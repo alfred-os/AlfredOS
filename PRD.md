@@ -1,23 +1,27 @@
-# Alfred — Product Requirements Document
+# AlfredOS — Product Requirements Document
 
 | | |
 |---|---|
-| **Project** | Alfred |
+| **Project** | AlfredOS |
 | **Tagline** | An open-source, self-hostable, multi-user, multi-persona, security-hardened agentic OS. |
 | **Status** | Draft v0.1 — pre-implementation |
 | **Owner** | ian.dominey@gmail.com |
 | **Last updated** | 2026-05-24 |
-| **License (intent)** | Apache-2.0 |
+| **License** | AGPL-3.0-or-later (community); commercial licenses available via dual-licensing (requires contributor CLA) |
+
+> **Naming convention.** **AlfredOS** is the product / runtime / GitHub repo. **Alfred** is the name of the default persona that ships enabled. Other personas (Lucius, Oracle, Diana, …) are specialists. Throughout this document, "AlfredOS" refers to the OS itself; "Alfred" refers to the default persona; "an AlfredOS household" refers to a particular deployment.
 
 ---
 
 ## 1. Executive Summary
 
-Alfred is a self-hostable agentic operating system: an always-on runtime that hosts one or more AI **personas** (agents specialized to particular purposes), gives them shared multi-layered memory of their users, lets them coordinate with each other, and lets them extend themselves with new skills under a reviewer-gated change process. Alfred speaks to users through pluggable communication adapters (Discord, Telegram, TUI for MVP; Slack, WhatsApp, voice post-MVP) and is hardened from day one against prompt injection, credential leakage, and PII exfiltration.
+AlfredOS is a self-hostable agentic operating system: an always-on runtime that hosts one or more AI **personas** (agents specialized to particular purposes), gives them shared multi-layered memory of their users, lets them coordinate with each other, and lets them extend themselves with new skills under a reviewer-gated change process. AlfredOS speaks to users through pluggable communication adapters (Discord, Telegram, TUI for MVP; Slack, WhatsApp, voice post-MVP) and is hardened from day one against prompt injection, credential leakage, and PII exfiltration.
 
-Alfred is **fully autonomous** (an OODA-style continuous loop) but **bounded** — every action is audited, every change is gated, every cost is budgeted, every output is scanned for leaks, and every component can be rolled back via an internal git repository.
+AlfredOS is **fully autonomous** (an OODA-style continuous loop) but **bounded** — every action is audited, every change is gated, every cost is budgeted, every output is scanned for leaks, and every component can be rolled back via an internal git repository.
 
-The default persona is **Alfred** himself — the head butler — but operators can enable specialists (research, communication, knowledge retrieval) and the system itself can propose new personas when usage patterns warrant.
+The default persona is **Alfred** — the head butler — but operators can enable specialists (research, communication, knowledge retrieval) and AlfredOS itself can propose new personas when usage patterns warrant.
+
+**Licensing model.** AlfredOS is released under the **GNU AGPL-3.0-or-later**. The network-copyleft clause is intentional: any modified AlfredOS offered as a network service must publish its modifications, ensuring ecosystem integrity and preventing silent hostile forks of a security-sensitive runtime. Because plugins communicate with the core via the MCP subprocess boundary (stdio / HTTP), they are not considered derivative works and may be licensed however their authors choose. A commercial license is available for organizations that cannot accept AGPL; the dual-licensing model requires contributors to sign a CLA granting the project the right to relicense their contributions.
 
 ## 2. Mission & Vision
 
@@ -520,7 +524,7 @@ Decisions captured during design (2026-05-24):
 - **DEC-007:** Dual-LLM (privileged orchestrator + quarantined T3 processor) is non-negotiable.
 - **DEC-008:** Persona addressing supports default + direct + group; coordination is free but rail-bounded.
 - **DEC-009:** MVP ships Alfred enabled + Lucius/Oracle/Diana as disabled examples.
-- **DEC-010:** Open source from day 1, Apache-2.0.
+- **DEC-010:** Open source from day 1; AGPL-3.0-or-later with commercial dual-license available (CLA required from contributors).
 - **DEC-011:** Single-host Docker Compose for MVP; horizontal scale post-MVP.
 
 **Open questions (TBD before implementation plan):**
