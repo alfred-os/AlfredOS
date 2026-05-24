@@ -1,0 +1,185 @@
+name: PR commit hygiene
+
+# Standalone PR validation that gates the merge button on commit hygiene.
+# Adapted from narrative-craft's workflow of the same name.
+#
+# Each check is its own job so the PR's checks panel shows individual
+# greyed checkboxes for each kind of failure. Add the relevant job names
+# to required status checks in branch protection on `main` to make these
+# gate the merge button.
+#
+# These checks are PURE LINTERS — they read commit metadata via git,
+# never run code or builds. Cheap, fast, no notification side-effect.
+#
+# Workflow-injection safety: every reference to a ${{ github.event.* }}
+# value is exposed via env: and read as "$VAR" in the shell script,
+# never inline-interpolated. The only commit-author-controlled values we
+# touch are commit subjects (read via `git log %s` from the local clone),
+# fed through `case "$SUBJECT" in ...` / `printf '%s\n'` — both safe
+# shell forms that do not evaluate the value.
+# See: https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+# Pushes to the same PR cancel earlier in-flight runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Workflow-level deny-all baseline. Each job opts in to the minimum scope.
+permissions: {}
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Job 1: No fixup / squash / amend commits.
+  #
+  # These are autosquash markers — every one of them must be squashed
+  # via `make autosquash` (or `scripts/autosquash.sh` directly) before
+  # the branch is mergeable.
+  # ──────────────────────────────────────────────────────────────
+  no-autosquash:
+    name: No autosquash commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # Pinned to v4.2.2 commit SHA per zizmor supply-chain policy
+        # (unpinned-uses). persist-credentials disabled because these jobs
+        # only read git history — no push needed — so leaving credentials in
+        # .git/config (artipacked) is unnecessary exposure.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan PR commits for autosquash markers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          BAD=$(git log --format='%h %s' "$BASE_SHA..$HEAD_SHA" \
+            | grep -E '^[a-f0-9]+ (fixup!|squash!|amend!) ' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error title=Autosquash commits present::Run \`make autosquash && git push --force-with-lease\` before merging."
+            echo ""
+            echo "Offending commits:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "✓ No fixup/squash/amend commits on this branch."
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 2: No merge commits in the PR.
+  #
+  # The repo merges PRs via rebase. Merge commits in a PR indicate
+  # the branch was synced via `git merge` instead of `git rebase`,
+  # which produces a tangled history.
+  # ──────────────────────────────────────────────────────────────
+  no-merge-commits:
+    name: No merge commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # Pinned to v4.2.2 commit SHA per zizmor supply-chain policy
+        # (unpinned-uses). persist-credentials disabled because these jobs
+        # only read git history — no push needed — so leaving credentials in
+        # .git/config (artipacked) is unnecessary exposure.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan PR commits for merge commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          MERGES=$(git log --merges --format='%h %s' "$BASE_SHA..$HEAD_SHA" || true)
+          if [ -n "$MERGES" ]; then
+            echo "::error title=Merge commits present::Rebase the branch onto \`origin/main\` (\`git rebase origin/main && git push --force-with-lease\`) instead of merging \`main\` into the branch."
+            echo ""
+            echo "Offending merge commits:"
+            echo "$MERGES"
+            exit 1
+          fi
+          echo "✓ No merge commits in this PR."
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 3: Conventional Commits subject + issue reference.
+  #
+  # Required format:
+  #   <type>[(<scope>)][!]: <description>
+  # where the subject ALSO contains a `#NNN` GitHub issue/PR ref
+  # somewhere. AlfredOS convention is the issue ref at the end in
+  # parens: e.g. `chore: remove CLA infrastructure (#68)`. Refs in
+  # the body do not count — keeps the requirement enforceable by
+  # inspecting the subject alone.
+  #
+  # Exempt subjects (auto-generated): fixup!, squash!, amend!,
+  # Merge, Revert, Initial commit. The autosquash and merge-commit
+  # jobs above flag the same subject prefixes — that's intentional
+  # duplication, with each job's diagnostic message tailored to the
+  # cause.
+  # ──────────────────────────────────────────────────────────────
+  conventional-commits:
+    name: Conventional commit format
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        # Pinned to v4.2.2 commit SHA per zizmor supply-chain policy
+        # (unpinned-uses). persist-credentials disabled because these jobs
+        # only read git history — no push needed — so leaving credentials in
+        # .git/config (artipacked) is unnecessary exposure.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate commit subjects
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          BAD_FILE="$RUNNER_TEMP/bad-commits.txt"
+          : > "$BAD_FILE"
+          # `git log --format=%H<TAB>%s` for safe tab-delimited parse.
+          # SUBJECT is only fed through `case` patterns and `printf '%s\n'`
+          # — never eval'd.
+          while IFS=$'\t' read -r SHA SUBJECT; do
+            case "$SUBJECT" in
+              "fixup! "*|"squash! "*|"amend! "*|"Merge "*|"Revert "*|"Initial commit"*)
+                continue
+                ;;
+            esac
+            # AlfredOS subject shape:
+            #   ^<type>[(<scope>)][!]: <any text>#<digits><any text>$
+            # Examples that match:
+            #   chore: remove CLA infrastructure (#68)
+            #   feat(security): add T3 quarantine path (#42)
+            #   refactor!: drop deprecated FooAPI (#101)
+            #   fix(memory): close #88 race condition in episodic.recent
+            if ! printf '%s\n' "$SUBJECT" \
+              | grep -qE '^[a-z]+(\([^)]+\))?(!)?: .*#[0-9]+.*$'; then
+              printf '%s %s\n' "$SHA" "$SUBJECT" >> "$BAD_FILE"
+            fi
+          done < <(git log --format='%H%x09%s' "$BASE_SHA..$HEAD_SHA")
+
+          if [ -s "$BAD_FILE" ]; then
+            echo "::error title=Non-conventional commit subjects::Each commit subject must match \`<type>[(<scope>)][!]: <description>\` AND contain a \`#NNN\` issue/PR reference. See CONTRIBUTING.md."
+            echo ""
+            echo "Offending commits:"
+            cat "$BAD_FILE"
+            exit 1
+          fi
+          echo "✓ All commit subjects are Conventional Commits with an issue reference."
