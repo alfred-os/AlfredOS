@@ -45,7 +45,7 @@ See [`PRD.md`](./PRD.md) for the full design, including:
 
 ## Contributing
 
-Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). All contributions require signing the [Contributor License Agreement](./CLA.md), enforced via the [CLA Assistant](https://cla-assistant.io/) bot on pull requests. The CLA exists so AlfredOS can offer commercial licenses to organizations that cannot accept AGPL — see the License section below.
+Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Contributions are licensed under the project's [Apache-2.0 license](./LICENSE).
 
 If you (or an AI agent) is contributing to this repository, also read [`CLAUDE.md`](./CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 
@@ -55,9 +55,6 @@ If you have found a security vulnerability, **do not open a public issue**. Use 
 
 ## License
 
-AlfredOS is dual-licensed:
-
-- **Community / default:** [GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later)](./LICENSE). The network-copyleft clause means anyone running a modified AlfredOS as a service must publish their modifications. This protects the ecosystem against silent hostile forks of a security-sensitive runtime.
-- **Commercial:** Available for organizations that cannot accept AGPL. Contact the maintainers.
+AlfredOS is licensed under the [Apache License, Version 2.0](./LICENSE). See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for the full terms.
 
 Plugins communicate with the core via the MCP subprocess boundary (stdio / HTTP) and are not considered derivative works; plugin authors may license their work however they choose.
