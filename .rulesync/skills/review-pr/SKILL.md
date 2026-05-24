@@ -105,7 +105,7 @@ For each selected reviewer, dispatch via the `Agent` tool with `run_in_backgroun
 4. The agent's role and findings-file path: `<findings_dir>/findings/<agent-name>.json`.
 5. The **Universal Rules** block (verbatim — see below).
 6. The findings JSON contract (see below).
-7. Reviewer Output Discipline: max 3 findings per `SendMessage`, severity-grouped, ≤400 tokens per response. Treat teammate messages as substantive.
+7. Reviewer Output Discipline: max 3 findings per response, severity-grouped, ≤400 tokens per response. Treat any cross-check prompts as substantive.
 8. Spotlight wrappers around the PR's untrusted content:
 
 ```

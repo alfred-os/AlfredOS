@@ -31,7 +31,16 @@ Run a comprehensive review of an implementation plan in `docs/superpowers/plans/
 
 ## How it works
 
-This skill dispatches a team of specialist reviewer agents from `.rulesync/subagents/`. Each reviewer reads the plan and produces structured findings against its domain. The skill aggregates findings into a single severity-grouped summary.
+This skill runs a **four-phase coordinator-led review**:
+
+- **Phase A — parallel reviewers.** A team of specialists from `.rulesync/subagents/` each read the plan in isolation and write structured findings.
+- **Phase B — coordinator synthesis.** `alfred-review-coordinator` reads every reviewer's findings, classifies each as `corroborated` / `solo` / `disputed` / `gap`, and identifies coverage holes.
+- **Phase C — targeted cross-checks.** The coordinator dispatches focused follow-up questions to specific specialists via **fresh `Agent` dispatch** (with the original finding embedded as context) for every solo / disputed / gap finding. Specialists confirm, retract, dispute, or treat as not-their-domain.
+- **Phase D — final aggregation.** The parent assembles a severity-grouped summary with **confidence tags** so the reader sees not just what was flagged but how well-vetted each finding is.
+
+The coordinator is the answer to "do reviewers double-check each other?" — they don't talk directly, but the coordinator forces verification of any finding that isn't already corroborated by a peer.
+
+> **Note on cross-check mechanics**: Claude Code does not expose `SendMessage` (continue-an-agent) as a tool in the CLI environment — only fresh `Agent` dispatch is available. The coordinator therefore re-dispatches specialists with full original-finding context embedded in each prompt. This costs more tokens than session-continuation but works portably.
 
 Unlike PR review:
 
@@ -97,10 +106,21 @@ If the plan's coverage spans every subsystem (e.g. a vertical slice), include **
 ```bash
 plan_slug=$(basename "$plan_path" .md)
 findings_dir="${RUNNER_TEMP:-$HOME/.cache/alfred-os}/review-plan/$plan_slug"
-mkdir -p "$findings_dir/findings" "$findings_dir/evidence"
+mkdir -p \
+  "$findings_dir/findings" \
+  "$findings_dir/evidence" \
+  "$findings_dir/coordinator" \
+  "$findings_dir/cross_checks"
 ```
 
-### Step 5: Spawn reviewers in parallel
+Subdirectory roles:
+
+- `findings/` — Phase A output. One JSON per specialist.
+- `evidence/` — long-form notes referenced by `evidence_path` in findings.
+- `coordinator/` — Phase B output. `synthesis.json` with classifications and gap detection.
+- `cross_checks/` — Phase C output. One JSON per specialist responding to coordinator follow-ups.
+
+### Step 5: Phase A — spawn reviewers in parallel
 
 For each selected reviewer, dispatch via the `Agent` tool with `run_in_background: true`. Pass each agent a self-contained prompt that includes:
 
@@ -125,40 +145,115 @@ The same prompt-injection mitigation applies as in `review-pr` — plan content 
 
 Spawn all reviewers in a single message so they run concurrently.
 
-### Step 6: Wait for completion
+### Step 6: Wait for Phase A completion
 
-Wait for every dispatched Agent to finish. Each writes its findings file. If a reviewer fails to write a findings file, record a `meta` finding (Critical severity, category `reviewer-failure`) and continue with the rest.
+Wait for every dispatched specialist to finish. Each writes its findings file. If a reviewer fails to write a findings file, record a `meta` finding (Critical severity, category `reviewer-failure`) and continue. Do **not** abort the review — the coordinator will see the gap and react.
 
-### Step 7: Aggregate
+Capture the list of `subagent_type` names that were dispatched so the coordinator can route fresh `Agent` calls back to them in Phase C.
 
-Load every `findings/<agent>.json`. Build a single summary using this template:
+### Step 7: Phase B — coordinator synthesis
+
+Dispatch the `alfred-review-coordinator` agent via `Agent`. Pass it a self-contained prompt that includes:
+
+1. The artifact path: `docs/superpowers/plans/<plan>.md`.
+2. The `findings_dir` root and the four subdirectory paths.
+3. The plan's coverage matrix (you extracted it in Step 2).
+4. The list of `subagent_type` names that were dispatched in Phase A.
+5. The instruction: "Classify every finding from Phase A. Write `coordinator/synthesis.json`. Then dispatch cross-checks via fresh `Agent` calls to the specialists for every `solo` / `disputed` / `gap` finding, embedding the originating finding's full text in each prompt. Wait for their responses in `cross_checks/<agent>.json`. Report back when done."
+
+The coordinator's own contract is defined in `.rulesync/subagents/alfred-review-coordinator.md` — it knows what to do.
+
+### Step 8: Phase C — cross-check round (driven by the coordinator)
+
+The coordinator runs this phase. The parent's job here is to wait for the coordinator's final reply.
+
+What the coordinator does:
+
+- For each `solo` finding: dispatch a fresh `Agent` call to the most-relevant other specialist with the originating finding fully embedded. The specialist appends its verdict to `cross_checks/<their-agent>.json`.
+- For each `disputed` finding: dispatch fresh `Agent` calls to both reviewers; ask each to confirm or retract.
+- For each `gap`: dispatch a fresh `Agent` call to the owning specialist asking whether the silence was intentional clearance or an oversight.
+- Cap: no more than 2 cross-checks per specialist per round (batched into one prompt if needed).
+- One round only. The coordinator does not loop.
+
+The coordinator dispatches all cross-checks in parallel (single message, multiple `Agent` tool uses).
+
+The cross-check JSON shape (specialists write this):
+
+```json
+{
+  "responder": "alfred-memory-engineer",
+  "responses": [
+    {
+      "finding_id": "sec-003",
+      "verdict": "confirmed | disputed | retracted | not_my_domain | intentional_clear | missed",
+      "rationale": "1-3 sentences."
+    }
+  ]
+}
+```
+
+`confirmed | disputed | retracted | not_my_domain` are valid on `solo` and `disputed` cross-checks. `intentional_clear` and `missed` are valid on `gap` cross-checks (the coverage-matrix subsystem the cross-check is asking about). One response file can mix verdicts — the verdict + the coordinator's original classification together drive reconciliation.
+
+### Step 9: Phase D — final aggregation
+
+Load:
+
+- Every `findings/<agent>.json` (Phase A).
+- `coordinator/synthesis.json` (Phase B classifications).
+- Every `cross_checks/<agent>.json` (Phase C responses).
+
+Reconcile each finding's final confidence using this table:
+
+| Coordinator class. | Cross-check verdict | Final confidence | Display tag |
+|---|---|---|---|
+| `corroborated` | n/a (no cross-check needed) | High | `[corroborated]` |
+| `solo` | `confirmed` | High | `[corroborated]` |
+| `solo` | `disputed` | Medium | `[disputed]` |
+| `solo` | `retracted` | Drop the finding entirely, but note in summary | — |
+| `solo` | `not_my_domain` | Medium | `[single-reviewer]` |
+| `disputed` | both `confirmed` | Medium | `[disputed-confirmed]` |
+| `disputed` | one retracted | High | `[corroborated]` |
+| `gap` | `intentional_clear` | n/a — appears in "Coverage gaps" section of the final summary as a clean bill of health | — |
+| `gap` | `missed` | per specialist's new finding | promote new finding |
+| `gap` | (no response, cross-check timed out) | n/a — appears in "Coverage gaps" section as "no specialist reachable" | — |
+
+Build the summary using this template:
 
 ```markdown
 # Plan Review Summary — <plan filename>
 
 > **Plan path**: `<plan_path>`
-> **Reviewers run**: <N> (<list>)
+> **Reviewers run**: <N> (<list>) + coordinator
+> **Cross-checks**: <X> dispatched, <Y> confirmed, <Z> retracted, <W> still disputed
 > **Findings**: <C> Critical, <H> High, <M> Medium, <L> Low
 
 ## Critical (must address before execution)
 
-- [reviewer]: <summary> — **§<section>** ([evidence](<evidence_path>))
+- [reviewer] `[confidence-tag]`: <summary> — **§<section>** ([evidence](<evidence_path>))
 
 ## High (should address)
 
-- [reviewer]: <summary> — **§<section>**
+- [reviewer] `[confidence-tag]`: <summary> — **§<section>**
 
 ## Medium
 
-- [reviewer]: <summary> — **§<section>**
+- [reviewer] `[confidence-tag]`: <summary> — **§<section>**
 
 ## Low / Nits
 
-- [reviewer]: <summary> — **§<section>**
+- [reviewer] `[confidence-tag]`: <summary> — **§<section>**
+
+## Disputed findings (human resolution needed)
+
+<!-- Findings the cross-check could not settle. The reviewer and the cross-checker disagree; the human picks. -->
+
+## Coverage gaps
+
+<!-- Subsystems whose specialist returned "intentional clear" appear here as a clean bill of health. Subsystems with no reviewer at all appear here as a flag. -->
 
 ## Cross-cutting observations
 
-<!-- Findings that surfaced in multiple reviewers' reports; collapse here. -->
+<!-- Themes that emerged across multiple reviewers' reports. -->
 
 ## Strengths
 
@@ -168,14 +263,15 @@ Load every `findings/<agent>.json`. Build a single summary using this template:
 
 1. Address Critical findings before executing the plan.
 2. Decide whether to fix High findings now or accept them with a written note.
-3. Treat Medium/Low as a punch list for the implementer to keep in mind.
+3. Resolve any **disputed findings** — these are the ones that need your judgment.
+4. Treat Medium/Low as a punch list for the implementer to keep in mind.
 ```
 
-### Step 8: Cleanup
+### Step 10: Cleanup
 
-The findings directory under `${RUNNER_TEMP:-$HOME/.cache/alfred-os}/review-plan/` is preserved for follow-up reads. If you want a clean slate, delete it manually.
+The findings directory under `${RUNNER_TEMP:-$HOME/.cache/alfred-os}/review-plan/` is preserved for follow-up reads. If you want a clean slate, delete it manually. The four subdirectories (`findings/`, `evidence/`, `coordinator/`, `cross_checks/`) together are the audit trail of the review and the input the human reads when they want to interrogate a finding.
 
-No team teardown required (we did not create a `TeamCreate` team — that tool may not be available; this skill uses parallel `Agent` dispatch instead).
+No team teardown required (we did not create a `TeamCreate` team — that tool may not be available; this skill uses parallel `Agent` dispatch + coordinator-driven fresh `Agent` cross-checks instead).
 
 ## Findings JSON contract
 
@@ -259,5 +355,7 @@ Every plan-review agent enforces these as flagged findings (Critical unless note
 - **Always include the security-engineer reviewer**, even for plans that look "non-security." Trust-boundary leakage often appears in seemingly innocuous places (a config file, a setup script, a TUI input handler).
 - **Always include the architect**. Plan-level coherence is its specialty; nobody else looks at the whole shape.
 - **Test-engineer is non-optional.** If the plan is light on tests, the test-engineer's findings are the most actionable.
+- **The coordinator is always run.** It is the only mechanism that forces specialists to verify each other's claims. Skipping it would regress the skill to "15 parallel opinions stitched together."
+- **Disputed findings are the real signal.** When two specialists disagree after a cross-check, that is exactly the place that needs a human. Read the disputed-findings section first.
 - **Run early.** Best invoked just after the plan is written and before the implementer picks it up. Iteration is cheap at plan time, expensive at PR time.
 - **Re-run after substantive edits.** The skill is fast and the cost is low.
