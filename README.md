@@ -2,7 +2,7 @@
 
 > An open-source, self-hostable, multi-user, multi-persona, security-hardened agentic OS.
 
-**Status:** Pre-implementation. The design is in [`PRD.md`](./PRD.md); the operating manual for AI agents working in this repo is in [`CLAUDE.md`](./CLAUDE.md).
+**Status:** Pre-implementation. The design is in [`PRD.md`](./PRD.md); the operating manual for AI agents working in this repo is in [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md).
 
 ## What is AlfredOS?
 
@@ -47,7 +47,7 @@ See [`PRD.md`](./PRD.md) for the full design, including:
 
 Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Contributions are licensed under the project's [Apache-2.0 license](./LICENSE).
 
-If you (or an AI agent) is contributing to this repository, also read [`CLAUDE.md`](./CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
+If you (or an AI agent) are contributing to this repository, also read [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 
 ## Security
 
