@@ -41,6 +41,12 @@ logs/
 dist/
 build/
 
-# Local Claude / memsearch artifacts that may appear in the cwd
+# Local Claude / memsearch working state — these are local-only artifacts.
+# Note: .claude/agents/ and .claude/skills/ ARE tracked (project assets).
 .memsearch/
-.claude/
+.claude/settings.local.json
+.claude/sessions/
+.claude/cache/
+.claude/projects/
+.claude/tmp/
+.claude/*.log
