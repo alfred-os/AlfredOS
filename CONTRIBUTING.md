@@ -1,0 +1,79 @@
+# Contributing to AlfredOS
+
+Thanks for your interest in contributing. AlfredOS is a security-sensitive, AGPL-licensed, dual-license project — we welcome contributions, and we ask you to read this guide before opening a PR.
+
+## Before you contribute
+
+- Read the [Code of Conduct](./CODE_OF_CONDUCT.md).
+- Read the [Security policy](./SECURITY.md). **Security vulnerabilities are not reported via public issues.**
+- Read [`CLAUDE.md`](./CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
+- Read the [PRD](./PRD.md) before proposing architectural changes.
+
+## Contributor License Agreement (CLA)
+
+All contributions require signing the [CLA](./CLA.md). The CLA Assistant bot will prompt you on your first pull request. Sign by commenting on your PR:
+
+> I have read the CLA Document and I hereby sign the CLA
+
+**Why a CLA?** AlfredOS is dual-licensed (AGPL-3.0-or-later for the community, commercial licenses for organizations that cannot accept AGPL). The CLA grants the project the right to relicense your contributions for the commercial offering. Contributions remain AGPL in the public repo regardless.
+
+## Where to discuss
+
+| You want to... | Use |
+|---|---|
+| Report a bug | GitHub Issues — `Bug report` template |
+| Propose a feature | GitHub Issues — `Feature request` template |
+| Propose a persona | GitHub Issues — `Persona proposal` template |
+| Propose a skill | GitHub Issues — `Skill proposal` template |
+| Report a vulnerability | [Private Security Advisory](https://github.com/alfred-os/AlfredOS/security/advisories/new) |
+| Discuss design / Q&A / ideas | GitHub Discussions |
+
+## Development setup
+
+> Pre-implementation. Once code lands, `bin/dev-setup.sh` will be the entry point. For now, see [`CLAUDE.md`](./CLAUDE.md) for the intended workflow.
+
+## Style
+
+- **Python:** `ruff` + `black` + `mypy --strict` for the core.
+- **Conventional commits** (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`, `security:`).
+- **Strict typing.** No `Any` without justification. Pydantic v2 at boundaries.
+- **Comments** only when the *why* is non-obvious — never explain *what*.
+- **Small, focused PRs** — one logical change per PR.
+
+## Tests
+
+| Type of change | Tests required |
+|---|---|
+| New feature | Unit + integration |
+| Bug fix | Regression unit test |
+| New skill | Happy-path + error-path + out-of-scope-refusal |
+| Anything touching `src/alfred/security/` | 100% coverage on the changed boundary + adversarial suite must pass |
+
+See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
+
+## Pull request process
+
+1. **Open a discussion or issue first** for non-trivial changes.
+2. Fork → branch → PR. Keep it small.
+3. Make sure CI is green: lint, types, unit tests, and (for security-relevant code) the adversarial suite.
+4. Sign the CLA when prompted.
+5. Be responsive to review feedback. Reviewers may request a video call or out-of-band confirmation for security-relevant changes.
+6. Squash on merge.
+
+## Architectural changes
+
+If your change touches a structural invariant from the PRD:
+
+1. Open a Discussion first to align.
+2. Propose an [ADR](./docs/adr/) (`docs/adr/NNNN-title.md`).
+3. Update the PRD in the same PR as the ADR.
+
+## Skills and personas
+
+- **Human-authored skills** use the regular PR flow + the required tests.
+- **AI-authored skills** go through the reviewer gate (see [PRD §6.4](./PRD.md#64-self-improvement-with-reviewer-gate)).
+- **New personas** require an ADR explaining their single responsibility, capability needs, and memory access policy.
+
+## License
+
+By contributing, you license your work under [AGPL-3.0-or-later](./LICENSE) for the public release, and via the CLA you grant the project the right to dual-license your contributions for the commercial offering.

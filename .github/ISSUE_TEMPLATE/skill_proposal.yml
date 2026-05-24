@@ -1,0 +1,50 @@
+name: Skill proposal
+description: Propose a new skill (procedural plugin)
+title: "skill: "
+labels: [skill-proposal, triage]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Skill name
+    validations:
+      required: true
+  - type: textarea
+    id: purpose
+    attributes:
+      label: Single responsibility
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When should an agent invoke this skill?
+    validations:
+      required: true
+  - type: textarea
+    id: io
+    attributes:
+      label: Inputs and outputs
+    validations:
+      required: true
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: Capabilities required
+      description: Network egress allowlist, filesystem paths, secret IDs.
+    validations:
+      required: true
+  - type: textarea
+    id: trust
+    attributes:
+      label: Trust-boundary considerations
+      description: Does this skill ingest T3 (untrusted) content? Does it act with high blast-radius? Step-up auth required?
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Tests planned
+      description: Happy-path, error-path, and out-of-scope refusal.
+    validations:
+      required: true

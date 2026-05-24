@@ -1,0 +1,11 @@
+# Default owner — until a maintainers team exists on the alfred-os org
+*       @MrReasonable
+
+# Trust-boundary paths — same default owner now; add @alfred-os/security
+# as a required reviewer once that team exists.
+/src/alfred/security/   @MrReasonable
+/CLA.md                 @MrReasonable
+/LICENSE                @MrReasonable
+/NOTICE                 @MrReasonable
+/SECURITY.md            @MrReasonable
+/.github/               @MrReasonable
