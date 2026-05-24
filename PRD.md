@@ -458,6 +458,37 @@ MVP is single-host. The design accommodates these without rewrites:
 - Qdrant cluster mode.
 - Reviewer agent horizontal scaling (stateless).
 
+### 7.7 Internationalization
+
+Localization is baked in from Slice 1 because retrofitting i18n into a deployed multi-user agent is materially harder than building it in from day one.
+
+**Per-user language preference.** Every user has a `language` field (BCP-47 tag — e.g. `en-US`, `fr-FR`, `ja-JP`). On first contact the operator's `Settings.operator_language` is the default; users can change theirs via CLI / chat command.
+
+**Alfred speaks the user's language.** Persona system prompts include a `{user.language}` placeholder; the orchestrator substitutes the active user's language before each provider call. The model handles the translation — Alfred is "the same Alfred" in every language, but his replies are in the user's preferred language.
+
+**Operator-/user-facing strings go through a translation function.** The codebase uses a `t()` helper backed by **Babel + gettext** translation catalogs:
+
+```python
+from alfred.i18n import t
+
+# In CLI / TUI / setup-script-bridging code:
+print(t("status.primary_provider", provider=settings.primary_provider))
+```
+
+Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source catalog; other languages are community translations. Pre-commit extracts new messages with `pybabel extract`; CI runs `pybabel update` and `pybabel compile --check` to fail on catalog drift.
+
+**Stored content is language-tagged.** `episodes`, `audit_log`, and (later) `semantic_facts` carry a `language` column. Consolidation passes respect the language at write time. Cross-language memory queries are supported (we store as-is, translate at query time when needed).
+
+**Prompt-cache implications.** Stable prompt prefixes vary by language (persona prompt + recent memory). Provider prompt caching keys on the full prefix, so we lose some hit rate when users switch language mid-conversation. Acceptable trade-off; caching still hits ~85%+ in steady-state.
+
+**What's deferred to later slices:**
+
+- Community translation workflow (Crowdin / Weblate integration, translation-PR automation) — Slice 0.0.4 or later.
+- RTL layout in the TUI — when an RTL language community translation lands.
+- Locale-aware date / number / currency formatting (`babel.dates`, `babel.numbers`) — applied progressively as needed; Slice 1 ships English defaults.
+
+**Doc language policy.** The PRD, CLAUDE.md, agent definitions, skill definitions, and ADRs stay English-only. They are contributor-facing artifacts; localizing them is out of scope.
+
 ## 8. Testing Strategy
 
 | Layer | Tool | What it covers |
@@ -485,7 +516,8 @@ MVP is single-host. The design accommodates these without rewrites:
 **MVP (v0.1) must include:**
 - Comms: Discord + Telegram + TUI
 - Memory: all 6 layers operational; knowledge graph may be sparse but functional
-- Providers: Anthropic + OpenAI; tiered routing with all 4 caching layers
+- Providers: DeepSeek + Anthropic + OpenAI; tiered routing with all 4 caching layers
+- Internationalization: Babel + gettext catalogs, `t()` discipline, per-user `language`, persona prompts honour the active user's language
 - Self-improvement: skill creation + reviewer gate + auto-generated tests
 - Persona system: registry + 3 addressing modes + group sessions + safety-railed background coordination + audit graph CLI; ships with Alfred enabled + Lucius/Oracle/Diana as disabled examples
 - Security: dual-LLM, secret broker, DLP, audit log, canaries, full adversarial suite passing
@@ -526,6 +558,8 @@ Decisions captured during design (2026-05-24):
 - **DEC-009:** MVP ships Alfred enabled + Lucius/Oracle/Diana as disabled examples.
 - **DEC-010:** Open source from day 1; AGPL-3.0-or-later with commercial dual-license available (CLA required from contributors).
 - **DEC-011:** Single-host Docker Compose for MVP; horizontal scale post-MVP.
+- **DEC-012:** Internationalization baked in from Slice 1. Babel + gettext catalogs; per-user `language` field on the User model; persona system prompts honour `{user.language}`; all operator-/user-facing strings go through `t()`. Doc files (PRD, CLAUDE.md, ADRs) stay English-only.
+- **DEC-013:** Specialist reviewer agents (error, performance, docs, i18n, devex) created alongside the subsystem-engineer agents to enable comprehensive adversarial review without overloading any single agent's scope.
 
 **Open questions (TBD before implementation plan):**
 - Exact persona-bundle file format (TOML vs YAML vs Python module)

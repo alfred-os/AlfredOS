@@ -123,6 +123,16 @@ These rules override everything else. Violating them is a release blocker.
 7. **No silent failures in security paths.** Failed DLP, failed capability check, canary trip → loud audit entry + alert + (where appropriate) quarantine.
 8. **No skipping pre-commit hooks** with `--no-verify`. If a hook fails, fix the issue.
 
+## Internationalization rules — HARD
+
+i18n is baked in from Slice 1 because retrofitting it later is materially harder. Violating these is a release blocker.
+
+1. **All operator-/user-facing strings go through `t()`.** Hardcoded English in `src/alfred/` outside the catalog source files is a release blocker. CLI output, TUI text, error messages, log messages destined for an operator's eyes — all `t()`.
+2. **Persona system prompts honour `{user.language}`.** Every persona prompt template includes the user's language; the orchestrator substitutes the active user's language before each provider call.
+3. **Every stored user content row has a `language` field.** `episodes`, `audit_log`, `semantic_facts` — anything that holds user text — carries a BCP-47 language tag.
+4. **`pybabel extract` runs in pre-commit; `pybabel compile --check` runs in CI.** Catalog drift fails the build.
+5. **Doc files stay English-only.** PRD, CLAUDE.md, ADRs, agent definitions, skill definitions. Localizing contributor docs is out of scope.
+
 ## Self-improvement rules
 
 When you (the AI agent, future-you, or another agent) propose modifying Alfred itself:
