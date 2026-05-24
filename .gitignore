@@ -40,3 +40,7 @@ logs/
 # Build artifacts
 dist/
 build/
+
+# Local Claude / memsearch artifacts that may appear in the cwd
+.memsearch/
+.claude/

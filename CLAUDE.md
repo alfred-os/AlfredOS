@@ -1,21 +1,26 @@
-# CLAUDE.md — Alfred Repo Operating Manual
+# CLAUDE.md — AlfredOS Repo Operating Manual
 
 This file is loaded by AI agents working in this repository. Read it before doing anything.
 
 ## What this is
 
-Alfred is a multi-user, multi-persona, security-hardened agentic OS. Self-hostable. Open source (Apache-2.0).
+**AlfredOS** is a multi-user, multi-persona, security-hardened agentic OS. Self-hostable. Licensed AGPL-3.0-or-later (community) with commercial dual-licensing available (CLA required from contributors). **Alfred** (no "OS") is the name of the default persona that ships enabled.
 
 Full design: see [`PRD.md`](./PRD.md). Read it before proposing any architectural change.
 
 ## Where things live
 
 ```
-alfred/
+AlfredOS/
 ├── PRD.md                          # the design — source of truth for *what* and *why*
 ├── CLAUDE.md                       # this file — operating manual for AI agents
 ├── README.md                       # user-facing quickstart
-├── LICENSE                         # Apache-2.0
+├── LICENSE                         # AGPL-3.0-or-later
+├── NOTICE                          # copyright + third-party attributions
+├── CLA.md                          # contributor license agreement (required to merge)
+├── CODE_OF_CONDUCT.md              # Contributor Covenant 2.1
+├── CONTRIBUTING.md                 # how to contribute, including CLA process
+├── SECURITY.md                     # vulnerability reporting
 ├── docker-compose.yaml             # default deployment
 ├── bin/                            # CLI + setup scripts (alfred-setup.sh, alfred-setup.ps1)
 ├── src/alfred/                     # Python core
