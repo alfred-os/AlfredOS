@@ -7,7 +7,7 @@
 | **Status** | Draft v0.1 — pre-implementation |
 | **Owner** | 4990954+MrReasonable@users.noreply.github.com |
 | **Last updated** | 2026-05-24 |
-| **License** | AGPL-3.0-or-later (community); commercial licenses available via dual-licensing (requires contributor CLA) |
+| **License** | Apache-2.0 |
 
 > **Naming convention.** **AlfredOS** is the product / runtime / GitHub repo. **Alfred** is the name of the default persona that ships enabled. Other personas (Lucius, Oracle, Diana, …) are specialists. Throughout this document, "AlfredOS" refers to the OS itself; "Alfred" refers to the default persona; "an AlfredOS household" refers to a particular deployment.
 
@@ -21,7 +21,9 @@ AlfredOS is **fully autonomous** (an OODA-style continuous loop) but **bounded**
 
 The default persona is **Alfred** — the head butler — but operators can enable specialists (research, communication, knowledge retrieval) and AlfredOS itself can propose new personas when usage patterns warrant.
 
-**Licensing model.** AlfredOS is released under the **GNU AGPL-3.0-or-later**. The network-copyleft clause is intentional: any modified AlfredOS offered as a network service must publish its modifications, ensuring ecosystem integrity and preventing silent hostile forks of a security-sensitive runtime. Because plugins communicate with the core via the MCP subprocess boundary (stdio / HTTP), they are not considered derivative works and may be licensed however their authors choose. A commercial license is available for organizations that cannot accept AGPL; the dual-licensing model requires contributors to sign a CLA granting the project the right to relicense their contributions.
+**Licensing model.** AlfredOS is released under the **Apache License 2.0**. The choice prioritises frictionless adoption by organisations of any size — Apache 2.0 is the de facto enterprise-friendly OSS license, with an explicit patent grant (§3) that gives users defensive protection against patent claims from contributors. Plugins communicate with the core via the MCP subprocess boundary (stdio / HTTP), are not considered derivative works, and may be licensed however their authors choose.
+
+The trade-off versus a copyleft licence (AGPL) is that we accept the possibility of third-party forks: anyone may take AlfredOS, modify it (including in ways that weaken its security guarantees), and redistribute it. The mitigations are non-legal: the AlfredOS trademark protects the canonical name; signed releases let users verify they are running the upstream version; brand and community trust differentiate the maintained-secure distribution from any variants. We consider this a better trade than gating enterprise adoption.
 
 ## 2. Mission & Vision
 
@@ -556,7 +558,7 @@ Decisions captured during design (2026-05-24):
 - **DEC-007:** Dual-LLM (privileged orchestrator + quarantined T3 processor) is non-negotiable.
 - **DEC-008:** Persona addressing supports default + direct + group; coordination is free but rail-bounded.
 - **DEC-009:** MVP ships Alfred enabled + Lucius/Oracle/Diana as disabled examples.
-- **DEC-010:** Open source from day 1; AGPL-3.0-or-later with commercial dual-license available (CLA required from contributors).
+- **DEC-010:** Open source from day 1; Apache-2.0 to maximise frictionless enterprise adoption. Patent grant in §3 protects users defensively against contributor-held patents.
 - **DEC-011:** Single-host Docker Compose for MVP; horizontal scale post-MVP.
 - **DEC-012:** Internationalization baked in from Slice 1. Babel + gettext catalogs; per-user `language` field on the User model; persona system prompts honour `{user.language}`; all operator-/user-facing strings go through `t()`. Doc files (PRD, CLAUDE.md, ADRs) stay English-only.
 - **DEC-013:** Specialist reviewer agents (error, performance, docs, i18n, devex) created alongside the subsystem-engineer agents to enable comprehensive adversarial review without overloading any single agent's scope.

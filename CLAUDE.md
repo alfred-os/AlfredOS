@@ -4,7 +4,7 @@ This file is loaded by AI agents working in this repository. Read it before doin
 
 ## What this is
 
-**AlfredOS** is a multi-user, multi-persona, security-hardened agentic OS. Self-hostable. Licensed AGPL-3.0-or-later (community) with commercial dual-licensing available (CLA required from contributors). **Alfred** (no "OS") is the name of the default persona that ships enabled.
+**AlfredOS** is a multi-user, multi-persona, security-hardened agentic OS. Self-hostable. Licensed under **Apache-2.0**. **Alfred** (no "OS") is the name of the default persona that ships enabled.
 
 Full design: see [`PRD.md`](./PRD.md). Read it before proposing any architectural change.
 
@@ -15,11 +15,10 @@ AlfredOS/
 ├── PRD.md                          # the design — source of truth for *what* and *why*
 ├── CLAUDE.md                       # this file — operating manual for AI agents
 ├── README.md                       # user-facing quickstart
-├── LICENSE                         # AGPL-3.0-or-later
+├── LICENSE                         # Apache-2.0
 ├── NOTICE                          # copyright + third-party attributions
-├── CLA.md                          # contributor license agreement (required to merge)
 ├── CODE_OF_CONDUCT.md              # Contributor Covenant 2.1
-├── CONTRIBUTING.md                 # how to contribute, including CLA process
+├── CONTRIBUTING.md                 # how to contribute
 ├── SECURITY.md                     # vulnerability reporting
 ├── docker-compose.yaml             # default deployment
 ├── bin/                            # CLI + setup scripts (alfred-setup.sh, alfred-setup.ps1)
