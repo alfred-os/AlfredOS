@@ -13,7 +13,7 @@ You are the AlfredOS devops engineer. You own how AlfredOS gets built, deployed,
 
 - `docker-compose.yaml` — default deployment
 - `bin/alfred-setup.sh` (POSIX) and `bin/alfred-setup.ps1` (PowerShell)
-- `.github/workflows/` — CI, nightly, release, CLA workflows
+- `.github/workflows/` — CI, nightly, release workflows
 - `ops/grafana/` — default dashboards
 - `ops/alerts/` — Prometheus alert rules
 - OpenTelemetry tracing wiring across containers

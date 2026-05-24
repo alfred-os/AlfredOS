@@ -38,10 +38,6 @@
 - [ ] CLAUDE.md updated if conventions or commands changed
 - [ ] ADR added under `docs/adr/` if architectural
 
-## CLA
-
-- [ ] I have signed the [Contributor License Agreement](../CLA.md) (the CLA Assistant bot will confirm on this PR).
-
 ## Notes for reviewers
 
 <!-- Anything reviewers should focus on, or context they need. -->

@@ -27,7 +27,6 @@ You are NOT the same as the runtime reviewer agent (which gates self-improvement
 4. **Cross-subsystem impact.** Does this PR touch more than one subsystem? If yes, did the architect agent vet it?
 5. **Hard rules from `CLAUDE.md`.** No secrets in logs. No bypass of the capability gate. No silent failures in trust-boundary paths. No `--no-verify`.
 6. **Conventions.** Strict typing, single responsibility, no premature abstractions, no comments explaining *what*.
-7. **CLA signed.** Confirm the CLA Assistant bot has marked all committers signed.
 
 ## How you work
 
