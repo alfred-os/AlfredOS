@@ -1,6 +1,6 @@
 # Contributing to AlfredOS
 
-Thanks for your interest in contributing. AlfredOS is a security-sensitive, AGPL-licensed, dual-license project — we welcome contributions, and we ask you to read this guide before opening a PR.
+Thanks for your interest in contributing. AlfredOS is a security-sensitive Apache-2.0 project — we welcome contributions, and we ask you to read this guide before opening a PR.
 
 ## Before you contribute
 
@@ -8,14 +8,6 @@ Thanks for your interest in contributing. AlfredOS is a security-sensitive, AGPL
 - Read the [Security policy](./SECURITY.md). **Security vulnerabilities are not reported via public issues.**
 - Read [`CLAUDE.md`](./CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 - Read the [PRD](./PRD.md) before proposing architectural changes.
-
-## Contributor License Agreement (CLA)
-
-All contributions require signing the [CLA](./CLA.md). The CLA Assistant bot will prompt you on your first pull request. Sign by commenting on your PR:
-
-> I have read the CLA Document and I hereby sign the CLA
-
-**Why a CLA?** AlfredOS is dual-licensed (AGPL-3.0-or-later for the community, commercial licenses for organizations that cannot accept AGPL). The CLA grants the project the right to relicense your contributions for the commercial offering. Contributions remain AGPL in the public repo regardless.
 
 ## Where to discuss
 
@@ -94,9 +86,8 @@ See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
 1. **Open a discussion or issue first** for non-trivial changes.
 2. Fork → branch → PR. Keep it small.
 3. Make sure CI is green: lint, types, unit tests, and (for security-relevant code) the adversarial suite.
-4. Sign the CLA when prompted.
-5. Be responsive to review feedback. Reviewers may request a video call or out-of-band confirmation for security-relevant changes.
-6. Squash on merge.
+4. Be responsive to review feedback. Reviewers may request a video call or out-of-band confirmation for security-relevant changes.
+5. Squash on merge.
 
 ## Architectural changes
 
@@ -114,4 +105,4 @@ If your change touches a structural invariant from the PRD:
 
 ## License
 
-By contributing, you license your work under [AGPL-3.0-or-later](./LICENSE) for the public release, and via the CLA you grant the project the right to dual-license your contributions for the commercial offering.
+By submitting a pull request, you license your contribution under the project's [Apache-2.0 license](./LICENSE).
