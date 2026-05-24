@@ -15,8 +15,8 @@ jobs:
     if: hashFiles('tests/e2e/conftest.py') != ''
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen --dev
       - name: Boot stack
         run: docker compose up -d --wait
@@ -30,7 +30,7 @@ jobs:
         run: docker compose logs --no-color > stack.log
       - name: Upload logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stack-logs
           path: stack.log
@@ -41,7 +41,7 @@ jobs:
     if: hashFiles('tests/adversarial/conftest.py') != ''
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen --dev
       - run: uv run pytest tests/adversarial -q

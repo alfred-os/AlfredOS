@@ -14,8 +14,8 @@ jobs:
     name: Markdown lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: DavidAnson/markdownlint-cli2-action@v16
+      - uses: actions/checkout@v6
+      - uses: DavidAnson/markdownlint-cli2-action@v23
         with:
           globs: |
             **/*.md
@@ -27,8 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     if: hashFiles('pyproject.toml') != ''
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv python install 3.12
       - run: uv sync --frozen --dev
       - name: Ruff
@@ -64,8 +64,8 @@ jobs:
         image: qdrant/qdrant:latest
         ports: ["6333:6333"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen --dev
       - run: uv run pytest tests/integration -q
 
@@ -77,5 +77,5 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: bin/alfred-setup.sh --dry-run
