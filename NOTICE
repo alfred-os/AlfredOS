@@ -1,12 +1,8 @@
 AlfredOS
-Copyright (c) 2026 Ian Dominey and AlfredOS contributors
+Copyright 2026 Ian Dominey and AlfredOS contributors
 
-This product is licensed under the GNU Affero General Public License,
-version 3 or later (AGPL-3.0-or-later). See the LICENSE file for the full
-license text.
+This product is licensed under the Apache License, Version 2.0
+(see the LICENSE file).
 
-Commercial licenses are available for organizations that cannot accept
-the AGPL terms. Contact the maintainers.
-
-Third-party dependencies, when added, will be attributed in
+Third-party dependencies, when added, are attributed in
 THIRD_PARTY_LICENSES.
