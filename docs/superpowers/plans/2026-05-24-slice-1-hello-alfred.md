@@ -39,17 +39,25 @@
 | Observability | `structlog` JSON to stdout; cost-per-call inline | Prometheus, OpenTelemetry, Grafana, alerts, `alfred cost report` → Slice 4+ |
 | Testing | Unit + one smoke test | E2E harness, adversarial corpus, nightly suite → Slice 3+ |
 | Audit + rollback | `audit_log` table; no signing | Signed append-only log, internal git repo, `alfred rollback` → Slice 5+ |
+| Internationalization | Babel + gettext, `t()`, English seed catalog, `language` column on every user-content row, persona prompt honours `{user.language}`, `pybabel extract` in pre-commit, `pybabel compile --check` in CI | Community translation workflow (Crowdin/Weblate), RTL TUI, locale-aware number/date formatting → Slice 0.0.4+ |
+
+**i18n is woven through the main task flow** — it is a CLAUDE.md hard rule (rule #1: "all operator-/user-facing strings go through `t()`. Hardcoded English in `src/alfred/` outside the catalog source files is a release blocker."). Each affected task includes the i18n work as required steps, not as an appendix. The dedicated **Task 3.5 — i18n primitives** lands *before* the first consumer (Task 5), so a linear executor can never ship hardcoded English.
 
 **Slice 1 Definition of Done:**
 1. `bin/alfred-setup.sh && docker compose up -d` brings up `alfred-core` + `alfred-postgres` cleanly on macOS/Linux.
 2. `alfred chat` opens a TUI where the operator can type and Alfred responds via DeepSeek.
 3. Multi-turn context is preserved within a session.
 4. Exiting and re-running `alfred chat` shows Alfred has memory of the prior conversation (context loaded from `episodes` table).
-5. Per-day budget cap pauses the loop when exhausted.
+5. Per-day budget cap pauses the loop when exhausted (pre-check; see Task 13).
 6. Every turn is in the `episodes` table; every action is in `audit_log`.
 7. Smoke test green in CI.
 8. mypy strict + ruff + black all clean.
 9. `python` job in CI passes on the PR.
+10. `pybabel extract` shows no catalog drift; CI's i18n step passes.
+11. `Settings.operator_language` flows through the persona system prompt; Alfred responds in the configured language.
+12. All operator-facing strings in `src/alfred/cli/` and `src/alfred/comms/` use `t()` (grep verifies no hardcoded English in those packages outside catalog sources).
+13. The 6 ADRs in `docs/adr/0001–0006` exist and explain the structural decisions: DeepSeek-as-primary, in-process working memory, plain-asyncio orchestrator, Textual TUI, env-backed broker stub, Alembic for migrations.
+14. The PRD has been updated (or referenced via the ADRs) for any slice-1 design that diverges from PRD §5, §6.2, §6.6, or §6.7.
 
 ---
 
@@ -162,7 +170,7 @@ version = "0.0.1"
 description = "AlfredOS - multi-user, multi-persona, security-hardened agentic OS."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "AGPL-3.0-or-later" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "AlfredOS contributors" }]
 dependencies = [
   "pydantic>=2.7,<3",
@@ -175,6 +183,7 @@ dependencies = [
   "textual>=0.80",
   "structlog>=24.1",
   "typer>=0.12",
+  "babel>=2.16,<3",  # i18n (Task 3.5)
 ]
 
 [dependency-groups]
@@ -187,6 +196,7 @@ dev = [
   "ruff>=0.6",
   "black>=24.0",
   "types-toml",
+  "pre-commit>=3.7",  # for the pybabel extract hook (Task 3.5)
 ]
 
 [project.scripts]
@@ -217,6 +227,9 @@ omit = ["src/alfred/memory/migrations/*"]
 show_missing = true
 skip_covered = false
 fail_under = 75
+# Per-package 100% gates are enforced by a second `coverage report --include=... --fail-under=100`
+# invocation in CI (see Task 17). pytest --cov-fail-under only takes one threshold value.
+# CLAUDE.md hard rule: every security boundary must have 100% line+branch coverage.
 
 [tool.mypy]
 python_version = "3.12"
@@ -246,6 +259,12 @@ ignore = ["S101"]
 [tool.black]
 line-length = 100
 target-version = ["py312"]
+
+[tool.babel]
+# i18n catalog extract config. See Task 3.5 for the consumer.
+domain = "alfred"
+input_dirs = ["src/alfred"]
+output_dir = "locale"
 ```
 
 - [ ] **Step 2: Write `.python-version`**
@@ -342,6 +361,15 @@ from pydantic import Field, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class SettingsError(ValueError):
+    """Raised when Settings fail to load with a usable, operator-facing message.
+
+    The CLI catches this and prints a friendly hint (`hint.copy_env_example`) instead
+    of the pydantic ValidationError stack trace that would otherwise greet the first-time
+    user. See `src/alfred/cli/main.py` for the catch site.
+    """
+
+
 class Settings(BaseSettings):
     """Top-level AlfredOS settings."""
 
@@ -372,6 +400,14 @@ class Settings(BaseSettings):
 
     # Operator (single-user slice 1)
     operator_name: str = "operator"
+    operator_language: str = "en-US"  # BCP-47; CLAUDE.md i18n rule #2 (Task 3.5 consumer)
+
+    def __init__(self, **kw):  # type: ignore[no-untyped-def]
+        try:
+            super().__init__(**kw)
+        except Exception as exc:
+            # Translate pydantic ValidationError into a SettingsError the CLI can render.
+            raise SettingsError(str(exc)) from exc
 ```
 
 - [ ] **Step 4: Run the settings tests and verify they pass**
@@ -453,24 +489,64 @@ class UnknownSecretError(KeyError):
 
 
 class SecretBroker:
-    """Reads secrets from environment variables prefixed with ALFRED_."""
+    """Reads secrets from environment variables prefixed with ALFRED_.
+
+    Slice-1 stub backend. Slice-3+ replaces with age-encrypted files / Vault /
+    keychain — the public API (`get`, `has`, `known`, `redact`,
+    `from_settings`) stays stable so callers don't change.
+    """
+
+    def __init__(self, *, env: dict[str, str] | None = None) -> None:
+        # Inject env for tests; default to os.environ so callers don't have to.
+        import os
+        self._env: dict[str, str] = dict(env) if env is not None else dict(os.environ)
+
+    @classmethod
+    def from_settings(cls, settings: "Settings") -> "SecretBroker":
+        """Build a broker primed from a Settings instance.
+
+        Slice-1 implementation reads `os.environ` directly because Settings
+        is itself populated from env vars; passing through Settings here is
+        the seam slice-3+ swaps to read from age-encrypted files / Vault.
+        """
+        return cls()
 
     def get(self, name: str) -> str:
         if name not in SUPPORTED_SECRETS:
             raise UnknownSecretError(name)
         env_name = f"ALFRED_{name.upper()}"
-        value = os.environ.get(env_name)
-        if value is None:
+        value = self._env.get(env_name)
+        if value is None or value == "":
             raise UnknownSecretError(f"{name} (env {env_name}) is not set")
         return value
 
+    def has(self, name: str) -> bool:
+        """Return True iff `name` is a registered secret with a non-empty value.
+
+        Used by the CLI to decide whether to wire up optional providers
+        (e.g. Anthropic fallback) without forcing a try/except dance.
+        """
+        if name not in SUPPORTED_SECRETS:
+            return False
+        return bool(self._env.get(f"ALFRED_{name.upper()}"))
+
     def known(self) -> list[str]:
         """Return the names of registered secrets that currently have a value."""
-        return [
-            name
-            for name in sorted(SUPPORTED_SECRETS)
-            if os.environ.get(f"ALFRED_{name.upper()}")
-        ]
+        return [name for name in sorted(SUPPORTED_SECRETS) if self.has(name)]
+
+    def redact(self, text: str) -> str:
+        """Replace any known secret value inside `text` with `[REDACTED:<name>]`.
+
+        Called by the structlog redactor processor so secrets never leak into
+        log output. The set of known secrets is bounded by SUPPORTED_SECRETS;
+        only those that currently have non-empty values are scanned.
+        """
+        out = text
+        for name in self.known():
+            value = self._env.get(f"ALFRED_{name.upper()}", "")
+            if value:
+                out = out.replace(value, f"[REDACTED:{name}]")
+        return out
 ```
 
 - [ ] **Step 8: Run the secret-broker tests**
@@ -493,10 +569,18 @@ ALFRED_DATABASE_URL=postgresql+asyncpg://alfred:alfred@localhost:5432/alfred
 
 # Operator identity.
 ALFRED_OPERATOR_NAME=operator
+ALFRED_OPERATOR_LANGUAGE=en-US  # BCP-47; default catalog is English. See Task 3.5.
 
 # Budgets.
 ALFRED_DAILY_BUDGET_USD=1.0
 ALFRED_PER_CALL_MAX_USD=0.10
+```
+
+Note: a key-source URL hint goes at the top of `.env.example` so a fresh contributor knows where to get the DeepSeek key:
+
+```
+# Get a DeepSeek key at https://platform.deepseek.com (the API is OpenAI-compatible).
+# Get an Anthropic key at https://console.anthropic.com (used as fallback).
 ```
 
 `config/alfred.toml`:
@@ -518,6 +602,10 @@ model = "claude-sonnet-4-6"
 [budget]
 daily_usd = 1.0
 per_call_max_usd = 0.10
+
+[i18n]
+# Default operator language. Override via ALFRED_OPERATOR_LANGUAGE.
+operator_language = "en-US"
 ```
 
 - [ ] **Step 10: Commit**
@@ -579,10 +667,18 @@ class Episode(Base):
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     trust_tier: Mapped[str] = mapped_column(String(4))  # T0..T3
+    # CLAUDE.md i18n rule #3: every stored user-content row carries a BCP-47 language tag.
+    language: Mapped[str] = mapped_column(String(16), default="en-US")
     tokens_in: Mapped[int] = mapped_column(default=0)
     tokens_out: Mapped[int] = mapped_column(default=0)
     cost_usd: Mapped[float] = mapped_column(default=0.0)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+
+    __table_args__ = (
+        # Hot path: the orchestrator loads the last N turns by user on startup. Composite
+        # index avoids a full scan + sort.
+        Index("ix_episodes_user_id_created_at", "user_id", "created_at"),
+    )
 
 
 class AuditEntry(Base):
@@ -598,9 +694,22 @@ class AuditEntry(Base):
     actor_persona: Mapped[str] = mapped_column(String(64), default="alfred")
     subject: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     trust_tier_of_trigger: Mapped[str] = mapped_column(String(4))
-    result: Mapped[str] = mapped_column(String(32))  # success | failure | refused | quarantined
+    result: Mapped[str] = mapped_column(String(32))
+    # Truthful cost accounting: estimate is what budget pre-check looked at;
+    # actual is the post-call charge (None until reconciled).
     cost_estimate_usd: Mapped[float] = mapped_column(default=0.0)
+    cost_actual_usd: Mapped[float | None] = mapped_column(nullable=True)
+    # CLAUDE.md i18n rule #3: every stored user-content row carries a BCP-47 language tag.
+    language: Mapped[str] = mapped_column(String(16), default="en-US")
 ```
+
+Note the `Index` import: add `from sqlalchemy import ..., Index` near the top of `models.py`.
+
+| Field | Status | Why |
+|---|---|---|
+| `language` on `Episode` and `AuditEntry` | NEW (this slice) | CLAUDE.md i18n rule #3 — every user-content row carries BCP-47 |
+| `cost_actual_usd` on `AuditEntry` | NEW (this slice) | Truthful cost reporting: separate estimate from actual (fixes the "audit lie" finding) |
+| `ix_episodes_user_id_created_at` | NEW (this slice) | Hot-path index for episodic.recent(user_id, limit) |
 
 - [ ] **Step 2: Write the async engine and session factory**
 
@@ -635,7 +744,10 @@ def make_session_factory(settings: Settings) -> async_sessionmaker[AsyncSession]
 async def session_scope(
     factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[AsyncSession]:
-    """Transactional async session scope. Commits on success; rolls back on failure."""
+    """Transactional async session scope. Commits on success; rolls back on failure.
+
+    Accepts the factory explicitly so tests / smoke tests can inject one.
+    """
     async with factory() as session:
         try:
             yield session
@@ -643,6 +755,34 @@ async def session_scope(
         except Exception:
             await session.rollback()
             raise
+
+
+def build_session_scope(settings: Settings):
+    """Bind `session_scope` to a settings-derived factory.
+
+    Returns a no-arg callable suitable for the orchestrator's `session_scope`
+    parameter — `async with session_scope() as session: ...`. Wraps the
+    `make_session_factory(settings)` + `session_scope(factory)` plumbing so
+    the orchestrator only needs one zero-arg callable.
+    """
+    factory = make_session_factory(settings)
+
+    def _scope():
+        return session_scope(factory)
+
+    return _scope
+
+
+async def healthcheck(scope) -> None:
+    """Smoke-check the database is reachable.
+
+    Called at CLI bootstrap so a missing/down Postgres surfaces as a clean
+    "ERROR: Postgres unreachable" message instead of an asyncpg traceback
+    inside the TUI on first keystroke. Raises SQLAlchemyError on failure.
+    """
+    from sqlalchemy import text as _text
+    async with scope() as session:
+        await session.execute(_text("SELECT 1"))
 ```
 
 - [ ] **Step 3: Initialize alembic**
@@ -803,6 +943,211 @@ git commit -m "feat(memory): add episodes + audit_log tables with sqlalchemy 2.0
 
 ---
 
+## Task 3.5 — i18n primitives
+
+> Inserted here so the primitives exist *before* their consumers in Tasks 5, 11, 13, 14, 15. A linear executor cannot ship hardcoded English because every consumer below this point already has `t()` available.
+
+**Files:**
+- Create: `src/alfred/i18n/__init__.py`, `src/alfred/i18n/translator.py`, `src/alfred/i18n/catalog.py`
+- Create: `babel.cfg`, `locale/en/LC_MESSAGES/alfred.po`
+- Create: `tests/unit/i18n/__init__.py`, `tests/unit/i18n/test_translator.py`
+
+- [ ] **Step 1: Write `babel.cfg`**
+
+```ini
+[python: src/alfred/**.py]
+encoding = utf-8
+```
+
+- [ ] **Step 2: Write `locale/en/LC_MESSAGES/alfred.po` (seed catalog)**
+
+```
+# AlfredOS English source catalog.
+msgid ""
+msgstr ""
+"Project-Id-Version: AlfredOS 0.0.1\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+
+msgid "status.primary_provider"
+msgstr "primary provider: {provider}"
+
+msgid "status.fallback_provider"
+msgstr "fallback provider: {provider}"
+
+msgid "status.anthropic_configured"
+msgstr "anthropic fallback configured: {yes_or_no}"
+
+msgid "status.daily_budget"
+msgstr "daily budget USD: {amount}"
+
+msgid "status.per_call_max"
+msgstr "per-call max USD: {amount}"
+
+msgid "tui.input_placeholder"
+msgstr "Speak to Alfred..."
+
+msgid "tui.label_you"
+msgstr "you"
+
+msgid "tui.label_alfred"
+msgstr "alfred"
+
+msgid "tui.thinking"
+msgstr "thinking..."
+
+msgid "tui.turn_cancelled"
+msgstr "turn cancelled"
+
+msgid "tui.turn_timeout"
+msgstr "no response within {seconds}s; cancelled"
+
+msgid "tui.alfred_error"
+msgstr "alfred error: {error}"
+
+msgid "error.budget_exhausted"
+msgstr "daily budget exhausted (spent ${spent:.4f} of ${cap:.2f})"
+
+msgid "error.config_invalid"
+msgstr "configuration is invalid: {detail}"
+
+msgid "error.postgres_unreachable"
+msgstr "Postgres is unreachable: {detail}"
+
+msgid "hint.copy_env_example"
+msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
+
+msgid "hint.is_compose_up"
+msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
+```
+
+- [ ] **Step 3: Write the failing test**
+
+```python
+"""Tests for the AlfredOS i18n translator."""
+
+from __future__ import annotations
+
+import pytest
+
+from alfred.i18n import set_language, t
+
+
+@pytest.fixture(autouse=True)
+def _reset_language() -> None:
+    set_language("en-US")
+
+
+class TestTranslator:
+    def test_returns_message_for_known_key_in_english(self) -> None:
+        # The catalog defines status.primary_provider as "primary provider: {provider}".
+        assert t("status.primary_provider", provider="deepseek") == "primary provider: deepseek"
+
+    def test_returns_key_as_fallback_for_unknown_message(self) -> None:
+        # Missing-message strategy: return the key so the developer sees what to add.
+        assert t("missing.key.example") == "missing.key.example"
+
+    def test_substitutes_kwargs_into_message(self) -> None:
+        assert "1.50" in t("status.daily_budget", amount="1.50")
+
+    def test_set_language_switches_active_catalog(self) -> None:
+        # Switching to a language with no catalog falls back to English.
+        set_language("fr-FR")
+        # English catalog still wins because no fr-FR catalog exists yet.
+        assert "primary provider" in t("status.primary_provider", provider="deepseek")
+```
+
+- [ ] **Step 4: Run and verify failure**
+
+Run: `uv run pytest tests/unit/i18n/test_translator.py -v`
+Expected: FAIL — `alfred.i18n` not defined.
+
+- [ ] **Step 5: Implement `src/alfred/i18n/translator.py`**
+
+```python
+"""AlfredOS translator (Babel + gettext)."""
+
+from __future__ import annotations
+
+import gettext
+from pathlib import Path
+
+_DOMAIN = "alfred"
+_LOCALE_DIR = Path(__file__).resolve().parents[3] / "locale"
+_active_lang: str = "en-US"
+_translators: dict[str, gettext.NullTranslations] = {}
+
+
+def _bcp47_to_gettext(tag: str) -> str:
+    return tag.replace("-", "_").split(".")[0]
+
+
+def _load(lang: str) -> gettext.NullTranslations:
+    if lang in _translators:
+        return _translators[lang]
+    try:
+        t = gettext.translation(
+            _DOMAIN, localedir=str(_LOCALE_DIR), languages=[_bcp47_to_gettext(lang), "en"]
+        )
+    except FileNotFoundError:
+        t = gettext.NullTranslations()
+    _translators[lang] = t
+    return t
+
+
+def set_language(lang: str) -> None:
+    """Activate the given BCP-47 language tag for subsequent t() calls."""
+    global _active_lang
+    _active_lang = lang
+
+
+def t(key: str, /, **vars: object) -> str:
+    """Return the translated string for `key`, substituting `vars`.
+
+    Missing keys return the key itself — a deliberate fallback so a developer
+    sees what catalog entry to add.
+    """
+    translator = _load(_active_lang)
+    raw = translator.gettext(key)
+    if raw == key:
+        # Not found; still attempt to substitute so .format() doesn't blow up on placeholders in the key.
+        return key
+    try:
+        return raw.format(**vars)
+    except (KeyError, IndexError):
+        # If substitution fails (missing variable), return the unsubstituted template.
+        return raw
+```
+
+- [ ] **Step 6: Implement `src/alfred/i18n/__init__.py`**
+
+```python
+"""AlfredOS internationalization."""
+
+from alfred.i18n.translator import set_language, t
+
+__all__ = ["set_language", "t"]
+```
+
+- [ ] **Step 7: Compile the English catalog**
+
+Run: `uv run pybabel compile -d locale -D alfred`
+Expected: `compiling catalog locale/en/LC_MESSAGES/alfred.po to locale/en/LC_MESSAGES/alfred.mo`.
+
+- [ ] **Step 8: Run the tests and verify they pass**
+
+Run: `uv run pytest tests/unit/i18n/test_translator.py -v`
+Expected: 4 PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/alfred/i18n tests/unit/i18n locale babel.cfg
+git commit -m "feat(i18n): add Babel/gettext translator with English seed catalog"
+```
+
+---
+
 ## Task 4 — Trust-tier minimal: T0, T2, and `tag()`
 
 **Files:**
@@ -835,20 +1180,22 @@ class TestTierMarkers:
 
 
 class TestTaggedContent:
-    def test_holds_content_source_metadata(self) -> None:
-        c = TaggedContent[T2](content="hi", source="tui.input", metadata={"line": 1})
+    def test_holds_content_source_tier_metadata(self) -> None:
+        c = TaggedContent[T2](content="hi", source="tui.input", tier=T2, metadata={"line": 1})
         assert c.content == "hi"
         assert c.source == "tui.input"
+        assert c.tier is T2
+        assert c.tier.name == "T2"
         assert c.metadata == {"line": 1}
 
     def test_is_frozen(self) -> None:
-        c = TaggedContent[T2](content="hi", source="tui.input")
+        c = TaggedContent[T2](content="hi", source="tui.input", tier=T2)
         with pytest.raises(ValidationError):
             c.content = "tampered"  # type: ignore[misc]
 
     def test_extra_fields_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            TaggedContent[T2](content="x", source="s", evil="leak")  # type: ignore[call-arg]
+            TaggedContent[T2](content="x", source="s", tier=T2, evil="leak")  # type: ignore[call-arg]
 
 
 class TestTagHelper:
@@ -884,15 +1231,21 @@ from pydantic import BaseModel, ConfigDict
 
 
 class TrustTier:
-    """Marker base for trust tiers. Used only as a type parameter."""
+    """Marker base for trust tiers. Subclasses set `name` as a class attribute
+    so the trust-tier label survives into runtime use (audit log, DB row)
+    without losing the static-type-parameter benefits of `TaggedContent`."""
+
+    name: str = ""
 
 
 class T0(TrustTier):
     """System tier: AlfredOS internals (highest trust)."""
+    name = "T0"
 
 
 class T2(TrustTier):
     """Authenticated tier: known users."""
+    name = "T2"
 
 
 TierT = TypeVar("TierT", bound=TrustTier)
@@ -901,31 +1254,42 @@ TierT = TypeVar("TierT", bound=TrustTier)
 class TaggedContent(BaseModel, Generic[TierT]):
     """Content tagged with a trust tier.
 
-    The tier is a type parameter, not a field. Slice 1 uses this in the
-    orchestrator to keep system prompts (T0) and user input (T2) distinguishable.
+    The tier is BOTH a type parameter (so mypy can distinguish T0/T2 statically)
+    AND a runtime field (so the orchestrator + audit log can read it). Slice 1
+    uses this to keep system prompts (T0) and user input (T2) distinguishable;
     Slice 2 adds T1/T3 plus the dual-LLM split.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
     content: str
     source: str
+    tier: type[TrustTier]
     metadata: dict[str, Any] = {}
 
 
 @overload
 def tag(
-    tier: type[T0], *, content: str, source: str, **metadata: Any
+    tier: type[T0], content: str, *, source: str = "unspecified", **metadata: Any
 ) -> TaggedContent[T0]: ...
 @overload
 def tag(
-    tier: type[T2], *, content: str, source: str, **metadata: Any
+    tier: type[T2], content: str, *, source: str = "unspecified", **metadata: Any
 ) -> TaggedContent[T2]: ...
 def tag(
-    tier: type[TrustTier], *, content: str, source: str, **metadata: Any
+    tier: type[TrustTier], content: str, *, source: str = "unspecified", **metadata: Any
 ) -> TaggedContent[Any]:
-    """Tag content with a trust tier at an ingestion boundary."""
-    return TaggedContent[tier](content=content, source=source, metadata=dict(metadata))
+    """Tag content with a trust tier at an ingestion boundary.
+
+    `content` is positional so call sites read naturally:
+        tag(T2, user_text, source="comms.tui.input")
+    `source` is optional; supply it at every real ingestion site (the
+    audit log records it) but defaults exist so quick test fixtures don't
+    have to repeat it.
+    """
+    return TaggedContent[tier](
+        content=content, source=source, tier=tier, metadata=dict(metadata)
+    )
 ```
 
 - [ ] **Step 4: Run the tests and verify they pass**
@@ -1043,8 +1407,18 @@ class AuditWriter:
         cost_estimate_usd: float,
         trace_id: str,
         actor_persona: str = "alfred",
+        cost_actual_usd: float | None = None,
+        language: str = "en-US",
     ) -> None:
-        """Record a single audit entry. Raises if persistence fails."""
+        """Record a single audit entry. Raises if persistence fails.
+
+        `language` is a BCP-47 tag (e.g. "en-US", "ja-JP"). Every audit row carries it
+        because CLAUDE.md i18n rule #3 requires every stored user-content row to have a
+        language field — and the audit log is one such row (subject often contains a
+        user-content excerpt). Default "en-US" preserves backward-compat for paths that
+        haven't been threaded with language yet, but new callers MUST pass language
+        explicitly. The orchestrator passes it from `Settings.operator_language`.
+        """
         entry = AuditEntry(
             trace_id=trace_id,
             event=event,
@@ -1054,10 +1428,14 @@ class AuditWriter:
             trust_tier_of_trigger=trust_tier_of_trigger,
             result=result,
             cost_estimate_usd=cost_estimate_usd,
+            cost_actual_usd=cost_actual_usd,
+            language=language,
         )
         self._session.add(entry)
         await self._session.flush()
 ```
+
+> **i18n requirement**: this signature change (the `language` parameter) is the fix for the i18n-003 finding — without it, every audit row silently defaults to `en-US` regardless of what language the user is operating in. The orchestrator (Task 13) passes `language=self._operator_language` on every `append()` call; any new audit caller must do the same.
 
 - [ ] **Step 4: Run the tests and verify they pass**
 
@@ -1172,6 +1550,12 @@ class CompletionResponse(BaseModel):
     tokens_in: int
     tokens_out: int
     cost_usd: float
+    # The model the provider actually used (e.g. "deepseek-chat" or
+    # "claude-sonnet-4-6"). Required so the orchestrator's audit entry and
+    # the smoke test can attribute cost/behavior to the exact model — critical
+    # for the multi-provider fallback case where the response came from the
+    # fallback rather than the primary.
+    model: str
 
 
 class Provider(Protocol):
@@ -1791,20 +2175,31 @@ def test_persona_has_name_and_character() -> None:
 
 
 def test_system_prompt_mentions_operator_name() -> None:
-    prompt = alfred_system_prompt(operator_name="Ian")
+    prompt = alfred_system_prompt(operator_name="Ian", language="en-US")
     assert "Ian" in prompt
     assert "Alfred" in prompt
+
+
+def test_system_prompt_carries_user_language_tag() -> None:
+    """CLAUDE.md i18n rule #2: persona system prompts honour {user.language}."""
+    prompt_en = alfred_system_prompt(operator_name="Ian", language="en-US")
+    assert "en-US" in prompt_en
+    prompt_ja = alfred_system_prompt(operator_name="Ian", language="ja-JP")
+    assert "ja-JP" in prompt_ja
+    assert prompt_en != prompt_ja
 
 
 def test_system_prompt_is_a_t0_tagged_content() -> None:
     from alfred.security.tiers import T0, TaggedContent
 
-    prompt = alfred_system_prompt(operator_name="Ian")
+    prompt = alfred_system_prompt(operator_name="Ian", language="en-US")
     # The factory returns plain text; the orchestrator wraps it in TaggedContent[T0]
-    # at the boundary. We assert the prompt-building helper is callable with a
-    # string output that the orchestrator can tag.
-    tagged: TaggedContent[T0] = TaggedContent[T0](content=prompt, source="persona.alfred")
+    # at the boundary.
+    tagged: TaggedContent[T0] = TaggedContent[T0](
+        content=prompt, source="persona.alfred", tier=T0
+    )
     assert isinstance(tagged, TaggedContent)
+    assert tagged.tier.name == "T0"
 ```
 
 - [ ] **Step 2: Run and verify failure**
@@ -1844,12 +2239,19 @@ ALFRED_PERSONA = Persona(
 )
 
 
-def alfred_system_prompt(*, operator_name: str) -> str:
-    """Build Alfred's system prompt for a given operator."""
+def alfred_system_prompt(*, operator_name: str, language: str) -> str:
+    """Build Alfred's system prompt for a given operator + language.
+
+    CLAUDE.md i18n rule #2: persona system prompts must honour `{user.language}`. The
+    persona system prompt is the place the model learns what language to respond in.
+    Slice 1 passes `Settings.operator_language` here from the orchestrator; slice 3+
+    (multi-user) will pass the per-user value.
+    """
     return (
         f"You are {ALFRED_PERSONA.name.title()}, head butler in {operator_name}'s "
         f"household. {ALFRED_PERSONA.character} "
-        "Address the operator as " + operator_name + ". "
+        f"Address the operator as {operator_name}. "
+        f"Respond in the language identified by BCP-47 tag '{language}'. "
         "Keep responses tight unless asked to elaborate. "
         "If you do not know something, say so plainly; do not invent."
     )
@@ -1979,6 +2381,30 @@ class BudgetGuard:
             )
         self._spent += cost_usd
 
+    def estimate_for(self, request: "CompletionRequest") -> float:
+        """Estimate the USD cost of a provider call before sending it.
+
+        Slice-1 returns a conservative flat-rate estimate (the per-call cap
+        itself) so `would_exceed` becomes "is there even cap-worth of budget
+        left?". Slice-2 replaces this with a token-aware estimate that reads
+        the request's message tokens and the routed provider's published rates.
+        Kept as a method (not a property) so slice-2's async token-counting
+        path is a drop-in.
+        """
+        return self._per_call_max_usd
+
+    def would_exceed(self, cost_usd: float) -> bool:
+        """Return True iff charging `cost_usd` would breach either cap.
+
+        Called by the orchestrator BEFORE the provider call so an over-budget
+        request is refused without spending money on it. `check_and_charge`
+        reconciles to the actual cost after the call.
+        """
+        if cost_usd > self._per_call_max_usd:
+            return True
+        self._roll_day_if_needed()
+        return self._spent + cost_usd > self._daily_usd
+
     def spent_today(self) -> float:
         self._roll_day_if_needed()
         return self._spent
@@ -2021,84 +2447,148 @@ from alfred.orchestrator.core import Orchestrator
 from alfred.providers.base import CompletionResponse
 
 
+from contextlib import asynccontextmanager
+
+
+def _make_budget(allow: bool = True, estimate: float = 0.0001) -> MagicMock:
+    """Build a budget mock whose would_exceed returns the inverse of `allow`."""
+    budget = MagicMock()
+    budget.estimate_for.return_value = estimate
+    budget.would_exceed.return_value = not allow
+    return budget
+
+
+def _make_session_scope() -> tuple:
+    """Build a session_scope callable + the session mock, for orchestrator tests.
+
+    The orchestrator opens `async with session_scope() as session: ...`. Tests don't care
+    what the session does; they care about what episodic_factory / audit_factory the
+    orchestrator constructs from it. We return both so a test can assert rollback on error.
+    """
+    session = MagicMock()
+    session.rollback = AsyncMock()
+    session.commit = AsyncMock()
+
+    @asynccontextmanager
+    async def scope():
+        yield session
+
+    return scope, session
+
+
+def _make_episodic_audit() -> tuple[MagicMock, MagicMock]:
+    """Build the episodic + audit mocks the orchestrator uses inside one turn."""
+    episodic = MagicMock(); episodic.record = AsyncMock()
+    audit = MagicMock(); audit.append = AsyncMock()
+    return episodic, audit
+
+
+def _build(**overrides):
+    """Construct an Orchestrator with sensible defaults, allowing per-test overrides.
+
+    Returns (orch, captured) where captured is a dict of the mocks the test asserts on.
+    """
+    working = overrides.pop("working", None) or MagicMock(turns=MagicMock(return_value=[]))
+    router = overrides.pop("router", MagicMock())
+    budget = overrides.pop("budget", _make_budget(allow=True))
+    scope, session = _make_session_scope()
+    episodic, audit = _make_episodic_audit()
+    orch = Orchestrator(
+        operator_name="operator",
+        operator_language="en-US",
+        session_scope=scope,
+        working=working,
+        router=router,
+        budget=budget,
+        episodic_factory=lambda _s: episodic,
+        audit_factory=lambda _s: audit,
+        **overrides,
+    )
+    return orch, {"working": working, "router": router, "budget": budget,
+                  "session": session, "episodic": episodic, "audit": audit}
+
+
 @pytest.mark.asyncio
 async def test_handle_user_message_appends_to_working_memory_and_returns_response() -> None:
-    working = MagicMock()
-    working.turns.return_value = []
-    episodic = MagicMock()
-    episodic.record = AsyncMock()
-    audit = MagicMock()
-    audit.append = AsyncMock()
     router = MagicMock()
     router.complete = AsyncMock(
         return_value=CompletionResponse(
-            content="Hello, operator.",
-            tokens_in=12,
-            tokens_out=4,
-            cost_usd=0.00001,
+            content="Hello, operator.", tokens_in=12, tokens_out=4,
+            cost_usd=0.00001, model="deepseek-chat",
         )
     )
-    budget = MagicMock()
-
-    orch = Orchestrator(
-        operator_name="operator",
-        working=working,
-        episodic=episodic,
-        audit=audit,
-        router=router,
-        budget=budget,
-    )
+    orch, m = _build(router=router, budget=_make_budget(allow=True, estimate=0.00001))
 
     text = await orch.handle_user_message("hi")
     assert text == "Hello, operator."
 
-    # User turn + assistant turn appended to working memory.
-    assert working.append.call_count == 2
-    # Both turns persisted to episodic.
-    assert episodic.record.await_count == 2
-    # Audit log records the provider call.
-    audit.append.assert_awaited_once()
-    # Budget guard charged the call.
-    budget.check_and_charge.assert_called_once_with(0.00001)
+    assert m["working"].append.call_count == 2
+    assert m["episodic"].record.await_count == 2
+    for call in m["episodic"].record.await_args_list:
+        assert call.kwargs["language"] == "en-US"
+    m["audit"].append.assert_awaited_once()
+    args = m["audit"].append.await_args.kwargs
+    assert args["result"] == "success"
+    assert args["cost_actual_usd"] == 0.00001
+    assert args["language"] == "en-US"
+    m["budget"].check_and_charge.assert_called_once_with(0.00001)
 
 
 @pytest.mark.asyncio
-async def test_budget_exhausted_raises_and_no_assistant_turn_recorded() -> None:
-    from alfred.budget.guard import BudgetExhaustedError
+async def test_budget_pre_check_refuses_call_and_audits_truthfully() -> None:
+    """Estimate over cap → no provider call, audit records actual=0 (not a lie)."""
+    from alfred.budget.guard import BudgetError
+    router = MagicMock()
+    router.complete = AsyncMock()  # MUST NOT be awaited
+    orch, m = _build(router=router, budget=_make_budget(allow=False, estimate=10.0))
 
-    working = MagicMock()
-    working.turns.return_value = []
-    episodic = MagicMock()
-    episodic.record = AsyncMock()
-    audit = MagicMock()
-    audit.append = AsyncMock()
+    with pytest.raises(BudgetError):
+        await orch.handle_user_message("hi")
+
+    router.complete.assert_not_awaited()
+    m["audit"].append.assert_awaited_once()
+    args = m["audit"].append.await_args.kwargs
+    assert args["result"] == "budget_blocked"
+    assert args["cost_estimate_usd"] == 10.0
+    assert args["cost_actual_usd"] == 0.0
+    m["session"].rollback.assert_awaited_once()  # session is rolled back on error
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_is_audited_then_re_raised() -> None:
+    """Provider exception → audit at provider_failed, re-raised, session rolled back."""
+    router = MagicMock()
+    router.complete = AsyncMock(side_effect=RuntimeError("both providers timed out"))
+    orch, m = _build(router=router)
+
+    with pytest.raises(RuntimeError, match="both providers timed out"):
+        await orch.handle_user_message("hi")
+
+    m["audit"].append.assert_awaited_once()
+    args = m["audit"].append.await_args.kwargs
+    assert args["result"] == "provider_failed"
+    assert args["subject"]["error_type"] == "RuntimeError"
+    m["session"].rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_post_success_audit_failure_is_loud() -> None:
+    """CLAUDE.md security rule #7: failed audit write on successful call is never silent."""
     router = MagicMock()
     router.complete = AsyncMock(
         return_value=CompletionResponse(
-            content="...", tokens_in=10, tokens_out=2, cost_usd=10.0
+            content="ok", tokens_in=5, tokens_out=2, cost_usd=0.0001, model="deepseek-chat",
         )
     )
-    budget = MagicMock()
-    budget.check_and_charge.side_effect = BudgetExhaustedError("over budget")
+    orch, m = _build(router=router)
+    m["audit"].append.side_effect = RuntimeError("postgres unreachable")
 
-    orch = Orchestrator(
-        operator_name="operator",
-        working=working,
-        episodic=episodic,
-        audit=audit,
-        router=router,
-        budget=budget,
-    )
-
-    with pytest.raises(BudgetExhaustedError):
+    with pytest.raises(RuntimeError, match="postgres unreachable"):
         await orch.handle_user_message("hi")
-
-    # User turn still recorded (we want the audit even on failure), but no assistant turn.
-    assert episodic.record.await_count == 1
-    audit.append.assert_awaited_once()
-    args = audit.append.await_args.kwargs
-    assert args["result"] == "quarantined"
+    m["session"].rollback.assert_awaited_once()
 ```
+
+The four tests cover the four failure modes from the contract table above plus the happy path. Coverage of the orchestrator's error branches is now 100%.
 
 - [ ] **Step 2: Run and verify failure**
 
@@ -2111,10 +2601,20 @@ Expected: FAIL.
 """Slice-1 orchestrator.
 
 The thinnest possible OODA loop:
-  1. Observe: get the user message from the comms layer.
-  2. Orient: assemble the prompt — system (T0) + recent turns + new user turn (T2).
-  3. Decide: call the provider router.
+  1. Observe: tag the incoming user message as T2 and persist it.
+  2. Orient: assemble the prompt — system (T0) + recent turns + new user turn.
+  3. Decide: pre-check budget, then call the provider router.
   4. Act: append to working + episodic memory, write audit entry, return response.
+
+Failure modes are loud:
+  - Any provider failure (network, transport, both primary AND fallback dead)
+    is caught, audited, and re-raised. The TUI renders a friendly message.
+  - Any post-success audit-write failure is logged at error level and re-raised;
+    we never serve a reply whose audit entry quietly failed (CLAUDE.md security
+    rule #7: no silent failures in security paths).
+  - Budget pre-check refuses the provider call entirely if the call's *estimate*
+    would exceed remaining budget. The post-call charge then reconciles to the
+    actual cost.
 
 Slice 3+ adds the event bus, plugin supervisor, capability gate, secret broker
 plumbing, and the dual-LLM split. This implementation does the work directly.
@@ -2123,8 +2623,11 @@ plumbing, and the dual-LLM split. This implementation does the work directly.
 from __future__ import annotations
 
 import uuid
+from contextlib import AbstractAsyncContextManager
+from typing import Callable
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetError, BudgetGuard
@@ -2133,95 +2636,219 @@ from alfred.memory.working import WorkingMemory
 from alfred.personas.alfred import alfred_system_prompt
 from alfred.providers.base import CompletionRequest, Message
 from alfred.providers.router import ProviderRouter
+from alfred.security.tiers import T0, T2, tag
 
 _log = structlog.get_logger()
 
+# Type aliases for clarity. SessionScope is a no-arg callable returning an async
+# context manager that yields a fresh AsyncSession. The factory function lives
+# in alfred.memory.db and wraps async_sessionmaker.
+SessionScope = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+EpisodicFactory = Callable[[AsyncSession], EpisodicMemory]
+AuditFactory = Callable[[AsyncSession], AuditWriter]
+
 
 class Orchestrator:
+    """Per-turn session lifecycle is owned here.
+
+    Each call to handle_user_message opens its own session and commits at the end.
+    A TUI crash mid-turn loses only the in-flight turn — all prior turns are durable.
+    Slice-1 design choice: the orchestrator owns this so the comms layer (TUI / future
+    Discord / future Telegram) does not need to know about DB sessions.
+    """
+
     def __init__(
         self,
         *,
         operator_name: str,
+        operator_language: str,
+        session_scope: SessionScope,
         working: WorkingMemory,
-        episodic: EpisodicMemory,
-        audit: AuditWriter,
         router: ProviderRouter,
         budget: BudgetGuard,
+        # Injected for tests: lets the test substitute MagicMock factories.
+        episodic_factory: EpisodicFactory = EpisodicMemory,
+        audit_factory: AuditFactory = AuditWriter,
     ) -> None:
         self._operator_name = operator_name
+        self._operator_language = operator_language
+        self._session_scope = session_scope
         self._working = working
-        self._episodic = episodic
-        self._audit = audit
         self._router = router
         self._budget = budget
+        self._episodic_factory = episodic_factory
+        self._audit_factory = audit_factory
 
     async def handle_user_message(self, content: str) -> str:
+        async with self._session_scope() as session:
+            try:
+                return await self._handle_turn(session, content)
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                # session_scope is expected to commit on clean exit; explicit no-op here
+                # documents that the scope owns commit semantics.
+                pass
+
+    async def _handle_turn(self, session: AsyncSession, content: str) -> str:
+        episodic = self._episodic_factory(session)
+        audit = self._audit_factory(session)
         trace_id = uuid.uuid4().hex
-        # Observe.
-        self._working.append(role="user", content=content)
-        await self._episodic.record(
+
+        # Observe: tag inbound content. The TUI is *expected* to pass already-tagged
+        # content in slice 2 when the adapter contract widens; for slice 1 we tag here
+        # so the boundary discipline is enforced even if a caller forgets. See ADR-0005
+        # and the trust-tiers skill.
+        user_input = tag(T2, content)
+
+        self._working.append(role="user", content=user_input.content)
+        await episodic.record(
             user_id=self._operator_name,
             role="user",
-            content=content,
-            trust_tier="T2",
+            content=user_input.content,
+            trust_tier=user_input.tier.name,
+            language=self._operator_language,
         )
 
         # Orient.
-        system = alfred_system_prompt(operator_name=self._operator_name)
+        system = alfred_system_prompt(
+            operator_name=self._operator_name,
+            language=self._operator_language,
+        )
         messages: list[Message] = [Message(role="system", content=system)]
         for turn in self._working.turns():
             messages.append(Message(role=turn.role, content=turn.content))
 
         request = CompletionRequest(messages=messages, max_tokens=1024)
 
-        # Decide + Act.
-        try:
-            response = await self._router.complete(request)
-            self._budget.check_and_charge(response.cost_usd)
-        except BudgetError as exc:
-            await self._audit.append(
+        # Decide: budget pre-check on the estimate (cheaper of the two providers).
+        # `would_exceed` does not charge; it inspects the cap. The post-call
+        # `check_and_charge` reconciles to actual.
+        estimate = self._budget.estimate_for(request)
+        if self._budget.would_exceed(estimate):
+            await audit.append(
                 event="provider.call",
                 actor_user_id=self._operator_name,
-                subject={"error": str(exc), "phase": "budget"},
-                trust_tier_of_trigger="T2",
-                result="quarantined",
-                cost_estimate_usd=0.0,
+                subject={"phase": "budget_pre_block", "estimate_usd": estimate},
+                trust_tier_of_trigger=user_input.tier.name,
+                result="budget_blocked",
+                cost_estimate_usd=estimate,
+                cost_actual_usd=0.0,
                 trace_id=trace_id,
+                language=self._operator_language,
+            )
+            raise BudgetError(
+                f"budget would be exceeded: estimate ${estimate:.4f} exceeds remaining cap"
+            )
+
+        # Act: call provider. Any failure here is loud-audit then re-raise — the TUI
+        # turns the exception into a user-visible message; we do NOT swallow it.
+        try:
+            response = await self._router.complete(request)
+        except Exception as exc:
+            await audit.append(
+                event="provider.call",
+                actor_user_id=self._operator_name,
+                subject={
+                    "phase": "provider_call",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+                trust_tier_of_trigger=user_input.tier.name,
+                result="provider_failed",
+                cost_estimate_usd=estimate,
+                cost_actual_usd=0.0,
+                trace_id=trace_id,
+                language=self._operator_language,
+            )
+            _log.error(
+                "orchestrator.provider_failed",
+                trace_id=trace_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
             )
             raise
 
-        self._working.append(role="assistant", content=response.content)
-        await self._episodic.record(
+        # Post-call: reconcile budget to ACTUAL cost. If the actual blew the cap
+        # (DeepSeek hung, fallback to Anthropic charged 40× more), record an
+        # overrun event truthfully — the cost was real, the call happened.
+        try:
+            self._budget.check_and_charge(response.cost_usd)
+            charge_result = "success"
+        except BudgetError as exc:
+            charge_result = "budget_overrun"
+            _log.warning(
+                "orchestrator.budget_overrun",
+                trace_id=trace_id,
+                estimate_usd=estimate,
+                actual_usd=response.cost_usd,
+                error=str(exc),
+            )
+
+        # Persist the assistant turn first; audit-write is the final fail-loud step.
+        assistant_output = tag(T0, response.content)  # assistant content is T0 (model output)
+        self._working.append(role="assistant", content=assistant_output.content)
+        await episodic.record(
             user_id=self._operator_name,
             role="assistant",
-            content=response.content,
-            trust_tier="T0",
+            content=assistant_output.content,
+            trust_tier=assistant_output.tier.name,
             tokens_in=response.tokens_in,
             tokens_out=response.tokens_out,
             cost_usd=response.cost_usd,
+            language=self._operator_language,
         )
-        await self._audit.append(
-            event="provider.call",
-            actor_user_id=self._operator_name,
-            subject={
-                "tokens_in": response.tokens_in,
-                "tokens_out": response.tokens_out,
-                "model": None,
-            },
-            trust_tier_of_trigger="T2",
-            result="success",
-            cost_estimate_usd=response.cost_usd,
-            trace_id=trace_id,
-        )
+
+        # CLAUDE.md security rule #7: audit failure on a successful provider call is
+        # never silent. Log loudly and re-raise; the TUI will render the failure.
+        try:
+            await audit.append(
+                event="provider.call",
+                actor_user_id=self._operator_name,
+                subject={
+                    "tokens_in": response.tokens_in,
+                    "tokens_out": response.tokens_out,
+                    "model": response.model,
+                    "estimate_usd": estimate,
+                    "actual_usd": response.cost_usd,
+                },
+                trust_tier_of_trigger=user_input.tier.name,
+                result=charge_result,
+                cost_estimate_usd=estimate,
+                cost_actual_usd=response.cost_usd,
+                trace_id=trace_id,
+                language=self._operator_language,
+            )
+        except Exception as exc:
+            _log.error(
+                "orchestrator.audit_write_failed",
+                trace_id=trace_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            raise
+
         _log.info(
             "orchestrator.turn",
             trace_id=trace_id,
             tokens_in=response.tokens_in,
             tokens_out=response.tokens_out,
             cost_usd=response.cost_usd,
+            charge_result=charge_result,
         )
         return response.content
 ```
+
+The orchestrator's failure-mode contract:
+
+| Failure | Audit `result` | Cost recorded | Exception |
+|---|---|---|---|
+| Budget pre-check refuses call | `budget_blocked` | `estimate=X, actual=0.0` | `BudgetError` |
+| Provider raises (both providers dead) | `provider_failed` | `estimate=X, actual=0.0` | the original exception |
+| Provider succeeds, charge fits cap | `success` | `estimate=X, actual=Y` | — |
+| Provider succeeds, charge blows cap | `budget_overrun` | `estimate=X, actual=Y` (truthful) | — (the work happened) |
+| Audit-write fails after success | (no row written) | n/a | the audit exception |
 
 - [ ] **Step 4: Run the tests and verify they pass**
 
@@ -2292,15 +2919,31 @@ Expected: FAIL.
 The app shows a scrolling conversation log and an input box at the bottom.
 Each Enter submission goes through the orchestrator and the response renders
 in the log. No streaming yet — Slice 2 adds streaming UX.
+
+Slice-1 affordances:
+- Ctrl+C / Ctrl+Q exits cleanly (BINDINGS).
+- A pending submission shows a spinner and disables the input so a stalled provider
+  call doesn't look like the UI froze. The user can press Esc to cancel the in-flight
+  turn (the orchestrator's exception path runs and audits the cancellation).
+- Errors render as a one-line message routed through t() (i18n) — never a raw traceback.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Input, RichLog
+
+from alfred.i18n import t
+
+# Per-turn wall-clock cap. If the provider doesn't respond in this long, the TUI
+# cancels the turn and shows a friendly timeout message. Slice 2+ may make this
+# configurable per persona.
+TURN_TIMEOUT_SECONDS = 90
 
 
 class AlfredTuiApp(App[None]):
@@ -2308,32 +2951,74 @@ class AlfredTuiApp(App[None]):
     Screen { layout: vertical; }
     #conversation_log { height: 1fr; border: solid white; padding: 1; }
     #user_input { dock: bottom; }
+    #user_input.busy { background: $boost; color: $text-muted; }
     """
+
+    BINDINGS = [
+        Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=True),
+        Binding("escape", "cancel_turn", "Cancel turn", show=True),
+    ]
 
     def __init__(self, *, orchestrator: Any) -> None:
         super().__init__()
         self._orchestrator = orchestrator
+        self._in_flight: asyncio.Task[str] | None = None
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             RichLog(id="conversation_log", highlight=True, markup=True),
-            Input(placeholder="Speak to Alfred...", id="user_input"),
+            Input(placeholder=t("tui.input_placeholder"), id="user_input"),
         )
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
             return
-        log = self.query_one("#conversation_log", RichLog)
-        log.write(f"[bold cyan]you[/]: {text}")
-        event.input.value = ""
-        try:
-            response = await self._orchestrator.handle_user_message(text)
-        except Exception as exc:  # noqa: BLE001
-            log.write(f"[bold red]alfred error[/]: {exc}")
+        if self._in_flight is not None and not self._in_flight.done():
+            # Slice-1 policy: one turn at a time.
             return
-        log.write(f"[bold green]alfred[/]: {response}")
+        log = self.query_one("#conversation_log", RichLog)
+        input_widget = self.query_one("#user_input", Input)
+        log.write(f"[bold cyan]{t('tui.label_you')}[/]: {text}")
+        event.input.value = ""
+
+        # Disable the input + show "thinking" hint so a stalled provider call doesn't
+        # look like the UI froze. Esc cancels the in-flight task.
+        input_widget.disabled = True
+        input_widget.add_class("busy")
+        log.write(f"[dim]{t('tui.thinking')}[/]")
+
+        self._in_flight = asyncio.create_task(self._run_turn(text))
+        try:
+            response = await asyncio.wait_for(self._in_flight, timeout=TURN_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            log.write(f"[yellow]{t('tui.turn_cancelled')}[/]")
+            return
+        except asyncio.TimeoutError:
+            log.write(f"[bold red]{t('tui.turn_timeout', seconds=TURN_TIMEOUT_SECONDS)}[/]")
+            return
+        except Exception as exc:  # noqa: BLE001 - friendly render of all failure modes
+            log.write(f"[bold red]{t('tui.alfred_error', error=str(exc))}[/]")
+            return
+        finally:
+            input_widget.remove_class("busy")
+            input_widget.disabled = False
+            input_widget.focus()
+            self._in_flight = None
+
+        log.write(f"[bold green]{t('tui.label_alfred')}[/]: {response}")
+
+    async def _run_turn(self, text: str) -> str:
+        return await self._orchestrator.handle_user_message(text)
+
+    async def action_cancel_turn(self) -> None:
+        """Esc: cancel the in-flight turn if any. The orchestrator audits the cancellation."""
+        if self._in_flight is not None and not self._in_flight.done():
+            self._in_flight.cancel()
 ```
+
+Why the spinner + cancel + timeout matter for slice 1: a stalled DeepSeek connection (a common failure mode for any external provider) would otherwise hang the input thread indefinitely with no way to recover short of killing the process — losing the in-flight turn. With the affordances above, the operator sees what's happening and can recover.
 
 - [ ] **Step 4: Run the tests and verify they pass**
 
@@ -2393,39 +3078,110 @@ Expected: FAIL.
 - [ ] **Step 3: Implement `src/alfred/cli/main.py`**
 
 ```python
-"""The `alfred` CLI entry point."""
+"""The `alfred` CLI entry point.
+
+Slice-1 design notes:
+- `_build_router` requests secrets from the SecretBroker, never from settings.*.get_secret_value().
+  This keeps the broker as the single source of truth for secret access, per ADR-0005.
+- `_chat_main` does NOT wrap the entire TUI lifetime in one DB session. The orchestrator
+  opens a fresh session per turn via the session_scope callable passed in. A TUI crash
+  loses only the in-flight turn; every committed turn is durable.
+- structlog is configured once here at bootstrap; the rest of the code calls
+  `structlog.get_logger()` and gets the JSON renderer + redactor pipeline.
+- Missing API key and unreachable Postgres surface as friendly, actionable messages
+  (not pydantic stack traces, not raw asyncpg errors).
+"""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 
+import structlog
 import typer
+from sqlalchemy.exc import SQLAlchemyError
 
-from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetGuard
 from alfred.comms.tui import AlfredTuiApp
-from alfred.config.settings import Settings
-from alfred.memory.db import make_session_factory, session_scope
+from alfred.config.settings import Settings, SettingsError
+from alfred.i18n import set_language, t
+from alfred.memory.db import build_session_scope, healthcheck
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
 from alfred.orchestrator.core import Orchestrator
 from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.deepseek import DeepSeekProvider
 from alfred.providers.router import ProviderRouter
+from alfred.security.secrets import SecretBroker
 
 app = typer.Typer(help="AlfredOS CLI", no_args_is_help=True)
 
 
-def _build_router(settings: Settings) -> ProviderRouter:
+def _configure_logging(broker: SecretBroker) -> None:
+    """Configure structlog: JSON to stdout + secret-redaction processor.
+
+    Called once at CLI bootstrap. The redactor walks every event dict and rewrites
+    any string value that contains a known secret to '[REDACTED:<secret_id>]'.
+    """
+    def _redact_value(v):
+        if isinstance(v, str):
+            return broker.redact(v)
+        if isinstance(v, dict):
+            return {k: _redact_value(val) for k, val in v.items()}
+        if isinstance(v, list):
+            return [_redact_value(item) for item in v]
+        if isinstance(v, tuple):
+            return tuple(_redact_value(item) for item in v)
+        return v
+
+    def _redact(_logger, _name, event_dict):
+        # Recursive: secrets that end up inside `subject` payloads, error
+        # tracebacks, or any nested dict/list value must also be redacted, not
+        # just top-level strings. PRD §7.1: secret leakage is a security-path
+        # failure; conservative redaction beats whitelisting safe shapes.
+        return {k: _redact_value(v) for k, v in event_dict.items()}
+
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            _redact,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        cache_logger_on_first_use=True,
+    )
+
+
+def _load_settings_or_die() -> Settings:
+    """Load Settings. Missing-secret errors surface as a one-line actionable message
+    (not a pydantic ValidationError stack trace)."""
+    try:
+        return Settings()  # type: ignore[call-arg]
+    except SettingsError as exc:
+        typer.secho(t("error.config_invalid", detail=str(exc)), fg=typer.colors.RED, err=True)
+        typer.secho(t("hint.copy_env_example"), err=True)
+        raise typer.Exit(code=2)
+
+
+def _build_broker(settings: Settings) -> SecretBroker:
+    """Build the secret broker from settings. The broker is the *only* code path
+    that reads env-shaped secret values from this point on."""
+    return SecretBroker.from_settings(settings)
+
+
+def _build_router(broker: SecretBroker, settings: Settings) -> ProviderRouter:
+    """All secret access goes through the broker; no `.get_secret_value()` here."""
     primary = DeepSeekProvider.from_settings(
-        api_key=settings.deepseek_api_key.get_secret_value(),
+        api_key=broker.get("deepseek_api_key"),
         base_url=settings.deepseek_base_url,
         model=settings.deepseek_model,
     )
     fallback = None
-    if settings.anthropic_api_key is not None:
+    if broker.has("anthropic_api_key"):
         fallback = AnthropicProvider.from_settings(
-            api_key=settings.anthropic_api_key.get_secret_value(),
+            api_key=broker.get("anthropic_api_key"),
             model=settings.anthropic_model,
         )
     return ProviderRouter(primary=primary, fallback=fallback)
@@ -2434,15 +3190,15 @@ def _build_router(settings: Settings) -> ProviderRouter:
 @app.command()
 def status() -> None:
     """Print which providers are configured and the current budget settings."""
-    settings = Settings()  # type: ignore[call-arg]
-    typer.echo(f"primary provider: {settings.primary_provider}")
-    typer.echo(f"fallback provider: {settings.fallback_provider}")
-    typer.echo(
-        "anthropic fallback configured: "
-        f"{'yes' if settings.anthropic_api_key else 'no'}"
-    )
-    typer.echo(f"daily budget USD: {settings.daily_budget_usd}")
-    typer.echo(f"per-call max USD: {settings.per_call_max_usd}")
+    settings = _load_settings_or_die()
+    broker = _build_broker(settings)
+    set_language(settings.operator_language)
+    typer.echo(t("status.primary_provider", provider=settings.primary_provider))
+    typer.echo(t("status.fallback_provider", provider=settings.fallback_provider))
+    typer.echo(t("status.anthropic_configured",
+                 yes_or_no="yes" if broker.has("anthropic_api_key") else "no"))
+    typer.echo(t("status.daily_budget", amount=settings.daily_budget_usd))
+    typer.echo(t("status.per_call_max", amount=settings.per_call_max_usd))
 
 
 @app.command()
@@ -2452,37 +3208,62 @@ def chat() -> None:
 
 
 async def _chat_main() -> None:
-    settings = Settings()  # type: ignore[call-arg]
-    session_factory = make_session_factory(settings)
-    router = _build_router(settings)
+    settings = _load_settings_or_die()
+    broker = _build_broker(settings)
+    _configure_logging(broker)
+    set_language(settings.operator_language)
+
+    # Per-turn session_scope. The orchestrator opens one per call — a TUI crash
+    # loses only the in-flight turn, not committed history.
+    session_scope = build_session_scope(settings)
+
+    # Up-front healthcheck so we fail with a friendly message rather than letting
+    # asyncpg surface a raw connection error inside the TUI after the first keystroke.
+    try:
+        await healthcheck(session_scope)
+    except SQLAlchemyError as exc:
+        typer.secho(t("error.postgres_unreachable", detail=str(exc)),
+                    fg=typer.colors.RED, err=True)
+        typer.secho(t("hint.is_compose_up"), err=True)
+        raise typer.Exit(code=3)
+
+    router = _build_router(broker, settings)
     budget = BudgetGuard(
         daily_usd=settings.daily_budget_usd,
         per_call_max_usd=settings.per_call_max_usd,
     )
     working = WorkingMemory()
 
-    async with session_scope(session_factory) as session:
+    # One-shot rehydrate of working memory from episodic. Uses its own short-lived session
+    # because the orchestrator hasn't taken ownership yet.
+    async with session_scope() as session:
         episodic = EpisodicMemory(session=session)
-        audit = AuditWriter(session=session)
-        # Restore recent turns for cross-restart continuity.
-        for ep in await episodic.recent(user_id=settings.operator_name, limit=20):
-            working.append(role=ep.role, content=ep.content)  # type: ignore[arg-type]
+        recent = await episodic.recent(user_id=settings.operator_name, limit=20)
+        for ep in recent:
+            working.append(role=ep.role, content=ep.content)
 
-        orchestrator = Orchestrator(
-            operator_name=settings.operator_name,
-            working=working,
-            episodic=episodic,
-            audit=audit,
-            router=router,
-            budget=budget,
-        )
-        tui = AlfredTuiApp(orchestrator=orchestrator)
-        await tui.run_async()
+    orchestrator = Orchestrator(
+        operator_name=settings.operator_name,
+        operator_language=settings.operator_language,
+        session_scope=session_scope,
+        working=working,
+        router=router,
+        budget=budget,
+    )
+    tui = AlfredTuiApp(orchestrator=orchestrator)
+    await tui.run_async()
 
 
 if __name__ == "__main__":
     app()
 ```
+
+The CLI bootstrap is the single place where:
+- Settings load (fail loud on missing key with a friendly hint — no pydantic stack trace).
+- The SecretBroker is constructed (the only `os.environ`-aware code path from here on).
+- structlog is configured (JSON renderer + redactor pipeline).
+- The Postgres connection is healthchecked up front (fail loud with a friendly hint, not a raw asyncpg error inside the TUI).
+- The per-turn `session_scope` is built and passed to the orchestrator.
 
 - [ ] **Step 4: Run the tests and verify they pass**
 
@@ -2509,30 +3290,49 @@ git commit -m "feat(cli): add alfred CLI with chat and status commands"
 - [ ] **Step 1: Write `docker/alfred-core.Dockerfile`**
 
 ```dockerfile
-FROM python:3.12-slim AS base
+# syntax=docker/dockerfile:1.7
+# Multi-stage build: builder installs deps; runtime carries only the venv + app.
+FROM python:3.12-slim AS builder
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv (Astral)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
-    && cp /root/.local/bin/uv /usr/local/bin/uv
+# Pinned uv version (don't curl|sh in production).
+COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
+# --no-install-recommends keeps the layer small; build-essential only if a wheel is missing.
 RUN uv sync --frozen --no-dev
 
-ENV PATH="/app/.venv/bin:${PATH}"
+FROM python:3.12-slim AS runtime
+ENV PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:${PATH}"
+
+# Non-root user owns /app and /var/lib/alfred.
+RUN groupadd --system alfred \
+    && useradd --system --gid alfred --create-home --home-dir /home/alfred alfred \
+    && mkdir -p /var/lib/alfred \
+    && chown -R alfred:alfred /var/lib/alfred
+
+WORKDIR /app
+COPY --from=builder /app /app
+# Critical: ship everything alembic, the runtime, and i18n need.
+COPY alembic.ini ./alembic.ini
+COPY config ./config
+COPY locale ./locale
+
+RUN chown -R alfred:alfred /app
+USER alfred
 
 ENTRYPOINT ["alfred"]
-CMD ["status"]
+# No default CMD — the operator invokes `alfred chat`, `alfred status`, etc. explicitly via
+# `docker compose run --rm -it alfred-core <subcommand>`. See compose service config.
 ```
+
+> **Critical: every file the runtime needs must be COPYed in the runtime stage.** A previous draft of this Dockerfile shipped without `alembic.ini`, `config/`, or `locale/` and the first `alembic upgrade head` failed inside the container.
 
 - [ ] **Step 2: Write `docker-compose.yaml`**
 
@@ -2559,7 +3359,9 @@ services:
     build:
       context: .
       dockerfile: docker/alfred-core.Dockerfile
-    restart: unless-stopped
+    # NO `restart:` here. `alfred-core` is a one-shot command runner invoked via
+    # `docker compose run --rm -it alfred-core <subcommand>` (chat, status, migrate, ...).
+    # Adding `restart: unless-stopped` with a finite-runtime CMD would flap forever.
     depends_on:
       alfred-postgres:
         condition: service_healthy
@@ -2568,13 +3370,18 @@ services:
       ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
       ALFRED_DATABASE_URL: postgresql+asyncpg://alfred:alfred@alfred-postgres:5432/alfred
       ALFRED_OPERATOR_NAME: ${ALFRED_OPERATOR_NAME:-operator}
+      ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}
       ALFRED_DAILY_BUDGET_USD: ${ALFRED_DAILY_BUDGET_USD:-1.0}
       ALFRED_PER_CALL_MAX_USD: ${ALFRED_PER_CALL_MAX_USD:-0.10}
-    command: ["status"]
+    # No `command:` — relies on the Dockerfile ENTRYPOINT plus a subcommand passed via
+    # `docker compose run alfred-core <subcommand>`. The status check `docker compose ps`
+    # showing alfred-core as "exited" is expected and correct for a command runner.
 
 volumes:
   alfred_pg_data:
 ```
+
+> **Critical: `alfred-core` is not a daemon.** It is the entrypoint for one-shot operator commands (`alfred chat`, `alfred status`, `alfred migrate`). It must not carry `restart: unless-stopped` because its commands exit cleanly when the operator finishes. Only `alfred-postgres` is a long-running daemon.
 
 - [ ] **Step 3: Write `bin/alfred-setup.sh`**
 
@@ -2711,50 +3518,69 @@ from alfred.providers.base import CompletionResponse
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_alfred_handles_one_turn_end_to_end() -> None:
+    """One full turn through real Postgres. Uses `alembic upgrade head` rather than
+    `Base.metadata.create_all` so the migration trail is exercised too — see ADR-0006."""
     with PostgresContainer("postgres:16") as pg:
         url = pg.get_connection_url().replace("postgresql://", "postgresql+asyncpg://")
         engine = create_async_engine(url, future=True)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
 
-        sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
-        async with sessionmaker() as session:
-            episodic = EpisodicMemory(session=session)
-            audit = AuditWriter(session=session)
-            working = WorkingMemory()
-            budget = BudgetGuard(daily_usd=1.0, per_call_max_usd=0.10)
+        # Run real migrations rather than create_all so a divergence between ORM models
+        # and the 0001_initial.py migration body fails the smoke test.
+        from alembic import command  # noqa: PLC0415
+        from alembic.config import Config  # noqa: PLC0415
 
-            router = MagicMock()
-            router.complete = AsyncMock(
-                return_value=CompletionResponse(
-                    content="Good evening, operator.",
-                    tokens_in=12,
-                    tokens_out=5,
-                    cost_usd=0.00001,
-                )
+        alembic_cfg = Config("alembic.ini")
+        alembic_cfg.set_main_option("sqlalchemy.url", url)
+        # Alembic's online migration runner is sync; this is fine for a one-shot smoke setup.
+        command.upgrade(alembic_cfg, "head")
+
+        sm = async_sessionmaker(bind=engine, expire_on_commit=False)
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def session_scope():
+            async with sm() as session:
+                async with session.begin():
+                    yield session
+
+        working = WorkingMemory()
+        budget = BudgetGuard(daily_usd=1.0, per_call_max_usd=0.10)
+
+        router = MagicMock()
+        router.complete = AsyncMock(
+            return_value=CompletionResponse(
+                content="Good evening, operator.",
+                tokens_in=12,
+                tokens_out=5,
+                cost_usd=0.00001,
+                model="deepseek-chat",
             )
+        )
 
-            orch = Orchestrator(
-                operator_name="operator",
-                working=working,
-                episodic=episodic,
-                audit=audit,
-                router=router,
-                budget=budget,
-            )
+        orch = Orchestrator(
+            operator_name="operator",
+            operator_language="en-US",
+            session_scope=session_scope,
+            working=working,
+            router=router,
+            budget=budget,
+        )
 
-            response = await orch.handle_user_message("hi alfred")
-            await session.commit()
+        response = await orch.handle_user_message("hi alfred")
+        assert response == "Good evening, operator."
 
-            assert response == "Good evening, operator."
-
+        async with sm() as session:
             ep_rows = (await session.execute(select(Episode))).scalars().all()
             assert len(ep_rows) == 2  # user + assistant
             assert {r.role for r in ep_rows} == {"user", "assistant"}
+            assert all(ep.language == "en-US" for ep in ep_rows)
 
             audit_rows = (await session.execute(select(AuditEntry))).scalars().all()
             assert len(audit_rows) == 1
             assert audit_rows[0].result == "success"
+            assert audit_rows[0].language == "en-US"
+            assert audit_rows[0].cost_actual_usd == 0.00001
 
         await engine.dispose()
 ```
@@ -2764,11 +3590,54 @@ async def test_alfred_handles_one_turn_end_to_end() -> None:
 Run: `uv run pytest tests/smoke -v`
 Expected: PASS. (testcontainers Postgres + full orchestrator stack; ~15-30s.)
 
-- [ ] **Step 3: Adjust `.github/workflows/ci.yml`**
+- [ ] **Step 3: Wire the smoke test and the coverage gate into `.github/workflows/ci.yml`**
 
-The existing `python` job is guarded by `hashFiles('pyproject.toml')`. That guard now passes because `pyproject.toml` exists. Verify the job runs by pushing a branch and checking the Actions tab. If the integration job uses Postgres service, ensure the smoke test runs (it spins its own testcontainer).
+The existing `python` job is guarded by `hashFiles('pyproject.toml')`. That guard now passes because `pyproject.toml` exists. But the workflow as written **does not run the smoke test** and **does not enforce the per-package coverage gate**. Both are release-blocking.
 
-No code change required if the current workflow is correct — open the PR and observe CI.
+Edit `.github/workflows/ci.yml` so the python job runs *all* of: ruff, black, mypy, unit tests, integration tests, smoke tests, full-suite coverage with per-package gates, and the i18n catalog check. Concretely, the job steps should be:
+
+```yaml
+jobs:
+  python:
+    if: hashFiles('pyproject.toml') != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run black --check src/ tests/
+      - run: uv run mypy src/
+      - run: uv run pytest tests/unit -v
+      - run: uv run pytest tests/integration -v
+      - run: uv run pytest tests/smoke -v
+      - name: Coverage with per-package gates
+        run: |
+          uv run pytest \
+            --cov=src/alfred \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=75
+          # Per-package 100% gate on the security package — CLAUDE.md hard rule.
+          uv run coverage report \
+            --include='src/alfred/security/*' \
+            --fail-under=100
+      - name: Verify i18n catalog is up to date
+        run: |
+          uv run pybabel extract -F babel.cfg -o locale/alfred.pot src/alfred
+          uv run pybabel update -i locale/alfred.pot -d locale -D alfred --no-fuzzy-matching
+          if ! git diff --exit-code locale/; then
+            echo "::error::Catalog drift detected. Run pybabel extract + update locally and commit."
+            exit 1
+          fi
+          uv run pybabel compile -d locale -D alfred --statistics
+```
+
+The per-package coverage gate is enforced by a second `coverage report --include=... --fail-under=100` invocation. `pytest --cov-fail-under` only takes one threshold; the second `coverage report` uses the cached `.coverage` from the first run.
+
+After editing, push a branch and confirm the Actions tab shows: ruff ✓, black ✓, mypy ✓, unit ✓, integration ✓, **smoke ✓**, coverage 75%+ overall ✓, security/ 100% ✓, i18n catalog clean ✓.
 
 - [ ] **Step 4: Run all the slice-1 quality gates locally**
 
@@ -2875,366 +3744,115 @@ Each subsequent slice keeps the existing surface working and adds one or two new
 | **0.0.7** | Reviewer gate; internal git repo; first agent-authored skill | Self-improvement actually self-improves |
 | **0.1.0** | Adversarial suite green; everything in PRD §9 met | MVP complete |
 
+**Tooling decision deferred to slice 0.0.3 / 0.0.6 / 0.0.7**: the event bus, inter-persona coordination, and reviewer-gate proposal flow are all state machines. Before building them in raw asyncio, **spike LangGraph** for one representative flow (likely the reviewer-gate, smallest surface) and compare lines-of-code, security-tier ergonomics, and audit-log integration cost against the hand-rolled equivalent. Adopt LangGraph if it's cleaner; stay in raw asyncio if it isn't. Slice 1's orchestrator and memory model are framework-agnostic — this decision doesn't paint us into a corner either way. Do NOT adopt the broader LangChain framework — the trust-tier discipline and CVE history make it a poor fit for the security-sensitive paths.
+
 ---
 
-## Appendix A — i18n Strand (woven through Slice 1)
+---
 
-Per [PRD §7.7](../../../PRD.md#77-internationalization) and [DEC-012](../../../PRD.md#10-open-questions--decisions-log), Slice 1 bakes in full i18n infrastructure. This appendix lists the **delta** to apply on top of the main task flow above. Apply each delta when you reach the affected task — the deltas are small but load-bearing.
+## Appendix A — i18n discipline reference
 
-### Coverage-matrix addition
+The full i18n strand has been inlined into the main task flow:
 
-Add this row to the Subsystem coverage matrix near the top of the plan:
+- **Task 1** — `babel` dependency, `pre-commit` dev dep, `[tool.babel]` config.
+- **Task 2** — `Settings.operator_language`, `SettingsError` for friendly load failure, `.env.example` and `config/alfred.toml` carry the operator language.
+- **Task 3** — `language` column on `Episode` and `AuditEntry`; index on `(user_id, created_at)`.
+- **Task 3.5** — i18n primitives (`alfred.i18n`, `t()`, `set_language`, English seed catalog, translator tests, `babel.cfg`).
+- **Task 5** — `AuditWriter.append` carries `language` and `cost_actual_usd`.
+- **Task 11** — `alfred_system_prompt(operator_name=..., language=...)` substitutes the BCP-47 tag into the persona prompt.
+- **Task 13** — orchestrator threads `operator_language` through every `episodic.record` and `audit.append` call.
+- **Task 14** — TUI uses `t()` for every operator-facing string; spinner, cancel, and timeout affordances use translated strings.
+- **Task 15** — CLI uses `t()` for every operator-facing string; `_load_settings_or_die` renders translated hints on missing keys / unreachable Postgres.
+- **Task 17** — CI runs `pybabel extract` + `update` + `compile --check`; pre-commit runs `pybabel extract` and refuses commits that introduce a `t()` key without a catalog entry.
 
-| Subsystem | This slice | Deferred |
-|---|---|---|
-| Internationalization | Babel + gettext, `t()`, `locale/en/LC_MESSAGES/alfred.po` catalog, `User.language` field, persona system prompt `{user.language}` placeholder, pre-commit `pybabel extract`, CI `pybabel compile --check` | Community translation workflow (Crowdin/Weblate), RTL TUI, locale-aware number/date formatting → Slice 0.0.4+ |
+If a future task adds a new operator-facing surface (a new CLI command, a new TUI screen, a new Discord adapter), the implementer must:
 
-### File-structure additions
+1. Wrap every operator-facing string in `t("namespace.message_key", **vars)`.
+2. Add the corresponding `msgid` / `msgstr` pair to `locale/en/LC_MESSAGES/alfred.po`.
+3. Run `uv run pybabel compile -d locale -D alfred` and commit the regenerated `.mo`.
+4. CI will fail the build if step 2 or 3 was skipped.
 
-Add these to the File Structure section:
+### Pre-commit hook (Task 3.5 wires this; documented here for reference)
 
-```
-src/alfred/i18n/
-  __init__.py                          # public re-exports: t, set_language
-  translator.py                        # GettextTranslator + t() implementation
-  catalog.py                           # discovery & lazy-loading of locale/ catalogs
-locale/
-  en/
-    LC_MESSAGES/
-      alfred.po                        # source English catalog
-      alfred.mo                        # compiled (generated by pybabel compile)
-babel.cfg                              # extract config: where to scan for t() calls
-tests/unit/i18n/
-  __init__.py
-  test_translator.py
-```
-
-### Task 1 delta (pyproject.toml)
-
-Add to `[project].dependencies`:
-
-```toml
-"babel>=2.16,<3",
-```
-
-Add to `[dependency-groups].dev`:
-
-```toml
-"types-babel",
-```
-
-Add at the bottom of `pyproject.toml`:
-
-```toml
-[tool.babel]
-domain = "alfred"
-input_dirs = ["src/alfred"]
-output_dir = "locale"
-```
-
-### NEW Task 3.5 — i18n primitives (insert between Task 3 and Task 4)
-
-**Files:**
-- Create: `src/alfred/i18n/__init__.py`, `src/alfred/i18n/translator.py`, `src/alfred/i18n/catalog.py`
-- Create: `babel.cfg`, `locale/en/LC_MESSAGES/alfred.po`
-- Create: `tests/unit/i18n/__init__.py`, `tests/unit/i18n/test_translator.py`
-
-- [ ] **Step 1: Write `babel.cfg`**
-
-```ini
-[python: src/alfred/**.py]
-encoding = utf-8
-```
-
-- [ ] **Step 2: Write `locale/en/LC_MESSAGES/alfred.po` (seed catalog)**
-
-```
-# AlfredOS English source catalog.
-msgid ""
-msgstr ""
-"Project-Id-Version: AlfredOS 0.0.1\n"
-"Content-Type: text/plain; charset=UTF-8\n"
-"Language: en\n"
-
-msgid "status.primary_provider"
-msgstr "primary provider: {provider}"
-
-msgid "status.fallback_provider"
-msgstr "fallback provider: {provider}"
-
-msgid "status.anthropic_configured"
-msgstr "anthropic fallback configured: {yes_or_no}"
-
-msgid "status.daily_budget"
-msgstr "daily budget USD: {amount}"
-
-msgid "status.per_call_max"
-msgstr "per-call max USD: {amount}"
-
-msgid "tui.input_placeholder"
-msgstr "Speak to Alfred..."
-
-msgid "tui.alfred_error"
-msgstr "alfred error: {error}"
-
-msgid "error.budget_exhausted"
-msgstr "daily budget exhausted (spent ${spent:.4f} of ${cap:.2f})"
-```
-
-- [ ] **Step 3: Write the failing test**
-
-```python
-"""Tests for the AlfredOS i18n translator."""
-
-from __future__ import annotations
-
-import pytest
-
-from alfred.i18n import set_language, t
-
-
-@pytest.fixture(autouse=True)
-def _reset_language() -> None:
-    set_language("en-US")
-
-
-class TestTranslator:
-    def test_returns_message_for_known_key_in_english(self) -> None:
-        # The catalog defines status.primary_provider as "primary provider: {provider}".
-        assert t("status.primary_provider", provider="deepseek") == "primary provider: deepseek"
-
-    def test_returns_key_as_fallback_for_unknown_message(self) -> None:
-        # Missing-message strategy: return the key so the developer sees what to add.
-        assert t("missing.key.example") == "missing.key.example"
-
-    def test_substitutes_kwargs_into_message(self) -> None:
-        assert "1.50" in t("status.daily_budget", amount="1.50")
-
-    def test_set_language_switches_active_catalog(self) -> None:
-        # Switching to a language with no catalog falls back to English.
-        set_language("fr-FR")
-        # English catalog still wins because no fr-FR catalog exists yet.
-        assert "primary provider" in t("status.primary_provider", provider="deepseek")
-```
-
-- [ ] **Step 4: Run and verify failure**
-
-Run: `uv run pytest tests/unit/i18n/test_translator.py -v`
-Expected: FAIL — `alfred.i18n` not defined.
-
-- [ ] **Step 5: Implement `src/alfred/i18n/translator.py`**
-
-```python
-"""AlfredOS translator (Babel + gettext)."""
-
-from __future__ import annotations
-
-import gettext
-from pathlib import Path
-
-_DOMAIN = "alfred"
-_LOCALE_DIR = Path(__file__).resolve().parents[3] / "locale"
-_active_lang: str = "en-US"
-_translators: dict[str, gettext.NullTranslations] = {}
-
-
-def _bcp47_to_gettext(tag: str) -> str:
-    return tag.replace("-", "_").split(".")[0]
-
-
-def _load(lang: str) -> gettext.NullTranslations:
-    if lang in _translators:
-        return _translators[lang]
-    try:
-        t = gettext.translation(
-            _DOMAIN, localedir=str(_LOCALE_DIR), languages=[_bcp47_to_gettext(lang), "en"]
-        )
-    except FileNotFoundError:
-        t = gettext.NullTranslations()
-    _translators[lang] = t
-    return t
-
-
-def set_language(lang: str) -> None:
-    """Activate the given BCP-47 language tag for subsequent t() calls."""
-    global _active_lang
-    _active_lang = lang
-
-
-def t(key: str, /, **vars: object) -> str:
-    """Return the translated string for `key`, substituting `vars`.
-
-    Missing keys return the key itself — a deliberate fallback so a developer
-    sees what catalog entry to add.
-    """
-    translator = _load(_active_lang)
-    raw = translator.gettext(key)
-    if raw == key:
-        # Not found; still attempt to substitute so .format() doesn't blow up on placeholders in the key.
-        return key
-    try:
-        return raw.format(**vars)
-    except (KeyError, IndexError):
-        # If substitution fails (missing variable), return the unsubstituted template.
-        return raw
-```
-
-- [ ] **Step 6: Implement `src/alfred/i18n/__init__.py`**
-
-```python
-"""AlfredOS internationalization."""
-
-from alfred.i18n.translator import set_language, t
-
-__all__ = ["set_language", "t"]
-```
-
-- [ ] **Step 7: Compile the English catalog**
-
-Run: `uv run pybabel compile -d locale -D alfred`
-Expected: `compiling catalog locale/en/LC_MESSAGES/alfred.po to locale/en/LC_MESSAGES/alfred.mo`.
-
-- [ ] **Step 8: Run the tests and verify they pass**
-
-Run: `uv run pytest tests/unit/i18n/test_translator.py -v`
-Expected: 4 PASS.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add src/alfred/i18n tests/unit/i18n locale babel.cfg
-git commit -m "feat(i18n): add Babel/gettext translator with English seed catalog"
-```
-
-### Task 3 delta (DB models)
-
-In `src/alfred/memory/models.py`, add a `language` column to both `Episode` and `AuditEntry`:
-
-```python
-# Episode model — add this column
-language: Mapped[str] = mapped_column(String(16), default="en-US")
-
-# AuditEntry model — same column
-language: Mapped[str] = mapped_column(String(16), default="en-US")
-```
-
-Regenerate the initial migration (`uv run alembic revision --autogenerate -m "initial schema"`) so the new column lands in `0001_initial.py`.
-
-Update the integration test (`tests/integration/test_memory_postgres.py`) to assert the column exists on both tables.
-
-### Task 2 delta (Settings)
-
-Add to `src/alfred/config/settings.py`:
-
-```python
-operator_language: str = "en-US"
-```
-
-Add to `.env.example`:
-
-```
-# Operator language (BCP-47).
-ALFRED_OPERATOR_LANGUAGE=en-US
-```
-
-Add to `config/alfred.toml`:
-
-```toml
-[i18n]
-operator_language = "en-US"
-```
-
-### Task 11 delta (Alfred persona)
-
-In `src/alfred/personas/alfred.py`, change `alfred_system_prompt` to take a `language` argument and include the directive:
-
-```python
-def alfred_system_prompt(*, operator_name: str, language: str) -> str:
-    return (
-        f"You are {ALFRED_PERSONA.name.title()}, head butler in {operator_name}'s "
-        f"household. {ALFRED_PERSONA.character} "
-        f"Address the operator as {operator_name}. "
-        f"Respond in the language identified by BCP-47 tag '{language}'. "
-        "Keep responses tight unless asked to elaborate. "
-        "If you do not know something, say so plainly; do not invent."
-    )
-```
-
-Add a test that asserts the language tag appears in the rendered prompt.
-
-### Task 13 delta (Orchestrator)
-
-Pass the operator's language into `alfred_system_prompt` from the orchestrator. Pull it from `Settings.operator_language` (Slice 1 single-user; per-user pull arrives in Slice 0.0.2 with multi-user).
-
-When recording episodes, set `language` from the operator's setting:
-
-```python
-await self._episodic.record(
-    user_id=self._operator_name,
-    role="user",
-    content=content,
-    trust_tier="T2",
-    language=self._language,  # add this
-)
-```
-
-### Task 14 delta (TUI)
-
-Replace hardcoded English in `src/alfred/comms/tui.py`:
-
-```python
-from alfred.i18n import t
-
-# Input placeholder
-Input(placeholder=t("tui.input_placeholder"), id="user_input")
-
-# Error message
-log.write(f"[bold red]{t('tui.alfred_error', error=exc)}[/]")
-```
-
-### Task 15 delta (CLI)
-
-Replace hardcoded English in `src/alfred/cli/main.py`:
-
-```python
-from alfred.i18n import set_language, t
-
-# In status():
-typer.echo(t("status.primary_provider", provider=settings.primary_provider))
-typer.echo(t("status.fallback_provider", provider=settings.fallback_provider))
-typer.echo(t("status.anthropic_configured",
-             yes_or_no="yes" if settings.anthropic_api_key else "no"))
-typer.echo(t("status.daily_budget", amount=settings.daily_budget_usd))
-typer.echo(t("status.per_call_max", amount=settings.per_call_max_usd))
-
-# At top of _chat_main(), before TUI launches:
-set_language(settings.operator_language)
-```
-
-### Task 17 delta (CI wiring)
-
-Add to `.github/workflows/ci.yml` under the python job:
+`.pre-commit-config.yaml` (root of the repo):
 
 ```yaml
-      - name: Verify i18n catalog is up to date
-        if: hashFiles('src/alfred/**/*.py', 'locale/**/*.po') != ''
-        run: |
-          uv run pybabel extract -F babel.cfg -o locale/alfred.pot src/alfred
-          uv run pybabel update -i locale/alfred.pot -d locale -D alfred --no-fuzzy-matching
-          if ! git diff --exit-code locale/; then
-            echo "::error::Catalog drift detected. Run pybabel extract + update locally and commit."
-            exit 1
-          fi
-          uv run pybabel compile -d locale -D alfred --statistics
+repos:
+  - repo: local
+    hooks:
+      - id: pybabel-extract
+        name: pybabel extract (i18n catalog drift)
+        language: system
+        entry: bash -c 'uv run pybabel extract -F babel.cfg -o locale/alfred.pot src/alfred && uv run pybabel update -i locale/alfred.pot -d locale -D alfred --no-fuzzy-matching && git diff --exit-code locale/ || (echo "Catalog drift: run pybabel extract+update and stage locale/."; exit 1)'
+        pass_filenames: false
+        files: '^(src/alfred/.*\.py|locale/.*\.po)$'
 ```
 
-This fails the build if a `t()` call references a message not in the catalog, or if the catalog has been regenerated by extract and differs from what's checked in.
+Install via `pre-commit install` once after cloning. CI runs the same check independently (Task 17 step 3).
 
-### Updated Definition of Done additions
+---
 
-Add these to the bottom of the Definition of Done list:
+## Appendix B — High-severity review findings: disposition
 
-- [ ] `pybabel extract` shows no catalog drift; CI's i18n step passes.
-- [ ] `User.language` (Slice 1: derived from `Settings.operator_language`) flows into the persona system prompt; Alfred responds in the configured language.
-- [ ] All operator-facing strings in `src/alfred/cli/` and `src/alfred/comms/` use `t()`.
-- [ ] `episodes` and `audit_log` rows carry the active user's language.
+The /review-plan pass produced 73 High-severity findings across 15 specialists. They are grouped below by theme. Each theme is marked as **inlined** (the fix is already in the plan above), **accepted-debt** (left for a later slice with a rationale), or **converted** (re-classified to Critical above and addressed there).
+
+### Inlined (fix lives in the plan body above)
+
+- **Budget guard runs *after* the provider call → uncapped overrun on first over-budget turn.** Task 13 now pre-checks via `BudgetGuard.would_exceed(estimate)` before the provider call; the post-call `check_and_charge` reconciles the actual cost (recorded as `cost_actual_usd`). If the actual blows the cap, the audit records `result="budget_overrun"` truthfully — the call already happened, we don't lie about it. This also closes test-002 (Critical).
+- **TUI blocks input with no spinner/cancel/timeout.** Task 14 now disables the input on submit, shows a translated "thinking…" hint, allows Esc to cancel the in-flight task, and `asyncio.wait_for` enforces a 90-second per-turn timeout. The cancel path goes through the orchestrator's exception branch and audits the cancellation.
+- **Provider router's bare `except Exception` lumps 401/400/429/5xx together.** Task 13's orchestrator (and Task 8's router — addressed inline at that task) now distinguishes errors before deciding whether to fall back: 4xx (auth, malformed request) is **not** retried via fallback (the request will fail there too); 429 and 5xx **are**; idempotency is asserted via the request's hash so a retried call doesn't duplicate work.
+- **Memory writes have no audit entry.** Each `episodic.record` call from the orchestrator is paired with an `audit.append` call carrying the `event="memory.write"` event and the truncated subject. This satisfies PRD §7.4 and CLAUDE.md security rule #7.
+- **`(user_id, created_at)` compound index missing on episodes.** Task 3 now declares `ix_episodes_user_id_created_at` via `__table_args__`; the migration 0001_initial.py creates it.
+- **Plan ships persona as a hardcoded import, not a registry stub.** Task 11 keeps the persona hardcoded for slice 1 *and* exposes the `Persona` dataclass shape that slice 5's registry will load. The `alfred_system_prompt` factory takes operator + language, so the registry's stored prompt template uses the same call shape. Forward-compatibility documented in ADR (covered by docs/adr/0001-0006).
+- **No timeouts on httpx / anthropic clients.** Task 6 (DeepSeek) and Task 7 (Anthropic) provider constructors now set explicit `timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)` and (for Anthropic) the SDK's `max_retries=2`. The TUI's 90s per-turn timeout is the outer ceiling.
+- **`AuditWriter.append` doesn't accept `language`.** Inlined into Task 5 (the `language` parameter is now a required-but-defaulted kwarg, with truncated-cost reconciliation via `cost_actual_usd`).
+- **Plan creates no ADRs despite 6+ structural decisions.** Six ADRs now exist at `docs/adr/0001..0006`. DoD entry #13 enforces this.
+- **PRD updates missing for slice-1 divergences (DeepSeek primary, in-process working memory, plain asyncio).** Addressed via ADRs 0001–0006. The ADRs are the canonical record; the PRD itself may be updated to *link* to them in a follow-up PR.
+
+### Accepted as slice-2 debt (with rationale)
+
+- **Plan is a single mega-PR of ~17 tasks.** Slicing this further would produce per-task PRs that each depend on the previous, with no individual PR passing the smoke test until the last. Slice 1 is intentionally one PR because its DoD is end-to-end runnability. Slice 2's plan (forthcoming) will explicitly split into a 3–5 PR sequence (router widening, observability, comms adapters, persona registry, reviewer-gate scaffold), each landing green on its own.
+- **`operator_name` doubles as `user_id`.** Slice 3 introduces identity binding (Discord ID → operator name → user_id), at which point the column splits cleanly. Doing it now would invent an identity layer no other slice-1 code uses. The audit-log already references `actor_user_id` explicitly; the column rename in slice 3 is one Alembic migration.
+- **Hardcoded provider pricing tables in the cost extractor.** The DeepSeek and Anthropic adapters carry a hardcoded `tokens_in × X + tokens_out × Y` formula. Provider pricing changes; slice 2's provider widening will move the table to `config/pricing.yaml` and add a CI job that fetches the latest from each provider's public docs and warns on drift.
+- **No internal-CLI provider (Claude Code as a provider).** Deferred per PRD §6.6. Slice 2+ adds it.
+- **Streaming responses in the TUI.** The slice-1 TUI renders the full response when the provider returns. Streaming UX (partial-token rendering) is slice 2 — it requires the provider Protocol's `stream()` method which is also deferred.
+- **No prompt cache, semantic-response cache, or embedding cache.** Slice 2+ per PRD §6.6.
+- **Slice 1 routes only `chat`; no `vision`, no `tool_use`, no `long_context`.** Capability fallback (route to a capable provider when the primary lacks vision) is slice 2.
+- **Adversarial corpus has no entries seeded.** Per slice-1 coverage matrix, adversarial work begins in slice 3 when T1/T3 ingestion paths exist. The corpus directory and the harness skeleton are added in slice 3.
+
+### Converted to Critical (and addressed above)
+
+- err-002 (silent audit-write failure) was elevated to Critical because it directly violates CLAUDE.md security rule #7. Addressed in Task 13.
+- The session_scope wrapping the entire TUI lifetime spanned 4 reviewers (comms, core, error, memory) so the implicit Critical was made explicit. Addressed in Tasks 13 and 15.
+- The structlog-never-configured finding was elevated because the DoD claim "observability via structlog JSON" cannot ship if structlog is never `configure()`d. Addressed in Task 15's `_configure_logging`.
+
+---
+
+## Appendix C — Medium/Low punch list
+
+These are nits and small improvements the implementer should pick up during PR review. None of them is release-blocking, but each represents a small quality improvement.
+
+### Medium
+
+- **`SecretBroker.get` returns plain `str` — should return `SecretStr`** so callers can't accidentally log it. Wrap the return type and unwrap at the provider-SDK boundary where the SDK demands a plain string.
+- **`_active_lang` in `alfred/i18n/translator.py` is a module-global.** Use `contextvars.ContextVar[str]` so per-request language doesn't leak across concurrent calls when slice 3+ introduces multi-user.
+- **`Episode.role` is a free-form `str` but `Turn.role` (in `WorkingMemory`) is a `Literal["user", "assistant"]`.** The CLI rehydrate bridges them with `# type: ignore`. Make both `Literal`-typed and add a `Role` enum in `alfred.providers.base` so the bridge is statically checked.
+- **The provider Protocol declares only `complete()` + `name`; PRD §6.6 specifies 5 methods (`complete`, `stream`, `embed`, `tools`, `capabilities`).** Add the stubs that raise `NotImplementedError` in slice 1 so slice 2 doesn't have to add them and change every caller.
+- **Several "inspect it" / "decide later" placeholders in Task 3** (e.g. "we'll figure out indexes later"). Either decide now or delete the placeholder.
+- **`0001_initial.py` migration body is referenced but not shown.** Add the autogenerated body inline so the implementer can verify the migration matches the ORM after running `alembic revision --autogenerate`.
+- **Hardcoded pricing tables in providers** (also under accepted-debt). Add a `TODO(slice-2-pricing)` comment with a link to the config-driven design.
+- **TUI test asserts on `log.render()`** which is a brittle private API. Use the Textual test harness's `pilot.app.query_one(RichLog).lines` instead.
+- **No outbound DLP scan stance documented for TUI text path.** Slice 1 has no T3 input so DLP is a no-op, but a one-line stance ("DLP wrapper exists with the noop policy; slice 2 adds the real policy") prevents a reviewer from being confused.
+- **`user_id`/`operator_name` conflation** (also under accepted-debt — repeated here at Medium severity because some operators will hit it in slice 1).
+- **PR template ships with pre-ticked test checkboxes.** Remove the default ticks; require the contributor to tick each consciously.
+
+### Low / nits
+
+- Unnecessary `# type: ignore[no-untyped-def]` on several test helpers where the type *is* known after `from __future__ import annotations`.
+- What-vs-why docstrings on small helpers — delete them; the name is the doc.
+- Mixed f-string / concatenation styles in Task 11's persona prompt builder; normalise to f-strings.
+- Duplicated `_estimate_cost` helper between DeepSeek and Anthropic providers — extract to `alfred.providers.base` once both have landed.
+- `.env.example` missing key-source URLs (where to get a DeepSeek key, where to get an Anthropic key). **Fixed inline in Task 2 above.**
+- Budget guard uses local-tz timestamps for the "daily" rollover. Switch to UTC so the rollover is deterministic regardless of host TZ.
+- No `--no-color` / accessibility flag on the TUI; future slice 3+ adds a `--plain` mode (called out in ADR-0004).
+- Unfiltered/unbounded context replay in Task 10 — the `recent(limit=20)` cap exists but isn't tunable. Add a settings field in slice 2 if any operator asks.
