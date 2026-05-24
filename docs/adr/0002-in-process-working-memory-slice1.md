@@ -22,7 +22,7 @@ Slice 1's **working memory is an in-process Python buffer** (a bounded list owne
 
 - The slice-1 stack is `alfred-core` + `alfred-postgres`. Two containers, not three. A contributor can run the smoke test with ~600 MB of RAM committed to dependencies.
 - The in-process buffer is trivial to test (just a Python list), trivial to reason about (no IPC, no eviction race), and zero-latency to read.
-- The interface the orchestrator uses is identical to what a Redis-backed implementation will expose: `append(turn)`, `read(limit=N)`, `clear()`. Swapping the backend in slice 3 is a one-class change.
+- The interface the orchestrator uses is identical to what a Redis-backed implementation will expose: `append(role, content)`, `turns()` (returns the bounded-history list), `clear()`. The slice-1 backing store is a `deque(maxlen=N)` so eviction is already happening — oldest turns drop when the buffer fills. The slice-3 Redis implementation preserves the external contract; its own eviction policy (LRU or capped stream) is decided at swap time.
 
 **Negative**
 
@@ -37,4 +37,4 @@ Slice 1's **working memory is an in-process Python buffer** (a bounded list owne
 ## Slice-3 implications
 
 - When the event bus lands (Redis-streams), working memory moves to Redis with the same interface. The orchestrator should not need to change.
-- The eviction policy (currently: bounded list, slice-1 has no eviction yet) must be defined before the swap. Slice-3 plan owns that decision.
+- The eviction policy (slice-1: `deque(maxlen=N)` — oldest-turn FIFO eviction once N is hit) may need rework for the Redis-backed version. Slice-3 plan owns that decision; default carry-over is "Redis stream with MAXLEN trimming at the same N."
