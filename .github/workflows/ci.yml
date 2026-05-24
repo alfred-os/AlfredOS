@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: |
+            **/*.md
+            !LICENSE
+            !node_modules/**
+
+  python:
+    name: Python (lint, types, unit)
+    runs-on: ubuntu-latest
+    if: hashFiles('pyproject.toml') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv python install 3.12
+      - run: uv sync --frozen --dev
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Black
+        run: uv run black --check .
+      - name: Mypy
+        if: hashFiles('src/**/*.py') != ''
+        run: uv run mypy src/
+      - name: Unit tests
+        if: hashFiles('tests/unit/**/*.py') != ''
+        run: uv run pytest tests/unit -q --cov=src/alfred --cov-report=term-missing
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    if: hashFiles('tests/integration/**/*.py') != ''
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports: ["5432:5432"]
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports: ["6333:6333"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --frozen --dev
+      - run: uv run pytest tests/integration -q
+
+  setup-script-smoke:
+    name: Setup script smoke (${{ matrix.os }})
+    if: hashFiles('bin/alfred-setup.sh') != ''
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: bin/alfred-setup.sh --dry-run

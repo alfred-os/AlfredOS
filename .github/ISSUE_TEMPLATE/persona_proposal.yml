@@ -1,0 +1,59 @@
+name: Persona proposal
+description: Propose a new specialist persona
+title: "persona: "
+labels: [persona-proposal, triage]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Persona name
+    validations:
+      required: true
+  - type: textarea
+    id: specialty
+    attributes:
+      label: Single, clear purpose
+      description: Per CLAUDE.md, every persona must have a single responsibility.
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When should users invoke this persona instead of Alfred or another specialist?
+    validations:
+      required: true
+  - type: textarea
+    id: capabilities
+    attributes:
+      label: Capabilities required
+      description: Tools, plugins, network egress allowlist, secrets needed.
+    validations:
+      required: true
+  - type: textarea
+    id: memory-policy
+    attributes:
+      label: Memory access policy
+      description: Shares semantic facts? Own episodic log? Reads other personas' summaries?
+    validations:
+      required: true
+  - type: textarea
+    id: routing
+    attributes:
+      label: Default routing tier
+      description: cheap-classifier / conversation / deep-reasoning / code-gen / vision
+    validations:
+      required: true
+  - type: textarea
+    id: budget
+    attributes:
+      label: Daily coordination budget
+      description: Token cap on non-user-facing chatter per 24 hours.
+    validations:
+      required: true
+  - type: textarea
+    id: success
+    attributes:
+      label: Success criteria
+      description: How will we know this persona adds value rather than noise?
+    validations:
+      required: true

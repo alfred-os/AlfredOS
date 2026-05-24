@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security issue (private)
+    url: https://github.com/alfred-os/AlfredOS/security/advisories/new
+    about: Use Security Advisories for private disclosure. Do not file public issues for security concerns.
+  - name: Discussions
+    url: https://github.com/alfred-os/AlfredOS/discussions
+    about: Ask questions, share ideas, or start a design conversation.
+  - name: Read the PRD before proposing architecture changes
+    url: https://github.com/alfred-os/AlfredOS/blob/main/PRD.md
+    about: The Product Requirements Document is the source of truth for what and why.

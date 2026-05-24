@@ -5,7 +5,7 @@
 | **Project** | AlfredOS |
 | **Tagline** | An open-source, self-hostable, multi-user, multi-persona, security-hardened agentic OS. |
 | **Status** | Draft v0.1 — pre-implementation |
-| **Owner** | ian.dominey@gmail.com |
+| **Owner** | 4990954+MrReasonable@users.noreply.github.com |
 | **Last updated** | 2026-05-24 |
 | **License** | AGPL-3.0-or-later (community); commercial licenses available via dual-licensing (requires contributor CLA) |
 
