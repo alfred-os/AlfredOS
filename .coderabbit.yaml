@@ -71,11 +71,10 @@ reviews:
 chat:
   auto_reply: true
 
+# tone_instructions has a 250-char schema limit. Substantive guidance lives in
+# `reviews.path_instructions` (above) and CLAUDE.md; this field is only a tone nudge.
 tone_instructions: |
-  AlfredOS is a security-focused multi-agent project under AGPL-3.0 + CLA.
-  - Be direct and specific. Vague comments are noise.
-  - Cite the PRD section name (e.g. "PRD §7.1") when flagging drift.
-  - Reference CLAUDE.md hard rules by number when flagging violations.
-  - For trust-boundary code, err on the side of more scrutiny.
-  - Distinguish "must fix before merge" from "consider for follow-up."
-  - PR titles should use Conventional Commits format; flag titles that don't.
+  AlfredOS is security-focused (AGPL-3.0 + CLA). Be direct and specific.
+  Cite PRD section names (e.g. "PRD §7.1") for drift and CLAUDE.md hard-rule
+  numbers for violations. Distinguish "must fix" from "follow-up". Conventional
+  Commits in titles.
