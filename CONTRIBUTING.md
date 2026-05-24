@@ -26,7 +26,10 @@ All contributions require signing the [CLA](./CLA.md). The CLA Assistant bot wil
 | Propose a persona | GitHub Issues — `Persona proposal` template |
 | Propose a skill | GitHub Issues — `Skill proposal` template |
 | Report a vulnerability | [Private Security Advisory](https://github.com/alfred-os/AlfredOS/security/advisories/new) |
-| Discuss design / Q&A / ideas | GitHub Discussions |
+| Float a design idea (pre-ADR) | [Discussions → Design Proposals](https://github.com/alfred-os/AlfredOS/discussions/categories/design-proposals) |
+| Ask a question | [Discussions → Q&A](https://github.com/alfred-os/AlfredOS/discussions/categories/q-a) |
+| Suggest a feature you'd like | [Discussions → Ideas](https://github.com/alfred-os/AlfredOS/discussions/categories/ideas) |
+| Casual chat | [Discussions → General](https://github.com/alfred-os/AlfredOS/discussions/categories/general) |
 
 ## Development setup
 
@@ -99,7 +102,7 @@ See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
 
 If your change touches a structural invariant from the PRD:
 
-1. Open a Discussion first to align.
+1. Open a [Design Proposal discussion](https://github.com/alfred-os/AlfredOS/discussions/categories/design-proposals) first to align on the approach.
 2. Propose an [ADR](./docs/adr/) (`docs/adr/NNNN-title.md`).
 3. Update the PRD in the same PR as the ADR.
 
