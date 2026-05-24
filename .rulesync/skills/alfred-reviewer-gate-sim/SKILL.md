@@ -1,8 +1,12 @@
 ---
 name: alfred-reviewer-gate-sim
-description: Use before submitting a proposal through the runtime reviewer gate. Simulates the gate locally so devs can preview how their proposal will be evaluated and fix issues before the gate spends real reviewer-agent tokens.
+description: >-
+  Use before submitting a proposal through the runtime reviewer gate. Simulates
+  the gate locally so devs can preview how their proposal will be evaluated and
+  fix issues before the gate spends real reviewer-agent tokens.
+targets:
+  - '*'
 ---
-
 # Simulating the runtime reviewer gate
 
 The runtime reviewer gate processes proposals (new skills, prompt changes, persona changes, plugin install). Simulating it locally lets you fix issues before incurring reviewer-agent cost.

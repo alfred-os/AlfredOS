@@ -1,8 +1,13 @@
 ---
 name: alfred-runtime-skill-author
-description: Use when authoring a runtime skill that AlfredOS itself will use (procedural plugin in skills/). Covers manifest format, mandatory tests, refusal logic, and reviewer-gate expectations. Different from authoring Claude Code skills - this is for AlfredOS's own runtime skills.
+description: >-
+  Use when authoring a runtime skill that AlfredOS itself will use (procedural
+  plugin in skills/). Covers manifest format, mandatory tests, refusal logic,
+  and reviewer-gate expectations. Different from authoring Claude Code skills -
+  this is for AlfredOS's own runtime skills.
+targets:
+  - '*'
 ---
-
 # Authoring a runtime skill for AlfredOS
 
 Runtime skills are procedural plugins AlfredOS personas use to do things. They live in `skills/<name>/`, are reviewer-gated, and must come with mandatory tests.

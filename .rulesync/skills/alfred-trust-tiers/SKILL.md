@@ -1,8 +1,14 @@
 ---
 name: alfred-trust-tiers
-description: Use whenever you write or review code that ingests external content (web, email, files, MCP tool outputs, file contents, inter-persona messages) or whenever you design a new flow that involves data crossing the AlfredOS trust boundary. Covers the T0-T3 system, the dual-LLM split, and common tagging patterns.
+description: >-
+  Use whenever you write or review code that ingests external content (web,
+  email, files, MCP tool outputs, file contents, inter-persona messages) or
+  whenever you design a new flow that involves data crossing the AlfredOS trust
+  boundary. Covers the T0-T3 system, the dual-LLM split, and common tagging
+  patterns.
+targets:
+  - '*'
 ---
-
 # Trust tiers in AlfredOS
 
 AlfredOS classifies every piece of content by trust tier. The classification gates what the privileged orchestrator may consider as instructions.

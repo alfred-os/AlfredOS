@@ -1,8 +1,13 @@
 ---
 name: alfred-adversarial-corpus
-description: Use when adding to the AlfredOS adversarial test corpus - new payload categories, new tier-confusion cases, new DLP canaries. Covers naming conventions, file layout, and the five payload categories the corpus maintains.
+description: >-
+  Use when adding to the AlfredOS adversarial test corpus - new payload
+  categories, new tier-confusion cases, new DLP canaries. Covers naming
+  conventions, file layout, and the five payload categories the corpus
+  maintains.
+targets:
+  - '*'
 ---
-
 # Growing the adversarial corpus
 
 `tests/adversarial/` is release-blocking. New trust-boundary code requires new adversarial coverage. This skill captures the conventions so contributors don't have to re-derive them.

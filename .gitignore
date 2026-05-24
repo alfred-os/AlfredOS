@@ -41,12 +41,17 @@ logs/
 dist/
 build/
 
-# Local Claude / memsearch working state — these are local-only artifacts.
-# Note: .claude/agents/ and .claude/skills/ ARE tracked (project assets).
+# AI-tool-specific outputs are generated from .rulesync/ via `rulesync generate`.
+# Source of truth lives in .rulesync/. CLAUDE.md at the repo root is the one
+# exception — it stays tracked so GitHub visitors see the operating manual.
 .memsearch/
-.claude/settings.local.json
-.claude/sessions/
-.claude/cache/
-.claude/projects/
-.claude/tmp/
-.claude/*.log
+.claude/
+.mcp.json
+# Other AI tool outputs (uncomment / add if you start generating them locally)
+# .cursorrules
+# .cursor/
+# .clinerules
+# .github/copilot-instructions.md
+# AGENTS.md
+# GEMINI.md
+# .gemini/

@@ -1,8 +1,13 @@
 ---
 name: alfred-mcp-plugin-author
-description: Use when authoring or testing an MCP plugin for AlfredOS - comms adapter, memory backend, integration, or any capability plugin. Covers manifest format, capability declarations, hybrid-isolation rules, and the AlfredOS-specific extensions to standard MCP.
+description: >-
+  Use when authoring or testing an MCP plugin for AlfredOS - comms adapter,
+  memory backend, integration, or any capability plugin. Covers manifest format,
+  capability declarations, hybrid-isolation rules, and the AlfredOS-specific
+  extensions to standard MCP.
+targets:
+  - '*'
 ---
-
 # Authoring an MCP plugin for AlfredOS
 
 Every capability beyond the agent core is an MCP plugin. This skill captures the AlfredOS conventions on top of standard MCP.

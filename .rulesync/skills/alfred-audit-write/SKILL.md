@@ -1,8 +1,12 @@
 ---
 name: alfred-audit-write
-description: Use whenever you need to write to the AlfredOS audit log - tool calls, memory writes, config changes, reviewer decisions, persona coordination messages. Covers attribution fields, append-only patterns, and signing.
+description: >-
+  Use whenever you need to write to the AlfredOS audit log - tool calls, memory
+  writes, config changes, reviewer decisions, persona coordination messages.
+  Covers attribution fields, append-only patterns, and signing.
+targets:
+  - '*'
 ---
-
 # Writing to the AlfredOS audit log
 
 The audit log is append-only, signed, and separately retained from operational logs. It is forensic infrastructure. Treat it accordingly.

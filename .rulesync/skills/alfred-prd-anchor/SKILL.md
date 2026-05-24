@@ -1,8 +1,12 @@
 ---
 name: alfred-prd-anchor
-description: Use whenever you need to ground a decision in the AlfredOS PRD. Fetches the relevant section instead of re-reading the whole document. Every agent should pull this in before proposing design changes.
+description: >-
+  Use whenever you need to ground a decision in the AlfredOS PRD. Fetches the
+  relevant section instead of re-reading the whole document. Every agent should
+  pull this in before proposing design changes.
+targets:
+  - '*'
 ---
-
 # Anchoring to the AlfredOS PRD
 
 The PRD (`PRD.md`) is the source of truth. Don't infer from code; read the section.
