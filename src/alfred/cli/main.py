@@ -26,6 +26,7 @@ masked before it leaves the process.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import TYPE_CHECKING, cast
 
 import structlog
@@ -202,6 +203,25 @@ def chat() -> None:
     happens inside ``_chat_main`` so the user never sees a raw traceback.
     """
     asyncio.run(_chat_main())
+
+
+@app.command()
+def migrate() -> None:
+    """Run alembic migrations up to head.
+
+    Invoked from the setup script as ``docker compose run --rm alfred-core
+    migrate``. Keeping the surface here (rather than relying on a `sh -c`
+    bypass of the ``alfred`` entrypoint) means operators only ever interact
+    with one blessed command surface, and the container can keep
+    ``ENTRYPOINT ["alfred"]`` without per-call ``--entrypoint`` overrides.
+    """
+    # List-form is the secure invocation (no shell, no injection). Alembic
+    # ships in our own venv and `alfred` runs with that venv's bin/ on PATH
+    # (set by the Dockerfile + uv-managed dev shell), so the partial-path
+    # lookup S607 flags resolves to a trusted binary in every supported
+    # environment. Resolving to an absolute path here would couple the CLI
+    # to the install layout and break `uv run alfred migrate` locally.
+    subprocess.run(["alembic", "upgrade", "head"], check=True)  # noqa: S607
 
 
 async def _chat_main() -> None:
