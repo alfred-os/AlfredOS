@@ -62,13 +62,37 @@ proto install node && npm install -g rulesync
 
 This eliminates the entire class of "the generated file drifted from its source" review findings.
 
+## Pre-push hooks (lefthook) — strongly recommended
+
+Install [`lefthook`](https://github.com/evilmartians/lefthook) once per clone so a fast subset of the Python quality bar runs before every push. It's not enforced — your PR will still go through review without it — but you'll get a sub-30-second local fail instead of a 3-minute CI-side fail. `make setup` installs it for you if `lefthook` is on your PATH:
+
+```sh
+# Homebrew
+brew install lefthook
+# OR npm
+npm install -g @evilmartians/lefthook
+# OR Go
+go install github.com/evilmartians/lefthook@latest
+
+# Then, from the repo root:
+make setup            # idempotent — uv sync --dev + lefthook install (if available)
+# or explicitly:
+lefthook install
+```
+
+**The pre-push hooks run** (no Docker needed): `ruff format --check`, `ruff check`, `mypy --strict`, `pyright`, `pytest tests/unit -q`. **CI additionally runs** `pytest tests/integration` against a testcontainers Postgres — so lefthook is a subset of CI, not a mirror.
+
+Config lives at [`lefthook.yml`](./lefthook.yml). Skipping a hook (`LEFTHOOK=0`) is treated as functionally equivalent to `--no-verify`: CI will still catch you, so don't habituate.
+
 ## Style
 
-- **Python:** `ruff` + `black` + `mypy --strict` for the core.
-- **Conventional commits required for every commit.** Format: `type(scope): summary`. Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`, `style`, `security`, `revert`. Use `!` after the type/scope for breaking changes (`refactor!: ...`). Examples: `feat(personas): add Lucius specialist`; `fix(security): patch trust-tier leak in relay`; `docs(prd): clarify reviewer-gate flow`. The body explains the why; the footer holds `Closes #NN`, `BREAKING CHANGE:`, etc.
-- **Strict typing.** No `Any` without justification. Pydantic v2 at boundaries.
+- **Python:** read [`docs/python-conventions.md`](./docs/python-conventions.md) — the canonical reference for tooling, types, errors, async, testing, and security discipline. AI work should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies the conventions without being asked.
+- **Toolchain:** `ruff check` + `ruff format` + `mypy --strict` + `pyright` + `pytest` + `hypothesis`. `make check` runs them all.
+- **Conventional commits required for every commit.** Format: `type(scope): summary (#NN)`. Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`, `style`, `security`, `revert`. Use `!` after the type/scope for breaking changes (`refactor!: ...`). Examples: `feat(personas): add Lucius specialist (#42)`; `fix(security): patch trust-tier leak in relay (#137)`; `docs(prd): clarify reviewer-gate flow (#89)`. The body explains the why; the footer holds `BREAKING CHANGE:`. The `(#NN)` issue ref is enforced by the `Conventional commit format` required check.
+- **Strong typing.** No `Any` without justification. Pydantic v2 at boundaries. PEP 604 unions (`X | Y`), PEP 585 built-in generics, PEP 695 generic syntax.
 - **Comments** only when the *why* is non-obvious — never explain *what*.
 - **Small, focused PRs** — one logical change per PR.
+- **Review fixes via fixup + autosquash.** Never write `fix: apply CR auto-fixes`. Use `git commit --fixup=<sha>` then `make autosquash` before pushing.
 
 ## Tests
 
