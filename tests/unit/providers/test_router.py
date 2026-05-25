@@ -1,0 +1,68 @@
+"""Tests for the provider router."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from alfred.providers.base import CompletionRequest, CompletionResponse, Message
+from alfred.providers.router import ProviderRouter
+
+
+@pytest.mark.asyncio
+async def test_uses_primary_when_it_succeeds() -> None:
+    primary = MagicMock(name="primary")
+    primary.name = "deepseek"
+    primary.complete = AsyncMock(
+        return_value=CompletionResponse(
+            content="primary said hi",
+            tokens_in=5,
+            tokens_out=3,
+            cost_usd=0.00001,
+            model="deepseek-chat",
+        )
+    )
+    fallback = MagicMock(name="fallback")
+    fallback.complete = AsyncMock(return_value=None)
+
+    router = ProviderRouter(primary=primary, fallback=fallback)
+    res = await router.complete(CompletionRequest(messages=[Message(role="user", content="hi")]))
+
+    assert res.content == "primary said hi"
+    primary.complete.assert_awaited_once()
+    fallback.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_falls_back_when_primary_raises() -> None:
+    primary = MagicMock(name="primary")
+    primary.name = "deepseek"
+    primary.complete = AsyncMock(side_effect=RuntimeError("upstream 503"))
+    fallback = MagicMock(name="fallback")
+    fallback.name = "anthropic"
+    fallback.complete = AsyncMock(
+        return_value=CompletionResponse(
+            content="fallback responded",
+            tokens_in=4,
+            tokens_out=3,
+            cost_usd=0.001,
+            model="claude-sonnet-4-6",
+        )
+    )
+
+    router = ProviderRouter(primary=primary, fallback=fallback)
+    res = await router.complete(CompletionRequest(messages=[Message(role="user", content="hi")]))
+
+    assert res.content == "fallback responded"
+    primary.complete.assert_awaited_once()
+    fallback.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_means_primary_errors_propagate() -> None:
+    primary = MagicMock(name="primary")
+    primary.complete = AsyncMock(side_effect=RuntimeError("upstream"))
+    router = ProviderRouter(primary=primary, fallback=None)
+    with pytest.raises(RuntimeError, match="upstream"):
+        await router.complete(CompletionRequest(messages=[Message(role="user", content="hi")]))
