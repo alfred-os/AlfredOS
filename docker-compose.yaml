@@ -1,0 +1,59 @@
+# Slice-1 default deployment for AlfredOS.
+#
+# Two services:
+#   * alfred-postgres — long-running daemon, healthchecked, restart-on-fail.
+#   * alfred-core     — command runner. Invoked as
+#                       `docker compose run --rm -it alfred-core <cmd>`.
+#                       Deliberately carries no `restart:` and no `command:` —
+#                       adding restart would flap it forever once each
+#                       subcommand exits.
+#
+# The compose service is named exactly `alfred-postgres` because the i18n
+# string `hint.is_compose_up` advertises that name to operators.
+
+services:
+  alfred-postgres:
+    image: postgres:16
+    restart: unless-stopped
+    # Credentials come from `.env` (see `.env.example`). Slice-1 default values
+    # land via `${VAR:-default}` so a fresh checkout still boots locally; an
+    # operator who wants stronger credentials sets the variables in `.env`
+    # before `docker compose up`. We deliberately do NOT commit the literal
+    # `alfred:alfred` password into the compose file so credential rotation
+    # never requires editing tracked YAML, and a leaked checkout doesn't ship
+    # reusable auth material.
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-alfred}
+      POSTGRES_USER: ${POSTGRES_USER:-alfred}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alfred}
+    ports:
+      - "5432:5432"
+    volumes:
+      - alfred_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-alfred} -d ${POSTGRES_DB:-alfred}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  alfred-core:
+    build:
+      context: .
+      dockerfile: docker/alfred-core.Dockerfile
+    depends_on:
+      alfred-postgres:
+        condition: service_healthy
+    environment:
+      ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
+      ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
+      # Reuse the same Postgres credentials so `.env` is the single source of
+      # truth. The default chain mirrors the alfred-postgres service so the
+      # two containers always agree on the DSN.
+      ALFRED_DATABASE_URL: ${ALFRED_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-alfred}:${POSTGRES_PASSWORD:-alfred}@alfred-postgres:5432/${POSTGRES_DB:-alfred}}
+      ALFRED_OPERATOR_NAME: ${ALFRED_OPERATOR_NAME:-operator}
+      ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}
+      ALFRED_DAILY_BUDGET_USD: ${ALFRED_DAILY_BUDGET_USD:-1.0}
+      ALFRED_PER_CALL_MAX_USD: ${ALFRED_PER_CALL_MAX_USD:-0.10}
+
+volumes:
+  alfred_pg_data:
