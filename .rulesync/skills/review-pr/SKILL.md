@@ -125,11 +125,13 @@ Send all `Agent` tool calls in a single message so they run concurrently.
 
 ### Step 5: Run CodeRabbit CLI in parallel
 
-In parallel with the agent team, invoke the `coderabbit:review` skill:
+In parallel with the agent team, invoke the `coderabbit:coderabbit-review` skill:
 
 ```
-Skill({ skill: "coderabbit:review" })
+Skill({ skill: "coderabbit:coderabbit-review" })
 ```
+
+(The skill was previously named `coderabbit:review`; it was renamed upstream. If this name stops working, check the installed slug at `~/.claude/plugins/cache/claude-plugins-marketplace/coderabbit/<version>/skills/` or list available skills at session start.)
 
 CodeRabbit is configured for AlfredOS via `.coderabbit.yaml`. It runs in cloud mode automatically on PRs once the GitHub App is installed; this CLI invocation gives a fast pre-flight pass before the cloud review lands.
 
