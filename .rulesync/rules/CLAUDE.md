@@ -47,7 +47,7 @@ AlfredOS/
 ├── tests/
 │   ├── unit/
 │   ├── integration/
-│   ├── e2e/
+│   ├── smoke/                      # end-to-end happy path against a running stack
 │   └── adversarial/                # MUST-PASS security suite — see PRD §8.1
 └── docs/
     ├── adr/                        # Architecture Decision Records
@@ -63,10 +63,12 @@ AlfredOS/
 - **Plugins:** MCP (stdio for in-process, HTTP for remote) — polyglot
 - **Datastores:** Postgres 16 (+ pgvector), Redis 7, Qdrant
 - **Containerization:** Docker + Docker Compose
-- **Type system:** Pydantic v2 for data models; mypy in strict mode for the core
+- **Type system:** Pydantic v2 for data models; `mypy --strict` (primary) + `pyright` (secondary) for the core
 - **Test framework:** pytest + testcontainers + custom adversarial harness
 - **Observability:** structlog + Prometheus client + OpenTelemetry
-- **Lint/format:** ruff + black
+- **Lint/format:** `ruff check` + `ruff format` (replaces black; see [`docs/python-conventions.md`](./docs/python-conventions.md))
+- **Type-check (secondary):** `pyright` alongside mypy
+- **Property tests:** `hypothesis` (where the function has a property you can state in one sentence)
 - **Package manager:** uv
 
 ## Commands you should know
@@ -76,10 +78,11 @@ AlfredOS/
 | Set up dev environment | `bin/dev-setup.sh` (creates `.venv`, installs deps, pulls test fixtures) |
 | Run unit tests | `uv run pytest tests/unit -q` |
 | Run integration tests | `uv run pytest tests/integration` (boots ephemeral containers) |
-| Run e2e tests | `uv run pytest tests/e2e` (requires `docker compose up` running) |
+| Run smoke tests | `uv run pytest tests/smoke` (requires `docker compose up` running) |
 | Run adversarial suite | `uv run pytest tests/adversarial` (release-blocking) |
-| Lint + format check | `uv run ruff check . && uv run black --check .` |
-| Type check | `uv run mypy src/` |
+| Lint + format check | `uv run ruff check . && uv run ruff format --check .` |
+| Type check | `uv run mypy src/ && uv run pyright src/` |
+| All quality gates | `make check` (lint + format + type + test) |
 | Local stack up | `docker compose up -d` |
 | TUI conversation | `alfred chat` |
 | Inspect state | `alfred status`, `alfred audit log`, `alfred audit graph --since 24h` |
@@ -100,12 +103,20 @@ If a command does not yet exist, that's a signal it needs to be implemented — 
 
 ### Coding conventions
 
+**Python work — use the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent.** It applies the full conventions in [`docs/python-conventions.md`](./docs/python-conventions.md) without being asked: modern Python 3.12+ idioms, SOLID + FP, Pydantic v2, SQLAlchemy 2.0 typed, async-first, strong typing (mypy strict + pyright), hypothesis property tests, structlog with redaction.
+
+The headline rules — restated here so they're impossible to miss:
+
 - **Single responsibility, narrow interfaces.** A module's public surface is small; internals are not exported.
 - **DRY across skills/plugins** via shared utilities. Reviewer rejects copy-paste reimplementations.
 - **SOLID applied with judgment** — no premature abstractions; refactor on the second duplication, not the first.
-- **Strict typing.** No `Any` without justification. Pydantic models at all serialization boundaries.
-- **Async-first** in the core. Avoid blocking calls in async code.
+- **Strong typing.** No `Any` without justification. Pydantic models at all serialization boundaries. `mypy --strict` + `pyright`.
+- **Modern Python 3.12+.** PEP 604 unions (`X | Y`), PEP 585 built-in generics, PEP 695 generic syntax. Never `Optional[X]` or `typing.List`.
+- **Immutability by default.** Frozen dataclasses, frozen Pydantic, `Mapping` over `dict` for read-only inputs.
+- **Pure functions for transformations; classes for stateful machines.** Functional core, imperative shell.
+- **Async-first** in the core. Avoid blocking calls in async code. Structured concurrency via `asyncio.TaskGroup`.
 - **No global state.** Pass dependencies explicitly.
+- **Errors loud at boundaries, structured inside.** No `except Exception: pass`. Custom exception hierarchy rooted at `AlfredError`.
 - **Comments only when WHY is non-obvious** — name things well so WHAT doesn't need a comment.
 - **Karpathy guidelines** — surgical changes, surface assumptions, verifiable success criteria. (See `andrej-karpathy-skills:karpathy-guidelines` skill.)
 
@@ -113,7 +124,7 @@ If a command does not yet exist, that's a signal it needs to be implemented — 
 
 - **Every skill** must ship with: happy-path test, error-path test, out-of-scope refusal test.
 - **Every security boundary** must have 100% line and branch coverage (input tagging, capability gate, DLP, secret broker, audit writes).
-- **Integration tests** use real Postgres/Redis/Qdrant via testcontainers; LLM responses are recorded fixtures except in `tests/e2e/`.
+- **Integration tests** use real Postgres/Redis/Qdrant via testcontainers; LLM responses are recorded fixtures except in `tests/smoke/`.
 - **Adversarial tests** are release-blocking. If you change anything in `src/alfred/security/`, you must run the full adversarial suite locally.
 
 ## Security rules — HARD
