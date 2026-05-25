@@ -25,18 +25,17 @@ When you remove a required check: same flow in reverse — `gh api -X DELETE ...
 | `Conventional commit format` | `.github/workflows/pr-validate-commits.yml` | `conventional-commits` | 2026-05-25 | Every commit subject must follow `<type>[(<scope>)][!]: <description> (#NN)` so the commit log stays parseable and traceable to an issue. |
 | `No autosquash commits` | `.github/workflows/pr-validate-commits.yml` | `no-autosquash` | 2026-05-25 | `fixup!` / `squash!` / `amend!` commits must be squashed via `make autosquash` before merge — they're scaffolding, not history. |
 | `No merge commits` | `.github/workflows/pr-validate-commits.yml` | `no-merge-commits` | 2026-05-25 | PRs are rebased onto main, not merged. Merge commits in a PR mean someone synced via `git merge` instead of `git rebase`. |
+| `Gitleaks (secrets)` | `.github/workflows/pr-validate-security.yml` | `gitleaks` | 2026-05-25 | Block PRs that introduce secrets / credentials / API tokens. Scans the PR diff only (cheap). |
+| `Zizmor (workflow security)` | `.github/workflows/pr-validate-security.yml` | `zizmor` | 2026-05-25 | Block PRs that introduce GitHub Actions security issues (workflow injection, unpinned uses, artipacked credentials, excessive token permissions). |
+| `Semgrep (SAST)` | `.github/workflows/pr-validate-security.yml` | `semgrep` | 2026-05-25 | Block PRs that introduce findings from the `p/security-audit` + `p/secrets` + `p/github-actions` rulesets. Returns ~0 findings today (no Python code yet); coverage activates as Slice 1+ lands code. |
+| `Trivy (IaC + filesystem)` | `.github/workflows/pr-validate-security.yml` | `trivy` | 2026-05-25 | Block PRs that introduce CRITICAL/HIGH vulnerabilities in the filesystem (secrets, license issues, future `uv.lock` deps) or IaC misconfigurations (future Dockerfile / docker-compose / workflow files). |
+| `CodeQL (Python)` | `.github/workflows/codeql.yml` | `analyze` | 2026-05-25 | Block PRs that introduce findings from CodeQL's `security-and-quality` query suite (data-flow-sensitive bugs Semgrep's rule-based engine misses). Free for public repos via GitHub Advanced Security. Skips when there's no Python source yet (pre-Slice-1). |
 
 ## Pending required (workflow merged, awaiting `gh api POST .../contexts`)
 
 These checks are emitted by their workflow but not yet in the branch-protection required list. Per the [author-gating-workflow skill](../../.rulesync/skills/author-gating-workflow/SKILL.md) Step 4: after the workflow merges and runs at least once on a PR, append each name via `gh api`, then move the row to "Currently required" above with today's date.
 
-| Check name | Workflow | Job key | Added in PR | Rationale |
-|---|---|---|---|---|
-| `Gitleaks (secrets)` | `.github/workflows/pr-validate-security.yml` | `gitleaks` | #77 | Block PRs that introduce secrets / credentials / API tokens. Scans the PR diff only (cheap). |
-| `Zizmor (workflow security)` | `.github/workflows/pr-validate-security.yml` | `zizmor` | #77 | Block PRs that introduce GitHub Actions security issues (workflow injection, unpinned uses, artipacked credentials, excessive token permissions). |
-| `Semgrep (SAST)` | `.github/workflows/pr-validate-security.yml` | `semgrep` | #77 | Block PRs that introduce findings from the `p/security-audit` + `p/secrets` + `p/github-actions` rulesets. Returns ~0 findings today (no Python code yet); coverage activates as Slice 1+ lands code. |
-| `Trivy (IaC + filesystem)` | `.github/workflows/pr-validate-security.yml` | `trivy` | #77 | Block PRs that introduce CRITICAL/HIGH vulnerabilities in the filesystem (secrets, license issues, future `uv.lock` deps) or IaC misconfigurations (future Dockerfile / docker-compose / workflow files). |
-| `CodeQL (Python)` | `.github/workflows/codeql.yml` | `analyze` | #77 | Block PRs that introduce findings from CodeQL's `security-and-quality` query suite (data-flow-sensitive bugs Semgrep's rule-based engine misses). Free for public repos via GitHub Advanced Security. |
+_(empty — no checks pending promotion)_
 
 ## Not currently required (but exists)
 
