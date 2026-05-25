@@ -57,9 +57,21 @@ jobs:
       - name: Pyright
         if: hashFiles('src/**/*.py') != ''
         run: uv run pyright src/
-      - name: Unit tests
+      - name: Unit tests + coverage gates
         if: hashFiles('tests/unit/**/*.py') != ''
-        run: uv run pytest tests/unit -q --cov=src/alfred --cov-report=term-missing
+        # Two gates so we can enforce different thresholds:
+        #   1. Overall coverage >= 75% (matches pyproject.toml [tool.coverage.report]
+        #      fail_under). Drift-detection contract — keeps wide modules honest.
+        #   2. Security boundaries 100% line+branch. CLAUDE.md hard rule:
+        #      every security boundary must have 100% line+branch coverage.
+        #      Slice 1's security surface is small (tiers + secret broker), so
+        #      100% is achievable today; future slices add canaries, capability
+        #      gate, DLP — each must land with its tests at this bar.
+        # The second `coverage report` re-uses the .coverage data file written
+        # by the pytest --cov run; no second test execution.
+        run: |
+          uv run pytest tests/unit -q --cov=src/alfred --cov-report=term-missing --cov-fail-under=75
+          uv run coverage report --include='src/alfred/security/*' --fail-under=100
 
   integration:
     name: Integration
@@ -96,6 +108,27 @@ jobs:
       - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
       - run: uv sync --frozen --dev
       - run: uv run pytest tests/integration -q
+
+  smoke:
+    name: Smoke (end-to-end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: hashFiles('tests/smoke/**/*.py') != ''
+    # No services: block — the smoke test boots its own Postgres testcontainer
+    # so the container lifecycle is deterministic and the test owns its data.
+    # Docker is available on ubuntu-latest by default; testcontainers uses the
+    # host docker socket.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - run: uv python install 3.12
+      - run: uv sync --frozen --dev
+      - name: Run smoke tests
+        run: uv run pytest tests/smoke -v
 
   setup-script-smoke:
     name: Setup script smoke (${{ matrix.os }})
