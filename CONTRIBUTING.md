@@ -91,7 +91,9 @@ If you're authoring a GitHub Actions workflow whose jobs should block the merge 
 2. Fork → branch → PR. Keep it small.
 3. Make sure CI is green: lint, types, unit tests, and (for security-relevant code) the adversarial suite.
 4. Be responsive to review feedback. Reviewers may request a video call or out-of-band confirmation for security-relevant changes.
-5. Squash on merge.
+5. Merge strategy: humans default to **squash on merge** via the GitHub UI; the [`/path-to-green`](./.rulesync/skills/path-to-green/SKILL.md) skill instead uses **`gh pr merge --rebase`** after a local `make autosquash` of all fixup commits. Both produce clean histories — squash collapses a multi-commit branch into one, rebase preserves the autosquashed sequence as separate commits on main. Pick squash when the branch had a single logical concern; pick rebase (which the skill does) when you want to preserve the commit progression.
+
+**Want the loop driven for you?** AI agents can run [`/path-to-green`](./.rulesync/skills/path-to-green/SKILL.md), which watches CI + CodeRabbit + reviewer comments, applies fixup commits, autosquashes, force-pushes, waits, and repeats — then merges with `gh pr merge --rebase --delete-branch` when every required check is green AND every reviewer thread is resolved AND every reviewer's review on the current SHA is terminal (never `pending`). Escalates rather than guesses on trust-boundary or architectural decisions. Hard safety stop at 100 iterations; expected convergence is ~5 rounds.
 
 ## Architectural changes
 
