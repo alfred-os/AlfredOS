@@ -1,0 +1,20 @@
+# AlfredOS default configuration. Override via environment variables prefixed
+# with ALFRED_ (see .env.example).
+[provider]
+primary = "deepseek"
+fallback = "anthropic"
+
+[provider.deepseek]
+model = "deepseek-chat"
+base_url = "https://api.deepseek.com/v1"
+
+[provider.anthropic]
+model = "claude-sonnet-4-6"
+
+[budget]
+daily_usd = 1.0
+per_call_max_usd = 0.10
+
+[i18n]
+# Default operator language. Override via ALFRED_OPERATOR_LANGUAGE.
+operator_language = "en-US"
