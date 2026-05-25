@@ -157,6 +157,28 @@ Two separate memory systems exist:
 
 When you learn something about the project, the user, or how to work here that future sessions will benefit from — write it to the right canonical file via the `/memory` skill.
 
+## Editing `.rulesync/*` — the regenerate + restart discipline
+
+`.rulesync/` is the canonical source for all AI-tool configuration (rules, subagents, skills, commands, hooks, permissions, MCP servers). The tool-specific overlays (`.claude/`, `.gemini/`, `.cursor/`, etc.) are GENERATED and gitignored — they only exist locally after you run `rulesync generate`.
+
+**Two-step discipline that must follow every `.rulesync/*` edit:**
+
+1. **Regenerate** for whichever AI tool is currently running:
+   ```bash
+   rulesync generate -t <active-tool> -f '*'
+   ```
+   Targets: `claudecode`, `cursor`, `windsurf`, `copilot`, `codexcli`, `gemini`, `cline`, or `'*'` for all. If unsure, use `'*'` — it's safe (only writes gitignored files) and takes about a second.
+
+2. **Announce restart-required** when the edit added or renamed a subagent, skill, command, hook, or MCP server. Most AI tools cache the available-skills / subagents registry at session start; a new file on disk is invisible to a running session. End your reply with an explicit:
+
+   > **Restart required.** This added `<name>` to `.rulesync/<path>`. Claude Code (or whichever tool you're in) caches the registry at session start, so `<name>` is on disk but invisible to this session. Restart to use it.
+
+   When in doubt: announce restart anyway. The cost of an unnecessary hint is small; the cost of silently using stale config is high.
+
+Without the regen step, the local overlay drifts from canonical. Without the restart announcement, you can land a perfectly correct change and the user spends an hour wondering why their new skill / agent doesn't work.
+
+When lefthook lands (issue #70 follow-up), a pre-commit hook will run `rulesync generate -t '*' -f '*'` automatically for every commit that touches `.rulesync/`. The restart announcement still has to come from the agent — no way to automate session restart from inside the session.
+
 ## When you get stuck
 
 1. Re-read the PRD section that covers what you're doing.

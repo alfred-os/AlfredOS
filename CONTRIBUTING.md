@@ -54,13 +54,30 @@ npm install -g rulesync
 proto install node && npm install -g rulesync
 ```
 
-**Workflow when editing AI-tool config:**
+**What goes where in `.rulesync/`:**
 
-1. Edit only files under `.rulesync/` (e.g. `.rulesync/rules/CLAUDE.md`, `.rulesync/subagents/<name>.md`).
+| You want to add… | Edit here | Becomes (per AI tool) |
+|---|---|---|
+| Operating-manual / global rules an AI agent must follow when working on AlfredOS | `.rulesync/rules/<name>.md` | `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`, `.windsurf/rules/*.md` |
+| A specialized **subagent** that can be dispatched by name (e.g. `alfred-security-engineer`) | `.rulesync/subagents/<name>.md` | `.claude/agents/<name>.md`, `.codex/agents/<name>.md` |
+| An **invokable skill** for the AI tool (e.g. `review-plan`, `author-gating-workflow`) | `.rulesync/skills/<name>/SKILL.md` | `.claude/skills/<name>/SKILL.md`, equivalent paths for other tools |
+| A **slash command** | `.rulesync/commands/<name>.md` | `.claude/commands/<name>.md` |
+| A **Claude Code hook** (PreToolUse, PostToolUse, SessionStart, etc.) | `.rulesync/hooks.json` | `.claude/settings.json` (hooks section) |
+| **Permission allowlist / denylist** for Claude Code tools | `.rulesync/permissions.json` | `.claude/settings.json` (permissions section) |
+| **MCP server** config (Gmail, custom MCP plugins, etc.) | `.rulesync/mcp.json` | `.mcp.json` |
+
+> **Important distinction**: `.rulesync/skills/` and `skills/` are **different things**.
+> - `.rulesync/skills/` = AI-tool helper skills for contributors building AlfredOS (the `review-plan`, `author-gating-workflow` kind — invoked by your editor's AI). Lives in `.rulesync/`, generated to `.claude/skills/`.
+> - `skills/` (top-level, lands in Slice 1) = AlfredOS's **own runtime skills** — procedural plugins loaded by the AlfredOS orchestrator at runtime. Lives in the repo root, NOT under `.rulesync/`. See PRD §6.3 and `.rulesync/skills/alfred-runtime-skill-author/SKILL.md`.
+
+**Workflow when editing `.rulesync/`:**
+
+1. Edit only files under `.rulesync/`.
 2. Re-run `rulesync generate -t '*' -f '*'` to refresh your local generated outputs.
 3. Commit the `.rulesync/` change. The generated outputs are gitignored, so they don't appear in your `git status` — that's by design.
+4. **If you added or renamed a subagent / skill / command**, mention "restart your AI tool to pick this up" in the PR description. Most AI tools (Claude Code included) cache their available-skills / subagents registry at session start; a new file on disk is invisible to a running session until restart.
 
-This eliminates the entire class of "the generated file drifted from its source" review findings.
+This eliminates the entire class of "the generated file drifted from its source" review findings, and the "I created a new skill but the dispatch silently uses the old definition" silent-failure mode.
 
 ## Style
 
@@ -80,6 +97,10 @@ This eliminates the entire class of "the generated file drifted from its source"
 | Anything touching `src/alfred/security/` | 100% coverage on the changed boundary + adversarial suite must pass |
 
 See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
+
+## When you add a CI gate
+
+If you're authoring a GitHub Actions workflow whose jobs should block the merge button (not just emit informational status), follow the [`author-gating-workflow` skill](./.rulesync/skills/author-gating-workflow/SKILL.md). The skill walks through writing the workflow with the AlfredOS conventions baked in (least-privilege permissions, workflow-injection-safe env passing, pinned action SHAs), and — critically — how to promote the gating jobs to **required status checks** after merge, plus updating [`docs/ci/required-checks.md`](./docs/ci/required-checks.md) so the gate list stays auditable from the repo. The "workflow ran red but didn't block" failure mode is what this skill exists to prevent.
 
 ## Pull request process
 
