@@ -35,13 +35,26 @@ When you remove a required check: same flow in reverse — `gh api -X DELETE ...
 
 These checks are emitted by their workflow but not yet in the branch-protection required list. Per the [author-gating-workflow skill](../../.rulesync/skills/author-gating-workflow/SKILL.md) Step 4: after the workflow merges and runs at least once on a PR, append each name via `gh api`, then move the row to "Currently required" above with today's date.
 
-_(empty — no checks pending promotion)_
+| Check name | Workflow | Job key | Rationale | Promote after |
+|---|---|---|---|---|
+| `Ruff format` | `.github/workflows/pr-validate-python.yml` | `ruff-format` | Enforces `ruff format --check` (formatter no-op) so the formatter is the source of truth, not reviewer time. Skips when `src/` / `tests/` have no `.py` files. | This PR merges + workflow runs on any subsequent PR. |
+| `Ruff lint` | `.github/workflows/pr-validate-python.yml` | `ruff-lint` | Enforces `ruff check` with the strict rule set (E, F, I, B, UP, N, S, ARG, RET, SIM, PTH, DTZ, FBT, PIE, RUF). Skips when no Python source. | Same as above. |
+| `Mypy (strict)` | `.github/workflows/pr-validate-python.yml` | `mypy` | Primary type-checker. Enforces `mypy --strict` on `src/`. Skips when no Python source. | Same as above. |
+| `Pyright` | `.github/workflows/pr-validate-python.yml` | `pyright` | Secondary type-checker. Catches data-flow patterns mypy misses. Skips when no Python source. | Same as above. |
+| `Pytest` | `.github/workflows/pr-validate-python.yml` | `pytest` | Runs `pytest tests/unit tests/integration -q`. Integration tests use testcontainers (Docker on the runner). Skips when no `test_*.py`. | Same as above. |
+| `i18n catalog freshness` | _(to be authored — `.github/workflows/pr-validate-i18n.yml`)_ | _(planned)_ | CLAUDE.md hard rule #4: `pybabel extract` runs in pre-commit; `pybabel compile --check` runs in CI. Catalog drift (extracted msgids missing from `.po`, or `.po` failing to compile) fails the build. Not yet authored — tracked as a Slice 1 follow-up. | After the i18n workflow PR merges. |
+
+**Post-Slice-1 cleanup**: once `src/alfred/**/*.py` lands, the `srccheck` short-circuit guards at the top of each Python gate's job should be **removed** (not toggled). A future layout-change that breaks the find pattern would otherwise silently re-enable the no-op. Tracked alongside the Task 17 (PR + CI wiring) deliverable.
 
 ## Not currently required (but exists)
 
 | Check name | Workflow | Why not required |
 |---|---|---|
 | `CodeRabbit` | (external service, no workflow file) | CodeRabbit has occasional service blips that surface as non-success status. We gate via `request_changes_workflow: true` in `.coderabbit.yaml` + the 1-approving-review rule instead, so an outage means "manually approve" rather than "repo unmergeable". |
+
+## On bypass
+
+Pre-push hooks (`lefthook`) can be skipped with `LEFTHOOK=0 git push`. This bypass is local-only — **the required status checks listed above cannot be bypassed**; they run on every PR and the merge button is blocked until they pass. Treat `LEFTHOOK=0` as functionally equivalent to `--no-verify`: emergency-only, never a habit.
 
 ## Audit
 

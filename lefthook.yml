@@ -1,0 +1,72 @@
+# AlfredOS pre-push hook config (lefthook).
+#
+# Runs a fast SUBSET of the CI quality bar before `git push` — the same gates
+# CI runs, minus the ones that need Docker (integration tests). So lefthook
+# is not a CI mirror; it's a fast local pre-filter.
+#
+# Install once per clone:
+#   make setup              # uv sync --dev + lefthook install (if available)
+# or:
+#   brew install lefthook   # or: npm i -g @evilmartians/lefthook
+#   lefthook install
+#
+# See docs/python-conventions.md for the toolchain rationale.
+
+# Sequential + piped: each command runs in order, the next is skipped if the
+# previous fails. This gives true fail-fast (parallel + fail_fast was the
+# previous config but `fail_fast` is not a valid lefthook key — silently
+# dropped — so we use the supported primitive instead).
+#
+# Pre-Slice-1 state: `src/` and `tests/` don't exist yet. Each command below
+# guards on the directory's presence so a fresh clone of pre-Slice-1 main can
+# `git push` without lefthook failing.
+#
+# Guard pattern: `if [ -d <dir> ]; then <cmd>; else echo skip; fi`. CRITICAL:
+# we use an `if` block, NOT `cmd || echo skip`, because the `||` pattern masks
+# real failures of `<cmd>` — the echo runs on ANY non-zero exit, defeating the
+# entire purpose of a quality-gate hook. The if-block preserves the inner
+# command's exit code; once Slice 1 lands src/ and tests/, lint/type/test
+# failures cleanly propagate.
+#
+# First-push latency on a cold cache (post-Slice-1): ~20–30s (ruff <1s, mypy
+# ~5s, pyright ~10s, pytest unit ~3s). Subsequent pushes: ~5–10s.
+pre-push:
+  piped: true
+  commands:
+    # Globs are intentionally omitted: lefthook's underlying gobwas matcher
+    # has surprising `**` semantics, and the gates are fast enough on
+    # unchanged code that running them unconditionally is preferable to
+    # silently skipping a layout the glob didn't anticipate.
+
+    "1-lint":
+      # Order matters: lint --fix-style rewrites first, then format. Ruff's
+      # integration docs (https://docs.astral.sh/ruff/formatter/) call this
+      # out explicitly. We run --check here (no mutation in a hook) and let
+      # the contributor recover via `make fix`.
+      run: 'if [ -d src ] || [ -d tests ]; then uv run ruff check $( [ -d src ] && echo src ) $( [ -d tests ] && echo tests ); else echo "::notice::no src/ or tests/ yet — skipping ruff check"; fi'
+      skip:
+        - merge
+        - rebase
+    "2-format":
+      run: 'if [ -d src ] || [ -d tests ]; then uv run ruff format --check $( [ -d src ] && echo src ) $( [ -d tests ] && echo tests ); else echo "::notice::no src/ or tests/ yet — skipping ruff format"; fi'
+      skip:
+        - merge
+        - rebase
+    "3-mypy":
+      run: 'if [ -d src ]; then uv run mypy --strict src; else echo "::notice::no src/ yet — skipping mypy"; fi'
+      skip:
+        - merge
+        - rebase
+    "4-pyright":
+      run: 'if [ -d src ]; then uv run pyright src; else echo "::notice::no src/ yet — skipping pyright"; fi'
+      skip:
+        - merge
+        - rebase
+    "5-pytest-unit":
+      # Unit tests only — integration needs Docker, smoke/adversarial need
+      # the full stack. CI runs unit + integration on every PR; the
+      # remaining suites run nightly or on demand.
+      run: 'if [ -d tests/unit ]; then uv run pytest tests/unit -q; else echo "::notice::no tests/unit/ yet — skipping pytest"; fi'
+      skip:
+        - merge
+        - rebase
