@@ -65,6 +65,18 @@ class AlfredTuiApp(App[None]):
             Input(placeholder=t("tui.input_placeholder"), id="user_input"),
         )
 
+    async def on_mount(self) -> None:
+        """Place initial focus on the input box.
+
+        Textual 8.x defaults focus to the first focusable widget in the
+        compose tree — that's the RichLog, not the Input — so without this
+        the first ``alfred chat`` keystrokes silently scroll the log rather
+        than typing into the input. Test pilots set focus explicitly so this
+        is intentionally not covered by ``tests/unit/comms/test_tui.py``;
+        the value is on real-terminal launch via the CLI.
+        """
+        self.query_one("#user_input", Input).focus()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
