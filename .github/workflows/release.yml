@@ -5,18 +5,32 @@ on:
     tags:
       - "v*"
 
+# Tag-driven; do not cancel.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+
 permissions:
-  contents: write
+  # contents: write is required by softprops/action-gh-release to create
+  # the draft release. Scoped to this workflow only; other workflows are
+  # contents: read.
+  contents: write  # zizmor: ignore[excessive-permissions]
 
 jobs:
   release:
+    name: Create draft release
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          # Release workflow doesn't push — only reads tag history to
+          # generate release notes — so credentials don't need to persist.
+          persist-credentials: false
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0 # zizmor: ignore[superfluous-actions]
         with:
           draft: true
           generate_release_notes: true
