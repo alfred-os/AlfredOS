@@ -321,3 +321,72 @@ jobs:
           [ -d tests/unit ] && test_targets+=(tests/unit)
           [ -d tests/integration ] && test_targets+=(tests/integration)
           uv run pytest "${test_targets[@]}" -q
+
+  # -----------------------------------------------------------------
+  # Job 6: i18n catalog drift
+  # CLAUDE.md hard rule (i18n #4): `pybabel extract` runs in pre-commit;
+  # `pybabel compile --check` runs in CI. Catalog drift fails the build.
+  # Splitting into its own gating job lets it be promoted to a required
+  # status independently of the other Python jobs.
+  # -----------------------------------------------------------------
+  i18n-catalog:
+    name: i18n catalog drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check for Python source files
+        id: srccheck
+        run: |
+          set -euo pipefail
+          # Same guard pattern as the other Python jobs: pre-Slice-1 main has
+          # no src/, so the catalog check is a no-op until Slice 1 lands.
+          if [ -d src ] && find src -name '*.py' 2>/dev/null | grep -q .; then
+            echo "has_source=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_source=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Python source in src/ - skipping i18n drift (expected pre-Slice-1)."
+          fi
+      - name: Install uv
+        if: steps.srccheck.outputs.has_source == 'true'
+        uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Set up Python
+        if: steps.srccheck.outputs.has_source == 'true'
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        if: steps.srccheck.outputs.has_source == 'true'
+        run: uv sync --dev
+      - name: Extract + check + compile
+        if: steps.srccheck.outputs.has_source == 'true'
+        # Three steps, in order:
+        #   1. Extract to /tmp (never pollute the working tree — only real
+        #      msgid drift should fail the gate, not the pot-creation-date
+        #      artefact of the check itself).
+        #   2. `pybabel update --check` exits non-zero on drift WITHOUT
+        #      mutating the catalog. --ignore-pot-creation-date is critical:
+        #      every extract embeds the current timestamp in the .pot, and
+        #      that timestamp would otherwise propagate into the .po every
+        #      run and produce eternal drift. --no-fuzzy-matching keeps a
+        #      renamed string surfaced as drift rather than auto-mapped to a
+        #      similar old translation.
+        #   3. Compile so the CI log shows translation-coverage stats per
+        #      locale (and so .mo files would be generated if we publish).
+        run: |
+          uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred
+          if ! uv run pybabel update --check -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching --ignore-pot-creation-date; then
+            echo "::error::i18n catalog drift detected. Run 'uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred && uv run pybabel update -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching' locally and commit the diff."
+            exit 1
+          fi
+          uv run pybabel compile -d locale -D alfred --statistics

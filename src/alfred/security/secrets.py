@@ -85,7 +85,12 @@ class SecretBroker:
         """
         out = text
         for name in self.known():
+            # `known()` already filtered to names with non-empty env values via
+            # `has()` — so the `if value:` guard below is defensive only and
+            # structurally never falsy on this path. `pragma: no branch` tells
+            # coverage not to demand the falsy branch be hit; the equivalent
+            # branch in `has()` is the one tested.
             value = self._env.get(f"ALFRED_{name.upper()}", "")
-            if value:
+            if value:  # pragma: no branch
                 out = out.replace(value, f"[REDACTED:{name}]")
         return out
