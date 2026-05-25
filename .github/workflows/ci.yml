@@ -43,13 +43,20 @@ jobs:
       - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
       - run: uv python install 3.12
       - run: uv sync --frozen --dev
-      - name: Ruff
+      - name: Ruff lint
         run: uv run ruff check .
-      - name: Black
-        run: uv run black --check .
-      - name: Mypy
+      - name: Ruff format check
+        # Replaces the old `black --check .` step. ruff format is the
+        # AlfredOS-canonical formatter (see docs/python-conventions.md);
+        # black is being removed from dev-deps in the Slice 1 Task 1
+        # pyproject.toml fixup.
+        run: uv run ruff format --check .
+      - name: Mypy (strict)
         if: hashFiles('src/**/*.py') != ''
-        run: uv run mypy src/
+        run: uv run mypy --strict src/
+      - name: Pyright
+        if: hashFiles('src/**/*.py') != ''
+        run: uv run pyright src/
       - name: Unit tests
         if: hashFiles('tests/unit/**/*.py') != ''
         run: uv run pytest tests/unit -q --cov=src/alfred --cov-report=term-missing
