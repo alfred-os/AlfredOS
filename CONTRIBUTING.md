@@ -117,7 +117,12 @@ If you're authoring a GitHub Actions workflow whose jobs should block the merge 
 4. Be responsive to review feedback. Reviewers may request a video call or out-of-band confirmation for security-relevant changes.
 5. Merge strategy: humans default to **squash on merge** via the GitHub UI; the [`/path-to-green`](./.rulesync/skills/path-to-green/SKILL.md) skill instead uses **`gh pr merge --rebase`** after a local `make autosquash` of all fixup commits. Both produce clean histories — squash collapses a multi-commit branch into one, rebase preserves the autosquashed sequence as separate commits on main. Pick squash when the branch had a single logical concern; pick rebase (which the skill does) when you want to preserve the commit progression.
 
-**Want the loop driven for you?** AI agents can run [`/path-to-green`](./.rulesync/skills/path-to-green/SKILL.md), which watches CI + CodeRabbit + reviewer comments, applies fixup commits, autosquashes, force-pushes, waits, and repeats — then merges with `gh pr merge --rebase --delete-branch` when every required check is green AND every reviewer thread is resolved AND every reviewer's review on the current SHA is terminal (never `pending`). Escalates rather than guesses on trust-boundary or architectural decisions. Hard safety stop at 100 iterations; expected convergence is ~5 rounds.
+### AI-driven helpers for the comments loop
+
+After CodeRabbit (or a human) posts a review, AI agents can run:
+
+- [`/address-comments`](./.rulesync/skills/address-comments/SKILL.md) — per-iteration: fetch all three comment sources with proper pagination, classify each finding (apply / reject / escalate), commit-fixup against the originating commit, reply-and-resolve, autosquash, push, poll for the next round. Treats reviewer text as untrusted input; never auto-applies trust-boundary, `.rulesync/**`, or `PRD.md`-touching findings.
+- [`/path-to-green`](./.rulesync/skills/path-to-green/SKILL.md) — meta-loop: watches CI + reviewer state across iterations, calls into `/address-comments` for the comments part, merges via `gh pr merge --rebase --delete-branch` when every required check is green AND every reviewer thread is resolved AND every reviewer's review on the current SHA is terminal (never `pending`). Escalates rather than guesses on trust-boundary or architectural decisions. Hard safety stop at 100 iterations; expected convergence is ~5 rounds.
 
 ## Architectural changes
 
