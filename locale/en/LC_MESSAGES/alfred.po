@@ -1,0 +1,57 @@
+# AlfredOS English source catalog.
+msgid ""
+msgstr ""
+"Project-Id-Version: AlfredOS 0.0.1\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+
+msgid "status.primary_provider"
+msgstr "primary provider: {provider}"
+
+msgid "status.fallback_provider"
+msgstr "fallback provider: {provider}"
+
+msgid "status.anthropic_configured"
+msgstr "anthropic fallback configured: {yes_or_no}"
+
+msgid "status.daily_budget"
+msgstr "daily budget USD: {amount}"
+
+msgid "status.per_call_max"
+msgstr "per-call max USD: {amount}"
+
+msgid "tui.input_placeholder"
+msgstr "Speak to Alfred..."
+
+msgid "tui.label_you"
+msgstr "you"
+
+msgid "tui.label_alfred"
+msgstr "alfred"
+
+msgid "tui.thinking"
+msgstr "thinking..."
+
+msgid "tui.turn_cancelled"
+msgstr "turn cancelled"
+
+msgid "tui.turn_timeout"
+msgstr "no response within {seconds}s; cancelled"
+
+msgid "tui.alfred_error"
+msgstr "alfred error: {error}"
+
+msgid "error.budget_exhausted"
+msgstr "daily budget exhausted (spent ${spent:.4f} of ${cap:.2f})"
+
+msgid "error.config_invalid"
+msgstr "configuration is invalid: {detail}"
+
+msgid "error.postgres_unreachable"
+msgstr "Postgres is unreachable: {detail}"
+
+msgid "hint.copy_env_example"
+msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
+
+msgid "hint.is_compose_up"
+msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
