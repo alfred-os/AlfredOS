@@ -81,6 +81,10 @@ This eliminates the entire class of "the generated file drifted from its source"
 
 See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
 
+## When you add a CI gate
+
+If you're authoring a GitHub Actions workflow whose jobs should block the merge button (not just emit informational status), follow the [`author-gating-workflow` skill](./.rulesync/skills/author-gating-workflow/SKILL.md). The skill walks through writing the workflow with the AlfredOS conventions baked in (least-privilege permissions, workflow-injection-safe env passing, pinned action SHAs), and — critically — how to promote the gating jobs to **required status checks** after merge, plus updating [`docs/ci/required-checks.md`](./docs/ci/required-checks.md) so the gate list stays auditable from the repo. The "workflow ran red but didn't block" failure mode is what this skill exists to prevent.
+
 ## Pull request process
 
 1. **Open a discussion or issue first** for non-trivial changes.
