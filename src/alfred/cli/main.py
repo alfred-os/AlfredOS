@@ -62,10 +62,15 @@ app = typer.Typer(help="AlfredOS CLI", no_args_is_help=True)
 def _load_settings_or_die() -> Settings:
     """Load ``Settings`` from the environment or exit with a friendly hint.
 
-    The first-time user error is "no ``ALFRED_DEEPSEEK_API_KEY`` in ``.env``";
-    the hint points them at ``.env.example``. Anything else gets the raw
-    pydantic detail through ``t("error.config_invalid")`` so the operator can
-    fix the offending field without grepping a stack trace.
+    Two distinct first-time-user errors get distinct messages:
+
+    * ``placeholder_api_key`` — the operator copied .env.example but never
+      replaced the literal ``sk-...``. We surface a dedicated translatable
+      message because "configuration is invalid" alongside a wall of pydantic
+      detail buries the actual fix (edit one line in .env).
+    * Anything else — generic ``t("error.config_invalid")`` with the raw
+      pydantic detail so the operator can fix the offending field without
+      grepping a stack trace.
     """
     try:
         # Settings.__init__ is annotated `# type: ignore[no-untyped-def]` in
@@ -74,6 +79,12 @@ def _load_settings_or_die() -> Settings:
         # justification at the call site rather than swallow it silently.
         return Settings()  # type: ignore[no-untyped-call]  # reason: Settings.__init__ is untyped pending task-17.
     except SettingsError as exc:
+        # `placeholder_api_key` is a sentinel raised by the deepseek_api_key
+        # validator. Match on substring rather than exact equality because
+        # pydantic decorates the message with loc/path context.
+        if "placeholder_api_key" in str(exc):
+            typer.echo(t("error.placeholder_api_key"))
+            raise typer.Exit(code=2) from exc
         typer.echo(t("error.config_invalid", detail=str(exc)))
         typer.echo(t("hint.copy_env_example"))
         raise typer.Exit(code=2) from exc
@@ -186,10 +197,27 @@ def status() -> None:
     settings = _load_settings_or_die()
     broker = _build_broker(settings)
     set_language(settings.operator_language)
-    yes_or_no = "yes" if broker.has("anthropic_api_key") else "no"
+    # The runtime fallback exists iff the broker can mint an Anthropic key
+    # (see ``_build_router``). Surfacing the configured name as-is would
+    # claim a fallback the operator hasn't actually wired up — and using a
+    # hardcoded "yes"/"no" leaks English regardless of operator_language.
+    # Derive both from a single boolean and pull the yes/no from the
+    # catalog.
+    anthropic_configured = broker.has("anthropic_api_key")
+    # Pybabel extracts ``t()`` argument as a literal string — a conditional
+    # expression inside the call would concatenate the branches into a
+    # phantom msgid (e.g. ``"status.yes" if x else "status.no"`` extracts
+    # as ``status.yesstatus.no``). Branch outside the call so each literal
+    # appears as its own extractable msgid.
+    if anthropic_configured:
+        yes_no = t("status.yes")
+        fallback_label = settings.fallback_provider
+    else:
+        yes_no = t("status.no")
+        fallback_label = t("status.fallback_none")
     typer.echo(t("status.primary_provider", provider=settings.primary_provider))
-    typer.echo(t("status.fallback_provider", provider=settings.fallback_provider))
-    typer.echo(t("status.anthropic_configured", yes_or_no=yes_or_no))
+    typer.echo(t("status.fallback_provider", provider=fallback_label))
+    typer.echo(t("status.anthropic_configured", yes_or_no=yes_no))
     typer.echo(t("status.daily_budget", amount=f"{settings.daily_budget_usd:.2f}"))
     typer.echo(t("status.per_call_max", amount=f"{settings.per_call_max_usd:.2f}"))
 
