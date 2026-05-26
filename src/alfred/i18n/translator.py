@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gettext
 import logging
+from contextvars import ContextVar
 from pathlib import Path
 
 _DOMAIN = "alfred"
@@ -61,7 +62,15 @@ if _LOCALE_DIR is None:
     # imported before _configure_logging() runs in cli/main.py.
     _LOG.warning("AlfredOS locale directory not found; translations disabled.")
 
-_active_lang: str = "en-US"
+# Per-coroutine active language. ContextVar (not a plain module global) so
+# concurrent handlers — Slice-2 Discord DMs, CLI commands under
+# ``asyncio.gather`` — each see their own language. asyncio propagates
+# ContextVars across ``await`` automatically; no handler-side bookkeeping
+# required. The ``_translators`` cache below stays a module-level dict
+# because ``gettext.translation`` is idempotent on ``(domain, localedir,
+# languages)`` — sharing the cache across coroutines is safe and saves
+# disk I/O.
+_active_lang: ContextVar[str] = ContextVar("alfred_active_lang", default="en-US")
 _translators: dict[str, gettext.NullTranslations] = {}
 
 
@@ -87,9 +96,14 @@ def _load(lang: str) -> gettext.NullTranslations:
 
 
 def set_language(lang: str) -> None:
-    """Activate the given BCP-47 language tag for subsequent t() calls."""
-    global _active_lang
-    _active_lang = lang
+    """Activate the given BCP-47 language tag for subsequent ``t()`` calls.
+
+    Implemented as a ``ContextVar.set()`` so each coroutine sees its own
+    language — asyncio propagates ContextVars across ``await`` automatically,
+    so multi-user Slice-2 handlers (Discord DMs, CLI commands running under
+    ``asyncio.gather``) do not cross-contaminate via a shared module global.
+    """
+    _active_lang.set(lang)
 
 
 def t(key: str, /, **vars: object) -> str:
@@ -98,7 +112,7 @@ def t(key: str, /, **vars: object) -> str:
     Missing keys return the key itself — a deliberate fallback so a developer
     sees what catalog entry to add.
     """
-    translator = _load(_active_lang)
+    translator = _load(_active_lang.get())
     raw = translator.gettext(key)
     if raw == key:
         # Not found; return key as-is so missing entries are visible during development.
