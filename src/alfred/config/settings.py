@@ -7,8 +7,13 @@ they never leak into logs by accident.
 
 from __future__ import annotations
 
-from pydantic import Field, PostgresDsn, SecretStr
+from pydantic import Field, PostgresDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The literal placeholder shipped in .env.example. Rejected in both the setup
+# script (bin/alfred-setup.sh) and the Settings validator below so an operator
+# who skipped editing .env hits a friendly error before any provider call.
+_PLACEHOLDER_API_KEY = "sk-..."
 
 
 class SettingsError(ValueError):
@@ -51,6 +56,25 @@ class Settings(BaseSettings):
     # Operator (single-user slice 1)
     operator_name: str = "operator"
     operator_language: str = "en-US"  # BCP-47; CLAUDE.md i18n rule #2 (Task 3.5 consumer)
+
+    @field_validator("deepseek_api_key")
+    @classmethod
+    def _reject_placeholder_key(cls, v: SecretStr) -> SecretStr:
+        """Reject the literal placeholder shipped in .env.example.
+
+        Belt-and-braces complement to the equivalent guard in
+        ``bin/alfred-setup.sh`` (DEVEX-001 on PR #89). The setup script catches
+        the typical first-run mistake; this validator catches every other path
+        — direct ``docker compose run``, CI bootstrap that forgot to override
+        the env, an operator who edited ``docker-compose.yaml`` directly. The
+        message stays raw English here (no ``t()`` import — Settings is loaded
+        too early in the boot to depend on the translator); the CLI catch site
+        in ``_load_settings_or_die`` reroutes through
+        ``t("error.placeholder_api_key")`` before printing.
+        """
+        if v.get_secret_value() == _PLACEHOLDER_API_KEY:
+            raise ValueError("placeholder_api_key")
+        return v
 
     def __init__(self, **kw):  # type: ignore[no-untyped-def]
         try:
