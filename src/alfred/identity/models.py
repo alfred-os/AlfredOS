@@ -70,8 +70,12 @@ class User(Base):
         # re-adding the enum across rollback boundaries, so this CHECK is
         # the permanent gate rather than a Postgres ENUM type. New tiers
         # land via additive CHECK migrations.
+        # ``authorization`` is a Postgres reserved keyword (per the SQL
+        # standard: GRANT…AUTHORIZATION). Bare in a CHECK expression PG
+        # parses it as the keyword and rejects the constraint; quote it so
+        # the column reference survives DDL emission unambiguously.
         CheckConstraint(
-            "authorization IN ('read_only', 'standard', 'trusted', 'operator')",
+            "\"authorization\" IN ('read_only', 'standard', 'trusted', 'operator')",
             name="ck_users_authorization",
         ),
         # Daily budget is a per-user spend cap consumed by BudgetGuard (PR
