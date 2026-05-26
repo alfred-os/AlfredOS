@@ -42,10 +42,32 @@ if [[ ! -f .env ]]; then
 fi
 
 step "Validating ALFRED_DEEPSEEK_API_KEY is set"
-# shellcheck disable=SC1091
-[[ -f .env ]] && source .env
+# Deliberately NOT `source .env`. Sourcing executes the file as bash, which
+# means `#` truncates lines silently, `$()` runs subshells, and an
+# operator-pasted line can run arbitrary commands. Instead, we extract just
+# the key we care about with a single grep + cut + tr pipeline. The tr -d
+# strips surrounding single/double quotes so an operator who wrote
+# `ALFRED_DEEPSEEK_API_KEY="sk-..."` is treated the same as the bare form.
+if [[ -f .env ]]; then
+  # `set -euo pipefail` is in effect: `grep` exits 1 when the key is absent,
+  # which would abort the script BEFORE the empty-check below can run and
+  # surface the friendly operator message. Use `|| true` so a missing key
+  # surfaces as an empty value instead of a hard abort.
+  ALFRED_DEEPSEEK_API_KEY=$(grep -E '^ALFRED_DEEPSEEK_API_KEY=' .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+else
+  ALFRED_DEEPSEEK_API_KEY=""
+fi
 if [[ -z "${ALFRED_DEEPSEEK_API_KEY:-}" ]]; then
   warn "ALFRED_DEEPSEEK_API_KEY is empty. Edit .env and re-run."
+  exit 1
+fi
+# Reject the literal placeholder shipped in .env.example. Catching it here
+# (rather than letting it propagate to the provider call) gives operators a
+# friendly error before the container even boots. The settings.py validator
+# enforces the same invariant inside the app for any path that skips this
+# script.
+if [[ "${ALFRED_DEEPSEEK_API_KEY}" == "sk-..." ]]; then
+  warn "Detected placeholder API key. Edit .env and replace 'sk-...' with a real DeepSeek API key from https://platform.deepseek.com."
   exit 1
 fi
 
