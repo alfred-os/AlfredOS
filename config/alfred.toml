@@ -9,6 +9,9 @@ model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 
 [provider.anthropic]
+# Source of truth for valid Anthropic model IDs: https://docs.anthropic.com/en/docs/about-claude/models
+# Mirrors the default in src/alfred/config/settings.py (Settings.anthropic_model).
+# Bump together when migrating model families.
 model = "claude-sonnet-4-6"
 
 [budget]
