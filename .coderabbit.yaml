@@ -20,6 +20,17 @@ reviews:
     drafts: false
     base_branches:
       - main
+    # Disable CodeRabbit's "auto-pause after N reviewed commits" behavior.
+    # During PR #89 (Slice 1 — 17 fixup rounds across multiple SHAs) CR
+    # auto-paused mid-loop with the message "It looks like this branch is
+    # under active development. To avoid overwhelming you with review
+    # comments..." and stopped reviewing several intermediate SHAs.
+    # AlfredOS uses fixup-driven iteration heavily (see CONTRIBUTING.md
+    # "Review fixes via fixup + autosquash") — we WANT CR re-reviewing
+    # every push. Setting to 0 turns the pause off entirely; setting it
+    # to a large number (e.g. 100) would just defer the pause until very
+    # long branches.
+    auto_pause_after_reviewed_commits: 0
 
   tools:
     ast-grep:

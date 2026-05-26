@@ -49,9 +49,16 @@ class Settings(BaseSettings):
         default=PostgresDsn("postgresql+asyncpg://alfred:alfred@localhost:5432/alfred")
     )
 
-    # Budget
-    daily_budget_usd: float = 1.0
-    per_call_max_usd: float = 0.10
+    # Budget. Both must be > 0 — a zero or negative cap would make every
+    # call an automatic refusal (daily_usd) or trivially-bypass-able
+    # (per_call_max_usd), which contradicts the operator's intent of having
+    # the gate at all. Pydantic raises ValidationError on load, which
+    # ``_load_settings_or_die`` translates to a friendly t() message. The
+    # complementary ``math.isfinite`` + non-negative guards inside
+    # ``BudgetGuard`` cover hand-constructed sub-guards (tests, future
+    # personas) that don't go through Settings.
+    daily_budget_usd: float = Field(default=1.0, gt=0)
+    per_call_max_usd: float = Field(default=0.10, gt=0)
 
     # Operator (single-user slice 1)
     operator_name: str = "operator"
