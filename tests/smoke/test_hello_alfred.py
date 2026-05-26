@@ -129,7 +129,9 @@ async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatc
                 entry = audit_rows[0]
                 assert entry.result == "success"
                 assert entry.language == "en-US"
-                assert entry.cost_actual_usd == 0.00001
+                # Float equality is fragile across SQL round-trip + Decimal
+                # coercion; use approx with a tight relative tolerance.
+                assert entry.cost_actual_usd == pytest.approx(0.00001, rel=1e-9)
                 assert entry.event == "orchestrator.turn"
                 # User input was tagged T2 at the orchestrator boundary.
                 assert entry.trust_tier_of_trigger == "T2"

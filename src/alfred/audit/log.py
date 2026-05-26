@@ -3,10 +3,24 @@
 Writes append-only entries to the `audit_log` table. Failed writes raise
 loudly — the caller decides whether to quarantine. Future slices add signing
 and integration with the internal git repo.
+
+Session boundary
+----------------
+``AuditWriter`` owns its own transaction. Callers pass a ``session_factory``
+(an async-context-manager factory shaped exactly like
+``alfred.memory.db.build_session_scope``'s output) and ``.append`` opens it,
+writes the row, and commits — independent of whatever transaction the caller
+is running for user-content writes. This is **load-bearing** for CLAUDE.md
+hard rule #7: a failed user-content turn (provider error, budget block,
+cancellation) MUST still produce an audit row. Sharing a session with the
+caller would mean the caller's ``rollback()`` wipes the audit write, leaving
+the operator with no record that anything happened.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,10 +29,19 @@ from alfred.memory.models import AuditEntry
 
 
 class AuditWriter:
-    """Append-only writer for the audit log."""
+    """Append-only writer for the audit log.
 
-    def __init__(self, *, session: AsyncSession) -> None:
-        self._session = session
+    Each ``.append()`` opens a fresh session from ``session_factory``, writes
+    the row, and commits — so audit persistence is decoupled from any caller
+    transaction that may roll back.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    ) -> None:
+        self._session_factory = session_factory
 
     async def append(
         self,
@@ -43,6 +66,10 @@ class AuditWriter:
         "en-US" preserves backward-compat for paths not yet threaded with
         language; new callers MUST pass language explicitly. The orchestrator
         passes it from `Settings.operator_language`.
+
+        Opens its own session+transaction via ``session_factory`` so the row
+        survives even if the caller's outer transaction rolls back (CLAUDE.md
+        hard rule #7 — see module docstring).
         """
         entry = AuditEntry(
             trace_id=trace_id,
@@ -56,5 +83,6 @@ class AuditWriter:
             cost_actual_usd=cost_actual_usd,
             language=language,
         )
-        self._session.add(entry)
-        await self._session.flush()
+        async with self._session_factory() as session:
+            session.add(entry)
+            await session.flush()
