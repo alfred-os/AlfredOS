@@ -73,8 +73,27 @@ class SecretBroker:
         return bool(self._env.get(f"ALFRED_{name.upper()}"))
 
     def known(self) -> list[str]:
-        """Return the names of registered secrets that currently have a value."""
-        return [name for name in sorted(SUPPORTED_SECRETS) if self.has(name)]
+        """Return the names of registered secrets that currently have a value.
+
+        Names only — callers that need the values use `_known_with_values()`
+        or `get()`. Keeping the public surface name-only prevents accidental
+        leakage of values into logs by anyone iterating `known()`.
+        """
+        return [name for name, _ in self._known_with_values()]
+
+    def _known_with_values(self) -> list[tuple[str, str]]:
+        """Return (name, value) pairs for registered secrets with non-empty values.
+
+        Single source of truth for "which secrets are live right now" — used by
+        `known()` (which drops the values) and `redact()` (which needs both).
+        Sorting by name keeps `known()` ordering deterministic for callers.
+        """
+        pairs: list[tuple[str, str]] = []
+        for name in sorted(SUPPORTED_SECRETS):
+            value = self._env.get(f"ALFRED_{name.upper()}", "")
+            if value:
+                pairs.append((name, value))
+        return pairs
 
     def redact(self, text: str) -> str:
         """Replace any known secret value inside `text` with `[REDACTED:<name>]`.
@@ -82,15 +101,17 @@ class SecretBroker:
         Called by the structlog redactor processor so secrets never leak into
         log output. The set of known secrets is bounded by SUPPORTED_SECRETS;
         only those that currently have non-empty values are scanned.
+
+        Pairs are processed in descending-length order so a longer secret
+        whose suffix happens to be another live secret is fully redacted
+        before the shorter one runs — otherwise the inner replacement would
+        consume the shared prefix and leak the longer secret's tail bytes.
+        Slice 1's SUPPORTED_SECRETS is small enough that overlap is rare,
+        but the ordering invariant is the DLP path's responsibility (PRD
+        §7.1) regardless of input shape.
         """
         out = text
-        for name in self.known():
-            # `known()` already filtered to names with non-empty env values via
-            # `has()` — so the `if value:` guard below is defensive only and
-            # structurally never falsy on this path. `pragma: no branch` tells
-            # coverage not to demand the falsy branch be hit; the equivalent
-            # branch in `has()` is the one tested.
-            value = self._env.get(f"ALFRED_{name.upper()}", "")
-            if value:  # pragma: no branch
-                out = out.replace(value, f"[REDACTED:{name}]")
+        pairs = sorted(self._known_with_values(), key=lambda item: len(item[1]), reverse=True)
+        for name, value in pairs:
+            out = out.replace(value, f"[REDACTED:{name}]")
         return out
