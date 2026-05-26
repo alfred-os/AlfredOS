@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+import structlog
 from anthropic import AsyncAnthropic
 
 from alfred.providers.base import CompletionRequest, CompletionResponse
+
+_log = structlog.get_logger()
+
+# Explicit per-phase timeouts so a hung provider can't stall the orchestrator
+# loop. The Anthropic SDK default is ~10 minutes for the full request, which is
+# unacceptable for an interactive TUI. Read=60s is enough headroom for slow
+# completions; connect/write/pool are tighter because they should be near-instant
+# on a healthy network.
+_HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=5.0)
 
 # Per-million-token prices in USD. Used to estimate cost_usd locally so the
 # orchestrator can enforce per-user/per-task budgets without an extra round
@@ -25,11 +36,22 @@ _ANTHROPIC_PRICING: dict[str, tuple[float, float]] = {
 
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    # Unknown models fall back to claude-sonnet-4-6 pricing rather than raising:
-    # cost is an estimate used for budget enforcement, and a missing entry
-    # should not break completion. Router/audit records the real model name
-    # so price-sheet drift is observable downstream.
-    in_per_m, out_per_m = _ANTHROPIC_PRICING.get(model, (3.0, 15.0))
+    # Unknown models fail CLOSED: charge at the most expensive known tariff
+    # (claude-opus-4-7 today) rather than the cheap sonnet default. CR (#89)
+    # flagged the prior cheap-fallback as a budget-bypass — a new Anthropic
+    # model name not yet in our table would silently undercount ``cost_usd``
+    # and let the per-call / per-day guards approve spend they should block.
+    # Logging the fallback makes price-sheet drift observable in real time.
+    if model in _ANTHROPIC_PRICING:
+        in_per_m, out_per_m = _ANTHROPIC_PRICING[model]
+    else:
+        in_per_m, out_per_m = max(_ANTHROPIC_PRICING.values(), key=lambda p: p[0] + p[1])
+        _log.warning(
+            "anthropic.unknown_model_pricing_fallback",
+            model=model,
+            in_per_m=in_per_m,
+            out_per_m=out_per_m,
+        )
     return (tokens_in / 1_000_000) * in_per_m + (tokens_out / 1_000_000) * out_per_m
 
 
@@ -47,7 +69,14 @@ class AnthropicProvider:
 
     @classmethod
     def from_settings(cls, api_key: str, model: str) -> AnthropicProvider:
-        return cls(client=AsyncAnthropic(api_key=api_key), model=model)
+        # max_retries=2 matches the SDK default but is stated explicitly: a
+        # transient failure on the fallback should retry once with backoff
+        # before surfacing to the orchestrator. Tiered routing in slice 2 will
+        # take over retry policy from the SDK.
+        return cls(
+            client=AsyncAnthropic(api_key=api_key, timeout=_HTTP_TIMEOUT, max_retries=2),
+            model=model,
+        )
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         # Anthropic separates the system prompt from the conversation: it goes

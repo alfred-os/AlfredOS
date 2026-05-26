@@ -5,13 +5,68 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from alfred.config.settings import Settings
 
+# Explicit DSN→engine registry. We dropped the previous `functools.cache`
+# wrapper because `.cache_clear()` only forgets the Python references — it
+# does NOT call `engine.dispose()`, so the SQLAlchemy pool kept its sockets
+# open well past every cache-clearing test. The registry below lets
+# `dispose_all_engines()` actually close the pools (see CR finding on
+# `make_engine`'s previous shape). Keyed on the DSN string so callers with
+# identical database URLs continue to share one engine and its pool.
+_ENGINES: dict[str, AsyncEngine] = {}
 
-def make_engine(settings: Settings):  # type: ignore[no-untyped-def]
-    return create_async_engine(settings.database_url.unicode_string(), echo=False, future=True)
+
+def _engine_for_url(url: str) -> AsyncEngine:
+    """Return the cached engine for ``url``, creating it on first use."""
+    engine = _ENGINES.get(url)
+    if engine is None:
+        engine = create_async_engine(url, echo=False, future=True)
+        _ENGINES[url] = engine
+    return engine
+
+
+def make_engine(settings: Settings) -> AsyncEngine:
+    """Return a cached async engine for ``settings.database_url``.
+
+    The engine owns a connection pool, so constructing a fresh one per
+    ``make_session_factory`` call leaked pools — neither the CLI bootstrap nor
+    the smoke test had a sensible place to ``.dispose()`` them. The cache is
+    keyed on the DSN string (Settings itself isn't hashable), so callers with
+    identical database URLs share one engine and its pool.
+
+    Engine disposal is the process-lifetime contract: the engine lives until
+    the process exits, when asyncio shutdown closes its pool. Tests / smoke
+    fixtures that need per-test disposal call ``dispose_all_engines()``;
+    ``functools.cache.cache_clear()`` was insufficient because it only drops
+    Python references and leaks the pool's sockets.
+    """
+    return _engine_for_url(settings.database_url.unicode_string())
+
+
+async def dispose_all_engines() -> None:
+    """Dispose every cached engine and clear the registry.
+
+    Tests, fixtures, and any controlled shutdown path call this so the
+    SQLAlchemy connection pools actually close their sockets. The previous
+    `functools.cache.cache_clear()` only dropped Python references and left
+    every pool's connections open until the process exited; long-running
+    test sessions piled up sockets and eventually exhausted the testcontainer.
+    """
+    # Snapshot first: `engine.dispose()` yields control to the event loop and
+    # we don't want a concurrent `_engine_for_url` to repopulate the dict
+    # while we're iterating it.
+    engines = list(_ENGINES.values())
+    _ENGINES.clear()
+    for engine in engines:
+        await engine.dispose()
 
 
 def make_session_factory(settings: Settings) -> async_sessionmaker[AsyncSession]:
