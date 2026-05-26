@@ -22,11 +22,21 @@ from alfred.identity.errors import (
     OperatorAlreadyExistsError,
     OperatorSlugCollisionError,
 )
+from alfred.identity.models import (
+    Authorization,
+    Platform,
+    PlatformIdentity,
+    User,
+)
 
 __all__ = [
+    "Authorization",
     "IdentityError",
     "IdentityResolutionError",
     "LastOperatorRemovalRefusedError",
     "OperatorAlreadyExistsError",
     "OperatorSlugCollisionError",
+    "Platform",
+    "PlatformIdentity",
+    "User",
 ]
