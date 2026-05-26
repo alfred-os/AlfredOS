@@ -1,6 +1,6 @@
 # 0008 — LLM output is T2 in Slice 1 (not T0)
 
-- **Status**: Accepted
+- **Status**: Accepted (superseded in part by ADR-0013 — Slice-2 commitment to T1+T3+dual-LLM rescheduled to Slice 3)
 - **Date**: 2026-05-26
 - **Slice**: 1 (`docs/superpowers/plans/2026-05-24-slice-1-hello-alfred.md`)
 - **Supersedes**: —
