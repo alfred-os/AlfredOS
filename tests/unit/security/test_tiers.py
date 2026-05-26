@@ -35,6 +35,62 @@ class TestTaggedContent:
             TaggedContent[T2](content="x", source="s", tier=T2, evil="leak")  # type: ignore[call-arg]
 
 
+class TestTaggedContentTierValidator:
+    """Pydantic + `arbitrary_types_allowed=True` accepts any class object for
+    `tier` at runtime. The field_validator is the runtime gate that backs the
+    static type parameter — without it, a caller bypassing mypy could smuggle
+    in `tier=str` and short-circuit the trust-tier invariant the dual-LLM split
+    relies on. These tests pin the gate."""
+
+    def test_rejects_non_trust_tier_class(self) -> None:
+        # The most important case: `str` is a class, but not a TrustTier
+        # subclass. Without the validator, Pydantic would happily store it.
+        with pytest.raises(ValidationError):
+            TaggedContent(content="x", source="t", tier=str)  # type: ignore[type-var]
+
+    def test_rejects_unrelated_class(self) -> None:
+        class NotATier:
+            name = "T0"  # spoofed name attribute is not enough
+
+        with pytest.raises(ValidationError):
+            TaggedContent(content="x", source="t", tier=NotATier)  # type: ignore[type-var]
+
+    def test_rejects_non_class_value(self) -> None:
+        # A bare instance, not a class — must fail before the issubclass check.
+        with pytest.raises(ValidationError):
+            TaggedContent(content="x", source="t", tier=T2())  # type: ignore[arg-type]
+
+    def test_rejects_trust_tier_subclass_with_empty_name(self) -> None:
+        # A subclass that forgets to set `name` would still type-check but
+        # produces "" in the audit log — meaningless. Reject at construction.
+        class AnonTier(TrustTier):
+            pass  # inherits name = ""
+
+        with pytest.raises(ValidationError):
+            TaggedContent(content="x", source="t", tier=AnonTier)
+
+    def test_accepts_approved_tier(self) -> None:
+        # Sanity check the happy path: T2 (an approved tier in
+        # ``_APPROVED_TIERS``) passes the validator.
+        c = TaggedContent(content="x", source="t", tier=T2)
+        assert c.tier is T2
+
+    def test_rejects_named_subclass_outside_slice1_allowlist(self) -> None:
+        """A TrustTier subclass with a non-empty name is no longer enough.
+
+        CR (#89) tightened the validator to enforce ``_APPROVED_TIERS``
+        (slice-1: only T0 and T2). The previous behaviour accepted any
+        properly-named subclass — that drifted from PRD §7.1's closed
+        T0..T3 tier model.
+        """
+
+        class ImpostorTier(TrustTier):
+            name = "T9"
+
+        with pytest.raises(ValidationError):
+            TaggedContent(content="x", source="t", tier=ImpostorTier)
+
+
 class TestTagHelper:
     def test_tags_t0_system_content(self) -> None:
         c = tag(T0, content="persona prompt", source="persona.alfred")
@@ -44,3 +100,20 @@ class TestTagHelper:
     def test_tags_t2_user_content_with_metadata(self) -> None:
         c = tag(T2, content="hi alfred", source="tui.input", line=3)
         assert c.metadata["line"] == 3
+
+    def test_rejects_trust_tier_outside_slice1_allowlist(self) -> None:
+        """Runtime guard: `tag()` rejects any TrustTier subclass not in the
+        slice-1 allowlist (`_APPROVED_TIERS = frozenset({T0, T2})`).
+
+        The Pydantic `_validate_tier` already rejects empty-name and
+        non-class values; this complementary guard at the `tag()` boundary
+        closes the "named subclass that looks like a TrustTier but isn't on
+        the active slice's list" hole — exactly the case PRD §7.1 expects
+        the ingestion boundary to enforce.
+        """
+
+        class ImpostorTier(TrustTier):
+            name = "T9"
+
+        with pytest.raises(ValueError, match="unsupported trust tier"):
+            tag(ImpostorTier, content="x", source="test")
