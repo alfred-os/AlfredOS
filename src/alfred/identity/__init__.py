@@ -28,6 +28,7 @@ from alfred.identity.models import (
     PlatformIdentity,
     User,
 )
+from alfred.identity.slug import derive_slug
 
 __all__ = [
     "Authorization",
@@ -39,4 +40,5 @@ __all__ = [
     "Platform",
     "PlatformIdentity",
     "User",
+    "derive_slug",
 ]
