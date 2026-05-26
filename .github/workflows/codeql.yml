@@ -39,12 +39,40 @@ jobs:
       contents: read         # Read the codebase for CodeQL extraction
       actions: read          # Query Actions for build/run context
       security-events: write # Write findings to the GitHub Security tab
+      packages: read         # CodeQL v4 needs to pull bundled query packs
     steps:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 1
+          # fetch-depth: 0 (full history) is required by CodeQL's pr-diff-range
+          # feature: it computes the diff between PR base and head to scope
+          # analysis to changed code, and a shallow clone can't fetch back to
+          # the merge base. A shallow checkout fails with
+          # "git call failed. Cannot fetch main" + "resolve extensions-by-pack
+          # error code 2" inside `codeql database run-queries`.
+          fetch-depth: 0
           persist-credentials: false
+      - name: Prepare git for CodeQL pr-diff-range
+        if: github.event_name == 'pull_request'
+        env:
+          # Avoid hard-coding 'main' so this still works if the PR base ever
+          # changes (e.g. release branches).
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          # The codeql-action's pr-diff-range feature shells out to
+          # `git fetch origin <base>` internally and fails with "fatal:
+          # error processing shallow info: 4" → "resolve extensions-by-pack
+          # error code 2" when the runner's clone retains a stale shallow
+          # marker (even after actions/checkout fetch-depth: 0) and/or has
+          # no refspec for the PR base. Two defensive prep steps:
+          #   1. If the clone is still marked shallow for any reason,
+          #      unshallow it so the codeql-internal fetch can resolve.
+          #   2. Materialise the base ref locally so the action's diff
+          #      computation has both endpoints to compare.
+          if [ -f .git/shallow ]; then
+            git fetch --unshallow || true
+          fi
+          git fetch --no-tags origin "${BASE_REF}:${BASE_REF}"
       - name: Check for Python source files
         # CodeQL's Python extractor exits with a fatal error if it finds no
         # Python source ("CodeQL detected code written in GitHub Actions,
@@ -66,12 +94,16 @@ jobs:
           fi
       - name: Initialize CodeQL
         if: steps.srccheck.outputs.has_source == 'true'
-        uses: github/codeql-action/init@6825d5659bf007b85a0866e2d0f434aacf50de94 # v3.27.5
+        uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           languages: python
           queries: security-and-quality
+          # codeql-action v4 ships a bundled CodeQL CLI that parses the
+          # action-generated pr-diff-range extension YAML correctly. v4
+          # doesn't accept `tools: latest` (only `linked` or `nightly`), so
+          # we rely on the bundled CLI rather than overriding it.
       - name: Perform CodeQL analysis
         if: steps.srccheck.outputs.has_source == 'true'
-        uses: github/codeql-action/analyze@6825d5659bf007b85a0866e2d0f434aacf50de94 # v3.27.5
+        uses: github/codeql-action/analyze@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
         with:
           category: "/language:python"
