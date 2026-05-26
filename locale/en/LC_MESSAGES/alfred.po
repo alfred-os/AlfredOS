@@ -104,6 +104,394 @@ msgstr "alfred error: {error}"
 msgid "tui.label_alfred"
 msgstr "alfred"
 
+# ---------------------------------------------------------------------------
+# Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root + cli.setup.*)
+# Added in advance of call-sites so pybabel compile --check stays green as
+# later tasks (T5-T16) land their t() invocations.
+# ---------------------------------------------------------------------------
+
+#: src/alfred/cli/main.py:54
+msgid "cli.help.root"
+msgstr "AlfredOS CLI"
+
+# --- alfred user group help -----------------------------------------------
+
+msgid "cli.user.help.group"
+msgstr "Manage AlfredOS users and their platform bindings."
+
+# --- alfred user <subcommand> short + long help ---------------------------
+
+msgid "cli.user.help.add.short"
+msgstr ""
+"Add a new user (optionally binding a platform identity in the same "
+"transaction)."
+
+msgid "cli.user.help.add.long"
+msgstr ""
+"Add a new user and derive their canonical slug from the display name. If "
+"--discord-id is passed, the bind happens in the same SQL transaction as the "
+"user insert so a UNIQUE conflict rolls back the user row too."
+
+msgid "cli.user.help.list.short"
+msgstr "List active users (rich.Table by default; --json for scripting)."
+
+msgid "cli.user.help.list.long"
+msgstr ""
+"List active users sorted by created_at ASC. Soft-deleted rows excluded "
+"unless --include-deleted; --json emits a stable JSON array suitable for "
+"piping into jq."
+
+msgid "cli.user.help.show.short"
+msgstr "Show one user with override-vs-derived rate-limit indicators."
+
+msgid "cli.user.help.show.long"
+msgstr ""
+"Show the full record for one user, including platform bindings and an "
+"explicit indicator on rate-limit fields showing whether the value is a "
+"per-user override or the authorization-derived default."
+
+msgid "cli.user.help.remove.short"
+msgstr "Soft-delete a user (refuses if target is the last operator)."
+
+msgid "cli.user.help.remove.long"
+msgstr ""
+"Soft-delete a user (sets deleted_at; preserves audit history). Refuses "
+"with exit code 2 if the target is the last authorization='operator' user. "
+"Confirms by default; exits 2 under non-TTY without --yes."
+
+msgid "cli.user.help.bind.short"
+msgstr "Bind a platform identity (e.g. a Discord snowflake) to an existing user."
+
+msgid "cli.user.help.bind.long"
+msgstr ""
+"Bind a platform identity to an existing user. Refuses on existing "
+"platform_id conflict (use 'alfred user unbind' first) or if the user is "
+"already bound on the named platform."
+
+msgid "cli.user.help.unbind.short"
+msgstr "Remove a platform binding from a user."
+
+msgid "cli.user.help.unbind.long"
+msgstr ""
+"Soft-delete the platform_identities row for (user, platform); the "
+"platform_id becomes reusable by another user."
+
+msgid "cli.user.help.set.short"
+msgstr ""
+"Tune an existing user's daily budget, authorization, language, or rate-"
+"limit overrides."
+
+msgid "cli.user.help.set.long"
+msgstr ""
+"Tune an existing user. Pass --rate-limit-per-min unset to revert an "
+"override to the authorization-derived default. --replace-operator <slug> "
+"required to promote a second user to operator (the named existing operator "
+"is demoted to 'trusted' in the same audit-logged transaction)."
+
+# --- alfred user * option flag help ---------------------------------------
+
+msgid "cli.user.flag.name.short"
+msgstr "Display name (will be slug-derived for the canonical user_id)."
+
+msgid "cli.user.flag.name.long"
+msgstr ""
+"Display name. Preserved verbatim with original casing and spacing for the "
+"persona prompt. Slug-derived for canonical user_id (NFKC → ASCII-"
+"transliterate → lowercase → regex → trim → 63-char truncate → collision "
+"suffix)."
+
+msgid "cli.user.flag.discord-id.short"
+msgstr "Discord snowflake to bind (atomic with user add)."
+
+msgid "cli.user.flag.discord-id.long"
+msgstr ""
+"Discord snowflake (e.g. 123456789012345678). Bound in the same transaction "
+"as the user insert so a UNIQUE conflict rolls back both."
+
+msgid "cli.user.flag.authorization.short"
+msgstr ""
+"Authorization tier (read-only | standard | trusted | operator; default "
+"standard)."
+
+msgid "cli.user.flag.authorization.long"
+msgstr ""
+"Authorization tier controls per-user budget defaults and rate-limit "
+"defaults. read-only users get zero replies (audit-logged); operator "
+"inherits the slice-1 global cap. Accepts kebab-case (read-only) or snake_"
+"case (read_only); both normalise to the snake_case enum value."
+
+msgid "cli.user.flag.daily-budget-usd.short"
+msgstr "Per-user daily budget cap in USD (default 0.50)."
+
+msgid "cli.user.flag.daily-budget-usd.long"
+msgstr ""
+"Per-user daily budget cap. Must be positive. Default 0.50 (raised from "
+"slice-1 default 0.10 per spec §7); operator inherits settings."
+"daily_budget_usd as their per-user cap. Per-call cap remains global "
+"(settings.per_call_max_usd)."
+
+msgid "cli.user.flag.language.short"
+msgstr "BCP-47 language tag (e.g. en-US, de-DE; default operator's language)."
+
+msgid "cli.user.flag.language.long"
+msgstr ""
+"BCP-47 language tag. Validated at ingress via babel.Locale.parse. If the "
+"catalog does not ship the named language, the CLI warns-with-confirm under "
+"interactive TTY (--no-warn-missing-catalog to skip)."
+
+msgid "cli.user.flag.rate-limit-per-min.short"
+msgstr "Override the authorization-derived messages-per-minute cap."
+
+msgid "cli.user.flag.rate-limit-per-min.long"
+msgstr ""
+"Per-user messages-per-minute cap. NULL means use the authorization-derived "
+"default (read-only=0, standard=30, trusted=60, operator=unlimited). Pass "
+"'unset' on 'user set' to revert."
+
+msgid "cli.user.flag.rate-limit-per-day.short"
+msgstr "Opt-in hard ceiling on messages-per-day (default off)."
+
+msgid "cli.user.flag.rate-limit-per-day.long"
+msgstr ""
+"Per-user messages-per-day cap. NULL means no day-cap (BudgetGuard."
+"daily_budget_usd owns the cost ceiling); set an integer for an opt-in hard "
+"ceiling above the cost cap."
+
+msgid "cli.user.flag.platform.short"
+msgstr "Platform name (tui | discord)."
+
+msgid "cli.user.flag.platform.long"
+msgstr "Platform name. Slice 2 supports tui and discord; Telegram lands in Slice 4."
+
+msgid "cli.user.flag.id.short"
+msgstr "Platform identifier (Discord snowflake / TUI operator name)."
+
+msgid "cli.user.flag.id.long"
+msgstr ""
+"Platform identifier. For Discord, the user's snowflake. For TUI, the "
+"operator_name from settings."
+
+msgid "cli.user.flag.json.short"
+msgstr "Emit machine-readable JSON instead of a table."
+
+msgid "cli.user.flag.json.long"
+msgstr ""
+"Emit a stable JSON array (one object per user) instead of the rich.Table. "
+"Suitable for piping into jq for setup-script automation."
+
+msgid "cli.user.flag.include-deleted.short"
+msgstr "Include soft-deleted users (strikethrough in the table)."
+
+msgid "cli.user.flag.include-deleted.long"
+msgstr ""
+"Include rows with non-null deleted_at; rendered with strikethrough in the "
+"table and a 'deleted_marker' annotation in JSON."
+
+msgid "cli.user.flag.yes.short"
+msgstr "Skip the confirmation prompt (required under non-TTY)."
+
+msgid "cli.user.flag.yes.long"
+msgstr ""
+"Skip the confirmation prompt for destructive operations. Required under "
+"non-TTY (exit 2 otherwise)."
+
+msgid "cli.user.flag.output-slug.short"
+msgstr "Print only the derived slug to stdout (for setup-script scripting)."
+
+msgid "cli.user.flag.output-slug.long"
+msgstr ""
+"Print only the derived slug to stdout (no table, no audit-row echo). Used "
+"by bin/alfred-setup.sh to capture the canonical slug for the follow-up "
+"bind command."
+
+msgid "cli.user.flag.replace-operator.short"
+msgstr "Demote the named existing operator while promoting this user (atomic)."
+
+msgid "cli.user.flag.replace-operator.long"
+msgstr ""
+"Promote this user to operator. The named existing operator is demoted to "
+"'trusted' in the same audit-logged SQL transaction so the resolver state "
+"never has zero or two operators."
+
+msgid "cli.user.flag.slug-override.short"
+msgstr ""
+"Override the derived slug with a memorable handle (use after a slug "
+"fallback warning)."
+
+msgid "cli.user.flag.slug-override.long"
+msgstr ""
+"Override the derived slug with a memorable handle. Use when the slug "
+"pipeline falls back to 'user' (e.g. emoji-only name) and the CLI emits "
+"cli.user.add.slug_fallback. The override still passes through collision "
+"suffixing."
+
+# --- alfred user * success / confirmation ---------------------------------
+
+msgid "cli.user.added"
+msgstr "Added user {display_name} (slug={slug}, authorization={authorization})."
+
+msgid "cli.user.bound"
+msgstr "Bound {platform} identity {platform_id} to user {slug}."
+
+msgid "cli.user.unbound"
+msgstr "Removed {platform} binding from user {slug}."
+
+msgid "cli.user.removed"
+msgstr "Removed user {slug} (soft-delete; audit history preserved)."
+
+msgid "cli.user.set.success"
+msgstr "Updated user {slug}: {diff}."
+
+msgid "cli.user.remove.confirm"
+msgstr ""
+"Remove user {slug} ({display_name})? This soft-deletes the row; episode "
+"and audit history are preserved. [y/N]: "
+
+msgid "cli.user.operator_replaced"
+msgstr "Promoted {new_slug} to operator; demoted {old_slug} to trusted."
+
+msgid "cli.user.add.slug_fallback"
+msgstr ""
+"Display name produced an empty slug; falling back to '{slug}'. Use --slug-"
+"override to pick a memorable handle."
+
+msgid "cli.user.add.slug_adjusted"
+msgstr ""
+"Note: slug adjusted to '{slug}' because '{base}' already exists (soft-"
+"deleted users retain their slug). Use this slug for follow-up commands."
+
+# --- alfred user * errors --------------------------------------------------
+
+msgid "cli.user.error.not_found"
+msgstr "No user with slug '{slug}'."
+
+msgid "cli.user.error.platform_id_in_use"
+msgstr ""
+"Platform identity {platform}:{platform_id} is already bound to user "
+"'{existing_slug}'."
+
+msgid "cli.user.error.user_already_bound"
+msgstr ""
+"User '{slug}' is already bound on platform '{platform}'. Run 'alfred user "
+"unbind {slug} --platform {platform}' first."
+
+msgid "cli.user.error.invalid_authorization"
+msgstr ""
+"Invalid authorization '{value}'. Choose one of: read-only, standard, "
+"trusted, operator."
+
+msgid "cli.user.error.invalid_language"
+msgstr "Invalid BCP-47 language tag '{value}'. Examples: en-US, de-DE, ja-JP."
+
+msgid "cli.user.error.invalid_bcp47"
+msgstr "BCP-47 parse failed for '{value}': {detail}."
+
+msgid "cli.user.error.budget_must_be_positive"
+msgstr "--daily-budget-usd must be > 0; got {value}."
+
+msgid "cli.user.error.no_operator"
+msgstr ""
+"No operator has been added yet. Run 'alfred user add --authorization "
+"operator --name <YourName>' first."
+
+msgid "cli.user.error.no_tty_without_yes"
+msgstr ""
+"This command is running under a non-TTY; pass --yes to skip the "
+"confirmation prompt."
+
+msgid "cli.user.error.operator_already_exists"
+msgstr ""
+"An operator already exists ('{existing_slug}' — {existing_display_name}). "
+"Pass --replace-operator {existing_slug} to atomically demote them while "
+"promoting this user."
+
+msgid "cli.user.error.remove_last_operator_refused"
+msgstr ""
+"Refused to remove the last operator '{slug}'. Promote another user to "
+"operator first (alfred user set <other> --authorization operator --replace-"
+"operator {slug})."
+
+# --- alfred user list: table chrome (i18n-001) ----------------------------
+
+msgid "cli.user.list.column.slug"
+msgstr "slug"
+
+msgid "cli.user.list.column.display_name"
+msgstr "display name"
+
+msgid "cli.user.list.column.authorization"
+msgstr "authorization"
+
+msgid "cli.user.list.column.daily_budget_usd"
+msgstr "daily budget (USD)"
+
+msgid "cli.user.list.column.platforms"
+msgstr "platforms"
+
+msgid "cli.user.list.column.language"
+msgstr "language"
+
+msgid "cli.user.list.empty_hint"
+msgstr ""
+"No users yet. Run 'alfred user add --authorization operator --name "
+"<YourName>' to add the operator."
+
+msgid "cli.user.list.deleted_marker"
+msgstr "(deleted)"
+
+msgid "cli.user.list.no_platforms"
+msgstr "(none)"
+
+msgid "cli.user.list.catalog_missing_annotation"
+msgstr "(no catalog)"
+
+# --- alfred user show: annotations ----------------------------------------
+
+msgid "cli.user.show.override_indicator"
+msgstr "(override)"
+
+msgid "cli.user.show.derived_indicator"
+msgstr "(derived from authorization)"
+
+msgid "cli.user.show.value.unset"
+msgstr "(unset)"
+
+msgid "cli.user.show.platforms_none"
+msgstr "No platform bindings."
+
+# --- BCP-47 catalog-missing warning (devex-003) ---------------------------
+
+msgid "cli.user.warn.catalog_missing"
+msgstr ""
+"Language '{language}' has no shipped catalog. Operator-facing chrome will "
+"render in English; model output will still be requested in the user's "
+"language. Continue? [y/N]: "
+
+# --- bin/alfred-setup.sh prompts ------------------------------------------
+
+msgid "cli.setup.operator_added"
+msgstr "Operator added as canonical user '{slug}' (display name: {display_name})."
+
+msgid "cli.setup.operator_name_prompt"
+msgstr "Operator display name [Operator]: "
+
+msgid "cli.setup.discord_bind_hint"
+msgstr ""
+"Discord snowflake to bind now (Settings > Advanced > Developer Mode > "
+"right-click > Copy ID; blank to skip): "
+
+msgid "cli.setup.slug_differs_hint"
+msgstr ""
+"  (Slug differs from display-lowercase; use '{slug}' in future CLI "
+"commands.)"
+
+# --- IdentityResolver WARN-once-per-user (unmapped catalog) ---------------
+
+msgid "identity.warn.catalog_missing_for_user"
+msgstr ""
+"User '{slug}' has language '{language}' but no catalog is shipped. "
+"Operator-facing chrome will fall back to English for this user."
+
 #~ msgid "error.budget_exhausted"
 #~ msgstr "daily budget exhausted (spent ${spent:.4f} of ${cap:.2f})"
 

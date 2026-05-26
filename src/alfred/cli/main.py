@@ -51,7 +51,7 @@ from alfred.security.secrets import SecretBroker
 if TYPE_CHECKING:
     from alfred.providers.base import Provider
 
-app = typer.Typer(help="AlfredOS CLI", no_args_is_help=True)
+app = typer.Typer(help=t("cli.help.root"), no_args_is_help=True)
 
 
 # ---------------------------------------------------------------------------
