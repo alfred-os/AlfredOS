@@ -49,15 +49,26 @@ class AlfredTuiApp(App[None]):
     """
 
     BINDINGS = [  # noqa: RUF012  # Textual reads BINDINGS off the class; mutable is the documented contract.
-        Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
-        Binding("ctrl+q", "quit", "Quit", show=True),
-        Binding("escape", "cancel_turn", "Cancel turn", show=True),
+        # Footer descriptions are operator-facing and go through t() per
+        # CLAUDE.md i18n hard rule #1. Resolution happens at class-definition
+        # time against the default ``_active_lang`` ("en-US"); slice-2's
+        # per-session language switch would need ``App.refresh_bindings`` to
+        # repaint, but the keys themselves stay stable.
+        Binding("ctrl+c", "quit", t("tui.binding.quit"), show=True, priority=True),
+        Binding("ctrl+q", "quit", t("tui.binding.quit"), show=True),
+        Binding("escape", "cancel_turn", t("tui.binding.cancel_turn"), show=True),
     ]
 
     def __init__(self, *, orchestrator: _OrchestratorLike) -> None:
         super().__init__()
         self._orchestrator = orchestrator
         self._in_flight: asyncio.Task[str] | None = None
+        # Tracks whether the most recent CancelledError originated from the
+        # user pressing Esc (``action_cancel_turn``). When False, a
+        # CancelledError reaching ``on_input_submitted`` is Textual's own
+        # shutdown signal and MUST propagate — masking it would block the
+        # app from exiting cleanly.
+        self._user_cancelled: bool = False
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -94,10 +105,18 @@ class AlfredTuiApp(App[None]):
         input_widget.add_class("busy")
         log.write(f"[dim]{t('tui.thinking')}[/]")
 
+        # Reset the user-cancelled flag at the start of each turn so a stale
+        # Esc from a prior turn cannot mask a fresh Textual shutdown signal.
+        self._user_cancelled = False
         self._in_flight = asyncio.create_task(self._run_turn(text))
         try:
             response = await asyncio.wait_for(self._in_flight, timeout=TURN_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
+            # Only swallow the cancellation when the user pressed Esc. Any
+            # other CancelledError reaching here is Textual's own shutdown
+            # signal and must propagate so the app exits cleanly.
+            if not self._user_cancelled:
+                raise
             log.write(f"[yellow]{t('tui.turn_cancelled')}[/]")
             return
         except TimeoutError:
@@ -124,7 +143,10 @@ class AlfredTuiApp(App[None]):
 
         The orchestrator audits the cancellation on its side; the TUI's
         ``on_input_submitted`` handler catches the resulting CancelledError
-        and paints ``tui.turn_cancelled``.
+        and paints ``tui.turn_cancelled``. We set ``_user_cancelled`` before
+        triggering the cancel so the handler can distinguish a user-driven
+        cancellation from a Textual shutdown signal.
         """
         if self._in_flight is not None and not self._in_flight.done():
+            self._user_cancelled = True
             self._in_flight.cancel()
