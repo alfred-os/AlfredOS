@@ -9,9 +9,20 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+import structlog
 from openai import AsyncOpenAI
 
 from alfred.providers.base import CompletionRequest, CompletionResponse
+
+_log = structlog.get_logger()
+
+# Explicit per-phase timeouts so a hung provider can't stall the orchestrator
+# loop. The OpenAI SDK default is ~10 minutes for the full request, which is
+# unacceptable for an interactive TUI. Read=60s is enough headroom for slow
+# completions; connect/write/pool are tighter because they should be near-instant
+# on a healthy network.
+_HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=5.0)
 
 # Per-million-token prices in USD. Used to estimate cost_usd locally so the
 # orchestrator can enforce per-user/per-task budgets without an extra round
@@ -23,11 +34,22 @@ _DEEPSEEK_PRICING: dict[str, tuple[float, float]] = {
 
 
 def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    # Unknown models fall back to deepseek-chat pricing rather than raising:
-    # cost is an estimate used for budget enforcement, and a missing entry
-    # should not break completion. Router/audit records the real model name
-    # so price-sheet drift is observable downstream.
-    in_per_m, out_per_m = _DEEPSEEK_PRICING.get(model, (0.07, 0.27))
+    # Unknown models fail CLOSED: charge at the most expensive known tariff
+    # rather than the deepseek-chat default. CR (#89) flagged the prior
+    # cheap-fallback as a budget-bypass — a model added by DeepSeek but not
+    # yet in our pricing table would silently undercount ``cost_usd`` and
+    # let the per-call / per-day guards approve spend they should block.
+    # Logging the fallback makes price-sheet drift observable in real time.
+    if model in _DEEPSEEK_PRICING:
+        in_per_m, out_per_m = _DEEPSEEK_PRICING[model]
+    else:
+        in_per_m, out_per_m = max(_DEEPSEEK_PRICING.values(), key=lambda p: p[0] + p[1])
+        _log.warning(
+            "deepseek.unknown_model_pricing_fallback",
+            model=model,
+            in_per_m=in_per_m,
+            out_per_m=out_per_m,
+        )
     return (tokens_in / 1_000_000) * in_per_m + (tokens_out / 1_000_000) * out_per_m
 
 
@@ -45,7 +67,10 @@ class DeepSeekProvider:
 
     @classmethod
     def from_settings(cls, api_key: str, base_url: str, model: str) -> DeepSeekProvider:
-        return cls(client=AsyncOpenAI(api_key=api_key, base_url=base_url), model=model)
+        return cls(
+            client=AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=_HTTP_TIMEOUT),
+            model=model,
+        )
 
     async def complete(self, request: CompletionRequest) -> CompletionResponse:
         response = await self._client.chat.completions.create(
