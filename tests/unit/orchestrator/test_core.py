@@ -8,6 +8,7 @@ with the spec-bug fixes from the parent agent's task brief baked in
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -57,6 +58,11 @@ def _build(
     budget: MagicMock | None = None,
     operator_name: str = "Sir",
     operator_language: str = "en-US",
+    redactor: Any = None,
+    # ``episodic_factory`` lets a test inject a custom EpisodicMemory stand-in —
+    # used by the cancellation tests to make a specific record() call cancel
+    # mid-await. Default = the shared mock created by `_make_episodic_audit`.
+    episodic_factory: Any = None,
 ) -> tuple[Orchestrator, dict[str, Any]]:
     if working is None:
         # A simple in-memory stand-in: append accumulates Turns; turns() returns
@@ -90,16 +96,31 @@ def _build(
         budget = _make_budget()
     scope, session = _make_session_scope()
     episodic, audit = _make_episodic_audit()
-    orch = Orchestrator(
-        operator_name=operator_name,
-        operator_language=operator_language,
-        session_scope=scope,
-        working=working,
-        router=router,
-        budget=budget,
-        episodic_factory=lambda _s: episodic,
-        audit_factory=lambda _s: audit,
-    )
+    # If a test supplied a custom factory, route through it (and resolve the
+    # episodic mock the test owns); otherwise wire the default shared mock so
+    # assertions on m["episodic"] continue to work.
+    if episodic_factory is not None:
+        resolved_factory = episodic_factory
+        episodic = episodic_factory(session)
+    else:
+        resolved_factory = lambda _s: episodic  # noqa: E731 — mock seam stays one-liner.
+    # ``audit_factory`` now receives the session-scope factory (not a session).
+    # The orchestrator wires the writer once at __init__ and the writer owns
+    # its own per-call session. The test ignores the arg and returns the
+    # shared mock so assertions can inspect calls.
+    kwargs: dict[str, Any] = {
+        "operator_name": operator_name,
+        "operator_language": operator_language,
+        "session_scope": scope,
+        "working": working,
+        "router": router,
+        "budget": budget,
+        "episodic_factory": resolved_factory,
+        "audit_factory": lambda _f: audit,
+    }
+    if redactor is not None:
+        kwargs["redactor"] = redactor
+    orch = Orchestrator(**kwargs)
     return orch, {
         "working": working,
         "router": router,
@@ -134,7 +155,10 @@ class TestOrchestratorHappyPath:
         assert ep_user["trust_tier"] == "T2"
         assert ep_user["content"] == "Good morning, Alfred."
         assert ep_asst["role"] == "assistant"
-        assert ep_asst["trust_tier"] == "T0"
+        # ADR-0008: assistant output is T2 in Slice 1 (at-most-as-trusted as
+        # the T2 input that triggered it). T0 is reserved for AlfredOS
+        # internals/code/prompts/configs per PRD §7.1.
+        assert ep_asst["trust_tier"] == "T2"
         assert ep_asst["tokens_in"] == 12
         assert ep_asst["tokens_out"] == 4
         assert ep_asst["cost_usd"] == pytest.approx(0.0005)
@@ -258,3 +282,154 @@ class TestOrchestratorBudgetOverrun:
         # The episode for the assistant turn still recorded the actual cost.
         assistant_call = m["episodic"].record.await_args_list[1].kwargs
         assert assistant_call["cost_usd"] == pytest.approx(0.0005)
+
+
+class TestOrchestratorOperatorName:
+    """The orchestrator must use the injected ``operator_name`` everywhere it
+    records a user_id — not a hardcoded module-level constant. Multi-user
+    landing in Slice 3 hinges on this seam.
+    """
+
+    async def test_operator_name_propagates_to_episodes_and_audit(self) -> None:
+        orch, m = _build(operator_name="Bruce")
+        await orch.handle_user_message("good morning")
+
+        # Both episodes (user + assistant) carry the operator name.
+        for call in m["episodic"].record.await_args_list:
+            assert call.kwargs["user_id"] == "Bruce"
+
+        # The success-path audit row carries the operator name.
+        audit_kwargs = m["audit"].append.await_args.kwargs
+        assert audit_kwargs["actor_user_id"] == "Bruce"
+
+    async def test_operator_name_propagates_on_budget_block(self) -> None:
+        budget = _make_budget(estimate=0.50, would_exceed=True)
+        orch, m = _build(operator_name="Bruce", budget=budget)
+        with pytest.raises(BudgetError):
+            await orch.handle_user_message("expensive")
+        audit_kwargs = m["audit"].append.await_args.kwargs
+        assert audit_kwargs["actor_user_id"] == "Bruce"
+        # User-input episode also carries the operator name.
+        assert m["episodic"].record.await_args_list[0].kwargs["user_id"] == "Bruce"
+
+    async def test_operator_name_propagates_on_provider_failure(self) -> None:
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=RuntimeError("upstream"))
+        orch, m = _build(operator_name="Bruce", router=router)
+        with pytest.raises(RuntimeError):
+            await orch.handle_user_message("ping")
+        audit_kwargs = m["audit"].append.await_args.kwargs
+        assert audit_kwargs["actor_user_id"] == "Bruce"
+
+
+class TestOrchestratorCancellation:
+    """``asyncio.CancelledError`` is a ``BaseException``, not ``Exception``.
+
+    CLAUDE.md hard rule #7 forbids silent cancellation: every awaited step in
+    the turn (working-memory append, episodic write, pre-/post-provider
+    audit, provider call itself) must produce a `cancelled` audit row, not
+    only cancellation that lands inside ``_router.complete``. The top-level
+    ``handle_user_message`` arm is the backstop; these tests exercise three
+    points of the turn (pre-provider, provider, post-provider) to prove the
+    backstop fires regardless of WHERE the cancellation lands.
+    """
+
+    async def test_user_cancellation_inside_provider_call_is_audited(self) -> None:
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=asyncio.CancelledError())
+        orch, m = _build(router=router)
+
+        with pytest.raises(asyncio.CancelledError):
+            await orch.handle_user_message("midway-cancel")
+
+        assert m["audit"].append.await_count == 1
+        audit_kwargs = m["audit"].append.await_args.kwargs
+        assert audit_kwargs["result"] == "cancelled"
+        assert audit_kwargs["subject"]["phase"] == "turn_cancelled"
+        assert audit_kwargs["cost_actual_usd"] == 0.0
+        # Assistant turn never buffered (provider call was cancelled).
+        assert m["working"].append.await_count == 1
+        # User-content txn rolled back as part of the outer BaseException arm.
+        m["session"].rollback.assert_awaited()
+
+    async def test_cancellation_before_provider_call_is_still_audited(self) -> None:
+        # Cancellation lands inside ``WorkingMemory.append`` — the FIRST
+        # awaited step after T2-tagging. Pre-fix this would have skipped the
+        # audit (the inner provider-call arm never executed). The top-level
+        # backstop now writes the cancellation row regardless.
+        working = MagicMock()
+        working.append = AsyncMock(side_effect=asyncio.CancelledError())
+        working.turns = AsyncMock(return_value=[])
+        orch, m = _build(working=working)
+
+        with pytest.raises(asyncio.CancelledError):
+            await orch.handle_user_message("cancel-before-provider")
+
+        assert m["audit"].append.await_count == 1
+        audit_kwargs = m["audit"].append.await_args.kwargs
+        assert audit_kwargs["result"] == "cancelled"
+        assert audit_kwargs["subject"]["phase"] == "turn_cancelled"
+        # Provider was never called.
+        assert m["router"].complete.await_count == 0
+        m["session"].rollback.assert_awaited()
+
+    async def test_cancellation_after_provider_call_is_still_audited(self) -> None:
+        # Provider succeeded; cancellation lands during the post-provider
+        # episodic write (operator hit Esc between turns). The completed
+        # response is discarded — the user-content txn rolls back — but the
+        # audit row still lands so the cancelled turn is visible in the trail.
+        from alfred.providers.base import CompletionResponse
+
+        response = CompletionResponse(
+            content="reply", tokens_in=4, tokens_out=2, cost_usd=0.0001, model="m"
+        )
+        router = MagicMock()
+        router.complete = AsyncMock(return_value=response)
+        # First episodic.record() (user turn) succeeds; second (assistant)
+        # cancels. This simulates a cancellation that arrives between the
+        # successful provider call and the assistant-turn persistence.
+        episodic = MagicMock()
+        episodic.record = AsyncMock(side_effect=[None, asyncio.CancelledError()])
+
+        def _episodic_factory(_session: object) -> MagicMock:
+            return episodic
+
+        orch, m = _build(router=router, episodic_factory=_episodic_factory)
+
+        with pytest.raises(asyncio.CancelledError):
+            await orch.handle_user_message("cancel-after-provider")
+
+        # Only the cancellation-audit row should have landed; the post-provider
+        # success-audit never executed because cancellation interrupted first.
+        assert m["audit"].append.await_count == 1
+        audit_kwargs = m["audit"].append.await_args.kwargs
+        assert audit_kwargs["result"] == "cancelled"
+        assert audit_kwargs["subject"]["phase"] == "turn_cancelled"
+        m["session"].rollback.assert_awaited()
+
+
+class TestOrchestratorRedactsAuditSubject:
+    """Provider SDK exceptions stringify with URLs / Authorization headers /
+    API keys. The redactor must run over every str value in the audit subject
+    so secrets never reach the audit log.
+    """
+
+    async def test_provider_failure_subject_is_redacted(self) -> None:
+        router = MagicMock()
+        router.complete = AsyncMock(
+            side_effect=RuntimeError(
+                "401 Unauthorized for https://api.example.com (Authorization: Bearer sk-LEAKED)"
+            )
+        )
+        # Redactor that scrubs the canary string.
+        orch, m = _build(
+            router=router,
+            redactor=lambda s: s.replace("sk-LEAKED", "[REDACTED]"),
+        )
+
+        with pytest.raises(RuntimeError):
+            await orch.handle_user_message("hi")
+
+        audit_kwargs = m["audit"].append.await_args.kwargs
+        assert "sk-LEAKED" not in audit_kwargs["subject"]["error"]
+        assert "[REDACTED]" in audit_kwargs["subject"]["error"]

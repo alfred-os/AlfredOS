@@ -1,7 +1,15 @@
-"""Tests for the slice 1 audit log writer."""
+"""Tests for the slice 1 audit log writer.
+
+The writer takes a ``session_factory`` (async context manager factory) and
+owns its own transaction inside ``.append()``. The fixtures here build a
+factory that yields a single shared session-mock so the assertions can
+inspect what was added/flushed.
+"""
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,11 +29,26 @@ def _mock_session() -> AsyncMock:
     return session
 
 
+def _factory_for(session: AsyncMock):  # type: ignore[no-untyped-def]
+    """Wrap a single session-mock in an async-context-manager factory.
+
+    Mirrors the shape of ``alfred.memory.db.build_session_scope``'s output:
+    a zero-arg callable returning an async context manager that yields the
+    session.
+    """
+
+    @asynccontextmanager
+    async def _scope() -> AsyncIterator[AsyncMock]:
+        yield session
+
+    return _scope
+
+
 @pytest.mark.asyncio
 class TestAuditWriter:
     async def test_append_persists_required_fields(self) -> None:
         session = _mock_session()
-        writer = AuditWriter(session=session)
+        writer = AuditWriter(session_factory=_factory_for(session))
         await writer.append(
             event="provider.call",
             actor_user_id="operator",
@@ -46,7 +69,7 @@ class TestAuditWriter:
     async def test_append_raises_on_persistence_failure(self) -> None:
         session = _mock_session()
         session.flush.side_effect = RuntimeError("db down")
-        writer = AuditWriter(session=session)
+        writer = AuditWriter(session_factory=_factory_for(session))
         with pytest.raises(RuntimeError, match="db down"):
             await writer.append(
                 event="provider.call",
