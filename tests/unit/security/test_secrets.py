@@ -105,3 +105,24 @@ class TestSecretRedaction:
         assert "an-key" not in out
         assert "[REDACTED:deepseek_api_key]" in out
         assert "[REDACTED:anthropic_api_key]" in out
+
+    def test_redact_longer_secret_before_shorter_substring(self) -> None:
+        """Longer secret must be redacted first to prevent partial leakage.
+
+        When two live secrets overlap such that the shorter one is a
+        substring of the longer (e.g. shared `sk-ant` prefix), redacting
+        in arbitrary order would consume the prefix and leak the longer
+        secret's tail bytes. The redactor sorts by length descending so
+        the longer value is matched (and replaced) first.
+        """
+        broker = SecretBroker(
+            env={
+                "ALFRED_DEEPSEEK_API_KEY": "sk-ant-longersecret",
+                "ALFRED_ANTHROPIC_API_KEY": "sk-ant",
+            }
+        )
+        result = broker.redact("token is sk-ant-longersecret here")
+        assert "[REDACTED:deepseek_api_key]" in result
+        # If we'd redacted the shorter prefix first, "longersecret" would
+        # remain in the output — explicitly assert no tail leakage.
+        assert "longersecret" not in result
