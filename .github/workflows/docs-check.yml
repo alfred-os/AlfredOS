@@ -1,0 +1,66 @@
+name: docs-check
+
+# Anchor-aware markdown link checker. Walks docs/ and the top-level README /
+# PRD / CONTRIBUTING / CODE_OF_CONDUCT / SECURITY files, extracts every
+# `[text](path#anchor)` link, and verifies (a) the target file exists and
+# (b) the `#anchor` resolves to a heading slug in that file.
+#
+# The script `scripts/docs_check.py` is stdlib-only so the job needs no
+# `uv sync` step — just Python.
+#
+# PR-E plan task 8 (Open Question Q3): a custom Python script was chosen
+# over Node `markdown-link-check` actions because none of them verify
+# `#anchor` fragments against the target file's heading set, and AlfredOS's
+# glossary anchors (`#authorization-role` + `#canonical-user-id`) are
+# load-bearing surfaces that the spec forward-references.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'docs/**/*.md'
+      - 'PRD.md'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'CODE_OF_CONDUCT.md'
+      - 'SECURITY.md'
+      - 'scripts/docs_check.py'
+      - 'Makefile'
+      - '.github/workflows/docs-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**/*.md'
+      - 'PRD.md'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'CODE_OF_CONDUCT.md'
+      - 'SECURITY.md'
+      - 'scripts/docs_check.py'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  docs-check:
+    name: Docs link + anchor check
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Run docs-check
+        run: make docs-check
