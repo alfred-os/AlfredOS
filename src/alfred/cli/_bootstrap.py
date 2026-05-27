@@ -255,10 +255,12 @@ def structlog_audit_sink(
     :class:`alfred.security.dlp._AuditSink` so the same DLP construction
     pattern works for both the structlog path (no-op sink, here) and the
     Discord outbound path (real audit sink, PR D2).
+
+    Parameters are intentionally unused — they exist solely to satisfy
+    the ``_AuditSink`` Protocol signature.
     """
     # Intentional no-op. See module docstring for the recursion-avoidance
     # rationale.
-    del event, subject
 
 
 def build_adapter_dlp_audit_sink(

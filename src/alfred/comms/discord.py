@@ -165,23 +165,19 @@ _log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _register_pybabel_visible_keys() -> None:
-    """Touch i18n keys dispatched via ``t_key=`` so pybabel sees them.
-
-    ``_audit_and_send_refusal`` (line 784) takes ``t_key: str`` and
-    calls ``t(t_key, **kwargs)`` at runtime. ``pybabel extract`` only
-    sees ``t()`` called with a literal first arg — it cannot follow
-    data flow through variable parameters. The literal ``t()`` calls
-    inside this function body are what pybabel parses; the function
-    itself is never invoked.
-
-    Function-scoped (rather than module-scope) so static analysers
-    don't flag the bindings as unused globals — pybabel's AST walk
-    only cares that the literal ``t("...")`` calls exist inside the
-    parsed source.
-    """
-    t("discord.embed_unsupported")
-    t("discord.rate_limited")
+#: Tuple of i18n keys dispatched via ``t_key=`` at runtime —
+#: ``_audit_and_send_refusal`` (line 784) takes ``t_key: str`` and calls
+#: ``t(t_key, **kwargs)``. ``pybabel extract`` only sees ``t()`` called
+#: with a literal first arg — it cannot follow data flow through
+#: variable parameters. Binding the literal ``t("...")`` calls into a
+#: module-level tuple keeps them visible to pybabel's AST walk and
+#: avoids CodeQL's ``py/no-effect`` flag on bare expression statements.
+#: The pre-resolved values are otherwise unused at runtime — the call
+#: sites pass ``t_key`` strings directly to ``t()``.
+_PYBABEL_VISIBLE_KEYS: tuple[str, ...] = (
+    t("discord.embed_unsupported"),
+    t("discord.rate_limited"),
+)
 
 
 # ---------------------------------------------------------------------------
