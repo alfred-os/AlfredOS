@@ -47,6 +47,11 @@ env:
 jobs:
   adversarial:
     name: Adversarial corpus
+    # Job-level guard: no-op cleanly (without spending checkout / runner steps)
+    # when the corpus has no test_*.py files. Mirrors the in-job
+    # `corpuscheck.outputs.has_corpus` probe but short-circuits earlier so the
+    # job appears as "skipped" rather than "succeeded with all steps skipped".
+    if: ${{ hashFiles('tests/adversarial/**/test_*.py') != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
