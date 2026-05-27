@@ -169,12 +169,18 @@ class WorkingMemoryPool:
         point of having a separate escape hatch — and any in-flight
         ``release()`` for that key will no-op.
 
-        The per-key lock is dropped too so that a brand-new identity reusing
-        the same slug (unlikely but possible across re-registration) starts
-        with a fresh lock and doesn't deadlock against the prior holder.
+        The per-key lock is INTENTIONALLY kept alive — locks are immortal in
+        this registry. Dropping the lock here would split the single-rehydrate
+        contract: an in-flight ``acquire()`` may already hold the old lock and
+        be awaiting ``_rehydrate``; a fresh ``acquire()`` after evict would
+        then ``setdefault`` a new lock and run a parallel rehydrate, producing
+        two WorkingMemory objects for the same key. Locks are a couple of
+        pointers each, so the bounded leak (one lock per ever-touched key) is
+        the right trade against a correctness bug. A re-registered slug
+        reuses the same lock harmlessly: contention is on the slug-shaped
+        key, not the identity behind it.
         """
         self._entries.pop(key, None)
-        self._locks.pop(key, None)
         self._in_use.discard(key)
 
     def _evict_to_cap(self) -> None:
@@ -193,7 +199,10 @@ class WorkingMemoryPool:
             key=lambda k: self._entries[k].last_released_at,
         )
         # Pop oldest idle until we're under cap or out of idle candidates.
+        # Locks are immortal (see :meth:`evict` docstring); only the entry is
+        # dropped here. A future acquire on the same key reuses the lock and
+        # rehydrates fresh — exactly the single-rehydrate guarantee callers
+        # rely on.
         while len(self._entries) > cap and idle_keys:
             victim = idle_keys.pop(0)
             self._entries.pop(victim, None)
-            self._locks.pop(victim, None)
