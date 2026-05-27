@@ -3,7 +3,7 @@ name = "alfred"
 version = "0.0.1"
 description = "AlfredOS - multi-user, multi-persona, security-hardened agentic OS."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = { text = "Apache-2.0" }
 authors = [{ name = "AlfredOS contributors" }]
 dependencies = [
@@ -88,7 +88,7 @@ fail_under = 75
 # CLAUDE.md hard rule: every security boundary must have 100% line+branch coverage.
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -139,7 +139,7 @@ extend-immutable-calls = [
 [tool.pyright]
 # Secondary type-checker per ADR-0007. mypy is primary; pyright catches what
 # mypy misses (especially data-flow narrowing). See docs/python-conventions.md.
-pythonVersion = "3.12"
+pythonVersion = "3.14"
 typeCheckingMode = "standard"
 include = ["src"]
 exclude = ["src/alfred/memory/migrations"]
