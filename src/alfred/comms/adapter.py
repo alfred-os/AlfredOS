@@ -19,8 +19,6 @@ swap a single-module rewrite rather than a cross-cutting refactor.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 # ``AdapterHealth`` lives in a leaf module so both this Protocol module

@@ -88,13 +88,31 @@ import discord
 import structlog
 from cachetools import TTLCache
 
-from alfred.comms.adapter import AdapterHealth
+from alfred.comms._types import AdapterHealth
 from alfred.comms.discord_types import _DiscordClientLike
 from alfred.comms.markdown_split import _split_for_discord
 from alfred.i18n import set_language, t
 from alfred.identity.errors import IdentityResolutionError
 from alfred.identity.models import Platform
 from alfred.security.tiers import T2, tag
+
+# ---------------------------------------------------------------------------
+# pybabel-visible registration of i18n keys used via ``t_key=`` dispatch.
+#
+# ``_audit_and_send_refusal`` (line 784) takes ``t_key: str`` and calls
+# ``t(t_key, **kwargs)`` at line 823. ``pybabel extract`` only sees ``t()``
+# called with a literal first arg — it can't follow data flow through
+# variable parameters. The dance below makes the dispatched keys visible
+# to the catalog drift gate.
+#
+# Call results discarded; ``t()`` has no side effects beyond returning a
+# string. ``_ALFRED_PYBABEL_VISIBLE`` is intentionally module-scope so it
+# survives import.
+_ALFRED_PYBABEL_VISIBLE = (
+    t("discord.embed_unsupported"),
+    t("discord.rate_limited"),
+)
+del _ALFRED_PYBABEL_VISIBLE  # binding's purpose was extraction only
 
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter

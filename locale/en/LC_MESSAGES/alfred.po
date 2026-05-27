@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 13:12+0100\n"
+"POT-Creation-Date: 2026-05-27 13:31+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -14,69 +14,121 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
+# PR D2 — CLI help and verify-event narration.
+#: src/alfred/cli/discord_cmd.py:64
+msgid "cli.discord.help.group"
+msgstr "Discord adapter subcommands."
+
+#: src/alfred/cli/discord_cmd.py:86
+msgid "cli.discord.help.verify.short"
+msgstr "Probe the Discord gateway for 30s and exit with a typed code."
+
+#: src/alfred/cli/discord_cmd.py:92
+msgid "cli.discord.help.verify.timeout"
+msgstr "Seconds to wait for on_ready before timing out (default 30)."
+
+#: src/alfred/cli/discord_cmd.py:148
+msgid "cli.discord.verify.config_failed.secrets_unreadable"
+msgstr "Discord verify failed: secrets file unreadable. Detail: {detail}"
+
+#: src/alfred/cli/discord_cmd.py:154
+msgid "cli.discord.verify.config_failed.bad_token"
+msgstr ""
+"Discord verify failed: bot token rejected. Confirm "
+"~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
+" {detail}"
+
+#: src/alfred/cli/discord_cmd.py:166 src/alfred/cli/main.py:487
+msgid "error.postgres_unreachable"
+msgstr "Postgres is unreachable: {detail}"
+
+#: src/alfred/cli/discord_cmd.py:167 src/alfred/cli/main.py:488
+msgid "hint.is_compose_up"
+msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
+
 #: src/alfred/cli/main.py:64
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:125
+#: src/alfred/cli/main.py:132
 msgid "error.placeholder_api_key"
 msgstr ""
 "ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
 "'sk-...' with a real DeepSeek API key."
 
-#: src/alfred/cli/main.py:127
+#: src/alfred/cli/main.py:134
 msgid "error.config_invalid"
 msgstr "configuration is invalid: {detail}"
 
-#: src/alfred/cli/main.py:128
+#: src/alfred/cli/main.py:135
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/main.py:417
+#: src/alfred/cli/main.py:424
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:420
+#: src/alfred/cli/main.py:427
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:421
+#: src/alfred/cli/main.py:428
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:422
+#: src/alfred/cli/main.py:429
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:423
+#: src/alfred/cli/main.py:430
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:424
+#: src/alfred/cli/main.py:431
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:425
+#: src/alfred/cli/main.py:432
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:426
+#: src/alfred/cli/main.py:433
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:480
-msgid "error.postgres_unreachable"
-msgstr "Postgres is unreachable: {detail}"
-
-#: src/alfred/cli/main.py:481
-msgid "hint.is_compose_up"
-msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
-
-#: src/alfred/cli/main.py:502
+#: src/alfred/cli/main.py:509
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
+
+#: src/alfred/comms/discord.py:112
+msgid "discord.embed_unsupported"
+msgstr ""
+"I can only read text DMs in Slice 2. Embeds, attachments, polls, "
+"components, stickers, and references are refused."
+
+#: src/alfred/comms/discord.py:113
+msgid "discord.rate_limited"
+msgstr "You're sending messages faster than I can keep up. Try again in a moment."
+
+#: src/alfred/comms/discord.py:617 src/alfred/comms/discord.py:780
+#: src/alfred/comms/discord.py:786 src/alfred/comms/discord.py:916
+#: src/alfred/comms/discord.py:936 src/alfred/comms/discord.py:963
+msgid "discord.alfred_error"
+msgstr "Something went wrong on my end. The operator's audit log has the details."
+
+# PR D2 — Discord adapter i18n catalog (spec §3 lines 514-520).
+#: src/alfred/comms/discord.py:689
+msgid "discord.unknown_user_first"
+msgstr ""
+"I don't recognise this Discord ID yet (snowflake: `{snowflake}`). Ask "
+"your operator to run: `alfred user add --name <YourName> --discord-id "
+"{snowflake}`. The operator's audit log shows this DM."
+
+#: src/alfred/comms/discord.py:768
+msgid "discord.budget_blocked"
+msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
 
 #: src/alfred/comms/tui.py:129 src/alfred/comms/tui.py:130
 msgid "tui.binding.quit"
@@ -389,112 +441,70 @@ msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
-# PR D2 — Discord adapter i18n catalog (spec §3 lines 514-520).
+#~ msgid "discord.unknown_user_repeat"
+#~ msgstr ""
 
-#: src/alfred/comms/discord.py
-msgid "discord.unknown_user_first"
-msgstr ""
-"I don't recognise this Discord ID yet (snowflake: `{snowflake}`). Ask your "
-"operator to run: `alfred user add --name <YourName> --discord-id "
-"{snowflake}`. The operator's audit log shows this DM."
+#~ msgid "discord.embed_unsupported"
+#~ msgstr ""
+#~ "I can only read text DMs in "
+#~ "Slice 2. Embeds, attachments, polls, "
+#~ "components, stickers, and references are "
+#~ "refused."
 
-#: src/alfred/comms/discord.py
-msgid "discord.unknown_user_repeat"
-msgstr ""
+#~ msgid "discord.rate_limited"
+#~ msgstr ""
+#~ "You're sending messages faster than I"
+#~ " can keep up. Try again in a"
+#~ " moment."
 
-#: src/alfred/comms/discord.py
-msgid "discord.embed_unsupported"
-msgstr ""
-"I can only read text DMs in Slice 2. Embeds, attachments, polls, "
-"components, stickers, and references are refused."
+#~ msgid "cli.discord.help.verify.long"
+#~ msgstr ""
+#~ "Connect to Discord with the configured"
+#~ " bot token, wait up to 30s for"
+#~ " on_ready, then exit. Exit codes: 0"
+#~ " ok / 1 upstream / 2 config "
+#~ "/ 3 login / 4 timeout / 130"
+#~ " interrupted."
 
-#: src/alfred/comms/discord.py
-msgid "discord.rate_limited"
-msgstr ""
-"You're sending messages faster than I can keep up. Try again in a moment."
+#~ msgid "cli.discord.help.boot.short"
+#~ msgstr "Run the Discord adapter as a long-running gateway client."
 
-#: src/alfred/comms/discord.py
-msgid "discord.budget_blocked"
-msgstr ""
-"Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
+#~ msgid "cli.discord.help.boot.long"
+#~ msgstr ""
+#~ "Construct the full Slice-2 dependency "
+#~ "graph and connect to the Discord "
+#~ "gateway. Runs until SIGTERM/SIGINT or an"
+#~ " unrecoverable upstream error."
 
-#: src/alfred/comms/discord.py
-msgid "discord.alfred_error"
-msgstr ""
-"Something went wrong on my end. The operator's audit log has the details."
+#~ msgid "cli.discord.verify.ok"
+#~ msgstr "Discord verify: on_ready fired. Intents: {intents}."
 
-# PR D2 — CLI help and verify-event narration.
+#~ msgid "cli.discord.verify.config_failed.intents_off"
+#~ msgstr ""
+#~ "Discord verify failed: the Message "
+#~ "Content intent appears disabled in the"
+#~ " developer portal. Enable it at "
+#~ "https://discord.com/developers/applications/<bot-id>/bot "
+#~ "and re-run."
 
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.help.group"
-msgstr "Discord adapter subcommands."
+#~ msgid "cli.discord.verify.login_failed"
+#~ msgstr ""
+#~ "Discord verify failed: LoginFailure. Check "
+#~ "the bot token in "
+#~ "~/.config/alfred/secrets.toml."
 
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.help.verify.short"
-msgstr "Probe the Discord gateway for 30s and exit with a typed code."
+#~ msgid "cli.discord.verify.timeout"
+#~ msgstr ""
+#~ "Discord verify failed: 30 seconds "
+#~ "elapsed without on_ready. The gateway "
+#~ "may be slow or the bot may "
+#~ "be missing intents."
 
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.help.verify.long"
-msgstr ""
-"Connect to Discord with the configured bot token, wait up to 30s for "
-"on_ready, then exit. Exit codes: 0 ok / 1 upstream / 2 config / 3 login "
-"/ 4 timeout / 130 interrupted."
+#~ msgid "cli.discord.verify.upstream_unrecoverable"
+#~ msgstr ""
+#~ "Discord verify failed: unrecoverable upstream"
+#~ " error. Check status.discord.com."
 
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.help.verify.timeout"
-msgstr "Seconds to wait for on_ready before timing out (default 30)."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.help.boot.short"
-msgstr "Run the Discord adapter as a long-running gateway client."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.help.boot.long"
-msgstr ""
-"Construct the full Slice-2 dependency graph and connect to the Discord "
-"gateway. Runs until SIGTERM/SIGINT or an unrecoverable upstream error."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.ok"
-msgstr "Discord verify: on_ready fired. Intents: {intents}."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.config_failed.intents_off"
-msgstr ""
-"Discord verify failed: the Message Content intent appears disabled in the "
-"developer portal. Enable it at "
-"https://discord.com/developers/applications/<bot-id>/bot and re-run."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.config_failed.bad_token"
-msgstr ""
-"Discord verify failed: bot token rejected. Confirm "
-"~/.config/alfred/secrets.toml contains a valid discord_bot_token. "
-"Detail: {detail}"
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.config_failed.secrets_unreadable"
-msgstr ""
-"Discord verify failed: secrets file unreadable. Detail: {detail}"
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.login_failed"
-msgstr ""
-"Discord verify failed: LoginFailure. Check the bot token in "
-"~/.config/alfred/secrets.toml."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.timeout"
-msgstr ""
-"Discord verify failed: 30 seconds elapsed without on_ready. The gateway "
-"may be slow or the bot may be missing intents."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.upstream_unrecoverable"
-msgstr ""
-"Discord verify failed: unrecoverable upstream error. Check status.discord.com."
-
-#: src/alfred/cli/discord_cmd.py
-msgid "cli.discord.verify.interrupted"
-msgstr "Discord verify interrupted by SIGINT."
+#~ msgid "cli.discord.verify.interrupted"
+#~ msgstr "Discord verify interrupted by SIGINT."
 
