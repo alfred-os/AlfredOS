@@ -51,6 +51,11 @@ AlfredOS/
 │   └── adversarial/                # MUST-PASS security suite — see PRD §8.1
 └── docs/
     ├── adr/                        # Architecture Decision Records
+    ├── glossary.md                 # single vocabulary source — every system-specific term defined once here, linked elsewhere
+    ├── runbooks/                   # operator-facing deployment walkthroughs (e.g. slice-2-discord-smoke.md)
+    ├── subsystems/                 # per-subsystem deep-docs (identity, comms, …) — the hub-and-spoke pattern Slice 3 grows
+    │   ├── identity.md             # identity / multi-user / IdentityResolver / canonical user id
+    │   └── comms.md                # CommsAdapter / DiscordAdapter / OutboundDlp / RateLimiter
     └── superpowers/specs/          # design docs (this is the path the brainstorming skill expects)
 ```
 
