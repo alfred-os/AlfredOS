@@ -146,11 +146,21 @@ def test_add_output_slug_short_circuits(
     cli_setup: IdentityResolver,
     audit_buffer: list[dict[str, Any]],
 ) -> None:
-    """``--output-slug`` prints ONLY the slug + newline; no confirmation echo."""
+    """``--output-slug`` prints ONLY the slug, but STILL writes the audit row.
+
+    CLAUDE.md hard rule #7: every successful mutation must be audited.
+    ``--output-slug`` is a machine-readable convenience for shell pipelines,
+    not an "I am invisible" flag. Regression test for PR #96 CR M2.
+    """
     result = runner.invoke(identity_cli.user_app, ["add", "--name", "Bob", "--output-slug"])
 
     assert result.exit_code == 0, result.stderr
     assert result.stdout == "bob\n"
+
+    assert len(audit_buffer) == 1, "--output-slug must NOT bypass the audit write"
+    entry = audit_buffer[0]
+    assert entry["event"] == "user.add"
+    assert entry["subject"]["slug"] == "bob"
 
 
 def test_add_authorization_kebab_and_snake_equivalent(
