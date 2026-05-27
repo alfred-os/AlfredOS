@@ -63,7 +63,11 @@ class _IdentityResolverLike(Protocol):
     extra coupling here is honest, not speculative.
     """
 
-    def get_operator(self) -> User: ...
+    # Protocol bodies need *some* body; ``raise NotImplementedError`` is
+    # preferred over ``...`` so accidental instantiation fails loudly and
+    # CodeQL's py/ineffectual-statement does not flag the ellipsis.
+    def get_operator(self) -> User:
+        raise NotImplementedError
 
 
 class _WorkingPoolLike(Protocol):
@@ -75,8 +79,11 @@ class _WorkingPoolLike(Protocol):
     concurrent acquires of the same key on its side.
     """
 
-    async def acquire(self, key: tuple[str, str]) -> WorkingMemory: ...
-    async def release(self, key: tuple[str, str], wm: WorkingMemory) -> None: ...
+    async def acquire(self, key: tuple[str, str]) -> WorkingMemory:
+        raise NotImplementedError
+
+    async def release(self, key: tuple[str, str], wm: WorkingMemory) -> None:
+        raise NotImplementedError
 
 
 class _OrchestratorLike(Protocol):
@@ -101,7 +108,8 @@ class _OrchestratorLike(Protocol):
         user: UserLike,
         content: TaggedContent[T2],
         working_memory: WorkingMemory,
-    ) -> str: ...
+    ) -> str:
+        raise NotImplementedError
 
 
 class AlfredTuiApp(App[None]):
