@@ -107,7 +107,10 @@ def verify(
 async def _boot_main() -> None:
     """Construct the full Slice-2 dependency graph + run the adapter.
 
-    Mirrors :func:`alfred.cli.main._chat_main` for the Discord path:
+    Mirrors :func:`alfred.cli.main._chat_main` for the Discord path —
+    both paths share the dependency-graph helpers in
+    :mod:`alfred.cli._bootstrap` so the Discord boot path stays in
+    lockstep with the TUI boot path:
 
     * ``Settings`` → ``SecretBroker`` (file backend required for the
       Discord token) → DB healthcheck → IdentityResolver → ProviderRouter
@@ -122,13 +125,12 @@ async def _boot_main() -> None:
 
     from alfred.audit.log import AuditWriter
     from alfred.budget.guard import BudgetGuard
-    from alfred.cli.main import (
-        _build_broker,
-        _build_router,
-        _configure_logging,
-        _install_identity_factories,
-        _load_settings_or_die,
-        _structlog_audit_sink,
+    from alfred.cli._bootstrap import (
+        build_broker,
+        build_router,
+        configure_logging,
+        install_identity_factories_for_settings,
+        load_settings_or_die,
     )
     from alfred.comms.adapter import build_discord_adapter
     from alfred.i18n import set_language
@@ -139,9 +141,9 @@ async def _boot_main() -> None:
     from alfred.orchestrator.core import Orchestrator
     from alfred.security.dlp import OutboundDlp
 
-    settings = _load_settings_or_die()
+    settings = load_settings_or_die()
     try:
-        broker = _build_broker(settings)
+        broker = build_broker(settings)
         broker.get("discord_bot_token")
     except SecretBrokerConfigError as exc:
         typer.echo(
@@ -156,19 +158,23 @@ async def _boot_main() -> None:
         )
         raise typer.Exit(code=int(_VerifyExitCode.CONFIG_FAILED)) from exc
 
-    _configure_logging(broker)
+    configure_logging(broker)
     set_language(settings.operator_language)
     session_scope = build_session_scope(settings)
 
     try:
         await healthcheck(session_scope)
     except SQLAlchemyError as exc:
-        typer.echo(t("error.postgres_unreachable", detail=str(exc)))
-        typer.echo(t("hint.is_compose_up"))
+        # Route to stderr for consistency with the secrets-error branches
+        # above (CR comment on PR #106 — minor). Other surfaces also send
+        # error chatter to stderr (typer.echo(..., err=True) is the
+        # convention; bare typer.echo writes to stdout).
+        typer.echo(t("error.postgres_unreachable", detail=str(exc)), err=True)
+        typer.echo(t("hint.is_compose_up"), err=True)
         raise typer.Exit(code=3) from exc
 
-    resolver = _install_identity_factories(settings)
-    router = _build_router(broker, settings)
+    resolver = install_identity_factories_for_settings(settings)
+    router = build_router(broker, settings)
     budget = BudgetGuard(
         user_loader=lambda user_id: resolver.show(slug=user_id),
         per_call_max_usd=settings.per_call_max_usd,
@@ -186,7 +192,9 @@ async def _boot_main() -> None:
         router=router,
         budget=budget,
     )
-    outbound_dlp = OutboundDlp(broker=broker, audit=_structlog_audit_sink)
+    from alfred.cli._bootstrap import structlog_audit_sink
+
+    outbound_dlp = OutboundDlp(broker=broker, audit=structlog_audit_sink)
     rate_limiter = InProcessTokenBucketRateLimiter()
     audit = AuditWriter(session_factory=session_scope)
     adapter = build_discord_adapter(
@@ -219,13 +227,13 @@ async def _verify_main(*, timeout_s: float = _VERIFY_TIMEOUT_S) -> _VerifyExitCo
     typed enum and emits the structlog event with the returned key +
     kwargs.
     """
-    from alfred.cli.main import _build_broker, _load_settings_or_die
+    from alfred.cli._bootstrap import build_broker, load_settings_or_die
     from alfred.comms.adapter import run_discord_verify_probe
     from alfred.security.dlp import OutboundDlp
 
     try:
-        settings = _load_settings_or_die()
-        broker = _build_broker(settings)
+        settings = load_settings_or_die()
+        broker = build_broker(settings)
     except (SystemExit, typer.Exit):
         _log.error("discord.verify.config_failed")
         return _VerifyExitCode.CONFIG_FAILED
