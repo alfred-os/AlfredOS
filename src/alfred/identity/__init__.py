@@ -7,6 +7,8 @@ is intentionally narrow:
 * ``Authorization`` / ``Platform`` — closed-domain enums (snake_case in DB; the
   Typer CLI accepts kebab-case and normalises at the boundary).
 * ``IdentityResolver`` — the only legitimate accessor for the two ORMs.
+* ``IdentityListener`` — LISTEN/NOTIFY supervisor that wires Postgres
+  identity-change notifies to the version counter (PR T15 production wiring).
 * ``IdentityVersionCounter`` — bump-on-mutate primitive subscribed by the
   resolver's in-process LRU and (in PR B) by ``BudgetGuard``.
 * Error types — ``OperatorAlreadyExistsError``, ``LastOperatorRemovalRefusedError``,
@@ -33,13 +35,14 @@ from alfred.identity.rate_limit import (
     RateLimiter,
     RateLimiterHealth,
 )
-from alfred.identity.resolver import IdentityResolver
+from alfred.identity.resolver import IdentityListener, IdentityResolver
 from alfred.identity.slug import derive_slug
 from alfred.identity.version_counter import IdentityVersionCounter
 
 __all__ = [
     "Authorization",
     "IdentityError",
+    "IdentityListener",
     "IdentityResolutionError",
     "IdentityResolver",
     "IdentityVersionCounter",
