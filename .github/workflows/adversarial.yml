@@ -41,7 +41,7 @@ concurrency:
 permissions: {}
 
 env:
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.14"
   UV_VERSION: "0.5.14"
 
 jobs:
