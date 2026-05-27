@@ -73,6 +73,9 @@ class _EnvScanner(ast.NodeVisitor):
         # Local names bound to ``os.environ`` directly via
         # ``from os import environ [as <alias>]``.
         self.env_aliases: set[str] = set()
+        # Local names bound to ``os.getenv`` via
+        # ``from os import getenv [as <alias>]``.
+        self.getenv_aliases: set[str] = set()
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -85,6 +88,8 @@ class _EnvScanner(ast.NodeVisitor):
             for alias in node.names:
                 if alias.name == "environ":
                     self.env_aliases.add(alias.asname or alias.name)
+                elif alias.name == "getenv":
+                    self.getenv_aliases.add(alias.asname or alias.name)
         self.generic_visit(node)
 
     def _record_if_banned(self, key: str | None, lineno: int) -> None:
@@ -108,16 +113,38 @@ class _EnvScanner(ast.NodeVisitor):
             self._record_if_banned(key, node.lineno)
         self.generic_visit(node)
 
+    def _first_key_arg(self, node: ast.Call) -> str | None:
+        """Extract the literal key from ``node.args[0]`` or ``key=`` kwarg.
+
+        Closes the keyword-arg bypass where a contributor writes
+        ``os.environ.get(key="ALFRED_X")`` instead of the positional form.
+        """
+        if node.args:
+            return _literal_str(node.args[0])
+        for kw in node.keywords:
+            if kw.arg == "key":
+                return _literal_str(kw.value)
+        return None
+
     def visit_Call(self, node: ast.Call) -> None:
-        # os.environ.get("ALFRED_X")
+        # os.getenv("ALFRED_X") OR
+        # from os import getenv as g; g("ALFRED_X")
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "getenv"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in self.os_aliases
+        ) or (isinstance(node.func, ast.Name) and node.func.id in self.getenv_aliases):
+            self._record_if_banned(self._first_key_arg(node), node.lineno)
+
+        # os.environ.get("ALFRED_X") OR environ.get(key="ALFRED_X")
         if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
             target = node.func.value
-            if (
-                _is_os_environ_attr(target, self.os_aliases)
-                or _is_bare_environ_name(target, self.env_aliases)
-            ) and node.args:
-                key = _literal_str(node.args[0])
-                self._record_if_banned(key, node.lineno)
+            if _is_os_environ_attr(target, self.os_aliases) or _is_bare_environ_name(
+                target, self.env_aliases
+            ):
+                self._record_if_banned(self._first_key_arg(node), node.lineno)
+
         self.generic_visit(node)
 
 
@@ -231,3 +258,32 @@ def test_scanner_ignores_environ_get_with_no_args(tmp_path: Path) -> None:
     fixture.write_text("import os\nos.environ.get()\n")
     banned = _env_keys_for_supported_secrets()
     assert _scan_file(fixture, banned) == []
+
+
+def test_scanner_detects_os_getenv_call(tmp_path: Path) -> None:
+    """`os.getenv("ALFRED_X")` is a direct env read and must be flagged."""
+    fixture = tmp_path / "violator_getenv.py"
+    fixture.write_text('import os\ntoken = os.getenv("ALFRED_DEEPSEEK_API_KEY")\n')
+    banned = _env_keys_for_supported_secrets()
+    violations = _scan_file(fixture, banned)
+    assert len(violations) == 1
+
+
+def test_scanner_detects_aliased_getenv_call(tmp_path: Path) -> None:
+    """`from os import getenv as g; g("ALFRED_X")` is the alias bypass."""
+    fixture = tmp_path / "violator_aliased_getenv.py"
+    fixture.write_text('from os import getenv as g\ntoken = g("ALFRED_ANTHROPIC_API_KEY")\n')
+    banned = _env_keys_for_supported_secrets()
+    violations = _scan_file(fixture, banned)
+    assert len(violations) == 1
+
+
+def test_scanner_detects_environ_get_keyword_key_arg(tmp_path: Path) -> None:
+    """`environ.get(key="ALFRED_X")` is the keyword-arg bypass on the get() path."""
+    fixture = tmp_path / "violator_kw.py"
+    fixture.write_text(
+        'from os import environ\ntoken = environ.get(key="ALFRED_ANTHROPIC_API_KEY")\n'
+    )
+    banned = _env_keys_for_supported_secrets()
+    violations = _scan_file(fixture, banned)
+    assert len(violations) == 1
