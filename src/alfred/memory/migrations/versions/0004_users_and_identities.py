@@ -167,8 +167,11 @@ def _add_persona_id_columns() -> None:
     docstring's reconciliation note for why this migration deliberately does
     not re-add it.
     """
-    op.add_column("episodes", sa.Column("persona_id", sa.Text(), nullable=True))
-    op.add_column("audit_log", sa.Column("persona_id", sa.Text(), nullable=True))
+    # ``String(length=64)`` matches the ORM (``src/alfred/memory/models.py``);
+    # ``sa.Text()`` would drift the schema and cause downstream alembic
+    # autogenerate to repeatedly propose column-type "fixes".
+    op.add_column("episodes", sa.Column("persona_id", sa.String(length=64), nullable=True))
+    op.add_column("audit_log", sa.Column("persona_id", sa.String(length=64), nullable=True))
 
 
 def _install_operator(conn: Any) -> None:
