@@ -95,6 +95,29 @@ ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "ARG"]
 "src/alfred/memory/migrations/**/*.py" = ["N999"]
+# FBT001/FBT002/FBT003 (boolean-trap rules) are valid for general API design
+# but conflict with Typer's declarative CLI surface — Typer flags are by
+# nature ``--flag`` / ``--no-flag`` booleans declared as function parameters
+# with bool defaults. The flag IS the argument; the "trap" the rule warns
+# against (a positional bool that obscures meaning) does not apply because
+# the user always types ``--include-deleted`` rather than a bare ``True``.
+"src/alfred/**/cli.py" = ["FBT001", "FBT002", "FBT003"]
+"src/alfred/cli/**/*.py" = ["FBT001", "FBT002", "FBT003"]
+
+[tool.ruff.lint.flake8-bugbear]
+# B008 (function call in default arg) intentionally allows Typer's declarative
+# parameter API. ``typer.Option`` / ``typer.Argument`` / ``typer.Context`` are
+# Typer's documented mechanism for declaring CLI flags; the framework itself
+# owns the lifecycle of the returned ParameterInfo. The Slice-2 CLI uses the
+# modern ``Annotated[type, typer.Option(...)]`` syntax which moves the call
+# out of default-arg position entirely (B008 stops firing), but legacy
+# call-sites that still default-assign ``typer.Option(...)`` continue to work
+# under this exemption. Other B008 hits remain flagged for genuine misuse.
+extend-immutable-calls = [
+    "typer.Argument",
+    "typer.Context",
+    "typer.Option",
+]
 
 [tool.pyright]
 # Secondary type-checker per ADR-0007. mypy is primary; pyright catches what
