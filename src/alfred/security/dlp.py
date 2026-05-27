@@ -121,12 +121,15 @@ class OutboundDlp:
 
         if text != pre:
             # Audit-on-modification. Synchronous; raises propagate per
-            # CLAUDE.md hard rule #7.
+            # CLAUDE.md hard rule #7. ``pre_bytes`` / ``post_bytes`` are
+            # UTF-8 byte counts (not character counts) — forensic audit
+            # consumers reason in bytes, and the byte/char split matters
+            # for non-ASCII content (multi-byte code points).
             self._audit(
                 event="dlp.outbound_redacted",
                 subject={
-                    "pre_bytes": len(pre),
-                    "post_bytes": len(text),
+                    "pre_bytes": len(pre.encode("utf-8")),
+                    "post_bytes": len(text.encode("utf-8")),
                     "stages_triggered": tuple(stages_triggered),
                 },
             )
