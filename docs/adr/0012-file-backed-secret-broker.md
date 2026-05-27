@@ -183,7 +183,7 @@ holds `path`; subclasses add their specifics.
 - [`docs/subsystems/comms.md`](../subsystems/comms.md) —
   `OutboundDlp.scan` consumes `broker.redact` as its stage-1 source.
 - [Glossary: SecretBroker](../glossary.md#secretbroker),
-  [SUPPORTED_SECRETS](../glossary.md#supportedsecrets),
-  [\_PREFER_FILE](../glossary.md#preferfile).
+  [SUPPORTED_SECRETS](../glossary.md#supported_secrets),
+  [\_PREFER_FILE](../glossary.md#_prefer_file).
 - `tests/unit/security/test_no_direct_env_reads.py` — broker-only access
   invariant.

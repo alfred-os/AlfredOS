@@ -85,13 +85,14 @@ def slugify(heading_text: str) -> str:
     normalises certain emoji, etc.), but for AlfredOS's English-only docs the
     rules collapse to:
 
-      1. Strip markdown emphasis markers (`*`, `_`, `` ` ``) so headings like
+      1. Strip markdown emphasis markers (`*`, `` ` ``) so headings like
          ``## `OutboundDlp` `` slug to `outbounddlp` rather than to a
-         backtick-laden mess. (`_` is part of `\\w`; we strip the literal
-         emphasis form here.)
+         backtick-laden mess. Underscores are NOT stripped — GitHub keeps
+         them as part of the slug (e.g. `#foo_bar` is a valid anchor for
+         a heading containing `foo_bar`).
       2. Lower-case.
-      3. Drop every character that is not alphanumeric, hyphen, or
-         whitespace.
+      3. Drop every character that is not alphanumeric, hyphen,
+         underscore, or whitespace.
       4. Replace each whitespace character with a single `-` (NOT a
          collapse: GitHub preserves consecutive hyphens that arise when
          punctuation between words is stripped — e.g. "Security & Prompt"
@@ -104,12 +105,12 @@ def slugify(heading_text: str) -> str:
     """
     text = re.sub(r"[*`]", "", heading_text)
     text = text.lower()
-    # Drop underscores from emphasis style without touching `\w` matches.
-    # `\w` includes `_`, but a markdown `_emphasised_` heading should slug
-    # `emphasised`, not `_emphasised_`. Strip leading/trailing underscores
-    # token-by-token.
-    text = re.sub(r"_+", "", text)
-    text = re.sub(r"[^a-z0-9\-\s]", "", text)
+    # GitHub's slug rules keep underscores (they're part of `\w`); anchors
+    # like `#foo_bar` resolve to a heading with `_` intact. We allow
+    # alphanumerics, hyphen, underscore, and whitespace; everything else
+    # is dropped. Whitespace becomes a single `-` (no collapse — see the
+    # docstring's step 4).
+    text = re.sub(r"[^a-z0-9_\-\s]", "", text)
     text = text.strip()
     return re.sub(r"\s", "-", text)
 
