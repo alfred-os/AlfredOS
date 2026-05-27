@@ -118,9 +118,19 @@ def test_no_other_broker_redact_callers_in_codebase() -> None:
     """AST-assert: the only ``broker.redact`` caller is OutboundDlp.scan.
 
     Catches the regression where someone re-introduces a direct
-    ``broker.redact`` call outside the DLP module, bypassing stages 2
+    ``.redact(...)`` call outside the DLP module, bypassing stages 2
     and 3. AST-based so references in docstrings / comments don't
     trigger false positives.
+
+    The visitor flags **every** attribute-form call to a method named
+    ``redact`` — variable-name suffix matching (the prior
+    ``endswith("broker")`` heuristic) was bypassable by trivial renames
+    like ``sb.redact(...)``. Since the only legitimate ``.redact``
+    method belongs to :class:`SecretBroker` (caller-wise: only
+    :class:`OutboundDlp`), flagging every call-site outside
+    ``dlp.py``/``secrets.py`` is both sound and tight. If a future
+    module legitimately needs to expose a different ``redact`` method,
+    add an explicit allowlist entry rather than weakening the gate.
     """
     import ast
     import pathlib
@@ -132,28 +142,22 @@ def test_no_other_broker_redact_callers_in_codebase() -> None:
         def __init__(self, file: pathlib.Path) -> None:
             self.file = file
 
-        def visit_Attribute(self, node: ast.Attribute) -> None:
-            # Catch ``something.redact`` where the value-name ends in
-            # ``broker`` (covers ``broker.redact`` plus ``self._broker.redact``,
-            # ``_broker_for_redact.redact``, etc.).
-            if node.attr == "redact":
-                target = node.value
-                # Bare name: ``broker.redact``.
-                target_name: str | None = None
-                if isinstance(target, ast.Name):
-                    target_name = target.id
-                elif isinstance(target, ast.Attribute):
-                    target_name = target.attr
-                if target_name and target_name.lower().endswith("broker"):
-                    offenders.append(f"{self.file}:{node.lineno}")
+        def visit_Call(self, node: ast.Call) -> None:
+            # Flag every ``*.redact(...)`` invocation site. The call form
+            # (vs. the attribute access in isolation) means docstrings
+            # mentioning ``.redact`` and bare attribute references that
+            # never invoke don't trip the guard.
+            fn = node.func
+            if isinstance(fn, ast.Attribute) and fn.attr == "redact":
+                offenders.append(f"{self.file}:{node.lineno}")
             self.generic_visit(node)
 
     for path in root.rglob("*.py"):
         if path.name == "dlp.py":
             continue
-        # ``secrets.py`` legitimately implements ``broker.redact`` and so
-        # references the method on ``self`` inside its docstring + helper
-        # paths — that's the method definition, not a caller.
+        # ``secrets.py`` legitimately implements ``redact`` as a method
+        # on :class:`SecretBroker` and may call ``self`` variants
+        # internally; the definition itself is not a "caller bypass".
         if path.name == "secrets.py":
             continue
         source = path.read_text(encoding="utf-8")
@@ -163,11 +167,17 @@ def test_no_other_broker_redact_callers_in_codebase() -> None:
             continue
         _Visitor(path).visit(tree)
     assert not offenders, (
-        f"broker.redact must only be called from OutboundDlp.scan after PR D1; found: {offenders}"
+        f"`.redact(...)` must only be called from OutboundDlp.scan after PR D1; "
+        f"found: {offenders}"
     )
 
 
-def test_structlog_audit_sink_is_a_noop_returning_none() -> None:
-    """Smoke-test the default sink: returns None, never raises."""
-    result = cli_main._structlog_audit_sink(event="ignored", subject={"k": "v"})
-    assert result is None
+def test_structlog_audit_sink_is_a_noop() -> None:
+    """Smoke-test the default sink: never raises.
+
+    The sink's signature is ``-> None`` so the call itself returning
+    cleanly is the whole contract. We deliberately don't assert on the
+    return value because CodeQL flags assignments from declared-None
+    callables (``py/use-of-none``).
+    """
+    cli_main._structlog_audit_sink(event="ignored", subject={"k": "v"})
