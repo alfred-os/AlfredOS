@@ -5,10 +5,18 @@ that the PR D2 tests inject MUST satisfy this Protocol — every method
 present, every signature shape correct. A drift between this Protocol and
 the discord.py 2.x ``discord.Client`` surface fails the test here, NOT
 on the integration boundary in PR D2.
+
+``@runtime_checkable`` Protocol's ``isinstance`` only verifies attribute
+*presence*, not signatures or return types. The tests below pair the
+``isinstance`` gate with explicit signature + return-type assertions so
+silent shape drift (e.g. a stub that switched ``start(token)`` to
+``start(token, secret)``) fails CI.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from collections.abc import Callable
 
 from alfred.comms.discord_types import _DiscordClientLike
@@ -51,3 +59,59 @@ def test_good_stub_satisfies_protocol() -> None:
 
 def test_stub_missing_close_fails_protocol_check() -> None:
     assert not isinstance(_MissingClose(), _DiscordClientLike)
+
+
+def test_good_stub_signatures_match_protocol_shape() -> None:
+    """Behavioural signature check beyond ``isinstance``.
+
+    ``isinstance`` accepts a stub regardless of its parameter shape.
+    Inspect the actual signatures to catch a drift that ``isinstance``
+    cannot see — e.g. ``start`` losing its keyword-only ``reconnect``,
+    or ``event`` becoming a no-arg method.
+    """
+    stub = _GoodStub()
+
+    event_sig = inspect.signature(stub.event)
+    assert list(event_sig.parameters) == ["coro"]
+
+    start_sig = inspect.signature(stub.start)
+    assert list(start_sig.parameters) == ["token", "reconnect"]
+    # ``reconnect`` is keyword-only with default True per discord.py 2.x.
+    assert start_sig.parameters["reconnect"].kind == inspect.Parameter.KEYWORD_ONLY
+    assert start_sig.parameters["reconnect"].default is True
+
+    close_sig = inspect.signature(stub.close)
+    assert list(close_sig.parameters) == []
+
+    is_ready_sig = inspect.signature(stub.is_ready)
+    assert list(is_ready_sig.parameters) == []
+
+
+def test_good_stub_async_methods_return_coroutines_and_return_value() -> None:
+    """The Protocol marks ``start``/``close`` async and ``is_ready``
+    returning ``bool``. ``isinstance`` would not catch a stub that
+    accidentally made ``close`` sync, or ``is_ready`` return ``None``;
+    these assertions do.
+    """
+    stub = _GoodStub()
+    start_coro = stub.start("fake-token")
+    assert inspect.iscoroutine(start_coro)
+    assert asyncio.run(start_coro) is None
+    close_coro = stub.close()
+    assert inspect.iscoroutine(close_coro)
+    assert asyncio.run(close_coro) is None
+    ready = stub.is_ready()
+    assert isinstance(ready, bool)
+
+
+def test_event_decorator_returns_the_passed_callable() -> None:
+    """``event(coro)`` is a decorator — it MUST return the same callable
+    so ``@client.event\\nasync def on_ready(): ...`` keeps the
+    annotated function bound in the caller's namespace. ``isinstance``
+    only proves ``event`` exists; this proves it behaves as a decorator.
+    """
+
+    async def handler() -> None:
+        return None
+
+    assert _GoodStub().event(handler) is handler
