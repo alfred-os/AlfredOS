@@ -35,15 +35,8 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-# Module-aliased import alongside the ``from ... import`` block below.
-# Some tests need direct module access for mutable globals
-# (``discord_unknown_dm_audit_dropped_total``) and for monkeypatching
-# (``monkeypatch.setattr(discord_mod, "_split_for_discord", ...)``).
-# Hoisting the alias here (rather than re-importing inside each test
-# function) avoids CodeQL's ``py/import-and-import-from`` flag while
-# keeping the dual-style usage the tests need.
-import alfred.comms.discord as discord_mod
 from alfred.budget.guard import BudgetExceededError, UnknownBudgetUserError
+from alfred.comms import discord as discord_mod
 from alfred.comms.discord import (
     DiscordAdapter,
     _bridge_library_logging,
@@ -57,6 +50,14 @@ from alfred.comms.discord import (
     _UnknownDmAuditCap,
     run_verify_probe,
 )
+
+# ``discord_mod`` (the module) is needed by a handful of tests for direct
+# module access — mutable counters (``discord_unknown_dm_audit_dropped_total``)
+# and for monkeypatching internal helpers (``_split_for_discord``).
+# Sourcing it as ``from alfred.comms import discord as discord_mod`` instead
+# of ``import alfred.comms.discord as discord_mod`` keeps CodeQL's
+# ``py/import-and-import-from`` rule happy: only the ``from ... import``
+# form is used to surface ``alfred.comms.discord`` into this module.
 from alfred.i18n import set_language, t
 from alfred.identity.models import Authorization
 
