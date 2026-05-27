@@ -14,6 +14,7 @@ is load-bearing — it is what makes Anthropic-style prompt caching effective.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from xml.sax.saxutils import escape as xml_escape
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +64,18 @@ def render_persona_prompt(
         "Keep responses tight unless asked to elaborate. "
         "If you do not know something, say so plainly; do not invent."
     )
+    # XML-escape every interpolated value. ``display_name`` is user-controlled
+    # (an operator can set their name to anything, including ``Alice & Bob``
+    # or ``<script>``); ``language`` is BCP-47 ASCII so it's escape-noop in
+    # practice but the discipline is uniform — every boundary that emits XML
+    # escapes its substitutions, no exceptions. Without this, a display name
+    # like ``A <b> C`` would break the structured ``<user_context>`` parse
+    # the provider sees, and a malicious name could inject sibling elements.
     tail = (
         "<user_context>\n"
-        f"  <operator_name>{operator_name}</operator_name>\n"
-        f"  <addressed_user_name>{requesting_user_name}</addressed_user_name>\n"
-        f"  <addressed_user_language>{language}</addressed_user_language>\n"
+        f"  <operator_name>{xml_escape(operator_name)}</operator_name>\n"
+        f"  <addressed_user_name>{xml_escape(requesting_user_name)}</addressed_user_name>\n"
+        f"  <addressed_user_language>{xml_escape(language)}</addressed_user_language>\n"
         "</user_context>"
     )
     return f"{prefix}\n\n{tail}"
