@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import structlog
@@ -54,6 +55,7 @@ from alfred.orchestrator.core import Orchestrator
 from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.deepseek import DeepSeekProvider
 from alfred.providers.router import ProviderRouter
+from alfred.security.dlp import OutboundDlp
 from alfred.security.secrets import SecretBroker
 
 if TYPE_CHECKING:
@@ -245,14 +247,16 @@ def _redact_value(v: object) -> object:
     the redactor a leaf processor — we never descend into an arbitrary
     object's ``__dict__`` and accidentally trigger ``__repr__`` side effects.
 
-    Closes over the module-level ``_broker_for_redact`` set by
-    ``_configure_logging`` so the processor function itself stays
-    structlog-shaped (``(_logger, _name, event_dict) -> EventDict``).
+    PR D1 (sec-003) routes the leaf string through
+    :meth:`alfred.security.dlp.OutboundDlp.scan` instead of
+    ``broker.redact`` so the operator console gains stage-2 generic-API-
+    key coverage that ``broker.redact`` alone misses. The DLP instance is
+    set by :func:`_configure_logging` once at bootstrap.
     """
-    if _broker_for_redact is None:
+    if _outbound_dlp_for_redact is None:
         return v
     if isinstance(v, str):
-        return _broker_for_redact.redact(v)
+        return _outbound_dlp_for_redact.scan(v)
     if isinstance(v, dict):
         return {k: _redact_value(item) for k, item in v.items()}
     if isinstance(v, list):
@@ -263,9 +267,9 @@ def _redact_value(v: object) -> object:
 
 
 # Module-level handle the processor closes over. Set by ``_configure_logging``.
-# A module-level handle is preferred over passing the broker through structlog
-# because structlog's processor signature is fixed.
-_broker_for_redact: SecretBroker | None = None
+# A module-level handle is preferred over passing the DLP scanner through
+# structlog because structlog's processor signature is fixed.
+_outbound_dlp_for_redact: OutboundDlp | None = None
 
 
 def _redact(_logger: object, _name: str, event_dict: EventDict) -> EventDict:
@@ -275,16 +279,34 @@ def _redact(_logger: object, _name: str, event_dict: EventDict) -> EventDict:
     return {k: _redact_value(v) for k, v in event_dict.items()}
 
 
+def _structlog_audit_sink(*, event: str, subject: Mapping[str, object]) -> None:
+    """No-op audit sink for the structlog-bridge DLP path.
+
+    The DLP scanner needs an audit sink at construction time. For the
+    structlog leaf-redactor we deliberately drop the audit row: emitting
+    one would re-enter structlog (recursion) and the redacted value has
+    already been masked from the operator's view. Slice 3 graduates this
+    to a queued async write through :class:`AuditWriter`; the queue is
+    drained on a supervisor tick so the audit DB stays consistent
+    without re-entrancy. The signature matches
+    :class:`alfred.security.dlp._AuditSink` so the same DLP construction
+    pattern works for both the structlog path (no-op sink, here) and the
+    Discord outbound path (real audit sink, PR D2).
+    """
+    del event, subject
+
+
 def _configure_logging(broker: SecretBroker) -> None:
-    """Wire structlog with the redactor in front of every other processor.
+    """Wire structlog with the DLP scanner in front of every other processor.
 
     Called once at bootstrap. The redactor is leaf-bounded (see
-    ``_redact_value``) so any secret value caught by ``SecretBroker.redact``
-    is masked before reaching the renderer — CLAUDE.md hard rule #1 on
-    logs.
+    ``_redact_value``) so any secret value caught by either
+    :meth:`SecretBroker.redact` (stage 1) OR the generic-API-key regex
+    (stage 2) is masked before reaching the renderer — CLAUDE.md hard
+    rule #1 on logs + sec-003.
     """
-    global _broker_for_redact
-    _broker_for_redact = broker
+    global _outbound_dlp_for_redact
+    _outbound_dlp_for_redact = OutboundDlp(broker=broker, audit=_structlog_audit_sink)
     structlog.configure(
         processors=[
             _redact,
