@@ -1,6 +1,6 @@
 """Pytest fixtures for the adversarial corpus.
 
-Walks every `tests/adversarial/<category>/payloads/*.yaml`, validates each
+Walks every `tests/adversarial/<category>/<short-name>.yaml`, validates each
 through `AdversarialPayload`, and exposes the result as the
 `corpus_payloads` session-scoped fixture. Two cross-file invariants are
 enforced at collection time via `pytest.UsageError` (fails loud, fails
@@ -35,12 +35,12 @@ _CATEGORIES: tuple[str, ...] = (
 
 
 def _iter_payload_paths(root: Path) -> Iterator[Path]:
-    """Yield every `<category>/payloads/*.yaml` path under `root`.
+    """Yield every `<category>/<short-name>.yaml` path under `root`.
 
     Split from the validator so unit tests can mock the file layer without
     touching pytest internals.
     """
-    yield from sorted(root.glob("*/payloads/*.yaml"))
+    yield from sorted(root.glob("*/*.yaml"))
 
 
 @pytest.fixture(scope="session")
@@ -70,15 +70,15 @@ def corpus_payloads(corpus_root: Path) -> tuple[AdversarialPayload, ...]:
             msg = f"adversarial payload {path} failed schema validation: {exc}"
             raise pytest.UsageError(msg) from exc
 
-        # Category-vs-directory cross-check. `path.parts[-3]` is the
+        # Category-vs-directory cross-check. `path.parts[-2]` is the
         # `<category>` segment because the layout is
-        # `tests/adversarial/<category>/payloads/<file>.yaml`.
-        dir_category = path.parts[-3]
+        # `tests/adversarial/<category>/<short-name>.yaml`.
+        dir_category = path.parts[-2]
         if dir_category != payload.category:
             msg = (
                 f"adversarial payload {path} declares category="
                 f"{payload.category!r} but lives under {dir_category!r}/. "
-                f"move it to tests/adversarial/{payload.category}/payloads/."
+                f"move it to tests/adversarial/{payload.category}/."
             )
             raise pytest.UsageError(msg)
 

@@ -68,7 +68,7 @@ def known_secret_leak_payload(
     if not matches:
         msg = (
             f"adversarial corpus is missing payload id={_PAYLOAD_ID!r}; "
-            f"expected at tests/adversarial/dlp/payloads/known_secret_leak.yaml"
+            f"expected at tests/adversarial/dlp/known_secret_leak.yaml"
         )
         raise pytest.UsageError(msg)
     return matches[0]

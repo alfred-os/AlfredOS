@@ -4,7 +4,7 @@ Source of truth for the field shape is
 `.rulesync/skills/alfred-adversarial-corpus/SKILL.md` lines 57-65 (required
 fields) and lines 49-53 (per-category id prefix). This module is imported by
 `tests/adversarial/conftest.py` to validate every YAML file under
-`tests/adversarial/<category>/payloads/`. Schema failures fail collection
+`tests/adversarial/<category>/`. Schema failures fail collection
 loudly (see `pytest.UsageError` usage in conftest) so corpus regressions never
 ship green.
 """
