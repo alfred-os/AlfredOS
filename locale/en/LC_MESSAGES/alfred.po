@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 03:14+0100\n"
+"POT-Creation-Date: 2026-05-27 09:55+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -14,103 +14,103 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: src/alfred/cli/main.py:63
+#: src/alfred/cli/main.py:62
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:124
+#: src/alfred/cli/main.py:123
 msgid "error.placeholder_api_key"
 msgstr ""
 "ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
 "'sk-...' with a real DeepSeek API key."
 
-#: src/alfred/cli/main.py:126
+#: src/alfred/cli/main.py:125
 msgid "error.config_invalid"
 msgstr "configuration is invalid: {detail}"
 
-#: src/alfred/cli/main.py:127
+#: src/alfred/cli/main.py:126
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/main.py:319
+#: src/alfred/cli/main.py:330
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:322
+#: src/alfred/cli/main.py:333
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:323
+#: src/alfred/cli/main.py:334
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:324
+#: src/alfred/cli/main.py:335
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:325
+#: src/alfred/cli/main.py:336
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:326
+#: src/alfred/cli/main.py:337
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:327
+#: src/alfred/cli/main.py:338
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:328
+#: src/alfred/cli/main.py:339
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:382
+#: src/alfred/cli/main.py:393
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/main.py:383
+#: src/alfred/cli/main.py:394
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/main.py:404
+#: src/alfred/cli/main.py:415
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/comms/tui.py:57 src/alfred/comms/tui.py:58
+#: src/alfred/comms/tui.py:129 src/alfred/comms/tui.py:130
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: src/alfred/comms/tui.py:59
+#: src/alfred/comms/tui.py:131
 msgid "tui.binding.cancel_turn"
 msgstr "Cancel turn"
 
-#: src/alfred/comms/tui.py:76
+#: src/alfred/comms/tui.py:156
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: src/alfred/comms/tui.py:101
+#: src/alfred/comms/tui.py:181
 msgid "tui.label_you"
 msgstr "you"
 
-#: src/alfred/comms/tui.py:106
+#: src/alfred/comms/tui.py:186
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: src/alfred/comms/tui.py:120
+#: src/alfred/comms/tui.py:200
 msgid "tui.turn_cancelled"
 msgstr "turn cancelled"
 
-#: src/alfred/comms/tui.py:123
+#: src/alfred/comms/tui.py:203
 msgid "tui.turn_timeout"
 msgstr "no response within {seconds}s; cancelled"
 
-#: src/alfred/comms/tui.py:128
+#: src/alfred/comms/tui.py:208
 msgid "tui.alfred_error"
 msgstr "alfred error: {error}"
 
-#: src/alfred/comms/tui.py:136
+#: src/alfred/comms/tui.py:216
 msgid "tui.label_alfred"
 msgstr "alfred"
 
