@@ -37,7 +37,7 @@ A `make docs-check` link-checker job stub enforces glossary anchor existence in 
 
 **Subagent owners:**
 
-- `alfred-test-engineer` — `tests/smoke/test_discord_gateway_smoke.py`; `tests/adversarial/conftest.py`; `tests/adversarial/payload_schema.py`; `tests/adversarial/test_corpus_health.py`; per-category README + empty payloads.yaml stubs.
+- `alfred-test-engineer` — `tests/smoke/test_discord_gateway_smoke.py`; `tests/smoke/test_tui_e2e.py` (Slice-2 UAT layer); `tests/adversarial/conftest.py`; `tests/adversarial/payload_schema.py`; `tests/adversarial/test_corpus_health.py`; per-category README + empty payloads.yaml stubs.
 - `alfred-security-engineer` — `tests/adversarial/dlp/payloads/known_secret_leak.yaml` + the DLP wiring assertion (must verify `OutboundDlp.scan` redacts a known `SUPPORTED_SECRETS` value; sec-008 / spec §3 OutboundDlp section).
 - `alfred-docs-author` — single dispatch with five deliverables (Task 9).
 - `alfred-devops-engineer` — `.github/workflows/adversarial.yml` + `.github/workflows/docs-check.yml` (or extension to existing CI) + `make docs-check` target.
@@ -54,9 +54,10 @@ A `make docs-check` link-checker job stub enforces glossary anchor existence in 
 
 ## 0. Files this PR creates or modifies
 
-**Smoke test (te-003):**
+**Smoke tests (te-003):**
 
 - `tests/smoke/test_discord_gateway_smoke.py` (new) — gated by `ALFRED_SMOKE_DISCORD_TOKEN`.
+- `tests/smoke/test_tui_e2e.py` (new) — Slice-2 UAT layer; mock-provider e2e + rehydrate-cadence run unconditionally, real-provider e2e gated by `ALFRED_SMOKE_PROVIDER_KEY`.
 - `docs/runbooks/slice-2-discord-smoke.md` (new) — companion deployment runbook.
 
 **Adversarial corpus scaffolding (spec §5 lines 814–823):**
@@ -96,7 +97,7 @@ A `make docs-check` link-checker job stub enforces glossary anchor existence in 
 
 ## 1. Task sequence
 
-Each task = one or two commits. The order matters only across two boundaries: (a) the adversarial harness lands before the per-payload DLP test (the test depends on the schema model), and (b) the docs-author dispatch is last among the doc work because its output references the glossary anchors that the spec depends on (so we want the glossary to land + be link-check-verified in one batch). Tasks 1–8 can each be opened as a draft PR locally for fast review iteration; Task 9 lands in the same PR as the rest.
+Each task = one or two commits. The order matters only across two boundaries: (a) the adversarial harness lands before the per-payload DLP test (the test depends on the schema model), and (b) the docs-author dispatch is last among the doc work because its output references the glossary anchors that the spec depends on (so we want the glossary to land + be link-check-verified in one batch). Tasks 1, 1b, and 2–8 can each be opened as a draft PR locally for fast review iteration; Task 9 lands in the same PR as the rest. Task 1b (TUI e2e) sits between Task 1 (Discord smoke) and Task 2 (runbook) because it shares the smoke-test conventions and the `ALFRED_SMOKE_*` env-var gating pattern — keeping smoke work contiguous.
 
 ### Task 1 — Discord-gateway smoke test (te-003)
 
@@ -105,6 +106,45 @@ Each task = one or two commits. The order matters only across two boundaries: (a
 - [ ] **Step 3: Confirm with-token behaviour (local only — do NOT push a bot token).** On the implementer's local box, set `ALFRED_SMOKE_DISCORD_TOKEN` to a throwaway bot from a private Discord application and re-run. Expect `PASSED`. Document the local-only verification in the PR description; CI will exercise it via a GitHub repo secret.
 - [ ] **Step 4: Wire the GitHub repo secret.** In `.github/workflows/pr-validate-python.yml` (or wherever the smoke job runs in CI), the smoke step gains `env: ALFRED_SMOKE_DISCORD_TOKEN: ${{ secrets.ALFRED_SMOKE_DISCORD_TOKEN }}`. The secret is operator-provisioned post-merge; the test skips on PRs from forks where secrets aren't available — that's the intended degradation.
 - [ ] **Step 5: Commit.** `test(slice-2): add Discord gateway smoke gated by ALFRED_SMOKE_DISCORD_TOKEN (te-003)`.
+
+### Task 1b — TUI e2e smoke test (`tests/smoke/test_tui_e2e.py`) — Slice-2 UAT layer
+
+**Owner:** `alfred-test-engineer`.
+
+**Why:** existing `tests/smoke/test_hello_alfred.py` drives the orchestrator directly with mocked providers — it's a fast integration, not a UAT. The Discord-gateway smoke in Task 1 exercises a single subcommand (`alfred discord verify`), not the operator's end-to-end interactive path. PR-E adds a real end-to-end test driven through the TUI subprocess so we catch the kinds of "shipped-but-broken-at-first-use" failures that mocks hide: Textual rendering, ContextVar threading from input through `t()` output, signal handling, slice-1 rehydrate cadence through the operator-visible surface. This task is the **UAT layer for Slice 2** — the only test in the slice that exercises the real interactive path end-to-end.
+
+**Files:**
+
+- Create: `tests/smoke/test_tui_e2e.py`.
+
+**Steps:**
+
+- [ ] **Step 1b.1 — Choose a harness.** Use Textual's built-in headless test harness (`Pilot` + `app.run_test()` async context manager) if Textual supports it for this app shape, OR `pexpect` driving the `alfred chat` subprocess. **Prefer the in-process Textual harness** — faster, deterministic, no PTY drift, and observes ContextVar isolation directly. Fall back to `pexpect` only if Textual's harness cannot observe the ContextVar-scoped `t()` substitution path (the operator's locale must round-trip through the TUI's input → `t()` → rendered output). The choice between the two is locked in Step 1b.1 by writing a 5-line spike before Step 1b.2; document the spike outcome in the PR description.
+- [ ] **Step 1b.2 — Real-provider gating.** `ALFRED_SMOKE_PROVIDER_KEY` env var (mirrors `ALFRED_SMOKE_DISCORD_TOKEN` from Task 1). Default behaviour: **skip-when-unset**. CI populates from a repo secret; local devs set from their own throwaway DeepSeek (or Anthropic fallback) key. The "mock-provider" variant always runs (uses the existing slice-1 mock-provider chain) so the test is never fully skipped on PRs from forks.
+- [ ] **Step 1b.3 — Mock-provider e2e** — boots TUI via the Textual harness (or pexpect, per Step 1b.1), types `"hi alfred"`, asserts:
+  - The TUI renders the assistant response (Textual-harness: query the response widget's `renderable`; pexpect: read until the response prompt re-appears).
+  - An `episodes` row landed (use the testcontainer Postgres from PR-A's `tests/integration` fixtures — `tests/smoke` already shares the same conftest).
+  - An `audit_log` row landed with `event=orchestrator.turn`, `actor_user_id=<operator slug>`, `language=<operator language>`, `actor_persona="alfred"` (per PR-B's seven-branch audit shape).
+  - `BudgetGuard._spent` for the operator moved (per-user counter, > 0).
+- [ ] **Step 1b.4 — Real-provider e2e (gated)** — same harness, gated by `ALFRED_SMOKE_PROVIDER_KEY`. Boots TUI against the real DeepSeek provider (or Anthropic fallback per ADR-0001), sends a **deterministic prompt** ("respond with exactly the word OK and nothing else"), asserts:
+  - The rendered response contains `"OK"` (case-sensitive; the prompt asks for exact casing).
+  - The same four persistence assertions from Step 1b.3 (episode row, audit row, budget moved).
+  - The provider-call audit row carries the real `model=` field (not the mock-provider sentinel).
+- [ ] **Step 1b.5 — Slice-1 rehydrate cadence test.** Drives two consecutive `alfred chat` invocations against the same testcontainer Postgres; the second invocation's TUI must show the prior turn's content fetched via the rehydrate path (PR-B's `WorkingMemoryPool` lazy-rehydrate). Implementation: harness invocation 1 sends `"remember the word artichoke"`, invocation 2 sends `"what word did i ask you to remember?"`; the TUI's second-turn rendered response must contain `"artichoke"` (sourced from the rehydrated working memory, not from re-prompting the provider with raw episode history — assertable via the audit row's `working_memory_hits` field if PR-B exposes it, or by asserting episodic-query count == 0 on the second turn). This is the load-bearing assertion: **if PR-B's lazy-rehydrate regresses, Step 1b.5 fails**.
+- [ ] **Step 1b.6 — Skip-vs-pass discipline.** Without `ALFRED_SMOKE_PROVIDER_KEY`, the real-provider tests report `SKIPPED` (NOT `PASSED`, NOT `ERROR`) — same pattern as Task 1. The mock-provider tests + the rehydrate-cadence test run unconditionally. Verify locally: `uv run pytest tests/smoke/test_tui_e2e.py -v` shows three passes and two skips on a fresh machine without the env var.
+- [ ] **Step 1b.7 — Wire the GitHub repo secret.** In `.github/workflows/pr-validate-python.yml` (or wherever the smoke job runs), the smoke step gains `env: ALFRED_SMOKE_PROVIDER_KEY: ${{ secrets.ALFRED_SMOKE_PROVIDER_KEY }}`. The secret is operator-provisioned post-merge; the test skips on fork-PRs where secrets aren't available — same intended degradation as Task 1.
+- [ ] **Step 1b.8 — Commit.**
+  ```bash
+  git add tests/smoke/test_tui_e2e.py
+  git commit -m "test(smoke): TUI e2e via Textual harness + slice-1 rehydrate cadence (te-003)"
+  ```
+
+**Acceptance gates:**
+
+- `uv run pytest tests/smoke/test_tui_e2e.py -v` passes in CI (mock-provider path + rehydrate-cadence test, three tests green).
+- Real-provider path passes locally and in CI when `ALFRED_SMOKE_PROVIDER_KEY` is present; skips cleanly when absent.
+- The slice-1 rehydrate assertion (Step 1b.5) fails loud if PR-B's `WorkingMemoryPool` lazy-rehydrate regresses — this is the load-bearing UAT signal for the slice.
+- This is the **Slice-2 UAT layer**; restated in §2's acceptance-gates table.
 
 ### Task 2 — Companion deployment runbook
 
@@ -408,6 +448,9 @@ This is the single biggest task in the PR. One dispatch of `alfred-docs-author` 
 | ADR-0011 + ADR-0012 bodies present | Both files contain Context + Decision + Implementation reference + Alternatives + Consequences + References sections; placeholder text gone | Task 9 Step 3 + docs-reviewer pass |
 | Discord smoke skip-when-unset | `uv run pytest tests/smoke/test_discord_gateway_smoke.py -v` reports `SKIPPED` (NOT `PASSED`, NOT `ERROR`) when `ALFRED_SMOKE_DISCORD_TOKEN` is unset | Task 1 Step 2 |
 | Discord smoke green-when-set | The same test passes when the env var carries a real bot token (verified locally; CI runs via repo secret) | Task 1 Step 3 + Step 4 |
+| TUI e2e mock-provider path green | `uv run pytest tests/smoke/test_tui_e2e.py -v` exits 0 with three passes (mock-provider e2e + rehydrate-cadence test); collection errors zero | Task 1b Step 1b.3 + Step 1b.6 |
+| TUI e2e real-provider gating | Without `ALFRED_SMOKE_PROVIDER_KEY`, the real-provider tests report `SKIPPED`; with the env var set, the deterministic-prompt assertion (`"OK"`) passes | Task 1b Step 1b.4 + Step 1b.6 |
+| Slice-1 rehydrate cadence preserved through TUI (UAT signal) | Second `alfred chat` invocation surfaces working-memory rehydrate from the first invocation; the `"artichoke"` assertion passes; if PR-B's `WorkingMemoryPool` lazy-rehydrate regresses, this gate fails loud | Task 1b Step 1b.5 |
 | DLP payload exercises stage 1 OR stage 2 | `tests/adversarial/dlp/test_dlp_payload_redaction.py::test_dlp_payload_redacts_known_secret[dlp-2026-001]` passes; the embedded secret value is NOT in `OutboundDlp.scan`'s output | Task 7 Step 3 |
 | Slice-3 flip path documented | The tracking issue for "remove `continue-on-error: true` from adversarial.yml" exists and links back to PR E | Task 9 Step 2 |
 | CLAUDE.md subsystem-index updated | `grep -E 'docs/subsystems/' CLAUDE.md` returns the two new entries | Task 11 Step 1 |
