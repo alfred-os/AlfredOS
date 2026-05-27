@@ -602,9 +602,38 @@ class IdentityResolver:
 # Type aliases for the listener's injection seams. The notify callback is
 # fire-and-forget (the listener bumps its counter + logs); ``listen_loop`` owns
 # the inner-loop coroutine that consumes connection events and dispatches them.
-_ConnectFactory = Callable[[], object]
+#
+# ``_ConnectFactory`` returns an awaitable because the production path
+# (``psycopg.AsyncConnection.connect``) is async, and supervising callers
+# ``await`` the result before passing the connection to the listen loop.
+# T13's integration test caught a contract drift where the supervisor was
+# treating the factory result as a ready connection rather than a coroutine
+# to await — see commit history for that resolver-side fix.
+_ConnectFactory = Callable[[], Awaitable[object]]
 _NotifyCallback = Callable[[Mapping[str, object]], None]
 _ListenLoop = Callable[[object, _NotifyCallback, asyncio.Event], Awaitable[None]]
+
+
+def _parse_notify_payload(raw: str | None) -> Mapping[str, object]:
+    """Decode the ``pg_notify`` payload into a logging-friendly mapping.
+
+    The resolver currently emits ``"<event>:<slug>"`` (colon-separated text);
+    future call sites might emit JSON. We accept both shapes and never raise —
+    a malformed payload should NOT take down the listener, because the bump
+    is what invalidates caches, not the payload contents (CLAUDE.md hard
+    rule #7: no silent security-path failures, but also no loud failures
+    that drop legitimate NOTIFYs on the floor).
+    """
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {"raw": raw}
+    if isinstance(decoded, dict):
+        # ``json.loads`` returns ``Any``-ish; normalise to a typed mapping.
+        return {str(k): v for k, v in decoded.items()}
+    return {"raw": raw}
 
 
 class IdentityListener:
@@ -669,7 +698,7 @@ class IdentityListener:
         backoff = self._backoff_start
         while not self._stop_event.is_set():
             try:
-                conn = self._connect_factory()
+                conn = await self._connect_factory()
                 await self._listen_loop(conn, self._on_notify, self._stop_event)
             except ConnectionError as exc:
                 self._reconnect_count += 1
@@ -736,8 +765,16 @@ class IdentityListener:
 
         Implementation detail: psycopg3's ``AsyncConnection.notifies()`` is
         an async iterator. Wrapped in an ``async with`` so the connection
-        closes on exit (clean or exceptional). Payload parsing tolerates an
-        empty payload (``NOTIFY channel`` without a body) and a JSON body.
+        closes on exit (clean or exceptional).
+
+        Payload handling — the resolver's :meth:`IdentityResolver._notify`
+        emits a colon-separated ``"<event>:<slug>"`` string. JSON would be
+        symmetric on both sides but adds round-trip cost for a payload
+        that's informational only (the bump is what invalidates downstream
+        caches, not the payload contents). We accept both shapes here so a
+        future change to either side doesn't accidentally drop notifies:
+        empty payload → ``{}``; ``"event:slug"`` → ``{"raw": "event:slug"}``;
+        JSON object → parsed dict.
 
         The integration test (T13) exercises this path against a real
         Postgres; the unit test for ``IdentityListener`` swaps in a test
@@ -751,5 +788,5 @@ class IdentityListener:
             async for notify in c.notifies():
                 if stop_event.is_set():
                     return
-                payload: Mapping[str, object] = json.loads(notify.payload) if notify.payload else {}
+                payload = _parse_notify_payload(notify.payload)
                 notify_callback(payload)

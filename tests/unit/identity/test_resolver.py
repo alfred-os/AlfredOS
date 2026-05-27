@@ -472,7 +472,12 @@ async def test_identity_listener_reconnect_on_connection_loss(
         "shutdown",
     ]
 
-    def fake_connect() -> MagicMock:
+    async def fake_connect() -> MagicMock:
+        # Async to match the production ``_ConnectFactory`` contract
+        # (``Callable[[], Awaitable[object]]``) — the supervisor awaits the
+        # factory so the unit-test double must be awaitable too. T13's
+        # Postgres integration test was the catalyst for tightening this
+        # type — see resolver.py's ``_ConnectFactory`` docstring.
         conn = MagicMock()
         conn.add_listener = AsyncMock()
         conn.close = AsyncMock()
