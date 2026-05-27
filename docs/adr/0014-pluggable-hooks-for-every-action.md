@@ -99,6 +99,14 @@ calls. In-tree (in-process) plugins may also register via a Python
 decorator at module-import time for ergonomics; the decorator routes
 through the same capability-gated registry.
 
+Hooks are **synchronous, in-band interception** — they run within the
+action's call stack, not asynchronously or out-of-band. This contrasts
+with the event bus (observe-only, fire-and-forget; PRD §5). Every hook
+invocation is **auditable and correlation-tagged**: the audit log records
+each pre-/post-/error-/cancel-hook call keyed to the originating action's
+correlation ID, so the full hook chain for any action (including
+refusals) is reproducible from the audit trail.
+
 **This is NOT a Slice-2 deliverable.** Slice 2 ships as currently scoped
 (identity + Discord + secret broker + per-user budget + memory + orchestrator
 hardening). Hooks land in a dedicated slice — call it Slice 2.5 — between
