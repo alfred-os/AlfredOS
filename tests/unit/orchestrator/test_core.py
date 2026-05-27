@@ -177,7 +177,10 @@ class TestOrchestratorHappyPath:
         assert m["budget"].estimate_for.call_count == 1
         assert m["budget"].would_exceed.call_count == 1
         assert m["budget"].check_and_charge.call_count == 1
-        m["budget"].check_and_charge.assert_called_with(pytest.approx(0.0005))
+        # PR-B Phase 1: BudgetGuard.check_and_charge now keys on canonical
+        # user_id; the orchestrator threads ``operator_name`` ("Sir" in
+        # ``_build``'s default) as the first positional argument.
+        m["budget"].check_and_charge.assert_called_with("Sir", pytest.approx(0.0005))
 
         # Audit: one row, success.
         assert m["audit"].append.await_count == 1

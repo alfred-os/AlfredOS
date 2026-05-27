@@ -236,8 +236,12 @@ class Orchestrator:
         # ------------------------------------------------------------------
         # Decide
         # ------------------------------------------------------------------
-        estimate = self._budget.estimate_for(request)
-        if self._budget.would_exceed(estimate):
+        # PR-B Phase 1: BudgetGuard now keys on canonical ``user_id``.
+        # Slice-2 single-operator path threads ``self._operator_name`` (the
+        # operator's slug) here; Phase 4 generalises to multi-user once the
+        # orchestrator carries the per-turn requester identity.
+        estimate = self._budget.estimate_for(self._operator_name, request)
+        if self._budget.would_exceed(self._operator_name, estimate):
             await self._audit.append(
                 event="orchestrator.turn",
                 actor_user_id=self._operator_name,
@@ -297,7 +301,7 @@ class Orchestrator:
         # happened — record truthfully, log loudly, do not raise.
         charge_result = "success"
         try:
-            self._budget.check_and_charge(response.cost_usd)
+            self._budget.check_and_charge(self._operator_name, response.cost_usd)
         except BudgetError as exc:
             charge_result = "budget_overrun"
             _log.warning(
