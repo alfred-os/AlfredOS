@@ -39,10 +39,12 @@ Design notes
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -57,12 +59,12 @@ from alfred.identity.errors import (
 )
 from alfred.identity.models import Authorization, Platform, PlatformIdentity, User
 from alfred.identity.slug import derive_slug
+from alfred.identity.version_counter import IdentityVersionCounter
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
     from alfred.identity.rate_limit import RateLimiter
-    from alfred.identity.version_counter import IdentityVersionCounter
 
 
 _LOG = logging.getLogger(__name__)
@@ -591,3 +593,163 @@ class IdentityResolver:
             raise ValueError("daily_budget_usd cannot be NaN.")
         if daily_budget_usd <= 0:
             raise ValueError(f"daily_budget_usd must be > 0 (got {daily_budget_usd}).")
+
+
+# --------------------------------------------------------------------------- #
+# Cross-process invalidation — IdentityListener
+# --------------------------------------------------------------------------- #
+
+# Type aliases for the listener's injection seams. The notify callback is
+# fire-and-forget (the listener bumps its counter + logs); ``listen_loop`` owns
+# the inner-loop coroutine that consumes connection events and dispatches them.
+_ConnectFactory = Callable[[], object]
+_NotifyCallback = Callable[[Mapping[str, object]], None]
+_ListenLoop = Callable[[object, _NotifyCallback, asyncio.Event], Awaitable[None]]
+
+
+class IdentityListener:
+    """Background asyncio task that subscribes to ``alfred_identity_changed``.
+
+    On every received NOTIFY the listener bumps the supplied
+    :class:`IdentityVersionCounter`, which in turn invalidates the
+    per-process :class:`IdentityResolver` LRU and (in PR B) the
+    ``BudgetGuard`` cache.
+
+    The listen loop is wrapped in an **exponential-backoff reconnect
+    supervisor**: a raised :class:`ConnectionError` triggers a sleep of
+    ``backoff_s`` (starting at ``backoff_start_s``, doubling per failure,
+    capped at ``backoff_max_s``) before reconnecting. The backoff resets
+    to ``backoff_start_s`` after any iteration that returned cleanly
+    without raising — that handles graceful close-and-resubscribe paths
+    distinctly from the disconnect-storm path.
+
+    CLAUDE.md hard rule #7 — no silent failures in security paths —
+    is what makes this supervisor load-bearing rather than nice-to-have.
+    A silently-dropped listener would age out cross-process invalidations
+    and let stale operator/authorization rows linger in caches across
+    every other AlfredOS process.
+
+    The ``connect_factory`` and ``listen_loop`` parameters exist as test
+    injection seams; production callers leave them ``None`` and pick up
+    :meth:`_default_connect` + :meth:`_default_listen_loop`, which wrap
+    ``psycopg.AsyncConnection``. The integration test in T13 exercises
+    the real psycopg path; this class's unit test exercises only the
+    supervisor's reconnect arithmetic with test doubles.
+    """
+
+    def __init__(
+        self,
+        *,
+        dsn: str,
+        version_counter: IdentityVersionCounter,
+        backoff_start_s: float = 1.0,
+        backoff_max_s: float = 60.0,
+        connect_factory: _ConnectFactory | None = None,
+        listen_loop: _ListenLoop | None = None,
+    ) -> None:
+        self._dsn = dsn
+        self._version_counter = version_counter
+        self._backoff_start = backoff_start_s
+        self._backoff_max = backoff_max_s
+        self._connect_factory: _ConnectFactory = connect_factory or self._default_connect
+        self._listen_loop: _ListenLoop = listen_loop or self._default_listen_loop
+        # The stop event is created in ``run`` so the listener can be
+        # constructed outside a running loop and started later.
+        self._stop_event: asyncio.Event | None = None
+        self._reconnect_count = 0
+
+    @property
+    def reconnect_count(self) -> int:
+        """Total number of forced reconnects since construction (observability)."""
+        return self._reconnect_count
+
+    async def run(self) -> None:
+        """Supervisor loop. Returns on clean stop or on graceful inner-loop exit."""
+        self._stop_event = asyncio.Event()
+        backoff = self._backoff_start
+        while not self._stop_event.is_set():
+            try:
+                conn = self._connect_factory()
+                await self._listen_loop(conn, self._on_notify, self._stop_event)
+            except ConnectionError as exc:
+                self._reconnect_count += 1
+                _LOG.warning(
+                    "identity_listener_disconnected",
+                    extra={
+                        "reconnect_count": self._reconnect_count,
+                        "backoff_s": backoff,
+                        "error": str(exc),
+                    },
+                )
+                # Sleep ``backoff`` seconds, but wake immediately if stop()
+                # is called during the sleep — never block shutdown waiting
+                # for a long backoff to expire.
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
+                    return
+                except TimeoutError:
+                    pass
+                backoff = min(backoff * 2, self._backoff_max)
+            else:
+                # Inner loop returned cleanly without raising. Either stop()
+                # was set (loop exits next iteration) or the connection
+                # closed gracefully and we should resubscribe with a fresh
+                # backoff. Reset so a later disconnect storm starts at 1s,
+                # not wherever the previous storm left us.
+                backoff = self._backoff_start
+
+    def stop(self) -> None:
+        """Signal the supervisor to exit at the next event boundary."""
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+    def _on_notify(self, payload: Mapping[str, object]) -> None:
+        """Bump the version counter for every NOTIFY receipt.
+
+        The payload shape is informational only — the bump is what
+        invalidates downstream caches. We log at DEBUG so operators can
+        correlate cache misses with received NOTIFYs without paying log
+        volume in steady state.
+        """
+        self._version_counter.bump()
+        _LOG.debug("identity_notify_received", extra={"payload": dict(payload)})
+
+    async def _default_connect(self) -> object:
+        """Default connection factory — async psycopg3 connection.
+
+        Returned as a coroutine so ``_default_listen_loop`` can ``async with``
+        it directly. The real connection details (DSN-from-Settings,
+        connection pool) belong in the wire-up code that constructs the
+        listener (T15); this is the minimum viable factory.
+        """
+        import psycopg  # local import — psycopg is heavy and only needed at production wire-up
+
+        return await psycopg.AsyncConnection.connect(self._dsn, autocommit=True)
+
+    async def _default_listen_loop(
+        self,
+        conn: object,
+        notify_callback: _NotifyCallback,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Default psycopg3 LISTEN loop.
+
+        Implementation detail: psycopg3's ``AsyncConnection.notifies()`` is
+        an async iterator. Wrapped in an ``async with`` so the connection
+        closes on exit (clean or exceptional). Payload parsing tolerates an
+        empty payload (``NOTIFY channel`` without a body) and a JSON body.
+
+        The integration test (T13) exercises this path against a real
+        Postgres; the unit test for ``IdentityListener`` swaps in a test
+        double via the ``listen_loop`` constructor parameter and never runs
+        this method.
+        """
+        # ``conn`` is opaque to the supervisor; the concrete type is the
+        # psycopg3 ``AsyncConnection`` returned by ``_default_connect``.
+        async with conn as c:  # type: ignore[attr-defined]  # reason: psycopg3 AsyncConnection supports async-with; opaque here for test-double symmetry
+            await c.execute(f"LISTEN {_NOTIFY_CHANNEL}")
+            async for notify in c.notifies():
+                if stop_event.is_set():
+                    return
+                payload: Mapping[str, object] = json.loads(notify.payload) if notify.payload else {}
+                notify_callback(payload)
