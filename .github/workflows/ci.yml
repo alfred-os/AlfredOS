@@ -128,6 +128,22 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --frozen --dev
       - name: Run smoke tests
+        # Gated smoke env vars: when present, the Discord-gateway smoke
+        # and the real-provider TUI smoke run end-to-end; when absent
+        # (fork PRs, secrets not yet provisioned), the tests SKIP cleanly
+        # — same skip-vs-pass discipline the test files enforce.
+        # The values must be set as repo secrets by the operator AFTER
+        # this PR merges (PR-E plan Task 1 Step 4 + Task 1b Step 1b.7):
+        # * ALFRED_SMOKE_DISCORD_TOKEN — throwaway bot from a private
+        #   Discord application the operator/CI owns.
+        # * ALFRED_SMOKE_PROVIDER_KEY — throwaway DeepSeek API key (or
+        #   Anthropic fallback per ADR-0001).
+        # Secrets are scoped via env:, never interpolated into the
+        # run: block — the workflow-injection guard in the security
+        # reminder hook is satisfied.
+        env:
+          ALFRED_SMOKE_DISCORD_TOKEN: ${{ secrets.ALFRED_SMOKE_DISCORD_TOKEN }}
+          ALFRED_SMOKE_PROVIDER_KEY: ${{ secrets.ALFRED_SMOKE_PROVIDER_KEY }}
         run: uv run pytest tests/smoke -v
 
   setup-script-smoke:
