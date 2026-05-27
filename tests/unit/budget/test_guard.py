@@ -7,7 +7,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from alfred.budget.guard import BudgetExhaustedError, BudgetGuard, PerCallCapExceededError
+from alfred.budget.guard import (
+    BudgetError,
+    BudgetExceededError,
+    BudgetExhaustedError,
+    BudgetGuard,
+    PerCallCapExceededError,
+    UnknownBudgetUserError,
+)
 from alfred.providers.base import CompletionRequest, Message
 
 
@@ -125,3 +132,52 @@ class TestEstimateFor:
         # MagicMock stands in for a request shape that doesn't yet exist —
         # confirms estimate_for never even reads the request.
         assert guard.estimate_for(MagicMock()) == 0.07
+
+
+class TestUnknownBudgetUserError:
+    """``UnknownBudgetUserError`` is defense-in-depth for the per-user guard.
+
+    PR-B routes budget calls through a resolver that maps ``user_id`` to a
+    per-user guard. The resolver is supposed to reject unknown user_ids before
+    they reach the guard layer, but if a caller bypasses the resolver (a
+    programming error) the guard layer raises this so the failure surfaces
+    loudly with an actionable remediation hint instead of silently charging
+    nothing.
+    """
+
+    def test_unknown_budget_user_error_inherits_budget_error(self) -> None:
+        assert issubclass(UnknownBudgetUserError, BudgetError)
+
+    def test_unknown_budget_user_error_message_includes_user_id(self) -> None:
+        err = UnknownBudgetUserError(user_id="alice")
+        # The user_id is what an operator needs to know to remediate, and the
+        # message points at the exact CLI command they have to run.
+        assert "alice" in str(err)
+        assert "alfred user add" in str(err)
+
+
+class TestBudgetExceededError:
+    """``BudgetExceededError`` is the per-user daily-cap hit.
+
+    Carries typed ``spent_usd`` + ``cap_usd`` attributes so downstream
+    consumers (the discord ``budget_blocked`` i18n template in PR D2, audit
+    rows, future TUI surfaces) can render structured kwargs rather than
+    parsing ``str(exc)``.
+    """
+
+    def test_budget_exceeded_error_inherits_budget_error(self) -> None:
+        assert issubclass(BudgetExceededError, BudgetError)
+
+    def test_budget_exceeded_error_carries_typed_kwargs(self) -> None:
+        err = BudgetExceededError(spent_usd=0.95, cap_usd=1.00)
+        # Attributes survive the raise/catch round-trip — pinning this keeps
+        # downstream consumers safe from accidentally regressing to str(exc).
+        assert err.spent_usd == 0.95
+        assert err.cap_usd == 1.00
+
+    def test_budget_exceeded_error_attributes_after_raise(self) -> None:
+        try:
+            raise BudgetExceededError(spent_usd=2.50, cap_usd=2.00)
+        except BudgetExceededError as caught:
+            assert caught.spent_usd == 2.50
+            assert caught.cap_usd == 2.00

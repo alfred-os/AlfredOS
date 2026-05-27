@@ -29,6 +29,42 @@ class BudgetExhaustedError(BudgetError):
     """The daily budget is exhausted."""
 
 
+class UnknownBudgetUserError(BudgetError):
+    """A budget operation referenced a ``user_id`` the resolver doesn't know.
+
+    Defense-in-depth: PR-B's per-user resolver is supposed to reject unknown
+    user_ids before they reach the guard layer. If a caller bypasses the
+    resolver (a programming error), this surfaces loudly with the exact CLI
+    command an operator runs to remediate, instead of silently no-op'ing a
+    charge against a phantom guard.
+    """
+
+    def __init__(self, *, user_id: str) -> None:
+        # Keep the user_id on the exception so downstream consumers (audit
+        # rows, structured logs) can render it as a typed field rather than
+        # parsing it out of the message string.
+        self.user_id = user_id
+        super().__init__(
+            f"budget unknown for user_id={user_id!r}; operator must add via 'alfred user add'"
+        )
+
+
+class BudgetExceededError(BudgetError):
+    """Per-user daily budget cap was hit.
+
+    Distinct from :class:`BudgetExhaustedError` which is the slice-1 single-
+    guard variant: ``BudgetExceededError`` is the per-user PR-B form and
+    carries typed ``spent_usd`` + ``cap_usd`` attributes so the discord
+    ``budget_blocked`` i18n template (PR D2) and audit rows can render
+    structured kwargs rather than parsing ``str(exc)``.
+    """
+
+    def __init__(self, *, spent_usd: float, cap_usd: float) -> None:
+        self.spent_usd = spent_usd
+        self.cap_usd = cap_usd
+        super().__init__(f"per-user daily budget ${cap_usd:.2f} exceeded (spent ${spent_usd:.4f})")
+
+
 class BudgetGuard:
     def __init__(self, *, daily_usd: float, per_call_max_usd: float) -> None:
         # Refuse construction with negative caps: a negative cap turns every
