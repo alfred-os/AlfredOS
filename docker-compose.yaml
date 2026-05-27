@@ -82,6 +82,13 @@ services:
     depends_on:
       alfred-postgres:
         condition: service_healthy
+    # ``mem_limit`` is the legacy service-level field Docker Compose
+    # (non-Swarm, ``docker compose up``) enforces via cgroups; the
+    # ``deploy.resources.limits.memory`` block below is the modern
+    # Compose-spec form that Swarm + the various managed-compose
+    # platforms read. Operators get a hard 256MB cap regardless of
+    # which runtime interprets the file.
+    mem_limit: 256m
     deploy:
       resources:
         limits:
