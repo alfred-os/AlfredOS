@@ -181,8 +181,9 @@ def _split_for_discord(text: str, *, max_len: int = 2000) -> Iterator[str]:
                 f"splitter produced chunk of length {len(chunk)} > max_len={max_len}; "
                 "this is a programmer bug — please report"
             )
-        if pos == chunk_start and not prefix:
-            # No progress on plain text means max_len < 1 worth of
-            # source after the suffix — programmer error.
+        if pos == chunk_start:
+            # Zero source advance means we cannot make further progress —
+            # max_len is too small for the prefix + suffix + at least one
+            # character of content. Raise to avoid an infinite loop.
             raise RuntimeError("splitter made no forward progress; max_len too small for content")
         yield chunk
