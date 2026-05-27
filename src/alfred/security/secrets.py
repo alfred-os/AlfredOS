@@ -535,6 +535,11 @@ class SecretBroker:
         if self._secrets_file_path is None or not self._secrets_file_path.exists():
             self._file_secrets = MappingProxyType({})
         else:
-            _validate_secrets_file_security(self._secrets_file_path)
-            self._file_secrets = _load_toml_file(self._secrets_file_path)
+            try:
+                _validate_secrets_file_security(self._secrets_file_path)
+                self._file_secrets = _load_toml_file(self._secrets_file_path)
+            except FileNotFoundError:
+                # TOCTOU: file disappeared between exists() and lstat() —
+                # treat as missing rather than propagating the race.
+                self._file_secrets = MappingProxyType({})
         self._bump_redactor_version()
