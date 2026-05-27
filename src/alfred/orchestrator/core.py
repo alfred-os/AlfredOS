@@ -58,7 +58,7 @@ from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetError, BudgetGuard
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
-from alfred.personas.alfred import alfred_system_prompt
+from alfred.personas.alfred import render_persona_prompt
 from alfred.providers.base import CompletionRequest, Message
 from alfred.providers.router import ProviderRouter
 from alfred.security.tiers import T2, tag
@@ -224,8 +224,9 @@ class Orchestrator:
         # ------------------------------------------------------------------
         # Orient
         # ------------------------------------------------------------------
-        system_prompt = alfred_system_prompt(
+        system_prompt = render_persona_prompt(
             operator_name=self._operator_name,
+            requesting_user_name=self._operator_name,
             language=self._operator_language,
         )
         history = await self._working.turns()
