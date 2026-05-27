@@ -137,6 +137,24 @@ def _scan_file(
                     module=module,
                     package_root=package_root,
                 )
+            # ``from alfred import comms`` (and any relative equivalent
+            # that resolves to ``alfred``) — importing the comms package
+            # itself is outside the explicit allowlist surface and must
+            # be flagged here. The default branch below catches
+            # ``from alfred.comms import …`` but misses this shape because
+            # ``module == "alfred"`` is not a comms module.
+            if module == "alfred":
+                for alias in node.names:
+                    if alias.name == "comms":
+                        violations.append(
+                            ImportViolation(
+                                file=path,
+                                lineno=node.lineno,
+                                symbol="alfred.comms",
+                                category="adapter_import",
+                            )
+                        )
+                continue
             if not _is_comms_module(module):
                 continue
             # ``from alfred.comms import X`` — every X is suspect unless
@@ -212,6 +230,49 @@ def test_scanner_detects_from_alfred_comms_import_name(tmp_path: pathlib.Path) -
     violations = _scan_file(fixture)
     assert len(violations) == 1
     assert violations[0].symbol == "alfred.comms.tui_adapter"
+
+
+def test_scanner_detects_from_alfred_import_comms_package(tmp_path: pathlib.Path) -> None:
+    """``from alfred import comms`` must be flagged.
+
+    The shape parses as ``ast.ImportFrom(module="alfred", names=["comms"])``,
+    so an earlier ``if not _is_comms_module(module): continue`` would
+    skip it because ``alfred`` is not a comms module. The package import
+    pulls in everything the comms package re-exports and is therefore
+    outside the explicit allowlist surface (PRD §5 / ADR-0009).
+    """
+    fixture = tmp_path / "violator_alfred_import_comms.py"
+    fixture.write_text(
+        "from alfred import comms\n",
+        encoding="utf-8",
+    )
+    violations = _scan_file(fixture)
+    assert len(violations) == 1
+    assert violations[0].symbol == "alfred.comms"
+
+
+def test_scanner_detects_relative_import_resolving_to_alfred_import_comms(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The relative spelling resolving to ``alfred`` must be flagged too.
+
+    Simulates a file at ``alfred/cli/foo.py`` doing
+    ``from .. import comms``. The scanner must resolve the relative path
+    to ``alfred`` and still flag the ``comms`` import — otherwise the
+    gate has a one-character bypass via dots.
+    """
+    pkg_root = tmp_path / "alfred"
+    (pkg_root / "cli").mkdir(parents=True)
+    (pkg_root / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_root / "cli" / "__init__.py").write_text("", encoding="utf-8")
+    fixture = pkg_root / "cli" / "relative_violator.py"
+    fixture.write_text(
+        "from .. import comms\n",
+        encoding="utf-8",
+    )
+    violations = _scan_file(fixture, package_root=pkg_root)
+    assert len(violations) == 1
+    assert violations[0].symbol == "alfred.comms"
 
 
 def test_scanner_allows_protocol_import(tmp_path: pathlib.Path) -> None:
