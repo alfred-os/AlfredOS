@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import structlog
@@ -303,6 +303,64 @@ def _structlog_audit_sink(
     # rationale.
 
 
+def _build_adapter_dlp_audit_sink(
+    *,
+    audit_writer: AuditWriter,
+    operator_user_id: str,
+    language: str,
+) -> Callable[..., None]:
+    """Return a sync audit sink that persists DLP modification events.
+
+    PR D1 wired the adapter ``OutboundDlp`` against the structlog no-op
+    sink — a real gap, because DLP audit-on-modification is the security
+    objective of the layer (CLAUDE.md hard rule #7 — no silent failures
+    in security paths). This bridge schedules the async
+    :meth:`AuditWriter.append` on the running event loop so the sync
+    :class:`alfred.security.dlp._AuditSink` Protocol stays satisfied
+    without blocking the scan path.
+
+    The created task is logged on failure rather than swallowed: an
+    audit-write failure must surface to the operator. We attach a
+    structured ``done_callback`` that re-raises the exception via
+    structlog at error level — the caller's structlog config has the
+    DLP redactor in front so a re-raise here cannot leak the redacted
+    value back into the log line.
+
+    ``trust_tier_of_trigger="T2"`` because the scan ran over outbound
+    content composed by an authenticated operator. ``result="modified"``
+    is the literal because the sink is ONLY called on modification.
+    """
+    log = structlog.get_logger("alfred.cli.dlp_audit")
+
+    def _on_done(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("dlp.audit_write_failed", error=str(exc))
+
+    def _sink(*, event: str, subject: Mapping[str, object]) -> None:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(
+            audit_writer.append(
+                event=event,
+                actor_user_id=operator_user_id,
+                # ``append`` types ``subject`` as ``dict[str, Any]``;
+                # widen the read-only ``Mapping`` we receive from DLP
+                # back to a fresh dict to satisfy the contract.
+                subject=dict(subject),
+                trust_tier_of_trigger="T2",
+                result="modified",
+                cost_estimate_usd=0.0,
+                trace_id="dlp-outbound",
+                language=language,
+            )
+        )
+        task.add_done_callback(_on_done)
+
+    return _sink
+
+
 def _configure_logging(broker: SecretBroker) -> None:
     """Wire structlog with the DLP scanner in front of every other processor.
 
@@ -494,7 +552,22 @@ async def _chat_main() -> None:
     # instance from the one the resolver holds — both are operator-
     # unlimited in Slice-2 single-operator mode, so the divergence is
     # functionally invisible; Slice-3+ unifies under the supervisor.
-    outbound_dlp = OutboundDlp(broker=broker, audit=_structlog_audit_sink)
+    # Adapter outbound DLP wires a PERSISTENT audit sink — not the
+    # structlog-bridge no-op. The DLP layer's whole point is audit-on-
+    # modification (CLAUDE.md hard rule #7); routing it to the no-op
+    # would lose every outbound-redaction event. The sink schedules an
+    # async ``AuditWriter.append`` on the running event loop so the
+    # synchronous ``_AuditSink`` contract stays satisfied without
+    # blocking the scan path. The audit writer is constructed against
+    # the same async session_scope ``_install_identity_factories`` uses
+    # so audit + identity writes share lifecycle.
+    adapter_audit_writer = AuditWriter(session_factory=session_scope)
+    adapter_dlp_audit_sink = _build_adapter_dlp_audit_sink(
+        audit_writer=adapter_audit_writer,
+        operator_user_id=operator.slug,
+        language=settings.operator_language,
+    )
+    outbound_dlp = OutboundDlp(broker=broker, audit=adapter_dlp_audit_sink)
     rate_limiter = InProcessTokenBucketRateLimiter()
     adapter = build_tui_adapter(
         orchestrator=orchestrator,
