@@ -1,0 +1,92 @@
+name: adversarial
+
+# Runs the AlfredOS adversarial security corpus
+# (`uv run pytest tests/adversarial -v`) on every PR that touches the corpus,
+# the security/audit subsystems, or the adversarial-corpus skill definition,
+# plus every push to main.
+#
+# PR-E plan task 9: Slice 2 ships the corpus as ADVISORY — the workflow
+# carries `continue-on-error: true` so failures surface as warnings, not
+# merge-blocking. Slice 3 makes this release-blocking by REMOVING that line:
+# a single-line flip, no other change needed. The tracking issue cited in
+# the plan tracks that follow-up.
+#
+# Why advisory in Slice 2: the corpus is largely empty scaffolding plus one
+# DLP wiring-smoke payload. Most coverage lands in Slice 3 as the full
+# payload population PRs land. Once the corpus is dense enough to be the
+# real release gate it gets flipped to release-blocking.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'tests/adversarial/**'
+      - 'src/alfred/security/**'
+      - 'src/alfred/audit/**'
+      - '.rulesync/skills/alfred-adversarial-corpus/**'
+      - '.github/workflows/adversarial.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tests/adversarial/**'
+      - 'src/alfred/security/**'
+      - 'src/alfred/audit/**'
+      - '.rulesync/skills/alfred-adversarial-corpus/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  PYTHON_VERSION: "3.12"
+  UV_VERSION: "0.5.14"
+
+jobs:
+  adversarial:
+    name: Adversarial corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Slice 2: advisory only. Slice 3 removes this line to flip the gate to
+    # release-blocking — single-line flip, no other change needed. See the
+    # PR-E plan (docs/superpowers/plans/2026-05-26-slice-2-pr-E-smoke-corpus-docs.md)
+    # task 9 step 2, which opens the tracking issue.
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check for adversarial corpus
+        id: corpuscheck
+        run: |
+          set -euo pipefail
+          if [ -d tests/adversarial ] && find tests/adversarial -name 'test_*.py' 2>/dev/null | grep -q .; then
+            echo "has_corpus=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_corpus=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No tests/adversarial/test_*.py — skipping adversarial run."
+          fi
+      - name: Install uv
+        if: steps.corpuscheck.outputs.has_corpus == 'true'
+        uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Set up Python
+        if: steps.corpuscheck.outputs.has_corpus == 'true'
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        if: steps.corpuscheck.outputs.has_corpus == 'true'
+        run: uv sync --dev
+      - name: Run adversarial corpus
+        if: steps.corpuscheck.outputs.has_corpus == 'true'
+        run: uv run pytest tests/adversarial -v
