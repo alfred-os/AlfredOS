@@ -97,6 +97,23 @@ def test_non_positive_max_len_rejected() -> None:
         list(_split_for_discord("hello world", max_len=0))
 
 
+def test_no_progress_with_prefix_raises_not_infinite_loop() -> None:
+    """Regression: zero source advance must raise even when a state prefix is active.
+
+    The earlier guard was ``pos == chunk_start and not prefix`` — it allowed
+    an infinite loop when a carryover prefix (e.g. an open inline-code
+    marker) consumed nearly all of ``max_len`` and no further content
+    character could fit. Any zero-advance iteration must raise.
+    """
+    # Inline span open across a chunk boundary, with max_len just large
+    # enough to fit the carryover prefix + suffix but no source char.
+    # Prefix is "`" (1) and suffix close is "`" (1); max_len=2 leaves zero
+    # room for a content character → no forward progress.
+    text = "`" + ("z" * 200) + "`tail"
+    with pytest.raises(RuntimeError, match="no forward progress"):
+        list(_split_for_discord(text, max_len=2))
+
+
 def test_open_fence_at_boundary_closes_and_reopens() -> None:
     """Fence straddling the cap is closed then re-opened on the next chunk."""
     text = "```python\n" + ("x" * 1990) + "\n```"
