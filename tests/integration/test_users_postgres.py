@@ -337,7 +337,10 @@ async def test_listen_notify_round_trip(
     except TimeoutError:
         listener_task.cancel()
         with pytest.raises((asyncio.CancelledError, TimeoutError)):
-            await listener_task
+            # ``await`` has the side-effect of surfacing the cancellation
+            # to ``pytest.raises``. Bind to ``_`` so CodeQL's
+            # py/ineffectual-statement doesn't read this as a no-op.
+            _ = await listener_task
 
     # Two mutations (add + bind) → at least two NOTIFY deliveries → at least
     # two counter bumps on the listener's side. Lower-bound rather than

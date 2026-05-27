@@ -16,6 +16,7 @@ These tests pin the three guarantees consumers rely on:
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -67,3 +68,34 @@ def test_concurrent_bump_no_lost_updates() -> None:
     asyncio.run(_race())
 
     assert counter.current() == 100
+
+
+def test_threaded_bump_no_lost_updates() -> None:
+    """Exercise the cross-thread contract documented on ``bump()``.
+
+    The listener task in T12 lives on a different loop-thread than the
+    resolver in T11 — both call ``bump()``. The coroutine-only race test
+    above doesn't actually cross OS-thread boundaries. This one does.
+    Without the internal lock, the GIL-protected refcount on the integer
+    is still safe but the read-modify-write of the version field is NOT —
+    we'd see lost updates.
+    """
+    counter = IdentityVersionCounter()
+    bumps_per_thread = 100
+    thread_count = 200
+    start = threading.Barrier(thread_count)
+
+    def _worker() -> None:
+        # Synchronise the start so every thread races the contended path,
+        # not the cheap "no other writers yet" path.
+        start.wait()
+        for _ in range(bumps_per_thread):
+            counter.bump()
+
+    threads = [threading.Thread(target=_worker) for _ in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert counter.current() == bumps_per_thread * thread_count
