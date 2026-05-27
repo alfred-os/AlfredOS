@@ -53,6 +53,16 @@ if TYPE_CHECKING:
 
 app = typer.Typer(help=t("cli.help.root"), no_args_is_help=True)
 
+# Identity sub-app — ``alfred user add|list|show|remove|bind|unbind|set``.
+# The sub-app's commands pull their resolver and audit writer from injected
+# factories (see ``alfred.identity.cli.install_factories``). Production
+# bootstrap wiring lands in T15 alongside the TUI startup change; for now
+# importing the sub-app at module scope keeps the registration declarative
+# and lets ``alfred user --help`` work without dragging in a Settings load.
+from alfred.identity.cli import user_app  # noqa: E402  # registered after app construction
+
+app.add_typer(user_app, name="user")
+
 
 # ---------------------------------------------------------------------------
 # Bootstrap helpers

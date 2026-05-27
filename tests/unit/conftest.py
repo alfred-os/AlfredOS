@@ -29,11 +29,13 @@ constructor accepts any object satisfying the ``RateLimiter`` Protocol.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from alfred.audit.log import AuditWriter
 from alfred.identity import IdentityVersionCounter, _NullRateLimiter
 from alfred.memory.models import Base
 
@@ -77,3 +79,39 @@ def version_counter() -> IdentityVersionCounter:
     by any other future test that needs to observe bumps in isolation.
     """
     return IdentityVersionCounter()
+
+
+@pytest.fixture
+def audit_buffer(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any]]]:
+    """Capture every ``AuditWriter.append`` call into an in-memory list.
+
+    Promoted to ``tests/unit/conftest.py`` (rather than the audit-test-local
+    conftest) because two unrelated subsystems assert on audit-row contents:
+    the audit-writer's own unit tests AND the identity CLI tests (T14). pytest
+    only resolves fixtures from conftests on the path to the test file, so a
+    fixture defined under ``tests/unit/audit/`` cannot be consumed from
+    ``tests/unit/identity/``. The unit-level conftest sits on both paths and
+    is the cheapest place to share the fixture without duplication.
+
+    Yields the list itself so tests can ``assert audit_buffer[-1]["event"]``
+    after invoking a CLI subcommand. The list is fresh per test — pytest
+    scopes ``monkeypatch`` to function by default, so captures from one test
+    never leak into another.
+
+    Production callers continue to call ``AuditWriter(...).append(...)``
+    unchanged; the monkeypatch swaps the bound method on the class for the
+    duration of the test so any factory that constructs an
+    :class:`AuditWriter` is a no-op as far as the database is concerned —
+    we never touch Postgres in the unit layer.
+    """
+    buffer: list[dict[str, Any]] = []
+
+    async def _capture(self: AuditWriter, **kwargs: Any) -> None:
+        # Defensive copy: kwargs values may be mutable (e.g. ``subject``
+        # dicts the caller continues to mutate after the call). Copy the
+        # top-level dict so assertions inspect the value as it was at
+        # call-time, not as it is at assertion-time.
+        buffer.append(dict(kwargs))
+
+    monkeypatch.setattr(AuditWriter, "append", _capture)
+    yield buffer
