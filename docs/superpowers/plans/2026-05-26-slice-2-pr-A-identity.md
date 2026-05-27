@@ -103,7 +103,7 @@
 
 - [ ] **Step 1.1 — Write the failing concurrent-isolation test.**
 
-  Create `tests/unit/i18n/test_concurrent_language.py` with the test below. The assertion is shape-level (each coroutine sees its own active language at every `t()` call between `await` points); the catalog assertion will be tightened in Task 5 once the `cli.user.added` key exists in `alfred.po`.
+  Create `tests/unit/i18n/test_concurrent_language.py` with the test below. The assertion is shape-level (each coroutine sees its own active language at every `t()` call between `await` points). The test is catalog-independent — a `_MarkerTranslator` monkeypatch substitutes a per-language sentinel into `_translators` so the assertion has no dependency on whether any specific message key has shipped yet. (No later T5 tightening step is needed.)
 
   ```python
   """Per-coroutine isolation of the active language (spec §0.1).
@@ -388,7 +388,7 @@
 
 **Owner:** `alfred-python-developer` (review: `alfred-i18n-reviewer`).
 
-**Why fourth:** every later task (`IdentityResolver` WARN-once, `alfred user *` help text, CLI error messages, migration remediation string) calls `t()` against keys that must exist before the catalog-drift check (`pybabel compile --check`) goes green. We add ALL `cli.user.*` + `cli.help.root` + `cli.setup.*` keys with English bodies in one commit, then the implementing tasks can land call-sites against an already-extracted catalog.
+**Why fourth:** every later task (`IdentityResolver` WARN-once, `alfred user *` help text, CLI error messages, migration remediation string) calls `t()` against keys that must exist before the catalog-drift check (`pybabel update --check`) goes green. We add ALL `cli.user.*` + `cli.help.root` + `cli.setup.*` keys with English bodies in one commit, then the implementing tasks can land call-sites against an already-extracted catalog.
 
 **Files:**
 
@@ -523,14 +523,13 @@
 
   > **Note:** the `secrets.*` keys (`secrets.file_perms_too_open`, `secrets.file_missing_required`, `secrets.path_is_directory`) belong to PR C and are NOT added in PR A. Same for the `discord.*` keys (PR D2).
 
-- [ ] **Step 4.3 — Compile the catalog and confirm no drift.**
+- [ ] **Step 4.3 — Compile the catalog.**
 
   ```bash
-  uv run pybabel compile -d locale --use-fuzzy
-  uv run pybabel compile -d locale --check
+  uv run pybabel compile -d locale -D alfred --use-fuzzy
   ```
 
-  Both must exit 0. `--use-fuzzy` accepts the new entries on first compile; the subsequent `--check` enforces no drift.
+  This regenerates `alfred.mo` against the freshly-added entries. **Do NOT run `pybabel update --check` here** — the catalog-first phasing (T4 adds keys before T5-T16 add the call-sites) means a per-commit drift check cannot pass until T16 lands. The per-PR drift gate reconciles at T16; intermediate commits are intentionally "catalog has unused keys."
 
 - [ ] **Step 4.4 — Commit (PR-A commit 4).**
 
@@ -850,7 +849,10 @@
       __tablename__ = "users"
       __table_args__ = (
           CheckConstraint(
-              "authorization IN ('read_only', 'standard', 'trusted', 'operator')",
+              # `authorization` MUST be double-quoted — it is a Postgres reserved keyword.
+              # Without the quotes the CHECK compiles to invalid SQL and migration 0004 fails.
+              # Side-fixed in T7's actual commit; pinned here so future ORM edits do not regress.
+              "\"authorization\" IN ('read_only', 'standard', 'trusted', 'operator')",
               name="ck_users_authorization",
           ),
           CheckConstraint("daily_budget_usd > 0", name="ck_users_daily_budget_positive"),
@@ -989,6 +991,8 @@
 
 **Owner:** `alfred-python-developer`; review by `alfred-security-engineer` (the collision-refusal path is a security invariant — silent backfill would mangle audit history).
 
+> **Note — slice-1 already shipped `episodes.language` and `audit_log.language`** (migration `0001` defined both as `String(length=16) NOT NULL` per CLAUDE.md i18n rule #3). T7 only adds **`persona_id`** to both tables; it does NOT re-add `language`. T15's per-row writes set `language=user.language` (NOT NULL respected) and `persona_id='alfred'`. Test (d) below asserts `persona_id IS NULL` only on pre-existing rows; any new rows the tests insert MUST set `language='en-US'` to satisfy the slice-1 NOT NULL constraint.
+
 **Files:**
 
 - Create: `src/alfred/memory/migrations/versions/0004_users_and_identities.py`.
@@ -1008,8 +1012,9 @@
   (b) Default operator_name == 'operator' — no-op backfill (literal already == slug).
   (c) Non-operator slug-collision — refuses with OperatorSlugCollisionError
       and the spec'd remediation message.
-  (d) ADD COLUMN coverage — pre-existing rows get NULL for the four new columns;
-      downgrade drops the four columns + two tables without mangling 0003 rows.
+  (d) ADD COLUMN coverage — pre-existing rows get NULL for the two new
+      persona_id columns (language was added in 0001); downgrade drops the
+      two persona_id columns + two tables without mangling 0003 rows.
   """
 
   from __future__ import annotations
@@ -1044,13 +1049,15 @@
       user_id are updated to the canonical slug; row counts preserved."""
       _upgrade_to(alembic_cfg, "0003")
       with postgres_engine.begin() as conn:
+          # `language` is NOT NULL on episodes/audit_log per slice-1 migration 0001;
+          # tests inserting new rows must supply a valid BCP-47 tag.
           conn.execute(text(
-              "INSERT INTO episodes (user_id, role, content, trust_tier, language, persona_id) "
-              "VALUES ('Bruce Wayne', 'user', 'hi', 'T2', NULL, NULL)"
+              "INSERT INTO episodes (user_id, role, content, trust_tier, language) "
+              "VALUES ('Bruce Wayne', 'user', 'hi', 'T2', 'en-US')"
           ))
           conn.execute(text(
-              "INSERT INTO audit_log (actor_user_id, event, subject, trust_tier_of_trigger, result, language, persona_id) "
-              "VALUES ('Bruce Wayne', 'tui.turn', '{}', 'T2', 'success', NULL, NULL)"
+              "INSERT INTO audit_log (actor_user_id, event, subject, trust_tier_of_trigger, result, language) "
+              "VALUES ('Bruce Wayne', 'tui.turn', '{}', 'T2', 'success', 'en-US')"
           ))
           before_episodes = conn.scalar(text("SELECT COUNT(*) FROM episodes"))
           before_audit = conn.scalar(text("SELECT COUNT(*) FROM audit_log"))
@@ -1083,9 +1090,10 @@
       monkeypatch.delenv("ALFRED_OPERATOR_NAME", raising=False)
       _upgrade_to(alembic_cfg, "0003")
       with postgres_engine.begin() as conn:
+          # `language` is NOT NULL on episodes per slice-1 migration 0001.
           conn.execute(text(
-              "INSERT INTO episodes (user_id, role, content, trust_tier, language, persona_id) "
-              "VALUES ('operator', 'user', 'hi', 'T2', NULL, NULL)"
+              "INSERT INTO episodes (user_id, role, content, trust_tier, language) "
+              "VALUES ('operator', 'user', 'hi', 'T2', 'en-US')"
           ))
 
       _upgrade_to(alembic_cfg, "0004")
@@ -1120,42 +1128,49 @@
 
 
   def test_backfill_d_add_column_and_downgrade(alembic_cfg, postgres_engine, monkeypatch) -> None:
-      """Scenario (d) — ADD COLUMN coverage + downgrade-drops-cleanly invariant."""
+      """Scenario (d) — ADD COLUMN coverage + downgrade-drops-cleanly invariant.
+
+      Only `persona_id` is added in 0004; `language` shipped in slice-1's 0001
+      as NOT NULL. The pre-0004 insert therefore supplies `language='en-US'`
+      and the post-upgrade assertion only checks `persona_id IS NULL`.
+      """
       _upgrade_to(alembic_cfg, "0003")
       with postgres_engine.begin() as conn:
+          # `language` is NOT NULL on episodes per slice-1 migration 0001.
           conn.execute(text(
-              "INSERT INTO episodes (user_id, role, content, trust_tier) "
-              "VALUES ('operator', 'user', 'pre-0004 row', 'T2')"
+              "INSERT INTO episodes (user_id, role, content, trust_tier, language) "
+              "VALUES ('operator', 'user', 'pre-0004 row', 'T2', 'en-US')"
           ))
 
       _upgrade_to(alembic_cfg, "0004")
 
       with postgres_engine.begin() as conn:
-          # Pre-existing row has NULL for the four new columns (no destructive backfill).
+          # Pre-existing row has NULL for the new persona_id column.
+          # `language` was already populated pre-0004 (NOT NULL since slice-1).
           row = conn.execute(text(
               "SELECT language, persona_id FROM episodes WHERE content='pre-0004 row'"
           )).one()
-          assert row.language is None
+          assert row.language == "en-US"
           assert row.persona_id is None
 
-          # Column types match DDL.
+          # Column presence — 0004 only ADDs persona_id; language was already there.
           insp = inspect(postgres_engine)
-          ep_cols = {c["name"]: c["type"] for c in insp.get_columns("episodes")}
-          al_cols = {c["name"]: c["type"] for c in insp.get_columns("audit_log")}
-          assert "language" in ep_cols and "persona_id" in ep_cols
-          assert "language" in al_cols and "persona_id" in al_cols
-          # TEXT, not VARCHAR — Postgres TEXT is the preferred unbounded form.
-          assert str(ep_cols["language"]).upper().startswith("TEXT")
+          ep_cols = {c["name"] for c in insp.get_columns("episodes")}
+          al_cols = {c["name"] for c in insp.get_columns("audit_log")}
+          assert "persona_id" in ep_cols
+          assert "persona_id" in al_cols
+          assert "language" in ep_cols and "language" in al_cols  # pre-existing from 0001
 
-      # Downgrade drops the four columns + two tables.
+      # Downgrade drops the persona_id columns + two tables; language stays
+      # (it belongs to 0001 and survives a 0004→0003 downgrade).
       _downgrade_to(alembic_cfg, "0003")
       with postgres_engine.begin() as conn:
           insp = inspect(postgres_engine)
           assert "users" not in insp.get_table_names()
           assert "platform_identities" not in insp.get_table_names()
           ep_cols = {c["name"] for c in insp.get_columns("episodes")}
-          assert "language" not in ep_cols
           assert "persona_id" not in ep_cols
+          assert "language" in ep_cols  # 0001-shipped, untouched by 0004 down.
           # 0003 row content survives the downgrade.
           assert conn.scalar(text(
               "SELECT COUNT(*) FROM episodes WHERE content='pre-0004 row'"
@@ -1273,10 +1288,11 @@
           "WHERE deleted_at IS NULL"
       )
 
-      # New per-row columns on episodes + audit_log (nullable on backfill).
-      op.add_column("episodes", sa.Column("language", sa.Text, nullable=True))
+      # New per-row column on episodes + audit_log (nullable on backfill).
+      # NOTE: `language` was added by slice-1 migration 0001 as NOT NULL; only
+      # `persona_id` is new in 0004. Adding `language` here a second time would
+      # raise DuplicateColumn at upgrade time.
       op.add_column("episodes", sa.Column("persona_id", sa.Text, nullable=True))
-      op.add_column("audit_log", sa.Column("language", sa.Text, nullable=True))
       op.add_column("audit_log", sa.Column("persona_id", sa.Text, nullable=True))
 
       operator_name = _operator_name()
@@ -1338,12 +1354,11 @@
 
 
   def downgrade() -> None:
-      """Drop the four columns + two tables. Preserves 0003-shape row content
-      (the four new columns don't exist after downgrade)."""
+      """Drop the two persona_id columns + two tables. Preserves 0003-shape
+      row content. `language` is NOT dropped here — it belongs to slice-1's
+      migration 0001 and survives a 0004→0003 downgrade."""
       op.drop_column("audit_log", "persona_id")
-      op.drop_column("audit_log", "language")
       op.drop_column("episodes", "persona_id")
-      op.drop_column("episodes", "language")
       op.execute("DROP INDEX IF EXISTS uq_platform_identities_user_platform_active")
       op.drop_table("platform_identities")
       op.drop_table("users")
@@ -1375,7 +1390,7 @@
   uv run alembic upgrade head
   ```
 
-  Both must exit 0; the four-column + two-table delta round-trips cleanly.
+  Both must exit 0; the two-persona-id-column + two-table delta round-trips cleanly. (`language` belongs to slice-1's 0001 and is unaffected.)
 
 - [ ] **Step 7.6 — Run mypy + pyright on the migration.**
 
@@ -2415,6 +2430,11 @@
   git commit -m "feat(identity): IdentityResolver core — resolve/add/bind/unbind/remove/set + LRU + counter (#<issue>)"
   ```
 
+#### Security + concurrency notes
+
+- **`--replace-operator` demotes to `TRUSTED`, never `STANDARD`.** Spec §2 architect-001 + catalog `cli.user.operator_replaced` both fix the demotion target at `Authorization.TRUSTED.value`. The resolver body's `set_()` path above already reflects this (`existing.authorization = Authorization.TRUSTED.value`). Any future docstring, comment, or test that asserts the demoted user becomes "standard" is a regression — fail the review. Implementation commit `b389750` (PR-A T11) already locked this in code.
+- **Last-operator-remove race window.** The gate (`SELECT count(*) ... WHERE id != user.id` → raise `LastOperatorRemovalRefusedError` if 0) is correct under serial callers but has a TOCTOU window under default Postgres `READ COMMITTED` isolation: two concurrent `remove()` calls on the last two operators could each pass the count check and both commit, leaving zero operators. T13's Postgres integration test exercises only the single-tenant case (the CLI is single-process), so the race is not hit in PR A. **PR D2 (Discord adapter as a second process consuming the resolver) makes this concrete** — PR D2's plan MUST either prove `SERIALIZABLE` isolation handles the case, or add `SELECT ... FOR UPDATE` on the operator rows inside `remove()` so concurrent removers serialise. Tracked as a forward-reference; do not patch in PR A.
+
 ---
 
 ### Task 12: `IdentityListener` — LISTEN/NOTIFY with exponential-backoff reconnect supervisor — PR-A commit 12
@@ -2947,7 +2967,7 @@
   make check
   ```
 
-  Expected: every gate green (`ruff check`, `ruff format --check`, `mypy --strict`, `pyright`, `pytest tests/unit tests/integration`, `pybabel compile --check`).
+  Expected: every gate green (`ruff check`, `ruff format --check`, `mypy --strict`, `pyright`, `pytest tests/unit tests/integration`, `pybabel update --check` — the actual catalog-drift command; `pybabel compile` has no `--check` flag).
 
   If anything fails, the fix is a fixup commit (`git commit --fixup=<sha>`) NOT a new top-level commit — keep the PR's logical commit graph clean.
 
