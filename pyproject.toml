@@ -20,6 +20,18 @@ dependencies = [
   "babel>=2.16,<3",  # i18n (Task 3.5)
   "unidecode>=1.3,<2",  # slug derivation transliteration (PR A T8)
   "psycopg[binary]>=3.1,<4",  # runtime: async LISTEN/NOTIFY (IdentityListener, PR A T12); sync identity resolver (via asyncio.to_thread)
+  # PR D2: discord.py is the Discord gateway client. We pin >=2.4,<3 because
+  # the adapter's surface test (``tests/integration/test_discord_message_surface.py``)
+  # pins the message-attribute + client-kwarg shape the adapter touches; a 2.x
+  # minor-version rename trips immediately and a 3.x sweep needs a coordinated
+  # adapter rewrite. NO ``[voice]`` extra — that pulls in PyNaCl + libsodium,
+  # which we don't need for DMs and which complicates the slim-wheel container.
+  "discord.py>=2.4,<3",
+  # PR D2 audit-DoS mitigation: per-snowflake LRU dedup of the unknown-DM
+  # audit row uses cachetools.TTLCache. Slice-3+ may swap to a Redis-backed
+  # equivalent for cross-process correctness; cachetools is the in-process
+  # shape.
+  "cachetools>=5.3,<6",
 ]
 
 [dependency-groups]
@@ -34,6 +46,7 @@ dev = [
   "ruff>=0.6",
   # black removed: `ruff format` replaces it per ADR-0007.
   "types-toml",
+  "types-cachetools",  # PR D2: stubs for the TTLCache import in alfred.comms.discord
   "pre-commit>=3.7",        # for the pybabel extract hook (Task 3.5)
   # dev/test only: testcontainers' built-in Postgres helper + alembic CLI
   # both default to psycopg2 for their sync sessions. Not used at runtime
