@@ -74,3 +74,51 @@ class TestEpisodicMemory:
         turns = await mem.recent(user_id="operator", limit=2)
         # Caller-facing list is in chronological order (oldest first).
         assert [t.content for t in turns] == ["a", "b"]
+
+    async def test_recent_no_persona_filter(self) -> None:
+        """When ``persona`` is omitted the SQL stays slice-1-shaped — only
+        the ``user_id`` predicate sits in the WHERE clause. We isolate the
+        WHERE clause text (not the whole SQL) because ``persona`` also
+        appears in the SELECT column list."""
+        session = _mock_session()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute = AsyncMock(return_value=result)
+
+        mem = EpisodicMemory(session=session)
+        await mem.recent(user_id="operator", limit=5)
+        stmt = session.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        where_clause = compiled.split("WHERE", 1)[1].split("ORDER BY", 1)[0]
+        assert "episodes.persona" not in where_clause
+        assert "episodes.user_id = 'operator'" in where_clause
+
+    async def test_recent_filters_on_persona(self) -> None:
+        """When ``persona="alfred"`` is set the SQL adds an exact-match
+        predicate on the ``persona`` column. PR-B per-persona isolation
+        on rehydrate depends on this — without it the WorkingMemoryPool
+        would smear Lucius's turns into Alfred's working memory."""
+        session = _mock_session()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        session.execute = AsyncMock(return_value=result)
+
+        mem = EpisodicMemory(session=session)
+        await mem.recent(user_id="operator", limit=5, persona="alfred")
+        stmt = session.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        where_clause = compiled.split("WHERE", 1)[1].split("ORDER BY", 1)[0]
+        assert "episodes.persona = 'alfred'" in where_clause
+
+    async def test_recent_unknown_persona_returns_nothing(self) -> None:
+        """A persona that no row carries returns ``[]``. We don't synthesise
+        rows, we don't fall back to no-filter — the empty result is the
+        signal that the persona hasn't talked to this user yet."""
+        session = _mock_session()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []  # DB says no match.
+        session.execute = AsyncMock(return_value=result)
+
+        mem = EpisodicMemory(session=session)
+        turns = await mem.recent(user_id="operator", limit=5, persona="oracle")
+        assert turns == []
