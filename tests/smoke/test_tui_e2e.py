@@ -194,14 +194,13 @@ def _build_session_app(
         version_counter=version_counter,
         rate_limiter=NullRateLimiter(),
     )
-    resolver.version_counter = version_counter  # type: ignore[attr-defined]
     operator = resolver.resolve(Platform.TUI, "operator")
     assert operator is not None, "migration 0004 must backfill the operator binding"
 
     budget = BudgetGuard(
         user_loader=lambda user_id: resolver.show(slug=user_id),
         per_call_max_usd=0.10,
-        version_counter=resolver.version_counter,  # type: ignore[attr-defined]
+        version_counter=version_counter,
     )
 
     working_pool = WorkingMemoryPool(
@@ -255,10 +254,20 @@ async def _drive_turn(app: AlfredTuiApp, text: str) -> None:
     await pilot.press(*keys)
     # Pump enough cycles for on_input_submitted to dispatch, the
     # orchestrator to round-trip, and the response line to repaint.
-    for _ in range(20):
+    # If ``_in_flight`` never clears (orchestrator hang / provider
+    # timeout), fail loudly rather than silently dropping into stale
+    # assertions downstream.
+    max_pumps = 20
+    for _ in range(max_pumps):
         await pilot.pause()
         if app._in_flight is None:
             break
+    else:
+        pytest.fail(
+            f"TUI turn did not complete within {max_pumps} pump cycles; "
+            "orchestrator hang or provider timeout — downstream assertions "
+            "would run on stale state."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +295,7 @@ async def test_tui_mock_provider_round_trip(monkeypatch: pytest.MonkeyPatch) -> 
                 model="mock-provider",
             )
         )
-        app, resolver, budget, _pool, operator = _build_session_app(stack, router=router)
+        app, _resolver, budget, _pool, operator = _build_session_app(stack, router=router)
 
         async with app.run_test() as pilot:
             # Stash the pilot on the app so ``_drive_turn`` can pump it
@@ -321,9 +330,6 @@ async def test_tui_mock_provider_round_trip(monkeypatch: pytest.MonkeyPatch) -> 
         # Per-user budget moved (PR-B Phase 1). Mock cost was 0.00001.
         spent = budget.spent_today(operator.slug)
         assert spent > 0, f"BudgetGuard._spent[{operator.slug}] did not move; got {spent!r}"
-        # Resolver was the one the test wired — guard against accidental
-        # double-wire to an outer resolver.
-        del resolver
 
 
 # ---------------------------------------------------------------------------

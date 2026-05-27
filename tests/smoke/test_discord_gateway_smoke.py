@@ -57,11 +57,22 @@ _VERIFY_DEADLINE_S = 30.0
 _HARNESS_SLACK_S = 15.0
 
 
+def _token_present() -> bool:
+    # GitHub Actions resolves an unset / fork-PR-inaccessible
+    # ``${{ secrets.X }}`` to the empty string, NOT undefined, so a plain
+    # ``is None`` check would still try to run the smoke against an empty
+    # token. Treat unset, empty, and whitespace-only as "skip".
+    raw = os.getenv(_TOKEN_ENV)
+    return raw is not None and raw.strip() != ""
+
+
 pytestmark = pytest.mark.skipif(
-    os.getenv(_TOKEN_ENV) is None,
+    not _token_present(),
     reason=(
-        f"{_TOKEN_ENV} is unset; this smoke targets a real Discord bot and "
-        "is skipped on fork PRs / unconfigured local boxes."
+        f"{_TOKEN_ENV} is unset, empty, or whitespace-only; this smoke "
+        "targets a real Discord bot and is skipped on fork PRs / "
+        "unconfigured local boxes (GitHub Actions resolves missing "
+        "secrets to '', not undefined)."
     ),
 )
 
