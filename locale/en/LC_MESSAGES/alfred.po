@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 02:42+0100\n"
+"POT-Creation-Date: 2026-05-27 03:14+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -32,47 +32,47 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/main.py:303
+#: src/alfred/cli/main.py:319
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:306
+#: src/alfred/cli/main.py:322
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:307
+#: src/alfred/cli/main.py:323
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:308
+#: src/alfred/cli/main.py:324
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:309
+#: src/alfred/cli/main.py:325
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:310
+#: src/alfred/cli/main.py:326
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:311
+#: src/alfred/cli/main.py:327
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:312
+#: src/alfred/cli/main.py:328
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:366
+#: src/alfred/cli/main.py:382
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/main.py:367
+#: src/alfred/cli/main.py:383
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/main.py:388
+#: src/alfred/cli/main.py:404
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
@@ -141,29 +141,29 @@ msgstr ""
 "Add a new user (optionally binding a platform identity in the same "
 "transaction)."
 
-#: src/alfred/identity/cli.py:243 src/alfred/identity/cli.py:679
+#: src/alfred/identity/cli.py:243 src/alfred/identity/cli.py:682
 msgid "cli.user.flag.name.short"
 msgstr "Display name (will be slug-derived for the canonical user_id)."
 
-#: src/alfred/identity/cli.py:246 src/alfred/identity/cli.py:683
+#: src/alfred/identity/cli.py:246 src/alfred/identity/cli.py:686
 msgid "cli.user.flag.authorization.short"
 msgstr ""
 "Authorization tier (read-only | standard | trusted | operator; default "
 "standard)."
 
-#: src/alfred/identity/cli.py:250 src/alfred/identity/cli.py:691
+#: src/alfred/identity/cli.py:250 src/alfred/identity/cli.py:694
 msgid "cli.user.flag.daily-budget-usd.short"
 msgstr "Per-user daily budget cap in USD (default 0.50)."
 
-#: src/alfred/identity/cli.py:254 src/alfred/identity/cli.py:687
+#: src/alfred/identity/cli.py:254 src/alfred/identity/cli.py:690
 msgid "cli.user.flag.language.short"
 msgstr "BCP-47 language tag (e.g. en-US, de-DE; default operator's language)."
 
-#: src/alfred/identity/cli.py:258 src/alfred/identity/cli.py:695
+#: src/alfred/identity/cli.py:258 src/alfred/identity/cli.py:698
 msgid "cli.user.flag.rate-limit-per-min.short"
 msgstr "Override the authorization-derived messages-per-minute cap."
 
-#: src/alfred/identity/cli.py:262 src/alfred/identity/cli.py:699
+#: src/alfred/identity/cli.py:262 src/alfred/identity/cli.py:702
 msgid "cli.user.flag.rate-limit-per-day.short"
 msgstr "Opt-in hard ceiling on messages-per-day (default off)."
 
@@ -177,11 +177,11 @@ msgstr ""
 "Override the derived slug with a memorable handle (use after a slug "
 "fallback warning)."
 
-#: src/alfred/identity/cli.py:274 src/alfred/identity/cli.py:703
+#: src/alfred/identity/cli.py:274 src/alfred/identity/cli.py:706
 msgid "cli.user.flag.replace-operator.short"
 msgstr "Demote the named existing operator while promoting this user (atomic)."
 
-#: src/alfred/identity/cli.py:302 src/alfred/identity/cli.py:735
+#: src/alfred/identity/cli.py:302 src/alfred/identity/cli.py:738
 msgid "cli.user.error.operator_already_exists"
 msgstr ""
 "An operator already exists ('{existing_slug}' — {existing_display_name})."
@@ -196,176 +196,176 @@ msgstr "--daily-budget-usd must be > 0; got {value}."
 msgid "cli.user.error.invalid_bcp47"
 msgstr "BCP-47 parse failed for '{value}': {detail}."
 
-#: src/alfred/identity/cli.py:335
+#: src/alfred/identity/cli.py:338
 msgid "cli.user.added"
 msgstr "Added user {display_name} (slug={slug}, authorization={authorization})."
 
-#: src/alfred/identity/cli.py:344
+#: src/alfred/identity/cli.py:347
 msgid "cli.user.operator_replaced"
 msgstr "Promoted {new_slug} to operator; demoted {old_slug} to trusted."
 
-#: src/alfred/identity/cli.py:371
+#: src/alfred/identity/cli.py:374
 msgid "cli.user.help.list.short"
 msgstr "List active users (rich.Table by default; --json for scripting)."
 
-#: src/alfred/identity/cli.py:375
+#: src/alfred/identity/cli.py:378
 msgid "cli.user.flag.json.short"
 msgstr "Emit machine-readable JSON instead of a table."
 
-#: src/alfred/identity/cli.py:379
+#: src/alfred/identity/cli.py:382
 msgid "cli.user.flag.include-deleted.short"
 msgstr "Include soft-deleted users (strikethrough in the table)."
 
-#: src/alfred/identity/cli.py:405
+#: src/alfred/identity/cli.py:408
 msgid "cli.user.list.empty_hint"
 msgstr ""
 "No users yet. Run 'alfred user add --authorization operator --name "
 "<YourName>' to add the operator."
 
-#: src/alfred/identity/cli.py:410 src/alfred/identity/cli.py:461
+#: src/alfred/identity/cli.py:413 src/alfred/identity/cli.py:464
 msgid "cli.user.list.column.slug"
 msgstr "slug"
 
-#: src/alfred/identity/cli.py:411 src/alfred/identity/cli.py:462
+#: src/alfred/identity/cli.py:414 src/alfred/identity/cli.py:465
 msgid "cli.user.list.column.display_name"
 msgstr "display name"
 
-#: src/alfred/identity/cli.py:412 src/alfred/identity/cli.py:463
+#: src/alfred/identity/cli.py:415 src/alfred/identity/cli.py:466
 msgid "cli.user.list.column.authorization"
 msgstr "authorization"
 
-#: src/alfred/identity/cli.py:413 src/alfred/identity/cli.py:464
+#: src/alfred/identity/cli.py:416 src/alfred/identity/cli.py:467
 msgid "cli.user.list.column.daily_budget_usd"
 msgstr "daily budget (USD)"
 
-#: src/alfred/identity/cli.py:414 src/alfred/identity/cli.py:465
+#: src/alfred/identity/cli.py:417 src/alfred/identity/cli.py:468
 msgid "cli.user.list.column.language"
 msgstr "language"
 
-#: src/alfred/identity/cli.py:415
+#: src/alfred/identity/cli.py:418
 msgid "cli.user.list.column.platforms"
 msgstr "platforms"
 
-#: src/alfred/identity/cli.py:417 src/alfred/identity/cli.py:483
+#: src/alfred/identity/cli.py:420 src/alfred/identity/cli.py:486
 msgid "cli.user.list.deleted_marker"
 msgstr "(deleted)"
 
-#: src/alfred/identity/cli.py:425
+#: src/alfred/identity/cli.py:428
 msgid "cli.user.list.no_platforms"
 msgstr "(none)"
 
-#: src/alfred/identity/cli.py:446
+#: src/alfred/identity/cli.py:449
 msgid "cli.user.help.show.short"
 msgstr "Show one user with override-vs-derived rate-limit indicators."
 
-#: src/alfred/identity/cli.py:452 src/alfred/identity/cli.py:512
+#: src/alfred/identity/cli.py:455 src/alfred/identity/cli.py:515
 msgid "cli.user.error.not_found"
 msgstr "No user with slug '{slug}'."
 
-#: src/alfred/identity/cli.py:467
+#: src/alfred/identity/cli.py:470
 msgid "cli.user.show.value.unset"
 msgstr "(unset)"
 
-#: src/alfred/identity/cli.py:468
+#: src/alfred/identity/cli.py:471
 msgid "cli.user.show.override_indicator"
 msgstr "(override)"
 
-#: src/alfred/identity/cli.py:469
+#: src/alfred/identity/cli.py:472
 msgid "cli.user.show.derived_indicator"
 msgstr "(derived from authorization)"
 
 # --- alfred user * show fields (H4): rate-limit field labels --------------
-#: src/alfred/identity/cli.py:473
+#: src/alfred/identity/cli.py:476
 msgid "cli.user.show.field.rate_limit_per_min"
 msgstr "rate-limit per min"
 
-#: src/alfred/identity/cli.py:478
+#: src/alfred/identity/cli.py:481
 msgid "cli.user.show.field.rate_limit_per_day"
 msgstr "rate-limit per day"
 
-#: src/alfred/identity/cli.py:491
+#: src/alfred/identity/cli.py:494
 msgid "cli.user.help.remove.short"
 msgstr "Soft-delete a user (refuses if target is the last operator)."
 
-#: src/alfred/identity/cli.py:496
+#: src/alfred/identity/cli.py:499
 msgid "cli.user.flag.yes.short"
 msgstr "Skip the confirmation prompt (required under non-TTY)."
 
-#: src/alfred/identity/cli.py:508
+#: src/alfred/identity/cli.py:511
 msgid "cli.user.error.no_tty_without_yes"
 msgstr ""
 "This command is running under a non-TTY; pass --yes to skip the "
 "confirmation prompt."
 
-#: src/alfred/identity/cli.py:519
+#: src/alfred/identity/cli.py:522
 msgid "cli.user.remove.confirm"
 msgstr ""
 "Remove user {slug} ({display_name})? This soft-deletes the row; episode "
 "and audit history are preserved. [y/N]: "
 
-#: src/alfred/identity/cli.py:534
+#: src/alfred/identity/cli.py:537
 msgid "cli.user.error.remove_last_operator_refused"
 msgstr ""
 "Refused to remove the last operator '{slug}'. Promote another user to "
 "operator first (alfred user set <other> --authorization operator "
 "--replace-operator {slug})."
 
-#: src/alfred/identity/cli.py:540
+#: src/alfred/identity/cli.py:543
 msgid "cli.user.removed"
 msgstr "Removed user {slug} (soft-delete; audit history preserved)."
 
-#: src/alfred/identity/cli.py:556
+#: src/alfred/identity/cli.py:559
 msgid "cli.user.help.bind.short"
 msgstr "Bind a platform identity (e.g. a Discord snowflake) to an existing user."
 
-#: src/alfred/identity/cli.py:561 src/alfred/identity/cli.py:620
+#: src/alfred/identity/cli.py:564 src/alfred/identity/cli.py:623
 msgid "cli.user.flag.platform.short"
 msgstr "Platform name (tui | discord)."
 
-#: src/alfred/identity/cli.py:565
+#: src/alfred/identity/cli.py:568
 msgid "cli.user.flag.id.short"
 msgstr "Platform identifier (Discord snowflake / TUI operator name)."
 
-#: src/alfred/identity/cli.py:578
+#: src/alfred/identity/cli.py:581
 msgid "cli.user.error.user_already_bound"
 msgstr ""
 "User '{slug}' is already bound on platform '{platform}'. Run 'alfred user"
 " unbind {slug} --platform {platform}' first."
 
-#: src/alfred/identity/cli.py:592
+#: src/alfred/identity/cli.py:595
 msgid "cli.user.error.platform_id_in_use"
 msgstr ""
 "Platform identity {platform}:{platform_id} is already bound to user "
 "'{existing_slug}'."
 
-#: src/alfred/identity/cli.py:604
+#: src/alfred/identity/cli.py:607
 msgid "cli.user.bound"
 msgstr "Bound {platform} identity {platform_id} to user {slug}."
 
-#: src/alfred/identity/cli.py:615
+#: src/alfred/identity/cli.py:618
 msgid "cli.user.help.unbind.short"
 msgstr "Remove a platform binding from a user."
 
-#: src/alfred/identity/cli.py:632
+#: src/alfred/identity/cli.py:635
 msgid "cli.user.unbound"
 msgstr "Removed {platform} binding from user {slug}."
 
 # B4: dedicated rate-limit parse-failure key (was previously misusing
 # cli.user.error.invalid_authorization, which leaked "authorization" into the
 # diagnostic for a rate-limit failure).
-#: src/alfred/identity/cli.py:668
+#: src/alfred/identity/cli.py:671
 msgid "cli.user.error.invalid_rate_limit"
 msgstr ""
 "Invalid rate-limit value: '{value}' — pass a positive integer or the "
 "literal 'unset'."
 
-#: src/alfred/identity/cli.py:674
+#: src/alfred/identity/cli.py:677
 msgid "cli.user.help.set.short"
 msgstr ""
 "Tune an existing user's daily budget, authorization, language, or rate-"
 "limit overrides."
 
-#: src/alfred/identity/cli.py:759
+#: src/alfred/identity/cli.py:762
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
 
