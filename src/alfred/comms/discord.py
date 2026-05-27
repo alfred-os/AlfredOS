@@ -539,7 +539,12 @@ class DiscordAdapter:
         """Run the gateway loop until ``stop()`` is called.
 
         Returns cleanly when ``stop()`` requests a shutdown. Reconnect
-        classification + repeat-storm detection happens here.
+        classification + repeat-storm detection happens here: gateway
+        exceptions are routed through :func:`_classify_gateway_exception`
+        and mapped to the spec §3 lines 553-559 outcomes
+        (``LoginFailure`` → audit ``result=login_failed`` + exit 2;
+        repeated reconnect storm → audit ``result=gateway_unhealthy`` +
+        exit 1).
         """
         if self._client is None:
             raise RuntimeError("DiscordAdapter.run() called before start()")
@@ -555,7 +560,67 @@ class DiscordAdapter:
         # gateway connection is closed. discord.py handles auto-
         # reconnect for 4xxx close codes; 5xx and login failures
         # propagate up here for our classification.
-        await self._client.start(token, reconnect=True)
+        try:
+            await self._client.start(token, reconnect=True)
+        except discord.LoginFailure as login_exc:
+            await self._handle_gateway_failure(
+                exc=login_exc,
+                event="discord.run.login_failed",
+                result="login_failed",
+                exit_code=2,
+            )
+        except (discord.ConnectionClosed, discord.HTTPException) as gateway_exc:
+            disposition = _classify_gateway_exception(gateway_exc, recent=self._recent_reconnects)
+            if disposition is _GatewayDisposition.REPEATED_RECONNECT_EXIT_1:
+                await self._handle_gateway_failure(
+                    exc=gateway_exc,
+                    event="discord.run.gateway_unhealthy",
+                    result="gateway_unhealthy",
+                    exit_code=1,
+                )
+            else:
+                # CONNECTION_CLOSED_AUTO_RECONNECT /
+                # HTTP_5XX_RETRY_ONCE_THEN_DROP / UNCLASSIFIED: the
+                # discord.py library handles auto-reconnect for the
+                # benign cases; anything that escaped its handler is
+                # ours to surface. Re-raise so the supervisor sees the
+                # actual error rather than swallowing it.
+                raise
+
+    async def _handle_gateway_failure(
+        self,
+        *,
+        exc: BaseException,
+        event: str,
+        result: str,
+        exit_code: int,
+    ) -> None:
+        """Emit the audit row + structlog event then raise SystemExit.
+
+        Centralised so both branches (``login_failed`` and
+        ``gateway_unhealthy``) share one shape. The audit row carries
+        the exception type + repr so the operator's post-mortem has
+        the gateway-layer detail without re-running with --debug. We
+        deliberately use ``type(exc).__name__`` rather than ``str(exc)``
+        in the subject so a discord.py exception that embeds a token
+        in its message cannot leak past DLP (CLAUDE.md hard rule #1).
+        """
+        _log.error(event, error_type=type(exc).__name__)
+        with suppress(Exception):
+            await self._audit.append(
+                event=event,
+                actor_user_id=None,
+                actor_persona=_ALFRED_PERSONA_ID,
+                subject={"error_type": type(exc).__name__},
+                trust_tier_of_trigger="T0",
+                result=result,
+                cost_estimate_usd=0.0,
+                cost_actual_usd=0.0,
+                trace_id=event,
+                language="en-US",
+                persona_id=_ALFRED_PERSONA_ID,
+            )
+        raise SystemExit(exit_code) from exc
 
     async def stop(self) -> None:
         """Request a clean shutdown of the gateway connection.
@@ -1157,14 +1222,16 @@ async def run_verify_probe(
     client.event(_on_ready)
 
     start_task: asyncio.Task[None] | None = None
+    ready_task: asyncio.Task[bool] | None = None
     try:
         start_task = asyncio.create_task(client.start(token, reconnect=False))
+        ready_task = asyncio.create_task(ready_event.wait())
         # Race on_ready against the timeout. We do NOT await start_task
         # directly — it blocks until close. The ready signal is the
         # success criterion.
         try:
             done, _pending = await asyncio.wait(
-                {asyncio.create_task(ready_event.wait()), start_task},
+                {ready_task, start_task},
                 timeout=timeout_s,
                 return_when=asyncio.FIRST_COMPLETED,
             )
@@ -1203,10 +1270,19 @@ async def run_verify_probe(
     except Exception as outer_exc:
         return _classify_verify_exception(outer_exc)
     finally:
+        # Cancel + await every still-running task we created. The
+        # FIRST_COMPLETED race always leaves at least one of {ready,
+        # start} pending; on timeout it leaves both. PRD §5.1 cancel
+        # discipline — drain via asyncio.CancelledError so the event
+        # loop never holds an orphaned wait.
         if start_task is not None and not start_task.done():
             start_task.cancel()
             with suppress(BaseException):
                 await start_task
+        if ready_task is not None and not ready_task.done():
+            ready_task.cancel()
+            with suppress(BaseException):
+                await ready_task
         with suppress(Exception):
             await client.close()
 

@@ -830,6 +830,81 @@ def test_classify_repeated_reconnect_to_exit_1() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cluster 13b — DiscordAdapter.run() classification + audit/exit mapping
+# (CR PR #106 — spec §3 lines 553-559 wiring into the adapter runtime)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_login_failure_audits_and_exits_2() -> None:
+    """LoginFailure from client.start → audit result=login_failed + SystemExit(2)."""
+
+    def factory(intents: discord.Intents) -> Any:
+        client = MagicMock()
+        client.event = MagicMock(side_effect=lambda fn: fn)
+
+        async def fake_start(*_a: object, **_kw: object) -> None:
+            raise discord.LoginFailure("bad token")
+
+        client.start = fake_start
+        client.close = AsyncMock()
+        client.is_ready = MagicMock(return_value=False)
+        return client
+
+    audit = MagicMock()
+    audit.append = AsyncMock()
+    adapter = _make_adapter(audit=audit)
+    # Replace the factory the helper installed with our LoginFailure one.
+    adapter._client_factory = factory  # type: ignore[attr-defined]
+    await adapter.start()
+    with pytest.raises(SystemExit) as exc_info:
+        await adapter.run()
+    assert exc_info.value.code == 2
+    login_audits = [
+        c for c in audit.append.await_args_list if c.kwargs.get("result") == "login_failed"
+    ]
+    assert len(login_audits) == 1
+    assert login_audits[0].kwargs["event"] == "discord.run.login_failed"
+    assert login_audits[0].kwargs["subject"]["error_type"] == "LoginFailure"
+
+
+@pytest.mark.asyncio
+async def test_run_reconnect_storm_audits_and_exits_1() -> None:
+    """>10 reconnects in 60s → audit result=gateway_unhealthy + SystemExit(1)."""
+
+    def factory(intents: discord.Intents) -> Any:
+        client = MagicMock()
+        client.event = MagicMock(side_effect=lambda fn: fn)
+        sock = MagicMock()
+
+        async def fake_start(*_a: object, **_kw: object) -> None:
+            raise discord.ConnectionClosed(sock, shard_id=0, code=5000)
+
+        client.start = fake_start
+        client.close = AsyncMock()
+        client.is_ready = MagicMock(return_value=False)
+        return client
+
+    audit = MagicMock()
+    audit.append = AsyncMock()
+    adapter = _make_adapter(audit=audit)
+    adapter._client_factory = factory  # type: ignore[attr-defined]
+    # Prime the sliding window above the threshold so the next register()
+    # trips REPEATED_RECONNECT_EXIT_1.
+    for _ in range(11):
+        adapter._recent_reconnects.register()
+    await adapter.start()
+    with pytest.raises(SystemExit) as exc_info:
+        await adapter.run()
+    assert exc_info.value.code == 1
+    unhealthy = [
+        c for c in audit.append.await_args_list if c.kwargs.get("result") == "gateway_unhealthy"
+    ]
+    assert len(unhealthy) == 1
+    assert unhealthy[0].kwargs["event"] == "discord.run.gateway_unhealthy"
+
+
+# ---------------------------------------------------------------------------
 # Cluster 14 — alfred discord verify exit codes
 # ---------------------------------------------------------------------------
 
