@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 14:47+0100\n"
+"POT-Creation-Date: 2026-05-27 15:10+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -102,31 +102,31 @@ msgstr "daily budget USD: {amount}"
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/comms/discord.py:179
+#: src/alfred/comms/discord.py:181
 msgid "discord.embed_unsupported"
 msgstr ""
 "I can only read text DMs in Slice 2. Embeds, attachments, polls, "
 "components, stickers, and references are refused."
 
-#: src/alfred/comms/discord.py:180
+#: src/alfred/comms/discord.py:182
 msgid "discord.rate_limited"
 msgstr "You're sending messages faster than I can keep up. Try again in a moment."
 
-#: src/alfred/comms/discord.py:693 src/alfred/comms/discord.py:856
-#: src/alfred/comms/discord.py:862 src/alfred/comms/discord.py:992
-#: src/alfred/comms/discord.py:1012 src/alfred/comms/discord.py:1039
+#: src/alfred/comms/discord.py:695 src/alfred/comms/discord.py:858
+#: src/alfred/comms/discord.py:864 src/alfred/comms/discord.py:1002
+#: src/alfred/comms/discord.py:1022 src/alfred/comms/discord.py:1049
 msgid "discord.alfred_error"
 msgstr "Something went wrong on my end. The operator's audit log has the details."
 
 # PR D2 — Discord adapter i18n catalog (spec §3 lines 514-520).
-#: src/alfred/comms/discord.py:765
+#: src/alfred/comms/discord.py:767
 msgid "discord.unknown_user_first"
 msgstr ""
 "I don't recognise this Discord ID yet (snowflake: `{snowflake}`). Ask "
 "your operator to run: `alfred user add --name <YourName> --discord-id "
 "{snowflake}`. The operator's audit log shows this DM."
 
-#: src/alfred/comms/discord.py:844
+#: src/alfred/comms/discord.py:846
 msgid "discord.budget_blocked"
 msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
 

@@ -1179,3 +1179,41 @@ def test_classify_verify_unclassified_returns_1() -> None:
     code, key, _ = _classify_verify_exception(exc)
     assert code == 1
     assert key == "discord.verify.upstream_unrecoverable"
+
+
+# ---------------------------------------------------------------------------
+# Cluster 16 — dynamic-dispatch t_key allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_pybabel_visible_keys_covers_known_callers() -> None:
+    """Allowlist contains every key the in-tree call sites dispatch.
+
+    Both ``embed_unsupported`` and ``rate_limited`` are passed via the
+    ``t_key=`` parameter on ``_audit_and_send_refusal`` (lines 679 and
+    805 in ``discord.py``); both must be in the allowlist for runtime
+    validation to pass.
+    """
+    assert "discord.embed_unsupported" in discord_mod._PYBABEL_VISIBLE_KEYS
+    assert "discord.rate_limited" in discord_mod._PYBABEL_VISIBLE_KEYS
+
+
+@pytest.mark.asyncio
+async def test_audit_and_send_refusal_rejects_out_of_allowlist_t_key() -> None:
+    """Unknown ``t_key`` raises ``ValueError`` BEFORE writing audit.
+
+    Defensive guard against a future caller passing a typo'd key —
+    rendering its raw msgid to the user would skip the pybabel-extracted
+    catalog and surface internal identifiers. The audit must not fire
+    on the rejected path.
+    """
+    adapter = _make_adapter()
+    msg = _make_msg(content="ignored")
+    with pytest.raises(ValueError, match="not in dynamic-dispatch allowlist"):
+        await adapter._audit_and_send_refusal(
+            msg=msg,
+            event_name="discord.bogus_event",
+            t_key="discord.not_a_real_key",
+            subject_fields={},
+        )
+    adapter._audit.append.assert_not_called()

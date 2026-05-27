@@ -162,23 +162,25 @@ _log = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# pybabel-visible registration of i18n keys used via ``t_key=`` dispatch
+# Dynamic-dispatch i18n key allowlist
 # ---------------------------------------------------------------------------
 
 
-#: Tuple of i18n keys dispatched via ``t_key=`` at runtime —
-#: ``_audit_and_send_refusal`` (line 784) takes ``t_key: str`` and calls
-#: ``t(t_key, **kwargs)``. ``pybabel extract`` only sees ``t()`` called
-#: with a literal first arg — it cannot follow data flow through
-#: variable parameters. Binding the literal ``t("...")`` calls into a
-#: module-level tuple keeps them visible to pybabel's AST walk and
-#: avoids CodeQL's ``py/no-effect`` flag on bare expression statements.
-#: The pre-resolved values are otherwise unused at runtime — the call
-#: sites pass ``t_key`` strings directly to ``t()``.
-_PYBABEL_VISIBLE_KEYS: tuple[str, ...] = (
-    t("discord.embed_unsupported"),
-    t("discord.rate_limited"),
-)
+#: Allowlist of i18n keys dispatched dynamically via ``t_key=`` on
+#: :func:`_audit_and_send_refusal`. The mapping's **keys** are the
+#: literal string identifiers callers pass; the **values** are no-arg
+#: ``t()`` calls that exist purely so ``pybabel extract`` records each
+#: key in the catalog (the extractor only follows ``t("literal")``
+#: patterns in the AST). The values themselves are discarded —
+#: ``_audit_and_send_refusal`` re-renders via ``t(t_key, **kwargs)``
+#: with caller-supplied kwargs. The runtime check
+#: ``if t_key not in _PYBABEL_VISIBLE_KEYS`` validates dispatched
+#: keys against this set, failing loud on typos rather than silently
+#: rendering a raw msgid to the user.
+_PYBABEL_VISIBLE_KEYS: dict[str, str] = {
+    "discord.embed_unsupported": t("discord.embed_unsupported"),
+    "discord.rate_limited": t("discord.rate_limited"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +890,14 @@ class DiscordAdapter:
         rule #7); on audit success we render the t_key reply via
         ``_send``.
         """
+        if t_key not in _PYBABEL_VISIBLE_KEYS:
+            # Fail loud — an out-of-allowlist key would render its raw
+            # msgid to the user and bypass the pybabel-extracted catalog.
+            raise ValueError(
+                f"t_key {t_key!r} not in dynamic-dispatch allowlist "
+                "_PYBABEL_VISIBLE_KEYS; add it there or use a static "
+                "t() call site."
+            )
         # Augment subject with the snowflake for forensic correlation.
         subject = dict(subject_fields)
         subject.setdefault("snowflake", str(msg.author.id))
