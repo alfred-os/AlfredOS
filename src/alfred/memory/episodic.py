@@ -63,19 +63,26 @@ class EpisodicMemory:
         self._session.add(episode)
         await self._session.flush()
 
-    async def recent(self, *, user_id: str, limit: int = 20) -> list[Episode]:
+    async def recent(
+        self, *, user_id: str, limit: int = 20, persona: str | None = None
+    ) -> list[Episode]:
         """Most recent N turns for a user, in chronological order (oldest first).
 
-        Lands on the composite index `ix_episodes_user_id_created_at` (Task 3).
+        Lands on the composite index ``ix_episodes_user_id_created_at`` (Task 3).
         DB returns newest-first; we reverse client-side so the orchestrator can
         consume in chronological prompt-assembly order.
+
+        ``persona`` is the PR-B per-persona scope (PRD §5.3). When ``None``,
+        the historic Slice-1 behaviour is preserved — all rows for the user
+        are eligible. When set, only rows whose ``persona`` column matches
+        are returned, which is what :class:`~alfred.memory.working_pool.
+        WorkingMemoryPool` uses to keep persona context strictly isolated
+        on rehydrate.
         """
-        stmt = (
-            select(Episode)
-            .where(Episode.user_id == user_id)
-            .order_by(Episode.created_at.desc())
-            .limit(limit)
-        )
+        stmt = select(Episode).where(Episode.user_id == user_id)
+        if persona is not None:
+            stmt = stmt.where(Episode.persona == persona)
+        stmt = stmt.order_by(Episode.created_at.desc()).limit(limit)
         result = await self._session.execute(stmt)
         rows = list(result.scalars().all())
         rows.reverse()
