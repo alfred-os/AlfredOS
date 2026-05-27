@@ -199,20 +199,32 @@ def _install_identity_factories(settings: Settings) -> IdentityResolver:
     The audit-writer factory uses the async session_scope (matching slice-1
     :class:`AuditWriter`'s contract); the resolver uses the sync sessionmaker
     described in ``_sync_db_url``.
+
+    The version counter is attached to the returned resolver as
+    ``resolver.version_counter`` so PR-B's :class:`BudgetGuard` can subscribe
+    to the same instance the resolver bumps on every identity mutation —
+    keeping the in-process cache-invalidation contract single-sourced.
+    Phase 5 lifts this attribute promotion into the resolver's public API.
     """
     sync_engine = create_engine(_sync_db_url(settings), future=True)
     sync_factory: sessionmaker = sessionmaker(  # type: ignore[type-arg]  # reason: SA 2.0 sessionmaker has runtime-generic shape; the Session-bound form is what IdentityResolver expects and what we pass here
         sync_engine, expire_on_commit=False, future=True
     )
+    version_counter = IdentityVersionCounter()
     resolver = IdentityResolver(
         session_factory=sync_factory,
-        version_counter=IdentityVersionCounter(),
+        version_counter=version_counter,
         # Slice 2 ships the RateLimiter Protocol; the in-process token bucket
         # lands in PR D1. The null double is correct for Slice-1+2 single-
         # operator scope — the production limiter enforces READ_ONLY refusal
         # which doesn't apply to an operator at all.
         rate_limiter=NullRateLimiter(),
     )
+    # PR-B Phase 1: pin the shared counter onto the resolver so call sites
+    # that need both (e.g. the BudgetGuard wiring in ``_chat_main``) can
+    # reach the same instance without crossing the resolver's
+    # encapsulation. Phase 5 promotes this to a typed property.
+    resolver.version_counter = version_counter  # type: ignore[attr-defined]  # reason: PR-B Phase 1 dynamic attribute; Phase 5 promotes to a typed property on IdentityResolver
     audit_session_scope = build_session_scope(settings)
     install_identity_factories(
         resolver=lambda: resolver,
@@ -405,9 +417,21 @@ async def _chat_main() -> None:
         raise typer.Exit(code=2)
 
     router = _build_router(broker, settings)
+    # PR-B Phase 1: per-user BudgetGuard. The loader resolves a canonical
+    # ``user_id`` (the resolver's slug) to the live ``User`` row; the
+    # guard reads ``daily_budget_usd`` off the row on first-touch and on
+    # every version-counter bump. Wrapping ``resolver.show`` keeps the
+    # guard ignorant of the SQLAlchemy session lifecycle — the resolver
+    # is the one that owns sessions.
+    #
+    # The operator's ``settings.daily_budget_usd`` (slice-1 single-guard
+    # cap) is no longer read here: migration 0004 backfilled it into
+    # ``users.daily_budget_usd`` for the operator row, and the loader
+    # below is what surfaces it. The per-call cap stays global.
     budget = BudgetGuard(
-        daily_usd=settings.daily_budget_usd,
+        user_loader=lambda user_id: resolver.show(slug=user_id),
         per_call_max_usd=settings.per_call_max_usd,
+        version_counter=resolver.version_counter,  # type: ignore[attr-defined]  # reason: PR-B Phase 1 — counter promoted via ``_install_identity_factories``; Phase 5 makes it a typed property on IdentityResolver
     )
     working = WorkingMemory()
 
