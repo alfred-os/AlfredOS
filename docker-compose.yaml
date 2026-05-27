@@ -55,5 +55,58 @@ services:
       ALFRED_DAILY_BUDGET_USD: ${ALFRED_DAILY_BUDGET_USD:-1.0}
       ALFRED_PER_CALL_MAX_USD: ${ALFRED_PER_CALL_MAX_USD:-0.10}
 
+  # PR D2 — Slice-2 Discord adapter. Reuses the alfred-core image (one
+  # Dockerfile, one entrypoint) and runs the long-running `alfred discord`
+  # subcommand. Restart policy is ``unless-stopped`` because this IS the
+  # daemon (unlike alfred-core which is a one-shot command runner). The
+  # 256M memory cap is sized for the DM-only Slice-2 workload with
+  # discord.Client(max_messages=100, chunk_guilds_at_startup=False,
+  # member_cache_flags=MemberCacheFlags.none()) — measured RSS for a
+  # quiet DM workload sits at ~90-150 MB. Bump to 512M if you see
+  # OOMKills under sustained load (perf-003).
+  #
+  # Secrets bind-mount: the Discord token lives in
+  # `~/.config/alfred/secrets.toml` on the host and is bind-mounted
+  # read-only into `/etc/alfred/secrets.toml`. The
+  # `user: "${UID:-1000}:${GID:-1000}"` substitution makes the container
+  # run as the host operator so the mount's `chmod 600` is enforceable
+  # against the in-container user too. The setup script `export UID GID`s
+  # before `docker compose up` so the substitution actually picks up the
+  # operator's real uid/gid (bash does not export UID by default on macOS).
+  alfred-discord:
+    build:
+      context: .
+      dockerfile: docker/alfred-core.Dockerfile
+    command: ["discord"]
+    restart: unless-stopped
+    depends_on:
+      alfred-postgres:
+        condition: service_healthy
+    # ``mem_limit`` is the legacy service-level field Docker Compose
+    # (non-Swarm, ``docker compose up``) enforces via cgroups; the
+    # ``deploy.resources.limits.memory`` block below is the modern
+    # Compose-spec form that Swarm + the various managed-compose
+    # platforms read. Operators get a hard 256MB cap regardless of
+    # which runtime interprets the file.
+    mem_limit: 256m
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
+      ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
+      ALFRED_DATABASE_URL: ${ALFRED_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-alfred}:${POSTGRES_PASSWORD:-alfred}@alfred-postgres:5432/${POSTGRES_DB:-alfred}}
+      ALFRED_OPERATOR_NAME: ${ALFRED_OPERATOR_NAME:-operator}
+      ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}
+      ALFRED_DAILY_BUDGET_USD: ${ALFRED_DAILY_BUDGET_USD:-1.0}
+      ALFRED_PER_CALL_MAX_USD: ${ALFRED_PER_CALL_MAX_USD:-0.10}
+      # Container-layer secrets file. The bind-mount below puts the
+      # operator's host secrets.toml at this path read-only.
+      ALFRED_SECRETS_FILE: /etc/alfred/secrets.toml
+    volumes:
+      - ${HOME}/.config/alfred/secrets.toml:/etc/alfred/secrets.toml:ro
+    user: "${UID:-1000}:${GID:-1000}"
+
 volumes:
   alfred_pg_data:

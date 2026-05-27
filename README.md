@@ -27,8 +27,84 @@ git clone https://github.com/alfred-os/AlfredOS
 cd AlfredOS
 bin/alfred-setup.sh        # macOS/Linux; on Windows, run inside WSL
 docker compose up -d
+alfred user add --authorization operator --name "Your Name"   # one-time
 alfred chat                 # start a TUI conversation
 ```
+
+### Enable Discord (Developer Mode walkthrough)
+
+Slice 2 ships a DM-only Discord adapter. Operator workflow for a fresh
+deploy:
+
+1. **Create a bot in the Discord developer portal.** Visit
+   <https://discord.com/developers/applications>, create a new
+   application, then create a Bot user under it.
+2. **Enable the Message Content gateway intent.** Bot settings →
+   Privileged Gateway Intents → toggle **Message Content** on. Without
+   this, the adapter sees every DM as empty content and never reaches
+   the orchestrator.
+3. **Copy the bot token.** Bot settings → Reset Token → copy.
+4. **Write the token to `~/.config/alfred/secrets.toml`.** The setup
+   script created the file with `chmod 600` for you; add:
+
+   ```toml
+   discord_bot_token = "YOUR-TOKEN-HERE"
+   ```
+
+5. **Invite the bot to a server with the `bot` scope.** Slice 2 only
+   reads DMs; you do not need any guild-message permissions yet.
+6. **Bind your Discord user to the operator identity.** In Discord:
+   Settings → Advanced → Developer Mode → right-click your user → Copy
+   ID. Then on the host:
+
+   ```sh
+   alfred user bind --slug <your-operator-slug> --platform discord --platform-id <snowflake>
+   ```
+
+   The setup script offers an interactive prompt for this in its final
+   step.
+7. **Verify the gateway is reachable.** Run:
+
+   ```sh
+   docker compose run --rm alfred-discord verify
+   ```
+
+   Exit codes: `0` ok / `1` upstream / `2` config (bad token, intents
+   off) / `3` LoginFailure / `4` timeout / `130` SIGINT. The error
+   message names the remediation surface.
+8. **Start the adapter as a daemon.** Once `verify` returns 0:
+
+   ```sh
+   docker compose up -d alfred-discord
+   ```
+
+   Send the bot a DM from your Discord account; the round-trip lands
+   through the orchestrator with audit + budget + episodic memory + DLP
+   all in place.
+
+### Secrets file — permission propagation matrix
+
+`~/.config/alfred/secrets.toml` is plaintext for Slice 2. ADR-0012
+documents this as a known risk; Slice 3 replaces it with an
+age-encrypted equivalent. **In the meantime:**
+
+- **macOS:** Docker Desktop maps the host file's uid/gid to the
+  container uid/gid directly; `chmod 600` on the host applies inside
+  the container too. The setup script runs `export UID GID` because
+  macOS bash 3.2 does not export `UID` by default.
+- **Linux:** `user: "${UID:-1000}:${GID:-1000}"` in
+  `docker-compose.yaml` resolves to the operator's real uid/gid; the
+  bind-mount's `chmod 600` is enforced by the kernel exactly as on the
+  host.
+- **WSL2:** same as Linux, with the caveat that running `docker compose`
+  from PowerShell (vs `wsl`) sees a different uid namespace. Run the
+  setup script from inside WSL to keep the perms consistent.
+
+**Backup-vector reminder:** if you back up your `~/.config` with
+`restic`, `borg`, or similar, **exclude `~/.config/alfred/secrets.toml`**
+or the backup will contain plaintext API keys and your Discord bot
+token. Slice 3 ships an age-encrypted alternative; until then, the
+operator owns the exclusion.
 
 ## Design
 

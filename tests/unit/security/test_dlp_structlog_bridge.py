@@ -13,7 +13,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from alfred.cli import main as cli_main
+from alfred.cli import _bootstrap as cli_bootstrap
 from alfred.security.dlp import OutboundDlp
 
 
@@ -41,7 +41,7 @@ def _install_dlp(
         audit_log.append((event, subject))
 
     dlp = OutboundDlp(broker=_StubBroker(broker_mapping), audit=_sink)
-    monkeypatch.setattr(cli_main, "_outbound_dlp_for_redact", dlp)
+    monkeypatch.setattr(cli_bootstrap, "_outbound_dlp_for_redact", dlp)
     return audit_log
 
 
@@ -49,7 +49,7 @@ def test_generic_api_key_redacted_in_log_message(monkeypatch: pytest.MonkeyPatch
     """Stage 2 generic-API-key regex now catches values in log dicts."""
     _install_dlp(monkeypatch)
     event_dict = {"event": "test", "token": "sk-AAAAAAAAAAAAAAAAAAAA"}
-    out = cli_main._redact(None, "warning", event_dict)
+    out = cli_bootstrap._redact(None, "warning", event_dict)
     assert out["token"] == "[REDACTED:api-key-shape]"  # noqa: S105 — sentinel, not a real secret
 
 
@@ -57,7 +57,7 @@ def test_live_secret_in_log_message_still_redacted(monkeypatch: pytest.MonkeyPat
     """Backwards-compat: stage 1 broker redaction still works (sec-003)."""
     _install_dlp(monkeypatch, broker_mapping={"hunter2": "deepseek_api_key"})
     event_dict = {"event": "test", "msg": "logged hunter2 leak"}
-    out = cli_main._redact(None, "warning", event_dict)
+    out = cli_bootstrap._redact(None, "warning", event_dict)
     assert "[REDACTED:deepseek_api_key]" in out["msg"]
 
 
@@ -71,7 +71,7 @@ def test_nested_redaction_through_list_of_dicts(monkeypatch: pytest.MonkeyPatch)
             {"token": "pk_BBBBBBBBBBBBBBBBBBBB", "ok": "still fine"},
         ],
     }
-    out = cli_main._redact(None, "warning", event_dict)
+    out = cli_bootstrap._redact(None, "warning", event_dict)
     assert out["rows"][0]["token"] == "[REDACTED:api-key-shape]"  # noqa: S105 — sentinel
     assert out["rows"][0]["ok"] == "no secret here"
     assert out["rows"][1]["token"] == "[REDACTED:api-key-shape]"  # noqa: S105 — sentinel
@@ -91,7 +91,7 @@ def test_no_double_audit_on_single_log_emission(monkeypatch: pytest.MonkeyPatch)
         "a": "sk-AAAAAAAAAAAAAAAAAAAA",
         "b": "sk-BBBBBBBBBBBBBBBBBBBB",
     }
-    cli_main._redact(None, "warning", event_dict)
+    cli_bootstrap._redact(None, "warning", event_dict)
     # Two leaf strings each carrying an api-key shape — two audit rows.
     assert len(audit_log) == 2
 
@@ -99,7 +99,7 @@ def test_no_double_audit_on_single_log_emission(monkeypatch: pytest.MonkeyPatch)
 def test_non_string_values_pass_through_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_dlp(monkeypatch)
     event_dict = {"event": "test", "count": 5, "ok": True, "tuple_field": (1, 2)}
-    out = cli_main._redact(None, "warning", event_dict)
+    out = cli_bootstrap._redact(None, "warning", event_dict)
     assert out["count"] == 5
     assert out["ok"] is True
     assert out["tuple_field"] == (1, 2)
@@ -107,9 +107,9 @@ def test_non_string_values_pass_through_untouched(monkeypatch: pytest.MonkeyPatc
 
 def test_redactor_inactive_when_dlp_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """Before ``_configure_logging`` runs, the redactor is a pass-through."""
-    monkeypatch.setattr(cli_main, "_outbound_dlp_for_redact", None)
+    monkeypatch.setattr(cli_bootstrap, "_outbound_dlp_for_redact", None)
     event_dict = {"event": "test", "token": "sk-AAAAAAAAAAAAAAAAAAAA"}
-    out = cli_main._redact(None, "warning", event_dict)
+    out = cli_bootstrap._redact(None, "warning", event_dict)
     # Pass-through: no redaction happens.
     assert out["token"] == "sk-AAAAAAAAAAAAAAAAAAAA"  # noqa: S105 — fabricated test token
 
@@ -179,4 +179,4 @@ def test_structlog_audit_sink_is_a_noop() -> None:
     return value because CodeQL flags assignments from declared-None
     callables (``py/use-of-none``).
     """
-    cli_main._structlog_audit_sink(event="ignored", subject={"k": "v"})
+    cli_bootstrap.structlog_audit_sink(event="ignored", subject={"k": "v"})
