@@ -178,11 +178,33 @@ def test_audit_records_byte_counts() -> None:
     pre = "header sk-AAAAAAAAAAAAAAAAAAAA trailer"
     out = dlp.scan(pre)
     subject = audit.events[0][1]
-    assert subject["pre_bytes"] == len(pre)
-    assert subject["post_bytes"] == len(out)
+    # Bytes, not characters. For an all-ASCII pre/post the two are equal;
+    # the non-ASCII case below pins the encoding choice.
+    assert subject["pre_bytes"] == len(pre.encode("utf-8"))
+    assert subject["post_bytes"] == len(out.encode("utf-8"))
     # The sentinel and matched key happen to have different lengths.
     # Whatever the direction, post != pre is what we care about.
     assert subject["post_bytes"] != subject["pre_bytes"]
+
+
+def test_audit_byte_counts_are_utf8_not_chars_for_non_ascii() -> None:
+    """Non-ASCII pin: forensic audit consumers reason in bytes.
+
+    ``len("é") == 1`` (chars) but ``len("é".encode("utf-8")) == 2`` (bytes).
+    The audit row records the latter so a 4-byte emoji and an ASCII
+    character don't both report as length 1.
+    """
+    dlp, audit = _dlp()
+    pre = "café sk-AAAAAAAAAAAAAAAAAAAA 🚀"
+    out = dlp.scan(pre)
+    subject = audit.events[0][1]
+    # The ASCII character count is shorter than the UTF-8 byte count for
+    # both pre and post — char counts would have been wrong.
+    assert subject["pre_bytes"] == len(pre.encode("utf-8"))
+    assert subject["post_bytes"] == len(out.encode("utf-8"))
+    assert subject["pre_bytes"] > len(pre), (
+        "test setup bug: chosen input must contain multibyte UTF-8 chars"
+    )
 
 
 def test_no_audit_on_clean_input() -> None:
