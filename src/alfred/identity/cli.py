@@ -326,26 +326,29 @@ def add(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
 
+    # Audit-on-success runs on BOTH paths: ``--output-slug`` is a
+    # machine-readable convenience for shell pipelines, not an "I don't
+    # exist" flag. CLAUDE.md hard rule #7 requires every successful mutation
+    # to be audited; the two branches differ only in operator-facing output.
     if output_slug:
         typer.echo(user.slug)
-        return
-
-    typer.echo(
-        t(
-            "cli.user.added",
-            display_name=user.display_name,
-            slug=user.slug,
-            authorization=user.authorization,
-        )
-    )
-    if replace_operator is not None:
+    else:
         typer.echo(
             t(
-                "cli.user.operator_replaced",
-                new_slug=user.slug,
-                old_slug=replace_operator,
+                "cli.user.added",
+                display_name=user.display_name,
+                slug=user.slug,
+                authorization=user.authorization,
             )
         )
+        if replace_operator is not None:
+            typer.echo(
+                t(
+                    "cli.user.operator_replaced",
+                    new_slug=user.slug,
+                    old_slug=replace_operator,
+                )
+            )
 
     asyncio.run(
         _write_audit(
