@@ -38,6 +38,21 @@ down_revision: str | Sequence[str] | None = "0004"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Alembic reads ``revision`` / ``down_revision`` / ``branch_labels`` /
+# ``depends_on`` via module introspection (see alembic.script.revision).
+# Static analysers (CodeQL's py/unused-global-variable) can't see that
+# reflective access — declaring them in ``__all__`` makes the contract
+# with Alembic explicit and silences the false-positive alert. Same
+# pattern as migration 0004.
+__all__ = [
+    "branch_labels",
+    "depends_on",
+    "down_revision",
+    "downgrade",
+    "revision",
+    "upgrade",
+]
+
 
 # Slice-1 base values (from 0003) — kept intact.
 _SLICE_1_RESULTS = (
