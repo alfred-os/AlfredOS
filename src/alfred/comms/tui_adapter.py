@@ -30,7 +30,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from alfred.comms.adapter import AdapterHealth
+# Import ``AdapterHealth`` from the leaf ``_types`` module rather than
+# ``alfred.comms.adapter`` to avoid the static cycle CodeQL flagged:
+# ``adapter`` -> ``tui_adapter`` (lazy, inside ``build_tui_adapter``) and
+# ``tui_adapter`` -> ``adapter`` (eager, for the dataclass) formed a
+# diamond at static-analysis time.
+from alfred.comms._types import AdapterHealth
 from alfred.comms.tui import (
     AlfredTuiApp,
     _IdentityResolverLike,
@@ -111,8 +116,14 @@ class TuiAdapter:
 
     async def stop(self) -> None:
         # ``app.exit()`` is idempotent — Textual no-ops a second call.
+        # Clear the handle after exit so ``health().gateway_connected``
+        # flips back to False; otherwise the supervisor's status table
+        # reports a dead adapter as "connected" and a future re-``start()``
+        # (which rebuilds the app) would shadow the existing handle
+        # without an explicit reset.
         if self._app is not None:
             self._app.exit()
+            self._app = None
 
     def health(self) -> AdapterHealth:
         # TUI is "gateway-connected" while the Textual loop is alive

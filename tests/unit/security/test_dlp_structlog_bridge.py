@@ -167,8 +167,7 @@ def test_no_other_broker_redact_callers_in_codebase() -> None:
             continue
         _Visitor(path).visit(tree)
     assert not offenders, (
-        f"`.redact(...)` must only be called from OutboundDlp.scan after PR D1; "
-        f"found: {offenders}"
+        f"`.redact(...)` must only be called from OutboundDlp.scan after PR D1; found: {offenders}"
     )
 
 

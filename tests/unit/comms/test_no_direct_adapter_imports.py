@@ -85,7 +85,7 @@ def _resolve_relative_import(
     # The importing package equals the file's parent relative to alfred.
     # E.g. ``src/alfred/cli/main.py`` -> parent parts ``("cli",)``,
     # ``src/alfred/comms/tui_adapter.py`` -> ``("comms",)``.
-    parent_parts: tuple[str, ...] = (package_root.name,) + tuple(rel.parts[:-1])
+    parent_parts: tuple[str, ...] = (package_root.name, *rel.parts[:-1])
     if level > len(parent_parts):
         return None
     base_parts = parent_parts[: len(parent_parts) - level + 1]

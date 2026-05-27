@@ -281,7 +281,11 @@ def _redact(_logger: object, _name: str, event_dict: EventDict) -> EventDict:
     return {k: _redact_value(v) for k, v in event_dict.items()}
 
 
-def _structlog_audit_sink(*, event: str, subject: Mapping[str, object]) -> None:
+def _structlog_audit_sink(
+    *,
+    event: str,
+    subject: Mapping[str, object],
+) -> None:
     """No-op audit sink for the structlog-bridge DLP path.
 
     The DLP scanner needs an audit sink at construction time. For the
@@ -295,7 +299,8 @@ def _structlog_audit_sink(*, event: str, subject: Mapping[str, object]) -> None:
     pattern works for both the structlog path (no-op sink, here) and the
     Discord outbound path (real audit sink, PR D2).
     """
-    del event, subject
+    # Intentional no-op. See module docstring for the recursion-avoidance
+    # rationale.
 
 
 def _configure_logging(broker: SecretBroker) -> None:
