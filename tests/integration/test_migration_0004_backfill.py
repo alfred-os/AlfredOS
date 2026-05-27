@@ -236,9 +236,10 @@ def test_backfill_d_add_column_and_downgrade(
         al_cols = {c["name"]: c["type"] for c in insp.get_columns("audit_log")}
         assert "persona_id" in ep_cols
         assert "persona_id" in al_cols
-        # TEXT, not VARCHAR — Postgres TEXT is the preferred unbounded form.
-        assert str(ep_cols["persona_id"]).upper().startswith("TEXT")
-        assert str(al_cols["persona_id"]).upper().startswith("TEXT")
+        # VARCHAR(64) — matches the ORM (``src/alfred/memory/models.py``).
+        # Schema/ORM alignment per PR #96 CR M3.
+        assert str(ep_cols["persona_id"]).upper().startswith("VARCHAR(64)")
+        assert str(al_cols["persona_id"]).upper().startswith("VARCHAR(64)")
 
     # Downgrade drops the new column + two tables.
     _downgrade_to(alembic_cfg, "0003")
