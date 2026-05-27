@@ -20,7 +20,9 @@ test (T13).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import asyncio
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -35,6 +37,7 @@ from alfred.identity import (
     Platform,
     User,
 )
+from alfred.identity.resolver import IdentityListener
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
@@ -437,3 +440,78 @@ def test_list_excludes_soft_deleted_by_default(
     all_users = {u.slug for u in resolver.list_(include_deleted=True)}
     assert doomed.slug in all_users
     assert operator.slug in all_users
+
+
+# --------------------------------------------------------------------------- #
+# IdentityListener — LISTEN/NOTIFY supervisor with exponential-backoff reconnect
+# err-001 (spec §2 line 162). CLAUDE.md hard rule #7 — a silently-dropped
+# listener would age out cross-process invalidations, so the supervisor's
+# reconnect-on-disconnect behaviour is load-bearing.
+# --------------------------------------------------------------------------- #
+
+
+async def test_identity_listener_reconnect_on_connection_loss(
+    version_counter: IdentityVersionCounter,
+) -> None:
+    """The listener wraps its LISTEN loop in an exponential-backoff supervisor.
+
+    On a raised ``ConnectionError`` it sleeps ``backoff_s``, reconnects, and
+    resets backoff on success. After three forced disconnects the version
+    counter has bumped at least once per simulated NOTIFY between disconnects.
+    """
+    # Event ribbon read in order by the injected listen-loop:
+    # - "disconnect"  → raise ConnectionError (supervisor reconnects)
+    # - dict          → deliver as a NOTIFY payload
+    # - "shutdown"    → set stop_event + return (clean exit)
+    events: list[str | dict[str, object]] = [
+        "disconnect",
+        {"slug": "alice", "op": "add"},
+        "disconnect",
+        {"slug": "bob", "op": "add"},
+        "disconnect",
+        "shutdown",
+    ]
+
+    def fake_connect() -> MagicMock:
+        conn = MagicMock()
+        conn.add_listener = AsyncMock()
+        conn.close = AsyncMock()
+        return conn
+
+    reconnect_count = 0
+
+    async def fake_listen_loop(
+        _conn: object,
+        notify_callback: Any,
+        stop_event: asyncio.Event,
+    ) -> None:
+        nonlocal reconnect_count
+        while events:
+            ev = events.pop(0)
+            if ev == "disconnect":
+                reconnect_count += 1
+                raise ConnectionError("simulated disconnect")
+            if ev == "shutdown":
+                stop_event.set()
+                return
+            notify_callback(ev)
+
+    listener = IdentityListener(
+        dsn="postgresql://fake",
+        version_counter=version_counter,
+        backoff_start_s=0.001,
+        backoff_max_s=0.01,
+        connect_factory=fake_connect,
+        listen_loop=fake_listen_loop,
+    )
+    task = asyncio.create_task(listener.run())
+    # Give the supervisor enough wall-clock to chew through the event ribbon;
+    # the backoff is sub-millisecond so 200ms is generous.
+    await asyncio.sleep(0.2)
+    listener.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    # Two NOTIFY payloads were delivered between three forced disconnects →
+    # the version counter must have advanced at least twice.
+    assert version_counter.current() >= 2
+    assert reconnect_count == 3

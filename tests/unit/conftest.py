@@ -34,7 +34,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from alfred.identity import _NullRateLimiter
+from alfred.identity import IdentityVersionCounter, _NullRateLimiter
 from alfred.memory.models import Base
 
 
@@ -67,3 +67,13 @@ def rate_limiter() -> _NullRateLimiter:
     token-bucket implementation into the unit-test classpath.
     """
     return _NullRateLimiter()
+
+
+@pytest.fixture
+def version_counter() -> IdentityVersionCounter:
+    """Fresh :class:`IdentityVersionCounter` per test.
+
+    Consumed by the ``IdentityListener`` reconnect-supervisor test (T12) and
+    by any other future test that needs to observe bumps in isolation.
+    """
+    return IdentityVersionCounter()
