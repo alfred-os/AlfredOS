@@ -72,7 +72,7 @@ class AdversarialPayload(BaseModel):
     payload: str | dict[str, Any]
     expected_outcome: ExpectedOutcome
     provenance: str = Field(..., min_length=1)
-    references: tuple[str, ...] = Field(default_factory=tuple)
+    references: tuple[str, ...] = Field(..., min_length=1)
 
     @field_validator("id")
     @classmethod

@@ -78,6 +78,25 @@ def test_extra_field_forbidden() -> None:
     assert "extra" in str(excinfo.value).lower()
 
 
+def test_missing_references_rejected() -> None:
+    # `references` is required (SKILL.md §"Required fields per payload"); a
+    # missing or empty tuple must fail validation so payloads can't ship
+    # without provenance citations.
+    data = _valid_payload_data()
+    del data["references"]
+    with pytest.raises(ValidationError) as excinfo:
+        AdversarialPayload.model_validate(data)
+    assert "references" in str(excinfo.value).lower()
+
+
+def test_empty_references_rejected() -> None:
+    data = _valid_payload_data()
+    data["references"] = ()
+    with pytest.raises(ValidationError) as excinfo:
+        AdversarialPayload.model_validate(data)
+    assert "references" in str(excinfo.value).lower()
+
+
 def test_structured_payload_accepted() -> None:
     data = _valid_payload_data()
     data["payload"] = {

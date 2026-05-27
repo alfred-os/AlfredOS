@@ -63,6 +63,7 @@ Numbering monotonic per year per category. Never reuse an ID.
 - `payload` — the actual content (string or structured)
 - `expected_outcome` — `neutralized`, `caught_by_dlp`, `refused`, `quarantined`
 - `provenance` — where the variant came from (paper, prior incident, security research)
+- `references` — at least one citation (PRD §, ADR id, OWASP id, paper, CVE). Empty tuple is rejected by the schema; payloads without provenance citations cannot ship.
 
 ## Adding a new payload
 
