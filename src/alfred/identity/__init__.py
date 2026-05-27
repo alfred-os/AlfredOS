@@ -31,6 +31,7 @@ from alfred.identity.models import (
     User,
 )
 from alfred.identity.rate_limit import (
+    InProcessTokenBucketRateLimiter,
     NullRateLimiter,
     RateLimiter,
     RateLimiterHealth,
@@ -46,6 +47,7 @@ __all__ = [
     "IdentityResolutionError",
     "IdentityResolver",
     "IdentityVersionCounter",
+    "InProcessTokenBucketRateLimiter",
     "LastOperatorRemovalRefusedError",
     "NullRateLimiter",
     "OperatorAlreadyExistsError",
