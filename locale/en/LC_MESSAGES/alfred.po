@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 09:55+0100\n"
+"POT-Creation-Date: 2026-05-27 04:31+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -368,4 +368,24 @@ msgstr ""
 #: src/alfred/identity/cli.py:762
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
+
+#: src/alfred/security/secrets.py:231 src/alfred/security/secrets.py:242
+#: src/alfred/security/secrets.py:258 src/alfred/security/secrets.py:270
+#: src/alfred/security/secrets.py:369
+msgid "secrets.file_perms_too_open"
+msgstr ""
+"Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
+"`chmod 600 {path}` and `chmod 700 {parent}`."
+
+#: src/alfred/security/secrets.py:252
+msgid "secrets.path_is_directory"
+msgstr ""
+"Secrets path '{path}' is a directory (Docker bind-mount usually causes "
+"this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
+
+#: src/alfred/security/secrets.py:345 src/alfred/security/secrets.py:356
+msgid "secrets.file_missing_required"
+msgstr ""
+"Secrets file '{path}' is required but does not exist; create with `touch "
+"{path} && chmod 600 {path}`."
 

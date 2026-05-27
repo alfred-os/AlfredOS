@@ -57,3 +57,11 @@ GEMINI.md
 # .cursorrules
 # .cursor/
 # .clinerules
+
+# Secrets — never commit; see ADR-0012. The file-backed SecretBroker reads
+# from ~/.config/alfred/secrets.toml (host) or /etc/alfred/secrets.toml
+# (container); test fixtures that synthesise the production filename are
+# caught by the third `**` pattern even when nested under tests/.
+secrets.toml
+secrets.*.toml
+**/secrets.toml
