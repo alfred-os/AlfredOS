@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     operator_name: str = "operator"
     operator_language: str = "en-US"  # BCP-47; CLAUDE.md i18n rule #2 (Task 3.5 consumer)
 
+    # PR-B Phase 5: WorkingMemoryPool cap override. ``None`` defers to the
+    # pool's default policy (``max(50, active_user_count * 2)`` — see
+    # ``alfred.memory.working_pool.WorkingMemoryPool._cap``). Operators can
+    # pin a hard cap via ``ALFRED_WORKING_MEMORY_POOL_MAX`` when running on
+    # constrained hardware; the floor of 50 stops single-user installs from
+    # thrashing on the very first persona switch.
+    working_memory_pool_max: int | None = None
+
     @field_validator("deepseek_api_key")
     @classmethod
     def _reject_placeholder_key(cls, v: SecretStr) -> SecretStr:

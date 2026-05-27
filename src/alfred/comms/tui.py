@@ -1,4 +1,4 @@
-"""Slice-1 TUI built on Textual.
+"""Slice-1/2 TUI built on Textual.
 
 Scrolling conversation log + bottom input box. Enter submits through the
 orchestrator; response renders in the log. Slice-1 affordances:
@@ -7,13 +7,22 @@ orchestrator; response renders in the log. Slice-1 affordances:
   provider doesn't look like a frozen UI. Esc cancels the in-flight turn.
 - Errors render as a one-line message routed through t() — never a raw traceback.
 
+PR-B Phase 5: the TUI is now the adapter that owns the trust-tier tag and
+working-memory lifecycle for each turn. ``_run_turn`` calls
+``identity_resolver.get_operator()`` to find the requesting user (slice 2
+single-operator: that's always the operator), tags the raw text as ``T2``
+(``source="comms.tui.input"`` — the adapter boundary per CLAUDE.md hard
+rule #3), then acquires the pooled :class:`WorkingMemory` for
+``("alfred", user.slug)`` and releases it in a ``finally`` block so a
+crash inside the orchestrator can't leave the entry stuck in-use.
+
 Slice 2+ adds streaming UX.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -21,11 +30,53 @@ from textual.containers import Vertical
 from textual.widgets import Input, RichLog
 
 from alfred.i18n import t
+from alfred.security.tiers import T2, tag
+
+if TYPE_CHECKING:
+    from alfred.identity.models import User
+    from alfred.memory.working import WorkingMemory
+    from alfred.orchestrator.core import UserLike
+    from alfred.security.tiers import TaggedContent
 
 # Per-turn wall-clock cap. If the provider doesn't respond in this long, the TUI
 # cancels the turn and renders a friendly timeout message. Slice 2+ may make this
 # per-persona configurable.
 TURN_TIMEOUT_SECONDS = 90
+
+
+class _IdentityResolverLike(Protocol):
+    """Structural type the TUI needs from its identity resolver.
+
+    The TUI calls :meth:`get_operator` exactly once per turn (Slice-2
+    single-operator scope — every turn is "the operator typing"). The
+    resolver's in-process LRU + version-counter coupling means the call
+    is a memory read on the cache-hit path and a single DB round-trip
+    when the cache is invalidated by an ``alfred user *`` mutation in
+    the same process.
+
+    Return type is the concrete :class:`alfred.identity.models.User`
+    (matching the orchestrator's ``IdentityResolverLike`` Protocol in
+    ``alfred.orchestrator.core``) rather than a structural ``UserLike``
+    because pyright's variance check on SQLAlchemy-mapped columns
+    (``Mapped[str]`` vs ``str``) refuses the structural form. Slice-1's
+    audit-row writes already depend on the concrete row type, so the
+    extra coupling here is honest, not speculative.
+    """
+
+    def get_operator(self) -> User: ...
+
+
+class _WorkingPoolLike(Protocol):
+    """Structural type the TUI needs from its working-memory pool.
+
+    Slice 2+ adapter contract: the adapter ``acquire`` -- ``release`` is
+    what owns the WorkingMemory lifecycle for the turn, NOT the
+    orchestrator. The pool's per-key ``asyncio.Lock`` registry serialises
+    concurrent acquires of the same key on its side.
+    """
+
+    async def acquire(self, key: tuple[str, str]) -> WorkingMemory: ...
+    async def release(self, key: tuple[str, str], wm: WorkingMemory) -> None: ...
 
 
 class _OrchestratorLike(Protocol):
@@ -35,9 +86,22 @@ class _OrchestratorLike(Protocol):
     keeps the comms layer decoupled from the core wiring — exactly what slice 2's
     plugin-supervised comms adapter pattern needs. The test substitutes an
     AsyncMock that matches this shape.
+
+    Signature (PR-B Phase 5): ``user`` is the resolved requester; ``content``
+    is the already-T2-tagged input from this adapter; ``working_memory`` is
+    the pool-acquired buffer for this (persona, user.slug) pair. The
+    ``user`` parameter is the orchestrator's own ``UserLike`` Protocol so
+    a concrete :class:`Orchestrator` satisfies this Protocol without a
+    cast at the TUI's call site.
     """
 
-    async def handle_user_message(self, content: str, /) -> str: ...
+    async def handle_user_message(
+        self,
+        *,
+        user: UserLike,
+        content: TaggedContent[T2],
+        working_memory: WorkingMemory,
+    ) -> str: ...
 
 
 class AlfredTuiApp(App[None]):
@@ -59,9 +123,17 @@ class AlfredTuiApp(App[None]):
         Binding("escape", "cancel_turn", t("tui.binding.cancel_turn"), show=True),
     ]
 
-    def __init__(self, *, orchestrator: _OrchestratorLike) -> None:
+    def __init__(
+        self,
+        *,
+        orchestrator: _OrchestratorLike,
+        identity_resolver: _IdentityResolverLike,
+        working_pool: _WorkingPoolLike,
+    ) -> None:
         super().__init__()
         self._orchestrator = orchestrator
+        self._identity_resolver = identity_resolver
+        self._working_pool = working_pool
         self._in_flight: asyncio.Task[str] | None = None
         # Tracks whether the most recent CancelledError originated from the
         # user pressing Esc (``action_cancel_turn``). When False, a
@@ -136,7 +208,42 @@ class AlfredTuiApp(App[None]):
         log.write(f"[bold green]{t('tui.label_alfred')}[/]: {response}")
 
     async def _run_turn(self, text: str) -> str:
-        return await self._orchestrator.handle_user_message(text)
+        """Tag the input as T2, acquire the per-user buffer, dispatch the turn.
+
+        The TUI is the adapter at the security boundary per CLAUDE.md hard
+        rule #3 — every function that ingests external content tags it at
+        the boundary. ``source="comms.tui.input"`` is the audit-traceable
+        provenance string that lets a future DLP / canary trip name the
+        adapter that admitted the content.
+
+        The pool ``acquire`` / ``release`` is a try/finally because the
+        orchestrator may raise (BudgetError, provider crash, cancellation)
+        and a leaked ``_in_use`` entry would block the pool's LRU trim
+        from ever evicting it. ``release`` is a no-op on a pool entry
+        that was force-evicted under us (see
+        :meth:`WorkingMemoryPool.release` docstring), so it's safe to
+        call unconditionally in the finally block.
+        """
+        user = self._identity_resolver.get_operator()
+        content = tag(T2, text, source="comms.tui.input")
+        key = ("alfred", user.slug)
+        wm = await self._working_pool.acquire(key)
+        try:
+            # ``user`` is a real ``alfred.identity.models.User`` ORM
+            # instance. It satisfies the orchestrator's ``UserLike``
+            # Protocol structurally on mypy (with the SQLAlchemy plugin
+            # that unwraps ``Mapped[str]`` → ``str``) but pyright's
+            # standard typing-mode treats ``Mapped[str]`` as a distinct
+            # descriptor type and refuses the assignment. The cast is the
+            # documented escape hatch — see ADR-0007 on the pyright /
+            # SQLAlchemy interop trade-off.
+            return await self._orchestrator.handle_user_message(
+                user=cast("UserLike", user),
+                content=content,
+                working_memory=wm,
+            )
+        finally:
+            await self._working_pool.release(key, wm)
 
     async def action_cancel_turn(self) -> None:
         """Esc: cancel the in-flight turn if any.
