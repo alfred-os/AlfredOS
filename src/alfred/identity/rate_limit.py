@@ -292,8 +292,17 @@ class InProcessTokenBucketRateLimiter:
         Called from CLI surfaces on authorization changes (e.g.
         ``alfred user set --authorization standard``) so the previous
         tier's bucket doesn't leak into the new tier's policy.
+
+        Unknown ``user_id`` is a no-op — we DO NOT call ``_get_lock``
+        because that would create a fresh registry entry for every
+        unknown id, letting a script that resets a misspelled id in
+        a loop grow ``_locks`` unboundedly. The registry is consulted
+        once under ``_registry_lock``; if there's no entry we return.
         """
-        lock = await self._get_lock(user_id)
+        async with self._registry_lock:
+            lock = self._locks.get(user_id)
+        if lock is None:
+            return
         async with lock:
             self._buckets.pop(user_id, None)
 

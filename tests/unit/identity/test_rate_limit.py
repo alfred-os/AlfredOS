@@ -238,6 +238,25 @@ async def test_reset_clears_bucket() -> None:
     assert await limiter.allow(user) is True
 
 
+@pytest.mark.asyncio
+async def test_reset_unknown_user_does_not_leak_lock_registry() -> None:
+    """Resetting unknown ids must not create lock-registry entries.
+
+    Regression: the original ``reset()`` called ``_get_lock(user_id)``
+    unconditionally, which created a fresh ``asyncio.Lock`` entry for
+    every unknown id. A script that resets a misspelled or rotated id in
+    a loop would grow ``_locks`` unboundedly. ``reset()`` must consult
+    the registry once and return without mutating it when the id is
+    unknown.
+    """
+    limiter = InProcessTokenBucketRateLimiter()
+    for i in range(50):
+        await limiter.reset(f"never-seen-{i}")
+    # Access via the private attribute is deliberate — this asserts the
+    # invariant that the public surface must not leak internal state.
+    assert len(limiter._locks) == 0
+
+
 # ---------- Defense in depth ----------
 
 
