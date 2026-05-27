@@ -106,6 +106,50 @@ msgstr "model"
 msgid "cli.audit.log.value.unknown"
 msgstr "<unknown>"
 
+#: src/alfred/cli/cost_cmd.py:60
+msgid "cli.cost.help.group"
+msgstr "Aggregated spend reports from the audit log."
+
+#: src/alfred/cli/cost_cmd.py:70
+msgid "cli.cost.help.report.short"
+msgstr "Grouped spend report over the given window."
+
+#: src/alfred/cli/cost_cmd.py:74
+msgid "cli.cost.flag.since.short"
+msgstr "Time window (e.g. 24h, 7d, 30d). Default 7d."
+
+#: src/alfred/cli/cost_cmd.py:78
+msgid "cli.cost.flag.by.short"
+msgstr "Group by 'persona' (default) or 'user'."
+
+#: src/alfred/cli/cost_cmd.py:99
+msgid "cli.cost.report.value.unknown"
+msgstr "<unknown>"
+
+#: src/alfred/cli/cost_cmd.py:137
+msgid "cli.cost.report.empty_hint"
+msgstr "No billable activity in the window."
+
+#: src/alfred/cli/cost_cmd.py:149
+msgid "cli.cost.report.column.persona"
+msgstr "persona"
+
+#: src/alfred/cli/cost_cmd.py:151
+msgid "cli.cost.report.column.user"
+msgstr "user"
+
+#: src/alfred/cli/cost_cmd.py:153
+msgid "cli.cost.report.column.turns"
+msgstr "turns"
+
+#: src/alfred/cli/cost_cmd.py:154
+msgid "cli.cost.report.column.total_cost_usd"
+msgstr "total_cost_usd"
+
+#: src/alfred/cli/cost_cmd.py:155
+msgid "cli.cost.report.column.avg_cost_usd_per_turn"
+msgstr "avg_cost_usd_per_turn"
+
 # PR D2 — CLI help and verify-event narration.
 #: src/alfred/cli/discord_cmd.py:64
 msgid "cli.discord.help.group"
@@ -130,53 +174,53 @@ msgstr ""
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:207
+#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:209
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:208
+#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:210
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:229
+#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:231
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/cli/main.py:78
+#: src/alfred/cli/main.py:79
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:144
+#: src/alfred/cli/main.py:146
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:147
+#: src/alfred/cli/main.py:149
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:148
+#: src/alfred/cli/main.py:150
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:149
+#: src/alfred/cli/main.py:151
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:150
+#: src/alfred/cli/main.py:152
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:151
+#: src/alfred/cli/main.py:153
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:152
+#: src/alfred/cli/main.py:154
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:153
+#: src/alfred/cli/main.py:155
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
