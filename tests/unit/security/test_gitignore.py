@@ -14,15 +14,19 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GITIGNORE = _REPO_ROOT / ".gitignore"
 
-_REQUIRED_PATTERNS = ("secrets.toml", "secrets.*.toml", "**/secrets.toml")
-
 
 def test_gitignore_contains_secrets_patterns() -> None:
+    """Patterns must appear in order under the ``# Secrets`` heading.
+
+    A single multi-line regex enforces both presence AND grouping — checking
+    each pattern independently of the heading would let a future re-shuffle
+    move the patterns out from under the section comment without failing.
+    """
     text = _GITIGNORE.read_text()
-    for pattern in _REQUIRED_PATTERNS:
-        assert pattern in text, f"missing pattern in .gitignore: {pattern}"
-    # Must sit under a "# Secrets" heading so future re-shuffles keep them grouped.
-    assert re.search(r"^# Secrets", text, flags=re.MULTILINE)
+    assert re.search(
+        r"(?ms)^# Secrets.*?^secrets\.toml$.*?^secrets\.\*\.toml$.*?^\*\*/secrets\.toml$",
+        text,
+    ), "secrets patterns must appear in order beneath '# Secrets' heading"
 
 
 def test_i18n_three_secrets_keys_registered() -> None:

@@ -32,13 +32,19 @@ def _env_keys_for_supported_secrets() -> frozenset[str]:
     return frozenset(f"ALFRED_{name.upper()}" for name in SUPPORTED_SECRETS)
 
 
-def _is_os_environ_attr(node: ast.expr) -> bool:
-    """True iff ``node`` is the AST shape for ``os.environ``."""
+def _is_os_environ_attr(node: ast.expr, os_aliases: set[str]) -> bool:
+    """True iff ``node`` is the AST shape for ``<os-alias>.environ``.
+
+    ``os_aliases`` carries every local name bound to the ``os`` module — the
+    default ``"os"`` plus anything from ``import os as foo`` rebindings. This
+    closes the bypass where a contributor could rename ``os`` on import and
+    sidestep a naive ``node.value.id == "os"`` check.
+    """
     return (
         isinstance(node, ast.Attribute)
         and node.attr == "environ"
         and isinstance(node.value, ast.Name)
-        and node.value.id == "os"
+        and node.value.id in os_aliases
     )
 
 
@@ -61,7 +67,18 @@ class _EnvScanner(ast.NodeVisitor):
         self.file = file
         self.banned_keys = banned_keys
         self.violations: list[ImportViolation] = []
+        # Local names bound to the ``os`` module. Seeded with the canonical
+        # name; ``import os as foo`` rebindings extend it.
+        self.os_aliases: set[str] = {"os"}
+        # Local names bound to ``os.environ`` directly via
+        # ``from os import environ [as <alias>]``.
         self.env_aliases: set[str] = set()
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.name == "os":
+                self.os_aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module == "os":
@@ -84,7 +101,9 @@ class _EnvScanner(ast.NodeVisitor):
             )
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
-        if _is_os_environ_attr(node.value) or _is_bare_environ_name(node.value, self.env_aliases):
+        if _is_os_environ_attr(node.value, self.os_aliases) or _is_bare_environ_name(
+            node.value, self.env_aliases
+        ):
             key = _literal_str(node.slice)
             self._record_if_banned(key, node.lineno)
         self.generic_visit(node)
@@ -94,7 +113,8 @@ class _EnvScanner(ast.NodeVisitor):
         if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
             target = node.func.value
             if (
-                _is_os_environ_attr(target) or _is_bare_environ_name(target, self.env_aliases)
+                _is_os_environ_attr(target, self.os_aliases)
+                or _is_bare_environ_name(target, self.env_aliases)
             ) and node.args:
                 key = _literal_str(node.args[0])
                 self._record_if_banned(key, node.lineno)
@@ -154,6 +174,33 @@ def test_scanner_detects_environ_get_call(tmp_path: Path) -> None:
 def test_scanner_detects_bare_environ_after_from_os_import(tmp_path: Path) -> None:
     fixture = tmp_path / "violator3.py"
     fixture.write_text('from os import environ\ntoken = environ["ALFRED_ANTHROPIC_API_KEY"]\n')
+    banned = _env_keys_for_supported_secrets()
+    violations = _scan_file(fixture, banned)
+    assert len(violations) == 1
+
+
+def test_scanner_detects_aliased_os_import(tmp_path: Path) -> None:
+    """``import os as <alias>`` must not bypass the env-read scan.
+
+    Without alias tracking the matcher only catches ``os.environ`` literally;
+    a contributor could rename the import and slip past it. The scanner walks
+    ``Import`` nodes and binds every alias back to the ``os`` module.
+    """
+    fixture = tmp_path / "violator4.py"
+    fixture.write_text('import os as _os\ntoken = _os.environ["ALFRED_ANTHROPIC_API_KEY"]\n')
+    banned = _env_keys_for_supported_secrets()
+    violations = _scan_file(fixture, banned)
+    assert len(violations) == 1
+    assert violations[0].lineno == 2
+    assert "ANTHROPIC" in violations[0].symbol
+
+
+def test_scanner_detects_aliased_environ_from_import(tmp_path: Path) -> None:
+    """``from os import environ as <alias>`` is also caught."""
+    fixture = tmp_path / "violator5.py"
+    fixture.write_text(
+        'from os import environ as _env\ntoken = _env.get("ALFRED_ANTHROPIC_API_KEY")\n'
+    )
     banned = _env_keys_for_supported_secrets()
     violations = _scan_file(fixture, banned)
     assert len(violations) == 1
