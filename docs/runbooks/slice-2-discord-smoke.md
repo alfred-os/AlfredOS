@@ -67,7 +67,7 @@ discord_bot_token = "MTI..."  # paste the token from Step 1.4
 ```
 
 Save the file. The
-[`SecretBroker`](../subsystems/comms.md#outbound-dlp) re-validates the
+[`SecretBroker`](../glossary.md#secretbroker) re-validates the
 file's permissions every read; if `chmod` flipped during editing, fix it
 with `chmod 0600 ~/.config/alfred/secrets.toml`. The broker fails closed
 on group/world-readable bits — the verify step in Step 5 surfaces the
