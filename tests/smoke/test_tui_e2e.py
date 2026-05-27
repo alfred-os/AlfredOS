@@ -469,6 +469,13 @@ async def test_tui_rehydrate_cadence_across_invocations(
             invocation. If the rehydrate fired, the prior user turn ("...
             artichoke ...") MUST be in this list.
             """
+            # Defensive: surface a clear failure if the router request shape
+            # ever drifts (e.g. dict, renamed attribute) rather than letting a
+            # bare `AttributeError` swallow the diagnosis.
+            assert hasattr(request, "messages"), (
+                "router request shape changed — expected `.messages` attribute; "
+                "update this test to match the new router contract"
+            )
             captured_messages.append(request.messages)
             return CompletionResponse(
                 content="The word was artichoke.",
