@@ -39,13 +39,13 @@ from structlog.types import EventDict
 
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetGuard
-from alfred.comms.tui import AlfredTuiApp
+from alfred.comms.adapter import build_tui_adapter
 from alfred.config.settings import Settings, SettingsError
 from alfred.i18n import set_language, t
 from alfred.identity import (
     IdentityResolver,
     IdentityVersionCounter,
-    NullRateLimiter,
+    InProcessTokenBucketRateLimiter,
     Platform,
 )
 from alfred.memory.db import build_session_scope, healthcheck
@@ -215,11 +215,13 @@ def _install_identity_factories(settings: Settings) -> IdentityResolver:
     resolver = IdentityResolver(
         session_factory=sync_factory,
         version_counter=version_counter,
-        # Slice 2 ships the RateLimiter Protocol; the in-process token bucket
-        # lands in PR D1. The null double is correct for Slice-1+2 single-
-        # operator scope — the production limiter enforces READ_ONLY refusal
-        # which doesn't apply to an operator at all.
-        rate_limiter=NullRateLimiter(),
+        # PR D1: the in-process token-bucket limiter is the production
+        # implementation. Operators have unlimited per-tier defaults, so
+        # for Slice-2 single-operator deployments this is functionally
+        # equivalent to the null double — but the READ_ONLY refusal path
+        # is now wired and the path-shape parity matches PR D2's Discord
+        # adapter.
+        rate_limiter=InProcessTokenBucketRateLimiter(),
     )
     # PR-B Phase 1: pin the shared counter onto the resolver so call sites
     # that need both (e.g. the BudgetGuard wiring in ``_chat_main``) can
@@ -478,11 +480,30 @@ async def _chat_main() -> None:
         router=router,
         budget=budget,
     )
-    await AlfredTuiApp(
+    # PR D1: construct the TuiAdapter Protocol seam rather than the
+    # AlfredTuiApp directly so the CLI consumes only the public
+    # ``alfred.comms.adapter.CommsAdapter`` surface. The adapter holds
+    # the canonical Slice-2 inject set; PR D2's Discord adapter takes
+    # the same set so the CLI bootstrap shape is unchanged when D2
+    # ships. The ``InProcessTokenBucketRateLimiter`` here is a separate
+    # instance from the one the resolver holds — both are operator-
+    # unlimited in Slice-2 single-operator mode, so the divergence is
+    # functionally invisible; Slice-3+ unifies under the supervisor.
+    outbound_dlp = OutboundDlp(broker=broker, audit=_structlog_audit_sink)
+    rate_limiter = InProcessTokenBucketRateLimiter()
+    adapter = build_tui_adapter(
         orchestrator=orchestrator,
         identity_resolver=resolver,
+        outbound_dlp=outbound_dlp,
+        rate_limiter=rate_limiter,
+        broker=broker,
         working_pool=working_pool,
-    ).run_async()
+    )
+    await adapter.start()
+    try:
+        await adapter.run()
+    finally:
+        await adapter.stop()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entry

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 10:06+0100\n"
+"POT-Creation-Date: 2026-05-27 11:15+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -14,65 +14,65 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: src/alfred/cli/main.py:62
+#: src/alfred/cli/main.py:64
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:123
+#: src/alfred/cli/main.py:125
 msgid "error.placeholder_api_key"
 msgstr ""
 "ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
 "'sk-...' with a real DeepSeek API key."
 
-#: src/alfred/cli/main.py:125
+#: src/alfred/cli/main.py:127
 msgid "error.config_invalid"
 msgstr "configuration is invalid: {detail}"
 
-#: src/alfred/cli/main.py:126
+#: src/alfred/cli/main.py:128
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/main.py:330
+#: src/alfred/cli/main.py:354
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:333
+#: src/alfred/cli/main.py:357
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:334
+#: src/alfred/cli/main.py:358
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:335
+#: src/alfred/cli/main.py:359
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:336
+#: src/alfred/cli/main.py:360
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:337
+#: src/alfred/cli/main.py:361
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:338
+#: src/alfred/cli/main.py:362
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:339
+#: src/alfred/cli/main.py:363
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:393
+#: src/alfred/cli/main.py:417
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/main.py:394
+#: src/alfred/cli/main.py:418
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/main.py:415
+#: src/alfred/cli/main.py:439
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "

@@ -20,7 +20,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from alfred.comms.tui import _IdentityResolverLike, _OrchestratorLike, _WorkingPoolLike
+    from alfred.identity.rate_limit import RateLimiter
+    from alfred.security.dlp import OutboundDlp
+    from alfred.security.secrets import SecretBroker
 
 
 @dataclass(frozen=True)
@@ -101,3 +107,39 @@ class CommsAdapter(Protocol):
         adapter is mid-reconnect when the snapshot is taken.
         """
         raise NotImplementedError
+
+
+def build_tui_adapter(
+    *,
+    orchestrator: _OrchestratorLike,
+    identity_resolver: _IdentityResolverLike,
+    outbound_dlp: OutboundDlp,
+    rate_limiter: RateLimiter,
+    broker: SecretBroker,
+    working_pool: _WorkingPoolLike,
+) -> CommsAdapter:
+    """Factory for the Slice-2 TUI adapter.
+
+    Returns a :class:`CommsAdapter` Protocol — the concrete class
+    ``TuiAdapter`` is an implementation detail intentionally NOT
+    re-exported from this module. The CLI bootstrap calls this factory
+    rather than ``TuiAdapter(...)`` directly so the adapter-import
+    boundary test stays clean: every consumer reaches the concrete class
+    indirectly through this allowlisted module.
+
+    PR D2 ships ``build_discord_adapter(...)`` alongside this factory
+    for the Discord adapter; same shape, same return type.
+    """
+    # Local import keeps the heavy ``alfred.comms.tui_adapter`` (and via
+    # it, Textual) off the import path of pure consumers like
+    # ``alfred status`` that never construct a TUI.
+    from alfred.comms.tui_adapter import TuiAdapter
+
+    return TuiAdapter(
+        orchestrator=orchestrator,
+        identity_resolver=identity_resolver,
+        outbound_dlp=outbound_dlp,
+        rate_limiter=rate_limiter,
+        broker=broker,
+        working_pool=working_pool,
+    )
