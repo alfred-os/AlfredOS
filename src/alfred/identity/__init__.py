@@ -28,6 +28,13 @@ from alfred.identity.models import (
     PlatformIdentity,
     User,
 )
+from alfred.identity.rate_limit import (
+    RateLimiter,
+    RateLimiterHealth,
+)
+from alfred.identity.rate_limit import (
+    _NullRateLimiter as _NullRateLimiter,  # test-only re-export; intentionally absent from __all__
+)
 from alfred.identity.slug import derive_slug
 from alfred.identity.version_counter import IdentityVersionCounter
 
@@ -41,6 +48,8 @@ __all__ = [
     "OperatorSlugCollisionError",
     "Platform",
     "PlatformIdentity",
+    "RateLimiter",
+    "RateLimiterHealth",
     "User",
     "derive_slug",
 ]
