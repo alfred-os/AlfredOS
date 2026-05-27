@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 13:31+0100\n"
+"POT-Creation-Date: 2026-05-27 14:12+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -13,6 +13,20 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
+
+#: src/alfred/cli/_bootstrap.py:98
+msgid "error.placeholder_api_key"
+msgstr ""
+"ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
+"'sk-...' with a real DeepSeek API key."
+
+#: src/alfred/cli/_bootstrap.py:100
+msgid "error.config_invalid"
+msgstr "configuration is invalid: {detail}"
+
+#: src/alfred/cli/_bootstrap.py:101
+msgid "hint.copy_env_example"
+msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
 # PR D2 — CLI help and verify-event narration.
 #: src/alfred/cli/discord_cmd.py:64
@@ -27,106 +41,92 @@ msgstr "Probe the Discord gateway for 30s and exit with a typed code."
 msgid "cli.discord.help.verify.timeout"
 msgstr "Seconds to wait for on_ready before timing out (default 30)."
 
-#: src/alfred/cli/discord_cmd.py:148
+#: src/alfred/cli/discord_cmd.py:150
 msgid "cli.discord.verify.config_failed.secrets_unreadable"
 msgstr "Discord verify failed: secrets file unreadable. Detail: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:154
+#: src/alfred/cli/discord_cmd.py:156
 msgid "cli.discord.verify.config_failed.bad_token"
 msgstr ""
 "Discord verify failed: bot token rejected. Confirm "
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:166 src/alfred/cli/main.py:487
+#: src/alfred/cli/discord_cmd.py:172 src/alfred/cli/main.py:196
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:167 src/alfred/cli/main.py:488
+#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:197
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/main.py:64
+#: src/alfred/cli/main.py:74
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:132
-msgid "error.placeholder_api_key"
-msgstr ""
-"ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
-"'sk-...' with a real DeepSeek API key."
-
-#: src/alfred/cli/main.py:134
-msgid "error.config_invalid"
-msgstr "configuration is invalid: {detail}"
-
-#: src/alfred/cli/main.py:135
-msgid "hint.copy_env_example"
-msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
-
-#: src/alfred/cli/main.py:424
+#: src/alfred/cli/main.py:133
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:427
+#: src/alfred/cli/main.py:136
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:428
+#: src/alfred/cli/main.py:137
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:429
+#: src/alfred/cli/main.py:138
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:430
+#: src/alfred/cli/main.py:139
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:431
+#: src/alfred/cli/main.py:140
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:432
+#: src/alfred/cli/main.py:141
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:433
+#: src/alfred/cli/main.py:142
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:509
+#: src/alfred/cli/main.py:218
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/comms/discord.py:112
+#: src/alfred/comms/discord.py:183
 msgid "discord.embed_unsupported"
 msgstr ""
 "I can only read text DMs in Slice 2. Embeds, attachments, polls, "
 "components, stickers, and references are refused."
 
-#: src/alfred/comms/discord.py:113
+#: src/alfred/comms/discord.py:184
 msgid "discord.rate_limited"
 msgstr "You're sending messages faster than I can keep up. Try again in a moment."
 
-#: src/alfred/comms/discord.py:617 src/alfred/comms/discord.py:780
-#: src/alfred/comms/discord.py:786 src/alfred/comms/discord.py:916
-#: src/alfred/comms/discord.py:936 src/alfred/comms/discord.py:963
+#: src/alfred/comms/discord.py:696 src/alfred/comms/discord.py:859
+#: src/alfred/comms/discord.py:865 src/alfred/comms/discord.py:995
+#: src/alfred/comms/discord.py:1015 src/alfred/comms/discord.py:1042
 msgid "discord.alfred_error"
 msgstr "Something went wrong on my end. The operator's audit log has the details."
 
 # PR D2 — Discord adapter i18n catalog (spec §3 lines 514-520).
-#: src/alfred/comms/discord.py:689
+#: src/alfred/comms/discord.py:768
 msgid "discord.unknown_user_first"
 msgstr ""
 "I don't recognise this Discord ID yet (snowflake: `{snowflake}`). Ask "
 "your operator to run: `alfred user add --name <YourName> --discord-id "
 "{snowflake}`. The operator's audit log shows this DM."
 
-#: src/alfred/comms/discord.py:768
+#: src/alfred/comms/discord.py:847
 msgid "discord.budget_blocked"
 msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
 
