@@ -37,6 +37,11 @@ class Episode(Base):
     # drops the historical `ix_episodes_user_id` accordingly.
     user_id: Mapped[str] = mapped_column(String(64))
     persona: Mapped[str] = mapped_column(String(64), default="alfred")
+    # Slice-2 per-row attribution (migration 0004). Nullable to keep pre-Slice-2
+    # rows valid; new writes set it to the active persona's id (``"alfred"`` in
+    # Slice 1+2). Distinct from ``persona`` so the existing downstream readers
+    # of that column keep working untouched.
+    persona_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     trust_tier: Mapped[str] = mapped_column(String(4))  # T0..T3
@@ -81,6 +86,11 @@ class AuditEntry(Base):
     event: Mapped[str] = mapped_column(String(64))  # e.g. "provider.call", "memory.write"
     actor_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     actor_persona: Mapped[str] = mapped_column(String(64), default="alfred")
+    # Slice-2 per-row attribution (migration 0004). Nullable; new writes set
+    # it to the active persona's id (``"alfred"`` for Slice 1+2). Kept
+    # distinct from ``actor_persona`` so existing downstream readers of that
+    # column stay untouched.
+    persona_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     subject: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     trust_tier_of_trigger: Mapped[str] = mapped_column(String(4))
     result: Mapped[str] = mapped_column(String(32))
