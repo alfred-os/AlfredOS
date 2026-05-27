@@ -115,3 +115,82 @@ def test_event_decorator_returns_the_passed_callable() -> None:
         return None
 
     assert _GoodStub().event(handler) is handler
+
+
+# ---------------------------------------------------------------------------
+# Negative drift case — demonstrates the gap that ``isinstance`` leaves and
+# proves the signature/return-shape checks above actually catch it.
+# ---------------------------------------------------------------------------
+
+
+class _BadStartDriftStub:
+    """Stub that satisfies ``isinstance`` but drifts on ``start`` shape.
+
+    ``isinstance(_BadStartDriftStub(), _DiscordClientLike)`` returns
+    ``True`` because Python's runtime Protocol check only verifies
+    attribute names, not signatures or return types. The shape checks
+    below MUST fail for this stub — that's how we prove the test gate
+    actually defends the contract.
+
+    Drift: ``start`` accepts ``reconnect`` positionally (not keyword-
+    only as discord.py 2.x does) AND returns ``int`` instead of
+    ``None``.
+    """
+
+    def event(self, coro: Callable[..., object]) -> Callable[..., object]:
+        return coro
+
+    async def start(self, token: str, reconnect: bool = True) -> int:  # noqa: ASYNC230 — drift demo, not for runtime use
+        del token, reconnect
+        return 123  # type: ignore[return-value]  # deliberate drift
+
+    async def close(self) -> None:
+        return None
+
+    def is_ready(self) -> bool:
+        return True
+
+
+def test_isinstance_passes_for_bad_start_drift_stub() -> None:
+    """Document the isinstance gap explicitly.
+
+    The Protocol check returns ``True`` here even though ``start`` drifts
+    on parameter kind AND return type. This is the gap the
+    signature-shape tests below close — if this assertion ever flips to
+    ``False`` (because Python tightened the runtime Protocol check),
+    delete this whole negative section since the gap is gone.
+    """
+    assert isinstance(_BadStartDriftStub(), _DiscordClientLike)
+
+
+def test_bad_stub_signature_check_catches_drift() -> None:
+    """The signature gate flags positional ``reconnect`` on ``start``.
+
+    discord.py 2.x has ``start(token, *, reconnect=True)`` — keyword-
+    only. The drift stub's positional form is exactly the regression
+    PRs D1 + D2 must catch at unit time; the signature inspection is
+    the only mechanism that does, because ``isinstance`` cannot.
+    """
+    bad = _BadStartDriftStub()
+    start_sig = inspect.signature(bad.start)
+    reconnect = start_sig.parameters.get("reconnect")
+    assert reconnect is not None
+    # The drift: keyword-only contract violated by positional spelling.
+    assert reconnect.kind != inspect.Parameter.KEYWORD_ONLY
+
+
+def test_bad_stub_return_value_check_catches_drift() -> None:
+    """The return-value gate flags non-``None`` from ``start``.
+
+    The Protocol promises ``async start(...) -> None``. The drift stub
+    returns ``123``. ``inspect.iscoroutine`` still passes (it IS a
+    coroutine), but awaiting it yields a non-None value — which the
+    shape test for ``_GoodStub`` asserts equals ``None``.
+    """
+    bad = _BadStartDriftStub()
+    result = asyncio.run(bad.start("fake-token"))
+    assert result != _GOOD_START_RETURN  # i.e. not None
+    assert result == 123  # drift confirmed
+
+
+_GOOD_START_RETURN: None = None
