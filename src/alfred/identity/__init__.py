@@ -29,11 +29,13 @@ from alfred.identity.models import (
     User,
 )
 from alfred.identity.slug import derive_slug
+from alfred.identity.version_counter import IdentityVersionCounter
 
 __all__ = [
     "Authorization",
     "IdentityError",
     "IdentityResolutionError",
+    "IdentityVersionCounter",
     "LastOperatorRemovalRefusedError",
     "OperatorAlreadyExistsError",
     "OperatorSlugCollisionError",
