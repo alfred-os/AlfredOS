@@ -40,8 +40,6 @@ from alfred.cli._bootstrap import (
     configure_logging,
     install_identity_factories_for_settings,
     load_settings_or_die,
-    structlog_audit_sink,
-    sync_db_url,
 )
 from alfred.cli.discord_cmd import discord_app
 from alfred.comms.adapter import build_tui_adapter
@@ -62,14 +60,19 @@ from alfred.security.dlp import OutboundDlp
 # ``_build_adapter_dlp_audit_sink``). Pre-D2 these lived inline here;
 # they were extracted into :mod:`alfred.cli._bootstrap` to break the
 # ``main`` <-> ``discord_cmd`` import cycle.
+#
+# Only the aliases this module actually references at runtime — or that
+# tests import by underscore name — are kept. ``structlog_audit_sink``
+# and ``sync_db_url`` previously had stubs here too; they were dead
+# (only consumed inside ``_bootstrap``) and CodeQL flagged them as
+# unused globals. Callers that want them import from ``_bootstrap``
+# directly.
 _load_settings_or_die = load_settings_or_die
 _build_broker = build_broker
 _build_router = build_router
 _configure_logging = configure_logging
 _install_identity_factories = install_identity_factories_for_settings
-_structlog_audit_sink = structlog_audit_sink
 _build_adapter_dlp_audit_sink = build_adapter_dlp_audit_sink
-_sync_db_url = sync_db_url
 
 app = typer.Typer(help=t("cli.help.root"), no_args_is_help=True)
 
