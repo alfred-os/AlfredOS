@@ -165,10 +165,26 @@ def _sync_db_url(settings: Settings) -> str:
     async driver (``postgresql+asyncpg``). :class:`IdentityResolver` consumes
     a sync ``sessionmaker[Session]`` deliberately — its callers from async
     paths wrap calls in :func:`asyncio.to_thread` (see resolver docstring).
-    Translate the async DSN to ``postgresql+psycopg`` for the sync engine so
-    the operator never has to configure two URLs.
+    Translate to ``postgresql+psycopg`` for the sync engine so the operator
+    never has to configure two URLs.
+
+    Handled scheme shapes:
+
+    * ``postgresql+asyncpg://...`` — default Slice-1 settings shape; rewrite
+      the driver token in place.
+    * ``postgresql://...`` — no driver token; explicitly insert ``+psycopg``
+      so SQLAlchemy doesn't fall back to its default driver (psycopg2),
+      which is only a dev-tooling dependency on this project.
+    * Anything else (``postgresql+psycopg://``, ``postgresql+pg8000://``,
+      ...) — pass through. If the operator chose a sync-incompatible driver,
+      SQLAlchemy itself will surface a clear engine-construction error.
     """
-    return settings.database_url.unicode_string().replace("+asyncpg", "+psycopg")
+    url = settings.database_url.unicode_string()
+    if "+asyncpg" in url:
+        return url.replace("+asyncpg", "+psycopg")
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
 
 
 def _install_identity_factories(settings: Settings) -> IdentityResolver:
