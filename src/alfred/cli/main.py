@@ -1,10 +1,10 @@
 """AlfredOS CLI entry point.
 
-This is the single bootstrap that constructs the full slice-1 graph:
-``Settings`` → ``SecretBroker`` → ``ProviderRouter`` → ``BudgetGuard``
-→ ``WorkingMemory`` → ``Orchestrator`` → ``AlfredTuiApp``. The CLI is the
-imperative shell; every subsystem below is a pure-ish core that gets its
-dependencies passed in.
+This is the single bootstrap that constructs the full slice-1/2 graph:
+``Settings`` → ``SecretBroker`` → ``ProviderRouter`` → ``IdentityResolver``
+→ ``BudgetGuard`` → ``WorkingMemoryPool`` → ``Orchestrator`` →
+``AlfredTuiApp``. The CLI is the imperative shell; every subsystem below
+is a pure-ish core that gets its dependencies passed in.
 
 The ``status`` command exits zero after printing a short health summary so
 operators can sanity-check their `.env` before launching the TUI. The
@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import structlog
 import typer
@@ -49,10 +49,9 @@ from alfred.identity import (
 )
 from alfred.memory.db import build_session_scope, healthcheck
 from alfred.memory.episodic import EpisodicMemory
-from alfred.memory.working import WorkingMemory
+from alfred.memory.working_pool import WorkingMemoryPool
 from alfred.orchestrator.core import Orchestrator
 from alfred.providers.anthropic_native import AnthropicProvider
-from alfred.providers.base import Role
 from alfred.providers.deepseek import DeepSeekProvider
 from alfred.providers.router import ProviderRouter
 from alfred.security.secrets import SecretBroker
@@ -433,30 +432,35 @@ async def _chat_main() -> None:
         per_call_max_usd=settings.per_call_max_usd,
         version_counter=resolver.version_counter,  # type: ignore[attr-defined]  # reason: PR-B Phase 1 — counter promoted via ``_install_identity_factories``; Phase 5 makes it a typed property on IdentityResolver
     )
-    working = WorkingMemory()
 
-    # Rehydrate working memory from the most recent episodes so a restart
-    # doesn't lose conversational context. ``EpisodicMemory.recent`` returns
-    # oldest-first so iteration order matches prompt-assembly order. Episode
-    # rows store ``role`` as ``str`` while ``WorkingMemory.append`` wants the
-    # ``Role`` literal — only the orchestrator writes episodes, and it
-    # constrains the input to ``Role`` at write time, so the cast is honest
-    # at this boundary.
-    async with session_scope() as session:
-        episodic = EpisodicMemory(session=session)
-        recent = await episodic.recent(user_id=operator.slug, limit=20)
-        for ep in recent:
-            await working.append(role=cast(Role, ep.role), content=ep.content)
+    # PR-B Phase 5: pool replaces the slice-1 single ``WorkingMemory()`` +
+    # rehydrate-on-startup block. The pool is lazy: the very first
+    # ``acquire(("alfred", user.slug))`` from the TUI rehydrates the
+    # operator's buffer from episodic; subsequent acquires hit the cache.
+    # Slice-2 single-operator deployments only ever populate one entry so
+    # the LRU cap is effectively unused — ``active_user_count=lambda: 1``
+    # makes the floor-of-50 default visible (rather than scaling with a
+    # number that doesn't change). Operators can override via
+    # ``ALFRED_WORKING_MEMORY_POOL_MAX``; Slice 4+ replaces the lambda
+    # with a live count from the identity resolver.
+    working_pool = WorkingMemoryPool(
+        episodic_factory=lambda session: EpisodicMemory(session=session),
+        pool_session_scope=session_scope,
+        max_entries=settings.working_memory_pool_max,
+        active_user_count=lambda: 1,
+    )
 
     orchestrator = Orchestrator(
-        operator_name=operator.slug,
-        operator_language=operator.language,
+        identity_resolver=resolver,
         session_scope=session_scope,
-        working=working,
         router=router,
         budget=budget,
     )
-    await AlfredTuiApp(orchestrator=orchestrator).run_async()
+    await AlfredTuiApp(
+        orchestrator=orchestrator,
+        identity_resolver=resolver,
+        working_pool=working_pool,
+    ).run_async()
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entry
