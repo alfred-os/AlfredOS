@@ -29,11 +29,9 @@ from alfred.identity.models import (
     User,
 )
 from alfred.identity.rate_limit import (
+    NullRateLimiter,
     RateLimiter,
     RateLimiterHealth,
-)
-from alfred.identity.rate_limit import (
-    _NullRateLimiter as _NullRateLimiter,  # test-only re-export; intentionally absent from __all__
 )
 from alfred.identity.resolver import IdentityResolver
 from alfred.identity.slug import derive_slug
@@ -46,6 +44,7 @@ __all__ = [
     "IdentityResolver",
     "IdentityVersionCounter",
     "LastOperatorRemovalRefusedError",
+    "NullRateLimiter",
     "OperatorAlreadyExistsError",
     "OperatorSlugCollisionError",
     "Platform",

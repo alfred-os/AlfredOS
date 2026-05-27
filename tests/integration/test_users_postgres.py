@@ -50,8 +50,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from alfred.identity import (
     Authorization,
     IdentityVersionCounter,
+    NullRateLimiter,
     Platform,
-    _NullRateLimiter,
 )
 from alfred.identity.resolver import IdentityListener, IdentityResolver
 
@@ -323,7 +323,7 @@ async def test_listen_notify_round_trip(
     resolver = IdentityResolver(
         session_factory=factory,
         version_counter=IdentityVersionCounter(),  # separate from listener's counter
-        rate_limiter=_NullRateLimiter(),
+        rate_limiter=NullRateLimiter(),
     )
     resolver.add(display_name="Eve", authorization=Authorization.STANDARD)
     resolver.bind(user_slug="eve", platform=Platform.DISCORD, platform_id="666")

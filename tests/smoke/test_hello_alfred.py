@@ -45,8 +45,8 @@ from alfred.budget.guard import BudgetGuard
 from alfred.identity import (
     IdentityResolver,
     IdentityVersionCounter,
+    NullRateLimiter,
     Platform,
-    _NullRateLimiter,
 )
 from alfred.memory.models import AuditEntry, Episode
 from alfred.memory.working import WorkingMemory
@@ -106,7 +106,7 @@ async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatc
         resolver = IdentityResolver(
             session_factory=sync_factory,
             version_counter=IdentityVersionCounter(),
-            rate_limiter=_NullRateLimiter(),
+            rate_limiter=NullRateLimiter(),
         )
         operator = await asyncio.to_thread(resolver.resolve, Platform.TUI, "operator")
         assert operator is not None, (

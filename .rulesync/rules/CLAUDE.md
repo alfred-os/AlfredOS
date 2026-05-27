@@ -88,6 +88,7 @@ AlfredOS/
 | Inspect state | `alfred status`, `alfred audit log`, `alfred audit graph --since 24h` |
 | Inspect a user's memory | `alfred memory show <user>` |
 | Cost report | `alfred cost report --since 7d --by persona` |
+| Manage users | `alfred user add|list|show|set|remove|bind|unbind` (see ADR-0010) |
 
 If a command does not yet exist, that's a signal it needs to be implemented — flag it.
 

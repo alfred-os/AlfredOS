@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -56,6 +57,8 @@ from alfred.identity.errors import (
     IdentityResolutionError,
     LastOperatorRemovalRefusedError,
     OperatorAlreadyExistsError,
+    PlatformIdInUseError,
+    UserAlreadyBoundError,
 )
 from alfred.identity.models import Authorization, Platform, PlatformIdentity, User
 from alfred.identity.slug import derive_slug
@@ -301,10 +304,7 @@ class IdentityResolver:
                     )
                 ).scalar_one_or_none()
                 if existing is not None:
-                    raise IdentityResolutionError(
-                        f"User '{user_slug}' is already bound on platform '{platform.value}'. "
-                        "Unbind the existing binding first."
-                    )
+                    raise UserAlreadyBoundError(slug=user_slug, platform=platform.value)
                 identity = PlatformIdentity(
                     user_id=user.id,
                     platform=platform.value,
@@ -315,14 +315,43 @@ class IdentityResolver:
                 self._notify(session, event="bind", slug=user_slug)
         except IntegrityError as exc:
             # The (platform, platform_id) global UNIQUE is enforced by the
-            # DB on both SQLite and Postgres. Wrap so callers get our typed
-            # error rather than a SQLAlchemy exception.
-            raise IdentityResolutionError(
-                f"Platform binding ({platform.value}, {platform_id}) is already in use."
+            # DB on both SQLite and Postgres. The colliding binding's owner
+            # is what the operator needs to act on next (e.g. ``alfred user
+            # unbind <existing_slug>``), so look it up in a fresh session
+            # before raising the typed error. The lookup runs OUTSIDE the
+            # failed transaction (which has rolled back by now), so it sees
+            # the durable state.
+            existing_slug = self._slug_for_binding(platform, platform_id) or "?"
+            raise PlatformIdInUseError(
+                platform=platform.value,
+                platform_id=platform_id,
+                existing_slug=existing_slug,
             ) from exc
 
         self._counter.bump()
         return identity
+
+    def _slug_for_binding(self, platform: Platform, platform_id: str) -> str | None:
+        """Return the slug of the user who owns the given live binding, if any.
+
+        Used by :meth:`bind`'s ``IntegrityError`` arm to enrich
+        :class:`PlatformIdInUseError` with the colliding user's slug so the
+        CLI can name them in the operator-facing error message. Runs in its
+        own session so it can be called after the bind transaction has
+        rolled back. Returns ``None`` if the binding genuinely no longer
+        exists (the integrity error raced with an unbind), letting the
+        caller render a fallback placeholder.
+        """
+        with self._session_factory() as session:
+            return session.execute(
+                select(User.slug)
+                .join(PlatformIdentity, PlatformIdentity.user_id == User.id)
+                .where(
+                    PlatformIdentity.platform == platform.value,
+                    PlatformIdentity.platform_id == platform_id,
+                    PlatformIdentity.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
 
     def unbind(self, *, user_slug: str, platform: Platform) -> None:
         """Soft-delete the live binding for ``user_slug`` on ``platform``.
@@ -581,16 +610,19 @@ class IdentityResolver:
 
     @staticmethod
     def _validate_budget(daily_budget_usd: float) -> None:
-        """Reject non-positive / NaN budgets.
+        """Reject non-finite / non-positive budgets.
 
         Mirrors the DB CHECK (``daily_budget_usd > 0``) so the CLI fails
-        before the round-trip. NaN is rejected explicitly because
-        ``NaN > 0`` returns ``False`` and would otherwise pass through —
-        but the DB CHECK would also accept it on SQLite, so this is the
-        only defence at the unit-test layer.
+        before the round-trip. ``math.isfinite`` catches the three
+        non-finite floats (``NaN``, ``+inf``, ``-inf``) in one call —
+        NaN slips past a naive ``<= 0`` check because ``NaN > 0`` is
+        False (so the comparison fires) but ``NaN <= 0`` is also False;
+        ``+inf`` slips past it because ``+inf > 0`` is True. The DB
+        CHECK on SQLite (the unit-test backend) likewise accepts both,
+        so this is the only defence at the unit-test layer.
         """
-        if daily_budget_usd != daily_budget_usd:  # NaN check — NaN != NaN.
-            raise ValueError("daily_budget_usd cannot be NaN.")
+        if not math.isfinite(daily_budget_usd):
+            raise ValueError(f"daily_budget_usd must be finite (got {daily_budget_usd}).")
         if daily_budget_usd <= 0:
             raise ValueError(f"daily_budget_usd must be > 0 (got {daily_budget_usd}).")
 
