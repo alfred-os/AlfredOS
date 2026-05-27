@@ -30,7 +30,7 @@ from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
@@ -95,8 +95,12 @@ def _seed_operator(sync_url: str) -> None:
         sync_engine.dispose()
 
 
-def _build_resolver(sync_url: str) -> IdentityResolver:
+def _build_resolver(sync_url: str) -> tuple[IdentityResolver, Engine]:
     """Construct an :class:`IdentityResolver` bound to the sync URL.
+
+    Returns the resolver alongside the sync engine so the caller can
+    ``dispose()`` it deterministically (CR review: avoid leaked
+    connections across testcontainer lifecycles).
 
     The resolver uses sync sessions (docs/python-conventions.md §async); we
     build a sync engine against the same testcontainer URL the async
@@ -116,7 +120,7 @@ def _build_resolver(sync_url: str) -> IdentityResolver:
     # onto the resolver instance (typed property lands in Phase 5); we
     # mirror that here so the test wiring matches production.
     resolver.version_counter = version_counter  # type: ignore[attr-defined]
-    return resolver
+    return resolver, sync_engine
 
 
 @pytest.mark.integration
@@ -158,7 +162,7 @@ async def test_provider_failure_audit_row_survives_rollback() -> None:
             router = MagicMock()
             router.complete = AsyncMock(side_effect=RuntimeError("upstream 503"))
 
-            resolver = _build_resolver(sync_url)
+            resolver, sync_engine = _build_resolver(sync_url)
             operator = resolver.get_operator()
 
             # PR-B BudgetGuard: per-user loader keyed on the canonical slug.
@@ -209,6 +213,7 @@ async def test_provider_failure_audit_row_survives_rollback() -> None:
                 assert row.actor_persona == "alfred"
         finally:
             await engine.dispose()
+            sync_engine.dispose()
 
 
 @pytest.mark.integration
@@ -252,7 +257,7 @@ async def test_budget_block_audit_row_survives_rollback() -> None:
             router = MagicMock()
             router.complete = AsyncMock()
 
-            resolver = _build_resolver(sync_url)
+            resolver, sync_engine = _build_resolver(sync_url)
             operator = resolver.get_operator()
             working = WorkingMemory()
 
@@ -291,3 +296,4 @@ async def test_budget_block_audit_row_survives_rollback() -> None:
             router.complete.assert_not_awaited()
         finally:
             await engine.dispose()
+            sync_engine.dispose()

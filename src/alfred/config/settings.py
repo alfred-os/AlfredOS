@@ -68,9 +68,10 @@ class Settings(BaseSettings):
     # pool's default policy (``max(50, active_user_count * 2)`` — see
     # ``alfred.memory.working_pool.WorkingMemoryPool._cap``). Operators can
     # pin a hard cap via ``ALFRED_WORKING_MEMORY_POOL_MAX`` when running on
-    # constrained hardware; the floor of 50 stops single-user installs from
-    # thrashing on the very first persona switch.
-    working_memory_pool_max: int | None = None
+    # constrained hardware; the ``ge=50`` floor stops single-user installs
+    # from thrashing on the very first persona switch (CR finding — enforce
+    # the docstring contract at the field level).
+    working_memory_pool_max: int | None = Field(default=None, ge=50)
 
     @field_validator("deepseek_api_key")
     @classmethod
