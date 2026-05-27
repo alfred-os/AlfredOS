@@ -140,9 +140,10 @@ class _BadStartDriftStub:
     def event(self, coro: Callable[..., object]) -> Callable[..., object]:
         return coro
 
-    async def start(self, token: str, reconnect: bool = True) -> int:  # noqa: ASYNC230 — drift demo, not for runtime use
+    async def start(self, token: str, reconnect: bool = True) -> int:  # noqa: FBT001, FBT002 — deliberate drift fixture: positional bool is the exact shape under test
+        # Drift demo, never used at runtime.
         del token, reconnect
-        return 123  # type: ignore[return-value]  # deliberate drift
+        return 123  # type: ignore[return-value]
 
     async def close(self) -> None:
         return None
