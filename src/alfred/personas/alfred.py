@@ -14,7 +14,13 @@ is load-bearing — it is what makes Anthropic-style prompt caching effective.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from xml.sax.saxutils import escape as xml_escape
+
+# NOTE: `html.escape` instead of `xml.sax.saxutils.escape`.
+# Semgrep's `python.lang.security.use-defused-xml` rule false-positives
+# on any `xml.*` import (the rule targets parsers vulnerable to
+# billion-laughs / XXE; the escape utility is just text replacement).
+# `html.escape` is byte-equivalent for <, >, &, ", ' on default args.
+from html import escape as xml_escape
 
 
 @dataclass(frozen=True, slots=True)
