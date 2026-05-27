@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 11:15+0100\n"
+"POT-Creation-Date: 2026-05-27 12:21+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -32,47 +32,47 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/main.py:354
+#: src/alfred/cli/main.py:359
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:357
+#: src/alfred/cli/main.py:362
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:358
+#: src/alfred/cli/main.py:363
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:359
+#: src/alfred/cli/main.py:364
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:360
+#: src/alfred/cli/main.py:365
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:361
+#: src/alfred/cli/main.py:366
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:362
+#: src/alfred/cli/main.py:367
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:363
+#: src/alfred/cli/main.py:368
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:417
+#: src/alfred/cli/main.py:422
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/main.py:418
+#: src/alfred/cli/main.py:423
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/main.py:439
+#: src/alfred/cli/main.py:444
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
