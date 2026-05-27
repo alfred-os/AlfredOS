@@ -227,9 +227,17 @@ class InProcessTokenBucketRateLimiter:
            (override) or :data:`AUTH_DEFAULT_PER_MIN` (tier default) and
            take a token from the bucket.
         """
+        # Normalize ``user.authorization`` to the enum up-front. SQLAlchemy
+        # may hand back either the ``Authorization`` member (when the ORM
+        # column type registered the enum) or the bare value-string (when
+        # a fresh row is built in tests). Comparing against ``.value``
+        # would miss the enum-member case and silently let READ_ONLY slip
+        # past the gate. ``Authorization(x)`` is the identity on a member
+        # and a coercion on a string, so this one line covers both.
+        auth = Authorization(user.authorization)
         # Step 1 — READ_ONLY security invariant. THIS MUST BE THE FIRST
-        # LINE OF THE METHOD. See spec §2 line 223.
-        if user.authorization == Authorization.READ_ONLY.value:
+        # SUBSTANTIVE CHECK. See spec §2 line 223.
+        if auth is Authorization.READ_ONLY:
             self._total_refused += 1
             return False
         # Step 2 — soft-delete defense-in-depth.
@@ -237,7 +245,7 @@ class InProcessTokenBucketRateLimiter:
             self._total_refused += 1
             return False
         # Step 3 — operator short-circuit.
-        if user.authorization == Authorization.OPERATOR.value:
+        if auth is Authorization.OPERATOR:
             self._total_allowed += 1
             return True
         # Step 4 — bucket lookup. Override wins when set.
@@ -245,7 +253,7 @@ class InProcessTokenBucketRateLimiter:
         if user.rate_limit_per_min is not None:
             per_min = user.rate_limit_per_min
         else:
-            per_min = AUTH_DEFAULT_PER_MIN.get(Authorization(user.authorization))
+            per_min = AUTH_DEFAULT_PER_MIN.get(auth)
         if per_min is None:
             # Defensive: any tier whose default is ``None`` is unlimited.
             # Only OPERATOR carries that default, and we already short-

@@ -34,7 +34,7 @@ that the older ``broker.redact``-only path missed (sec-003).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Final, Protocol
 
 # Generic API-key shape: prefix + separator + 20-or-more alnum bytes,
@@ -148,9 +148,3 @@ class OutboundDlp:
 
 
 __all__ = ["OutboundDlp"]
-
-
-# Re-export the helper Callable type so the structlog bridge in
-# ``alfred.cli.main`` can carry the same audit-sink signature without
-# duplicating the typing pattern.
-_DlpAuditCallable = Callable[..., None]

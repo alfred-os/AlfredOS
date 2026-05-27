@@ -96,8 +96,13 @@ def _split_for_discord(text: str, *, max_len: int = 2000) -> Iterator[str]:
 
         chunk_start = pos
         while pos < text_len:
-            # Look for a fence opener/closer.
-            if text.startswith(_FENCE, pos):
+            # Look for a fence opener/closer. While an inline-code span
+            # is already open, triple-backticks read as three consecutive
+            # inline backticks (closing + reopening + extra) rather than
+            # a fence — so don't promote them into fence state here, or
+            # ``open_inline`` resets at the bottom of the loop drift the
+            # next chunk's prefix.
+            if text.startswith(_FENCE, pos) and not local_in_inline:
                 if local_in_fence:
                     # Closing fence.
                     after_state_in_fence = False

@@ -98,6 +98,22 @@ async def test_health_after_start_reports_connected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_health_after_stop_reports_disconnected() -> None:
+    """``stop()`` must flip ``gateway_connected`` back to False.
+
+    Adapter lifecycle contract: ``health()`` reflects the live state. If
+    ``stop()`` left ``_app`` set, the supervisor's status table would
+    report a dead adapter as "connected" — masking outages.
+    """
+    with patch("alfred.comms.tui_adapter.AlfredTuiApp"):
+        adapter = _build_adapter()
+        await adapter.start()
+        await adapter.stop()
+        health = adapter.health()
+        assert health.gateway_connected is False
+
+
+@pytest.mark.asyncio
 async def test_restart_rebuilds_app_instance() -> None:
     """Idempotent start: re-start after stop rebuilds the app."""
     with patch("alfred.comms.tui_adapter.AlfredTuiApp") as mock_app:

@@ -75,6 +75,30 @@ class _FakeClock:
 
 
 @pytest.mark.asyncio
+async def test_read_only_refused_when_authorization_is_enum_member() -> None:
+    """Bypass regression: READ_ONLY must be refused even when the ORM hands
+    back the enum *member* rather than the value-string.
+
+    SQLAlchemy's ``Enum`` column type may produce either depending on
+    how the row was loaded; the limiter must normalize at the boundary
+    so neither form can slip past the gate (see ``allow`` docstring).
+    """
+    limiter = InProcessTokenBucketRateLimiter()
+    user = User(
+        slug="enumcurious",
+        display_name="Enum Curious",
+        # NOTE: the enum *member*, not ``.value``.
+        authorization=Authorization.READ_ONLY,
+        daily_budget_usd=5.0,
+        language="en-US",
+        rate_limit_per_min=30,
+        rate_limit_per_day=None,
+        deleted_at=None,
+    )
+    assert await limiter.allow(user) is False
+
+
+@pytest.mark.asyncio
 async def test_read_only_user_refused_regardless_of_override() -> None:
     """READ_ONLY users are refused even with a generous ``rate_limit_per_min``.
 

@@ -18,39 +18,20 @@ swap a single-module rewrite rather than a cross-cutting refactor.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+# ``AdapterHealth`` lives in a leaf module so both this Protocol module
+# and ``alfred.comms.tui_adapter`` can import it without forming the
+# static import cycle CodeQL flagged on PR D1. The symbol is re-exported
+# below for backwards compatibility with consumers that already do
+# ``from alfred.comms.adapter import AdapterHealth``.
+from alfred.comms._types import AdapterHealth
 
 if TYPE_CHECKING:
     from alfred.comms.tui import _IdentityResolverLike, _OrchestratorLike, _WorkingPoolLike
     from alfred.identity.rate_limit import RateLimiter
     from alfred.security.dlp import OutboundDlp
     from alfred.security.secrets import SecretBroker
-
-
-@dataclass(frozen=True)
-class AdapterHealth:
-    """Point-in-time adapter health snapshot.
-
-    Three fields, shape-compatible with both the Textual TUI and the future
-    Discord gateway:
-
-    * ``gateway_connected`` — Discord-specific signal that the gateway
-      websocket is currently alive. TUI returns ``True`` while the Textual
-      loop is running (the in-process loop is the "gateway" for the TUI).
-    * ``last_on_ready_at`` — Discord-specific timestamp of the most recent
-      ``on_ready`` event. TUI returns its ``start()`` time.
-    * ``recent_reconnect_count`` — Discord-specific recent-window counter.
-      TUI returns ``0`` (no reconnect concept).
-
-    Slice-3's MCP transport carries an analogous shape so the supervisor
-    can compare adapter health across transports uniformly.
-    """
-
-    gateway_connected: bool
-    last_on_ready_at: datetime | None
-    recent_reconnect_count: int
 
 
 @runtime_checkable

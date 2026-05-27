@@ -318,7 +318,12 @@ async def test_second_submit_while_busy_is_silently_ignored() -> None:
                 await pilot.pause()
                 if submit_task.done():
                     break
-            await submit_task
+            # Surface any exception raised inside the gated task. The
+            # ``assert ... is None`` makes the await result-bearing so
+            # CodeQL doesn't flag it as ``py/ineffectual-statement`` —
+            # the on_input_submitted handler is declared ``-> None``,
+            # so this is both a real assertion and a contract pin.
+            assert await submit_task is None
             rendered = _rendered(app)
             assert "one response" in rendered
             _assert_dispatched_once(orch, user=user, expected_text="hi")
