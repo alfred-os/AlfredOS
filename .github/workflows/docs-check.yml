@@ -38,6 +38,8 @@ on:
       - 'CODE_OF_CONDUCT.md'
       - 'SECURITY.md'
       - 'scripts/docs_check.py'
+      - 'Makefile'
+      - '.github/workflows/docs-check.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
