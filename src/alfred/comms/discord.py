@@ -96,24 +96,6 @@ from alfred.identity.errors import IdentityResolutionError
 from alfred.identity.models import Platform
 from alfred.security.tiers import T2, tag
 
-# ---------------------------------------------------------------------------
-# pybabel-visible registration of i18n keys used via ``t_key=`` dispatch.
-#
-# ``_audit_and_send_refusal`` (line 784) takes ``t_key: str`` and calls
-# ``t(t_key, **kwargs)`` at line 823. ``pybabel extract`` only sees ``t()``
-# called with a literal first arg — it can't follow data flow through
-# variable parameters. The dance below makes the dispatched keys visible
-# to the catalog drift gate.
-#
-# Call results discarded; ``t()`` has no side effects beyond returning a
-# string. ``_ALFRED_PYBABEL_VISIBLE`` is intentionally module-scope so it
-# survives import.
-_ALFRED_PYBABEL_VISIBLE = (
-    t("discord.embed_unsupported"),
-    t("discord.rate_limited"),
-)
-del _ALFRED_PYBABEL_VISIBLE  # binding's purpose was extraction only
-
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.identity.models import User
@@ -155,11 +137,51 @@ _RECONNECT_THRESHOLD: Final[int] = 10
 
 # Prometheus counter stub — production-wiring to ``prometheus_client``
 # lands in Slice 3 alongside the other observability surfaces. The
-# module-level int is the seam tests assert against.
+# module-level int is the seam tests assert against (and the eventual
+# Slice-3 exporter will read it at scrape time, hence its inclusion in
+# ``__all__`` below — CodeQL's py/unused-global-variable can't see
+# either the in-function ``global`` mutation nor the future scrape-time
+# read without an explicit export contract).
 discord_unknown_dm_audit_dropped_total: int = 0
 
+# Public-export contract for static analysers. Tests use explicit
+# imports rather than ``from alfred.comms.discord import *`` so this
+# list does NOT narrow runtime visibility — its sole purpose is making
+# CodeQL's ``py/unused-global-variable`` analyser see the counter
+# (which is read at scrape time by the Slice-3 Prometheus exporter the
+# stub is the seam for, and read directly by the test suite via
+# ``import alfred.comms.discord as discord_mod``).
+__all__ = [
+    "DiscordAdapter",
+    "discord_unknown_dm_audit_dropped_total",
+    "run_verify_probe",
+]
+
 _log = structlog.get_logger(__name__)
-_stdlib_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# pybabel-visible registration of i18n keys used via ``t_key=`` dispatch
+# ---------------------------------------------------------------------------
+
+
+def _register_pybabel_visible_keys() -> None:
+    """Touch i18n keys dispatched via ``t_key=`` so pybabel sees them.
+
+    ``_audit_and_send_refusal`` (line 784) takes ``t_key: str`` and
+    calls ``t(t_key, **kwargs)`` at runtime. ``pybabel extract`` only
+    sees ``t()`` called with a literal first arg — it cannot follow
+    data flow through variable parameters. The literal ``t()`` calls
+    inside this function body are what pybabel parses; the function
+    itself is never invoked.
+
+    Function-scoped (rather than module-scope) so static analysers
+    don't flag the bindings as unused globals — pybabel's AST walk
+    only cares that the literal ``t("...")`` calls exist inside the
+    parsed source.
+    """
+    t("discord.embed_unsupported")
+    t("discord.rate_limited")
 
 
 # ---------------------------------------------------------------------------
@@ -375,14 +397,6 @@ class _UnknownDmAuditCap:
             return False
         self._events.append(timestamp)
         return True
-
-
-# ---------------------------------------------------------------------------
-# Recovery-mode marker for _send recursion guard
-# ---------------------------------------------------------------------------
-
-
-_RECOVERY_MARKER: Final[str] = "__alfred_recovery__"
 
 
 # ---------------------------------------------------------------------------
