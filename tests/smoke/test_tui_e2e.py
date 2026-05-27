@@ -124,10 +124,15 @@ async def _pg_stack(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Stack]:
     with PostgresContainer("postgres:16") as pg:
         async_url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         monkeypatch.setenv("ALFRED_DATABASE_URL", async_url)
-        monkeypatch.setenv(
-            "ALFRED_DEEPSEEK_API_KEY",
-            "not-a-real-secret-smoke-test-placeholder",
-        )
+        # Only seed the placeholder when the caller hasn't already supplied
+        # a real key (the real-provider test sets ALFRED_DEEPSEEK_API_KEY
+        # before entering this fixture and would otherwise have its key
+        # clobbered by the placeholder, masking real auth failures).
+        if not os.environ.get("ALFRED_DEEPSEEK_API_KEY"):
+            monkeypatch.setenv(
+                "ALFRED_DEEPSEEK_API_KEY",
+                "not-a-real-secret-smoke-test-placeholder",
+            )
 
         alembic_cfg = Config("alembic.ini")
         await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
