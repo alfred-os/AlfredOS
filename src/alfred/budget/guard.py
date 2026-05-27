@@ -186,11 +186,18 @@ class BudgetGuard:
         # user_id paired with a NaN cost MUST NOT leak a phantom entry into
         # ``_user_budgets``. The order here is load-bearing.
         self._validate_cost(cost_usd)
+        # Resolve user_id BEFORE the per-call cap check so an unknown user
+        # paired with an over-cap cost still surfaces as UnknownBudgetUserError
+        # (the precise, actionable failure mode) rather than the more generic
+        # PerCallCapExceededError that an operator might misread as a tuning
+        # problem. The cost-validation gate above still runs first so a NaN
+        # cost on an unknown user remains a ValueError, never an
+        # UnknownBudgetUserError-shaped phantom-entry leak.
+        entry = self._load_or_get_user(user_id)
         if cost_usd > self._per_call_max_usd:
             raise PerCallCapExceededError(
                 f"call cost ${cost_usd:.4f} exceeds per-call cap ${self._per_call_max_usd:.2f}"
             )
-        entry = self._load_or_get_user(user_id)
         self._roll_day_if_needed(entry)
         if entry.spent + cost_usd > entry.daily_usd:
             # Raise without mutation: the charge does not stick. Carries the
@@ -211,9 +218,14 @@ class BudgetGuard:
             UnknownBudgetUserError: ``user_id`` isn't known to the loader.
         """
         self._validate_cost(cost_usd)
+        # Resolve user_id BEFORE the per-call cap check so an unknown user
+        # paired with an over-cap cost surfaces as UnknownBudgetUserError
+        # rather than a silent ``True``. Pre-flight callers (the orchestrator)
+        # then audit the precise failure mode instead of guessing why the
+        # turn was refused.
+        entry = self._load_or_get_user(user_id)
         if cost_usd > self._per_call_max_usd:
             return True
-        entry = self._load_or_get_user(user_id)
         self._roll_day_if_needed(entry)
         return entry.spent + cost_usd > entry.daily_usd
 
