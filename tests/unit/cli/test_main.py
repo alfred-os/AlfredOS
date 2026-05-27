@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
+import pytest
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
-from alfred.cli.main import app
+from alfred.cli.main import _build_adapter_dlp_audit_sink, app
 
 runner = CliRunner()
 
@@ -32,3 +36,88 @@ def test_alfred_migrate_command_is_registered() -> None:
     result = runner.invoke(app, ["migrate", "--help"])
     assert result.exit_code == 0
     assert "migrations" in result.stdout.lower() or "alembic" in result.stdout.lower()
+
+
+# ---------------------------------------------------------------------------
+# Adapter DLP audit sink (PR D1 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAuditWriter:
+    """Captures calls to ``.append`` for the DLP audit-sink wiring test."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def append(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+def test_adapter_dlp_audit_sink_persists_modification_event() -> None:
+    """Adapter outbound DLP must route audit rows to ``AuditWriter.append``.
+
+    Regression: PR D1 originally wired ``OutboundDlp`` with
+    ``_structlog_audit_sink`` (no-op) for the adapter path too. Audit-
+    on-modification is the DLP layer's security objective (CLAUDE.md
+    hard rule #7); routing it to a no-op silently drops every outbound-
+    redaction event. The bridge MUST schedule a real
+    ``AuditWriter.append`` for each modification.
+    """
+
+    async def run() -> None:
+        writer = _RecordingAuditWriter()
+        sink = _build_adapter_dlp_audit_sink(
+            audit_writer=writer,  # type: ignore[arg-type]  # reason: structural fake
+            operator_user_id="alice",
+            language="en-US",
+        )
+        sink(event="dlp.outbound_redacted", subject={"stages_triggered": ("broker",)})
+        # The sink schedules a task on the running loop; yield once so
+        # the task body runs to completion before we assert.
+        await asyncio.sleep(0)
+        assert len(writer.calls) == 1
+        call = writer.calls[0]
+        assert call["event"] == "dlp.outbound_redacted"
+        assert call["actor_user_id"] == "alice"
+        assert call["language"] == "en-US"
+        assert call["trust_tier_of_trigger"] == "T2"
+        assert call["result"] == "modified"
+        assert call["cost_estimate_usd"] == 0.0
+        # Subject is widened from ``Mapping`` to ``dict`` by the bridge.
+        assert call["subject"] == {"stages_triggered": ("broker",)}
+
+    asyncio.run(run())
+
+
+def test_adapter_dlp_audit_sink_surfaces_writer_failure_via_logger(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failing ``AuditWriter.append`` must NOT be swallowed silently.
+
+    CLAUDE.md hard rule #7: no silent failures in security paths. The
+    sync sink schedules an async task; we re-surface a task exception
+    through structlog at ``error`` level rather than dropping it.
+    """
+
+    class _FailingWriter:
+        async def append(self, **kwargs: Any) -> None:
+            raise RuntimeError("audit DB exploded")
+
+    async def run() -> None:
+        sink = _build_adapter_dlp_audit_sink(
+            audit_writer=_FailingWriter(),  # type: ignore[arg-type]  # reason: structural fake
+            operator_user_id="alice",
+            language="en-US",
+        )
+        sink(event="dlp.outbound_redacted", subject={})
+        # Let the scheduled task run + the done_callback fire.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    # structlog default config renders to stdout in tests; an ``error``-
+    # level event for ``dlp.audit_write_failed`` MUST surface there so
+    # the operator sees the failure rather than a silent drop.
+    captured = capsys.readouterr().out
+    assert "dlp.audit_write_failed" in captured
+    assert "audit DB exploded" in captured
