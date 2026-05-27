@@ -175,9 +175,11 @@ def install_identity_factories_for_settings(settings: Settings) -> IdentityResol
     keeping the in-process cache-invalidation contract single-sourced.
     Phase 5 lifts this attribute promotion into the resolver's public API.
     """
-    sync_engine = create_engine(sync_db_url(settings), future=True)
+    # ``future=True`` was the SQLAlchemy 1.4→2.0 migration flag — accepted
+    # but a no-op on 2.0+. Drop it to keep the call sites readable.
+    sync_engine = create_engine(sync_db_url(settings))
     sync_factory: sessionmaker = sessionmaker(  # type: ignore[type-arg]  # reason: SA 2.0 sessionmaker has runtime-generic shape; the Session-bound form is what IdentityResolver expects and what we pass here
-        sync_engine, expire_on_commit=False, future=True
+        sync_engine, expire_on_commit=False
     )
     version_counter = IdentityVersionCounter()
     resolver = IdentityResolver(

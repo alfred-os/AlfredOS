@@ -126,6 +126,7 @@ async def _boot_main() -> None:
     from alfred.audit.log import AuditWriter
     from alfred.budget.guard import BudgetGuard
     from alfred.cli._bootstrap import (
+        build_adapter_dlp_audit_sink,
         build_broker,
         build_router,
         configure_logging,
@@ -134,7 +135,7 @@ async def _boot_main() -> None:
     )
     from alfred.comms.adapter import build_discord_adapter
     from alfred.i18n import set_language
-    from alfred.identity import InProcessTokenBucketRateLimiter
+    from alfred.identity import InProcessTokenBucketRateLimiter, Platform
     from alfred.memory.db import build_session_scope, healthcheck
     from alfred.memory.episodic import EpisodicMemory
     from alfred.memory.working_pool import WorkingMemoryPool
@@ -174,6 +175,15 @@ async def _boot_main() -> None:
         raise typer.Exit(code=3) from exc
 
     resolver = install_identity_factories_for_settings(settings)
+    # Resolve the canonical operator row so the adapter-DLP audit sink can
+    # attribute outbound-redaction events to a real user_id. Migration
+    # 0004 backfills the operator under ``Platform.TUI`` regardless of
+    # which adapter the operator launches first — mirrors the TUI boot
+    # in ``cli/main.py``.
+    operator = await asyncio.to_thread(resolver.resolve, Platform.TUI, settings.operator_name)
+    if operator is None:
+        typer.echo(t("cli.user.error.no_operator"), err=True)
+        raise typer.Exit(code=2)
     router = build_router(broker, settings)
     budget = BudgetGuard(
         user_loader=lambda user_id: resolver.show(slug=user_id),
@@ -192,11 +202,21 @@ async def _boot_main() -> None:
         router=router,
         budget=budget,
     )
-    from alfred.cli._bootstrap import structlog_audit_sink
-
-    outbound_dlp = OutboundDlp(broker=broker, audit=structlog_audit_sink)
-    rate_limiter = InProcessTokenBucketRateLimiter()
+    # Adapter outbound DLP wires a PERSISTENT audit sink — not the
+    # structlog-bridge no-op. DLP audit-on-modification is the security
+    # objective of the layer (CLAUDE.md hard rule #7). The persistent
+    # sink schedules an async ``AuditWriter.append`` on the running
+    # event loop so the synchronous ``_AuditSink`` Protocol stays
+    # satisfied without blocking the scan path. Mirrors the TUI boot's
+    # wiring in ``cli/main.py`` so both adapters share lifecycle.
     audit = AuditWriter(session_factory=session_scope)
+    adapter_dlp_audit_sink = build_adapter_dlp_audit_sink(
+        audit_writer=audit,
+        operator_user_id=operator.slug,
+        language=settings.operator_language,
+    )
+    outbound_dlp = OutboundDlp(broker=broker, audit=adapter_dlp_audit_sink)
+    rate_limiter = InProcessTokenBucketRateLimiter()
     adapter = build_discord_adapter(
         orchestrator=orchestrator,
         identity_resolver=resolver,
