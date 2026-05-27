@@ -15,7 +15,8 @@
 
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
-        check format-check lint-check typecheck test test-unit test-integration test-smoke test-adversarial
+        check format-check lint-check typecheck test test-unit test-integration test-smoke test-adversarial \
+        docs-check
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -113,6 +114,24 @@ test-adversarial: ## Run the adversarial security suite (nightly + release-block
 	fi
 
 check: format-check lint-check typecheck test ## Verify everything (identical to CI). No mutations.
+
+# ──────────────────────────────────────────────────────────────
+# Docs link + anchor checker (PR E, plan task 8)
+# ──────────────────────────────────────────────────────────────
+# scripts/docs_check.py is stdlib-only — no `uv run` needed, so the target
+# works on a fresh clone before dev deps are synced. Anchor-aware: every
+# `[text](path#anchor)` resolves the `#anchor` against the target file's
+# heading set (GitHub-compatible slug algorithm). The glossary anchors
+# `#authorization-role` + `#canonical-user-id` are load-bearing surfaces;
+# this gate catches forward-reference drift before merge.
+#
+# `docs/superpowers/plans/` is excluded because those are working/draft
+# documents whose forward-refs (to specs that haven't been written yet)
+# legitimately fail until later PRs land. The trivy IaC scan applies the
+# same exclude (see .github/workflows/pr-validate-security.yml).
+docs-check: ## Verify markdown link + anchor integrity across docs/, top-level *.md.
+	python3 scripts/docs_check.py docs/ PRD.md README.md CONTRIBUTING.md CODE_OF_CONDUCT.md SECURITY.md \
+		--exclude docs/superpowers/plans
 
 # ──────────────────────────────────────────────────────────────
 # Git helpers

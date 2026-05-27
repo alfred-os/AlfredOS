@@ -6,7 +6,7 @@ Thanks for your interest in contributing. AlfredOS is a security-sensitive Apach
 
 - Read the [Code of Conduct](./CODE_OF_CONDUCT.md).
 - Read the [Security policy](./SECURITY.md). **Security vulnerabilities are not reported via public issues.**
-- Read [`CLAUDE.md`](./CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
+- Read [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md) for repo conventions, security rules, and the self-improvement process. (Canonical source is `.rulesync/`; root-level `CLAUDE.md` is generated.)
 - Read the [PRD](./PRD.md) before proposing architectural changes.
 
 ## Where to discuss

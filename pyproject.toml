@@ -47,6 +47,7 @@ dev = [
   # black removed: `ruff format` replaces it per ADR-0007.
   "types-toml",
   "types-cachetools",  # PR D2: stubs for the TTLCache import in alfred.comms.discord
+  "types-PyYAML",      # PR E: stubs for the YAML walker in tests/adversarial/conftest.py
   "pre-commit>=3.7",        # for the pybabel extract hook (Task 3.5)
   # dev/test only: testcontainers' built-in Postgres helper + alembic CLI
   # both default to psycopg2 for their sync sessions. Not used at runtime
