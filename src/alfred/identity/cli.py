@@ -53,6 +53,8 @@ from alfred.identity.errors import (
     IdentityResolutionError,
     LastOperatorRemovalRefusedError,
     OperatorAlreadyExistsError,
+    PlatformIdInUseError,
+    UserAlreadyBoundError,
 )
 from alfred.identity.models import Authorization, Platform
 from alfred.identity.resolver import IdentityResolver
@@ -61,6 +63,15 @@ from alfred.identity.resolver import IdentityResolver
 # Kept as a module constant so future audit-graph consumers can filter on it
 # without grepping for the string literal across the code base.
 _BOOTSTRAP_ACTOR = "<bootstrap>"
+
+# Fallback BCP-47 tag stamped onto bootstrap-actor audit rows (i.e. the very
+# first operator add, before any user exists to read a language from). The
+# operator-set CLI re-stamps every subsequent row with the live operator's
+# language; this fallback only ever lands on the single bootstrap row.
+# Kept here rather than importing from ``Settings`` to keep the identity CLI
+# free of the Settings dependency — the bootstrap row will be relabelled at
+# first ``alfred user set`` if the operator chose a non-default language.
+_BOOTSTRAP_LANGUAGE = "en-US"
 
 
 # --------------------------------------------------------------------------- #
@@ -157,24 +168,28 @@ def _validate_language_or_exit(language: str) -> None:
         raise typer.Exit(code=2) from exc
 
 
-def _actor_slug() -> str:
-    """Return the current operator slug, or the bootstrap sentinel.
+def _actor() -> tuple[str, str]:
+    """Return ``(actor_slug, actor_language)`` for the current CLI invocation.
 
     The CLI is operator-only in Slice 2. ``get_operator()`` raises
     :class:`IdentityResolutionError` if zero operators exist — that's the
-    bootstrap path, where we record ``<bootstrap>`` so the audit row
-    truthfully reflects "no operator existed yet when this happened."
+    bootstrap path, where we record ``<bootstrap>`` + ``_BOOTSTRAP_LANGUAGE``
+    so the audit row truthfully reflects "no operator existed yet when this
+    happened" rather than silently hardcoding ``en-US`` (CLAUDE.md i18n
+    rule #3: every stored user-content row carries a BCP-47 language tag).
     """
     try:
-        return _load_resolver().get_operator().slug
+        operator = _load_resolver().get_operator()
     except IdentityResolutionError:
-        return _BOOTSTRAP_ACTOR
+        return _BOOTSTRAP_ACTOR, _BOOTSTRAP_LANGUAGE
+    return operator.slug, operator.language
 
 
 async def _write_audit(
     *,
     event: str,
     actor: str,
+    language: str,
     subject: dict[str, Any],
     result: str = "success",
 ) -> None:
@@ -182,12 +197,18 @@ async def _write_audit(
 
     The shape mirrors slice-1's ``AuditWriter.append`` contract: every
     row carries an event + actor + subject + trust tier + result + cost
-    estimate + trace id. CLI mutations have no per-call cost (they're DB
-    writes, not provider calls) so ``cost_estimate_usd=0.0``; the audit
-    log keeps a 0 row so the graph stays connected. ``trace_id`` is the
-    event name + actor — every mutation is a single point on the trace,
-    so a synthetic id is sufficient and avoids dragging in a UUID
+    estimate + trace id + language. CLI mutations have no per-call cost
+    (they're DB writes, not provider calls) so ``cost_estimate_usd=0.0``;
+    the audit log keeps a 0 row so the graph stays connected. ``trace_id``
+    is the event name + actor — every mutation is a single point on the
+    trace, so a synthetic id is sufficient and avoids dragging in a UUID
     dependency.
+
+    ``language`` is the BCP-47 tag the row is stamped with. CLAUDE.md i18n
+    rule #3 forbids defaulting it inside the writer — every caller must
+    pass the actor's resolved language so the audit graph keeps an honest
+    record of WHO acted in WHICH language. The CLI resolves this once per
+    invocation via :func:`_actor`.
     """
     writer = _load_audit_writer()
     await writer.append(
@@ -198,6 +219,7 @@ async def _write_audit(
         result=result,
         cost_estimate_usd=0.0,
         trace_id=f"cli:{event}:{actor}",
+        language=language,
     )
 
 
@@ -261,7 +283,7 @@ def add(
     # Capture the actor BEFORE the mutation: post-mutation, ``get_operator``
     # would return the freshly-added operator on a bootstrap path, which is
     # not who acted (no one did — the system bootstrapped itself).
-    actor = _actor_slug()
+    actor, actor_language = _actor()
 
     try:
         user = resolver.add(
@@ -329,6 +351,7 @@ def add(
         _write_audit(
             event="user.add",
             actor=actor,
+            language=actor_language,
             subject={
                 "slug": user.slug,
                 "authorization": user.authorization,
@@ -429,11 +452,17 @@ def show(slug: str) -> None:
         typer.echo(t("cli.user.error.not_found", slug=slug), err=True)
         raise typer.Exit(code=2)
 
-    typer.echo(f"slug: {user.slug}")
-    typer.echo(f"display_name: {user.display_name}")
-    typer.echo(f"authorization: {user.authorization}")
-    typer.echo(f"daily_budget_usd: {user.daily_budget_usd:.2f}")
-    typer.echo(f"language: {user.language}")
+    # CLAUDE.md i18n rule #1: every operator-facing string routes through
+    # ``t()``. The list-view column labels already cover slug / display_name
+    # / authorization / daily_budget_usd / language; the show view reuses
+    # them so a translator only has to localise each field name once. The
+    # two rate-limit fields are show-specific (the list view collapses them)
+    # and get their own keys.
+    typer.echo(f"{t('cli.user.list.column.slug')}: {user.slug}")
+    typer.echo(f"{t('cli.user.list.column.display_name')}: {user.display_name}")
+    typer.echo(f"{t('cli.user.list.column.authorization')}: {user.authorization}")
+    typer.echo(f"{t('cli.user.list.column.daily_budget_usd')}: {user.daily_budget_usd:.2f}")
+    typer.echo(f"{t('cli.user.list.column.language')}: {user.language}")
 
     unset_marker = t("cli.user.show.value.unset")
     override_marker = t("cli.user.show.override_indicator")
@@ -441,11 +470,13 @@ def show(slug: str) -> None:
     rpm = user.rate_limit_per_min
     rpd = user.rate_limit_per_day
     typer.echo(
-        f"rate_limit_per_min: {rpm if rpm is not None else unset_marker} "
+        f"{t('cli.user.show.field.rate_limit_per_min')}: "
+        f"{rpm if rpm is not None else unset_marker} "
         f"{override_marker if rpm is not None else derived_marker}"
     )
     typer.echo(
-        f"rate_limit_per_day: {rpd if rpd is not None else unset_marker} "
+        f"{t('cli.user.show.field.rate_limit_per_day')}: "
+        f"{rpd if rpd is not None else unset_marker} "
         f"{override_marker if rpd is not None else derived_marker}"
     )
     if user.deleted_at is not None:
@@ -496,7 +527,7 @@ def remove(
         if not confirmed:
             raise typer.Exit(code=1)
 
-    actor = _actor_slug()
+    actor, actor_language = _actor()
     try:
         resolver.remove(slug=slug)
     except LastOperatorRemovalRefusedError as exc:
@@ -507,7 +538,14 @@ def remove(
         raise typer.Exit(code=2) from exc
 
     typer.echo(t("cli.user.removed", slug=slug))
-    asyncio.run(_write_audit(event="user.remove", actor=actor, subject={"slug": slug}))
+    asyncio.run(
+        _write_audit(
+            event="user.remove",
+            actor=actor,
+            language=actor_language,
+            subject={"slug": slug},
+        )
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -529,28 +567,38 @@ def bind(
 ) -> None:
     """Bind ``(platform, id)`` to the user with ``slug``."""
     resolver = _load_resolver()
-    actor = _actor_slug()
+    actor, actor_language = _actor()
     try:
         resolver.bind(user_slug=slug, platform=platform, platform_id=id)
+    except UserAlreadyBoundError as exc:
+        # The user already has a live binding on this platform — distinct
+        # from the cross-user platform_id collision below.
+        typer.echo(
+            t(
+                "cli.user.error.user_already_bound",
+                slug=exc.slug,
+                platform=exc.platform,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
+    except PlatformIdInUseError as exc:
+        # A different user owns the same (platform, platform_id). The
+        # typed exception carries the colliding user's slug so the operator
+        # can name them in the next ``alfred user unbind`` call without
+        # querying the DB by hand.
+        typer.echo(
+            t(
+                "cli.user.error.platform_id_in_use",
+                platform=exc.platform,
+                platform_id=exc.platform_id,
+                existing_slug=exc.existing_slug,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=2) from exc
     except IdentityResolutionError as exc:
-        message = str(exc)
-        if "already bound" in message.lower():
-            typer.echo(
-                t("cli.user.error.user_already_bound", slug=slug, platform=platform.value),
-                err=True,
-            )
-        elif "already in use" in message.lower():
-            typer.echo(
-                t(
-                    "cli.user.error.platform_id_in_use",
-                    platform=platform.value,
-                    platform_id=id,
-                    existing_slug="?",
-                ),
-                err=True,
-            )
-        else:
-            typer.echo(message, err=True)
+        typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
 
     typer.echo(t("cli.user.bound", platform=platform.value, platform_id=id, slug=slug))
@@ -558,6 +606,7 @@ def bind(
         _write_audit(
             event="user.bind",
             actor=actor,
+            language=actor_language,
             subject={"slug": slug, "platform": platform.value, "platform_id": id},
         )
     )
@@ -573,7 +622,7 @@ def unbind(
 ) -> None:
     """Soft-delete the live binding for ``slug`` on ``platform``."""
     resolver = _load_resolver()
-    actor = _actor_slug()
+    actor, actor_language = _actor()
     try:
         resolver.unbind(user_slug=slug, platform=platform)
     except IdentityError as exc:
@@ -585,6 +634,7 @@ def unbind(
         _write_audit(
             event="user.unbind",
             actor=actor,
+            language=actor_language,
             subject={"slug": slug, "platform": platform.value},
         )
     )
@@ -611,8 +661,11 @@ def _coerce_rate_limit(raw: str | None) -> int | None | str:
     try:
         return int(raw)
     except ValueError as exc:
+        # Use the dedicated rate-limit key, not the authorization key — the
+        # operator-facing message must name the field that actually failed
+        # to parse so they know which flag to fix.
         typer.echo(
-            t("cli.user.error.invalid_authorization", value=raw),
+            t("cli.user.error.invalid_rate_limit", value=raw),
             err=True,
         )
         raise typer.Exit(code=2) from exc
@@ -658,7 +711,7 @@ def set_(
 
     rpm = _coerce_rate_limit(rate_limit_per_min)
     rpd = _coerce_rate_limit(rate_limit_per_day)
-    actor = _actor_slug()
+    actor, actor_language = _actor()
 
     try:
         # ``set_`` accepts the "unset" literal via Literal["unset"]; pass the
@@ -709,6 +762,7 @@ def set_(
         _write_audit(
             event="user.set",
             actor=actor,
+            language=actor_language,
             subject={"slug": user.slug, "diff": diff_parts},
         )
     )

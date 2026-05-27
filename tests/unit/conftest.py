@@ -20,7 +20,7 @@ Why SQLite at the unit layer:
   unit tests can validate the surrounding transaction flow without a real
   Postgres.
 
-The ``rate_limiter`` fixture returns the no-op double :class:`_NullRateLimiter`
+The ``rate_limiter`` fixture returns the no-op double :class:`NullRateLimiter`
 (test-only re-export from ``alfred.identity``). PR D1 swaps in the real
 in-process token-bucket implementation; until then, the resolver's
 constructor accepts any object satisfying the ``RateLimiter`` Protocol.
@@ -36,7 +36,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from alfred.audit.log import AuditWriter
-from alfred.identity import IdentityVersionCounter, _NullRateLimiter
+from alfred.identity import IdentityVersionCounter, NullRateLimiter
 from alfred.memory.models import Base
 
 
@@ -60,7 +60,7 @@ def session_factory() -> Iterator[sessionmaker[Session]]:
 
 
 @pytest.fixture
-def rate_limiter() -> _NullRateLimiter:
+def rate_limiter() -> NullRateLimiter:
     """No-op rate limiter satisfying the ``RateLimiter`` Protocol.
 
     The resolver only stores the reference (it never calls it directly —
@@ -68,7 +68,7 @@ def rate_limiter() -> _NullRateLimiter:
     exists so the constructor stays happy without dragging the production
     token-bucket implementation into the unit-test classpath.
     """
-    return _NullRateLimiter()
+    return NullRateLimiter()
 
 
 @pytest.fixture

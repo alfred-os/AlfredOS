@@ -44,8 +44,8 @@ from alfred.i18n import set_language, t
 from alfred.identity import (
     IdentityResolver,
     IdentityVersionCounter,
+    NullRateLimiter,
     Platform,
-    _NullRateLimiter,
 )
 from alfred.memory.db import build_session_scope, healthcheck
 from alfred.memory.episodic import EpisodicMemory
@@ -195,7 +195,7 @@ def _install_identity_factories(settings: Settings) -> IdentityResolver:
         # lands in PR D1. The null double is correct for Slice-1+2 single-
         # operator scope — the production limiter enforces READ_ONLY refusal
         # which doesn't apply to an operator at all.
-        rate_limiter=_NullRateLimiter(),
+        rate_limiter=NullRateLimiter(),
     )
     audit_session_scope = build_session_scope(settings)
     install_identity_factories(

@@ -53,8 +53,8 @@ from alfred.identity import (
     Authorization,
     IdentityResolver,
     IdentityVersionCounter,
+    NullRateLimiter,
     Platform,
-    _NullRateLimiter,
 )
 from alfred.identity import cli as identity_cli
 from alfred.memory.models import Base
@@ -96,7 +96,7 @@ def cli_setup(
     resolver = IdentityResolver(
         session_factory=factory,
         version_counter=IdentityVersionCounter(),
-        rate_limiter=_NullRateLimiter(),
+        rate_limiter=NullRateLimiter(),
     )
 
     # The CLI builds an AuditWriter from a session factory; the
@@ -480,6 +480,204 @@ def test_set_rate_limit_unset_clears_to_null(
     assert alice.rate_limit_per_min is None
 
     assert any(e["event"] == "user.set" for e in audit_buffer)
+
+
+def test_set_rate_limit_non_integer_exits_2(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+) -> None:
+    """``--rate-limit-per-min foo`` fails with a rate-limit diagnostic, not authorization.
+
+    B4 / i18n-005: the parse-failure path used to misuse
+    ``cli.user.error.invalid_authorization`` which leaked "authorization"
+    into the operator-facing message for a rate-limit failure. This test
+    pins the dedicated key by asserting "rate-limit" appears in stderr and
+    "authorization" does not — the only way both checks pass is for the
+    correct key to be used.
+    """
+    cli_setup.add(display_name="Alice", authorization=Authorization.STANDARD)
+
+    result = runner.invoke(
+        identity_cli.user_app,
+        ["set", "alice", "--rate-limit-per-min", "foo"],
+    )
+
+    assert result.exit_code == 2
+    assert "rate-limit" in result.stderr.lower()
+    assert "authorization" not in result.stderr.lower()
+
+
+def test_set_authorization_operator_without_replace_refused(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+) -> None:
+    """``alfred user set <other> --authorization operator`` without --replace-operator refused.
+
+    H5: pins the CLI's wiring of the resolver's operator upper-bound on the
+    ``set`` path. Without this gate, an operator could be silently created
+    by ``alfred user set <other> --authorization operator``.
+    """
+    cli_setup.add(display_name="Alice", authorization=Authorization.OPERATOR)
+    cli_setup.add(display_name="Bob", authorization=Authorization.STANDARD)
+
+    result = runner.invoke(
+        identity_cli.user_app,
+        ["set", "bob", "--authorization", "operator"],
+    )
+
+    assert result.exit_code == 2
+    assert "operator already exists" in result.stderr.lower()
+    assert "alice" in result.stderr
+
+
+def test_set_authorization_operator_with_replace_demotes_atomically(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+) -> None:
+    """``alfred user set <bob> --authorization operator --replace-operator <alice>``
+    demotes alice and promotes bob in one transaction.
+
+    H5: pins the CLI's ``--replace-operator`` wiring on the ``set`` path —
+    the ``add`` path is covered by ``test_add_second_operator_with_replace``.
+    After the call there must be exactly one operator (bob) and the old
+    operator (alice) must be demoted to TRUSTED.
+    """
+    cli_setup.add(display_name="Alice", authorization=Authorization.OPERATOR)
+    cli_setup.add(display_name="Bob", authorization=Authorization.STANDARD)
+
+    result = runner.invoke(
+        identity_cli.user_app,
+        [
+            "set",
+            "bob",
+            "--authorization",
+            "operator",
+            "--replace-operator",
+            "alice",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    op = cli_setup.get_operator()
+    assert op.slug == "bob"
+    alice = cli_setup.show(slug="alice")
+    assert alice is not None
+    assert alice.authorization == Authorization.TRUSTED.value
+
+
+# --------------------------------------------------------------------------- #
+# unbind
+# --------------------------------------------------------------------------- #
+
+
+def test_unbind_happy_path(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+    audit_buffer: list[dict[str, Any]],
+) -> None:
+    """``alfred user unbind`` soft-deletes the live binding + writes an audit row.
+
+    H5 / test-H1: the ``unbind`` command shipped without any CLI test in
+    PR-A; this pins the happy path so future refactors can't silently drop
+    the audit-row write or the soft-delete.
+    """
+    cli_setup.add(display_name="Alice", authorization=Authorization.STANDARD)
+    cli_setup.bind(user_slug="alice", platform=Platform.DISCORD, platform_id="111")
+    audit_buffer.clear()
+
+    result = runner.invoke(
+        identity_cli.user_app,
+        ["unbind", "alice", "--platform", "discord"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    # The binding is soft-deleted: ``resolve`` must return ``None`` because
+    # the platform_identities row's ``deleted_at`` is now non-null.
+    assert cli_setup.resolve(Platform.DISCORD, "111") is None
+    assert any(e["event"] == "user.unbind" for e in audit_buffer)
+
+
+def test_unbind_user_not_found(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+) -> None:
+    """``alfred user unbind <unknown>`` exits 2 with the resolver's error message."""
+    result = runner.invoke(
+        identity_cli.user_app,
+        ["unbind", "ghost", "--platform", "discord"],
+    )
+
+    assert result.exit_code == 2
+    assert "ghost" in result.stderr.lower()
+
+
+def test_unbind_no_live_binding(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+) -> None:
+    """``alfred user unbind`` on a user without a live binding for that platform
+    exits 2 — not silently no-ops.
+    """
+    cli_setup.add(display_name="Alice", authorization=Authorization.STANDARD)
+
+    result = runner.invoke(
+        identity_cli.user_app,
+        ["unbind", "alice", "--platform", "discord"],
+    )
+
+    assert result.exit_code == 2
+    assert "alice" in result.stderr.lower() or "binding" in result.stderr.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Audit row language (B2 / i18n-001)
+# --------------------------------------------------------------------------- #
+
+
+def test_audit_row_carries_operator_language(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+    audit_buffer: list[dict[str, Any]],
+) -> None:
+    """The audit row stamped for a CLI mutation carries the operator's BCP-47 tag.
+
+    B2 / i18n-001 + CLAUDE.md i18n rule #3: every audit row MUST carry a
+    BCP-47 language tag derived from the actor — not the writer's hardcoded
+    ``en-US`` default. Pin this with a de-DE operator so any regression
+    that defaults the language back to en-US shows up immediately.
+    """
+    cli_setup.add(
+        display_name="Astrid",
+        authorization=Authorization.OPERATOR,
+        language="de-DE",
+    )
+    audit_buffer.clear()
+
+    result = runner.invoke(identity_cli.user_app, ["add", "--name", "Bob"])
+
+    assert result.exit_code == 0, result.stderr
+    assert audit_buffer[-1]["language"] == "de-DE"
+
+
+def test_audit_row_bootstrap_language_is_default(
+    runner: CliRunner,
+    cli_setup: IdentityResolver,
+    audit_buffer: list[dict[str, Any]],
+) -> None:
+    """The bootstrap-actor audit row carries the documented fallback language.
+
+    B2: when no operator exists yet (very first ``alfred user add``), there
+    is no operator to read a language from. The bootstrap row falls back to
+    the documented sentinel rather than silently picking up a stale value.
+    """
+    result = runner.invoke(
+        identity_cli.user_app,
+        ["add", "--name", "Alice", "--authorization", "operator"],
+    )
+
+    assert result.exit_code == 0, result.stderr
+    # ``_BOOTSTRAP_LANGUAGE`` in the CLI module — pinned at "en-US".
+    assert audit_buffer[-1]["language"] == "en-US"
 
 
 # --------------------------------------------------------------------------- #

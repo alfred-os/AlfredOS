@@ -37,12 +37,13 @@ from alfred.identity import (
     Platform,
     User,
 )
+from alfred.identity.errors import PlatformIdInUseError, UserAlreadyBoundError
 from alfred.identity.resolver import IdentityListener
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
-    from alfred.identity import _NullRateLimiter
+    from alfred.identity import NullRateLimiter
 
 
 # --------------------------------------------------------------------------- #
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
 
 def _build_resolver(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
     *,
     counter: IdentityVersionCounter | None = None,
 ) -> IdentityResolver:
@@ -75,7 +76,7 @@ def _build_resolver(
 
 def test_resolve_miss_returns_none(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """Resolving an unknown (platform, platform_id) returns ``None``."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -85,7 +86,7 @@ def test_resolve_miss_returns_none(
 
 def test_bind_and_resolve_roundtrip(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """``bind`` then ``resolve`` yields the original user."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -100,7 +101,7 @@ def test_bind_and_resolve_roundtrip(
 
 def test_resolve_soft_deleted_returns_none(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """A soft-deleted platform binding must not resolve."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -119,7 +120,7 @@ def test_resolve_soft_deleted_returns_none(
 
 def test_add_minimal(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """Happy-path ``add`` returns a User with the derived slug + defaults."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -135,7 +136,7 @@ def test_add_minimal(
 
 def test_add_slug_collision_suffixes(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """Same display name twice produces ``alice`` then ``alice-2``."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -149,7 +150,7 @@ def test_add_slug_collision_suffixes(
 
 def test_add_slug_collision_with_soft_deleted_still_suffixes(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """Soft-deleted users still occupy their slug; the next ``add`` must suffix.
 
@@ -180,7 +181,7 @@ def test_add_slug_collision_with_soft_deleted_still_suffixes(
 
 def test_add_operator_upper_bound(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """A second operator without ``replace_operator`` raises."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -192,7 +193,7 @@ def test_add_operator_upper_bound(
 
 def test_replace_operator_atomic_demote_promote(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """``replace_operator`` demotes the named operator and promotes the new one."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -215,7 +216,7 @@ def test_replace_operator_atomic_demote_promote(
 
 def test_remove_last_operator_refused(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """Removing the only operator raises :class:`LastOperatorRemovalRefusedError`."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -227,7 +228,7 @@ def test_remove_last_operator_refused(
 
 def test_get_operator_zero_raises(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """``get_operator`` on a deployment with no operator raises loudly."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -238,7 +239,7 @@ def test_get_operator_zero_raises(
 
 def test_get_operator_multi_raises(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """If somehow >1 operators exist, ``get_operator`` raises.
 
@@ -278,29 +279,46 @@ def test_get_operator_multi_raises(
 
 def test_bind_double_platform_refused(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
-    """A user already bound to a platform cannot bind a second active row for it."""
+    """A user already bound to a platform raises :class:`UserAlreadyBoundError`."""
     resolver = _build_resolver(session_factory, rate_limiter)
     user = resolver.add(display_name="Alice", authorization=Authorization.STANDARD)
     resolver.bind(user_slug=user.slug, platform=Platform.DISCORD, platform_id="111")
 
-    with pytest.raises(IdentityResolutionError):
+    with pytest.raises(UserAlreadyBoundError) as excinfo:
         resolver.bind(user_slug=user.slug, platform=Platform.DISCORD, platform_id="222")
+
+    # The typed exception MUST carry the slug + platform so the CLI can
+    # render a localised message naming both. Substring-matching the old
+    # bare ``IdentityResolutionError.args[0]`` was brittle; the typed
+    # attributes are the contract going forward.
+    assert excinfo.value.slug == "alice"
+    assert excinfo.value.platform == Platform.DISCORD.value
 
 
 def test_bind_platform_id_in_use_refused(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
-    """The same (platform, platform_id) cannot point at two different users."""
+    """The same (platform, platform_id) collision raises :class:`PlatformIdInUseError`
+    with the colliding user's slug populated.
+    """
     resolver = _build_resolver(session_factory, rate_limiter)
     alice = resolver.add(display_name="Alice", authorization=Authorization.STANDARD)
     bob = resolver.add(display_name="Bob", authorization=Authorization.STANDARD)
     resolver.bind(user_slug=alice.slug, platform=Platform.DISCORD, platform_id="shared")
 
-    with pytest.raises(IdentityResolutionError):
+    with pytest.raises(PlatformIdInUseError) as excinfo:
         resolver.bind(user_slug=bob.slug, platform=Platform.DISCORD, platform_id="shared")
+
+    # H2 / architect M2: the typed exception MUST surface the colliding
+    # slug so the CLI can name them instead of rendering "?". This pins
+    # the resolver's post-IntegrityError lookup that enriches the error
+    # with real context.
+    assert excinfo.value.existing_slug == "alice"
+    assert excinfo.value.platform == Platform.DISCORD.value
+    assert excinfo.value.platform_id == "shared"
 
 
 # --------------------------------------------------------------------------- #
@@ -310,7 +328,7 @@ def test_bind_platform_id_in_use_refused(
 
 def test_add_invalid_language_rejected(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """A malformed BCP-47 language tag fails fast at the resolver boundary."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -323,6 +341,89 @@ def test_add_invalid_language_rejected(
         )
 
 
+@pytest.mark.parametrize(
+    "bad_budget",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        0.0,
+        -1.0,
+    ],
+)
+def test_add_nan_budget_rejected(
+    session_factory: sessionmaker[Session],
+    rate_limiter: NullRateLimiter,
+    bad_budget: float,
+) -> None:
+    """NaN / inf / non-positive budgets fail the resolver-side CHECK mirror.
+
+    H5: the DB-level ``daily_budget_usd > 0`` CHECK constraint accepts NaN
+    under SQLite (the test backend) because ``NaN > 0`` is False but the
+    column-level check doesn't fire — so the resolver MUST defend at the
+    Python boundary. Same logic for ``+inf`` / ``-inf`` and for the
+    boundary ``0`` / negative cases.
+    """
+    resolver = _build_resolver(session_factory, rate_limiter)
+
+    with pytest.raises(ValueError):
+        resolver.add(
+            display_name="Budget Bad",
+            authorization=Authorization.STANDARD,
+            daily_budget_usd=bad_budget,
+        )
+
+
+def test_set_promote_to_operator_collision_raises(
+    session_factory: sessionmaker[Session],
+    rate_limiter: NullRateLimiter,
+) -> None:
+    """``set_(authorization=OPERATOR)`` without ``--replace-operator`` raises.
+
+    H5: pins the operator upper-bound enforcement on the ``set_`` path —
+    the ``add`` path is already covered by ``test_add_operator_upper_bound``;
+    this test confirms ``set_`` exercises the same gate. Without the gate,
+    an operator could be silently created via ``alfred user set <other>
+    --authorization operator``, leaving the deployment with two operators.
+    """
+    resolver = _build_resolver(session_factory, rate_limiter)
+    resolver.add(display_name="Alice", authorization=Authorization.OPERATOR)
+    bob = resolver.add(display_name="Bob", authorization=Authorization.STANDARD)
+
+    with pytest.raises(OperatorAlreadyExistsError):
+        resolver.set_(slug=bob.slug, authorization=Authorization.OPERATOR)
+
+
+def test_set_promote_with_replace_operator_demotes_atomically(
+    session_factory: sessionmaker[Session],
+    rate_limiter: NullRateLimiter,
+) -> None:
+    """``set_(authorization=OPERATOR, replace_operator=<old>)`` demotes + promotes
+    in one transaction.
+
+    H5: pins the atomic demote-then-promote on the ``set_`` path. The
+    ``add`` path is covered by ``test_replace_operator_atomic_demote_promote``;
+    this complements it for promotion of an existing standard user. After
+    the call there must be exactly one operator (the new one) and the old
+    operator must be demoted to TRUSTED.
+    """
+    resolver = _build_resolver(session_factory, rate_limiter)
+    alice = resolver.add(display_name="Alice", authorization=Authorization.OPERATOR)
+    bob = resolver.add(display_name="Bob", authorization=Authorization.STANDARD)
+
+    resolver.set_(
+        slug=bob.slug,
+        authorization=Authorization.OPERATOR,
+        replace_operator=alice.slug,
+    )
+
+    op = resolver.get_operator()
+    assert op.slug == bob.slug
+    demoted = resolver.show(slug=alice.slug)
+    assert demoted is not None
+    assert demoted.authorization == Authorization.TRUSTED.value
+
+
 # --------------------------------------------------------------------------- #
 # Version-counter bump contract
 # --------------------------------------------------------------------------- #
@@ -330,7 +431,7 @@ def test_add_invalid_language_rejected(
 
 def test_every_mutating_method_bumps_counter(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """Each successful mutator advances the counter by exactly one.
 
@@ -372,7 +473,7 @@ def test_every_mutating_method_bumps_counter(
 
 def test_resolve_lru_invalidates_on_counter_bump(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """A counter bump invalidates cached resolves on next access.
 
@@ -407,7 +508,7 @@ def test_resolve_lru_invalidates_on_counter_bump(
 
 def test_show_and_list(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """``show`` returns a single user; ``list_`` returns all live users."""
     resolver = _build_resolver(session_factory, rate_limiter)
@@ -424,7 +525,7 @@ def test_show_and_list(
 
 def test_list_excludes_soft_deleted_by_default(
     session_factory: sessionmaker[Session],
-    rate_limiter: _NullRateLimiter,
+    rate_limiter: NullRateLimiter,
 ) -> None:
     """A soft-deleted user is hidden from ``list_()`` unless explicitly asked for."""
     resolver = _build_resolver(session_factory, rate_limiter)

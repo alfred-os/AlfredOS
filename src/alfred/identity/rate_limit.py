@@ -9,15 +9,21 @@ Why a Protocol-first stub:
 * ``IdentityResolver`` (T11) takes a ``RateLimiter`` for type hints. Shipping
   the Protocol now keeps PR A self-contained without dragging in the token
   bucket.
-* PR B tests need a no-op double they can wire in. ``_NullRateLimiter`` is
-  test-only (leading underscore, intentionally not in ``__all__``).
+* PR B tests + the Slice-1/2 CLI wire-up need a no-op double they can wire
+  in until PR D1 ships the in-process token bucket. :class:`NullRateLimiter`
+  is the public stand-in; it is production-acceptable for single-operator
+  deployments where every authenticated caller is the operator (operators
+  have unlimited rate-limit defaults), but the production
+  ``InProcessTokenBucketRateLimiter`` from PR D1 is required as soon as
+  multi-user authorization tiers (``READ_ONLY``) actually route through the
+  orchestrator.
 
 Security note: ``allow()`` takes the full ``User`` rather than a slug because
 the concrete limiter must consult ``user.authorization`` —
 ``Authorization.READ_ONLY`` returns ``False`` unconditionally (spec §2
 line 223). Passing the typed ``User`` at the seam makes that gate
 impossible to forget at call sites. The null double does NOT enforce that
-invariant (it's a test no-op); the production limiter in PR D1 does.
+invariant (it's a no-op); the production limiter in PR D1 does.
 """
 
 from __future__ import annotations
@@ -68,13 +74,20 @@ class RateLimiter(Protocol):
         ...
 
 
-class _NullRateLimiter:
-    """No-op test double — always allows, never tracks state.
+class NullRateLimiter:
+    """No-op rate limiter — always allows, tracks only the lifetime refusal counter.
 
-    Intentionally NOT in ``__all__``: this is for tests + PR B wiring only.
-    The production path uses ``InProcessTokenBucketRateLimiter`` (PR D1),
-    which enforces the ``READ_ONLY`` gate that this double deliberately
-    skips.
+    Production-acceptable for Slice-1/2 single-operator deployments per
+    ADR-0010: every authenticated caller is the operator, and operators
+    have unlimited rate-limit defaults, so there is no policy decision to
+    make. PR D1 ships :class:`InProcessTokenBucketRateLimiter`, which is
+    required as soon as multi-user authorization tiers (``READ_ONLY``)
+    actually route through the orchestrator — that limiter enforces the
+    ``READ_ONLY`` gate this double deliberately skips.
+
+    Exported in ``__all__`` (see :mod:`alfred.identity`) so the slice-1 CLI
+    bootstrap and the slice-2 TUI wire-up can import it without reaching
+    into private names.
     """
 
     def __init__(self) -> None:
