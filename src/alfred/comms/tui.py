@@ -152,7 +152,7 @@ class AlfredTuiApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Vertical(
-            RichLog(id="conversation_log", highlight=True, markup=True),
+            RichLog(id="conversation_log", highlight=True, markup=True, wrap=True),
             Input(placeholder=t("tui.input_placeholder"), id="user_input"),
         )
 
