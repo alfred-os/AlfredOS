@@ -60,8 +60,54 @@ def _is_comms_module(module: str | None) -> bool:
     return module == "alfred.comms" or module.startswith("alfred.comms.")
 
 
-def _scan_file(path: pathlib.Path) -> list[ImportViolation]:
-    """Return any ImportViolation entries for ``path``."""
+def _resolve_relative_import(
+    *,
+    file_path: pathlib.Path,
+    level: int,
+    module: str | None,
+    package_root: pathlib.Path = _SRC_ROOT,
+) -> str | None:
+    """Translate a relative ``from .x import Y`` into its absolute module name.
+
+    Returns ``None`` if the source file is outside the package tree
+    rooted at ``package_root`` (no relative resolution is meaningful) or
+    if ``level`` would overshoot the package root. Otherwise returns
+    the resolved dotted module path (e.g. ``alfred.comms.tui_adapter``).
+
+    ``package_root`` defaults to the real ``src/alfred`` tree; the
+    parameter exists so the scanner's own unit tests can synthesize a
+    fake package layout under ``tmp_path``.
+    """
+    try:
+        rel = file_path.resolve().relative_to(package_root)
+    except ValueError:
+        return None
+    # The importing package equals the file's parent relative to alfred.
+    # E.g. ``src/alfred/cli/main.py`` -> parent parts ``("cli",)``,
+    # ``src/alfred/comms/tui_adapter.py`` -> ``("comms",)``.
+    parent_parts: tuple[str, ...] = (package_root.name,) + tuple(rel.parts[:-1])
+    if level > len(parent_parts):
+        return None
+    base_parts = parent_parts[: len(parent_parts) - level + 1]
+    if module:
+        return ".".join((*base_parts, module))
+    return ".".join(base_parts)
+
+
+def _scan_file(
+    path: pathlib.Path,
+    *,
+    package_root: pathlib.Path = _SRC_ROOT,
+) -> list[ImportViolation]:
+    """Return any ImportViolation entries for ``path``.
+
+    Relative imports (``from .comms.x import Y``) are normalized to
+    their absolute dotted form before the comms-boundary check runs so
+    a contributor cannot bypass the gate by switching to a relative
+    spelling. ``package_root`` is the package-tree root used for the
+    relative-import resolver — production scans use the real
+    ``src/alfred`` tree; the scanner's own unit tests pass a fake root.
+    """
     source = path.read_text(encoding="utf-8")
     try:
         tree = ast.parse(source, filename=str(path))
@@ -82,6 +128,15 @@ def _scan_file(path: pathlib.Path) -> list[ImportViolation]:
                     )
         elif isinstance(node, ast.ImportFrom):
             module = node.module
+            level = node.level or 0
+            if level > 0:
+                # ``from . import x`` or ``from .x import Y`` — resolve.
+                module = _resolve_relative_import(
+                    file_path=path,
+                    level=level,
+                    module=module,
+                    package_root=package_root,
+                )
             if not _is_comms_module(module):
                 continue
             # ``from alfred.comms import X`` — every X is suspect unless
@@ -185,6 +240,57 @@ def test_scanner_ignores_unrelated_imports(tmp_path: pathlib.Path) -> None:
         encoding="utf-8",
     )
     assert _scan_file(fixture) == []
+
+
+def test_scanner_detects_relative_import_of_concrete_adapter(tmp_path: pathlib.Path) -> None:
+    """A consumer cannot bypass the gate via relative spelling.
+
+    Simulates a file at ``alfred/cli/foo.py`` doing
+    ``from ..comms.tui_adapter import TuiAdapter``. The scanner must
+    resolve the relative path to ``alfred.comms.tui_adapter`` and flag
+    it — otherwise the AST gate has a one-character bypass.
+    """
+    pkg_root = tmp_path / "alfred"
+    (pkg_root / "cli").mkdir(parents=True)
+    (pkg_root / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_root / "cli" / "__init__.py").write_text("", encoding="utf-8")
+    fixture = pkg_root / "cli" / "violator.py"
+    fixture.write_text(
+        "from ..comms.tui_adapter import TuiAdapter\n",
+        encoding="utf-8",
+    )
+    violations = _scan_file(fixture, package_root=pkg_root)
+    assert len(violations) == 1
+    assert "alfred.comms.tui_adapter" in violations[0].symbol
+
+
+def test_scanner_detects_single_dot_relative_import(tmp_path: pathlib.Path) -> None:
+    """``from .comms.tui_adapter import X`` from inside the alfred package."""
+    pkg_root = tmp_path / "alfred"
+    pkg_root.mkdir()
+    (pkg_root / "__init__.py").write_text("", encoding="utf-8")
+    fixture = pkg_root / "violator.py"
+    fixture.write_text(
+        "from .comms.tui_adapter import TuiAdapter\n",
+        encoding="utf-8",
+    )
+    violations = _scan_file(fixture, package_root=pkg_root)
+    assert len(violations) == 1
+    assert "alfred.comms.tui_adapter" in violations[0].symbol
+
+
+def test_scanner_allows_relative_import_to_allowlisted_module(tmp_path: pathlib.Path) -> None:
+    """The relative-import path resolves to the same allowlist."""
+    pkg_root = tmp_path / "alfred"
+    (pkg_root / "cli").mkdir(parents=True)
+    (pkg_root / "__init__.py").write_text("", encoding="utf-8")
+    (pkg_root / "cli" / "__init__.py").write_text("", encoding="utf-8")
+    fixture = pkg_root / "cli" / "legit.py"
+    fixture.write_text(
+        "from ..comms.adapter import CommsAdapter\n",
+        encoding="utf-8",
+    )
+    assert _scan_file(fixture, package_root=pkg_root) == []
 
 
 def test_allowlist_is_locked_to_three_entries() -> None:
