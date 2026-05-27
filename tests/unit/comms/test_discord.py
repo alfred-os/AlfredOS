@@ -35,6 +35,14 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
+# Module-aliased import alongside the ``from ... import`` block below.
+# Some tests need direct module access for mutable globals
+# (``discord_unknown_dm_audit_dropped_total``) and for monkeypatching
+# (``monkeypatch.setattr(discord_mod, "_split_for_discord", ...)``).
+# Hoisting the alias here (rather than re-importing inside each test
+# function) avoids CodeQL's ``py/import-and-import-from`` flag while
+# keeping the dual-style usage the tests need.
+import alfred.comms.discord as discord_mod
 from alfred.budget.guard import BudgetExceededError, UnknownBudgetUserError
 from alfred.comms.discord import (
     DiscordAdapter,
@@ -428,8 +436,6 @@ async def test_unknown_dm_dedup_within_ttl() -> None:
 @pytest.mark.asyncio
 async def test_unknown_dm_global_cap_drops_audit_but_replies() -> None:
     """61 distinct snowflakes in 1 min: ≤60 audit rows + counter bumps."""
-    import alfred.comms.discord as discord_mod
-
     resolver = MagicMock()
     resolver.resolve = MagicMock(return_value=None)
     adapter = _make_adapter(identity_resolver=resolver, unknown_dm_audit_cap_per_min=60)
@@ -714,9 +720,9 @@ async def test_send_dlp_failed_audit_branch() -> None:
 @pytest.mark.asyncio
 async def test_send_split_failed_audit_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = _make_adapter()
-    # Force the splitter to raise.
-    import alfred.comms.discord as discord_mod
 
+    # Force the splitter to raise (uses the hoisted ``discord_mod``
+    # alias from the top-of-file imports).
     def bad_split(*_args, **_kwargs):
         raise RuntimeError("split boom")
 
