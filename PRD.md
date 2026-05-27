@@ -118,6 +118,24 @@ Each criterion is binary; all must pass for v0.1.
 - **Internal git repo at `/var/lib/alfred/state.git`** holds: skills, persona definitions, prompt/persona configs, routing config, security policy. The agent commits proposed changes to `proposal/*` branches; the reviewer agent reviews; merged commits become active. Rollback is `git revert`.
 - **The LLM never holds secrets.** The secret broker substitutes values at the tool-call boundary; the LLM sees opaque references (`{{secret:gmail_oauth}}`).
 - **Dual-LLM split.** The privileged orchestrator never processes raw T3 content; the quarantined LLM is the only consumer of T3 content and can only emit structured data.
+- **Every action is hookable.** Every unit of work the agentic core dispatches — tool calls, provider calls, memory writes, comms outbounds, consolidation passes, audit writes, inter-persona messages, skill invocations — is registered with a hookable interface (pre / post / error / cancel). Hook registration is plugin-scoped and capability-gated; hook ordering is deterministic (system tier → operator tier → user-plugin tier, registration order within tier). Detail in §5.1; ADR-0014 carries the rationale and the slice-placement decision.
+
+### 5.1 Hookable actions
+
+Plugins, the operator, and AlfredOS core components extend the system by registering **hooks** on actions other components take. The four hook kinds are:
+
+- **Pre-action** — observes or mutates the input before the action runs; may refuse the action (typed `HookRefusal`).
+- **Post-action** — observes or mutates the result after the action succeeds.
+- **Error** — observes the exception when the action raises; may swallow and replace with a synthesised result.
+- **Cancel** — runs cleanup on `asyncio.CancelledError`; cannot suppress the cancellation.
+
+Every action carries up to four hook chains, one per kind. Each chain is ordered by capability tier (**system**, **operator**, **user-plugin**) and by registration order within tier. Pre-action chains short-circuit on first refusal; the refusal is itself an event the error chain and the audit log observe.
+
+Plugin authors register hooks via the MCP protocol (a `hooks` block in the plugin manifest declares `(action, kind)` tuples) or via an in-process Python decorator for in-tree plugins. Both paths route through the same capability-gated registry; a plugin without the `hook.<action-name>` capability is refused at load time.
+
+Hooks coexist with the event bus: the event bus stays the observation-only surface for components that do not need to mutate or refuse, hooks are the synchronous in-band interception surface. Hooks coexist with the audit log: every hook invocation is itself auditable, keyed to the originating action's correlation ID.
+
+**Status — planned for Slice 2.5** (between Slice 2's identity/Discord/secret-broker scope and Slice 3's MCP-transport + T1/T3 rewrite). ADR-0014 records the decision, alternatives considered (event-bus-only, MCP-only, AOP decorators, retrofit into Slice 2, defer to Slice 3), and the performance + security consequences. Final slice placement is the architect's call at Slice-2 graduation planning.
 
 ## 6. Capability Pillars
 
