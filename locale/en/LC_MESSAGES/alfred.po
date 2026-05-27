@@ -174,55 +174,126 @@ msgstr ""
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:209
+#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:211
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:210
+#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:212
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:231
+#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:233
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/cli/main.py:79
+#: src/alfred/cli/main.py:80
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:146
+#: src/alfred/cli/main.py:148
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:149
+#: src/alfred/cli/main.py:151
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:150
+#: src/alfred/cli/main.py:152
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:151
+#: src/alfred/cli/main.py:153
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:152
+#: src/alfred/cli/main.py:154
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:153
+#: src/alfred/cli/main.py:155
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:154
+#: src/alfred/cli/main.py:156
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:155
+#: src/alfred/cli/main.py:157
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
+
+#: src/alfred/cli/memory_cmd.py:65
+msgid "cli.memory.help.group"
+msgstr "Inspect a user's stored memory."
+
+#: src/alfred/cli/memory_cmd.py:88
+msgid "cli.memory.help.show.short"
+msgstr "Show the user row and recent episodes for SLUG."
+
+#: src/alfred/cli/memory_cmd.py:100
+msgid "cli.memory.error.user_not_found"
+msgstr "No user with slug '{slug}'."
+
+#: src/alfred/cli/memory_cmd.py:139 src/alfred/identity/cli.py:413
+#: src/alfred/identity/cli.py:464
+msgid "cli.user.list.column.slug"
+msgstr "slug"
+
+#: src/alfred/cli/memory_cmd.py:140 src/alfred/identity/cli.py:414
+#: src/alfred/identity/cli.py:465
+msgid "cli.user.list.column.display_name"
+msgstr "display name"
+
+#: src/alfred/cli/memory_cmd.py:141 src/alfred/identity/cli.py:415
+#: src/alfred/identity/cli.py:466
+msgid "cli.user.list.column.authorization"
+msgstr "authorization"
+
+#: src/alfred/cli/memory_cmd.py:143 src/alfred/identity/cli.py:416
+#: src/alfred/identity/cli.py:467
+msgid "cli.user.list.column.daily_budget_usd"
+msgstr "daily budget (USD)"
+
+#: src/alfred/cli/memory_cmd.py:146 src/alfred/identity/cli.py:417
+#: src/alfred/identity/cli.py:468
+msgid "cli.user.list.column.language"
+msgstr "language"
+
+#: src/alfred/cli/memory_cmd.py:150
+msgid "cli.memory.show.episodes.empty_hint"
+msgstr "No episodes recorded for this user yet."
+
+#: src/alfred/cli/memory_cmd.py:155
+msgid "cli.memory.show.episodes.title"
+msgstr "Recent episodes (most recent {limit})"
+
+#: src/alfred/cli/memory_cmd.py:157
+msgid "cli.memory.show.column.time"
+msgstr "time"
+
+#: src/alfred/cli/memory_cmd.py:158
+msgid "cli.memory.show.column.role"
+msgstr "role"
+
+#: src/alfred/cli/memory_cmd.py:159
+msgid "cli.memory.show.column.content"
+msgstr "content"
+
+#: src/alfred/cli/memory_cmd.py:160
+msgid "cli.memory.show.column.trust_tier"
+msgstr "trust_tier"
+
+#: src/alfred/cli/memory_cmd.py:161
+msgid "cli.memory.show.column.language"
+msgstr "language"
+
+#: src/alfred/cli/memory_cmd.py:169
+msgid "cli.memory.show.working.unavailable_hint"
+msgstr ""
+"Working memory is per-process state held by the running TUI / Discord "
+"adapter and is not queryable from a one-shot CLI."
 
 #: src/alfred/comms/discord.py:181
 msgid "discord.embed_unsupported"
@@ -395,26 +466,6 @@ msgid "cli.user.list.empty_hint"
 msgstr ""
 "No users yet. Run 'alfred user add --authorization operator --name "
 "<YourName>' to add the operator."
-
-#: src/alfred/identity/cli.py:413 src/alfred/identity/cli.py:464
-msgid "cli.user.list.column.slug"
-msgstr "slug"
-
-#: src/alfred/identity/cli.py:414 src/alfred/identity/cli.py:465
-msgid "cli.user.list.column.display_name"
-msgstr "display name"
-
-#: src/alfred/identity/cli.py:415 src/alfred/identity/cli.py:466
-msgid "cli.user.list.column.authorization"
-msgstr "authorization"
-
-#: src/alfred/identity/cli.py:416 src/alfred/identity/cli.py:467
-msgid "cli.user.list.column.daily_budget_usd"
-msgstr "daily budget (USD)"
-
-#: src/alfred/identity/cli.py:417 src/alfred/identity/cli.py:468
-msgid "cli.user.list.column.language"
-msgstr "language"
 
 #: src/alfred/identity/cli.py:418
 msgid "cli.user.list.column.platforms"

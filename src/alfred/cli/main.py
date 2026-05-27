@@ -44,6 +44,7 @@ from alfred.cli._bootstrap import (
 from alfred.cli.audit_cmd import audit_app
 from alfred.cli.cost_cmd import cost_app
 from alfred.cli.discord_cmd import discord_app
+from alfred.cli.memory_cmd import memory_app
 from alfred.comms.adapter import build_tui_adapter
 from alfred.i18n import set_language, t
 from alfred.identity import (
@@ -111,6 +112,7 @@ app.add_typer(discord_app, name="discord")
 # sync engine — see the module docstrings for the cold-start rationale.
 app.add_typer(audit_app, name="audit")
 app.add_typer(cost_app, name="cost")
+app.add_typer(memory_app, name="memory")
 
 
 # ---------------------------------------------------------------------------
