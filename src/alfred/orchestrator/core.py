@@ -125,12 +125,21 @@ class UserLike(Protocol):
     here is the structural minimum a Protocol can express.
     """
 
+    # Protocol bodies need *some* body; ``raise NotImplementedError`` is
+    # preferred over ``...`` so accidental instantiation fails loudly and
+    # CodeQL's py/ineffectual-statement does not flag the ellipsis. Pattern
+    # carried over from :class:`alfred.identity.rate_limit.RateLimiter`.
     @property
-    def slug(self) -> str: ...
+    def slug(self) -> str:
+        raise NotImplementedError
+
     @property
-    def display_name(self) -> str: ...
+    def display_name(self) -> str:
+        raise NotImplementedError
+
     @property
-    def language(self) -> str: ...
+    def language(self) -> str:
+        raise NotImplementedError
 
 
 class IdentityResolverLike(Protocol):
@@ -143,7 +152,8 @@ class IdentityResolverLike(Protocol):
     instance satisfies the Protocol structurally.
     """
 
-    def get_operator(self) -> User: ...
+    def get_operator(self) -> User:
+        raise NotImplementedError
 
 
 def _sanitize_subject(subject: dict[str, Any], redactor: Callable[[str], str]) -> dict[str, Any]:

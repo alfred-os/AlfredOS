@@ -58,10 +58,17 @@ def _user_loader() -> Callable[[str], _StubUser | None]:
 
 
 # Slug-shaped strings only. Real ``user_id`` values come from the resolver's
-# slug column, which is ``[a-z0-9-]+``. Constraining to lowercase letters
-# keeps the strategy in-domain and avoids burning shrinker time on Unicode
-# escape paths that the resolver rejects upstream.
-_USER_ID = st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=10)
+# slug column, which is ``[a-z0-9-]+``. The alphabet covers the full slug
+# contract (letters + digits + hyphen); the filter rejects the degenerate
+# ``"-"``-only / leading-hyphen / trailing-hyphen cases the resolver's
+# slug-derivation pipeline already strips upstream so the strategy stays
+# in-domain. Constraining keeps shrinker time off Unicode escape paths the
+# resolver rejects.
+_USER_ID = st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyz0123456789-",
+    min_size=1,
+    max_size=10,
+).filter(lambda s: not s.startswith("-") and not s.endswith("-") and s != "-")
 
 # Per-call cap is 0.10 below; cost strategy stays well under that so the
 # property is "isolation under valid charges", not "cap-breach handling"
