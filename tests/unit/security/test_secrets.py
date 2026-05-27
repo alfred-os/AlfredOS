@@ -470,15 +470,25 @@ class TestGetPrecedence:
 
 
 class TestFromSettings:
-    def test_uses_settings_secrets_file_when_present(self, secure_secrets_file: Path) -> None:
+    def test_uses_settings_secrets_file_when_present(
+        self,
+        secure_secrets_file: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from types import SimpleNamespace
 
+        # Strip any caller env that would otherwise mask the file backend —
+        # the fixture writes ``discord_bot_token = "from-file"`` so the broker
+        # MUST report that value once the settings path is honoured.
+        monkeypatch.delenv("ALFRED_DISCORD_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("ALFRED_SECRETS_FILE", raising=False)
+
         broker = SecretBroker.from_settings(SimpleNamespace(secrets_file=secure_secrets_file))
-        # We can't directly inspect _file_secrets through the public API, but
-        # has() reflects the file backend with no env present.
-        assert broker.has("discord_bot_token") in {True, False}
-        # The path resolution accepted the Path arg.
-        assert isinstance(broker, SecretBroker)
+
+        # Real behavioural assertion: the file-backend was loaded and the
+        # value from the fixture is retrievable through the public API.
+        assert broker.has("discord_bot_token") is True
+        assert broker.get("discord_bot_token") == "from-file"
 
     def test_ignores_non_path_settings_attribute(self) -> None:
         from types import SimpleNamespace
