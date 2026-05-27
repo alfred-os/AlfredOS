@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 14:12+0100\n"
+"POT-Creation-Date: 2026-05-27 14:47+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -41,92 +41,92 @@ msgstr "Probe the Discord gateway for 30s and exit with a typed code."
 msgid "cli.discord.help.verify.timeout"
 msgstr "Seconds to wait for on_ready before timing out (default 30)."
 
-#: src/alfred/cli/discord_cmd.py:150
+#: src/alfred/cli/discord_cmd.py:151
 msgid "cli.discord.verify.config_failed.secrets_unreadable"
 msgstr "Discord verify failed: secrets file unreadable. Detail: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:156
+#: src/alfred/cli/discord_cmd.py:157
 msgid "cli.discord.verify.config_failed.bad_token"
 msgstr ""
 "Discord verify failed: bot token rejected. Confirm "
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:172 src/alfred/cli/main.py:196
+#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:199
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:197
+#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:200
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/main.py:74
-msgid "cli.help.root"
-msgstr "AlfredOS CLI"
-
-#: src/alfred/cli/main.py:133
-msgid "status.yes"
-msgstr "yes"
-
-#: src/alfred/cli/main.py:136
-msgid "status.no"
-msgstr "no"
-
-#: src/alfred/cli/main.py:137
-msgid "status.fallback_none"
-msgstr "(none)"
-
-#: src/alfred/cli/main.py:138
-msgid "status.primary_provider"
-msgstr "primary provider: {provider}"
-
-#: src/alfred/cli/main.py:139
-msgid "status.fallback_provider"
-msgstr "fallback provider: {provider}"
-
-#: src/alfred/cli/main.py:140
-msgid "status.anthropic_configured"
-msgstr "anthropic fallback configured: {yes_or_no}"
-
-#: src/alfred/cli/main.py:141
-msgid "status.daily_budget"
-msgstr "daily budget USD: {amount}"
-
-#: src/alfred/cli/main.py:142
-msgid "status.per_call_max"
-msgstr "per-call max USD: {amount}"
-
-#: src/alfred/cli/main.py:218
+#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:221
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/comms/discord.py:183
+#: src/alfred/cli/main.py:77
+msgid "cli.help.root"
+msgstr "AlfredOS CLI"
+
+#: src/alfred/cli/main.py:136
+msgid "status.yes"
+msgstr "yes"
+
+#: src/alfred/cli/main.py:139
+msgid "status.no"
+msgstr "no"
+
+#: src/alfred/cli/main.py:140
+msgid "status.fallback_none"
+msgstr "(none)"
+
+#: src/alfred/cli/main.py:141
+msgid "status.primary_provider"
+msgstr "primary provider: {provider}"
+
+#: src/alfred/cli/main.py:142
+msgid "status.fallback_provider"
+msgstr "fallback provider: {provider}"
+
+#: src/alfred/cli/main.py:143
+msgid "status.anthropic_configured"
+msgstr "anthropic fallback configured: {yes_or_no}"
+
+#: src/alfred/cli/main.py:144
+msgid "status.daily_budget"
+msgstr "daily budget USD: {amount}"
+
+#: src/alfred/cli/main.py:145
+msgid "status.per_call_max"
+msgstr "per-call max USD: {amount}"
+
+#: src/alfred/comms/discord.py:179
 msgid "discord.embed_unsupported"
 msgstr ""
 "I can only read text DMs in Slice 2. Embeds, attachments, polls, "
 "components, stickers, and references are refused."
 
-#: src/alfred/comms/discord.py:184
+#: src/alfred/comms/discord.py:180
 msgid "discord.rate_limited"
 msgstr "You're sending messages faster than I can keep up. Try again in a moment."
 
-#: src/alfred/comms/discord.py:696 src/alfred/comms/discord.py:859
-#: src/alfred/comms/discord.py:865 src/alfred/comms/discord.py:995
-#: src/alfred/comms/discord.py:1015 src/alfred/comms/discord.py:1042
+#: src/alfred/comms/discord.py:693 src/alfred/comms/discord.py:856
+#: src/alfred/comms/discord.py:862 src/alfred/comms/discord.py:992
+#: src/alfred/comms/discord.py:1012 src/alfred/comms/discord.py:1039
 msgid "discord.alfred_error"
 msgstr "Something went wrong on my end. The operator's audit log has the details."
 
 # PR D2 — Discord adapter i18n catalog (spec §3 lines 514-520).
-#: src/alfred/comms/discord.py:768
+#: src/alfred/comms/discord.py:765
 msgid "discord.unknown_user_first"
 msgstr ""
 "I don't recognise this Discord ID yet (snowflake: `{snowflake}`). Ask "
 "your operator to run: `alfred user add --name <YourName> --discord-id "
 "{snowflake}`. The operator's audit log shows this DM."
 
-#: src/alfred/comms/discord.py:847
+#: src/alfred/comms/discord.py:844
 msgid "discord.budget_blocked"
 msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
 

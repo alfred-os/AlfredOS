@@ -152,6 +152,7 @@ discord_unknown_dm_audit_dropped_total: int = 0
 # stub is the seam for, and read directly by the test suite via
 # ``import alfred.comms.discord as discord_mod``).
 __all__ = [
+    "_PYBABEL_VISIBLE_KEYS",
     "DiscordAdapter",
     "discord_unknown_dm_audit_dropped_total",
     "run_verify_probe",
