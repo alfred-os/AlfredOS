@@ -60,18 +60,21 @@ class RateLimiter(Protocol):
         ``user.authorization == Authorization.READ_ONLY`` (spec §2 line 223,
         architect-002).
         """
-        ...
+        # Protocol bodies must declare *some* body; ``raise`` is preferred
+        # over ``...`` so accidental instantiation fails loudly, and so
+        # CodeQL's py/ineffectual-statement doesn't flag the ellipsis.
+        raise NotImplementedError
 
     async def reset(self, user_id: str) -> None:
         """Clear any accumulated state for the given user slug.
 
         Called on authorization changes and on explicit operator action.
         """
-        ...
+        raise NotImplementedError
 
     def health(self) -> RateLimiterHealth:
         """Return a point-in-time snapshot for surfaces like ``alfred status``."""
-        ...
+        raise NotImplementedError
 
 
 class NullRateLimiter:

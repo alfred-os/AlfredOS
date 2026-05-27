@@ -816,6 +816,11 @@ class IdentityListener:
         # ``conn`` is opaque to the supervisor; the concrete type is the
         # psycopg3 ``AsyncConnection`` returned by ``_default_connect``.
         async with conn as c:  # type: ignore[attr-defined]  # reason: psycopg3 AsyncConnection supports async-with; opaque here for test-double symmetry
+            # Postgres LISTEN does not accept parameterised channel names — the
+            # channel must be a SQL identifier literal. ``_NOTIFY_CHANNEL`` is a
+            # module-level constant (never user-controlled), so the f-string is
+            # safe. Ruff S608 doesn't currently flag this shape; the comment is
+            # here as documentation for future maintainers and static analysers.
             await c.execute(f"LISTEN {_NOTIFY_CHANNEL}")
             async for notify in c.notifies():
                 if stop_event.is_set():

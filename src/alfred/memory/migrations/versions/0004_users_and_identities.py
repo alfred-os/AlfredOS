@@ -64,6 +64,20 @@ down_revision: str | Sequence[str] | None = "0003"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Alembic reads ``revision`` / ``down_revision`` / ``branch_labels`` /
+# ``depends_on`` via module introspection (see alembic.script.revision).
+# Static analysers (CodeQL's py/unused-global-variable) can't see that
+# reflective access — declaring them in ``__all__`` makes the contract
+# with Alembic explicit and silences the false-positive alert.
+__all__ = [
+    "branch_labels",
+    "depends_on",
+    "down_revision",
+    "downgrade",
+    "revision",
+    "upgrade",
+]
+
 
 def _operator_name() -> str:
     """Operator's human-readable name from env; defaults to ``"operator"``."""
