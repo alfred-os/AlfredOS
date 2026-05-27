@@ -18,7 +18,10 @@ swap a single-module rewrite rather than a cross-cutting refactor.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 # ``AdapterHealth`` lives in a leaf module so both this Protocol module
 # and ``alfred.comms.tui_adapter`` can import it without forming the
@@ -28,8 +31,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from alfred.comms._types import AdapterHealth
 
 if TYPE_CHECKING:
+    from alfred.audit.log import AuditWriter
     from alfred.comms.tui import _IdentityResolverLike, _OrchestratorLike, _WorkingPoolLike
     from alfred.identity.rate_limit import RateLimiter
+    from alfred.identity.resolver import IdentityResolver
+    from alfred.memory.working_pool import WorkingMemoryPool
+    from alfred.orchestrator.core import Orchestrator
     from alfred.security.dlp import OutboundDlp
     from alfred.security.secrets import SecretBroker
 
@@ -123,4 +130,79 @@ def build_tui_adapter(
         rate_limiter=rate_limiter,
         broker=broker,
         working_pool=working_pool,
+    )
+
+
+async def run_discord_verify_probe(
+    *,
+    broker: SecretBroker,
+    outbound_dlp: OutboundDlp,
+    timeout_s: float,
+    client_factory: Any = None,
+) -> tuple[int, str, Mapping[str, object]]:
+    """Allowlisted seam for the ``alfred discord verify`` subcommand.
+
+    The CLI cannot import :mod:`alfred.comms.discord` directly — the
+    import-isolation test locks the allowlist to three modules. This
+    function lives inside the allowlisted ``alfred.comms.adapter``
+    module so the CLI consumes only the public seam.
+
+    Returns ``(exit_code, event_key, event_kwargs)``. The exit code is
+    the typed verify-exit value (0/1/2/3/4/130). The CLI maps it onto
+    its own ``_VerifyExitCode`` enum and emits the structlog event with
+    the returned key + kwargs.
+
+    Deferred import: the heavy ``discord.py`` import stays inside
+    :mod:`alfred.comms.discord`, so importing this seam does not pay
+    the gateway-client cost until ``alfred discord verify`` actually
+    runs.
+    """
+    from alfred.comms.discord import run_verify_probe
+
+    return await run_verify_probe(
+        broker=broker,
+        outbound_dlp=outbound_dlp,
+        timeout_s=timeout_s,
+        client_factory=client_factory,
+    )
+
+
+def build_discord_adapter(
+    *,
+    orchestrator: Orchestrator,
+    identity_resolver: IdentityResolver,
+    broker: SecretBroker,
+    outbound_dlp: OutboundDlp,
+    rate_limiter: RateLimiter,
+    working_pool: WorkingMemoryPool,
+    audit: AuditWriter,
+) -> CommsAdapter:
+    """Factory for the Slice-2 Discord adapter.
+
+    Mirrors :func:`build_tui_adapter` — returns the
+    :class:`CommsAdapter` Protocol so callers in ``src/alfred/cli/``
+    consume only the allowlisted seam. The concrete
+    :class:`alfred.comms.discord.DiscordAdapter` is intentionally NOT
+    re-exported from this module: the import-isolation test
+    (``tests/unit/comms/test_no_direct_adapter_imports.py``) locks the
+    allowlist to three modules; this factory keeps the CLI bootstrap
+    on the right side of that boundary.
+
+    The local import avoids dragging ``discord.py`` (and via it
+    ``aiohttp``, ``yarl``, …) into the import path of consumers like
+    ``alfred status`` that never spin up the Discord gateway.
+    """
+    from alfred.comms.discord import DiscordAdapter
+
+    return cast(
+        "CommsAdapter",
+        DiscordAdapter(
+            orchestrator=orchestrator,
+            identity_resolver=identity_resolver,
+            broker=broker,
+            outbound_dlp=outbound_dlp,
+            rate_limiter=rate_limiter,
+            working_pool=working_pool,
+            audit=audit,
+        ),
     )

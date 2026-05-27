@@ -69,6 +69,7 @@ app = typer.Typer(help=t("cli.help.root"), no_args_is_help=True)
 # bootstrap calls ``_install_identity_factories(settings)`` from both
 # ``_chat_main`` (TUI) and the ``user`` subcommand callback below, so the
 # resolver and writer share one engine + lifecycle across surfaces.
+from alfred.cli.discord_cmd import discord_app  # noqa: E402  # PR D2 Discord adapter
 from alfred.identity.cli import install_factories as install_identity_factories  # noqa: E402
 from alfred.identity.cli import user_app  # noqa: E402  # registered after app construction
 
@@ -91,6 +92,12 @@ def _user_bootstrap() -> None:
 
 
 app.add_typer(user_app, name="user", callback=_user_bootstrap)
+# PR D2: register the ``alfred discord`` Typer group. The group's
+# default callback (no subcommand) boots the long-running adapter;
+# ``alfred discord verify`` runs the 30s probe. Both subcommands
+# construct their own dependency graph inside the callback so the
+# import cost only lands when an operator actually uses the surface.
+app.add_typer(discord_app, name="discord")
 
 
 # ---------------------------------------------------------------------------
