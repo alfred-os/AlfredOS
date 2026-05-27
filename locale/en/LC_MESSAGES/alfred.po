@@ -28,6 +28,84 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
+#: src/alfred/cli/audit_cmd.py:72
+msgid "cli.audit.help.group"
+msgstr "Inspect the AlfredOS audit trail."
+
+#: src/alfred/cli/audit_cmd.py:100 src/alfred/cli/audit_cmd.py:107
+msgid "cli.audit.error.invalid_since"
+msgstr ""
+"Invalid --since value '{value}'. Expected an integer with suffix m, h, or"
+" d (e.g. 5m, 1h, 24h, 7d)."
+
+#: src/alfred/cli/audit_cmd.py:126
+msgid "cli.audit.help.log.short"
+msgstr "Print audit-log rows for the given window, sorted newest-first."
+
+#: src/alfred/cli/audit_cmd.py:130
+msgid "cli.audit.flag.since.short"
+msgstr "Time window (e.g. 5m, 1h, 24h, 7d). Default 24h."
+
+#: src/alfred/cli/audit_cmd.py:134
+msgid "cli.audit.flag.user.short"
+msgstr "Filter to one actor_user_id slug."
+
+#: src/alfred/cli/audit_cmd.py:138
+msgid "cli.audit.flag.persona.short"
+msgstr "Filter to one actor_persona id."
+
+#: src/alfred/cli/audit_cmd.py:142
+msgid "cli.audit.flag.limit.short"
+msgstr "Max rows to render (default 50; capped at {max})."
+
+#: src/alfred/cli/audit_cmd.py:155
+msgid "cli.audit.error.invalid_limit"
+msgstr "Invalid --limit '{value}'. Must be between 1 and {max}."
+
+#: src/alfred/cli/audit_cmd.py:180
+msgid "cli.audit.log.empty_hint"
+msgstr "No audit rows matched the filter window."
+
+#: src/alfred/cli/audit_cmd.py:185
+msgid "cli.audit.log.column.time"
+msgstr "time"
+
+#: src/alfred/cli/audit_cmd.py:186
+msgid "cli.audit.log.column.event"
+msgstr "event"
+
+#: src/alfred/cli/audit_cmd.py:187
+msgid "cli.audit.log.column.actor_user_id"
+msgstr "actor_user_id"
+
+#: src/alfred/cli/audit_cmd.py:188
+msgid "cli.audit.log.column.actor_persona"
+msgstr "actor_persona"
+
+#: src/alfred/cli/audit_cmd.py:189
+msgid "cli.audit.log.column.tier"
+msgstr "tier"
+
+#: src/alfred/cli/audit_cmd.py:190
+msgid "cli.audit.log.column.result"
+msgstr "result"
+
+#: src/alfred/cli/audit_cmd.py:191
+msgid "cli.audit.log.column.cost_usd"
+msgstr "cost_usd"
+
+#: src/alfred/cli/audit_cmd.py:192
+msgid "cli.audit.log.column.language"
+msgstr "language"
+
+#: src/alfred/cli/audit_cmd.py:193
+msgid "cli.audit.log.column.model"
+msgstr "model"
+
+#: src/alfred/cli/audit_cmd.py:195
+msgid "cli.audit.log.value.unknown"
+msgstr "<unknown>"
+
 # PR D2 — CLI help and verify-event narration.
 #: src/alfred/cli/discord_cmd.py:64
 msgid "cli.discord.help.group"
@@ -52,53 +130,53 @@ msgstr ""
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:199
+#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:207
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:200
+#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:208
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:221
+#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:229
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/cli/main.py:77
+#: src/alfred/cli/main.py:78
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:136
+#: src/alfred/cli/main.py:144
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:139
+#: src/alfred/cli/main.py:147
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:140
+#: src/alfred/cli/main.py:148
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:141
+#: src/alfred/cli/main.py:149
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:142
+#: src/alfred/cli/main.py:150
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:143
+#: src/alfred/cli/main.py:151
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:144
+#: src/alfred/cli/main.py:152
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:145
+#: src/alfred/cli/main.py:153
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
@@ -507,4 +585,70 @@ msgstr ""
 
 #~ msgid "cli.discord.verify.interrupted"
 #~ msgstr "Discord verify interrupted by SIGINT."
+
+#~ msgid "cli.cost.help.group"
+#~ msgstr ""
+
+#~ msgid "cli.cost.help.report.short"
+#~ msgstr ""
+
+#~ msgid "cli.cost.flag.since.short"
+#~ msgstr ""
+
+#~ msgid "cli.cost.flag.by.short"
+#~ msgstr ""
+
+#~ msgid "cli.cost.report.value.unknown"
+#~ msgstr ""
+
+#~ msgid "cli.cost.report.empty_hint"
+#~ msgstr ""
+
+#~ msgid "cli.cost.report.column.persona"
+#~ msgstr ""
+
+#~ msgid "cli.cost.report.column.user"
+#~ msgstr ""
+
+#~ msgid "cli.cost.report.column.turns"
+#~ msgstr ""
+
+#~ msgid "cli.cost.report.column.total_cost_usd"
+#~ msgstr ""
+
+#~ msgid "cli.cost.report.column.avg_cost_usd_per_turn"
+#~ msgstr ""
+
+#~ msgid "cli.memory.help.group"
+#~ msgstr ""
+
+#~ msgid "cli.memory.help.show.short"
+#~ msgstr ""
+
+#~ msgid "cli.memory.error.user_not_found"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.episodes.empty_hint"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.episodes.title"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.column.time"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.column.role"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.column.content"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.column.trust_tier"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.column.language"
+#~ msgstr ""
+
+#~ msgid "cli.memory.show.working.unavailable_hint"
+#~ msgstr ""
 

@@ -41,6 +41,7 @@ from alfred.cli._bootstrap import (
     install_identity_factories_for_settings,
     load_settings_or_die,
 )
+from alfred.cli.audit_cmd import audit_app
 from alfred.cli.discord_cmd import discord_app
 from alfred.comms.adapter import build_tui_adapter
 from alfred.i18n import set_language, t
@@ -101,6 +102,13 @@ app.add_typer(user_app, name="user", callback=_user_bootstrap)
 # construct their own dependency graph inside the callback so the
 # import cost only lands when an operator actually uses the surface.
 app.add_typer(discord_app, name="discord")
+# Read-only operator-inspection surfaces. Each subgroup loads
+# ``Settings`` lazily inside its handler (rather than via a
+# ``callback=...``) so an operator on an unconfigured stack still gets
+# the friendly ``.env`` error from ``_load_settings_or_die`` and never
+# a pre-callback traceback. Each subgroup opens its own short-lived
+# sync engine — see the module docstrings for the cold-start rationale.
+app.add_typer(audit_app, name="audit")
 
 
 # ---------------------------------------------------------------------------
