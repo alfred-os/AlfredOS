@@ -10,6 +10,7 @@ reopen) are removed by ``_strip_state_markers`` before comparison.
 from __future__ import annotations
 
 import re
+import uuid
 
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -20,7 +21,20 @@ from alfred.comms.markdown_split import _split_for_discord
 # ----- Helpers --------------------------------------------------------------
 
 
-_SENTINEL = "XSPLITX"
+def _fresh_sentinel(chunks: list[str]) -> str:
+    """Return a sentinel string guaranteed absent from every chunk.
+
+    A fixed sentinel (the prior ``XSPLITX``) plus unconditional
+    ``replace(_SENTINEL, "")`` deletes legitimate input the moment
+    hypothesis or a future fixture happens to generate the substring.
+    Loop on UUID4 hex tokens until none of the chunks contains the
+    candidate. Two random 32-hex tokens colliding with finite text is
+    astronomically unlikely on the first try; the loop is paranoia.
+    """
+    while True:
+        candidate = f"__SENTINEL_{uuid.uuid4().hex}__"
+        if not any(candidate in chunk for chunk in chunks):
+            return candidate
 
 
 def _strip_state_markers(chunks: list[str]) -> str:
@@ -28,22 +42,27 @@ def _strip_state_markers(chunks: list[str]) -> str:
 
     We don't know the cut points a priori, so we re-join with a sentinel,
     then peel any close/reopen pair that straddles the sentinel.
+
+    The sentinel is generated per-call against the actual chunk content so
+    a chunk that legitimately contains an earlier fixed sentinel does not
+    have part of its body silently deleted by the cleanup pass.
     """
-    joined = _SENTINEL.join(chunks)
+    sentinel = _fresh_sentinel(chunks)
+    joined = sentinel.join(chunks)
     # Fence close + fence reopen across the sentinel.
     joined = re.sub(
-        r"\n?```" + re.escape(_SENTINEL) + r"```[^\n]*\n",
+        r"\n?```" + re.escape(sentinel) + r"```[^\n]*\n",
         "",
         joined,
     )
     # Inline backtick close + reopen across the sentinel.
     joined = re.sub(
-        r"`" + re.escape(_SENTINEL) + r"`",
+        r"`" + re.escape(sentinel) + r"`",
         "",
         joined,
     )
     # Leftover sentinels (plain-text joins).
-    return joined.replace(_SENTINEL, "")
+    return joined.replace(sentinel, "")
 
 
 # ----- Boundary cases -------------------------------------------------------
