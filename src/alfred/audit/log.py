@@ -54,18 +54,27 @@ class AuditWriter:
         cost_estimate_usd: float,
         trace_id: str,
         actor_persona: str = "alfred",
+        persona_id: str | None = None,
         cost_actual_usd: float | None = None,
         language: str = "en-US",
     ) -> None:
         """Record a single audit entry. Raises if persistence fails.
 
-        `language` is a BCP-47 tag (e.g. "en-US", "ja-JP"). Every audit row
+        ``language`` is a BCP-47 tag (e.g. "en-US", "ja-JP"). Every audit row
         carries it because CLAUDE.md i18n rule #3 requires every stored
         user-content row to have a language field — and the audit log is one
         such row (subject often contains a user-content excerpt). Default
-        "en-US" preserves backward-compat for paths not yet threaded with
+        ``"en-US"`` preserves backward-compat for paths not yet threaded with
         language; new callers MUST pass language explicitly. The orchestrator
-        passes it from `Settings.operator_language`.
+        passes it from ``Settings.operator_language``.
+
+        ``persona_id`` is the Slice-2 per-row attribution column added in
+        migration 0004 (nullable). Identifies WHICH persona authored the
+        action so the audit graph can attribute multi-persona traffic
+        (Slice 5+) without a join. Defaults to ``None`` for pre-multi-
+        persona callers; the orchestrator passes ``"alfred"`` so Slice-1+2
+        rows are non-null. Distinct from ``actor_persona`` so downstream
+        readers of that column keep working untouched.
 
         Opens its own session+transaction via ``session_factory`` so the row
         survives even if the caller's outer transaction rolls back (CLAUDE.md
@@ -76,6 +85,7 @@ class AuditWriter:
             event=event,
             actor_user_id=actor_user_id,
             actor_persona=actor_persona,
+            persona_id=persona_id,
             subject=subject,
             trust_tier_of_trigger=trust_tier_of_trigger,
             result=result,

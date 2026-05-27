@@ -31,17 +31,27 @@ class EpisodicMemory:
         tokens_out: int = 0,
         cost_usd: float = 0.0,
         persona: str = "alfred",
+        persona_id: str | None = None,
         language: str = "en-US",
     ) -> None:
         """Persist one turn. `language` is BCP-47 (CLAUDE.md i18n rule #3).
 
-        Default `"en-US"` keeps backward-compat for paths not yet threaded with
-        language; the orchestrator (Task 13) passes
-        `language=settings.operator_language` explicitly per turn.
+        Default ``"en-US"`` for ``language`` keeps backward-compat for paths
+        not yet threaded with it; the orchestrator passes
+        ``language=settings.operator_language`` explicitly per turn.
+
+        ``persona_id`` is the new Slice-2 per-row column added in migration
+        0004 (nullable). It identifies WHICH persona authored the row so the
+        audit graph can attribute multi-persona traffic (Slice 5+) without a
+        join. Defaults to ``None`` for pre-multi-persona callers; the
+        orchestrator passes ``"alfred"`` so Slice-1+2 rows are non-null.
+        The pre-existing ``persona`` column stays for backward compatibility
+        with downstream analytics that already read it.
         """
         episode = Episode(
             user_id=user_id,
             persona=persona,
+            persona_id=persona_id,
             role=role,
             content=content,
             trust_tier=trust_tier,

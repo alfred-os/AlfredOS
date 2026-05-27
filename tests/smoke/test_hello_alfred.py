@@ -36,11 +36,18 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import sessionmaker
 from testcontainers.postgres import PostgresContainer
 
 from alfred.budget.guard import BudgetGuard
+from alfred.identity import (
+    IdentityResolver,
+    IdentityVersionCounter,
+    Platform,
+    _NullRateLimiter,
+)
 from alfred.memory.models import AuditEntry, Episode
 from alfred.memory.working import WorkingMemory
 from alfred.orchestrator.core import Orchestrator
@@ -68,7 +75,9 @@ async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatc
         # already-running event loop. Run the whole alembic call on a worker
         # thread so it gets its own loop. Using the real CLI behaviour here is
         # load-bearing: it catches ORM-vs-migration drift the integration test
-        # (which uses ``Base.metadata.create_all``) cannot.
+        # (which uses ``Base.metadata.create_all``) cannot. Migration 0004
+        # backfills the operator + ``(tui, operator_name)`` binding so the
+        # IdentityResolver call below resolves on a fresh stack.
         alembic_cfg = Config("alembic.ini")
         await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
 
@@ -82,6 +91,28 @@ async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatc
             # it relies on the scope to persist writes.
             async with sm() as session, session.begin():
                 yield session
+
+        # Resolve the canonical operator slug via IdentityResolver. The CLI's
+        # ``_chat_main`` (T15) does exactly this at startup; the smoke test
+        # mirrors that wiring so the slug propagated into episode + audit
+        # rows matches what production writes. We can't reuse the async
+        # engine for the sync resolver, so build a sync engine against the
+        # SAME testcontainer URL (psycopg driver). Both engines target the
+        # same DB; the orchestrator writes through the async path and the
+        # resolver reads through the sync path.
+        sync_url = async_url.replace("+asyncpg", "+psycopg")
+        sync_engine = create_engine(sync_url, future=True)
+        sync_factory = sessionmaker(sync_engine, expire_on_commit=False, future=True)
+        resolver = IdentityResolver(
+            session_factory=sync_factory,
+            version_counter=IdentityVersionCounter(),
+            rate_limiter=_NullRateLimiter(),
+        )
+        operator = await asyncio.to_thread(resolver.resolve, Platform.TUI, "operator")
+        assert operator is not None, (
+            "migration 0004 must backfill (tui, ALFRED_OPERATOR_NAME='operator') "
+            "binding — the smoke env defaults to operator_name='operator'"
+        )
 
         working = WorkingMemory()
         # Budget headroom comfortably exceeds the mocked cost so the pre-check
@@ -100,8 +131,8 @@ async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatc
         )
 
         orch = Orchestrator(
-            operator_name="operator",
-            operator_language="en-US",
+            operator_name=operator.slug,
+            operator_language=operator.language,
             session_scope=session_scope,
             working=working,
             router=router,
@@ -119,16 +150,23 @@ async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatc
                 ep_rows = (await session.execute(select(Episode))).scalars().all()
                 assert len(ep_rows) == 2, "expected user + assistant episodes"
                 assert {r.role for r in ep_rows} == {"user", "assistant"}
-                assert all(ep.language == "en-US" for ep in ep_rows), (
+                assert all(ep.language == operator.language for ep in ep_rows), (
                     "all episodes must carry the operator's BCP-47 language tag "
                     "(CLAUDE.md i18n rule #3)"
                 )
+                # Slice-2 identity: every episode carries the canonical slug
+                # and the active persona id (T15 — migration 0004 added the
+                # per-row column and the orchestrator pins ``"alfred"``).
+                assert all(ep.user_id == operator.slug for ep in ep_rows)
+                assert all(ep.persona_id == "alfred" for ep in ep_rows)
 
                 audit_rows = (await session.execute(select(AuditEntry))).scalars().all()
                 assert len(audit_rows) == 1, "expected exactly one audit entry per turn"
                 entry = audit_rows[0]
                 assert entry.result == "success"
-                assert entry.language == "en-US"
+                assert entry.language == operator.language
+                assert entry.actor_user_id == operator.slug
+                assert entry.persona_id == "alfred"
                 # Float equality is fragile across SQL round-trip + Decimal
                 # coercion; use approx with a tight relative tolerance.
                 assert entry.cost_actual_usd == pytest.approx(0.00001, rel=1e-9)
@@ -136,4 +174,5 @@ async def test_alfred_handles_one_turn_end_to_end(monkeypatch: pytest.MonkeyPatc
                 # User input was tagged T2 at the orchestrator boundary.
                 assert entry.trust_tier_of_trigger == "T2"
         finally:
+            sync_engine.dispose()
             await engine.dispose()

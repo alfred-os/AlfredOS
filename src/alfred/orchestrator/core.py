@@ -65,6 +65,13 @@ from alfred.security.tiers import T2, tag
 
 _log = structlog.get_logger(__name__)
 
+# Slice-2 per-row persona attribution (migration 0004 added the column on
+# ``episodes`` + ``audit_log`` as nullable). Slice-1 is single-persona —
+# every write is Alfred — so the orchestrator pins the literal here rather
+# than threading another constructor kwarg through every test. Slice 5's
+# persona registry replaces this with a per-turn lookup.
+_ALFRED_PERSONA_ID = "alfred"
+
 
 def _sanitize_subject(subject: dict[str, Any], redactor: Callable[[str], str]) -> dict[str, Any]:
     """Run every str value (recursively) through ``redactor``.
@@ -183,6 +190,7 @@ class Orchestrator:
                 cost_actual_usd=0.0,
                 trace_id=trace_id,
                 language=self._operator_language,
+                persona_id=_ALFRED_PERSONA_ID,
             )
         except Exception as audit_exc:
             _log.error(
@@ -210,6 +218,7 @@ class Orchestrator:
             content=user_input.content,
             trust_tier=user_input.tier.name,
             language=self._operator_language,
+            persona_id=_ALFRED_PERSONA_ID,
         )
 
         # ------------------------------------------------------------------
@@ -242,6 +251,7 @@ class Orchestrator:
                 cost_actual_usd=0.0,
                 trace_id=trace_id,
                 language=self._operator_language,
+                persona_id=_ALFRED_PERSONA_ID,
             )
             raise BudgetError(f"pre-check refused: estimate ${estimate:.4f} would breach budget")
 
@@ -279,6 +289,7 @@ class Orchestrator:
                 cost_actual_usd=0.0,
                 trace_id=trace_id,
                 language=self._operator_language,
+                persona_id=_ALFRED_PERSONA_ID,
             )
             raise
 
@@ -312,6 +323,7 @@ class Orchestrator:
             tokens_out=response.tokens_out,
             cost_usd=response.cost_usd,
             language=self._operator_language,
+            persona_id=_ALFRED_PERSONA_ID,
         )
 
         try:
@@ -334,6 +346,7 @@ class Orchestrator:
                 cost_actual_usd=response.cost_usd,
                 trace_id=trace_id,
                 language=self._operator_language,
+                persona_id=_ALFRED_PERSONA_ID,
             )
         except Exception as exc:
             # CLAUDE.md hard rule #7: audit-path failures are loud.

@@ -31,13 +31,22 @@ from typing import TYPE_CHECKING, cast
 
 import structlog
 import typer
+from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
 from structlog.types import EventDict
 
+from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetGuard
 from alfred.comms.tui import AlfredTuiApp
 from alfred.config.settings import Settings, SettingsError
 from alfred.i18n import set_language, t
+from alfred.identity import (
+    IdentityResolver,
+    IdentityVersionCounter,
+    Platform,
+    _NullRateLimiter,
+)
 from alfred.memory.db import build_session_scope, healthcheck
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
@@ -56,12 +65,31 @@ app = typer.Typer(help=t("cli.help.root"), no_args_is_help=True)
 # Identity sub-app — ``alfred user add|list|show|remove|bind|unbind|set``.
 # The sub-app's commands pull their resolver and audit writer from injected
 # factories (see ``alfred.identity.cli.install_factories``). Production
-# bootstrap wiring lands in T15 alongside the TUI startup change; for now
-# importing the sub-app at module scope keeps the registration declarative
-# and lets ``alfred user --help`` work without dragging in a Settings load.
+# bootstrap calls ``_install_identity_factories(settings)`` from both
+# ``_chat_main`` (TUI) and the ``user`` subcommand callback below, so the
+# resolver and writer share one engine + lifecycle across surfaces.
+from alfred.identity.cli import install_factories as install_identity_factories  # noqa: E402
 from alfred.identity.cli import user_app  # noqa: E402  # registered after app construction
 
-app.add_typer(user_app, name="user")
+
+def _user_bootstrap() -> None:
+    """Wire identity factories before any ``alfred user *`` subcommand runs.
+
+    Typer invokes a sub-app's callback before dispatching the chosen
+    subcommand. Registering this via ``add_typer(callback=...)`` rather than
+    ``@user_app.callback()`` keeps the callback attached to the **root-app's
+    registration** of ``user_app`` — direct ``user_app`` invocations (e.g.
+    ``tests/unit/identity/test_cli.py``) skip the bootstrap and use the
+    monkeypatched factories they install themselves. Settings load through
+    ``_load_settings_or_die`` so an unconfigured operator hits the same
+    friendly ``.env`` error path as ``alfred chat`` / ``alfred status``.
+    """
+    settings = _load_settings_or_die()
+    set_language(settings.operator_language)
+    _install_identity_factories(settings)
+
+
+app.add_typer(user_app, name="user", callback=_user_bootstrap)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +151,58 @@ def _build_router(broker: SecretBroker, settings: Settings) -> ProviderRouter:
             model=settings.anthropic_model,
         )
     return ProviderRouter(primary=primary, fallback=fallback)
+
+
+# ---------------------------------------------------------------------------
+# Identity bootstrap
+# ---------------------------------------------------------------------------
+
+
+def _sync_db_url(settings: Settings) -> str:
+    """Return a SYNC SQLAlchemy URL for the identity resolver.
+
+    Slice-1's ``Settings.database_url`` is a ``PostgresDsn`` shaped for the
+    async driver (``postgresql+asyncpg``). :class:`IdentityResolver` consumes
+    a sync ``sessionmaker[Session]`` deliberately — its callers from async
+    paths wrap calls in :func:`asyncio.to_thread` (see resolver docstring).
+    Translate the async DSN to ``postgresql+psycopg`` for the sync engine so
+    the operator never has to configure two URLs.
+    """
+    return settings.database_url.unicode_string().replace("+asyncpg", "+psycopg")
+
+
+def _install_identity_factories(settings: Settings) -> IdentityResolver:
+    """Wire the identity-resolver + audit-writer factories used by ``alfred user *``
+    and the TUI startup. Returns the resolver so the caller can read the operator.
+
+    A single shared engine per process keeps the LRU + version counter
+    coherent: the TUI's resolve at startup and a subsequent ``alfred user
+    set`` invocation in the same process would otherwise see different
+    counter values across two engines.
+
+    The audit-writer factory uses the async session_scope (matching slice-1
+    :class:`AuditWriter`'s contract); the resolver uses the sync sessionmaker
+    described in ``_sync_db_url``.
+    """
+    sync_engine = create_engine(_sync_db_url(settings), future=True)
+    sync_factory: sessionmaker = sessionmaker(  # type: ignore[type-arg]  # reason: SA 2.0 sessionmaker has runtime-generic shape; the Session-bound form is what IdentityResolver expects and what we pass here
+        sync_engine, expire_on_commit=False, future=True
+    )
+    resolver = IdentityResolver(
+        session_factory=sync_factory,
+        version_counter=IdentityVersionCounter(),
+        # Slice 2 ships the RateLimiter Protocol; the in-process token bucket
+        # lands in PR D1. The null double is correct for Slice-1+2 single-
+        # operator scope — the production limiter enforces READ_ONLY refusal
+        # which doesn't apply to an operator at all.
+        rate_limiter=_NullRateLimiter(),
+    )
+    audit_session_scope = build_session_scope(settings)
+    install_identity_factories(
+        resolver=lambda: resolver,
+        audit_writer=lambda: AuditWriter(session_factory=audit_session_scope),
+    )
+    return resolver
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +367,27 @@ async def _chat_main() -> None:
         typer.echo(t("hint.is_compose_up"))
         raise typer.Exit(code=3) from exc
 
+    # Identity: resolve the operator's canonical slug + language BEFORE
+    # constructing the orchestrator so every episode + audit row carries
+    # the canonical slug (CLAUDE.md i18n rule #3 + spec §2 identity
+    # invariants). Migration 0004 backfilled the operator row from
+    # ALFRED_OPERATOR_NAME, so the TUI binding ``(tui, operator_name)``
+    # always resolves on a freshly-set-up stack. If it doesn't, the
+    # operator skipped ``alembic upgrade head`` or removed the operator
+    # row — surface the friendly hint that points at
+    # ``alfred user add --authorization operator``.
+    #
+    # ``_install_identity_factories`` doubles as both the resolver
+    # construction and the wiring for the ``alfred user *`` subcommands
+    # in the same process, so a Slice-2 operator who launches the TUI
+    # then opens another shell to add a second user gets coherent
+    # version-counter behaviour without two engines.
+    resolver = _install_identity_factories(settings)
+    operator = await asyncio.to_thread(resolver.resolve, Platform.TUI, settings.operator_name)
+    if operator is None:
+        typer.echo(t("cli.user.error.no_operator"), err=True)
+        raise typer.Exit(code=2)
+
     router = _build_router(broker, settings)
     budget = BudgetGuard(
         daily_usd=settings.daily_budget_usd,
@@ -303,13 +404,13 @@ async def _chat_main() -> None:
     # at this boundary.
     async with session_scope() as session:
         episodic = EpisodicMemory(session=session)
-        recent = await episodic.recent(user_id=settings.operator_name, limit=20)
+        recent = await episodic.recent(user_id=operator.slug, limit=20)
         for ep in recent:
             await working.append(role=cast(Role, ep.role), content=ep.content)
 
     orchestrator = Orchestrator(
-        operator_name=settings.operator_name,
-        operator_language=settings.operator_language,
+        operator_name=operator.slug,
+        operator_language=operator.language,
         session_scope=session_scope,
         working=working,
         router=router,
