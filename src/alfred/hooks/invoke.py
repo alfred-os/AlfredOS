@@ -1,4 +1,4 @@
-"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Tasks 8 + 9.
+"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Tasks 8 + 9 + 10.
 
 The :func:`invoke` primitive is the public entry point every action
 callsite uses to drive a hook chain. It is intentionally tiny:
@@ -20,15 +20,40 @@ callsite uses to drive a hook chain. It is intentionally tiny:
    (``fail_closed=True``). The cancelled-subscriber await-to-completion
    (core-006) happens INSIDE the ``except TimeoutError`` handler, never
    inside the live timeout scope.
-4. Return the handler's :class:`HookContext` (for ``pre`` / ``post`` /
-   error-suppressed / timeout-recovered) or re-raise (for the
-   ``error``-all-none path and the ``cancel`` propagate-cancellation
-   path, when the chain completed within the deadline).
+4. Each chain-walking handler catches NON-:class:`HookRefusal`,
+   NON-:class:`asyncio.CancelledError`, NON-:class:`TimeoutError`
+   exceptions from a subscriber (Task 10 / spec §6.6) and:
 
-Tasks 8 + 9 ship the happy-path dispatch and the chain-timeout fault
-arm. Faults still pending land in later tasks:
+   * wraps the fault as
+     :class:`alfred.hooks.errors.HookSubscriberError` via
+     :meth:`HookSubscriberError.from_subscriber`, chaining ``__cause__``
+     back to the original exception so the traceback walks both;
+   * emits a
+     :data:`alfred.hooks.audit_sink.HOOKS_SUBSCRIBER_ERROR` row through
+     the registry-owned sink. Fields are NAME + TYPE only — NEVER
+     ``str(exc)`` or ``exc.args``, because the subscriber may have
+     inadvertently wrapped T3 user content in its exception (CLAUDE.md
+     hard rule #1 — never log secrets);
+   * applies ``fail_closed``: ``True`` raises the wrapped error so the
+     action body sees a hard fault; ``False`` treats the subscriber as
+     pass-through and continues the chain with the LAST-GOOD ctx (the
+     ctx as it was BEFORE the erroring subscriber's call). The error
+     is still audited — recorded, not hidden (CLAUDE.md hard rule #7).
 
-* Unexpected-subscriber-exception fault policy + row → Task 10.
+   ``_run_cancel`` is special: cleanup is best-effort, so the swallow
+   stays but the audit row makes the swallow no longer silent. Cancel
+   never wraps and never honours ``fail_closed`` — the original
+   cancellation always propagates.
+
+5. Return the handler's :class:`HookContext` (for ``pre`` / ``post`` /
+   error-suppressed / timeout-recovered / fail-closed-false subscriber-
+   error-recovered) or re-raise (for the ``error``-all-none path, the
+   ``cancel`` propagate-cancellation path when the chain completed
+   within the deadline, and the fail-closed-true subscriber-error
+   wrap).
+
+Faults still pending land in later tasks:
+
 * Refusal-authorisation by tier + audit row          → Task 11.
 * Re-entry bypass via :data:`alfred.hooks.registry._reentry` → Task 12.
 
@@ -103,9 +128,9 @@ import contextlib
 from collections.abc import Coroutine
 from typing import Any, Final, cast
 
-from alfred.hooks.audit_sink import HOOKS_CHAIN_TIMEOUT
+from alfred.hooks.audit_sink import HOOKS_CHAIN_TIMEOUT, HOOKS_SUBSCRIBER_ERROR
 from alfred.hooks.context import HookContext, HookKind
-from alfred.hooks.errors import HookError
+from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
 from alfred.hooks.registry import Subscriber, get_registry
 
 # ──────────────────────────────────────────────────────────────────────
@@ -169,6 +194,36 @@ trap DoS needs a primary-handler refactor to an :func:`asyncio.wait`
 -based dispatch; that lands as a follow-up to Task 9. The S-001
 hardening shipped here covers the slow-cleanup arm of the threat
 surface; the full trap DoS arm is tracked separately.
+"""
+
+
+_SUBSCRIBER_ERROR_AUDIT_FIELDS: Final[frozenset[str]] = frozenset(
+    {"hookpoint", "kind", "subscriber_name", "exception_type"}
+)
+"""Canonical key set for the ``fields`` mapping on every
+:data:`HOOKS_SUBSCRIBER_ERROR` audit row.
+
+PR-B's :class:`alfred.audit.log.AuditWriter`-backed sink keys off this
+schema for row projection; an unannounced addition / removal here breaks
+the projector. The set is asserted by
+``tests/unit/hooks/test_fault_semantics.py::test_subscriber_error_audit_row_fields_schema``
+so a drift surfaces as a failing test the author MUST acknowledge.
+
+Schema:
+
+* ``hookpoint`` — dotted hookpoint identifier (str)
+* ``kind`` — lifecycle stage (one of ``"pre"`` / ``"post"`` / ``"error"``
+  / ``"cancel"``)
+* ``subscriber_name`` — ``hook_fn.__qualname__`` of the offending
+  subscriber (str). Lets the operator grep the registry for the plugin
+  / module that crashed.
+* ``exception_type`` — ``exc.__class__.__name__`` of the original
+  unexpected exception (str). NAME ONLY — never ``str(exc)`` or
+  ``exc.args``, because the subscriber may have inadvertently wrapped
+  T3 user content in its exception (CLAUDE.md hard rule #1 — never
+  log secrets). The wrapped :class:`HookSubscriberError`'s
+  ``__cause__`` chain is where an operator with audit-log access can
+  inspect the upstream traceback.
 """
 
 
@@ -546,6 +601,98 @@ async def _handle_chain_timeout[T](
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Shared subscriber-error helper — Task 10
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def _emit_subscriber_error_audit(
+    *,
+    sub: Subscriber,
+    exc: BaseException,
+    hookpoint: str,
+    kind: HookKind,
+    correlation_id: str,
+) -> None:
+    """Emit one :data:`HOOKS_SUBSCRIBER_ERROR` audit row through the
+    registry-owned sink.
+
+    Centralises the audit-row field shape so the schema is built in ONE
+    place — every kind handler (and the cancel arm) shares it. Drift is
+    impossible because there is only one call site that builds the
+    ``fields`` mapping; the canonical key set is
+    :data:`_SUBSCRIBER_ERROR_AUDIT_FIELDS`.
+
+    Hard-rule discipline (CLAUDE.md #1 — never log secrets): the audit
+    row carries the subscriber's ``__qualname__`` and the original
+    exception's class NAME only. NEVER ``str(exc)``, ``exc.args``, or
+    any string derived from the exception's message — those may carry
+    T3 user content the subscriber inadvertently wrapped in its
+    exception. The chained :class:`HookSubscriberError`'s
+    ``__cause__`` chain is where an operator with audit-log access can
+    inspect the upstream traceback; the audit row itself stays
+    name-and-type only.
+
+    Args:
+        sub: The :class:`Subscriber` whose ``hook_fn`` raised. Its
+            ``__qualname__`` surfaces as the ``subscriber_name`` field.
+        exc: The original unexpected exception. Only its class NAME is
+            read; the instance is otherwise untouched here (the wrap
+            site sets ``__cause__`` separately).
+        hookpoint: The dotted hookpoint identifier — surfaces as the
+            ``hookpoint`` field so PR-B's projector can attribute the
+            fault to the right action.
+        kind: The lifecycle stage — surfaces as the ``kind`` field so
+            the operator can see which arm of the action's lifecycle
+            faulted.
+        correlation_id: Cross-system trace correlation id, passed
+            through to the sink so the row joins on
+            ``correlation_id``-keyed traces.
+    """
+    await get_registry().sink.emit(
+        event=HOOKS_SUBSCRIBER_ERROR,
+        correlation_id=correlation_id,
+        fields={
+            "hookpoint": hookpoint,
+            "kind": kind,
+            "subscriber_name": sub.hook_fn.__qualname__,
+            "exception_type": exc.__class__.__name__,
+        },
+    )
+
+
+def _wrap_subscriber_error(
+    *,
+    sub: Subscriber,
+    correlation_id: str,
+) -> HookSubscriberError:
+    """Build the :class:`HookSubscriberError` wrap for an unexpected
+    subscriber exception.
+
+    Centralises the :meth:`HookSubscriberError.from_subscriber` call
+    shape so a future widening of the wrap surface (e.g. an additional
+    kwarg, an alternative constructor) lands in one place rather than
+    at three handler sites. Cause chaining is the caller's job: every
+    call site is ``raise _wrap_subscriber_error(...) from exc``, which
+    sets ``__cause__`` (and ``__suppress_context__``) via Python's
+    ``raise ... from`` machinery.
+
+    Args:
+        sub: The :class:`Subscriber` whose call raised.
+        correlation_id: The chain's correlation id; surfaces in the
+            wrap's rendered message via
+            :meth:`HookSubscriberError.from_subscriber`.
+
+    Returns:
+        The :class:`HookSubscriberError` wrap. The caller is expected
+        to ``raise ... from exc`` to attach ``__cause__``.
+    """
+    return HookSubscriberError.from_subscriber(
+        name=sub.hook_fn.__qualname__,
+        correlation_id=correlation_id,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Per-kind private handlers
 # ──────────────────────────────────────────────────────────────────────
 
@@ -592,15 +739,53 @@ async def _run_pre[T](
     deadline_seconds = get_registry().chain_deadline_seconds
 
     chain_ctx = ctx
+    last_good_ctx = ctx
     pending: asyncio.Task[HookContext[T] | None] | None = None
     try:
         async with asyncio.timeout(deadline_seconds):
             for sub in subscribers:
                 pending = _spawn_subscriber(sub, chain_ctx)
-                result = await pending
+                try:
+                    result = await pending
+                except Exception as exc:
+                    # Task 10 §6.6: caught + wrapped + audited + fail_closed
+                    # applied. The catch is :class:`Exception` (NOT
+                    # :class:`BaseException`) so :class:`asyncio.CancelledError`
+                    # and :class:`SystemExit` / :class:`KeyboardInterrupt`
+                    # propagate. :class:`HookRefusal` is a subclass of
+                    # :class:`Exception` BUT is short-circuited by the
+                    # explicit ``isinstance`` re-raise below; Task 11 will
+                    # layer ``refusable_tiers`` enforcement onto that
+                    # re-raise.
+                    pending = None
+                    if isinstance(exc, HookRefusal):
+                        # Task 11 owns refusal-by-tier; this slice lets
+                        # every refusal propagate uncaught by the wrap arm.
+                        raise
+                    # Wrap, audit, apply fail_closed.
+                    await _emit_subscriber_error_audit(
+                        sub=sub,
+                        exc=exc,
+                        hookpoint=name,
+                        kind="pre",
+                        correlation_id=chain_ctx.correlation_id,
+                    )
+                    if fail_closed:
+                        raise _wrap_subscriber_error(
+                            sub=sub,
+                            correlation_id=chain_ctx.correlation_id,
+                        ) from exc
+                    # fail_closed=False: subscriber is pass-through.
+                    # Rewind chain_ctx to the last-good snapshot so the
+                    # NEXT subscriber sees the ctx as it was BEFORE this
+                    # subscriber's call. Mutations the subscriber would
+                    # have produced are discarded.
+                    chain_ctx = last_good_ctx
+                    continue
                 pending = None
                 if result is not None:
                     chain_ctx = result
+                    last_good_ctx = result
         return chain_ctx
     except TimeoutError:
         return await _handle_chain_timeout(
@@ -646,15 +831,44 @@ async def _run_post[T](
     deadline_seconds = get_registry().chain_deadline_seconds
 
     chain_ctx = ctx
+    last_good_ctx = ctx
     pending: asyncio.Task[HookContext[T] | None] | None = None
     try:
         async with asyncio.timeout(deadline_seconds):
             for sub in subscribers:
                 pending = _spawn_subscriber(sub, chain_ctx)
-                result = await pending
+                try:
+                    result = await pending
+                except Exception as exc:
+                    # Task 10 §6.6: caught + wrapped + audited + fail_closed
+                    # applied. Same shape as :func:`_run_pre`; post has no
+                    # refusal contract (Task 11 only authorises ``pre``
+                    # refusals) so the isinstance guard is unnecessary
+                    # here, BUT we still re-raise :class:`HookRefusal` for
+                    # safety so a subscriber that incorrectly raises one
+                    # from a post-handler propagates rather than getting
+                    # audited as a generic subscriber error.
+                    pending = None
+                    if isinstance(exc, HookRefusal):
+                        raise
+                    await _emit_subscriber_error_audit(
+                        sub=sub,
+                        exc=exc,
+                        hookpoint=name,
+                        kind="post",
+                        correlation_id=chain_ctx.correlation_id,
+                    )
+                    if fail_closed:
+                        raise _wrap_subscriber_error(
+                            sub=sub,
+                            correlation_id=chain_ctx.correlation_id,
+                        ) from exc
+                    chain_ctx = last_good_ctx
+                    continue
                 pending = None
                 if result is not None:
                     chain_ctx = result
+                    last_good_ctx = result
         return chain_ctx
     except TimeoutError:
         return await _handle_chain_timeout(
@@ -732,11 +946,43 @@ async def _run_error[T](
 
     pending: asyncio.Task[HookContext[T] | None] | None = None
     suppressed: HookContext[T] | None = None
+    last_good_ctx = chain_ctx
     try:
         async with asyncio.timeout(deadline_seconds):
             for sub in subscribers:
                 pending = _spawn_subscriber(sub, chain_ctx)
-                result = await pending
+                try:
+                    result = await pending
+                except Exception as raised_exc:
+                    # Task 10 §6.6: caught + wrapped + audited + fail_closed
+                    # applied. A subscriber that RAISES does NOT count as
+                    # "returned a substitute" — the suppressed-vs-re-raise
+                    # short-circuit on the error arm checks ``result is
+                    # not None``, not "the catch arm fired". So when
+                    # fail_closed=False and the subscriber raises, the
+                    # chain continues and the upstream ``exc`` may still
+                    # re-raise at the end if no later subscriber returns
+                    # a substitute. That's the "no silent failure"
+                    # guarantee for the error stage (CLAUDE.md hard
+                    # rule #7).
+                    pending = None
+                    if isinstance(raised_exc, HookRefusal):
+                        raise
+                    await _emit_subscriber_error_audit(
+                        sub=sub,
+                        exc=raised_exc,
+                        hookpoint=name,
+                        kind="error",
+                        correlation_id=chain_ctx.correlation_id,
+                    )
+                    if fail_closed:
+                        raise _wrap_subscriber_error(
+                            sub=sub,
+                            correlation_id=chain_ctx.correlation_id,
+                        ) from raised_exc
+                    # fail_closed=False: continue chain with last-good ctx.
+                    chain_ctx = last_good_ctx
+                    continue
                 pending = None
                 if result is not None:
                     # First non-None wins — short-circuit the rest of the
@@ -744,6 +990,7 @@ async def _run_error[T](
                     # timeout-wrapped loop so the post-loop disposition
                     # logic can return it cleanly.
                     suppressed = result
+                    last_good_ctx = result
                     break
     except TimeoutError:
         return await _handle_chain_timeout(
@@ -846,14 +1093,33 @@ async def _run_cancel[T](
                     # the audit row would never land (CLAUDE.md hard
                     # rule #7).
                     raise
-                except BaseException:  # noqa: S110 -- cancel cleanup is best-effort; Task 10 adds audit-row emission to this arm so the swallow is not silent. Re-raising a subscriber-raised exception here would let a cleanup bug suppress the original cancellation, which is the user-visible regression we are explicitly preventing.
-                    # Best-effort cleanup — swallow so subsequent
-                    # subscribers can still run. The pending task has
-                    # already completed (we awaited it) so we clear it
-                    # before the next iteration to avoid a stale handle
-                    # leaking into the timeout-handler if the NEXT
-                    # iteration's create_task races the deadline.
-                    pass
+                except BaseException as cleanup_exc:
+                    # cancel cleanup is best-effort; Task 10 emits an
+                    # audit row so the swallow is not silent (CLAUDE.md
+                    # hard rule #7). Re-raising a subscriber-raised
+                    # exception here would let a cleanup bug suppress
+                    # the original cancellation, which is the user-visible
+                    # regression we are explicitly preventing.
+                    # ``BaseException`` is the correct width —
+                    # :class:`asyncio.CancelledError` is short-circuited
+                    # above; :class:`SystemExit` / :class:`KeyboardInterrupt`
+                    # would propagate the process-termination signal if
+                    # not absorbed, but cancel cleanup must not abort
+                    # itself on a botched subscriber so we absorb here.
+                    # ``fail_closed`` is NOT honoured on the cancel arm —
+                    # the cancellation always propagates at the end of
+                    # the chain.
+                    # Task 10 §6.6 (cancel arm): emit the audit row so
+                    # the swallow is not silent (CLAUDE.md hard rule #7).
+                    # No wrap, no fail_closed — cancel always propagates
+                    # the original cancellation via the post-loop raise.
+                    await _emit_subscriber_error_audit(
+                        sub=sub,
+                        exc=cleanup_exc,
+                        hookpoint=name,
+                        kind="cancel",
+                        correlation_id=chain_ctx.correlation_id,
+                    )
                 pending = None
     except TimeoutError:
         return await _handle_chain_timeout(

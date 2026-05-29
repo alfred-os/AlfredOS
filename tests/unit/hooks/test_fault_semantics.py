@@ -1,9 +1,15 @@
-"""Tests for ``alfred.hooks.invoke``'s fault arms — Slice-2.5 PR-A Task 9.
+"""Tests for ``alfred.hooks.invoke``'s fault arms — Slice-2.5 PR-A Tasks 9 + 10.
 
 Task 9 wires the per-chain ``asyncio.timeout()`` deadline into the
-dispatcher's four kind-handlers. This module pins the three load-bearing
-invariants the dispatcher MUST honour when the chain exceeds the
-deadline:
+dispatcher's four kind-handlers. Task 10 layers the
+unexpected-subscriber-exception fault policy onto the same handlers —
+catching non-:class:`HookRefusal`, non-:class:`asyncio.CancelledError`,
+non-:class:`TimeoutError` exceptions, wrapping them as
+:class:`HookSubscriberError`, emitting a
+:data:`HOOKS_SUBSCRIBER_ERROR` audit row, and applying ``fail_closed``.
+
+This module pins the three load-bearing invariants the dispatcher MUST
+honour when the chain exceeds the deadline:
 
 1. **The audit row lands** — every timeout emits a
    :data:`alfred.hooks.audit_sink.HOOKS_CHAIN_TIMEOUT` row through the
@@ -33,8 +39,6 @@ does not flake against a 0.25-second production default.
 Out of scope (each lands with its own task):
 
 * ``HookRefusal`` audit emission — Task 11 (refusable-tier filter).
-* Unexpected subscriber exception wrap into :class:`HookSubscriberError`
-  — Task 10.
 * Re-entry bypass via :data:`alfred.hooks.registry._reentry` — Task 12.
 """
 
@@ -47,10 +51,10 @@ from typing import Any
 
 import pytest
 
-from alfred.hooks.audit_sink import HOOKS_CHAIN_TIMEOUT
+from alfred.hooks.audit_sink import HOOKS_CHAIN_TIMEOUT, HOOKS_SUBSCRIBER_ERROR
 from alfred.hooks.capability import DevGate
 from alfred.hooks.context import HookContext, HookKind
-from alfred.hooks.errors import HookError
+from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
 from alfred.hooks.invoke import invoke
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 
@@ -121,6 +125,34 @@ def short_deadline_registry(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
         set_registry(prior)
 
 
+@pytest.fixture
+def generous_deadline_registry(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
+    """Install a :class:`HookRegistry` with a generous deadline + spy sink.
+
+    Task 10's subscriber-error tests need a chain that COMPLETES (so the
+    catch arm can fire, audit the row, and continue or raise). Using
+    :data:`_SHORT_DEADLINE` for those tests would race a real audit-sink
+    emit on a loaded CI runner and trip the chain-timeout arm instead of
+    the subscriber-error arm.
+
+    500ms is well above the longest plausible end-to-end audit-sink
+    emit + chain walk on any CI runner, but still bounded so a runaway
+    test (e.g. an accidental ``await Event().wait()``) fails fast
+    rather than hanging the suite.
+    """
+    prior = get_registry()
+    registry = HookRegistry(
+        gate=DevGate(),
+        sink=spy_sink,
+        chain_deadline_seconds=0.5,
+    )
+    set_registry(registry)
+    try:
+        yield registry
+    finally:
+        set_registry(prior)
+
+
 def _timeout_rows(spy_sink: SpyAuditSink) -> list[dict[str, object]]:
     """Filter the spy sink's recorded calls to just the timeout rows.
 
@@ -130,6 +162,16 @@ def _timeout_rows(spy_sink: SpyAuditSink) -> list[dict[str, object]]:
     arm starts emitting too.
     """
     return [c for c in spy_sink.calls if c["event"] == HOOKS_CHAIN_TIMEOUT]
+
+
+def _subscriber_error_rows(spy_sink: SpyAuditSink) -> list[dict[str, object]]:
+    """Filter the spy sink's recorded calls to just the subscriber-error rows.
+
+    Task 10's tests assert against their own slice of the spy call list
+    so an adjacent fault arm (timeout, refusal) emitting on the same sink
+    cannot perturb the subscriber-error assertions.
+    """
+    return [c for c in spy_sink.calls if c["event"] == HOOKS_SUBSCRIBER_ERROR]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -866,3 +908,676 @@ async def test_timeout_short_circuits_remaining_subscribers(
     assert second_ran.is_set() is False
     # Exactly one timeout audit row (NOT one-per-subscriber).
     assert len(_timeout_rows(spy_sink)) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TASK 10 — Unexpected-subscriber-exception fault policy (§6.6)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Section §6.6 of the hooks spec: when a subscriber raises an unexpected
+# exception (not :class:`HookRefusal` — Task 11's tier filter; not
+# :class:`asyncio.CancelledError` — propagation discipline; not
+# :class:`TimeoutError` — Task 9's chain-deadline arm), the dispatcher
+# MUST:
+#
+# 1. Catch the exception at the per-subscriber boundary.
+# 2. Wrap it as :class:`HookSubscriberError.from_subscriber(...)` with
+#    the original ``exc`` set as ``__cause__`` so the chained traceback
+#    points back at the subscriber's failure (CLAUDE.md hard rule #13 —
+#    errors loud at boundaries).
+# 3. Emit :data:`HOOKS_SUBSCRIBER_ERROR` through the registry-owned
+#    sink so the fault is audited (CLAUDE.md hard rule #7 — no silent
+#    failures). Audit fields are NAME + TYPE only — NEVER ``str(exc)``
+#    or ``exc.args`` — because the subscriber may have inadvertently
+#    wrapped T3 user content in its exception (CLAUDE.md hard rule #1 —
+#    never log secrets).
+# 4. Apply ``fail_closed``:
+#    * ``fail_closed=True`` → raise the wrapped error so the action
+#      body sees a hard fault.
+#    * ``fail_closed=False`` → treat the subscriber as pass-through and
+#      continue the chain with the LAST-GOOD ctx (the ctx as it was
+#      BEFORE the erroring subscriber's call). The error is still
+#      audited — recorded, not hidden.
+#
+# Cancel-arm caveat: ``_run_cancel``'s ``except BaseException: pass``
+# arm (Task 8) already swallowed subscriber exceptions for best-effort
+# cleanup. Task 10 ADDS the audit row to that arm so the swallow is no
+# longer silent (CLAUDE.md hard rule #7). No wrap, no fail_closed —
+# cancel always propagates the original :class:`asyncio.CancelledError`.
+
+
+_SUBSCRIBER_ERROR_FIELDS_EXPECTED: frozenset[str] = frozenset(
+    {"hookpoint", "kind", "subscriber_name", "exception_type"}
+)
+"""Local mirror of :data:`alfred.hooks.invoke._SUBSCRIBER_ERROR_AUDIT_FIELDS`
+so the schema-drift test asserts both a set-equality against the
+production constant AND a verbatim literal — drift surfaces at BOTH
+sites so the author cannot accidentally sync only one."""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 12. Wrap + audit + fail_closed=True propagates (pre)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_pre_subscriber_raise_wraps_and_audits_fail_closed_true_propagates(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """A ``pre`` subscriber raising :class:`ValueError` is caught,
+    wrapped as :class:`HookSubscriberError`, audited via
+    :data:`HOOKS_SUBSCRIBER_ERROR`, and (``fail_closed=True``) propagates
+    out of :func:`invoke` so the action body never runs.
+
+    The wrapped error's ``__cause__`` is the original :class:`ValueError`
+    so the traceback chain points back at the subscriber's actual fault.
+    """
+    original_exc: ValueError | None = None
+
+    async def raises_value_error(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        nonlocal original_exc
+        original_exc = ValueError("subscriber blew up")
+        raise original_exc
+
+    generous_deadline_registry.register(
+        hook_fn=raises_value_error,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    with pytest.raises(HookSubscriberError) as exc_info:
+        await invoke("hp", _ctx(), kind="pre", fail_closed=True)
+
+    # The wrapped error chains via __cause__ to the original ValueError —
+    # the traceback reads "during handling of <ValueError>, the above
+    # HookSubscriberError was raised".
+    assert exc_info.value.__cause__ is original_exc
+
+    # The wrapped error is structurally a HookError (CLAUDE.md hard rule
+    # #13 — errors loud at boundaries; the orchestrator catches AlfredError
+    # uniformly, HookSubscriberError is in that subtree).
+    assert isinstance(exc_info.value, HookError)
+
+    # Exactly one subscriber-error audit row landed (loud-failure escape).
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["event"] == HOOKS_SUBSCRIBER_ERROR
+    assert row["correlation_id"] == "corr-fault"
+    fields = row["fields"]
+    assert isinstance(fields, dict)
+    assert fields["hookpoint"] == "hp"
+    assert fields["kind"] == "pre"
+    assert fields["exception_type"] == "ValueError"
+    # The subscriber's qualname surfaces as audit attribution — operator
+    # can grep the registry for the offending plugin.
+    assert "raises_value_error" in str(fields["subscriber_name"])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 13. fail_closed=False — chain continues from last-good ctx
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_pre_subscriber_raise_fail_closed_false_continues_chain(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """Three subscribers wired in order: A passes through, B raises,
+    C marks itself. ``fail_closed=False`` → A runs, B's exception is
+    audited as :data:`HOOKS_SUBSCRIBER_ERROR` and SUPPRESSED, C runs with
+    the ctx as it was before B's call.
+
+    The returned ctx's metadata carries C's ``reached=True`` marker so
+    the test pins both branches: the chain DID continue past B, AND it
+    continued with the last-good ctx (A's output, NOT some partial-B
+    state).
+    """
+    a_ran = asyncio.Event()
+    c_ran = asyncio.Event()
+
+    async def a_passthrough(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        a_ran.set()
+        # Tag the ctx so the test can prove last-good-ctx is what C sees.
+        return ctx.with_metadata(a_ran=True)
+
+    async def b_raises(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise ValueError("B is broken")
+
+    async def c_marks(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        c_ran.set()
+        return ctx.with_metadata(reached=True)
+
+    generous_deadline_registry.register(
+        hook_fn=a_passthrough, hookpoint="hp", kind="pre", tier="operator"
+    )
+    generous_deadline_registry.register(
+        hook_fn=b_raises, hookpoint="hp", kind="pre", tier="operator"
+    )
+    generous_deadline_registry.register(
+        hook_fn=c_marks, hookpoint="hp", kind="pre", tier="operator"
+    )
+
+    result = await invoke("hp", _ctx(), kind="pre", fail_closed=False)
+
+    # All three handlers were reached for dispatch — A executed, B's
+    # exception was audited+suppressed, C executed with the last-good ctx.
+    assert a_ran.is_set() is True
+    assert c_ran.is_set() is True
+
+    # The returned ctx carries A's metadata (last-good before B fired) AND
+    # C's metadata — pinning that the chain continued from last-good, NOT
+    # from a fresh ctx and NOT from B's (non-existent) output.
+    assert result.metadata.get("a_ran") is True
+    assert result.metadata.get("reached") is True
+
+    # Exactly one subscriber-error audit row landed for B; the chain
+    # itself completed without raising.
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["exception_type"] == "ValueError"
+    assert "b_raises" in str(fields["subscriber_name"])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 14. Same shape for post + error kinds — parametrised
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["post", "error"])
+async def test_subscriber_raise_wraps_and_audits_other_kinds_fail_closed_true(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+    *,
+    kind: HookKind,
+) -> None:
+    """``post`` and ``error`` handlers exhibit the same wrap-audit-raise
+    semantic as ``pre`` when a subscriber raises an unexpected exception.
+
+    ``error`` requires an ``exc`` arg (per :func:`_run_error`'s defensive
+    contract); ``post`` ignores it. Both arms wrap the new fault as
+    :class:`HookSubscriberError` and propagate when ``fail_closed=True``.
+    """
+    original_exc: RuntimeError | None = None
+
+    async def raises_runtime_error(
+        _ctx: HookContext[Any],
+    ) -> HookContext[Any] | None:
+        nonlocal original_exc
+        original_exc = RuntimeError("boom")
+        raise original_exc
+
+    generous_deadline_registry.register(
+        hook_fn=raises_runtime_error,
+        hookpoint="hp",
+        kind=kind,
+        tier="operator",
+    )
+
+    with pytest.raises(HookSubscriberError) as exc_info:
+        if kind == "error":
+            await invoke(
+                "hp",
+                _ctx(),
+                kind="error",
+                exc=ValueError("upstream"),
+                fail_closed=True,
+            )
+        else:
+            await invoke("hp", _ctx(), kind="post", fail_closed=True)
+
+    assert exc_info.value.__cause__ is original_exc
+
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["kind"] == kind
+    assert fields["exception_type"] == "RuntimeError"
+    assert "raises_runtime_error" in str(fields["subscriber_name"])
+
+
+@pytest.mark.parametrize(
+    ("kind", "first_returns"),
+    [
+        ("post", "substitute"),
+        ("error", "none"),
+    ],
+)
+async def test_subscriber_raise_fail_closed_false_continues_other_kinds(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+    *,
+    kind: HookKind,
+    first_returns: str,
+) -> None:
+    """``fail_closed=False`` on ``post`` / ``error`` continues the chain
+    past the erroring subscriber with the last-good ctx.
+
+    For ``post`` (no short-circuit): A returns a metadata-tagged ctx, B
+    raises (audited + suppressed), C returns another metadata-tagged ctx
+    — the final ctx carries BOTH metadata keys, proving C saw A's
+    output (last-good) and the chain fold continued past B.
+
+    For ``error`` (first-non-None-wins): A returns ``None`` so the chain
+    does NOT short-circuit there; B raises (audited + suppressed); C
+    returns a substitute ctx that the handler picks up as the
+    suppressed-substitute.  C's metadata marker proves C ran; the
+    returned ctx carries C's tag.
+
+    The ``first_returns`` parameter codes the per-kind difference: the
+    error kind needs A to return ``None`` (otherwise A would short-circuit
+    before B even runs).
+    """
+    a_ran = asyncio.Event()
+    c_ran = asyncio.Event()
+
+    async def a_for_post(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        a_ran.set()
+        return ctx.with_metadata(a_ran=True)
+
+    async def a_for_error(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        a_ran.set()
+        return None  # error kind: A must not short-circuit
+
+    async def b_raises(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise RuntimeError("B is broken")
+
+    async def c_marks(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        c_ran.set()
+        return ctx.with_metadata(reached=True)
+
+    a = a_for_post if first_returns == "substitute" else a_for_error
+    for fn in (a, b_raises, c_marks):
+        generous_deadline_registry.register(hook_fn=fn, hookpoint="hp", kind=kind, tier="operator")
+
+    if kind == "error":
+        result = await invoke(
+            "hp",
+            _ctx(),
+            kind="error",
+            exc=ValueError("upstream"),
+            fail_closed=False,
+        )
+    else:
+        result = await invoke("hp", _ctx(), kind="post", fail_closed=False)
+
+    assert a_ran.is_set() is True
+    assert c_ran.is_set() is True
+    assert result.metadata.get("reached") is True
+    if first_returns == "substitute":
+        # post kind: A's metadata is still on the carrier because the
+        # chain fold accumulates — last-good ctx semantic.
+        assert result.metadata.get("a_ran") is True
+
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["kind"] == kind
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 15. Cancel arm — audits but does NOT wrap and does NOT raise
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_cancel_subscriber_raise_audits_but_does_not_wrap_and_propagates_cancel(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """A ``cancel``-kind subscriber raising :class:`ValueError` is
+    swallowed (cleanup is best-effort) BUT now audited via
+    :data:`HOOKS_SUBSCRIBER_ERROR` — Task 10 resolves the
+    silent-swallow TODO from Task 8.
+
+    The original :class:`asyncio.CancelledError` still re-raises at the
+    end of the chain — the cancel-arm semantic is preserved.
+    """
+
+    async def raises_during_cleanup(
+        _ctx: HookContext[Any],
+    ) -> HookContext[Any] | None:
+        raise ValueError("cleanup-fail")
+
+    generous_deadline_registry.register(
+        hook_fn=raises_during_cleanup,
+        hookpoint="hp",
+        kind="cancel",
+        tier="operator",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await invoke(
+            "hp",
+            _ctx(),
+            kind="cancel",
+            exc=asyncio.CancelledError(),
+            fail_closed=False,
+        )
+
+    # The swallow is no longer silent — exactly one audit row landed.
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["hookpoint"] == "hp"
+    assert fields["kind"] == "cancel"
+    assert fields["exception_type"] == "ValueError"
+    assert "raises_during_cleanup" in str(fields["subscriber_name"])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 16. Audit fields exclude exception message strings — CLAUDE.md rule #1
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_subscriber_error_audit_fields_exclude_exception_message(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """Hard rule #1 (never log secrets): when a subscriber raises an
+    exception whose message carries secret-shaped content, the
+    :data:`HOOKS_SUBSCRIBER_ERROR` audit row's ``fields`` mapping MUST
+    NOT carry the literal message string. Names + types only.
+
+    A subscriber might inadvertently wrap T3 user content in its
+    exception (e.g. ``ValueError(f"could not parse {user_input!r}")``).
+    The redactor would mask secret-shapes in the structlog row IF the
+    message was emitted — but the rule is stronger here: the message
+    string is NEVER included in the first place, so even a redactor
+    miss cannot leak.
+    """
+    secret_shape = "sk-DEADBEEFCAFEBABE0123456789ABCDEF"  # noqa: S105 -- fake-secret literal used to assert the audit row does NOT carry it
+
+    async def raises_with_secret_message(
+        _ctx: HookContext[Any],
+    ) -> HookContext[Any] | None:
+        raise ValueError(f"{secret_shape} api key leaked")
+
+    generous_deadline_registry.register(
+        hook_fn=raises_with_secret_message,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    # fail_closed=False so the audit row lands without the test having
+    # to catch the wrapped exception.
+    await invoke("hp", _ctx(), kind="pre", fail_closed=False)
+
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    # The secret-shape literal must NOT appear in ANY field value — the
+    # exception message string was never copied into the audit row.
+    for value in fields.values():
+        assert secret_shape not in str(value), (
+            f"Audit field carried exception message; would leak secret-shape: {value!r}"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 17. Schema constant pin — set-equality against
+#     _SUBSCRIBER_ERROR_AUDIT_FIELDS — PR-B's projector keys off this
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_subscriber_error_audit_row_fields_schema(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """The ``fields`` mapping on a :data:`HOOKS_SUBSCRIBER_ERROR` audit
+    row contains EXACTLY ``hookpoint``, ``kind``, ``subscriber_name``,
+    ``exception_type``. PR-B's :class:`EpisodicAuditSink` keys off this
+    schema; an unannounced addition or removal here breaks PR-B's
+    row-projection.
+
+    Pinned as a set-equality assertion against the canonical
+    :data:`alfred.hooks.invoke._SUBSCRIBER_ERROR_AUDIT_FIELDS` constant
+    AND against the verbatim literal — drift surfaces at BOTH sites so
+    the author cannot accidentally sync only one.
+    """
+    from alfred.hooks.invoke import _SUBSCRIBER_ERROR_AUDIT_FIELDS
+
+    async def raises(
+        _ctx: HookContext[Any],
+    ) -> HookContext[Any] | None:
+        raise ValueError("schema pin")
+
+    generous_deadline_registry.register(hook_fn=raises, hookpoint="hp", kind="pre", tier="operator")
+
+    await invoke("hp", _ctx(), kind="pre", fail_closed=False)
+
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert set(fields.keys()) == set(_SUBSCRIBER_ERROR_AUDIT_FIELDS)
+    assert set(fields.keys()) == _SUBSCRIBER_ERROR_FIELDS_EXPECTED
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 18. Regression — HookRefusal still propagates (Task 11 owns the
+#     refusable-tier filter; Task 10 must NOT catch refusals)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["pre", "post", "error"])
+async def test_subscriber_hook_refusal_still_propagates_uncaught_by_task_10(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+    *,
+    kind: HookKind,
+) -> None:
+    """Regression: a subscriber raising :class:`HookRefusal` is NOT
+    caught by Task 10's subscriber-error arm on ``pre``, ``post``, or
+    ``error`` kinds. The refusal propagates out of :func:`invoke` and
+    emits NO :data:`HOOKS_SUBSCRIBER_ERROR` row.
+
+    Task 11 will layer ``refusable_tiers`` enforcement onto the raise
+    arm for ``pre`` and emit :data:`HOOKS_REFUSAL` separately. Task 10's
+    catch must use :class:`Exception` (NOT :class:`BaseException`) and
+    must place the :class:`HookRefusal` re-raise BEFORE the generic
+    catch arm in every chain-walking handler — a refusal raised from a
+    ``post``/``error`` subscriber must propagate uncaught by the
+    subscriber-error wrap (the audit attribution belongs to refusal-row
+    semantics, not subscriber-error semantics).
+    """
+
+    async def refuses(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise HookRefusal(
+            hook_id="hp",
+            action_id="action.test",
+            reason="policy",
+            correlation_id="corr-fault",
+        )
+
+    generous_deadline_registry.register(hook_fn=refuses, hookpoint="hp", kind=kind, tier="operator")
+
+    with pytest.raises(HookRefusal):
+        if kind == "error":
+            await invoke(
+                "hp",
+                _ctx(),
+                kind="error",
+                exc=ValueError("upstream"),
+                fail_closed=False,
+            )
+        else:
+            await invoke("hp", _ctx(), kind=kind, fail_closed=False)
+
+    # Task 10's subscriber-error arm did NOT catch the refusal —
+    # the spy sink has zero subscriber-error rows.
+    assert _subscriber_error_rows(spy_sink) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 19. Regression — a subscriber raising CancelledError is not wrapped;
+#     it propagates to the timeout handler (or, outside a timeout
+#     scope, to the caller).
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_pre_subscriber_raising_cancelled_error_propagates_uncaught(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """A subscriber raising :class:`asyncio.CancelledError` directly
+    must NOT be wrapped as :class:`HookSubscriberError`.
+    :class:`asyncio.CancelledError` is a :class:`BaseException` (not an
+    :class:`Exception`) so Task 10's ``except Exception`` arm does not
+    catch it.
+
+    The enclosing ``asyncio.timeout`` scope only converts the
+    cancellation to :class:`TimeoutError` when the scope's own deadline
+    is the cause of the cancellation — a subscriber raising
+    ``CancelledError`` manually inside the scope does NOT trigger that
+    conversion. The cancellation therefore propagates up through
+    :func:`invoke` to the caller as a bare :class:`asyncio.CancelledError`.
+
+    The observable effects:
+
+    * The wrap arm did NOT catch the cancellation: ZERO
+      :data:`HOOKS_SUBSCRIBER_ERROR` rows.
+    * The chain-timeout arm did NOT take the fault: ZERO
+      :data:`HOOKS_CHAIN_TIMEOUT` rows.
+
+    Pins the catch-order discipline: Task 10's wrap arm uses
+    :class:`Exception` (NOT :class:`BaseException`) so a manually-raised
+    :class:`asyncio.CancelledError` flows through uninterrupted.
+    """
+
+    async def raises_cancelled(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise asyncio.CancelledError()
+
+    generous_deadline_registry.register(
+        hook_fn=raises_cancelled,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await invoke("hp", _ctx(), kind="pre", fail_closed=False)
+
+    # Neither fault arm took the cancellation — it propagated.
+    assert _timeout_rows(spy_sink) == []
+    assert _subscriber_error_rows(spy_sink) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 20. HookSubscriberError surfaces as a HookError subclass at the
+#     wrap-and-raise site
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_wrapped_hook_subscriber_error_is_hook_error_subclass(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """Pins the isinstance-narrowing contract Task 10's wrap site relies
+    on: the wrapped exception is a :class:`HookError` instance so an
+    upstream ``except HookError`` arm catches it uniformly.
+
+    A regression to plain :class:`Exception` here would break PR-B's
+    dispatcher policy code (which catches :class:`HookError` to decide
+    swallow-vs-re-raise per stage) without surfacing as an import error.
+    """
+
+    async def raises(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise ValueError("subclass pin")
+
+    generous_deadline_registry.register(hook_fn=raises, hookpoint="hp", kind="pre", tier="operator")
+
+    with pytest.raises(HookError) as exc_info:
+        await invoke("hp", _ctx(), kind="pre", fail_closed=True)
+    assert isinstance(exc_info.value, HookSubscriberError)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 21. fail_closed=False on a single-subscriber chain — chain "continues"
+#     to its end without raising; last_good_ctx is the input.
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_pre_single_subscriber_raise_fail_closed_false_returns_last_good(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """fail_closed=False with ONE subscriber that raises: the chain
+    completes silently (the action body still runs), the audit row
+    lands, and the returned ctx is the original input (last-good ctx
+    BEFORE the erroring subscriber's call).
+
+    Pins the boundary case where ``last_good_ctx`` is never updated
+    because the only subscriber failed without producing a result.
+    """
+
+    async def raises(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise ValueError("alone in the chain")
+
+    generous_deadline_registry.register(hook_fn=raises, hookpoint="hp", kind="pre", tier="operator")
+
+    src = _ctx(input_="last-good-input")
+    result = await invoke("hp", src, kind="pre", fail_closed=False)
+
+    # Returned ctx is the input — last-good before the single subscriber
+    # fired.
+    assert result.input == "last-good-input"
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["exception_type"] == "ValueError"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 22. error-arm — subscriber that raises does NOT count as "suppression"
+#     for the error-arm's "first non-None wins" semantic. If no LATER
+#     subscriber returns a substitute, the original ``exc`` re-raises.
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_error_subscriber_raise_then_no_substitute_reraises_upstream_exc(
+    generous_deadline_registry: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """For the ``error`` kind: a subscriber that RAISES does not count
+    as "returned a substitute". If no LATER subscriber returns a
+    :class:`HookContext`, the original upstream ``exc`` re-raises (the
+    error-arm's "no silent failure" guarantee — CLAUDE.md hard rule #7).
+
+    Pins that Task 10's catch arm does NOT accidentally populate
+    ``suppressed`` with the wrapped error and short-circuit the
+    "no subscriber suppressed" re-raise path.
+    """
+    upstream = ValueError("upstream original")
+
+    async def raises(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise RuntimeError("error-handler bug")
+
+    generous_deadline_registry.register(
+        hook_fn=raises, hookpoint="hp", kind="error", tier="operator"
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await invoke(
+            "hp",
+            _ctx(),
+            kind="error",
+            exc=upstream,
+            fail_closed=False,
+        )
+    # Identity preserved — the same upstream instance re-raises.
+    assert exc_info.value is upstream
+
+    rows = _subscriber_error_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["exception_type"] == "RuntimeError"
