@@ -1,4 +1,4 @@
-"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Tasks 8 + 9 + 10.
+"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Tasks 8 + 9 + 10 + 11.
 
 The :func:`invoke` primitive is the public entry point every action
 callsite uses to drive a hook chain. It is intentionally tiny:
@@ -54,7 +54,6 @@ callsite uses to drive a hook chain. It is intentionally tiny:
 
 Faults still pending land in later tasks:
 
-* Refusal-authorisation by tier + audit row          → Task 11.
 * Re-entry bypass via :data:`alfred.hooks.registry._reentry` → Task 12.
 
 The five-parameter :func:`invoke` signature is verbatim from spec §0 —
@@ -128,7 +127,12 @@ import contextlib
 from collections.abc import Coroutine
 from typing import Any, Final, cast
 
-from alfred.hooks.audit_sink import HOOKS_CHAIN_TIMEOUT, HOOKS_SUBSCRIBER_ERROR
+from alfred.hooks.audit_sink import (
+    HOOKS_CHAIN_TIMEOUT,
+    HOOKS_REFUSAL,
+    HOOKS_SUBSCRIBER_ERROR,
+    HOOKS_UNAUTHORIZED_REFUSAL,
+)
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
 from alfred.hooks.registry import Subscriber, get_registry
@@ -224,6 +228,65 @@ Schema:
   log secrets). The wrapped :class:`HookSubscriberError`'s
   ``__cause__`` chain is where an operator with audit-log access can
   inspect the upstream traceback.
+"""
+
+
+_REFUSAL_AUDIT_FIELDS: Final[frozenset[str]] = frozenset(
+    {"hookpoint", "kind", "subscriber_name", "subscriber_tier"}
+)
+"""Canonical key set for the ``fields`` mapping on every
+:data:`HOOKS_REFUSAL` AND :data:`HOOKS_UNAUTHORIZED_REFUSAL` audit row
+(§6.5).
+
+PR-B's :class:`alfred.audit.log.AuditWriter`-backed sink keys off this
+schema for row projection; an unannounced addition / removal here breaks
+the projector. The set is asserted by
+``tests/unit/hooks/test_security_contract.py::test_refusal_audit_row_fields_schema``
+so a drift surfaces as a failing test the author MUST acknowledge.
+
+The SAME schema governs both refusal events — they share field shape
+and differ only by the ``event`` constant (authorized vs unauthorized).
+
+Schema:
+
+* ``hookpoint`` — dotted hookpoint identifier (str)
+* ``kind`` — lifecycle stage. Always ``"pre"`` this slice — the §6.5
+  refusal-authorization contract applies ONLY to the pre chain. The
+  post / error / cancel handlers' defensive :class:`HookRefusal`
+  re-raise (Task 10) propagates uncaught and emits NEITHER refusal
+  event.
+* ``subscriber_name`` — ``hook_fn.__qualname__`` of the refusing
+  subscriber (str). Lets the operator grep the registry for the
+  plugin / module that refused.
+* ``subscriber_tier`` — the in-tree-controlled tier string the
+  subscriber declared at registration (one of ``"system"`` /
+  ``"operator"`` / ``"user-plugin"``). Lets the operator distinguish a
+  DLP refusal (system) from a persona refusal (operator) from a user-
+  plugin refusal — and surfaces which tier attempted the unauthorized
+  refusal on the :data:`HOOKS_UNAUTHORIZED_REFUSAL` arm.
+
+What is NOT in the schema (and WHY):
+
+* ``refusal.reason`` — subscriber-supplied; may carry T3 user content
+  (e.g. a quoted fragment of the rejected input). CLAUDE.md hard
+  rule #1 (never log secrets) forbids copying it into the audit row.
+  Operators reading the propagating :class:`HookRefusal` exception's
+  ``str()`` get the reason via the i18n-rendered ``hooks.refusal``
+  catalog message; the durable audit row deliberately omits it. The
+  :data:`HOOKS_UNAUTHORIZED_REFUSAL` arm has no propagating exception
+  AT ALL — the reason is durably lost for unauthorized refusals, and
+  that is intentional (an unauthorized subscriber's reason is by
+  definition untrustworthy, and surfacing it on the operator audit
+  trail would create a T3-leak surface).
+* ``refusal.hook_id`` / ``refusal.action_id`` — redundant with
+  ``hookpoint`` (hookpoint is conventionally
+  ``f"{action_id}.{kind}"``) and with the ``HookRefusal`` exception's
+  own attributes (which an operator with audit-log access can inspect
+  via the propagating exception's ``__cause__`` chain on the
+  authorized arm).
+* ``refusal.correlation_id`` — already passed as the outer
+  ``correlation_id`` argument to :meth:`AuditSink.emit`, not a
+  ``fields`` entry.
 """
 
 
@@ -345,12 +408,23 @@ async def invoke[T](
             :data:`alfred.hooks.context.HookKind` literals.
         subscribable_tiers: Tier set whose subscribers are permitted
             to RUN at this dispatch. Threaded through to the four
-            handlers for Task-11's tier-filter; this slice ignores
+            handlers for Slice-3's grant gate; this slice ignores
             the value (every registered subscriber runs).
         refusable_tiers: Tier set whose subscribers are permitted
-            to refuse via :class:`HookRefusal`. Threaded through for
-            Task-11's authorisation; this slice ignores the value
-            (every :class:`HookRefusal` propagates).
+            to refuse via :class:`HookRefusal` on the ``pre`` chain
+            (§6.5). A refusal from a subscriber whose ``tier`` is in
+            this set propagates as :class:`HookRefusal` and emits a
+            :data:`HOOKS_REFUSAL` audit row; a refusal from a tier
+            OUTSIDE this set is audited as
+            :data:`HOOKS_UNAUTHORIZED_REFUSAL` and SWALLOWED (the
+            audit row IS the loud-failure escape; raising a
+            :class:`HookError` for a hook the caller did not write
+            would violate §6.5). Only the ``pre`` handler honours
+            this filter; post / error / cancel
+            :class:`HookRefusal`-from-subscribers propagate uncaught
+            via the Task-10 defensive re-raise. Defaults to
+            ``{"system", "operator", "user-plugin"}`` — every tier can
+            refuse by default.
         fail_closed: Whether to fail closed on a chain timeout / Task
             10's unexpected subscriber error. On a chain timeout:
             ``True`` raises :class:`HookError` AFTER the audit row;
@@ -381,10 +455,19 @@ async def invoke[T](
             registry's ``chain_deadline_seconds``. The audit row is
             emitted FIRST so the fault attribution lands even when
             the caller does not catch the exception.
-        HookRefusal: A ``pre`` subscriber refused the action. The
-            error carries the refuser's ``hook_id`` / ``action_id`` /
-            ``reason`` / ``correlation_id`` for the audit row Task 11
-            will emit; this slice simply propagates.
+        HookRefusal: A ``pre`` subscriber whose ``tier`` is in
+            ``refusable_tiers`` refused the action; the dispatcher
+            emits the :data:`HOOKS_REFUSAL` audit row FIRST so the
+            attribution lands even when the caller does not catch the
+            exception. The error carries the refuser's ``hook_id`` /
+            ``action_id`` / ``reason`` / ``correlation_id`` on its
+            attributes. An UNAUTHORIZED refusal (tier outside the set)
+            is swallowed and surfaces only as
+            :data:`HOOKS_UNAUTHORIZED_REFUSAL` on the audit log — the
+            caller never sees an exception for that case. A
+            :class:`HookRefusal` raised in ``post`` / ``error`` /
+            ``cancel`` propagates uncaught (Task 10 defensive re-raise)
+            with NO refusal audit row — §6.5 is pre-only.
         BaseException: The ``exc`` passed in, re-raised for the
             ``error``-all-none path and the ``cancel`` path WHEN the
             chain completed inside its deadline. Identity is preserved
@@ -708,11 +791,21 @@ async def _run_pre[T](
     """Dispatch the ``pre`` chain.
 
     Linear walk-and-fold under one ``asyncio.timeout``. A
-    subscriber-raised :class:`HookRefusal` propagates immediately —
-    subsequent subscribers do not run, and the caller's caught
-    exception means no mutated ctx is observable to the action body.
-    Task 11 will layer ``refusable_tiers`` enforcement onto the raise
-    arm; this slice lets every refusal propagate.
+    subscriber-raised :class:`HookRefusal` is dispatched per §6.5:
+
+    * Subscriber tier IN ``refusable_tiers`` — AUTHORIZED. Emit a
+      :data:`HOOKS_REFUSAL` audit row, then re-raise. Subsequent
+      subscribers do not run; the caller's caught exception means no
+      mutated ctx is observable to the action body. Earlier subscribers'
+      mutations are discarded because :func:`invoke` raises before
+      returning.
+    * Subscriber tier NOT IN ``refusable_tiers`` — UNAUTHORIZED. Emit a
+      :data:`HOOKS_UNAUTHORIZED_REFUSAL` audit row, rewind ``chain_ctx``
+      to the last-good snapshot (the would-be mutation from this
+      subscriber's call is discarded), and continue the walk. No
+      exception reaches the caller — §6.5 disposition is "fail-loud via
+      audit row, not raised error" because the caller did not write
+      this hook.
 
     On timeout: emits :data:`HOOKS_CHAIN_TIMEOUT` and either returns
     the last-good ctx (``fail_closed=False``) or raises
@@ -724,19 +817,29 @@ async def _run_pre[T](
         name: The hookpoint identifier the caller passed to
             :func:`invoke`.
         ctx: The retargeted carrier.
-        subscribable_tiers: Threaded through for Task 11. Ignored.
-        refusable_tiers: Threaded through for Task 11. Ignored.
+        subscribable_tiers: Threaded through for Slice-3's grant gate.
+            Ignored this slice.
+        refusable_tiers: The set of tiers whose :class:`HookRefusal`
+            propagates to the caller. A refusal from a tier OUTSIDE
+            this set is audited as
+            :data:`HOOKS_UNAUTHORIZED_REFUSAL` and swallowed.
         fail_closed: Task 9's timeout policy bit. Consumed in the
-            ``except TimeoutError`` arm.
+            ``except TimeoutError`` arm. NOT honoured on the
+            unauthorized-refusal arm — §6.5 disposition is "swallow
+            unconditionally" because raising a :class:`HookError` for a
+            hook the caller did not write would violate the spec.
 
     Returns:
         The chain ctx folded across every ``pre`` subscriber, OR the
         last-good ctx if the chain timed out and ``fail_closed`` is
-        ``False``.
+        ``False``, OR the last-good-after-discarding-unauthorized-
+        mutations ctx when one or more subscribers refused without
+        authorization.
     """
-    del subscribable_tiers, refusable_tiers
-    subscribers = get_registry().subscribers_for(name, "pre")
-    deadline_seconds = get_registry().chain_deadline_seconds
+    del subscribable_tiers
+    registry = get_registry()
+    subscribers = registry.subscribers_for(name, "pre")
+    deadline_seconds = registry.chain_deadline_seconds
 
     chain_ctx = ctx
     last_good_ctx = ctx
@@ -747,21 +850,88 @@ async def _run_pre[T](
                 pending = _spawn_subscriber(sub, chain_ctx)
                 try:
                     result = await pending
-                except Exception as exc:
-                    # Task 10 §6.6: caught + wrapped + audited + fail_closed
-                    # applied. The catch is :class:`Exception` (NOT
-                    # :class:`BaseException`) so :class:`asyncio.CancelledError`
-                    # and :class:`SystemExit` / :class:`KeyboardInterrupt`
-                    # propagate. :class:`HookRefusal` is a subclass of
-                    # :class:`Exception` BUT is short-circuited by the
-                    # explicit ``isinstance`` re-raise below; Task 11 will
-                    # layer ``refusable_tiers`` enforcement onto that
-                    # re-raise.
+                except HookRefusal:
+                    # §6.5 refusal authorization. The subscriber's tier
+                    # decides disposition:
+                    #
+                    # * tier IN ``refusable_tiers`` — AUTHORIZED. Emit
+                    #   :data:`HOOKS_REFUSAL` (the operator's loud
+                    #   attribution row), then re-raise so the caller's
+                    #   action body is short-circuited. Subsequent
+                    #   subscribers do NOT run; earlier subscribers'
+                    #   mutations are discarded because :func:`invoke`
+                    #   raises before returning ``chain_ctx``.
+                    # * tier NOT IN ``refusable_tiers`` — UNAUTHORIZED.
+                    #   Emit :data:`HOOKS_UNAUTHORIZED_REFUSAL` (the
+                    #   audit row IS the loud-failure escape per §6.5
+                    #   "fail-loud via audit, not raised error"), then
+                    #   rewind ``chain_ctx`` to ``last_good_ctx`` and
+                    #   continue. The caller never sees a
+                    #   :class:`HookError` for a hook it did not write —
+                    #   that is the §6.5 disposition we resolve here.
+                    #
+                    # Branch ordering: this ``except HookRefusal:`` MUST
+                    # precede the broader ``except Exception:`` below
+                    # because :class:`HookRefusal` is a subclass of
+                    # :class:`Exception`; Python takes the first
+                    # matching arm.
+                    #
+                    # ``pending = None`` is set FIRST: the task is
+                    # already done (the await raised); the next
+                    # iteration must not see a stale handle if the
+                    # audit emit re-enters the loop scope.
                     pending = None
-                    if isinstance(exc, HookRefusal):
-                        # Task 11 owns refusal-by-tier; this slice lets
-                        # every refusal propagate uncaught by the wrap arm.
+                    if sub.tier in refusable_tiers:
+                        # Authorized: emit + re-raise. The audit row
+                        # carries name + tier — NEVER the user-supplied
+                        # ``refusal.reason`` (CLAUDE.md hard rule #1).
+                        # Operators get the reason via the propagating
+                        # exception's i18n-rendered ``str()``.
+                        await registry.sink.emit(
+                            event=HOOKS_REFUSAL,
+                            correlation_id=chain_ctx.correlation_id,
+                            fields={
+                                "hookpoint": name,
+                                "kind": "pre",
+                                "subscriber_name": sub.hook_fn.__qualname__,
+                                "subscriber_tier": sub.tier,
+                            },
+                        )
                         raise
+                    # Unauthorized: emit + swallow. The audit row
+                    # explicitly OMITS ``refusal.reason`` even though
+                    # this arm has no propagating exception to carry it
+                    # — an unauthorized subscriber's reason is by
+                    # definition untrustworthy, and surfacing it on the
+                    # operator audit trail would create a T3-leak
+                    # surface.
+                    await registry.sink.emit(
+                        event=HOOKS_UNAUTHORIZED_REFUSAL,
+                        correlation_id=chain_ctx.correlation_id,
+                        fields={
+                            "hookpoint": name,
+                            "kind": "pre",
+                            "subscriber_name": sub.hook_fn.__qualname__,
+                            "subscriber_tier": sub.tier,
+                        },
+                    )
+                    # Discard the would-be mutation: rewind to the
+                    # last-good ctx so the next subscriber sees the
+                    # chain as it was BEFORE this unauthorized refuser
+                    # ran. Same semantic as Task 10's fail_closed=False
+                    # subscriber-error continuation.
+                    chain_ctx = last_good_ctx
+                    continue
+                except Exception as exc:
+                    # Task 10 §6.6: caught + wrapped + audited +
+                    # fail_closed applied. The catch is
+                    # :class:`Exception` (NOT :class:`BaseException`) so
+                    # :class:`asyncio.CancelledError` and
+                    # :class:`SystemExit` / :class:`KeyboardInterrupt`
+                    # propagate. :class:`HookRefusal` is short-circuited
+                    # by the ``except HookRefusal`` arm above, NEVER
+                    # falling through here.
+                    pending = None
                     # Wrap, audit, apply fail_closed.
                     await _emit_subscriber_error_audit(
                         sub=sub,

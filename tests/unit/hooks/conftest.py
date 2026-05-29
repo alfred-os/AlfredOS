@@ -8,7 +8,7 @@ because the registry is the module-level singleton seam and per-test
 isolation is enforced by :func:`alfred.hooks.registry.set_registry` /
 :func:`get_registry` swap-and-restore, NOT by a fresh module import.
 
-Three fixtures ship:
+Four fixtures ship:
 
 * :func:`fresh_registry` — the canonical default. Installs a brand-new
   :class:`HookRegistry` with a :class:`DevGate` (system tier denied) and
@@ -18,7 +18,15 @@ Three fixtures ship:
 * :func:`fresh_registry_allow_system` — same shape, but the gate accepts
   ``system``-tier requests. Used by tests that need to register a
   system-tier subscriber (Task 7's @hook decorator unit tests, Task 9's
-  chain-deadline tests, Task 12's reentry-guard tests).
+  chain-deadline tests).
+* :func:`spy_registry_allow_system` — the spy-sink composition of
+  ``fresh_registry_allow_system``. Installs a :class:`HookRegistry` with
+  ``allow_system=True`` AND a :class:`SpyAuditSink` injected via
+  constructor, so fault-path audit rows land on the test-visible
+  recorder rather than the global structlog sink. Used by Task 11's
+  §6.5 refusal-authorization tests and Task 12's reentry-bypass tests
+  against system-tier subscribers — the only fixture combination that
+  needs both axes (system permitted + sink observable).
 * :func:`spy_sink` — a structural :class:`AuditSink` test double that
   records every ``emit(event, correlation_id, fields)`` into a flat
   list. Tasks 9-12 inject this into a :class:`HookRegistry` to assert the
@@ -112,6 +120,43 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(gate=DevGate(allow_system=True))
+    set_registry(registry)
+    try:
+        yield registry
+    finally:
+        set_registry(prior)
+
+
+@pytest.fixture
+def spy_registry_allow_system(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
+    """Yield a :class:`HookRegistry` with ``allow_system=True`` AND the
+    shared :func:`spy_sink` injected as the audit sink.
+
+    Tests that exercise the §6.5 refusal-authorization contract (Task 11)
+    or the §6.7 reentry-bypass contract against system-tier subscribers
+    (Task 12) need BOTH axes:
+
+    * **System permitted at the gate** so a ``system``-tier subscriber
+      can be registered without tripping :class:`DevGate`'s default-deny
+      on the system tier.
+    * **Spy sink observable** so fault-path audit rows
+      (:data:`HOOKS_REFUSAL`, :data:`HOOKS_UNAUTHORIZED_REFUSAL`,
+      :data:`HOOKS_REENTRY_BYPASS`) land on the test recorder rather
+      than the registry's default :class:`StructlogAuditSink`.
+
+    Naming mirrors :func:`fresh_registry_allow_system` (tier axis first)
+    then ``_with_spy``-style tail via the ``spy_`` prefix so a reader
+    grepping ``spy_`` finds every spy-injected fixture in one shot. The
+    sink is shared via the :func:`spy_sink` fixture so the test that
+    requests both ``spy_registry_allow_system`` AND ``spy_sink`` sees
+    the exact same recorder pytest hands to the registry constructor.
+
+    Swap-and-restore the module singleton on teardown — same discipline
+    as the other registry fixtures — so a test failing mid-run cannot
+    leak the spy-injected registry into the next test.
+    """
+    prior = get_registry()
+    registry = HookRegistry(gate=DevGate(allow_system=True), sink=spy_sink)
     set_registry(registry)
     try:
         yield registry
