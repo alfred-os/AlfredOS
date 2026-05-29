@@ -52,20 +52,27 @@ no-global-state rule).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
 
 from alfred.hooks.audit_sink import (
+    HOOKS_REENTRY_BYPASS,
     HOOKS_REFUSAL,
     HOOKS_SUBSCRIBER_ERROR,
     HOOKS_UNAUTHORIZED_REFUSAL,
 )
 from alfred.hooks.context import HookContext
-from alfred.hooks.errors import HookRefusal
-from alfred.hooks.invoke import _REFUSAL_AUDIT_FIELDS, invoke
-from alfred.hooks.registry import HookRegistry
+from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
+from alfred.hooks.invoke import (
+    _REENTRY_BYPASS_AUDIT_FIELDS,
+    _REFUSAL_AUDIT_FIELDS,
+    _invoke_internal,
+    invoke,
+)
+from alfred.hooks.registry import HookRegistry, _reentry
 
 from .conftest import SpyAuditSink
 
@@ -780,3 +787,516 @@ async def test_error_refusal_is_not_subject_to_section_65(
     assert _unauthorized_rows(spy_sink) == []
     sub_err_rows = [c for c in spy_sink.calls if c["event"] == HOOKS_SUBSCRIBER_ERROR]
     assert sub_err_rows == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Task 12 — §6.9 / sec-008 re-entry guard + _invoke_internal bypass
+# ──────────────────────────────────────────────────────────────────────
+#
+# Contract (controller-locked via architect + security + core consensus):
+#
+# * The :data:`alfred.hooks.registry._reentry` ContextVar propagates by
+#   Python's STANDARD ContextVar rules — including across
+#   ``asyncio.create_task`` (Python's default copies the current
+#   ``contextvars.Context`` into the spawned task). A subscriber that
+#   re-invokes the same hookpoint — directly OR via a spawned task that
+#   inherits this Context — routes to the bypass-and-audit path.
+# * sec-008: ``_invoke_internal`` MUST be unreachable from subscriber
+#   code. The runtime defensive guard inside the function makes the
+#   symbol useless even when imported via the submodule path; Task 14's
+#   ``__all__`` locks the package-level surface.
+# * NO opt-out / fresh-chain escape hatch in PR-A. A subscriber seeking
+#   a detached chain is NOT supported this slice; future need surfaces
+#   as a system-tier ``@hook(...)`` registration flag (Slice 3).
+
+
+def _reentry_bypass_rows(spy_sink: SpyAuditSink) -> list[dict[str, object]]:
+    """Filter the spy sink's call list to re-entry bypass rows."""
+    return [c for c in spy_sink.calls if c["event"] == HOOKS_REENTRY_BYPASS]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 12. Direct re-entry: subscriber on hp calls invoke("hp", ...) — bypass + audit
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_direct_reentry_emits_bypass_audit(
+    spy_registry_allow_system: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """A subscriber on hookpoint ``hp`` that itself calls
+    ``invoke("hp", ...)`` re-enters; the inner call routes to
+    :func:`_invoke_internal` and emits exactly one
+    :data:`HOOKS_REENTRY_BYPASS` row with ``hookpoint="hp"`` and
+    ``kind="pre"``. The full inner chain is SKIPPED — that's the
+    sec-008 invariant: re-entry is loudly audited and the chain does
+    NOT recurse.
+    """
+    captured_inner: list[HookContext[Any]] = []
+
+    async def reenters(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        # Re-invoke the same hookpoint synchronously from the subscriber.
+        inner = await invoke("hp", ctx, kind="pre")
+        captured_inner.append(inner)
+        return None
+
+    spy_registry_allow_system.register(
+        hook_fn=reenters,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    await invoke("hp", _ctx(input_="payload"), kind="pre")
+
+    rows = _reentry_bypass_rows(spy_sink)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["event"] == HOOKS_REENTRY_BYPASS
+    assert row["correlation_id"] == "corr-sec"
+    fields = row["fields"]
+    assert isinstance(fields, dict)
+    assert fields["hookpoint"] == "hp"
+    assert fields["kind"] == "pre"
+    # The subscriber captured ONE inner ctx — the bypass returned a ctx,
+    # the chain did NOT recurse infinitely.
+    assert len(captured_inner) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 13. Re-entry returns ctx unchanged
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_reentry_returns_ctx_unchanged(
+    spy_registry_allow_system: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """The re-entrant invoke call returns a ctx whose ``input`` and
+    ``correlation_id`` equal those passed in — the bypass path is a
+    no-op for the carrier. (The ``for_stage`` retarget at invoke()
+    entry may rewrite hookpoint/kind to the call's args, but those
+    were already the same on re-entry by definition.)
+    """
+    inner_ctx_holder: list[HookContext[Any]] = []
+
+    async def reenters(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        inner = await invoke("hp", ctx, kind="pre")
+        inner_ctx_holder.append(inner)
+        return None
+
+    spy_registry_allow_system.register(
+        hook_fn=reenters,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    sentinel_payload = {"k": "v-unique"}
+    outer_ctx = _ctx(input_=sentinel_payload, correlation_id="corr-reentry")
+    await invoke("hp", outer_ctx, kind="pre")
+
+    assert len(inner_ctx_holder) == 1
+    inner = inner_ctx_holder[0]
+    # Carrier was returned unchanged on the bypass path.
+    assert inner.input == sentinel_payload
+    assert inner.correlation_id == "corr-reentry"
+    # Bypass row landed.
+    assert len(_reentry_bypass_rows(spy_sink)) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 14. Re-entry skips system-tier subscribers (T0 invariant)
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_reentry_skips_system_tier_subscribers(
+    spy_registry_allow_system: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """The bypass path skips EVERY tier — system included. A
+    system-tier subscriber that would mutate the ctx on the first
+    (non-re-entrant) call does NOT mutate on the re-entrant call.
+
+    Setup: ``system_mutator`` (system tier) appends ``-mutated`` to
+    ``ctx.input``. ``reenterer`` (operator tier, registered AFTER so it
+    runs second) re-invokes ``hp`` with the chain ctx it received. The
+    re-entrant invoke must NOT run ``system_mutator`` again.
+    """
+    mutation_count = 0
+
+    async def system_mutator(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        nonlocal mutation_count
+        mutation_count += 1
+        return ctx.with_input(f"{ctx.input}-mutated")
+
+    inner_ctx_holder: list[HookContext[Any]] = []
+
+    async def reenterer(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        inner = await invoke("hp", ctx, kind="pre")
+        inner_ctx_holder.append(inner)
+        return None
+
+    spy_registry_allow_system.register(
+        hook_fn=system_mutator,
+        hookpoint="hp",
+        kind="pre",
+        tier="system",
+    )
+    spy_registry_allow_system.register(
+        hook_fn=reenterer,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    result = await invoke("hp", _ctx(input_="seed"), kind="pre")
+
+    # Non-re-entrant call ran ``system_mutator`` ONCE — the outer chain.
+    # The re-entrant call routed to bypass and SKIPPED the system chain.
+    assert mutation_count == 1
+    # Outer chain saw the mutation.
+    assert result.input == "seed-mutated"
+    # Inner (re-entrant) chain returned the ctx unchanged — the
+    # subscriber passed in the chain ctx after ``system_mutator`` ran,
+    # so the inner ctx.input equals the post-mutation value but no
+    # further mutation happened.
+    assert len(inner_ctx_holder) == 1
+    assert inner_ctx_holder[0].input == "seed-mutated"
+    # Exactly one bypass row landed.
+    assert len(_reentry_bypass_rows(spy_sink)) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 15. Stack popped on success
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_reentry_stack_popped_on_success(
+    spy_registry_allow_system: HookRegistry,
+) -> None:
+    """After :func:`invoke` returns normally, the :data:`_reentry`
+    stack is the empty tuple — no leaked stack frames.
+    """
+
+    async def noop(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        return None
+
+    spy_registry_allow_system.register(hook_fn=noop, hookpoint="hp", kind="pre", tier="operator")
+
+    assert _reentry.get() == ()
+    await invoke("hp", _ctx(), kind="pre")
+    assert _reentry.get() == ()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 16. Stack popped on exception (parametrized)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("subscriber_factory", "expected_exc"),
+    [
+        pytest.param(
+            lambda: _refuser_for_stack_test(),
+            HookRefusal,
+            id="HookRefusal-authorized",
+        ),
+        pytest.param(
+            lambda: _raiser_for_stack_test(),
+            HookSubscriberError,
+            id="HookSubscriberError-via-fail-closed",
+        ),
+    ],
+)
+async def test_reentry_stack_popped_on_exception(
+    spy_registry_allow_system: HookRegistry,
+    subscriber_factory: Callable[
+        [], Callable[[HookContext[Any]], Coroutine[Any, Any, HookContext[Any] | None]]
+    ],
+    expected_exc: type[BaseException],
+) -> None:
+    """After :func:`invoke` raises, the :data:`_reentry` stack MUST
+    still be the empty tuple — the ``finally`` block in :func:`invoke`
+    pops the frame regardless of how the dispatch terminated. Pinned
+    over two distinct exception shapes:
+
+    * Authorized :class:`HookRefusal` propagates from the pre handler.
+    * :class:`HookSubscriberError` is raised on
+      ``fail_closed=True`` after a subscriber raises a generic
+      exception.
+    """
+    subscriber = subscriber_factory()
+    spy_registry_allow_system.register(
+        hook_fn=subscriber, hookpoint="hp", kind="pre", tier="operator"
+    )
+
+    assert _reentry.get() == ()
+    with pytest.raises(expected_exc):
+        await invoke(
+            "hp",
+            _ctx(),
+            kind="pre",
+            fail_closed=True,
+            refusable_tiers=frozenset({"operator"}),
+        )
+    assert _reentry.get() == ()
+
+
+def _refuser_for_stack_test() -> Callable[
+    [HookContext[Any]], Coroutine[Any, Any, HookContext[Any] | None]
+]:
+    """Build a subscriber that raises an authorized :class:`HookRefusal`.
+
+    Factored out of the parametrize id so the lambda inside the
+    ``pytest.param`` reads cleanly and the test body owns the
+    registration call.
+    """
+
+    async def _refuser(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise HookRefusal(
+            hook_id="hook.stack",
+            action_id="action.test",
+            reason="block",
+            correlation_id="corr-sec",
+        )
+
+    return _refuser
+
+
+def _raiser_for_stack_test() -> Callable[
+    [HookContext[Any]], Coroutine[Any, Any, HookContext[Any] | None]
+]:
+    """Build a subscriber that raises a generic exception (wrapped on
+    ``fail_closed=True`` as :class:`HookSubscriberError`)."""
+
+    async def _raiser(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        raise ValueError("boom")
+
+    return _raiser
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 17. Different hookpoint — no bypass
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_different_hookpoint_does_not_bypass(
+    spy_registry_allow_system: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """A subscriber on ``hp1`` calling ``invoke("hp2", ...)`` is NOT
+    re-entry — the ``hp2`` chain runs normally; no
+    :data:`HOOKS_REENTRY_BYPASS` row lands.
+    """
+    hp2_ran = False
+
+    async def hp1_subscriber(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        await invoke("hp2", ctx, kind="pre")
+        return None
+
+    async def hp2_subscriber(_ctx: HookContext[Any]) -> HookContext[Any] | None:
+        nonlocal hp2_ran
+        hp2_ran = True
+        return None
+
+    spy_registry_allow_system.register(
+        hook_fn=hp1_subscriber, hookpoint="hp1", kind="pre", tier="operator"
+    )
+    spy_registry_allow_system.register(
+        hook_fn=hp2_subscriber, hookpoint="hp2", kind="pre", tier="operator"
+    )
+
+    await invoke("hp1", _ctx(hookpoint="hp1"), kind="pre")
+
+    assert hp2_ran is True
+    assert _reentry_bypass_rows(spy_sink) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 18. Nested re-entry — A on hp1 → invoke hp2 → subscriber on hp2 → invoke hp1
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_nested_reentry_inner_hp1_routes_to_bypass(
+    spy_registry_allow_system: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """A on hp1 invokes hp2; subscriber on hp2 invokes hp1; the inner
+    hp1 call sees its hookpoint already on the stack (pushed by the
+    outermost invoke) and routes to bypass. Exactly one
+    :data:`HOOKS_REENTRY_BYPASS` row lands, with ``hookpoint="hp1"``.
+
+    Verifies the stack is a tuple-of-hookpoints (NOT a single-element
+    flag) so nested chains compose correctly.
+    """
+    hp2_ran = False
+    inner_hp1_returned = False
+
+    async def hp1_subscriber(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        await invoke("hp2", ctx, kind="pre")
+        return None
+
+    async def hp2_subscriber(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        nonlocal hp2_ran, inner_hp1_returned
+        hp2_ran = True
+        # This re-invokes hp1 — which IS on the stack (the outermost call
+        # pushed it). The bypass path SHOULD fire here.
+        await invoke("hp1", ctx, kind="pre")
+        inner_hp1_returned = True
+        return None
+
+    spy_registry_allow_system.register(
+        hook_fn=hp1_subscriber, hookpoint="hp1", kind="pre", tier="operator"
+    )
+    spy_registry_allow_system.register(
+        hook_fn=hp2_subscriber, hookpoint="hp2", kind="pre", tier="operator"
+    )
+
+    await invoke("hp1", _ctx(hookpoint="hp1"), kind="pre")
+
+    assert hp2_ran is True
+    assert inner_hp1_returned is True
+    rows = _reentry_bypass_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["hookpoint"] == "hp1"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 19. asyncio.create_task propagates the stack
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_asyncio_create_task_propagates_reentry_stack(
+    spy_registry_allow_system: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """Contract — Python's standard ContextVar propagation copies the
+    current ``contextvars.Context`` into a spawned task. A subscriber
+    on ``hp`` that spawns ``asyncio.create_task(invoke("hp", ...))``
+    and awaits it MUST see the bypass path fire inside the spawned
+    task. This is the load-bearing pin against the alternative
+    (non-inheritance) which would let a subscriber escape the guard
+    via ``create_task``.
+    """
+    inner_results: list[HookContext[Any]] = []
+
+    async def reenter_via_task(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        # Spawn a task that re-invokes the SAME hookpoint. Python's
+        # default copy_context() at asyncio.create_task means the
+        # spawned task sees ``hp`` on the _reentry stack and routes
+        # to bypass.
+        task: asyncio.Task[HookContext[Any]] = asyncio.create_task(invoke("hp", ctx, kind="pre"))
+        inner = await task
+        inner_results.append(inner)
+        return None
+
+    spy_registry_allow_system.register(
+        hook_fn=reenter_via_task,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    await invoke("hp", _ctx(input_="payload"), kind="pre")
+
+    # Exactly one bypass row from the spawned task's invoke call.
+    rows = _reentry_bypass_rows(spy_sink)
+    assert len(rows) == 1
+    assert len(inner_results) == 1
+    # Inner ctx returned unchanged by the bypass.
+    assert inner_results[0].input == "payload"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 20. sec-008 — `from alfred.hooks import _invoke_internal` raises ImportError
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_invoke_internal_not_importable_from_package() -> None:
+    """The package surface (``alfred.hooks``) does NOT export
+    :func:`_invoke_internal` because the ``__init__.py`` is empty
+    (Task 14 will lock ``__all__``).
+
+    Trying ``from alfred.hooks import _invoke_internal`` raises
+    :class:`ImportError` — the symbol lives on the submodule only.
+    """
+    with pytest.raises(ImportError):
+        from alfred.hooks import _invoke_internal as _  # type: ignore[attr-defined]  # noqa: F401
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 21. sec-008 — direct submodule import works (underscore is convention)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_invoke_internal_importable_from_submodule() -> None:
+    """The underscore prefix is Python convention, not an enforced
+    block: ``from alfred.hooks.invoke import _invoke_internal`` does
+    succeed. The runtime defensive guard inside the function (test 22)
+    makes the symbol USELESS even when imported this way.
+    """
+    from alfred.hooks.invoke import _invoke_internal as imported
+
+    assert callable(imported)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 22. sec-008 — defensive guard fires when called outside re-entry detection
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_invoke_internal_defensive_guard_raises_outside_reentry(
+    fresh_registry_allow_system: HookRegistry,
+) -> None:
+    """Defense-in-depth (sec-008): even when a subscriber imports
+    :func:`_invoke_internal` via the submodule path, calling it
+    directly with the current hookpoint NOT on the
+    :data:`_reentry` stack raises :class:`HookError`.
+
+    Validates the contract that :func:`_invoke_internal` is ONLY safe
+    to call from inside :func:`invoke`'s re-entry detection branch
+    (where the hookpoint is provably already on the stack).
+    """
+    del fresh_registry_allow_system  # registry available but not needed
+    assert _reentry.get() == ()  # stack is empty — outside detection path
+    ctx = _ctx(hookpoint="hp")
+    with pytest.raises(HookError, match="sec-008"):
+        await _invoke_internal(ctx, kind="pre")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 23. Schema pin — _REENTRY_BYPASS_AUDIT_FIELDS set-equality
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_reentry_bypass_audit_row_fields_schema(
+    spy_registry_allow_system: HookRegistry,
+    spy_sink: SpyAuditSink,
+) -> None:
+    """Pin the canonical key set on every :data:`HOOKS_REENTRY_BYPASS`
+    audit row. PR-B's :class:`AuditWriter`-backed projector keys off
+    this schema; a drift surfaces here as a failing test the author
+    MUST acknowledge.
+    """
+
+    async def reenters(ctx: HookContext[Any]) -> HookContext[Any] | None:
+        await invoke("hp", ctx, kind="pre")
+        return None
+
+    spy_registry_allow_system.register(
+        hook_fn=reenters,
+        hookpoint="hp",
+        kind="pre",
+        tier="operator",
+    )
+
+    await invoke("hp", _ctx(), kind="pre")
+
+    rows = _reentry_bypass_rows(spy_sink)
+    assert len(rows) == 1
+    fields = rows[0]["fields"]
+    assert isinstance(fields, dict)
+    assert set(fields.keys()) == _REENTRY_BYPASS_AUDIT_FIELDS

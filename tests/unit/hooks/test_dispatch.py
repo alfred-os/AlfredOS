@@ -42,14 +42,14 @@ Out of scope for Task 8 (each lands with its own failing test):
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from alfred.hooks.context import HookContext
-from alfred.hooks.errors import HookRefusal
+from alfred.hooks.context import HookContext, HookKind
+from alfred.hooks.errors import HookError, HookRefusal
 from alfred.hooks.invoke import invoke
-from alfred.hooks.registry import _EMPTY, HookRegistry
+from alfred.hooks.registry import _EMPTY, HookRegistry, _reentry
 
 # ──────────────────────────────────────────────────────────────────────
 # Test helpers
@@ -553,15 +553,11 @@ async def test_cancel_handler_with_zero_subscribers(
 @pytest.mark.usefixtures("fresh_registry")
 async def test_error_kind_without_exc_raises_runtime_error() -> None:
     """Calling :func:`invoke` with ``kind="error"`` and ``exc=None`` is
-    a caller bug — :func:`_run_error` refuses loudly with a
-    :class:`RuntimeError` so the upstream failure cannot be silently
-    swallowed (CLAUDE.md hard rule #7).
-
-    Pins the defensive branch in :func:`_run_error` reached only when
-    the chain runs to completion with zero subscribers AND ``exc`` is
-    ``None`` — the ``raise RuntimeError(...)`` arm guarding the final
-    ``raise exc`` from a mypy-narrow ``None`` value. Task 14's 100%
-    branch-coverage gate requires this arm to be exercised.
+    a caller bug — the early precondition check at the top of
+    :func:`invoke` refuses loudly with a :class:`RuntimeError` so the
+    upstream failure cannot be silently swallowed (CLAUDE.md hard
+    rule #7). The per-handler check in :func:`_run_error` remains as a
+    defense-in-depth canary; today the early raise reaches first.
     """
     with pytest.raises(RuntimeError, match="error stage requires"):
         await invoke("hp.defensive.error", _ctx(), kind="error", exc=None)
@@ -570,17 +566,140 @@ async def test_error_kind_without_exc_raises_runtime_error() -> None:
 @pytest.mark.usefixtures("fresh_registry")
 async def test_cancel_kind_without_exc_raises_runtime_error() -> None:
     """Calling :func:`invoke` with ``kind="cancel"`` and ``exc=None`` is
-    a caller bug — :func:`_run_cancel` refuses loudly with a
-    :class:`RuntimeError`. There is no meaningful cancellation to
-    re-raise without a sentinel, so silently returning would violate
-    the "cancel always propagates" contract.
-
-    Pins the defensive branch in :func:`_run_cancel` (symmetric with
-    the ``error`` arm above) required by Task 14's 100% branch-coverage
-    gate.
+    a caller bug — the early precondition check at the top of
+    :func:`invoke` refuses loudly with a :class:`RuntimeError`. There
+    is no meaningful cancellation to re-raise without a sentinel, so
+    silently returning would violate the "cancel always propagates"
+    contract. The per-handler check in :func:`_run_cancel` remains as a
+    defense-in-depth canary.
     """
     with pytest.raises(RuntimeError, match="cancel stage requires"):
         await invoke("hp.defensive.cancel", _ctx(), kind="cancel", exc=None)
+
+
+@pytest.mark.usefixtures("fresh_registry")
+async def test_reentrant_invoke_error_kind_without_exc_raises_runtime_error() -> None:
+    """The early ``exc``-precondition guard ALSO catches the
+    re-entrant bypass path.
+
+    Without the early raise at the top of :func:`invoke`, a re-entry
+    detection would route directly to :func:`_invoke_internal` BEFORE
+    the per-handler defensive RuntimeError checks fire — silently
+    bypassing the chain on a missing-``exc`` caller bug. Seeding the
+    ``_reentry`` stack with the target hookpoint simulates the
+    re-entrant condition without spinning up a subscriber that
+    self-invokes; the early guard at the public surface is what
+    catches the misuse.
+    """
+    token = _reentry.set(("hp.reentrant.error",))
+    try:
+        with pytest.raises(RuntimeError, match="error stage requires"):
+            await invoke("hp.reentrant.error", _ctx(), kind="error", exc=None)
+    finally:
+        _reentry.reset(token)
+
+
+@pytest.mark.usefixtures("fresh_registry")
+async def test_reentrant_invoke_cancel_kind_without_exc_raises_runtime_error() -> None:
+    """Symmetric re-entrant-path guard for ``kind="cancel"``.
+
+    Same shape as the error-arm reentrant test: the early
+    precondition at :func:`invoke`'s public surface guarantees an
+    omitted ``exc`` raises :class:`RuntimeError` on the bypass route,
+    not just on the first-call route. The per-handler check in
+    :func:`_run_cancel` is the defense-in-depth backstop.
+    """
+    token = _reentry.set(("hp.reentrant.cancel",))
+    try:
+        with pytest.raises(RuntimeError, match="cancel stage requires"):
+            await invoke("hp.reentrant.cancel", _ctx(), kind="cancel", exc=None)
+    finally:
+        _reentry.reset(token)
+
+
+@pytest.mark.usefixtures("fresh_registry")
+async def test_dispatch_unknown_kind_raises_hook_error() -> None:
+    """A runtime-constructed ``kind`` value outside the :data:`HookKind`
+    literal set raises :class:`HookError`.
+
+    The :data:`HookKind` Literal alias provides STATIC exhaustiveness
+    via mypy / pyright at the call site, but a runtime caller that
+    bypasses the type system (``cast(Any, "invalid")``) or builds the
+    string from un-sanitised input would otherwise silently route to
+    the ``cancel`` handler under the pre-fix branch ordering — a
+    silent misroute is exactly the hazard CLAUDE.md hard rule #7
+    forbids. The explicit ``raise HookError(...)`` keeps the
+    misuse loud.
+    """
+    bad_kind = cast(HookKind, "invalid-kind")
+    with pytest.raises(HookError, match="Unsupported hook kind"):
+        await invoke("hp.unknown.kind", _ctx(), kind=bad_kind)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 13. Defense-in-depth canaries — per-handler exc=None raises
+# ──────────────────────────────────────────────────────────────────────
+#
+# The early precondition guard at the top of :func:`invoke` catches
+# ``exc is None`` on every public-surface call (first-call, re-entrant,
+# and via :func:`invoking`) BEFORE reaching the per-kind handlers, so
+# the handlers' own ``if exc is None: raise RuntimeError(...)`` arms
+# are NORMALLY unreachable. They remain in source as defense-in-depth
+# canaries: a future refactor that moves the early guard out of
+# :func:`invoke` (a refactor we explicitly do not want) would surface
+# as the handlers' arms going from "unreached" to "reached" — a
+# coverage delta a reviewer is forced to notice.
+#
+# The tests below exercise the canaries directly by importing the
+# private handlers and calling them with ``exc=None``, with the
+# explicit caveat that PRODUCTION CODE NEVER ROUTES HERE.
+
+
+@pytest.mark.usefixtures("fresh_registry")
+async def test_run_error_handler_directly_raises_without_exc() -> None:
+    """Defense-in-depth canary: :func:`_run_error` keeps its own
+    ``exc is None`` raise as anti-refactor scaffolding.
+
+    Calling the private handler directly bypasses the public early
+    guard at :func:`invoke`'s entry. Without subscribers AND with
+    ``exc=None``, the handler reaches the defensive
+    ``raise RuntimeError(...)`` arm at the end of its body. This
+    arm SHOULD NOT be reachable from production code (the public
+    surface raises first); the canary stays so a refactor that
+    weakens the public guard is caught by a coverage delta.
+    """
+    from alfred.hooks.invoke import _run_error
+
+    with pytest.raises(RuntimeError, match="error stage requires"):
+        await _run_error(
+            "hp.canary.error",
+            _ctx(),
+            exc=None,
+            subscribable_tiers=frozenset({"system", "operator", "user-plugin"}),
+            fail_closed=False,
+        )
+
+
+@pytest.mark.usefixtures("fresh_registry")
+async def test_run_cancel_handler_directly_raises_without_exc() -> None:
+    """Defense-in-depth canary: :func:`_run_cancel` keeps its own
+    ``exc is None`` raise as anti-refactor scaffolding.
+
+    Symmetric to the error-arm canary above — the per-handler
+    defensive arm is unreachable via :func:`invoke` but pinned here
+    so the language-level coverage signal stays honest if a future
+    refactor moves the public early guard.
+    """
+    from alfred.hooks.invoke import _run_cancel
+
+    with pytest.raises(RuntimeError, match="cancel stage requires"):
+        await _run_cancel(
+            "hp.canary.cancel",
+            _ctx(),
+            exc=None,
+            subscribable_tiers=frozenset({"system", "operator", "user-plugin"}),
+            fail_closed=False,
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────

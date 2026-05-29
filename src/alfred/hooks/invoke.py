@@ -1,4 +1,4 @@
-"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Tasks 8 + 9 + 10 + 11.
+"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Tasks 8 + 9 + 10 + 11 + 12.
 
 The :func:`invoke` primitive is the public entry point every action
 callsite uses to drive a hook chain. It is intentionally tiny:
@@ -52,9 +52,25 @@ callsite uses to drive a hook chain. It is intentionally tiny:
    within the deadline, and the fail-closed-true subscriber-error
    wrap).
 
-Faults still pending land in later tasks:
-
-* Re-entry bypass via :data:`alfred.hooks.registry._reentry` → Task 12.
+Task 12 layers the §6.9 / sec-008 re-entry guard onto :func:`invoke`:
+the top of the public entry point pushes ``name`` onto the
+:data:`alfred.hooks.registry._reentry` ContextVar stack via
+``_reentry.set(...)``, dispatches the four-way kind routing inside a
+``try``, and pops the frame in a ``finally`` so normal returns AND
+every propagating exception both pop. When ``name`` is ALREADY on the
+stack at entry (the re-entry detection), :func:`invoke` routes to
+:func:`_invoke_internal`, which emits :data:`HOOKS_REENTRY_BYPASS` and
+returns ``ctx`` unchanged — the chain is SKIPPED so a subscriber
+cannot recurse into its own action. The ContextVar propagates by
+Python's standard rules, including across :func:`asyncio.create_task`,
+so a subscriber that spawns a task to re-invoke its own hookpoint also
+routes to the bypass path (no opt-out / fresh-chain escape hatch
+exists in PR-A — future need lands as a Slice-3 ``@hook(...)``
+registration flag, NOT as a runtime knob). :func:`_invoke_internal`
+itself carries a defensive runtime guard: a caller that imports the
+name and calls it outside the re-entry detection path receives a
+:class:`HookError`, making the symbol useless even when imported via
+the underscore-prefix submodule path.
 
 The five-parameter :func:`invoke` signature is verbatim from spec §0 —
 ``subscribable_tiers`` / ``refusable_tiers`` / ``fail_closed`` /
@@ -129,13 +145,14 @@ from typing import Any, Final, cast
 
 from alfred.hooks.audit_sink import (
     HOOKS_CHAIN_TIMEOUT,
+    HOOKS_REENTRY_BYPASS,
     HOOKS_REFUSAL,
     HOOKS_SUBSCRIBER_ERROR,
     HOOKS_UNAUTHORIZED_REFUSAL,
 )
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
-from alfred.hooks.registry import Subscriber, get_registry
+from alfred.hooks.registry import Subscriber, _reentry, get_registry
 
 # ──────────────────────────────────────────────────────────────────────
 # Module constants
@@ -316,6 +333,28 @@ Schema:
 """
 
 
+_REENTRY_BYPASS_AUDIT_FIELDS: Final[frozenset[str]] = frozenset({"hookpoint", "kind"})
+"""Canonical key set for the ``fields`` mapping on every
+:data:`HOOKS_REENTRY_BYPASS` audit row (§6.9 / sec-008).
+
+PR-B's :class:`alfred.audit.log.AuditWriter`-backed sink keys off this
+schema for row projection; an unannounced addition / removal here breaks
+the projector. The set is asserted by
+``tests/unit/hooks/test_security_contract.py::test_reentry_bypass_audit_row_fields_schema``
+so a drift surfaces as a failing test the author MUST acknowledge.
+
+Schema:
+
+* ``hookpoint`` — dotted hookpoint identifier (str). The re-entered
+  hookpoint, NOT the outermost call.
+* ``kind`` — lifecycle stage of the re-entrant call (one of ``"pre"`` /
+  ``"post"`` / ``"error"`` / ``"cancel"``). Lets the operator distinguish
+  a re-entrant ``pre`` (the common shape — a subscriber that recursively
+  invokes its own action) from a re-entrant ``error`` (the suspicious
+  shape — an error-handler that re-throws into its own error chain).
+"""
+
+
 def _spawn_subscriber[T](
     sub: Subscriber,
     chain_ctx: HookContext[T],
@@ -475,12 +514,100 @@ async def invoke[T](
             re-raise is suppressed in favour of the audit row +
             last-good ctx return.
     """
+    # Early precondition: ``error`` and ``cancel`` kinds REQUIRE ``exc``.
+    # A caller bug that omits the upstream exception would otherwise
+    # bypass the per-handler defensive RuntimeError on the re-entrant
+    # bypass path (which routes to :func:`_invoke_internal` BEFORE the
+    # handlers ever run). Raising here at the public surface catches
+    # the misuse on EVERY path — first-call, re-entrant, and via the
+    # ``invoking()`` helper — and produces the same message shape the
+    # handlers' own checks would. The per-handler checks remain as
+    # belt-and-braces canaries (defense-in-depth + refactor signal):
+    # a refactor that moves the early raise out of this function
+    # surfaces as the handler-arm tests flipping from "unreached"
+    # to "reached", not as a silently swallowed cancellation.
+    if kind == "error" and exc is None:
+        raise RuntimeError(
+            "invoke(kind='error', ...) called without an exc argument; "
+            "the error stage requires the upstream exception."
+        )
+    if kind == "cancel" and exc is None:
+        raise RuntimeError(
+            "invoke(kind='cancel', ...) called without an exc argument; "
+            "the cancel stage requires the cancellation sentinel."
+        )
+
     # Retarget the carrier — invoke is authoritative for the stage.
     # Even with zero subscribers, the returned ctx reflects the
     # (hookpoint, kind) the caller specified, NOT what the input ctx
     # claimed. This is what makes a stale caller-side ctx safe.
     ctx = ctx.for_stage(hookpoint=name, kind=kind)
 
+    # §6.9 / sec-008 — re-entry guard.
+    #
+    # The :data:`alfred.hooks.registry._reentry` ContextVar propagates by
+    # Python's STANDARD ContextVar rules — including across
+    # ``asyncio.create_task``. Python's default copies the current
+    # ``contextvars.Context`` into the spawned task, so a subscriber
+    # that re-invokes its own hookpoint EITHER directly OR via a
+    # spawned task that inherits this Context routes through this
+    # guard and into :func:`_invoke_internal`. There is NO opt-out /
+    # fresh-chain escape hatch in PR-A: a subscriber seeking a
+    # detached chain is NOT supported this slice (future need lands
+    # as a system-tier ``@hook(...)`` registration flag in Slice 3).
+    #
+    # The stack is a ``tuple[str, ...]`` of hookpoint identifiers, so
+    # nested chains compose: ``hp1`` → ``hp2`` → re-invoke ``hp1``
+    # correctly hits the bypass on the inner ``hp1`` call. NEVER
+    # mutate the tuple in place; ``set()`` returns a token,
+    # ``reset(token)`` pops.
+    current_stack = _reentry.get()
+    if name in current_stack:
+        return await _invoke_internal(ctx, kind=kind)
+
+    token = _reentry.set((*current_stack, name))
+    try:
+        return await _dispatch_by_kind(
+            name,
+            ctx,
+            kind=kind,
+            subscribable_tiers=subscribable_tiers,
+            refusable_tiers=refusable_tiers,
+            fail_closed=fail_closed,
+            exc=exc,
+        )
+    finally:
+        # Pop the frame REGARDLESS of how dispatch terminated — a
+        # normal return AND any propagating exception (HookRefusal,
+        # HookSubscriberError, TimeoutError, BaseException) both flow
+        # through this ``finally`` so the stack never leaks. Pinned by
+        # ``test_reentry_stack_popped_on_success`` and
+        # ``test_reentry_stack_popped_on_exception``.
+        _reentry.reset(token)
+
+
+async def _dispatch_by_kind[T](
+    name: str,
+    ctx: HookContext[T],
+    *,
+    kind: HookKind,
+    subscribable_tiers: frozenset[str],
+    refusable_tiers: frozenset[str],
+    fail_closed: bool,
+    exc: BaseException | None,
+) -> HookContext[T]:
+    """Route to one of four kind-handlers.
+
+    Factored out of :func:`invoke` so the re-entry guard's
+    push-and-pop discipline (``_reentry.set(...)`` / ``_reentry.reset(...)``)
+    wraps the entire dispatch — the ``finally`` in :func:`invoke`
+    runs even when a handler raises. Splitting the routing into its
+    own ``async def`` keeps :func:`invoke`'s body small enough that
+    the re-entry guard sequence stays readable end-to-end.
+
+    Mirrors the original four-way routing verbatim; no behavioural
+    change relative to pre-Task-12 dispatch.
+    """
     if kind == "pre":
         return await _run_pre(
             name,
@@ -504,15 +631,109 @@ async def invoke[T](
             subscribable_tiers=subscribable_tiers,
             fail_closed=fail_closed,
         )
-    # kind == "cancel" — the HookKind literal type pins exhaustiveness;
-    # mypy / pyright reject any other value at the call site.
-    return await _run_cancel(
-        name,
-        ctx,
-        exc=exc,
-        subscribable_tiers=subscribable_tiers,
-        fail_closed=fail_closed,
+    if kind == "cancel":
+        return await _run_cancel(
+            name,
+            ctx,
+            exc=exc,
+            subscribable_tiers=subscribable_tiers,
+            fail_closed=fail_closed,
+        )
+    # The :data:`HookKind` Literal alias pins static exhaustiveness;
+    # mypy / pyright reject any other value at the call site. The
+    # explicit raise is defense-in-depth for a RUNTIME caller that
+    # bypasses the type system (``cast(Any, "invalid")``) or for a
+    # subscriber that constructs an unsanitised string at runtime — a
+    # silent route to ``cancel`` would hide the misuse on the audit
+    # trail (CLAUDE.md hard rule #7). Raising :class:`HookError` keeps
+    # the loud-failure discipline and surfaces the bad value verbatim.
+    raise HookError(f"Unsupported hook kind: {kind!r}")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# §6.9 / sec-008 re-entry bypass
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def _invoke_internal[T](
+    ctx: HookContext[T],
+    *,
+    kind: HookKind,
+) -> HookContext[T]:
+    """Re-entrant bypass path. NOT exported. NOT for subscribers (sec-008).
+
+    Reached when :func:`invoke` detects ``ctx.hookpoint`` is already on
+    the :data:`alfred.hooks.registry._reentry` stack — i.e. a subscriber
+    (possibly via :func:`asyncio.create_task`, which inherits the parent
+    Context by default) is re-invoking its own hookpoint. The full chain
+    is SKIPPED — every tier, system included; this is the T0-only
+    invariant. Emits :data:`HOOKS_REENTRY_BYPASS` so the bypass is
+    loudly audited (CLAUDE.md hard rule #7) and returns ``ctx``
+    unchanged.
+
+    DO NOT add ANY chain walking, ``for_stage`` retarget, or kind
+    routing here. The whole point of this function is to skip
+    dispatch when the dispatcher would otherwise recurse — every line
+    of dispatch logic added here is an avenue for the recursion the
+    guard was designed to prevent.
+
+    Defense-in-depth (sec-008): even though this name is module-private
+    AND Task 14 forbids its package-level export, a determined
+    subscriber could still import the symbol via
+    ``from alfred.hooks.invoke import _invoke_internal`` — the
+    underscore is convention, not an enforced block. The runtime
+    guard at the top of the function makes the symbol USELESS when
+    called outside the re-entry detection path: callers receive a
+    :class:`HookError` instead of the silent bypass behaviour.
+
+    Args:
+        ctx: The carrier whose hookpoint :func:`invoke` confirmed is
+            already on the :data:`_reentry` stack. The
+            :meth:`HookContext.for_stage` retarget happened at
+            :func:`invoke`'s entry; here ``ctx.hookpoint`` / ``ctx.kind``
+            reflect the re-entrant stage and surface verbatim on the
+            audit row.
+        kind: The lifecycle stage of the re-entrant call. Surfaces as
+            the ``kind`` field on the audit row so the operator can
+            distinguish a re-entrant ``pre`` from a re-entrant
+            ``error``.
+
+    Returns:
+        ``ctx`` unchanged — the bypass path is a no-op for the carrier.
+
+    Raises:
+        HookError: When the defensive guard fires — i.e. the function
+            was called with ``ctx.hookpoint`` NOT on the
+            :data:`_reentry` stack. This is the sec-008 "useless when
+            misused" pin.
+    """
+    # Defense-in-depth (sec-008): even though this name is
+    # module-private and Task 14 forbids its package-level export, a
+    # determined subscriber could still import the symbol via
+    # ``from alfred.hooks.invoke import _invoke_internal``. The guard
+    # makes the function useless when called outside the re-entry
+    # detection path: a caller without the hookpoint on the stack is
+    # NOT in the re-entrant code path the function exists to serve.
+    if ctx.hookpoint not in _reentry.get():
+        raise HookError(
+            "_invoke_internal called outside the re-entry detection path. "
+            "This is the bypass path for hookpoint re-entry; calling it "
+            "directly is a sec-008 violation. Use invoke() instead."
+        )
+
+    # The audit row's ``fields[kind]`` matches the re-entrant stage
+    # because ``ctx.kind`` was rewritten by :func:`invoke`'s
+    # ``for_stage`` call at entry. Schema pinned by
+    # :data:`_REENTRY_BYPASS_AUDIT_FIELDS`.
+    await get_registry().sink.emit(
+        event=HOOKS_REENTRY_BYPASS,
+        correlation_id=ctx.correlation_id,
+        fields={
+            "hookpoint": ctx.hookpoint,
+            "kind": kind,
+        },
     )
+    return ctx
 
 
 # ──────────────────────────────────────────────────────────────────────
