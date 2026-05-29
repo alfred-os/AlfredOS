@@ -140,8 +140,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Coroutine
-from typing import Any, Final, cast
+from collections.abc import AsyncIterator, Coroutine
+from contextlib import asynccontextmanager
+from typing import Any, Final, Self, cast
+from uuid import uuid4
 
 from alfred.hooks.audit_sink import (
     HOOKS_CHAIN_TIMEOUT,
@@ -150,6 +152,7 @@ from alfred.hooks.audit_sink import (
     HOOKS_SUBSCRIBER_ERROR,
     HOOKS_UNAUTHORIZED_REFUSAL,
 )
+from alfred.hooks.capability import CapabilityGate
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
 from alfred.hooks.registry import Subscriber, _reentry, get_registry
@@ -1529,3 +1532,305 @@ async def _run_cancel[T](
             "the cancel stage requires the cancellation sentinel."
         )
     raise exc
+
+
+# ──────────────────────────────────────────────────────────────────────
+# §3.4 invoking() helper + Flow[T] — Task 13
+# ──────────────────────────────────────────────────────────────────────
+
+
+class Flow[T]:
+    """Mutable holder threading the action's lifecycle through
+    :func:`invoking`.
+
+    ``Flow`` is the ergonomic surface returned to the caller of the
+    :func:`invoking` async context manager. The caller does NOT
+    instantiate :class:`Flow` directly — :func:`invoking` constructs
+    one, threads each chain's frozen-:class:`HookContext` output back
+    into the flow's internal ``_ctx`` holder, and yields the flow for
+    the caller to drive.
+
+    The split — frozen carrier, mutable holder — is load-bearing:
+
+    * Every :class:`HookContext` instance is ``frozen=True`` (spec
+      §3.3) so mid-chain mutation is impossible. A ``pre`` subscriber
+      that wants to rewrite the input returns
+      :meth:`HookContext.with_input`, which produces a NEW frozen
+      instance.
+    * The flow is the holder of "the latest ctx the chain produced".
+      :meth:`pre` rebinds ``_ctx`` to the chain's output so the next
+      stage's view (via :attr:`input` or via the next
+      :func:`invoke` call) is up-to-date. The holder itself is the only
+      mutable surface; the carrier it points at is always frozen.
+
+    Why a plain class (not a dataclass / NamedTuple): the holder needs
+    rebindable instance state, NOT frozen-by-default semantics. A
+    ``@dataclass`` without ``frozen=True`` would work but the only
+    field is ``_ctx`` — a single mutable attribute on a plain class is
+    the minimal shape and keeps the surface obviously imperative.
+    """
+
+    __slots__ = ("_ctx",)
+
+    _ctx: HookContext[T]
+
+    def __init__(self, ctx: HookContext[T]) -> None:
+        """Construct the flow with an initial frozen :class:`HookContext`.
+
+        Args:
+            ctx: The initial carrier built by :func:`invoking` at entry.
+                Carries the freshly-minted ``correlation_id`` and the
+                caller-supplied ``action_id`` / ``input``.
+        """
+        self._ctx = ctx
+
+    @property
+    def input(self) -> T:
+        """Return the latest threaded ctx's input payload.
+
+        After :meth:`pre` runs, this property reflects the chain's
+        mutation — :meth:`pre` rebinds ``_ctx`` to the dispatcher's
+        return value (the chain's fold output). Action bodies read
+        ``flow.input`` to get the post-pre-chain view.
+        """
+        return self._ctx.input
+
+    async def pre(self, stage: str, **invoke_kwargs: Any) -> Self:
+        """Run the ``pre`` chain for ``stage`` and thread the output.
+
+        Calls :func:`invoke` with ``kind="pre"`` against the flow's
+        current ``_ctx``; rebinds ``_ctx`` to the chain's return value
+        so :attr:`input` reflects the latest stage's mutation. Returns
+        ``self`` so callers may chain or immediately read
+        ``flow.input`` against the same holder.
+
+        Args:
+            stage: The dotted hookpoint identifier for this ``pre``
+                stage (e.g. ``"before_db_write"``). Forwarded to
+                :func:`invoke` as the ``name`` arg.
+            **invoke_kwargs: Forwarded verbatim to :func:`invoke`. Lets
+                the action author override ``fail_closed`` /
+                ``subscribable_tiers`` / ``refusable_tiers`` per-stage
+                without expanding the helper's surface. ``kind="pre"``
+                is set by this method and MUST NOT be overridden by
+                the caller.
+
+        Returns:
+            ``self`` — the same :class:`Flow` instance. Lets the caller
+            chain or read :attr:`input` immediately after the await on
+            the same holder.
+
+        Raises:
+            HookRefusal: Propagated unchanged from :func:`invoke` when
+                an authorized ``pre`` subscriber refused.
+            HookError: Propagated from :func:`invoke` on a chain
+                timeout when ``fail_closed=True`` or an unexpected
+                subscriber error wrap.
+            BaseException: Any other exception propagating from a
+                subscriber via the documented :func:`invoke` contract.
+        """
+        new_ctx = await invoke(stage, self._ctx, kind="pre", **invoke_kwargs)
+        self._ctx = new_ctx
+        return self
+
+    @asynccontextmanager
+    async def body(
+        self,
+        *,
+        post: str,
+        error: str,
+        cancel: str,
+    ) -> AsyncIterator[None]:
+        """Run the action's persistence step and dispatch the right
+        terminal chain on exit.
+
+        Exit dispositions — order matters and is the test-102
+        cancel-before-error invariant (spec §4):
+
+        * **Success** (no exception): fire the ``post`` chain on
+          ``post``. The chain's fold output is rebound into ``_ctx``
+          so a caller that reads :attr:`input` post-block sees the
+          post-stage view.
+        * **:class:`asyncio.CancelledError` mid-body**: fire the
+          ``cancel`` chain on ``cancel`` FIRST, then re-raise the
+          :class:`asyncio.CancelledError`. The ``error`` chain does
+          NOT run for a cancellation — a regression here would let an
+          error subscriber observe a cancellation as if it were a
+          non-cancellation failure, corrupting audit attribution and
+          potentially leaking T3 user content into the wrong audit
+          arm (CLAUDE.md hard rule #7 + trust-tier discipline). The
+          ``except CancelledError:`` arm MUST precede the ``except
+          Exception:`` arm; Python evaluates the arms top-down and
+          :class:`asyncio.CancelledError` is a :class:`BaseException`,
+          NOT an :class:`Exception` — but explicit ordering documents
+          the intent.
+        * **Other :class:`Exception` mid-body**: fire the ``error``
+          chain on ``error``, then re-raise (or substitute, if a
+          subscriber suppressed). The ``cancel`` chain does NOT run.
+
+        Args:
+            post: Hookpoint identifier for the ``post`` chain (e.g.
+                ``"after_flush"``). Required kwarg — defaulting would
+                hide the contract from the action author.
+            error: Hookpoint identifier for the ``error`` chain (e.g.
+                ``"write_failed"``). Required kwarg.
+            cancel: Hookpoint identifier for the ``cancel`` chain
+                (e.g. ``"cancelled"``). Required kwarg — the
+                test-102 invariant depends on an explicit cancel
+                hookpoint; defaulting or auto-deriving would hide the
+                load-bearing contract.
+
+        Yields:
+            ``None`` — the body has no return value (PR-A actions are
+            side-effect-only; the spec §13 forward-compat reservation
+            for value-returning actions lives on the action surface,
+            not on the helper). The action's persistence logic runs
+            inside the ``async with`` block.
+
+        Raises:
+            asyncio.CancelledError: Re-raised after the ``cancel``
+                chain fires when the body raised
+                :class:`asyncio.CancelledError`.
+            Exception: Re-raised after the ``error`` chain fires when
+                the body raised a non-cancellation exception AND no
+                error subscriber substituted.
+        """
+        try:
+            yield
+        except asyncio.CancelledError as cancel_exc:
+            # test-102: cancel chain FIRST, error chain NEVER runs on
+            # a cancellation. Synthesize the :class:`asyncio.CancelledError`
+            # as ``exc=`` for the cancel chain so subscribers can
+            # introspect the cancellation cause via
+            # ``ctx.metadata[ERROR_EXC_METADATA_KEY]`` (the dispatcher
+            # stashes it). The :func:`invoke` cancel arm re-raises
+            # ``exc`` at the end of the chain, which is the
+            # :class:`asyncio.CancelledError` we just passed — so the
+            # ``raise`` below is reachable only on the chain-timeout
+            # arm (:func:`_run_cancel` returns last-good ctx on
+            # timeout instead of re-raising). The explicit bare
+            # ``raise`` preserves the original traceback in that arm.
+            await invoke(cancel, self._ctx, kind="cancel", exc=cancel_exc)
+            raise
+        except Exception as exc:
+            # Error chain ONLY for non-:class:`asyncio.CancelledError`
+            # exceptions — the arm above short-circuits cancellation.
+            # :class:`HookRefusal` from a pre-stage propagates BEFORE
+            # the body runs (caught by the caller's ``async with
+            # invoking(...)`` frame), so the only refusals reaching
+            # this arm are post/error/cancel ones — which propagate
+            # uncaught via the dispatcher's defensive re-raise (Task
+            # 10). We do NOT special-case :class:`HookRefusal` here;
+            # the dispatcher handles disposition.
+            #
+            # The chain may RETURN a substitute ctx (the "error
+            # suppression" semantic — first subscriber to return
+            # non-``None`` wins) — in which case :func:`invoke`
+            # returns normally and the body's exception is swallowed.
+            # We rebind ``_ctx`` to the substitute so a caller reading
+            # ``flow.input`` post-block sees the suppression's view.
+            # If every subscriber returned ``None``, :func:`invoke`
+            # re-raises ``exc`` — which propagates out of this
+            # ``except`` arm as if the body had raised it directly.
+            self._ctx = await invoke(error, self._ctx, kind="error", exc=exc)
+        else:
+            # Success path: fire ``post`` chain and thread its fold
+            # back into ``_ctx`` so post-block readers see the latest
+            # view.
+            self._ctx = await invoke(post, self._ctx, kind="post")
+
+
+@asynccontextmanager
+async def invoking[T](
+    action_id: str,
+    input: T,
+    *,
+    gate: CapabilityGate | None = None,
+) -> AsyncIterator[Flow[T]]:
+    """Async context manager driving an action's hook lifecycle.
+
+    The ergonomic surface over the four-kind :func:`invoke` primitive.
+    The typical action threads pre / body / post / error / cancel
+    chains through ONE :func:`invoking` block instead of four hand-rolled
+    :func:`invoke` calls — see :class:`Flow` for the per-stage surface.
+
+    Behaviour at entry:
+
+    * Mints ONE :class:`uuid.uuid4`-hex ``correlation_id`` — every
+      chain stage and every audit row under this action shares it,
+      giving operators a single key to join on across the audit log.
+    * Builds the initial frozen :class:`HookContext` with the
+      caller's ``action_id`` / ``input`` / minted ``correlation_id``,
+      ``hookpoint=action_id`` (the per-stage retarget happens inside
+      each :func:`invoke` call via :meth:`HookContext.for_stage`), and
+      ``kind="pre"`` (a placeholder — :func:`invoke` is authoritative
+      for the per-stage kind and rewrites it).
+
+    Behaviour during the block: the caller drives the flow via
+    :meth:`Flow.pre` (one call per ``pre`` hookpoint) and
+    :meth:`Flow.body` (an async context manager wrapping the action's
+    persistence step). The flow rebinds its internal ``_ctx`` holder
+    on each chain output so :attr:`Flow.input` always reflects the
+    latest stage's view.
+
+    Behaviour on exit: no special teardown. Any exception propagating
+    out of the block (a :class:`HookRefusal` from a ``pre`` stage, a
+    body exception that no error subscriber suppressed, a re-raised
+    :class:`asyncio.CancelledError`) propagates uncaught to the
+    caller; the helper does NOT swallow.
+
+    Args:
+        action_id: The dotted action identifier (e.g.
+            ``"memory.episodic.record"``). Positional so a typo
+            surfaces as a type mismatch by mypy. Carried on every
+            :class:`HookContext` the chain sees as ``ctx.action_id``;
+            the per-stage :func:`invoke` calls retarget
+            ``ctx.hookpoint`` separately via
+            :meth:`HookContext.for_stage`.
+        input: The typed input payload (PEP 695 generic over ``T``).
+            Carried on the initial :class:`HookContext` as
+            ``ctx.input``; ``pre`` subscribers may mutate via
+            :meth:`HookContext.with_input` which produces a new frozen
+            instance, and the flow rebinds.
+        gate: Reserved for Slice-3's per-call capability gate. PR-A
+            scope: subscribers register against the active registry's
+            gate at decoration time and the helper itself does NOT
+            re-check at dispatch time. Accepting ``None`` (the
+            default) and unused this slice keeps the helper's
+            signature forward-compatible; a Slice-3 grant gate slots
+            in here without source change at the call site.
+
+    Yields:
+        :class:`Flow[T]` — the per-action driver. The caller invokes
+        :meth:`Flow.pre` per ``pre`` hookpoint and
+        :meth:`Flow.body` to run the action's persistence step.
+
+    Raises:
+        HookRefusal: Propagated from a ``pre`` subscriber via
+            :meth:`Flow.pre`. The body never runs.
+        HookError: Propagated from any chain on a timeout with
+            ``fail_closed=True`` or an unexpected-subscriber-error
+            wrap.
+        asyncio.CancelledError: Propagated from
+            :meth:`Flow.body` when the body raised
+            :class:`asyncio.CancelledError` and the cancel chain ran
+            (test-102 invariant).
+        Exception: Propagated from :meth:`Flow.body` when the body
+            raised a non-cancellation exception AND no error
+            subscriber substituted.
+    """
+    # The ``gate`` kwarg is reserved for Slice-3 — see the docstring.
+    # Discarding it with ``del`` here makes the "unused this slice"
+    # contract explicit at the implementation site; a future caller
+    # that needs per-call gate override will land alongside its own
+    # tests and the ``del`` removal.
+    del gate
+
+    initial_ctx: HookContext[T] = HookContext(
+        action_id=action_id,
+        hookpoint=action_id,
+        input=input,
+        correlation_id=uuid4().hex,
+        kind="pre",
+    )
+    yield Flow(initial_ctx)
