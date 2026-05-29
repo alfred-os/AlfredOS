@@ -1,4 +1,4 @@
-"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Task 8.
+"""Hook subsystem dispatch primitive — Slice-2.5 PR-A Tasks 8 + 9.
 
 The :func:`invoke` primitive is the public entry point every action
 callsite uses to drive a hook chain. It is intentionally tiny:
@@ -11,21 +11,31 @@ callsite uses to drive a hook chain. It is intentionally tiny:
    / ``_run_post`` / ``_run_error`` / ``_run_cancel``. Each handler is a
    structurally distinct function so the 100% branch-coverage gate
    (Task 14) can pin each kind independently.
-3. Return the handler's :class:`HookContext` (for ``pre`` / ``post`` /
-   error-suppressed) or re-raise (for the error-no-suppression /
-   cancel-always-propagates branches).
+3. Each handler wraps its subscriber walk in ONE
+   ``asyncio.timeout(deadline_seconds)`` (Task 9 / perf §5). On
+   :class:`TimeoutError` the dispatcher emits a
+   :data:`alfred.hooks.audit_sink.HOOKS_CHAIN_TIMEOUT` audit row through
+   the registry-owned sink and either returns the last-good ctx
+   (``fail_closed=False``) or raises :class:`HookError`
+   (``fail_closed=True``). The cancelled-subscriber await-to-completion
+   (core-006) happens INSIDE the ``except TimeoutError`` handler, never
+   inside the live timeout scope.
+4. Return the handler's :class:`HookContext` (for ``pre`` / ``post`` /
+   error-suppressed / timeout-recovered) or re-raise (for the
+   ``error``-all-none path and the ``cancel`` propagate-cancellation
+   path, when the chain completed within the deadline).
 
-This module ships the HAPPY PATH only. Faults land in later tasks:
+Tasks 8 + 9 ship the happy-path dispatch and the chain-timeout fault
+arm. Faults still pending land in later tasks:
 
-* Per-chain ``asyncio.timeout`` wrap                 → Task 9.
 * Unexpected-subscriber-exception fault policy + row → Task 10.
 * Refusal-authorisation by tier + audit row          → Task 11.
 * Re-entry bypass via :data:`alfred.hooks.registry._reentry` → Task 12.
 
 The five-parameter :func:`invoke` signature is verbatim from spec §0 —
 ``subscribable_tiers`` / ``refusable_tiers`` / ``fail_closed`` /
-``exc`` all flow through even where Task-8 dispatch ignores them, so
-later tasks layer fault logic without changing the call shape.
+``exc`` all flow through even where dispatch ignores them, so later
+tasks layer fault logic without changing the call shape.
 
 Design — how ``exc`` reaches error/cancel subscribers:
 
@@ -39,18 +49,38 @@ Design — how ``exc`` reaches error/cancel subscribers:
   carrier; no original ctx is mutated. Subscribers that need the
   upstream exception read ``ctx.metadata["error_exc"]`` directly.
 
-Design — why ``_run_chain`` only serves ``pre`` and ``post``:
+Design — why each kind owns its own timeout-wrapped walk (Option 3):
 
-  ``pre`` and ``post`` share a linear-walk shape: walk the snapshot,
-  call each subscriber, fold a ``HookContext`` return into the chain
-  ctx, leave the chain ctx unchanged on a ``None`` return. The shared
-  helper folds that into one body. ``error`` (first non-``None`` wins,
-  re-raise if all ``None``) and ``cancel`` (return values ignored,
-  ``exc`` always re-raises, subscriber exceptions cannot suppress) are
-  different enough that inlining them is clearer than parameterising
-  them through a callback. Each of the four handlers therefore has its
-  own ``def`` and a structurally distinct body — the four-way coverage
-  pin Task 14 will exercise.
+  ``pre`` and ``post`` share a linear walk-and-fold shape; ``error`` is
+  "first non-None wins, else re-raise exc"; ``cancel`` is "swallow
+  subscriber exceptions, always re-raise exc". Unifying the four
+  through one callback-parameterised iterator would obscure each
+  handler's disposition logic. Instead each handler inlines its own
+  ``async with asyncio.timeout(...)`` block plus its kind-specific
+  loop body; a single :func:`_handle_chain_timeout` helper
+  centralises the shared three-step fault sequence (await the
+  cancelled subscriber to completion, emit the audit row, apply
+  ``fail_closed``). The four handlers therefore each have a structurally
+  distinct ``def`` and a structurally distinct ``try/except
+  TimeoutError`` arm — the eight-way coverage pin Task 14 will exercise.
+
+Design — core-006 cancelled-coroutine await-to-completion:
+
+  When the ``asyncio.timeout`` scope expires, the in-flight subscriber
+  task is cancelled by the scheduler. By the time the ``except
+  TimeoutError`` arm starts running, the scope has already exited and
+  the cancellation has been delivered to the subscriber — but the
+  subscriber's ``finally`` block (database commit-or-rollback, lock
+  release, span close) has NOT necessarily completed. The dispatcher
+  must ``await`` the cancelled task once more inside the ``except``
+  handler so the subscriber's cleanup runs to completion before any
+  audit row is emitted or any caller observes the chain's outcome.
+  This is the half-open-cursor pin tested by
+  ``test_cancelled_subscriber_finally_runs_to_completion``. The
+  ``except BaseException`` on the await is cleanup-only — whatever the
+  cancelled subscriber raises during its own ``finally`` (typically
+  :class:`asyncio.CancelledError`, defensively any
+  :class:`BaseException`) must not prevent the audit row from landing.
 
 Design — cancel subscriber exceptions are NOT re-raised:
 
@@ -61,21 +91,22 @@ Design — cancel subscriber exceptions are NOT re-raised:
   from running, and absolutely must not suppress the original
   cancellation. Task 10 will layer audit-row emission onto the catch
   arm so the swallow is no longer silent (CLAUDE.md hard rule #7 —
-  Task-10's audit row IS the loud-failure escape). For Task 8 the
+  Task-10's audit row IS the loud-failure escape). For Task 9 the
   swallow ships without audit attribution; the test suite verifies
   the propagate-cancellation contract directly.
 """
 
 from __future__ import annotations
 
-from typing import Final
+import asyncio
+import contextlib
+from collections.abc import Coroutine
+from typing import Any, Final, cast
 
+from alfred.hooks.audit_sink import HOOKS_CHAIN_TIMEOUT
 from alfred.hooks.context import HookContext, HookKind
-from alfred.hooks.registry import (
-    HOOK_CHAIN_DEADLINE_SECONDS,
-    Subscriber,
-    get_registry,
-)
+from alfred.hooks.errors import HookError
+from alfred.hooks.registry import Subscriber, get_registry
 
 # ──────────────────────────────────────────────────────────────────────
 # Module constants
@@ -93,6 +124,107 @@ string literal) so a future rename surfaces at every read site.
 
 # Default subscribable / refusable tier sets — verbatim spec §0.
 _DEFAULT_TIERS: Final[frozenset[str]] = frozenset({"system", "operator", "user-plugin"})
+
+
+_CLEANUP_DEADLINE_SECONDS: Final[float] = 0.05
+"""Secondary deadline bounding the cancelled-subscriber await-to-completion
+step inside :func:`_handle_chain_timeout` (S-001 hardening).
+
+The chain-timeout fault sequence's first step awaits the in-flight
+subscriber task ONE MORE TIME after the primary ``asyncio.timeout``
+scope has fired and cancellation has propagated to the subscriber, so
+the subscriber's ``finally`` block (DB commit-or-rollback, lock
+release, span close) runs to completion before the audit row lands.
+WITHOUT a second bound on that await, a subscriber whose ``finally``
+takes longer than the rest of the chain budget — a slow DB rollback
+under load, a network close that hangs on a half-open socket — would
+inflate the dispatcher's tail latency and push the audit row past the
+operator's alert window.
+
+50 ms is the chosen value:
+
+* Long enough for any legitimate cooperative cleanup — a DB connection
+  rollback, an in-process file close, a span flush — to finish, even on
+  a loaded CI runner.
+* Short enough that a slow cleanup stalls the audit emission by no
+  more than 50 ms, well inside the operator's tolerance for a chain
+  that has ALREADY exceeded its primary deadline.
+
+When this secondary deadline expires, the helper sets
+``cleanup_timed_out=True`` on the audit row, force-cancels the task one
+more time (best-effort signal), and proceeds to emit the audit row and
+apply the fail-closed policy. The task is then left running until
+garbage collection; that's an accepted leak because the audit row
+records the leak attribution and the dispatch chain itself is
+unblocked. The leak is a tradeoff against the alternative (blocking
+the dispatcher indefinitely), which is strictly worse.
+
+Threat-model caveat: the secondary deadline defends against
+slow-but-cooperative cleanup. It does NOT defend against a subscriber
+that TRAPS :class:`asyncio.CancelledError` and never lets it propagate
+out of its coroutine — in that adversarial case the PRIMARY chain
+timeout itself is defeated (``await pending`` in the kind handler
+never returns because the subscriber's task is never done). The full
+trap DoS needs a primary-handler refactor to an :func:`asyncio.wait`
+-based dispatch; that lands as a follow-up to Task 9. The S-001
+hardening shipped here covers the slow-cleanup arm of the threat
+surface; the full trap DoS arm is tracked separately.
+"""
+
+
+_CHAIN_TIMEOUT_AUDIT_FIELDS: Final[frozenset[str]] = frozenset(
+    {"hookpoint", "kind", "deadline_seconds", "cleanup_timed_out"}
+)
+"""Canonical key set for the ``fields`` mapping on every
+:data:`HOOKS_CHAIN_TIMEOUT` audit row.
+
+PR-B's :class:`alfred.audit.log.AuditWriter`-backed sink keys off this
+schema for row projection; an unannounced addition / removal here breaks
+the projector. The set is asserted by
+``tests/unit/hooks/test_fault_semantics.py::test_chain_timeout_audit_row_fields_schema``
+so a drift surfaces as a failing test the author MUST acknowledge.
+
+Schema:
+
+* ``hookpoint`` — dotted hookpoint identifier (str)
+* ``kind`` — lifecycle stage (one of ``"pre"`` / ``"post"`` / ``"error"``
+  / ``"cancel"``)
+* ``deadline_seconds`` — the primary chain deadline that fired (float)
+* ``cleanup_timed_out`` — ``True`` when the SECONDARY (cleanup) deadline
+  also expired, indicating an adversarial subscriber trapped
+  :class:`asyncio.CancelledError` and the dispatcher abandoned the
+  task. ``False`` for a cooperative subscriber whose ``finally`` ran
+  inside the cleanup budget. (S-001 hardening.)
+"""
+
+
+def _spawn_subscriber[T](
+    sub: Subscriber,
+    chain_ctx: HookContext[T],
+) -> asyncio.Task[HookContext[T] | None]:
+    """Wrap ``sub.hook_fn(chain_ctx)`` in a fresh :class:`asyncio.Task`.
+
+    Centralises the one place in this module where the structural
+    return-type widening between :data:`alfred.hooks.registry.HookFn`
+    (``Callable[..., Awaitable[HookContext[Any] | None]]``) and
+    :func:`asyncio.create_task`'s parameter shape
+    (``Coroutine[Any, Any, _T]``) is bridged. The
+    :meth:`HookRegistry.register` validator rejects any non-coroutine
+    function at registration time via
+    :func:`inspect.iscoroutinefunction` — so at dispatch time
+    ``sub.hook_fn(...)`` is GUARANTEED to be a real coroutine, and
+    the :func:`typing.cast` here is a static-checker hint rather than
+    a runtime conversion.
+
+    Living in one helper means a future widening of :data:`HookFn`
+    (e.g. PR-B's value-returning-action carrier) updates the type
+    contract in ONE call site instead of four.
+    """
+    coro = cast(
+        Coroutine[Any, Any, HookContext[T] | None],
+        sub.hook_fn(chain_ctx),
+    )
+    return asyncio.create_task(coro)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -117,28 +249,35 @@ async def invoke[T](
     called with, even if the caller-passed ``ctx`` claims a different
     stage. Then routes to one of four private handlers by ``kind``.
 
-    Task 8 ships the happy-path dispatch:
+    Tasks 8 + 9 ship the happy-path dispatch and the chain-timeout
+    fault arm:
 
     * ``pre`` — walk the chain, allow each subscriber to mutate
       ``ctx.input`` via :meth:`HookContext.with_input`. A
       :class:`HookRefusal` raised by any subscriber propagates
       immediately; downstream subscribers do not run; the caller never
-      sees a rewritten ctx (the action body never runs).
+      sees a rewritten ctx (the action body never runs). A chain
+      timeout emits :data:`HOOKS_CHAIN_TIMEOUT` and either returns
+      last-good ctx or raises :class:`HookError`.
     * ``post`` — walk the chain, fold every subscriber's returned ctx
       into the next subscriber's input. The final ctx is the
-      end-of-chain fold.
+      end-of-chain fold. Same timeout treatment as ``pre``.
     * ``error`` — walk the chain with ``exc`` exposed under
       ``ctx.metadata[ERROR_EXC_METADATA_KEY]``. The FIRST subscriber
       that returns a :class:`HookContext` wins
       (swallow-and-substitute); subsequent subscribers do not run. If
       every subscriber returns ``None``, the original ``exc``
-      re-raises.
+      re-raises. A chain timeout SUPPRESSES the would-be re-raise —
+      the audit row is the loud-failure escape, and last-good ctx is
+      returned (or :class:`HookError` raised on ``fail_closed``).
     * ``cancel`` — walk the chain so each subscriber can run cleanup;
       return values are IGNORED; the original ``exc`` (whatever
       :class:`BaseException` the caller passed; conventionally
       :class:`asyncio.CancelledError`) re-raises after the chain
-      finishes. A subscriber exception is swallowed (best-effort
-      cleanup) and the next subscriber still runs.
+      finishes. A chain timeout SUPPRESSES the propagate-cancellation
+      semantic for the timeout arm specifically — the audit row makes
+      the abandonment loud, and last-good ctx is returned (or
+      :class:`HookError` raised on ``fail_closed``).
 
     Args:
         name: The dotted hookpoint identifier (e.g.
@@ -157,9 +296,11 @@ async def invoke[T](
             to refuse via :class:`HookRefusal`. Threaded through for
             Task-11's authorisation; this slice ignores the value
             (every :class:`HookRefusal` propagates).
-        fail_closed: Whether to fail closed on a timeout / unexpected
-            subscriber error. Consumed by Tasks 9 + 10; this slice
-            ignores the value.
+        fail_closed: Whether to fail closed on a chain timeout / Task
+            10's unexpected subscriber error. On a chain timeout:
+            ``True`` raises :class:`HookError` AFTER the audit row;
+            ``False`` returns last-good ctx with the audit row as the
+            loud-failure escape.
         exc: The upstream exception for ``error`` / ``cancel`` kinds.
             Typed :class:`BaseException` because
             :class:`asyncio.CancelledError` is a ``BaseException``
@@ -170,21 +311,31 @@ async def invoke[T](
 
     Returns:
         For ``pre`` — the final mutated ctx (or the input ctx if no
-        subscriber mutated).
-        For ``post`` — the final folded ctx.
+        subscriber mutated, or last-good on timeout).
+        For ``post`` — the final folded ctx (or last-good on timeout).
         For ``error`` — the substitute ctx returned by the first
-        non-``None`` subscriber. If all subscribers returned ``None``,
+        non-``None`` subscriber, OR the last-good ctx if the chain
+        timed out before any subscriber suppressed. If all subscribers
+        returned ``None`` AND the chain did not time out,
         :func:`invoke` re-raises ``exc`` instead of returning.
-        For ``cancel`` — never returns; ``exc`` always re-raises.
+        For ``cancel`` — last-good ctx if the chain timed out;
+        otherwise never returns (``exc`` always re-raises).
 
     Raises:
+        HookError: ``fail_closed=True`` and the chain exceeded the
+            registry's ``chain_deadline_seconds``. The audit row is
+            emitted FIRST so the fault attribution lands even when
+            the caller does not catch the exception.
         HookRefusal: A ``pre`` subscriber refused the action. The
             error carries the refuser's ``hook_id`` / ``action_id`` /
             ``reason`` / ``correlation_id`` for the audit row Task 11
             will emit; this slice simply propagates.
         BaseException: The ``exc`` passed in, re-raised for the
-            ``error``-all-none path and the ``cancel`` path. Identity
-            is preserved so the upstream traceback is intact.
+            ``error``-all-none path and the ``cancel`` path WHEN the
+            chain completed inside its deadline. Identity is preserved
+            so the upstream traceback is intact. On timeout the
+            re-raise is suppressed in favour of the audit row +
+            last-good ctx return.
     """
     # Retarget the carrier — invoke is authoritative for the stage.
     # Even with zero subscribers, the returned ctx reflects the
@@ -227,57 +378,171 @@ async def invoke[T](
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Shared linear-walk core (used by _run_pre + _run_post)
+# Shared timeout-handling helper
 # ──────────────────────────────────────────────────────────────────────
 
 
-async def _run_chain[T](
-    subscribers: tuple[Subscriber, ...],
-    ctx: HookContext[T],
+async def _handle_chain_timeout[T](
     *,
+    pending: asyncio.Task[HookContext[T] | None] | None,
+    chain_ctx: HookContext[T],
+    hookpoint: str,
+    kind: HookKind,
     deadline_seconds: float,
+    fail_closed: bool,
 ) -> HookContext[T]:
-    """Walk a linear chain folding each subscriber's result.
+    """Centralised three-step timeout fault sequence.
 
-    The shared core for ``pre`` and ``post`` — both share the
-    "walk-and-fold" shape:
+    Called by each kind-handler's ``except TimeoutError`` arm. The
+    sequence — order matters and is load-bearing:
 
-    * Subscriber returns a :class:`HookContext` → that becomes the new
-      chain ctx; the next subscriber sees the rewritten payload.
-    * Subscriber returns ``None`` → the current chain ctx flows
-      forward unchanged.
-
-    A :class:`HookRefusal` raised by any subscriber propagates
-    out — the caller sees the raise. This is the only short-circuit
-    semantic this helper honours; the rest of the per-kind disposition
-    lives in :func:`_run_pre` / :func:`_run_post` / :func:`_run_error`
-    / :func:`_run_cancel`.
+    1. **Await the cancelled subscriber to completion** (core-006),
+       BOUNDED by a SECONDARY deadline (S-001 hardening).
+       The ``asyncio.timeout`` scope has already exited by the time
+       this helper runs, so the in-flight subscriber task has been
+       cancelled — but its ``finally`` block may not yet have run.
+       Awaiting the task here gives the subscriber's cleanup
+       (database commit-or-rollback, lock release, span close) a
+       chance to finish before the dispatcher returns or raises. The
+       wait is bounded by :data:`_CLEANUP_DEADLINE_SECONDS` so a slow
+       cleanup cannot stall the audit emission past the operator's
+       tolerance window. When the secondary deadline expires we set
+       ``cleanup_timed_out=True`` on the audit row, force-cancel the
+       task one more time as a best-effort signal, and abandon it
+       (the task is left running until GC; the audit row records the
+       leak). The ``contextlib.suppress(BaseException)`` around the
+       drain is cleanup-only — :class:`asyncio.CancelledError` is the
+       conventional value raised by ``pending.result()`` on a
+       cancelled task, but defensively we absorb any
+       :class:`BaseException` so a subscriber's botched ``finally``
+       cannot prevent the audit row from landing.
+    2. **Emit the audit row** through the registry-owned sink. CLAUDE.md
+       hard rule #7 — the row IS the loud-failure escape; the chain
+       was abandoned, the operator must see attribution. The
+       ``cleanup_timed_out`` field surfaces the adversarial-trap signal
+       so the operator can distinguish a cooperative-but-slow chain
+       from a hostile subscriber.
+    3. **Apply the ``fail_closed`` policy.** ``True`` raises
+       :class:`HookError`; ``False`` returns the last-good ctx (the
+       chain's snapshot before the timeout fired). The audit row is
+       emitted BEFORE the conditional raise so even an uncaught
+       :class:`HookError` leaves an audit trail.
 
     Args:
-        subscribers: Ordered tuple from
-            :meth:`HookRegistry.subscribers_for`. Iterated synchronously
-            before the first ``await`` so a concurrent register-after-
-            snapshot is safe.
-        ctx: The carrier to fold subscribers' results into.
-        deadline_seconds: Per-CHAIN deadline. Accepted now and IGNORED
-            this slice; Task 9 wraps the body in
-            ``asyncio.timeout(deadline_seconds)``. Keeping the parameter
-            on the signature now means Task 9 lands as a single-line
-            wrap-the-body edit, not a signature change every handler
-            has to re-thread.
+        pending: The :class:`asyncio.Task` wrapping the subscriber
+            call that was in-flight when the timeout fired. ``None``
+            when the timeout fires between iterations (subscriber just
+            returned, next ``create_task`` not yet reached) — that
+            window is small but legal; we skip the await-to-completion
+            and proceed straight to the audit emission.
+        chain_ctx: The last-good ctx — the chain's snapshot at the
+            most recent fold point before the timeout fired. Returned
+            to the caller in the ``fail_closed=False`` arm.
+        hookpoint: The dotted hookpoint identifier — surfaces on the
+            audit row as the ``hookpoint`` field so PR-B's
+            :class:`EpisodicAuditSink` can attribute the timeout to
+            the right action.
+        kind: The lifecycle stage that timed out — surfaces on the
+            audit row as the ``kind`` field so the operator can see
+            which arm of the action's lifecycle was abandoned.
+        deadline_seconds: The deadline value that was applied —
+            surfaces on the audit row so a future tuning is traceable.
+        fail_closed: The policy bit. ``True`` raises
+            :class:`HookError` after the audit; ``False`` returns
+            ``chain_ctx``.
 
     Returns:
-        The chain ctx after every subscriber has run.
-    """
-    # deadline_seconds is wired through for Task 9 but unused this slice.
-    # Avoid an unused-arg lint via a side-effect-free reference.
-    del deadline_seconds
+        ``chain_ctx`` (the last-good carrier) when ``fail_closed`` is
+        ``False``. Never returns when ``fail_closed`` is ``True``.
 
-    for sub in subscribers:
-        result = await sub.hook_fn(ctx)
-        if result is not None:
-            ctx = result
-    return ctx
+    Raises:
+        HookError: When ``fail_closed`` is ``True``. Message includes
+            hookpoint, kind, deadline, ``cleanup_timed_out``, and
+            correlation id so the operator can trace the audit row to
+            the raise site AND tell the cooperative-but-slow case apart
+            from the adversarial-trap case. NOT translated via
+            :func:`alfred.i18n.t` — no ``hooks.chain_timeout`` catalog
+            key exists this slice and inline English with audit
+            attribution preserves the loud-failure discipline (CLAUDE.md
+            hard rule #7).
+    """
+    # Step 1 (core-006 + S-001): await the cancelled subscriber to
+    # completion, bounded by the secondary cleanup deadline so a
+    # subscriber whose ``finally`` outlasts :data:`_CLEANUP_DEADLINE_SECONDS`
+    # cannot stall the audit emission.
+    #
+    # Implementation uses :func:`asyncio.wait` with an explicit
+    # ``timeout=`` rather than wrapping ``await pending`` in an
+    # ``asyncio.timeout()`` context. The wait-based bound is robust
+    # against a slow cleanup because :func:`asyncio.wait` runs its own
+    # timer and reports completion-or-timeout WITHOUT cancelling the
+    # awaited task — that lets the cleanup-suppression semantic stay
+    # explicit (we observe done-state, we drain via
+    # ``pending.result()``) without the
+    # ``contextlib.suppress(BaseException)`` swallowing the secondary
+    # timeout's :class:`asyncio.CancelledError` and silently disarming
+    # the bound.
+    #
+    # After the wait we drain any exception ``pending`` accumulated
+    # via ``pending.result()`` so an unretrieved-exception warning
+    # does not surface on a botched-finally subscriber.
+    # ``contextlib.suppress`` is cleanup-only — :class:`asyncio.CancelledError`
+    # is the conventional value but defensively we absorb any
+    # :class:`BaseException` so the audit emission below still runs.
+    #
+    # Threat-model caveat: a subscriber that truly TRAPS
+    # :class:`asyncio.CancelledError` and never lets it propagate
+    # defeats the PRIMARY chain timeout entirely (``await pending``
+    # in the kind handler never returns because pending is never
+    # done). The secondary deadline here is a real defense for
+    # slow-but-cooperative cleanup; it does NOT defend against the
+    # full cancellation-trap DoS — that needs a primary-handler
+    # refactor to an asyncio.wait-based dispatch and is tracked
+    # separately (see Task 9 follow-up notes).
+    cleanup_timed_out = False
+    if pending is not None and not pending.done():
+        done, _still_pending = await asyncio.wait(
+            {pending},
+            timeout=_CLEANUP_DEADLINE_SECONDS,
+        )
+        if pending in done:
+            # Cooperative subscriber: finally ran inside the cleanup budget.
+            # Retrieve the result/exception so asyncio does not log it
+            # as unretrieved.
+            with contextlib.suppress(BaseException):
+                pending.result()
+        else:
+            # Slow cleanup outlasted the secondary deadline. Record
+            # the leak on the audit row, force-cancel as a best-effort
+            # signal, and abandon the task (left running until GC —
+            # the audit row records attribution).
+            cleanup_timed_out = True
+            pending.cancel()
+
+    # Step 2: emit audit row through the registry-owned sink. The
+    # ``cleanup_timed_out`` field is the S-001 signal that distinguishes
+    # a cooperative-but-slow chain from a hostile subscriber. Schema
+    # canonicalised by :data:`_CHAIN_TIMEOUT_AUDIT_FIELDS`.
+    await get_registry().sink.emit(
+        event=HOOKS_CHAIN_TIMEOUT,
+        correlation_id=chain_ctx.correlation_id,
+        fields={
+            "hookpoint": hookpoint,
+            "kind": kind,
+            "deadline_seconds": deadline_seconds,
+            "cleanup_timed_out": cleanup_timed_out,
+        },
+    )
+
+    # Step 3: apply fail_closed policy.
+    if fail_closed:
+        raise HookError(
+            f"hooks.chain_timeout: chain for hookpoint={hookpoint!r} "
+            f"kind={kind!r} exceeded deadline={deadline_seconds}s "
+            f"(cleanup_timed_out={cleanup_timed_out}); "
+            f"see audit log (correlation_id={chain_ctx.correlation_id!r})."
+        )
+    return chain_ctx
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -295,12 +560,18 @@ async def _run_pre[T](
 ) -> HookContext[T]:
     """Dispatch the ``pre`` chain.
 
-    Linear walk via :func:`_run_chain`. A subscriber-raised
-    :class:`HookRefusal` propagates immediately — subsequent
-    subscribers do not run, and the caller's caught exception means
-    no mutated ctx is observable to the action body. Task 11 will
-    layer ``refusable_tiers`` enforcement onto the raise arm; this
-    slice lets every refusal propagate.
+    Linear walk-and-fold under one ``asyncio.timeout``. A
+    subscriber-raised :class:`HookRefusal` propagates immediately —
+    subsequent subscribers do not run, and the caller's caught
+    exception means no mutated ctx is observable to the action body.
+    Task 11 will layer ``refusable_tiers`` enforcement onto the raise
+    arm; this slice lets every refusal propagate.
+
+    On timeout: emits :data:`HOOKS_CHAIN_TIMEOUT` and either returns
+    the last-good ctx (``fail_closed=False``) or raises
+    :class:`HookError` (``fail_closed=True``). The cancelled
+    subscriber's ``finally`` runs to completion via
+    :func:`_handle_chain_timeout` before the disposition.
 
     Args:
         name: The hookpoint identifier the caller passed to
@@ -308,18 +579,38 @@ async def _run_pre[T](
         ctx: The retargeted carrier.
         subscribable_tiers: Threaded through for Task 11. Ignored.
         refusable_tiers: Threaded through for Task 11. Ignored.
-        fail_closed: Threaded through for Task 9. Ignored.
+        fail_closed: Task 9's timeout policy bit. Consumed in the
+            ``except TimeoutError`` arm.
 
     Returns:
-        The chain ctx folded across every ``pre`` subscriber.
+        The chain ctx folded across every ``pre`` subscriber, OR the
+        last-good ctx if the chain timed out and ``fail_closed`` is
+        ``False``.
     """
-    del subscribable_tiers, refusable_tiers, fail_closed
+    del subscribable_tiers, refusable_tiers
     subscribers = get_registry().subscribers_for(name, "pre")
-    return await _run_chain(
-        subscribers,
-        ctx,
-        deadline_seconds=HOOK_CHAIN_DEADLINE_SECONDS,
-    )
+    deadline_seconds = get_registry().chain_deadline_seconds
+
+    chain_ctx = ctx
+    pending: asyncio.Task[HookContext[T] | None] | None = None
+    try:
+        async with asyncio.timeout(deadline_seconds):
+            for sub in subscribers:
+                pending = _spawn_subscriber(sub, chain_ctx)
+                result = await pending
+                pending = None
+                if result is not None:
+                    chain_ctx = result
+        return chain_ctx
+    except TimeoutError:
+        return await _handle_chain_timeout(
+            pending=pending,
+            chain_ctx=chain_ctx,
+            hookpoint=name,
+            kind="pre",
+            deadline_seconds=deadline_seconds,
+            fail_closed=fail_closed,
+        )
 
 
 async def _run_post[T](
@@ -331,27 +622,49 @@ async def _run_post[T](
 ) -> HookContext[T]:
     """Dispatch the ``post`` chain.
 
-    Linear walk via :func:`_run_chain`. ``post`` has no short-circuit
-    semantic — every subscriber runs (until Task 10 introduces the
-    unexpected-exception fault policy). The final ctx is the
-    end-of-chain fold.
+    Linear walk-and-fold under one ``asyncio.timeout``. ``post`` has
+    no short-circuit semantic — every subscriber runs (until Task 10
+    introduces the unexpected-exception fault policy). The final ctx
+    is the end-of-chain fold.
+
+    On timeout: same disposition as ``_run_pre`` — audit row + either
+    last-good or :class:`HookError`.
 
     Args:
         name: The hookpoint identifier the caller passed.
         ctx: The retargeted carrier.
         subscribable_tiers: Threaded through for Task 11. Ignored.
-        fail_closed: Threaded through for Task 9. Ignored.
+        fail_closed: Task 9's timeout policy bit.
 
     Returns:
-        The chain ctx folded across every ``post`` subscriber.
+        The chain ctx folded across every ``post`` subscriber, OR the
+        last-good ctx if the chain timed out and ``fail_closed`` is
+        ``False``.
     """
-    del subscribable_tiers, fail_closed
+    del subscribable_tiers
     subscribers = get_registry().subscribers_for(name, "post")
-    return await _run_chain(
-        subscribers,
-        ctx,
-        deadline_seconds=HOOK_CHAIN_DEADLINE_SECONDS,
-    )
+    deadline_seconds = get_registry().chain_deadline_seconds
+
+    chain_ctx = ctx
+    pending: asyncio.Task[HookContext[T] | None] | None = None
+    try:
+        async with asyncio.timeout(deadline_seconds):
+            for sub in subscribers:
+                pending = _spawn_subscriber(sub, chain_ctx)
+                result = await pending
+                pending = None
+                if result is not None:
+                    chain_ctx = result
+        return chain_ctx
+    except TimeoutError:
+        return await _handle_chain_timeout(
+            pending=pending,
+            chain_ctx=chain_ctx,
+            hookpoint=name,
+            kind="post",
+            deadline_seconds=deadline_seconds,
+            fail_closed=fail_closed,
+        )
 
 
 async def _run_error[T](
@@ -371,6 +684,14 @@ async def _run_error[T](
     rule #7). The no-subscribers case also re-raises ``exc`` — same
     rationale.
 
+    On chain timeout: the would-be re-raise is SUPPRESSED — the
+    audit row IS the loud-failure escape, and last-good ctx is
+    returned (or :class:`HookError` raised on ``fail_closed``). This
+    is the timeout-arm-overrides-error-re-raise rule: when the chain
+    didn't get to decide whether to suppress, the dispatcher takes the
+    safer "record + return" path rather than re-raising an exception
+    the chain might have meant to suppress.
+
     Task 11 will layer tier policy: only ``system``-tier subscribers'
     suppression is honoured; ``user-plugin``-tier returns are denied
     with a :data:`alfred.hooks.audit_sink.HOOKS_UNAUTHORIZED_REFUSAL`
@@ -384,40 +705,63 @@ async def _run_error[T](
             upstream exception.
         exc: The upstream exception that triggered the ``error``
             stage. Re-raised at the end of the handler if no
-            subscriber suppressed.
+            subscriber suppressed AND the chain did not time out.
         subscribable_tiers: Threaded through for Task 11. Ignored.
-        fail_closed: Threaded through for Task 9. Ignored.
+        fail_closed: Task 9's timeout policy bit.
 
     Returns:
         The substitute ctx returned by the first non-``None``
-        subscriber.
+        subscriber, OR the last-good ctx on timeout when
+        ``fail_closed`` is ``False``.
 
     Raises:
-        BaseException: The ``exc`` parameter, re-raised. Identity
-            preserved (the same instance) so the upstream traceback
-            stays intact.
+        HookError: ``fail_closed`` and the chain timed out.
+        BaseException: The ``exc`` parameter, re-raised on the
+            no-suppression-completed path. Identity preserved (the
+            same instance) so the upstream traceback stays intact.
     """
-    del subscribable_tiers, fail_closed
+    del subscribable_tiers
 
     subscribers = get_registry().subscribers_for(name, "error")
+    deadline_seconds = get_registry().chain_deadline_seconds
 
     # Stash exc on metadata so subscribers can introspect it without
     # widening the canonical async-fn signature. The merge builds a
     # fresh dict so the caller's ctx.metadata is untouched.
     chain_ctx = ctx.with_metadata(**{ERROR_EXC_METADATA_KEY: exc})
 
-    for sub in subscribers:
-        result = await sub.hook_fn(chain_ctx)
-        if result is not None:
-            # First non-None wins — short-circuit the rest of the chain.
-            return result
+    pending: asyncio.Task[HookContext[T] | None] | None = None
+    suppressed: HookContext[T] | None = None
+    try:
+        async with asyncio.timeout(deadline_seconds):
+            for sub in subscribers:
+                pending = _spawn_subscriber(sub, chain_ctx)
+                result = await pending
+                pending = None
+                if result is not None:
+                    # First non-None wins — short-circuit the rest of the
+                    # chain. Capture the substitute and break out of the
+                    # timeout-wrapped loop so the post-loop disposition
+                    # logic can return it cleanly.
+                    suppressed = result
+                    break
+    except TimeoutError:
+        return await _handle_chain_timeout(
+            pending=pending,
+            chain_ctx=chain_ctx,
+            hookpoint=name,
+            kind="error",
+            deadline_seconds=deadline_seconds,
+            fail_closed=fail_closed,
+        )
 
-    # No subscriber suppressed — re-raise the upstream exception. This
-    # is the load-bearing "no silent failures" guarantee for the error
-    # stage; mypy narrowing for the ``exc is None`` branch is via the
-    # explicit raise path below. ``exc`` is optionally None on the
-    # signature for symmetry with the other kinds, but a caller that
-    # passes kind="error" without an exc is a programming error.
+    if suppressed is not None:
+        return suppressed
+
+    # No subscriber suppressed AND the chain did not time out — re-raise
+    # the upstream exception. This is the load-bearing "no silent
+    # failures" guarantee for the error stage; mypy narrowing for the
+    # ``exc is None`` branch is via the explicit raise path below.
     if exc is None:
         # Defensive: a missing ``exc`` on an ``error`` invoke is a
         # caller bug. Raising RuntimeError instead of failing silently
@@ -443,7 +787,10 @@ async def _run_cancel[T](
     values are IGNORED — ``cancel`` is cleanup-only, no
     mutation/substitution semantic. The original ``exc`` (conventionally
     :class:`asyncio.CancelledError`, which is a :class:`BaseException`
-    in Python 3.8+) ALWAYS re-raises after the chain finishes.
+    in Python 3.8+) ALWAYS re-raises after the chain finishes —
+    EXCEPT on chain timeout, where the audit row replaces the re-raise
+    (the audit is the loud-failure escape and the chain didn't get to
+    finish cleanup anyway).
 
     A subscriber that itself raises is swallowed-and-skipped so
     best-effort cleanup continues — Task 10 will layer an audit row
@@ -460,35 +807,63 @@ async def _run_cancel[T](
             ``ctx.metadata[ERROR_EXC_METADATA_KEY] = exc`` so cleanup
             subscribers can introspect the cancellation cause.
         exc: The cancellation sentinel. Conventionally a
-            :class:`asyncio.CancelledError`. Re-raised at the end.
+            :class:`asyncio.CancelledError`. Re-raised at the end
+            UNLESS the chain timed out.
         subscribable_tiers: Threaded through for Task 11. Ignored.
-        fail_closed: Threaded through for Task 9. Ignored.
+        fail_closed: Task 9's timeout policy bit.
 
     Returns:
-        Never returns — the declared return type satisfies the
-        :func:`invoke` signature, but every path ends in a raise.
+        Last-good ctx on chain timeout when ``fail_closed`` is
+        ``False``. Otherwise never returns — every path ends in a
+        raise (either the re-raised ``exc`` or :class:`HookError`).
 
     Raises:
-        BaseException: The ``exc`` parameter, re-raised. Identity
-            preserved.
+        HookError: ``fail_closed`` and the chain timed out.
+        BaseException: The ``exc`` parameter, re-raised when the chain
+            completed inside its deadline. Identity preserved.
     """
-    del subscribable_tiers, fail_closed
+    del subscribable_tiers
 
     subscribers = get_registry().subscribers_for(name, "cancel")
+    deadline_seconds = get_registry().chain_deadline_seconds
     chain_ctx = ctx.with_metadata(**{ERROR_EXC_METADATA_KEY: exc})
 
-    for sub in subscribers:
-        try:  # noqa: SIM105 -- explicit try/except keeps the inline comment block visible to future readers; `contextlib.suppress(BaseException)` would hide the security-review-load-bearing rationale.
-            await sub.hook_fn(chain_ctx)
-        except BaseException:  # noqa: S110 -- cancel cleanup is best-effort; Task 10 adds audit-row emission to this arm so the swallow is not silent. Re-raising would let a cleanup bug suppress the original cancellation, which is the user-visible regression we are explicitly preventing.
-            # Best-effort cleanup — swallow so subsequent subscribers
-            # can still run. CLAUDE.md hard rule #7's loud-failure
-            # discipline is satisfied by Task 10's audit row on the
-            # same arm; this slice ships the propagate-cancellation
-            # contract pinned by the test suite. Re-raising here would
-            # let a cleanup bug suppress the original cancellation —
-            # the user-visible regression we are explicitly preventing.
-            pass
+    pending: asyncio.Task[HookContext[T] | None] | None = None
+    try:
+        async with asyncio.timeout(deadline_seconds):
+            for sub in subscribers:
+                pending = _spawn_subscriber(sub, chain_ctx)
+                try:
+                    await pending
+                except asyncio.CancelledError:
+                    # Re-raise so the surrounding ``asyncio.timeout``
+                    # scope can convert it into ``TimeoutError`` —
+                    # ``asyncio.timeout`` signals deadline expiry by
+                    # cancelling the current task and EXPECTS the
+                    # cancellation to reach the scope boundary. If we
+                    # swallowed it here (the broad ``BaseException``
+                    # arm below) the timeout would silently disarm and
+                    # the audit row would never land (CLAUDE.md hard
+                    # rule #7).
+                    raise
+                except BaseException:  # noqa: S110 -- cancel cleanup is best-effort; Task 10 adds audit-row emission to this arm so the swallow is not silent. Re-raising a subscriber-raised exception here would let a cleanup bug suppress the original cancellation, which is the user-visible regression we are explicitly preventing.
+                    # Best-effort cleanup — swallow so subsequent
+                    # subscribers can still run. The pending task has
+                    # already completed (we awaited it) so we clear it
+                    # before the next iteration to avoid a stale handle
+                    # leaking into the timeout-handler if the NEXT
+                    # iteration's create_task races the deadline.
+                    pass
+                pending = None
+    except TimeoutError:
+        return await _handle_chain_timeout(
+            pending=pending,
+            chain_ctx=chain_ctx,
+            hookpoint=name,
+            kind="cancel",
+            deadline_seconds=deadline_seconds,
+            fail_closed=fail_closed,
+        )
 
     # Defensive — cancel without an exc is a caller bug; refuse loudly.
     if exc is None:

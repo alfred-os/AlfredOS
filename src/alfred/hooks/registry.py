@@ -280,6 +280,7 @@ class HookRegistry:
 
     gate: CapabilityGate
     sink: AuditSink
+    chain_deadline_seconds: float
     _subscribers: dict[tuple[str, HookKind], list[Subscriber]]
 
     def __init__(
@@ -287,6 +288,7 @@ class HookRegistry:
         *,
         gate: CapabilityGate,
         sink: AuditSink | None = None,
+        chain_deadline_seconds: float = HOOK_CHAIN_DEADLINE_SECONDS,
     ) -> None:
         """Construct a :class:`HookRegistry`.
 
@@ -297,6 +299,18 @@ class HookRegistry:
                 rows through. Keyword-only; defaults to a fresh
                 :class:`StructlogAuditSink` bound to
                 ``structlog.get_logger("alfred.hooks")``.
+            chain_deadline_seconds: Per-CHAIN deadline (Task 9). The
+                dispatcher reads ``get_registry().chain_deadline_seconds``
+                on every chain entry and wraps the walk in
+                ``asyncio.timeout(...)`` against this value. Defaults to
+                the module-level :data:`HOOK_CHAIN_DEADLINE_SECONDS`
+                (0.25 seconds — the production default from spec §5).
+                Keyword-only. INTENDED ONLY as a test-and-bootstrap seam:
+                CI flake-free fault tests inject ``~0.01s`` so a
+                never-firing ``asyncio.Event`` trips deterministically;
+                PR-B's adversarial corpus tunes per-test; production
+                code does NOT swap this at runtime. Slice 3's
+                arch-002 reload subsystem owns the hot-reload semantics.
 
         The sink default is lazily constructed inside ``__init__``
         rather than at the parameter default site because
@@ -311,6 +325,7 @@ class HookRegistry:
             if sink is not None
             else StructlogAuditSink(logger=structlog.get_logger("alfred.hooks"))
         )
+        self.chain_deadline_seconds = chain_deadline_seconds
         self._subscribers = {}
 
     def register(
