@@ -16,6 +16,20 @@ from alfred.hooks import invoking
 from alfred.memory.models import Episode
 from alfred.providers.base import Role
 
+# The runtime vocabulary of the ``Role`` ``Literal``. PEP 586's
+# ``typing.get_args(Role)`` would compute this dynamically, but
+# materializing the tuple at import time keeps the membership check in
+# :meth:`EpisodicMemory._validate` a constant-time set lookup and lets
+# the drift-guard in
+# :func:`tests.unit.memory.test_episodic_hooks_wiring.TestValidateGuard.
+# test_validate_rejects_unknown_role` lock the exact set without
+# depending on ``typing`` internals. If a new ``Role`` member is added
+# to :mod:`alfred.providers.base`, the test fails the moment
+# ``role="..."`` is no longer rejected here — surfacing the drift
+# before a writer can persist a row whose role the closed-domain DB
+# constraint would later reject at commit time.
+_VALID_ROLES: frozenset[str] = frozenset({"system", "user", "assistant"})
+
 
 @dataclass(frozen=True, slots=True)
 class EpisodicRecordInput:
@@ -174,19 +188,53 @@ class EpisodicMemory:
                 await self._persist(flow.input)
 
     def _validate(self, inp: EpisodicRecordInput) -> None:
-        """Synchronous structural guard run between ``before_validate``
-        and ``before_db_write``.
+        """Synchronous structural guard run AFTER the
+        ``before_validate`` chain and BEFORE the ``before_db_write``
+        security stage.
 
-        No-op stub this slice. PR-B Task 6 grows the body to enforce
-        the structural invariants the writer relies on (BCP-47 language
-        well-formedness, trust-tier vocabulary, non-empty user_id /
-        content). Sync on purpose: the guard is pure CPU and a sync
-        signature keeps the failure mode (raise → :func:`Flow.body` 's
-        ``except Exception`` arm → ``write_failed`` error chain) easy
-        to audit. The hookpoint wiring around it is verifiable today
-        with this stub so Task 6 ships against a known-good seam.
+        Minimal by design — the anchor that makes the
+        ``before_validate`` hookpoint name meaningful. Subscribers on
+        ``before_validate`` may rewrite ``content`` / ``user_id`` /
+        any other field BEFORE this runs; ``_validate``'s rejection
+        short-circuits the chain before the DLP / redactor seam fires
+        and before :meth:`_persist` writes the row.
+
+        Sync on purpose: the guard is pure CPU. A sync signature
+        keeps the failure mode (raise → :class:`Flow.body`'s
+        exception arm → ``write_failed`` error chain) easy to audit
+        and keeps the call site one line in :meth:`record`.
+
+        Pure function of its input: no I/O, no DB access, no
+        registry lookup. Raises loudly at the boundary
+        (CLAUDE.md hard rule #7 — no silent failures in write paths).
+
+        Two guards this slice — kept minimal so the "what does the
+        validate stage check?" answer fits in two lines. Growing
+        business rules (BCP-47 well-formedness, trust-tier vocabulary,
+        content-length caps) belongs to a later slice that adds the
+        corresponding test pins.
+
+        Args:
+            inp: the post-``before_validate``-chain carrier.
+
+        Raises:
+            ValueError: if ``user_id`` is empty (per-user partition
+                anchor; a row with no owner is a partition-leak
+                class defect — CLAUDE.md memory rule #2), or if
+                ``role`` is not a member of the ``Role`` Literal
+                vocabulary
+                (``"system"`` / ``"user"`` / ``"assistant"``).
         """
-        del inp  # Task 6 consumes; see docstring.
+        if not inp.user_id:
+            raise ValueError(
+                "EpisodicMemory.record rejected: user_id must not be empty "
+                "(per-user partition anchor)"
+            )
+        if inp.role not in _VALID_ROLES:
+            raise ValueError(
+                f"EpisodicMemory.record rejected: role must be one of "
+                f"{sorted(_VALID_ROLES)!r}, got {inp.role!r}"
+            )
 
     async def _persist(self, inp: EpisodicRecordInput) -> None:
         """Write one ``Episode`` row from a frozen input snapshot.

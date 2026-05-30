@@ -858,3 +858,178 @@ async def test_zero_subscriber_path_persists_one_row(
 
     assert session.add.call_count == 1
     session.flush.assert_awaited_once()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Task 6 — `_validate` guard semantics
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestValidateGuard:
+    """Task 6 — pin the minimal structural guard that makes the
+    ``before_validate`` hookpoint name meaningful.
+
+    ``_validate`` is the anchor between the ``before_validate`` pre
+    stage (open hookpoint; subscribers may mutate the payload) and the
+    ``before_db_write`` security stage. Without a real guard in this
+    slot, ``before_validate`` would be a hookpoint whose name lies
+    about its position in the lifecycle — there would be no validate
+    step to run "before".
+
+    The guard is minimal by design (Task 6 spec): non-empty
+    ``user_id`` and a ``role`` drawn from the ``Role`` Literal
+    vocabulary. Growing business rules here is out of scope; the
+    point of these tests is to pin the EXISTENCE of the guard, its
+    failure mode (loud :class:`ValueError`), and its position in the
+    chain (sees post-``before_validate`` mutation, short-circuits
+    ``before_db_write`` + ``_persist``).
+    """
+
+    # ------------------------------------------------------------------
+    # 1. Empty user_id is rejected loudly + does NOT persist
+    # ------------------------------------------------------------------
+
+    async def test_validate_rejects_empty_user_id(self) -> None:
+        """``_validate`` raises :class:`ValueError` when the input
+        carries an empty ``user_id``, and the body's write never runs.
+
+        The guard's failure mode is load-bearing: a silent acceptance
+        of an empty ``user_id`` would let a per-user-partitioned row
+        land under no owner — a partition-leak class defect
+        (CLAUDE.md memory rule #2). Loud at the boundary is the only
+        acceptable behaviour.
+        """
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+        kwargs = dict(_RECORD_KWARGS, user_id="")
+
+        with pytest.raises(ValueError, match="user_id"):
+            await mem.record(**kwargs)  # type: ignore[arg-type]
+
+        # The body never ran: no row added, no flush.
+        assert session.add.call_count == 0
+        assert session.flush.await_count == 0
+
+    # ------------------------------------------------------------------
+    # 2. Unknown role string is rejected
+    # ------------------------------------------------------------------
+
+    async def test_validate_rejects_unknown_role(self) -> None:
+        """``_validate`` raises :class:`ValueError` when ``role`` is
+        not one of the ``Role`` Literal members
+        (``system`` / ``user`` / ``assistant``).
+
+        Distinct from the DB-level ``ck_episodes_role`` constraint
+        which only fires on COMMIT (and only for ``user`` /
+        ``assistant``). Failing fast in Python lets the orchestrator's
+        budget guard and audit writer attribute the rejection to the
+        WRITER tier, not to a Postgres integrity error at session
+        commit time.
+        """
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+        kwargs = dict(_RECORD_KWARGS, role="not-a-role")
+
+        with pytest.raises(ValueError, match="role"):
+            await mem.record(**kwargs)  # type: ignore[arg-type]
+
+        assert session.add.call_count == 0
+        assert session.flush.await_count == 0
+
+    # ------------------------------------------------------------------
+    # 3. Validate rejection short-circuits before_db_write + _persist
+    # ------------------------------------------------------------------
+
+    async def test_validate_rejection_short_circuits_before_db_write(
+        self,
+        fresh_registry_allow_system: HookRegistry,
+    ) -> None:
+        """A ``_validate`` rejection aborts the action BEFORE the
+        ``before_db_write`` security stage fires.
+
+        This is the order anchor the Task-6 plan names: the
+        ``before_validate`` chain runs → ``_validate`` runs → on
+        rejection, the chain stops. The ``before_db_write``
+        subscribers never see the bad row, and ``_persist`` never
+        writes it. If ``_validate`` ran AFTER ``before_db_write``,
+        a malformed row would already have been through DLP / redactor
+        seams before the structural check rejected it — wasted
+        security-stage work and a worse audit story.
+        """
+        before_db_write_calls: list[bool] = []
+
+        async def before_db_write_spy(
+            _ctx: HookContext[EpisodicRecordInput],
+        ) -> HookContext[EpisodicRecordInput] | None:
+            before_db_write_calls.append(True)
+            return None
+
+        fresh_registry_allow_system.register(
+            hook_fn=before_db_write_spy,
+            hookpoint="before_db_write",
+            kind="pre",
+            tier="operator",
+        )
+
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+        kwargs = dict(_RECORD_KWARGS, user_id="")
+
+        with pytest.raises(ValueError):
+            await mem.record(**kwargs)  # type: ignore[arg-type]
+
+        # before_db_write spy never fired — the chain short-circuited
+        # at _validate, BEFORE the security stage.
+        assert before_db_write_calls == []
+        assert session.add.call_count == 0
+        assert session.flush.await_count == 0
+
+    # ------------------------------------------------------------------
+    # 4. _validate sees the post-`before_validate`-mutation input
+    # ------------------------------------------------------------------
+
+    async def test_validate_sees_before_validate_mutation(
+        self,
+        fresh_registry_allow_system: HookRegistry,
+    ) -> None:
+        """A ``before_validate`` subscriber that mutates ``user_id``
+        to ``""`` causes ``_validate`` to reject.
+
+        This is the chain-order pin from the Task-6 plan: WITHOUT the
+        subscriber, the call would persist (valid kwargs). WITH the
+        subscriber, ``_validate`` raises because it now sees the
+        mutated empty ``user_id``. The only way for that to be true
+        is if ``_validate`` runs AFTER ``before_validate``'s output —
+        proving the position of the guard in the documented sequence.
+
+        A regression where ``_validate`` ran on the pre-mutation
+        carrier would let a malformed row past the guard whenever a
+        subscriber later in the ``before_validate`` chain made it
+        invalid — defeating the whole point of having mutation hooks
+        before validation.
+        """
+
+        async def empty_user_id_mutator(
+            ctx: HookContext[EpisodicRecordInput],
+        ) -> HookContext[EpisodicRecordInput]:
+            return ctx.with_input(replace(ctx.input, user_id=""))
+
+        fresh_registry_allow_system.register(
+            hook_fn=empty_user_id_mutator,
+            hookpoint="before_validate",
+            kind="pre",
+            tier="operator",
+        )
+
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+        # Valid kwargs (non-empty user_id) — the mutator is what makes
+        # it invalid by the time _validate sees it.
+        with pytest.raises(ValueError, match="user_id"):
+            await mem.record(**_RECORD_KWARGS)  # type: ignore[arg-type]
+
+        # _persist never ran — the post-mutation carrier failed the
+        # guard, short-circuiting the chain.
+        assert session.add.call_count == 0
+        assert session.flush.await_count == 0
