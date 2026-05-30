@@ -90,8 +90,104 @@ Slice 3 introduces `TaggedContent[T3]` as a new type-level discriminant
 (not a runtime flag) and the quarantined LLM that processes T3 content
 without the privileged orchestrator ever seeing the raw bytes.
 
+**Not to be confused with [hook tier](#hook-tier)** — `system` /
+`operator` / `user-plugin` are dispatch-order + capability gates on
+hook subscribers, an entirely separate axis from content provenance.
+
 See [ADR-0008](adr/0008-llm-output-trust-tier.md) and
 [ADR-0013](adr/0013-defer-t1-t3-and-dual-llm.md).
+
+## Action
+
+A named unit of work the core or a plugin dispatches: a tool call, a
+provider call, a memory write, a comms outbound, an audit write, a
+persona-to-persona message, a skill invocation. Distinct from a *tool
+call*, which is one kind of action. Every action that wants to be
+hookable threads its lifecycle through the same five-stage primitive
+(`pre` → body → `post` / `error` / `cancel`) so subscribers across all
+actions register against one uniform contract.
+
+See [ADR-0014](adr/0014-pluggable-hooks-for-every-action.md) and
+[`docs/subsystems/hooks.md`](subsystems/hooks.md).
+
+## Hookpoint
+
+A named, string-keyed extension point declared at a point in some
+code's execution. Any code — core or plugin — may both publish
+(call `invoke(name, ctx, kind=...)` at the stage) and subscribe
+(register a handler against `(name, kind)`); spec §9.1's "no
+asymmetry" point pins this. Hookpoint names are dotted strings keyed
+on the action's qualified name plus the lifecycle stage
+(`memory.episodic.record.before_db_write`).
+
+See spec §3,
+[`docs/subsystems/hooks.md`](subsystems/hooks.md), and
+[ADR-0014](adr/0014-pluggable-hooks-for-every-action.md).
+
+## Hook kind
+
+One of `pre` / `post` / `error` / `cancel`. The routing axis on a hook
+invocation; each kind has a distinct subscriber contract (spec §3.5,
+§4):
+
+- **`pre`** — runs before the action body; subscribers may mutate the
+  input or refuse via [`HookRefusal`](#hookrefusal).
+- **`post`** — runs after the action body succeeds; observe-or-rewrite
+  for downstream observers; refusal is meaningless.
+- **`error`** — runs when the action body raised a non-cancellation
+  exception; swallow-and-substitute via returning a `HookContext`.
+- **`cancel`** — runs on `asyncio.CancelledError`; cleanup-only,
+  return values ignored, original cancellation always re-raises.
+
+See [`docs/subsystems/hooks.md`](subsystems/hooks.md).
+
+## Hook tier
+
+One of `system` / `operator` / `user-plugin`. The deterministic
+dispatch-order axis on hook subscribers (system → operator →
+user-plugin, then registration order within tier) and a **requested
+capability** the operator-side `CapabilityGate` must grant (spec §6.1).
+Tier is a request, not a self-declaration: the publisher's
+`subscribable_tiers` allow-list and the registry's capability gate
+together decide whether a registered subscriber actually runs.
+
+**Not to be confused with [trust tier](#trust-tier)** — trust tier
+(T0-T3) is the type-level provenance discriminant on content blobs;
+hook tier is the dispatch + authorization axis on subscribers. They
+share the word "tier" only.
+
+See spec §6.1, [`docs/subsystems/hooks.md`](subsystems/hooks.md), and
+[ADR-0014](adr/0014-pluggable-hooks-for-every-action.md).
+
+## HookRefusal
+
+The exception a `pre` subscriber raises to short-circuit the chain
+(`src/alfred/hooks/errors.py`). The action body does not run, a
+`hooks.refusal` audit row is written, and the exception propagates to
+the caller — provided the subscriber's tier is in the hookpoint's
+`refusable_tiers` allow-list. An **unauthorized** refusal (subscriber's
+tier NOT in `refusable_tiers`) is audited as
+`hooks.unauthorized_refusal`, the would-be mutation is discarded, and
+NO exception is raised to the caller; the audit row IS the
+loud-failure escape (CLAUDE.md hard rule #7). This is spec §6.5.
+
+`HookRefusal` is `pre`-only; raising it from a `post`, `error`, or
+`cancel` subscriber propagates uncaught with no refusal audit row.
+
+See [`docs/subsystems/hooks.md`](subsystems/hooks.md).
+
+## PoC
+
+Proof-of-concept. In the Slice 2.5 hooks context, the single
+instrumented action — `memory.episodic.record` in
+[`src/alfred/memory/episodic.py`](../src/alfred/memory/episodic.py) —
+that exercises the hook contract end-to-end across all four
+[hook kinds](#hook-kind) (`pre`, `post`, `error`, `cancel`). The PoC
+proves the publisher / subscriber / dispatcher / capability-gate
+contract on real action infrastructure before the rest of the
+codebase migrates.
+
+See spec §7 and [`docs/subsystems/hooks.md`](subsystems/hooks.md).
 
 ## CommsAdapter Protocol
 

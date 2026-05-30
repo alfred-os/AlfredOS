@@ -1,6 +1,6 @@
 # 0014 — Every action AlfredOS takes is hookable
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-05-27
 - **Slice**: 2.5 (target — final placement by `alfred-architect` at Slice-2-graduation
   planning; recommended between Slice 2's identity/Discord/secret-broker work and
@@ -186,3 +186,15 @@ transport on the remote side).
 - ADR-0009 (CommsAdapter Protocol Slice-2-only — Slice 3 swaps to MCP).
 - ADR-0013 (Defer T1/T3 + dual-LLM to Slice 3).
 - CLAUDE.md hard rules (capability gate, audit, trust tiers).
+- [Slice 2.5 hooks design spec](../superpowers/specs/2026-05-27-slice-2.5-hooks-design.md).
+
+## Amendment (Slice 2.5)
+
+Slice 2.5 shipping is the trigger to move this ADR from *Proposed* to
+*Accepted* and append the following clarifying paragraph (spec §9.1):
+
+> **Core lifecycle methods are themselves hookpoint producers.** They use the same `invoke()`/`invoking()` primitive that plugins use to declare extension points. There is no asymmetry between "core actions get hooks" and "plugins publish hooks" — a hookpoint is a named, string-keyed extension point, and any code (core or plugin) may both publish and subscribe. The four kinds (pre/post/error/cancel) are routing semantics on an invocation, not the structure-defining concept.
+
+The matching PRD §5.1 refinement is proposed separately for human approval
+per CLAUDE.md self-improvement rule #4. See the proposed PRD §5.1 amendment
+at [proposed-prd-5.1-hooks-amendment.md](../superpowers/specs/proposed-prd-5.1-hooks-amendment.md).

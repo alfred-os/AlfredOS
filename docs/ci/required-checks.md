@@ -35,6 +35,22 @@ When you remove a required check: same flow in reverse — `gh api -X DELETE ...
 
 These checks are emitted by their workflow but not yet in the branch-protection required list. Per the [author-gating-workflow skill](../../.rulesync/skills/author-gating-workflow/SKILL.md) Step 4: after the workflow merges and runs at least once on a PR, append each name via `gh api`, then move the row to "Currently required" above with today's date.
 
+> **Before promoting `Hook dispatch perf gate` to a required check:**
+> The workflow `.github/workflows/perf.yml` uses a `paths:` filter (it only triggers
+> when changes touch `src/alfred/hooks/**`, `src/alfred/memory/episodic.py`,
+> `tests/perf/**`, `pyproject.toml`, or the workflow file). If promoted to a required
+> check as-is, PRs that don't touch those paths would have the check stay in "Pending"
+> and the PR would be blocked from merging
+> (see [GitHub docs](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks)).
+>
+> Mitigation options (decide before promotion):
+> 1. Add a companion always-triggered workflow that reports the same check name
+>    and short-circuits to success on off-path PRs.
+> 2. Drop the `paths:` filter from `perf.yml` (lets the workflow run on all PRs;
+>    higher CI cost, but simpler).
+> 3. Use `actions/changed-files` inside a single job to gate the actual bench run
+>    while always reporting the check name.
+
 | Check name | Workflow | Job key | Rationale | Promote after |
 |---|---|---|---|---|
 | `Ruff format` | `.github/workflows/pr-validate-python.yml` | `ruff-format` | Enforces `ruff format --check` (formatter no-op) so the formatter is the source of truth, not reviewer time. Skips when `src/` / `tests/` have no `.py` files. | This PR merges + workflow runs on any subsequent PR. |
@@ -43,6 +59,7 @@ These checks are emitted by their workflow but not yet in the branch-protection 
 | `Pyright` | `.github/workflows/pr-validate-python.yml` | `pyright` | Secondary type-checker. Catches data-flow patterns mypy misses. Skips when no Python source. | Same as above. |
 | `Pytest` | `.github/workflows/pr-validate-python.yml` | `pytest` | Runs `pytest tests/unit tests/integration -q`. Integration tests use testcontainers (Docker on the runner). Skips when no `test_*.py`. | Same as above. |
 | `i18n catalog freshness` | _(to be authored — `.github/workflows/pr-validate-i18n.yml`)_ | _(planned)_ | CLAUDE.md hard rule #4: `pybabel extract` runs in pre-commit; `pybabel compile --check` runs in CI. Catalog drift (extracted msgids missing from `.po`, or `.po` failing to compile) fails the build. Not yet authored — tracked as a Slice 1 follow-up. | After the i18n workflow PR merges. |
+| `Hook dispatch perf gate` | `.github/workflows/perf.yml` | `perf` | Slice-2.5 spec §5: release-blocking dispatch-overhead gate for the pluggable-hooks subsystem. Asserts the p99 delta over a per-runner baseline is < 100µs for empty-hookpoint dispatch and < 1ms for a 5-subscriber pre chain (empirical budgets calibrated in `tests/perf/test_hook_dispatch_perf.py`). Workflow carries NO `continue-on-error` — release-blocking from day one. The paired refusal-short-circuit correctness test runs in a dedicated step because `--benchmark-only` deselects it. **Before promoting:** see the path-filter caveat above the table — `perf.yml`'s `paths:` filter would block off-path PRs unless mitigated. | This PR merges + workflow runs on any subsequent PR. |
 
 **Post-Slice-1 cleanup**: once `src/alfred/**/*.py` lands, the `srccheck` short-circuit guards at the top of each Python gate's job should be **removed** (not toggled). A future layout-change that breaks the find pattern would otherwise silently re-enable the no-op. Tracked alongside the Task 17 (PR + CI wiring) deliverable.
 

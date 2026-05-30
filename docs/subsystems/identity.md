@@ -6,9 +6,9 @@ memory partitioning, rate limiter — depends on the identity layer for the
 canonical `user_id` and the authorization tier.
 
 This is the first entry under `docs/subsystems/`. The Slice-2 hub seeds
-two subsystem deep-docs (identity + [comms](comms.md)); the broader
-hub-and-spoke restructure of CLAUDE.md is Slice-3's first docs-author
-dispatch.
+three subsystem deep-docs — identity, [comms](comms.md), and
+[hooks](hooks.md) — the broader hub-and-spoke restructure of CLAUDE.md
+is Slice-3's first docs-author dispatch.
 
 ## Overview
 
