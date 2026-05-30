@@ -123,7 +123,7 @@ See [`PRD.md`](./PRD.md) for the full design, including:
 
 Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Contributions are licensed under the project's [Apache-2.0 license](./LICENSE).
 
-For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain *why* the conventions look the way they do.
+For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain *why* the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
 
 If you (or an AI agent) are contributing to this repository, also read [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 
