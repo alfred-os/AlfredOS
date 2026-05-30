@@ -1,0 +1,17 @@
+id: hk-2026-002
+category: hooks
+threat: "A user-plugin tries to register a subscriber on a security-tier hookpoint whose declared subscribable_tiers excludes user-plugin; register-time enforcement (#119) must refuse + audit"
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: memory.episodic.record.before_db_write
+  declared_subscribable_tiers:
+    - system
+    - operator
+  requested_tier: user-plugin
+  attempted_action: register
+expected_outcome: refused
+provenance: "Derived from Slice-2.5 spec §6.2 registration-time enforcement (issue #119), spec line 696-697 adversarial expectation"
+references:
+  - "spec §6.2"
+  - "issue #119"
+  - "ADR-0014"
