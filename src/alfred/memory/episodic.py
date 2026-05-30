@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alfred.hooks import invoking
 from alfred.memory.models import Episode
 from alfred.providers.base import Role
 
@@ -85,13 +86,33 @@ class EpisodicMemory:
         The pre-existing ``persona`` column stays for backward compatibility
         with downstream analytics that already read it.
 
-        The body is intentionally trivial: collect kwargs into an
-        :class:`EpisodicRecordInput` snapshot and hand it to
-        :meth:`_persist`. PR-B Task 4-5 will wrap that single dispatch
-        call in :func:`alfred.hooks.invoking` so subscribers see the
-        same frozen carrier at pre / post / observe stages. Keeping
-        ``record`` thin means the hookpoint wiring lands as one
-        localized edit instead of an interleaving rewrite.
+        Task 4 (Slice-2.5 PR-B) wraps the persistence path in
+        :func:`alfred.hooks.invoking` so every action callsite shares one
+        lifecycle: ``pre → body → post / error / cancel``. The two ``pre``
+        hookpoints fire BEFORE the DB write:
+
+        * ``before_validate`` — open hookpoint; any tier may subscribe.
+          Default ``fail_closed=False`` so a crashing subscriber falls
+          through to the next stage with the last-good ctx (the registry
+          still emits :data:`HOOKS_SUBSCRIBER_ERROR` for attribution).
+          The canonical use is i18n/persona rewriting BEFORE the
+          structural guard runs.
+        * ``before_db_write`` — security stage. Locked to
+          ``subscribable_tiers={"system","operator"}`` so a user-plugin
+          cannot wedge into the redactor seam, ``refusable_tiers={"system"}``
+          so only DLP-style system-tier subscribers may refuse the write
+          (§6.5), and ``fail_closed=True`` so a timed-out / erroring
+          redactor MUST NOT write (CLAUDE.md hard rule #7 — no silent
+          failures in security paths). The canonical use is DLP
+          redaction / refusal.
+
+        The three terminal hookpoints — ``after_flush`` (post),
+        ``write_failed`` (error), ``cancelled`` (cancel) — are bound by
+        name on the :meth:`Flow.body` call; PR-B Task 5 adds spy
+        subscribers for each. The names are load-bearing: spec §7 fixes
+        ``after_flush`` (NOT ``committed``), ``write_failed``, and
+        ``cancelled`` as the canonical chain identifiers for episodic
+        writes.
         """
         inp = EpisodicRecordInput(
             user_id=user_id,
@@ -105,7 +126,53 @@ class EpisodicMemory:
             persona_id=persona_id,
             language=language,
         )
-        await self._persist(inp)
+        async with invoking("memory.episodic.record", inp) as flow:
+            # ``before_validate`` — open hookpoint, all tiers eligible,
+            # default ``fail_closed=False``. A crashing subscriber is
+            # audited and treated as pass-through so the action body
+            # still runs; ``_validate`` is the next guard. Reassigning
+            # ``flow`` to ``await flow.pre(...)`` is the PR-A Task-13
+            # contract: the helper returns the SAME flow object with
+            # ``_ctx`` rebound to the chain's output, so reading
+            # ``flow.input`` immediately after reflects any subscriber's
+            # ``with_input`` mutation.
+            flow = await flow.pre("before_validate")
+            self._validate(flow.input)
+            # ``before_db_write`` — security stage. The three kwargs are
+            # the load-bearing security-stage values from spec §7;
+            # weakening any of the three is a trust-boundary defect.
+            flow = await flow.pre(
+                "before_db_write",
+                subscribable_tiers=frozenset({"system", "operator"}),
+                refusable_tiers=frozenset({"system"}),
+                fail_closed=True,
+            )
+            # The terminal hookpoint names are fixed by spec §7 —
+            # ``after_flush`` (NOT ``committed``), ``write_failed``,
+            # ``cancelled``. Subscriber spies for these chains land in
+            # PR-B Task 5; the names are pinned here so the dispatcher
+            # wiring is verifiable before any subscriber exists.
+            async with flow.body(
+                post="after_flush",
+                error="write_failed",
+                cancel="cancelled",
+            ):
+                await self._persist(flow.input)
+
+    def _validate(self, inp: EpisodicRecordInput) -> None:
+        """Synchronous structural guard run between ``before_validate``
+        and ``before_db_write``.
+
+        No-op stub this slice. PR-B Task 6 grows the body to enforce
+        the structural invariants the writer relies on (BCP-47 language
+        well-formedness, trust-tier vocabulary, non-empty user_id /
+        content). Sync on purpose: the guard is pure CPU and a sync
+        signature keeps the failure mode (raise → :func:`Flow.body` 's
+        ``except Exception`` arm → ``write_failed`` error chain) easy
+        to audit. The hookpoint wiring around it is verifiable today
+        with this stub so Task 6 ships against a known-good seam.
+        """
+        del inp  # Task 6 consumes; see docstring.
 
     async def _persist(self, inp: EpisodicRecordInput) -> None:
         """Write one ``Episode`` row from a frozen input snapshot.
