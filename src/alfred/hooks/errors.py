@@ -321,6 +321,106 @@ def tier_not_subscribable_message(
     )
 
 
+def dispatch_undeclared_hookpoint_message(
+    *,
+    name: str,
+    kind: str,
+    correlation_id: str,
+) -> str:
+    """Render the ``hooks.dispatch_undeclared_hookpoint`` operator-facing string.
+
+    Called by :func:`alfred.hooks.invoke._enforce_meta_drift` at dispatch
+    time, on the strict-mode arm where the hookpoint was never declared
+    AND register-time enforcement should have prevented the subscriber
+    from landing. This is the "internal inconsistency" path — both the
+    publisher's :meth:`HookRegistry.register_hookpoint` call AND the
+    subscriber's :meth:`HookRegistry.register` call should have
+    serialised the typo at module import time; reaching this branch
+    means something downstream re-imported a publisher module or the
+    registry singleton was swapped mid-run.
+
+    The audit row goes out BEFORE this message is rendered (see the
+    ``HOOKS_TIER_REJECTED`` emit at the call-site); this helper is the
+    operator-facing tail that surfaces on the raised
+    :class:`HookError`'s ``str()`` representation.
+
+    Args:
+        name: The dotted hookpoint identifier that was dispatched but
+            never declared.
+        kind: The lifecycle stage (``"pre"`` / ``"post"`` / ``"error"``
+            / ``"cancel"``) — surfaces on both the audit row and the
+            message so the operator can correlate the two attributions.
+        correlation_id: Cross-system trace id — surfaces on the message
+            so an operator reading the raised exception can grep the
+            audit log for the matching row.
+    """
+    return t(
+        "hooks.dispatch_undeclared_hookpoint",
+        name=name,
+        kind=kind,
+        correlation_id=correlation_id,
+    )
+
+
+def publisher_drift_message(
+    *,
+    name: str,
+    drift_kind: str,
+    declared_subscribable_tiers: Iterable[str],
+    declared_refusable_tiers: Iterable[str],
+    declared_fail_closed: bool,
+    invoked_subscribable_tiers: Iterable[str],
+    invoked_refusable_tiers: Iterable[str] | None,
+    invoked_fail_closed: bool | None,
+) -> str:
+    """Render the ``hooks.publisher_drift`` operator-facing string.
+
+    Called by :func:`alfred.hooks.invoke._enforce_meta_drift` when the
+    publisher's invoke-time args disagree with the
+    :class:`HookpointMeta` the publisher declared at module init. The
+    catalog template surfaces BOTH sides of the disagreement so the
+    operator can grep both the declaration site and the invoke site
+    and reconcile.
+
+    ``drift_kind`` is the FIRST field detected as disagreeing (the
+    detector walks ``subscribable_tiers`` → ``refusable_tiers`` →
+    ``fail_closed``); the message carries the full state of all three
+    fields so the operator can see whether more than one field drifted.
+
+    Args:
+        name: The dotted hookpoint identifier.
+        drift_kind: The first-detected disagreeing field
+            (``"subscribable_tiers"`` / ``"refusable_tiers"`` /
+            ``"fail_closed"``) — surfaces on both the audit row and
+            the message so the two attributions correlate.
+        declared_subscribable_tiers: From the stored
+            :class:`HookpointMeta`. Rendered as a sorted list.
+        declared_refusable_tiers: From the stored
+            :class:`HookpointMeta`. Rendered as a sorted list.
+        declared_fail_closed: From the stored :class:`HookpointMeta`.
+        invoked_subscribable_tiers: The publisher's invoke-time arg.
+            Rendered as a sorted list.
+        invoked_refusable_tiers: The publisher's invoke-time arg,
+            ``None`` when the handler does not pass this field.
+        invoked_fail_closed: The publisher's invoke-time arg, ``None``
+            when the handler does not pass this field.
+    """
+    invoked_refusable_repr = (
+        repr(sorted(invoked_refusable_tiers)) if invoked_refusable_tiers is not None else repr(None)
+    )
+    return t(
+        "hooks.publisher_drift",
+        name=name,
+        drift_kind=drift_kind,
+        declared_subscribable_tiers=repr(sorted(declared_subscribable_tiers)),
+        declared_refusable_tiers=repr(sorted(declared_refusable_tiers)),
+        declared_fail_closed=repr(declared_fail_closed),
+        invoked_subscribable_tiers=repr(sorted(invoked_subscribable_tiers)),
+        invoked_refusable_tiers=invoked_refusable_repr,
+        invoked_fail_closed=repr(invoked_fail_closed),
+    )
+
+
 def unknown_tier_in_declaration_message(
     *,
     hookpoint: str,

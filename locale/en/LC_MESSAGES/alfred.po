@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-30 16:00+0100\n"
+"POT-Creation-Date: 2026-05-30 16:25+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -213,7 +213,27 @@ msgstr ""
 "tier {tier} not allowed on hookpoint {hookpoint} — declared "
 "subscribable_tiers={subscribable_tiers}."
 
-#: src/alfred/hooks/errors.py:357
+# #119 CR cycle-2: dispatch-time HookError raises (defense-in-depth path).
+#: src/alfred/hooks/errors.py:358
+msgid "hooks.dispatch_undeclared_hookpoint"
+msgstr ""
+"hookpoint {name} dispatched (kind={kind}) but not declared, AND the "
+"registry is in strict mode — register-time enforcement should have "
+"prevented this. This is an internal inconsistency; see audit log "
+"(correlation_id={correlation_id})."
+
+#: src/alfred/hooks/errors.py:412
+msgid "hooks.publisher_drift"
+msgstr ""
+"publisher-side meta drift on hookpoint {name} (drift_kind={drift_kind}): "
+"declared subscribable_tiers={declared_subscribable_tiers} "
+"refusable_tiers={declared_refusable_tiers} "
+"fail_closed={declared_fail_closed}; invoked "
+"subscribable_tiers={invoked_subscribable_tiers}, "
+"refusable_tiers={invoked_refusable_tiers}, "
+"fail_closed={invoked_fail_closed}."
+
+#: src/alfred/hooks/errors.py:457
 msgid "hooks.unknown_tier_in_declaration"
 msgstr ""
 "register_hookpoint({hookpoint}) declares unknown tier(s) {unknown_tiers} "

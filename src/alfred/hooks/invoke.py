@@ -145,16 +145,25 @@ from contextlib import asynccontextmanager
 from typing import Any, Final, Self, cast
 from uuid import uuid4
 
+import structlog
+
 from alfred.hooks.audit_sink import (
     HOOKS_CHAIN_TIMEOUT,
     HOOKS_REENTRY_BYPASS,
     HOOKS_REFUSAL,
     HOOKS_SUBSCRIBER_ERROR,
+    HOOKS_TIER_REJECTED,
     HOOKS_UNAUTHORIZED_REFUSAL,
 )
 from alfred.hooks.capability import CapabilityGate
 from alfred.hooks.context import HookContext, HookKind
-from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
+from alfred.hooks.errors import (
+    HookError,
+    HookRefusal,
+    HookSubscriberError,
+    dispatch_undeclared_hookpoint_message,
+    publisher_drift_message,
+)
 from alfred.hooks.registry import Subscriber, _reentry, get_registry
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1000,6 +1009,215 @@ def _wrap_subscriber_error(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Publisher-drift detector (#119, spec §6.2 dispatch-time half)
+# ──────────────────────────────────────────────────────────────────────
+
+
+_warned_undeclared_hookpoints: set[str] = set()
+"""Module-level memo of hookpoints we've already warned about.
+
+#119 review Group D: when the registry is in permissive mode (the dev /
+pre-#119 test escape hatch), the dispatch-time drift helper logs a warning
+once per hookpoint to surface "publisher bypassed `register_hookpoint`"
+without spamming the log on every dispatch. The set is process-lifetime
+and never cleared — the warning is informational and a publisher
+correctly declaring later in the run is a no-op against this memo.
+
+NOT a security boundary — strict mode is enforced separately at
+register time (see :class:`alfred.hooks.registry.HookRegistry.register`).
+This memo is purely a log-noise control for the permissive-mode arm.
+"""
+
+
+async def _enforce_subscribable_tiers[T](
+    name: str,
+    ctx: HookContext[T],
+    *,
+    kind: HookKind,
+    subscribable_tiers: frozenset[str],
+    refusable_tiers: frozenset[str] | None = None,
+    fail_closed: bool | None = None,
+) -> None:
+    """Defense-in-depth re-check of every meta field at dispatch time.
+
+    Spec §6.2: "subscribable_tiers — registration-time enforced;
+    **re-checked at invoke**". #119 review Group I extends this to
+    check ALL three publisher-declared fields (``subscribable_tiers``,
+    ``refusable_tiers``, ``fail_closed``) so a publisher whose
+    invoke-time arg drifts from the declaration on ANY field is
+    refused. The original spec wording centred on ``subscribable_tiers``
+    because that's the trust-tier surface — but a publisher passing
+    ``fail_closed=False`` when the declared value is ``True`` silently
+    bypasses the strict timeout policy on a security stage, which is
+    CLAUDE.md hard rule #7's exact threat.
+
+    Registration enforcement (the gate against subscribers whose tier
+    isn't in the publisher's allow-list) lands in the registry; this
+    helper covers the second half. The publisher's invoke-time args
+    MUST equal the registry's declared meta for the hookpoint. If they
+    disagree on any field, that's a publisher bug — either:
+
+    * the publisher's declaration site (one-time, at module init) drifts
+      from the publisher's invoke site (every call); or
+    * a vendored / forked copy of the publisher declared with one set
+      of meta and the active copy invokes with another.
+
+    Either way, the dispatcher cannot decide which is "correct" and
+    refuses to run the chain. The audit row carries BOTH the declared
+    and the invoked values so the operator can grep both sites and
+    reconcile.
+
+    Undeclared hookpoints — disposition by mode (#119 review Group D):
+
+    * **strict_declarations=True** (production posture): a missing
+      declaration here would mean the register-time gate let a
+      subscriber through without a publisher declaration — that's an
+      internal inconsistency the registration enforcement MUST have
+      caught. Logging via :func:`structlog.error` AND raising
+      :class:`HookError` surfaces the inconsistency loudly so the
+      operator does not silently dispatch through.
+    * **permissive declarations mode** (transitional test escape):
+      log a one-time warning via :func:`structlog.warning` per
+      undeclared hookpoint (memoised via
+      :data:`_warned_undeclared_hookpoints`) and proceed. The
+      permissive mode is the "dev-mode bypass" — proceed-but-warn is
+      the right disposition; spamming on every dispatch would obscure
+      the signal.
+
+    The earlier "silently return when meta is None" behaviour was
+    flagged as ERR-119-002: combined with the permissive-declarations
+    posture on the registry, BOTH halves of #119 silently no-op'd. The
+    current arms make the failure mode observable in both postures.
+
+    Args:
+        name: The dotted hookpoint identifier — the registry lookup key.
+        ctx: The retargeted carrier — carries the correlation id used
+            for the audit row.
+        kind: The lifecycle stage — surfaces on the audit row so
+            operators distinguish a ``pre`` drift from a ``cancel``
+            drift.
+        subscribable_tiers: The publisher's invoke-time arg. Compared
+            to ``registry.hookpoint_meta(name).subscribable_tiers``.
+        refusable_tiers: The publisher's invoke-time arg, ``None`` when
+            the handler does not pass refusable_tiers (post / error /
+            cancel — §6.5 is pre-only). When ``None`` the drift check
+            on this field is skipped.
+        fail_closed: The publisher's invoke-time arg, ``None`` when
+            the handler does not pass fail_closed. When ``None`` the
+            drift check on this field is skipped. Otherwise compared
+            to ``registry.hookpoint_meta(name).fail_closed``.
+
+    Raises:
+        HookError: When any of the compared fields disagree, OR when
+            ``strict_declarations=True`` and the hookpoint is undeclared
+            (the should-never-happen arm). The audit row is emitted
+            BEFORE the raise so the operator's attribution lands even
+            if the caller does not catch the exception.
+    """
+    registry = get_registry()
+    meta = registry.hookpoint_meta(name)
+    if meta is None:
+        # #119 review Group D: distinguish strict vs permissive
+        # postures so neither arm silently no-ops.
+        if registry.strict_declarations:
+            # CR cycle-1 alignment: the other dispatch-time drift arm
+            # (the meta-fields-disagree arm below) emits
+            # :data:`HOOKS_TIER_REJECTED` BEFORE the structlog.error +
+            # raise so operators can query/alert via the registry
+            # sink. The "undeclared in strict mode" arm is the same
+            # shape — register-time enforcement SHOULD have caught
+            # this; the internal inconsistency MUST surface on the
+            # audit sink before the raise propagates (CLAUDE.md hard
+            # rule #7).
+            await registry.sink.emit(
+                event=HOOKS_TIER_REJECTED,
+                correlation_id=ctx.correlation_id,
+                fields={
+                    "hookpoint": name,
+                    "kind": kind,
+                    "drift_at": "dispatch",
+                    "drift_kind": "undeclared_hookpoint",
+                },
+            )
+            structlog.get_logger("alfred.hooks").error(
+                "hooks.dispatch_undeclared_hookpoint_in_strict_mode",
+                hookpoint=name,
+                kind=kind,
+                correlation_id=ctx.correlation_id,
+            )
+            raise HookError(
+                dispatch_undeclared_hookpoint_message(
+                    name=name,
+                    kind=kind,
+                    correlation_id=ctx.correlation_id,
+                )
+            )
+        # Permissive mode (dev / test escape). Warn once per hookpoint
+        # so the bypass is visible but not noisy.
+        if name not in _warned_undeclared_hookpoints:
+            _warned_undeclared_hookpoints.add(name)
+            structlog.get_logger("alfred.hooks").warning(
+                "hooks.dispatch_undeclared_hookpoint_in_permissive_mode",
+                hookpoint=name,
+                kind=kind,
+            )
+        return
+
+    # #119 review Group I — detect drift on ANY of the three meta fields.
+    # ``drift_kind`` surfaces on the audit row so the operator can grep
+    # for the precise field that disagreed. Multi-field drifts surface
+    # the first-detected field's kind; in practice a single typo at the
+    # invoke site only drifts one field at a time.
+    drift_kind: str | None = None
+    if meta.subscribable_tiers != subscribable_tiers:
+        drift_kind = "subscribable_tiers"
+    elif refusable_tiers is not None and meta.refusable_tiers != refusable_tiers:
+        drift_kind = "refusable_tiers"
+    elif fail_closed is not None and meta.fail_closed != fail_closed:
+        drift_kind = "fail_closed"
+
+    if drift_kind is None:
+        # All compared fields agree — the common case, no drift.
+        return
+
+    # Drift detected. Emit the audit row FIRST so attribution lands
+    # even when the caller does not catch the HookError below.
+    # CLAUDE.md hard rule #7: the audit row IS the loud-failure escape.
+    fields: dict[str, object] = {
+        "hookpoint": name,
+        "kind": kind,
+        "drift_at": "dispatch",
+        "drift_kind": drift_kind,
+        "declared_subscribable_tiers": sorted(meta.subscribable_tiers),
+        "invoked_subscribable_tiers": sorted(subscribable_tiers),
+        "declared_refusable_tiers": sorted(meta.refusable_tiers),
+        "declared_fail_closed": meta.fail_closed,
+    }
+    if refusable_tiers is not None:
+        fields["invoked_refusable_tiers"] = sorted(refusable_tiers)
+    if fail_closed is not None:
+        fields["invoked_fail_closed"] = fail_closed
+
+    await registry.sink.emit(
+        event=HOOKS_TIER_REJECTED,
+        correlation_id=ctx.correlation_id,
+        fields=fields,
+    )
+    raise HookError(
+        publisher_drift_message(
+            name=name,
+            drift_kind=drift_kind,
+            declared_subscribable_tiers=meta.subscribable_tiers,
+            declared_refusable_tiers=meta.refusable_tiers,
+            declared_fail_closed=meta.fail_closed,
+            invoked_subscribable_tiers=subscribable_tiers,
+            invoked_refusable_tiers=refusable_tiers,
+            invoked_fail_closed=fail_closed,
+        )
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Per-kind private handlers
 # ──────────────────────────────────────────────────────────────────────
 
@@ -1060,7 +1278,21 @@ async def _run_pre[T](
         mutations ctx when one or more subscribers refused without
         authorization.
     """
-    del subscribable_tiers
+    # #119 / spec §6.2 dispatch-time re-check: publisher's invoke-time
+    # meta MUST equal the registry's declared one. Drift on
+    # ``subscribable_tiers``, ``refusable_tiers``, OR ``fail_closed``
+    # is a publisher bug; the dispatcher emits a loud audit row and
+    # raises :class:`HookError`. Undeclared hookpoints fail-loud in
+    # strict mode and warn-once in permissive mode — see
+    # :func:`_enforce_subscribable_tiers` docstring.
+    await _enforce_subscribable_tiers(
+        name,
+        ctx,
+        kind="pre",
+        subscribable_tiers=subscribable_tiers,
+        refusable_tiers=refusable_tiers,
+        fail_closed=fail_closed,
+    )
     registry = get_registry()
     subscribers = registry.subscribers_for(name, "pre")
     deadline_seconds = registry.chain_deadline_seconds
@@ -1220,7 +1452,16 @@ async def _run_post[T](
         last-good ctx if the chain timed out and ``fail_closed`` is
         ``False``.
     """
-    del subscribable_tiers
+    # #119 / spec §6.2 dispatch-time re-check. See :func:`_run_pre`
+    # for the rationale and :func:`_enforce_subscribable_tiers` for
+    # the helper's contract.
+    await _enforce_subscribable_tiers(
+        name,
+        ctx,
+        kind="post",
+        subscribable_tiers=subscribable_tiers,
+        fail_closed=fail_closed,
+    )
     subscribers = get_registry().subscribers_for(name, "post")
     deadline_seconds = get_registry().chain_deadline_seconds
 
@@ -1328,7 +1569,16 @@ async def _run_error[T](
             no-suppression-completed path. Identity preserved (the
             same instance) so the upstream traceback stays intact.
     """
-    del subscribable_tiers
+    # #119 / spec §6.2 dispatch-time re-check. See :func:`_run_pre`
+    # for the rationale and :func:`_enforce_subscribable_tiers` for
+    # the helper's contract.
+    await _enforce_subscribable_tiers(
+        name,
+        ctx,
+        kind="error",
+        subscribable_tiers=subscribable_tiers,
+        fail_closed=fail_closed,
+    )
 
     subscribers = get_registry().subscribers_for(name, "error")
     deadline_seconds = get_registry().chain_deadline_seconds
@@ -1463,7 +1713,16 @@ async def _run_cancel[T](
         BaseException: The ``exc`` parameter, re-raised when the chain
             completed inside its deadline. Identity preserved.
     """
-    del subscribable_tiers
+    # #119 / spec §6.2 dispatch-time re-check. See :func:`_run_pre`
+    # for the rationale and :func:`_enforce_subscribable_tiers` for
+    # the helper's contract.
+    await _enforce_subscribable_tiers(
+        name,
+        ctx,
+        kind="cancel",
+        subscribable_tiers=subscribable_tiers,
+        fail_closed=fail_closed,
+    )
 
     subscribers = get_registry().subscribers_for(name, "cancel")
     deadline_seconds = get_registry().chain_deadline_seconds
