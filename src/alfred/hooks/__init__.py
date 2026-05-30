@@ -35,9 +35,19 @@ from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.decorators import hook
 from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
 from alfred.hooks.invoke import invoke, invoking
-from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+from alfred.hooks.registry import (
+    OPEN_TIERS,
+    SYSTEM_ONLY_TIERS,
+    SYSTEM_OPERATOR_TIERS,
+    HookRegistry,
+    get_registry,
+    set_registry,
+)
 
 __all__ = [
+    "OPEN_TIERS",
+    "SYSTEM_ONLY_TIERS",
+    "SYSTEM_OPERATOR_TIERS",
     "AuditSink",
     "CapabilityGate",
     "DevGate",

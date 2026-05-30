@@ -1,6 +1,6 @@
 """Tests for ``alfred.hooks`` — the public-surface lock (spec §3.1).
 
-Pins the exact 14-symbol public surface of the hooks subsystem. The lock is
+Pins the exact 17-symbol public surface of the hooks subsystem. The lock is
 load-bearing for three independent reasons:
 
 * **sec-008** — ``_invoke_internal`` is the privileged bypass path used by the
@@ -18,7 +18,9 @@ load-bearing for three independent reasons:
   invariants this test pins. The two together — public surface ∧ 100% — are
   the durable contract.
 
-Spec verbatim (§3.1) lists exactly 14 names. Anything else — ``Flow`` (only
+Spec verbatim (§3.1) lists 14 names; #119 review Group F adds 3 publisher-
+facing tier-set constants (``OPEN_TIERS``, ``SYSTEM_OPERATOR_TIERS``,
+``SYSTEM_ONLY_TIERS``) bringing the total to 17. Anything else — ``Flow`` (only
 reachable via ``invoking()`` per Task-13's M-3 discussion), ``Subscriber`` (the
 registry's internal carrier; introspection callers reach into
 ``alfred.hooks.registry``), ``StructlogAuditSink`` (the default
@@ -38,7 +40,7 @@ import pytest
 import alfred.hooks as hooks_pkg
 
 # ──────────────────────────────────────────────────────────────────────
-# The canonical 14-symbol public surface (spec §3.1, verbatim)
+# The canonical 17-symbol public surface (spec §3.1 + #119 review Group F)
 # ──────────────────────────────────────────────────────────────────────
 #
 # Sorted alphabetically — the canonical order ``ruff`` (RUF022) enforces on
@@ -55,6 +57,9 @@ EXPECTED_PUBLIC_SURFACE: Final[frozenset[str]] = frozenset(
         "HookRefusal",
         "HookRegistry",
         "HookSubscriberError",
+        "OPEN_TIERS",
+        "SYSTEM_ONLY_TIERS",
+        "SYSTEM_OPERATOR_TIERS",
         "get_registry",
         "hook",
         "invoke",
@@ -136,7 +141,14 @@ def test_reexports_are_identity_equal_to_submodule_origins() -> None:
     from alfred.hooks.decorators import hook
     from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
     from alfred.hooks.invoke import invoke, invoking
-    from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+    from alfred.hooks.registry import (
+        OPEN_TIERS,
+        SYSTEM_ONLY_TIERS,
+        SYSTEM_OPERATOR_TIERS,
+        HookRegistry,
+        get_registry,
+        set_registry,
+    )
 
     assert hooks_pkg.AuditSink is AuditSink
     assert hooks_pkg.CapabilityGate is CapabilityGate
@@ -152,6 +164,9 @@ def test_reexports_are_identity_equal_to_submodule_origins() -> None:
     assert hooks_pkg.hook is hook
     assert hooks_pkg.invoke is invoke
     assert hooks_pkg.invoking is invoking
+    assert hooks_pkg.OPEN_TIERS is OPEN_TIERS
+    assert hooks_pkg.SYSTEM_OPERATOR_TIERS is SYSTEM_OPERATOR_TIERS
+    assert hooks_pkg.SYSTEM_ONLY_TIERS is SYSTEM_ONLY_TIERS
 
 
 # ──────────────────────────────────────────────────────────────────────

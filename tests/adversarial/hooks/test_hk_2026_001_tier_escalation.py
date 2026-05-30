@@ -121,7 +121,11 @@ def test_hook_registry_refuses_user_plugin_registering_at_system_tier(
     # exercise the allow-path build `DevGate(allow_system=True)` (see
     # `EpisodicAuditSink`'s class docstring Example) — that posture is
     # NOT under test here.
-    registry = HookRegistry(gate=DevGate())
+    # ``strict_declarations=False`` keeps the test focused on the tier
+    # gate (the load-bearing defense for this payload); the
+    # registration-time tier-allowlist enforcement is its own dedicated
+    # adversarial in ``tests/adversarial/test_hooks_tier_enforcement.py``.
+    registry = HookRegistry(gate=DevGate(), strict_declarations=False)
 
     # No-op subscriber — the body is immaterial. The registration gate
     # rejects BEFORE the subscriber is added to any bucket, so the body

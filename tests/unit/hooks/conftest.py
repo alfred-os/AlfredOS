@@ -99,9 +99,16 @@ def fresh_registry() -> Iterator[HookRegistry]:
     after the test (no leaked subscribers, no swapped gate). The gate
     is a default :class:`DevGate` (``allow_system=False``); the sink is
     the registry's own default :class:`StructlogAuditSink`.
+
+    ``strict_declarations=False`` is set so the pre-#119 test bodies
+    that register against ad-hoc hookpoint names without an explicit
+    :meth:`HookRegistry.register_hookpoint` call continue to work.
+    Production code (``alfred.memory.episodic`` et al) constructs the
+    singleton with the default ``True``; tests that explicitly assert
+    the strict contract use the :func:`strict_registry` fixture.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=DevGate(), strict_declarations=False)
     set_registry(registry)
     try:
         yield registry
@@ -117,9 +124,35 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     (Task 7's @hook decorator tests, etc.). The default-deny on
     ``system`` is the production posture; this fixture is the explicit
     opt-in for tests that need to exercise the granted-system code path.
+
+    ``strict_declarations=False`` — same rationale as
+    :func:`fresh_registry`.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate(allow_system=True))
+    registry = HookRegistry(gate=DevGate(allow_system=True), strict_declarations=False)
+    set_registry(registry)
+    try:
+        yield registry
+    finally:
+        set_registry(prior)
+
+
+@pytest.fixture
+def strict_registry() -> Iterator[HookRegistry]:
+    """Yield a :class:`HookRegistry` with ``strict_declarations=True``
+    — the production posture under #119.
+
+    Tests in ``test_registration_enforcement.py`` use this to pin the
+    strict-declaration contract (undeclared hookpoint refuses
+    subscriber registration). The gate is :class:`DevGate` with
+    ``allow_system=True`` so a test that exercises a system-tier
+    subscriber on a declared hookpoint passes both gates.
+    """
+    prior = get_registry()
+    registry = HookRegistry(
+        gate=DevGate(allow_system=True),
+        strict_declarations=True,
+    )
     set_registry(registry)
     try:
         yield registry
@@ -156,7 +189,11 @@ def spy_registry_allow_system(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
     leak the spy-injected registry into the next test.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate(allow_system=True), sink=spy_sink)
+    registry = HookRegistry(
+        gate=DevGate(allow_system=True),
+        sink=spy_sink,
+        strict_declarations=False,
+    )
     set_registry(registry)
     try:
         yield registry

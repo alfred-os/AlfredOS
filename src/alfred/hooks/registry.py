@@ -85,7 +85,13 @@ import structlog
 from alfred.hooks.audit_sink import AuditSink, StructlogAuditSink
 from alfred.hooks.capability import CapabilityGate, DevGate
 from alfred.hooks.context import HookContext, HookKind
-from alfred.hooks.errors import HookError, subscriber_must_be_async_message
+from alfred.hooks.errors import (
+    HookError,
+    hookpoint_drift_message,
+    hookpoint_not_declared_message,
+    subscriber_must_be_async_message,
+    unknown_tier_message,
+)
 
 # ──────────────────────────────────────────────────────────────────────
 # Module constants — spec §0 verbatim
@@ -158,6 +164,68 @@ propagates ContextVars across ``await`` automatically.
 
 
 # ──────────────────────────────────────────────────────────────────────
+# HookpointMeta — per-hookpoint declaration record (spec §6.2)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class HookpointMeta:
+    """Immutable per-hookpoint declaration carried by the registry.
+
+    A publisher (e.g. :mod:`alfred.memory.episodic`) calls
+    :meth:`HookRegistry.register_hookpoint` once at module-init time to
+    record this metadata. Subscriber registrations on the same
+    hookpoint then consult this record:
+
+    * :attr:`subscribable_tiers` — the allow-list checked at register
+      time (issue #119) AND re-checked at dispatch time
+      (defense-in-depth against a publisher whose invoke-time arg
+      drifts from the declaration). A subscriber whose ``tier`` is not
+      in this set is refused at register time with a loud
+      :data:`alfred.hooks.audit_sink.HOOKS_TIER_REJECTED` audit row.
+    * :attr:`refusable_tiers` — the set of tiers whose
+      :class:`alfred.hooks.errors.HookRefusal` propagates as a normal
+      refusal on the ``pre`` chain (§6.5). Threaded through to
+      :func:`alfred.hooks.invoke.invoke` so the dispatcher's refusal
+      arm consults it.
+    * :attr:`fail_closed` — the policy bit applied when a subscriber
+      times out or raises an unexpected exception. Pinned at
+      declaration so a typo at the call site cannot silently disarm
+      the fail-closed contract on a security stage.
+
+    Frozen + slots: same hot-path discipline as :class:`Subscriber`.
+    The metadata is consulted on every register and every dispatch;
+    constructor-only configuration keeps the value semantics clean and
+    prevents a subscriber from rewriting the contract at runtime.
+
+    Equality is field-wise (the dataclass default) so the registry can
+    detect idempotent re-declaration via ``new == stored`` and
+    conflicting re-declaration via ``new != stored``. ``frozenset``
+    hashes by content so equality on the two tier-set fields matches
+    intuition.
+
+    Attributes:
+        name: The dotted hookpoint identifier (e.g.
+            ``"memory.episodic.record.before_db_write"``). Carried so
+            error messages and audit rows attribute the declaration
+            back to a grep-able name.
+        subscribable_tiers: The tier allow-list. A subscriber whose
+            ``tier`` is not in this set is refused at register time.
+        refusable_tiers: The tier set whose :class:`HookRefusal` is
+            authorized on the ``pre`` chain (§6.5). Threaded through
+            the invoke dispatch on every pre-stage call.
+        fail_closed: The policy bit. ``True`` raises
+            :class:`HookError` on subscriber timeout / error; ``False``
+            rewinds to the last-good ctx and continues the chain.
+    """
+
+    name: str
+    subscribable_tiers: frozenset[str]
+    refusable_tiers: frozenset[str]
+    fail_closed: bool
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Subscriber dataclass — spec §3.2
 # ──────────────────────────────────────────────────────────────────────
 
@@ -215,6 +283,44 @@ class Subscriber:
 # above the dataclass works at runtime via ``from __future__ import
 # annotations`` but breaks runtime introspection.
 _EMPTY: Final[tuple[Subscriber, ...]] = ()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Public tier-set constants — DevEx polish (#119 review Group F)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Named constants for the three tier-set combinations publishers reach
+# for at module-init time. Re-exported from :mod:`alfred.hooks` so
+# publishers spell their declarations declaratively (``OPEN_TIERS``
+# rather than the inline ``frozenset({...})``).
+
+OPEN_TIERS: Final[frozenset[str]] = frozenset({"system", "operator", "user-plugin"})
+"""All three tiers — the open-hookpoint default.
+
+Use for hookpoints with no special security posture (observability,
+post-write notification, error-stage chains). A subscriber from any of
+the three tiers may register; refusals from any tier propagate.
+"""
+
+SYSTEM_OPERATOR_TIERS: Final[frozenset[str]] = frozenset({"system", "operator"})
+"""System + operator only — locks user-plugin tiers OUT.
+
+Use for security-stage hookpoints where the action body MUST not be
+extended by an untrusted third-party plugin (DLP redaction seam, trust
+boundary enforcement, secret-broker substitution). A user-plugin
+subscriber attempting to register against a hookpoint declared with
+this set is refused at register time and emits
+:data:`HOOKS_TIER_REJECTED`.
+"""
+
+SYSTEM_ONLY_TIERS: Final[frozenset[str]] = frozenset({"system"})
+"""System tier only — the tightest gate.
+
+Use for the most security-sensitive hookpoints (capability-gate
+register-time consult, audit-log write authorization). Both operator
+and user-plugin tiers are locked out. Typically paired with
+``fail_closed=True`` for the timeout / unexpected-exception policy.
+"""
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -281,7 +387,9 @@ class HookRegistry:
     gate: CapabilityGate
     sink: AuditSink
     chain_deadline_seconds: float
+    strict_declarations: bool
     _subscribers: dict[tuple[str, HookKind], list[Subscriber]]
+    _hookpoints: dict[str, HookpointMeta]
 
     def __init__(
         self,
@@ -289,6 +397,7 @@ class HookRegistry:
         gate: CapabilityGate,
         sink: AuditSink | None = None,
         chain_deadline_seconds: float = HOOK_CHAIN_DEADLINE_SECONDS,
+        strict_declarations: bool = True,
     ) -> None:
         """Construct a :class:`HookRegistry`.
 
@@ -311,6 +420,30 @@ class HookRegistry:
                 PR-B's adversarial corpus tunes per-test; production
                 code does NOT swap this at runtime. Slice 3's
                 arch-002 reload subsystem owns the hot-reload semantics.
+            strict_declarations: SECURITY-CRITICAL — production code
+                paths MUST use ``True`` (the default). Setting this to
+                ``False`` SILENTLY DISABLES BOTH halves of the #119
+                enforcement: the register-time tier-allowlist check
+                (this method) AND the dispatch-time defense-in-depth
+                re-check (:func:`alfred.hooks.invoke._enforce_subscribable_tiers`).
+                A subscriber whose tier is NOT in the publisher's
+                declared ``subscribable_tiers`` registers cleanly and
+                runs at dispatch — defeating the whole purpose of the
+                security stage.
+
+                This parameter exists ONLY as a transitional opt-out
+                for the pre-#119 unit-test corpus, which registers
+                against ad-hoc hookpoint names without an explicit
+                :meth:`register_hookpoint` declaration. Tests that
+                genuinely need the non-strict mode use the
+                :func:`strict_registry`-or-:func:`fresh_registry`
+                fixture composition.
+
+                The non-strict opt-out literal MUST NOT appear
+                anywhere in ``src/``. The CI lint at
+                ``scripts/check_strict_declarations.py`` enforces this
+                — adding the false-valued keyword literal anywhere in
+                ``src/`` fails the build. Keyword-only.
 
         The sink default is lazily constructed inside ``__init__``
         rather than at the parameter default site because
@@ -326,7 +459,103 @@ class HookRegistry:
             else StructlogAuditSink(logger=structlog.get_logger("alfred.hooks"))
         )
         self.chain_deadline_seconds = chain_deadline_seconds
+        self.strict_declarations = strict_declarations
         self._subscribers = {}
+        self._hookpoints = {}
+
+    def register_hookpoint(
+        self,
+        *,
+        name: str,
+        subscribable_tiers: frozenset[str],
+        refusable_tiers: frozenset[str],
+        fail_closed: bool,
+    ) -> None:
+        """Declare a hookpoint's per-hookpoint metadata (#119).
+
+        Publishers MUST call this once at module-init time for every
+        hookpoint they own BEFORE any subscriber registers against it.
+        The stored :class:`HookpointMeta` is consulted by
+        :meth:`register` (registration-time tier-allowlist check) and
+        by :func:`alfred.hooks.invoke.invoke` (dispatch-time
+        defense-in-depth re-check, commit 3 in this PR).
+
+        Idempotent on equal metadata, strict on different metadata:
+
+        * Calling ``register_hookpoint(name="x", subscribable_tiers=A, ...)``
+          twice with identical args succeeds both times. This makes
+          re-importing a publisher module (pytest test isolation,
+          Slice-3's reload-by-module flow) safe.
+        * Calling it with DIFFERENT args raises :class:`HookError`. Two
+          shapes this defends against:
+
+          - Publisher version drift — two versions of the same module
+            land in one process and disagree on the metadata. Silent
+            last-import-wins acceptance would be a surprise vector.
+          - Publisher typo on a metadata field (e.g. flipping
+            ``fail_closed`` on a security-tier hookpoint). Loud
+            refusal forces the author to reconcile both sites.
+
+        The error message attributes the hookpoint name + which field
+        drifted so the operator can grep both declaration sites.
+
+        Synchronous on purpose — the same module-init-time discipline
+        as :meth:`register`. Publishers declare at import; no event
+        loop required.
+
+        Args:
+            name: The dotted hookpoint identifier (e.g.
+                ``"memory.episodic.record.before_db_write"``).
+                Keyword-only — matches the rest of the registry's
+                surface (``register``, the ``HookRegistry``
+                constructor) so a silent argument-order regression at
+                the call site is impossible (#119 review Group J).
+            subscribable_tiers: The tier allow-list for subscriber
+                registration. Keyword-only.
+            refusable_tiers: The tier set whose :class:`HookRefusal`
+                propagates as a normal refusal on the ``pre`` chain
+                (§6.5). Keyword-only.
+            fail_closed: The fail-closed policy for subscriber timeout
+                / unexpected exception. Keyword-only.
+
+        Raises:
+            HookError: A previous declaration of ``name`` exists with
+                metadata that does not equal the new declaration.
+        """
+        new_meta = HookpointMeta(
+            name=name,
+            subscribable_tiers=subscribable_tiers,
+            refusable_tiers=refusable_tiers,
+            fail_closed=fail_closed,
+        )
+        stored = self._hookpoints.get(name)
+        if stored is not None and stored != new_meta:
+            # Conflicting declaration — attribute the drift so the
+            # operator can grep both sites. CLAUDE.md hard rule #7:
+            # loud failure, no silent acceptance of "last import wins".
+            # Message routes through :func:`alfred.hooks.errors.hookpoint_drift_message`
+            # so the operator-facing text is i18n-localised (CLAUDE.md
+            # i18n rule #1).
+            raise HookError(hookpoint_drift_message(name=name, stored=stored, new=new_meta))
+        self._hookpoints[name] = new_meta
+
+    def hookpoint_meta(self, name: str) -> HookpointMeta | None:
+        """Return the declared :class:`HookpointMeta` for ``name``, or
+        ``None`` if no declaration exists.
+
+        The dispatch-time defense-in-depth re-check (commit 3) consults
+        this — a ``None`` return signals "publisher bypassed the
+        ``register_hookpoint`` contract entirely", which is a publisher
+        bug surfaced loudly via the audit row.
+
+        Args:
+            name: The dotted hookpoint identifier to look up.
+
+        Returns:
+            The stored :class:`HookpointMeta` instance, or ``None`` if
+            no publisher has declared ``name``.
+        """
+        return self._hookpoints.get(name)
 
     def register(
         self,
@@ -399,9 +628,32 @@ class HookRegistry:
         # ``hookpoint``.
         if tier not in _TIER_RANK:
             raise HookError(
-                f"Unknown hook tier {tier!r} for {hook_fn.__qualname__} "
-                f"on hookpoint {hookpoint!r}. Valid tiers: "
-                f"{sorted(_TIER_RANK)!r}."
+                unknown_tier_message(
+                    tier=tier,
+                    subscriber_name=hook_fn.__qualname__,
+                    hookpoint=hookpoint,
+                    valid_tiers=_TIER_RANK,
+                )
+            )
+
+        # Strict-declaration gate (#119). A publisher MUST have
+        # declared the hookpoint via :meth:`register_hookpoint` before
+        # subscribers may register. Refusal surfaces a typo on the
+        # publisher's hookpoint name (which would otherwise silently
+        # disable the security stage by sending subscribers to a
+        # never-invoked name). Permissive mode (``strict_declarations=
+        # False``) is for the pre-#119 test corpus; production code
+        # paths construct the singleton with the default ``True``.
+        # Message routes through
+        # :func:`alfred.hooks.errors.hookpoint_not_declared_message`,
+        # which carries publisher/subscriber attribution + a
+        # difflib-driven closest-match suggestion (Group F).
+        if self.strict_declarations and hookpoint not in self._hookpoints:
+            raise HookError(
+                hookpoint_not_declared_message(
+                    name=hookpoint,
+                    declared_names=self._hookpoints.keys(),
+                )
             )
 
         # Capability gate consult. The DevGate ignores plugin_id and
@@ -474,15 +726,25 @@ class HookRegistry:
         return tuple(bucket)
 
     def reset(self) -> None:
-        """Clear every registered subscriber.
+        """Clear every registered subscriber AND every hookpoint
+        declaration.
 
         Used by the :func:`tests.unit.hooks.conftest.fresh_registry`
         fixture for per-test isolation inside a single registry
         instance. NOT a production reload path — the
         registration_seq counter is module-level and continues
         monotonic across resets to preserve global uniqueness.
+
+        The hookpoint declaration map is cleared too so a test that
+        reuses a registry instance across declaration scenarios sees a
+        clean slate. The two stores are conceptually a single
+        invariant ("what this registry knows about hookpoints and the
+        subscribers wired to them"); resetting one without the other
+        would leave the registry in an inconsistent state where
+        :meth:`hookpoint_meta` and :meth:`subscribers_for` disagree.
         """
         self._subscribers.clear()
+        self._hookpoints.clear()
 
 
 # ──────────────────────────────────────────────────────────────────────

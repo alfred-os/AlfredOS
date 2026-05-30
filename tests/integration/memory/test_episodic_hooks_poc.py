@@ -176,7 +176,12 @@ async def test_zero_subscriber_row_byte_identical(
     # :class:`StructlogAuditSink` is fine here: with zero subscribers no
     # fault-path audit row ever fires, so the sink choice is invisible.
     prior = get_registry()
-    fresh_reg = HookRegistry(gate=DevGate())
+    # ``strict_declarations=False`` here for symmetry with the unit
+    # wiring tests; the episodic publisher module declares its
+    # hookpoints at import time, but a freshly-constructed bare
+    # registry without an import-cycle would not see those
+    # declarations carried over.
+    fresh_reg = HookRegistry(gate=DevGate(), strict_declarations=False)
     set_registry(fresh_reg)
     try:
         memory = EpisodicMemory(session=session)
@@ -305,6 +310,7 @@ async def test_audit_sink_no_recursion(
     registry = HookRegistry(
         gate=DevGate(allow_system=True),
         sink=EpisodicAuditSink(audit=AuditWriter(session_factory=session_factory)),
+        strict_declarations=False,
     )
     set_registry(registry)
     try:
@@ -446,6 +452,7 @@ async def test_fault_row_persists_on_flush_failure(
     registry = HookRegistry(
         gate=DevGate(allow_system=True),
         sink=EpisodicAuditSink(audit=AuditWriter(session_factory=session_factory)),
+        strict_declarations=False,
     )
     set_registry(registry)
     try:
@@ -666,6 +673,7 @@ async def test_system_tier_redactor_scrubs_content(
     fresh_reg = HookRegistry(
         gate=DevGate(allow_system=True),
         sink=EpisodicAuditSink(audit=AuditWriter(session_factory=session_factory)),
+        strict_declarations=False,
     )
     set_registry(fresh_reg)
 

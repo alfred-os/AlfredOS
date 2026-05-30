@@ -182,6 +182,37 @@ msgstr ""
 "Hook subscriber {name} raised an unexpected error (correlation "
 "{correlation_id}); see the audit log."
 
+# #119 — register_hookpoint / register message helpers (Group E + Group F).
+#: src/alfred/hooks/errors.py
+msgid "hooks.hookpoint_drift"
+msgstr ""
+"hookpoint {name} already declared with different metadata: "
+"stored={stored}, new={new}."
+
+#: src/alfred/hooks/errors.py
+msgid "hooks.unknown_tier"
+msgstr ""
+"Unknown hook tier {tier} for {subscriber_name} on hookpoint {hookpoint}. "
+"Valid tiers: {valid_tiers}."
+
+#: src/alfred/hooks/errors.py
+msgid "hooks.hookpoint_not_declared"
+msgstr ""
+"hookpoint {name} not declared — the PUBLISHER of this hookpoint must "
+"call `register_hookpoint('{name}', ...)` at module init BEFORE any "
+"subscriber attempts to register against it. See "
+"docs/subsystems/hooks.md → Publisher hello-world.{suggestion}"
+
+#: src/alfred/hooks/errors.py
+msgid "hooks.hookpoint_not_declared.did_you_mean"
+msgstr " Did you mean: '{suggestion}'?"
+
+#: src/alfred/hooks/errors.py
+msgid "hooks.tier_not_subscribable"
+msgstr ""
+"tier {tier} not allowed on hookpoint {hookpoint} — declared "
+"subscribable_tiers={subscribable_tiers}."
+
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
 # Only keys with live call-sites are retained; help-text long forms and

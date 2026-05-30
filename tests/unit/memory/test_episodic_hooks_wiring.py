@@ -189,7 +189,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     directory.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate(allow_system=True))
+    registry = HookRegistry(gate=DevGate(allow_system=True), strict_declarations=False)
     set_registry(registry)
     try:
         yield registry
