@@ -84,18 +84,56 @@ class EpisodicMemory:
         orchestrator passes ``"alfred"`` so Slice-1+2 rows are non-null.
         The pre-existing ``persona`` column stays for backward compatibility
         with downstream analytics that already read it.
+
+        The body is intentionally trivial: collect kwargs into an
+        :class:`EpisodicRecordInput` snapshot and hand it to
+        :meth:`_persist`. PR-B Task 4-5 will wrap that single dispatch
+        call in :func:`alfred.hooks.invoking` so subscribers see the
+        same frozen carrier at pre / post / observe stages. Keeping
+        ``record`` thin means the hookpoint wiring lands as one
+        localized edit instead of an interleaving rewrite.
         """
-        episode = Episode(
+        inp = EpisodicRecordInput(
             user_id=user_id,
-            persona=persona,
-            persona_id=persona_id,
             role=role,
             content=content,
             trust_tier=trust_tier,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost_usd=cost_usd,
+            persona=persona,
+            persona_id=persona_id,
             language=language,
+        )
+        await self._persist(inp)
+
+    async def _persist(self, inp: EpisodicRecordInput) -> None:
+        """Write one ``Episode`` row from a frozen input snapshot.
+
+        Pure extraction of the pre-Task-2 body of :meth:`record` — the
+        ``Episode(...)`` constructor call, the ``session.add`` and the
+        awaited ``flush`` are unchanged, only their argument source
+        (``inp.<field>`` instead of local params). The four
+        characterization tests in
+        ``tests/unit/memory/test_episodic_hooks_wiring.py`` pin the
+        golden-row shape across this refactor.
+
+        Private because the hook-wiring in PR-B Task 4-5 wraps this
+        method — not ``record`` — so the dispatcher can hand the same
+        :class:`EpisodicRecordInput` snapshot to subscribers and to the
+        DB write without a second carrier construction.
+        """
+        episode = Episode(
+            user_id=inp.user_id,
+            persona=inp.persona,
+            persona_id=inp.persona_id,
+            role=inp.role,
+            content=inp.content,
+            trust_tier=inp.trust_tier,
+            tokens_in=inp.tokens_in,
+            tokens_out=inp.tokens_out,
+            cost_usd=inp.cost_usd,
+            language=inp.language,
         )
         self._session.add(episode)
         await self._session.flush()
