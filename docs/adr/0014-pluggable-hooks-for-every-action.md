@@ -196,5 +196,5 @@ Slice 2.5 shipping is the trigger to move this ADR from *Proposed* to
 > **Core lifecycle methods are themselves hookpoint producers.** They use the same `invoke()`/`invoking()` primitive that plugins use to declare extension points. There is no asymmetry between "core actions get hooks" and "plugins publish hooks" — a hookpoint is a named, string-keyed extension point, and any code (core or plugin) may both publish and subscribe. The four kinds (pre/post/error/cancel) are routing semantics on an invocation, not the structure-defining concept.
 
 The matching PRD §5.1 refinement is proposed separately for human approval
-per CLAUDE.md self-improvement rule #4; the proposed-diff artifact lands in
-a follow-up commit in this same PR (Slice 2.5 PR-C, Task 5).
+per CLAUDE.md self-improvement rule #4. See the proposed PRD §5.1 amendment
+at [proposed-prd-5.1-hooks-amendment.md](../superpowers/specs/proposed-prd-5.1-hooks-amendment.md).
