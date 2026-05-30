@@ -2,17 +2,17 @@
 
 The hooks subsystem owns "where, and on whose authority, does third-party
 code get to observe, mutate, or refuse one of AlfredOS's actions?" Every
-in-tree action that wants to be hookable threads its lifecycle through
-the same five-stage primitive; every plugin or in-tree subscriber that
-wants to participate registers against the same registry under the same
-capability gate.
+in-tree [action](../glossary.md#action) that wants to be hookable
+threads its lifecycle through the same five-stage primitive; every
+plugin or in-tree subscriber that wants to participate registers against
+the same registry under the same [capability gate](../glossary.md#capability-gate).
 
 Slice 2.5 is the subsystem's first slice. The dispatch engine, the
 publisher helper, the capability gate, the four-kind contract, the
 audit-row vocabulary, and the per-process registry all land here. The
-PoC publisher (`memory.episodic.record`) lives in the memory subsystem
-but its hook wiring is documented here because the contract belongs to
-hooks, not to memory.
+[PoC](../glossary.md#poc) publisher (`memory.episodic.record`) lives in
+the memory subsystem but its hook wiring is documented here because the
+contract belongs to hooks, not to memory.
 
 Sibling subsystem docs: [identity](identity.md), [comms](comms.md).
 
@@ -40,8 +40,10 @@ async def log_recorded_turn(ctx: HookContext) -> None:
 ```
 
 This is the whole observer contract: an async function decorated with
-the hookpoint name, the lifecycle kind, and the trust tier the
-subscriber is requesting. Returning `None` means "no change" for every
+the [hookpoint](../glossary.md#hookpoint) name, the
+[hook kind](../glossary.md#hook-kind), and the
+[hook tier](../glossary.md#hook-tier) the subscriber is requesting.
+Returning `None` means "no change" for every
 kind — the dispatcher folds the prior chain ctx forward to the next
 subscriber. Security material — the capability gate, the refusal
 contract, the fail-closed semantics — layers on top of this minimal
@@ -101,8 +103,9 @@ dispatcher folds `chain_ctx = result` after each subscriber so the next
 one starts from the most recent mutation.
 
 The subtle bit — a later refusal **discards** an earlier mutation. If
-subscriber A rewrites `content`, then subscriber B raises `HookRefusal`,
-the action body NEVER runs and the caller never observes A's mutation.
+subscriber A rewrites `content`, then subscriber B raises
+[`HookRefusal`](../glossary.md#hookrefusal), the action body NEVER runs
+and the caller never observes A's mutation.
 The fold buffer is only realised when the chain completes. This is the
 intent: a refusal means "the action is not happening," not "the action
 is happening with the first half of subscribers' rewrites baked in."
@@ -111,7 +114,8 @@ is happening with the first half of subscribers' rewrites baked in."
 
 A `pre` hook raises `HookRefusal` to short-circuit the action. The
 dispatcher stops walking the chain immediately, emits a `hooks.refusal`
-audit row, and propagates the exception to the caller:
+[audit log](../glossary.md#audit-log) row, and propagates the exception
+to the caller:
 
 ```python
 @hook("before_db_write", kind="pre", tier="system")
@@ -202,10 +206,10 @@ wrapped T3 user content in its exception).
 
 ### The hookpoint primitive and the four kinds
 
-A **hookpoint** is a named stage in an action's lifecycle. The publisher
-calls `invoke(name, ctx, kind=...)` at the stage; the dispatcher walks
-every subscriber registered against `(name, kind)`. Spec §4 fixes four
-kinds:
+A **[hookpoint](../glossary.md#hookpoint)** is a named stage in an
+[action](../glossary.md#action)'s lifecycle. The publisher calls
+`invoke(name, ctx, kind=...)` at the stage; the dispatcher walks every
+subscriber registered against `(name, kind)`. Spec §4 fixes four kinds:
 
 - **`pre`** — runs BEFORE the action body. Subscribers may mutate the
   input (return a new ctx via `with_input`), or refuse via
@@ -270,7 +274,8 @@ both surfaces: `subscribable_tiers`, `refusable_tiers`, `fail_closed`,
 
 ### Tier model
 
-Every subscriber registers at a tier (spec §6.1):
+Every subscriber registers at a [hook tier](../glossary.md#hook-tier)
+(spec §6.1):
 
 - **`system`** — observes pre-DLP content, may participate in security
   stages. In Slice 2.5 every in-tree module is treated as `T0`; the
@@ -295,9 +300,10 @@ hard rule #7). The dispatcher:
 
 1. Wraps the exception as `HookSubscriberError` via
    `HookSubscriberError.from_subscriber(...)`, chained via `from exc`.
-2. Emits a `hooks.subscriber_error` audit row carrying the
-   subscriber's `__qualname__` and the exception's class NAME only
-   (never `str(exc)` / `exc.args` — they may carry T3 content).
+2. Emits a `hooks.subscriber_error` [audit log](../glossary.md#audit-log)
+   row carrying the subscriber's `__qualname__` and the exception's
+   class NAME only (never `str(exc)` / `exc.args` — they may carry T3
+   content).
 3. Applies `fail_closed`:
    - `fail_closed=True` — the wrap re-raises; the action body never
      runs (if the fault was in a `pre` chain) or the action's
@@ -341,7 +347,8 @@ would recurse indefinitely. The dispatcher detects this via a
 (`alfred.hooks.registry._reentry`); on detection the dispatcher routes
 to `_invoke_internal`, which **skips the chain entirely** (every tier,
 system included — the T0-only invariant) and emits a
-`hooks.reentry_bypass` audit row. This is spec §6.9.
+`hooks.reentry_bypass` [audit log](../glossary.md#audit-log) row. This
+is spec §6.9.
 
 The stack propagates via Python's standard `ContextVar` rules,
 including across `asyncio.create_task` — a subscriber that spawns a
@@ -435,11 +442,11 @@ hard rule: do not weaken security or perf defaults to make tests pass).
 
 ## Manifest surface
 
-Plugins declare hookpoint subscriptions in their manifest's `hooks`
-block — the **existing** field PRD §5.1 and
+Plugins declare [hookpoint](../glossary.md#hookpoint) subscriptions in
+their manifest's `hooks` block — the **existing** field PRD §5.1 and
 [ADR-0014](../adr/0014-pluggable-hooks-for-every-action.md) already
-specify. A subscription is a `(action, kind)` tuple plus the tier the
-plugin requests:
+specify. A subscription is a `(action, kind)` tuple plus the
+[hook tier](../glossary.md#hook-tier) the plugin requests:
 
 ```toml
 [[hooks]]
@@ -496,7 +503,8 @@ Per spec §6.10 and ADR-0014:
   invocation emits an audit row.
 
 `DevGate` is the Slice-2.5 gate. In-tree code is treated as `T0` (the
-trust-tier the spec stamps on in-tree modules) so `DevGate` grants
+[trust tier](../glossary.md#trust-tier) the spec stamps on in-tree
+modules) so `DevGate` grants
 `operator` and `user-plugin` unconditionally; `system` requires
 constructor opt-in. Slice 3 replaces the whole gate without touching
 the publisher / subscriber call sites — the `CapabilityGate` Protocol
@@ -515,10 +523,18 @@ surface is stable.
 - [ADR-0009](../adr/0009-comms-adapter-protocol-slice2-only.md) — the
   MCP-transport rewrite that will carry out-of-process hook
   registration in Slice 3.
-- Glossary terms: `hookpoint`, `dispatch chain`, `capability gate`,
-  `trust tier`, `audit log`, `correlation id`. New entries land in the
-  glossary in PR-C Task 7; this doc references them as bare terms
-  until those anchors exist.
+- Glossary terms:
+  [action](../glossary.md#action),
+  [hookpoint](../glossary.md#hookpoint),
+  [hook kind](../glossary.md#hook-kind),
+  [hook tier](../glossary.md#hook-tier),
+  [HookRefusal](../glossary.md#hookrefusal),
+  [PoC](../glossary.md#poc),
+  [trust tier](../glossary.md#trust-tier),
+  [capability gate](../glossary.md#capability-gate),
+  [audit log](../glossary.md#audit-log).
+  `dispatch chain` and `correlation id` remain bare terms until
+  subsequent slices add them.
 - Source code: [`src/alfred/hooks/`](../../src/alfred/hooks/) (registry,
   invoke, decorators, capability, context, errors, audit sink) and
   [`src/alfred/memory/episodic.py`](../../src/alfred/memory/episodic.py)
