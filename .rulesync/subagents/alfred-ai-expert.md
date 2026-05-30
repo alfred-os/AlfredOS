@@ -140,7 +140,7 @@ The architectural defense against indirect prompt injection. Two LLMs, two trust
 
 The release-blocker test suite for prompt injection / jailbreak / DLP. You design payload classes, not write payloads (`alfred-test-engineer` co-owns with `alfred-security-engineer`). Categories to inform:
 
-The corpus ships **five top-level categories** (see [`alfred-adversarial-corpus`](../skills/alfred-adversarial-corpus/SKILL.md)):
+The corpus ships **six top-level categories** (see [`alfred-adversarial-corpus`](../skills/alfred-adversarial-corpus/SKILL.md)):
 
 | Category | Directory | What it exercises |
 |---|---|---|
@@ -149,13 +149,14 @@ The corpus ships **five top-level categories** (see [`alfred-adversarial-corpus`
 | `capability_bypass` | `tests/adversarial/capability_bypass/` | Transcripts attempting tool calls outside the current capability grant |
 | `canary` | `tests/adversarial/canary/` | Canary tokens seeded into ingested content; trip should fire on egress |
 | `inter_persona` | `tests/adversarial/inter_persona/` | Persona A receives T3 content and relays it as T2 to Persona B (Slice 6+) |
+| `hooks` | `tests/adversarial/hooks/` | A user-plugin tries to register/refuse at a tier it was not granted (Slice-2.5 spec §6.1+§6.3 two-gate model) |
 
 You inform payload-class design within these categories — not the payloads themselves (`alfred-test-engineer` + `alfred-security-engineer` co-own those). Categories you commonly inform:
 
 - **Prompt-injection sub-variants** — direct ("Ignore previous instructions"), indirect (instructions hidden in T3 content), memory-rehydrate (payload stored in an `Episode` row that runs on next session-start), tool-output (payload returned from an MCP plugin).
 - **Jailbreak** — adversarial prompts that get the model to ignore safety policy. Catalogued under `prompt_injection/` in slice-1 layout; promote to its own directory if/when volume justifies.
 
-Each corpus entry's required fields (per canonical skill): `id`, `category`, `threat`, `ingestion_path`, `payload`, `expected_outcome`, `provenance`. ID format: `pi-YYYY-NNN` (prompt-injection), `dlp-YYYY-NNN`, `cap-YYYY-NNN`, `cnry-YYYY-NNN`, `ipp-YYYY-NNN`. Provenance matters — don't commit live exploits; defang and link the source.
+Each corpus entry's required fields (per canonical skill): `id`, `category`, `threat`, `ingestion_path`, `payload`, `expected_outcome`, `provenance`, `references`. ID format: `pi-YYYY-NNN` (prompt-injection), `dlp-YYYY-NNN`, `cap-YYYY-NNN`, `cnry-YYYY-NNN`, `ipp-YYYY-NNN`, `hk-YYYY-NNN` (hooks). Provenance matters — don't commit live exploits; defang and link the source.
 
 ### MCP plugin boundary (PRD §6.3)
 

@@ -3,7 +3,7 @@ name: alfred-adversarial-corpus
 description: >-
   Use when adding to the AlfredOS adversarial test corpus - new payload
   categories, new tier-confusion cases, new DLP canaries. Covers naming
-  conventions, file layout, and the five payload categories the corpus
+  conventions, file layout, and the six payload categories the corpus
   maintains.
 targets:
   - '*'
@@ -12,7 +12,7 @@ targets:
 
 `tests/adversarial/` is release-blocking. New trust-boundary code requires new adversarial coverage. This skill captures the conventions so contributors don't have to re-derive them.
 
-## Five categories
+## Six categories
 
 | Category | What it exercises | Directory |
 |---|---|---|
@@ -21,6 +21,7 @@ targets:
 | Capability-bypass corpus | Transcripts attempting tool calls outside the current grant | `tests/adversarial/capability_bypass/` |
 | Canary-trip suite | Canary tokens seeded into ingested content | `tests/adversarial/canary/` |
 | Inter-persona poisoning | Persona A receives T3 content and relays it as T2 to Persona B | `tests/adversarial/inter_persona/` |
+| Hook tier-escalation | A user-plugin tries to register/refuse at a tier it was not granted | `tests/adversarial/hooks/` |
 
 ## Payload file layout
 
@@ -51,6 +52,7 @@ references:
 - `cap-YYYY-NNN` for capability-bypass
 - `cnry-YYYY-NNN` for canary
 - `ipp-YYYY-NNN` for inter-persona
+- `hk-YYYY-NNN` for hooks
 
 Numbering monotonic per year per category. Never reuse an ID.
 

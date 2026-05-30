@@ -108,13 +108,28 @@ class AuditEntry(Base):
             name="ck_audit_log_trust_tier_of_trigger",
         ),
         # `result` is the audit subsystem's closed domain. The orchestrator
-        # writes one of these four values per turn (see Orchestrator._handle_turn).
-        # Keeping it pinned here means a typo in a future writer (or a manual
-        # row insert) fails fast at the DB instead of polluting downstream
-        # analytics that depend on a fixed enum.
+        # writes one of these values per turn (see Orchestrator._handle_turn),
+        # the Slice-2 comms adapters write the refusal / rate-limited /
+        # outbound-failure family (migration 0005), and Slice-2.5 PR-B's
+        # :class:`alfred.memory.hooks_audit_sink.EpisodicAuditSink` writes
+        # ``"fault"`` / ``"bypass"`` for the §0 hook-trace result-disposition
+        # table (migration 0006). Keeping it pinned at the DB layer means a
+        # typo in a future writer (or a manual row insert) fails fast
+        # against the CHECK instead of polluting downstream analytics that
+        # depend on a fixed enum. Source of truth: every value here MUST
+        # also be in the upgrade path of the latest migration; CI's
+        # migration-roundtrip test catches drift.
         CheckConstraint(
             "result IN ('success', 'budget_blocked', 'budget_overrun', "
-            "'provider_failed', 'cancelled')",
+            "'provider_failed', 'cancelled', "
+            # Slice-2 (migration 0005) — comms-adapter outcomes.
+            "'refused', 'refused_unknown_user', 'rate_limited', "
+            "'dlp_failed', 'split_failed', 'send_failed', "
+            "'recovery_send_failed', 'login_failed', 'gateway_unhealthy', "
+            "'unknown_budget_user', "
+            # Slice-2.5 (migration 0006) — hook-trace dispositions written
+            # by :class:`alfred.memory.hooks_audit_sink.EpisodicAuditSink`.
+            "'fault', 'bypass')",
             name="ck_audit_log_result",
         ),
     )
