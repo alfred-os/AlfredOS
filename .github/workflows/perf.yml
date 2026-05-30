@@ -1,0 +1,142 @@
+name: perf
+
+# Runs the AlfredOS hook-dispatch perf gate (`uv run pytest tests/perf -v
+# --benchmark-only`) plus the paired correctness assertion
+# (`test_refusal_short_circuits_subscribers`, which `--benchmark-only`
+# deselects) on every PR that touches the hook dispatcher, the episodic
+# memory record path that publishes the canonical sample hookpoint, the
+# perf corpus itself, or pyproject.toml (which carries the perf budgets
+# via the `benchmark` marker + pytest-benchmark config), plus every push
+# to main on the same paths.
+#
+# Release-blocking: NO continue-on-error. The perf gate must block merge
+# on regression, per Slice-2.5 spec §5 "release-blocking for this subsystem".
+# Unlike adversarial.yml's advisory mode, this gate is enforced from day one.
+#
+# Promoting `perf` to a required status check on `main` is an out-of-PR
+# operator step (`gh api`) tracked in docs/ci/required-checks.md per the
+# author-gating-workflow convention.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'src/alfred/hooks/**'
+      - 'src/alfred/memory/episodic.py'
+      - 'tests/perf/**'
+      - 'pyproject.toml'
+      - '.github/workflows/perf.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/alfred/hooks/**'
+      - 'src/alfred/memory/episodic.py'
+      - 'tests/perf/**'
+      - 'pyproject.toml'
+      - '.github/workflows/perf.yml'
+  # Manual trigger — lets an operator re-run the perf gate against an
+  # arbitrary ref to corroborate a regression report or to gather a fresh
+  # CI baseline sample for the Slice-3 recalibration corpus.
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  PYTHON_VERSION: "3.14"
+  UV_VERSION: "0.5.14"
+
+jobs:
+  perf:
+    name: Hook dispatch perf gate
+    # Job-level guard: no-op cleanly (without spending checkout / runner steps)
+    # when the perf corpus has no test_*.py files. Mirrors the in-job
+    # `perfcheck.outputs.has_perf` probe but short-circuits earlier so the
+    # job appears as "skipped" rather than "succeeded with all steps skipped".
+    if: ${{ hashFiles('tests/perf/**/test_*.py') != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Release-blocking: NO continue-on-error. The perf gate must block merge
+    # on regression, per Slice-2.5 spec §5 "release-blocking for this subsystem".
+    # Unlike adversarial.yml's advisory mode, this gate is enforced from day one.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check for perf corpus
+        id: perfcheck
+        run: |
+          set -euo pipefail
+          if [ -d tests/perf ] && find tests/perf -name 'test_*.py' 2>/dev/null | grep -q .; then
+            echo "has_perf=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_perf=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No tests/perf/test_*.py — skipping perf gate."
+          fi
+      - name: Install uv
+        if: steps.perfcheck.outputs.has_perf == 'true'
+        uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Set up Python
+        if: steps.perfcheck.outputs.has_perf == 'true'
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        if: steps.perfcheck.outputs.has_perf == 'true'
+        run: uv sync --dev
+      - name: Run perf benches (budget-gated)
+        if: steps.perfcheck.outputs.has_perf == 'true'
+        run: uv run pytest tests/perf -v --benchmark-only --benchmark-json=benchmark.json
+      - name: Run perf correctness assertion (refusal short-circuit)
+        # `--benchmark-only` above deselects this test (it has no
+        # benchmark fixture by design — it's a correctness pin). A
+        # dedicated step ensures the short-circuit invariant runs in CI
+        # alongside the budget benches.
+        if: steps.perfcheck.outputs.has_perf == 'true'
+        run: uv run pytest tests/perf -v -k refusal_short_circuits_subscribers
+      - name: Upload benchmark JSON
+        # Uploaded even on failure so a regression run still leaves the
+        # measurement record behind for Slice-3 recalibration analysis.
+        # SHA pinned to match nightly.yml's upload-artifact pin.
+        if: always() && steps.perfcheck.outputs.has_perf == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hook-dispatch-perf-${{ github.run_id }}
+          path: benchmark.json
+          retention-days: 30
+      - name: Write step summary
+        # Surfaces the calibration context + a regression-investigation
+        # pointer in the GitHub UI so an operator hitting a red run does
+        # not need to dig into the workflow file to know where to look.
+        if: always() && steps.perfcheck.outputs.has_perf == 'true'
+        run: |
+          set -euo pipefail
+          {
+            echo "## Hook dispatch perf gate"
+            echo ""
+            if [ -f benchmark.json ]; then
+              echo "Benchmark JSON: \`benchmark.json\` uploaded as artifact"
+              echo ""
+              echo "### Calibration"
+              echo "PR-C empirical budgets: empty <100µs / 5-chain <1ms"
+              echo "See \`tests/perf/test_hook_dispatch_perf.py\` CALIBRATION NOTE"
+              echo "for the M-series vs CI variance discussion."
+            else
+              echo "Benchmark did not produce a JSON file — see job logs."
+            fi
+            echo ""
+            echo "On a regression: investigate \`src/alfred/hooks/invoke.py\` first."
+            echo "If the budget itself needs a recalibration, open a tracking issue + amend spec §5."
+          } >> "$GITHUB_STEP_SUMMARY"
