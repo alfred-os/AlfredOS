@@ -49,6 +49,64 @@ subscriber. Security material — the capability gate, the refusal
 contract, the fail-closed semantics — layers on top of this minimal
 shape.
 
+### Self-check: is my subscriber registered?
+
+Inspect the active registry directly via the
+[`get_registry`](../../src/alfred/hooks/registry.py) singleton accessor:
+
+```python
+from alfred.hooks import get_registry
+
+regs = get_registry().subscribers_for("after_flush", kind="post")
+assert any(s.origin_module == __name__ for s in regs), \
+    "my subscriber didn't register"
+```
+
+`HookRegistry.subscribers_for(hookpoint, kind)` is the public-surface
+read path for introspecting the registry. It returns a tuple of
+`Subscriber` records — frozen, slotted dataclasses — each carrying
+`hook_fn` (the registered async callable), `hookpoint`, `kind`, `tier`,
+`origin_module` (captured from `hook_fn.__module__` at register time),
+and `registration_seq` (the monotonic counter used as the same-tier
+tie-breaker). A miss returns the module-level `_EMPTY` singleton; a hit
+returns a freshly-built tuple snapshot sorted by `(tier_rank,
+registration_seq)`.
+
+### Drive a synthetic dispatch from a test
+
+Once registered, you drive a one-shot chain via the lower-level
+[`invoke`](../../src/alfred/hooks/invoke.py) primitive. `HookContext` is
+frozen + slotted, so construction is keyword-friendly; the five required
+fields are `action_id`, `hookpoint`, `input`, `correlation_id`, and `kind`:
+
+```python
+import asyncio
+from alfred.hooks import HookContext, invoke
+
+# A synthetic input — actions in the real publishers carry a typed
+# payload (e.g. EpisodicRecordInput). Anything pickle-friendly works for
+# a drive-from-test case.
+fake_input = {"user_id": "alice", "content": "hello"}
+
+ctx = HookContext(
+    action_id="memory.episodic.record",
+    hookpoint="after_flush",       # stem; the dispatcher rewrites it via for_stage()
+    input=fake_input,
+    correlation_id="test-corr-id",
+    kind="post",
+)
+
+# invoke() is async — wrap the call in asyncio.run(...) at the test entry.
+result = asyncio.run(invoke("after_flush", ctx, kind="post"))
+```
+
+`invoke(name, ctx, *, kind=...)` applies `HookContext.for_stage(...)`
+internally so the subscriber sees the stage `invoke` was called with,
+even if the caller-passed `ctx` claims a different one. The returned
+`HookContext` is the end-of-chain fold (or last-good on a fault) — your
+test can assert on `result.input` to confirm a `pre`-stage rewrite, or
+on the absence of an exception to confirm a `post` chain ran clean.
+
 ## Progressive disclosure
 
 ### Observe
