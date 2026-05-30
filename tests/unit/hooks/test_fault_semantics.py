@@ -117,6 +117,7 @@ def short_deadline_registry(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
         gate=DevGate(),
         sink=spy_sink,
         chain_deadline_seconds=_SHORT_DEADLINE,
+        strict_declarations=False,
     )
     set_registry(registry)
     try:
@@ -145,6 +146,7 @@ def generous_deadline_registry(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]
         gate=DevGate(),
         sink=spy_sink,
         chain_deadline_seconds=0.5,
+        strict_declarations=False,
     )
     set_registry(registry)
     try:
@@ -444,6 +446,7 @@ async def test_chain_deadline_seconds_on_registry_is_the_gate(
         gate=DevGate(),
         sink=spy_sink,
         chain_deadline_seconds=_SHORT_DEADLINE,
+        strict_declarations=False,
     )
     set_registry(tight)
     try:

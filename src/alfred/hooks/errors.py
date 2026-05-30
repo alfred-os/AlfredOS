@@ -46,6 +46,9 @@ having landed yet.
 
 from __future__ import annotations
 
+import difflib
+from collections.abc import Iterable
+
 from alfred.errors import AlfredError
 from alfred.i18n import t
 
@@ -172,3 +175,287 @@ class HookSubscriberError(HookError):
             correlation_id=correlation_id,
         )
         return cls(message)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #119 register_hookpoint / register message helpers (i18n via t())
+# ──────────────────────────────────────────────────────────────────────
+#
+# Four operator-facing message templates rendered through ``t()`` so the
+# new register-time refusal raises (registry.py) honour the i18n rule
+# (CLAUDE.md i18n hard rule #1 — every operator-facing string goes
+# through ``t()``). Each helper carries the call-site attribution data
+# the catalog template interpolates; placing them here keeps every
+# ``hooks.*`` msgid co-located in one source-of-truth file (pybabel
+# behaviour + i18n rule #4 — atomic catalog landing).
+
+
+def hookpoint_drift_message(
+    *,
+    name: str,
+    stored: object,
+    new: object,
+) -> str:
+    """Render the ``hooks.hookpoint_drift`` operator-facing string.
+
+    Called by :meth:`alfred.hooks.registry.HookRegistry.register_hookpoint`
+    when a publisher attempts to re-declare a hookpoint with different
+    metadata. The attribution carries BOTH the stored and the new
+    metadata so the operator can grep both sites and reconcile.
+
+    The catalog template (``hooks.hookpoint_drift``) interpolates the
+    three fields; ``stored`` and ``new`` are ``repr``-rendered at the
+    catalog seam so the locale switch never loses the
+    ``HookpointMeta(...)`` shape that makes the diff readable.
+    """
+    return t(
+        "hooks.hookpoint_drift",
+        name=name,
+        stored=repr(stored),
+        new=repr(new),
+    )
+
+
+def unknown_tier_message(
+    *,
+    tier: str,
+    subscriber_name: str,
+    hookpoint: str,
+    valid_tiers: Iterable[str],
+) -> str:
+    """Render the ``hooks.unknown_tier`` operator-facing string.
+
+    Called by :meth:`alfred.hooks.registry.HookRegistry.register` when
+    the requested ``tier`` is not one of the three known values
+    (``"system"`` / ``"operator"`` / ``"user-plugin"``). The attribution
+    includes the subscriber name and the hookpoint so the operator
+    can locate the typo in source.
+
+    Args:
+        tier: The unknown tier string the caller passed.
+        subscriber_name: ``hook_fn.__qualname__`` of the offending
+            subscriber.
+        hookpoint: The dotted hookpoint identifier the subscriber was
+            registering against.
+        valid_tiers: The known-tier iterable surfaced verbatim in the
+            message so the operator sees the legal alternatives.
+    """
+    return t(
+        "hooks.unknown_tier",
+        tier=tier,
+        subscriber_name=subscriber_name,
+        hookpoint=hookpoint,
+        valid_tiers=repr(sorted(valid_tiers)),
+    )
+
+
+def hookpoint_not_declared_message(
+    *,
+    name: str,
+    declared_names: Iterable[str] = (),
+) -> str:
+    """Render the ``hooks.hookpoint_not_declared`` operator-facing string.
+
+    Called by :meth:`alfred.hooks.registry.HookRegistry.register` when
+    a subscriber attempts to register against a hookpoint that no
+    publisher has declared.
+
+    The rewritten message (Group F of the #119 review):
+
+    * **Publisher / subscriber distinction** — the message explicitly
+      tells the reader that the PUBLISHER of the hookpoint must call
+      ``register_hookpoint`` at module init, BEFORE any subscriber
+      attempts to register. This collapses the two shapes a
+      subscriber-side reader could otherwise guess at ("did I get the
+      name wrong?" vs "did the publisher forget to declare?").
+    * **Closest-match suggestion** — when ``name`` is within edit-
+      distance 2 of any declared hookpoint, the message appends a
+      ``Did you mean: 'X'?`` hint via :func:`difflib.get_close_matches`.
+      Mirrors the surface of CLI typo-suggestion error messages so the
+      reader's first reaction is "try the suggestion" not "re-read the
+      paragraph".
+
+    Args:
+        name: The undeclared hookpoint the subscriber tried to
+            register against.
+        declared_names: The currently-declared hookpoint names. Empty
+            iterable disables the closest-match suggestion (the
+            message still carries the publisher/subscriber hint).
+    """
+    suggestion = ""
+    matches = difflib.get_close_matches(name, declared_names, n=1, cutoff=0.6)
+    if matches:
+        suggestion = t("hooks.hookpoint_not_declared.did_you_mean", suggestion=matches[0])
+    return t(
+        "hooks.hookpoint_not_declared",
+        name=name,
+        suggestion=suggestion,
+    )
+
+
+def tier_not_subscribable_message(
+    *,
+    tier: str,
+    hookpoint: str,
+    subscribable_tiers: Iterable[str],
+) -> str:
+    """Render the ``hooks.tier_not_subscribable`` operator-facing string.
+
+    Called by :meth:`alfred.hooks.registry.HookRegistry.register` when
+    a subscriber's tier is rejected by the publisher's declared
+    ``subscribable_tiers``. The attribution surfaces both the
+    rejected tier AND the allowed set so the operator can either
+    re-tier the subscriber or amend the publisher's declaration.
+
+    Args:
+        tier: The rejected tier the subscriber declared.
+        hookpoint: The dotted hookpoint identifier.
+        subscribable_tiers: The publisher-declared allow-list,
+            rendered as a sorted list for stable comparison.
+    """
+    return t(
+        "hooks.tier_not_subscribable",
+        tier=tier,
+        hookpoint=hookpoint,
+        subscribable_tiers=repr(sorted(subscribable_tiers)),
+    )
+
+
+def dispatch_undeclared_hookpoint_message(
+    *,
+    name: str,
+    kind: str,
+    correlation_id: str,
+) -> str:
+    """Render the ``hooks.dispatch_undeclared_hookpoint`` operator-facing string.
+
+    Called by :func:`alfred.hooks.invoke._enforce_meta_drift` at dispatch
+    time, on the strict-mode arm where the hookpoint was never declared
+    AND register-time enforcement should have prevented the subscriber
+    from landing. This is the "internal inconsistency" path — both the
+    publisher's :meth:`HookRegistry.register_hookpoint` call AND the
+    subscriber's :meth:`HookRegistry.register` call should have
+    serialised the typo at module import time; reaching this branch
+    means something downstream re-imported a publisher module or the
+    registry singleton was swapped mid-run.
+
+    The audit row goes out BEFORE this message is rendered (see the
+    ``HOOKS_TIER_REJECTED`` emit at the call-site); this helper is the
+    operator-facing tail that surfaces on the raised
+    :class:`HookError`'s ``str()`` representation.
+
+    Args:
+        name: The dotted hookpoint identifier that was dispatched but
+            never declared.
+        kind: The lifecycle stage (``"pre"`` / ``"post"`` / ``"error"``
+            / ``"cancel"``) — surfaces on both the audit row and the
+            message so the operator can correlate the two attributions.
+        correlation_id: Cross-system trace id — surfaces on the message
+            so an operator reading the raised exception can grep the
+            audit log for the matching row.
+    """
+    return t(
+        "hooks.dispatch_undeclared_hookpoint",
+        name=name,
+        kind=kind,
+        correlation_id=correlation_id,
+    )
+
+
+def publisher_drift_message(
+    *,
+    name: str,
+    drift_kind: str,
+    declared_subscribable_tiers: Iterable[str],
+    declared_refusable_tiers: Iterable[str],
+    declared_fail_closed: bool,
+    invoked_subscribable_tiers: Iterable[str],
+    invoked_refusable_tiers: Iterable[str] | None,
+    invoked_fail_closed: bool | None,
+) -> str:
+    """Render the ``hooks.publisher_drift`` operator-facing string.
+
+    Called by :func:`alfred.hooks.invoke._enforce_meta_drift` when the
+    publisher's invoke-time args disagree with the
+    :class:`HookpointMeta` the publisher declared at module init. The
+    catalog template surfaces BOTH sides of the disagreement so the
+    operator can grep both the declaration site and the invoke site
+    and reconcile.
+
+    ``drift_kind`` is the FIRST field detected as disagreeing (the
+    detector walks ``subscribable_tiers`` → ``refusable_tiers`` →
+    ``fail_closed``); the message carries the full state of all three
+    fields so the operator can see whether more than one field drifted.
+
+    Args:
+        name: The dotted hookpoint identifier.
+        drift_kind: The first-detected disagreeing field
+            (``"subscribable_tiers"`` / ``"refusable_tiers"`` /
+            ``"fail_closed"``) — surfaces on both the audit row and
+            the message so the two attributions correlate.
+        declared_subscribable_tiers: From the stored
+            :class:`HookpointMeta`. Rendered as a sorted list.
+        declared_refusable_tiers: From the stored
+            :class:`HookpointMeta`. Rendered as a sorted list.
+        declared_fail_closed: From the stored :class:`HookpointMeta`.
+        invoked_subscribable_tiers: The publisher's invoke-time arg.
+            Rendered as a sorted list.
+        invoked_refusable_tiers: The publisher's invoke-time arg,
+            ``None`` when the handler does not pass this field.
+        invoked_fail_closed: The publisher's invoke-time arg, ``None``
+            when the handler does not pass this field.
+    """
+    invoked_refusable_repr = (
+        repr(sorted(invoked_refusable_tiers)) if invoked_refusable_tiers is not None else repr(None)
+    )
+    return t(
+        "hooks.publisher_drift",
+        name=name,
+        drift_kind=drift_kind,
+        declared_subscribable_tiers=repr(sorted(declared_subscribable_tiers)),
+        declared_refusable_tiers=repr(sorted(declared_refusable_tiers)),
+        declared_fail_closed=repr(declared_fail_closed),
+        invoked_subscribable_tiers=repr(sorted(invoked_subscribable_tiers)),
+        invoked_refusable_tiers=invoked_refusable_repr,
+        invoked_fail_closed=repr(invoked_fail_closed),
+    )
+
+
+def unknown_tier_in_declaration_message(
+    *,
+    hookpoint: str,
+    unknown_tiers: Iterable[str],
+    valid_tiers: Iterable[str],
+) -> str:
+    """Render the ``hooks.unknown_tier_in_declaration`` operator-facing string.
+
+    Called by :meth:`alfred.hooks.registry.HookRegistry.register_hookpoint`
+    when a publisher's :attr:`HookpointMeta.subscribable_tiers` or
+    :attr:`HookpointMeta.refusable_tiers` contains one or more tier
+    strings that are not in the known-tier vocabulary
+    (``"system"`` / ``"operator"`` / ``"user-plugin"``).
+
+    The high-blast shape this guards against (CR cycle-1 MAJ-3): a
+    publisher with ``subscribable_tiers={"operatior"}`` (typo) would
+    silently disable the register-time tier-allow-list gate at every
+    subscriber site — the typo string never matches any subscriber's
+    requested tier so every register call refuses. Without
+    declaration-time validation the typo is invisible until the first
+    subscriber registers AND the operator notices the unexpected
+    refusal. Declaration-time validation surfaces the typo at module
+    init.
+
+    Args:
+        hookpoint: The dotted hookpoint identifier the publisher is
+            declaring against.
+        unknown_tiers: The tier strings the publisher passed that are
+            not in the known-tier vocabulary.
+        valid_tiers: The known-tier vocabulary, rendered verbatim so
+            the operator sees the legal alternatives.
+    """
+    return t(
+        "hooks.unknown_tier_in_declaration",
+        hookpoint=hookpoint,
+        unknown_tiers=repr(sorted(unknown_tiers)),
+        valid_tiers=repr(sorted(valid_tiers)),
+    )

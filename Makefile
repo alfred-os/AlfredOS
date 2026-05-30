@@ -15,7 +15,7 @@
 
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
-        check format-check lint-check typecheck test test-unit test-integration test-smoke test-adversarial test-perf \
+        check format-check lint-check typecheck strict-declarations-lint test test-unit test-integration test-smoke test-adversarial test-perf \
         docs-check
 
 help: ## Show this help.
@@ -150,7 +150,10 @@ test-perf: ## Run the release-blocking hook-dispatch perf gate (host-load-sensit
 		echo "::notice::no tests/perf/test_*.py — skipping test-perf"; \
 	fi
 
-check: format-check lint-check typecheck test ## Verify everything (identical to CI). No mutations.
+strict-declarations-lint: ## #119 SEC-Med-1: `strict_declarations=False` MUST NOT appear in src/.
+	python3 scripts/check_strict_declarations.py
+
+check: format-check lint-check typecheck strict-declarations-lint test ## Verify everything (identical to CI). No mutations.
 
 # ──────────────────────────────────────────────────────────────
 # Docs link + anchor checker (PR E, plan task 8)

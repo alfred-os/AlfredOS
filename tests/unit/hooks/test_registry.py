@@ -254,7 +254,7 @@ def test_subscribers_sorted_by_tier_then_registration_seq(
     function-pure; hypothesis disallows pytest fixtures on the
     parameter list.
     """
-    registry = HookRegistry(gate=DevGate(allow_system=True))
+    registry = HookRegistry(gate=DevGate(allow_system=True), strict_declarations=False)
 
     # Register one subscriber per element of the insertion order.
     # Each registration captures the seq it received so we can assert
@@ -676,7 +676,7 @@ def test_register_unknown_tier_raises_hook_error_before_bucket_mutation() -> Non
             del plugin_id, hookpoint, requested_tier
             return True
 
-    registry = HookRegistry(gate=_AlwaysAllowGate())
+    registry = HookRegistry(gate=_AlwaysAllowGate(), strict_declarations=False)
     with pytest.raises(HookError, match="Unknown hook tier"):
         registry.register(
             hook_fn=_noop_pre,

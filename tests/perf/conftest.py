@@ -67,7 +67,7 @@ from typing import Any
 import pytest
 
 from alfred.hooks.capability import DevGate
-from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+from alfred.hooks.registry import OPEN_TIERS, HookRegistry, get_registry, set_registry
 
 # Pinned bench knobs — mirrored from
 # ``tests/perf/test_hook_dispatch_perf.py``. Centralising them lets the
@@ -238,6 +238,40 @@ def _p99(stats_holder: Any) -> float:
     return _p99_from_sorted(list(sorted_data))
 
 
+def _declare_bench_hookpoints(registry: HookRegistry) -> None:
+    """Declare every hookpoint the perf benches register subscribers on.
+
+    The benches drive :meth:`EpisodicMemory.record` which invokes the
+    five episodic hookpoints — production-side declarations happen in
+    :func:`alfred.memory.episodic.declare_hookpoints`. But the benches
+    also register their OWN pass-through subscribers on
+    ``before_validate`` BEFORE constructing the
+    :class:`EpisodicMemory` (the fixture-then-test ordering pytest
+    enforces). Under the production-strict default
+    (``strict_declarations=True``), the bench's register call would
+    fail because the publisher hasn't run its module-init declaration
+    against this fresh registry yet.
+
+    The fix mirrors how production publishers will use the API: the
+    fixture declares the hookpoint on the fresh registry BEFORE any
+    subscriber-register call. The values match the
+    :func:`alfred.memory.episodic.declare_hookpoints` defaults for
+    ``before_validate`` so the bench measurement reflects the same
+    metadata-lookup cost a production dispatch would pay.
+
+    Only ``before_validate`` needs an upfront declaration here — the
+    other four hookpoints are declared by
+    :func:`alfred.memory.episodic.declare_hookpoints` when
+    :class:`EpisodicMemory.__init__` runs (idempotent on equal meta).
+    """
+    registry.register_hookpoint(
+        name="before_validate",
+        subscribable_tiers=OPEN_TIERS,
+        refusable_tiers=OPEN_TIERS,
+        fail_closed=False,
+    )
+
+
 @pytest.fixture
 def fresh_registry() -> Iterator[HookRegistry]:
     """Yield a brand-new :class:`HookRegistry` installed as the singleton.
@@ -254,9 +288,18 @@ def fresh_registry() -> Iterator[HookRegistry]:
     pre-test singleton is captured at fixture entry and restored on
     teardown so the perf bench cannot leak subscribers into a sibling
     test run.
+
+    Strict declarations: the registry runs with the production default
+    (``strict_declarations=True``). :func:`_declare_bench_hookpoints`
+    declares ``before_validate`` upfront so the bench's pass-through
+    subscriber registrations pass the strict gate exactly as a
+    production publisher's would. Aligning the bench with the
+    publisher-declares-first ordering preserves strict-mode dispatch
+    measurement — see Group C in the #119 review report.
     """
     prior = get_registry()
     registry = HookRegistry(gate=DevGate())
+    _declare_bench_hookpoints(registry)
     set_registry(registry)
     try:
         yield registry
@@ -275,6 +318,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(gate=DevGate(allow_system=True))
+    _declare_bench_hookpoints(registry)
     set_registry(registry)
     try:
         yield registry

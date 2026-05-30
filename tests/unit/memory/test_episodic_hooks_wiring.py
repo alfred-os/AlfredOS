@@ -72,7 +72,7 @@ from alfred.hooks import HookContext, HookRefusal, HookSubscriberError
 from alfred.hooks.capability import DevGate
 from alfred.hooks.invoke import ERROR_EXC_METADATA_KEY
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
-from alfred.memory.episodic import EpisodicMemory, EpisodicRecordInput
+from alfred.memory.episodic import EpisodicMemory, EpisodicRecordInput, declare_hookpoints
 from alfred.memory.models import Episode
 
 # Representative kwargs covering every parameter — including non-default
@@ -191,6 +191,14 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     prior = get_registry()
     registry = HookRegistry(gate=DevGate(allow_system=True))
     set_registry(registry)
+    # #119 — declare the episodic publisher's hookpoints on the fresh
+    # registry BEFORE any subscriber registers. Production code reaches
+    # the same declaration via the module-init call at the bottom of
+    # ``src/alfred/memory/episodic.py``; tests swap the singleton so we
+    # re-run the declaration on the fresh one explicitly. The call is
+    # idempotent, so a future test that also constructs an
+    # :class:`EpisodicMemory` doesn't double-declare.
+    declare_hookpoints(registry)
     try:
         yield registry
     finally:

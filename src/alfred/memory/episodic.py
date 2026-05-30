@@ -8,11 +8,19 @@ this with the full summarization + semantic-fact consolidation pass.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alfred.hooks import invoking
+from alfred.hooks import (
+    OPEN_TIERS,
+    SYSTEM_ONLY_TIERS,
+    SYSTEM_OPERATOR_TIERS,
+    HookRegistry,
+    get_registry,
+    invoking,
+)
 from alfred.memory.models import Episode
 from alfred.providers.base import Role
 
@@ -29,6 +37,106 @@ from alfred.providers.base import Role
 # before a writer can persist a row whose role the closed-domain DB
 # constraint would later reject at commit time.
 _VALID_ROLES: frozenset[str] = frozenset({"system", "user", "assistant"})
+
+
+# The five hookpoint names :meth:`EpisodicMemory.record` invokes.
+# Centralised so :func:`declare_hookpoints` and ``record``'s invoke
+# calls share one source of truth (a typo on either side would surface
+# as a register-time strict-declaration failure under #119, but
+# centralising names removes the typo surface entirely).
+_HOOKPOINT_BEFORE_VALIDATE: Final[str] = "before_validate"
+_HOOKPOINT_BEFORE_DB_WRITE: Final[str] = "before_db_write"
+_HOOKPOINT_AFTER_FLUSH: Final[str] = "after_flush"
+_HOOKPOINT_WRITE_FAILED: Final[str] = "write_failed"
+_HOOKPOINT_CANCELLED: Final[str] = "cancelled"
+
+
+def declare_hookpoints(registry: HookRegistry | None = None) -> None:
+    """Declare every hookpoint :meth:`EpisodicMemory.record` invokes.
+
+    Idempotent — re-running this against the same registry is a no-op
+    (the registry's :meth:`HookRegistry.register_hookpoint` is
+    idempotent on equal metadata). This is what makes it safe to call
+    from BOTH module-init AND :meth:`EpisodicMemory.__init__`: the
+    second call's metadata equals the first call's, so the registry
+    short-circuits.
+
+    Why both call sites:
+
+    * **Module-init** (called at the bottom of this file) — the
+      production path. The first ``from alfred.memory.episodic import
+      EpisodicMemory`` triggers the declaration against the global
+      singleton, and subsequent subscriber registrations succeed.
+    * **Per-instance** (called from :meth:`EpisodicMemory.__init__`) —
+      the test path. A test fixture swaps :func:`get_registry`'s
+      singleton with a fresh registry; the module-init declaration
+      went to the prior registry, NOT the fresh one. Re-declaring on
+      the active registry at instance construction time ensures the
+      hookpoints land on whichever registry the test is using.
+
+    Idempotency means "called twice on the same registry" is safe.
+    Production code never sees the second call (the test swap doesn't
+    happen there); test code triggers both but the second is a no-op.
+
+    Args:
+        registry: The registry to declare against. Defaults to
+            :func:`get_registry`'s active singleton. The test fixtures
+            pass the fresh registry explicitly to be unambiguous.
+    """
+    target = registry if registry is not None else get_registry()
+
+    # ``before_validate`` — open hookpoint, all tiers eligible,
+    # ``fail_closed=False``. Refusals from any tier are authorized.
+    target.register_hookpoint(
+        name=_HOOKPOINT_BEFORE_VALIDATE,
+        subscribable_tiers=OPEN_TIERS,
+        refusable_tiers=OPEN_TIERS,
+        fail_closed=False,
+    )
+
+    # ``before_db_write`` — security stage. ``user-plugin`` cannot
+    # subscribe (would let a third-party plugin wedge into the
+    # redactor seam); only system-tier subscribers may refuse;
+    # ``fail_closed=True`` because a crashing redactor MUST NOT let
+    # the un-redacted write proceed (CLAUDE.md hard rule #7).
+    #
+    # The tier sets here MUST equal the invoke-site values in
+    # :meth:`EpisodicMemory.record` — Group I's dispatch-time drift
+    # check raises :class:`HookError` on any disagreement. CR cycle-1
+    # MAJ-4: routing both sides through the public
+    # :data:`alfred.hooks.SYSTEM_OPERATOR_TIERS` /
+    # :data:`alfred.hooks.SYSTEM_ONLY_TIERS` constants makes
+    # one-side edits impossible — both sites pin to the SAME object.
+    target.register_hookpoint(
+        name=_HOOKPOINT_BEFORE_DB_WRITE,
+        subscribable_tiers=SYSTEM_OPERATOR_TIERS,
+        refusable_tiers=SYSTEM_ONLY_TIERS,
+        fail_closed=True,
+    )
+
+    # The three terminal hookpoints inherit the defaults — open
+    # subscription, open refusal (though §6.5 says refusal is pre-only
+    # so post/error/cancel refusals propagate uncaught regardless),
+    # not fail-closed (post is observability-shaped; error and cancel
+    # have their own special re-raise semantics).
+    target.register_hookpoint(
+        name=_HOOKPOINT_AFTER_FLUSH,
+        subscribable_tiers=OPEN_TIERS,
+        refusable_tiers=OPEN_TIERS,
+        fail_closed=False,
+    )
+    target.register_hookpoint(
+        name=_HOOKPOINT_WRITE_FAILED,
+        subscribable_tiers=OPEN_TIERS,
+        refusable_tiers=OPEN_TIERS,
+        fail_closed=False,
+    )
+    target.register_hookpoint(
+        name=_HOOKPOINT_CANCELLED,
+        subscribable_tiers=OPEN_TIERS,
+        refusable_tiers=OPEN_TIERS,
+        fail_closed=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +179,14 @@ class EpisodicMemory:
 
     def __init__(self, *, session: AsyncSession) -> None:
         self._session = session
+        # Idempotently re-declare the hookpoints against the active
+        # registry. Production already declared at module-init
+        # (no-op); tests that swap the singleton via
+        # :func:`alfred.hooks.set_registry` get the declarations on
+        # whichever registry is active when the instance is
+        # constructed. The call is microseconds — five idempotent
+        # dict-and-equality checks.
+        declare_hookpoints()
 
     async def record(
         self,
@@ -150,15 +266,28 @@ class EpisodicMemory:
             # ``_ctx`` rebound to the chain's output, so reading
             # ``flow.input`` immediately after reflects any subscriber's
             # ``with_input`` mutation.
-            flow = await flow.pre("before_validate")
+            flow = await flow.pre(
+                _HOOKPOINT_BEFORE_VALIDATE,
+                subscribable_tiers=OPEN_TIERS,
+                refusable_tiers=OPEN_TIERS,
+                fail_closed=False,
+            )
             self._validate(flow.input)
             # ``before_db_write`` — security stage. The three kwargs are
             # the load-bearing security-stage values from spec §7;
             # weakening any of the three is a trust-boundary defect.
+            # Under #119 the values MUST equal
+            # :func:`declare_hookpoints`'s declaration for this
+            # hookpoint — the dispatch-time defense-in-depth re-check
+            # raises :class:`HookError` on drift. CR cycle-1 MAJ-4:
+            # both sides pin to the SAME public constants
+            # (:data:`alfred.hooks.SYSTEM_OPERATOR_TIERS` /
+            # :data:`alfred.hooks.SYSTEM_ONLY_TIERS`) so one-side
+            # edits are impossible.
             flow = await flow.pre(
-                "before_db_write",
-                subscribable_tiers=frozenset({"system", "operator"}),
-                refusable_tiers=frozenset({"system"}),
+                _HOOKPOINT_BEFORE_DB_WRITE,
+                subscribable_tiers=SYSTEM_OPERATOR_TIERS,
+                refusable_tiers=SYSTEM_ONLY_TIERS,
                 fail_closed=True,
             )
             # The terminal hookpoint names are fixed by spec §7 —
@@ -181,9 +310,9 @@ class EpisodicMemory:
             # signal to a future ``after_commit`` hookpoint owned by
             # ``session_scope`` (out of scope this slice).
             async with flow.body(
-                post="after_flush",
-                error="write_failed",
-                cancel="cancelled",
+                post=_HOOKPOINT_AFTER_FLUSH,
+                error=_HOOKPOINT_WRITE_FAILED,
+                cancel=_HOOKPOINT_CANCELLED,
             ):
                 await self._persist(flow.input)
 
@@ -291,3 +420,13 @@ class EpisodicMemory:
         rows = list(result.scalars().all())
         rows.reverse()
         return rows
+
+
+# Module-init declaration — #119 / spec §6.2 "publishers declare at
+# import time". The call is idempotent (re-declaring with the same
+# args is a no-op) so re-importing this module under pytest test
+# isolation is safe. Test fixtures that swap :func:`get_registry`'s
+# singleton get the declaration via :meth:`EpisodicMemory.__init__`'s
+# call to :func:`declare_hookpoints`, which targets the active
+# registry at instance construction time.
+declare_hookpoints()
