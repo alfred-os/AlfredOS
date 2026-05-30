@@ -7,6 +7,8 @@ deliberate, bounded deviation from PRD §5 (which requires plugins to
 speak MCP); the deviation and the Slice-3 rewrite plan are documented in
 [ADR-0009](../adr/0009-comms-adapter-protocol-slice2-only.md).
 
+Sibling subsystem docs: [identity](identity.md), [hooks](hooks.md).
+
 ## Overview
 
 Every comms adapter satisfies the same lifecycle contract: `start()`,

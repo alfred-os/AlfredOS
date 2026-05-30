@@ -1,0 +1,525 @@
+# Hooks subsystem
+
+The hooks subsystem owns "where, and on whose authority, does third-party
+code get to observe, mutate, or refuse one of AlfredOS's actions?" Every
+in-tree action that wants to be hookable threads its lifecycle through
+the same five-stage primitive; every plugin or in-tree subscriber that
+wants to participate registers against the same registry under the same
+capability gate.
+
+Slice 2.5 is the subsystem's first slice. The dispatch engine, the
+publisher helper, the capability gate, the four-kind contract, the
+audit-row vocabulary, and the per-process registry all land here. The
+PoC publisher (`memory.episodic.record`) lives in the memory subsystem
+but its hook wiring is documented here because the contract belongs to
+hooks, not to memory.
+
+Sibling subsystem docs: [identity](identity.md), [comms](comms.md).
+
+## Hello world
+
+The simplest case — a `user-plugin`-tier `post` observer that watches
+every recorded turn and changes nothing:
+
+> **Hookpoint naming.** PR-A's in-process dispatch keys on the LOCAL stem
+> name the publisher passes to `invoke()` (`"after_flush"`,
+> `"before_validate"`, etc.). The dotted form
+> (`memory.episodic.record.after_flush`) is the canonical threat-model
+> identifier the Slice-3 MCP transport will normalize to — but a Slice-2.5
+> subscriber MUST use the stem to fire against PR-B's publisher. See the
+> `tests/unit/memory/test_episodic_hooks_wiring.py` fixtures for the
+> as-shipped registration form.
+
+```python
+from alfred.hooks import hook, HookContext
+
+@hook("after_flush", kind="post", tier="user-plugin")
+async def log_recorded_turn(ctx: HookContext) -> None:
+    print(f"recorded turn for {ctx.input.user_id}")  # observe only
+    return None  # pass through — the chain's view is unchanged
+```
+
+This is the whole observer contract: an async function decorated with
+the hookpoint name, the lifecycle kind, and the trust tier the
+subscriber is requesting. Returning `None` means "no change" for every
+kind — the dispatcher folds the prior chain ctx forward to the next
+subscriber. Security material — the capability gate, the refusal
+contract, the fail-closed semantics — layers on top of this minimal
+shape.
+
+## Progressive disclosure
+
+### Observe
+
+The hello-world above is the canonical `post` observer. The `pre`
+observer is the mirror — fires before the action body runs, returns
+`None`, sees the input the action will process:
+
+```python
+@hook("before_validate", kind="pre", tier="user-plugin")
+async def count_pending_writes(ctx: HookContext) -> None:
+    metrics.incr("pending_writes", tags={"user": ctx.input.user_id})
+    return None
+```
+
+A `None` return from a `post` observer is end-of-story — there is no
+downstream caller to see a substitution. A `None` return from a `pre`
+observer means "I have nothing to rewrite; proceed with the carrier you
+already have." Both fall through cleanly.
+
+> **Snippet preamble.** The Mutate, Refuse, and System-tier examples below
+> share these imports / stubs. Drop them once at the top of your subscriber
+> module:
+>
+> ```python
+> from dataclasses import replace
+> from alfred.hooks import hook, HookContext, HookRefusal
+> from alfred.memory.episodic import EpisodicRecordInput  # actual model name in src
+>
+> # placeholder for an imagined PII detector — swap in your real implementation
+> def looks_like_api_key(s: str) -> bool: ...
+> def redact(s: str) -> str: ...
+> ```
+
+### Mutate
+
+A `pre` hook that returns a new `HookContext` rewrites the input the
+action body will see:
+
+```python
+@hook("before_db_write", kind="pre", tier="operator")
+async def normalise_content(
+    ctx: HookContext[EpisodicRecordInput],
+) -> HookContext[EpisodicRecordInput]:
+    new_input = replace(ctx.input, content=ctx.input.content.strip())
+    return ctx.with_input(new_input)
+```
+
+`HookContext` is frozen + slotted; `with_input` returns a NEW carrier.
+Subsequent subscribers and the action body see the mutated input. The
+dispatcher folds `chain_ctx = result` after each subscriber so the next
+one starts from the most recent mutation.
+
+The subtle bit — a later refusal **discards** an earlier mutation. If
+subscriber A rewrites `content`, then subscriber B raises `HookRefusal`,
+the action body NEVER runs and the caller never observes A's mutation.
+The fold buffer is only realised when the chain completes. This is the
+intent: a refusal means "the action is not happening," not "the action
+is happening with the first half of subscribers' rewrites baked in."
+
+### Refuse
+
+A `pre` hook raises `HookRefusal` to short-circuit the action. The
+dispatcher stops walking the chain immediately, emits a `hooks.refusal`
+audit row, and propagates the exception to the caller:
+
+```python
+@hook("before_db_write", kind="pre", tier="system")
+async def block_secret_leaks(
+    ctx: HookContext[EpisodicRecordInput],
+) -> HookContext[EpisodicRecordInput]:
+    if looks_like_api_key(ctx.input.content):
+        raise HookRefusal(
+            hook_id="dlp-block",
+            action_id=ctx.action_id,
+            reason="content matches a known secret shape",
+            correlation_id=ctx.correlation_id,
+        )
+    return ctx
+```
+
+Refusal is **authorized** per hookpoint, not unconditional. The
+publisher declares which tiers may refuse via `refusable_tiers`. A
+subscriber whose tier is in the set sees its refusal propagate; a
+subscriber whose tier is OUTSIDE the set has its refusal **swallowed**,
+its would-be mutation **discarded**, and a `hooks.unauthorized_refusal`
+audit row written. The caller never sees a `HookError` for an
+unauthorized refusal — the audit row IS the loud-failure escape (the
+caller did not write that hook, so handing it an exception would
+violate the spec; CLAUDE.md hard rule #7 is satisfied by the audit row,
+not by raising). This is spec §6.5.
+
+### System-tier
+
+The PoC redactor on `before_db_write` is the system-tier example. It
+needs `tier="system"` to see pre-DLP content (an in-tree security stage)
+and it needs the registry's capability gate to grant `system`:
+
+```python
+@hook("before_db_write", kind="pre", tier="system")
+async def redact_pre_persist(
+    ctx: HookContext[EpisodicRecordInput],
+) -> HookContext[EpisodicRecordInput]:
+    redacted = redact(ctx.input.content)
+    return ctx.with_input(replace(ctx.input, content=redacted))
+```
+
+`system` is the highest-blast tier. Two independent gates must pass
+before such a subscriber runs (spec §6.3):
+
+- **Publisher-side allow-list.** The hookpoint's `subscribable_tiers`
+  must include `system`. For `before_db_write` that is the case —
+  `subscribable_tiers={"system", "operator"}`, deliberately excluding
+  `user-plugin` so a third-party plugin cannot wedge into the redactor
+  seam.
+- **Operator-side capability grant.** The registry's `CapabilityGate`
+  must approve. In Slice 2.5 the gate is `DevGate`; the default
+  refuses `system` unconditionally. The bootstrap must construct
+  `DevGate(allow_system=True)` explicitly to enable system-tier
+  registration. Test fixtures use `fresh_registry_allow_system` for
+  the same reason.
+
+> **Slice 2.5 caveat — `subscribable_tiers` is DEFERRED, not enforced.**
+> The publisher-side `subscribable_tiers` allowlist is threaded through the
+> dispatch path but EVERY invoke handler currently does `del subscribable_tiers`
+> (see `src/alfred/hooks/invoke.py:1063,1223,1331,1466`). The Slice-3 grant gate
+> will activate enforcement; until then, only `CapabilityGate.allow_subscriber()`
+> blocks user-plugin subscribers, and `DevGate` (the Slice 2.5 default) grants
+> `operator` and `user-plugin` unconditionally but refuses `system` without
+> `DevGate(allow_system=True)` (see `src/alfred/hooks/capability.py:51` for the
+> grant table). A subscriber author MUST NOT rely on `subscribable_tiers` for a
+> security guarantee this slice. Tracked: follow-up issue (open via
+> `gh issue create` after PR-C merge).
+
+The two-gate model is what makes "a system-tier security stage is
+load-bearing" survive contact with a malicious in-tree dependency: a
+dependency that imports a `@hook(..., tier="system")` decorator at
+import time fails the gate refusal and the registration leaves no
+trace in the registry. There is no env-flag escape hatch — sec-007
+forbids `DevGate` reading the environment for the
+`ambient-escalation` reason given in the spec.
+
+The PoC's `before_db_write` stage is `fail_closed=True`. A subscriber
+that crashes (the redactor backend is down), refuses, or exceeds the
+per-chain deadline must NOT let the un-redacted write proceed — that
+is the spec §6.6 + §6.4 contract. The wrap is a `HookSubscriberError`
+with the original exception chained via `__cause__`; the original
+exception's `args` / `str(exc)` are NEVER copied into the audit row
+(CLAUDE.md hard rule #1 — the subscriber may have inadvertently
+wrapped T3 user content in its exception).
+
+## Contract surface
+
+### The hookpoint primitive and the four kinds
+
+A **hookpoint** is a named stage in an action's lifecycle. The publisher
+calls `invoke(name, ctx, kind=...)` at the stage; the dispatcher walks
+every subscriber registered against `(name, kind)`. Spec §4 fixes four
+kinds:
+
+- **`pre`** — runs BEFORE the action body. Subscribers may mutate the
+  input (return a new ctx via `with_input`), or refuse via
+  `HookRefusal`. The first authorized refusal short-circuits the chain
+  and the action body never runs.
+- **`post`** — runs AFTER the action body succeeds. Subscribers may
+  return a new ctx for downstream observers; refusal is meaningless
+  here (the action already happened) and `HookRefusal` propagates
+  uncaught with NO refusal audit row — §6.5's authorization contract is
+  `pre`-only.
+- **`error`** — runs when the action body raised a non-cancellation
+  exception. The first subscriber that returns a `HookContext` wins:
+  "swallow-and-substitute" semantics. The upstream exception is
+  exposed under `ctx.metadata["error_exc"]` so subscribers can
+  introspect what went wrong. If every subscriber returns `None`, the
+  original exception re-raises.
+- **`cancel`** — runs on `asyncio.CancelledError`. Cleanup-only.
+  Subscriber return values are IGNORED; the original cancellation
+  always re-raises after the chain completes. The cancel chain fires
+  BEFORE the error chain would — the spec §4 cancel-before-error
+  invariant is what stops an error subscriber from misclassifying a
+  cancellation as a non-cancellation failure.
+
+### The `invoking` helper and the `invoke` primitive
+
+Publishers thread an action through the `invoking` async context
+manager rather than calling `invoke` four times. The helper mints one
+`correlation_id` per action, builds the initial frozen `HookContext`,
+and yields a mutable `Flow[T]` driver. The PoC's `record` reads:
+
+```python
+async with invoking("memory.episodic.record", inp) as flow:
+    flow = await flow.pre("before_validate")
+    self._validate(flow.input)
+    flow = await flow.pre(
+        "before_db_write",
+        subscribable_tiers=frozenset({"system", "operator"}),
+        refusable_tiers=frozenset({"system"}),
+        fail_closed=True,
+    )
+    async with flow.body(
+        post="after_flush",
+        error="write_failed",
+        cancel="cancelled",
+    ):
+        await self._persist(flow.input)
+```
+
+`flow.pre(stage, ...)` drives the `pre` chain and rebinds the flow's
+internal ctx to the chain's output; `flow.body(post=..., error=...,
+cancel=...)` is the async context manager that fires the right
+terminal chain on the body's exit (success → post; cancellation →
+cancel + re-raise; any other exception → error + re-raise-or-suppress).
+This is spec §3.4.
+
+The lower-level `invoke(name, ctx, *, kind, ...)` primitive is what
+`Flow.pre` and `Flow.body` call. Callers that need finer control (a
+publisher with non-standard lifecycle, a test that drives one chain
+in isolation) use `invoke` directly. The same five kwargs flow through
+both surfaces: `subscribable_tiers`, `refusable_tiers`, `fail_closed`,
+`exc`, plus the chain deadline read from the registry.
+
+### Tier model
+
+Every subscriber registers at a tier (spec §6.1):
+
+- **`system`** — observes pre-DLP content, may participate in security
+  stages. In Slice 2.5 every in-tree module is treated as `T0`; the
+  capability grant requires explicit operator opt-in
+  (`DevGate(allow_system=True)`) per sec-007. Slice 3 ships the
+  manifest-driven `CapabilityGate` with an install-time prompt.
+- **`operator`** — the operator's own customisations. The dev-time
+  gate grants this unconditionally.
+- **`user-plugin`** — third-party plugins under the operator's
+  authority. The dev-time gate grants this unconditionally.
+
+Tier is a **requested capability**, not a self-declaration. The
+publisher's `subscribable_tiers` allow-list and the registry's
+capability gate together decide whether a registered subscriber
+actually runs.
+
+### Fault semantics
+
+A subscriber that raises an unexpected exception (a bug, a downstream
+backend down) is **never silently swallowed** (spec §6.6, CLAUDE.md
+hard rule #7). The dispatcher:
+
+1. Wraps the exception as `HookSubscriberError` via
+   `HookSubscriberError.from_subscriber(...)`, chained via `from exc`.
+2. Emits a `hooks.subscriber_error` audit row carrying the
+   subscriber's `__qualname__` and the exception's class NAME only
+   (never `str(exc)` / `exc.args` — they may carry T3 content).
+3. Applies `fail_closed`:
+   - `fail_closed=True` — the wrap re-raises; the action body never
+     runs (if the fault was in a `pre` chain) or the action's
+     terminal disposition is overridden (if in a `post` / `error`).
+   - `fail_closed=False` — the chain rewinds to the last-good ctx
+     and continues. The audit row IS the loud-failure escape; the
+     fault is recorded, not hidden.
+
+The `cancel` chain is special. A subscriber that crashes during a
+cancel chain has its exception swallowed (cleanup must be best-effort
+so the cancellation always propagates) but the audit row still
+fires — the swallow is no longer silent. `cancel` never honours
+`fail_closed`; the upstream cancellation always re-raises.
+
+### Per-chain timeout
+
+Every chain is wrapped in ONE `asyncio.timeout(chain_deadline_seconds)`.
+The default is **250 ms per chain** (`HOOK_CHAIN_DEADLINE_SECONDS` in
+`src/alfred/hooks/registry.py`), configurable per registry. A timeout
+fires `hooks.chain_timeout` audit row and applies the hookpoint's
+`fail_closed` policy. The cancelled in-flight subscriber is awaited to
+completion under a secondary 50 ms cleanup deadline so its `finally`
+block (DB rollback, lock release, span close) runs before the audit
+row lands — bounded so an adversarial subscriber that traps
+`CancelledError` cannot stall the dispatcher indefinitely. The
+`cleanup_timed_out` field on the audit row distinguishes a cooperative
+slow cleanup from an adversarial trap.
+
+**The 250 ms per-chain wall-clock deadline (§6.4) is a SEPARATE concern
+from the µs dispatch-overhead budget below.** The wall-clock deadline
+bounds how long a chain may take to complete (real subscriber work
+included); the perf budget bounds how much overhead the dispatch engine
+itself adds, independent of any subscriber. A regression in either is a
+release blocker; do not conflate them.
+
+### Re-entry semantics
+
+A subscriber that re-invokes its own hookpoint within the same chain
+would recurse indefinitely. The dispatcher detects this via a
+`ContextVar` stack of in-flight hookpoint names
+(`alfred.hooks.registry._reentry`); on detection the dispatcher routes
+to `_invoke_internal`, which **skips the chain entirely** (every tier,
+system included — the T0-only invariant) and emits a
+`hooks.reentry_bypass` audit row. This is spec §6.9.
+
+The stack propagates via Python's standard `ContextVar` rules,
+including across `asyncio.create_task` — a subscriber that spawns a
+task to re-invoke its own hookpoint also routes to the bypass path.
+There is no opt-out / fresh-chain escape hatch in Slice 2.5; a
+subscriber genuinely needing a detached chain lands as a Slice-3
+`@hook(...)` registration flag, not a runtime knob (the runtime knob
+would be an injection vector).
+
+> **ContextVar boundary caveat.** The `_reentry` ContextVar guard inherits
+> across `asyncio.create_task` (Python copies the context at task spawn).
+> It does NOT inherit across:
+> - `asyncio.to_thread(...)` — runs in a thread executor without contextvar copy
+> - `loop.run_in_executor(...)` / `ThreadPoolExecutor.submit(...)` — same
+> - `asyncio.run_coroutine_threadsafe(...)` — cross-loop
+>
+> A subscriber that spawns work via any of these escapes the re-entry guard
+> for that sub-call. The defensive runtime check inside `_invoke_internal`
+> will refuse the re-entry attempt LOUDLY (raising `HookError`) rather than
+> silently bypass, but subscriber authors should be aware and prefer
+> `asyncio.create_task(...)` for in-loop fan-out.
+
+`_invoke_internal` is module-private + carries a defensive runtime
+guard — a caller that imports it directly outside the re-entry
+detection path receives `HookError`. Sec-008's "useless when misused"
+pin.
+
+### Audit vocabulary
+
+PR-A's `StructlogAuditSink` emits six event constants from
+[`src/alfred/hooks/audit_sink.py`](../../src/alfred/hooks/audit_sink.py)
+(the `HOOKS_*` `Final[str]` block):
+
+| Event | When |
+|---|---|
+| `hooks.refusal` | Subscriber raised `HookRefusal` (`pre` kind only) |
+| `hooks.chain_timeout` | Per-chain `asyncio.timeout(...)` expired |
+| `hooks.subscriber_error` | Subscriber raised a non-refusal exception |
+| `hooks.error_suppressed` | A deny was suppressed because the action body had already failed (`error` stage) |
+| `hooks.unauthorized_refusal` | A refusal was raised by a hook whose declared tier the capability gate denied |
+| `hooks.reentry_bypass` | Re-entrant dispatch — the inner chain was bypassed |
+
+Migration `0006_audit_result_hooks_values.py` extended `ck_audit_log_result`
+with `"fault"` (chain timeout / subscriber error / error suppressed) and
+`"bypass"` (re-entry path); the existing Slice-1/2 dispositions
+(`success`, `refused`, `cancelled`, …) remain. Operators writing SIEM
+queries against the audit log should grep on the event constant
++ result-disposition pair.
+
+## Performance budget
+
+The perf gate measures **dispatch overhead only** — the cost the
+`invoke()` machinery adds, NOT the cost of the action body or its
+DB round-trip (which dominate real latency; the gate is an overhead
+gate, not a throughput gate). Each bench measures **p99 delta over a
+same-loop baseline** (`await` of a no-op coroutine) so the gate is
+not CI-hardware-absolute and not dominated by event-loop scheduling
+noise. `pytest-benchmark` is pinned at 100 rounds × 20 iterations
+with 5 warmup rounds.
+
+**Release-blocking budgets — empirically grounded** (PR-C Task 2,
+NOT spec §5's a-priori illustrative numbers):
+
+- Empty hookpoint (zero subscribers): **p99 < 100 µs** delta over
+  baseline.
+- 5-subscriber pre chain: **p99 < 1000 µs** delta over baseline.
+- Refusal short-circuit: subscribers after the refusing one do not run
+  (correctness pin paired with the bench).
+
+The CALIBRATION NOTE in
+[`tests/perf/test_hook_dispatch_perf.py`](../../tests/perf/test_hook_dispatch_perf.py)
+documents the empirical p99 on PR-A's as-shipped path (25-30 µs empty,
+190-240 µs 5-chain on M-series; ~2-3× slower on CI) and the ~4×
+headroom rationale. The original spec §5 numbers (<10 µs empty,
+<100 µs 5-chain) stand as a long-term optimisation target; reaching
+them is a future dispatch-optimisation PR.
+
+**This µs dispatch-overhead gate is distinct from the 250 ms per-chain
+wall-clock deadline (§6.4).** The dispatch-overhead gate catches a
+regression that doubles the dispatcher's own cost; the wall-clock
+deadline catches a chain that takes too long to complete (real
+subscriber work included). Conflating them would let a 200 ms slow
+subscriber pass the dispatch-overhead gate while the chain-deadline
+gate that should catch it gets relaxed.
+
+The gate runs on every PR via
+[`.github/workflows/perf.yml`](../../.github/workflows/perf.yml). A
+regression that pushes either bench above its budget is treated as a
+structural regression and must be investigated before merge (CLAUDE.md
+hard rule: do not weaken security or perf defaults to make tests pass).
+
+## Manifest surface
+
+Plugins declare hookpoint subscriptions in their manifest's `hooks`
+block — the **existing** field PRD §5.1 and
+[ADR-0014](../adr/0014-pluggable-hooks-for-every-action.md) already
+specify. A subscription is a `(action, kind)` tuple plus the tier the
+plugin requests:
+
+```toml
+[[hooks]]
+action = "memory.episodic.record.before_db_write"
+kind = "pre"
+tier = "operator"
+```
+
+> **Note (Slice 2.5):** PR-A's in-process dispatch keys on the LOCAL stem
+> (`"before_db_write"`). The dotted form shown above is the
+> canonical/threat-model identifier the Slice-3 MCP transport will
+> accept; until then, a plugin manifest emitted into the in-process
+> loader must use the stem. The Slice-3 MCP transport will introduce a
+> canonical→runtime resolution layer.
+
+Slice 2.5 does NOT invent new field names. An earlier draft did and a
+review caught the drift against PRD §5.1 / ADR-0014; the spec text was
+corrected. The manifest is consumed by the Slice-3 MCP transport. This
+slice only documents the shape so Slice 3 implements against one
+canonical definition.
+
+A plugin's manifest also declares any hookpoints the plugin
+**publishes** (calls `invoke()` against from its own code) so the
+operator and other plugins know what surface the plugin exposes. The
+publish declaration uses the same `hooks` block (spec §3.6 — a plugin
+is symmetric: it both subscribes and publishes via the same primitive).
+
+## Deferred to Slice 3
+
+Per spec §6.10 and ADR-0014:
+
+- **The real manifest-driven `CapabilityGate` + install-time prompt
+  UX.** Slice 2.5 ships `DevGate`; Slice 3 replaces it with the
+  operator-grant gate that consults a policy store, prompts the
+  operator on first install, and audits the grant. `DevGate` stays
+  available as the dev-time default; tests continue to construct it
+  directly.
+- **MCP-transport hook registration for out-of-process plugins.**
+  Slice 2.5 wires only the in-process `@hook` decorator path. The MCP
+  transport rewrite lands alongside [ADR-0009](../adr/0009-comms-adapter-protocol-slice2-only.md)'s
+  protocol inversion: a plugin process registers via the same
+  manifest field shape but the registration crosses the process
+  boundary via MCP rather than via Python decorator.
+- **Per-hookpoint data-classification tags.** T1/T2/T3 labels on
+  hookpoints, matched against subscriber clearance. Depends on the
+  trust-tier work deferred by [ADR-0013](../adr/0013-defer-t1-t3-and-dual-llm.md).
+  Slice 3 treats this as a **blocking gate** on enabling
+  out-of-process subscribers — an MCP plugin subscribing to a
+  hookpoint that carries T3 content without a classification check
+  would be a trust-boundary hole.
+- **Audit-volume sampling / aggregation.** Hook-trace rows can reach
+  hundreds per second once actions carry real subscribers. Sampling
+  lands when the volume is measurable; until then every chain
+  invocation emits an audit row.
+
+`DevGate` is the Slice-2.5 gate. In-tree code is treated as `T0` (the
+trust-tier the spec stamps on in-tree modules) so `DevGate` grants
+`operator` and `user-plugin` unconditionally; `system` requires
+constructor opt-in. Slice 3 replaces the whole gate without touching
+the publisher / subscriber call sites — the `CapabilityGate` Protocol
+surface is stable.
+
+## Cross-references
+
+- [the hooks design spec](../superpowers/specs/2026-05-27-slice-2.5-hooks-design.md)
+  — the source of truth for §3.1–§7 contract decisions.
+- [ADR-0014](../adr/0014-pluggable-hooks-for-every-action.md) — the
+  decision that every action is hookable, plus the PR-C amendment that
+  pins "core methods ARE the producer surface."
+- [ADR-0013](../adr/0013-defer-t1-t3-and-dual-llm.md) — the T1/T3
+  deferral that makes the dispatcher's `T0`-only re-entry-bypass
+  invariant tenable this slice.
+- [ADR-0009](../adr/0009-comms-adapter-protocol-slice2-only.md) — the
+  MCP-transport rewrite that will carry out-of-process hook
+  registration in Slice 3.
+- Glossary terms: `hookpoint`, `dispatch chain`, `capability gate`,
+  `trust tier`, `audit log`, `correlation id`. New entries land in the
+  glossary in PR-C Task 7; this doc references them as bare terms
+  until those anchors exist.
+- Source code: [`src/alfred/hooks/`](../../src/alfred/hooks/) (registry,
+  invoke, decorators, capability, context, errors, audit sink) and
+  [`src/alfred/memory/episodic.py`](../../src/alfred/memory/episodic.py)
+  (the PoC publisher).
