@@ -59,7 +59,7 @@ jobs:
         run: uv run pyright src/
       - name: Unit tests + coverage gates
         if: hashFiles('tests/unit/**/*.py') != ''
-        # Two gates so we can enforce different thresholds:
+        # Two gates here:
         #   1. Overall coverage >= 75% (matches pyproject.toml [tool.coverage.report]
         #      fail_under). Drift-detection contract — keeps wide modules honest.
         #   2. Security boundaries 100% line+branch. CLAUDE.md hard rule:
@@ -67,11 +67,35 @@ jobs:
         #      Slice 1's security surface is small (tiers + secret broker), so
         #      100% is achievable today; future slices add canaries, capability
         #      gate, DLP — each must land with its tests at this bar.
-        # The second `coverage report` re-uses the .coverage data file written
-        # by the pytest --cov run; no second test execution.
+        # The follow-up `coverage report` invocation re-uses the .coverage
+        # data file written by the pytest --cov run; no second test execution.
+        # The hooks-subsystem coverage gate lives in its OWN step below so
+        # the `if: hashFiles('src/alfred/hooks/*.py') != ''` guard cleanly
+        # no-ops on a branch where the hooks subsystem hasn't landed yet —
+        # mirrors the unit-test step's guard discipline.
         run: |
           uv run pytest tests/unit -q --cov=src/alfred --cov-report=term-missing --cov-fail-under=75
           uv run coverage report --include='src/alfred/security/*' --fail-under=100
+      - name: Hooks subsystem 100% line+branch coverage
+        # Slice 2.5 PR-A's ``src/alfred/hooks/`` is a trust boundary in its
+        # own right — the capability gate (sec-007), the re-entry bypass
+        # (sec-008), the chain-deadline timer (§6.4) and the
+        # refusal-authorization check (§6.5) ALL live in this subsystem;
+        # every line must be proven by a test. Per-file ``--include``
+        # enumerates the eight ``.py`` modules (including ``__init__.py``
+        # so the public-surface lock is gated too) so the list stays
+        # unambiguous when new files land — a new module skipped here is a
+        # code-review smell, not a silent coverage hole.
+        # The hashFiles guard makes the step a clean no-op on a branch where
+        # the hooks subsystem hasn't landed yet (mirrors the unit-test step
+        # at line 61's guard discipline). Re-uses the .coverage data file
+        # written by the unit-test step above; depends on that step running
+        # first via implicit step ordering.
+        if: hashFiles('src/alfred/hooks/*.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py' \
+            --fail-under=100
 
   integration:
     name: Integration
