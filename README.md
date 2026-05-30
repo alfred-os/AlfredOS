@@ -1,8 +1,12 @@
 # AlfredOS
 
+[![Discord](https://img.shields.io/discord/1508136189830369300?label=chat&logo=discord&logoColor=white&style=flat-square)](https://discord.gg/HeNwaBhJfU)
+
 > An open-source, self-hostable, multi-user, multi-persona, security-hardened agentic OS.
 
 **Status:** Pre-implementation. The design is in [`PRD.md`](./PRD.md); the operating manual for AI agents working in this repo is in [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md).
+
+**Community:** Join the [**AlfredOS Discord**](https://discord.gg/HeNwaBhJfU) to ask questions, share builds, or follow development.
 
 ## What is AlfredOS?
 
