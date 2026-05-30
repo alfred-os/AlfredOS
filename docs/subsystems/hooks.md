@@ -391,6 +391,20 @@ PR-A's `StructlogAuditSink` emits six event constants from
 | `hooks.unauthorized_refusal` | A refusal was raised by a hook whose declared tier the capability gate denied |
 | `hooks.reentry_bypass` | Re-entrant dispatch — the inner chain was bypassed |
 
+> **Slice 2.5 design choice — failures-only auditing.** All six events
+> above are failure-path constants. Happy-path dispatch emits NO audit row
+> in Slice 2.5; observability of successful subscriber execution is via the
+> subscriber's own logging or via the perf benchmark output. The rationale
+> traces to **CLAUDE.md hard rule #7** ("No silent failures in security
+> paths — failed DLP, failed capability check, canary trip → loud audit
+> entry"): the rule frames the audit log as the surface for **anomalies an
+> operator would want to investigate**, not as a positive-confirmation
+> ledger. The emit-site authority is `src/alfred/hooks/invoke.py` — a future
+> positive-confirmation event (e.g. `hooks.dispatched`) would land as a new
+> `emit()` call there plus a new `HOOKS_*` `Final[str]` constant in
+> `src/alfred/hooks/audit_sink.py`, NOT as a sink-side filter. Candidate
+> Slice-3 addition if operator demand emerges.
+
 Migration `0006_audit_result_hooks_values.py` extended `ck_audit_log_result`
 with `"fault"` (chain timeout / subscriber error / error suppressed) and
 `"bypass"` (re-entry path); the existing Slice-1/2 dispositions
