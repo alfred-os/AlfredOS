@@ -15,7 +15,7 @@
 
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
-        check format-check lint-check typecheck test test-unit test-integration test-smoke test-adversarial \
+        check format-check lint-check typecheck test test-unit test-integration test-smoke test-adversarial test-perf \
         docs-check
 
 help: ## Show this help.
@@ -111,6 +111,21 @@ test-adversarial: ## Run the adversarial security suite (nightly + release-block
 		uv run pytest tests/adversarial -q; \
 	else \
 		echo "::notice::no tests/adversarial/ yet — skipping test-adversarial"; \
+	fi
+
+# Mirrors `test-adversarial`'s shape: its own gate, NOT part of `check`'s
+# prerequisites. Benches are slow (~0.5–2s/bench) and hardware-sensitive
+# (CI vs laptop p99 deltas differ), so the perf suite runs as its own
+# release-blocking gate in CI (.github/workflows/perf.yml), not on every
+# `make check`. Two pytest invocations because `--benchmark-only`
+# deselects `test_refusal_short_circuits_subscribers` (a correctness pin
+# paired with the 5-chain bench; no benchmark fixture by design).
+test-perf: ## Run the release-blocking hook-dispatch perf gate.
+	@if [ -d tests/perf ] && find tests/perf -name 'test_*.py' 2>/dev/null | grep -q .; then \
+		uv run pytest tests/perf -v --benchmark-only && \
+		uv run pytest tests/perf -v -k refusal_short_circuits_subscribers ; \
+	else \
+		echo "::notice::no tests/perf/test_*.py — skipping test-perf"; \
 	fi
 
 check: format-check lint-check typecheck test ## Verify everything (identical to CI). No mutations.
