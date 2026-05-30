@@ -73,8 +73,10 @@ Design decision — sink emission on register-time refusal (Option A):
 
 from __future__ import annotations
 
+import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+import threading
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from itertools import count
@@ -82,7 +84,7 @@ from typing import Any, Final
 
 import structlog
 
-from alfred.hooks.audit_sink import AuditSink, StructlogAuditSink
+from alfred.hooks.audit_sink import HOOKS_TIER_REJECTED, AuditSink, StructlogAuditSink
 from alfred.hooks.capability import CapabilityGate, DevGate
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import (
@@ -90,6 +92,8 @@ from alfred.hooks.errors import (
     hookpoint_drift_message,
     hookpoint_not_declared_message,
     subscriber_must_be_async_message,
+    tier_not_subscribable_message,
+    unknown_tier_in_declaration_message,
     unknown_tier_message,
 )
 
@@ -324,6 +328,73 @@ and user-plugin tiers are locked out. Typically paired with
 
 
 # ──────────────────────────────────────────────────────────────────────
+# _emit_sync hardening — sentinels (#119 review Group A)
+# ──────────────────────────────────────────────────────────────────────
+
+_EMIT_SYNC_THREAD_JOIN_SECONDS: Final[float] = 0.5
+"""Bounded join window for the running-loop arm of :meth:`HookRegistry._emit_sync`.
+
+500 ms is the caller-side tolerance for one sync-from-async sink emit.
+A sink that exceeds this bound trips the structlog fallback so the
+audit row is never lost (CLAUDE.md hard rule #7). The
+:class:`AuditSink` Protocol docstring restates this as a contract on
+implementations: p99 emit cost < 500 ms.
+"""
+
+
+def _fallback_to_structlog(
+    *,
+    event: str,
+    correlation_id: str,
+    fields: Mapping[str, object],
+    reason: str,
+) -> None:
+    """Loud-failure escape: emit the audit row via structlog directly.
+
+    Reached when :meth:`HookRegistry._emit_sync` could not drive the
+    primary sink to completion within
+    :data:`_EMIT_SYNC_THREAD_JOIN_SECONDS`. The row is written to a
+    dedicated ``alfred.hooks.audit_fallback`` logger so an operator
+    can grep both the primary sink AND the fallback channel to
+    correlate a backpressure event.
+
+    CLAUDE.md hard rule #7: never drop a security-boundary audit row.
+    The fallback writes the SAME fields the primary sink would have
+    received, plus ``reason`` attributing the fallback to a specific
+    failure mode. Two ``reason`` values today:
+
+    * ``"sink_emit_timeout"`` — the running-loop arm's daemon thread
+      did not join within :data:`_EMIT_SYNC_THREAD_JOIN_SECONDS`.
+    * ``"sink_emit_timeout_import_time"`` — the no-running-loop arm's
+      :func:`asyncio.wait_for` raised :class:`TimeoutError` inside the
+      sub-loop. Distinct attribution so operators can tell a startup-
+      time sink stall from a running-loop stall (CR cycle-2 MAJ-2).
+
+    The fallback is intentionally synchronous and never raises — if
+    the structlog redactor chain itself fails, the exception
+    propagates and the caller (typically :meth:`HookRegistry.register`)
+    sees a hard failure. That is the right disposition: a fallback
+    that itself fails is a deeper bug than the one we are escaping
+    from.
+
+    Args:
+        event: One of the ``HOOKS_*`` audit-row event constants.
+        correlation_id: Cross-system trace correlation id.
+        fields: The free-form row attributes the primary sink would
+            have received.
+        reason: Attribution string for the fallback — surfaced as a
+            row attribute so operators can distinguish a timeout
+            fallback from a future raise-fallback variant.
+    """
+    structlog.get_logger("alfred.hooks.audit_fallback").error(
+        event,
+        correlation_id=correlation_id,
+        reason=reason,
+        **fields,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
 # HookRegistry — the per-process keyed-and-ordered store
 # ──────────────────────────────────────────────────────────────────────
 
@@ -467,8 +538,8 @@ class HookRegistry:
         self,
         *,
         name: str,
-        subscribable_tiers: frozenset[str],
-        refusable_tiers: frozenset[str],
+        subscribable_tiers: Iterable[str],
+        refusable_tiers: Iterable[str],
         fail_closed: bool,
     ) -> None:
         """Declare a hookpoint's per-hookpoint metadata (#119).
@@ -503,6 +574,26 @@ class HookRegistry:
         as :meth:`register`. Publishers declare at import; no event
         loop required.
 
+        CR cycle-1 MAJ-3 hardening — two failure modes the prior shape
+        accepted are now caught at declaration time:
+
+        * **Mutable tier sets** — a caller passing ``set(...)`` (an
+          easy mistake — it satisfies any ``Iterable[str]`` and the
+          dataclass field accepts it at runtime) could later mutate
+          the SAME object after register, silently rewriting the
+          allow-list in :class:`HookpointMeta`. Both tier-set fields
+          are eagerly normalized to :class:`frozenset` so the stored
+          metadata is provably immutable regardless of the caller's
+          choice.
+        * **Misspelled tier names** — ``subscribable_tiers={"operatior"}``
+          (typo) would silently disable the register-time tier-allow-
+          list gate at every subscriber site (the typo string never
+          matches a subscriber's requested tier, so every register
+          refuses). The typo is invisible until an operator notices
+          the unexpected refusals. Validating against ``_TIER_RANK``
+          at declaration time surfaces the typo at module init —
+          before any subscriber runs.
+
         Args:
             name: The dotted hookpoint identifier (e.g.
                 ``"memory.episodic.record.before_db_write"``).
@@ -511,21 +602,58 @@ class HookRegistry:
                 constructor) so a silent argument-order regression at
                 the call site is impossible (#119 review Group J).
             subscribable_tiers: The tier allow-list for subscriber
-                registration. Keyword-only.
+                registration. Any :class:`Iterable[str]` is accepted
+                and eagerly normalized to :class:`frozenset` so a
+                ``set`` caller cannot later mutate the stored
+                metadata. Keyword-only.
             refusable_tiers: The tier set whose :class:`HookRefusal`
                 propagates as a normal refusal on the ``pre`` chain
-                (§6.5). Keyword-only.
+                (§6.5). Same normalize-to-frozenset discipline.
+                Keyword-only.
             fail_closed: The fail-closed policy for subscriber timeout
                 / unexpected exception. Keyword-only.
 
         Raises:
             HookError: A previous declaration of ``name`` exists with
-                metadata that does not equal the new declaration.
+                metadata that does not equal the new declaration, OR
+                any tier string in ``subscribable_tiers`` /
+                ``refusable_tiers`` is not in the known-tier
+                vocabulary (``"system"`` / ``"operator"`` /
+                ``"user-plugin"``).
         """
+        # CR cycle-1 MAJ-3: defensively normalize to frozenset so a
+        # caller passing ``set(...)`` cannot later mutate the stored
+        # metadata. The :class:`HookpointMeta` field annotation is
+        # ``frozenset[str]`` but Python does not enforce that at
+        # runtime — eagerly converting locks the invariant in code.
+        normalized_subscribable_tiers = frozenset(subscribable_tiers)
+        normalized_refusable_tiers = frozenset(refusable_tiers)
+
+        # CR cycle-1 MAJ-3: validate tier names against ``_TIER_RANK``
+        # at declaration time so typos like ``"operatior"`` surface at
+        # module init, not at the first subscriber's register call (by
+        # which point the operator has lost the call-site attribution
+        # and has to grep the publisher source for the typo). The
+        # message routes through
+        # :func:`alfred.hooks.errors.unknown_tier_in_declaration_message`
+        # so the operator-facing text is i18n-localised (CLAUDE.md
+        # i18n rule #1).
+        unknown_tiers = (
+            normalized_subscribable_tiers | normalized_refusable_tiers
+        ) - _TIER_RANK.keys()
+        if unknown_tiers:
+            raise HookError(
+                unknown_tier_in_declaration_message(
+                    hookpoint=name,
+                    unknown_tiers=unknown_tiers,
+                    valid_tiers=_TIER_RANK.keys(),
+                )
+            )
+
         new_meta = HookpointMeta(
             name=name,
-            subscribable_tiers=subscribable_tiers,
-            refusable_tiers=refusable_tiers,
+            subscribable_tiers=normalized_subscribable_tiers,
+            refusable_tiers=normalized_refusable_tiers,
             fail_closed=fail_closed,
         )
         stored = self._hookpoints.get(name)
@@ -656,6 +784,38 @@ class HookRegistry:
                 )
             )
 
+        # Tier-allowlist gate (#119 / spec §6.2 — registration-time
+        # half). When the hookpoint IS declared, the requested tier
+        # MUST appear in the declared ``subscribable_tiers``. Refusal
+        # emits a loud :data:`HOOKS_TIER_REJECTED` audit row through
+        # the registry's sink (CLAUDE.md hard rule #7 — every
+        # security-boundary refusal is auditable). The row goes
+        # through the sink synchronously via :meth:`_emit_sync` so an
+        # operator monitoring the audit log sees the rejection before
+        # the raise propagates. The dispatch-time defense-in-depth
+        # re-check (commit 3) sits ALONGSIDE this — both gates must
+        # agree for a subscriber to run.
+        meta = self._hookpoints.get(hookpoint)
+        if meta is not None and tier not in meta.subscribable_tiers:
+            self._emit_sync(
+                event=HOOKS_TIER_REJECTED,
+                correlation_id="register-time",
+                fields={
+                    "hookpoint": hookpoint,
+                    "kind": kind,
+                    "subscriber_name": hook_fn.__qualname__,
+                    "subscriber_tier": tier,
+                    "subscribable_tiers": sorted(meta.subscribable_tiers),
+                },
+            )
+            raise HookError(
+                tier_not_subscribable_message(
+                    tier=tier,
+                    hookpoint=hookpoint,
+                    subscribable_tiers=meta.subscribable_tiers,
+                )
+            )
+
         # Capability gate consult. The DevGate ignores plugin_id and
         # hookpoint this slice; Slice-3's grant gate consults all three.
         # Passing ``hook_fn.__module__`` as ``plugin_id`` is the
@@ -691,6 +851,181 @@ class HookRegistry:
         # is safe here because the tier-validation gate above rejected
         # any unknown tier before reaching this point.
         bucket.sort(key=lambda s: (_TIER_RANK[s.tier], s.registration_seq))
+
+    def _emit_sync(
+        self,
+        *,
+        event: str,
+        correlation_id: str,
+        fields: Mapping[str, object],
+    ) -> None:
+        """Drive ``self.sink.emit(...)`` synchronously from a sync caller.
+
+        The :class:`AuditSink` Protocol's :meth:`emit` is async (PR-A
+        Task 5 — every emission goes through the same async surface
+        the dispatcher uses). :meth:`register` is sync because it's
+        called by the ``@hook`` decorator at module-import time before
+        any event loop exists, AND from within ``async def`` test
+        bodies that already have a running loop. Both arms must land
+        the row synchronously so a register-time rejection is
+        observable BEFORE the raise propagates (CLAUDE.md hard rule
+        #7 — the audit row IS the loud-failure escape).
+
+        Two arms:
+
+        * **No running loop** (the import-time decorator case): drive
+          the emit on a fresh sub-loop via
+          :meth:`asyncio.AbstractEventLoop.run_until_complete`, wrapped
+          in :func:`asyncio.wait_for` with the same 500 ms bound the
+          running-loop arm uses. A DB-backed sink that stalls on a
+          connect at module-import time would otherwise hang
+          :meth:`register` (and process startup) indefinitely; the
+          bounded ``wait_for`` trips the structlog fallback with
+          ``reason="sink_emit_timeout_import_time"`` so the row is
+          NEVER lost (CR cycle-2 MAJ-2 — symmetric defense-in-depth
+          with the running-loop arm).
+        * **Running loop** (the ``async def`` test case): driving an
+          ``asyncio.run`` inside a running loop raises
+          ``RuntimeError("asyncio.run() cannot be called from a
+          running event loop")``. We dispatch the emit on a dedicated
+          DAEMON thread (:func:`threading.Thread`, ``daemon=True``)
+          which spins up its own loop, runs the emit to completion,
+          and joins under a 500 ms bound. Daemon-mode ensures a hung
+          sink does not block process exit; the bounded join ensures
+          a slow sink does not stall :meth:`register` indefinitely.
+          The structlog fallback fires with ``reason="sink_emit_timeout"``
+          so operators distinguish a running-loop stall from the
+          import-time stall above.
+
+        Sink contract (load-bearing — see :class:`AuditSink` docstring):
+
+        * Implementations MUST be fast (p99 < 500 ms). The bounded
+          join here pins the caller-side tolerance window; a sink
+          that routinely exceeds it trips the structlog fallback.
+        * Implementations MUST be thread-safe. The running-loop arm
+          drives ``emit`` from a fresh thread that owns its own
+          asyncio loop; any shared state inside the sink must be
+          guarded.
+
+        Hardening (#119 review consensus — 6 reviewers):
+
+        * **Exception propagation** — exceptions raised inside the
+          driving thread are captured into ``exc_holder`` and
+          re-raised on the calling thread AFTER the join completes.
+          Without this the failure would be silently dropped (the
+          thread dies, the audit row never lands, the caller proceeds
+          as though the row was emitted).
+        * **Bounded join** — ``thread.join(timeout=0.5)`` caps the
+          calling thread's wait. A sink that exceeds the bound trips
+          the structlog-direct fallback so the audit row is NEVER
+          lost (CLAUDE.md hard rule #7 — the audit row IS the
+          escape).
+        * **Daemon thread** — ``daemon=True`` so a hung sink thread
+          does not block process exit. Combined with the bounded
+          join, the process can shut down cleanly even when a sink is
+          mid-stall; the partial audit row, if any, surfaces on the
+          structlog fallback.
+
+        This is a register-time-only path. The dispatcher itself never
+        calls :meth:`_emit_sync` — it already runs in an async context
+        and uses ``await self.sink.emit(...)`` directly. Centralising
+        the sync-from-async bridge here keeps :meth:`register`'s body
+        readable.
+
+        Args:
+            event: One of the ``HOOKS_*`` audit-row event constants.
+            correlation_id: Cross-system trace correlation id. At
+                registration time there's no per-action chain, so the
+                caller passes a sentinel like ``"register-time"``.
+            fields: Free-form mapping of additional row attributes.
+                Forwarded verbatim to the sink.
+
+        Raises:
+            BaseException: Whatever the sink's ``emit`` raised inside
+                the driving thread, propagated to the caller after
+                the join. The audit-row fallback runs ONLY for the
+                timeout arm — a sink that completes within the bound
+                but raises is the caller's failure to handle.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — the import-time decorator path. Drive
+            # the emit on a fresh sub-loop bounded by the same window
+            # the running-loop arm uses (CR cycle-2 MAJ-2): a sink that
+            # stalls on a DB connect at module import time would
+            # otherwise hang :meth:`register` (and the whole process
+            # startup) indefinitely. The structlog fallback is the
+            # loud-failure escape (CLAUDE.md hard rule #7) — same
+            # discipline as the running-loop arm, distinct ``reason``
+            # so operators can tell which arm tripped.
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(
+                        asyncio.wait_for(
+                            self.sink.emit(
+                                event=event,
+                                correlation_id=correlation_id,
+                                fields=fields,
+                            ),
+                            timeout=_EMIT_SYNC_THREAD_JOIN_SECONDS,
+                        )
+                    )
+                except TimeoutError:
+                    _fallback_to_structlog(
+                        event=event,
+                        correlation_id=correlation_id,
+                        fields=fields,
+                        reason="sink_emit_timeout_import_time",
+                    )
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+            return
+
+        # A loop is already running. We CANNOT call ``asyncio.run`` here
+        # (nesting is forbidden), so dispatch the emit on a dedicated
+        # DAEMON thread that spins its own loop. Capture exceptions
+        # and re-raise on the calling thread so a sink failure is not
+        # silently dropped; bound the join so a slow / hung sink trips
+        # the structlog fallback rather than stalling :meth:`register`.
+        sink = self.sink
+        exc_holder: list[BaseException] = []
+
+        def _drive() -> None:
+            try:
+                asyncio.run(
+                    sink.emit(
+                        event=event,
+                        correlation_id=correlation_id,
+                        fields=fields,
+                    )
+                )
+            except BaseException as e:
+                exc_holder.append(e)
+
+        thread = threading.Thread(target=_drive, daemon=True)
+        thread.start()
+        thread.join(timeout=_EMIT_SYNC_THREAD_JOIN_SECONDS)
+        if thread.is_alive():
+            # Sink hung past the bound — fall back to structlog-direct
+            # so the row is NEVER lost. CLAUDE.md hard rule #7: the
+            # audit row IS the loud-failure escape; abandoning the row
+            # here would be a silent security failure. The fallback
+            # surfaces the same fields plus ``reason=sink_emit_timeout``
+            # so an operator can correlate the fallback row with the
+            # primary sink's downstream backpressure.
+            _fallback_to_structlog(
+                event=event,
+                correlation_id=correlation_id,
+                fields=fields,
+                reason="sink_emit_timeout",
+            )
+            return
+        if exc_holder:
+            raise exc_holder[0]
 
     def subscribers_for(
         self,

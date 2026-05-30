@@ -319,3 +319,43 @@ def tier_not_subscribable_message(
         hookpoint=hookpoint,
         subscribable_tiers=repr(sorted(subscribable_tiers)),
     )
+
+
+def unknown_tier_in_declaration_message(
+    *,
+    hookpoint: str,
+    unknown_tiers: Iterable[str],
+    valid_tiers: Iterable[str],
+) -> str:
+    """Render the ``hooks.unknown_tier_in_declaration`` operator-facing string.
+
+    Called by :meth:`alfred.hooks.registry.HookRegistry.register_hookpoint`
+    when a publisher's :attr:`HookpointMeta.subscribable_tiers` or
+    :attr:`HookpointMeta.refusable_tiers` contains one or more tier
+    strings that are not in the known-tier vocabulary
+    (``"system"`` / ``"operator"`` / ``"user-plugin"``).
+
+    The high-blast shape this guards against (CR cycle-1 MAJ-3): a
+    publisher with ``subscribable_tiers={"operatior"}`` (typo) would
+    silently disable the register-time tier-allow-list gate at every
+    subscriber site — the typo string never matches any subscriber's
+    requested tier so every register call refuses. Without
+    declaration-time validation the typo is invisible until the first
+    subscriber registers AND the operator notices the unexpected
+    refusal. Declaration-time validation surfaces the typo at module
+    init.
+
+    Args:
+        hookpoint: The dotted hookpoint identifier the publisher is
+            declaring against.
+        unknown_tiers: The tier strings the publisher passed that are
+            not in the known-tier vocabulary.
+        valid_tiers: The known-tier vocabulary, rendered verbatim so
+            the operator sees the legal alternatives.
+    """
+    return t(
+        "hooks.unknown_tier_in_declaration",
+        hookpoint=hookpoint,
+        unknown_tiers=repr(sorted(unknown_tiers)),
+        valid_tiers=repr(sorted(valid_tiers)),
+    )

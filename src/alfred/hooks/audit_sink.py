@@ -3,8 +3,9 @@
 The audit sink is the Protocol seam between the hook dispatcher and the
 audit-row writer. Every refusal, every chain timeout, every subscriber
 error, every error-suppressed deny, every unauthorized-tier refusal,
-every reentry-bypass event flows through ``await sink.emit(...)`` so
-audit attribution stays uniform across the six hook-trace event kinds.
+every reentry-bypass event, and every registration-time tier rejection
+flows through ``await sink.emit(...)`` so audit attribution stays
+uniform across the seven hook-trace event kinds.
 
 Two pieces ship this slice:
 
@@ -20,11 +21,11 @@ Two pieces ship this slice:
   write — that's arch-001 — PR-B brings the real
   :class:`alfred.audit.log.AuditWriter`-backed sink.
 
-The six ``HOOKS_*`` module constants are the canonical audit-row event
-IDENTIFIERS the dispatcher and the test suite share by import. They are
-NOT operator-facing display strings (they're never rendered to a TUI /
-Discord operator), so they live as plain ``Final[str]`` constants — no
-catalog key, no :func:`alfred.i18n.t` wrapping.
+The seven ``HOOKS_*`` module constants are the canonical audit-row
+event IDENTIFIERS the dispatcher and the test suite share by import.
+They are NOT operator-facing display strings (they're never rendered
+to a TUI / Discord operator), so they live as plain ``Final[str]``
+constants — no catalog key, no :func:`alfred.i18n.t` wrapping.
 
 Hard-rule invariants pinned by ``tests/unit/hooks/test_audit_sink.py``:
 
@@ -91,6 +92,47 @@ HOOKS_REENTRY_BYPASS: Final[str] = "hooks.reentry_bypass"
 """Audit-row event id for a re-entrant dispatch where the inner chain
 was bypassed (the dispatcher detected the loop and refused to recurse)."""
 
+HOOKS_TIER_REJECTED: Final[str] = "hooks.tier_rejected"
+"""Audit-row event id for any #119 / spec §6.2 tier-allow-list refusal
+OR any dispatch-time publisher-side meta drift.
+
+Two emit sites — the same event id covers both because both shapes
+are the same operational signal ("a publisher / subscriber
+contract was violated against the declared hookpoint metadata"). The
+``drift_at`` and ``drift_kind`` fields on the row distinguish the
+specific arm so operators can grep and alert per-shape.
+
+* :meth:`alfred.hooks.registry.HookRegistry.register` — **register
+  time**. Emitted when the publisher-declared
+  :attr:`HookpointMeta.subscribable_tiers` rejects the subscriber's
+  requested ``tier``. The row carries the subscriber name and the
+  declared allow-list; no ``drift_at`` / ``drift_kind`` because the
+  refusal happened before any dispatch.
+* :func:`alfred.hooks.invoke._enforce_subscribable_tiers` —
+  **dispatch time** (#119 review Group I, CR cycle-1 MAJ-2). Emitted
+  when the publisher's invoke-time arg drifts from the declared
+  :class:`HookpointMeta` on any of the three fields
+  (``subscribable_tiers``, ``refusable_tiers``, ``fail_closed``) OR
+  when the hookpoint is undeclared under
+  ``strict_declarations=True``. The row carries ``drift_at="dispatch"``
+  plus a ``drift_kind`` field:
+
+  - ``"subscribable_tiers"`` — declared and invoked sets differ.
+  - ``"refusable_tiers"`` — same, for the refusal allow-list.
+  - ``"fail_closed"`` — declared and invoked policy bits differ
+    (highest-blast — silently disarms the timeout policy on a
+    security stage).
+  - ``"undeclared_hookpoint"`` — strict mode + no
+    :meth:`register_hookpoint` declaration. An internal
+    inconsistency: register-time enforcement should have caught
+    this.
+
+CLAUDE.md hard rule #7 — the audit row is the loud-failure escape;
+the :class:`alfred.hooks.errors.HookError` raise is the immediate
+signal to the caller, the audit row is the durable attribution
+operators can grep.
+"""
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Protocol seam — spec §0 verbatim
@@ -121,6 +163,24 @@ class AuditSink(Protocol):
     * the ``*,`` discipline (all parameters keyword-only),
     * the ``-> None`` return (the sink does not return a value to the
       dispatcher; failure surfaces as a raised exception).
+
+    Operational contract (load-bearing for the sync-from-async bridge
+    in :meth:`alfred.hooks.registry.HookRegistry._emit_sync`):
+
+    * **Fast** — implementations MUST keep ``emit`` p99 cost below
+      500 ms. The register-time sync-from-async bridge bounds the
+      driving thread's join at 500 ms; a sink that routinely exceeds
+      the bound trips the structlog fallback and surfaces in the
+      ``alfred.hooks.audit_fallback`` channel as a
+      ``reason=sink_emit_timeout`` row. Persistent fallbacks are an
+      ALERT — the primary sink is either backed up or wedged.
+    * **Thread-safe** — the register-time bridge may drive ``emit``
+      from a fresh thread that owns its own asyncio loop. Any shared
+      state inside the sink (DB connection pools, in-process queues,
+      counters) must be safe under concurrent access from the
+      dispatcher's main loop AND from short-lived sync-from-async
+      threads. Slice-3's future grant-gate runtime-register-from-
+      async path inherits the same expectation.
     """
 
     async def emit(

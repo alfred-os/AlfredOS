@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-28 15:55+0100\n"
+"POT-Creation-Date: 2026-05-30 16:00+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -166,52 +166,59 @@ msgstr "alfred error: {error}"
 msgid "tui.label_alfred"
 msgstr "alfred"
 
-#: src/alfred/hooks/errors.py:105
+#: src/alfred/hooks/errors.py:108
 msgid "hooks.refusal"
 msgstr "Hook {hook_id} refused action {action_id}: {reason}"
 
-#: src/alfred/hooks/errors.py:132
+#: src/alfred/hooks/errors.py:135
 msgid "hooks.subscriber_must_be_async"
 msgstr ""
 "Hook subscriber {name} must be `async def`. Add `async` to the function "
 "definition."
 
-#: src/alfred/hooks/errors.py:170
+#: src/alfred/hooks/errors.py:173
 msgid "hooks.subscriber_error"
 msgstr ""
 "Hook subscriber {name} raised an unexpected error (correlation "
 "{correlation_id}); see the audit log."
 
 # #119 — register_hookpoint / register message helpers (Group E + Group F).
-#: src/alfred/hooks/errors.py
+#: src/alfred/hooks/errors.py:212
 msgid "hooks.hookpoint_drift"
 msgstr ""
 "hookpoint {name} already declared with different metadata: "
 "stored={stored}, new={new}."
 
-#: src/alfred/hooks/errors.py
+#: src/alfred/hooks/errors.py:244
 msgid "hooks.unknown_tier"
 msgstr ""
 "Unknown hook tier {tier} for {subscriber_name} on hookpoint {hookpoint}. "
 "Valid tiers: {valid_tiers}."
 
-#: src/alfred/hooks/errors.py
-msgid "hooks.hookpoint_not_declared"
-msgstr ""
-"hookpoint {name} not declared — the PUBLISHER of this hookpoint must "
-"call `register_hookpoint('{name}', ...)` at module init BEFORE any "
-"subscriber attempts to register against it. See "
-"docs/subsystems/hooks.md → Publisher hello-world.{suggestion}"
-
-#: src/alfred/hooks/errors.py
+#: src/alfred/hooks/errors.py:288
 msgid "hooks.hookpoint_not_declared.did_you_mean"
 msgstr " Did you mean: '{suggestion}'?"
 
-#: src/alfred/hooks/errors.py
+#: src/alfred/hooks/errors.py:290
+msgid "hooks.hookpoint_not_declared"
+msgstr ""
+"hookpoint {name} not declared — the PUBLISHER of this hookpoint must call"
+" `register_hookpoint('{name}', ...)` at module init BEFORE any subscriber"
+" attempts to register against it. See docs/subsystems/hooks.md → "
+"Publisher hello-world.{suggestion}"
+
+#: src/alfred/hooks/errors.py:317
 msgid "hooks.tier_not_subscribable"
 msgstr ""
 "tier {tier} not allowed on hookpoint {hookpoint} — declared "
 "subscribable_tiers={subscribable_tiers}."
+
+#: src/alfred/hooks/errors.py:357
+msgid "hooks.unknown_tier_in_declaration"
+msgstr ""
+"register_hookpoint({hookpoint}) declares unknown tier(s) {unknown_tiers} "
+"— valid tiers are {valid_tiers}. Check for typos on the publisher's "
+"subscribable_tiers / refusable_tiers args."
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).

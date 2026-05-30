@@ -289,6 +289,7 @@ def test_invoke_internal_import_fails() -> None:
 NON_EXPORTED_PUBLIC_NAMES: Final[tuple[str, ...]] = (
     "Flow",
     "Subscriber",
+    "HookpointMeta",
     "StructlogAuditSink",
     "HOOKS_REFUSAL",
     "HOOKS_CHAIN_TIMEOUT",
@@ -296,6 +297,7 @@ NON_EXPORTED_PUBLIC_NAMES: Final[tuple[str, ...]] = (
     "HOOKS_ERROR_SUPPRESSED",
     "HOOKS_UNAUTHORIZED_REFUSAL",
     "HOOKS_REENTRY_BYPASS",
+    "HOOKS_TIER_REJECTED",
     "HOOK_CHAIN_DEADLINE_SECONDS",
 )
 
