@@ -116,9 +116,21 @@ A named, string-keyed extension point declared at a point in some
 code's execution. Any code — core or plugin — may both publish
 (call `invoke(name, ctx, kind=...)` at the stage) and subscribe
 (register a handler against `(name, kind)`); spec §9.1's "no
-asymmetry" point pins this. Hookpoint names are dotted strings keyed
-on the action's qualified name plus the lifecycle stage
-(`memory.episodic.record.before_db_write`).
+asymmetry" point pins this. Slice-2.5 PR-A's in-process dispatch keys
+on the LOCAL stem name the publisher passes to `invoke()`
+(`"before_db_write"`, `"after_flush"`, etc.). The dotted form
+(`memory.episodic.record.before_db_write`) is the canonical
+threat-model identifier the Slice-3 MCP transport will normalise to —
+but a Slice-2.5 subscriber MUST use the stem to fire against the
+in-process publisher. See the "Hookpoint naming" callout in
+[`docs/subsystems/hooks.md`](subsystems/hooks.md) for the same
+Slice-2.5 caveat.
+
+Hookpoints are PUBLISHER-DECLARED: the action that emits the hookpoint
+calls `register_hookpoint(name=..., subscribable_tiers=...,
+refusable_tiers=..., fail_closed=...)` at module init. Subscribers
+register against the declared metadata; mismatched tiers are refused
+at registration time and audited as `hooks.tier_rejected` (#119).
 
 See spec §3,
 [`docs/subsystems/hooks.md`](subsystems/hooks.md), and

@@ -72,6 +72,75 @@ tie-breaker). A miss returns the module-level `_EMPTY` singleton; a hit
 returns a freshly-built tuple snapshot sorted by `(tier_rank,
 registration_seq)`.
 
+### Publisher hello-world: declaring a hookpoint
+
+A subscriber registers only AFTER the publisher of the hookpoint has
+declared the per-hookpoint contract — `subscribable_tiers`,
+`refusable_tiers`, `fail_closed`. The declaration goes in the
+publisher's module-init path (typically a `declare_hookpoints()`
+function called at import time + idempotently re-called from the
+publisher's `__init__`).
+
+```python
+# src/alfred/<your_publisher_module>/your_module.py
+
+from alfred.hooks import (
+    OPEN_TIERS,
+    SYSTEM_OPERATOR_TIERS,
+    SYSTEM_ONLY_TIERS,
+    HookRegistry,
+    get_registry,
+)
+
+
+def declare_hookpoints(registry: HookRegistry | None = None) -> None:
+    """Declare every hookpoint this publisher invokes."""
+    target = registry if registry is not None else get_registry()
+
+    # Open observability hookpoint — every tier can subscribe and refuse.
+    target.register_hookpoint(
+        name="after_flush",
+        subscribable_tiers=OPEN_TIERS,
+        refusable_tiers=OPEN_TIERS,
+        fail_closed=False,
+    )
+
+    # Security stage — system + operator only, system-only refusal,
+    # fail-closed on subscriber error / timeout.
+    target.register_hookpoint(
+        name="before_db_write",
+        subscribable_tiers=SYSTEM_OPERATOR_TIERS,
+        refusable_tiers=SYSTEM_ONLY_TIERS,
+        fail_closed=True,
+    )
+
+
+# Module-init: declare BEFORE any subscriber imports this module.
+declare_hookpoints()
+```
+
+Why upfront declaration is required (#119): under
+`strict_declarations=True` (the production default), a subscriber that
+attempts to register against an undeclared hookpoint is REFUSED at
+register time with a `HookError`. This forces a publisher-first
+ordering — the publisher imports first and declares its metadata;
+subscriber modules import second and find the declaration already in
+place. Without the gate, a subscriber could register against a
+misspelled hookpoint (typo on the publisher's name) and never run —
+the typo would silently disable the security stage.
+
+The reference implementation lives at
+[`EpisodicMemory.declare_hookpoints`](../../src/alfred/memory/episodic.py)
+— five hookpoints, three tier-set shapes, the same idempotent
+declare-at-init + declare-from-instance-init pattern this example
+uses.
+
+```python
+# Self-check: is the hookpoint declared?
+from alfred.hooks import get_registry
+assert get_registry().hookpoint_meta("before_db_write") is not None
+```
+
 ### Drive a synthetic dispatch from a test
 
 Once registered, you drive a one-shot chain via the lower-level
@@ -231,17 +300,13 @@ before such a subscriber runs (spec §6.3):
   registration. Test fixtures use `fresh_registry_allow_system` for
   the same reason.
 
-> **Slice 2.5 caveat — `subscribable_tiers` is DEFERRED, not enforced.**
-> The publisher-side `subscribable_tiers` allowlist is threaded through the
-> dispatch path but EVERY invoke handler currently does `del subscribable_tiers`
-> (see `src/alfred/hooks/invoke.py:1063,1223,1331,1466`). The Slice-3 grant gate
-> will activate enforcement; until then, only `CapabilityGate.allow_subscriber()`
-> blocks user-plugin subscribers, and `DevGate` (the Slice 2.5 default) grants
-> `operator` and `user-plugin` unconditionally but refuses `system` without
-> `DevGate(allow_system=True)` (see `src/alfred/hooks/capability.py:51` for the
-> grant table). A subscriber author MUST NOT rely on `subscribable_tiers` for a
-> security guarantee this slice. Tracked: follow-up issue (open via
-> `gh issue create` after PR-C merge).
+**`subscribable_tiers` is enforced at registration AND re-checked at
+dispatch** (issue #119, spec §6.2). The publisher-side allow-list is
+ACTIVE — every subscriber registration consults the declared metadata
+and the dispatcher rechecks on every `invoke`. Both halves of the
+defense are described in
+[Publisher declarations and the `subscribable_tiers` enforcement](#publisher-declarations-and-the-subscribable_tiers-enforcement)
+below.
 
 The two-gate model is what makes "a system-tier security stage is
 load-bearing" survive contact with a malicious in-tree dependency: a
@@ -350,6 +415,98 @@ publisher's `subscribable_tiers` allow-list and the registry's
 capability gate together decide whether a registered subscriber
 actually runs.
 
+### Publisher declarations and the `subscribable_tiers` enforcement
+
+Every hookpoint has **one publisher** — the module that owns the
+action it sits inside (e.g. `alfred.memory.episodic` for
+`before_db_write`). That publisher MUST declare the hookpoint's
+metadata at module-init time via
+`HookRegistry.register_hookpoint(...)`. The declaration carries the
+three values that govern dispatch policy for the hookpoint:
+
+- `subscribable_tiers` — which tiers may register a subscriber.
+- `refusable_tiers` — which tiers' `HookRefusal` is authorized on
+  the `pre` chain (§6.5).
+- `fail_closed` — whether a subscriber timeout / unexpected exception
+  hard-raises (`True`) or rewinds + continues (`False`).
+
+A subscriber registration with no matching declaration is **refused at
+register time**:
+
+```text
+HookError: hookpoint 'before_db_write' not declared — declare via
+register_hookpoint() before registering subscribers
+```
+
+This forces module-init ordering — publishers import first and
+declare; subscriber modules import second and find the declarations
+already in place. The check is the load-bearing typo guard: a
+subscriber registered against a misspelled hookpoint would silently
+never run, defeating the security stage. The strict check turns the
+typo into a loud failure.
+
+**Declarations are idempotent** on equal metadata — re-importing a
+publisher under test isolation re-runs the declaration call and the
+second call is a no-op. A **conflicting** re-declaration (different
+metadata for the same name) is the publisher-version-drift / copy-
+paste-typo shape and raises `HookError`. The error message attributes
+both declaration sites so the operator can grep both.
+
+**Subscriber tier enforcement at registration.** When a publisher has
+declared a hookpoint, every subsequent
+`HookRegistry.register(..., tier=X, ...)` consults the declared
+`subscribable_tiers`. If `X` is NOT in the allow-list, register raises
+`HookError` and emits a `hooks.tier_rejected` audit row through the
+registry's sink. The row carries the hookpoint, the kind, the
+subscriber's `__qualname__`, the requested tier, AND the declared
+allow-list so the operator can attribute the rejection AND grep both
+declaration sites in one shot. The failed register leaves no trace —
+a subsequent `subscribers_for(name, kind)` returns the empty
+singleton.
+
+**Dispatch-time defense-in-depth.** Every `invoke(name, ctx, *,
+subscribable_tiers=...)` call re-checks the publisher's invoke-time
+allow-list against the registry's declaration. Drift here is a
+publisher bug (a refactor that split declaration and invoke sites,
+then drifted one side; a vendored copy disagreeing with the active
+copy). The dispatcher emits a `hooks.tier_rejected` audit row carrying
+BOTH allow-lists and raises `HookError` to short-circuit the chain.
+The check fires for every kind (`pre` / `post` / `error` / `cancel`)
+so a regression that wires the re-check only into the most-trafficked
+arm cannot defeat defense-in-depth on the others.
+
+The two-gate model now reads:
+
+- **Publisher-side allow-list** (declared + register-time enforced +
+  dispatch-time rechecked, this section).
+- **Operator-side capability grant** (registry's `CapabilityGate`,
+  enforced at registration). Slice 3 lands the operator-grant gate;
+  Slice 2.5 ships the dev-time `DevGate`.
+
+Both gates must pass for a subscriber to run. Together they are what
+makes "a system-tier security stage is load-bearing" survive contact
+with a malicious in-tree dependency (which can lie about its requested
+tier but cannot defeat either declared allow-list).
+
+```python
+# Publisher (alfred.memory.episodic) — declared at module-init.
+get_registry().register_hookpoint(
+    name="before_db_write",
+    subscribable_tiers=frozenset({"system", "operator"}),
+    refusable_tiers=frozenset({"system"}),
+    fail_closed=True,
+)
+
+# Subscriber module — succeeds (operator tier IN the allow-list).
+@hook("before_db_write", kind="pre", tier="operator")
+async def operator_redactor(ctx): ...
+
+# Subscriber module — refused at register time (user-plugin NOT in
+# allow-list). HookError + hooks.tier_rejected audit row.
+@hook("before_db_write", kind="pre", tier="user-plugin")
+async def hostile_user_plugin(ctx): ...
+```
+
 ### Fault semantics
 
 A subscriber that raises an unexpected exception (a bug, a downstream
@@ -436,7 +593,7 @@ pin.
 
 ### Audit vocabulary
 
-PR-A's `StructlogAuditSink` emits six event constants from
+`StructlogAuditSink` emits seven event constants from
 [`src/alfred/hooks/audit_sink.py`](../../src/alfred/hooks/audit_sink.py)
 (the `HOOKS_*` `Final[str]` block):
 
@@ -448,8 +605,9 @@ PR-A's `StructlogAuditSink` emits six event constants from
 | `hooks.error_suppressed` | A deny was suppressed because the action body had already failed (`error` stage) |
 | `hooks.unauthorized_refusal` | A refusal was raised by a hook whose declared tier the capability gate denied |
 | `hooks.reentry_bypass` | Re-entrant dispatch — the inner chain was bypassed |
+| `hooks.tier_rejected` | A subscriber's tier was not in the hookpoint's declared `subscribable_tiers` (register-time) OR the publisher's invoke-time `subscribable_tiers` drifted from the declaration (dispatch-time, #119) |
 
-> **Slice 2.5 design choice — failures-only auditing.** All six events
+> **Slice 2.5 design choice — failures-only auditing.** All seven events
 > above are failure-path constants. Happy-path dispatch emits NO audit row
 > in Slice 2.5; observability of successful subscriber execution is via the
 > subscriber's own logging or via the perf benchmark output. The rationale
