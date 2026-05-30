@@ -189,11 +189,12 @@ class TestPerKeyLock:
     async def test_per_key_asyncio_lock(self) -> None:
         """Two acquires of DIFFERENT keys must not serialise on each other.
 
-        We start two acquires; the slow one holds its rehydrate for 50ms.
-        If keys shared a lock, the fast one would wait ~50ms behind the slow
-        one. With per-key locks, they overlap and total ≈ slow one alone.
+        We start two acquires; the slow one holds its rehydrate for 100ms.
+        If keys shared a lock, the fast one would wait ~100ms behind the slow
+        one (~200ms total). With per-key locks, they overlap and total ≈ slow
+        one alone (~100ms).
         """
-        slow_ep = _FakeEpisodic(sleep=0.05)
+        slow_ep = _FakeEpisodic(sleep=0.10)  # 100ms slow path; shared-lock serial ≈ 200ms
         # Both use the same pool; the pool internally owns the locks.
         pool = _make_pool(slow_ep)
         t0 = asyncio.get_event_loop().time()
@@ -202,10 +203,13 @@ class TestPerKeyLock:
             pool.acquire(("alfred", "bob")),
         )
         elapsed = asyncio.get_event_loop().time() - t0
-        # Strict serial would be ~100ms; per-key parallel is ~50ms. Use 80ms
-        # as a comfortable upper bound that still catches a regression to
-        # shared-lock behaviour.
-        assert elapsed < 0.08, f"keys appear to share a lock; elapsed={elapsed:.3f}s"
+        # Strict serial would be ~200ms (both acquires of the same lock serialize
+        # through the 100ms slow path); per-key parallel is ~100ms (both overlap).
+        # Use 0.150s as the upper bound: comfortably above the parallel floor
+        # (~50ms headroom over measured 116ms noise from UAT #120) while still
+        # well below the shared-lock floor (~50ms gap). Reference: UAT #120
+        # observed 0.083s-0.116s under load with the old (50ms sleep, 80ms cap).
+        assert elapsed < 0.150, f"keys appear to share a lock; elapsed={elapsed:.3f}s"
 
 
 @pytest.mark.asyncio

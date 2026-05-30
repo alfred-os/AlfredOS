@@ -120,9 +120,31 @@ test-adversarial: ## Run the adversarial security suite (nightly + release-block
 # `make check`. Two pytest invocations because `--benchmark-only`
 # deselects `test_refusal_short_circuits_subscribers` (a correctness pin
 # paired with the 5-chain bench; no benchmark fixture by design).
-test-perf: ## Run the release-blocking hook-dispatch perf gate.
+test-perf: ## Run the release-blocking hook-dispatch perf gate (host-load-sensitive).
 	@if [ -d tests/perf ] && find tests/perf -name 'test_*.py' 2>/dev/null | grep -q .; then \
-		uv run pytest tests/perf -v --benchmark-only && \
+		FORCE=0; \
+		case "$$(printf '%s' "$$ALFRED_TEST_PERF_FORCE" | tr '[:upper:]' '[:lower:]')" in 1|true|yes) FORCE=1 ;; esac; \
+		if [ "$$FORCE" = "0" ]; then \
+			LOAD_INFO=$$(python3 -c 'import os; l = os.getloadavg()[0]; c = os.cpu_count() or 4; print(f"{l} {c} {l/c:.2f}")' 2>&1); \
+			if [ $$? -ne 0 ]; then \
+				echo "::error::could not read os.getloadavg() — refusing to silently run benches. Set ALFRED_TEST_PERF_FORCE=1 to override."; \
+				exit 75; \
+			fi; \
+			LOAD=$$(echo "$$LOAD_INFO" | awk '{print $$1}'); \
+			CPUS=$$(echo "$$LOAD_INFO" | awk '{print $$2}'); \
+			RATIO=$$(echo "$$LOAD_INFO" | awk '{print $$3}'); \
+			BUSY=$$(awk -v r="$$RATIO" 'BEGIN {print (r >= 1.0) ? "refuse" : (r >= 0.7) ? "warn" : "ok"}'); \
+			if [ "$$BUSY" = "refuse" ]; then \
+				echo "::warning::host load $$LOAD on $$CPUS CPUs (ratio $$RATIO) — benches will be unreliable."; \
+				echo "::warning::Refusing to run with load >= 1.0x CPU count. Wait for the box to quiesce, or set ALFRED_TEST_PERF_FORCE=1 (CI sets this)."; \
+				echo "::warning::This is NOT a pass — exit 75 (EX_TEMPFAIL) so release scripts catch it."; \
+				exit 75; \
+			fi; \
+			if [ "$$BUSY" = "warn" ]; then \
+				echo "::warning::host load $$LOAD on $$CPUS CPUs (ratio $$RATIO) — benches MAY be noisy. Proceeding anyway."; \
+			fi; \
+		fi; \
+		uv run pytest tests/perf -v --benchmark-only --benchmark-json=benchmark.json && \
 		uv run pytest tests/perf -v -k refusal_short_circuits_subscribers ; \
 	else \
 		echo "::notice::no tests/perf/test_*.py — skipping test-perf"; \

@@ -49,6 +49,13 @@ permissions: {}
 env:
   PYTHON_VERSION: "3.14"
   UV_VERSION: "0.5.14"
+  # Bypass the `make test-perf` host-load guard. The workflow invokes
+  # `make test-perf` (Makefile is single-source-of-truth for the perf
+  # invocation), and the guard's truthy-env semantics ("1"/"true"/"yes"
+  # force) take this value as the explicit "CI box is fine, run the
+  # benches" signal — keeps the gate release-blocking regardless of
+  # hypothetical runner load.
+  ALFRED_TEST_PERF_FORCE: "1"
 
 jobs:
   perf:
@@ -96,16 +103,17 @@ jobs:
       - name: Sync dependencies
         if: steps.perfcheck.outputs.has_perf == 'true'
         run: uv sync --dev
-      - name: Run perf benches (budget-gated)
+      - name: Run perf gate (budgets + refusal short-circuit)
+        # Single source of truth: `make test-perf` runs the bench pass
+        # (`--benchmark-only --benchmark-json=benchmark.json`) followed
+        # by the paired correctness pin (`-k refusal_short_circuits_…`,
+        # which `--benchmark-only` deselects). The Makefile target
+        # owns the invocation shape so contributors running locally hit
+        # the same gate as CI. The host-load guard at the top of the
+        # target is bypassed via `ALFRED_TEST_PERF_FORCE=1` (set in
+        # the workflow `env:` block).
         if: steps.perfcheck.outputs.has_perf == 'true'
-        run: uv run pytest tests/perf -v --benchmark-only --benchmark-json=benchmark.json
-      - name: Run perf correctness assertion (refusal short-circuit)
-        # `--benchmark-only` above deselects this test (it has no
-        # benchmark fixture by design — it's a correctness pin). A
-        # dedicated step ensures the short-circuit invariant runs in CI
-        # alongside the budget benches.
-        if: steps.perfcheck.outputs.has_perf == 'true'
-        run: uv run pytest tests/perf -v -k refusal_short_circuits_subscribers
+        run: make test-perf
       - name: Upload benchmark JSON
         # Uploaded even on failure so a regression run still leaves the
         # measurement record behind for Slice-3 recalibration analysis.

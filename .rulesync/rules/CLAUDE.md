@@ -90,12 +90,15 @@ AlfredOS/
 | All quality gates | `make check` (lint + format + type + test) |
 | Local stack up | `docker compose up -d` |
 | TUI conversation | `alfred chat` |
-| Inspect state | `alfred status`, `alfred audit log`, `alfred audit graph --since 24h` |
-| Inspect a user's memory | `alfred memory show <user>` |
-| Cost report | `alfred cost report --since 7d --by persona` |
+| Inspect state | `alfred status` (Slice 1); `alfred audit log` / `alfred audit graph --since 24h` (planned — Slice 3+) |
+| Inspect a user's memory | `alfred memory show <user>` (planned — Slice 3+) |
+| Cost report | `alfred cost report --since 7d --by persona` (planned — Slice 4+) |
 | Manage users | `alfred user add|list|show|set|remove|bind|unbind` (see ADR-0010) |
 
-If a command does not yet exist, that's a signal it needs to be implemented — flag it.
+If a command lacks a slice marker, flag it. Commands
+marked `(planned — Slice N+)` are scheduled — do NOT implement ahead of
+slice (slice plans schedule WHEN each piece lands; CLAUDE.md and the PRD
+are aspirational on overall command surface).
 
 ## How to work in this repo
 

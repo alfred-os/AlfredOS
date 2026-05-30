@@ -105,6 +105,18 @@ Config lives at [`lefthook.yml`](./lefthook.yml). Skipping a hook (`LEFTHOOK=0`)
 
 See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
 
+### Running performance benches locally
+
+`make test-perf` runs the release-blocking hook-dispatch perf gate (the same
+gate `.github/workflows/perf.yml` enforces in CI). The target guards the
+host before spending bench time: it reads `os.getloadavg()[0]`, compares it
+to `os.cpu_count()`, and refuses (`exit 75`, EX_TEMPFAIL) when load ≥ 1.0×
+CPUs or warns and proceeds at 0.7×. Set `ALFRED_TEST_PERF_FORCE=1` (or
+`true` / `yes`, case-insensitive) to skip the guard when you know the host
+is appropriate — for example, a deliberate quiet benchmark on a laptop you
+believe is idle, or anywhere CI-equivalent. Setting it to `0` / `false` /
+empty does NOT bypass (truthy semantics).
+
 ## When you add a CI gate
 
 If you're authoring a GitHub Actions workflow whose jobs should block the merge button (not just emit informational status), follow the [`author-gating-workflow` skill](./.rulesync/skills/author-gating-workflow/SKILL.md). The skill walks through writing the workflow with the AlfredOS conventions baked in (least-privilege permissions, workflow-injection-safe env passing, pinned action SHAs), and — critically — how to promote the gating jobs to **required status checks** after merge, plus updating [`docs/ci/required-checks.md`](./docs/ci/required-checks.md) so the gate list stays auditable from the repo. The "workflow ran red but didn't block" failure mode is what this skill exists to prevent.
