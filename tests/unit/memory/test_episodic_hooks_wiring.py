@@ -61,6 +61,7 @@ Six hookpoint-wiring invariants pinned (Task 4):
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
@@ -69,6 +70,7 @@ import pytest
 
 from alfred.hooks import HookContext, HookRefusal, HookSubscriberError
 from alfred.hooks.capability import DevGate
+from alfred.hooks.invoke import ERROR_EXC_METADATA_KEY
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.memory.episodic import EpisodicMemory, EpisodicRecordInput
 from alfred.memory.models import Episode
@@ -570,6 +572,259 @@ class TestRecordPreHookpointWiring:
         assert before_validate_seen == [True]
         assert len(validate_called_with) == 1
         assert before_db_write_seen == [True]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Task 5 — terminal hookpoint wiring: after_flush / write_failed /
+# cancelled
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestRecordTerminalHookpointWiring:
+    """Task 5 — pin the three terminal chains the :meth:`Flow.body`
+    helper drives on behalf of :meth:`EpisodicMemory.record`:
+
+    * ``after_flush`` (post) fires on success.
+    * ``write_failed`` (error) fires when ``_persist`` raises a
+      non-cancellation exception, and the upstream ``exc`` re-raises
+      when no subscriber substitutes (CLAUDE.md hard rule #7 — no
+      silent failures).
+    * ``cancelled`` (cancel) fires on :class:`asyncio.CancelledError`,
+      and the ``write_failed`` chain MUST NOT fire on that path
+      (test-102 — cancel-before-error invariant; a regression would
+      corrupt audit attribution and risk T3 leakage into the wrong
+      audit arm).
+
+    The names themselves are wired by Task 4's ``flow.body(...)`` call
+    on :class:`EpisodicMemory.record`. Task 5 PROVES they work by
+    observing spies through the real dispatcher path — the PoC
+    registers NO terminal-chain subscriber in production wiring, only
+    these tests do (cancel-chain dispatch is PR-A-tested at the
+    dispatcher level; here we prove the action wires all four kinds
+    correctly).
+    """
+
+    # ------------------------------------------------------------------
+    # 1. after_flush post chain fires on success
+    # ------------------------------------------------------------------
+
+    async def test_after_flush_post_chain_fires_on_success(
+        self,
+        fresh_registry_allow_system: HookRegistry,
+    ) -> None:
+        """``after_flush`` fires post-:meth:`AsyncSession.flush`,
+        pre-commit — the durability invariant lives on the caller's
+        ``session_scope``, not this hook (mem-1 / Decision 3.1).
+
+        A regression that renamed the hookpoint to ``committed`` would
+        let a subscriber fire BEFORE the row was durable; any
+        notification / metric / counter the subscriber externalised
+        on that signal would become a falsehood if a later same-turn
+        write rolled back. The spec §7 fix on ``after_flush`` is the
+        load-bearing choice this test pins.
+        """
+        seen: list[HookContext[EpisodicRecordInput]] = []
+
+        async def post_spy(
+            ctx: HookContext[EpisodicRecordInput],
+        ) -> HookContext[EpisodicRecordInput] | None:
+            seen.append(ctx)
+            return None
+
+        fresh_registry_allow_system.register(
+            hook_fn=post_spy,
+            hookpoint="after_flush",
+            kind="post",
+            tier="operator",
+        )
+
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+
+        await mem.record(**_RECORD_KWARGS)  # type: ignore[arg-type]
+
+        assert len(seen) == 1
+        assert seen[0].kind == "post"
+        assert seen[0].hookpoint == "after_flush"
+        # Sanity: _persist did run (the post chain fires only after
+        # the body completes successfully).
+        assert session.add.call_count == 1
+        session.flush.assert_awaited_once()
+
+    # ------------------------------------------------------------------
+    # 2. write_failed error chain fires when _persist raises
+    # ------------------------------------------------------------------
+
+    async def test_write_failed_error_chain_fires_on_persist_raise(
+        self,
+        fresh_registry_allow_system: HookRegistry,
+    ) -> None:
+        """A non-:class:`asyncio.CancelledError` exception from
+        :meth:`_persist` routes through the ``write_failed`` chain.
+
+        Contract pinned:
+
+        * the spy receives the upstream exception via
+          ``ctx.metadata[ERROR_EXC_METADATA_KEY]`` (the dispatcher's
+          stash key — read by import, not string literal, so a future
+          rename surfaces at this read site);
+        * :meth:`_persist` was called (the exception is from the
+          body, not earlier in the chain);
+        * the spy returns ``None`` so the upstream :class:`ValueError`
+          re-raises unchanged (no silent suppression — CLAUDE.md hard
+          rule #7).
+        """
+        seen_exc: list[BaseException] = []
+
+        async def error_spy(
+            ctx: HookContext[EpisodicRecordInput],
+        ) -> HookContext[EpisodicRecordInput] | None:
+            upstream = ctx.metadata.get(ERROR_EXC_METADATA_KEY)
+            assert isinstance(upstream, BaseException)
+            seen_exc.append(upstream)
+            return None
+
+        fresh_registry_allow_system.register(
+            hook_fn=error_spy,
+            hookpoint="write_failed",
+            kind="error",
+            tier="operator",
+        )
+
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+
+        boom = ValueError("persist failed")
+
+        async def failing_persist(_inp: EpisodicRecordInput) -> None:
+            raise boom
+
+        mem._persist = failing_persist  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError) as exc_info:
+            await mem.record(**_RECORD_KWARGS)  # type: ignore[arg-type]
+
+        # Identity preserved — same instance, not a re-wrap.
+        assert exc_info.value is boom
+        assert len(seen_exc) == 1
+        assert seen_exc[0] is boom
+
+    # ------------------------------------------------------------------
+    # 3. cancelled cancel chain fires + write_failed does NOT fire
+    # ------------------------------------------------------------------
+
+    async def test_cancelled_chain_fires_and_write_failed_does_not(
+        self,
+        fresh_registry_allow_system: HookRegistry,
+    ) -> None:
+        """**test-102 regression pin — cancel-before-error invariant.**
+
+        When :meth:`_persist` raises :class:`asyncio.CancelledError`:
+
+        * the ``cancelled`` cancel chain fires;
+        * the ``write_failed`` error chain does NOT fire (a regression
+          here would let an error subscriber observe a cancellation as
+          if it were a non-cancellation failure — corrupting audit
+          attribution and risking T3 leakage into the wrong audit arm);
+        * the :class:`asyncio.CancelledError` propagates so the
+          surrounding task's cancellation is preserved.
+
+        The PoC registers no production cancel subscriber (the
+        cancel-chain dispatch is PR-A-tested at the dispatcher level);
+        this spy exists only to prove the action wires the cancel
+        hookpoint correctly.
+        """
+        cancel_seen: list[HookContext[EpisodicRecordInput]] = []
+        error_seen: list[HookContext[EpisodicRecordInput]] = []
+
+        async def cancel_spy(
+            ctx: HookContext[EpisodicRecordInput],
+        ) -> HookContext[EpisodicRecordInput] | None:
+            cancel_seen.append(ctx)
+            return None
+
+        async def error_spy(
+            ctx: HookContext[EpisodicRecordInput],
+        ) -> HookContext[EpisodicRecordInput] | None:
+            error_seen.append(ctx)
+            return None
+
+        fresh_registry_allow_system.register(
+            hook_fn=cancel_spy,
+            hookpoint="cancelled",
+            kind="cancel",
+            tier="operator",
+        )
+        fresh_registry_allow_system.register(
+            hook_fn=error_spy,
+            hookpoint="write_failed",
+            kind="error",
+            tier="operator",
+        )
+
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+
+        async def cancelling_persist(_inp: EpisodicRecordInput) -> None:
+            raise asyncio.CancelledError
+
+        mem._persist = cancelling_persist  # type: ignore[method-assign]
+
+        with pytest.raises(asyncio.CancelledError):
+            await mem.record(**_RECORD_KWARGS)  # type: ignore[arg-type]
+
+        # Cancel chain ran; error chain did NOT.
+        assert len(cancel_seen) == 1
+        assert cancel_seen[0].kind == "cancel"
+        assert cancel_seen[0].hookpoint == "cancelled"
+        assert error_seen == []
+
+    # ------------------------------------------------------------------
+    # 4. after_flush does NOT fire when _persist raises
+    # ------------------------------------------------------------------
+
+    async def test_after_flush_does_not_fire_on_persist_raise(
+        self,
+        fresh_registry_allow_system: HookRegistry,
+    ) -> None:
+        """``after_flush`` is the success-arm hookpoint; it must NOT
+        fire when the body raised.
+
+        A regression where ``after_flush`` fired on the error path
+        would be a worse durability lie than the ``committed``-vs-
+        ``after_flush`` choice itself: a subscriber would observe the
+        post-success signal on a FAILED write. Pins the
+        :meth:`Flow.body`'s ``else``-vs-``except`` branch routing for
+        episodic-record specifically.
+        """
+        post_seen: list[bool] = []
+
+        async def post_spy(
+            _ctx: HookContext[EpisodicRecordInput],
+        ) -> HookContext[EpisodicRecordInput] | None:
+            post_seen.append(True)
+            return None
+
+        fresh_registry_allow_system.register(
+            hook_fn=post_spy,
+            hookpoint="after_flush",
+            kind="post",
+            tier="operator",
+        )
+
+        session = _mock_session()
+        mem = EpisodicMemory(session=session)
+
+        async def failing_persist(_inp: EpisodicRecordInput) -> None:
+            raise ValueError("persist failed")
+
+        mem._persist = failing_persist  # type: ignore[method-assign]
+
+        with pytest.raises(ValueError):
+            await mem.record(**_RECORD_KWARGS)  # type: ignore[arg-type]
+
+        assert post_seen == []
 
 
 # ──────────────────────────────────────────────────────────────────────

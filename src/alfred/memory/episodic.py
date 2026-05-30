@@ -149,9 +149,23 @@ class EpisodicMemory:
             )
             # The terminal hookpoint names are fixed by spec §7 —
             # ``after_flush`` (NOT ``committed``), ``write_failed``,
-            # ``cancelled``. Subscriber spies for these chains land in
-            # PR-B Task 5; the names are pinned here so the dispatcher
-            # wiring is verifiable before any subscriber exists.
+            # ``cancelled``. PR-B Task 5 pins each with a spy subscriber
+            # in ``tests/unit/memory/test_episodic_hooks_wiring.py``.
+            #
+            # mem-1 / Decision 3.1 — WHY ``after_flush`` and not
+            # ``committed``:
+            # :meth:`_persist` only ``flush``-es; the durable COMMIT
+            # happens in the caller's ``session_scope`` (see
+            # ``src/alfred/db.py``). Until commit, a later same-turn
+            # failure can still roll back this row. A subscriber wired
+            # to a hookpoint named ``committed`` would therefore be a
+            # durability lie — it would fire BEFORE the row is durable
+            # and any side-effect it took on that promise (queue a
+            # notification, count a metric as "persisted") could become
+            # an externalised falsehood. ``after_flush`` is honest
+            # about the lifecycle stage and leaves the durability
+            # signal to a future ``after_commit`` hookpoint owned by
+            # ``session_scope`` (out of scope this slice).
             async with flow.body(
                 post="after_flush",
                 error="write_failed",
