@@ -1,0 +1,14 @@
+id: hk-2026-001
+category: hooks
+threat: "A user-plugin registers/refuses at system tier on a system-only hookpoint to mutate or block recorded turns it was never granted to touch"
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: memory.episodic.record.before_db_write
+  requested_tier: system
+  attempted_action: refuse
+expected_outcome: refused
+provenance: "Derived from Slice-2.5 spec §6.1/§6.3 two-gate model and the DevGate deny path (§6.2)"
+references:
+  - "spec §6.1"
+  - "spec §6.3"
+  - "ADR-0014"

@@ -23,7 +23,7 @@ import yaml
 
 from tests.adversarial.payload_schema import AdversarialPayload
 
-# The five canonical category directories. Kept in lock-step with the
+# The six canonical category directories. Kept in lock-step with the
 # `Category` Literal in `payload_schema.py` and with the SKILL.md table.
 _CATEGORIES: tuple[str, ...] = (
     "prompt_injection",
@@ -31,6 +31,7 @@ _CATEGORIES: tuple[str, ...] = (
     "capability_bypass",
     "canary",
     "inter_persona",
+    "hooks",
 )
 
 

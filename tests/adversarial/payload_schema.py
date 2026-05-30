@@ -24,11 +24,12 @@ _PREFIX_TO_CATEGORY: dict[str, str] = {
     "cap": "capability_bypass",
     "cnry": "canary",
     "ipp": "inter_persona",
+    "hk": "hooks",
 }
 
 # Anchored regex matching `<prefix>-YYYY-NNN`. NNN is zero-padded to three
 # digits per SKILL.md "Numbering monotonic per year per category."
-_ID_PATTERN = re.compile(r"^(pi|dlp|cap|cnry|ipp)-\d{4}-\d{3}$")
+_ID_PATTERN = re.compile(r"^(pi|dlp|cap|cnry|ipp|hk)-\d{4}-\d{3}$")
 
 Category = Literal[
     "prompt_injection",
@@ -36,6 +37,7 @@ Category = Literal[
     "capability_bypass",
     "canary",
     "inter_persona",
+    "hooks",
 ]
 
 IngestionPath = Literal[
