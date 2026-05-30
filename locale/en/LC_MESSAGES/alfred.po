@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-27 15:10+0100\n"
+"POT-Creation-Date: 2026-05-28 15:55+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -165,6 +165,22 @@ msgstr "alfred error: {error}"
 #: src/alfred/comms/tui.py:216
 msgid "tui.label_alfred"
 msgstr "alfred"
+
+#: src/alfred/hooks/errors.py:105
+msgid "hooks.refusal"
+msgstr "Hook {hook_id} refused action {action_id}: {reason}"
+
+#: src/alfred/hooks/errors.py:132
+msgid "hooks.subscriber_must_be_async"
+msgstr ""
+"Hook subscriber {name} must be `async def`. Add `async` to the function "
+"definition."
+
+#: src/alfred/hooks/errors.py:170
+msgid "hooks.subscriber_error"
+msgstr ""
+"Hook subscriber {name} raised an unexpected error (correlation "
+"{correlation_id}); see the audit log."
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
