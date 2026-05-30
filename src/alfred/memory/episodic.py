@@ -7,11 +7,48 @@ this with the full summarization + semantic-fact consolidation pass.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alfred.memory.models import Episode
 from alfred.providers.base import Role
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodicRecordInput:
+    """Immutable carrier for one :meth:`EpisodicMemory.record` call.
+
+    PR-B Task 2+ routes ``record`` through :func:`alfred.hooks.invoking`
+    so every persistence call fans out across five hookpoints
+    (pre/post/error/observe) before/after the DB write. The hook
+    dispatcher needs a single hashable, value-equal snapshot of the
+    call shape to hand subscribers — that's this class.
+
+    The field shape is locked 1:1 to ``record``'s signature (same names,
+    types, defaults, order); ``tests/unit/memory/
+    test_episodic_record_input.py`` is the drift-guard. Don't add a
+    kwarg to ``record`` without adding the matching field here.
+
+    Frozen + slots is load-bearing: subscribers receive the input at the
+    pre stage and must not be able to mutate the snapshot the dispatcher
+    will re-hand to post / observe subscribers later in the chain.
+
+    No methods by design — produce a modified copy via
+    :func:`dataclasses.replace`, never in-place mutation.
+    """
+
+    user_id: str
+    role: Role
+    content: str
+    trust_tier: str
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    persona: str = "alfred"
+    persona_id: str | None = None
+    language: str = "en-US"
 
 
 class EpisodicMemory:
