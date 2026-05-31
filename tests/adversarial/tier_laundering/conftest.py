@@ -13,6 +13,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.security import tiers as _tiers
 from alfred.security.tiers import CapabilityGateNonce
 
@@ -24,11 +25,19 @@ def authorized_t3_nonce() -> Iterator[CapabilityGateNonce]:
     Yields the nonce object so adversarial tests can pass it as
     ``caller_token`` when exercising the legitimate-path branch. Saves
     and restores the previous slot value on teardown.
+
+    Both the install and the restore happen under ``_NONCE_LOCK`` (the
+    same module-level lock that guards ``create_and_register_t3_nonce``)
+    so concurrent test workers cannot race the slot mutation — spec §3.2
+    "one live nonce per process" stays sound under same-process
+    parallelism (pytest-xdist with ``--dist loadgroup``, etc.).
     """
-    previous = _tiers._AUTHORIZED_T3_NONCE
-    nonce = CapabilityGateNonce()
-    _tiers._set_authorized_t3_nonce(nonce)
+    with _NONCE_LOCK:
+        previous = _tiers._AUTHORIZED_T3_NONCE
+        nonce = CapabilityGateNonce()
+        _tiers._set_authorized_t3_nonce(nonce)
     try:
         yield nonce
     finally:
-        _tiers._set_authorized_t3_nonce(previous)
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(previous)
