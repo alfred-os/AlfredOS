@@ -138,14 +138,9 @@ class PostgresBackend:
             self._session_factory = session_factory
         elif dsn is not None:
             engine = create_async_engine(dsn, echo=False)
-            self._session_factory = async_sessionmaker(
-                engine, expire_on_commit=False
-            )
+            self._session_factory = async_sessionmaker(engine, expire_on_commit=False)
         else:
-            msg = (
-                "PostgresBackend requires either session_factory or dsn; "
-                "neither was provided"
-            )
+            msg = "PostgresBackend requires either session_factory or dsn; neither was provided"
             raise ValueError(msg)
 
     @asynccontextmanager
@@ -245,10 +240,7 @@ class PostgresBackend:
         """Return the most recently recorded state.git HEAD hash, or ``None``."""
         async with self._session() as session:
             result = await session.execute(
-                sa.text(
-                    "SELECT commit_hash FROM capability_gate_sync "
-                    "ORDER BY id DESC LIMIT 1"
-                )
+                sa.text("SELECT commit_hash FROM capability_gate_sync ORDER BY id DESC LIMIT 1")
             )
             row = result.fetchone()
         if row is None:
