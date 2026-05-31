@@ -1,0 +1,48 @@
+# config/policies.yaml — AlfredOS low-blast operator policy knobs.
+#
+# Changes here take effect on the next hot-reload (file-mtime polling,
+# 1s interval). No restart required. These knobs narrow or tune within
+# the existing trust surface — they cannot widen it. Widening actions
+# (domain allowlist additions, plugin grants, quarantined-provider changes)
+# require state.git reviewer-gate approval (spec §11.1).
+
+web_fetch:
+  # User-Agent header sent with every web.fetch request (spec §16 Fork 4).
+  # Default: AlfredOS/<version> — operators may customise but should
+  # retain an identifiable UA string.
+  user_agent: "AlfredOS/dev"
+
+  # Per-domain rate-limit overrides. Keys are domain names; values are
+  # requests/minute (int). Omitting a domain uses the system default (10/min).
+  # Example: rate_limits: {api.example.com: 60}
+  rate_limits: {}
+
+  # Per-user daily fetch budget. "user" tier = non-operator users.
+  # Operator-tier default: unlimited (null). Override per-user with
+  # 'alfred config web-fetch-budget <user> <n>' (writes to this file).
+  user_daily_budget: 100
+  operator_daily_budget: null  # unlimited
+
+  # Per-user concurrent ContentHandle cap (spec §7.7).
+  # A sixth web.fetch call from the same user while 5 handles are live
+  # receives WebFetchRateLimited.
+  max_concurrent_handles_per_user: 5
+
+  # Maximum response body size in bytes (spec §16 Fork 4). Default: 5MB.
+  max_response_body_bytes: 5242880
+
+  # TLS verification — ONLY honoured when ALFRED_ENV=development.
+  # Production deployments with skip_tls_verify=true emit a loud startup
+  # warning + supervisor.config_insecure audit row (spec §7.11).
+  skip_tls_verify: false
+
+quarantine:
+  # Maximum retries for prompt-embedded fallback extraction (spec §6.3).
+  # After this many failures, QuarantinedExtractor returns TypedRefusal.
+  extraction_max_retries: 2
+
+orchestrator:
+  # Per-action deadline in seconds (spec §10.5).
+  # asyncio.timeout wraps the entire handle_user_message turn.
+  # Configurable here; default 30s matches spec §10.5.
+  action_deadline_seconds: 30
