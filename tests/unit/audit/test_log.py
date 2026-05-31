@@ -104,6 +104,7 @@ async def test_append_schema_accepts_fields_kwarg() -> None:
     writer, session_mock = _make_writer()
     await writer.append_schema(
         fields=audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
+        schema_name="PLUGIN_LIFECYCLE_FIELDS",
         event="plugin.lifecycle.loaded",
         actor_user_id=None,
         subject={
@@ -132,6 +133,7 @@ async def test_append_schema_rejects_subject_missing_field() -> None:
     with pytest.raises(ValueError, match="missing required fields"):
         await writer.append_schema(
             fields=audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
+            schema_name="PLUGIN_LIFECYCLE_FIELDS",
             event="plugin.lifecycle.loaded",
             actor_user_id=None,
             subject={"plugin_id": "alfred-web-fetch"},  # missing all other fields
@@ -140,6 +142,131 @@ async def test_append_schema_rejects_subject_missing_field() -> None:
             cost_estimate_usd=0.0,
             trace_id="trace-abc",
         )
+
+
+@pytest.mark.asyncio
+async def test_append_schema_rejects_extra_subject_keys() -> None:
+    """append_schema() raises ValueError when subject dict carries unexpected keys.
+
+    Symmetric validation defends against typo'd field names (``"plugin_iid"``
+    silently shadowing ``"plugin_id"``) and against emitters accidentally
+    persisting T3 fragments (``str(exc)``, ``exc.args``) into JSONB — see
+    spec §5.6.
+    """
+    writer, _ = _make_writer()
+    full_subject = {
+        "plugin_id": "alfred-web-fetch",
+        "manifest_subscriber_tier": "system",
+        "manifest_version": 1,
+        "sandbox_profile": "unsandboxed",
+        "exit_code": None,
+        "signal": None,
+        "restart_count": 0,
+        "breaker_state": "CLOSED",
+        "correlation_id": "trace-abc",
+        # Unexpected key — simulates an emitter persisting str(exc).
+        "raw_extract_excerpt": "Traceback (most recent call last): ...",
+    }
+    with pytest.raises(ValueError, match="unexpected fields"):
+        await writer.append_schema(
+            fields=audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
+            schema_name="PLUGIN_LIFECYCLE_FIELDS",
+            event="plugin.lifecycle.loaded",
+            actor_user_id=None,
+            subject=full_subject,
+            trust_tier_of_trigger="T0",
+            result="loaded",
+            cost_estimate_usd=0.0,
+            trace_id="trace-abc",
+        )
+
+
+@pytest.mark.asyncio
+async def test_append_schema_rejects_empty_fields() -> None:
+    """append_schema() raises ValueError when ``fields`` is empty.
+
+    ``frozenset() - anything = frozenset()``, so without an explicit guard
+    the contract would be silently bypassed: any ``subject`` dict would
+    pass the missing-field check. Guard with a length check up front.
+    """
+    writer, _ = _make_writer()
+    with pytest.raises(ValueError, match="fields must be non-empty"):
+        await writer.append_schema(
+            fields=frozenset(),
+            schema_name="EMPTY_FOR_TEST",
+            event="bogus.event",
+            actor_user_id=None,
+            subject={"anything": "goes"},
+            trust_tier_of_trigger="T0",
+            result="success",
+            cost_estimate_usd=0.0,
+            trace_id="trace-abc",
+        )
+
+
+@pytest.mark.asyncio
+async def test_append_schema_propagates_persistence_failure() -> None:
+    """append_schema() surfaces persistence errors raised by the inner append().
+
+    Mirrors ``test_append_raises_on_persistence_failure`` to lock in the
+    error-propagation contract on the typed helper directly — not just
+    transitively through ``append()``.
+    """
+    session = _mock_session()
+    session.flush.side_effect = RuntimeError("db down")
+    writer = AuditWriter(session_factory=_factory_for(session))
+    with pytest.raises(RuntimeError, match="db down"):
+        await writer.append_schema(
+            fields=audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
+            schema_name="PLUGIN_LIFECYCLE_FIELDS",
+            event="plugin.lifecycle.loaded",
+            actor_user_id=None,
+            subject={
+                "plugin_id": "alfred-web-fetch",
+                "manifest_subscriber_tier": "system",
+                "manifest_version": 1,
+                "sandbox_profile": "unsandboxed",
+                "exit_code": None,
+                "signal": None,
+                "restart_count": 0,
+                "breaker_state": "CLOSED",
+                "correlation_id": "trace-abc",
+            },
+            trust_tier_of_trigger="T0",
+            result="loaded",
+            cost_estimate_usd=0.0,
+            trace_id="trace-abc",
+        )
+
+
+@pytest.mark.asyncio
+async def test_append_schema_error_message_names_constant() -> None:
+    """append_schema() error message embeds ``schema_name`` so the engineer can grep it.
+
+    Without this, the engineer who fields the ValueError has to find the
+    caller, read it, and grep audit_row_schemas to discover which constant
+    was passed. Naming the constant in the message collapses that loop.
+    """
+    writer, _ = _make_writer()
+    with pytest.raises(ValueError) as exc_info:
+        await writer.append_schema(
+            fields=audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
+            schema_name="PLUGIN_LIFECYCLE_FIELDS",
+            event="plugin.lifecycle.loaded",
+            actor_user_id=None,
+            subject={"plugin_id": "alfred-web-fetch"},  # missing fields
+            trust_tier_of_trigger="T0",
+            result="loaded",
+            cost_estimate_usd=0.0,
+            trace_id="trace-abc",
+        )
+    message = str(exc_info.value)
+    assert "PLUGIN_LIFECYCLE_FIELDS" in message, (
+        f"ValueError must name the schema constant; got: {message!r}"
+    )
+    assert "alfred.audit.audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS" in message, (
+        f"ValueError must give the fully-qualified import path; got: {message!r}"
+    )
 
 
 def test_all_audit_row_schema_fields_live_in_known_subject_space() -> None:
