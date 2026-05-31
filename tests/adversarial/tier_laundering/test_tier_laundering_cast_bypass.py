@@ -27,7 +27,9 @@ from alfred.security.tiers import (
 )
 
 
-def test_cast_t2_of_t3_value_does_not_change_runtime_tier() -> None:
+def test_cast_t2_of_t3_value_does_not_change_runtime_tier(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
     """``cast(TaggedContent[T2], t3_value)`` is a type-system lie.
 
     At runtime, ``cast()`` is a no-op — the object's ``.tier`` attribute
@@ -35,13 +37,14 @@ def test_cast_t2_of_t3_value_does_not_change_runtime_tier() -> None:
     the cast bypass: the orchestrator reading ``.tier.name`` still sees
     "T3". The CI grep gate (``scripts/check_tag_t3.py``) catches the
     pattern at commit time. Spec §3.8.
+
+    Uses the ``authorized_t3_nonce`` fixture rather than the removed
+    per-call ``_authorized_nonce=`` override (CR-138 finding #7).
     """
-    nonce = CapabilityGateNonce()
     t3_value = tag_t3_with_nonce(
         "injected content",
         source="web.fetch",
-        caller_token=nonce,
-        _authorized_nonce=nonce,
+        caller_token=authorized_t3_nonce,
     )
     assert t3_value.tier is T3
 
