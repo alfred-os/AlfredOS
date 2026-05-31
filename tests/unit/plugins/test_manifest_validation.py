@@ -28,7 +28,7 @@ from __future__ import annotations
 import pytest
 
 from alfred.plugins.errors import ManifestError, ManifestTierError, ManifestVersionError
-from alfred.plugins.manifest import PluginManifest, parse_manifest
+from alfred.plugins.manifest import parse_manifest
 
 # ---------------------------------------------------------------------------
 # Canonical valid manifest — every test starts from this and perturbs one
@@ -124,9 +124,7 @@ def test_content_trust_tier_as_subscriber_tier_refused(forbidden_tier: str) -> N
 
 
 def test_unknown_subscriber_tier_refused() -> None:
-    bad = VALID_MANIFEST_TOML.replace(
-        'subscriber_tier = "system"', 'subscriber_tier = "root"'
-    )
+    bad = VALID_MANIFEST_TOML.replace('subscriber_tier = "system"', 'subscriber_tier = "root"')
     with pytest.raises(ManifestError):
         parse_manifest(bad)
 
