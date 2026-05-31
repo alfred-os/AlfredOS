@@ -53,10 +53,11 @@ def test_launcher_passes_bash_syntax_check() -> None:
     static level so the failure surfaces at CI rather than at the
     first plugin spawn.
     """
-    result = subprocess.run(
-        ["bash", "-n", str(_LAUNCHER)],
+    result = subprocess.run(  # noqa: S603 — bash on PATH + repo-owned script path
+        ["bash", "-n", str(_LAUNCHER)],  # noqa: S607 — bash is on PATH by convention
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, f"bash -n failed: {result.stderr}"
 
@@ -118,10 +119,11 @@ def test_launcher_exits_1_without_sandbox_policy_in_production() -> None:
         "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
     }
     env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
         [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "hello"],
         capture_output=True,
         env=env,
+        check=False,
     )
     assert result.returncode == 1
     assert b"plugin.launcher_no_sandbox_policy" in result.stderr
@@ -140,10 +142,11 @@ def test_launcher_refuses_unsandboxed_flag_in_production() -> None:
         "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
         "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
     }
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
         [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "hello"],
         capture_output=True,
         env=env,
+        check=False,
     )
     assert result.returncode == 1
     assert b"plugin.launcher_no_sandbox_policy" in result.stderr
@@ -162,7 +165,7 @@ def test_launcher_accepts_unsandboxed_in_development() -> None:
         "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
         "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
     }
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
         [
             str(_LAUNCHER),
             "alfred.test-plugin",
@@ -171,6 +174,7 @@ def test_launcher_accepts_unsandboxed_in_development() -> None:
         ],
         capture_output=True,
         env=env,
+        check=False,
     )
     assert result.returncode == 0
     assert b"alfred-launcher-test-marker" in result.stdout
@@ -189,18 +193,17 @@ def test_launcher_emits_config_insecure_audit_row_in_development() -> None:
         "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
         "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
     }
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
         [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "ok"],
         capture_output=True,
         env=env,
+        check=False,
     )
     assert b"supervisor.config_insecure" in result.stderr
     # The audit row is one JSON object per stderr line. Find the line
     # that contains the event marker and parse it.
     json_line = next(
-        line
-        for line in result.stderr.splitlines()
-        if b"supervisor.config_insecure" in line
+        line for line in result.stderr.splitlines() if b"supervisor.config_insecure" in line
     )
     parsed = json.loads(json_line)
     assert parsed["event"] == "supervisor.config_insecure"
@@ -235,7 +238,7 @@ def test_launcher_macos_dev_emits_uid_separation_unavailable_row() -> None:
             "ALFRED_SANDBOX_POLICY_DIR": str(sandbox_dir),
         }
         env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603 — literal repo-owned script path
             [
                 str(_LAUNCHER),
                 "alfred.test-plugin",
@@ -244,6 +247,7 @@ def test_launcher_macos_dev_emits_uid_separation_unavailable_row() -> None:
             ],
             capture_output=True,
             env=env,
+            check=False,
         )
         # Successful exec via /bin/echo (no UID-drop) → 0 + marker present.
         assert result.returncode == 0
@@ -258,10 +262,7 @@ def test_launcher_macos_dev_emits_uid_separation_unavailable_row() -> None:
         parsed = json.loads(json_line)
         assert parsed["event"] == "supervisor.config_insecure"
         assert parsed["plugin_id"] == "alfred.test-plugin"
-        assert (
-            parsed["insecure_config_key"]
-            == "launcher_uid_separation_unavailable_macos"
-        )
+        assert parsed["insecure_config_key"] == "launcher_uid_separation_unavailable_macos"
     finally:
         policy.unlink(missing_ok=True)
         sandbox_dir.rmdir()
