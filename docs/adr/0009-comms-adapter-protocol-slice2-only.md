@@ -1,10 +1,10 @@
 # 0009 — `CommsAdapter` is an in-process Python Protocol for Slice 2 only
 
-- **Status**: Accepted
+- **Status**: Superseded by ADR-0016 for new adapters; in-process Discord + TUI adapters unchanged through Slice 3
 - **Date**: 2026-05-27
 - **Slice**: 2 — `docs/superpowers/plans/2026-05-26-slice-2-pr-A-identity.md`
 - **Supersedes**: —
-- **Superseded by**: —
+- **Superseded by**: ADR-0016 (2026-05-31, for new adapters only)
 
 ## Context
 
@@ -61,6 +61,11 @@ the constraint retroactively.
   lands, the reviewer agent must confirm `src/alfred/comms/` no longer
   contains in-process adapter classes and that this ADR transitions to
   "Superseded by 00NN".
+
+Slice 3 ships a `CommsAdapterMCP` Protocol stub (`src/alfred/comms/mcp_protocol.py`)
+and a reference test plugin (`plugins/alfred-comms-test/`) that validates the MCP
+comms transport contract. The existing `DiscordAdapter` and `TuiAdapter` remain
+in-process through Slice 3, untouched. ADR-0016 commits Slice 4 to the full rewrite.
 
 ## Alternatives considered
 
