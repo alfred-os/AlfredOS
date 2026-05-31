@@ -71,8 +71,6 @@ from alfred.audit.log import AuditWriter
 from alfred.hooks.capability import CapabilityGate
 from alfred.plugins.errors import (
     ManifestError,
-    ManifestTierError,
-    ManifestVersionError,
     PluginError,
 )
 from alfred.plugins.manifest import PluginManifest, parse_manifest
@@ -187,11 +185,24 @@ class AlfredPluginSession:
         synchronous ``__init__`` would silently drop the coroutine,
         omitting the audit row for a tier-laundering attempt — see
         rvw-cr-round-1.
+
+        Catches every :class:`ManifestError` subclass (not just version
+        / tier). CR on PR #140 caught the prior narrower handler as a
+        contract gap: ``parse_manifest`` also raises plain
+        :class:`ManifestError` for malformed TOML, missing ``[plugin]``
+        table, missing/invalid id, unknown subscriber_tier label, and
+        wrong types for ``sandbox_profile`` / ``platform``. Those
+        paths previously propagated with NO ``plugin.lifecycle.load_refused``
+        row, violating the refused-load audit contract in PRD §4.2 — an
+        operator could not distinguish "we never received the manifest"
+        from "we received it and refused it for shape reasons". The
+        emit helper handles the version-less / tier-less subclass via
+        ``getattr(exc, "got", -1)`` so this broader catch is safe.
         """
         correlation_id = str(uuid.uuid4())
         try:
             manifest = parse_manifest(manifest_raw)
-        except (ManifestVersionError, ManifestTierError) as exc:
+        except ManifestError as exc:
             await cls._emit_load_refused_from_parse_failure(
                 audit_writer=audit_writer,
                 manifest_raw=manifest_raw,

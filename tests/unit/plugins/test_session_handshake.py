@@ -31,7 +31,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from alfred.audit import audit_row_schemas
-from alfred.plugins.errors import ManifestVersionError, PluginError
+from alfred.plugins.errors import (
+    ManifestError,
+    ManifestTierError,
+    ManifestVersionError,
+    PluginError,
+)
 from alfred.plugins.session import AlfredPluginSession
 
 _VALID_MANIFEST = """
@@ -348,3 +353,192 @@ async def test_handshake_complete_is_idempotent_no_double_emit(
     first_call_count = len(fake_audit_writer.calls)
     await session._on_handshake_complete()
     assert len(fake_audit_writer.calls) == first_call_count
+
+
+# ---------------------------------------------------------------------------
+# CR-PR-140 F5 — load_refused row must land for EVERY manifest parse failure.
+# ---------------------------------------------------------------------------
+#
+# The original ``create()`` only caught ``ManifestVersionError`` and
+# ``ManifestTierError``. Other parse failures (malformed TOML, missing
+# fields, invalid types, unknown subscriber_tier label) raised plain
+# ``ManifestError`` and skipped the ``plugin.lifecycle.load_refused``
+# audit emit — violating the refused-load contract in PRD §4.2 (an
+# operator could not distinguish "we never received the manifest" from
+# "we received it and refused it for shape reasons"). These tests pin
+# the broader contract.
+
+
+_MALFORMED_TOML_MANIFEST = "this is not valid TOML ::: ===\n[unclosed"
+
+
+_MISSING_PLUGIN_TABLE_MANIFEST = """
+[alfred]
+manifest_version = 1
+"""
+
+
+_MISSING_PLUGIN_ID_MANIFEST = """
+[alfred]
+manifest_version = 1
+
+[plugin]
+subscriber_tier = "system"
+sandbox_profile = "user-plugin"
+"""
+
+
+_UNKNOWN_SUBSCRIBER_TIER_MANIFEST = """
+[alfred]
+manifest_version = 1
+
+[plugin]
+id = "alfred.weird-tier-plugin"
+subscriber_tier = "made-up-tier"
+sandbox_profile = "user-plugin"
+"""
+
+
+_INVALID_SANDBOX_PROFILE_TYPE_MANIFEST = """
+[alfred]
+manifest_version = 1
+
+[plugin]
+id = "alfred.bad-sandbox-type"
+subscriber_tier = "system"
+sandbox_profile = 42
+"""
+
+
+_CONTENT_TRUST_TIER_MANIFEST = """
+[alfred]
+manifest_version = 1
+
+[plugin]
+id = "alfred.tier-laundering-attempt"
+subscriber_tier = "T3"
+sandbox_profile = "user-plugin"
+"""
+
+
+@pytest.mark.asyncio
+async def test_create_emits_load_refused_on_malformed_toml(
+    fake_audit_writer: MagicMock, fake_gate: MagicMock
+) -> None:
+    """Malformed TOML → ``ManifestError`` AND ``plugin.lifecycle.load_refused`` row.
+
+    CR PR #140 F5 fix: previously the narrower ``except`` skipped this
+    path. The forensic ``plugin_id`` falls back to the sha256 sentinel
+    because the raw TOML is unparseable so the id-regex extractor
+    typically misses too.
+    """
+    with pytest.raises(ManifestError):
+        await AlfredPluginSession.create(
+            manifest_raw=_MALFORMED_TOML_MANIFEST,
+            audit_writer=fake_audit_writer,
+            gate=fake_gate,
+        )
+    assert fake_audit_writer.last_event == "plugin.lifecycle.load_refused"
+    call = fake_audit_writer.calls[-1]
+    assert call["fields"] is audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS
+    subject = call["subject"]
+    # ``got`` is absent on plain ManifestError so the helper records -1.
+    assert subject["manifest_version"] == -1
+
+
+@pytest.mark.asyncio
+async def test_create_emits_load_refused_on_missing_plugin_table(
+    fake_audit_writer: MagicMock, fake_gate: MagicMock
+) -> None:
+    """No ``[plugin]`` table → audit row lands.
+
+    CR PR #140 F5 fix.
+    """
+    with pytest.raises(ManifestError):
+        await AlfredPluginSession.create(
+            manifest_raw=_MISSING_PLUGIN_TABLE_MANIFEST,
+            audit_writer=fake_audit_writer,
+            gate=fake_gate,
+        )
+    assert fake_audit_writer.last_event == "plugin.lifecycle.load_refused"
+
+
+@pytest.mark.asyncio
+async def test_create_emits_load_refused_on_missing_plugin_id(
+    fake_audit_writer: MagicMock, fake_gate: MagicMock
+) -> None:
+    """Missing ``[plugin] id`` → audit row lands with sha256 sentinel.
+
+    CR PR #140 F5 fix.
+    """
+    with pytest.raises(ManifestError):
+        await AlfredPluginSession.create(
+            manifest_raw=_MISSING_PLUGIN_ID_MANIFEST,
+            audit_writer=fake_audit_writer,
+            gate=fake_gate,
+        )
+    assert fake_audit_writer.last_event == "plugin.lifecycle.load_refused"
+    subject = fake_audit_writer.calls[-1]["subject"]
+    # No id to extract → sha256 sentinel.
+    assert subject["plugin_id"].startswith("unknown(sha256=")
+
+
+@pytest.mark.asyncio
+async def test_create_emits_load_refused_on_unknown_subscriber_tier(
+    fake_audit_writer: MagicMock, fake_gate: MagicMock
+) -> None:
+    """Unknown ``subscriber_tier`` label (not T0-T3, not in valid set) → row lands.
+
+    CR PR #140 F5 fix. Note this is distinct from the
+    ``ManifestTierError`` path (which fires on T0-T3 confusion); a
+    label outside the closed vocabulary raises plain ``ManifestError``.
+    """
+    with pytest.raises(ManifestError):
+        await AlfredPluginSession.create(
+            manifest_raw=_UNKNOWN_SUBSCRIBER_TIER_MANIFEST,
+            audit_writer=fake_audit_writer,
+            gate=fake_gate,
+        )
+    assert fake_audit_writer.last_event == "plugin.lifecycle.load_refused"
+    subject = fake_audit_writer.calls[-1]["subject"]
+    # The forensic id extractor recovers the id even though the strict
+    # parse failed on the tier.
+    assert subject["plugin_id"] == "alfred.weird-tier-plugin"
+
+
+@pytest.mark.asyncio
+async def test_create_emits_load_refused_on_invalid_sandbox_profile_type(
+    fake_audit_writer: MagicMock, fake_gate: MagicMock
+) -> None:
+    """Non-string ``sandbox_profile`` → audit row lands.
+
+    CR PR #140 F5 fix.
+    """
+    with pytest.raises(ManifestError):
+        await AlfredPluginSession.create(
+            manifest_raw=_INVALID_SANDBOX_PROFILE_TYPE_MANIFEST,
+            audit_writer=fake_audit_writer,
+            gate=fake_gate,
+        )
+    assert fake_audit_writer.last_event == "plugin.lifecycle.load_refused"
+
+
+@pytest.mark.asyncio
+async def test_create_emits_load_refused_on_content_trust_tier_in_subscriber_field(
+    fake_audit_writer: MagicMock, fake_gate: MagicMock
+) -> None:
+    """T0-T3 in ``subscriber_tier`` → ``ManifestTierError`` AND audit row.
+
+    Defence-in-depth pin: the broader ``except ManifestError`` introduced
+    in the F5 fix still covers the tier-laundering subclass. A regression
+    that re-narrowed the catch would break this assertion.
+    """
+    with pytest.raises(ManifestTierError):
+        await AlfredPluginSession.create(
+            manifest_raw=_CONTENT_TRUST_TIER_MANIFEST,
+            audit_writer=fake_audit_writer,
+            gate=fake_gate,
+        )
+    assert fake_audit_writer.last_event == "plugin.lifecycle.load_refused"
+    subject = fake_audit_writer.calls[-1]["subject"]
+    assert subject["plugin_id"] == "alfred.tier-laundering-attempt"
