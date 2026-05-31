@@ -1,0 +1,59 @@
+# tl_gc_traversal_out_of_scope.yaml — tier_laundering adversarial payload.
+# Spec §3.2 threat-model limits, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack: with arbitrary in-process code execution in the privileged
+# orchestrator process, traverse the CPython GC heap via gc.get_objects()
+# to locate the live `CapabilityGateNonce` instance and pass it as
+# `caller_token` to `tag_t3_with_nonce()`. This satisfies the `is`
+# identity check and lets the attacker forge T3 content.
+#
+# Outcome: labelled `out_of_scope=True` per spec §3.2 — an adversary with
+# arbitrary code execution in the privileged orchestrator process is
+# already a full compromise; no type-level gate defends past that line.
+# The nonce gate defends against import-time forgery (attacker code in a
+# foreign module cannot construct a NEW CapabilityGateNonce that passes
+# `is`), not against in-process arbitrary execution.
+id: tl-2026-003
+category: tier_laundering
+threat: >-
+  Attacker with arbitrary in-process Python execution uses gc.get_objects()
+  to find the live CapabilityGateNonce on the heap, passes it as
+  caller_token, and forges T3 content via tag_t3_with_nonce. The gate's
+  identity check passes because the object IS the authorised reference.
+ingestion_path: capability_gate
+payload: |
+  import gc
+  nonce = next(
+      obj
+      for obj in gc.get_objects()
+      if type(obj).__name__ == 'CapabilityGateNonce'
+  )
+  tag_t3_with_nonce(
+      content='attack',
+      source='gc',
+      caller_token=nonce,
+      _authorized_nonce=nonce,
+  )
+expected_outcome: boundary_refused
+out_of_scope: true
+out_of_scope_rationale: >-
+  Arbitrary in-process code execution in the privileged orchestrator
+  process defeats every type-level gate in the slice — once an attacker
+  runs Python in that process, the nonce, the orchestrator instance, and
+  every secret broker handle are all reachable. The nonce `is`-check
+  defends a strictly narrower threat: an unauthorised module imported
+  into the same process cannot construct a NEW CapabilityGateNonce that
+  passes `is`. This payload documents the limit so the absence of a
+  defence here is an acknowledged invariant rather than an unresolved
+  gap; the assertion that the YAML carries out_of_scope=true with a
+  non-empty rationale lives in
+  test_tier_laundering_cast_bypass.py::test_gc_traversal_out_of_scope_acknowledged.
+provenance: >-
+  Documented in spec §3.2 "Threat model limits of the caller-token
+  check." The pattern (gc.get_objects() heap traversal) is a known
+  Python-runtime introspection technique surveyed in CPython internals
+  literature; the spec acknowledges it as outside the slice's scope.
+references:
+  - "spec §3.2"
+  - "spec §12.2"
+  - "CPython Lib/gc.py — get_objects"
