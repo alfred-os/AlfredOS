@@ -375,6 +375,8 @@ async def test_real_gate_apply_grants_swaps_policy_and_persists() -> None:
     # Backend received the upsert and sync-hash set.
     backend.upsert_grant.assert_awaited_once_with(new_grant)
     backend.set_sync_hash.assert_awaited_once_with("new-head-hash")
+    # No revokes: the previous snapshot was empty.
+    backend.revoke_grant.assert_not_awaited()
 
     # In-memory policy now answers the new grant positively.
     assert (
@@ -385,3 +387,72 @@ async def test_real_gate_apply_grants_swaps_policy_and_persists() -> None:
         )
         is True
     )
+
+
+async def test_real_gate_apply_grants_revokes_absent_grants_in_postgres() -> None:
+    """CR-139 finding #2: revocation persists to the backing store.
+
+    The previous in-memory snapshot is the source of truth for what
+    was approved. A grant that disappears from the new ``grants`` set
+    is a revocation and MUST trigger
+    :meth:`StorageBackend.revoke_grant` — otherwise the Postgres row
+    survives the in-memory swap and the next process startup
+    resurrects the capability.
+    """
+    from alfred.security.capability_gate._gate import RealGate
+
+    existing = GrantRow(
+        plugin_id="legacy.plugin",
+        subscriber_tier="operator",
+        hookpoint="tool.web.fetch",
+        content_tier=None,
+        proposal_branch="proposal/policy-grant-legacy",
+    )
+    backend = _make_backend(grants=frozenset({existing}))
+    gate = await RealGate.create(backend=backend, audit_sink=_make_no_op_sink())
+
+    # Apply an empty grant set — the existing grant becomes a revocation.
+    await gate._apply_grants(frozenset(), commit_hash="post-revoke-hash")
+
+    backend.revoke_grant.assert_awaited_once_with(
+        plugin_id="legacy.plugin",
+        hookpoint="tool.web.fetch",
+        subscriber_tier="operator",
+    )
+    backend.set_sync_hash.assert_awaited_once_with("post-revoke-hash")
+    # In-memory policy now denies.
+    assert (
+        gate.check(
+            plugin_id="legacy.plugin",
+            hookpoint="tool.web.fetch",
+            requested_tier="operator",
+        )
+        is False
+    )
+
+
+async def test_real_gate_apply_grants_does_not_revoke_unchanged_grants() -> None:
+    """Idempotent re-apply: a grant present in both snapshots is not revoked.
+
+    The delta is ``previous - new``. A re-applied identical snapshot
+    has an empty difference and triggers zero
+    :meth:`StorageBackend.revoke_grant` calls — re-running the
+    rebuild during a state.git resync must not churn the table.
+    """
+    from alfred.security.capability_gate._gate import RealGate
+
+    keeper = GrantRow(
+        plugin_id="keep.plugin",
+        subscriber_tier="operator",
+        hookpoint="tool.web.fetch",
+        content_tier=None,
+        proposal_branch="proposal/policy-grant-keep",
+    )
+    backend = _make_backend(grants=frozenset({keeper}))
+    gate = await RealGate.create(backend=backend, audit_sink=_make_no_op_sink())
+
+    # Re-apply the same snapshot.
+    await gate._apply_grants(frozenset({keeper}), commit_hash="same-hash")
+
+    backend.revoke_grant.assert_not_awaited()
+    backend.upsert_grant.assert_awaited_once_with(keeper)
