@@ -383,3 +383,48 @@ async def test_create_proposal_audit_row_emitted_after_state_git_write() -> None
     # No audit row because state.git write failed.
     assert emitted == []
     backend.upsert_grant.assert_not_awaited()
+
+
+def test_write_proposal_log_does_not_emit_operator_user_id() -> None:
+    """CR-139 R2: the operational structlog event must NOT carry the
+    raw ``operator_user_id`` (an email). PII discipline — the structlog
+    redactor (alfred.cli._bootstrap._redact) scrubs secret-shaped strings
+    via SecretBroker.redact + the generic API-key regex but does NOT
+    scrub user identifiers. The full id is available in the audit-row
+    fields where it belongs.
+    """
+    import asyncio
+
+    import structlog.testing
+
+    from alfred.security.capability_gate.proposals import (
+        _write_proposal_to_state_git,
+    )
+
+    canonical_email = "alice@example.com"
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(NotImplementedError),
+    ):
+        asyncio.run(
+            _write_proposal_to_state_git(
+                branch_name="proposal/p1",
+                plugin_id="alfred-foo",
+                subscriber_tier="user-plugin",
+                hookpoint="plugin.foo",
+                content_tier="T2",
+                operator_user_id=canonical_email,
+            )
+        )
+
+    matched = [e for e in captured if e.get("event") == "capability_gate.proposal.write_attempted"]
+    assert matched, f"structlog event was not captured; got {captured!r}"
+    for event in matched:
+        for key, value in event.items():
+            assert value != canonical_email, (
+                f"Raw operator_user_id leaked into operational log under field {key!r}: {event!r}"
+            )
+        # Length marker IS present so missing-id bugs stay diagnosable.
+        assert event.get("operator_user_id_len") == len(canonical_email), (
+            f"Expected operator_user_id_len={len(canonical_email)} in event; got {event!r}"
+        )

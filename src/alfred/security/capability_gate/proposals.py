@@ -311,6 +311,13 @@ async def _write_proposal_to_state_git(
         will return the resolved branch ref name after the commit
         lands.
     """
+    # PII discipline (CR-139 R2): operator_user_id is canonically an email
+    # and MUST NOT appear in the operational structlog stream. The structlog
+    # redactor (alfred.cli._bootstrap._redact) scrubs secret-shaped strings
+    # via SecretBroker.redact + the generic API-key regex but does NOT scrub
+    # user identifiers. Pass a length marker instead so operators can still
+    # diagnose missing-id bugs without exposing the canonical id; the full
+    # id lives only in the audit-row fields where it belongs.
     _log.info(
         "capability_gate.proposal.write_attempted",
         branch_name=branch_name,
@@ -318,7 +325,7 @@ async def _write_proposal_to_state_git(
         subscriber_tier=subscriber_tier,
         hookpoint=hookpoint,
         content_tier=content_tier,
-        operator_user_id=operator_user_id,
+        operator_user_id_len=len(operator_user_id),
     )
     msg = (
         "_write_proposal_to_state_git requires gitpython state.git "
