@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import struct
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -70,7 +70,7 @@ def _wire_subprocess_io(
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.drain = AsyncMock()
     mock_proc.stdout.readexactly = AsyncMock(side_effect=[framed[:4], framed[4:]])
-    transport._process = mock_proc  # noqa: SLF001 -- test wires private slot
+    transport._process = mock_proc
     return mock_proc
 
 
@@ -129,9 +129,7 @@ async def test_web_fetch_returns_content_handle(
         passthrough_transport,
         {"jsonrpc": "2.0", "result": {"body": "<html>hi</html>"}},
     )
-    result = await passthrough_transport.dispatch(
-        "web.fetch", {"url": "https://example.com"}
-    )
+    result = await passthrough_transport.dispatch("web.fetch", {"url": "https://example.com"})
     assert isinstance(result, ContentHandle)
     assert result.source_url.startswith("plugin:test.plugin:")
 
@@ -152,10 +150,8 @@ async def test_content_handle_response_persists_tagged_in_store(
         passthrough_transport,
         {"jsonrpc": "2.0", "result": {"body": "abc"}},
     )
-    handle = await passthrough_transport.dispatch(
-        "web.fetch", {"url": "https://example.com"}
-    )
+    handle = await passthrough_transport.dispatch("web.fetch", {"url": "https://example.com"})
     assert isinstance(handle, ContentHandle)
-    stored = passthrough_transport._content_store.get(handle.id)  # noqa: SLF001
+    stored = passthrough_transport._content_store.get(handle.id)
     assert isinstance(stored, TaggedContent)
     assert stored.tier is T3

@@ -20,7 +20,6 @@ plugin shim.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock
@@ -66,7 +65,7 @@ async def test_spawn_scrubs_environment(
     * The parent's ``ALFRED_TEST_SECRET`` (which we set just above) is
       NOT present.
     """
-    os.environ["ALFRED_TEST_SECRET"] = "should-not-leak"
+    os.environ["ALFRED_TEST_SECRET"] = "should-not-leak"  # noqa: S105 - synthetic non-secret leak marker
     try:
         transport = _make_transport(
             fake_audit_writer,
@@ -75,11 +74,11 @@ async def test_spawn_scrubs_environment(
             executable="/bin/sh",
             args=["-c", "env"],
         )
-        await transport._spawn()  # noqa: SLF001 -- test exercises private spawn
-        assert transport._process is not None  # noqa: SLF001
-        assert transport._process.stdout is not None  # noqa: SLF001
-        stdout = await transport._process.stdout.read()  # noqa: SLF001
-        await transport._process.wait()  # noqa: SLF001
+        await transport._spawn()
+        assert transport._process is not None
+        assert transport._process.stdout is not None
+        stdout = await transport._process.stdout.read()
+        await transport._process.wait()
         decoded = stdout.decode("utf-8", errors="replace")
         # PATH is the only inherited-shape var; confirm the parent's
         # ALFRED_TEST_SECRET never reached the child.
@@ -116,57 +115,88 @@ async def test_spawn_closes_fd3_pipe_even_when_executable_missing(
 
     def _count_open_fds() -> int:
         if sys.platform == "linux":
-            return len(os.listdir("/proc/self/fd"))
+            return len(os.listdir("/proc/self/fd"))  # noqa: PTH208 - Linux-specific procfs probe; pathlib offers no advantage here
         # On Darwin/BSD we approximate by opening+closing one pipe and
         # counting via the delta — sufficient signal for the leak test.
         return -1  # sentinel; assertion below is conditional.
 
     before = _count_open_fds()
     with pytest.raises(FileNotFoundError):
-        await transport._spawn(provider_key=b"fake-key")  # noqa: SLF001
+        await transport._spawn(provider_key=b"fake-key")
     after = _count_open_fds()
     if before >= 0:
         # Allow ±1 for transient interpreter fds; the leak we defend
         # against would be 2 (read + write end of the pipe).
-        assert after - before <= 1, (
-            f"fd leak after spawn failure: before={before}, after={after}"
-        )
+        assert after - before <= 1, f"fd leak after spawn failure: before={before}, after={after}"
 
 
 @pytest.mark.asyncio
-async def test_spawn_delivers_provider_key_on_fd3(
+async def test_spawn_delivers_provider_key_via_inherited_fd(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:
-    """The host writes the length-prefixed key on fd-3 of the child (spec §5.3).
+    """The host writes the length-prefixed key on an inherited fd (spec §5.3).
 
-    The child shell reads exactly the framed bytes via ``head -c`` against
-    ``/dev/fd/3`` and echoes the unwrapped bytes (sans the 4-byte header).
-    We confirm the host wrote the key by checking the child's stdout.
+    The child reads ``ALFRED_PROVIDER_KEY_FD`` from its env to discover
+    the fd number and pulls the framed payload off the pipe. The 4-byte
+    big-endian length prefix + N bytes contract holds across the wire;
+    the env carries only the fd integer, never the key itself.
+
+    Spec §5.3 deviation: earlier drafts named fd 3 specifically. Forcing
+    the child's fd to 3 requires preexec_fn shenanigans that break on
+    macOS/Python-3.14 with asyncio's kqueue selector (the loop already
+    uses fd 3). The invariant — key value is out of band from env —
+    holds under the env-passed-fd approach.
     """
     key = b"sk-test-provider-key-ABC"
-    # Use awk to skip the 4-byte header and print the remaining bytes.
-    # `dd bs=1 count=N` after a 4-byte skip is the most portable shell shim.
-    shell_script = (
-        # Read 4 bytes of header from fd-3 into a variable; then read the
-        # remaining bytes and emit. ``dd`` handles the binary copy.
-        "dd if=/dev/fd/3 bs=1 count=4 of=/dev/null 2>/dev/null;"
-        f"dd if=/dev/fd/3 bs=1 count={len(key)} 2>/dev/null"
+    child_program = (
+        "import os, sys, struct;"
+        "fd=int(os.environ['ALFRED_PROVIDER_KEY_FD']);"
+        "header=os.read(fd,4); length=struct.unpack('>I',header)[0];"
+        "sys.stdout.buffer.write(os.read(fd,length))"
     )
     transport = _make_transport(
         fake_audit_writer,
         fake_broker,
         stub_nonce,
-        executable="/bin/sh",
-        args=["-c", shell_script],
+        executable=sys.executable,
+        args=["-c", child_program],
     )
-    await transport._spawn(provider_key=key)  # noqa: SLF001
-    assert transport._process is not None  # noqa: SLF001
-    assert transport._process.stdout is not None  # noqa: SLF001
-    stdout = await transport._process.stdout.read()  # noqa: SLF001
-    await transport._process.wait()  # noqa: SLF001
+    await transport._spawn(provider_key=key)
+    assert transport._process is not None
+    assert transport._process.stdout is not None
+    stdout = await transport._process.stdout.read()
+    await transport._process.wait()
     assert stdout == key, (
-        f"child failed to read framed key on fd-3: got {stdout!r}, expected {key!r}"
+        f"child failed to read framed key on inherited fd: got {stdout!r}, expected {key!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_spawn_announces_provider_key_fd_via_env(
+    fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
+) -> None:
+    """``ALFRED_PROVIDER_KEY_FD`` is set when ``provider_key`` is supplied.
+
+    Plain ``env``-print regression test: the env var carries an integer
+    (the fd number), never the key itself. Plaintext appears nowhere
+    visible in ``/proc/<pid>/environ`` or ``ps``-style introspection.
+    """
+    transport = _make_transport(
+        fake_audit_writer,
+        fake_broker,
+        stub_nonce,
+        executable="/bin/sh",
+        args=["-c", "env"],
+    )
+    await transport._spawn(provider_key=b"sk-PRIVATE-KEY-do-not-leak")
+    assert transport._process is not None
+    assert transport._process.stdout is not None
+    stdout = await transport._process.stdout.read()
+    await transport._process.wait()
+    decoded = stdout.decode("utf-8", errors="replace")
+    assert "ALFRED_PROVIDER_KEY_FD=" in decoded
+    # The key itself must NEVER appear in env.
+    assert "sk-PRIVATE-KEY-do-not-leak" not in decoded
 
 
 @pytest.mark.asyncio
@@ -186,7 +216,7 @@ async def test_kill_returns_true_on_live_subprocess(
         executable="/bin/sh",
         args=["-c", "sleep 5"],
     )
-    await transport._spawn()  # noqa: SLF001
+    await transport._spawn()
     succeeded = await transport.kill()
     assert succeeded is True
 
@@ -207,7 +237,7 @@ async def test_kill_returns_false_when_process_already_dead(
     mock_proc = MagicMock()
     mock_proc.kill = MagicMock(side_effect=ProcessLookupError)
     mock_proc.wait = AsyncMock()
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
     succeeded = await transport.kill()
     assert succeeded is False
 
@@ -264,7 +294,7 @@ async def test_close_kills_subprocess_after_timeout(
 
     mock_proc.wait = _wait
     mock_proc.kill = MagicMock()
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
 
     # Use a tiny timeout so the test isn't held up — close() wraps the
     # first wait() in asyncio.wait_for. The mock raises TimeoutError
@@ -273,6 +303,22 @@ async def test_close_kills_subprocess_after_timeout(
 
     mock_proc.stdin.close.assert_called_once()
     mock_proc.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_read_length_prefixed_before_spawn_raises_runtime_error(
+    fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
+) -> None:
+    """err-013 defence-in-depth: ``_read_length_prefixed`` direct-call guard.
+
+    The dispatch path already short-circuits on ``_process is None`` so this
+    method's guard is only reachable through the test harness — but it must
+    still raise loudly so any future refactor that reorders dispatch can't
+    silently downgrade the protection.
+    """
+    transport = _make_transport(fake_audit_writer, fake_broker, stub_nonce)
+    with pytest.raises(RuntimeError):
+        await transport._read_length_prefixed()
 
 
 @pytest.mark.asyncio
@@ -310,7 +356,7 @@ async def test_canary_trip_raises_security_event(
     dlp = MagicMock()
     dlp.scan.return_value = MagicMock(refused=False, rule_matched=None)
     scanner = MagicMock()
-    scanner.scan.return_value = CanaryTrip(matched_token="CANARY-X", frame_offset=0)
+    scanner.scan.return_value = CanaryTrip(matched_token="CANARY-X", frame_offset=0)  # noqa: S106 - canary token, not a credential
     transport = StdioTransport(
         plugin_id="test.plugin",
         executable="/bin/sh",
@@ -328,11 +374,11 @@ async def test_canary_trip_raises_security_event(
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.drain = AsyncMock()
     mock_proc.stdout.readexactly = AsyncMock(side_effect=[framed[:4], framed[4:]])
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
     with pytest.raises(CanaryTripSecurityEvent) as excinfo:
         await transport.dispatch("web.fetch", {"url": "https://example.com"})
     assert excinfo.value.plugin_id == "test.plugin"
-    assert excinfo.value.matched_token == "CANARY-X"
+    assert excinfo.value.matched_token == "CANARY-X"  # noqa: S105 - canary token, not a credential
 
 
 @pytest.mark.asyncio
@@ -369,7 +415,7 @@ async def test_inbound_frame_exceeding_max_size_raises_protocol_error(
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.drain = AsyncMock()
     mock_proc.stdout.readexactly = AsyncMock(return_value=oversize_header)
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
     with pytest.raises(PluginProtocolError):
         await transport.dispatch("web.fetch", {"url": "https://example.com"})
 
@@ -408,7 +454,7 @@ async def test_dispatch_large_frame_uses_to_thread_for_dlp(
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.drain = AsyncMock()
     mock_proc.stdout.readexactly = AsyncMock(side_effect=[framed[:4], framed[4:]])
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
 
     big_payload = "x" * 5000  # crosses the 4096-byte threshold
     await transport.dispatch("lifecycle.start", {"payload": big_payload})
@@ -453,7 +499,7 @@ async def test_runtime_error_when_nonce_missing(
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.drain = AsyncMock()
     mock_proc.stdout.readexactly = AsyncMock(side_effect=[framed[:4], framed[4:]])
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
     with pytest.raises(NonceNotConfigured):
         await transport.dispatch("web.fetch", {"url": "https://example.com"})
 
@@ -472,7 +518,7 @@ async def test_close_kills_subprocess_after_timeout_no_stdin(
 
     mock_proc.wait = _wait
     mock_proc.kill = MagicMock()
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
     await transport.close()
     mock_proc.kill.assert_called_once()
 
@@ -488,7 +534,7 @@ async def test_close_returns_after_wait_succeeds(
     mock_proc.stdin.close = MagicMock()
     mock_proc.wait = AsyncMock(return_value=0)
     mock_proc.kill = MagicMock()
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
     await transport.close()
     mock_proc.stdin.close.assert_called_once()
     mock_proc.kill.assert_not_called()
@@ -508,7 +554,7 @@ async def test_canary_trip_message_uses_i18n_key(
     dlp = MagicMock()
     dlp.scan.return_value = MagicMock(refused=False, rule_matched=None)
     scanner = MagicMock()
-    scanner.scan.return_value = CanaryTrip(matched_token="CANARY-Y", frame_offset=5)
+    scanner.scan.return_value = CanaryTrip(matched_token="CANARY-Y", frame_offset=5)  # noqa: S106 - canary token, not a credential
     transport = StdioTransport(
         plugin_id="my.plugin",
         executable="/bin/sh",
@@ -525,11 +571,9 @@ async def test_canary_trip_message_uses_i18n_key(
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.drain = AsyncMock()
     mock_proc.stdout.readexactly = AsyncMock(side_effect=[framed[:4], framed[4:]])
-    transport._process = mock_proc  # noqa: SLF001
+    transport._process = mock_proc
     with pytest.raises(CanaryTripSecurityEvent) as excinfo:
         await transport.dispatch("web.fetch", {"url": "https://example.com"})
     # The key falls back to itself when the catalog entry is absent — both
     # behaviours satisfy i18n rule #1 because the call routes through t().
-    assert "canary" in str(excinfo.value).lower() or "security.canary_tripped" in str(
-        excinfo.value
-    )
+    assert "canary" in str(excinfo.value).lower() or "security.canary_tripped" in str(excinfo.value)

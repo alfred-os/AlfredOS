@@ -10,36 +10,40 @@ and inlining the same MagicMock setup in each test would diverge over time
 Fixture intent:
 
 * ``fake_audit_writer`` exposes ``append_schema`` as an async mock that
-  records the last ``event`` string. The StdioTransport calls
-  ``append_schema`` (not ``append``) so the schema-validation contract from
-  PR-S3-0a is exercised.
+  records the last ``event`` string and every captured kwargs dict. The
+  StdioTransport calls ``append_schema`` (not ``append``) so the schema-
+  validation contract from PR-S3-0a is exercised.
 * ``fake_broker`` exposes an awaitable ``substitute`` returning the input
   params unchanged by default; individual tests override the return value
   for substitution-correctness assertions.
-* ``stub_nonce`` returns the real :class:`CapabilityGateNonce` so identity
-  comparisons inside ``tag_t3_with_nonce`` reach the production gate
-  surface. A MagicMock would short-circuit the gate's ``is`` check.
+* ``stub_nonce`` installs a fresh :class:`CapabilityGateNonce` as the
+  module-level authorised slot for the duration of the test (mirrors
+  ``tests/unit/security/conftest.py::authorized_t3_nonce``). Acquired
+  under ``_NONCE_LOCK`` so the fixture is race-safe against any
+  bootstrap path that might run in parallel.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from alfred.bootstrap import nonce_factory
+from alfred.bootstrap.nonce_factory import _NONCE_LOCK
+from alfred.security import tiers as _tiers
 from alfred.security.tiers import CapabilityGateNonce
 
 
 @pytest.fixture
 def fake_audit_writer() -> MagicMock:
-    """``MagicMock`` whose ``append_schema`` records ``event`` on ``.last_event``.
+    """``MagicMock`` whose ``append_schema`` records calls on ``.calls``.
 
-    The StdioTransport always emits via ``append_schema`` with
+    The StdioTransport always emits via ``append_schema`` with the
     ``schema_name`` kwarg (CR-138 R3 pattern, Cluster 4 fix). The fake
-    records every kwargs dict on ``.calls`` and exposes ``.last_event`` for
-    succinct assertions in DLP refusal tests.
+    records every kwargs dict on ``.calls`` and exposes ``.last_event``
+    for succinct assertions in DLP refusal tests.
     """
     writer = MagicMock()
     writer.calls = []
@@ -59,8 +63,8 @@ def fake_broker() -> MagicMock:
 
     The default identity-return semantics let dispatch tests skip secret-
     substitution noise; the DLP-ordering test overrides
-    ``substitute.return_value`` to assert the placeholder-vs-substituted
-    invariant (arch-001).
+    ``substitute.return_value`` (or ``.side_effect``) to assert the
+    placeholder-vs-substituted invariant (arch-001).
     """
     broker = MagicMock()
     broker.substitute = AsyncMock(side_effect=lambda params: params)
@@ -68,16 +72,26 @@ def fake_broker() -> MagicMock:
 
 
 @pytest.fixture
-def stub_nonce() -> CapabilityGateNonce:
-    """Authorised :class:`CapabilityGateNonce` for transport construction.
+def stub_nonce() -> Iterator[CapabilityGateNonce]:
+    """Install a fresh authorised :class:`CapabilityGateNonce` for the test.
 
-    Uses :func:`nonce_factory.create_and_register_t3_nonce` when no nonce
-    has been registered yet, otherwise reads the registered nonce — both
-    are the live module-level "authorised" singleton, so ``tag_t3_with_nonce``
-    accepts it. The MagicMock alternative would fail the ``is`` check inside
-    the capability gate.
+    Mirrors ``tests/unit/security/conftest.py::authorized_t3_nonce``: the
+    fixture saves the previous slot value, installs a fresh nonce, yields
+    it for the test to pass as ``inbound_t3_nonce``, then restores the
+    previous slot on teardown. The save/install/restore sequence runs
+    inside :data:`alfred.bootstrap.nonce_factory._NONCE_LOCK` so it stays
+    race-safe against any concurrent bootstrap path.
+
+    The yielded nonce is the *same object* the gate's identity check
+    (``caller_token is _AUTHORIZED_T3_NONCE``) accepts. A MagicMock would
+    fail that check and route every T3 tag through the refusal path.
     """
+    with _NONCE_LOCK:
+        previous = _tiers._AUTHORIZED_T3_NONCE
+        nonce = CapabilityGateNonce()
+        _tiers._set_authorized_t3_nonce(nonce)
     try:
-        return nonce_factory.get_authorized_t3_nonce()
-    except Exception:
-        return nonce_factory.create_and_register_t3_nonce()
+        yield nonce
+    finally:
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(previous)
