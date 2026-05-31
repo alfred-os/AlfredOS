@@ -25,10 +25,35 @@ class T0(TrustTier):
     name = "T0"
 
 
+class T1(TrustTier):
+    """Operator tier: TUI ingress + operator-attributable outbound.
+
+    T1 ingress path: TUI adapter + operator role via _ingest_tier()
+    (src/alfred/identity/_ingest.py). T1 outbound is TUI stdout only
+    in Slice 3. Discord is broadcast-shaped and never reaches T1.
+    See spec §3.1 and §3.6.
+    """
+
+    name = "T1"
+
+
 class T2(TrustTier):
     """Authenticated tier: known users."""
 
     name = "T2"
+
+
+class T3(TrustTier):
+    """Untrusted ingestion tier: web fetch, email, file, MCP tool output.
+
+    tag(T3, ...) is capability-gated via a per-process nonce token
+    (spec §3.2). The quarantined LLM is the only legitimate T3 producer
+    in Slice 3. T3 bytes never reach the privileged orchestrator directly;
+    the orchestrator holds ContentHandle references only.
+    See spec §3.1, §3.2, and §7.3.
+    """
+
+    name = "T3"
 
 
 class TaggedContent[TierT: TrustTier](BaseModel):
@@ -83,12 +108,12 @@ class TaggedContent[TierT: TrustTier](BaseModel):
         return value
 
 
-# Slice 1 admits only T0 and T2 at the `tag()` boundary. Slice 2 will add T1
-# (operator) and T3 (untrusted ingestion) here alongside the dual-LLM split —
-# a one-line change. Keeping the allowlist as a module-level frozenset (rather
-# than literals inline in `tag()`) makes the Slice-2 migration mechanical and
-# keeps the rejection branch a single, testable predicate.
-_APPROVED_TIERS: frozenset[type[TrustTier]] = frozenset({T0, T2})
+# Slice 3 adds T1 (operator) and T3 (untrusted ingestion) alongside the
+# dual-LLM split. The closed T0..T3 tier model in PRD §7.1 / ADR-0017 is
+# now fully populated; any TrustTier subclass outside this frozenset is
+# rejected at both the `tag()` boundary and the `_validate_tier` field
+# validator. See spec §3.1.
+_APPROVED_TIERS: frozenset[type[TrustTier]] = frozenset({T0, T1, T2, T3})
 
 
 @overload
