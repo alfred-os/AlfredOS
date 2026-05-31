@@ -514,6 +514,12 @@ msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
 "matched."
 
+#: src/alfred/plugins/stdio_transport.py:548
+msgid "security.canary_tripped"
+msgstr ""
+"SECURITY: canary token detected in content from {url!r}; the plugin "
+"subprocess has been quarantined."
+
 #: src/alfred/security/secrets.py:232 src/alfred/security/secrets.py:243
 #: src/alfred/security/secrets.py:259 src/alfred/security/secrets.py:271
 #: src/alfred/security/secrets.py:368
