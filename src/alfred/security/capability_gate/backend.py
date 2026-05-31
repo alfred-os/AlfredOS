@@ -36,6 +36,8 @@ Hard invariants pinned by ``tests/unit/security/capability_gate/test_storage_bac
 
 from __future__ import annotations
 
+import datetime as dt
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Protocol, runtime_checkable
@@ -164,13 +166,22 @@ class PostgresBackend:
             await session.execute(sa.text("SELECT 1"))
 
     async def load_grants(self) -> frozenset[GrantRow]:
-        """Load every row from ``plugin_grants`` as :class:`GrantRow`."""
+        """Load every active grant from ``plugin_grants`` as :class:`GrantRow`.
+
+        Filters by ``state = 'approved'``. The closed-domain CHECK admits
+        ``'requested' | 'approved' | 'denied' | 'revoked'``; only
+        ``'approved'`` rows authorise hot-path dispatch. ``'requested'``
+        rows are pending reviewer review; ``'denied'`` / ``'revoked'``
+        are historical attribution kept for audit-graph traversal.
+        Letting any non-approved row leak into the in-memory policy would
+        be a silent privilege escalation — CLAUDE.md hard rule #7.
+        """
         async with self._session() as session:
             result = await session.execute(
                 sa.text(
                     "SELECT plugin_id, subscriber_tier, hookpoint, "
                     "content_tier, proposal_branch "
-                    "FROM plugin_grants"
+                    "FROM plugin_grants WHERE state = 'approved'"
                 )
             )
             rows = result.fetchall()
@@ -191,25 +202,54 @@ class PostgresBackend:
         The ON CONFLICT target matches migration 0008's
         ``uq_plugin_grants_plugin_hook_tier`` UNIQUE constraint exactly;
         the mem-003 comment in that migration documents the contract.
+
+        NOT NULL columns from migration 0008 — ``id``, ``created_at``,
+        ``correlation_id``, ``state`` — are populated here at the SQL
+        layer rather than at the :class:`GrantRow` boundary. Rationale:
+        :class:`GrantRow` models the state.git source-of-truth shape;
+        these four columns are persistence-layer attribution that lives
+        in Postgres but not in the state.git proposal tree. Generating
+        them here keeps the policy-layer immutable model lean.
+
+        State semantics: every row written via this method represents an
+        approved-and-merged grant (the reviewer-agent's
+        ``state.git → main`` merge triggered the rebuild calling this
+        path). The closed-domain CHECK in migration 0008 admits
+        ``'approved'`` for that lifecycle position. ``'requested'`` rows
+        come from the proposal flow (PR-S3-2 :mod:`proposals` writes to
+        state.git, NOT this table); ``'denied'`` / ``'revoked'`` come
+        from the reviewer-agent's tooling in a later PR.
+
+        ``correlation_id`` is freshly minted per row — one rebuild
+        operation upserts N grants and emits one audit row per upsert,
+        each with its own correlation. The forensic graph follows the
+        per-grant correlation upstream to the per-rebuild trace via
+        ``state_git_commit_hash`` (populated by ``set_sync_hash``).
         """
+        now = dt.datetime.now(dt.UTC)
         async with self._session() as session:
             await session.execute(
                 sa.text(
                     "INSERT INTO plugin_grants "
-                    "(plugin_id, subscriber_tier, hookpoint, "
-                    "content_tier, proposal_branch) "
-                    "VALUES (:plugin_id, :subscriber_tier, :hookpoint, "
-                    ":content_tier, :proposal_branch) "
+                    "(id, created_at, plugin_id, subscriber_tier, hookpoint, "
+                    "content_tier, proposal_branch, correlation_id, state) "
+                    "VALUES (:id, :created_at, :plugin_id, :subscriber_tier, "
+                    ":hookpoint, :content_tier, :proposal_branch, "
+                    ":correlation_id, :state) "
                     "ON CONFLICT (plugin_id, hookpoint, subscriber_tier) "
                     "DO UPDATE SET content_tier = EXCLUDED.content_tier, "
                     "proposal_branch = EXCLUDED.proposal_branch"
                 ),
                 {
+                    "id": uuid.uuid4(),
+                    "created_at": now,
                     "plugin_id": grant.plugin_id,
                     "subscriber_tier": grant.subscriber_tier,
                     "hookpoint": grant.hookpoint,
                     "content_tier": grant.content_tier,
                     "proposal_branch": grant.proposal_branch,
+                    "correlation_id": str(uuid.uuid4()),
+                    "state": "approved",
                 },
             )
 
@@ -249,12 +289,19 @@ class PostgresBackend:
         return commit_hash
 
     async def set_sync_hash(self, commit_hash: str) -> None:
-        """Upsert the single-row commit-hash marker (migration 0009)."""
+        """Upsert the singleton commit-hash marker (migration 0009).
+
+        mem-004: the table's INTEGER PK has ``CHECK (id = 1)`` enforcing
+        the singleton-row contract. The INSERT explicitly supplies
+        ``id = 1``; the ``ON CONFLICT (id) DO UPDATE`` then updates the
+        same row in place when called multiple times during a process
+        lifetime (one set per state.git rebuild).
+        """
         async with self._session() as session:
             await session.execute(
                 sa.text(
-                    "INSERT INTO capability_gate_sync (commit_hash) "
-                    "VALUES (:commit_hash) "
+                    "INSERT INTO capability_gate_sync (id, commit_hash) "
+                    "VALUES (1, :commit_hash) "
                     "ON CONFLICT (id) DO UPDATE SET "
                     "commit_hash = EXCLUDED.commit_hash"
                 ),

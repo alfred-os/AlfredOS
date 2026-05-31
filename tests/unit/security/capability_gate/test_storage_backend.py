@@ -226,7 +226,18 @@ async def test_upsert_grant_uses_correct_on_conflict_target() -> None:
     or shrinks the target, every upsert raises ``InvalidColumnReference``
     at runtime. This test pins the SQL target so the breakage surfaces in
     the unit tier, not in integration.
+
+    Persistence-layer fields auto-supplied by ``upsert_grant`` (mem-006):
+    ``id``, ``created_at``, ``correlation_id``, ``state`` are NOT NULL in
+    migration 0008 but absent from the policy-layer
+    :class:`GrantRow`. The backend generates them at the SQL layer; this
+    test asserts the GrantRow-derived columns match exactly and the
+    auto-supplied columns are present (without pinning their generated
+    values — UUIDs and timestamps differ run to run).
     """
+    import datetime as dt
+    import uuid as _uuid
+
     from alfred.security.capability_gate.backend import PostgresBackend
     from alfred.security.capability_gate.policy import GrantRow
 
@@ -245,13 +256,26 @@ async def test_upsert_grant_uses_correct_on_conflict_target() -> None:
     sql_text = str(sql_arg)
     assert "INSERT INTO plugin_grants" in sql_text
     assert "ON CONFLICT (plugin_id, hookpoint, subscriber_tier)" in sql_text
-    assert params == {
-        "plugin_id": "test.plugin",
-        "subscriber_tier": "operator",
-        "hookpoint": "tool.web.fetch",
-        "content_tier": None,
-        "proposal_branch": "proposal/policy-grant-abc",
-    }
+
+    # GrantRow-derived columns: exact match.
+    assert params["plugin_id"] == "test.plugin"
+    assert params["subscriber_tier"] == "operator"
+    assert params["hookpoint"] == "tool.web.fetch"
+    assert params["content_tier"] is None
+    assert params["proposal_branch"] == "proposal/policy-grant-abc"
+
+    # Auto-supplied persistence fields: shape match, not value match.
+    assert isinstance(params["id"], _uuid.UUID)
+    assert isinstance(params["created_at"], dt.datetime)
+    assert params["created_at"].tzinfo is not None
+    # correlation_id is a UUID rendered as str (the audit-row family
+    # expects a string, not a UUID object — same shape as Slice-2.5
+    # audit emitters).
+    assert isinstance(params["correlation_id"], str)
+    _uuid.UUID(params["correlation_id"])
+    # state must be one of the migration-0008 closed-domain values; the
+    # rebuild path writes 'approved' (post-reviewer-merge).
+    assert params["state"] == "approved"
 
 
 async def test_revoke_grant_deletes_by_all_three_keys() -> None:
