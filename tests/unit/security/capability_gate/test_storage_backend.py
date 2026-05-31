@@ -1,6 +1,8 @@
-"""Tests for ``alfred.security.capability_gate.backend`` — StorageBackend Protocol + PostgresBackend.
+"""Tests for ``alfred.security.capability_gate.backend``.
 
-The Postgres I/O surface stays under unit-tier control by stubbing
+Covers the StorageBackend Protocol and the PostgresBackend production
+implementation. The Postgres I/O surface stays under unit-tier control
+by stubbing
 ``async_sessionmaker``: each unit test injects a fake session factory
 whose context-manager yields an ``AsyncSession`` mock and the test
 asserts on the SQL the backend emits. A separate integration tier (under
@@ -42,8 +44,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-pytestmark = pytest.mark.asyncio
 
 
 def _fake_session_factory() -> tuple[MagicMock, MagicMock]:
@@ -157,7 +157,7 @@ async def test_load_grants_returns_empty_frozenset_when_no_rows() -> None:
     """An empty ``plugin_grants`` table yields an empty :class:`frozenset`."""
     from alfred.security.capability_gate.backend import PostgresBackend
 
-    factory, session = _fake_session_factory()
+    factory, _session = _fake_session_factory()
     # fetchall returns [] from the default result_mock.
     backend = PostgresBackend(session_factory=factory)
     rows = await backend.load_grants()
@@ -292,7 +292,7 @@ async def test_get_sync_hash_returns_none_when_unseeded() -> None:
     """
     from alfred.security.capability_gate.backend import PostgresBackend
 
-    factory, session = _fake_session_factory()
+    factory, _ = _fake_session_factory()
     # fetchone defaults to None.
     backend = PostgresBackend(session_factory=factory)
     hash_ = await backend.get_sync_hash()

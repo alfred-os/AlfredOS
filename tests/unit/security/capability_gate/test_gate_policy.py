@@ -39,7 +39,9 @@ def test_grant_row_is_frozen() -> None:
         content_tier=None,
         proposal_branch="proposal/policy-grant-abc",
     )
-    with pytest.raises(Exception):  # frozen dataclass  # noqa: B017, BLE001, PT011
+    import dataclasses
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
         row.plugin_id = "other"  # type: ignore[misc]
 
 
