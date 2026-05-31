@@ -97,10 +97,11 @@ jobs:
             --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py' \
             --fail-under=100
       - name: Trust-boundary files 100% line+branch coverage
-        # Slice-3 PR-S3-1 trust-boundary surface (spec §11a). The three
+        # Slice-3 PR-S3-1 trust-boundary surface (spec §11a). The four
         # files explicitly enumerated below are the ONLY legitimate
         # construction sites for ``TaggedContent`` instances and the
-        # ingress / quarantine boundaries the orchestrator depends on:
+        # ingress / quarantine / bootstrap boundaries the orchestrator
+        # depends on:
         #
         #   * ``src/alfred/security/tiers.py`` — T0/T1/T2/T3 classes,
         #     ``tag()`` overload set, ``CapabilityGateNonce``, and
@@ -113,22 +114,25 @@ jobs:
         #     T1/T2 derivation hook (§3.6) AND the publisher for the
         #     ``identity.t1_ingress`` + ``identity.t1_downgrade``
         #     hookpoints (§14).
+        #   * ``src/alfred/bootstrap/nonce_factory.py`` — the per-process
+        #     T3 nonce factory and the module-level lock that backs the
+        #     atomic registration invariant (§3.2; CR-138 round-2 #3+#4).
         #
         # Per-file ``--include`` mirrors the hooks-subsystem precedent
         # above. The list is explicit so a new trust-boundary file gets
         # added to the gate at the same PR it lands, not silently shipped
         # at < 100% coverage. The hashFiles guard makes the step a clean
-        # no-op on a branch where any of the three files have not yet
-        # landed (mirrors the unit-test step's guard discipline).
+        # no-op on a branch where any of the files have not yet landed
+        # (mirrors the unit-test step's guard discipline).
         #
-        # CR-138 finding #1: chain three separate hashFiles() checks with
-        # ``&&`` because ``hashFiles('a','b','c') != ''`` is ANY-match,
-        # not ALL-match. The gate must require ALL three files to be
-        # present; if any one is missing the coverage step should no-op.
-        if: hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != ''
+        # CR-138 finding #1: chain the hashFiles() checks with ``&&``
+        # because ``hashFiles('a','b','c') != ''`` is ANY-match, not
+        # ALL-match. The gate must require ALL files to be present; if
+        # any one is missing the coverage step should no-op.
+        if: hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py' \
+            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py' \
             --fail-under=100
 
   integration:

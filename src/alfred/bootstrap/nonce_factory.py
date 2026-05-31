@@ -14,12 +14,38 @@ call sites:
 This module is the ONLY legitimate caller of
 ``alfred.security.tiers._set_authorized_t3_nonce`` outside of tests. The
 gate compares by identity (Python ``is``); see spec §3.2 and ADR-0017.
+
+CR-138 round-2 finding #3: registration is locked under a module-level
+:class:`threading.Lock` so two concurrent bootstrap paths cannot both
+observe ``None``, mint different nonces, and race to install — the
+losing caller would otherwise return a stale (now-orphaned) nonce that
+fails the gate's identity check.
+
+CR-138 round-2 finding #4: the test-only reset seam
+(``reset_authorized_t3_nonce_for_tests``) was REMOVED from this module
+because any code under ``src/`` could call it to clear the live slot
+and then mint its own authorised nonce — a runtime-callable bypass of
+the bootstrap DI invariant. Tests now poke the slot inline through the
+``clean_t3_nonce_slot`` / ``authorized_t3_nonce`` fixtures in
+``tests/unit/security/conftest.py``; the fixtures acquire
+:data:`_NONCE_LOCK` so they remain race-safe against concurrent
+bootstrap.
 """
 
 from __future__ import annotations
 
+from threading import Lock
+
 from alfred.security import tiers as _tiers
 from alfred.security.tiers import CapabilityGateNonce, _set_authorized_t3_nonce
+
+# Module-level lock guarding every read+write of the authorised nonce
+# slot. The test fixtures acquire the same lock when they poke the slot
+# for setup/teardown — see ``tests/unit/security/conftest.py``. The
+# lock is exposed (no underscore-only access) because the test fixtures
+# legitimately need to coordinate with production bootstrap in
+# pathological multi-thread test runs.
+_NONCE_LOCK: Lock = Lock()
 
 
 class T3NonceAlreadyRegisteredError(RuntimeError):
@@ -33,9 +59,11 @@ class T3NonceAlreadyRegisteredError(RuntimeError):
     "T3 tagging refuses a call that worked five minutes ago" with no
     log entry pointing at the rotation.
 
-    Tests that legitimately need to reset the slot call
-    :func:`reset_authorized_t3_nonce_for_tests` explicitly; production
-    code never does. CR-138 finding #3.
+    Tests that legitimately need to reset the slot do so via the
+    ``clean_t3_nonce_slot`` fixture in
+    ``tests/unit/security/conftest.py``. There is no production
+    runtime API for clearing the slot. CR-138 finding #3 + round-2
+    finding #4.
     """
 
 
@@ -50,40 +78,32 @@ def create_and_register_t3_nonce() -> CapabilityGateNonce:
     authorised modules. Doing either would defeat the identity check
     that backs the gate.
 
-    Idempotent ONLY via the explicit test-only reset path. Calling this
-    a second time after a previous call has registered a nonce raises
-    :class:`T3NonceAlreadyRegisteredError`. The silent-rotation failure mode
-    (an authorised holder's ``is`` check suddenly failing because
+    Idempotent ONLY via the test-only fixture path. Calling this a
+    second time after a previous call has registered a nonce raises
+    :class:`T3NonceAlreadyRegisteredError`. The silent-rotation failure
+    mode (an authorised holder's ``is`` check suddenly failing because
     bootstrap ran again) is far worse than a loud refusal — CR-138
     finding #3.
 
+    Concurrency: the check + create + register sequence runs inside
+    :data:`_NONCE_LOCK`. Two concurrent callers each observing
+    ``_AUTHORIZED_T3_NONCE is None`` and both racing to install would
+    otherwise leave the loser holding a now-orphaned nonce that fails
+    the gate's identity check — CR-138 round-2 finding #3.
+
     Raises:
-        T3NonceAlreadyRegisteredError: if a nonce is already registered. Tests
-            must call :func:`reset_authorized_t3_nonce_for_tests` first.
+        T3NonceAlreadyRegisteredError: if a nonce is already registered.
+            Tests reset the slot via the ``clean_t3_nonce_slot`` fixture
+            (``tests/unit/security/conftest.py``).
     """
-    if _tiers._AUTHORIZED_T3_NONCE is not None:
-        raise T3NonceAlreadyRegisteredError(
-            "create_and_register_t3_nonce() called a second time. "
-            "Production code calls this exactly once at process start. "
-            "Tests that need to reset must call "
-            "reset_authorized_t3_nonce_for_tests() explicitly."
-        )
-    nonce = CapabilityGateNonce()
-    _set_authorized_t3_nonce(nonce)
-    return nonce
-
-
-def reset_authorized_t3_nonce_for_tests() -> None:
-    """Test-only seam: clear the authorised T3 nonce slot.
-
-    Production code must NEVER call this — silently rotating the nonce
-    mid-process invalidates every authorised holder (see
-    :class:`T3NonceAlreadyRegisteredError`). Tests that exercise the
-    bootstrap path use this to return to a fresh state between runs.
-
-    Prefer the ``authorized_t3_nonce`` pytest fixture (declared in
-    ``tests/unit/security/conftest.py``) over calling this directly:
-    the fixture handles save/restore so subsequent tests observe the
-    correct slot value.
-    """
-    _set_authorized_t3_nonce(None)
+    with _NONCE_LOCK:
+        if _tiers._AUTHORIZED_T3_NONCE is not None:
+            raise T3NonceAlreadyRegisteredError(
+                "create_and_register_t3_nonce() called a second time. "
+                "Production code calls this exactly once at process start. "
+                "Tests reset the slot via the clean_t3_nonce_slot fixture "
+                "in tests/unit/security/conftest.py."
+            )
+        nonce = CapabilityGateNonce()
+        _set_authorized_t3_nonce(nonce)
+        return nonce
