@@ -7,6 +7,8 @@ PR-S3-0b i18n catalog (security.tag_t3_unauthorized key).
 
 from __future__ import annotations
 
+import typing
+
 import pytest
 
 from alfred.security.tiers import (
@@ -18,6 +20,7 @@ from alfred.security.tiers import (
     TaggedContent,
     TrustTier,
     _APPROVED_TIERS,
+    tag,
 )
 
 
@@ -58,3 +61,42 @@ def test_any_tagged_content_has_no_content_mutation() -> None:
     result: AnyTaggedContent = tagged
     with pytest.raises((AttributeError, TypeError, ValueError)):
         result.content = "mutated"  # type: ignore[misc]
+
+
+def test_tag_t1_returns_tagged_content_t1() -> None:
+    """tag(T1, ...) routes through the shared body and returns a T1 envelope."""
+    tc = tag(T1, "operator input", source="tui")
+    assert tc.tier is T1
+    assert tc.content == "operator input"
+
+
+def test_tag_t1_type_roundtrip() -> None:
+    """Wire-format round trip via the T1 overload preserves the tier name."""
+    tc = tag(T1, "x", source="tui")
+    dumped = tc.model_dump()
+    assert dumped["tier"] == "T1"
+
+
+def test_tag_t1_overload_is_registered() -> None:
+    """A static @overload signature for tag(type[T1], ...) is registered.
+
+    ``typing.get_overloads`` returns every @overload-decorated stub for
+    a function. Spec §3.1 pins the typed overload as part of the public
+    surface — without it, callers of tag(T1, ...) lose the
+    TaggedContent[T1] return type and observers downstream lose static
+    provenance.
+    """
+    overloads = typing.get_overloads(tag)
+    overload_tier_params: list[type[TrustTier]] = []
+    for ovl in overloads:
+        hints = typing.get_type_hints(ovl)
+        tier_hint = hints.get("tier")
+        # ``tier`` is annotated as ``type[T_X]`` — the inner arg is the tier.
+        if tier_hint is None:
+            continue
+        args = typing.get_args(tier_hint)
+        if args:
+            overload_tier_params.append(args[0])
+    assert T1 in overload_tier_params, (
+        f"tag() overloads must include a type[T1] variant; saw {overload_tier_params}"
+    )
