@@ -6,6 +6,7 @@ Two tables for the first slice: episodes (raw conversation turns) and audit_log
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 from typing import Any
@@ -22,7 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, reconstructor
 
 
 class Base(DeclarativeBase):
@@ -258,3 +259,100 @@ class CapabilityGateSync(Base):
     )
 
     __table_args__ = (CheckConstraint("id = 1", name="ck_capability_gate_sync_singleton"),)
+
+
+class CircuitBreakerState(Base):
+    """Persisted state for a named circuit breaker (spec §10.6).
+
+    One row per supervised component_id (e.g. ``"quarantined-llm"``,
+    ``"web-fetch"``). On process restart, the supervisor loads each row and
+    stays OPEN if ``last_trip_at < 1h`` ago — this is the flap protection
+    on rolling restarts (spec §10.6).
+
+    Audit-row mirroring
+    -------------------
+
+    Two columns mirror fields from
+    :data:`alfred.audit.audit_row_schemas.SUPERVISOR_BREAKER_TRIPPED_FIELDS`:
+
+    * ``breaker_state`` — always ``"OPEN"`` at trip time in the audit row;
+      persisted here so the supervisor can reconstruct the last-trip
+      event on restart without re-reading the audit log.
+    * ``correlation_id`` — the trip event's correlation id. Lets operators
+      pivot from a breaker row to the audit-log entry that opened it.
+
+    Both are last-trip metadata: when the breaker resets (operator-initiated
+    or HALF_OPEN probe success), they are NOT cleared — they retain the
+    most-recent-trip values for forensic purposes. ``state`` is the live
+    state; ``breaker_state`` is the captured-at-trip state.
+
+    PII / T3 safety (spec §5.6)
+    ---------------------------
+
+    ``last_failure_type`` is the Python exception class name (e.g.
+    ``"SubprocessExitedError"``). It MUST NOT be ``str(exc)`` because the
+    exception message may contain T3 fragments from the plugin subprocess.
+    The supervisor's failure-recording path enforces this; the column type
+    is fixed at 128 characters so a stray ``str(exc)`` would truncate
+    rather than overflow.
+
+    Concurrency
+    -----------
+
+    ``_save_lock`` is a per-instance ``asyncio.Lock`` used by
+    :meth:`CircuitBreaker.save_to_db` (Task 8) to serialise concurrent
+    writes for the same row and prevent lost-update races. Per-instance,
+    NOT class-level, so unrelated breakers do not block each other. PR-S3-3a
+    R3 fix. Initialised in both ``__init__`` (Python-side construction
+    path) and the SQLAlchemy ``@reconstructor`` (ORM-load path) so every
+    materialised instance has a fresh lock.
+
+    Downgrade semantics (migration 0010): DROP TABLE. Breaker state is
+    transient — the next run re-discovers failures organically. Operators
+    who need the trip history snapshot the table BEFORE downgrading.
+    """
+
+    __tablename__ = "circuit_breakers"
+
+    component_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    state: Mapped[str] = mapped_column(String(16), default="CLOSED", server_default="CLOSED")
+    # CLOSED | OPEN | HALF_OPEN — DB-side CHECK constraint pins the closed domain.
+    trip_count: Mapped[int] = mapped_column(default=0, server_default="0")
+    last_trip_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Python exception type name; never str(exc) — spec §5.6 T3 leak risk.
+    last_failure_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Mirrors SUPERVISOR_BREAKER_TRIPPED_FIELDS["breaker_state"] — always
+    # "OPEN" at trip time. Captured snapshot, not live state.
+    breaker_state: Mapped[str] = mapped_column(
+        String(16), default="CLOSED", server_default="CLOSED"
+    )
+    # Mirrors SUPERVISOR_BREAKER_TRIPPED_FIELDS["correlation_id"] — the
+    # correlation id of the most-recent trip event. Empty string until the
+    # breaker has ever tripped.
+    correlation_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('CLOSED', 'OPEN', 'HALF_OPEN')",
+            name="ck_circuit_breakers_state",
+        ),
+    )
+
+    def __init__(self, **kwargs: Any) -> None:
+        # Delegate the column-side construction to SQLAlchemy's declarative
+        # __init__, then attach the per-instance asyncio.Lock used by
+        # CircuitBreaker.save_to_db (Task 8). The lock is NOT a mapped
+        # column — see test_save_lock_is_not_a_mapped_column.
+        super().__init__(**kwargs)
+        self._save_lock: asyncio.Lock = asyncio.Lock()
+
+    @reconstructor
+    def _init_save_lock_on_load(self) -> None:
+        """Re-create ``_save_lock`` when SQLAlchemy materialises a row from DB.
+
+        The ``@reconstructor`` decorator runs after a row is loaded via the
+        ORM (where ``__init__`` is bypassed). Without this hook, an instance
+        loaded from a SELECT would have no ``_save_lock`` attribute and the
+        first ``save_to_db`` call would raise ``AttributeError``.
+        """
+        self._save_lock = asyncio.Lock()
