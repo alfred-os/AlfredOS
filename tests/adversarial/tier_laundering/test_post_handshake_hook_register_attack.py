@@ -29,9 +29,11 @@ YAML payload
 ============
 
 The companion YAML payload (``tl_post_handshake_hook_register.yaml``,
-id ``tl-2026-003``) declares the corpus-level contract: the corpus
+id ``tl-2026-004``) declares the corpus-level contract: the corpus
 README is the source of truth for which attacks the slice owns, and
-this module is the live executable assertion.
+this module is the live executable assertion. ID ``tl-2026-003``
+belongs to ``tl_gc_traversal_out_of_scope.yaml`` — CR on PR #140
+caught the prior docstring drift.
 
 sec-015 fix
 ===========
