@@ -14,8 +14,9 @@ Downstream PRs import: ``from alfred.audit import audit_row_schemas``
 No subsystem needs to import deeper than this package.
 """
 
-from alfred.audit import audit_row_schemas as audit_row_schemas
-from alfred.audit.log import AuditWriter as AuditWriter
 from alfred.memory.models import AuditEntry as AuditEntry
+
+from . import audit_row_schemas as audit_row_schemas
+from .log import AuditWriter as AuditWriter
 
 __all__ = ["AuditEntry", "AuditWriter", "audit_row_schemas"]
