@@ -90,6 +90,13 @@ class AdversarialPayload(BaseModel):
     expected_outcome: ExpectedOutcome
     provenance: str = Field(..., min_length=1)
     references: tuple[str, ...] = Field(..., min_length=1)
+    # Optional acknowledgement that the attack is outside the current threat
+    # model. Used for spec §3.2-style limits (e.g. arbitrary code execution in
+    # the privileged orchestrator process bypasses every type-level gate). A
+    # payload with ``out_of_scope=True`` must carry a non-empty rationale so
+    # auditors can see WHY the gate doesn't defend, not just THAT it doesn't.
+    out_of_scope: bool = False
+    out_of_scope_rationale: str | None = None
 
     @field_validator("id")
     @classmethod
@@ -113,6 +120,33 @@ class AdversarialPayload(BaseModel):
                 f"id prefix {prefix!r} implies category {expected!r} but "
                 f"payload declared category={self.category!r}; rename the id "
                 "or move the file (see SKILL.md naming table)."
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_out_of_scope_has_rationale(self) -> AdversarialPayload:
+        """An out-of-scope payload must carry a non-empty rationale.
+
+        The pair (``out_of_scope``, ``out_of_scope_rationale``) is how
+        Slice-3 tier-laundering payloads acknowledge spec §3.2 threat-model
+        limits (e.g. arbitrary code execution defeats every type-level gate).
+        Marking ``out_of_scope=True`` without a rationale would convert a
+        forensic acknowledgement into a silent hand-wave — exactly what
+        adversarial corpora exist to prevent.
+        """
+        if self.out_of_scope and not (self.out_of_scope_rationale or "").strip():
+            msg = (
+                f"payload {self.id!r} has out_of_scope=True but no "
+                "out_of_scope_rationale — every out-of-scope acknowledgement "
+                "must carry the WHY (spec §3.2 threat-model limits)."
+            )
+            raise ValueError(msg)
+        if not self.out_of_scope and self.out_of_scope_rationale is not None:
+            msg = (
+                f"payload {self.id!r} carries out_of_scope_rationale but "
+                "out_of_scope=False — drop the rationale field or flip the "
+                "flag (these two fields move together)."
             )
             raise ValueError(msg)
         return self

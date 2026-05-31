@@ -40,22 +40,15 @@ def _count_payload_artifacts(category_dir: Path) -> int:
     return len(yaml_payloads) + len(pytest_modules)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "tier_laundering payloads land in PR-S3-1 / PR-S3-3a / PR-S3-4. "
-        "When the first payload arrives this xfail flips and the strict "
-        "marker forces removal — formalising the populated-dir contract."
-    ),
-)
 def test_tier_laundering_corpus_has_payloads() -> None:
     """`tests/adversarial/tier_laundering/` must carry at least one payload.
 
-    Today this fails (the dir is README-only per PR-S3-0a's stub-ship
-    convention). The `xfail(strict=True)` marker flips to `XPASS=fail` as
-    soon as PR-S3-1 (or any later Slice-3 PR) lands a payload, forcing
-    the implementer to delete the marker — at which point the test
-    becomes a forever-green density guard.
+    Forever-green density guard. The owning PR (S3-1) landed
+    ``tl_cast_bypass.yaml`` + sibling payloads; from this point forward,
+    deleting every payload from the dir fails CI loudly. The previous
+    ``xfail(strict=True)`` marker self-destructed on the first arriving
+    payload, by design — its purpose was to force this assertion to be
+    promoted to a real guard the moment the contract was satisfied.
     """
     category_dir = Path(__file__).parent / "tier_laundering"
     count = _count_payload_artifacts(category_dir)

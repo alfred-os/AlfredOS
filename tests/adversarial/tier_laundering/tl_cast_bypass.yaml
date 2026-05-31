@@ -1,0 +1,31 @@
+# tl_cast_bypass.yaml — tier_laundering adversarial payload.
+# Spec §3.8, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack: typing.cast(TaggedContent[T2], t3_value) re-labels a T3 value as
+# T2 at the type level. At runtime cast() is a no-op — the .tier attribute
+# still reports T3 — but a type-checker would be deceived. The defence is
+# the CI grep gate (scripts/check_tag_t3.py) which rejects this pattern in
+# any non-approved src/ file at commit time. Runtime tier tracking is
+# robust against the bypass (covered by
+# tests/adversarial/tier_laundering/test_tier_laundering_cast_bypass.py).
+id: tl-2026-001
+category: tier_laundering
+threat: >-
+  Attacker uses typing.cast(TaggedContent[T2], t3_value) to re-label T3
+  content as T2 at the type level, hoping to slip raw web/email content
+  past the privileged orchestrator's TaggedContent[T2] type gate.
+ingestion_path: cast_bypass
+payload: "cast(TaggedContent[T2], t3_tagged_value)"
+expected_outcome: boundary_refused
+provenance: >-
+  Derived from the PR-S3-1 type-system threat model — cast() as a typing
+  escape hatch is documented in PEP 484 and surveyed by the spec §3.8 type-
+  laundering cluster. The runtime no-op behaviour is CPython-standard
+  (Lib/typing.py:cast). The CI rule scripts/check_tag_t3.py is the
+  commit-time defence.
+references:
+  - "spec §3.3"
+  - "spec §3.7"
+  - "spec §3.8"
+  - "spec §12.2"
+  - "PEP 484 #the-cast-function"
