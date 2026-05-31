@@ -217,7 +217,7 @@ def test_nonce_factory_sets_module_nonce(clean_t3_nonce_slot: None) -> None:
     assert tiers_mod._AUTHORIZED_T3_NONCE is nonce
 
 
-def test_nonce_factory_rejects_second_call() -> None:
+def test_nonce_factory_rejects_second_call(clean_t3_nonce_slot: None) -> None:
     """CR-138 finding #3: re-running bootstrap raises rather than silently rotating.
 
     A second call to ``create_and_register_t3_nonce`` after a nonce has
@@ -226,37 +226,39 @@ def test_nonce_factory_rejects_second_call() -> None:
     check with no log entry pointing at the cause.
 
     Uses ``clean_t3_nonce_slot`` so the slot starts ``None`` regardless
-    of test ordering; the helper ``reset_authorized_t3_nonce_for_tests``
-    is used between the two factory calls to make the intent explicit.
+    of test ordering; the mid-test reset is done inline under
+    :data:`alfred.bootstrap.nonce_factory._NONCE_LOCK` because the
+    runtime helper ``reset_authorized_t3_nonce_for_tests`` was removed
+    from ``src/`` in CR-138 round-2 finding #4 (it was a production-
+    callable bypass of the bootstrap-owned DI invariant).
     """
     from alfred.bootstrap.nonce_factory import (
+        _NONCE_LOCK,
         T3NonceAlreadyRegisteredError,
         create_and_register_t3_nonce,
-        reset_authorized_t3_nonce_for_tests,
     )
     from alfred.security import tiers as tiers_mod
 
-    previous = tiers_mod._AUTHORIZED_T3_NONCE
-    try:
-        reset_authorized_t3_nonce_for_tests()
-        first = create_and_register_t3_nonce()
-        assert tiers_mod._AUTHORIZED_T3_NONCE is first
+    # clean_t3_nonce_slot already set _AUTHORIZED_T3_NONCE to None.
+    first = create_and_register_t3_nonce()
+    assert tiers_mod._AUTHORIZED_T3_NONCE is first
 
-        # Second call without an explicit reset is refused.
-        with pytest.raises(T3NonceAlreadyRegisteredError):
-            create_and_register_t3_nonce()
+    # Second call without an explicit reset is refused.
+    with pytest.raises(T3NonceAlreadyRegisteredError):
+        create_and_register_t3_nonce()
 
-        # The registered nonce is unchanged — no silent rotation.
-        assert tiers_mod._AUTHORIZED_T3_NONCE is first
+    # The registered nonce is unchanged — no silent rotation.
+    assert tiers_mod._AUTHORIZED_T3_NONCE is first
 
-        # After an explicit reset the factory accepts a fresh call.
-        reset_authorized_t3_nonce_for_tests()
-        assert tiers_mod._AUTHORIZED_T3_NONCE is None
-        second = create_and_register_t3_nonce()
-        assert second is not first
-        assert tiers_mod._AUTHORIZED_T3_NONCE is second
-    finally:
-        tiers_mod._set_authorized_t3_nonce(previous)
+    # Mid-test reset: poke the slot inline under the same lock the
+    # factory uses. The runtime helper was removed; the test tree owns
+    # this seam now.
+    with _NONCE_LOCK:
+        tiers_mod._set_authorized_t3_nonce(None)
+    assert tiers_mod._AUTHORIZED_T3_NONCE is None
+    second = create_and_register_t3_nonce()
+    assert second is not first
+    assert tiers_mod._AUTHORIZED_T3_NONCE is second
 
 
 def test_orchestrator_type_signature_accepts_t1(monkeypatch: pytest.MonkeyPatch) -> None:
