@@ -207,3 +207,25 @@ def test_nonce_factory_sets_module_nonce() -> None:
     tiers_mod._set_authorized_t3_nonce(None)
     nonce = create_and_register_t3_nonce()
     assert tiers_mod._AUTHORIZED_T3_NONCE is nonce
+
+
+def test_orchestrator_type_signature_accepts_t1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The orchestrator's handle_user_message signature accepts TaggedContent[T1].
+
+    This test imports the function signature via ``inspect.signature`` to
+    assert the annotation was widened, without running the full orchestrator.
+    Spec §3.1 final paragraph: T1 (operator-via-TUI) ingress paths must
+    reach the orchestrator; T3 stays excluded as the load-bearing invariant.
+    """
+    import inspect
+
+    from alfred.orchestrator.core import Orchestrator
+
+    sig = inspect.signature(Orchestrator.handle_user_message)
+    content_param = sig.parameters.get("content")
+    assert content_param is not None
+    # The annotation should mention T1 (either as a string or resolved type)
+    annotation = str(content_param.annotation)
+    assert "T1" in annotation, (
+        f"Expected 'T1' in orchestrator content annotation; got: {annotation}"
+    )
