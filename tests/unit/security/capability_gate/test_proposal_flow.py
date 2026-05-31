@@ -290,28 +290,58 @@ async def test_create_proposal_default_content_tier_is_none() -> None:
     assert captured["content_tier"] is None
 
 
-async def test_write_proposal_stub_returns_branch_name_unchanged() -> None:
-    """The PR-S3-2 ``_write_proposal_to_state_git`` stub is a no-op log + return.
+async def test_write_proposal_stub_raises_not_implemented() -> None:
+    """CR-139 finding #5: the PR-S3-2 stub is fail-loud, not silent.
 
     Spec §6.4 / §8.3: the real state.git write lands in PR-S3-6
-    alongside the CLI wiring; PR-S3-2 ships the function shape so
-    proposals.py can be tested via patching here. The stub MUST return
-    the branch name unchanged (callers chain it through to the caller-
-    visible return value) and MUST NOT raise.
+    alongside the CLI wiring. Until then, calling the stub MUST raise
+    :class:`NotImplementedError` so a caller cannot accidentally emit
+    ``plugin.grant.requested`` for a branch that was never durably
+    written. Matches the err-002 shape used by
+    :meth:`RealGate.rebuild_from_state_git`.
     """
     from alfred.security.capability_gate.proposals import (
         _write_proposal_to_state_git,
     )
 
-    result = await _write_proposal_to_state_git(
-        branch_name="proposal/policy-grant-stubtest",
-        plugin_id="p",
-        subscriber_tier="operator",
-        hookpoint="h",
-        content_tier=None,
-        operator_user_id="op@example.com",
-    )
-    assert result == "proposal/policy-grant-stubtest"
+    with pytest.raises(NotImplementedError, match=r"PR-S3-6"):
+        await _write_proposal_to_state_git(
+            branch_name="proposal/policy-grant-stubtest",
+            plugin_id="p",
+            subscriber_tier="operator",
+            hookpoint="h",
+            content_tier=None,
+            operator_user_id="op@example.com",
+        )
+
+
+async def test_create_proposal_branch_unpatched_stub_propagates_raise() -> None:
+    """Un-patched ``create_proposal_branch`` propagates the stub's raise.
+
+    The audit row MUST NOT emit when the state.git write hasn't
+    landed. Since :func:`_write_proposal_to_state_git` is fail-loud
+    until PR-S3-6, an un-patched call to
+    :func:`create_proposal_branch` MUST surface the
+    :class:`NotImplementedError` directly to the caller and leave the
+    audit sink untouched.
+    """
+    from alfred.security.capability_gate.proposals import create_proposal_branch
+
+    backend = _make_backend()
+    sink, emitted = _make_spy_sink()
+
+    with pytest.raises(NotImplementedError, match=r"PR-S3-6"):
+        await create_proposal_branch(
+            plugin_id="p",
+            subscriber_tier="operator",
+            hookpoint="h",
+            operator_user_id="op@example.com",
+            backend=backend,
+            audit_sink=sink,
+        )
+
+    assert emitted == []
+    backend.upsert_grant.assert_not_awaited()
 
 
 async def test_create_proposal_audit_row_emitted_after_state_git_write() -> None:

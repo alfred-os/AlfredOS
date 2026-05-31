@@ -34,11 +34,14 @@ Implementation status:
 * :func:`create_proposal_branch` — PR-S3-2 ships the full proposal-
   creation flow: identifier generation, audit row, and the
   patch-friendly call to :func:`_write_proposal_to_state_git`.
-* :func:`_write_proposal_to_state_git` — PR-S3-2 ships a logging stub
-  that returns the branch name. PR-S3-6 replaces the body with the
-  gitpython integration that writes the branch into
-  ``/var/lib/alfred/state.git``. The function is kept as a separate
-  ``async def`` so the proposal-flow unit tests can patch it cleanly.
+* :func:`_write_proposal_to_state_git` — PR-S3-2 ships a fail-loud
+  :class:`NotImplementedError` stub (CR-139 finding #5). PR-S3-6
+  replaces the body with the gitpython integration that writes the
+  branch into ``/var/lib/alfred/state.git``. The function is kept as
+  a separate ``async def`` so the proposal-flow unit and integration
+  tests can patch it cleanly; an un-patched call raises so a caller
+  cannot accidentally emit ``plugin.grant.requested`` for a branch
+  that was never durably written.
 """
 
 from __future__ import annotations
@@ -268,24 +271,27 @@ async def _write_proposal_to_state_git(
 ) -> str:
     """Write the proposal branch to ``/var/lib/alfred/state.git``.
 
-    DEFERRED-STUB CONTRACT (PR-S3-2):
+    DEFERRED-STUB CONTRACT (PR-S3-2 + CR-139 finding #5):
 
-    PR-S3-2 ships this function as a structured-log stub that returns
-    the branch name unchanged. The real gitpython implementation lands
-    alongside the CLI in PR-S3-6 (``alfred plugin grant``). Rationale:
-    gitpython is not yet in the dependency tree, and the bare state.git
-    repo bootstrap is the PR-S3-6 surface; pulling both forward into
-    PR-S3-2 would inflate scope without adding test value beyond what
-    :func:`create_proposal_branch` already covers via patch-friendly
-    isolation.
+    PR-S3-2 ships this function as a fail-loud
+    :class:`NotImplementedError`. The real gitpython implementation
+    lands alongside the CLI in PR-S3-6 (``alfred plugin grant``);
+    until then, an un-patched call MUST NOT silently succeed: the
+    previous structured-log stub returned the branch name unchanged
+    and let :func:`create_proposal_branch` emit
+    ``plugin.grant.requested`` for a branch that was never durably
+    written. The audit row then pointed at a nonexistent branch,
+    breaking the PRD §6.4 reviewer-gate flow and the audit-graph
+    forensic-traversal guarantee.
 
-    Why a stub instead of a :class:`NotImplementedError` raise (cf.
-    :meth:`RealGate.rebuild_from_state_git`): the rebuild call sits on
-    the runtime hot path where a silent return would mask staleness; a
-    proposal-write stub sits at the CLI boundary where the operator
-    will see the audit row immediately, and the stub keeps the
-    proposal-flow unit tests testable without an extra patch-fixture
-    layer per test. PR-S3-6 replaces the body with::
+    Matches the err-002 shape used by
+    :meth:`RealGate.rebuild_from_state_git`: deferred state.git
+    integration is loud, never silent (CLAUDE.md hard rule #7). Unit
+    tests patch this function via
+    :func:`unittest.mock.patch`; the integration tier (which exercises
+    the un-patched path) asserts the raise.
+
+    PR-S3-6 replaces the body with::
 
         repo = git.Repo("/var/lib/alfred/state.git")
         # ... branch + commit ...
@@ -296,13 +302,17 @@ async def _write_proposal_to_state_git(
             operator_user_id: proposal payload — written into the
             state.git tree by the PR-S3-6 implementation.
 
+    Raises:
+        NotImplementedError: always, until PR-S3-6 wires gitpython.
+
     Returns:
-        ``branch_name`` unchanged. The PR-S3-6 implementation returns
-        the resolved branch ref name after the commit lands; for
-        PR-S3-2 the input is the canonical answer.
+        The post-fix function never returns under PR-S3-2; the return
+        annotation is retained for the PR-S3-6 implementation, which
+        will return the resolved branch ref name after the commit
+        lands.
     """
     _log.info(
-        "capability_gate.proposal.written_to_state_git",
+        "capability_gate.proposal.write_attempted",
         branch_name=branch_name,
         plugin_id=plugin_id,
         subscriber_tier=subscriber_tier,
@@ -310,7 +320,13 @@ async def _write_proposal_to_state_git(
         content_tier=content_tier,
         operator_user_id=operator_user_id,
     )
-    return branch_name
+    msg = (
+        "_write_proposal_to_state_git requires gitpython state.git "
+        "integration (ships in PR-S3-6). Until then this function is a "
+        "fail-loud stub; unit tests must patch it before calling "
+        "create_proposal_branch."
+    )
+    raise NotImplementedError(msg)
 
 
 # Module-init declaration — spec §6.2 / #119 discipline: publishers
