@@ -184,3 +184,26 @@ def test_tag_via_overload_t3_is_always_refused() -> None:
     """
     with pytest.raises(ValueError, match=re.escape("security.tag_t3_unauthorized")):
         tag(T3, "fetched html", source="web.fetch")
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap nonce factory — spec §3.2
+# ---------------------------------------------------------------------------
+
+
+def test_nonce_factory_sets_module_nonce() -> None:
+    """Bootstrap factory sets the module-level authorised nonce.
+
+    The nonce returned by the factory IS the live module-level reference
+    (``alfred.security.tiers._AUTHORIZED_T3_NONCE``), not a copy. This
+    pins the DI invariant: the factory's caller and the gate read the
+    SAME object. Spec §3.2.
+    """
+    from alfred.bootstrap.nonce_factory import create_and_register_t3_nonce
+    from alfred.security import tiers as tiers_mod
+
+    # Reset to None, then bootstrap. The setter is the bootstrap seam
+    # exposed for both production and tests; no global mutation here.
+    tiers_mod._set_authorized_t3_nonce(None)
+    nonce = create_and_register_t3_nonce()
+    assert tiers_mod._AUTHORIZED_T3_NONCE is nonce
