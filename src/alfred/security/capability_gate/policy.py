@@ -36,6 +36,15 @@ introduce an indexed projection without changing the public surface.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Final
+
+# Closed-domain validation per PRD §7.1 (content tiers) and §4.3
+# (subscriber-capability axis). Locked here so an upstream parser bug
+# (state.git proposal with a typo'd tier) cannot smuggle a non-PRD tier
+# into the in-memory policy where an exact-match check would then
+# silently authorise it. CR-139 finding #4.
+_VALID_SUBSCRIBER_TIERS: Final[frozenset[str]] = frozenset({"system", "operator", "user-plugin"})
+_VALID_CONTENT_TIERS: Final[frozenset[str]] = frozenset({"T0", "T1", "T2", "T3"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +80,37 @@ class GrantRow:
     hookpoint: str
     content_tier: str | None
     proposal_branch: str
+
+    def __post_init__(self) -> None:
+        """Reject non-PRD tier values at construction time.
+
+        CR-139 finding #4: ``subscriber_tier`` and ``content_tier`` are
+        closed domains (PRD §4.3 / §7.1). Accepting arbitrary strings
+        would let an upstream parser bug — a typo in a state.git
+        proposal tree, a malformed migration backfill — smuggle a
+        non-PRD tier into the in-memory snapshot, where the exact-match
+        check in :class:`GatePolicy` would then silently authorise it.
+        The fail-loud :class:`ValueError` surfaces the contract
+        violation at the policy-construction boundary instead.
+
+        Raised :class:`ValueError` rather than a custom exception
+        because :class:`GrantRow` construction is one layer above any
+        trust-boundary call site; a generic value-error matches what
+        Pydantic v2 would raise at the same boundary if the model were
+        Pydantic-shaped.
+        """
+        if self.subscriber_tier not in _VALID_SUBSCRIBER_TIERS:
+            msg = (
+                f"invalid subscriber_tier {self.subscriber_tier!r}; "
+                f"must be one of {sorted(_VALID_SUBSCRIBER_TIERS)!r}"
+            )
+            raise ValueError(msg)
+        if self.content_tier is not None and self.content_tier not in _VALID_CONTENT_TIERS:
+            msg = (
+                f"invalid content_tier {self.content_tier!r}; "
+                f"must be None or one of {sorted(_VALID_CONTENT_TIERS)!r}"
+            )
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
