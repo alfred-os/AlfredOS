@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 import struct
 
+import pytest
+
 
 def test_fd3_key_delivery_4byte_length_prefix() -> None:
     """Host writes 4-byte big-endian length + N key bytes on fd 3 (spec §5.3).
@@ -75,6 +77,126 @@ def test_fd3_zero_length_key_is_a_valid_frame() -> None:
 
         assert length == 0
         assert raw_key == b""
+    finally:
+        if w_fd >= 0:
+            os.close(w_fd)
+        os.close(r_fd)
+
+
+# ---------------------------------------------------------------------------
+# CR-PR-140 F7 — ``_write_all`` short-write / EINTR retry contract.
+# ---------------------------------------------------------------------------
+#
+# ``os.write`` on a pipe is not guaranteed to deliver the full buffer:
+# a signal-interrupted or buffer-bounded write returns a short count
+# (or raises ``InterruptedError``). The provider-key delivery path is a
+# trust-boundary secret — a silent truncation corrupts key delivery,
+# the child reads a header claiming N bytes then hits EOF when the
+# parent closes the write end in ``finally``. CR on PR #140 caught the
+# bare ``os.write(...)`` call as a MUST-FIX. The helper loops until the
+# full frame has been written, retrying on EINTR.
+
+
+def test_write_all_delivers_full_buffer_on_one_shot_write() -> None:
+    """Happy path: a write that succeeds in one syscall returns cleanly."""
+    from alfred.plugins.stdio_transport import _write_all
+
+    r_fd, w_fd = os.pipe()
+    try:
+        data = b"a" * 1024
+        _write_all(w_fd, data)
+        os.close(w_fd)
+        w_fd = -1
+
+        received = b""
+        while chunk := os.read(r_fd, 4096):
+            received += chunk
+        assert received == data
+    finally:
+        if w_fd >= 0:
+            os.close(w_fd)
+        os.close(r_fd)
+
+
+def test_write_all_retries_on_short_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short-write returning n < len(data) loops until the buffer is drained.
+
+    Synthesises a sequence of short ``os.write`` returns via monkeypatch
+    on the module-level ``os.write`` symbol the helper imports. The loop
+    must concatenate the returned counts so that the final byte
+    position equals ``len(data)``.
+    """
+    import alfred.plugins.stdio_transport as transport_mod
+    from alfred.plugins.stdio_transport import _write_all
+
+    data = b"0123456789ABCDEF"
+    write_returns: list[int] = [4, 4, 4, 4]  # four short writes of 4 bytes each
+    captured: list[bytes] = []
+
+    def fake_write(fd: int, buf: memoryview | bytes) -> int:
+        # memoryview slices are what the loop passes — coerce to bytes
+        # for forensic comparison.
+        captured.append(bytes(buf))
+        return write_returns.pop(0)
+
+    monkeypatch.setattr(transport_mod.os, "write", fake_write)  # type: ignore[attr-defined]
+
+    _write_all(fd=999, data=data)  # fd value is irrelevant — write is monkeypatched
+
+    # Reconstruct what the helper actually delivered.
+    delivered = b""
+    for i, chunk in enumerate(captured):
+        delivered += chunk[: write_returns[i] if i < len(write_returns) else len(chunk)]
+    # The simpler assertion: total bytes returned across all calls equals data length.
+    total_returned = sum(min(len(c), 4) for c in captured)
+    assert total_returned == len(data)
+    # Each call's view should start at the correct offset.
+    assert captured[0].startswith(b"0123")
+    assert captured[1].startswith(b"4567")
+    assert captured[2].startswith(b"89AB")
+    assert captured[3].startswith(b"CDEF")
+
+
+def test_write_all_retries_on_eintr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ``InterruptedError`` (EINTR) is retried, not propagated.
+
+    A signal-interrupted ``os.write`` before any bytes were written
+    is not a delivery failure — the helper retries. CR on PR #140
+    specifically called out the EINTR handling as part of the F7 fix.
+    """
+    import alfred.plugins.stdio_transport as transport_mod
+    from alfred.plugins.stdio_transport import _write_all
+
+    data = b"provider-key-secret"
+    call_count = {"n": 0}
+
+    def fake_write(fd: int, buf: memoryview | bytes) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise InterruptedError("EINTR")
+        return len(buf)  # second call delivers everything
+
+    monkeypatch.setattr(transport_mod.os, "write", fake_write)  # type: ignore[attr-defined]
+
+    _write_all(fd=999, data=data)
+    assert call_count["n"] == 2  # exactly one retry past the EINTR
+
+
+def test_write_all_handles_empty_data() -> None:
+    """An empty buffer is a valid frame — the loop body never executes.
+
+    Defends against a future caller passing an empty key or header
+    accidentally — the helper must not spin or raise on an empty input.
+    """
+    from alfred.plugins.stdio_transport import _write_all
+
+    r_fd, w_fd = os.pipe()
+    try:
+        _write_all(w_fd, b"")
+        os.close(w_fd)
+        w_fd = -1
+        # No bytes should have been delivered.
+        assert os.read(r_fd, 1) == b""
     finally:
         if w_fd >= 0:
             os.close(w_fd)

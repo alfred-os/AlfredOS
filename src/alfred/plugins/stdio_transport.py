@@ -231,6 +231,38 @@ def _is_control_plane(method: str) -> bool:
     return any(method.startswith(prefix) for prefix in _CONTROL_PLANE_METHOD_PREFIXES)
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write the full ``data`` buffer to ``fd``, retrying on short writes + EINTR.
+
+    ``os.write`` on a pipe may return a short count (signal-interrupted
+    or buffer-bounded), which silently truncates the payload. On the
+    provider-key delivery path that truncation corrupts a trust-boundary
+    secret: the child reads a header claiming ``len(data)`` and then
+    hits EOF (the parent closes the write end in a ``finally`` block).
+    This helper loops until every byte has been written, retrying on
+    ``InterruptedError`` (EINTR). CR on PR #140 MUST-FIX.
+
+    ``OSError`` (other than EINTR) propagates so the caller's spawn-
+    error path observes the failure and the pipe fds are cleaned up via
+    the outer ``finally``.
+    """
+    view = memoryview(data)
+    while view:
+        try:
+            n = os.write(fd, view)
+        except InterruptedError:
+            # EINTR: a signal interrupted the syscall before any bytes
+            # were written. Retry rather than propagate — the contract
+            # is "deliver the full frame", and a spurious signal is not
+            # a delivery failure.
+            continue
+        if n <= 0:  # pragma: no cover — POSIX guarantees n > 0 on success
+            # ``os.write`` raises on error, so n == 0 is an unexpected
+            # state. Raise loudly rather than spin-loop forever.
+            raise OSError(f"_write_all: os.write returned {n} on fd={fd}; refusing to spin")
+        view = view[n:]
+
+
 class StdioTransport:
     """MCP stdio transport — dispatches JSON-RPC to a plugin subprocess.
 
@@ -315,8 +347,21 @@ class StdioTransport:
         # tests/unit/plugins/test_env_scrub_subprocess.py is the
         # release-blocker against any future patch that re-introduces a
         # bare environ read here.
+        #
+        # ``LANG``/``LC_ALL`` are pinned to ``C.UTF-8`` (not inherited
+        # from the host) so the child runs under a deterministic
+        # UTF-8 locale regardless of what the parent process inherited.
+        # CR on PR #140 caught the prior implementation: the module
+        # docstring and ``_spawn`` docstring promised i18n env
+        # forwarding, but only ``PATH`` was set — a plugin relying on
+        # ``LANG``/``LC_ALL`` for locale-correct text handling would
+        # silently run under the C locale. Pinning the values (rather
+        # than reading from the parent's environ) keeps the env-scrub
+        # invariant intact while delivering the documented contract.
         minimal_env: dict[str, str] = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
         }
         extra_fds: tuple[int, ...] = ()
         r_fd: int | None = None
@@ -356,8 +401,19 @@ class StdioTransport:
                     # 4-byte big-endian length + N key bytes (spec §5.3
                     # framing). The child reads exactly this much then
                     # sees EOF.
+                    #
+                    # ``os.write`` on a pipe is not guaranteed to write
+                    # the full buffer in one call — a signal-interrupted
+                    # or buffer-bounded write can return a short count,
+                    # silently truncating the provider key. The child
+                    # would then read a header claiming ``len(provider_key)``
+                    # and immediately hit EOF (the parent closes ``w_fd``
+                    # in the surrounding ``finally``), corrupting key
+                    # delivery on a trust-boundary path. Loop until the
+                    # full frame has been written, retrying on EINTR.
+                    # CR on PR #140 MUST-FIX.
                     header = struct.pack(">I", len(provider_key))
-                    os.write(w_fd, header + provider_key)
+                    _write_all(w_fd, header + provider_key)
             except Exception:
                 spawn_outcome = "spawn_failed"
                 raise
