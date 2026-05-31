@@ -131,6 +131,43 @@ def test_is_production_false_when_env_is_development(
     assert gate_factory.is_production() is False
 
 
+def test_is_production_false_when_env_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present-but-empty ``ALFRED_ENV=""`` stays in development.
+
+    Shell-export chains can silently produce an empty environment
+    variable (``export ALFRED_ENV=$UNSET_VAR``); without explicit
+    handling, ``os.environ.get(_ENV_KEY, _DEVELOPMENT)`` returns ``""``
+    (not the default) and the original predicate flips the gate to
+    production. CR-139 finding #1: empty must be treated as
+    development, matching the documented contract.
+    """
+    monkeypatch.setenv("ALFRED_ENV", "")
+    from alfred.bootstrap import gate_factory
+
+    importlib.reload(gate_factory)
+    assert gate_factory.is_production() is False
+
+
+def test_is_production_false_when_env_is_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace-only ``ALFRED_ENV`` is normalised to empty / development.
+
+    Defends against the same shell-export footgun as the empty-string
+    case: a stray space-only value ("ALFRED_ENV= ") would otherwise
+    pass the empty-string check and flip the gate to production. The
+    ``.strip()`` in :func:`is_production` collapses both shapes into
+    the safe default.
+    """
+    monkeypatch.setenv("ALFRED_ENV", "   ")
+    from alfred.bootstrap import gate_factory
+
+    importlib.reload(gate_factory)
+    assert gate_factory.is_production() is False
+
+
 def test_is_production_true_when_env_is_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -177,8 +214,15 @@ def test_gate_factory_is_the_only_alfred_env_read_site(module_path: Path) -> Non
     ``ALFRED_ENV`` (cross-referencing the bootstrap seam) is fine; an
     actual string literal is not.
     """
-    if not module_path.exists():
-        pytest.skip(f"{module_path.name} not present in this PR slice")
+    # CR-139 finding #9: fail loud when the guarded path disappears.
+    # A pytest.skip would silently disable the invariant — exactly the
+    # shape CLAUDE.md hard rule #7 forbids. The forbidden-reader list is
+    # source-pinned; if a module is intentionally removed, the list MUST
+    # be updated in the same commit.
+    assert module_path.exists(), (
+        f"Forbidden-module list references {module_path}, which is missing. "
+        "Update the list only if the module was intentionally removed."
+    )
     tree = ast.parse(module_path.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and node.value == "ALFRED_ENV":
