@@ -25,13 +25,18 @@ Column naming (mem-002)
 -----------------------
 
 * Column is ``commit_hash`` (NOT ``state_git_commit_hash``) so the PR-S3-2
-  PostgresBackend SQL matches exactly:
+  PostgresBackend SQL matches exactly. The upsert includes ``synced_at``
+  (the column is NOT NULL with ``server_default=NOW()`` for raw-SQL writers
+  that omit it; ORM and explicit writers supply it directly):
 
   .. code-block:: sql
 
-     SELECT commit_hash FROM capability_gate_sync;
-     INSERT (id, commit_hash) VALUES (1, :h)
-       ON CONFLICT (id) DO UPDATE SET commit_hash = EXCLUDED.commit_hash;
+     SELECT commit_hash, synced_at FROM capability_gate_sync WHERE id = 1;
+     INSERT INTO capability_gate_sync (id, commit_hash, synced_at)
+       VALUES (1, :h, :ts)
+       ON CONFLICT (id) DO UPDATE
+       SET commit_hash = EXCLUDED.commit_hash,
+           synced_at   = EXCLUDED.synced_at;
 
 Columns
 -------
