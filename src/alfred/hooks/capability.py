@@ -77,6 +77,49 @@ class CapabilityGate(Protocol):
         requested_tier: str,
     ) -> bool: ...
 
+    def check_plugin_load(
+        self,
+        *,
+        plugin_id: str,
+        manifest_tier: str,
+    ) -> bool:
+        """Gate plugin load at handshake time.
+
+        Called by :class:`alfred.plugins.session.AlfredPluginSession`
+        (PR-S3-3a) before the plugin's stdio transport opens. A refusal
+        emits ``plugin.lifecycle.load_refused`` and the supervisor marks
+        the plugin REFUSED until re-granted (spec §8.2).
+
+        ``manifest_tier`` is the subscriber-capability axis the plugin's
+        manifest declares (``"system"`` / ``"operator"`` / ``"user-plugin"``);
+        it is ORTHOGONAL to the content trust tier (T0-T3). The two axes
+        share no codomain — they are checked separately.
+        """
+        ...
+
+    def check_content_clearance(
+        self,
+        *,
+        plugin_id: str,
+        hookpoint: str,
+        content_tier: str,
+    ) -> bool:
+        """Gate content-tier access on the orthogonal trust axis.
+
+        Spec §8.2 (Fork 7): T3 content must not reach T2-only paths. The
+        quarantined-LLM plugin host and the StdioTransport boundary are
+        the only authorised callers for ``content_tier="T3"``. Every
+        other caller receives ``False`` from the production
+        :class:`RealGate`; :class:`DevGate` fail-opens (returns ``True``)
+        only for Slice-2.5 co-existence, scheduled for removal in
+        PR-S3-7.
+
+        ``content_tier`` is the T0-T3 content axis; ``plugin_id`` and
+        ``hookpoint`` are the subscriber-side coordinates. The gate
+        consults all three.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DevGate:
@@ -134,3 +177,41 @@ class DevGate:
         if requested_tier == _TIER_GATED_BY_ALLOW_SYSTEM:
             return self.allow_system
         return False
+
+    def check_plugin_load(
+        self,
+        *,
+        plugin_id: str,
+        manifest_tier: str,
+    ) -> bool:
+        """Fail-open stub for Slice-3 co-existence (spec §8.4).
+
+        Backward-compat shim: Slice-2.5 tests that pre-date the
+        :class:`CapabilityGate` Protocol extension still construct
+        :class:`DevGate` and expect plugin-load to succeed. Until the
+        flag-day removal in PR-S3-7, this method returns ``True``
+        unconditionally — the real subscriber-tier check lives in
+        :class:`alfred.security.capability_gate._gate.RealGate`.
+
+        ``plugin_id`` and ``manifest_tier`` are accepted to satisfy the
+        Protocol contract but unused by the dev-time gate.
+        """
+        del plugin_id, manifest_tier  # Protocol contract; unused.
+        return True
+
+    def check_content_clearance(
+        self,
+        *,
+        plugin_id: str,
+        hookpoint: str,
+        content_tier: str,
+    ) -> bool:
+        """Fail-open stub for Slice-3 co-existence (spec §8.4).
+
+        See :meth:`check_plugin_load` docstring for the rationale; this
+        is the orthogonal content-tier axis fail-open. PR-S3-7 removes
+        :class:`DevGate` on flag-day; until then, dev-time content checks
+        always pass through.
+        """
+        del plugin_id, hookpoint, content_tier  # Protocol contract; unused.
+        return True
