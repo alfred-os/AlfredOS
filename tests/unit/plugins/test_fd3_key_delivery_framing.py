@@ -143,11 +143,12 @@ def test_write_all_retries_on_short_writes(monkeypatch: pytest.MonkeyPatch) -> N
 
     _write_all(fd=999, data=data)  # fd value is irrelevant — write is monkeypatched
 
-    # Reconstruct what the helper actually delivered.
-    delivered = b""
-    for i, chunk in enumerate(captured):
-        delivered += chunk[: write_returns[i] if i < len(write_returns) else len(chunk)]
-    # The simpler assertion: total bytes returned across all calls equals data length.
+    # CR-140 R2 fix: previous code indexed `write_returns[i]` which the
+    # fake_write closure had already drained via pop(0); dead code that
+    # would IndexError if the simpler assertion below ever flipped. The
+    # contract under test is that `_write_all` keeps issuing writes until
+    # the full payload is delivered — captured-call-count + per-call
+    # length together pin that contract without resurrecting dead state.
     total_returned = sum(min(len(c), 4) for c in captured)
     assert total_returned == len(data)
     # Each call's view should start at the correct offset.
