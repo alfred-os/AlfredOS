@@ -527,3 +527,171 @@ def test_check_tag_t3_script_rejects_multiline_cast(tmp_path: Path) -> None:
         f"Expected non-zero exit for multiline cast(TaggedContent[...]) call; got 0.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CR-138 round-2 finding #2: qualified call targets (``module.tag(T3, ...)``
+# and ``typing.cast(TaggedContent[...], x)``) must trip the gate too. The
+# pre-round-2 ``_call_name`` returned ``None`` for any ``ast.Attribute``
+# target, so qualified invocations silently bypassed both the
+# ``tag(T3, ...)`` rule and the ``cast(TaggedContent[...], x)`` rule.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("filename", "source", "label"),
+    [
+        # Bare-name invocations — covered before round 2 already, kept to
+        # pin the regression matrix.
+        (
+            "bare_tag_t3.py",
+            "from alfred.security.tiers import tag, T3\nx = tag(T3, 'attack via bare tag')\n",
+            "bare tag(T3, ...)",
+        ),
+        (
+            "bare_cast.py",
+            "from typing import cast\n"
+            "from alfred.security.tiers import TaggedContent, T2\n"
+            "x = cast(TaggedContent[T2], some_t3_value)\n",
+            "bare cast(TaggedContent[T2], x)",
+        ),
+        # Qualified invocations — these are the NEW round-2 coverage.
+        (
+            "qualified_tag_t3.py",
+            "from alfred.security import tiers as _t\n"
+            "x = _t.tag(_t.T3, 'attack via qualified tag')\n",
+            "qualified module.tag(T3, ...)",
+        ),
+        (
+            "qualified_typing_cast.py",
+            "import typing\n"
+            "from alfred.security.tiers import TaggedContent, T1\n"
+            "x = typing.cast(TaggedContent[T1], some_t3_value)\n",
+            "qualified typing.cast(TaggedContent[T1], x)",
+        ),
+    ],
+)
+def test_check_tag_t3_script_rejects_qualified_calls(
+    tmp_path: Path, filename: str, source: str, label: str
+) -> None:
+    """CR-138 round-2 finding #2: qualified call targets are caught.
+
+    ``_call_name`` was widened to return ``node.func.attr`` for
+    ``ast.Attribute`` so that ``module.tag(T3, ...)`` and
+    ``typing.cast(TaggedContent[...], x)`` are detected with the same
+    rules as their bare-name siblings. The bare-name cases stay in the
+    parametrise matrix to pin the full regression surface.
+    """
+    import subprocess
+    import sys
+
+    bad_file = tmp_path / filename
+    bad_file.write_text(source)
+
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode != 0, (
+        f"Expected non-zero exit for {label}; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CR-138 round-2 finding #1: ``test_*.py`` basename exemption must not apply
+# to in-repo paths. An attacker shipping ``src/alfred/foo/test_bypass.py``
+# with a ``tag(T3, ...)`` call would have slipped through the gate.
+# ---------------------------------------------------------------------------
+
+
+def test_check_tag_t3_script_rejects_in_repo_test_prefix_attack(tmp_path: Path) -> None:
+    """An in-repo file named ``test_*.py`` outside ``tests/`` is NOT exempt.
+
+    Plants a synthetic file under a fake ``src/`` subtree inside this
+    checkout's tree (the script resolves the path and rejects if it is
+    inside ``_REPO_ROOT`` and not under ``tests/``). The same physical
+    file at a tmp_path location outside the repo IS exempt — see the
+    next test for that direction.
+    """
+    import subprocess
+    import sys
+
+    # Plant the file UNDER the repo root in a fake ``src/`` subtree so
+    # the path resolves inside ``_REPO_ROOT`` but is not under ``tests/``.
+    in_repo_subtree = _REPO_ROOT / "build" / "synthetic-r2-f1"
+    in_repo_subtree.mkdir(parents=True, exist_ok=True)
+    try:
+        bad_file = in_repo_subtree / "test_bypass.py"
+        bad_file.write_text(
+            "from alfred.security.tiers import tag, T3\n"
+            "# An attacker basenames this 'test_*.py' to dodge the gate.\n"
+            "x = tag(T3, 'attack via in-repo test_* basename')\n"
+        )
+
+        result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+            [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
+            capture_output=True,
+            text=True,
+            cwd=str(_REPO_ROOT),
+            check=False,
+        )
+        assert result.returncode != 0, (
+            "Expected non-zero exit for an in-repo file named test_*.py "
+            "outside tests/; got 0. The basename-only exemption that "
+            "round-2 finding #1 closed has reopened.\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    finally:
+        # Tidy up so the planted file does not bleed into other tests
+        # (the ``test_check_tag_t3_script_clean_on_real_src_tree`` test
+        # scans ``src/alfred`` only, but be polite about it).
+        if bad_file.exists():
+            bad_file.unlink()
+        # Empty dir is fine to leave; rmdir if it's empty for hygiene.
+        try:
+            in_repo_subtree.rmdir()
+            in_repo_subtree.parent.rmdir()
+        except OSError:
+            pass
+
+
+def test_check_tag_t3_script_exempts_out_of_repo_tmp_path_test_file(tmp_path: Path) -> None:
+    """A ``test_*.py`` file under ``tmp_path`` (outside the repo) IS exempt.
+
+    ``tmp_path`` resolves outside ``_REPO_ROOT`` (it lives under the
+    OS tmp dir). The narrowed exemption in ``_is_exempt`` still allows
+    these so the unit suite can plant violating fixtures and assert the
+    gate's positive shape without being rejected for the test plant
+    itself.
+    """
+    import subprocess
+    import sys
+
+    # File basename starts with ``test_`` and the parent is outside the
+    # repo root — exemption should fire and the script should exit 0
+    # even though the file legitimately contains ``tag(T3, ...)``.
+    exempt_file = tmp_path / "test_fixture_plant.py"
+    exempt_file.write_text(
+        "from alfred.security.tiers import tag, T3\n"
+        "# tmp_path test fixture — exempt by basename + out-of-repo realpath.\n"
+        "x = tag(T3, 'this is a legitimate test fixture')\n"
+    )
+
+    # Sanity-check the fixture lives outside the repo root.
+    assert not exempt_file.resolve().is_relative_to(_REPO_ROOT)
+
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(exempt_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"Expected 0 for an out-of-repo test_*.py fixture; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )

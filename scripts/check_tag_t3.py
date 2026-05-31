@@ -86,10 +86,15 @@ _APPROVED_PATHS: frozenset[Path] = frozenset(
 )
 
 # Test paths are always exempt. Tests assert the patterns the gate forbids.
-_TEST_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(^|/)tests/"),
-    re.compile(r"(^|/)test_[^/]+\.py$"),
-)
+#
+# CR-138 round-2 finding #1: the previous ``test_[^/]+\.py$`` pattern
+# exempted ANY file whose basename started with ``test_`` regardless of
+# location. A non-test file at ``src/alfred/foo/test_bypass.py`` would
+# have slipped through the gate. The fix narrows the basename
+# exemption to paths OUTSIDE the repo root (``tmp_path`` fixtures and
+# similar) — in-repo ``test_*.py`` files must live under ``tests/`` to
+# be exempt by directory, not by name alone.
+_TEST_PATTERNS: tuple[re.Pattern[str], ...] = (re.compile(r"(^|/)tests/"),)
 
 
 def _is_exempt(path: Path) -> bool:
@@ -97,8 +102,13 @@ def _is_exempt(path: Path) -> bool:
 
     Exempt set:
       * any path under a ``tests/`` directory (regex on string form,
-        because test files can live in ``tmp_path`` for fixtures),
-      * any ``test_*.py`` filename (catches tmp-path test fixtures),
+        because test files can live in ``tmp_path`` for fixtures
+        whose path includes a ``/tests/`` segment),
+      * any ``test_*.py`` file whose **resolved absolute path is OUTSIDE
+        this repo** — this covers ``tmp_path`` test fixtures the unit
+        suite plants under e.g. ``/private/var/folders/.../test_foo.py``.
+        In-repo ``test_*.py`` files (basename-only match) are NOT exempt;
+        they must live under ``tests/`` to qualify.
       * the explicit authorised homes in ``_APPROVED_PATHS`` — matched
         by resolved absolute-path equality, not suffix. A file outside
         this repo that happens to end with ``src/alfred/security/tiers.py``
@@ -121,42 +131,96 @@ def _is_exempt(path: Path) -> bool:
         resolved = path.resolve(strict=False)
     except (OSError, RuntimeError):
         return False
+
+    # Out-of-repo ``test_*.py`` fixtures (tmp_path planted files etc.)
+    # are exempt — they are genuine test artefacts the suite creates to
+    # exercise the gate. In-repo ``test_*.py`` files outside ``tests/``
+    # are NOT exempt: this would be an attacker shipping a file named
+    # ``test_bypass.py`` under ``src/`` to dodge the grep gate.
+    if (
+        path.name.startswith("test_")
+        and path.suffix == ".py"
+        and not resolved.is_relative_to(_REPO_ROOT)
+    ):
+        return True
+
     return resolved in _APPROVED_PATHS
 
 
 def _call_name(node: ast.Call) -> str | None:
     """Return the bare callable name for ``node`` (e.g. ``tag``, ``cast``).
 
-    Returns ``None`` if the call's target is not a simple ``Name`` node —
-    e.g. ``module.tag(T3, ...)`` deliberately falls through because the
-    convention in this codebase is that the two forbidden patterns are
-    invoked by their bare names and the import-rename attack
-    (``from … import tag as t; t(T3, x)``) is out of scope (the renamed
-    binding still trips the suppression-comment rule whenever a
-    cast-style suppressor is added).
+    Both shapes resolve to the same callable name from the gate's POV:
+
+    - ``tag(T3, ...)``        → ``ast.Name(id="tag")``      → ``"tag"``
+    - ``module.tag(T3, ...)`` → ``ast.Attribute(attr="tag")`` → ``"tag"``
+    - ``typing.cast(...)``    → ``ast.Attribute(attr="cast")`` → ``"cast"``
+
+    Returns ``None`` for any other shape (subscript, lambda call, etc.) —
+    those are not the patterns the gate is looking for.
+
+    CR-138 round-2 finding #2: prior versions returned ``None`` for any
+    ``ast.Attribute`` target, so qualified calls like ``module.tag(T3,
+    ...)`` or ``typing.cast(TaggedContent[T2], x)`` silently bypassed
+    both ``_is_tag_t3_call`` and ``_is_cast_tagged_content_call``. The
+    import-rename attack (``from … import tag as t; t(T3, x)``) remains
+    out of scope — the renamed binding still trips the suppression-
+    comment rule whenever a cast-style suppressor is added.
     """
     if isinstance(node.func, ast.Name):
         return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _arg_name(node: ast.expr) -> str | None:
+    """Return the bare identifier for ``node`` (e.g. ``T3``, ``TaggedContent``).
+
+    Mirrors :func:`_call_name` on the argument side: both ``T3`` and
+    ``tiers.T3`` resolve to the identifier ``"T3"``. Without this, the
+    qualified-call widening from CR-138 round-2 finding #2 would only
+    cover the call target — the first positional arg pattern
+    ``module.T3`` would still slip past.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
     return None
 
 
 def _is_tag_t3_call(node: ast.Call) -> bool:
-    """``tag(T3, ...)`` — first positional arg is the bare name ``T3``."""
+    """``tag(T3, ...)`` — first positional arg is the identifier ``T3``.
+
+    Accepts both the bare ``T3`` (``ast.Name``) and the qualified
+    ``module.T3`` (``ast.Attribute``) form via :func:`_arg_name`. The
+    qualified-call widening for CR-138 round-2 finding #2 covers the
+    callable target; this helper covers the matching arg shape so the
+    pair stays consistent (``tiers.tag(tiers.T3, ...)`` is the most
+    natural qualified form an author would write).
+    """
     if _call_name(node) != "tag":
         return False
     if not node.args:
         return False
-    first = node.args[0]
-    return isinstance(first, ast.Name) and first.id == "T3"
+    return _arg_name(node.args[0]) == "T3"
 
 
 def _is_cast_tagged_content_call(node: ast.Call) -> bool:
-    """``cast(TaggedContent[...], ...)`` — first arg is a Subscript of ``TaggedContent``.
+    """``cast(TaggedContent[...], ...)`` — first arg subscripts ``TaggedContent``.
 
-    Also matches ``cast("TaggedContent[T2]", x)`` (the string-form generic
-    used to suppress mypy's TypeVar complaint) — the literal substring
-    ``TaggedContent[`` inside the constant string is the same provenance
-    erasure as the live form.
+    Accepts:
+
+    - ``cast(TaggedContent[T2], x)``           — bare name
+    - ``cast(tiers.TaggedContent[T2], x)``     — qualified Attribute
+    - ``typing.cast(TaggedContent[T2], x)``    — qualified call target (covered by ``_call_name``)
+    - ``cast("TaggedContent[T2]", x)``         — string-form generic
+
+    The qualified subscript form (``tiers.TaggedContent[T2]``) is the
+    matching round-2 finding #2 widening on the argument side: without
+    it, an author who imports the security module and casts via
+    ``tiers.TaggedContent[T2]`` would skip the gate.
     """
     if _call_name(node) != "cast":
         return False
@@ -164,8 +228,9 @@ def _is_cast_tagged_content_call(node: ast.Call) -> bool:
         return False
     first = node.args[0]
     if isinstance(first, ast.Subscript):
-        value = first.value
-        return isinstance(value, ast.Name) and value.id == "TaggedContent"
+        # ``_arg_name`` collapses ``ast.Name`` and ``ast.Attribute`` to the
+        # same identifier so qualified subscripts also match.
+        return _arg_name(first.value) == "TaggedContent"
     if isinstance(first, ast.Constant) and isinstance(first.value, str):
         # String-form generic: the parser keeps it as a literal, so look
         # for the same syntactic shape inside the constant.
