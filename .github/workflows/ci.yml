@@ -96,6 +96,35 @@ jobs:
           uv run coverage report \
             --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py' \
             --fail-under=100
+      - name: Trust-boundary files 100% line+branch coverage
+        # Slice-3 PR-S3-1 trust-boundary surface (spec §11a). The three
+        # files explicitly enumerated below are the ONLY legitimate
+        # construction sites for ``TaggedContent`` instances and the
+        # ingress / quarantine boundaries the orchestrator depends on:
+        #
+        #   * ``src/alfred/security/tiers.py`` — T0/T1/T2/T3 classes,
+        #     ``tag()`` overload set, ``CapabilityGateNonce``, and
+        #     ``tag_t3_with_nonce`` (§3.1 / §3.2).
+        #   * ``src/alfred/security/quarantine.py`` — ``T3DerivedData``
+        #     NewType, ``ContentHandle`` single-use carrier, and the
+        #     ``quarantined_to_structured`` / ``downgrade_to_orchestrator``
+        #     stubs PR-S3-4 will fill in (§3.4 / §3.7 / §7.3).
+        #   * ``src/alfred/identity/_ingest.py`` — the role × adapter
+        #     T1/T2 derivation hook (§3.6) AND the publisher for the
+        #     ``identity.t1_ingress`` + ``identity.t1_downgrade``
+        #     hookpoints (§14).
+        #
+        # Per-file ``--include`` mirrors the hooks-subsystem precedent
+        # above. The list is explicit so a new trust-boundary file gets
+        # added to the gate at the same PR it lands, not silently shipped
+        # at < 100% coverage. The hashFiles guard makes the step a clean
+        # no-op on a branch where any of the three files have not yet
+        # landed (mirrors the unit-test step's guard discipline).
+        if: hashFiles('src/alfred/security/tiers.py', 'src/alfred/security/quarantine.py', 'src/alfred/identity/_ingest.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py' \
+            --fail-under=100
 
   integration:
     name: Integration
