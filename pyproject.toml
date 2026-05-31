@@ -36,6 +36,12 @@ dependencies = [
   # needed). Pinned >=5 for the GETDEL primitive exercised by ContentStore
   # (spec §7.2, PR-S3-5).
   "redis>=5",
+  # PR-S3-3a: transport-layer Prometheus histograms (spec §7a.1 — perf-002 /
+  # perf-009). Four histograms cover the four p99 budgets the supervisor
+  # gates on (StdioTransport.dispatch, OutboundDlp.scan, InboundContentScanner.scan,
+  # subprocess cold-start). Process-local default registry; the SigNoz /
+  # OpenTelemetry bridge is independently configured in ops/.
+  "prometheus-client>=0.20,<1",
 ]
 
 [dependency-groups]
