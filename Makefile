@@ -15,7 +15,7 @@
 
 .PHONY: help setup autosquash \
         fix format-fix lint-fix \
-        check format-check lint-check typecheck strict-declarations-lint test test-unit test-integration test-smoke test-adversarial test-perf \
+        check format-check lint-check typecheck strict-declarations-lint tag-t3-check test test-unit test-integration test-smoke test-adversarial test-perf \
         docs-check
 
 help: ## Show this help.
@@ -153,7 +153,14 @@ test-perf: ## Run the release-blocking hook-dispatch perf gate (host-load-sensit
 strict-declarations-lint: ## #119 SEC-Med-1: `strict_declarations=False` MUST NOT appear in src/.
 	python3 scripts/check_strict_declarations.py
 
-check: format-check lint-check typecheck strict-declarations-lint test ## Verify everything (identical to CI). No mutations.
+tag-t3-check: ## Slice-3 spec §3.7-3.8: reject unauthorised tag(T3 + cast(TaggedContent[ uses in src/.
+	@if [ -d src/alfred ]; then \
+		python3 scripts/check_tag_t3.py src/alfred; \
+	else \
+		echo "::notice::no src/alfred/ yet — skipping tag-t3-check"; \
+	fi
+
+check: format-check lint-check typecheck strict-declarations-lint tag-t3-check test ## Verify everything (identical to CI). No mutations.
 
 # ──────────────────────────────────────────────────────────────
 # Docs link + anchor checker (PR E, plan task 8)

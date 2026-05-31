@@ -266,27 +266,87 @@ def test_check_tag_t3_script_rejects_unauthorized_call(tmp_path: Path) -> None:
     )
 
 
-def test_check_tag_t3_script_allows_approved_sites(tmp_path: Path) -> None:
-    """Approved call sites (stdio_transport.py, quarantine_host.py) are allowed."""
+def test_check_tag_t3_script_allows_clean_file(tmp_path: Path) -> None:
+    """A file with no disallowed pattern passes — using tag_t3_with_nonce is fine."""
     import subprocess
     import sys
 
-    approved_file = tmp_path / "stdio_transport.py"
-    approved_file.write_text(
-        "# src/alfred/plugins/stdio_transport.py\n"
+    # A clean file: no `tag(T3,`, no `cast(TaggedContent[`, no TaggedContent + type-ignore.
+    clean_file = tmp_path / "clean_module.py"
+    clean_file.write_text(
         "from alfred.security.tiers import tag_t3_with_nonce\n"
-        "# uses tag_t3_with_nonce, not tag(T3, ...)\n"
+        "# This module uses tag_t3_with_nonce with an injected nonce.\n"
+        "# It contains no forbidden pattern, so the gate accepts it.\n"
     )
     result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
-        [sys.executable, "scripts/check_tag_t3.py", str(approved_file)],
+        [sys.executable, "scripts/check_tag_t3.py", str(clean_file)],
         capture_output=True,
         text=True,
         cwd=str(_REPO_ROOT),
         check=False,
     )
-    # An approved file using tag_t3_with_nonce instead of tag(T3 passes
     assert result.returncode == 0, (
-        f"Expected 0 for approved site; got {result.returncode}.\n"
+        f"Expected 0 for clean file; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_check_tag_t3_script_exempts_authorised_homes(tmp_path: Path) -> None:
+    """The authorised homes (tiers.py, quarantine.py) are exempt by path.
+
+    Per the PR-S3-1 briefing the authorised callers list is EXACTLY:
+      - src/alfred/security/tiers.py   (the ``tag`` overload bodies)
+      - src/alfred/security/quarantine.py (the downgrade boundary)
+      - tests/unit/security/**         (tests assert the gate's behaviour)
+
+    A synthetic path ending in ``src/alfred/security/tiers.py`` exercises the
+    suffix-based exemption — even when the file contains a literal
+    ``tag(T3,`` call site (which only those approved homes may contain).
+    Spec §3.7-3.8.
+    """
+    import subprocess
+    import sys
+
+    nested = tmp_path / "src" / "alfred" / "security"
+    nested.mkdir(parents=True)
+    home = nested / "tiers.py"
+    home.write_text(
+        "from alfred.security.tiers import T3\n"
+        "# Synthetic stand-in for the real tiers.py — the gate exempts this path.\n"
+        "x = tag(T3, 'authorised use of the factory')\n"
+    )
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(home)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"Expected 0 for authorised home suffix; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_check_tag_t3_script_clean_on_real_src_tree() -> None:
+    """The script returns 0 when scanning the actual ``src/alfred/`` tree.
+
+    This is the load-bearing assertion: shipping CI runs the script against
+    the real source tree. If any non-approved file ever contains a
+    ``tag(T3,`` or ``cast(TaggedContent[`` line, this test fires.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "scripts/check_tag_t3.py", "src/alfred"],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"Expected 0 on real src/alfred tree; got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
