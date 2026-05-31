@@ -150,10 +150,14 @@ def test_quarantined_to_structured_stub_raises_not_implemented() -> None:
     class _FixtureGate:
         """Minimal CapabilityGate fixture: structurally satisfies the Protocol.
 
-        Returns ``True`` for any clearance request — the stub never
-        consults the gate (it raises NotImplementedError first), so this
-        is sufficient to satisfy the type signature without an
-        ``always-allow`` runtime bypass in production-shaped code paths.
+        Returns ``False`` (always-deny) — CR-138 R3 fix per CLAUDE.md hard
+        rule #4 (capability gate is not bypassable in tests). The
+        ``quarantined_to_structured`` stub raises ``NotImplementedError``
+        before consulting the gate, so the deny value is never observed;
+        but using ``return False`` (rather than ``return True``) keeps a
+        future copy-paste of this fixture from accidentally codifying an
+        always-allow pattern. When PR-S3-4 wires the real impl, a proper
+        fixture-grant pattern lands here.
         """
 
         def check(
@@ -163,7 +167,7 @@ def test_quarantined_to_structured_stub_raises_not_implemented() -> None:
             hookpoint: str,
             requested_tier: str,
         ) -> bool:
-            return True
+            return False
 
     with pytest.raises(NotImplementedError):
         asyncio.run(quarantined_to_structured(handle, _Schema, extractor=None, gate=_FixtureGate()))
