@@ -65,6 +65,7 @@ import datetime
 import json
 import os
 import struct
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
@@ -73,6 +74,12 @@ import structlog
 from alfred.audit import audit_row_schemas
 from alfred.errors import AlfredError
 from alfred.i18n import t
+from alfred.plugins._observability import (
+    DISPATCH_DURATION,
+    INBOUND_SCANNER_SCAN_DURATION,
+    OUTBOUND_DLP_SCAN_DURATION,
+    PLUGIN_SPAWN_DURATION,
+)
 from alfred.plugins.content_store_base import ContentStoreBase, InMemoryContentStore
 from alfred.plugins.errors import DlpOutboundRefusedError
 from alfred.plugins.inbound_scanner import CanaryTrip, InboundContentScanner
@@ -326,35 +333,53 @@ class StdioTransport:
             extra_fds = (r_fd,)
             minimal_env["ALFRED_PROVIDER_KEY_FD"] = str(r_fd)
 
+        # Spawn-duration accounting: start the clock here; record the
+        # outcome on every exit path so a ``FileNotFoundError`` on
+        # missing executable observes ``spawn_failed`` while a successful
+        # exec observes ``ok``. The manifest-handshake stage is in the
+        # session — this observation covers the subprocess-exec slice
+        # only. Spec §7a.1: budget p99 < 500 ms.
+        spawn_start = time.monotonic()
+        spawn_outcome = "ok"
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                self._executable,
-                *self._args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=minimal_env,
-                pass_fds=extra_fds,
-            )
-            if provider_key is not None and w_fd is not None:
-                # 4-byte big-endian length + N key bytes (spec §5.3
-                # framing). The child reads exactly this much then sees
-                # EOF.
-                header = struct.pack(">I", len(provider_key))
-                os.write(w_fd, header + provider_key)
+            try:
+                self._process = await asyncio.create_subprocess_exec(
+                    self._executable,
+                    *self._args,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=minimal_env,
+                    pass_fds=extra_fds,
+                )
+                if provider_key is not None and w_fd is not None:
+                    # 4-byte big-endian length + N key bytes (spec §5.3
+                    # framing). The child reads exactly this much then
+                    # sees EOF.
+                    header = struct.pack(">I", len(provider_key))
+                    os.write(w_fd, header + provider_key)
+            except Exception:
+                spawn_outcome = "spawn_failed"
+                raise
+            finally:
+                # Close both ends on every path — success and failure.
+                # The child has its own dup of r_fd via pass_fds; the
+                # parent's copies are no longer needed.
+                # ``contextlib.suppress`` is used because a double-close
+                # on a never-opened fd is the only failure mode and it is
+                # benign — we don't want a close-after-failure to mask
+                # the original spawn exception.
+                if w_fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(w_fd)
+                if r_fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(r_fd)
         finally:
-            # Close both ends on every path — success and failure. The
-            # child has its own dup of r_fd via pass_fds; the parent's
-            # copies are no longer needed. ``contextlib.suppress`` is
-            # used because a double-close on a never-opened fd is the
-            # only failure mode and it is benign — we don't want a
-            # close-after-failure to mask the original spawn exception.
-            if w_fd is not None:
-                with contextlib.suppress(OSError):
-                    os.close(w_fd)
-            if r_fd is not None:
-                with contextlib.suppress(OSError):
-                    os.close(r_fd)
+            PLUGIN_SPAWN_DURATION.labels(
+                plugin_id=self._plugin_id,
+                outcome=spawn_outcome,
+            ).observe(time.monotonic() - spawn_start)
 
     async def _read_length_prefixed(self) -> bytes:
         """Read one length-prefixed frame from stdout.
@@ -406,128 +431,188 @@ class StdioTransport:
           inbound bytes (no redact-and-continue — quarantine trigger).
         * ``RuntimeError`` — dispatch called before ``_spawn`` (err-013).
         * :class:`NonceNotConfigured` — content-bearing branch with no nonce.
+
+        Observability (spec §7a.1 / perf-002 / perf-009): observes
+        :data:`DISPATCH_DURATION` once per call with the outcome label set
+        from the actual exit path; the per-stage histograms
+        (:data:`OUTBOUND_DLP_SCAN_DURATION`,
+        :data:`INBOUND_SCANNER_SCAN_DURATION`) observe inline at their
+        respective stages so a slow DLP scan that triggers a refusal still
+        records its scan latency.
         """
-        # Step 1: serialise the placeholder frame for DLP. {{secret:*}}
-        # placeholders are untouched until the broker substitutes them.
-        placeholder_frame = json.dumps(
-            {"jsonrpc": "2.0", "method": method, "params": params}
-        ).encode("utf-8")
+        # Dispatch-duration accounting: start the clock here, record once
+        # at the exit path (try/finally below). ``method_shape`` is fixed
+        # at the time of the call; ``outcome`` is set to the actual exit
+        # path so a DLP-refused dispatch reports ``dlp_refused``.
+        dispatch_start = time.monotonic()
+        method_shape = "control" if _is_control_plane(method) else "content"
+        outcome = "ok"
+        try:
+            # Step 1: serialise the placeholder frame for DLP. {{secret:*}}
+            # placeholders are untouched until the broker substitutes them.
+            placeholder_frame = json.dumps(
+                {"jsonrpc": "2.0", "method": method, "params": params}
+            ).encode("utf-8")
 
-        # Step 2: outbound DLP on the placeholder frame. perf-012 — frames
-        # over the threshold offload to a thread because the regex/NER scan
-        # is O(n) on the frame size and would stall the event loop.
-        # The DLP collaborator is structural: ``scan(bytes) -> Result``
-        # where Result has ``refused: bool`` and ``rule_matched: str``.
-        # The Slice-3 DLP shim adapts ``OutboundDlp.scan(str) -> str`` to
-        # this shape; PR-S3-5 lands the full bytes-aware OutboundDlp.
-        if len(placeholder_frame) > _OUTBOUND_DLP_THREAD_THRESHOLD:
-            dlp_result = await asyncio.to_thread(self._dlp.scan, placeholder_frame)
-        else:
-            dlp_result = self._dlp.scan(placeholder_frame)
+            # Step 2: outbound DLP on the placeholder frame. perf-012 —
+            # frames over the threshold offload to a thread because the
+            # regex/NER scan is O(n) on the frame size and would stall
+            # the event loop. The DLP collaborator is structural:
+            # ``scan(bytes) -> Result`` where Result has ``refused:
+            # bool`` and ``rule_matched: str``. The Slice-3 DLP shim
+            # adapts ``OutboundDlp.scan(str) -> str`` to this shape;
+            # PR-S3-5 lands the full bytes-aware OutboundDlp.
+            dlp_start = time.monotonic()
+            if len(placeholder_frame) > _OUTBOUND_DLP_THREAD_THRESHOLD:
+                dlp_result = await asyncio.to_thread(self._dlp.scan, placeholder_frame)
+            else:
+                dlp_result = self._dlp.scan(placeholder_frame)
+            dlp_refused = bool(getattr(dlp_result, "refused", False))
+            OUTBOUND_DLP_SCAN_DURATION.labels(
+                outcome="refused" if dlp_refused else "allowed",
+            ).observe(time.monotonic() - dlp_start)
 
-        if getattr(dlp_result, "refused", False):
-            rule_matched = getattr(dlp_result, "rule_matched", "unknown") or "unknown"
-            correlation_id = str(uuid.uuid4())
-            # Audit the refusal BEFORE raising — the security path must
-            # leave a trace even when the dispatch fails loud
-            # (CLAUDE.md hard rule #7).
-            await self._audit_writer.append_schema(
-                fields=audit_row_schemas.DLP_OUTBOUND_REFUSED_FIELDS,
-                schema_name="DLP_OUTBOUND_REFUSED_FIELDS",
-                event="security.dlp_outbound_refused",
-                actor_user_id=None,
-                subject={
-                    "wire": "stdio_transport.outbound",
-                    "direction": "outbound",
-                    "scan_rule_matched": rule_matched,
-                    "field_name": "frame",
-                    "correlation_id": correlation_id,
-                },
-                trust_tier_of_trigger="T0",
-                result="refused",
-                cost_estimate_usd=0.0,
-                trace_id=correlation_id,
+            if dlp_refused:
+                outcome = "dlp_refused"
+                rule_matched = getattr(dlp_result, "rule_matched", "unknown") or "unknown"
+                correlation_id = str(uuid.uuid4())
+                # Audit the refusal BEFORE raising — the security path
+                # must leave a trace even when the dispatch fails loud
+                # (CLAUDE.md hard rule #7).
+                await self._audit_writer.append_schema(
+                    fields=audit_row_schemas.DLP_OUTBOUND_REFUSED_FIELDS,
+                    schema_name="DLP_OUTBOUND_REFUSED_FIELDS",
+                    event="security.dlp_outbound_refused",
+                    actor_user_id=None,
+                    subject={
+                        "wire": "stdio_transport.outbound",
+                        "direction": "outbound",
+                        "scan_rule_matched": rule_matched,
+                        "field_name": "frame",
+                        "correlation_id": correlation_id,
+                    },
+                    trust_tier_of_trigger="T0",
+                    result="refused",
+                    cost_estimate_usd=0.0,
+                    trace_id=correlation_id,
+                )
+                raise DlpOutboundRefusedError(
+                    plugin_id=self._plugin_id,
+                    rule_matched=rule_matched,
+                )
+
+            # Step 3: broker substitution — AFTER DLP, per ADR-0017
+            # invariant. The broker is structural:
+            # ``substitute(params) -> awaitable[dict]``.
+            substituted_params = await self._broker.substitute(params)
+
+            # Step 4: final frame with substituted values.
+            final_frame = json.dumps(
+                {"jsonrpc": "2.0", "method": method, "params": substituted_params}
+            ).encode("utf-8")
+
+            # Step 5: write to subprocess. err-013 — explicit guard, not
+            # ``assert`` (which ``python -O`` strips), because this is a
+            # trust-boundary I/O path. The catch-all ``except Exception``
+            # below labels ``outcome`` for the histogram exit.
+            if self._process is None or self._process.stdin is None:
+                raise RuntimeError(
+                    "dispatch() called before _spawn(); transport state invariant violated"
+                )
+            self._process.stdin.write(struct.pack(">I", len(final_frame)) + final_frame)
+            await self._process.stdin.drain()
+
+            # Step 6: read the inbound frame (length-prefixed, perf-008
+            # cap).
+            raw = await self._read_length_prefixed()
+
+            # Step 7: inbound canary scan, offloaded to a thread to keep
+            # the event loop responsive on regex-heavy frames.
+            scan_start = time.monotonic()
+            trip = await asyncio.to_thread(self._scanner.scan, raw)
+            INBOUND_SCANNER_SCAN_DURATION.labels(
+                outcome="canary_trip" if isinstance(trip, CanaryTrip) else "clean",
+            ).observe(time.monotonic() - scan_start)
+            if isinstance(trip, CanaryTrip):
+                outcome = "canary_trip"
+                # SECURITY EVENT — never recoverable. The supervisor
+                # catches this and quarantines the subprocess; we surface
+                # forensic attributes (plugin_id + matched_token) on the
+                # exception.
+                log.warning(
+                    "canary_trip_on_inbound_frame",
+                    plugin_id=self._plugin_id,
+                    token=trip.matched_token,
+                )
+                raise CanaryTripSecurityEvent(
+                    message=t("security.canary_tripped", url=f"plugin:{self._plugin_id}"),
+                    plugin_id=self._plugin_id,
+                    matched_token=trip.matched_token,
+                )
+
+            # Step 8: branch on method shape (sec-001 / core-006).
+            if _is_control_plane(method):
+                # Control-plane response: deserialise to ControlResult.
+                # No T3 tagging, no content store write — these responses
+                # carry status/health/lifecycle info, never user content.
+                payload_raw = json.loads(raw).get("result", {})
+                payload: dict[str, object] = (
+                    dict(payload_raw) if isinstance(payload_raw, dict) else {}
+                )
+                return ControlResult(method=method, payload=payload)
+
+            # Content-bearing branch: tag T3 and persist the WRAPPER in
+            # the content store (rvw-004 / CR R3 fix). Persisting raw
+            # bytes would lose the nonce + provenance and silently
+            # downgrade T3 → untagged on retrieval.
+            #
+            # Explicit guard, not ``assert`` (err-013) — survives
+            # ``python -O``. The catch-all ``except Exception`` below
+            # labels ``outcome`` for the histogram exit.
+            if self._nonce is None:
+                raise NonceNotConfigured(
+                    "StdioTransport inbound_t3_nonce must be set at construction"
+                )
+            # T3 content is a *string* on the TaggedContent model; decode
+            # the inbound bytes with ``errors="replace"`` so non-UTF-8
+            # sequences (binary blobs, images) don't crash the tagging
+            # path — the downstream extractor handles binary handles via
+            # the content store metadata.
+            decoded = raw.decode("utf-8", errors="replace")
+            tagged = tag_t3_with_nonce(
+                decoded,
+                source=f"plugin:{self._plugin_id}:{method}",
+                caller_token=self._nonce,
             )
-            raise DlpOutboundRefusedError(
+            handle = ContentHandle(
+                id=str(uuid.uuid4()),
+                source_url=f"plugin:{self._plugin_id}:{method}",
+                fetch_timestamp=datetime.datetime.now(datetime.UTC),
+            )
+            self._content_store.put(handle, tagged)
+            return handle
+        except PluginProtocolError:
+            outcome = "protocol_error"
+            raise
+        except (DlpOutboundRefusedError, CanaryTripSecurityEvent):
+            # ``outcome`` was already set on the relevant branch above
+            # (``dlp_refused`` / ``canary_trip``) — let the labelled
+            # exception name propagate.
+            raise
+        except Exception:
+            # Catch-all so the histogram still records the exit path
+            # even when an unexpected exception fires (broker error,
+            # process death mid-write, ``NonceNotConfigured`` from the
+            # err-013 guard, etc.). The exception itself is re-raised;
+            # this is observability, not error suppression.
+            outcome = "error"
+            raise
+        finally:
+            DISPATCH_DURATION.labels(
                 plugin_id=self._plugin_id,
-                rule_matched=rule_matched,
-            )
-
-        # Step 3: broker substitution — AFTER DLP, per ADR-0017 invariant.
-        # The broker is structural: ``substitute(params) -> awaitable[dict]``.
-        substituted_params = await self._broker.substitute(params)
-
-        # Step 4: final frame with substituted values.
-        final_frame = json.dumps(
-            {"jsonrpc": "2.0", "method": method, "params": substituted_params}
-        ).encode("utf-8")
-
-        # Step 5: write to subprocess. err-013 — explicit guard, not
-        # ``assert`` (which ``python -O`` strips), because this is a
-        # trust-boundary I/O path.
-        if self._process is None or self._process.stdin is None:
-            raise RuntimeError(
-                "dispatch() called before _spawn(); transport state invariant violated"
-            )
-        self._process.stdin.write(struct.pack(">I", len(final_frame)) + final_frame)
-        await self._process.stdin.drain()
-
-        # Step 6: read the inbound frame (length-prefixed, perf-008 cap).
-        raw = await self._read_length_prefixed()
-
-        # Step 7: inbound canary scan, offloaded to a thread to keep the
-        # event loop responsive on regex-heavy frames.
-        trip = await asyncio.to_thread(self._scanner.scan, raw)
-        if isinstance(trip, CanaryTrip):
-            # SECURITY EVENT — never recoverable. The supervisor catches
-            # this and quarantines the subprocess; we surface forensic
-            # attributes (plugin_id + matched_token) on the exception.
-            log.warning(
-                "canary_trip_on_inbound_frame",
-                plugin_id=self._plugin_id,
-                token=trip.matched_token,
-            )
-            raise CanaryTripSecurityEvent(
-                message=t("security.canary_tripped", url=f"plugin:{self._plugin_id}"),
-                plugin_id=self._plugin_id,
-                matched_token=trip.matched_token,
-            )
-
-        # Step 8: branch on method shape (sec-001 / core-006).
-        if _is_control_plane(method):
-            # Control-plane response: deserialise to ControlResult.
-            # No T3 tagging, no content store write — these responses
-            # carry status/health/lifecycle info, never user content.
-            payload_raw = json.loads(raw).get("result", {})
-            payload: dict[str, object] = dict(payload_raw) if isinstance(payload_raw, dict) else {}
-            return ControlResult(method=method, payload=payload)
-
-        # Content-bearing branch: tag T3 and persist the WRAPPER in the
-        # content store (rvw-004 / CR R3 fix). Persisting raw bytes
-        # would lose the nonce + provenance and silently downgrade
-        # T3 → untagged on retrieval.
-        #
-        # Explicit guard, not ``assert`` (err-013) — survives ``python -O``.
-        if self._nonce is None:
-            raise NonceNotConfigured("StdioTransport inbound_t3_nonce must be set at construction")
-        # T3 content is a *string* on the TaggedContent model; decode the
-        # inbound bytes with ``errors="replace"`` so non-UTF-8 sequences
-        # (binary blobs, images) don't crash the tagging path — the
-        # downstream extractor handles binary handles via the content
-        # store metadata.
-        decoded = raw.decode("utf-8", errors="replace")
-        tagged = tag_t3_with_nonce(
-            decoded,
-            source=f"plugin:{self._plugin_id}:{method}",
-            caller_token=self._nonce,
-        )
-        handle = ContentHandle(
-            id=str(uuid.uuid4()),
-            source_url=f"plugin:{self._plugin_id}:{method}",
-            fetch_timestamp=datetime.datetime.now(datetime.UTC),
-        )
-        self._content_store.put(handle, tagged)
-        return handle
+                method_shape=method_shape,
+                outcome=outcome,
+            ).observe(time.monotonic() - dispatch_start)
 
     async def kill(self) -> bool:
         """SIGKILL the subprocess; return whether the kill landed.
