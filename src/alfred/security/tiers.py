@@ -6,7 +6,7 @@ dual-LLM split in Slice 2/3 when AlfredOS first ingests untrusted content.
 
 from __future__ import annotations
 
-from typing import Any, overload
+from typing import Any, Protocol, overload, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -54,6 +54,34 @@ class T3(TrustTier):
     """
 
     name = "T3"
+
+
+@runtime_checkable
+class AnyTaggedContent(Protocol):
+    """Read-only view of any TaggedContent regardless of tier parameter.
+
+    Observer code — audit writers, logging, DLP scanners — takes
+    AnyTaggedContent rather than a concrete TaggedContent[T] to avoid
+    cast() proliferation that the generic variance gap would otherwise
+    force. Mutators take the concrete TaggedContent[T].
+
+    A ruff/grep CI rule (scripts/check_tag_t3.py — lands in a follow-up
+    task) rejects ``cast(TaggedContent[`` in non-test src/ files to
+    prevent observers from re-acquiring a concrete generic type and
+    discarding provenance. See spec §3.3.
+    """
+
+    @property
+    def content(self) -> str: ...
+
+    @property
+    def source(self) -> str: ...
+
+    @property
+    def tier(self) -> type[TrustTier]: ...
+
+    @property
+    def metadata(self) -> dict[str, Any]: ...
 
 
 class TaggedContent[TierT: TrustTier](BaseModel):
