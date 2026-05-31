@@ -275,7 +275,7 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
   Step 2 — Run and confirm FAIL (migration 0007 does not exist yet):
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   uv run pytest tests/integration/test_migrations_0007_0009.py::test_0007_upgrade_accepts_slice3_results -x -q 2>&1 | tail -5
   # Expected: ERROR — alembic can't find revision 0007
   ```
@@ -1381,14 +1381,14 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
   Check existing deps:
 
   ```bash
-  grep -i redis /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design/pyproject.toml
+  grep -i redis <repo-root>/pyproject.toml
   # If not present, add redis[asyncio]>=5 to dependencies
   ```
 
   If redis is not listed, add it:
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   uv add "redis[asyncio]>=5"
   ```
 
@@ -2649,7 +2649,7 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
   After appending, compile the catalog:
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   # i18n-009: pybabel extract is NOT run here. The Slice-3 t() call-sites land in
   # PR-S3-1 through PR-S3-6, not in this PR. Running extract now would flag all
   # 86 new entries as obsolete (#~ msgid) because no call-sites exist in src/ yet.
@@ -2691,7 +2691,7 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
 - [ ] **Task 17 — Run full quality bar and fix any issues.**
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   make check 2>&1 | tail -20
   # Expected: all green (lint + format + type + tests)
   # Fix any ruff / mypy / pyright issues before proceeding.

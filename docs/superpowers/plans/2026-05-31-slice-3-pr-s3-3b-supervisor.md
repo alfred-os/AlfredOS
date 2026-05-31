@@ -2526,7 +2526,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
 - [ ] **Task 23 — Full `make check` pass.**
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   make check
   ```
 
@@ -2553,7 +2553,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
 - [ ] **Task 24 — `make docs-check` pass.**
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   make docs-check
   ```
 

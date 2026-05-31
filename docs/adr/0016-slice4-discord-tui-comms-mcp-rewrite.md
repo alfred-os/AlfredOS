@@ -23,7 +23,7 @@ shipped. The remaining gap is the adapter implementations themselves.
 
 Slice 4 rewrites `DiscordAdapter` and `TuiAdapter` as MCP plugins under the
 Slice-3 `StdioTransport`. The message-contract definition (full field schema,
-error shapes, rate-limit signalling) co-defined with this ADR at Slice-4
+error shapes, rate-limit signalling) is co-defined with this ADR at Slice-4
 implementation time. The four wire methods contracted in the Slice-3
 reference test plugin (`lifecycle.start`, `lifecycle.stop`,
 `inbound.message`, `adapter.health`) are the seed; Slice 4 extends this
