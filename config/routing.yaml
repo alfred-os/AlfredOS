@@ -1,0 +1,32 @@
+# config/routing.yaml — AlfredOS provider routing configuration.
+#
+# This file configures the privileged and quarantined LLM providers.
+# The [quarantine] block is gated: changes to 'provider' and 'secret_id'
+# go through the state.git reviewer-gate (high-blast, spec §11.1).
+# Use 'alfred config quarantined-provider <provider>' to propose a change.
+#
+# Downstream consumer: QuarantinedExtractor (PR-S3-4) reads
+# routing.yaml[quarantine] at construction; the manifest's declared
+# provider must match or the plugin receives plugin.load_refused at handshake
+# (spec §5.4, index plan §3 cross-PR contract).
+
+# Primary (privileged) provider — governed by config/alfred.toml [provider].
+# Repeated here for documentation; alfred.toml is the authoritative source.
+# primary_provider: "deepseek"  # informational only; set in alfred.toml
+
+quarantine:
+  # Provider for the quarantined LLM — MUST differ from the privileged
+  # provider by default (defence-in-depth, spec §5.4, PRD §6.4).
+  # If privileged uses deepseek, quarantined uses anthropic (and vice versa).
+  # Changing this field requires 'alfred config quarantined-provider <provider>'
+  # + state.git reviewer-gate approval (spec §11.1).
+  provider: "anthropic"
+
+  # Model identifier for the quarantined LLM.
+  # Haiku is the default: fast, cheap, adequate for structured extraction.
+  model: "claude-haiku-3-5"
+
+  # Secret broker ID for the quarantined provider API key.
+  # The SecretBroker resolves this before subprocess spawn via fd-3 handshake
+  # (spec §5.3). The literal API key never appears here.
+  secret_id: "quarantine_provider_api_key"
