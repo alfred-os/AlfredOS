@@ -246,9 +246,7 @@ async def test_spawn_missing_executable_observes_spawn_failed(
     )
     with pytest.raises(FileNotFoundError):
         await transport._spawn()
-    after = _child_count(
-        PLUGIN_SPAWN_DURATION, plugin_id="test.spawn_fail", outcome="spawn_failed"
-    )
+    after = _child_count(PLUGIN_SPAWN_DURATION, plugin_id="test.spawn_fail", outcome="spawn_failed")
     assert after - before == 1.0
 
 
