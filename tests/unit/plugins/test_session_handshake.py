@@ -34,7 +34,6 @@ from alfred.audit import audit_row_schemas
 from alfred.plugins.errors import ManifestVersionError, PluginError
 from alfred.plugins.session import AlfredPluginSession
 
-
 _VALID_MANIFEST = """
 [alfred]
 manifest_version = 1
@@ -270,11 +269,11 @@ async def test_post_handshake_hook_register_emits_audit_when_kill_raises(
     survives the failure mode.
     """
 
-    class _Boom(RuntimeError):
+    class _BoomError(RuntimeError):
         pass
 
     transport = MagicMock()
-    transport.kill = AsyncMock(side_effect=_Boom("transport pipe closed"))
+    transport.kill = AsyncMock(side_effect=_BoomError("transport pipe closed"))
     session = await AlfredPluginSession.create(
         manifest_raw=_VALID_MANIFEST,
         audit_writer=fake_audit_writer,
@@ -282,7 +281,7 @@ async def test_post_handshake_hook_register_emits_audit_when_kill_raises(
         transport=transport,
     )
     await session._on_handshake_complete()
-    with pytest.raises(_Boom):
+    with pytest.raises(_BoomError):
         await session._on_post_handshake_method("alfred/hooks.register")
     assert fake_audit_writer.last_event == "plugin.lifecycle.quarantined"
     assert fake_audit_writer.calls[-1]["subject"]["kill_succeeded"] is False
