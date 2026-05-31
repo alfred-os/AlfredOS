@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import typing
+from pathlib import Path
 
 import pytest
 
@@ -228,4 +229,90 @@ def test_orchestrator_type_signature_accepts_t1(monkeypatch: pytest.MonkeyPatch)
     annotation = str(content_param.annotation)
     assert "T1" in annotation, (
         f"Expected 'T1' in orchestrator content annotation; got: {annotation}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CI grep gate: scripts/check_tag_t3.py — spec §3.7-3.8
+# ---------------------------------------------------------------------------
+
+# Repo root resolved relative to this test file so the suite runs on any
+# checkout / CI runner. test file lives at tests/unit/security/...
+_REPO_ROOT = Path(__file__).parent.parent.parent.parent
+
+
+def test_check_tag_t3_script_rejects_unauthorized_call(tmp_path: Path) -> None:
+    """The CI script flags any non-approved src/ file containing ``tag(T3``.
+
+    Spec §3.2 and §3.3.
+    """
+    import subprocess
+    import sys
+
+    # Write a violating file
+    bad_file = tmp_path / "fake_orchestrator.py"
+    bad_file.write_text("from alfred.security.tiers import T3, tag\ntag(T3, 'x')\n")
+
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode != 0, (
+        f"Expected non-zero exit for unauthorized tag(T3 call; got 0.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_check_tag_t3_script_allows_approved_sites(tmp_path: Path) -> None:
+    """Approved call sites (stdio_transport.py, quarantine_host.py) are allowed."""
+    import subprocess
+    import sys
+
+    approved_file = tmp_path / "stdio_transport.py"
+    approved_file.write_text(
+        "# src/alfred/plugins/stdio_transport.py\n"
+        "from alfred.security.tiers import tag_t3_with_nonce\n"
+        "# uses tag_t3_with_nonce, not tag(T3, ...)\n"
+    )
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(approved_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    # An approved file using tag_t3_with_nonce instead of tag(T3 passes
+    assert result.returncode == 0, (
+        f"Expected 0 for approved site; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_check_tag_t3_script_rejects_cast_bypass(tmp_path: Path) -> None:
+    """The CI script flags cast(TaggedContent[ in non-test src/ files.
+
+    Spec §3.3.
+    """
+    import subprocess
+    import sys
+
+    bad_file = tmp_path / "bad_module.py"
+    bad_file.write_text(
+        "from typing import cast\n"
+        "from alfred.security.tiers import TaggedContent, T2\n"
+        "x = cast(TaggedContent[T2], some_t3_value)\n"
+    )
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode != 0, (
+        f"Expected non-zero exit for cast(TaggedContent[ bypass; got 0.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
