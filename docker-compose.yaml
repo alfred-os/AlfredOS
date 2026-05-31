@@ -36,6 +36,34 @@ services:
       timeout: 5s
       retries: 10
 
+  # alfred-redis — rate-limit counters, ContentHandle store, robots cache.
+  # Internal-only: no host port exposed (spec §7.7). volatile-lru evicts
+  # TTL-bearing keys under memory pressure when maxmemory is reached.
+  # devops-002: maxmemory MUST be set — without it volatile-lru never
+  # triggers (eviction only kicks in at the memory ceiling). Default 256 MB;
+  # override with ALFRED_REDIS_MAXMEMORY env var for larger deployments.
+  # devops-007: appendfsync everysec means up to 1s of budget-counter data
+  # can be lost on crash. This is the accepted trade-off for AlfredOS's low
+  # write rate — budget bypass from a 1s gap is an acceptable risk vs. the
+  # performance cost of appendfsync always. Document this in the operator
+  # runbook.
+  alfred-redis:
+    image: redis:7
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory ${ALFRED_REDIS_MAXMEMORY:-256mb}
+      --maxmemory-policy volatile-lru
+      --appendonly yes
+      --appendfsync everysec
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - alfred_redis_data:/data
+
   alfred-core:
     build:
       context: .
@@ -43,6 +71,16 @@ services:
     depends_on:
       alfred-postgres:
         condition: service_healthy
+      alfred-redis:
+        condition: service_healthy
+    # SETUID is load-bearing for spec §5.2: alfred-plugin-launcher needs the
+    # setuid bit (or this capability) to drop privileges to alfred-quarantine
+    # at subprocess spawn. The compose-invariant test (devops-010, in
+    # tests/unit/test_compose_invariants.py) pins that alfred-discord does
+    # NOT have it — that service must never be able to impersonate the
+    # quarantine UID.
+    cap_add:
+      - SETUID
     environment:
       ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
       ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
@@ -54,6 +92,15 @@ services:
       ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}
       ALFRED_DAILY_BUDGET_USD: ${ALFRED_DAILY_BUDGET_USD:-1.0}
       ALFRED_PER_CALL_MAX_USD: ${ALFRED_PER_CALL_MAX_USD:-0.10}
+      # Internal redis URL — alfred-redis has no host port; only services on
+      # the compose network can reach it. PR-S3-5 ContentStore + RateLimiter
+      # consume this.
+      ALFRED_REDIS_URL: ${ALFRED_REDIS_URL:-redis://alfred-redis:6379/0}
+    # state.git lives on this volume and is the source of truth for
+    # reviewer-gated proposals + plugin grants (spec §11.1). NOT mounted in
+    # alfred-discord — the comms adapter has no business writing grants.
+    volumes:
+      - alfred_state_git:/var/lib/alfred
 
   # PR D2 — Slice-2 Discord adapter. Reuses the alfred-core image (one
   # Dockerfile, one entrypoint) and runs the long-running `alfred discord`
@@ -110,3 +157,5 @@ services:
 
 volumes:
   alfred_pg_data:
+  alfred_redis_data:
+  alfred_state_git:
