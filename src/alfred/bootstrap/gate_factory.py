@@ -61,18 +61,26 @@ def is_production() -> bool:
     """Return :data:`True` when ``ALFRED_ENV`` is anything but ``"development"``.
 
     Spec §8.4: RealGate is the production default. An unset env var,
-    an empty string, or the explicit ``"development"`` sentinel all map
-    to development; everything else (``"production"``, ``"staging"``,
-    a typo'd label like ``"prdouction"``) maps to production so the
-    safer gate wins on operator error.
+    an empty string (including whitespace-only), or the explicit
+    ``"development"`` sentinel all map to development; everything else
+    (``"production"``, ``"staging"``, a typo'd label like
+    ``"prdouction"``) maps to production so the safer gate wins on
+    operator error.
+
+    Empty-string handling: ``os.environ.get(_ENV_KEY, _DEVELOPMENT)``
+    only returns the default when the key is absent; a present-but-empty
+    ``ALFRED_ENV=""`` (a common misconfiguration in shell-export chains
+    where a variable is exported with no value) used to fall through to
+    production. The ``.strip()`` + closed-domain check below treats
+    empty / whitespace as missing — same as the documented contract.
 
     This is the SINGLE sanctioned ``os.environ`` read for gate
     selection in the entire ``src/alfred/`` tree. Adding another would
     break the sec-007 invariant pinned by
     ``test_default_strict_declarations_invariant.py``.
     """
-    value = os.environ.get(_ENV_KEY, _DEVELOPMENT)
-    return value != _DEVELOPMENT
+    value = os.environ.get(_ENV_KEY, "").strip()
+    return value not in {"", _DEVELOPMENT}
 
 
 def build_dev_gate() -> DevGate:
