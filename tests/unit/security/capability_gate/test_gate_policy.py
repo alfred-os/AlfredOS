@@ -270,6 +270,38 @@ def test_gate_policy_check_skips_grants_with_wrong_subscriber_tier() -> None:
     )
 
 
+def test_gate_policy_check_skips_grants_with_wrong_hookpoint() -> None:
+    """Branch coverage: ``check`` skips grants whose hookpoint is specific and does not match.
+
+    Exercises the loop-continue branch where ``plugin_id`` and
+    ``subscriber_tier`` both match but the grant's ``hookpoint`` is a
+    specific (non-wildcard) string different from the requested one.
+    The loop body falls through to the next iteration; with no further
+    grants, ``check`` returns ``False``.
+    """
+    policy = GatePolicy(
+        grants=frozenset(
+            {
+                GrantRow(
+                    plugin_id="mypl",
+                    subscriber_tier="operator",
+                    hookpoint="tool.web.fetch",  # specific, not wildcard
+                    content_tier=None,
+                    proposal_branch="proposal/policy-grant-narrow",
+                )
+            }
+        )
+    )
+    assert (
+        policy.check(
+            plugin_id="mypl",
+            hookpoint="tool.other.hookpoint",  # different from grant's hookpoint
+            requested_tier="operator",
+        )
+        is False
+    )
+
+
 def test_gate_policy_check_content_clearance_skips_wrong_plugin_id() -> None:
     """Branch coverage: content-clearance skips grants whose plugin_id does not match."""
     policy = GatePolicy(
