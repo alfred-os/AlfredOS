@@ -1,6 +1,6 @@
 """Integration test: capability_gate_sync seeding on a fresh database.
 
-Asserts that after migrations 0007–0009 are applied to a fresh DB (i.e.
+Asserts that after migrations 0007-0009 are applied to a fresh DB (i.e.
 ``alembic upgrade head``), ``capability_gate_sync`` exists and can accept
 the initial seed row that ``alfred plugin grant init`` writes per spec
 §15.4 step 2.

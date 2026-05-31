@@ -124,16 +124,15 @@ def test_0009_capability_gate_sync_rejects_second_id(
     enforces the contract at the DB layer.
     """
     command.upgrade(alembic_cfg, "0009")
-    with pytest.raises(exc.IntegrityError):
-        with postgres_engine.begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO capability_gate_sync "
-                    "(id, commit_hash, synced_at) "
-                    "VALUES (2, :hash, :ts)"
-                ),
-                {"hash": "xyz", "ts": dt.datetime.now(dt.UTC)},
-            )
+    with pytest.raises(exc.IntegrityError), postgres_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO capability_gate_sync "
+                "(id, commit_hash, synced_at) "
+                "VALUES (2, :hash, :ts)"
+            ),
+            {"hash": "xyz", "ts": dt.datetime.now(dt.UTC)},
+        )
 
 
 def test_0009_capability_gate_sync_allows_null_commit_hash(
