@@ -7,10 +7,11 @@ tests for that behaviour live in PR-S3-5 alongside ContentStore.store().
 The canonical definition of ContentHandle lives here (src/alfred/security/
 quarantine.py); PR-S3-5 re-exports it for namespace continuity.
 """
+
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from alfred.security.quarantine import ContentHandle
 
@@ -20,7 +21,7 @@ def test_content_handle_accepts_uuid_string() -> None:
     handle = ContentHandle(
         id=handle_id,
         source_url="https://example.com/article",
-        fetch_timestamp=datetime.now(tz=timezone.utc),
+        fetch_timestamp=datetime.now(tz=UTC),
     )
     assert handle.id == handle_id
 
@@ -33,7 +34,7 @@ def test_two_content_handles_with_same_url_differ() -> None:
     id_a = str(uuid.uuid4())
     id_b = str(uuid.uuid4())
     assert id_a != id_b  # UUID4 collision probability is negligible
-    ts = datetime.now(tz=timezone.utc)
+    ts = datetime.now(tz=UTC)
     h_a = ContentHandle(id=id_a, source_url="https://example.com", fetch_timestamp=ts)
     h_b = ContentHandle(id=id_b, source_url="https://example.com", fetch_timestamp=ts)
     assert h_a.id != h_b.id
@@ -48,5 +49,6 @@ def test_content_handle_is_canonical_import_from_quarantine() -> None:
     (directly or via re-export) should be flagged as drift. See arch-003.
     """
     import alfred.security.quarantine as q
+
     assert hasattr(q, "ContentHandle")
     assert q.ContentHandle is ContentHandle

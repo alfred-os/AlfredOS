@@ -3,16 +3,22 @@ boundary stub. Spec §3.4, §3.7, §7.3.
 
 Full quarantined_to_structured implementation lands in PR-S3-4.
 """
+
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
+from pydantic import BaseModel
 
 from alfred.security.quarantine import (
     ContentHandle,
+    Extracted,
+    ExtractionResult,  # noqa: F401  --  import-chain assertion for PR-S3-3a (sec-002)
     T3DerivedData,
+    TypedRefusal,
     downgrade_to_orchestrator,
     quarantined_to_structured,
 )
@@ -47,7 +53,7 @@ def test_content_handle_is_frozen() -> None:
     handle = ContentHandle(
         id="abc-123",
         source_url="https://example.com",
-        fetch_timestamp=datetime.now(tz=timezone.utc),
+        fetch_timestamp=datetime.now(tz=UTC),
     )
     with pytest.raises((AttributeError, TypeError)):
         handle.id = "mutated"  # type: ignore[misc]
@@ -59,7 +65,7 @@ def test_content_handle_has_no_content_field() -> None:
     handle = ContentHandle(
         id="abc-123",
         source_url="https://example.com",
-        fetch_timestamp=datetime.now(tz=timezone.utc),
+        fetch_timestamp=datetime.now(tz=UTC),
     )
     assert not hasattr(handle, "content")
 
@@ -68,7 +74,7 @@ def test_content_handle_id_is_string() -> None:
     handle = ContentHandle(
         id="550e8400-e29b-41d4-a716-446655440000",
         source_url="https://example.com",
-        fetch_timestamp=datetime.now(tz=timezone.utc),
+        fetch_timestamp=datetime.now(tz=UTC),
     )
     assert isinstance(handle.id, str)
 
@@ -78,16 +84,14 @@ def test_quarantined_to_structured_stub_raises_not_implemented() -> None:
     handle = ContentHandle(
         id="x",
         source_url="https://example.com",
-        fetch_timestamp=datetime.now(tz=timezone.utc),
+        fetch_timestamp=datetime.now(tz=UTC),
     )
+
+    class _Schema(BaseModel):
+        schema_version: int = 1
+        title: str
+
     with pytest.raises(NotImplementedError):
-        import asyncio
-        from pydantic import BaseModel
-
-        class _Schema(BaseModel):
-            schema_version: int = 1
-            title: str
-
         asyncio.run(
             quarantined_to_structured(handle, _Schema, extractor=None, gate=None)  # type: ignore[arg-type]
         )
@@ -97,8 +101,6 @@ def test_downgrade_to_orchestrator_stub_raises_not_implemented() -> None:
     """The stub raises NotImplementedError — full impl is PR-S3-4."""
     data: T3DerivedData = T3DerivedData({"title": "x"})
     with pytest.raises(NotImplementedError):
-        import asyncio
-
         asyncio.run(downgrade_to_orchestrator(data, audit_row=None))  # type: ignore[arg-type]
 
 
@@ -109,14 +111,7 @@ def test_extraction_result_type_stubs_importable() -> None:
     PR-S3-3a needs these types at import time. This test confirms the
     import chain is satisfied from the PR-S3-1 stubs.
     """
-    from alfred.security.quarantine import (
-        ExtractionResult,
-        Extracted,
-        TypedRefusal,
-    )
-    import datetime
-
-    ts = datetime.datetime.now(tz=datetime.timezone.utc)
+    ts = datetime.now(tz=UTC)
     handle = ContentHandle(id="test-id", source_url="https://x.com", fetch_timestamp=ts)
     data: T3DerivedData = T3DerivedData({"title": "x"})
     extracted = Extracted(data=data, handle=handle)
