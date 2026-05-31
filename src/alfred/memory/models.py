@@ -129,7 +129,13 @@ class AuditEntry(Base):
             "'unknown_budget_user', "
             # Slice-2.5 (migration 0006) — hook-trace dispositions written
             # by :class:`alfred.memory.hooks_audit_sink.EpisodicAuditSink`.
-            "'fault', 'bypass')",
+            "'fault', 'bypass', "
+            # Slice-3 (migration 0007) — quarantined-LLM / plugin-lifecycle /
+            # plugin-grant / supervisor-breaker / content-handle dispositions
+            # (spec §13). Order matches the migration's _SLICE_3_ADDITIONS.
+            "'extracted', 'malformed_exhausted', 'load_refused', 'crashed', "
+            "'quarantined', 'reloaded', 'requested', 'approved', 'denied', "
+            "'revoked', 'tripped', 'reset', 'content_expired')",
             name="ck_audit_log_result",
         ),
     )

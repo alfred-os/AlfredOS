@@ -90,14 +90,20 @@ def _insert_audit_row(engine: Engine, *, result_value: str) -> None:
     CHECK string is the Slice-2.5 domain at HEAD of this branch — using the
     ORM here would couple test inputs to that frozen domain instead of
     exercising the DB CHECK the migration installs.
+
+    Explicit values for every NOT NULL column (``actor_persona``,
+    ``subject``, ``cost_estimate_usd``) — Postgres applies SQLAlchemy ORM
+    defaults at flush time, not at the DB layer, so raw-SQL inserts must
+    name them or they NotNullViolation.
     """
     with engine.begin() as conn:
         conn.execute(
             text(
                 "INSERT INTO audit_log "
-                "(id, created_at, trace_id, event, trust_tier_of_trigger, "
-                " result, language) "
-                "VALUES (:id, :ts, :trace, :event, :tier, :result, :lang)"
+                "(id, created_at, trace_id, event, actor_persona, subject, "
+                " trust_tier_of_trigger, result, cost_estimate_usd, language) "
+                "VALUES (:id, :ts, :trace, :event, 'alfred', '{}', :tier, "
+                "        :result, 0.0, :lang)"
             ),
             {
                 "id": str(uuid.uuid4()),
@@ -187,8 +193,6 @@ def test_0007_downgrade_deletes_slice3_rows(
 
     with postgres_engine.begin() as conn:
         after = conn.scalar(text("SELECT COUNT(*) FROM audit_log"))
-        survivors = conn.execute(
-            text("SELECT result FROM audit_log")
-        ).scalars().all()
+        survivors = conn.execute(text("SELECT result FROM audit_log")).scalars().all()
     assert after == 1
     assert survivors == ["success"]
