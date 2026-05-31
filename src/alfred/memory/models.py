@@ -11,7 +11,7 @@ import uuid
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import JSON, CheckConstraint, DateTime, Index, String, Text
+from sqlalchemy import JSON, CheckConstraint, DateTime, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -138,4 +138,68 @@ class AuditEntry(Base):
             "'revoked', 'tripped', 'reset', 'content_expired')",
             name="ck_audit_log_result",
         ),
+    )
+
+
+class PluginGrant(Base):
+    """Postgres projection of a state.git capability grant (spec §8.1).
+
+    ``RealGate`` (PR-S3-2) reads this table for millisecond-latency hot-path
+    capability checks. Built from state.git when its commit hash drifts from
+    :class:`CapabilityGateSync` (migration 0009). See migration 0008.
+
+    Two grant axes per spec §4.3 — kept distinct in the schema so a future
+    "subscriber tier T3" footgun is structurally impossible:
+
+    * ``subscriber_tier`` (``'system' | 'operator' | 'user-plugin'``) — which
+      hook-subscriber tier the plugin is permitted to serve.
+    * ``content_tier`` (``'T0' | 'T1' | 'T2' | 'T3' | None``) — which content
+      trust tier the plugin may handle. ``None`` means no content-tier
+      restriction.
+
+    The UNIQUE on ``(plugin_id, hookpoint, subscriber_tier)`` matches the
+    PR-S3-2 ``PostgresBackend.upsert_grant`` ``ON CONFLICT`` target (mem-003);
+    the round-trip test pins it so a future refactor cannot quietly drop the
+    constraint.
+    """
+
+    __tablename__ = "plugin_grants"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    plugin_id: Mapped[str] = mapped_column(String(128))
+    # spec §4.3 naming rule: hook-subscription axis, NOT a content trust tier.
+    subscriber_tier: Mapped[str] = mapped_column(String(32))
+    hookpoint: Mapped[str] = mapped_column(String(128))
+    # NULL = no content-tier restriction. When set, must be T0/T1/T2/T3.
+    content_tier: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    operator_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    proposal_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    correlation_id: Mapped[str] = mapped_column(String(64))
+    # Closed domain — same values as the plugin.grant.* audit family.
+    state: Mapped[str] = mapped_column(String(32))
+    state_git_commit_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('requested', 'approved', 'denied', 'revoked')",
+            name="ck_plugin_grants_state",
+        ),
+        CheckConstraint(
+            "subscriber_tier IN ('system', 'operator', 'user-plugin')",
+            name="ck_plugin_grants_subscriber_tier",
+        ),
+        CheckConstraint(
+            "content_tier IS NULL OR content_tier IN ('T0', 'T1', 'T2', 'T3')",
+            name="ck_plugin_grants_content_tier",
+        ),
+        # mem-003: matches PR-S3-2 PostgresBackend.upsert_grant ON CONFLICT target.
+        UniqueConstraint(
+            "plugin_id",
+            "hookpoint",
+            "subscriber_tier",
+            name="uq_plugin_grants_plugin_hook_tier",
+        ),
+        Index("ix_plugin_grants_plugin_id_state", "plugin_id", "state"),
+        Index("ix_plugin_grants_hookpoint", "hookpoint"),
     )
