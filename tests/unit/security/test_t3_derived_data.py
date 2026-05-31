@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 
 import pytest
 from pydantic import BaseModel
@@ -79,8 +79,64 @@ def test_content_handle_id_is_string() -> None:
     assert isinstance(handle.id, str)
 
 
+def test_content_handle_rejects_naive_fetch_timestamp() -> None:
+    """CR-138 finding #4: ContentHandle rejects naive datetimes.
+
+    A naive ``datetime`` (no tzinfo) silently encodes the producer's
+    local clock, breaking forensic ordering across hosts. The
+    ``__post_init__`` validator must raise ``ValueError`` rather than
+    silently accept the value.
+    """
+    naive = datetime(2026, 5, 31, 12, 0, 0)  # noqa: DTZ001 — deliberately naive for the test
+    assert naive.tzinfo is None
+    with pytest.raises(ValueError, match="must be timezone-aware"):
+        ContentHandle(
+            id="naive-handle",
+            source_url="https://example.com",
+            fetch_timestamp=naive,
+        )
+
+
+def test_content_handle_rejects_tzinfo_returning_none_utcoffset() -> None:
+    """CR-138 finding #4: a tzinfo whose ``utcoffset()`` returns ``None`` is rejected.
+
+    A ``tzinfo`` subclass that returns ``None`` from ``utcoffset`` is
+    "tzinfo-present but offset-unknown" per the datetime contract, which
+    is functionally naive. ContentHandle rejects this case alongside
+    bare ``tzinfo=None``.
+    """
+
+    class _OffsetUnknownTz(tzinfo):
+        """Returns ``None`` from ``utcoffset`` — legal but functionally naive."""
+
+        def utcoffset(self, dt: datetime | None) -> timedelta | None:
+            return None
+
+        def dst(self, dt: datetime | None) -> timedelta | None:
+            return None
+
+        def tzname(self, dt: datetime | None) -> str | None:
+            return None
+
+    ambiguous = datetime(2026, 5, 31, 12, 0, 0, tzinfo=_OffsetUnknownTz())
+    assert ambiguous.tzinfo is not None
+    assert ambiguous.utcoffset() is None
+    with pytest.raises(ValueError, match="must be timezone-aware"):
+        ContentHandle(
+            id="offset-unknown-handle",
+            source_url="https://example.com",
+            fetch_timestamp=ambiguous,
+        )
+
+
 def test_quarantined_to_structured_stub_raises_not_implemented() -> None:
-    """The stub raises NotImplementedError — full impl is PR-S3-4."""
+    """The stub raises NotImplementedError — full impl is PR-S3-4.
+
+    CR-138 finding #5: ``gate`` is non-optional at the trust boundary.
+    The stub is exercised here with a fixture gate that returns ``True``
+    for all clearance requests. PR-S3-4 will replace this with the real
+    capability-gate wiring.
+    """
     handle = ContentHandle(
         id="x",
         source_url="https://example.com",
@@ -91,10 +147,26 @@ def test_quarantined_to_structured_stub_raises_not_implemented() -> None:
         schema_version: int = 1
         title: str
 
+    class _FixtureGate:
+        """Minimal CapabilityGate fixture: structurally satisfies the Protocol.
+
+        Returns ``True`` for any clearance request — the stub never
+        consults the gate (it raises NotImplementedError first), so this
+        is sufficient to satisfy the type signature without an
+        ``always-allow`` runtime bypass in production-shaped code paths.
+        """
+
+        def check(
+            self,
+            *,
+            plugin_id: str,
+            hookpoint: str,
+            requested_tier: str,
+        ) -> bool:
+            return True
+
     with pytest.raises(NotImplementedError):
-        asyncio.run(
-            quarantined_to_structured(handle, _Schema, extractor=None, gate=None)  # type: ignore[arg-type]
-        )
+        asyncio.run(quarantined_to_structured(handle, _Schema, extractor=None, gate=_FixtureGate()))
 
 
 def test_downgrade_to_orchestrator_stub_raises_not_implemented() -> None:
