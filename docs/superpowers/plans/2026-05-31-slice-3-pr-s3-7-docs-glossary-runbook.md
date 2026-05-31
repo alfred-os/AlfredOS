@@ -1147,21 +1147,28 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   ```shell
   git init --bare /var/lib/alfred/state.git
-  # Seed an empty root commit on `main`. A bare repo has no working tree, so
-  # `git commit --allow-empty` cannot run — drop down to plumbing instead.
-  SEED_COMMIT=$(
-    git -C /var/lib/alfred/state.git commit-tree \
-      "$(git -C /var/lib/alfred/state.git mktree </dev/null)" \
-      -m "seed: empty initial commit"
-  )
-  git -C /var/lib/alfred/state.git update-ref refs/heads/main "$SEED_COMMIT"
-  git -C /var/lib/alfred/state.git symbolic-ref HEAD refs/heads/main
+  # Seed an empty root commit on `main` ONLY IF main is missing.
+  # A bare repo has no working tree, so `git commit --allow-empty` cannot
+  # run — drop down to plumbing instead. The `rev-parse --verify` guard
+  # makes this step idempotent on rerun: re-seeding would rewrite
+  # `refs/heads/main` to a new empty commit and erase grant history
+  # (which is state-of-truth per PRD §7.1).
+  if ! git -C /var/lib/alfred/state.git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
+      SEED_COMMIT=$(
+          git -C /var/lib/alfred/state.git commit-tree \
+              "$(git -C /var/lib/alfred/state.git mktree </dev/null)" \
+              -m "seed: empty initial commit"
+      )
+      git -C /var/lib/alfred/state.git update-ref refs/heads/main "$SEED_COMMIT"
+      git -C /var/lib/alfred/state.git symbolic-ref HEAD refs/heads/main
+  fi
   ```
 
   This initialises the bare repository that `RealGate` uses as its
   grant backing store and creates the initial `main` branch. The
-  operation is idempotent — if `state.git` already contains a `HEAD`
-  ref, skip this step.
+  operation is idempotent: the `rev-parse --verify` guard skips the
+  seed when `main` already exists, so reruns do not destroy grant
+  history.
 
   *Slice 3.x+: an `alfred plugin grant seed` wrapper command that
   encapsulates these two steps is tracked as a follow-up.*
@@ -1251,14 +1258,18 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   ```shell
   git init --bare /var/lib/alfred/state.git
   # Bare repos have no working tree, so `git commit --allow-empty` cannot run;
-  # use plumbing to seed an empty root commit on `main`.
-  SEED_COMMIT=$(
-    git -C /var/lib/alfred/state.git commit-tree \
-      "$(git -C /var/lib/alfred/state.git mktree </dev/null)" \
-      -m "seed: empty initial commit"
-  )
-  git -C /var/lib/alfred/state.git update-ref refs/heads/main "$SEED_COMMIT"
-  git -C /var/lib/alfred/state.git symbolic-ref HEAD refs/heads/main
+  # use plumbing to seed an empty root commit on `main`. The `rev-parse --verify`
+  # guard makes this step idempotent on rerun: re-seeding would rewrite
+  # `refs/heads/main` and erase grant history.
+  if ! git -C /var/lib/alfred/state.git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
+      SEED_COMMIT=$(
+          git -C /var/lib/alfred/state.git commit-tree \
+              "$(git -C /var/lib/alfred/state.git mktree </dev/null)" \
+              -m "seed: empty initial commit"
+      )
+      git -C /var/lib/alfred/state.git update-ref refs/heads/main "$SEED_COMMIT"
+      git -C /var/lib/alfred/state.git symbolic-ref HEAD refs/heads/main
+  fi
   alfred supervisor reset quarantined-llm --confirm
   alfred supervisor reset web-fetch --confirm
   ```
