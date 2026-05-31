@@ -21,6 +21,7 @@ Public surface this slice (Tasks 1-8 batch):
 
 from __future__ import annotations
 
+from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 
-__all__ = ["GatePolicy", "GrantRow"]
+__all__ = ["GatePolicy", "GrantRow", "RealGate"]

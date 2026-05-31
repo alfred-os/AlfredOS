@@ -183,14 +183,9 @@ def test_gate_policy_empty_grants_always_denies() -> None:
     state before :meth:`RealGate._apply_grants` runs.
     """
     policy = GatePolicy(grants=frozenset())
-    assert (
-        policy.check(plugin_id="x", hookpoint="y", requested_tier="system") is False
-    )
+    assert policy.check(plugin_id="x", hookpoint="y", requested_tier="system") is False
     assert policy.check_plugin_load(plugin_id="x", manifest_tier="system") is False
-    assert (
-        policy.check_content_clearance(plugin_id="x", hookpoint="y", content_tier="T3")
-        is False
-    )
+    assert policy.check_content_clearance(plugin_id="x", hookpoint="y", content_tier="T3") is False
 
 
 def test_gate_policy_check_content_clearance_wildcard_hookpoint() -> None:

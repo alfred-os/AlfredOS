@@ -228,7 +228,7 @@ async def test_real_gate_rebuild_from_state_git_is_fail_loud_stub() -> None:
 
     backend = _make_backend(sync_hash="old-hash")
     gate = await RealGate.create(backend=backend, audit_sink=_make_no_op_sink())
-    with pytest.raises(NotImplementedError, match="gitpython state.git parser"):
+    with pytest.raises(NotImplementedError, match=r"gitpython state\.git parser"):
         await gate.rebuild_from_state_git(state_git_head="new-hash")
 
 
@@ -246,6 +246,104 @@ async def test_real_gate_rebuild_from_state_git_short_circuits_when_unchanged() 
     # No exception, no rebuild.
     await gate.rebuild_from_state_git(state_git_head="abc123")
     backend.set_sync_hash.assert_not_called()
+
+
+async def test_real_gate_check_fail_closed_denies_and_increments_count() -> None:
+    """When ``_fail_closed=True``, :meth:`check` denies and bumps ``_denied_dispatch_count``.
+
+    Spec §8.1: ALL dispatches deny when the heartbeat staleness window
+    elapses — including in-process ones. The denied-dispatch count is
+    rolled into the exiting-fail-closed audit row (Component E in a
+    later PR-S3-2 task); the test pins the increment so the audit row
+    surfaces accurate counts.
+
+    The fail-closed flag is set directly here (rather than via the
+    heartbeat loop, which lands in Tasks 9-10) so the hot-path branch
+    is exercised in unit-tier coverage today.
+    """
+    from alfred.security.capability_gate._gate import RealGate
+
+    grant = GrantRow(
+        plugin_id="test.plugin",
+        subscriber_tier="operator",
+        hookpoint="tool.web.fetch",
+        content_tier=None,
+        proposal_branch="proposal/policy-grant-abc",
+    )
+    gate = await RealGate.create(
+        backend=_make_backend(grants=frozenset({grant})),
+        audit_sink=_make_no_op_sink(),
+    )
+    # Before fail-closed: the grant grants.
+    assert (
+        gate.check(
+            plugin_id="test.plugin",
+            hookpoint="tool.web.fetch",
+            requested_tier="operator",
+        )
+        is True
+    )
+
+    # Flip the flag directly (Component E's heartbeat will do this in production).
+    gate._fail_closed = True
+
+    # After fail-closed: even the present grant denies, and the count increments.
+    assert (
+        gate.check(
+            plugin_id="test.plugin",
+            hookpoint="tool.web.fetch",
+            requested_tier="operator",
+        )
+        is False
+    )
+    assert gate._denied_dispatch_count == 1
+
+
+async def test_real_gate_check_plugin_load_fail_closed_denies_and_counts() -> None:
+    """``check_plugin_load`` denies + increments under fail-closed."""
+    from alfred.security.capability_gate._gate import RealGate
+
+    grant = GrantRow(
+        plugin_id="mypl",
+        subscriber_tier="system",
+        hookpoint="*",
+        content_tier=None,
+        proposal_branch="proposal/policy-grant-xyz",
+    )
+    gate = await RealGate.create(
+        backend=_make_backend(grants=frozenset({grant})),
+        audit_sink=_make_no_op_sink(),
+    )
+    gate._fail_closed = True
+    assert gate.check_plugin_load(plugin_id="mypl", manifest_tier="system") is False
+    assert gate._denied_dispatch_count == 1
+
+
+async def test_real_gate_check_content_clearance_fail_closed_denies_and_counts() -> None:
+    """``check_content_clearance`` denies + increments under fail-closed."""
+    from alfred.security.capability_gate._gate import RealGate
+
+    grant = GrantRow(
+        plugin_id="quarantine.host",
+        subscriber_tier="system",
+        hookpoint="tag.T3",
+        content_tier="T3",
+        proposal_branch="proposal/policy-grant-t3",
+    )
+    gate = await RealGate.create(
+        backend=_make_backend(grants=frozenset({grant})),
+        audit_sink=_make_no_op_sink(),
+    )
+    gate._fail_closed = True
+    assert (
+        gate.check_content_clearance(
+            plugin_id="quarantine.host",
+            hookpoint="tag.T3",
+            content_tier="T3",
+        )
+        is False
+    )
+    assert gate._denied_dispatch_count == 1
 
 
 async def test_real_gate_apply_grants_swaps_policy_and_persists() -> None:
