@@ -32,6 +32,14 @@ These three forces require one coherent ADR rather than three separate records b
 
 **Decision 6 — `QuarantinedUnavailable` lives in `src/alfred/plugins/errors.py`.** Spec §5.5 says `QuarantinedUnavailable` is "a distinct top-level exception" in `src/alfred/plugins/errors.py`. Spec §10.1 lists it as a public export of the supervisor module — a direct contradiction. Resolution: `QuarantinedUnavailable` lives in `src/alfred/plugins/errors.py` (spec §5.5 wins because it is the plugin-transport module that raises this error when the quarantined LLM is unavailable — the supervisor observes it but does not own it). `src/alfred/supervisor/errors.py` imports and re-exports it for ergonomic import in supervisor code, satisfying spec §10.1's "supervisor exposes it" requirement without placing the definition in the wrong module. The `ExtractionResult` `ImportError` (sec-002) is eliminated because `from alfred.plugins.errors import QuarantinedUnavailable` no longer fails with a circular import. Every Slice-3 PR that raises `QuarantinedUnavailable` imports it from `alfred.plugins.errors`.
 
+**Decision 7 — Wire-format versioning anchors (three schemes, three namespaces, zero aliasing).** Slice 3 lands three independent versioning schemes on three different wires, and spec §2 ("Cross-cutting wire-format ADR section") requires this ADR to reconcile them so a reviewer reading any single PR can find the canonical anchor without re-deriving it. The three anchors are:
+
+*TrustTier wire format.* `TaggedContent` serialises `tier` as the literal string form of `tier.name` — exactly one of `"T0"`, `"T1"`, `"T2"`, `"T3"` — re-resolved against `_APPROVED_TIERS` on parse. There is **no version field on the tier itself**; the class registry is the versioning mechanism. Cross-tier confusion on the wire (payload labelled with one tier but constructed from another) is rejected at the `model_validator` boundary with a loud `ValueError` carrying the `t("security.tier_mismatch", …)` message — never at a later business-logic seam. The validator also rejects any `tier` string not in `{t.name for t in _APPROVED_TIERS}`, so a forged `"T4"` is refused before reaching the orchestrator's type contract. Spec §2 paragraph 1, §3.5.
+
+*Plugin manifest version.* Every Slice-3 MCP plugin manifest carries `alfred.manifest_version = 1` as a single integer — typed as `Literal[1]` in the manifest model. A plugin presenting `alfred.manifest_version != 1` is refused at the `AlfredPluginSession` handshake with exactly one `plugin.load_refused` audit row before any capability-gate check runs. The integer is the **sole** manifest-evolution lever: no semver tolerance, no negotiation, no minor-version forgiveness. The integer increments only when the manifest schema adds or removes fields that break backward compatibility; the reserved-for-Slice-4 `[plugin] platform` field is the explicit mechanism by which the Slice-4 comms-MCP rewrite avoids forcing the bump to 2. Spec §2 paragraph 2, §4.3, §4.9.
+
+*Extraction handoff schema version.* Every Pydantic model passed to `QuarantinedExtractor.extract()` carries `schema_version: Literal[1]` as a class attribute. The extractor validates this before constructing the schema payload for the quarantined-LLM plugin call; an extraction schema without `schema_version` raises `ValueError` with `t("quarantine.schema_version_missing", …)` before any MCP RPC is dispatched. This anchor governs the QuarantinedExtractor → privileged-orchestrator handoff specifically — it is **not** the same field as `alfred.manifest_version` (which governs the plugin handshake) and **not** the same field as the wire-format `tier` string (which governs `TaggedContent` serialisation). The three fields never share a namespace: `alfred.manifest_version` lives in the MCP manifest TOML/JSON, `schema_version` lives on extraction schema Pydantic models, and `tier.name` lives in `TaggedContent` serialisation. The cost of aliasing them — silent cross-version acceptance, drift between PRs, breakage during Slice 4's first bump — is paid up-front in this Decision rather than discovered at integration time. Spec §2 paragraph 3, §5.5, §6.6, §7a.1.
+
 ## Consequences
 
 ### Positive
@@ -76,25 +84,7 @@ Rejected: `DevGate` fails open for `operator`/`user-plugin` without a backing st
 - [ADR-0008](0008-llm-output-trust-tier.md) — established the trust-tier discriminant in Slice 1; superseded in full by this ADR.
 - [ADR-0009](0009-comms-adapter-protocol-slice2-only.md) — bounded deviation for `CommsAdapter`; MCP plugin host named as Slice-3 deliverable; status updated to superseded-for-new-adapters.
 - [ADR-0013](0013-defer-t1-t3-and-dual-llm.md) — deferred T1+T3+dual-LLM to Slice 3; binding "Slice 3 commits the full stack" obligation; superseded in full by this ADR.
-- ADR-0015 (Slice-4 containerised quarantined LLM stub — co-merged, see Task 7)
-- ADR-0016 (Slice-4 Discord/TUI comms-MCP stub — co-merged, see Task 8)
+- [ADR-0015](0015-slice4-containerised-quarantined-llm.md) — Slice-4 containerised quarantined LLM commitment
+- [ADR-0016](0016-slice4-discord-tui-comms-mcp-rewrite.md) — Slice-4 Discord/TUI comms-MCP migration commitment
 - [Design spec](../superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md) — complete Slice-3 design; §§1.3, 3.2, 4.1, 4.2, 4.3, 5.5, 5.7, 7a.1, 8.4, 10.1 govern the decisions above.
 - Code anchors: `src/alfred/security/secrets.py:228-279` (UID ownership check), `src/alfred/hooks/capability.py` (existing capability gate seam).
-
-### Slice-2.5 issue retirement (spec §15.3)
-
-Per spec §15.3, the following Slice-2.5 deferral tracking issues are retired
-in this PR (the first Slice-3 PR):
-
-- Issue #122 — Slice-2.5: hooks perf-gate CI calibration (PR-S3-7 perf-gate
-  hardens with host-load guard; no remaining open action).
-- Issue #123 — Slice-2.5: dotted-form hookpoint normalisation (open; tracked
-  as Slice-3 follow-on in PR-S3-7 Task N per §6.10 deferred list).
-- Issue #124 — Slice-2.5: `subscribable_tiers` registration-time enforcement
-  (shipped in PR #129; closed).
-- Issue #125 — Slice-2.5: post-UAT polish (shipped in PR #121; closed).
-
-Issues #122 (perf-gate calibration) and #123 (dotted-form) remain open at
-the GitHub level pending their Slice-3 work; the retirement here means the
-Slice-2.5 planning epoch ends and ownership transfers to the Slice-3 plan
-suite.
