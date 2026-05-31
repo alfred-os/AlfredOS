@@ -120,7 +120,12 @@ jobs:
         # at < 100% coverage. The hashFiles guard makes the step a clean
         # no-op on a branch where any of the three files have not yet
         # landed (mirrors the unit-test step's guard discipline).
-        if: hashFiles('src/alfred/security/tiers.py', 'src/alfred/security/quarantine.py', 'src/alfred/identity/_ingest.py') != ''
+        #
+        # CR-138 finding #1: chain three separate hashFiles() checks with
+        # ``&&`` because ``hashFiles('a','b','c') != ''`` is ANY-match,
+        # not ALL-match. The gate must require ALL three files to be
+        # present; if any one is missing the coverage step should no-op.
+        if: hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != ''
         run: |
           uv run coverage report \
             --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py' \
