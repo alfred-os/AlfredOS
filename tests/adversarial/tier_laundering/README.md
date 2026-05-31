@@ -45,7 +45,7 @@ graph — drift between the two is a release-blocker.
 | `tag(T3, ...)` from orchestrator module context | **TBD — Slice-3 follow-on (no current task)** — PR-S3-1 implements the per-process-nonce gate (spec §3.2) but no dedicated adversarial payload exercises the "called from orchestrator module" failure mode |
 | Frame-introspection bypass (monkey-patch `sys.modules` to forge `__name__`) | PR-S3-1 Task 26 (`test_tier_laundering_frame_bypass.py`) |
 | Capability-gate bypass via `subscriber_tier=user-plugin` on T3-carrying hookpoint | **TBD — Slice-3 follow-on (no current task)** — PR-S3-2 implements the `subscriber_tier` axis but no adversarial payload exercises a user-plugin tier attempting to subscribe to a T3-carrying hookpoint |
-| Post-handshake hook registration | PR-S3-3a Task (`test_post_handshake_hook_registration.py`) |
+| Post-handshake hook registration | PR-S3-3a (`tl_post_handshake_hook_register.yaml` + `test_post_handshake_hook_register_attack.py`) |
 | In-flight grant revocation race | **TBD — Slice-3 follow-on (no current task)** — PR-S3-2 covers the race in `tests/unit/` (`plugin.grant.revoked_inflight` audit row) but no `tier_laundering` adversarial payload formalises the attack |
 | Retry-guidance hygiene (strict token-set invariant + poisoned-input control) | PR-S3-4 (`test_tier_laundering_retry_guidance_hygiene.py`) |
 | `gc.get_objects()`-style T3 token retrieval (out-of-scope acknowledgement) | PR-S3-1 Task 24 (`tl_gc_traversal_out_of_scope.yaml`) — explicit out-of-scope label per spec §3.2 threat model limits |
