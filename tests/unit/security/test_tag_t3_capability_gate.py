@@ -17,10 +17,12 @@ from alfred.security.tiers import (
     T2,
     T3,
     AnyTaggedContent,
+    CapabilityGateNonce,
     TaggedContent,
     TrustTier,
     _APPROVED_TIERS,
     tag,
+    tag_t3_with_nonce,
 )
 
 
@@ -100,3 +102,84 @@ def test_tag_t1_overload_is_registered() -> None:
     assert T1 in overload_tier_params, (
         f"tag() overloads must include a type[T1] variant; saw {overload_tier_params}"
     )
+
+
+# ---------------------------------------------------------------------------
+# tag(T3, ...) capability-gated factory — spec §3.2
+# ---------------------------------------------------------------------------
+
+
+def test_tag_t3_without_nonce_raises() -> None:
+    """tag_t3_with_nonce with caller_token=None refuses construction.
+
+    The error message contains the i18n key ``security.tag_t3_unauthorized``
+    (the t() helper returns the key itself when the catalog entry is the
+    untranslated source — see locale/en/LC_MESSAGES/alfred.po). Spec §3.2.
+    """
+    with pytest.raises(ValueError, match="security.tag_t3_unauthorized"):
+        tag_t3_with_nonce(
+            "fetched html",
+            source="web.fetch",
+            caller_token=None,
+        )
+
+
+def test_tag_t3_with_wrong_nonce_raises() -> None:
+    """A nonce that is a DIFFERENT OBJECT is rejected by the identity check.
+
+    Two ``CapabilityGateNonce()`` instances pass an ``==`` test (they have
+    no attributes) but fail the ``is`` check the gate uses. Spec §3.2.
+    """
+    nonce_a = CapabilityGateNonce()
+    nonce_b = CapabilityGateNonce()  # different object
+    with pytest.raises(ValueError, match="security.tag_t3_unauthorized"):
+        tag_t3_with_nonce(
+            "x",
+            source="test",
+            caller_token=nonce_b,
+            _authorized_nonce=nonce_a,
+        )
+
+
+def test_tag_t3_with_correct_nonce_succeeds() -> None:
+    """The holder of the live nonce reference can tag T3 content. Spec §3.2."""
+    nonce = CapabilityGateNonce()
+    tc = tag_t3_with_nonce(
+        "fetched html",
+        source="web.fetch",
+        caller_token=nonce,
+        _authorized_nonce=nonce,
+    )
+    assert tc.tier is T3
+    assert tc.content == "fetched html"
+
+
+def test_tag_t3_imported_nonce_is_same_object() -> None:
+    """Importing a module-level nonce yields the SAME object (CPython
+    reference semantics) — this is the expected DI pattern.
+
+    This documents why import-based forgery fails: importing a module-level
+    nonce gives you the live reference, so two authorised modules sharing
+    the same nonce holder pass the ``is`` check. An *unauthorised* module
+    that constructs its own ``CapabilityGateNonce`` gets a different object
+    and fails. Spec §3.2 threat model.
+    """
+    nonce = CapabilityGateNonce()
+    # Simulate an authorised module holding the same reference.
+    authorized_module_ref = nonce  # same object in same process
+    assert authorized_module_ref is nonce  # passes `is` check
+    # Simulate an unauthorised module constructing its own nonce.
+    attacker_nonce = CapabilityGateNonce()
+    assert attacker_nonce is not nonce  # fails `is` check
+
+
+def test_tag_via_overload_t3_is_always_refused() -> None:
+    """Direct callers using ``tag(T3, ...)`` (without the nonce) are refused.
+
+    The shared ``tag()`` body routes T3 through ``tag_t3_with_nonce`` with
+    ``caller_token=None``, which always raises. Only authorised call sites
+    that invoke ``tag_t3_with_nonce`` directly (with their injected nonce)
+    can tag T3 content. Spec §3.2.
+    """
+    with pytest.raises(ValueError, match="security.tag_t3_unauthorized"):
+        tag(T3, "fetched html", source="web.fetch")
