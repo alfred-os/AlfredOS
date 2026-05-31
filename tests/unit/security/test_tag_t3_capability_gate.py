@@ -7,11 +7,13 @@ PR-S3-0b i18n catalog (security.tag_t3_unauthorized key).
 
 from __future__ import annotations
 
+import re
 import typing
 
 import pytest
 
 from alfred.security.tiers import (
+    _APPROVED_TIERS,
     T0,
     T1,
     T2,
@@ -20,7 +22,6 @@ from alfred.security.tiers import (
     CapabilityGateNonce,
     TaggedContent,
     TrustTier,
-    _APPROVED_TIERS,
     tag,
     tag_t3_with_nonce,
 )
@@ -37,7 +38,7 @@ def test_t3_class_name() -> None:
 
 
 def test_approved_tiers_contains_all_four() -> None:
-    assert _APPROVED_TIERS == frozenset({T0, T1, T2, T3})
+    assert frozenset({T0, T1, T2, T3}) == _APPROVED_TIERS
 
 
 def test_any_tagged_content_protocol_accepts_t0() -> None:
@@ -116,7 +117,7 @@ def test_tag_t3_without_nonce_raises() -> None:
     (the t() helper returns the key itself when the catalog entry is the
     untranslated source — see locale/en/LC_MESSAGES/alfred.po). Spec §3.2.
     """
-    with pytest.raises(ValueError, match="security.tag_t3_unauthorized"):
+    with pytest.raises(ValueError, match=re.escape("security.tag_t3_unauthorized")):
         tag_t3_with_nonce(
             "fetched html",
             source="web.fetch",
@@ -132,7 +133,7 @@ def test_tag_t3_with_wrong_nonce_raises() -> None:
     """
     nonce_a = CapabilityGateNonce()
     nonce_b = CapabilityGateNonce()  # different object
-    with pytest.raises(ValueError, match="security.tag_t3_unauthorized"):
+    with pytest.raises(ValueError, match=re.escape("security.tag_t3_unauthorized")):
         tag_t3_with_nonce(
             "x",
             source="test",
@@ -181,5 +182,5 @@ def test_tag_via_overload_t3_is_always_refused() -> None:
     that invoke ``tag_t3_with_nonce`` directly (with their injected nonce)
     can tag T3 content. Spec §3.2.
     """
-    with pytest.raises(ValueError, match="security.tag_t3_unauthorized"):
+    with pytest.raises(ValueError, match=re.escape("security.tag_t3_unauthorized")):
         tag(T3, "fetched html", source="web.fetch")
