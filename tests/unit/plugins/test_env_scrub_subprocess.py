@@ -40,12 +40,16 @@ def test_stdio_transport_has_no_bare_os_environ_read() -> None:
     source = _STDIO_TRANSPORT_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id == "os" and node.attr == "environ":
-                raise AssertionError(
-                    "os.environ read found in stdio_transport.py — use an "
-                    "explicit env= dict (spec §5.3)"
-                )
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+            and node.attr == "environ"
+        ):
+            raise AssertionError(
+                "os.environ read found in stdio_transport.py — use an "
+                "explicit env= dict (spec §5.3)"
+            )
 
 
 def test_create_subprocess_exec_has_explicit_env_kwarg() -> None:
@@ -65,9 +69,9 @@ def test_create_subprocess_exec_has_explicit_env_kwarg() -> None:
         # Match: asyncio.create_subprocess_exec(...) or create_subprocess_exec(...)
         func = node.func
         is_target = False
-        if isinstance(func, ast.Attribute) and func.attr == "create_subprocess_exec":
-            is_target = True
-        elif isinstance(func, ast.Name) and func.id == "create_subprocess_exec":
+        if (isinstance(func, ast.Attribute) and func.attr == "create_subprocess_exec") or (
+            isinstance(func, ast.Name) and func.id == "create_subprocess_exec"
+        ):
             is_target = True
         if not is_target:
             continue
