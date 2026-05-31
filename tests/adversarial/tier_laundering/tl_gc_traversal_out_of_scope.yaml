@@ -16,10 +16,7 @@
 id: tl-2026-003
 category: tier_laundering
 threat: >-
-  Attacker with arbitrary in-process Python execution uses gc.get_objects()
-  to find the live CapabilityGateNonce on the heap, passes it as
-  caller_token, and forges T3 content via tag_t3_with_nonce. The gate's
-  identity check passes because the object IS the authorised reference.
+  Attacker with arbitrary in-process Python execution uses gc.get_objects() to find the live CapabilityGateNonce on the heap and passes it as caller_token to forge T3 content via tag_t3_with_nonce, where the gate identity check passes because the object IS the authorised reference.
 ingestion_path: capability_gate
 payload: |
   import gc
@@ -32,7 +29,6 @@ payload: |
       content='attack',
       source='gc',
       caller_token=nonce,
-      _authorized_nonce=nonce,
   )
 expected_outcome: boundary_refused
 out_of_scope: true
