@@ -159,6 +159,100 @@ def test_devgate_does_not_read_environment(
     assert gate.check(plugin_id="p", hookpoint="h", requested_tier="system") is False
 
 
+def test_capability_gate_protocol_has_check_plugin_load() -> None:
+    """:class:`CapabilityGate` Protocol exposes ``check_plugin_load``.
+
+    PR-S3-2 (spec §8.2) extends the Protocol with the
+    ``check_plugin_load`` method so the supervisor can refuse a plugin at
+    handshake time when no subscriber-tier grant exists. The signature is
+    keyword-only on ``plugin_id`` / ``manifest_tier`` and every gate
+    implementation MUST honour it — the Protocol membership is the only
+    way the supervisor's type-narrowing finds the method.
+    """
+    import inspect
+
+    from alfred.hooks.capability import CapabilityGate
+
+    assert "check_plugin_load" in dir(CapabilityGate)
+    sig = inspect.signature(CapabilityGate.check_plugin_load)
+    assert "plugin_id" in sig.parameters
+    assert "manifest_tier" in sig.parameters
+
+
+def test_capability_gate_protocol_has_check_content_clearance() -> None:
+    """:class:`CapabilityGate` Protocol exposes ``check_content_clearance``.
+
+    PR-S3-2 (spec §8.2) extends the Protocol with
+    ``check_content_clearance`` — the orthogonal content-trust axis. The
+    quarantined-LLM plugin host and StdioTransport are the only
+    authorised callers for ``content_tier="T3"``; every other caller
+    receives a refusal. The Protocol signature is the gate-side contract
+    every implementation must honour.
+    """
+    import inspect
+
+    from alfred.hooks.capability import CapabilityGate
+
+    assert "check_content_clearance" in dir(CapabilityGate)
+    sig = inspect.signature(CapabilityGate.check_content_clearance)
+    assert "plugin_id" in sig.parameters
+    assert "hookpoint" in sig.parameters
+    assert "content_tier" in sig.parameters
+
+
+def test_devgate_check_plugin_load_returns_true_by_default() -> None:
+    """``DevGate.check_plugin_load`` is fail-open for Slice-3 co-existence.
+
+    Spec §8.4: ``DevGate`` implements the two new Protocol methods to
+    fail-open (returning ``True``) so Slice-2.5 tests that pre-date the
+    Protocol extension still pass. PR-S3-7 flag-day removes ``DevGate``;
+    until then the fail-open stub is deliberate, not an oversight.
+    """
+    from alfred.hooks.capability import DevGate
+
+    gate = DevGate()
+    assert (
+        gate.check_plugin_load(plugin_id="test.plugin", manifest_tier="operator")
+        is True
+    )
+
+
+def test_devgate_check_content_clearance_returns_true_by_default() -> None:
+    """``DevGate.check_content_clearance`` is fail-open for Slice-3 co-existence.
+
+    Same rationale as ``check_plugin_load``: the two new Protocol methods
+    are fail-open stubs on ``DevGate`` for backward compatibility with
+    Slice-2.5 dispatch tests. Spec §8.4; PR-S3-7 removes ``DevGate`` on
+    flag-day.
+    """
+    from alfred.hooks.capability import DevGate
+
+    gate = DevGate()
+    assert (
+        gate.check_content_clearance(
+            plugin_id="test.plugin",
+            hookpoint="tool.web.fetch",
+            content_tier="T3",
+        )
+        is True
+    )
+
+
+def test_devgate_satisfies_extended_capability_gate_protocol() -> None:
+    """``DevGate`` with the two new methods still satisfies :class:`CapabilityGate`.
+
+    The Protocol is ``@runtime_checkable`` so the structural membership
+    check runs at runtime. After Task-2 adds ``check_plugin_load`` and
+    ``check_content_clearance`` to both the Protocol and ``DevGate``, the
+    ``isinstance`` check below MUST still pass — otherwise dispatcher
+    code that type-narrows on :class:`CapabilityGate` loses ``DevGate``
+    coverage for the new methods.
+    """
+    from alfred.hooks.capability import CapabilityGate, DevGate
+
+    assert isinstance(DevGate(), CapabilityGate)
+
+
 def test_devgate_is_frozen_and_rejects_post_init_mutation() -> None:
     """sec-007 (frozen-mutation): ``DevGate`` is a frozen dataclass.
 
