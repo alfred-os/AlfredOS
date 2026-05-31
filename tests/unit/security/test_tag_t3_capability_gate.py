@@ -126,31 +126,37 @@ def test_tag_t3_without_nonce_raises() -> None:
         )
 
 
-def test_tag_t3_with_wrong_nonce_raises() -> None:
+def test_tag_t3_with_wrong_nonce_raises(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
     """A nonce that is a DIFFERENT OBJECT is rejected by the identity check.
 
     Two ``CapabilityGateNonce()`` instances pass an ``==`` test (they have
     no attributes) but fail the ``is`` check the gate uses. Spec §3.2.
+
+    The ``authorized_t3_nonce`` fixture (``conftest.py``) installs the
+    legitimate nonce in the module-level slot; the test passes a
+    different object as ``caller_token`` and asserts refusal. CR-138
+    finding #7 — no per-call override seam.
     """
-    nonce_a = CapabilityGateNonce()
-    nonce_b = CapabilityGateNonce()  # different object
+    attacker_nonce = CapabilityGateNonce()  # different object
+    assert attacker_nonce is not authorized_t3_nonce
     with pytest.raises(ValueError, match=re.escape("security.tag_t3_unauthorized")):
         tag_t3_with_nonce(
             "x",
             source="test",
-            caller_token=nonce_b,
-            _authorized_nonce=nonce_a,
+            caller_token=attacker_nonce,
         )
 
 
-def test_tag_t3_with_correct_nonce_succeeds() -> None:
+def test_tag_t3_with_correct_nonce_succeeds(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
     """The holder of the live nonce reference can tag T3 content. Spec §3.2."""
-    nonce = CapabilityGateNonce()
     tc = tag_t3_with_nonce(
         "fetched html",
         source="web.fetch",
-        caller_token=nonce,
-        _authorized_nonce=nonce,
+        caller_token=authorized_t3_nonce,
     )
     assert tc.tier is T3
     assert tc.content == "fetched html"
@@ -192,22 +198,65 @@ def test_tag_via_overload_t3_is_always_refused() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_nonce_factory_sets_module_nonce() -> None:
+def test_nonce_factory_sets_module_nonce(clean_t3_nonce_slot: None) -> None:
     """Bootstrap factory sets the module-level authorised nonce.
 
     The nonce returned by the factory IS the live module-level reference
     (``alfred.security.tiers._AUTHORIZED_T3_NONCE``), not a copy. This
     pins the DI invariant: the factory's caller and the gate read the
     SAME object. Spec §3.2.
+
+    CR-138 finding #10: the ``clean_t3_nonce_slot`` fixture saves and
+    restores ``_AUTHORIZED_T3_NONCE`` so this test no longer leaks
+    global state into subsequent tests.
     """
     from alfred.bootstrap.nonce_factory import create_and_register_t3_nonce
     from alfred.security import tiers as tiers_mod
 
-    # Reset to None, then bootstrap. The setter is the bootstrap seam
-    # exposed for both production and tests; no global mutation here.
-    tiers_mod._set_authorized_t3_nonce(None)
     nonce = create_and_register_t3_nonce()
     assert tiers_mod._AUTHORIZED_T3_NONCE is nonce
+
+
+def test_nonce_factory_rejects_second_call() -> None:
+    """CR-138 finding #3: re-running bootstrap raises rather than silently rotating.
+
+    A second call to ``create_and_register_t3_nonce`` after a nonce has
+    already been registered raises :class:`T3NonceAlreadyRegisteredError`.
+    Silent rotation would invalidate every authorised holder's identity
+    check with no log entry pointing at the cause.
+
+    Uses ``clean_t3_nonce_slot`` so the slot starts ``None`` regardless
+    of test ordering; the helper ``reset_authorized_t3_nonce_for_tests``
+    is used between the two factory calls to make the intent explicit.
+    """
+    from alfred.bootstrap.nonce_factory import (
+        T3NonceAlreadyRegisteredError,
+        create_and_register_t3_nonce,
+        reset_authorized_t3_nonce_for_tests,
+    )
+    from alfred.security import tiers as tiers_mod
+
+    previous = tiers_mod._AUTHORIZED_T3_NONCE
+    try:
+        reset_authorized_t3_nonce_for_tests()
+        first = create_and_register_t3_nonce()
+        assert tiers_mod._AUTHORIZED_T3_NONCE is first
+
+        # Second call without an explicit reset is refused.
+        with pytest.raises(T3NonceAlreadyRegisteredError):
+            create_and_register_t3_nonce()
+
+        # The registered nonce is unchanged — no silent rotation.
+        assert tiers_mod._AUTHORIZED_T3_NONCE is first
+
+        # After an explicit reset the factory accepts a fresh call.
+        reset_authorized_t3_nonce_for_tests()
+        assert tiers_mod._AUTHORIZED_T3_NONCE is None
+        second = create_and_register_t3_nonce()
+        assert second is not first
+        assert tiers_mod._AUTHORIZED_T3_NONCE is second
+    finally:
+        tiers_mod._set_authorized_t3_nonce(previous)
 
 
 def test_orchestrator_type_signature_accepts_t1(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,40 +340,84 @@ def test_check_tag_t3_script_allows_clean_file(tmp_path: Path) -> None:
     )
 
 
-def test_check_tag_t3_script_exempts_authorised_homes(tmp_path: Path) -> None:
-    """The authorised homes (tiers.py, quarantine.py) are exempt by path.
+def test_check_tag_t3_script_exempts_real_authorised_homes() -> None:
+    """The authorised homes (tiers.py, quarantine.py) are exempt by resolved path.
 
     Per the PR-S3-1 briefing the authorised callers list is EXACTLY:
       - src/alfred/security/tiers.py   (the ``tag`` overload bodies)
       - src/alfred/security/quarantine.py (the downgrade boundary)
       - tests/unit/security/**         (tests assert the gate's behaviour)
 
-    A synthetic path ending in ``src/alfred/security/tiers.py`` exercises the
-    suffix-based exemption — even when the file contains a literal
-    ``tag(T3,`` call site (which only those approved homes may contain).
-    Spec §3.7-3.8.
+    CR-138 finding #11 closed the suffix-based bypass: the script now
+    matches against absolute, resolved paths inside this repo. This
+    test invokes the script against the REAL ``src/alfred/security/
+    tiers.py`` file in this checkout (which legitimately contains
+    ``tag(T3, ...)`` in its overload bodies) and asserts the script
+    exits 0. Spec §3.7-3.8.
     """
     import subprocess
     import sys
 
-    nested = tmp_path / "src" / "alfred" / "security"
-    nested.mkdir(parents=True)
-    home = nested / "tiers.py"
-    home.write_text(
-        "from alfred.security.tiers import T3\n"
-        "# Synthetic stand-in for the real tiers.py — the gate exempts this path.\n"
-        "x = tag(T3, 'authorised use of the factory')\n"
-    )
+    real_home = _REPO_ROOT / "src" / "alfred" / "security" / "tiers.py"
+    assert real_home.exists(), f"Test prerequisite missing: {real_home}"
+
     result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
-        [sys.executable, "scripts/check_tag_t3.py", str(home)],
+        [sys.executable, "scripts/check_tag_t3.py", str(real_home)],
         capture_output=True,
         text=True,
         cwd=str(_REPO_ROOT),
         check=False,
     )
     assert result.returncode == 0, (
-        f"Expected 0 for authorised home suffix; got {result.returncode}.\n"
+        f"Expected 0 for the real authorised home; got {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_check_tag_t3_script_rejects_synthetic_suffix_attack(tmp_path: Path) -> None:
+    """CR-138 finding #11: a path that merely ends with the authorised suffix is NOT exempt.
+
+    Before the finding, ``scripts/check_tag_t3.py`` used
+    ``str(path).endswith("src/alfred/security/tiers.py")`` to identify
+    authorised homes. An attacker could ship a file at any path that
+    ended with that segment (e.g. ``/etc/src/alfred/security/tiers.py``
+    or ``vendor/foo/src/alfred/security/tiers.py``) and bypass the
+    grep gate.
+
+    The fix resolves paths to absolute realpaths and compares against a
+    closed set of approved files inside this repo. This test plants a
+    synthetic file under ``tmp_path`` whose path ends with
+    ``src/alfred/security/tiers.py`` and contains a literal ``tag(T3,
+    ...)`` call, then asserts the script rejects it. Spec §3.2.
+    """
+    import subprocess
+    import sys
+
+    nested = tmp_path / "src" / "alfred" / "security"
+    nested.mkdir(parents=True)
+    synthetic_home = nested / "tiers.py"
+    synthetic_home.write_text(
+        "from alfred.security.tiers import T3, tag\n"
+        "# Synthetic file whose path ends with src/alfred/security/tiers.py\n"
+        "# but is NOT the real authorised home. Pre-finding-#11 this slipped\n"
+        "# through the suffix check; post-fix it is rejected.\n"
+        "x = tag(T3, 'attack via synthetic suffix path')\n"
+    )
+
+    # Sanity: the synthetic file's path does end with the authorised suffix.
+    assert str(synthetic_home).replace("\\", "/").endswith("src/alfred/security/tiers.py")
+
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(synthetic_home)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode != 0, (
+        "Expected the script to reject a synthetic file whose path ends with the "
+        "authorised suffix but does not resolve to the real authorised home.\n"
+        f"returncode: {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
@@ -374,5 +467,63 @@ def test_check_tag_t3_script_rejects_cast_bypass(tmp_path: Path) -> None:
     )
     assert result.returncode != 0, (
         f"Expected non-zero exit for cast(TaggedContent[ bypass; got 0.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_check_tag_t3_script_rejects_multiline_tag_t3(tmp_path: Path) -> None:
+    """CR-138 finding #2: the CI script catches ``tag(T3, ...)`` split across lines.
+
+    The pre-AST per-line regex would have missed this; the AST walk
+    introduced for finding #2 reads the call as a single ``ast.Call``
+    node regardless of how the source is formatted. Spec §3.2.
+    """
+    import subprocess
+    import sys
+
+    bad_file = tmp_path / "multiline_attack.py"
+    bad_file.write_text(
+        "from alfred.security.tiers import tag, T3\n"
+        "x = tag(\n"
+        "    T3,\n"
+        "    'attack via line break',\n"
+        ")\n"
+    )
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode != 0, (
+        f"Expected non-zero exit for multiline tag(T3, ...) call; got 0.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_check_tag_t3_script_rejects_multiline_cast(tmp_path: Path) -> None:
+    """CR-138 finding #2: the CI script catches ``cast(TaggedContent[...]`` split across lines."""
+    import subprocess
+    import sys
+
+    bad_file = tmp_path / "multiline_cast.py"
+    bad_file.write_text(
+        "from typing import cast\n"
+        "from alfred.security.tiers import TaggedContent, T2\n"
+        "x = cast(\n"
+        "    TaggedContent[T2],\n"
+        "    some_t3_value,\n"
+        ")\n"
+    )
+    result = subprocess.run(  # noqa: S603 — sys.executable + literal script path under our control
+        [sys.executable, "scripts/check_tag_t3.py", str(bad_file)],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    assert result.returncode != 0, (
+        f"Expected non-zero exit for multiline cast(TaggedContent[...]) call; got 0.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
