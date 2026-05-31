@@ -50,6 +50,33 @@ def test_canary_trip_records_byte_offset() -> None:
     assert result.frame_offset == len(b"prefix-bytes-")
 
 
+def test_canary_trip_frame_offset_is_byte_not_char_offset() -> None:
+    """A multi-byte UTF-8 prefix must produce a *byte* offset, not a char index.
+
+    CR on PR #140 caught the prior char-mode implementation: the
+    ``CanaryTrip.frame_offset`` field is documented as a byte offset
+    (used for forensic correlation across replays of the same frame),
+    but a string-mode ``match.start()`` returns a character index that
+    diverges from the bytes-into-the-frame position whenever the
+    preceding bytes include a multi-byte UTF-8 character. T3 frames are
+    routinely non-ASCII (web content, attachments), so this divergence
+    was guaranteed to surface in production. The prefix ``"héllo-"``
+    has ``len("héllo-") == 6`` characters but encodes to
+    ``len(b"héllo-".encode("utf-8")) == 7`` bytes — the assertion only
+    holds when the scanner operates on raw bytes.
+    """
+    scanner = InboundContentScanner(canary_tokens=frozenset({"CANARY"}))
+    prefix = "héllo-".encode()
+    result = scanner.scan(prefix + b"CANARY-suffix")
+    assert isinstance(result, CanaryTrip)
+    assert result.frame_offset == len(prefix)
+    # Belt-and-braces: confirm the divergence is real (the char-mode
+    # offset would have been 6, not 7).
+    assert len("héllo-") != len(prefix), (
+        "test premise broken — prefix must have distinct char/byte lengths"
+    )
+
+
 def test_first_match_wins_when_multiple_canaries_present() -> None:
     # The scanner returns on the first match — it does not enumerate all
     # canaries. The canary trip itself is enough to quarantine the plugin.

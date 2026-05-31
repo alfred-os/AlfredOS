@@ -72,9 +72,20 @@ class InboundContentScanner:
         # ``re.escape`` so any regex metacharacters in canary strings are
         # treated as literals — canaries are arbitrary operator tokens,
         # not patterns.
+        #
+        # Patterns are compiled against ``bytes`` (not ``str``) so the
+        # match offset returned to forensic consumers is a true *byte*
+        # offset into the raw frame — not a character index. CR on
+        # PR #140 caught the prior decode-first implementation as
+        # contract drift: ``CanaryTrip.frame_offset`` is documented as a
+        # byte offset, but a string-mode ``match.start()`` on a frame
+        # containing multi-byte UTF-8 (or ``errors="replace"``
+        # substitutions) diverges from the bytes-into-the-frame position.
+        # T3 frames are routinely non-ASCII (web content, attachments)
+        # so this divergence was guaranteed to surface in production.
         self._canary_tokens: frozenset[str] = canary_tokens or frozenset()
-        self._canary_patterns: tuple[re.Pattern[str], ...] = tuple(
-            re.compile(re.escape(tok)) for tok in self._canary_tokens
+        self._canary_patterns: tuple[re.Pattern[bytes], ...] = tuple(
+            re.compile(re.escape(tok.encode("utf-8"))) for tok in self._canary_tokens
         )
 
     def scan(self, frame: bytes) -> CanaryTrip | None:
@@ -85,16 +96,22 @@ class InboundContentScanner:
         this call in ``asyncio.to_thread`` per spec §7a.1 to keep the
         event loop responsive on large frames.
 
-        ``errors="replace"`` so non-UTF-8 bytes never raise — T3 content
-        may be binary (an image, a binary blob from a fetched URL) and
-        the scanner has to remain a stable disposition gate regardless.
+        The scan runs on raw bytes — never decoded — so
+        ``CanaryTrip.frame_offset`` is a true byte offset into ``frame``
+        and the scanner never raises on non-UTF-8 sequences. T3 content
+        may be binary (an image, a binary blob from a fetched URL); the
+        scanner has to remain a stable disposition gate regardless.
+
+        The matched canary token is decoded back to ``str`` for the
+        forensic field (canaries are operator-controlled UTF-8 strings;
+        ``errors="replace"`` only fires on a malformed canary registry,
+        which is itself a bug worth surfacing in the audit row).
         """
-        text = frame.decode("utf-8", errors="replace")
         for pattern in self._canary_patterns:
-            match = pattern.search(text)
+            match = pattern.search(frame)
             if match:
                 return CanaryTrip(
-                    matched_token=match.group(0),
+                    matched_token=match.group(0).decode("utf-8", errors="replace"),
                     frame_offset=match.start(),
                 )
         return None
