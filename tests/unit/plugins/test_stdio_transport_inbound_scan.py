@@ -39,21 +39,22 @@ def test_canary_trip_returns_canary_trip_event() -> None:
     scanner = InboundContentScanner(canary_tokens=frozenset({"ALFRED_CANARY_TEST"}))
     result = scanner.scan(b'{"result": "ALFRED_CANARY_TEST was found"}')
     assert isinstance(result, CanaryTrip)
-    assert result.matched_token == "ALFRED_CANARY_TEST"
+    assert result.matched_token == "ALFRED_CANARY_TEST"  # noqa: S105 -- canary token, not a credential
 
 
 def test_canary_trip_records_byte_offset() -> None:
     scanner = InboundContentScanner(canary_tokens=frozenset({"CANARY"}))
-    result = scanner.scan(b'prefix-bytes-CANARY-suffix')
+    result = scanner.scan(b"prefix-bytes-CANARY-suffix")
     assert isinstance(result, CanaryTrip)
-    assert result.frame_offset == b'prefix-bytes-'.index(b'') + len(b'prefix-bytes-')
+    # The match starts at byte 13 (length of b"prefix-bytes-").
+    assert result.frame_offset == len(b"prefix-bytes-")
 
 
 def test_first_match_wins_when_multiple_canaries_present() -> None:
     # The scanner returns on the first match — it does not enumerate all
     # canaries. The canary trip itself is enough to quarantine the plugin.
     scanner = InboundContentScanner(canary_tokens=frozenset({"ONE", "TWO"}))
-    result = scanner.scan(b'ONE then TWO')
+    result = scanner.scan(b"ONE then TWO")
     assert isinstance(result, CanaryTrip)
     assert result.matched_token in {"ONE", "TWO"}
 
@@ -62,14 +63,14 @@ def test_no_canaries_configured_means_clean_frame() -> None:
     # An empty canary set is the "scanner is wired but no canaries
     # registered" state. Frames pass through regardless of content.
     scanner = InboundContentScanner()
-    assert scanner.scan(b'arbitrary content') is None
+    assert scanner.scan(b"arbitrary content") is None
 
 
 def test_scanner_handles_non_utf8_bytes() -> None:
     # T3 content may be binary (e.g. a fetched image); the scanner must
     # not throw on undecodable bytes.
     scanner = InboundContentScanner(canary_tokens=frozenset({"X"}))
-    result = scanner.scan(b'\xff\xfe\x00\x01X-found')
+    result = scanner.scan(b"\xff\xfe\x00\x01X-found")
     assert isinstance(result, CanaryTrip)
 
 
@@ -87,9 +88,14 @@ def test_inbound_scanner_is_not_outbound_dlp_subclass() -> None:
 
 def test_canary_trip_is_frozen_dataclass() -> None:
     # Frozen so audit-emission cannot mutate the matched token / offset.
-    trip = CanaryTrip(matched_token="X", frame_offset=0)
-    with pytest.raises((AttributeError, Exception)):
-        trip.matched_token = "Y"  # type: ignore[misc]
+    # FrozenInstanceError is the documented exception for frozen
+    # dataclasses; using it concretely rather than catch-all Exception so
+    # the test asserts the precise contract.
+    import dataclasses
+
+    trip = CanaryTrip(matched_token="X", frame_offset=0)  # noqa: S106 -- canary token, not a credential
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        trip.matched_token = "Y"  # type: ignore[misc]  # noqa: S105 -- canary token, not a credential
 
 
 # ---------------------------------------------------------------------------
