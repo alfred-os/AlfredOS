@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from typing import Any, Protocol, overload, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class TrustTier:
@@ -109,20 +116,26 @@ class TaggedContent[TierT: TrustTier](BaseModel):
     @field_validator("tier")
     @classmethod
     def _validate_tier(cls, value: type[TrustTier]) -> type[TrustTier]:
-        """Reject any tier outside the slice-1 allowlist.
+        """Reject any tier outside the Slice-3 closed allowlist.
 
         Defence in depth at the data-class boundary, matching the runtime
-        guard in ``tag()``. Three checks:
+        guard in ``tag()``. Four checks (the fourth is cross-tier):
 
         1. Pydantic's ``is_subclass_of`` check (driven by the
            ``type[TrustTier]`` annotation) already rejects non-TrustTier
            classes and non-class values — the static half of the gate.
         2. Empty ``name`` would persist "" into the audit log — reject it.
-        3. The class must be one of ``_APPROVED_TIERS``. This is the trust-
-           boundary policy: even a properly-named TrustTier subclass that
-           isn't in this slice's enabled set must not be constructable. CR
-           (#89) tightened this against the prior "any-named-subclass"
-           pass-through; PRD §7.1 only enables T0/T2 in slice 1.
+        3. The class must be one of ``_APPROVED_TIERS``. The closed PRD §7.1
+           tier model is {T0, T1, T2, T3}; any other subclass — even a
+           properly-named one — is rejected.
+        4. If this class was parameterised (``TaggedContent[T2]``) the
+           generic argument must match the resolved tier. Closes the wire
+           "tier-laundering" attack (spec §3.5) where a payload claims
+           ``tier="T3"`` against a consumer expecting ``TaggedContent[T2]``.
+           Pydantic v2 preserves the generic args on the parameterised
+           class via ``__pydantic_generic_metadata__["args"]``; the
+           non-parameterised base form leaves ``args`` empty, so the
+           check is skipped for legacy untyped construction sites.
         """
         if not value.name:
             raise ValueError(
@@ -133,7 +146,80 @@ class TaggedContent[TierT: TrustTier](BaseModel):
             raise ValueError(
                 f"unsupported trust tier for this build: {value.name!r} (approved: {approved})"
             )
+        # Cross-tier guard: the generic argument (when present) MUST match.
+        # __pydantic_generic_metadata__["args"] is a tuple of the type
+        # parameters supplied to the parameterised class; for the unparameterised
+        # base TaggedContent it is empty.
+        generic_meta = getattr(cls, "__pydantic_generic_metadata__", None)
+        if generic_meta is not None:
+            args = generic_meta.get("args", ()) or ()
+            if args:
+                expected_tier = args[0]
+                # ``expected_tier`` may be a TypeVar on the unparameterised base
+                # (which we already short-circuit via the empty-args branch);
+                # only enforce when it is a concrete TrustTier subclass.
+                if (
+                    isinstance(expected_tier, type)
+                    and issubclass(expected_tier, TrustTier)
+                    and value is not expected_tier
+                ):
+                    raise ValueError(
+                        "cross-tier wire payload rejected: declared "
+                        f"{value.name!r} but parser expects "
+                        f"{expected_tier.name!r} (spec §3.5)"
+                    )
         return value
+
+    @model_serializer(mode="plain")
+    def _serialize_with_tier_name(self) -> dict[str, Any]:
+        """Emit ``tier`` as ``tier.name`` (string) for wire transport (spec §3.5).
+
+        Mode is ``plain`` (not ``wrap``) because the default field
+        serialiser cannot encode ``type[TrustTier]`` into JSON — the
+        ``arbitrary_types_allowed=True`` flag lets the class object live
+        on the model but excludes it from any wire format. A ``plain``
+        serializer fully owns the output shape, which is what the wire
+        contract needs anyway.
+
+        Cross-tier confusion — a Python ``TaggedContent[T3]`` serialised
+        with ``tier="T2"`` — is impossible here because we read
+        ``self.tier.name`` directly off the instance. The cross-tier attack
+        lands at deserialisation: a wire payload claiming ``T2`` but whose
+        content was T3-derived. The ``_validate_tier`` field validator
+        (above) and the ``_resolve_tier_from_wire`` model validator (below)
+        together close that path.
+        """
+        return {
+            "content": self.content,
+            "source": self.source,
+            "tier": self.tier.name,
+            "metadata": dict(self.metadata),
+        }
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_tier_from_wire(cls, data: Any) -> Any:
+        """Resolve a wire-format tier string to a TrustTier subclass on parse.
+
+        Two-stage rejection (spec §3.5):
+
+        - Unknown tier string (``"TX_UNKNOWN"``) → ``ValueError`` here.
+        - Known-but-mismatched-with-generic-parameter → caught by
+          ``_validate_tier`` after the string resolves.
+
+        Inputs that already supply a TrustTier subclass (the in-process
+        ``TaggedContent[T2](..., tier=T2)`` form) pass through unchanged.
+        """
+        if isinstance(data, dict) and isinstance(data.get("tier"), str):
+            tier_name = data["tier"]
+            resolved = _tier_by_name(tier_name)
+            if resolved is None:
+                approved = sorted(t.name for t in _APPROVED_TIERS)
+                raise ValueError(
+                    f"unknown trust tier on wire: {tier_name!r} (approved: {approved})"
+                )
+            data = {**data, "tier": resolved}
+        return data
 
 
 # Slice 3 adds T1 (operator) and T3 (untrusted ingestion) alongside the
@@ -142,6 +228,20 @@ class TaggedContent[TierT: TrustTier](BaseModel):
 # rejected at both the `tag()` boundary and the `_validate_tier` field
 # validator. See spec §3.1.
 _APPROVED_TIERS: frozenset[type[TrustTier]] = frozenset({T0, T1, T2, T3})
+
+
+def _tier_by_name(name: str) -> type[TrustTier] | None:
+    """Look up an approved TrustTier subclass by its wire-format name.
+
+    Returns ``None`` for any name not in ``_APPROVED_TIERS`` so the caller
+    can raise a context-aware ``ValueError`` (spec §3.5 cross-tier
+    rejection). The linear scan is fine — ``_APPROVED_TIERS`` is bounded
+    at four entries by the closed PRD §7.1 tier model.
+    """
+    for tier in _APPROVED_TIERS:
+        if tier.name == name:
+            return tier
+    return None
 
 
 @overload
