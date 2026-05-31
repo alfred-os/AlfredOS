@@ -163,3 +163,70 @@ def test_missing_plugin_id_raises() -> None:
     bad = VALID_MANIFEST_TOML.replace('id = "alfred.test-plugin"\n', "")
     with pytest.raises(ManifestError):
         parse_manifest(bad)
+
+
+# ---------------------------------------------------------------------------
+# Structural errors — bad TOML, missing [plugin] table, wrong types.
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_toml_raises_manifest_error() -> None:
+    with pytest.raises(ManifestError):
+        parse_manifest("[plugin\nid = ")
+
+
+def test_missing_plugin_table_raises_manifest_error() -> None:
+    # Only the [alfred] section, no [plugin] table at all.
+    with pytest.raises(ManifestError):
+        parse_manifest("[alfred]\nmanifest_version = 1\n")
+
+
+def test_subscriber_tier_not_string_raises_manifest_error() -> None:
+    bad = VALID_MANIFEST_TOML.replace('subscriber_tier = "system"', "subscriber_tier = 5")
+    with pytest.raises(ManifestError):
+        parse_manifest(bad)
+
+
+def test_sandbox_profile_not_string_raises_manifest_error() -> None:
+    bad = VALID_MANIFEST_TOML.replace('sandbox_profile = "user-plugin"', "sandbox_profile = 42")
+    with pytest.raises(ManifestError):
+        parse_manifest(bad)
+
+
+def test_platform_not_string_raises_manifest_error() -> None:
+    src = VALID_MANIFEST_TOML + "platform = 7\n"
+    with pytest.raises(ManifestError):
+        parse_manifest(src)
+
+
+# ---------------------------------------------------------------------------
+# Direct PluginManifest construction (bypassing parse_manifest) still
+# triggers the subscriber_tier field validator — defence in depth.
+# ---------------------------------------------------------------------------
+
+
+def test_direct_construction_t3_subscriber_tier_refused() -> None:
+    # Pydantic v2 propagates non-ValidationError exceptions raised in
+    # field_validators as-is — so the defence-in-depth path surfaces the
+    # same ManifestTierError as parse_manifest.
+    from alfred.plugins.manifest import PluginManifest
+
+    with pytest.raises(ManifestTierError):
+        PluginManifest(
+            manifest_version=1,
+            plugin_id="alfred.x",
+            subscriber_tier="T3",
+            sandbox_profile="user-plugin",
+        )
+
+
+def test_direct_construction_unknown_subscriber_tier_refused() -> None:
+    from alfred.plugins.manifest import PluginManifest
+
+    with pytest.raises(ManifestError):
+        PluginManifest(
+            manifest_version=1,
+            plugin_id="alfred.x",
+            subscriber_tier="root",
+            sandbox_profile="user-plugin",
+        )
