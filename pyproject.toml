@@ -32,6 +32,10 @@ dependencies = [
   # equivalent for cross-process correctness; cachetools is the in-process
   # shape.
   "cachetools>=5.3,<6",
+  # redis>=4.2 ships asyncio support in ``redis.asyncio`` natively (no extra
+  # needed). Pinned >=5 for the GETDEL primitive exercised by ContentStore
+  # (spec §7.2, PR-S3-5).
+  "redis>=5",
 ]
 
 [dependency-groups]
@@ -40,7 +44,7 @@ dev = [
   "pytest-asyncio>=0.23",
   "pytest-benchmark>=4",    # PR-C: micro-benches for the hooks dispatch perf gate
   "pytest-cov>=5",
-  "testcontainers[postgres]>=4.7",
+  "testcontainers[postgres,redis]>=4.7",
   "hypothesis>=6.100",      # property-based testing per docs/python-conventions.md
   "mypy>=1.11",
   "pyright>=1.1.380",       # secondary type-checker per ADR-0007

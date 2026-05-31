@@ -31,11 +31,30 @@ FROM python:3.12-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:${PATH}"
 
+# Install git + util-linux.
+# git: required for state.git operations (spec §8.1, §11.1).
+# util-linux: provides `runuser` — required by alfred-plugin-launcher for
+# UID-drop to alfred-quarantine at subprocess spawn (spec §5.2, sec-003).
+# Without runuser the launcher cannot drop privileges and the isolation
+# guarantee collapses.
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends git util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
 # Non-root runtime user. /var/lib/alfred is owned by alfred:alfred so
 # the orchestrator can persist state (per PRD §2.4 the agent writes
 # state here; operators get read-only access on the host).
+#
+# alfred-quarantine is the dedicated UID for quarantined-LLM subprocess
+# isolation (spec §5.2). It has no home dir and cannot read alfred's
+# secrets file (OS-level enforcement of the secrets boundary).
+# devops-008: `--user-group` creates a dedicated GID for alfred-quarantine
+# (separate from any default group) so the OS-level secret-file ownership
+# boundary is enforceable: alfred's secret files owned alfred:alfred are
+# not readable by the alfred-quarantine GID.
 RUN groupadd --system alfred \
     && useradd --system --gid alfred --create-home --home-dir /home/alfred alfred \
+    && useradd --system --no-create-home --user-group alfred-quarantine \
     && mkdir -p /var/lib/alfred \
     && chown -R alfred:alfred /var/lib/alfred
 
@@ -47,6 +66,11 @@ COPY --from=builder /app /app
 COPY alembic.ini ./alembic.ini
 COPY config ./config
 COPY locale ./locale
+# bin/ contains alfred-plugin-launcher (stub shipped in PR-S3-3a) plus the
+# alfred-state-git-seed.sh script invoked by bin/alfred-setup.sh. Copied
+# into the image so the seed script is reachable from
+# `docker compose run --rm --entrypoint /bin/sh alfred-core ...`.
+COPY bin ./bin
 
 RUN chown -R alfred:alfred /app
 USER alfred

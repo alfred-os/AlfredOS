@@ -23,7 +23,11 @@ def redis_url() -> Iterator[str]:
         yield f"redis://{r.get_container_host_ip()}:{r.get_exposed_port(6379)}"
 
 
-@pytest.fixture(scope="module")
+# Function-scoped client fixture — module-scoped async fixtures fight
+# pytest-asyncio's per-function event loop and surface as "Event loop is
+# closed" on teardown. The container is module-scoped (start-up is expensive);
+# the in-process Redis client is cheap, so a fresh one per test is fine.
+@pytest.fixture
 async def redis_client(redis_url: str) -> AsyncIterator[aioredis.Redis]:
     client = aioredis.from_url(redis_url)
     yield client
@@ -60,7 +64,7 @@ async def test_rate_user_key_pattern(redis_client: aioredis.Redis) -> None:
 @pytest.mark.asyncio
 async def test_fetch_budget_key_pattern(redis_client: aioredis.Redis) -> None:
     """alfred:fetch_budget:{user_id}:{YYYY-MM-DD} keys with TTL=48h."""
-    today = dt.date.today().isoformat()
+    today = dt.datetime.now(tz=dt.UTC).date().isoformat()
     key = f"alfred:fetch_budget:user-abc-123:{today}"
     await redis_client.set(key, 42, ex=172800)  # 48h
     val = await redis_client.get(key)
@@ -144,9 +148,18 @@ async def test_content_store_connection_pool_reuse(
             await client.set(key, b"body", ex=5)
             body = await client.getdel(key)
             assert body == b"body"
-        # Pool should have at most ~2 connections open (pool + INFO query)
-        info = await client.info("clients")
-        assert info["connected_clients"] <= 2
+        # The shared pool must keep its working-set tiny — assert via the
+        # pool's own bookkeeping, not the server-side connected_clients
+        # field (which counts other test clients + testcontainers' own
+        # health-check connections too). For sequential ops on a single
+        # client+pool the pool reuses a single connection (allow <=2 to
+        # leave headroom for the client.aclose() teardown path).
+        # `get_connection_count()` returns the combined available+in-use list.
+        total = len(pool.get_connection_count())
+        assert total <= 2, (
+            f"shared pool held {total} connections for 10 sequential ops — "
+            "perf-006 requires connection reuse, not per-op handshake."
+        )
     finally:
         await client.aclose()
         await pool.disconnect()
