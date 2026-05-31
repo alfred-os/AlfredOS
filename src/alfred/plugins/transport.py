@@ -37,8 +37,18 @@ class ControlResult(BaseModel):
     NEVER carries structured extraction — that path returns
     :class:`alfred.security.quarantine.ExtractionResult`.
 
-    Frozen so dispatch sites cannot mutate the response between
-    construction and audit-log emission.
+    ``model_config = ConfigDict(frozen=True)`` makes the model
+    faux-immutable: dispatch sites cannot **reassign** ``method`` or
+    ``payload`` between construction and audit-log emission. It does
+    **not** deep-freeze the nested ``payload`` mapping — Pydantic v2's
+    ``frozen=True`` only blocks attribute reassignment, so
+    ``result.payload["x"] = ...`` still mutates the dict in place. The
+    audit-emission contract treats control-plane payloads as read-only
+    by convention (the orchestrator deserialises and forwards them); a
+    Slice-4+ tightening could swap the field type for
+    ``Mapping[str, object]`` + a ``MappingProxyType`` validator if a
+    true deep-freeze is ever required. CR on PR #140 caught the
+    original phrasing ("cannot mutate the response") as overstated.
     """
 
     model_config = ConfigDict(frozen=True)
