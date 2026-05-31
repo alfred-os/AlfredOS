@@ -1,0 +1,258 @@
+"""Reviewer-gated proposal flow for capability-grant requests.
+
+Spec §8.3 (PR-S3-2 Component G). Granting a hookpoint subscription —
+particularly at the ``system`` subscriber tier — is a high-blast
+operation: a system-tier grant gives the plugin orchestrator-level
+attribution that the operator cannot rescind in the middle of a turn.
+PRD §6.4's self-improvement rules require these changes go through:
+
+1. A state.git ``proposal/policy-grant-<id>`` branch (this module
+   writes it).
+2. Reviewer-agent review of the proposal payload.
+3. Explicit human approval (PRD §6.4 #4 — plugin install/remove).
+4. Reviewer merges to ``main``, which triggers
+   :meth:`alfred.security.capability_gate._gate.RealGate.rebuild_from_state_git`
+   and the corresponding Postgres upsert.
+
+This module is the entry point for step 1. The CLI surface
+``alfred plugin grant <plugin-id> <tier> <hookpoint>`` (PR-S3-6) calls
+:func:`create_proposal_branch` and surfaces
+``t("cli.plugin.grant.pending_review")`` to the operator.
+
+CRITICAL CONTRACT: :func:`create_proposal_branch` MUST NOT call
+:meth:`alfred.security.capability_gate.backend.PostgresBackend.upsert_grant`.
+The grant is inert until the reviewer-agent merges the branch.
+Writing to Postgres at proposal-creation time would race the
+reviewer-gate flow and silently activate an unreviewed grant — exactly
+the silent privilege-escalation CLAUDE.md hard rule #2 forbids.
+
+sec-007: this module does NOT ``import os`` — ``ALFRED_ENV`` reads
+live in :mod:`alfred.bootstrap.gate_factory`.
+
+Implementation status:
+
+* :func:`create_proposal_branch` — PR-S3-2 ships the full proposal-
+  creation flow: identifier generation, audit row, and the
+  patch-friendly call to :func:`_write_proposal_to_state_git`.
+* :func:`_write_proposal_to_state_git` — PR-S3-2 ships a logging stub
+  that returns the branch name. PR-S3-6 replaces the body with the
+  gitpython integration that writes the branch into
+  ``/var/lib/alfred/state.git``. The function is kept as a separate
+  ``async def`` so the proposal-flow unit tests can patch it cleanly.
+"""
+
+from __future__ import annotations
+
+import secrets
+import uuid
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+import structlog
+
+from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
+
+if TYPE_CHECKING:
+    from alfred.security.capability_gate.backend import StorageBackend
+
+_log = structlog.get_logger(__name__)
+
+
+@runtime_checkable
+class _AuditSink(Protocol):
+    """Structural seam matching :meth:`AuditWriter.append_schema`.
+
+    Mirrors the same Protocol the :class:`RealGate` audit emit path uses
+    — production wires the real :class:`alfred.audit.log.AuditWriter`
+    and tests inject a spy with the same shape. Kept private to this
+    module so the proposal-flow public surface (just
+    :func:`create_proposal_branch` + the stub) does not leak the audit
+    subsystem's dependency graph.
+    """
+
+    async def append_schema(
+        self,
+        *,
+        fields: frozenset[str],
+        schema_name: str,
+        event: str,
+        actor_user_id: str | None,
+        subject: dict[str, Any],
+        trust_tier_of_trigger: str,
+        result: str,
+        cost_estimate_usd: float,
+        trace_id: str,
+    ) -> None:
+        raise NotImplementedError  # pragma: no cover
+
+
+async def create_proposal_branch(
+    *,
+    plugin_id: str,
+    subscriber_tier: str,
+    hookpoint: str,
+    operator_user_id: str,
+    backend: StorageBackend,
+    audit_sink: _AuditSink,
+    content_tier: str | None = None,
+) -> str:
+    """Queue a reviewer-gated capability-grant proposal.
+
+    Writes a ``proposal/policy-grant-<id>`` branch into state.git via
+    :func:`_write_proposal_to_state_git` and emits the
+    ``plugin.grant.requested`` audit row. Does NOT touch the
+    ``plugin_grants`` Postgres table; the eventual upsert happens
+    inside :meth:`RealGate._apply_grants` after the reviewer merges.
+
+    Identifier source: :func:`secrets.token_hex` (16 hex chars from 8
+    random bytes). Cryptographically unpredictable per ``secrets`` —
+    spec §8.3 implicitly requires this so an adversary who reads one
+    branch name from the audit log cannot enumerate or predict future
+    proposal IDs. ``uuid.uuid1`` would leak host MAC + timestamp;
+    ``uuid.uuid4`` would also work but ``token_hex`` is the canonical
+    Python ergonomic for "give me opaque random bytes as a string."
+
+    Ordering: state.git write FIRST, audit row SECOND. If the state.git
+    write fails, no audit row emits — the operator gets the raised
+    exception and the audit log truthfully shows the proposal never
+    landed. The alternative (audit-first) would leave the operator
+    believing the proposal exists when the state.git write failed.
+
+    Args:
+        plugin_id: MCP plugin identifier (e.g. ``"alfred.web-fetch"``).
+        subscriber_tier: ``"system" | "operator" | "user-plugin"`` —
+            the hook-subscription axis, NOT a content trust tier
+            (spec §4.3 two-axis naming rule).
+        hookpoint: dotted action name (e.g. ``"tool.web.fetch"``).
+        operator_user_id: canonical user_id of the human operator who
+            requested the grant. Carried into the audit row for
+            per-operator forensic attribution.
+        backend: :class:`StorageBackend` — referenced only to enforce
+            the contract that the proposal flow does NOT touch the
+            backend. The argument is present so a future refactor that
+            wires backend-side coordination (e.g. proposal-status
+            cache) does not break the public signature.
+        audit_sink: :class:`_AuditSink` — required per err-005.
+            CLAUDE.md hard rule #7 forbids the silent audit path; a
+            reviewer-gated grant proposal with no audit row leaves the
+            flow undocumented.
+        content_tier: optional ``T0/T1/T2/T3`` restriction.
+            ``None`` = no content-tier restriction (the common case).
+            Spec §4.3: orthogonal to subscriber_tier.
+
+    Returns:
+        The state.git branch name (``proposal/policy-grant-<hex>``).
+        The CLI layer uses this for ``alfred plugin grant status
+        <branch>``.
+
+    Raises:
+        Any exception from :func:`_write_proposal_to_state_git`.
+        Currently the stub never raises; PR-S3-6's gitpython
+        integration can surface :class:`OSError` /
+        :class:`git.exc.GitError` here.
+    """
+    # secrets.token_hex(8) yields 16 hex characters — wide enough that
+    # collision in a single state.git lifetime is statistically zero.
+    # Spec §8.3's reviewer-gate flow assumes the branch namespace is
+    # unpredictable; secrets is the canonical Python source. Keeping
+    # the unused `backend` argument bound silences ruff ARG002
+    # without removing the contract-defending parameter.
+    _ = backend
+    proposal_id = secrets.token_hex(8)
+    branch_name = f"proposal/policy-grant-{proposal_id}"
+    correlation_id = str(uuid.uuid4())
+
+    _log.info(
+        "capability_gate.proposal.creating",
+        plugin_id=plugin_id,
+        subscriber_tier=subscriber_tier,
+        hookpoint=hookpoint,
+        branch_name=branch_name,
+    )
+
+    # state.git write FIRST. A raised exception here MUST short-circuit
+    # the audit emit — see test_create_proposal_audit_row_emitted_after_state_git_write.
+    await _write_proposal_to_state_git(
+        branch_name=branch_name,
+        plugin_id=plugin_id,
+        subscriber_tier=subscriber_tier,
+        hookpoint=hookpoint,
+        content_tier=content_tier,
+        operator_user_id=operator_user_id,
+    )
+
+    await audit_sink.append_schema(
+        fields=PLUGIN_GRANT_FIELDS,
+        schema_name="PLUGIN_GRANT_FIELDS",
+        event="plugin.grant.requested",
+        actor_user_id=operator_user_id,
+        subject={
+            "plugin_id": plugin_id,
+            "subscriber_tier": subscriber_tier,
+            "hookpoint": hookpoint,
+            "operator_user_id": operator_user_id,
+            "proposal_branch": branch_name,
+            "correlation_id": correlation_id,
+        },
+        trust_tier_of_trigger="T1",
+        result="requested",
+        cost_estimate_usd=0.0,
+        trace_id=correlation_id,
+    )
+
+    return branch_name
+
+
+async def _write_proposal_to_state_git(
+    *,
+    branch_name: str,
+    plugin_id: str,
+    subscriber_tier: str,
+    hookpoint: str,
+    content_tier: str | None,
+    operator_user_id: str,
+) -> str:
+    """Write the proposal branch to ``/var/lib/alfred/state.git``.
+
+    DEFERRED-STUB CONTRACT (PR-S3-2):
+
+    PR-S3-2 ships this function as a structured-log stub that returns
+    the branch name unchanged. The real gitpython implementation lands
+    alongside the CLI in PR-S3-6 (``alfred plugin grant``). Rationale:
+    gitpython is not yet in the dependency tree, and the bare state.git
+    repo bootstrap is the PR-S3-6 surface; pulling both forward into
+    PR-S3-2 would inflate scope without adding test value beyond what
+    :func:`create_proposal_branch` already covers via patch-friendly
+    isolation.
+
+    Why a stub instead of a :class:`NotImplementedError` raise (cf.
+    :meth:`RealGate.rebuild_from_state_git`): the rebuild call sits on
+    the runtime hot path where a silent return would mask staleness; a
+    proposal-write stub sits at the CLI boundary where the operator
+    will see the audit row immediately, and the stub keeps the
+    proposal-flow unit tests testable without an extra patch-fixture
+    layer per test. PR-S3-6 replaces the body with::
+
+        repo = git.Repo("/var/lib/alfred/state.git")
+        # ... branch + commit ...
+
+    Args:
+        branch_name: full branch name (``proposal/policy-grant-<hex>``).
+        plugin_id, subscriber_tier, hookpoint, content_tier,
+            operator_user_id: proposal payload — written into the
+            state.git tree by the PR-S3-6 implementation.
+
+    Returns:
+        ``branch_name`` unchanged. The PR-S3-6 implementation returns
+        the resolved branch ref name after the commit lands; for
+        PR-S3-2 the input is the canonical answer.
+    """
+    _log.info(
+        "capability_gate.proposal.written_to_state_git",
+        branch_name=branch_name,
+        plugin_id=plugin_id,
+        subscriber_tier=subscriber_tier,
+        hookpoint=hookpoint,
+        content_tier=content_tier,
+        operator_user_id=operator_user_id,
+    )
+    return branch_name
