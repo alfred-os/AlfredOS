@@ -428,11 +428,16 @@ async def test_dispatch_large_frame_uses_to_thread_for_dlp(
 
     Regex/NER scans are O(n) on the frame size and would block the event
     loop above the threshold. We construct a frame ~5KB wide by stuffing
-    the params dict; the DLP scan must still complete and produce a
-    non-refusing result.
+    the params dict; the test patches ``asyncio.to_thread`` in the
+    transport's namespace so we can directly assert the offload happened
+    — the prior version asserted only ``dlp.scan.called`` which held
+    regardless of whether the scan ran inline on the event loop or via
+    the thread executor. CR on PR #140 caught the gap.
     """
+    import asyncio
     import json
     import struct
+    from unittest.mock import patch
 
     dlp = MagicMock()
     dlp.scan.return_value = MagicMock(refused=False, rule_matched=None)
@@ -457,9 +462,91 @@ async def test_dispatch_large_frame_uses_to_thread_for_dlp(
     transport._process = mock_proc
 
     big_payload = "x" * 5000  # crosses the 4096-byte threshold
-    await transport.dispatch("lifecycle.start", {"payload": big_payload})
+    real_to_thread = asyncio.to_thread
+    with patch(
+        "alfred.plugins.stdio_transport.asyncio.to_thread",
+        side_effect=real_to_thread,
+    ) as spy:
+        await transport.dispatch("lifecycle.start", {"payload": big_payload})
     # Sanity check: DLP was invoked at least once.
     assert dlp.scan.called
+    # Load-bearing assertion: the >4KB frame triggered an
+    # ``asyncio.to_thread`` offload. Without this assertion a regression
+    # that runs the DLP scan inline on the event loop would pass — the
+    # perf-012 budget is the whole reason this branch exists.
+    #
+    # ``asyncio.to_thread`` is also used for the inbound canary scan
+    # later in dispatch, so the spy may have ≥1 calls; the assertion is
+    # "at least one call" and the first call is the DLP offload (the
+    # placeholder frame crosses the threshold before the inbound scan
+    # runs).
+    assert spy.call_count >= 1
+    # The first offload is the DLP scan — verify the callee is the DLP
+    # collaborator, not the canary scanner.
+    first_call_callable = spy.call_args_list[0].args[0]
+    assert first_call_callable is dlp.scan, (
+        f"first asyncio.to_thread call should offload dlp.scan; got {first_call_callable!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_small_frame_does_not_offload_dlp(
+    fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
+) -> None:
+    """perf-012 counter-case: sub-threshold frames must NOT offload the DLP scan.
+
+    Below the 4096-byte threshold the thread-handoff overhead exceeds
+    the scan time, so the dispatch path runs the scan inline. CR on
+    PR #140 asked for this counter-case alongside the positive test —
+    without it, a regression that always offloads (defeating the perf
+    budget the threshold exists for) would pass the positive test
+    silently.
+    """
+    import asyncio
+    import json
+    import struct
+    from unittest.mock import patch
+
+    dlp = MagicMock()
+    dlp.scan.return_value = MagicMock(refused=False, rule_matched=None)
+    scanner = MagicMock()
+    scanner.scan.return_value = None
+    transport = StdioTransport(
+        plugin_id="test.plugin",
+        executable="/bin/sh",
+        args=["-c", "true"],
+        audit_writer=fake_audit_writer,
+        dlp=dlp,
+        scanner=scanner,
+        secret_broker=fake_broker,
+        inbound_t3_nonce=stub_nonce,
+    )
+    body = json.dumps({"jsonrpc": "2.0", "result": {}}).encode("utf-8")
+    framed = struct.pack(">I", len(body)) + body
+    mock_proc = MagicMock()
+    mock_proc.stdin.write = MagicMock()
+    mock_proc.stdin.drain = AsyncMock()
+    mock_proc.stdout.readexactly = AsyncMock(side_effect=[framed[:4], framed[4:]])
+    transport._process = mock_proc
+
+    # Tiny payload — well under the 4096-byte threshold.
+    small_payload = "x" * 16
+    real_to_thread = asyncio.to_thread
+    with patch(
+        "alfred.plugins.stdio_transport.asyncio.to_thread",
+        side_effect=real_to_thread,
+    ) as spy:
+        await transport.dispatch("lifecycle.start", {"payload": small_payload})
+    # DLP still runs — but inline, not via the executor.
+    assert dlp.scan.called
+    # The inbound canary scan still uses ``to_thread`` (unconditionally),
+    # so the spy may record exactly one call. What MUST NOT appear is a
+    # call whose first arg is ``dlp.scan``.
+    dlp_offloads = [call for call in spy.call_args_list if call.args and call.args[0] is dlp.scan]
+    assert not dlp_offloads, (
+        f"sub-threshold frame should run DLP scan inline; got {len(dlp_offloads)} "
+        "asyncio.to_thread calls for dlp.scan"
+    )
 
 
 @pytest.mark.asyncio
