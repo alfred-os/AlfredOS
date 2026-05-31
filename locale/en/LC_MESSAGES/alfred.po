@@ -515,6 +515,422 @@ msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
+# === Slice 3: CLI navigation / help strings ===
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.help"
+msgstr "Manage AlfredOS plugins — list, show, and grant capabilities."
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.grant.help"
+msgstr "Manage plugin capability grants."
+
+#: src/alfred/cli/plugin_cmd.py
+# Translators: CLI argument help text; {plugin_id} is the plugin identifier.
+msgid "cli.plugin.grant.usage"
+msgstr "Plugin identifier (e.g. alfred.web-fetch)"
+
+#: src/alfred/cli/plugin_cmd.py
+# Translators: {proposal_id} is the proposal ID shown after queuing.
+msgid "cli.plugin.grant.follow_up_command"
+msgstr "Run 'alfred plugin grant status {proposal_id}' to track approval."
+
+#: src/alfred/cli/plugin_cmd.py
+# Reserved for the reviewer-approved path — not shown when queuing the proposal.
+msgid "cli.plugin.grant.success"
+msgstr "Plugin grant for {plugin_id} on {hookpoint} is now active."
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.help"
+msgstr "Manage web-fetch settings — allowlist and rate limits."
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.help"
+msgstr "Manage the web-fetch domain allowlist."
+
+#: src/alfred/cli/web_cmd.py
+# Translators: CLI argument help text.
+msgid "cli.web.allowlist.add.usage"
+msgstr "Domain to add to the allowlist (e.g. example.com)"
+
+#: src/alfred/cli/web_cmd.py
+# Translators: {reason} is the denial reason.
+msgid "cli.web.allowlist.add.denied"
+msgstr "Allowlist addition denied: {reason}"
+
+#: src/alfred/cli/web_cmd.py
+# Translators: {reason} is the denial reason.
+msgid "cli.web.allowlist.remove.denied"
+msgstr "Allowlist removal denied: {reason}"
+
+#: src/alfred/cli/config_cmd.py
+msgid "cli.config.help"
+msgstr "Manage AlfredOS operator configuration."
+
+#: src/alfred/cli/config_cmd.py
+msgid "cli.config.set.key_help"
+msgstr "Configuration key to set (dotted path, e.g. web_fetch.user_agent)"
+
+#: src/alfred/cli/config_cmd.py
+msgid "cli.config.set.value_help"
+msgstr "New value for the configuration key"
+
+#: src/alfred/cli/config_cmd.py
+# Translators: {reason} is the denial reason.
+msgid "cli.config.set.denied"
+msgstr "Configuration change denied: {reason}"
+
+#: src/alfred/cli/config_cmd.py
+# Translators: {key} is the configuration key.
+msgid "cli.config.set.unknown_key"
+msgstr "Unknown configuration key: {key}. Run 'alfred config list' to see available keys."
+
+#: src/alfred/cli/config_cmd.py
+# Translators: {key} is the configuration key.
+msgid "cli.config.get.unknown_key"
+msgstr "Unknown configuration key: {key}."
+
+#: src/alfred/cli/config_cmd.py
+# Translators: {key} is the configuration key.
+msgid "cli.config.get.not_set"
+msgstr "{key} is not set (using default)."
+
+#: src/alfred/cli/config_cmd.py
+msgid "cli.config.list.empty"
+msgstr "No configuration keys have been overridden. All values are at their defaults."
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.help"
+msgstr "Manage the AlfredOS supervisor — circuit breakers and component status."
+
+#: src/alfred/cli/supervisor_cmd.py
+# Translators: CLI argument help text; {component} is the supervisor component ID.
+msgid "cli.supervisor.reset.usage"
+msgstr "Supervisor component ID (e.g. quarantined-llm)"
+
+#: src/alfred/cli/audit_cmd.py
+msgid "cli.audit.help"
+msgstr "Query the AlfredOS audit log."
+
+#: src/alfred/cli/audit_cmd.py
+# Translators: {tier} is the trust tier filter (T1 or T3).
+msgid "cli.audit.graph.tier_help"
+msgstr "Filter by trust tier (T1 or T3)"
+
+#: src/alfred/cli/audit_cmd.py
+# Translators: accepts a duration string, e.g. "24h", "7d".
+msgid "cli.audit.graph.since_help"
+msgstr "Show events since this duration ago (e.g. 24h, 7d)"
+
+#: src/alfred/cli/audit_cmd.py
+# Translators: {tier} is the trust tier; {since} is the duration.
+msgid "cli.audit.graph.empty"
+msgstr "No audit events found for tier {tier} in the last {since}."
+
+#: src/alfred/cli/audit_cmd.py
+# Translators: {tier} is the trust tier string.
+msgid "cli.audit.graph.tier_header"
+msgstr "Audit graph — tier {tier}"
+
+#: src/alfred/cli/audit_cmd.py
+msgid "cli.audit.graph.header"
+msgstr "Audit graph"
+
+# === Slice 3: CLI plugin management ===
+#: src/alfred/cli/plugin_cmd.py
+# Translators: {branch} is the state.git proposal branch; {proposal_id} is the short ID.
+# i18n-002: caller passes branch= (not proposal_branch=) + proposal_id= — match those names.
+msgid "cli.plugin.grant.pending_review"
+msgstr ""
+"Plugin grant proposal queued at {branch}. "
+"Run 'alfred plugin grant status {proposal_id}' to track approval."
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.grant.denied"
+msgstr "Plugin grant denied for {plugin_id} on {hookpoint}: {reason}"
+
+#: src/alfred/cli/plugin_cmd.py
+# Translators: shown before the operator confirms a grant. {blast_radius} is
+# a human-readable description of what the grant allows.
+msgid "cli.plugin.grant.confirm_prompt"
+msgstr ""
+"Grant {plugin_id} access to {hookpoint} at {tier} tier. "
+"Blast radius: {blast_radius}. Proceed? [y/N]"
+
+#: src/alfred/cli/plugin_cmd.py
+# Translators: {proposal_id} is the proposal short ID (not branch name).
+# i18n-002: caller passes proposal_id= (not proposal_branch=) — match that name.
+msgid "cli.plugin.grant.status.pending"
+msgstr "Pending review (proposal: {proposal_id})"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.grant.status.approved"
+msgstr "Approved (commit {commit_hash})"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.grant.status.denied"
+msgstr "Denied: {reason}"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.grant.status.expired"
+msgstr "Expired: proposal branch deleted or not merged within TTL"
+
+# === Slice 3: CLI web allowlist ===
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.pending_review"
+msgstr ""
+"Web allowlist addition queued at {proposal_branch}. "
+"Run 'alfred web allowlist list' to confirm when approved."
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.added"
+msgstr "Domain {domain} added to web fetch allowlist."
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.removed"
+msgstr "Domain {domain} removed from web fetch allowlist."
+
+# === Slice 3: CLI config ===
+#: src/alfred/cli/config_cmd.py
+msgid "cli.config.quarantined_provider_pending_review"
+msgstr ""
+"Quarantined-provider change to {provider} queued at {proposal_branch}. "
+"Run 'alfred plugin grant status' to track approval."
+
+#: src/alfred/cli/config_cmd.py
+# Translators: {user} is the canonical user slug; {n} is the new daily limit.
+msgid "cli.config.web_fetch_budget_set"
+msgstr "Daily web-fetch budget for {user} set to {n} fetches/day."
+
+# === Slice 3: CLI supervisor ===
+#: src/alfred/cli/supervisor_cmd.py
+# Translators: {component} is a supervisor component ID (e.g. "quarantined-llm").
+msgid "cli.supervisor.reset.confirm_prompt"
+msgstr ""
+"Reset circuit breaker for {component}? "
+"({trip_count} trips; last trip at {last_trip_at}) [y/N]"
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.reset.success"
+msgstr "Circuit breaker for {component} reset. Current state: CLOSED."
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.reset.component_not_found"
+msgstr "Component {component} not found. Run 'alfred supervisor status' to list components."
+
+#: src/alfred/cli/supervisor_cmd.py
+# Translators: {component} is the supervisor component ID. This hint is shown
+# when reset is invoked without --confirm; devex-004 / i18n-004.
+msgid "cli.supervisor.reset.rerun_hint"
+msgstr "Re-run with: alfred supervisor reset {component} --confirm"
+
+#: src/alfred/cli/audit_cmd.py
+# Translators: {value} is the bad --since value the user typed;
+# {example} gives accepted examples. devex-016.
+msgid "cli.audit.graph.since_invalid"
+msgstr "Invalid --since value: '{value}'. Use a number with a unit, e.g. {example}."
+
+# === Slice 3: CLI list/table column labels ===
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.list.column.plugin_id"
+msgstr "Plugin ID"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.list.column.subscriber_tier"
+msgstr "Subscriber Tier"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.list.column.status"
+msgstr "Status"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.list.column.manifest_version"
+msgstr "Manifest Version"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.list.empty_hint"
+msgstr "No plugins loaded. Run 'alfred plugin grant init' to initialise the capability gate."
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.show.field.plugin_id"
+msgstr "Plugin ID"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.show.field.manifest_version"
+msgstr "Manifest Version"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.show.field.sandbox_profile"
+msgstr "Sandbox Profile"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.show.field.hookpoints"
+msgstr "Registered Hookpoints"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.show.field.grants"
+msgstr "Active Grants"
+
+#: src/alfred/cli/plugin_cmd.py
+msgid "cli.plugin.show.field.last_lifecycle_event"
+msgstr "Last Lifecycle Event"
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.list.column.domain"
+msgstr "Domain"
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.list.column.path_prefix"
+msgstr "Path Prefix"
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.list.column.granted_by"
+msgstr "Granted By"
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.list.column.granted_at"
+msgstr "Granted At"
+
+#: src/alfred/cli/web_cmd.py
+msgid "cli.web.allowlist.list_empty"
+msgstr "No domains in allowlist. Use 'alfred web allowlist add <domain>' to add one."
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.column.component"
+msgstr "Component"
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.column.state"
+msgstr "State"
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.column.trip_count"
+msgstr "Trip Count"
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.column.last_trip_at"
+msgstr "Last Trip At"
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.empty_hint"
+msgstr "No supervisor-managed components found."
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.breaker_state.open"
+msgstr "OPEN"
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.breaker_state.closed"
+msgstr "CLOSED"
+
+#: src/alfred/cli/supervisor_cmd.py
+msgid "cli.supervisor.status.breaker_state.half_open"
+msgstr "HALF_OPEN"
+
+# === Slice 3: WebFetchError messages ===
+#: src/alfred/plugins/errors.py
+# Translators: {url} is the URL that was blocked; {domain} is the domain.
+msgid "web.fetch.error.domain_not_allowed"
+msgstr "Domain {domain} is not in the web-fetch allowlist. Ask your operator to add it."
+
+#: src/alfred/plugins/errors.py
+msgid "web.fetch.error.tls_failure"
+msgstr "TLS verification failed for {url}. The connection cannot be trusted."
+
+#: src/alfred/plugins/errors.py
+# Translators: {limit} is the rate limit (e.g. "10/min"); {scope} is "domain" or "user".
+msgid "web.fetch.error.rate_limited"
+msgstr "Rate limit exceeded ({limit} per {scope}). Retry in {retry_after}s."
+
+#: src/alfred/plugins/errors.py
+# Translators: {mime_type} is the MIME type that was refused.
+msgid "web.fetch.error.mime_type_not_allowed"
+msgstr "MIME type {mime_type} is not in the allowed list for web fetch."
+
+#: src/alfred/plugins/errors.py
+# Translators: {size} is the response body size in bytes; {limit} is the limit.
+msgid "web.fetch.error.size_limit_exceeded"
+msgstr "Response body size {size} bytes exceeds the {limit}-byte limit."
+
+# === Slice 3: System / bootstrap keys ===
+#: src/alfred/bootstrap/gate_factory.py
+msgid "bootstrap.quarantined_provider_same_as_privileged"
+msgstr ""
+"Quarantined and privileged LLMs are configured to use the same provider. "
+"This weakens defence-in-depth. Run 'alfred config quarantined-provider <provider>' "
+"to set a different provider, or obtain reviewer-gate approval to proceed with "
+"the same provider."
+
+#: src/alfred/orchestrator/core.py
+msgid "orchestrator.quarantine_unavailable"
+msgstr "I can't process external content right now; please retry in a few minutes."
+
+#: src/alfred/orchestrator/core.py
+msgid "orchestrator.action_timeout"
+msgstr "This action is taking too long. Please retry — if the problem persists, contact your operator."
+
+#: src/alfred/security/tiers.py
+# Translators: {caller_id} is the identifier of the caller attempting the tag.
+msgid "security.tag_t3_unauthorized"
+msgstr "Unauthorized attempt to tag content as T3 by {caller_id}."
+
+#: src/alfred/security/tiers.py
+# Translators: {wire_tier} is the tier string on the wire; {expected_tier} is the expected Python type.
+msgid "security.tier_mismatch"
+msgstr "Trust tier mismatch: wire says {wire_tier} but object is typed as {expected_tier}."
+
+#: src/alfred/security/
+# Translators: {url} is the URL where the canary token was detected.
+msgid "security.canary_tripped"
+msgstr "Canary token detected in content from {url}. This is a security event."
+
+#: src/alfred/hooks/capability.py
+msgid "capability_gate.unavailable"
+msgstr "I can't verify your permissions right now. Please retry in a few minutes."
+
+#: src/alfred/plugins/
+# Translators: {got} is the version presented; {expected} is 1.
+msgid "plugin.manifest_version_mismatch"
+msgstr "Plugin manifest version {got} is not supported (expected {expected}). Update the plugin."
+
+#: src/alfred/plugins/
+# Translators: {plugin_id} is the plugin identifier.
+msgid "plugin.launcher_no_sandbox_policy"
+msgstr ""
+"No sandbox policy configured for plugin {plugin_id}. "
+"Set ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 for development, "
+"or provide a sandbox policy file."
+
+#: src/alfred/cli/plugin_cmd.py
+# Translators: {plugin_id} is the plugin; {tier} is the subscription tier;
+# {hookpoint} is the hookpoint name; {blast_radius} describes the access granted.
+msgid "plugin.grant_prompt"
+msgstr ""
+"Grant plugin {plugin_id} access at {tier} tier on hookpoint {hookpoint}. "
+"Blast radius: {blast_radius}."
+
+#: src/alfred/plugins/quarantine_extractor.py
+# Translators: {schema_name} is the Pydantic model class name.
+msgid "quarantine.schema_version_missing"
+msgstr ""
+"Extraction schema {schema_name} is missing schema_version: Literal[1]. "
+"Add 'schema_version: Literal[1] = 1' as a class attribute."
+
+#: src/alfred/bootstrap/gate_factory.py
+msgid "bootstrap.capability_gate_unseeded"
+msgstr ""
+"Capability gate backing store is not seeded. "
+"Run 'alfred plugin grant init' to initialise state.git, "
+"then 'uv run alembic upgrade head' to apply migrations."
+
+# === Cluster 1 / PR-S3-3a: StdioTransport DLP outbound refused ===
+#: src/alfred/plugins/transport.py
+# Translators: {plugin_id} is the plugin identifier. Raised when OutboundDlp.scan
+# refuses to let the outbound payload leave for the subprocess (arch-006 / sec-006).
+msgid "plugin.transport.dlp_outbound_refused"
+msgstr ""
+"Outbound DLP blocked dispatch to plugin {plugin_id}. "
+"The payload contains content that cannot be sent to an external subprocess."
+
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""
 

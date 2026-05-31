@@ -12,7 +12,7 @@ Two-part test (Cluster 6 / i18n-007):
    PR-S3-0b CI rather than at runtime in PR-S3-6.
 
 i18n-003 note: the test list and the catalog msgid count must agree.
-Current total: 86 keys (82 original + 3 new: plugin.transport.dlp_outbound_refused,
+Current total: 85 keys (82 original + 3 new: plugin.transport.dlp_outbound_refused,
 cli.supervisor.reset.rerun_hint, cli.audit.graph.since_invalid).
 """
 
