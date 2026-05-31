@@ -203,26 +203,26 @@ class TaggedContent[TierT: TrustTier](BaseModel):
             )
         # Cross-tier guard: the generic argument (when present) MUST match.
         # __pydantic_generic_metadata__["args"] is a tuple of the type
-        # parameters supplied to the parameterised class; for the unparameterised
-        # base TaggedContent it is empty.
-        generic_meta = getattr(cls, "__pydantic_generic_metadata__", None)
-        if generic_meta is not None:
-            args = generic_meta.get("args", ()) or ()
-            if args:
-                expected_tier = args[0]
-                # ``expected_tier`` may be a TypeVar on the unparameterised base
-                # (which we already short-circuit via the empty-args branch);
-                # only enforce when it is a concrete TrustTier subclass.
-                if (
-                    isinstance(expected_tier, type)
-                    and issubclass(expected_tier, TrustTier)
-                    and value is not expected_tier
-                ):
-                    raise ValueError(
-                        "cross-tier wire payload rejected: declared "
-                        f"{value.name!r} but parser expects "
-                        f"{expected_tier.name!r} (spec §3.5)"
-                    )
+        # parameters supplied to the parameterised class; for the
+        # unparameterised base TaggedContent it is empty. Pydantic v2 always
+        # populates this attribute on BaseModel subclasses — accessed directly
+        # without a None guard.
+        args = cls.__pydantic_generic_metadata__.get("args", ()) or ()
+        if args:
+            expected_tier = args[0]
+            # ``expected_tier`` may be a TypeVar on the unparameterised base
+            # (which we already short-circuit via the empty-args branch);
+            # only enforce when it is a concrete TrustTier subclass.
+            if (
+                isinstance(expected_tier, type)
+                and issubclass(expected_tier, TrustTier)
+                and value is not expected_tier
+            ):
+                raise ValueError(
+                    "cross-tier wire payload rejected: declared "
+                    f"{value.name!r} but parser expects "
+                    f"{expected_tier.name!r} (spec §3.5)"
+                )
         return value
 
     @model_serializer(mode="plain")
