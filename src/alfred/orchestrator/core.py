@@ -95,7 +95,7 @@ from alfred.memory.working import WorkingMemory
 from alfred.personas.alfred import ALFRED_PERSONA, render_persona_prompt
 from alfred.providers.base import CompletionRequest, Message
 from alfred.providers.router import ProviderRouter
-from alfred.security.tiers import T2, TaggedContent
+from alfred.security.tiers import T1, T2, TaggedContent
 
 if TYPE_CHECKING:
     from alfred.identity.models import User
@@ -228,17 +228,22 @@ class Orchestrator:
         self,
         *,
         user: UserLike,
-        content: TaggedContent[T2],
+        content: TaggedContent[T1] | TaggedContent[T2],
         working_memory: WorkingMemory,
     ) -> str:
         """Process one user turn end-to-end and return the assistant reply.
 
         ``user`` is the per-turn requester (may be the operator or any other
-        authorized household user). ``content`` is already T2-tagged by the
-        adapter — the orchestrator reads ``content.content`` and
-        ``content.tier.name`` but does not re-tag. ``working_memory`` is the
-        pool-acquired buffer for this (persona, user.slug) pair; the adapter
-        owns its lifecycle (acquire before, release in finally).
+        authorized household user). ``content`` is already tagged by the
+        adapter via :func:`alfred.identity._ingest._ingest_tier` — the
+        orchestrator reads ``content.content`` and ``content.tier.name``
+        but does not re-tag. The accepted tiers are T1 (operator via TUI)
+        and T2 (all other authenticated ingress); T3 NEVER reaches this
+        method directly — T3 bytes live behind opaque ContentHandle
+        references in the plugin host's content store (spec §3.1, §7.3).
+        ``working_memory`` is the pool-acquired buffer for this
+        (persona, user.slug) pair; the adapter owns its lifecycle (acquire
+        before, release in finally).
 
         Raises:
             BudgetError: pre-check refusal — or, for the 7th audit branch,
@@ -322,7 +327,7 @@ class Orchestrator:
         session: AsyncSession,
         *,
         user: UserLike,
-        content: TaggedContent[T2],
+        content: TaggedContent[T1] | TaggedContent[T2],
         working_memory: WorkingMemory,
         trace_id: str,
     ) -> str:
@@ -333,8 +338,12 @@ class Orchestrator:
         episodic = self._episodic_factory(session)
 
         # ------------------------------------------------------------------
-        # Observe — the adapter already T2-tagged ``content``; read off the
-        # tier name for downstream rows but do not re-tag.
+        # Observe — the adapter already tagged ``content`` via
+        # ``alfred.identity._ingest._ingest_tier``; read off the tier name
+        # for downstream rows but do not re-tag. Content is
+        # ``TaggedContent[T1]`` (operator via TUI) or ``TaggedContent[T2]``
+        # (all other ingress paths). T3 never reaches this method directly
+        # — T3 bytes are held in ContentHandle references only (spec §3.1).
         # ------------------------------------------------------------------
         user_input_text = content.content
         user_input_tier = content.tier.name
