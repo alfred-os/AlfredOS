@@ -131,6 +131,14 @@ step "Running migrations"
 # every container action is an `alfred` subcommand.
 docker compose run --rm alfred-core migrate
 
+step "Seeding state.git (idempotent)"
+# devops-001: --entrypoint /bin/sh bypasses the `alfred` ENTRYPOINT so we
+# can invoke the seed script directly. `alfred /app/bin/alfred-state-git-seed.sh`
+# would land as an invalid alfred subcommand. The script (devops-009) is
+# idempotent: re-running this step on a previously-seeded state.git is a
+# no-op. spec §15.4 step 2.
+docker compose run --rm --entrypoint /bin/sh alfred-core /app/bin/alfred-state-git-seed.sh
+
 step "Priming secrets bind-mount"
 # PR D2 devex-002: Compose silently creates a *directory* at the
 # bind-mount host path if the host file is missing. That surfaces
