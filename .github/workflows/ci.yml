@@ -97,11 +97,11 @@ jobs:
             --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py' \
             --fail-under=100
       - name: Trust-boundary files 100% line+branch coverage
-        # Slice-3 PR-S3-1 trust-boundary surface (spec §11a). The four
-        # files explicitly enumerated below are the ONLY legitimate
-        # construction sites for ``TaggedContent`` instances and the
+        # Slice-3 PR-S3-1 + PR-S3-2 trust-boundary surface (spec §11a).
+        # The files explicitly enumerated below are the ONLY legitimate
+        # construction sites for ``TaggedContent`` instances, the
         # ingress / quarantine / bootstrap boundaries the orchestrator
-        # depends on:
+        # depends on, and the real capability-gate enforcement plane:
         #
         #   * ``src/alfred/security/tiers.py`` — T0/T1/T2/T3 classes,
         #     ``tag()`` overload set, ``CapabilityGateNonce``, and
@@ -117,6 +117,23 @@ jobs:
         #   * ``src/alfred/bootstrap/nonce_factory.py`` — the per-process
         #     T3 nonce factory and the module-level lock that backs the
         #     atomic registration invariant (§3.2; CR-138 round-2 #3+#4).
+        #   * ``src/alfred/bootstrap/gate_factory.py`` — sanctioned
+        #     ``ALFRED_ENV`` read site (sec-007) that selects the
+        #     :class:`RealGate` vs deferred-stub bootstrap strategy.
+        #   * ``src/alfred/security/capability_gate/__init__.py`` —
+        #     public surface re-exports (Protocol + RealGate + factory).
+        #   * ``src/alfred/security/capability_gate/_gate.py`` — RealGate
+        #     hot-path ``check``/``check_plugin_load``/
+        #     ``check_content_clearance``, heartbeat fail-closed loop,
+        #     and ``supervisor.capability_gate_unavailable`` audit emit
+        #     (spec §8.1 / §8.2 / §8.5; CLAUDE.md hard rule #7).
+        #   * ``src/alfred/security/capability_gate/backend.py`` —
+        #     ``StorageBackend`` Protocol + ``PostgresBackend`` (the
+        #     authoritative grant store).
+        #   * ``src/alfred/security/capability_gate/policy.py`` — pure
+        #     ``GatePolicy`` + ``GrantRow`` algebra (no I/O).
+        #   * ``src/alfred/security/capability_gate/proposals.py`` —
+        #     reviewer-gated proposal-branch creation (PRD §6.4 #4).
         #
         # Per-file ``--include`` mirrors the hooks-subsystem precedent
         # above. The list is explicit so a new trust-boundary file gets
@@ -129,10 +146,10 @@ jobs:
         # because ``hashFiles('a','b','c') != ''`` is ANY-match, not
         # ALL-match. The gate must require ALL files to be present; if
         # any one is missing the coverage step should no-op.
-        if: hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != ''
+        if: hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py' \
+            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py' \
             --fail-under=100
 
   integration:
