@@ -45,16 +45,71 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
 
 import structlog
 
 from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
+from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry, get_registry
 
 if TYPE_CHECKING:
     from alfred.security.capability_gate.backend import StorageBackend
 
 _log = structlog.get_logger(__name__)
+
+# Spec §14 hookpoint table — the four plugin.grant.* lifecycle events.
+# Constants centralise the literals so the declaration site (this
+# module) and any future invoke / subscribe site reference the same
+# string; a typo on either end then fails at register_hookpoint's
+# strict-declaration check instead of silently never matching.
+HOOKPOINT_GRANT_REQUESTED: Final[str] = "plugin.grant.requested"
+HOOKPOINT_GRANT_APPROVED: Final[str] = "plugin.grant.approved"
+HOOKPOINT_GRANT_DENIED: Final[str] = "plugin.grant.denied"
+HOOKPOINT_GRANT_REVOKED: Final[str] = "plugin.grant.revoked"
+
+_GRANT_HOOKPOINTS: Final[tuple[str, ...]] = (
+    HOOKPOINT_GRANT_REQUESTED,
+    HOOKPOINT_GRANT_APPROVED,
+    HOOKPOINT_GRANT_DENIED,
+    HOOKPOINT_GRANT_REVOKED,
+)
+
+
+def declare_hookpoints(registry: HookRegistry | None = None) -> None:
+    """Declare the four ``plugin.grant.*`` hookpoints (spec §14).
+
+    Mirrors the Slice-2.5 :mod:`alfred.memory.episodic` /
+    :mod:`alfred.identity._ingest` precedent: publishers declare at
+    module-init time, and the per-call shim makes the declaration
+    discoverable by tests that swap the global registry singleton with
+    a fresh instance.
+
+    Spec §14 (hookpoint table): the four ``plugin.grant.*`` events are
+    post-only observability stages (no ``pre`` chain, no refusable
+    tier set), subscribers come from the system tier only because the
+    grant-lifecycle observers run inside the supervisor process and
+    must not be extendable by an untrusted plugin (a user-plugin
+    subscriber of ``plugin.grant.approved`` would see every operator
+    grant approval — that's an exfiltration path on its own), and
+    ``fail_closed=False`` because a crashing observer must not stall
+    a reviewer-approved grant.
+
+    Idempotent on equal metadata (:meth:`HookRegistry.register_hookpoint`
+    semantics) — re-importing under pytest test isolation is safe.
+
+    Args:
+        registry: The :class:`HookRegistry` to declare against.
+            Defaults to :func:`get_registry`'s active singleton; tests
+            pass the fresh registry explicitly to be unambiguous.
+    """
+    target = registry if registry is not None else get_registry()
+    for hookpoint in _GRANT_HOOKPOINTS:
+        target.register_hookpoint(
+            name=hookpoint,
+            subscribable_tiers=SYSTEM_ONLY_TIERS,
+            refusable_tiers=frozenset(),
+            fail_closed=False,
+        )
 
 
 @runtime_checkable
@@ -256,3 +311,13 @@ async def _write_proposal_to_state_git(
         operator_user_id=operator_user_id,
     )
     return branch_name
+
+
+# Module-init declaration — spec §6.2 / #119 discipline: publishers
+# declare at import time so subscribers registering at module-init
+# elsewhere always find the metadata. Idempotent on equal metadata so
+# re-importing under pytest test isolation is safe. The PR-S3-6 CLI
+# wiring will additionally call :func:`declare_hookpoints` from its
+# own entrypoint so a test fixture that swaps :func:`get_registry`'s
+# singleton picks up the declaration too.
+declare_hookpoints()
