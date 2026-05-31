@@ -53,6 +53,35 @@ def test_git_init_bare_is_idempotent(tmp_path: Path) -> None:
     assert (state_git / "HEAD").exists()
 
 
+def test_git_init_bare_on_existing_empty_dir(tmp_path: Path) -> None:
+    """``git init --bare`` against a pre-existing empty directory works.
+
+    Pins the Docker-named-volume case (spec §11.1): the alfred_state_git
+    volume mounts /var/lib/alfred, and on first boot STATE_GIT_PATH
+    (defaults to /var/lib/alfred/state.git) may already exist as an empty
+    directory rather than as a bare repo — for example if a setup script
+    pre-created the path. ``git init --bare`` must turn the empty dir
+    into a valid bare repo without complaint, and a follow-up call must
+    remain a no-op.
+    """
+    state_git = tmp_path / "state.git"
+    state_git.mkdir()
+    assert not (state_git / "HEAD").exists(), (
+        "fixture sanity: empty dir must not be a bare repo before init"
+    )
+
+    _run(["git", "init", "--bare", str(state_git)])
+    assert (state_git / "HEAD").exists()
+    assert (state_git / "config").exists()
+    assert (state_git / "objects").is_dir()
+
+    # Re-running on the now-initialised dir must remain idempotent —
+    # otherwise a second alfred-setup invocation against a pre-existing
+    # volume would fail.
+    _run(["git", "init", "--bare", str(state_git)])
+    assert (state_git / "HEAD").exists()
+
+
 def test_seed_main_branch(tmp_path: Path) -> None:
     """After ``git init --bare``, seeding a main branch with an empty commit succeeds."""
     state_git = tmp_path / "state.git"
