@@ -9,6 +9,7 @@ per-process nonce token — see ``CapabilityGateNonce`` and spec §3.2.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol, overload, runtime_checkable
 
 import structlog
@@ -97,8 +98,11 @@ class CapabilityGateNonce:
 
 # Module-level "authorised" nonce slot — set once at bootstrap by
 # alfred.bootstrap.nonce_factory.create_and_register_t3_nonce(). Tests
-# inject directly via the _authorized_nonce= kw on tag_t3_with_nonce so
-# they never have to touch this global.
+# install fixture state via the ``authorized_t3_nonce`` pytest fixture
+# in tests/unit/security/conftest.py; the per-call ``_authorized_nonce=``
+# seam was removed in CR-138 finding #7 because it codified a bypass
+# of the bootstrap-registered capability into the public function
+# signature.
 _AUTHORIZED_T3_NONCE: CapabilityGateNonce | None = None
 
 _log_t3 = structlog.get_logger(__name__)
@@ -131,6 +135,18 @@ class AnyTaggedContent(Protocol):
     task) rejects ``cast(TaggedContent[`` in non-test src/ files to
     prevent observers from re-acquiring a concrete generic type and
     discarding provenance. See spec §3.3.
+
+    All four members are declared as read-only ``@property`` in the
+    Protocol so type checkers refuse observer code that tries to
+    rebind ``c.content = "..."`` or similar. ``metadata`` returns
+    ``Mapping[str, Any]`` (not ``dict[str, Any]``) so observers cannot
+    statically mutate the metadata dict either — the static surface
+    is the contract. NOTE: Python's runtime ``isinstance`` against a
+    ``runtime_checkable`` Protocol only checks attribute presence, not
+    descriptor shape, so a class with mutating attributes still passes
+    ``isinstance``. The Mapping return type is the load-bearing
+    static-typing fix; the property declarations document intent.
+    CR-138 finding #6.
     """
 
     @property
@@ -143,7 +159,7 @@ class AnyTaggedContent(Protocol):
     def tier(self) -> type[TrustTier]: ...
 
     @property
-    def metadata(self) -> dict[str, Any]: ...
+    def metadata(self) -> Mapping[str, Any]: ...
 
 
 class TaggedContent[TierT: TrustTier](BaseModel):
@@ -373,7 +389,6 @@ def tag_t3_with_nonce(
     source: str = "unspecified",
     *,
     caller_token: CapabilityGateNonce | None,
-    _authorized_nonce: CapabilityGateNonce | None = None,
     **metadata: Any,
 ) -> TaggedContent[T3]:
     """Tag content with the T3 (untrusted) tier — capability-gated.
@@ -383,9 +398,14 @@ def tag_t3_with_nonce(
     check uses Python ``is`` (identity), not ``==`` (equality), so a
     re-constructed or imported-value copy cannot forge the gate. Spec §3.2.
 
-    ``_authorized_nonce`` is a test-injection seam only. Production code
-    passes ``None`` and the module-level ``_AUTHORIZED_T3_NONCE`` is used.
-    Tests that need to control the nonce inject both sides.
+    The authorised nonce comes from the module-level
+    ``_AUTHORIZED_T3_NONCE`` slot, set exactly once at process start by
+    ``alfred.bootstrap.nonce_factory.create_and_register_t3_nonce()``.
+    Tests install fixture state via the ``authorized_t3_nonce`` pytest
+    fixture (``tests/unit/security/conftest.py``); the pre-CR-138 per-
+    call ``_authorized_nonce=`` test-injection seam was removed because
+    any caller could pass the same object as both ``caller_token`` and
+    ``_authorized_nonce`` and defeat the gate. CR-138 finding #7.
 
     Raises:
         ValueError: when ``caller_token`` is ``None`` or is not the
@@ -394,7 +414,7 @@ def tag_t3_with_nonce(
             structlog warning ``security.t3_boundary.refused`` is also
             emitted; the full AuditWriter wiring lands in PR-S3-4.
     """
-    authorized = _authorized_nonce if _authorized_nonce is not None else _AUTHORIZED_T3_NONCE
+    authorized = _AUTHORIZED_T3_NONCE
     if caller_token is None or caller_token is not authorized:
         # Best-effort frame-derived caller label for forensics only — NOT
         # a security gate. Spec §3.2 is explicit: frame introspection is
