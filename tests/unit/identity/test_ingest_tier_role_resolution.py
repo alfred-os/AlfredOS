@@ -9,19 +9,32 @@ boundary before passing tagged content to the orchestrator.
 
 from __future__ import annotations
 
-from alfred.identity._ingest import _ingest_tier
+from dataclasses import dataclass
 
-from alfred.identity.models import Authorization, User
+from alfred.identity._ingest import _ingest_tier
+from alfred.identity.models import Authorization
 from alfred.security.tiers import T1, T2, TrustTier
 
 
-def _make_user(authorization: Authorization) -> User:
-    """Minimal User stub for testing _ingest_tier."""
-    user = User.__new__(User)
-    # Set the attributes directly on the ORM object for test isolation
-    object.__setattr__(user, "authorization", authorization.value)
-    object.__setattr__(user, "slug", f"test-{authorization.value}")
-    return user
+@dataclass(frozen=True, slots=True)
+class _UserStub:
+    """Minimal stand-in for the User ORM at the _ingest_tier boundary.
+
+    ``_ingest_tier`` reads only ``.authorization`` off the user (it is
+    typed ``object`` and uses ``getattr``) so a tiny dataclass with the
+    same two attributes is sufficient. Constructing a real ``User`` via
+    ``User.__new__`` would require SQLAlchemy's InstrumentedAttribute
+    machinery to be initialised, which is unit-test heavyweight for a
+    boundary that doesn't need ORM semantics.
+    """
+
+    authorization: str
+    slug: str
+
+
+def _make_user(authorization: Authorization) -> _UserStub:
+    """Build a minimal stub User for testing _ingest_tier."""
+    return _UserStub(authorization=authorization.value, slug=f"test-{authorization.value}")
 
 
 def test_tui_operator_resolves_to_t1() -> None:
