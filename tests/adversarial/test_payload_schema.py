@@ -211,3 +211,59 @@ def test_new_expected_outcomes_valid(outcome: str) -> None:
         references=("spec §12",),
     )
     assert payload.expected_outcome == outcome
+
+
+# --- Out-of-scope acknowledgement (spec §3.2 threat-model limits) ---
+
+
+def _out_of_scope_payload_data() -> dict[str, object]:
+    """Minimal valid payload with the out_of_scope pair flagged True."""
+    return {
+        "id": "tl-2026-005",
+        "category": "tier_laundering",
+        "threat": "gc.get_objects() traversal to retrieve the live nonce",
+        "ingestion_path": "capability_gate",
+        "payload": "import gc; nonce = next(...)",
+        "expected_outcome": "boundary_refused",
+        "provenance": "spec §3.2 threat-model limits",
+        "references": ("spec §3.2",),
+        "out_of_scope": True,
+        "out_of_scope_rationale": (
+            "Arbitrary in-process code execution defeats every type-level "
+            "gate; the nonce `is`-check defends against import-time forgery "
+            "only."
+        ),
+    }
+
+
+def test_out_of_scope_with_rationale_accepted() -> None:
+    """A payload may carry out_of_scope=True with a non-empty rationale."""
+    payload = AdversarialPayload.model_validate(_out_of_scope_payload_data())
+    assert payload.out_of_scope is True
+    assert payload.out_of_scope_rationale is not None
+    assert "code execution" in payload.out_of_scope_rationale
+
+
+def test_out_of_scope_without_rationale_rejected() -> None:
+    """out_of_scope=True with an empty rationale fails validation."""
+    data = _out_of_scope_payload_data()
+    data["out_of_scope_rationale"] = "   "  # whitespace-only is empty
+    with pytest.raises(ValidationError) as excinfo:
+        AdversarialPayload.model_validate(data)
+    assert "out_of_scope_rationale" in str(excinfo.value)
+
+
+def test_rationale_without_flag_rejected() -> None:
+    """out_of_scope=False but a rationale is set — drift between paired fields."""
+    data = _out_of_scope_payload_data()
+    data["out_of_scope"] = False
+    with pytest.raises(ValidationError) as excinfo:
+        AdversarialPayload.model_validate(data)
+    assert "out_of_scope_rationale" in str(excinfo.value)
+
+
+def test_out_of_scope_defaults_to_false() -> None:
+    """A payload with no out_of_scope fields defaults to out_of_scope=False."""
+    payload = AdversarialPayload.model_validate(_valid_payload_data())
+    assert payload.out_of_scope is False
+    assert payload.out_of_scope_rationale is None
