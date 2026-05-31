@@ -211,10 +211,7 @@ def test_devgate_check_plugin_load_returns_true_by_default() -> None:
     from alfred.hooks.capability import DevGate
 
     gate = DevGate()
-    assert (
-        gate.check_plugin_load(plugin_id="test.plugin", manifest_tier="operator")
-        is True
-    )
+    assert gate.check_plugin_load(plugin_id="test.plugin", manifest_tier="operator") is True
 
 
 def test_devgate_check_content_clearance_returns_true_by_default() -> None:

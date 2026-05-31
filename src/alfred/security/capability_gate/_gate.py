@@ -7,12 +7,15 @@ PR-S3-7 flag-day removal.
 
 This file lands incrementally across PR-S3-2:
 
-* PR-S3-2 Tasks 1-8 (this commit) — happy-path :meth:`check` /
+* PR-S3-2 Tasks 1-8 — happy-path :meth:`check` /
   :meth:`check_plugin_load` / :meth:`check_content_clearance`, the
   :meth:`_apply_grants` Postgres sync path, and the
   err-002 fail-loud :meth:`rebuild_from_state_git` deferred stub.
-* PR-S3-2 Tasks 9-10 (Component E) — heartbeat task + fail-closed
-  audit emission (``supervisor.capability_gate_unavailable``).
+* PR-S3-2 Tasks 9-10 (this commit) — heartbeat loop body +
+  :meth:`_emit_gate_unavailable_audit` /
+  :meth:`stop_heartbeat`, emitting
+  ``supervisor.capability_gate_unavailable`` on both fail-closed
+  transitions.
 * PR-S3-6 — replaces the :meth:`rebuild_from_state_git`
   ``NotImplementedError`` with the gitpython-backed parse, calling
   :meth:`_apply_grants` directly.
@@ -28,14 +31,48 @@ selection lives in :mod:`alfred.bootstrap.gate_factory` (forthcoming).
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+import uuid
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 
+from alfred.audit.audit_row_schemas import (
+    SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS,
+)
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 
 if TYPE_CHECKING:
     from alfred.security.capability_gate.backend import StorageBackend
+
+
+@runtime_checkable
+class _AuditSink(Protocol):
+    """Structural seam for the audit sink the gate writes to.
+
+    Matches :meth:`alfred.audit.log.AuditWriter.append_schema` keyword-only.
+    Kept private to this module — production wires the real ``AuditWriter``
+    and tests inject a spy with the same signature. Defending the seam
+    structurally (rather than importing ``AuditWriter`` here) keeps the
+    capability_gate package import-graph free of the audit subsystem's
+    SQLAlchemy dependency, matching the sec-007 layering posture: gate
+    code is hot-path; the audit writer is a sink, not a dependency.
+    """
+
+    async def append_schema(
+        self,
+        *,
+        fields: frozenset[str],
+        schema_name: str,
+        event: str,
+        actor_user_id: str | None,
+        subject: dict[str, Any],
+        trust_tier_of_trigger: str,
+        result: str,
+        cost_estimate_usd: float,
+        trace_id: str,
+    ) -> None:
+        raise NotImplementedError  # pragma: no cover
+
 
 _log = structlog.get_logger(__name__)
 
@@ -69,7 +106,7 @@ class RealGate:
         *,
         policy: GatePolicy,
         backend: StorageBackend,
-        audit_sink: object,
+        audit_sink: _AuditSink,
     ) -> None:
         self._policy = policy
         self._backend = backend
@@ -84,7 +121,7 @@ class RealGate:
         cls,
         *,
         backend: StorageBackend,
-        audit_sink: object,
+        audit_sink: _AuditSink,
         start_heartbeat: bool = False,
     ) -> RealGate:
         """Factory: load grants from Postgres, return a ready :class:`RealGate`.
@@ -111,13 +148,7 @@ class RealGate:
         policy = GatePolicy(grants=grants)
         gate = cls(policy=policy, backend=backend, audit_sink=audit_sink)
         if start_heartbeat:
-            # Tasks 9-10 (Component E) ship _heartbeat_loop; until then
-            # the supervisor wires its own heartbeat. This branch stays
-            # so the constructor signature is stable when Component E
-            # lands.
-            gate._heartbeat_task = asyncio.create_task(  # pragma: no cover
-                gate._heartbeat_loop()
-            )
+            gate._heartbeat_task = asyncio.create_task(gate._heartbeat_loop())
         return gate
 
     # ------------------------------------------------------------------
@@ -268,16 +299,114 @@ class RealGate:
         )
 
     # ------------------------------------------------------------------
-    # Heartbeat / fail-closed machinery — Components E-F (subsequent PR-S3-2 tasks)
+    # Heartbeat / fail-closed machinery (spec §8.1, Tasks 9-10)
     # ------------------------------------------------------------------
 
-    async def _heartbeat_loop(self) -> None:  # pragma: no cover - lands in Tasks 9-10
-        """Background task: ping Postgres every 10s; fail-closed after 60s silence.
+    async def _heartbeat_loop(self) -> None:
+        """Background task: ping the backing store and track outage state.
 
-        Full implementation lands in PR-S3-2 Component E (Tasks 9-10).
-        The signature is fixed here so :meth:`create` can dispatch to
-        it conditionally without ABI churn when the body lands.
+        Spec §8.1: every ``_HEARTBEAT_INTERVAL_SECONDS`` (10 s), call
+        :meth:`StorageBackend.ping`. On success, the miss counter resets;
+        if we were fail-closed, emit the ``exiting_fail_closed`` audit
+        row and re-open the gate. On failure, the miss counter
+        increments; once it reaches ``_MAX_MISSED_HEARTBEATS`` (6 misses
+        ≡ 60 s window) and we are not already fail-closed, emit the
+        ``entering_fail_closed`` audit row and trip the flag.
+
+        The loop runs forever and only exits on :class:`asyncio.CancelledError`
+        (from :meth:`stop_heartbeat`). All other exceptions on the ping
+        path are treated as backing-store failures — CLAUDE.md hard rule
+        #7 forbids silent broken-pipe states. We capture
+        ``type(exc).__name__`` only (spec §5.6: never persist
+        ``str(exc)`` / ``exc.args`` because they may carry T3 content
+        fragments).
         """
-        raise NotImplementedError(
-            "RealGate._heartbeat_loop lands in PR-S3-2 Component E (Tasks 9-10)"
+        while True:
+            try:
+                await self._backend.ping()
+            except asyncio.CancelledError:
+                # Cooperative shutdown: stop_heartbeat() cancelled us.
+                raise
+            except Exception as exc:
+                error_type = type(exc).__name__
+                self._missed_heartbeats += 1
+                if self._missed_heartbeats >= _MAX_MISSED_HEARTBEATS and not self._fail_closed:
+                    await self._emit_gate_unavailable_audit(
+                        state_transition="entering_fail_closed",
+                        denied_dispatch_count=None,
+                        backing_store_error_type=error_type,
+                    )
+                    self._fail_closed = True
+            else:
+                self._missed_heartbeats = 0
+                if self._fail_closed:
+                    # Recovery: emit the exiting row with the cumulative
+                    # denied-dispatch count, then re-open the gate.
+                    await self._emit_gate_unavailable_audit(
+                        state_transition="exiting_fail_closed",
+                        denied_dispatch_count=self._denied_dispatch_count,
+                        backing_store_error_type=None,
+                    )
+                    self._fail_closed = False
+                    self._denied_dispatch_count = 0
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+
+    async def _emit_gate_unavailable_audit(
+        self,
+        *,
+        state_transition: str,
+        denied_dispatch_count: int | None,
+        backing_store_error_type: str | None,
+    ) -> None:
+        """Emit one ``supervisor.capability_gate_unavailable`` audit row.
+
+        Spec §8.1 / §8.5: a fail-closed state transition (entering OR
+        exiting) MUST surface as an audit row. The ``subject`` dict is
+        constructed against
+        :data:`SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS` exactly —
+        every declared key is present (``None`` where conditionally
+        absent) so :meth:`AuditWriter.append_schema` symmetric
+        validation passes.
+
+        CLAUDE.md hard rule #7: this method does NOT swallow audit
+        failures. If the sink raises, the heartbeat loop's
+        exception-bare-handler does NOT catch it (this method is invoked
+        outside the ``try/except`` around ``backend.ping()``); the loop
+        crashes loudly. A future PR-S3 task can wire a supervisor-level
+        crash-restart strategy, but the silent path is forbidden.
+        """
+        correlation_id = str(uuid.uuid4())
+        await self._audit_sink.append_schema(
+            fields=SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS,
+            schema_name="SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS",
+            event="supervisor.capability_gate_unavailable",
+            actor_user_id=None,
+            subject={
+                "state_transition": state_transition,
+                "denied_dispatch_count": denied_dispatch_count,
+                "backing_store_error_type": backing_store_error_type,
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="success",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
         )
+        _log.warning(
+            "capability_gate.unavailable",
+            state_transition=state_transition,
+            denied_dispatch_count=denied_dispatch_count,
+            backing_store_error_type=backing_store_error_type,
+        )
+
+    def stop_heartbeat(self) -> None:
+        """Cancel the heartbeat task. Safe to call when no task is running.
+
+        Tests that opt in to ``start_heartbeat=True`` MUST call this in a
+        ``finally`` block; without cancellation the task lingers across
+        tests and asyncio warns about unawaited coroutines. Production
+        bootstrap calls this during graceful shutdown.
+        """
+        task = self._heartbeat_task
+        if task is not None and not task.done():
+            task.cancel()
