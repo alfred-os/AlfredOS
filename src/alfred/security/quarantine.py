@@ -74,11 +74,27 @@ class ContentHandle:
     quarantine.extract call. The content store (PR-S3-5) enforces this
     via atomic DEL on first successful extract. A second extract against
     the same id receives ContentHandleExpired. See spec §7.2.
+
+    ``fetch_timestamp`` MUST be timezone-aware. Naive datetimes silently
+    encode the producer's local clock, which breaks forensic ordering
+    when audit rows from different hosts are correlated and can hide
+    out-of-order extracts under DST boundaries. CR-138 finding #4.
     """
 
     id: str
     source_url: str
     fetch_timestamp: datetime
+
+    def __post_init__(self) -> None:
+        # tzinfo presence alone is insufficient — a tzinfo whose
+        # ``utcoffset()`` returns ``None`` (legal per the datetime
+        # contract for "unknown") is functionally naive. Both checks
+        # must pass.
+        if self.fetch_timestamp.tzinfo is None or self.fetch_timestamp.utcoffset() is None:
+            raise ValueError(
+                "ContentHandle.fetch_timestamp must be timezone-aware; "
+                f"got naive datetime {self.fetch_timestamp!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +107,7 @@ async def quarantined_to_structured(
     schema: type[BaseModel],
     *,
     extractor: Any,
-    gate: CapabilityGate | None,
+    gate: CapabilityGate,
 ) -> Any:
     """Convert an opaque ContentHandle into a validated Pydantic model.
 
@@ -106,6 +122,13 @@ async def quarantined_to_structured(
     hookpoint="quarantine.dereference", content_tier="T3") — a clearance
     distinct from the tag.T3 clearance (which is plugin-host-internal).
     See spec §3.4.
+
+    ``gate`` is REQUIRED — no default, no ``| None``. A trust-boundary
+    function whose capability gate can be elided through a default
+    argument is a boundary with a bypass path codified in its public
+    type signature. Tests inject a fixture gate (see
+    ``tests/unit/security/conftest.py``); production callers inject the
+    real ``CapabilityGate`` implementation. CR-138 finding #5.
     """
     raise NotImplementedError("quarantined_to_structured stub — full implementation is PR-S3-4")
 
