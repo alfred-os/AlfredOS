@@ -1,10 +1,10 @@
 # 0013 — Defer T1 operator tier, T3 untrusted ingestion, and dual-LLM split to Slice 3
 
-- **Status**: Accepted
+- **Status**: Superseded by [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Slice 3 delivers the full stack this ADR committed to
 - **Date**: 2026-05-27
 - **Slice**: 2 — `docs/superpowers/plans/2026-05-26-slice-2-pr-A-identity.md`
 - **Supersedes**: [ADR-0008](0008-llm-output-trust-tier.md) (in part)
-- **Superseded by**: —
+- **Superseded by**: [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) (2026-05-31)
 
 ## Context
 
@@ -112,6 +112,8 @@ body at PR-A merge; this PR (PR-E) supplies the full prose. Between
 PR-A merge and PR-E merge, a reader of ADR-0008 sees the supersession
 edge but no rationale — acceptable because the placeholder explicitly
 says "full body in PR E."
+
+ADR-0013 deferred T1+T3+dual-LLM to Slice 3. Slice 3 delivered all three per this commitment. ADR-0017 supersedes this ADR and records the five structural decisions that govern the implementation. The Slice-3 tracking issues for §6.10 deferred items are retired in PR-S3-7.
 
 ## References
 
