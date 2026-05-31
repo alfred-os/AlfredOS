@@ -21,12 +21,13 @@ set -eu
 
 STATE_GIT_PATH="${STATE_GIT_PATH:-/var/lib/alfred/state.git}"
 
-if git -C "${STATE_GIT_PATH}" rev-parse --is-bare-repository >/dev/null 2>&1; then
-  echo "state.git already initialised at ${STATE_GIT_PATH}; skipping init."
+if [ "$(git -C "${STATE_GIT_PATH}" rev-parse --is-bare-repository 2>/dev/null || echo 'false')" = "true" ]; then
+  echo "state.git already exists as bare repo at ${STATE_GIT_PATH}; skipping init."
 else
-  # Bare-repo predicate (not directory existence) — covers the
-  # Docker-named-volume pre-create case where ${STATE_GIT_PATH} exists
-  # as an empty directory but is not yet a bare repo (devops-008).
+  # Bare-repo predicate via OUTPUT value (not exit code) — `rev-parse
+  # --is-bare-repository` exits 0 for non-bare Git repos too, just
+  # prints "false". The `|| echo 'false'` catches the not-a-repo case
+  # so an empty Docker-volume directory falls through to init (devops-008).
   git init --bare "${STATE_GIT_PATH}"
   echo "Initialised bare state.git at ${STATE_GIT_PATH}."
 fi
