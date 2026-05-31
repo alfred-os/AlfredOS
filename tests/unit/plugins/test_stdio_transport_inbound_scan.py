@@ -66,6 +66,13 @@ def test_no_canaries_configured_means_clean_frame() -> None:
     assert scanner.scan(b"arbitrary content") is None
 
 
+def test_canary_set_non_empty_but_no_match_returns_none() -> None:
+    # Covers the loop-continuation branch when a canary is registered but
+    # absent from the frame — distinct from the empty-canaries fast path.
+    scanner = InboundContentScanner(canary_tokens=frozenset({"NEVER_PRESENT"}))
+    assert scanner.scan(b"this frame is clean") is None
+
+
 def test_scanner_handles_non_utf8_bytes() -> None:
     # T3 content may be binary (e.g. a fetched image); the scanner must
     # not throw on undecodable bytes.
