@@ -1,10 +1,10 @@
 # 0008 — LLM output is T2 in Slice 1 (not T0)
 
-- **Status**: Accepted (superseded in part by ADR-0013 — Slice-2 commitment to T1+T3+dual-LLM rescheduled to Slice 3)
+- **Status**: Superseded by [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Slice 3 delivers the full trust-tier stack this ADR committed to in Slice 1/2
 - **Date**: 2026-05-26
 - **Slice**: 1 (`docs/superpowers/plans/2026-05-24-slice-1-hello-alfred.md`)
 - **Supersedes**: —
-- **Superseded by**: —
+- **Superseded by**: [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) (2026-05-31)
 
 ## Context
 
