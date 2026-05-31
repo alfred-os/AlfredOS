@@ -114,7 +114,7 @@ Each criterion is binary; all must pass for v0.1.
 
 **Architectural invariants (non-negotiable, baked into every component):**
 - **Plugins are MCP servers.** Comms adapters, skills, memory backends, integrations, and the reviewer agent are all MCP servers — stdio for in-process, HTTP for remote.
-- **Hybrid isolation.** Plugins declare a trust tier; official → in-process subprocess; third-party or agent-authored → containerized with declared capabilities (network allowlist, fs mounts, secret IDs).
+- **Hybrid isolation.** Plugins declare a trust tier; official → in-process subprocess; third-party or agent-authored → containerized with declared capabilities (network allowlist, fs mounts, secret IDs). **Slice 3 relaxation:** the quarantined-LLM plugin runs as a dedicated-UID subprocess with env scrubbing rather than a container — a time-bounded deviation recorded in [ADR-0017](docs/adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md). Full containerisation lands in Slice 4 per [ADR-0015](docs/adr/0015-slice4-containerised-quarantined-llm.md).
 - **Internal git repo at `/var/lib/alfred/state.git`** holds: skills, persona definitions, prompt/persona configs, routing config, security policy. The agent commits proposed changes to `proposal/*` branches; the reviewer agent reviews; merged commits become active. Rollback is `git revert`.
 - **The LLM never holds secrets.** The secret broker substitutes values at the tool-call boundary; the LLM sees opaque references (`{{secret:gmail_oauth}}`).
 - **Dual-LLM split.** The privileged orchestrator never processes raw T3 content; the quarantined LLM is the only consumer of T3 content and can only emit structured data.
