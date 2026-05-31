@@ -40,6 +40,10 @@ Columns
 * ``commit_hash`` — 40-char SHA, or NULL before first sync (spec §15.4
   step 2).
 * ``synced_at`` — timestamp (with tz) of the last successful sync.
+  ``server_default=NOW()`` so raw-SQL writers that omit the column still
+  get a DB-supplied timestamp (mem-005); the Python ORM ``default=_now``
+  in :class:`CapabilityGateSync` continues to populate the instance on
+  ORM-shaped INSERTs without requiring a refresh.
 
 Downgrade: DROP TABLE — re-derived from state.git on next startup
 (spec §13). No data preservation.
@@ -86,6 +90,11 @@ def upgrade() -> None:
         sa.Column(
             "synced_at",
             sa.DateTime(timezone=True),
+            # mem-005: DB-level NOW() default so raw-SQL writers (Alembic
+            # data ops, psql) that omit synced_at still get a populated
+            # value — the Python ORM default in models.CapabilityGateSync
+            # does not run for non-ORM INSERT paths.
+            server_default=sa.text("now()"),
             nullable=False,
         ),
         sa.CheckConstraint("id = 1", name="ck_capability_gate_sync_singleton"),

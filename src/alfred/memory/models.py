@@ -246,6 +246,15 @@ class CapabilityGateSync(Base):
     # NULL before first sync (before `alfred plugin grant init` runs).
     # spec §15.4 step 2 seeds this with the empty-tree hash on init.
     commit_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    synced_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # mem-005: server_default=NOW() so raw-SQL writers (Alembic data ops,
+    # psql, integration fixtures that omit the column) get a DB-supplied
+    # timestamp. The Python-side default=_now stays for ORM-shaped INSERTs
+    # so the resulting instance has the value populated without a refresh.
+    synced_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now,
+        server_default=sa.func.now(),
+        nullable=False,
+    )
 
     __table_args__ = (CheckConstraint("id = 1", name="ck_capability_gate_sync_singleton"),)
