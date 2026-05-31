@@ -223,9 +223,14 @@ async def test_entering_fail_closed_emits_audit_row() -> None:
     assert row["denied_dispatch_count"] is None
     assert row["backing_store_error_type"] == "ConnectionError"
     assert isinstance(row["correlation_id"], str)
-    # Validate the correlation_id is a UUID4 — defends against drift to
-    # a deterministic format that could collide across processes.
-    uuid.UUID(row["correlation_id"])
+    # CR-139 finding #6 / PRD §8.1: assert UUID4 + RFC4122 variant
+    # explicitly. Plain ``uuid.UUID(...)`` accepts any UUID version
+    # (including v1, which leaks MAC + timestamp). Pinning version
+    # and variant defends against drift to a deterministic or
+    # leakable format.
+    parsed = uuid.UUID(row["correlation_id"])
+    assert parsed.version == 4
+    assert parsed.variant == uuid.RFC_4122
 
 
 async def test_exiting_fail_closed_emits_audit_row_with_count() -> None:
@@ -479,6 +484,57 @@ async def test_heartbeat_loop_transitions_to_fail_closed() -> None:
     assert len(emitted) == 1
     assert emitted[0]["state_transition"] == "entering_fail_closed"
     assert emitted[0]["backing_store_error_type"] == "ConnectionError"
+
+
+async def test_heartbeat_loop_fail_closed_survives_audit_sink_failure() -> None:
+    """CR-139 finding #3: fail-closed flips even if ``append_schema`` raises.
+
+    The audit subsystem may itself be wedged on the same backing-store
+    outage that drove the heartbeat into fail-closed. The previous
+    code awaited the audit emit BEFORE flipping ``_fail_closed``, so a
+    raised audit-sink exception left the gate fully open and crashed
+    the heartbeat loop — every subsequent dispatch would have been
+    admitted until a restart, exactly the silent privilege-stay-open
+    shape CLAUDE.md hard rule #7 forbids.
+
+    The fix flips ``_fail_closed = True`` first, so the gate denies
+    immediately on every subsequent ``check*`` call regardless of what
+    the audit sink does.
+    """
+    from alfred.security.capability_gate import _gate as gate_module
+    from alfred.security.capability_gate._gate import _MAX_MISSED_HEARTBEATS
+
+    backend = _make_failing_backend()
+
+    # Audit sink that raises — simulates audit subsystem wedge.
+    sink = MagicMock()
+    sink.append_schema = AsyncMock(side_effect=RuntimeError("audit wedged"))
+
+    gate = await gate_module.RealGate.create(
+        backend=backend, audit_sink=sink, start_heartbeat=False
+    )
+    gate._missed_heartbeats = _MAX_MISSED_HEARTBEATS - 1
+
+    async def _fake_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    original_sleep = gate_module.asyncio.sleep
+    gate_module.asyncio.sleep = _fake_sleep  # type: ignore[assignment]
+    try:
+        # The audit-sink raise propagates out of the loop (heartbeat
+        # error-loud-not-silent behaviour); the cancellation never
+        # arrives because the audit raise wins first. The critical
+        # invariant is that _fail_closed is True at the point of raise.
+        with pytest.raises(RuntimeError, match="audit wedged"):
+            await gate._heartbeat_loop()
+    finally:
+        gate_module.asyncio.sleep = original_sleep  # type: ignore[assignment]
+
+    # The flag MUST be set even though the audit emit failed.
+    assert gate._fail_closed is True
+    # Every check method denies — the gate is fail-closed even though
+    # no audit row landed.
+    assert gate.check(plugin_id="x", hookpoint="y", requested_tier="operator") is False
 
 
 async def test_heartbeat_loop_recovery_emits_exiting_row() -> None:

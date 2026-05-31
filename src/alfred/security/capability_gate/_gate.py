@@ -275,15 +275,46 @@ class RealGate:
 
         Called by PR-S3-6's ``parse_state_git_head`` after parsing the
         state.git tree on a new HEAD commit; until then, the supervisor
-        calls this directly with pre-parsed grants. Upserts each grant
-        individually (idempotent); revocations are handled by the full
-        replacement of the in-memory policy below.
+        calls this directly with pre-parsed grants.
 
-        Persistence ordering: upsert each grant, then set the sync hash.
-        On any DB failure the in-memory policy is NOT swapped — the
-        previous policy stays authoritative until a future rebuild
+        Persistence delta (CR-139 finding #2): the previous in-memory
+        snapshot is the source of truth for what was approved. Any
+        grant in the previous snapshot but NOT in ``grants`` is a
+        revocation — :meth:`StorageBackend.revoke_grant` removes the
+        Postgres row. Without this, the runtime cache stayed
+        in-memory-revoked but Postgres-approved; the next process
+        restart loaded the stale row and resurrected the capability —
+        a CLAUDE.md hard-rule #2 silent privilege-escalation shape.
+
+        Ordering: revoke removed rows, upsert new / changed rows, set
+        the sync hash, swap the in-memory policy. The reordering is
+        idempotent: a re-applied identical snapshot is a no-op at every
+        stage. On any DB failure the in-memory policy is NOT swapped —
+        the previous policy stays authoritative until a future rebuild
         succeeds.
+
+        Note on grant identity: :class:`GrantRow` equality / hashing is
+        structural (frozen dataclass with slots). The
+        ``previous - grants`` set difference yields every row whose
+        ``(plugin_id, subscriber_tier, hookpoint, content_tier,
+        proposal_branch)`` tuple disappeared from the new snapshot.
+        Backend ``revoke_grant`` keys on
+        ``(plugin_id, hookpoint, subscriber_tier)`` so a row whose
+        ``content_tier`` or ``proposal_branch`` changed (but key didn't)
+        is a revoke-then-upsert — the upsert below recreates it with
+        the new payload. That's the correct semantics: a
+        content-tier widening is a separate reviewer decision from the
+        original grant, and the Postgres row should reflect the latest
+        approved shape.
         """
+        previous_grants = self._policy.grants
+        revoked = previous_grants - grants
+        for grant in revoked:
+            await self._backend.revoke_grant(
+                plugin_id=grant.plugin_id,
+                hookpoint=grant.hookpoint,
+                subscriber_tier=grant.subscriber_tier,
+            )
         for grant in grants:
             await self._backend.upsert_grant(grant)
         await self._backend.set_sync_hash(commit_hash)
@@ -295,6 +326,7 @@ class RealGate:
         _log.info(
             "capability_gate.rebuild.complete",
             grant_count=len(grants),
+            revoked_count=len(revoked),
             commit_hash=commit_hash,
         )
 
@@ -331,12 +363,22 @@ class RealGate:
                 error_type = type(exc).__name__
                 self._missed_heartbeats += 1
                 if self._missed_heartbeats >= _MAX_MISSED_HEARTBEATS and not self._fail_closed:
+                    # CR-139 finding #3: flip fail-closed BEFORE awaiting
+                    # the audit sink. If ``append_schema`` raises (the
+                    # audit subsystem may itself be wedged on the same
+                    # backing-store outage), the previous ordering left
+                    # ``self._fail_closed`` False and the gate kept
+                    # admitting dispatches — exactly the silent
+                    # privilege-stay-open shape CLAUDE.md hard rule #7
+                    # forbids. Setting the flag first guarantees every
+                    # subsequent ``check*`` denies even if the audit
+                    # path crashes the heartbeat loop.
+                    self._fail_closed = True
                     await self._emit_gate_unavailable_audit(
                         state_transition="entering_fail_closed",
                         denied_dispatch_count=None,
                         backing_store_error_type=error_type,
                     )
-                    self._fail_closed = True
             else:
                 self._missed_heartbeats = 0
                 if self._fail_closed:
