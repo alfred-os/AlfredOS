@@ -82,10 +82,15 @@ def test_alfred_core_has_state_git_volume(compose: dict[str, Any]) -> None:
     """
     core = compose.get("services", {}).get("alfred-core", {})
     volumes = core.get("volumes", []) or []
-    assert any("alfred_state_git:/var/lib/alfred" in v for v in _volume_strings(volumes)), (
-        "alfred-core requires alfred_state_git mounted at /var/lib/alfred "
-        "for state.git ops (spec §11.1). Wrong target would break the "
-        "STATE_GIT_PATH default in bin/alfred-state-git-seed.sh."
+    volume_entries = _volume_strings(volumes)
+    # Exact membership, not substring: a mis-mount like
+    # `alfred_state_git:/var/lib/alfred_backup` would silently pass
+    # a substring check and break STATE_GIT_PATH (CR-round-2 fix).
+    assert "alfred_state_git:/var/lib/alfred" in volume_entries, (
+        "alfred-core requires alfred_state_git mounted at exactly "
+        "/var/lib/alfred (no trailing path) for state.git ops "
+        "(spec §11.1). Wrong target would break the STATE_GIT_PATH "
+        "default in bin/alfred-state-git-seed.sh."
     )
 
 
