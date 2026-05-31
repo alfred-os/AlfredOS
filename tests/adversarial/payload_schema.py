@@ -25,11 +25,13 @@ _PREFIX_TO_CATEGORY: dict[str, str] = {
     "cnry": "canary",
     "ipp": "inter_persona",
     "hk": "hooks",
+    "tl": "tier_laundering",  # Slice 3 — T3 content posing as T2, cast bypasses
+    "de": "dlp_egress",  # Slice 3 — T3-origin credential exfiltration paths
 }
 
 # Anchored regex matching `<prefix>-YYYY-NNN`. NNN is zero-padded to three
 # digits per SKILL.md "Numbering monotonic per year per category."
-_ID_PATTERN = re.compile(r"^(pi|dlp|cap|cnry|ipp|hk)-\d{4}-\d{3}$")
+_ID_PATTERN = re.compile(r"^(pi|dlp|cap|cnry|ipp|hk|tl|de)-\d{4}-\d{3}$")
 
 Category = Literal[
     "prompt_injection",
@@ -38,6 +40,8 @@ Category = Literal[
     "canary",
     "inter_persona",
     "hooks",
+    "tier_laundering",  # Slice 3: T3->T2 cast bypasses, wire-format confusion, nonce forgery
+    "dlp_egress",  # Slice 3: T3-origin exfiltration (distinct from dlp — see spec §12.1)
 ]
 
 IngestionPath = Literal[
@@ -46,6 +50,13 @@ IngestionPath = Literal[
     "mcp.tool.output",
     "file.read",
     "inter_persona.relay",
+    # Slice 3 additions (spec §12.2):
+    "stdio_transport.outbound",  # frames written to subprocess stdin
+    "stdio_transport.inbound",  # frames read from subprocess stdout
+    "cast_bypass",  # cast(TaggedContent[T2], t3_value) type-level attack
+    "wire_format_deser",  # malformed JSON-RPC tier field on the wire
+    "capability_gate",  # capability-gate bypass attempt
+    "secret_broker",  # secret leaked via env or manifest
 ]
 
 ExpectedOutcome = Literal[
@@ -53,6 +64,10 @@ ExpectedOutcome = Literal[
     "caught_by_dlp",
     "refused",
     "quarantined",
+    # Slice 3 additions (spec §12.2):
+    "boundary_refused",  # tag(T3, ...) from unauthorised caller disposition
+    # asserts a specific named audit row exists (e.g. manifest-broadening-capped):
+    "audit_row_emitted",
 ]
 
 

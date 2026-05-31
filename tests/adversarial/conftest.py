@@ -17,22 +17,20 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Final, get_args
 
 import pytest
 import yaml
 
-from tests.adversarial.payload_schema import AdversarialPayload
+from tests.adversarial.payload_schema import AdversarialPayload, Category
 
-# The six canonical category directories. Kept in lock-step with the
-# `Category` Literal in `payload_schema.py` and with the SKILL.md table.
-_CATEGORIES: tuple[str, ...] = (
-    "prompt_injection",
-    "dlp",
-    "capability_bypass",
-    "canary",
-    "inter_persona",
-    "hooks",
-)
+# Canonical category directories — derived from the `Category` Literal in
+# `payload_schema.py` so the two can never drift. Adding a new variant to
+# `Category` automatically extends every README/density/layout invariant
+# below; deleting a variant from the Literal makes the corresponding
+# category-dir contracts disappear in lock-step. The SKILL.md table is the
+# external doc that mirrors this set.
+_CATEGORIES: Final[tuple[str, ...]] = get_args(Category)
 
 
 def _iter_payload_paths(root: Path) -> Iterator[Path]:
