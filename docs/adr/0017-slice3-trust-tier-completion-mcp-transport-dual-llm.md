@@ -80,3 +80,21 @@ Rejected: `DevGate` fails open for `operator`/`user-plugin` without a backing st
 - ADR-0016 (Slice-4 Discord/TUI comms-MCP stub — co-merged, see Task 8)
 - [Design spec](../superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md) — complete Slice-3 design; §§1.3, 3.2, 4.1, 4.2, 4.3, 5.5, 5.7, 7a.1, 8.4, 10.1 govern the decisions above.
 - Code anchors: `src/alfred/security/secrets.py:228-279` (UID ownership check), `src/alfred/hooks/capability.py` (existing capability gate seam).
+
+### Slice-2.5 issue retirement (spec §15.3)
+
+Per spec §15.3, the following Slice-2.5 deferral tracking issues are retired
+in this PR (the first Slice-3 PR):
+
+- Issue #122 — Slice-2.5: hooks perf-gate CI calibration (PR-S3-7 perf-gate
+  hardens with host-load guard; no remaining open action).
+- Issue #123 — Slice-2.5: dotted-form hookpoint normalisation (open; tracked
+  as Slice-3 follow-on in PR-S3-7 Task N per §6.10 deferred list).
+- Issue #124 — Slice-2.5: `subscribable_tiers` registration-time enforcement
+  (shipped in PR #129; closed).
+- Issue #125 — Slice-2.5: post-UAT polish (shipped in PR #121; closed).
+
+Issues #122 (perf-gate calibration) and #123 (dotted-form) remain open at
+the GitHub level pending their Slice-3 work; the retirement here means the
+Slice-2.5 planning epoch ends and ownership transfers to the Slice-3 plan
+suite.
