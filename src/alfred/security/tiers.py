@@ -1,13 +1,17 @@
-"""Trust-tier types for AlfredOS. Slice 1 ships T0 and T2 only.
+"""Trust-tier types for AlfredOS.
 
-See PRD §7.1. T1 (operator) and T3 (untrusted) markers land alongside the
-dual-LLM split in Slice 2/3 when AlfredOS first ingests untrusted content.
+The closed tier model (PRD §7.1 / ADR-0017): {T0, T1, T2, T3}.
+
+Slice 3 adds T1 (operator) and T3 (untrusted ingestion) alongside the
+dual-LLM split. The ``tag(T3, ...)`` factory is capability-gated by a
+per-process nonce token — see ``CapabilityGateNonce`` and spec §3.2.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol, overload, runtime_checkable
 
+import structlog
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -16,6 +20,8 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+
+from alfred.i18n import t
 
 
 class TrustTier:
@@ -61,6 +67,55 @@ class T3(TrustTier):
     """
 
     name = "T3"
+
+
+# ---------------------------------------------------------------------------
+# CapabilityGateNonce — per-process opaque token for the tag(T3) gate.
+# ---------------------------------------------------------------------------
+
+
+class CapabilityGateNonce:
+    """Per-process opaque nonce token for the tag(T3, ...) capability gate.
+
+    Constructed once by ``src/alfred/bootstrap/nonce_factory.py`` and
+    distributed via dependency injection to exactly two authorised call
+    sites: ``StdioTransport`` (PR-S3-3a) and ``quarantine_host`` (PR-S3-4).
+
+    The gate compares by identity (Python ``is``, not ``==``). Constructing
+    your own ``CapabilityGateNonce`` yields a different object that fails
+    the ``is`` check — this closes the import-copy-and-call attack.
+
+    The ``gc.get_objects()`` traversal attack (locating the live nonce in
+    the GC heap and passing it) is acknowledged as out-of-scope: an
+    adversary with that capability already has full process compromise.
+    The adversarial corpus labels this ``tl_gc_traversal_out_of_scope``.
+    See spec §3.2.
+    """
+
+    __slots__ = ()  # no attributes; identity is the only meaningful property
+
+
+# Module-level "authorised" nonce slot — set once at bootstrap by
+# alfred.bootstrap.nonce_factory.create_and_register_t3_nonce(). Tests
+# inject directly via the _authorized_nonce= kw on tag_t3_with_nonce so
+# they never have to touch this global.
+_AUTHORIZED_T3_NONCE: CapabilityGateNonce | None = None
+
+_log_t3 = structlog.get_logger(__name__)
+
+
+def _set_authorized_t3_nonce(nonce: CapabilityGateNonce | None) -> None:
+    """Bootstrap seam: called once by ``alfred.bootstrap.nonce_factory``.
+
+    Sets the module-level authorised nonce. Tests call this to reset to
+    ``None`` between runs (the test fixture pattern); the production caller
+    is the bootstrap factory.
+    """
+    # Module-level bootstrap seam — the ONE legitimate `global` in this
+    # module. The pattern is locked by spec §3.2; ruff's PLW0603 rule is
+    # not enabled in this project so no noqa needed.
+    global _AUTHORIZED_T3_NONCE
+    _AUTHORIZED_T3_NONCE = nonce
 
 
 @runtime_checkable
@@ -142,7 +197,7 @@ class TaggedContent[TierT: TrustTier](BaseModel):
                 f"TrustTier subclass {value.__name__} must set a non-empty `name`",
             )
         if value not in _APPROVED_TIERS:
-            approved = sorted(t.name for t in _APPROVED_TIERS)
+            approved = sorted(t_cls.name for t_cls in _APPROVED_TIERS)
             raise ValueError(
                 f"unsupported trust tier for this build: {value.name!r} (approved: {approved})"
             )
@@ -214,7 +269,7 @@ class TaggedContent[TierT: TrustTier](BaseModel):
             tier_name = data["tier"]
             resolved = _tier_by_name(tier_name)
             if resolved is None:
-                approved = sorted(t.name for t in _APPROVED_TIERS)
+                approved = sorted(t_cls.name for t_cls in _APPROVED_TIERS)
                 raise ValueError(
                     f"unknown trust tier on wire: {tier_name!r} (approved: {approved})"
                 )
@@ -262,28 +317,109 @@ def tag(
 ) -> TaggedContent[T2]: ...
 
 
+@overload
+def tag(
+    tier: type[T3], content: str, *, source: str = "unspecified", **metadata: Any
+) -> TaggedContent[T3]: ...
+
+
 def tag(
     tier: type[TrustTier], content: str, *, source: str = "unspecified", **metadata: Any
 ) -> TaggedContent[Any]:
     """Tag content with a trust tier at an ingestion boundary.
 
-    `content` is positional so call sites read naturally:
+    ``content`` is positional so call sites read naturally::
+
         tag(T2, user_text, source="comms.tui.input")
-    `source` is optional; supply it at every real ingestion site (the
+
+    ``source`` is optional; supply it at every real ingestion site (the
     audit log records it) but defaults exist so quick test fixtures don't
     have to repeat it.
 
-    Runtime-rejects any tier outside the slice-1 allowlist (T0, T2). The
-    `@overload` signatures and the Pydantic `_validate_tier` already close
-    the static + empty-name halves of the gate; this guard closes the
-    runtime "looks like a TrustTier but isn't on the slice's list" hole.
+    Routing:
+
+    - ``tag(T0, ...)`` / ``tag(T1, ...)`` / ``tag(T2, ...)`` go through
+      the open construction path below.
+    - ``tag(T3, ...)`` routes through ``tag_t3_with_nonce`` with
+      ``caller_token=None``, which always raises. Authorised call sites
+      bypass ``tag()`` and call ``tag_t3_with_nonce`` directly with their
+      injected ``CapabilityGateNonce``. This makes ``tag(T3, ...)`` an
+      always-loud refusal — direct callers cannot accidentally produce
+      T3 content. Spec §3.2.
     """
+    if tier is T3:
+        # Route through the capability gate. Direct callers without a
+        # nonce receive ValueError. Authorised call sites use
+        # tag_t3_with_nonce() with their injected token.
+        return tag_t3_with_nonce(
+            content,
+            source=source,
+            caller_token=None,  # direct tag(T3, ...) is always refused
+            **metadata,
+        )
     if tier not in _APPROVED_TIERS:
-        approved = sorted(t.name for t in _APPROVED_TIERS)
+        approved = sorted(t_cls.name for t_cls in _APPROVED_TIERS)
         raise ValueError(
             f"unsupported trust tier for this build: "
             f"{getattr(tier, 'name', tier)!r} (approved: {approved})"
         )
     return TaggedContent[tier](  # type: ignore[valid-type]
         content=content, source=source, tier=tier, metadata=dict(metadata)
+    )
+
+
+def tag_t3_with_nonce(
+    content: str,
+    source: str = "unspecified",
+    *,
+    caller_token: CapabilityGateNonce | None,
+    _authorized_nonce: CapabilityGateNonce | None = None,
+    **metadata: Any,
+) -> TaggedContent[T3]:
+    """Tag content with the T3 (untrusted) tier — capability-gated.
+
+    The caller must pass the exact ``CapabilityGateNonce`` object that
+    was distributed to them at bootstrap via dependency injection. The
+    check uses Python ``is`` (identity), not ``==`` (equality), so a
+    re-constructed or imported-value copy cannot forge the gate. Spec §3.2.
+
+    ``_authorized_nonce`` is a test-injection seam only. Production code
+    passes ``None`` and the module-level ``_AUTHORIZED_T3_NONCE`` is used.
+    Tests that need to control the nonce inject both sides.
+
+    Raises:
+        ValueError: when ``caller_token`` is ``None`` or is not the
+            authorised nonce. The message contains the i18n key
+            ``security.tag_t3_unauthorized`` per i18n rule #1. A
+            structlog warning ``security.t3_boundary.refused`` is also
+            emitted; the full AuditWriter wiring lands in PR-S3-4.
+    """
+    authorized = _authorized_nonce if _authorized_nonce is not None else _AUTHORIZED_T3_NONCE
+    if caller_token is None or caller_token is not authorized:
+        # Best-effort frame-derived caller label for forensics only — NOT
+        # a security gate. Spec §3.2 is explicit: frame introspection is
+        # forgeable via sys.modules manipulation, so it must NEVER
+        # influence the allow/deny decision. The gate is the identity
+        # check above; this label is purely so audit reviewers can see
+        # *something* about the failed call site. An attacker who forges
+        # sys.modules will see their forged label in the audit row — that
+        # is by design (unverified = forensic, not authoritative).
+        import sys
+
+        # sys._getframe is "private" but stable CPython API; ruff's SLF001
+        # private-member-access rule is not enabled here. The use is
+        # forensic-only — see the block comment above.
+        frame = sys._getframe(1)
+        caller_module_unverified = frame.f_globals.get("__name__", "<unknown>")
+        _log_t3.warning(
+            "security.t3_boundary.refused",
+            caller_module_unverified=caller_module_unverified,
+            attempted_tier="T3",
+        )
+        raise ValueError(t("security.tag_t3_unauthorized", caller=caller_module_unverified))
+    return TaggedContent[T3](
+        content=content,
+        source=source,
+        tier=T3,
+        metadata=dict(metadata),
     )

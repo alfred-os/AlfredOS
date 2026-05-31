@@ -515,6 +515,13 @@ msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
+#: src/alfred/security/tiers.py:416
+msgid "security.tag_t3_unauthorized"
+msgstr ""
+"security.tag_t3_unauthorized: tag(T3, ...) refused — caller {caller} did "
+"not present the authorised CapabilityGateNonce. The T3 ingestion boundary "
+"is gated to StdioTransport and quarantine_host only (spec §3.2)."
+
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""
 
@@ -581,4 +588,7 @@ msgstr ""
 
 #~ msgid "cli.discord.verify.interrupted"
 #~ msgstr "Discord verify interrupted by SIGINT."
+
+#~ msgid "missing.key.example"
+#~ msgstr ""
 
