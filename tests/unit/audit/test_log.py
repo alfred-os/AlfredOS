@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from alfred.audit import audit_row_schemas
 from alfred.audit.log import AuditWriter
 
 
@@ -79,4 +80,90 @@ class TestAuditWriter:
                 result="success",
                 cost_estimate_usd=0.0,
                 trace_id="abc",
+            )
+
+
+# --- append_schema helper (Cluster 4, rvw-001) ---
+
+
+def _make_writer() -> tuple[AuditWriter, AsyncMock]:
+    """Return (writer, session_mock) for testing."""
+    session_mock = AsyncMock()
+    session_mock.add = MagicMock()
+    session_mock.flush = AsyncMock()
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=session_mock)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+    return AuditWriter(session_factory=factory), session_mock
+
+
+@pytest.mark.asyncio
+async def test_append_schema_accepts_fields_kwarg() -> None:
+    """append_schema() forwards all required append() kwargs plus field set."""
+    writer, session_mock = _make_writer()
+    await writer.append_schema(
+        fields=audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
+        event="plugin.lifecycle.loaded",
+        actor_user_id=None,
+        subject={
+            "plugin_id": "alfred-web-fetch",
+            "manifest_subscriber_tier": "system",
+            "manifest_version": 1,
+            "sandbox_profile": "unsandboxed",
+            "exit_code": None,
+            "signal": None,
+            "restart_count": 0,
+            "breaker_state": "CLOSED",
+            "correlation_id": "trace-abc",
+        },
+        trust_tier_of_trigger="T0",
+        result="loaded",
+        cost_estimate_usd=0.0,
+        trace_id="trace-abc",
+    )
+    assert session_mock.add.called
+
+
+@pytest.mark.asyncio
+async def test_append_schema_rejects_subject_missing_field() -> None:
+    """append_schema() raises ValueError when subject dict is missing a declared field."""
+    writer, _ = _make_writer()
+    with pytest.raises(ValueError, match="missing required fields"):
+        await writer.append_schema(
+            fields=audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
+            event="plugin.lifecycle.loaded",
+            actor_user_id=None,
+            subject={"plugin_id": "alfred-web-fetch"},  # missing all other fields
+            trust_tier_of_trigger="T0",
+            result="loaded",
+            cost_estimate_usd=0.0,
+            trace_id="trace-abc",
+        )
+
+
+def test_all_audit_row_schema_fields_live_in_known_subject_space() -> None:
+    """Every field name in every constant is a non-empty string with no whitespace.
+
+    This is the AuditEntry column-space guard (Cluster 4): no constant may
+    introduce a field name that is empty, contains whitespace (would break
+    SQL/JSON key hygiene), or starts with an underscore (private convention).
+    It cannot verify against the JSON subject dict at import time — that
+    verification is the append_schema() runtime check — but it guards against
+    typo-introduced field names that would fail silently.
+    """
+    import re
+
+    valid_field = re.compile(r"^[a-z][a-z0-9_]*$")
+    constant_names = [
+        name
+        for name in dir(audit_row_schemas)
+        if name.isupper() and isinstance(getattr(audit_row_schemas, name), frozenset)
+    ]
+    assert len(constant_names) >= 17, f"Expected >=17 constants, got {len(constant_names)}"
+    for name in constant_names:
+        for field in getattr(audit_row_schemas, name):
+            assert valid_field.match(field), (
+                f"{name} member {field!r} fails snake_case field-name rule; "
+                "all audit subject dict keys must be lowercase snake_case"
             )
