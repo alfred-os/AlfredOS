@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-31 21:11+0100\n"
+"POT-Creation-Date: 2026-05-31 23:39+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -514,7 +514,7 @@ msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
 "matched."
 
-#: src/alfred/plugins/stdio_transport.py:548
+#: src/alfred/plugins/stdio_transport.py:604
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
