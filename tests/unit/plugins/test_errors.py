@@ -32,7 +32,6 @@ from alfred.plugins.errors import (
     QuarantinedUnavailable,
 )
 
-
 # ---------------------------------------------------------------------------
 # Root identity — every plugin error must descend from AlfredError so the
 # CLI top-level dispatch and orchestrator catch arms catch them uniformly.

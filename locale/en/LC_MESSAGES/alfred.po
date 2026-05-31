@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-31 18:33+0100\n"
+"POT-Creation-Date: 2026-05-31 21:11+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -494,6 +494,25 @@ msgstr ""
 #: src/alfred/identity/cli.py:762
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
+
+#: src/alfred/plugins/errors.py:129
+msgid "plugin.manifest_version_mismatch"
+msgstr ""
+"Plugin manifest version mismatch: got alfred.manifest_version={got}, "
+"expected {expected}."
+
+#: src/alfred/plugins/errors.py:148
+msgid "plugin.manifest_subscriber_tier_invalid"
+msgstr ""
+"Plugin manifest subscriber_tier {tier!r} is not a valid subscriber tier "
+"(valid: {valid_tiers}). Content trust tiers (T0-T3) are not subscriber "
+"tiers; see ADR-0017."
+
+#: src/alfred/plugins/errors.py:195
+msgid "plugin.transport.dlp_outbound_refused"
+msgstr ""
+"Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
+"matched."
 
 #: src/alfred/security/secrets.py:232 src/alfred/security/secrets.py:243
 #: src/alfred/security/secrets.py:259 src/alfred/security/secrets.py:271
