@@ -11,7 +11,16 @@ import uuid
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import JSON, CheckConstraint, DateTime, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -203,3 +212,40 @@ class PluginGrant(Base):
         Index("ix_plugin_grants_plugin_id_state", "plugin_id", "state"),
         Index("ix_plugin_grants_hookpoint", "hookpoint"),
     )
+
+
+class CapabilityGateSync(Base):
+    """Commit-hash cache for ``RealGate`` (spec §8.1).
+
+    Singleton row with ``id = 1`` enforced by a CHECK constraint. Upserted
+    by ``RealGate`` on each successful state.git sync. On AlfredOS startup
+    ``RealGate`` reads ``commit_hash`` and compares against the current
+    state.git HEAD — mismatch → rebuild :class:`PluginGrant` from state.git.
+    See migration 0009.
+
+    mem-002: column is ``commit_hash`` (NOT ``state_git_commit_hash``) so
+    PR-S3-2 ``PostgresBackend`` SQL matches exactly.
+
+    mem-004: ``id`` is INTEGER with ``CHECK (id = 1)``, not UUID. A UUID PK
+    with ``default=uuid4`` would create a new row on every INSERT that
+    omits ``id``, making the staleness check non-deterministic. The
+    singleton sentinel guarantees one row always.
+    """
+
+    __tablename__ = "capability_gate_sync"
+
+    # Singleton sentinel: id is always 1. autoincrement=False so Postgres
+    # does not silently swap in a SERIAL/IDENTITY column that would defeat
+    # the CHECK contract.
+    id: Mapped[int] = mapped_column(
+        Integer(),
+        primary_key=True,
+        autoincrement=False,
+        default=1,
+    )
+    # NULL before first sync (before `alfred plugin grant init` runs).
+    # spec §15.4 step 2 seeds this with the empty-tree hash on init.
+    commit_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    synced_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (CheckConstraint("id = 1", name="ck_capability_gate_sync_singleton"),)
