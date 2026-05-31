@@ -29,3 +29,54 @@ These three forces require one coherent ADR rather than three separate records b
 **Decision 4 — Hybrid-isolation relaxation with Slice-4 commitment.** Slice 3 ships the quarantined LLM as a subprocess under a dedicated `alfred-quarantine` UID with env scrubbing and fd-3 key delivery. This is a time-bounded relaxation of PRD §5 line 117, which requires (paraphrase) containerised plugins with declared capabilities. PRD §5 line 117 is amended (co-merged with this ADR) to read (paraphrase): hybrid isolation — containerised or dedicated-UID-with-env-scrub during Slice 3, fully containerised from Slice 4 per ADR-0015. ADR-0015 is co-merged as the Slice-4 commitment record. Spec §5.7.
 
 **Decision 5 — PR-S3-0 pre-committed split into PR-S3-0a and PR-S3-0b; PR-S3-3 pre-committed split into PR-S3-3a and PR-S3-3b.** The original PR-S3-0 scope (five ADRs + three Alembic migrations + i18n + Docker infra) exceeded the ~600-line budget on prose alone. PR-S3-0a carries docs-only deliverables; PR-S3-0b carries schema/infra. PR-S3-3 splits transport (PR-S3-3a) from supervisor (PR-S3-3b). Both splits are pre-committed so implementors do not re-open the split decision at implementation time. Spec §1.3.
+
+**Decision 6 — `QuarantinedUnavailable` lives in `src/alfred/plugins/errors.py`.** Spec §5.5 says `QuarantinedUnavailable` is "a distinct top-level exception" in `src/alfred/plugins/errors.py`. Spec §10.1 lists it as a public export of the supervisor module — a direct contradiction. Resolution: `QuarantinedUnavailable` lives in `src/alfred/plugins/errors.py` (spec §5.5 wins because it is the plugin-transport module that raises this error when the quarantined LLM is unavailable — the supervisor observes it but does not own it). `src/alfred/supervisor/errors.py` imports and re-exports it for ergonomic import in supervisor code, satisfying spec §10.1's "supervisor exposes it" requirement without placing the definition in the wrong module. The `ExtractionResult` `ImportError` (sec-002) is eliminated because `from alfred.plugins.errors import QuarantinedUnavailable` no longer fails with a circular import. Every Slice-3 PR that raises `QuarantinedUnavailable` imports it from `alfred.plugins.errors`.
+
+## Consequences
+
+### Positive
+
+- The trust-tier story closes in one slice: T1+T3+dual-LLM are inseparable (T3 without the quarantined LLM is taint-tagging only; T1 without T3 provides no discriminator payoff), so completing them together eliminates the partial-implementation window that ADR-0013 held open.
+- Process-level isolation lands from day one of the dual-LLM split. The `alfred-quarantine` UID boundary is enforced by the OS; a misbehaving quarantined LLM subprocess literally cannot read the orchestrator's secrets file (`src/alfred/security/secrets.py:228-279` validates ownership against `os.getuid()`).
+- The `PluginTransport` Protocol is future-proof: HTTP transport (Slice 5+) implements the same surface without touching the orchestrator.
+
+### Negative
+
+- The subprocess transport adds cold-start latency (< 500ms per spec §7a.1). Operators with a single cold deployment will feel this on first restart.
+- The hybrid-isolation relaxation (no container isolation in Slice 3) means the `alfred-quarantine` UID's filesystem isolation is UID-separation only — the quarantined LLM can write to any UID-permitted path on the host. `bin/alfred-plugin-launcher` enforces `$XDG_RUNTIME_DIR/alfred/plugin-<id>/` as the write root via the `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` guard; Slice 4's `bwrap` policy hardens this.
+- The `DevGate` → `RealGate` flag-day migration (PR-S3-7) is a final-slice mandatory step. Skipping it leaves the nonce-token gate without a production backing store.
+
+### Neutral
+
+- The `manifest_version = 1` pin means any future manifest schema change that breaks backward compatibility requires incrementing to 2. This is intentional (explicit versioning discipline) rather than semver tolerance.
+- ADR-0009 status flips to superseded-for-new-adapters; existing Discord+TUI adapters are untouched through Slice 3.
+
+## Alternatives considered
+
+### Option A — Ship T3-tagging at the comms boundary without the dual-LLM split
+
+Rejected per ADR-0013's §c analysis: T3 without the quarantined LLM is taint-tagging only; the PRD §7.1 invariant ("the privileged orchestrator never processes raw T3 content") is unmet.
+
+### Option B — HTTP plugin transport instead of stdio subprocess
+
+Rejected for Slice 3: HTTP requires TLS cert management, service discovery, and a separate network policy in Docker Compose — a materially larger infrastructure surface than stdio subprocess. The `PluginTransport` Protocol keeps HTTP available as a Slice-5+ option without coupling to it in Slice 3.
+
+### Option C — Frame introspection for `tag(T3, ...)` call-site enforcement
+
+Rejected per spec §3.2: `sys._getframe` is forgeable via `sys.modules` manipulation and provides no real caller identity. The nonce-token approach (`is`-comparison per-process random nonce) closes import-time forgery without the forgeable-via-modules vulnerability.
+
+### Option D — Keep DevGate and remove the flag-day
+
+Rejected: `DevGate` fails open for `operator`/`user-plugin` without a backing store, which is incompatible with the real `CapabilityGate` requirement from spec §8.4. The flag-day is the mechanism that ensures every production deployment migrates.
+
+## References
+
+- [PRD §5 Architecture Overview](../../PRD.md#5-architecture-overview) — "Plugins are MCP servers" invariant; hybrid-isolation invariant at line 117.
+- [PRD §7.1 Security & Prompt Injection Defense](../../PRD.md#71-security--prompt-injection-defense) — dual-LLM split as the load-bearing prompt-injection defence; T0–T3 trust tier definitions.
+- [ADR-0008](0008-llm-output-trust-tier.md) — established the trust-tier discriminant in Slice 1; superseded in full by this ADR.
+- [ADR-0009](0009-comms-adapter-protocol-slice2-only.md) — bounded deviation for `CommsAdapter`; MCP plugin host named as Slice-3 deliverable; status updated to superseded-for-new-adapters.
+- [ADR-0013](0013-defer-t1-t3-and-dual-llm.md) — deferred T1+T3+dual-LLM to Slice 3; binding "Slice 3 commits the full stack" obligation; superseded in full by this ADR.
+- ADR-0015 (Slice-4 containerised quarantined LLM stub — co-merged, see Task 7)
+- ADR-0016 (Slice-4 Discord/TUI comms-MCP stub — co-merged, see Task 8)
+- [Design spec](../superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md) — complete Slice-3 design; §§1.3, 3.2, 4.1, 4.2, 4.3, 5.5, 5.7, 7a.1, 8.4, 10.1 govern the decisions above.
+- Code anchors: `src/alfred/security/secrets.py:228-279` (UID ownership check), `src/alfred/hooks/capability.py` (existing capability gate seam).
