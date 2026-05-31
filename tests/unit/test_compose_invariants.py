@@ -72,11 +72,20 @@ def test_alfred_core_has_setuid(compose: dict[str, Any]) -> None:
 
 
 def test_alfred_core_has_state_git_volume(compose: dict[str, Any]) -> None:
-    """alfred-core must mount alfred_state_git at /var/lib/alfred (spec §11.1)."""
+    """alfred-core must mount alfred_state_git at /var/lib/alfred (spec §11.1).
+
+    Enforces both the source volume name AND the mount target — name-only
+    matching would pass a misconfigured compose that mounts the volume at
+    the wrong path (e.g. /tmp/state) and silently break the seed script
+    (``bin/alfred-state-git-seed.sh`` defaults STATE_GIT_PATH to
+    /var/lib/alfred/state.git).
+    """
     core = compose.get("services", {}).get("alfred-core", {})
     volumes = core.get("volumes", []) or []
-    assert any("alfred_state_git" in v for v in _volume_strings(volumes)), (
-        "alfred-core requires the alfred_state_git volume for state.git ops."
+    assert any("alfred_state_git:/var/lib/alfred" in v for v in _volume_strings(volumes)), (
+        "alfred-core requires alfred_state_git mounted at /var/lib/alfred "
+        "for state.git ops (spec §11.1). Wrong target would break the "
+        "STATE_GIT_PATH default in bin/alfred-state-git-seed.sh."
     )
 
 
