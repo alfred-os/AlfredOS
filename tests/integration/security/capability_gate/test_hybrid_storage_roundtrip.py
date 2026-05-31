@@ -33,87 +33,34 @@ the integration suite see the gate's storage and outage stories together.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from alembic import command, config
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from alfred.security.capability_gate.backend import PostgresBackend
 from alfred.security.capability_gate.policy import GrantRow
 
+# CR-139 finding #8: shared fixtures (alembic_cfg, migrated_postgres,
+# make_audit_sink, backend_against) now live in
+# tests/integration/security/capability_gate/conftest.py.
+
 pytestmark = pytest.mark.integration
 
-
-@pytest.fixture
-def alembic_cfg(postgres_url: str, monkeypatch: pytest.MonkeyPatch) -> config.Config:
-    """Alembic Config pointed at the per-test container.
-
-    Mirrors the shape used by ``tests/integration/memory/`` migration
-    round-trip tests — both env-var and Config ``sqlalchemy.url`` so the
-    migration env covers either code path.
-    """
-    monkeypatch.setenv("ALFRED_DATABASE_URL", postgres_url)
-    cfg = config.Config("alembic.ini")
-    cfg.set_main_option("sqlalchemy.url", postgres_url)
-    return cfg
+# Type alias for the ``backend_against`` fixture return — keeps the
+# test signatures readable without re-declaring the long generic.
+_BackendCM = Callable[
+    [str],
+    AbstractAsyncContextManager[tuple[PostgresBackend, async_sessionmaker[AsyncSession]]],
+]
 
 
-def _make_audit_sink() -> Any:
-    """No-op audit sink for the round-trip test.
-
-    The :meth:`AuditWriter.append_schema` Protocol is satisfied
-    structurally; this test asserts on storage state, not audit rows.
-    """
-    sink = MagicMock()
-    sink.append_schema = AsyncMock(return_value=None)
-    return sink
-
-
-@asynccontextmanager
-async def _backend_against(
-    postgres_url: str,
-) -> AsyncIterator[tuple[PostgresBackend, async_sessionmaker[AsyncSession]]]:
-    """Yield a ``(PostgresBackend, factory)`` pair against the per-test container.
-
-    Builds an async engine from ``postgres_url`` (asyncpg) and a
-    sessionmaker, hands the sessionmaker to :class:`PostgresBackend`,
-    and disposes the engine on exit so the testcontainer lifecycle does
-    not leak open connections to neighbours.
-    """
-    engine = create_async_engine(postgres_url, future=True)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    backend = PostgresBackend(session_factory=factory)
-    try:
-        yield backend, factory
-    finally:
-        await engine.dispose()
-
-
-@pytest.fixture
-def migrated_postgres(
-    alembic_cfg: config.Config,
-    postgres_url: str,
-) -> str:
-    """Upgrade the per-test container to HEAD before any backend operation.
-
-    HEAD lands at migration 0009 today; the fixture stays HEAD-relative
-    so a future migration that touches ``plugin_grants`` or
-    ``capability_gate_sync`` is still exercised end-to-end. Returns the
-    URL unchanged so downstream fixtures / tests can compose.
-    """
-    command.upgrade(alembic_cfg, "head")
-    return postgres_url
-
-
-async def test_upsert_and_load_round_trip(migrated_postgres: str) -> None:
+async def test_upsert_and_load_round_trip(
+    migrated_postgres: str,
+    backend_against: _BackendCM,
+) -> None:
     """Insert one grant via upsert, read it back via load_grants.
 
     Pins the SQL parameter binding (column ordering, types) against
@@ -128,7 +75,7 @@ async def test_upsert_and_load_round_trip(migrated_postgres: str) -> None:
         content_tier=None,
         proposal_branch="proposal/policy-grant-rt-1",
     )
-    async with _backend_against(migrated_postgres) as (backend, _factory):
+    async with backend_against(migrated_postgres) as (backend, _factory):
         await backend.upsert_grant(grant)
         loaded = await backend.load_grants()
     assert loaded == frozenset({grant})
@@ -136,6 +83,7 @@ async def test_upsert_and_load_round_trip(migrated_postgres: str) -> None:
 
 async def test_upsert_conflict_updates_existing_row(
     migrated_postgres: str,
+    backend_against: _BackendCM,
 ) -> None:
     """A second upsert on the same key updates content_tier + proposal_branch.
 
@@ -159,7 +107,7 @@ async def test_upsert_conflict_updates_existing_row(
         content_tier="T3",
         proposal_branch="proposal/policy-grant-updated",
     )
-    async with _backend_against(migrated_postgres) as (backend, _factory):
+    async with backend_against(migrated_postgres) as (backend, _factory):
         await backend.upsert_grant(initial)
         await backend.upsert_grant(updated)
         loaded = await backend.load_grants()
@@ -171,7 +119,10 @@ async def test_upsert_conflict_updates_existing_row(
     assert only.proposal_branch == "proposal/policy-grant-updated"
 
 
-async def test_revoke_removes_grant(migrated_postgres: str) -> None:
+async def test_revoke_removes_grant(
+    migrated_postgres: str,
+    backend_against: _BackendCM,
+) -> None:
     """:meth:`revoke_grant` removes one grant; second revoke is idempotent.
 
     Spec §8.5: revocation is the reviewer-merge path's counterpart to
@@ -186,7 +137,7 @@ async def test_revoke_removes_grant(migrated_postgres: str) -> None:
         content_tier=None,
         proposal_branch="proposal/policy-grant-revoke",
     )
-    async with _backend_against(migrated_postgres) as (backend, _factory):
+    async with backend_against(migrated_postgres) as (backend, _factory):
         await backend.upsert_grant(grant)
         await backend.revoke_grant(
             plugin_id="revoke.plugin",
@@ -207,7 +158,10 @@ async def test_revoke_removes_grant(migrated_postgres: str) -> None:
     assert loaded_after_second_revoke == frozenset()
 
 
-async def test_sync_hash_round_trip(migrated_postgres: str) -> None:
+async def test_sync_hash_round_trip(
+    migrated_postgres: str,
+    backend_against: _BackendCM,
+) -> None:
     """``set_sync_hash`` writes; ``get_sync_hash`` reads back the singleton row.
 
     mem-004: the singleton-row contract (``CHECK (id = 1)``) means
@@ -215,7 +169,7 @@ async def test_sync_hash_round_trip(migrated_postgres: str) -> None:
     inserting new ones. Validated by setting two different hashes then
     asserting the latest wins.
     """
-    async with _backend_against(migrated_postgres) as (backend, _factory):
+    async with backend_against(migrated_postgres) as (backend, _factory):
         # Unseeded: returns None.
         assert await backend.get_sync_hash() is None
 
@@ -227,7 +181,10 @@ async def test_sync_hash_round_trip(migrated_postgres: str) -> None:
         assert await backend.get_sync_hash() == "c0ffee00" * 5
 
 
-async def test_ping_succeeds_against_live_postgres(migrated_postgres: str) -> None:
+async def test_ping_succeeds_against_live_postgres(
+    migrated_postgres: str,
+    backend_against: _BackendCM,
+) -> None:
     """:meth:`ping` succeeds against a healthy container.
 
     The heartbeat loop's success branch depends on ``ping`` returning
@@ -235,11 +192,15 @@ async def test_ping_succeeds_against_live_postgres(migrated_postgres: str) -> No
     ``ping`` mock. A connection-string drift would surface here as a
     raised exception.
     """
-    async with _backend_against(migrated_postgres) as (backend, _factory):
+    async with backend_against(migrated_postgres) as (backend, _factory):
         await backend.ping()  # Must not raise.
 
 
-async def test_grant_lifecycle_through_real_gate(migrated_postgres: str) -> None:
+async def test_grant_lifecycle_through_real_gate(
+    migrated_postgres: str,
+    backend_against: _BackendCM,
+    make_audit_sink: Callable[[], Any],
+) -> None:
     """End-to-end: ``RealGate.create → check → _apply_grants → check``.
 
     Drives :class:`RealGate` against the real Postgres backend so the
@@ -262,8 +223,8 @@ async def test_grant_lifecycle_through_real_gate(migrated_postgres: str) -> None
         content_tier=None,
         proposal_branch="proposal/policy-grant-e2e",
     )
-    async with _backend_against(migrated_postgres) as (backend, _factory):
-        sink = _make_audit_sink()
+    async with backend_against(migrated_postgres) as (backend, _factory):
+        sink = make_audit_sink()
         gate = await RealGate.create(backend=backend, audit_sink=sink, start_heartbeat=False)
 
         # Initial state: no grants, all checks deny.
@@ -292,8 +253,8 @@ async def test_grant_lifecycle_through_real_gate(migrated_postgres: str) -> None
         assert await backend.get_sync_hash() == "e2e-rebuild-hash"
 
     # Fresh process: build a brand-new RealGate against the same DB.
-    async with _backend_against(migrated_postgres) as (backend2, _factory2):
-        sink2 = _make_audit_sink()
+    async with backend_against(migrated_postgres) as (backend2, _factory2):
+        sink2 = make_audit_sink()
         gate2 = await RealGate.create(backend=backend2, audit_sink=sink2, start_heartbeat=False)
 
         # Cross-process roundtrip: the grant survives because Postgres
