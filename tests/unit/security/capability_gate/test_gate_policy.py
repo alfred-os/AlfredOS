@@ -30,6 +30,88 @@ import pytest
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 
 
+def test_grant_row_rejects_invalid_subscriber_tier() -> None:
+    """CR-139 finding #4: ``subscriber_tier`` is a closed PRD §4.3 domain.
+
+    Constructing a :class:`GrantRow` with anything outside
+    ``{"system", "operator", "user-plugin"}`` MUST raise
+    :class:`ValueError`. Accepting an arbitrary string would let an
+    upstream parser bug smuggle a non-PRD tier into the policy
+    snapshot, where the exact-match check would then silently authorise
+    it.
+    """
+    with pytest.raises(ValueError, match=r"invalid subscriber_tier"):
+        GrantRow(
+            plugin_id="p",
+            subscriber_tier="root",  # Not in the closed domain.
+            hookpoint="h",
+            content_tier=None,
+            proposal_branch="proposal/policy-grant-bad",
+        )
+
+
+def test_grant_row_rejects_invalid_content_tier() -> None:
+    """CR-139 finding #4: ``content_tier`` is a closed PRD §7.1 domain.
+
+    Constructing a :class:`GrantRow` with anything outside ``None`` or
+    ``{"T0", "T1", "T2", "T3"}`` MUST raise :class:`ValueError`. Same
+    rationale as the subscriber-tier validator: the policy layer
+    matches on exact string equality, so an out-of-domain value would
+    be silently authorisable.
+    """
+    with pytest.raises(ValueError, match=r"invalid content_tier"):
+        GrantRow(
+            plugin_id="p",
+            subscriber_tier="operator",
+            hookpoint="h",
+            content_tier="T9",  # Not a valid tier.
+            proposal_branch="proposal/policy-grant-bad-tier",
+        )
+
+
+def test_grant_row_accepts_none_content_tier() -> None:
+    """``content_tier=None`` is the common case (no content-tier restriction).
+
+    Pinning that ``None`` survives the validator alongside the closed-
+    domain check so the validator does not regress to requiring a
+    string.
+    """
+    row = GrantRow(
+        plugin_id="p",
+        subscriber_tier="operator",
+        hookpoint="h",
+        content_tier=None,
+        proposal_branch="proposal/policy-grant-ok",
+    )
+    assert row.content_tier is None
+
+
+@pytest.mark.parametrize("tier", ["system", "operator", "user-plugin"])
+def test_grant_row_accepts_each_valid_subscriber_tier(tier: str) -> None:
+    """All three PRD §4.3 subscriber-tier strings construct cleanly."""
+    row = GrantRow(
+        plugin_id="p",
+        subscriber_tier=tier,
+        hookpoint="h",
+        content_tier=None,
+        proposal_branch="proposal/policy-grant-ok",
+    )
+    assert row.subscriber_tier == tier
+
+
+@pytest.mark.parametrize("tier", ["T0", "T1", "T2", "T3"])
+def test_grant_row_accepts_each_valid_content_tier(tier: str) -> None:
+    """All four PRD §7.1 content-tier strings construct cleanly."""
+    row = GrantRow(
+        plugin_id="p",
+        subscriber_tier="operator",
+        hookpoint="h",
+        content_tier=tier,
+        proposal_branch="proposal/policy-grant-ok",
+    )
+    assert row.content_tier == tier
+
+
 def test_grant_row_is_frozen() -> None:
     """:class:`GrantRow` is a frozen dataclass; post-init mutation raises."""
     row = GrantRow(
