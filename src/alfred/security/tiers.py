@@ -252,6 +252,12 @@ def tag(
 
 @overload
 def tag(
+    tier: type[T1], content: str, *, source: str = "unspecified", **metadata: Any
+) -> TaggedContent[T1]: ...
+
+
+@overload
+def tag(
     tier: type[T2], content: str, *, source: str = "unspecified", **metadata: Any
 ) -> TaggedContent[T2]: ...
 
