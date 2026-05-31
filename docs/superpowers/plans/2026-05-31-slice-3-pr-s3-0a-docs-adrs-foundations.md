@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Establish the shared vocabulary, schema constants, and corpus structure that every downstream Slice-3 PR depends on — specifically: ADR-0017 (the load-bearing Slice-3 ADR), status-flip edits to ADR-0008/ADR-0013/ADR-0009, Slice-4 commitment stubs ADR-0015/ADR-0016, a PRD §5 line 117 amendment for hybrid isolation, `src/alfred/audit/audit_row_schemas.py` with all 17 field-list constants, updated `src/alfred/audit/__init__.py`, and `tests/adversarial/payload_schema.py` extended with the two new categories (`tier_laundering`, `dlp_egress`) plus `IngestionPath`/`ExpectedOutcome` extensions with new stubs.
+**Goal:** Establish the shared vocabulary, schema constants, and corpus structure that every downstream Slice-3 PR depends on — specifically: ADR-0017 (the load-bearing Slice-3 ADR), status-flip edits to ADR-0008/ADR-0013/ADR-0009, Slice-4 commitment stubs ADR-0015/ADR-0016, a PRD §5 line 117 amendment for hybrid isolation, `src/alfred/audit/audit_row_schemas.py` with all 18 field-list constants (17 spec §13 constants + `T3_DERIVED_DOWNGRADE_FIELDS` added per rvw-003 for PR-S3-4 consumption), updated `src/alfred/audit/__init__.py`, and `tests/adversarial/payload_schema.py` extended with the two new categories (`tier_laundering`, `dlp_egress`) plus `IngestionPath`/`ExpectedOutcome` extensions with new stubs.
 
 **Architecture:** This PR is pure docs-and-schema — no runtime code ships other than `audit_row_schemas.py` and the updated `payload_schema.py`. ADR-0017 records the structural decisions that govern how all 11 forks compose; the audit-row-schemas module centralises field-list constants so that five emitter subsystems (`plugins/`, `supervisor/`, `security/`, `orchestrator/`, `identity/`) share one import surface, preventing field-name drift across PRs. The adversarial schema additions establish the two new attack-family categories before any implementation PR ships a test that references them, so later PRs can write YAML payloads without touching the schema.
 
@@ -22,7 +22,7 @@ PR-S3-0a is the first Slice-3 PR and the prerequisite for everything else. It de
 
 4. **PRD §5 line 117 amendment** — the hybrid-isolation invariant text, co-merged with ADR-0017 per spec §5.7. Changes "containerized with declared capabilities" to "hybrid isolation: containerized OR dedicated-UID-with-env-scrub during Slice 3, fully containerized from Slice 4 per ADR-0015." This is a docs edit to `PRD.md`; no separate proposal flow because this is the explicit relaxation record.
 
-5. **`src/alfred/audit/audit_row_schemas.py`** — 17 `Final[frozenset[str]]` constants covering all Slice-3 audit row families. Spec §13 defines the exact field lists verbatim; this module is the single import surface — downstream PRs may import the module (`from alfred.audit import audit_row_schemas`) and access constants as `audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS`, or import specific constants directly (`from alfred.audit.audit_row_schemas import PLUGIN_LIFECYCLE_FIELDS`). Both forms are valid. Tests assert the field lists are frozen sets and that each constant name matches its spec §13 entry.
+5. **`src/alfred/audit/audit_row_schemas.py`** — 18 `Final[frozenset[str]]` constants covering all Slice-3 audit row families: 17 constants verbatim from spec §13, plus `T3_DERIVED_DOWNGRADE_FIELDS` added here per rvw-003 (consumed by PR-S3-4's `downgrade_to_orchestrator`; this PR is the canonical home so the field-list is defined exactly once and imported across PRs). This module is the single import surface — downstream PRs may import the module (`from alfred.audit import audit_row_schemas`) and access constants as `audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS`, or import specific constants directly (`from alfred.audit.audit_row_schemas import PLUGIN_LIFECYCLE_FIELDS`). Both forms are valid. Tests assert the field lists are frozen sets and that each constant name matches its spec §13 entry (the rvw-003 addition has its own assertion).
 
 6. **`src/alfred/audit/__init__.py`** — exports `audit_row_schemas`, `AuditWriter`, and `AuditEntry` so downstream PRs can `from alfred.audit import audit_row_schemas` without a deeper import path.
 
@@ -81,7 +81,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 | `docs/adr/0013-defer-t1-t3-and-dual-llm.md` | Modify | Status header only: `Superseded by ADR-0017`. |
 | `docs/adr/0009-comms-adapter-protocol-slice2-only.md` | Modify | Status header only: `Superseded by ADR-0016 for new adapters; in-process adapters unchanged through Slice 3`. |
 | `PRD.md` | Modify | Line 117 amendment: hybrid-isolation invariant text updated to reflect Slice-3 relaxation. |
-| `src/alfred/audit/audit_row_schemas.py` | Create | All 17 Slice-3 audit row field-list `Final[frozenset[str]]` constants. |
+| `src/alfred/audit/audit_row_schemas.py` | Create | All 18 Slice-3 audit row field-list `Final[frozenset[str]]` constants (17 from spec §13 + `T3_DERIVED_DOWNGRADE_FIELDS` per rvw-003). |
 | `src/alfred/audit/__init__.py` | Modify | Re-exports `audit_row_schemas`, `AuditWriter`, `AuditEntry` from the audit package. |
 | `src/alfred/audit/log.py` | Modify | Adds `AuditWriter.append_schema(fields, **kwargs)` helper that validates subject keys against the field-list constant before forwarding to `append()`. |
 | `tests/unit/audit/test_audit_row_schemas.py` | Create | Asserts every field-list constant is a `frozenset`, matches its spec §13 entry, and that nothing from `typing` leaks into the frozenset values. |
@@ -184,7 +184,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run `make docs-check` to confirm the file has no broken links:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && make docs-check
+    cd <repo-root> && make docs-check
     ```
     Expected: exits 0, last 3 lines show no errors.
 
@@ -512,6 +512,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
         "T3_BOUNDARY_REFUSAL_FIELDS",
         "T1_INGRESS_FIELDS",
         "T1_DOWNGRADE_FIELDS",
+        "T3_DERIVED_DOWNGRADE_FIELDS",
         "PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS",
         "SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS",
         "SUPERVISOR_CONFIG_INSECURE_FIELDS",
@@ -635,7 +636,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run the test expecting FAIL (module does not yet exist):
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit/audit/test_audit_row_schemas.py -q 2>&1 | head -20
+    cd <repo-root> && uv run pytest tests/unit/audit/test_audit_row_schemas.py -q 2>&1 | head -20
     ```
     Expected: `ModuleNotFoundError` or `ImportError` — test collection fails because `audit_row_schemas` does not exist yet.
 
@@ -819,6 +820,26 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     })
 
     # ---------------------------------------------------------------------------
+    # quarantine.t3_derived_downgrade family (rvw-003 — cross-PR constant)
+    # ---------------------------------------------------------------------------
+
+    # Fields for quarantine.t3_derived_downgrade audit rows — emitted by
+    # src/alfred/security/quarantine.py::downgrade_to_orchestrator (PR-S3-4) when
+    # T3DerivedData is gate-checked and converted to a plain dict for orchestrator
+    # consumption (spec §3.7). Defined here (PR-S3-0a) rather than PR-S3-4 so the
+    # field-list lives in the single import surface; the constant is consumed by
+    # PR-S3-4 once that PR ships.
+    #
+    # Distinct trust transition from T1 → T2 (T1_DOWNGRADE_FIELDS), so the audit
+    # schema family is also distinct — see rvw-003 in spec §13.
+    T3_DERIVED_DOWNGRADE_FIELDS: Final = frozenset({
+        "trust_tier_of_trigger",   # always "T3" — the originating tier of the T3DerivedData
+        "trust_tier_of_response",  # always "T2" — the post-downgrade tier
+        "downgrade_explicit",      # always True — gate check enforces this is deliberate
+        "correlation_id",
+    })
+
+    # ---------------------------------------------------------------------------
     # plugin.grant.revoked_inflight family
     # ---------------------------------------------------------------------------
 
@@ -900,19 +921,19 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run the test expecting PASS:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit/audit/test_audit_row_schemas.py -v 2>&1 | tail -20
+    cd <repo-root> && uv run pytest tests/unit/audit/test_audit_row_schemas.py -v 2>&1 | tail -20
     ```
     Expected: all tests pass.
 
   - [ ] Run mypy + pyright:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run mypy src/alfred/audit/audit_row_schemas.py && uv run pyright src/alfred/audit/audit_row_schemas.py
+    cd <repo-root> && uv run mypy src/alfred/audit/audit_row_schemas.py && uv run pyright src/alfred/audit/audit_row_schemas.py
     ```
     Expected: no errors.
 
   Commit:
   ```
-  feat(audit): audit_row_schemas.py — 17 Final frozenset constants for Slice-3 audit row families (#TBD-slice3)
+  feat(audit): audit_row_schemas.py — 18 Final frozenset constants for Slice-3 audit row families (17 spec §13 + T3_DERIVED_DOWNGRADE_FIELDS) (#TBD-slice3)
   ```
 
 ### Component F — `src/alfred/audit/__init__.py` public surface update
@@ -924,7 +945,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   Steps:
   - [ ] **Verify existing import paths** (mem-006: dependency paths must exist before the re-export is written):
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run python -c \
+    cd <repo-root> && uv run python -c \
       'from alfred.audit.log import AuditWriter; from alfred.memory.models import AuditEntry; print("OK", AuditWriter, AuditEntry)'
     ```
     Expected: prints `OK` with both class references. If either fails, update the import path in the `__init__.py` body below to match the actual module location before proceeding.
@@ -956,7 +977,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
     Run expecting FAIL (`audit_row_schemas` not yet in `__init__.py`):
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit/audit/test_audit_init.py -q 2>&1 | head -10
+    cd <repo-root> && uv run pytest tests/unit/audit/test_audit_init.py -q 2>&1 | head -10
     ```
 
   - [ ] Implement: update `src/alfred/audit/__init__.py` to:
@@ -981,12 +1002,12 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run tests expecting PASS:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit/audit/ -v 2>&1 | tail -15
+    cd <repo-root> && uv run pytest tests/unit/audit/ -v 2>&1 | tail -15
     ```
 
   - [ ] Run mypy + pyright on the updated `__init__.py`:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run mypy src/alfred/audit/__init__.py && uv run pyright src/alfred/audit/__init__.py
+    cd <repo-root> && uv run mypy src/alfred/audit/__init__.py && uv run pyright src/alfred/audit/__init__.py
     ```
 
   Commit:
@@ -1079,7 +1100,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
             name for name in dir(audit_row_schemas)
             if name.isupper() and isinstance(getattr(audit_row_schemas, name), frozenset)
         ]
-        assert len(constant_names) >= 17, f"Expected ≥17 constants, got {len(constant_names)}"
+        assert len(constant_names) >= 18, f"Expected ≥18 constants, got {len(constant_names)}"
         for name in constant_names:
             for field in getattr(audit_row_schemas, name):
                 assert valid_field.match(field), (
@@ -1090,7 +1111,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run tests expecting FAIL (`append_schema` does not yet exist):
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit/audit/test_log.py -q -k "append_schema" 2>&1 | head -15
+    cd <repo-root> && uv run pytest tests/unit/audit/test_log.py -q -k "append_schema" 2>&1 | head -15
     ```
     Expected: `AttributeError: 'AuditWriter' object has no attribute 'append_schema'`.
 
@@ -1164,12 +1185,12 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run tests expecting PASS:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit/audit/ -v 2>&1 | tail -20
+    cd <repo-root> && uv run pytest tests/unit/audit/ -v 2>&1 | tail -20
     ```
 
   - [ ] Run mypy + pyright:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run mypy src/alfred/audit/log.py && uv run pyright src/alfred/audit/log.py
+    cd <repo-root> && uv run mypy src/alfred/audit/log.py && uv run pyright src/alfred/audit/log.py
     ```
 
   - [ ] Update the §3 file structure table to reflect the new `log.py` modification:
@@ -1294,7 +1315,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run tests expecting FAIL (`ValidationError` imports needed; `tl` prefix unrecognised):
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/adversarial/test_payload_schema.py -q 2>&1 | head -15
+    cd <repo-root> && uv run pytest tests/adversarial/test_payload_schema.py -q 2>&1 | head -15
     ```
     Expected: failures on `tier_laundering`/`dlp_egress` category tests and `tl`/`de` prefix tests.
 
@@ -1374,12 +1395,12 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run tests expecting PASS:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/adversarial/test_payload_schema.py -v 2>&1 | tail -20
+    cd <repo-root> && uv run pytest tests/adversarial/test_payload_schema.py -v 2>&1 | tail -20
     ```
 
   - [ ] Run full adversarial suite to confirm no regressions:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/adversarial -q 2>&1 | tail -10
+    cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -10
     ```
 
   Commit:
@@ -1443,7 +1464,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run adversarial suite to confirm the empty category dir is tolerated:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/adversarial -q 2>&1 | tail -5
+    cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -5
     ```
 
   Commit:
@@ -1490,7 +1511,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   - [ ] Run adversarial suite:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/adversarial -q 2>&1 | tail -5
+    cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -5
     ```
 
   Commit:
@@ -1505,25 +1526,25 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   Steps:
   - [ ] Run the full quality gate:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && make check 2>&1 | tail -20
+    cd <repo-root> && make check 2>&1 | tail -20
     ```
     Expected: exits 0. Ruff + format + mypy strict + pyright all pass.
 
   - [ ] Run docs check:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && make docs-check 2>&1 | tail -3
+    cd <repo-root> && make docs-check 2>&1 | tail -3
     ```
     Expected: exits 0.
 
   - [ ] Run adversarial suite:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/adversarial -q 2>&1 | tail -5
+    cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -5
     ```
     Expected: all existing tests pass; new `tier_laundering` + `dlp_egress` stubs collected without errors.
 
   - [ ] Run all unit tests:
     ```bash
-    cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit -q 2>&1 | tail -5
+    cd <repo-root> && uv run pytest tests/unit -q 2>&1 | tail -5
     ```
     Expected: all pass, including new `tests/unit/audit/` tests.
 
@@ -1569,22 +1590,22 @@ Run these commands in order before opening the PR:
 
 ```bash
 # 1. Lint + format check + type check + all tests
-cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && make check
+cd <repo-root> && make check
 
 # 2. Cross-link validation (broken ADR links, broken PRD section links)
-cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && make docs-check
+cd <repo-root> && make docs-check
 
 # 3. Adversarial suite (new stubs must be collected without errors)
-cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/adversarial -q
+cd <repo-root> && uv run pytest tests/adversarial -q
 
 # 4. Unit tests for the new audit module
-cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run pytest tests/unit/audit/ -v
+cd <repo-root> && uv run pytest tests/unit/audit/ -v
 
 # 5. Confirm no ruff violations in the two new Python files
-cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && uv run ruff check src/alfred/audit/audit_row_schemas.py tests/adversarial/payload_schema.py
+cd <repo-root> && uv run ruff check src/alfred/audit/audit_row_schemas.py tests/adversarial/payload_schema.py
 
 # 6. Confirm pybabel extract finds no new catalog keys (this PR adds no t() calls)
-cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design && pybabel extract -F babel.cfg -o /tmp/s3-0a-check.pot . && diff <(grep ^msgid locale/en/LC_MESSAGES/alfred.po | sort) <(grep ^msgid /tmp/s3-0a-check.pot | sort) && echo "No new catalog keys — correct for PR-S3-0a"
+cd <repo-root> && pybabel extract -F babel.cfg -o /tmp/s3-0a-check.pot . && diff <(grep ^msgid locale/en/LC_MESSAGES/alfred.po | sort) <(grep ^msgid /tmp/s3-0a-check.pot | sort) && echo "No new catalog keys — correct for PR-S3-0a"
 ```
 
 All six commands must exit 0 before the PR is opened.

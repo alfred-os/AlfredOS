@@ -1147,7 +1147,15 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   ```shell
   git init --bare /var/lib/alfred/state.git
-  git -C /var/lib/alfred/state.git commit --allow-empty -m "Initial empty main branch"
+  # Seed an empty root commit on `main`. A bare repo has no working tree, so
+  # `git commit --allow-empty` cannot run — drop down to plumbing instead.
+  SEED_COMMIT=$(
+    git -C /var/lib/alfred/state.git commit-tree \
+      "$(git -C /var/lib/alfred/state.git mktree </dev/null)" \
+      -m "seed: empty initial commit"
+  )
+  git -C /var/lib/alfred/state.git update-ref refs/heads/main "$SEED_COMMIT"
+  git -C /var/lib/alfred/state.git symbolic-ref HEAD refs/heads/main
   ```
 
   This initialises the bare repository that `RealGate` uses as its
@@ -1242,7 +1250,15 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   Fix:
   ```shell
   git init --bare /var/lib/alfred/state.git
-  git -C /var/lib/alfred/state.git commit --allow-empty -m "Initial empty main branch"
+  # Bare repos have no working tree, so `git commit --allow-empty` cannot run;
+  # use plumbing to seed an empty root commit on `main`.
+  SEED_COMMIT=$(
+    git -C /var/lib/alfred/state.git commit-tree \
+      "$(git -C /var/lib/alfred/state.git mktree </dev/null)" \
+      -m "seed: empty initial commit"
+  )
+  git -C /var/lib/alfred/state.git update-ref refs/heads/main "$SEED_COMMIT"
+  git -C /var/lib/alfred/state.git symbolic-ref HEAD refs/heads/main
   alfred supervisor reset quarantined-llm --confirm
   alfred supervisor reset web-fetch --confirm
   ```

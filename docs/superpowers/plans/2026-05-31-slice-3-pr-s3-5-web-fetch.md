@@ -2105,7 +2105,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   if TYPE_CHECKING:
       from alfred.security.dlp import OutboundDlp
       from alfred.audit.log import AuditWriter  # rvw-001 fix: use AuditWriter.append_schema
-      from alfred.plugins.transport import StdioTransport
+      from alfred.plugins.stdio_transport import StdioTransport
 
   log = structlog.get_logger(__name__)
 

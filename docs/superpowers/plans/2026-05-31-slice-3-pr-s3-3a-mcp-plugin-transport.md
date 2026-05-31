@@ -1366,7 +1366,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   subscriber_tier = "system"
   sandbox_profile = "user-plugin"
   """
-      session = AlfredPluginSession(
+      session = await AlfredPluginSession.create(
           manifest_raw=manifest_toml,
           audit_writer=fake_audit_writer,
           gate=fake_gate,
@@ -1375,13 +1375,14 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
       assert fake_audit_writer.last_event == "plugin.lifecycle.loaded"
 
 
-  def test_session_emits_load_refused_on_version_mismatch(fake_audit_writer, fake_gate):
-      """Version mismatch is detected in __init__ (sync) — no await needed.
+  @pytest.mark.asyncio
+  async def test_session_emits_load_refused_on_version_mismatch(fake_audit_writer, fake_gate):
+      """Version mismatch is detected in ``create()`` (async).
 
-      The version-mismatch audit row is emitted from the ``__init__`` failure
-      path (sync best-effort row); see plan §Cluster-4 + err-017 fix notes.
-      ``_on_handshake_complete`` is never reached because parse_manifest()
-      raises before the session can transition to handshake.
+      The version-mismatch audit row is emitted from the ``create()`` async
+      factory's failure path so the awaited ``append_schema`` lands properly
+      (rvw-cr-round-1). ``_on_handshake_complete`` is never reached because
+      ``parse_manifest()`` raises before the session object is constructed.
       """
       manifest_toml = """
   alfred.manifest_version = 2
@@ -1391,7 +1392,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   sandbox_profile = "user-plugin"
   """
       with pytest.raises(ManifestVersionError):
-          AlfredPluginSession(
+          await AlfredPluginSession.create(
               manifest_raw=manifest_toml,
               audit_writer=fake_audit_writer,
               gate=fake_gate,
@@ -1409,7 +1410,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   subscriber_tier = "system"
   sandbox_profile = "user-plugin"
   """
-      session = AlfredPluginSession(
+      session = await AlfredPluginSession.create(
           manifest_raw=manifest_toml,
           audit_writer=fake_audit_writer,
           gate=fake_gate,
@@ -1421,18 +1422,39 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
 
   Run: `uv run pytest tests/unit/plugins/test_session_handshake.py -q` → `ImportError`.
 
+  > **Async construction pattern (rvw-cr-round-1):** `AlfredPluginSession` parses
+  > the manifest and may need to emit a `plugin.lifecycle.load_refused` audit row
+  > *before* the session object exists. `AuditWriter.append_schema()` is `async def`
+  > (PR-S3-0a), so the emit MUST be awaited — but `__init__` cannot be async. The
+  > original draft of this plan called `self._audit_writer.append_schema(...)` from
+  > `__init__` without await, leaking an unawaited coroutine and silently dropping
+  > the audit row on manifest-version mismatch (a security-relevant failure mode).
+  >
+  > Fix: split construction into a private synchronous `__init__` (pure state init,
+  > accepting an already-parsed `PluginManifest`) plus a public `async classmethod
+  > create()` factory that handles `parse_manifest`, the awaited load-refused emit
+  > on failure, and final object construction. All call sites — production and
+  > tests — use `await AlfredPluginSession.create(...)`. The synchronous
+  > `__init__` remains usable but is documented as "internal: prefer `create()`".
+  >
+  > This is the standard pattern for any class whose construction needs to await:
+  > keep `__init__` synchronous, expose `async classmethod create()` as the
+  > public API.
+
   **Implementation** (`src/alfred/plugins/session.py`):
   ```python
   """AlfredPluginSession — manifest handshake + lifecycle audit rows (spec §4.2, §4.7).
 
   Owns the subprocess lifecycle for a single plugin:
-  1. parse_manifest() — rejects version != 1, subscriber_tier=T3
+  1. AlfredPluginSession.create() — async factory: parse_manifest() + awaited load_refused emit on failure
   2. check_plugin_load() — capability gate (PR-S3-2 RealGate)
   3. emit plugin.lifecycle.loaded on success
   4. emit plugin.lifecycle.load_refused on any handshake failure
   5. SIGKILL (via transport.kill()) + emit plugin.lifecycle.quarantined on post-handshake alfred/hooks.register
 
   Cluster 4 fix: all audit emits use `await self._audit_writer.append_schema(fields, **kwargs)`.
+  rvw-cr-round-1 fix: construction split into sync ``__init__`` (state only) + ``async classmethod create()``
+    so the load_refused emit on manifest-version mismatch is properly awaited rather than dropped.
   sec-013 / core-007 fix: _on_post_handshake_method calls `await self._transport.kill()` before emitting the row.
   err-017 fix: best-effort plugin_id extraction from raw TOML before strict parse.
   """
@@ -1478,28 +1500,59 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
 
 
   class AlfredPluginSession:
-      """Manages the lifecycle of a single plugin subprocess — from manifest to SIGKILL."""
+      """Manages the lifecycle of a single plugin subprocess — from manifest to SIGKILL.
+
+      **Construction:** always via ``await AlfredPluginSession.create(...)``. The
+      synchronous ``__init__`` takes an already-parsed manifest and is internal
+      — direct construction skips the `plugin.lifecycle.load_refused` audit emit
+      on manifest-version mismatch, which is a security-relevant invariant.
+      """
 
       def __init__(
           self,
+          *,
+          manifest: PluginManifest,
+          audit_writer: AuditWriter,
+          gate: CapabilityGate,
+          transport: StdioTransport | None = None,
+          correlation_id: str | None = None,
+      ) -> None:
+          """Internal: prefer ``await AlfredPluginSession.create(manifest_raw=..., ...)``.
+
+          Takes an already-parsed ``PluginManifest`` so this is purely synchronous
+          state init — no audit emits, no I/O. ``create()`` handles the parse
+          + the awaited ``plugin.lifecycle.load_refused`` emit on failure.
+          """
+          self._audit_writer = audit_writer
+          self._gate = gate
+          self._transport = transport  # held for SIGKILL on quarantine (sec-013 / core-007 fix)
+          self._manifest: PluginManifest = manifest
+          self._handshake_complete = False
+          self._correlation_id = correlation_id or str(uuid.uuid4())
+
+      @classmethod
+      async def create(
+          cls,
           *,
           manifest_raw: str,
           audit_writer: AuditWriter,
           gate: CapabilityGate,
           transport: StdioTransport | None = None,
-      ) -> None:
-          self._audit_writer = audit_writer
-          self._gate = gate
-          self._transport = transport  # held for SIGKILL on quarantine (sec-013 / core-007 fix)
-          self._manifest: PluginManifest | None = None
-          self._handshake_complete = False
-          self._correlation_id = str(uuid.uuid4())
-          best_effort_id = _best_effort_plugin_id(manifest_raw)
+      ) -> AlfredPluginSession:
+          """Async factory: parse the manifest, emit load_refused on failure, then construct.
+
+          The awaited ``audit_writer.append_schema(...)`` on failure is the reason
+          this is async; ``__init__`` would silently drop the coroutine
+          (rvw-cr-round-1).
+          """
+          correlation_id = str(uuid.uuid4())
           try:
-              self._manifest = parse_manifest(manifest_raw)
+              manifest = parse_manifest(manifest_raw)
           except (ManifestVersionError, ManifestTierError) as exc:
-              # Cluster 4 fix: use append_schema, not append with positional fields kwarg.
-              self._audit_writer.append_schema(
+              # Best-effort plugin_id when parse fails (err-017): scan the raw TOML.
+              best_effort_id = _best_effort_plugin_id(manifest_raw)
+              # Cluster 4 + rvw-cr-round-1: awaited append_schema.
+              await audit_writer.append_schema(
                   audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS,
                   event="plugin.lifecycle.load_refused",
                   plugin_id=best_effort_id,
@@ -1510,9 +1563,16 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
                   signal=None,
                   restart_count=0,
                   breaker_state="CLOSED",
-                  correlation_id=self._correlation_id,
+                  correlation_id=correlation_id,
               )
               raise
+          return cls(
+              manifest=manifest,
+              audit_writer=audit_writer,
+              gate=gate,
+              transport=transport,
+              correlation_id=correlation_id,
+          )
 
       async def _on_handshake_complete(self) -> None:
           """Call after subprocess MCP handshake succeeds.
@@ -1521,12 +1581,11 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
           (Cluster-4 invariant). Callers — including unit tests — must await
           this method; the non-async variant was a Cluster-4 await-drift bug
           flagged in plan review round 2.
+
+          ``self._manifest`` is always set post-``create()`` (rvw-cr-round-1: the
+          async factory either parses successfully or raises before calling
+          ``__init__``), so no None-guard is needed.
           """
-          if self._manifest is None:
-              raise RuntimeError(
-                  "_on_handshake_complete() called before manifest was parsed; "
-                  "session state invariant violated"
-              )
           if not self._gate.check_plugin_load(
               plugin_id=self._manifest.plugin_id,
               manifest_tier=self._manifest.subscriber_tier,
@@ -1575,7 +1634,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
           whether the SIGKILL landed.
           """
           if method in _DISALLOWED_POST_HANDSHAKE_METHODS:
-              assert self._manifest is not None
+              # self._manifest is always set post-create() (rvw-cr-round-1).
               log.error(
                   "post_handshake_disallowed_method",
                   plugin_id=self._manifest.plugin_id,
@@ -1633,7 +1692,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
       """Post-handshake alfred/hooks.register → SIGKILL then quarantine audit row (spec §4.6)."""
       mock_transport = MagicMock()
       mock_transport.kill = AsyncMock()
-      session = AlfredPluginSession(
+      session = await AlfredPluginSession.create(
           manifest_raw=manifest_toml,
           audit_writer=fake_audit_writer,
           gate=fake_gate,
@@ -1713,10 +1772,11 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   async def session_post_handshake(fake_audit_writer, fake_gate, mock_transport):
       """Build a session that has completed handshake.
 
-      ``_on_handshake_complete`` is async (Cluster-4: awaited audit emits),
+      Both ``AlfredPluginSession.create()`` (rvw-cr-round-1) and
+      ``_on_handshake_complete`` are async (Cluster-4: awaited audit emits),
       so the fixture must itself be async via ``pytest_asyncio.fixture``.
       """
-      session = AlfredPluginSession(
+      session = await AlfredPluginSession.create(
           manifest_raw=VALID_MANIFEST,
           audit_writer=fake_audit_writer,
           gate=fake_gate,
@@ -2081,7 +2141,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Per spec §11a, `src/alfred/plugins/stdio_transport.py` and `src/alfred/plugins/inbound_scanner.py` require 100% line+branch coverage.
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   uv run pytest tests/unit/plugins/ tests/unit/identity/ \
     --cov=src/alfred/plugins/stdio_transport \
     --cov=src/alfred/plugins/inbound_scanner \
@@ -2138,7 +2198,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
 - [ ] **Task 14 — Final quality gates.**
 
   ```bash
-  cd /Users/iandominey/projects/AlfredOS-worktrees/slice-3-design
+  cd <repo-root>
   make check
   # Expected: lint + format + type + tests all pass
   uv run pytest tests/adversarial/tier_laundering/ -q
