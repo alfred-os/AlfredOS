@@ -113,7 +113,7 @@ PR-A merge and PR-E merge, a reader of ADR-0008 sees the supersession
 edge but no rationale — acceptable because the placeholder explicitly
 says "full body in PR E."
 
-ADR-0013 deferred T1+T3+dual-LLM to Slice 3. Slice 3 delivered all three per this commitment. ADR-0017 supersedes this ADR and records the five structural decisions that govern the implementation. The Slice-3 tracking issues for §6.10 deferred items are retired in PR-S3-0a (the first Slice-3 PR) per spec §15.3.
+ADR-0013 deferred T1+T3+dual-LLM to Slice 3. Slice 3 delivered all three per this commitment. ADR-0017 supersedes this ADR and records the five structural decisions that govern the implementation. The Slice-3 tracking issues for §6.10 deferred items are retired in PR-S3-7.
 
 ## References
 
