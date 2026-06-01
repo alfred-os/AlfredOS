@@ -21,15 +21,32 @@ Four histograms covering the four spec §7a.1 p99 budgets:
   ``plugin_id``, ``outcome`` (``ok`` | ``spawn_failed`` |
   ``handshake_rejected``). Budget: p99 < 500 ms.
 
-Label-cardinality notes
------------------------
+Label-cardinality cap (perf-003)
+--------------------------------
 
-``plugin_id`` is bounded by the operator's installed plugin set (Slice 3
-ships single-digit plugins; Slice 4+ counts likely stay <100). ``outcome``
-and ``method_shape`` are closed vocabularies (see the parenthesised lists
-above) so the time-series count per histogram is
-``plugin_id x |outcome|`` at most — well below Prometheus's
-recommendations.
+``plugin_id`` is an open-vocabulary label — any future plugin manifest
+declares its own id, and a runaway proposal loop / misconfigured plugin
+fleet could mint thousands of distinct ids that all land in the
+histogram label index. At 1K plugins x 5 outcomes x 3 method_shapes the
+``DISPATCH_DURATION`` series count crosses 15K — well above the
+prometheus_client recommended ceiling for a single histogram.
+
+The fix: route every label-emit through :func:`bucket_plugin_id`, which
+maintains a fixed-size allowlist of recently-seen plugin ids
+(:data:`MAX_TRACKED_PLUGINS = 100`). The first 100 distinct plugin ids
+keep their actual label value (operators see the exact plugin in
+dashboards); every subsequent id falls into the
+:data:`PLUGIN_ID_OVERFLOW_BUCKET` (``"other"``) so the long tail
+collapses to a single series. The bucket count is itself a useful signal
+— a non-zero ``"other"`` bucket means the deployment has grown past the
+tracked-plugin threshold and the allowlist needs raising (or the plugin
+fleet needs auditing).
+
+The allowlist is module-level (process-lifetime), thread-safe via a
+single ``threading.Lock`` (Prometheus scrapes can race the dispatch
+hot-path), and intentionally NOT persistent: a process restart resets
+the allowlist, which is the safe shape — the post-restart cardinality
+budget is fresh, and the histograms themselves reset on restart anyway.
 
 The histograms are intentionally module-level (created once at import
 time) rather than constructed per-dispatch, because
@@ -45,7 +62,73 @@ transport dispatch site imports them directly.
 
 from __future__ import annotations
 
+import threading
+from typing import Final
+
 from prometheus_client import Histogram
+
+# perf-003: open-vocabulary plugin_id label is the cardinality hotspot.
+# 100 is a generous ceiling — Slice 3 ships single-digit plugins; a
+# healthy Slice 4+ deployment with adapter plugins, integration plugins,
+# and the host's own observability-emitting modules stays well under
+# this. The constant lives at module scope so a test can lower it via
+# monkeypatch to exercise the overflow branch without minting 100 ids.
+MAX_TRACKED_PLUGINS: Final[int] = 100
+
+# Long-tail bucket label value. ``"other"`` is the canonical Prometheus
+# convention for "everything past the allowlist"; operators see a
+# non-zero ``other`` bucket and know the allowlist is saturated.
+PLUGIN_ID_OVERFLOW_BUCKET: Final[str] = "other"
+
+# Process-lifetime allowlist + a lock guarding it. Prometheus scrapes
+# the histograms from a separate thread (the WSGI exporter or the
+# OpenTelemetry bridge), and the dispatch hot-path mutates the
+# allowlist on first-sight of a new plugin id; without the lock the
+# read / mutate race would let two simultaneously-arriving new ids
+# both believe they slipped in under the cap. The lock is held only
+# across the set-mutation; the histogram emit happens outside.
+_tracked_plugin_ids: set[str] = set()
+_tracked_plugin_ids_lock: threading.Lock = threading.Lock()
+
+
+def bucket_plugin_id(plugin_id: str) -> str:
+    """Return the histogram-label value for ``plugin_id``.
+
+    Maintains a fixed-size allowlist (:data:`MAX_TRACKED_PLUGINS`) of
+    recently-seen plugin ids. Inside the allowlist: returns ``plugin_id``
+    unchanged so operators see the actual identifier in dashboards.
+    Outside the allowlist: returns :data:`PLUGIN_ID_OVERFLOW_BUCKET`
+    so every future plugin id past the cap shares one series.
+
+    Thread-safe (Prometheus exporters scrape from separate threads).
+    Idempotent on already-tracked ids — no allocation on the
+    already-seen hot path past the lock acquisition.
+
+    perf-003: this is the cardinality firewall — without it,
+    :data:`DISPATCH_DURATION` and :data:`PLUGIN_SPAWN_DURATION` would
+    leak unbounded series into Prometheus on any environment with more
+    than O(100) distinct plugins.
+    """
+    with _tracked_plugin_ids_lock:
+        if plugin_id in _tracked_plugin_ids:
+            return plugin_id
+        if len(_tracked_plugin_ids) < MAX_TRACKED_PLUGINS:
+            _tracked_plugin_ids.add(plugin_id)
+            return plugin_id
+    return PLUGIN_ID_OVERFLOW_BUCKET
+
+
+def _reset_tracked_plugin_ids_for_test() -> None:
+    """Test-only allowlist reset. NOT for production use.
+
+    Production code MUST NOT call this — the allowlist is process-
+    lifetime by design (a refresh would shift cardinality boundaries
+    mid-flight). Tests that exercise the cap-hit branch call this in a
+    setUp / fixture to start from a known state.
+    """
+    with _tracked_plugin_ids_lock:
+        _tracked_plugin_ids.clear()
+
 
 # StdioTransport.dispatch end-to-end. The bucket boundaries straddle the
 # spec §7a.1 5ms p99 budget (0.005 is present, so the operator can read
@@ -89,6 +172,9 @@ PLUGIN_SPAWN_DURATION: Histogram = Histogram(
 __all__ = [
     "DISPATCH_DURATION",
     "INBOUND_SCANNER_SCAN_DURATION",
+    "MAX_TRACKED_PLUGINS",
     "OUTBOUND_DLP_SCAN_DURATION",
+    "PLUGIN_ID_OVERFLOW_BUCKET",
     "PLUGIN_SPAWN_DURATION",
+    "bucket_plugin_id",
 ]
