@@ -225,13 +225,21 @@ class CircuitBreaker:
         self._backoff_seconds = _BACKOFF_INITIAL_SECONDS
         _log.info("supervisor.breaker.closed", component_id=self.component_id)
 
-    def record_probe_failure(self, exception_type: str) -> None:
+    def record_probe_failure(
+        self, exception_type: str, *, now: dt.datetime | None = None
+    ) -> None:
         """HALF_OPEN probe failed — reopen the breaker with doubled backoff.
 
         Backoff is capped at ``_BACKOFF_MAX_SECONDS`` so a sustained crash
         loop does not push the next re-arm attempt arbitrarily far into
         the future. ``exception_type`` is the Python type name only
         (spec §5.6 — never ``str(exc)``).
+
+        CR PR-S3-3b R5 #3332700145: ``now`` accepts a frozen-clock
+        injection so tests run without sleeping. Honours the module
+        docstring's "every method that consults the clock accepts a
+        ``now`` keyword" contract (lines 28-30). The wall-clock fallback
+        runs only when the caller omits ``now``.
         """
         if self.state != BreakerState.HALF_OPEN:
             raise BreakStateError(
@@ -240,7 +248,8 @@ class CircuitBreaker:
         self._backoff_seconds = min(
             self._backoff_seconds * _BACKOFF_MULTIPLIER, _BACKOFF_MAX_SECONDS
         )
-        self._trip(exception_type=exception_type, now=dt.datetime.now(dt.UTC))
+        effective_now = now if now is not None else dt.datetime.now(dt.UTC)
+        self._trip(exception_type=exception_type, now=effective_now)
 
     # ------------------------------------------------------------------
     # Operator-triggered reset (Task 7)
