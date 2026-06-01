@@ -88,9 +88,12 @@ deploy:
 
 ### Secrets file — permission propagation matrix
 
-`~/.config/alfred/secrets.toml` is plaintext for Slice 2. ADR-0012
-documents this as a known risk; Slice 3 replaces it with an
-age-encrypted equivalent. **In the meantime:**
+`~/.config/alfred/secrets.toml` is plaintext for Slices 2 and 3.
+[ADR-0012](docs/adr/0012-file-backed-secret-broker.md) documents this as
+a known risk; secrets management hardening (containerised secret broker)
+ships in Slice 4 per
+[ADR-0015](docs/adr/0015-slice4-containerised-quarantined-llm.md).
+**In the meantime:**
 
 - **macOS:** Docker Desktop maps the host file's uid/gid to the
   container uid/gid directly; `chmod 600` on the host applies inside
@@ -107,8 +110,36 @@ age-encrypted equivalent. **In the meantime:**
 **Backup-vector reminder:** if you back up your `~/.config` with
 `restic`, `borg`, or similar, **exclude `~/.config/alfred/secrets.toml`**
 or the backup will contain plaintext API keys and your Discord bot
-token. Slice 3 ships an age-encrypted alternative; until then, the
+token. The containerised secret broker lands in Slice 4; until then, the
 operator owns the exclusion.
+
+## Configuration
+
+Operator-facing environment variables live in [`.env.example`](./.env.example);
+copy it to `.env` and edit. The Slice-3 trust-boundary section documents the
+plugin-launcher, capability-gate, and supervisor knobs (sandbox policy
+directory, plugin UID, perf-gate force-run, redis maxmemory, state-git path).
+
+### Gate selection
+
+The capability gate has two implementations: `RealGate` (Postgres-backed,
+production default) and `DevGate` (fail-open stubs, development-only). The
+selection mechanism is **opt-out of production** rather than opt-in:
+
+| `ALFRED_ENV` value | Gate constructed |
+| --- | --- |
+| `development` | `DevGate` (fail-open stubs) |
+| Unset, empty, or whitespace-only | `DevGate` |
+| Anything else (`production`, `staging`, `prdouction` typo, ...) | `RealGate` |
+
+This means a typo in a production deployment safely falls through to
+`RealGate`. The matching startup log event (`bootstrap.gate_selected`,
+INFO-level) carries the exact env value the bootstrap read so an operator
+who set `ALFRED_ENV=prod` (instead of `production`) can confirm which gate
+they ended up on. The plugin runbook
+([`docs/runbooks/slice-3-plugins.md`](./docs/runbooks/slice-3-plugins.md))
+walks through the full Slice-3 deployment, including the launcher and the
+supervisor.
 
 ## Design
 

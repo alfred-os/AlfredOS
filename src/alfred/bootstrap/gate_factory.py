@@ -41,7 +41,11 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+import structlog
+
 from alfred.hooks.capability import DevGate
+
+_log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from alfred.security.capability_gate._gate import RealGate
@@ -94,7 +98,20 @@ def build_dev_gate() -> DevGate:
     ``DevGate(allow_system=True)`` directly; the bootstrap factory
     does not surface the flag because the production-equivalent path
     (RealGate consulting a grant table) has no analogue.
+
+    DEVEX-004: emits an INFO-level structlog event so the operator's
+    log stream visibly carries which gate is wired at bootstrap.
+    DevGate is fail-open — operators should never see this in
+    production. The event name is closed-vocabulary so log filters
+    can alert on it directly.
     """
+    raw_env = os.environ.get(_ENV_KEY, "").strip()
+    _log.info(
+        "bootstrap.gate_selected",
+        gate="DevGate",
+        alfred_env=raw_env or "(unset)",
+        warning="fail-open capability stubs; do not use in production",
+    )
     return DevGate()
 
 
@@ -128,6 +145,17 @@ async def build_real_gate(
     """
     from alfred.security.capability_gate._gate import RealGate
 
+    # DEVEX-004: emit the bootstrap-time gate-selected event before the
+    # await so the log line ALWAYS lands even if RealGate.create fails
+    # (the failure shape is useful operator forensics with this context).
+    # The raw_env value lets an operator who typo'd "prdouction" see
+    # the exact string the bootstrap read.
+    raw_env = os.environ.get(_ENV_KEY, "").strip()
+    _log.info(
+        "bootstrap.gate_selected",
+        gate="RealGate",
+        alfred_env=raw_env or "(unset)",
+    )
     return await RealGate.create(
         backend=backend,
         audit_sink=audit_sink,  # type: ignore[arg-type]
