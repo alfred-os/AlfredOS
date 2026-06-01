@@ -18,6 +18,19 @@ msgstr ""
 msgid "bootstrap.gate_selected.devgate_warning"
 msgstr "fail-open capability stubs; do not use in production"
 
+#: src/alfred/bootstrap/quarantine.py:59
+msgid "bootstrap.providers_blank_error"
+msgstr ""
+"Both routing.yaml [quarantine] provider and the privileged provider id "
+"must be declared; refusing to boot with either side blank."
+
+#: src/alfred/bootstrap/quarantine.py:63
+msgid "bootstrap.providers_same_error"
+msgstr ""
+"routing.yaml [quarantine] provider must differ from the privileged "
+"provider; both are set to {provider}. The dual-LLM split (spec §5.4) "
+"requires distinct providers."
+
 #: src/alfred/cli/_bootstrap.py:98
 msgid "error.placeholder_api_key"
 msgstr ""

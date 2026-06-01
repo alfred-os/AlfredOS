@@ -3,7 +3,9 @@
 # This file configures the privileged and quarantined LLM providers.
 # The [quarantine] block is gated: changes to 'provider' and 'secret_id'
 # go through the state.git reviewer-gate (high-blast, spec §11.1).
-# Use 'alfred config quarantined-provider <provider>' to propose a change.
+# See docs/runbooks/slice-3-quarantined-llm.md for the proposal walkthrough
+# (the previous 'alfred config quarantined-provider' CLI was vapourware —
+# devex-001 fix; the runbook documents the actual state.git flow).
 #
 # Downstream consumer: QuarantinedExtractor (PR-S3-4) reads
 # routing.yaml[quarantine] at construction; the manifest's declared
@@ -18,8 +20,10 @@ quarantine:
   # Provider for the quarantined LLM — MUST differ from the privileged
   # provider by default (defence-in-depth, spec §5.4, PRD §6.4).
   # If privileged uses deepseek, quarantined uses anthropic (and vice versa).
-  # Changing this field requires 'alfred config quarantined-provider <provider>'
-  # + state.git reviewer-gate approval (spec §11.1).
+  # The bootstrap-time check in alfred.bootstrap.quarantine.assert_provider_separation
+  # refuses to start when the privileged + quarantined ids collide (AI-3 fix).
+  # Changing this field requires a state.git reviewer-gate proposal — see
+  # docs/runbooks/slice-3-quarantined-llm.md (spec §11.1).
   provider: "anthropic"
 
   # Model identifier for the quarantined LLM.
@@ -30,3 +34,13 @@ quarantine:
   # The SecretBroker resolves this before subprocess spawn via fd-3 handshake
   # (spec §5.3). The literal API key never appears here.
   secret_id: "quarantine_provider_api_key"
+
+  # Per-extraction max-token budget (AI-2 fix). Caps the total tokens
+  # the quarantined LLM may emit for a single quarantine.extract call;
+  # exceeding this cap raises TypedRefusal(reason="provider_refused")
+  # so audit consumers see an explicit budget breach rather than a
+  # silent provider-side truncation. 8192 is the conservative default
+  # — structured-extraction schemas in Slice 3 are small JSON objects.
+  # Per-day / per-user quotas are deferred to Slice 4 (the quota
+  # subsystem lands alongside cost-report wiring).
+  max_tokens_per_extraction: 8192
