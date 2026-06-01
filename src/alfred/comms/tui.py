@@ -10,11 +10,22 @@ orchestrator; response renders in the log. Slice-1 affordances:
 PR-B Phase 5: the TUI is now the adapter that owns the trust-tier tag and
 working-memory lifecycle for each turn. ``_run_turn`` calls
 ``identity_resolver.get_operator()`` to find the requesting user (slice 2
-single-operator: that's always the operator), tags the raw text as ``T2``
-(``source="comms.tui.input"`` — the adapter boundary per CLAUDE.md hard
-rule #3), then acquires the pooled :class:`WorkingMemory` for
+single-operator: that's always the operator), tags the raw text using
+:func:`alfred.identity._ingest._ingest_tier` (which yields ``T1`` for
+operator-role users on the TUI adapter and ``T2`` everywhere else per
+spec §3.6), then acquires the pooled :class:`WorkingMemory` for
 ``("alfred", user.slug)`` and releases it in a ``finally`` block so a
 crash inside the orchestrator can't leave the entry stuck in-use.
+
+arch-001 (slice-3 retrospective): pre-fix the TUI hard-coded
+``tag(T2, ...)`` even though ``_ingest_tier`` had landed for the T1
+ingress path. T1 was reachable only via test fixtures — production
+operator turns ran under T2. This module is now the FIRST production
+producer for T1 ingress: an operator-role user typing in the TUI
+produces ``TaggedContent[T1]``; the orchestrator's T1|T2 widening
+accepts both. Discord stays T2 because the adapter name differs (the
+``_ingest_tier`` rule is hard-coded TUI-only — Discord is
+broadcast-shaped per §3.6 and never T1).
 
 Slice 2+ adds streaming UX.
 """
@@ -30,13 +41,14 @@ from textual.containers import Vertical
 from textual.widgets import Input, RichLog
 
 from alfred.i18n import t
-from alfred.security.tiers import T2, tag
+from alfred.identity._ingest import _ingest_tier
+from alfred.security.tiers import T1, T2, tag
 
 if TYPE_CHECKING:
     from alfred.identity.models import User
     from alfred.memory.working import WorkingMemory
     from alfred.orchestrator.core import UserLike
-    from alfred.security.tiers import TaggedContent
+    from alfred.security.tiers import TaggedContent, TrustTier
 
 # Per-turn wall-clock cap. If the provider doesn't respond in this long, the TUI
 # cancels the turn and renders a friendly timeout message. Slice 2+ may make this
@@ -106,7 +118,7 @@ class _OrchestratorLike(Protocol):
         self,
         *,
         user: UserLike,
-        content: TaggedContent[T2],
+        content: TaggedContent[T1] | TaggedContent[T2],
         working_memory: WorkingMemory,
     ) -> str:
         raise NotImplementedError
@@ -216,13 +228,28 @@ class AlfredTuiApp(App[None]):
         log.write(f"[bold green]{t('tui.label_alfred')}[/]: {response}")
 
     async def _run_turn(self, text: str) -> str:
-        """Tag the input as T2, acquire the per-user buffer, dispatch the turn.
+        """Tag the input via ``_ingest_tier``, acquire the buffer, dispatch.
 
         The TUI is the adapter at the security boundary per CLAUDE.md hard
         rule #3 — every function that ingests external content tags it at
         the boundary. ``source="comms.tui.input"`` is the audit-traceable
         provenance string that lets a future DLP / canary trip name the
         adapter that admitted the content.
+
+        arch-001 (slice-3 retrospective): the tier is derived from the
+        role x adapter pair via :func:`alfred.identity._ingest._ingest_tier`
+        rather than hard-coded as T2. The rule (spec §3.6) maps an
+        operator-role user on the TUI adapter to ``T1`` and everything
+        else to ``T2``. The orchestrator's content parameter accepts
+        ``TaggedContent[T1] | TaggedContent[T2]`` so both flows land on
+        the same dispatch path; the audit row picks up the resolved
+        tier name without per-call branching here.
+
+        The :func:`alfred.security.tiers.tag` factory routes ``tier=T1``
+        and ``tier=T2`` through the open construction path (only
+        ``tier=T3`` is capability-gated), so the dispatch is identical
+        in shape to the prior T2-only call — only the tier argument
+        moves from a hard-coded constant to a derived value.
 
         The pool ``acquire`` / ``release`` is a try/finally because the
         orchestrator may raise (BudgetError, provider crash, cancellation)
@@ -233,7 +260,25 @@ class AlfredTuiApp(App[None]):
         call unconditionally in the finally block.
         """
         user = self._identity_resolver.get_operator()
-        content = tag(T2, text, source="comms.tui.input")
+        # arch-001: derive the ingress tier from the role x adapter pair
+        # via the single source of truth in ``alfred.identity._ingest``.
+        # The adapter name is the literal ``"tui"`` — same value
+        # :class:`alfred.comms.adapter.TuiAdapter` registers under (the
+        # ``_ingest_tier`` rule keys on that exact string per spec §3.6).
+        # Cast at the call site, not inside ``_ingest_tier``, so a wrong
+        # adapter name surfaces as a type error rather than a silent T2
+        # default.
+        ingress_tier: type[TrustTier] = _ingest_tier(user, adapter_name="tui")
+        # Both T1 and T2 routes through the open ``tag()`` path (T3 is
+        # the capability-gated tier — out of scope here). The cast keeps
+        # mypy's overload resolution happy: ``tag`` is overloaded per
+        # tier, and the union return type is what the orchestrator
+        # expects.
+        content = tag(
+            cast("type[T1] | type[T2]", ingress_tier),
+            text,
+            source="comms.tui.input",
+        )
         key = ("alfred", user.slug)
         wm = await self._working_pool.acquire(key)
         try:
