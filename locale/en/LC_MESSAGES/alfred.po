@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 05:29+0100\n"
+"POT-Creation-Date: 2026-06-01 09:25+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -711,10 +711,10 @@ msgstr ""
 #: src/alfred/supervisor/core.py:433
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
-"register_plugin_task() called before Supervisor.start() (or after stop());"
-" no active TaskGroup to attach to. Call start() first."
+"register_plugin_task() called before Supervisor.start() (or after "
+"stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:481
+#: src/alfred/supervisor/core.py:480
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
