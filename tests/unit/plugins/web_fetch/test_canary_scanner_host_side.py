@@ -27,6 +27,8 @@ from collections.abc import AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
+import structlog
+from redis.exceptions import RedisError
 from testcontainers.redis import RedisContainer
 
 from alfred.plugins.web_fetch.canary_scanner import (
@@ -130,6 +132,99 @@ async def test_canary_trip_quarantines_handle(store: ContentStore) -> None:
         await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
     with pytest.raises(ContentHandleExpired):
         await store.extract(handle.id)
+
+
+@pytest.mark.asyncio
+async def test_canary_trip_raises_even_when_redis_delete_fails(
+    store: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """err-002: a RedisError on quarantine delete must NOT swallow the
+    canary trip.
+
+    Two failure modes line up here: (a) the handle stays alive in Redis
+    until TTL — survivable; (b) the typed canary exception fails to
+    propagate — the orchestrator's canary arm never fires; the
+    load-bearing defence is invisible. (b) is strictly worse, so the
+    contract is: even when the quarantine I/O throws, the typed canary
+    exception STILL raises. This test pins the invariant — if a future
+    refactor accidentally chains the raise to the delete's success, the
+    test catches it.
+    """
+    body = b"content with CANARY-DELETE-FAIL token"
+    handle = await store.write(body=body, source_url="https://attacker.test/del-fail")
+
+    async def _raise_redis_error(handle_id: str) -> None:
+        # ConnectionError is a RedisError subclass — most common
+        # production shape for a transient quarantine I/O failure.
+        msg = "simulated Redis connection reset mid-quarantine"
+        raise RedisError(msg)
+
+    monkeypatch.setattr(store, "delete", _raise_redis_error)
+    scanner = InboundCanaryScanner(
+        content_store=store,
+        known_canary_tokens=[CanaryToken("CANARY-DELETE-FAIL")],
+    )
+    with pytest.raises(WebFetchCanaryTripped) as exc_info:
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+    # source_url + handle_id still attributed despite the delete failure
+    # — the orchestrator's catch-arm needs both to emit the
+    # canary_tripped audit row.
+    assert exc_info.value.handle_id == handle.id
+    assert exc_info.value.source_url == handle.source_url
+
+
+@pytest.mark.asyncio
+async def test_canary_trip_emits_quarantine_failed_structlog(
+    store: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """err-002: the quarantine-failure leg emits a LOUD structlog event
+    naming the failed quarantine.
+
+    ``capture_logs`` intercepts structlog output. The event name is the
+    operator-visible signal until the dedicated quarantine_failed audit
+    schema lands — so the test pins both the event name AND the
+    forensic attributes (handle_id + source_url + exception_type) so a
+    future refactor cannot silently weaken the signal to a generic
+    ``error`` event.
+
+    ``exception_type`` carries the Python type name only — never
+    ``str(exc)`` or ``exc.args`` (spec §5.6: a misbehaving subprocess
+    may have laundered T3 fragments into the Redis error message).
+    """
+    body = b"content with CANARY-DELETE-STRUCTLOG token"
+    handle = await store.write(
+        body=body,
+        source_url="https://attacker.test/structlog",
+    )
+
+    async def _raise_redis_error(handle_id: str) -> None:
+        msg = "simulated Redis connection reset"
+        raise RedisError(msg)
+
+    monkeypatch.setattr(store, "delete", _raise_redis_error)
+    scanner = InboundCanaryScanner(
+        content_store=store,
+        known_canary_tokens=[CanaryToken("CANARY-DELETE-STRUCTLOG")],
+    )
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(WebFetchCanaryTripped),
+    ):
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+
+    quarantine_failed_events = [
+        e for e in captured if e.get("event") == "web_fetch.canary.quarantine_failed"
+    ]
+    assert len(quarantine_failed_events) == 1, (
+        f"expected exactly one web_fetch.canary.quarantine_failed event; captured: {captured!r}"
+    )
+    event = quarantine_failed_events[0]
+    assert event["log_level"] == "error", "quarantine_failed must be LOUD (error level)"
+    assert event["handle_id"] == handle.id
+    assert event["source_url"] == handle.source_url
+    assert event["exception_type"] == "RedisError"
 
 
 @pytest.mark.asyncio
