@@ -69,9 +69,15 @@ class InboundMessage(BaseModel):
     platform namespace and identity collisions occur across platforms.
 
     ``language`` is a BCP-47 tag per CLAUDE.md i18n rule #3.
+
+    sec-pr-s3-6-03: ``extra='forbid'`` so an MCP adapter sending an
+    unknown field (typo, smuggling attempt, future-version drift)
+    raises :class:`pydantic.ValidationError` at the wire boundary
+    rather than silently accepting the payload. Spec §9.1 pins the
+    field set; widening it is an ADR-0016 decision, not a runtime one.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     platform: str
     platform_user_id: str
@@ -86,9 +92,16 @@ class AdapterHealthResponse(BaseModel):
     ``status="degraded"`` → adapter running but with reduced capability
     (e.g. reconnecting to gateway). ``detail`` provides human-readable
     context for operators.
+
+    sec-pr-s3-6-03: ``extra='forbid'`` so an adapter that smuggles a
+    ``debug_uri`` / ``operator_secrets`` / ``raw_traceback`` field into
+    its health response is rejected at the wire boundary. Spec §9.1
+    pins the field set; the in-process supervisor never reads
+    unrecognised keys today, and the forbid policy makes that
+    contract structural rather than de-facto.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     # comms-009: Slice-3 narrow set per spec §9.1. ADR-0016 (Slice 4) will
     # widen this to include "unhealthy" / "starting" / "stopping" for full
