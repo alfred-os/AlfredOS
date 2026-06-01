@@ -225,9 +225,7 @@ class CircuitBreaker:
         self._backoff_seconds = _BACKOFF_INITIAL_SECONDS
         _log.info("supervisor.breaker.closed", component_id=self.component_id)
 
-    def record_probe_failure(
-        self, exception_type: str, *, now: dt.datetime | None = None
-    ) -> None:
+    def record_probe_failure(self, exception_type: str, *, now: dt.datetime | None = None) -> None:
         """HALF_OPEN probe failed — reopen the breaker with doubled backoff.
 
         Backoff is capped at ``_BACKOFF_MAX_SECONDS`` so a sustained crash
