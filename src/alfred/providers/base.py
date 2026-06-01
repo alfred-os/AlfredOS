@@ -11,21 +11,15 @@ quarantined-LLM dispatch path. See ``ProviderCapability`` below and the
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import Literal, Protocol, TypeVar
+from enum import StrEnum
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
 Role = Literal["system", "user", "assistant"]
 
-# Generic TypeVar used by the ``register_provider`` decorator. The decorator
-# is identity at the value level (it returns ``cls`` unchanged) so the type
-# round-trips without information loss — mypy/pyright see the same class
-# the source file declared.
-_ProviderT = TypeVar("_ProviderT")
 
-
-class ProviderCapability(str, Enum):
+class ProviderCapability(StrEnum):
     """Closed-set capabilities a provider may declare (spec §6.1).
 
     The quarantined-LLM dispatch path (spec §6.2) branches on these:
@@ -55,8 +49,12 @@ class ProviderCapability(str, Enum):
     LONG_CONTEXT_1M = "long_context_1m"
 
 
-def register_provider(cls: type[_ProviderT]) -> type[_ProviderT]:
+def register_provider[ProviderT](cls: type[ProviderT]) -> type[ProviderT]:
     """Decorator that asserts ``capabilities()`` is callable on ``cls``.
+
+    Uses PEP 695 generic syntax (Python 3.12+) — the type parameter is
+    scoped to the decorator and round-trips ``cls`` so static-analysis
+    sees the same symbol the source file declared.
 
     Why this exists rather than ``__init_subclass__`` on the
     ``Provider`` Protocol: real concrete providers
