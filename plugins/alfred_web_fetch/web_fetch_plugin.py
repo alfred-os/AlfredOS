@@ -49,6 +49,8 @@ import structlog
 # the same venv as the host (no separate sandbox process boundary on
 # the Python layer), so the import is cheap and the type stays honest.
 from alfred.plugins.web_fetch.content_store import ContentStore
+from alfred.plugins.web_fetch.errors import WebFetchInternalIPRefused
+from alfred.plugins.web_fetch.host_ip_guard import check_url_host_ips
 from alfred.plugins.web_fetch.tls_policy import TlsConfigError, TlsPolicy
 
 log = structlog.get_logger(__name__)
@@ -121,6 +123,30 @@ async def _handle_fetch(params: dict[str, Any]) -> dict[str, Any]:
                 "code": -32001,
                 "message": str(e),
                 "data": {"type": "TlsConfigError"},
+            }
+        }
+
+    # sec-pr-s3-5-003 / H3 — subprocess-side IP guard (defence-in-depth).
+    # The host-side guard in ``dispatch_web_fetch`` is the authoritative
+    # gate; this second pass closes the DNS-rebinding race window
+    # (parent resolved to a safe IP, subprocess's resolution returns an
+    # internal one). Code -32006 routes to WebFetchInternalIPRefused via
+    # the host-side ``_ERROR_TYPE_MAP``; the ``reason`` data field
+    # preserves the closed refusal vocabulary so the audit row gets the
+    # same attack-class string the parent-side guard would have emitted.
+    try:
+        check_url_host_ips(url, tls_policy)
+    except WebFetchInternalIPRefused as ip_exc:
+        return {
+            "error": {
+                "code": -32006,
+                "message": str(ip_exc),
+                "data": {
+                    "type": "WebFetchInternalIPRefused",
+                    "resolved_ip": ip_exc.resolved_ip,
+                    "reason": ip_exc.reason,
+                    "dlp_scan_result": "internal_ip_refused",
+                },
             }
         }
 

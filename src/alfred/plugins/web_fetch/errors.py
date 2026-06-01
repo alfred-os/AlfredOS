@@ -140,6 +140,38 @@ class WebFetchSizeLimitExceeded(WebFetchError):  # noqa: N818 -- name pinned by 
         self.limit_bytes = limit_bytes
 
 
+class WebFetchInternalIPRefused(WebFetchError):  # noqa: N818 -- name pinned by sec-pr-s3-5-003
+    """The URL's hostname resolved to an internal address (sec-pr-s3-5-003).
+
+    DNS-rebinding / cloud-metadata SSRF / RFC1918 internal-IP attacks
+    that the URL-name allowlist alone cannot block: an upstream resolver
+    that hands back ``10.0.0.1`` / ``169.254.169.254`` / ``127.0.0.1`` for
+    an allowlisted hostname would otherwise let the fetcher reach an
+    internal endpoint. See :mod:`alfred.plugins.web_fetch.host_ip_guard`
+    for the classification logic and the closed reason vocabulary
+    (``rfc1918`` / ``link_local`` / ``loopback`` / ``multicast`` /
+    ``reserved`` / ``dns_failure`` / ``no_hostname``).
+
+    ``url`` is the URL the caller asked for; ``resolved_ip`` is the
+    offending IP address the resolver returned (empty string when the
+    refusal happens before resolution — e.g. ``no_hostname`` / DNS
+    failure); ``reason`` is the closed-vocabulary refusal class so
+    audit rows can pivot on the attack shape.
+    """
+
+    def __init__(self, url: str, resolved_ip: str, reason: str) -> None:
+        super().__init__(
+            t(
+                "web.fetch.error.internal_ip_refused",
+                url=url,
+                resolved_ip=resolved_ip,
+            )
+        )
+        self.url = url
+        self.resolved_ip = resolved_ip
+        self.reason = reason
+
+
 # NB: NOT a ``WebFetchError`` subclass. Spec §7.10 makes this distinction
 # load-bearing — the orchestrator's operational-error arm must not catch
 # canary trips.
@@ -168,6 +200,7 @@ __all__ = [
     "WebFetchCanaryTripped",
     "WebFetchDomainNotAllowed",
     "WebFetchError",
+    "WebFetchInternalIPRefused",
     "WebFetchMimeTypeNotAllowed",
     "WebFetchRateLimited",
     "WebFetchRedirectRefused",

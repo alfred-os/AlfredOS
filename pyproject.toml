@@ -106,6 +106,10 @@ markers = [
   #   The baseline uses the SAME runner so loop-driver overhead cancels in the
   #   `p99(measured) - p99(baseline)` delta computation.
   "benchmark: micro-benchmark / perf-gate tests (run via `make test-perf` and the perf workflow)",
+  # sec-pr-s3-5-003 / H3: opt-out for the host-IP guard tests so they keep
+  # their own ``socket.getaddrinfo`` monkeypatch instead of getting the
+  # web_fetch conftest's autouse "public-IP" stub on top.
+  "no_getaddrinfo_stub: opt out of the web_fetch conftest's autouse getaddrinfo stub",
 ]
 
 [tool.coverage.run]
