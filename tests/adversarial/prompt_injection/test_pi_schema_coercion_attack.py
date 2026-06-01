@@ -46,13 +46,28 @@ _PAYLOAD_PATH: Final[Path] = Path(__file__).parent / "pi_schema_coercion_attack.
 
 
 def test_payload_yaml_present_and_well_formed() -> None:
-    """Drift-guard: the ``pi-2026-003`` YAML exists with expected shape."""
+    """Drift-guard: the ``pi-2026-003`` YAML exists with all corpus-required fields.
+
+    CR-142 round-3 test-003: assert every required field per the
+    ``.rulesync/skills/alfred-adversarial-corpus/SKILL.md`` schema is
+    present and non-empty. The schema is also enforced at collection
+    time by ``tests/adversarial/payload_schema.py`` — this test
+    duplicates the check at runtime so a YAML that survives schema
+    parsing but lost a required value (e.g. an empty ``references``)
+    fails per-file with a precise message, not a generic collection
+    error.
+    """
     assert _PAYLOAD_PATH.exists(), f"Missing adversarial payload {_PAYLOAD_PATH.name}"
     payload = yaml.safe_load(_PAYLOAD_PATH.read_text())
     assert payload["id"] == _PAYLOAD_ID
     assert payload["category"] == "prompt_injection"
     assert payload["ingestion_path"] == "web.fetch"
     assert payload["expected_outcome"] == "neutralized"
+    # Required fields per adversarial corpus conventions
+    # (.rulesync/skills/alfred-adversarial-corpus/SKILL.md).
+    assert payload.get("threat"), "required field `threat` missing or empty"
+    assert payload.get("provenance"), "required field `provenance` missing or empty"
+    assert payload.get("references"), "required field `references` must have at least one citation"
     # The injection's payload field IS the coercion attempt — pin
     # the canonical shape so a future refactor doesn't silently
     # change the test target.

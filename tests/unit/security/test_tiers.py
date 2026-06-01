@@ -115,8 +115,22 @@ class TestTagHelper:
         class ImpostorTier(TrustTier):
             name = "T9"
 
-        # The error message ships via t("security.tier_unsupported", ...)
-        # (slice-3 retrospective arch-003), so we match the case-insensitive
-        # phrase rather than the prior hardcoded lowercase form.
-        with pytest.raises(ValueError, match=r"(?i)unsupported trust tier"):
+        # CR-142 round-3 test-001: assert on locale-stable signal
+        # (the offending tier token + the approved-tier names) rather
+        # than English wording. The error is rendered via
+        # t("security.tier_unsupported", tier_name=..., approved=...);
+        # both substitutions land in the output regardless of locale,
+        # which makes the assertion stable when a future i18n pass
+        # ships a non-English msgstr.
+        with pytest.raises(ValueError) as excinfo:
             tag(ImpostorTier, content="x", source="test")
+        msg = str(excinfo.value)
+        assert "T9" in msg, f"expected impostor tier token in {msg!r}"
+        # The approved tiers list is sorted by name and inserted as a
+        # comma-separated string; each canonical name must appear so
+        # the operator can see WHICH tiers ARE accepted vs the rejected
+        # impostor name.
+        for approved_name in ("T0", "T1", "T2", "T3"):
+            assert approved_name in msg, (
+                f"expected approved tier {approved_name!r} in error message {msg!r}"
+            )
