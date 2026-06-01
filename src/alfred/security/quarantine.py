@@ -324,6 +324,41 @@ _RETRY_CATEGORY_LABELS: dict[str, str] = {
 }
 
 
+def _build_retry_prompt(
+    *,
+    validator_error_category: ValidatorErrorCategory,
+    schema_json: str,
+) -> str:
+    """Module-level retry-prompt builder shared with the quarantine plugin.
+
+    Identical body to :meth:`QuarantinedExtractor._build_retry_prompt`;
+    the module-level binding lets the plugin-side dispatcher import the
+    closed-vocab builder without depending on the orchestrator-side
+    extractor class (sec-001 / rvw-1 / AI-5 consolidation).
+
+    The two sides of the trust boundary use the SAME prompt body — a
+    drift between them would let a misbehaving plugin observe different
+    retry text than the orchestrator's tests pin, breaking the
+    inspect.signature contract that prov-002 relies on.
+
+    See :meth:`QuarantinedExtractor._build_retry_prompt` for the
+    closed-vocabulary rationale (no ``prior_response`` parameter,
+    type-level + runtime gate, etc).
+    """
+    if validator_error_category not in get_args(ValidatorErrorCategory):
+        raise ValueError(
+            "validator_error_category must be one of "
+            f"{sorted(get_args(ValidatorErrorCategory))}; "
+            f"got {validator_error_category!r}",
+        )
+    label = _RETRY_CATEGORY_LABELS[validator_error_category]
+    return (
+        f"Previous extraction failed: {label}.\n\n"
+        "Try again. Output valid JSON matching this schema:\n"
+        f"{schema_json}"
+    )
+
+
 class QuarantinedExtractor:
     """Orchestrator-side client of the quarantined-LLM plugin (spec §6.4).
 
@@ -419,17 +454,9 @@ class QuarantinedExtractor:
         absence of those parameters from the signature is the
         structural defence that ``inspect.signature``-based tests pin.
         """
-        if validator_error_category not in get_args(ValidatorErrorCategory):
-            raise ValueError(
-                "validator_error_category must be one of "
-                f"{sorted(get_args(ValidatorErrorCategory))}; "
-                f"got {validator_error_category!r}",
-            )
-        label = _RETRY_CATEGORY_LABELS[validator_error_category]
-        return (
-            f"Previous extraction failed: {label}.\n\n"
-            "Try again. Output valid JSON matching this schema:\n"
-            f"{schema_json}"
+        return _build_retry_prompt(
+            validator_error_category=validator_error_category,
+            schema_json=schema_json,
         )
 
     # ------------------------------------------------------------------

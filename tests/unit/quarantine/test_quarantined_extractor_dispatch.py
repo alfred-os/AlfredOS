@@ -16,18 +16,23 @@ This file tests the dispatcher in isolation — the orchestrator-side
 ``QuarantinedExtractor`` (Task 6) wraps the dispatch in audit-emit +
 hookpoint plumbing.
 
-Two security invariants are pinned here as well:
+Security invariants pinned here:
 
-* ``sanitize_validator_error`` MUST NOT embed the offending input value
-  (prov-004 / err-009). The prior draft used ``str(exc)`` which embeds
-  prior LLM output via Pydantic's ``ValidationError.__str__``. The
-  sanitised form extracts only ``exc.errors()`` field-paths + validator
-  types so retry prompts never carry forward injection payloads.
+* Retry prompts NEVER carry forward the free-form Pydantic /
+  JSONDecodeError text. The dispatcher routes through the closed-vocab
+  :func:`alfred.security.quarantine._build_retry_prompt` builder, which
+  accepts only :data:`ValidatorErrorCategory` labels (sec-001 / rvw-1 /
+  AI-5 consolidation; replaces the prior free-form
+  ``sanitize_validator_error`` path). The prior helper is removed
+  because keeping a free-form sanitiser around invites accidental reuse.
 * Retry-exhaustion (``_MAX_RETRIES`` exceeded) MUST yield a
   ``TypedRefusal(reason="cannot_extract")``, NOT a malformed-output
   variant of ``Extracted``. ``kind="malformed_output"`` is a transport-
   layer protocol-violation marker, not a legitimate extraction outcome
   (spec §6.7 / prov-011).
+* Provider connection failures (httpx.HTTPError) map to
+  ``TypedRefusal(reason="provider_unavailable")`` so audit consumers
+  can tell provider outages apart from model-output failures (err-002).
 """
 
 from __future__ import annotations
@@ -253,21 +258,22 @@ async def test_dispatch_returns_typed_refusal_on_retry_exhaustion() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_propagates_non_validation_errors() -> None:
-    """A non-(ValidationError/JSONDecodeError) propagates — no silent retry.
+    """A non-retry-eligible exception propagates — no silent retry.
 
-    err-009: catching ``Exception`` would silently swallow provider HTTP
-    errors, rate-limit responses, and SDK bugs and present them as
-    ``cannot_extract`` — which would hide outages from the audit log.
-    The dispatcher catches only the two retry-eligible exception types
-    and lets everything else propagate to the supervisor.
+    err-009: catching ``Exception`` would silently swallow SDK bugs and
+    present them as ``cannot_extract`` — which would hide outages from
+    the audit log. The dispatcher catches only the retry-eligible
+    exception types (ValidationError, JSONDecodeError) and the
+    closed-vocab ``provider_unavailable`` leg (httpx.HTTPError); every
+    other exception propagates to the supervisor.
     """
     from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
 
     provider = AsyncMock()
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
-    provider.complete = AsyncMock(side_effect=RuntimeError("provider HTTP 503"))
+    provider.complete = AsyncMock(side_effect=RuntimeError("provider SDK bug"))
 
-    with pytest.raises(RuntimeError, match="provider HTTP 503"):
+    with pytest.raises(RuntimeError, match="provider SDK bug"):
         await dispatch_extraction(
             content=b"",
             schema_json='{"type":"object"}',
@@ -276,22 +282,66 @@ async def test_dispatch_propagates_non_validation_errors() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_dispatch_returns_provider_unavailable_on_httpx_error() -> None:
+    """err-002 fix: ``provider_unavailable`` is no longer claim-only.
+
+    Prior to the fix, :data:`TypedRefusalReason` advertised
+    ``provider_unavailable`` but no path in :func:`dispatch_extraction`
+    returned it — every provider connection failure either propagated
+    as ``RuntimeError`` (failing loud at the wrong layer) or got
+    mistakenly collapsed into ``cannot_extract``. This test pins the
+    closed map ``httpx.HTTPError → provider_unavailable``.
+    """
+    import httpx
+
+    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+
+    provider = AsyncMock()
+    provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
+    provider.complete = AsyncMock(side_effect=httpx.ConnectError("dns timeout"))
+
+    result = await dispatch_extraction(
+        content=b'{"title": "hello"}',
+        schema_json='{"type":"object"}',
+        schema_version=1,
+        provider=provider,
+    )
+    assert result == {"kind": "typed_refusal", "reason": "provider_unavailable"}
+
+
 # ---------------------------------------------------------------------------
-# sanitize_validator_error — prov-004 / err-009.
+# Retry-prompt builder — closed-vocab consolidation (sec-001 / rvw-1 / AI-5).
 # ---------------------------------------------------------------------------
 
 
-def test_sanitize_validator_error_does_not_include_input_value() -> None:
-    """The sanitised string MUST NOT carry the offending value.
+def test_categorise_validator_error_maps_json_decode_to_closed_label() -> None:
+    """A JSONDecodeError maps to the closed-vocab ``json_parse_error``.
 
-    Pydantic's ``ValidationError.__str__`` embeds the input value (e.g.
-    ``input_value=123`` or, worse, ``input_value='<prompt injection>'``).
-    Carrying that into the retry prompt is the exact injection vector
-    this helper exists to close.
+    The closed-vocab map is the single source the dispatcher's retry
+    path uses; free-form ``str(exc)`` is forbidden because Pydantic
+    ``loc`` tuples can include attacker-controlled JSON keys when the
+    quarantined LLM returns a poisoned dict.
+    """
+    from plugins.alfred_quarantined_llm.provider_dispatch import (
+        _categorise_validator_error,
+    )
+
+    try:
+        json.loads("absolutely not json")
+    except json.JSONDecodeError as exc:
+        assert _categorise_validator_error(exc) == "json_parse_error"
+
+
+def test_categorise_validator_error_maps_validation_to_closed_label() -> None:
+    """A ValidationError maps to ``schema_mismatch`` (the conservative
+    closed-vocab default).
     """
     from pydantic import BaseModel, ValidationError
 
-    from plugins.alfred_quarantined_llm.provider_dispatch import sanitize_validator_error
+    from plugins.alfred_quarantined_llm.provider_dispatch import (
+        _categorise_validator_error,
+    )
 
     class S(BaseModel):
         title: str
@@ -299,27 +349,33 @@ def test_sanitize_validator_error_does_not_include_input_value() -> None:
     try:
         S(title=123)  # type: ignore[arg-type]
     except ValidationError as exc:
-        sanitised = sanitize_validator_error(exc)
-        # Must NOT contain the bad value.
-        assert "123" not in sanitised
-        # Must contain the field path or validator type so the model
-        # has something to act on.
-        assert "title" in sanitised or "str_type" in sanitised
+        assert _categorise_validator_error(exc) == "schema_mismatch"
 
 
-def test_sanitize_validator_error_handles_json_decode_error() -> None:
-    """The other ``except`` leg: a JSONDecodeError sanitises to a stable
-    string that names the error type but not the raw input.
+def test_build_extraction_prompt_retry_does_not_leak_pydantic_loc() -> None:
+    """The retry prompt body NEVER contains free-form Pydantic error text.
+
+    A poisoned JSON key like ``"IGNORE PRIOR INSTRUCTIONS"`` could end
+    up in a Pydantic ``loc`` tuple when the quarantined LLM returns a
+    dict with attacker-controlled keys. The closed-vocab retry path
+    accepts only :data:`ValidatorErrorCategory` labels, so the prompt
+    body is fixed at the type level — even a category like
+    ``"schema_mismatch"`` cannot widen into attacker text.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import sanitize_validator_error
+    from plugins.alfred_quarantined_llm.provider_dispatch import (
+        _build_extraction_prompt,
+    )
 
-    try:
-        json.loads("absolutely not json")
-    except json.JSONDecodeError as exc:
-        sanitised = sanitize_validator_error(exc)
-        # Identifies the error class — never includes the raw user input.
-        assert "JSONDecodeError" in sanitised
-        assert "absolutely" not in sanitised
+    prompt = _build_extraction_prompt(
+        content="(ignored on retry)",
+        schema_json='{"type":"object"}',
+        retry_category="schema_mismatch",
+    )
+    # Closed-vocab body — schema + label only, never raw error text.
+    assert "IGNORE PRIOR INSTRUCTIONS" not in prompt
+    assert "loc" not in prompt or '"loc"' not in prompt
+    # And the closed-vocab label IS in the prompt (positive control).
+    assert "did not match the schema" in prompt
 
 
 @pytest.mark.asyncio
@@ -350,17 +406,23 @@ async def test_dispatch_treats_non_object_json_as_retry_eligible() -> None:
     assert result["reason"] == "cannot_extract"
 
 
-def test_sanitize_validator_error_strips_nested_input_values() -> None:
+def test_dispatch_retry_path_does_not_carry_prior_response_text() -> None:
     """Adversarial input that itself looks like a prompt MUST NOT carry
-    through to the retry prompt via the validator-error string.
+    through to the retry prompt via any error-text leg.
 
-    Positive-control test for the prov-004 invariant: even when the
-    offending value is a string the LLM could be tricked by, the
-    sanitised form drops it.
+    Positive-control test for the prov-004 / sec-001 invariant: even
+    when the offending value is a string the LLM could be tricked by,
+    the closed-vocab retry path drops it. We construct a ValidationError
+    that embeds the poisoned string, then verify the retry prompt body
+    produced by :func:`_build_extraction_prompt` for the matching
+    category does not surface it.
     """
     from pydantic import BaseModel, ValidationError
 
-    from plugins.alfred_quarantined_llm.provider_dispatch import sanitize_validator_error
+    from plugins.alfred_quarantined_llm.provider_dispatch import (
+        _build_extraction_prompt,
+        _categorise_validator_error,
+    )
 
     class S(BaseModel):
         count: int
@@ -369,6 +431,11 @@ def test_sanitize_validator_error_strips_nested_input_values() -> None:
     try:
         S(count=poisoned)  # type: ignore[arg-type]
     except ValidationError as exc:
-        sanitised = sanitize_validator_error(exc)
-        assert poisoned not in sanitised
-        assert "IGNORE" not in sanitised
+        category = _categorise_validator_error(exc)
+        prompt = _build_extraction_prompt(
+            content="(ignored)",
+            schema_json='{"type":"object"}',
+            retry_category=category,
+        )
+        assert poisoned not in prompt
+        assert "IGNORE" not in prompt
