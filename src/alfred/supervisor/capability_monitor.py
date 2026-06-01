@@ -181,32 +181,47 @@ class CapabilityGateMonitor:
         exiting). On steady state — gate available, monitor not in
         fail-closed, or gate unavailable, monitor already in fail-closed
         — the method is a no-op (single read on the gate Protocol).
+
+        Audit-before-commit invariant (CR PR-S3-3b R5 #3332700170):
+        the in-memory state flip (``_in_fail_closed``,
+        ``_outage_correlation_id``, ``_denied_dispatch_count``) ONLY lands
+        if the matching audit emit succeeds. If ``append_schema`` raises,
+        the previous state is restored and the exception propagates so the
+        supervisor's TaskGroup surfaces the failure (err-001). Without
+        this, a single transient sink failure during the entering branch
+        would leave the monitor in the new state with no entering row in
+        the audit graph — subsequent heartbeats would silently skip the
+        transition forever because the "already in fail-closed" branch
+        short-circuits before the emit (PRD §10.4 outage-transition
+        contract).
         """
         available = self._gate.is_backing_store_available()
         if not available and not self._in_fail_closed:
-            self._in_fail_closed = True
-            self._outage_correlation_id = str(uuid.uuid4())
-            self._denied_dispatch_count = 0
+            new_correlation_id = str(uuid.uuid4())
             await self._emit_transition(
                 state_transition="entering_fail_closed",
                 denied_dispatch_count=0,
                 backing_store_error_type="unavailable",
+                correlation_id_override=new_correlation_id,
             )
+            # Audit emit succeeded — commit the in-memory transition.
+            self._in_fail_closed = True
+            self._outage_correlation_id = new_correlation_id
+            self._denied_dispatch_count = 0
             return
         if available and self._in_fail_closed:
-            self._in_fail_closed = False
             denied = self._denied_dispatch_count
-            self._denied_dispatch_count = 0
-            # Read the correlation_id before clearing so the exiting row
-            # carries the same id the entering row did (err-014).
             correlation_id = self._outage_correlation_id
-            self._outage_correlation_id = None
             await self._emit_transition(
                 state_transition="exiting_fail_closed",
                 denied_dispatch_count=denied,
                 backing_store_error_type="",
                 correlation_id_override=correlation_id,
             )
+            # Audit emit succeeded — commit the in-memory transition.
+            self._in_fail_closed = False
+            self._denied_dispatch_count = 0
+            self._outage_correlation_id = None
 
     async def _emit_transition(
         self,
