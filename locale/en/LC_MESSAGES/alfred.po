@@ -663,11 +663,11 @@ msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
 "subprocess has been quarantined."
 
-#: src/alfred/security/quarantine.py:793
+#: src/alfred/security/quarantine.py:813
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:857
+#: src/alfred/security/quarantine.py:885
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 

@@ -53,12 +53,33 @@ _PAYLOAD_PATH: Final[Path] = Path(__file__).parent / "tl_retry_guidance_hygiene.
 
 
 def test_payload_yaml_present_and_well_formed() -> None:
-    """The ``tl-2026-008`` payload exists with the corpus-required shape."""
+    """The ``tl-2026-008`` payload exists with the corpus-required shape.
+
+    Asserts the full required-fields surface from the alfred-adversarial-
+    corpus SKILL: id, category, threat, ingestion_path, payload,
+    expected_outcome, provenance, references (at least one citation).
+    A subset check would let a payload with a missing ``references``
+    array — the citation guarantee the corpus relies on — pass CI.
+    """
     assert _PAYLOAD_PATH.exists(), f"Missing adversarial payload {_PAYLOAD_PATH.name}"
     payload = yaml.safe_load(_PAYLOAD_PATH.read_text())
     assert payload["id"] == _PAYLOAD_ID
     assert payload["category"] == "tier_laundering"
+    assert isinstance(payload.get("threat"), str) and payload["threat"].strip(), (
+        "tl-2026-008: ``threat`` must be a non-empty string"
+    )
+    assert payload.get("ingestion_path") == "stdio_transport.inbound", (
+        "tl-2026-008: ``ingestion_path`` must be ``stdio_transport.inbound``"
+    )
+    assert "payload" in payload, "tl-2026-008: ``payload`` field is required"
     assert payload["expected_outcome"] == "boundary_refused"
+    assert isinstance(payload.get("provenance"), str) and payload["provenance"].strip(), (
+        "tl-2026-008: ``provenance`` must be a non-empty string"
+    )
+    refs = payload.get("references")
+    assert isinstance(refs, list | tuple) and len(refs) >= 1, (
+        "tl-2026-008: ``references`` must contain at least one citation"
+    )
     assert "INJECTED_SYSTEM_OVERRIDE" in payload["payload"]
 
 

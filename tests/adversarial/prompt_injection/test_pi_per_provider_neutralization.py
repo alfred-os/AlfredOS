@@ -97,6 +97,24 @@ def test_payload_neutralizes_against_every_provider_fixture(
     """
     payload = _load_payload(payload_file)
     assert payload["id"] == payload_id
+    # Full corpus-schema drift guard (.rulesync/skills/alfred-adversarial-
+    # corpus/SKILL.md required-fields list). Asserting the subset here lets
+    # a malformed payload (missing threat / provenance / references) reach
+    # the cross-provider matrix and silently degrade to a less-meaningful
+    # test. Enforce the corpus schema's required-non-empty surface.
+    assert isinstance(payload.get("threat"), str) and payload["threat"].strip(), (
+        f"payload {payload_id}: ``threat`` must be a non-empty string"
+    )
+    assert isinstance(payload.get("ingestion_path"), str) and payload["ingestion_path"].strip(), (
+        f"payload {payload_id}: ``ingestion_path`` must be a non-empty string"
+    )
+    assert isinstance(payload.get("provenance"), str) and payload["provenance"].strip(), (
+        f"payload {payload_id}: ``provenance`` must be a non-empty string"
+    )
+    refs = payload.get("references")
+    assert isinstance(refs, list | tuple) and len(refs) >= 1, (
+        f"payload {payload_id}: ``references`` must contain at least one citation"
+    )
     assert payload["expected_outcome"] == "neutralized", (
         f"payload {payload_id} declares expected_outcome="
         f"{payload['expected_outcome']!r}; this module pins "

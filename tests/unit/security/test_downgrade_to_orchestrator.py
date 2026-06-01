@@ -89,10 +89,12 @@ async def test_refuses_without_clearance(fake_audit_writer: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_gate_consulted_with_t3_derived_tier(fake_audit_writer: MagicMock) -> None:
-    """``check_content_clearance`` is called with ``content_tier="T3_derived"``
-    and ``hookpoint="t3.downgrade_to_orchestrator"``. The closed-vocabulary
-    tier label is what audit-graph consumers join on.
+async def test_gate_consulted_with_prd_t3_tier(fake_audit_writer: MagicMock) -> None:
+    """``check_content_clearance`` is called with ``content_tier="T3"``
+    (PRD §7.1 canonical tier vocabulary) and ``hookpoint=
+    "t3.downgrade_to_orchestrator"``. The closed-vocabulary tier label
+    is what gate-policy authors join on; the ``T3_derived`` forensic
+    provenance label remains on the audit row's ``source_tier`` field.
     """
     seen: dict[str, str] = {}
 
@@ -117,7 +119,7 @@ async def test_gate_consulted_with_t3_derived_tier(fake_audit_writer: MagicMock)
 
     data: T3DerivedData = T3DerivedData({"title": "hello"})
     await downgrade_to_orchestrator(data, gate=_RecordingGate(), audit_writer=fake_audit_writer)
-    assert seen["content_tier"] == "T3_derived"
+    assert seen["content_tier"] == "T3"
     assert seen["hookpoint"] == "t3.downgrade_to_orchestrator"
 
 

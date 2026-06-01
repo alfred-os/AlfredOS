@@ -354,6 +354,12 @@ jobs:
         #     vs OpenAI strict:true vs DeepSeek JSON-mode branching in
         #     the extractor; a missed branch silently downgrades a
         #     constrained-generation provider to prompt-embedded.
+        #   * ``src/alfred/bootstrap/quarantine.py`` — provider-separation
+        #     bootstrap helper (PRD §7.1). Enforces the orchestrator vs
+        #     quarantined-LLM provider-distinct-instance invariant at
+        #     process start; a skipped branch here lets a misconfigured
+        #     deployment ship with shared providers across the dual-LLM
+        #     split, collapsing the trust boundary.
         #   * ``plugins/alfred_quarantined_llm/__init__.py`` — public
         #     re-export surface. The package-import lock is the contract
         #     every ``from plugins.alfred_quarantined_llm import ...``
@@ -377,10 +383,10 @@ jobs:
         # < 100% coverage. Chained ``&&`` hashFiles guard per PR-S3-1 R1
         # F1: ANY-match must NOT no-op the gate; ALL files must be
         # present before the coverage report runs.
-        if: hashFiles('src/alfred/providers/base.py') != '' && hashFiles('plugins/alfred_quarantined_llm/__init__.py') != '' && hashFiles('plugins/alfred_quarantined_llm/provider_dispatch.py') != '' && hashFiles('plugins/alfred_quarantined_llm/quarantine_plugin.py') != ''
+        if: hashFiles('src/alfred/providers/base.py') != '' && hashFiles('src/alfred/bootstrap/quarantine.py') != '' && hashFiles('plugins/alfred_quarantined_llm/__init__.py') != '' && hashFiles('plugins/alfred_quarantined_llm/provider_dispatch.py') != '' && hashFiles('plugins/alfred_quarantined_llm/quarantine_plugin.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/providers/base.py,plugins/alfred_quarantined_llm/__init__.py,plugins/alfred_quarantined_llm/provider_dispatch.py,plugins/alfred_quarantined_llm/quarantine_plugin.py' \
+            --include='src/alfred/providers/base.py,src/alfred/bootstrap/quarantine.py,plugins/alfred_quarantined_llm/__init__.py,plugins/alfred_quarantined_llm/provider_dispatch.py,plugins/alfred_quarantined_llm/quarantine_plugin.py' \
             --fail-under=100
 
   smoke:
