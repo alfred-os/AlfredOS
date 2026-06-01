@@ -489,34 +489,74 @@ class Supervisor:
         breaker.reset()
 
         correlation_id = str(uuid.uuid4())
+
+        # CR PR-S3-3b R5 #3332700182: persist BEFORE auditing ``success``.
+        # Previously, the row was emitted with ``result="success"`` then
+        # ``session.commit()`` ran; a commit failure left the audit graph
+        # showing a clean reset while the on-disk state stayed pre-reset,
+        # so a ``load_all_breakers`` on the next boot would silently re-open
+        # the breaker the operator believed they cleared. Mirror the
+        # err-002 pattern in ``stop()``: persist first, audit ``success``
+        # on commit success, audit ``persistence_failed`` and re-raise on
+        # ``SQLAlchemyError`` so the operator-facing reset error is loud.
+        #
+        # The in-memory ``breaker.reset()`` above is irreversible — it has
+        # already mutated state by the time we get here. The audit row in
+        # the failure arm captures the divergence: subscribers see the
+        # operator-initiated transition AND the persistence failure, so
+        # the next ``load_all_breakers`` (which restores OPEN) is
+        # explainable from the graph.
+        subject: dict[str, Any] = {
+            "component_id": component_id,
+            "old_state": old_state,
+            # S3-3b-R1: pin the BreakerState enum's CLOSED value so a
+            # future rename to the domain literal (CHECK constraint at
+            # the DB layer is the source of truth) propagates here
+            # without a manual sync. Mirrors line 370's old_state read.
+            "new_state": BreakerState.CLOSED.value,
+            "trip_count": breaker.trip_count,
+            "operator_user_id": operator_user_id,
+            "correlation_id": correlation_id,
+        }
+
+        try:
+            async with self._session_scope() as session:
+                await breaker.save_to_db(session)
+                await session.commit()
+        except SQLAlchemyError as persistence_exc:
+            await self._audit.append_schema(
+                fields=SUPERVISOR_BREAKER_RESET_FIELDS,
+                schema_name="SUPERVISOR_BREAKER_RESET_FIELDS",
+                event="supervisor.breaker.reset",
+                actor_user_id=operator_user_id,
+                actor_persona="supervisor",
+                subject=subject,
+                trust_tier_of_trigger="T1",
+                result="persistence_failed",
+                cost_estimate_usd=0.0,
+                cost_actual_usd=0.0,
+                trace_id=correlation_id,
+            )
+            _log.error(
+                "supervisor.reset_breaker_persistence_failed",
+                component_id=component_id,
+                error_type=type(persistence_exc).__name__,
+            )
+            raise
+
         await self._audit.append_schema(
             fields=SUPERVISOR_BREAKER_RESET_FIELDS,
             schema_name="SUPERVISOR_BREAKER_RESET_FIELDS",
             event="supervisor.breaker.reset",
             actor_user_id=operator_user_id,
             actor_persona="supervisor",
-            subject={
-                "component_id": component_id,
-                "old_state": old_state,
-                # S3-3b-R1: pin the BreakerState enum's CLOSED value so a
-                # future rename to the domain literal (CHECK constraint at
-                # the DB layer is the source of truth) propagates here
-                # without a manual sync. Mirrors line 370's old_state read.
-                "new_state": BreakerState.CLOSED.value,
-                "trip_count": breaker.trip_count,
-                "operator_user_id": operator_user_id,
-                "correlation_id": correlation_id,
-            },
+            subject=subject,
             trust_tier_of_trigger="T1",
             result="success",
             cost_estimate_usd=0.0,
             cost_actual_usd=0.0,
             trace_id=correlation_id,
         )
-
-        async with self._session_scope() as session:
-            await breaker.save_to_db(session)
-            await session.commit()
 
     async def load_all_breakers(self) -> None:
         """Restore every registered breaker's state from Postgres.
