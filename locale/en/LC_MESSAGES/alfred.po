@@ -1076,3 +1076,90 @@ msgstr ""
 "No manifest data available yet. The Postgres manifest projection lands "
 "in PR-S3-7; until then, inspect the plugin's manifest.toml under "
 "plugins/ directly."
+
+# PR-S3-6 Component C — alfred web allowlist sub-app (reviewer-gated
+# add/remove, read-only list). Async-UX strings carry {branch} +
+# {proposal_id} so the operator can copy-paste the follow-up command.
+
+#: src/alfred/cli/web.py
+msgid "cli.web.help.group"
+msgstr "Manage web-fetch policy (domain allowlist, per-domain limits)."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.help.group"
+msgstr "Manage the web-fetch domain allowlist."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.add.help.short"
+msgstr "Queue a reviewer-gated proposal to add a domain to the allowlist."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.add.arg.domain"
+msgstr "Domain to add (e.g. api.example.com)."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.add.flag.path_prefix"
+msgstr ""
+"Path prefix the entry scopes to (default '/'). Narrower prefixes (e.g. "
+"'/v1/') restrict the allowlist to a single API surface."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.add.pending_review"
+msgstr ""
+"Allowlist-add proposal queued for reviewer approval.\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The domain is NOT yet fetchable — it activates when the reviewer "
+"approves the proposal and the supervisor rebuilds the web_allowlist "
+"projection."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.add.denied"
+msgstr "alfred web allowlist add denied: {reason}"
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.remove.help.short"
+msgstr "Queue a reviewer-gated proposal to remove a domain from the allowlist."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.remove.arg.domain"
+msgstr "Domain to remove."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.remove.pending_review"
+msgstr ""
+"Allowlist-remove proposal queued for reviewer approval.\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The domain is still fetchable until the reviewer approves the proposal."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.remove.denied"
+msgstr "alfred web allowlist remove denied: {reason}"
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.list.help.short"
+msgstr "List the current web-fetch domain allowlist."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.list.empty"
+msgstr ""
+"No allowlist entries to display. The web_allowlist projection is "
+"empty (no operator-added entries yet, or the Postgres projection is "
+"not yet wired — PR-S3-7)."
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.list.column.domain"
+msgstr "domain"
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.list.column.path_prefix"
+msgstr "path_prefix"
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.list.column.granted_by"
+msgstr "granted_by"
+
+#: src/alfred/cli/web.py
+msgid "cli.web.allowlist.list.column.granted_at"
+msgstr "granted_at"
