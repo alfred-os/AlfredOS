@@ -22,8 +22,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 
 def _count_payload_artifacts(category_dir: Path) -> int:
     """Return the number of YAML payloads + pytest modules under `category_dir`.
@@ -58,21 +56,15 @@ def test_tier_laundering_corpus_has_payloads() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "dlp_egress payloads land in PR-S3-5 (`web.fetch` plugin). When "
-        "the first payload arrives this xfail flips and the strict marker "
-        "forces removal — formalising the populated-dir contract."
-    ),
-)
 def test_dlp_egress_corpus_has_payloads() -> None:
     """`tests/adversarial/dlp_egress/` must carry at least one payload.
 
-    Today this fails (the dir is README-only per PR-S3-0a's stub-ship
-    convention). The `xfail(strict=True)` marker flips to `XPASS=fail` as
-    soon as PR-S3-5 lands the canary-token-in-HTML payload, forcing the
-    implementer to delete the marker.
+    PR-S3-5 (`web.fetch` plugin) ships the first two payloads here —
+    ``de-2026-001`` (canary token in HTML) and ``de-2026-002`` (the
+    documented cross-field secret-leak gap deferred to Slice 4). The
+    earlier `xfail(strict=True)` placeholder enforced the "dir
+    populated by Slice 3" contract; with payloads landed the marker
+    is gone and the count assertion stands on its own.
     """
     category_dir = Path(__file__).parent / "dlp_egress"
     count = _count_payload_artifacts(category_dir)
