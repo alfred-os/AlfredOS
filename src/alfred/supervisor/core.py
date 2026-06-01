@@ -59,13 +59,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, suppress
 from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
-from alfred.supervisor.breaker import CircuitBreaker
+from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.capability_monitor import CapabilityGateMonitor
 from alfred.supervisor.errors import SupervisorError
 from alfred.supervisor.plugin_lifecycle import PluginLifecycle
@@ -267,29 +268,98 @@ class Supervisor:
             return
         _log.info("supervisor.stopping")
         self._shutdown_event.set()
+        force_cancel_exc: BaseException | None = None
         try:
             await asyncio.wait_for(self._run_task, timeout=_STOP_DRAIN_TIMEOUT_SECONDS)
         except TimeoutError:
+            # Pure timeout — the task is still alive but exceeded the drain
+            # budget. Cancel it and await it to completion so any
+            # supervised plugin's finally-arm gets to run. The await may
+            # raise CancelledError (the expected signal — swallow) or a
+            # BaseExceptionGroup carrying real errors (capture for the
+            # audit row below). err-001 (F5).
             self._run_task.cancel()
             _log.warning("supervisor.stop_timeout_force_cancel")
+            with suppress(asyncio.CancelledError):
+                try:
+                    await self._run_task
+                except BaseException as exc:
+                    force_cancel_exc = exc
+        except BaseException as exc:
+            # Python 3.11+ wait_for(task, timeout) cancels the task on
+            # timeout and awaits it — if the task raises a non-cancel
+            # error during cancellation (e.g. a plugin's finally-arm
+            # raised RuntimeError), wait_for re-raises that error
+            # directly rather than TimeoutError. err-001 (F5): capture
+            # it so the audit row reflects the unclean shutdown
+            # instead of letting the exception silently propagate out
+            # of stop() and skip the audit emit + state cleanup below.
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            force_cancel_exc = exc
+            _log.warning(
+                "supervisor.stop_supervised_task_error",
+                error_type=type(exc).__name__,
+            )
 
         # Persist breaker states. The session_scope is a fresh transaction
         # — independent of any plugin-task transactions that may have
-        # been rolled back by their cancellation. CLAUDE.md hard rule #7:
-        # no try/except suppression here; persistence failure must
-        # propagate so the operator-facing shutdown is loud.
-        async with self._session_scope() as session:
-            for breaker in self._breakers.values():
-                await breaker.save_to_db(session)
-            await session.commit()
+        # been rolled back by their cancellation.
+        #
+        # err-002 (F5): persistence failure on shutdown is loud — we
+        # propagate the SQLAlchemyError so the operator-facing shutdown
+        # error message surfaces — but we ALSO emit the lifecycle.stopped
+        # row with ``result=persistence_failed`` BEFORE re-raising so the
+        # audit graph records the failure. The audit writer opens its own
+        # session per ``.append()`` call (it does not share our
+        # session_scope), so the row commits even though our persistence
+        # scope rolled back.
+        try:
+            async with self._session_scope() as session:
+                for breaker in self._breakers.values():
+                    await breaker.save_to_db(session)
+                await session.commit()
+        except SQLAlchemyError as persistence_exc:
+            await self._audit.append(
+                event="supervisor.lifecycle.stopped",
+                actor_user_id=None,
+                actor_persona="supervisor",
+                subject={
+                    "component_count": len(self._breakers),
+                    "error_type": type(persistence_exc).__name__,
+                },
+                trust_tier_of_trigger="T0",
+                result="persistence_failed",
+                cost_estimate_usd=0.0,
+                cost_actual_usd=0.0,
+                trace_id=str(uuid.uuid4()),
+            )
+            _log.error(
+                "supervisor.stop_persistence_failed",
+                error_type=type(persistence_exc).__name__,
+            )
+            self._run_task = None
+            self._task_group = None
+            raise
+
+        # err-001 (F5): if the force-cancel arm captured a BaseException
+        # from the supervised TaskGroup, the row reflects that — operators
+        # see "clean shutdown failed" as the audit-graph signal instead of
+        # the misleading clean success row. The exception is NOT re-raised
+        # (stop() is the shutdown path; we MUST drain before returning so
+        # the supervising process can finish exiting), but it IS audited.
+        result_label = "cancelled_with_errors" if force_cancel_exc is not None else "success"
+        subject: dict[str, Any] = {"component_count": len(self._breakers)}
+        if force_cancel_exc is not None:
+            subject["error_type"] = type(force_cancel_exc).__name__
 
         await self._audit.append(
             event="supervisor.lifecycle.stopped",
             actor_user_id=None,
             actor_persona="supervisor",
-            subject={"component_count": len(self._breakers)},
+            subject=subject,
             trust_tier_of_trigger="T0",
-            result="success",
+            result=result_label,
             cost_estimate_usd=0.0,
             cost_actual_usd=0.0,
             trace_id=str(uuid.uuid4()),
@@ -380,7 +450,11 @@ class Supervisor:
             subject={
                 "component_id": component_id,
                 "old_state": old_state,
-                "new_state": "CLOSED",
+                # S3-3b-R1: pin the BreakerState enum's CLOSED value so a
+                # future rename to the domain literal (CHECK constraint at
+                # the DB layer is the source of truth) propagates here
+                # without a manual sync. Mirrors line 370's old_state read.
+                "new_state": BreakerState.CLOSED.value,
                 "trip_count": breaker.trip_count,
                 "operator_user_id": operator_user_id,
                 "correlation_id": correlation_id,
