@@ -87,3 +87,64 @@ def test_protocol_is_runtime_checkable() -> None:
         pass
 
     assert not isinstance(_NotAnAdapter(), CommsAdapterMCP)
+
+
+# ---------------------------------------------------------------------------
+# sec-pr-s3-6-03: wire models reject unknown fields (extra='forbid')
+# ---------------------------------------------------------------------------
+
+
+def test_inbound_message_rejects_unknown_field() -> None:
+    """sec-pr-s3-6-03: an unknown field at the wire boundary raises ValidationError.
+
+    A future-version MCP adapter (or a smuggling attempt) that adds
+    fields beyond the spec §9.1 closed set MUST fail at parse time;
+    silent acceptance would let the orchestrator skip whatever
+    invariant the new field encodes. Widening this set is an ADR-0016
+    decision, not a runtime concession.
+    """
+    with pytest.raises(ValidationError):
+        InboundMessage.model_validate(
+            {
+                "platform": "discord",
+                "platform_user_id": "12345",
+                "content": "hi",
+                "language": "en-US",
+                # Smuggled fields the spec does not declare.
+                "operator_token": "sk-leak-attempt",
+                "raw_traceback": "...",
+            }
+        )
+
+
+def test_inbound_message_round_trip_strict_keys() -> None:
+    """Round-trip with only the declared fields keeps working."""
+    payload = {
+        "platform": "tui",
+        "platform_user_id": "u-1",
+        "content": "hi",
+        "language": "en-US",
+    }
+    msg = InboundMessage.model_validate(payload)
+    assert msg.model_dump() == payload
+
+
+def test_adapter_health_response_rejects_unknown_field() -> None:
+    """sec-pr-s3-6-03: ``adapter.health`` response also locks the field set."""
+    with pytest.raises(ValidationError):
+        AdapterHealthResponse.model_validate(
+            {
+                "status": "ok",
+                "detail": "all good",
+                # An adapter cannot smuggle extra observability surface
+                # past the supervisor through this response shape.
+                "debug_uri": "http://attacker.invalid/exfil",
+            }
+        )
+
+
+def test_adapter_health_response_round_trip_strict_keys() -> None:
+    """Declared-fields-only round-trip remains valid."""
+    payload = {"status": "ok", "detail": "all good"}
+    health = AdapterHealthResponse.model_validate(payload)
+    assert health.model_dump() == payload
