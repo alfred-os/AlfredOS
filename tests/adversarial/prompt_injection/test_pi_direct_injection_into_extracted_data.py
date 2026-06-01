@@ -118,44 +118,57 @@ def test_extracted_data_field_is_t3_derived_data_type() -> None:
     assert T3DerivedData.__supertype__ is not None  # type: ignore[attr-defined]
 
 
-async def test_quarantined_to_structured_stub_is_fail_loud() -> None:
-    """:func:`quarantined_to_structured` raises :class:`NotImplementedError`.
+async def test_quarantined_to_structured_refuses_on_denied_gate() -> None:
+    """:func:`quarantined_to_structured` is gate-first.
 
-    PR-S3-1 ships the function as a fail-loud deferred stub. PR-S3-4
-    replaces the body with the full extraction + DLP post-scan +
-    audit row. The stub posture itself is a defence — any caller
-    before PR-S3-4 fails loudly, preventing a silent partial wiring
-    that could ship without the DLP post-scan step. CLAUDE.md hard
-    rule #7 (no silent security paths).
+    PR-S3-4 Task 7 promoted the prior fail-loud
+    :class:`NotImplementedError` stub into the full impl: the function
+    consults ``CapabilityGate.check_content_clearance(...,
+    hookpoint="quarantine.dereference", content_tier="T3")`` BEFORE
+    invoking the extractor. A denial raises :class:`AlfredError`
+    without touching the extractor — the structural defence against
+    silent T3 dereference. CLAUDE.md hard rule #4 (no bypass), hard
+    rule #7 (loud refusal).
 
-    The capability-gate clearance is intentionally NOT exercised here
-    — the stub raises before the gate is consulted, which is the
-    correct posture (the stub raise happens at the function boundary,
-    not after a successful gate consult).
+    The adversarial posture: a T3 web payload reaching
+    :func:`quarantined_to_structured` MUST trip the gate before the
+    extractor's :meth:`extract` runs — the extractor here is a stub
+    whose ``extract`` would AttributeError if touched, so the test
+    fails loudly on any path that skips the gate.
     """
+    from alfred.errors import AlfredError
+    from alfred.security.quarantine import ExtractionSchema
+
     handle = ContentHandle(
         id="00000000-0000-0000-0000-000000000000",
         source_url="https://attacker.example/leak-attempt",
         fetch_timestamp=datetime.now(UTC),
     )
 
-    # Use a minimal dummy schema; the stub doesn't get far enough to
-    # care about the shape. The point is: the function MUST raise.
+    class _StubSchema(ExtractionSchema):
+        pass
+
+    # A bare object — any attempt to call ``.extract`` will AttributeError,
+    # which proves the gate refused BEFORE the extractor was touched.
     class _DummyExtractor:
         pass
 
-    class _DummyGate:
-        pass
+    class _DenyGate:
+        def check(self, *, plugin_id: str, hookpoint: str, requested_tier: str) -> bool:
+            return False
 
-    with pytest.raises(NotImplementedError, match="PR-S3-4"):
-        from alfred.security.quarantine import ExtractionSchema
+        def check_plugin_load(self, *, plugin_id: str, manifest_tier: str) -> bool:
+            return False
 
-        class _StubSchema(ExtractionSchema):
-            pass
+        def check_content_clearance(
+            self, *, plugin_id: str, hookpoint: str, content_tier: str
+        ) -> bool:
+            return False
 
+    with pytest.raises(AlfredError):
         await quarantined_to_structured(
             handle,
             _StubSchema,
-            extractor=_DummyExtractor(),
-            gate=_DummyGate(),  # type: ignore[arg-type]
+            extractor=_DummyExtractor(),  # type: ignore[arg-type]
+            gate=_DenyGate(),
         )
