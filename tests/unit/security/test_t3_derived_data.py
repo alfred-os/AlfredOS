@@ -180,22 +180,38 @@ def test_downgrade_to_orchestrator_stub_raises_not_implemented() -> None:
         asyncio.run(downgrade_to_orchestrator(data, audit_row=None))  # type: ignore[arg-type]
 
 
-def test_extraction_result_type_stubs_importable() -> None:
-    """sec-002 (applied via PR-S3-1): ExtractionResult, Extracted, TypedRefusal
-    are importable from alfred.security.quarantine before PR-S3-4 merges.
+def test_extraction_result_types_importable_and_constructable() -> None:
+    """sec-002 (applied via PR-S3-1, fully landed in PR-S3-4): ``ExtractionResult``,
+    ``Extracted``, ``TypedRefusal`` are importable + constructable.
 
-    PR-S3-3a needs these types at import time. This test confirms the
-    import chain is satisfied from the PR-S3-1 stubs.
+    PR-S3-3a's ``DispatchResult`` union references ``ExtractionResult``;
+    this test confirms the import chain is satisfied. PR-S3-4 promoted
+    the stubs to Pydantic models with ``kind`` discriminants — see
+    ``tests/unit/quarantine/test_extraction_result_types.py`` for the
+    full shape suite.
+
+    The ``handle=`` field present in the PR-S3-1 stub was dropped in
+    PR-S3-4: ``ContentHandle`` is the *input* to ``quarantine.extract``,
+    not part of the extraction result; handle-id correlation rides on
+    the audit row, not on the result payload.
     """
+    # ContentHandle import is still load-bearing for spec §7.3 — the
+    # handle exists on the quarantine-input side. Spot-check construction.
     ts = datetime.now(tz=UTC)
     handle = ContentHandle(id="test-id", source_url="https://x.com", fetch_timestamp=ts)
+    assert handle.id == "test-id"
+
+    # Full-shape Extracted: kind + data: T3DerivedData + extraction_mode Literal.
     data: T3DerivedData = T3DerivedData({"title": "x"})
-    extracted = Extracted(data=data, handle=handle)
-    assert extracted.data is data
+    extracted = Extracted(data=data, extraction_mode="native_constrained")
+    assert extracted.data == data
+    assert extracted.kind == "extracted"
 
-    refusal = TypedRefusal(reason="policy_violation", handle=handle)
-    assert refusal.reason == "policy_violation"
+    # Full-shape TypedRefusal: kind + closed-Literal reason.
+    refusal = TypedRefusal(reason="cannot_extract")
+    assert refusal.reason == "cannot_extract"
+    assert refusal.kind == "typed_refusal"
 
-    # ExtractionResult is the union type — check both branches are subtypes
+    # ExtractionResult union: both branches present.
     assert isinstance(extracted, Extracted)
     assert isinstance(refusal, TypedRefusal)
