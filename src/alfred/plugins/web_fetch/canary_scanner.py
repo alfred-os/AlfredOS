@@ -53,6 +53,7 @@ from typing import Final, cast
 
 import redis.asyncio as aioredis
 import structlog
+from redis.exceptions import RedisError
 
 from alfred.errors import AlfredError
 from alfred.plugins.web_fetch.content_store import ContentStore
@@ -234,7 +235,51 @@ class InboundCanaryScanner:
                 # from Redis at the moment WebFetchCanaryTripped
                 # propagates so a compromised downstream consumer
                 # cannot race to extract the trip'd content.
-                await self._store.delete(handle_id)
+                #
+                # err-002: a RedisError on the delete CANNOT silently
+                # swallow the canary trip. Two failure modes line up
+                # against each other here:
+                #   1. The handle stays alive in Redis (quarantine I/O
+                #      failed) — the orchestrator's TTL will eventually
+                #      reap it, but in the interim a compromised
+                #      consumer COULD race to extract.
+                #   2. The typed canary exception does NOT propagate —
+                #      the orchestrator's canary arm never fires; the
+                #      load-bearing defence is silently bypassed.
+                # The second failure mode is strictly worse: a missed
+                # quarantine without a missed exception means the
+                # orchestrator still aborts the turn and the operator
+                # still sees the canary_tripped audit row. A missed
+                # exception means the trip is invisible to every layer
+                # above. So we emit a LOUD structlog error naming the
+                # failed quarantine for operator action — and STILL
+                # raise the typed canary exception so the security
+                # event surfaces. The orchestrator's catch-arm emits
+                # tool.web.fetch.canary_tripped regardless of
+                # quarantine I/O outcome (the audit row schema
+                # WEB_FETCH_FIELDS does not currently include a
+                # quarantine-failure leg; the structlog event is the
+                # operator-visible signal until a dedicated
+                # quarantine_failed schema lands in a follow-up).
+                try:
+                    await self._store.delete(handle_id)
+                except RedisError as quarantine_exc:
+                    _log.error(
+                        "web_fetch.canary.quarantine_failed",
+                        handle_id=handle_id,
+                        source_url=source_url,
+                        pattern=pattern.pattern,
+                        # Type name only — never str(exc) / exc.args
+                        # (T3 content fragments may have ended up in
+                        # the Redis error message). Spec §5.6.
+                        exception_type=type(quarantine_exc).__name__,
+                        note=(
+                            "canary quarantine I/O failed; handle may "
+                            "remain in store until TTL — typed canary "
+                            "exception STILL raised so orchestrator's "
+                            "canary arm fires and audit row is emitted"
+                        ),
+                    )
                 raise WebFetchCanaryTripped(source_url=source_url, handle_id=handle_id)
 
 
