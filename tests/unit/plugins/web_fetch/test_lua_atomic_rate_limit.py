@@ -112,13 +112,9 @@ async def test_per_user_daily_limit_enforced(limiter: RateLimiter) -> None:
     try:
         user_id = _unique_user()
         for _ in range(5):
-            await daily_limiter.check_and_increment(
-                domain=_unique_domain(), user_id=user_id
-            )
+            await daily_limiter.check_and_increment(domain=_unique_domain(), user_id=user_id)
         with pytest.raises(WebFetchRateLimited) as exc_info:
-            await daily_limiter.check_and_increment(
-                domain=_unique_domain(), user_id=user_id
-            )
+            await daily_limiter.check_and_increment(domain=_unique_domain(), user_id=user_id)
         assert exc_info.value.bucket == "daily_budget"
     finally:
         await daily_limiter.close()
