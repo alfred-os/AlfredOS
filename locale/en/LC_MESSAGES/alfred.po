@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 23:47+0100\n"
+"POT-Creation-Date: 2026-06-02 00:11+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -239,11 +239,11 @@ msgstr "per-call max USD: {amount}"
 # PR-S3-6 Component B — alfred plugin sub-app (reviewer-gated grant/revoke,
 # read-only list/show/status). Async-UX strings carry {branch} +
 # {proposal_id} so the operator can copy-paste the follow-up command.
-#: src/alfred/cli/plugin.py:80
+#: src/alfred/cli/plugin.py:101
 msgid "cli.plugin.help.group"
 msgstr "Manage plugin grants and inspect loaded plugins."
 
-#: src/alfred/cli/plugin.py:96
+#: src/alfred/cli/plugin.py:117
 msgid "cli.plugin.grant.pending_review"
 msgstr ""
 "Grant proposal queued for reviewer approval.\n"
@@ -253,75 +253,75 @@ msgstr ""
 "approves the proposal and the supervisor rebuilds the capability "
 "projection."
 
-#: src/alfred/cli/plugin.py:103
+#: src/alfred/cli/plugin.py:124
 msgid "cli.plugin.grant.follow_up_command"
 msgstr "Check status with: alfred plugin grant status {proposal_id}"
 
-#: src/alfred/cli/plugin.py:133
+#: src/alfred/cli/plugin.py:154
 msgid "cli.plugin.grant.denied"
 msgstr "alfred plugin grant denied: {reason}"
 
-#: src/alfred/cli/plugin.py:166
+#: src/alfred/cli/plugin.py:196
 msgid "cli.plugin.grant.help.short"
 msgstr "Queue a reviewer-gated capability-grant proposal for a plugin."
 
-#: src/alfred/cli/plugin.py:173
+#: src/alfred/cli/plugin.py:203
 msgid "cli.plugin.grant.arg.plugin_id"
 msgstr "Plugin id from the manifest (e.g. alfred.web-fetch)."
 
-#: src/alfred/cli/plugin.py:193
+#: src/alfred/cli/plugin.py:223
 msgid "cli.plugin.grant.status.usage_error"
 msgstr "Usage: alfred plugin grant status <proposal_id>."
 
-#: src/alfred/cli/plugin.py:202
+#: src/alfred/cli/plugin.py:232
 msgid "cli.plugin.grant.usage_error"
 msgstr ""
 "Usage: alfred plugin grant <plugin_id> <subscriber_tier> <hookpoint>. "
 "Reserved subcommands: 'status <proposal_id>' and 'list [--pending]'."
 
-#: src/alfred/cli/plugin.py:229
+#: src/alfred/cli/plugin.py:259
 msgid "cli.plugin.grant.status.pending"
 msgstr ""
 "Proposal {proposal_id} is pending reviewer approval. Branch: {branch}. "
 "Full status (pending / approved / denied / not_found) lands once the "
 "Postgres plugin_grants projection is wired (PR-S3-7)."
 
-#: src/alfred/cli/plugin.py:245
+#: src/alfred/cli/plugin.py:275
 msgid "cli.plugin.grant.list.empty"
 msgstr ""
 "No grants to display. Pending-proposal listing reads from the state.git "
 "branch index + Postgres plugin_grants projection; both surfaces fully "
 "land in PR-S3-7."
 
-#: src/alfred/cli/plugin.py:250
+#: src/alfred/cli/plugin.py:280
 msgid "cli.plugin.grant.list.column.plugin_id"
 msgstr "plugin_id"
 
-#: src/alfred/cli/plugin.py:251
+#: src/alfred/cli/plugin.py:281
 msgid "cli.plugin.grant.list.column.subscriber_tier"
 msgstr "tier"
 
-#: src/alfred/cli/plugin.py:252
+#: src/alfred/cli/plugin.py:282
 msgid "cli.plugin.grant.list.column.hookpoint"
 msgstr "hookpoint"
 
-#: src/alfred/cli/plugin.py:253
+#: src/alfred/cli/plugin.py:283
 msgid "cli.plugin.grant.list.column.status"
 msgstr "status"
 
-#: src/alfred/cli/plugin.py:270
+#: src/alfred/cli/plugin.py:300
 msgid "cli.plugin.revoke.help.short"
 msgstr "Queue a reviewer-gated revocation proposal for a plugin's grants."
 
-#: src/alfred/cli/plugin.py:274
+#: src/alfred/cli/plugin.py:304
 msgid "cli.plugin.revoke.arg.plugin_id"
 msgstr "Plugin id whose grants will be revoked."
 
-#: src/alfred/cli/plugin.py:285
+#: src/alfred/cli/plugin.py:315
 msgid "cli.plugin.revoke.denied"
 msgstr "alfred plugin revoke denied: {reason}"
 
-#: src/alfred/cli/plugin.py:291
+#: src/alfred/cli/plugin.py:327
 msgid "cli.plugin.revoke.pending_review"
 msgstr ""
 "Revocation proposal queued for reviewer approval.\n"
@@ -330,30 +330,30 @@ msgstr ""
 "The revocation is NOT yet effective — it activates when the reviewer "
 "approves the proposal."
 
-#: src/alfred/cli/plugin.py:303
+#: src/alfred/cli/plugin.py:339
 msgid "cli.plugin.list.help.short"
 msgstr "List every plugin registered in the Postgres manifest projection."
 
-#: src/alfred/cli/plugin.py:313
+#: src/alfred/cli/plugin.py:349
 msgid "cli.plugin.list.not_implemented_yet"
 msgstr ""
 "alfred plugin list is not yet implemented. Pulls the manifest projection "
 "from Postgres once RealGate is seeded (PR-S3-7). Until then, inspect "
 "plugins via the plugin manifest files under plugins/."
 
-#: src/alfred/cli/plugin.py:317
+#: src/alfred/cli/plugin.py:353
 msgid "cli.plugin.show.help.short"
 msgstr "Show manifest details for a registered plugin."
 
-#: src/alfred/cli/plugin.py:321
+#: src/alfred/cli/plugin.py:357
 msgid "cli.plugin.show.arg.plugin_id"
 msgstr "Plugin id to inspect."
 
-#: src/alfred/cli/plugin.py:330
+#: src/alfred/cli/plugin.py:366
 msgid "cli.plugin.show.plugin_id_label"
 msgstr "plugin_id: {plugin_id}"
 
-#: src/alfred/cli/plugin.py:331
+#: src/alfred/cli/plugin.py:367
 msgid "cli.plugin.show.no_manifest_yet"
 msgstr ""
 "No manifest data available yet. The Postgres manifest projection lands in"
@@ -662,6 +662,92 @@ msgstr ""
 "register_hookpoint({hookpoint}) declares unknown tier(s) {unknown_tiers} "
 "— valid tiers are {valid_tiers}. Check for typos on the publisher's "
 "subscribable_tiers / refusable_tiers args."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:62
+msgid "cli.plugin.grant.status.approved"
+msgstr "approved"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:63
+msgid "cli.plugin.grant.status.denied"
+msgstr "denied"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:64
+msgid "cli.plugin.grant.status.expired"
+msgstr "expired"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:68
+msgid "cli.plugin.list.column.plugin_id"
+msgstr "plugin_id"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:69
+msgid "cli.plugin.list.column.subscriber_tier"
+msgstr "subscriber_tier"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:70
+msgid "cli.plugin.list.column.status"
+msgstr "status"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:71
+msgid "cli.plugin.list.column.manifest_version"
+msgstr "manifest_version"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:72
+msgid "cli.plugin.list.empty_hint"
+msgstr ""
+"No plugins registered. Run `alfred plugin grant <plugin_id> <tier> "
+"<hookpoint>` to queue a grant proposal."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:77
+msgid "cli.plugin.show.field.plugin_id"
+msgstr "plugin_id"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:81
+msgid "cli.web.allowlist.pending_review"
+msgstr ""
+"Allowlist proposal queued for reviewer approval.\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The fetch surface is unchanged until the reviewer approves the proposal "
+"and the supervisor rebuilds the web_allowlist projection."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:82
+msgid "cli.web.allowlist.added"
+msgstr "Added {domain} to the web fetch allowlist."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:83
+msgid "cli.web.allowlist.removed"
+msgstr "Removed {domain} from the web fetch allowlist."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:84
+msgid "cli.web.allowlist.list_empty"
+msgstr ""
+"No allowlist entries. Run `alfred web allowlist add <domain>` to queue a "
+"grant proposal."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:87
+msgid "cli.config.quarantined_provider_pending_review"
+msgstr ""
+"Quarantined-provider config proposal queued for reviewer approval.\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The current provider stays active until the reviewer approves the "
+"proposal and the supervisor reloads routing.yaml."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:88
+msgid "cli.config.web_fetch_budget_set"
+msgstr "Set per-user web-fetch budget to {limit} fetches/day for {user_id}."
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:94
+msgid "cli.supervisor.status.breaker_state.open"
+msgstr "OPEN"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:95
+msgid "cli.supervisor.status.breaker_state.closed"
+msgstr "CLOSED"
+
+#: src/alfred/i18n/_pr_s3_7_key_anchors.py:96
+msgid "cli.supervisor.status.breaker_state.half_open"
+msgstr "HALF_OPEN"
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
