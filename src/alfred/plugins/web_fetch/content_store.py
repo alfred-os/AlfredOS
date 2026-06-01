@@ -165,8 +165,11 @@ class ContentStore:
         key = f"{_KEY_PREFIX}{handle_id}"
         client = await self._get_client()
         await client.set(key, body, ex=ttl)
+        # devex-005: normalise structlog event names under the
+        # ``web_fetch.`` prefix so log consumers can filter by subsystem
+        # without per-module exceptions.
         _log.debug(
-            "content_store.written",
+            "web_fetch.content_store.written",
             handle_id=handle_id,
             ttl_seconds=ttl,
             source_url=source_url,
@@ -209,9 +212,14 @@ class ContentStore:
             # security event (canary scanner already quarantined the
             # handle). The error itself does not distinguish; the
             # caller's context does.
-            _log.info("content_store.miss", handle_id=handle_id)
+            # devex-005: normalised structlog event prefix.
+            _log.info("web_fetch.content_store.getdel_miss", handle_id=handle_id)
             raise ContentHandleExpired(handle_id)
-        _log.debug("content_store.extracted", handle_id=handle_id, body_bytes=len(body))
+        _log.debug(
+            "web_fetch.content_store.extracted",
+            handle_id=handle_id,
+            body_bytes=len(body),
+        )
         return body
 
     async def delete(self, handle_id: str) -> None:

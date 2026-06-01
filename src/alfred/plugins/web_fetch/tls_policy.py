@@ -88,8 +88,11 @@ class TlsPolicy:
                 # the single source of truth for the operator-visible
                 # wording across every locale.
                 raise TlsConfigError(t("web.fetch.tls.skip_refused_in_non_dev", env=env))
+            # devex-005: normalised structlog event prefix under
+            # ``web_fetch.`` so the policy-validation events join the
+            # rest of the subsystem stream.
             log.warning(
-                "tls_policy.skip_enabled",
+                "web_fetch.tls_policy.skip_enabled",
                 env=env,
                 note="INSECURE — development mode only",
             )
