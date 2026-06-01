@@ -269,13 +269,30 @@ class AlfredTuiApp(App[None]):
         # adapter name surfaces as a type error rather than a silent T2
         # default.
         ingress_tier: type[TrustTier] = _ingest_tier(user, adapter_name="tui")
+        # CR-142 round-3 hardening: runtime allowlist before ``tag()``.
+        # ``_ingest_tier`` is the source of truth for the role x adapter
+        # mapping, but a future drift in that helper (or a hostile
+        # refactor that widens the return set) could surface as T0 or
+        # T3 here — both of which the open ``tag()`` path would refuse
+        # with a less precise error AFTER the cast. The explicit guard
+        # fails LOUD at the ingress boundary with the actual class name
+        # in the message, matching CLAUDE.md hard rule #3 (every
+        # ingestion path tags at the boundary with the right tier).
+        if ingress_tier not in (T1, T2):
+            raise RuntimeError(
+                t(
+                    "comms.tui.ingress_tier_unexpected",
+                    tier_name=getattr(ingress_tier, "__name__", repr(ingress_tier)),
+                )
+            )
         # Both T1 and T2 routes through the open ``tag()`` path (T3 is
-        # the capability-gated tier — out of scope here). The cast keeps
-        # mypy's overload resolution happy: ``tag`` is overloaded per
-        # tier, and the union return type is what the orchestrator
-        # expects.
+        # the capability-gated tier — out of scope here). The runtime
+        # allowlist above narrows ``ingress_tier`` to ``type[T1] |
+        # type[T2]`` for mypy via the ``in (T1, T2)`` check, so no
+        # explicit cast is required at this site (it would be redundant
+        # under the narrowed type).
         content = tag(
-            cast("type[T1] | type[T2]", ingress_tier),
+            ingress_tier,
             text,
             source="comms.tui.input",
         )

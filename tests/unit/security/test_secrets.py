@@ -526,6 +526,63 @@ class TestReload:
         with pytest.raises(UnknownSecretError):
             broker.get("discord_bot_token")
 
+    def test_reload_toctou_filenotfound_fails_closed_to_empty(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """CR-142 round-3 sec-003: deterministic coverage for the TOCTOU branch.
+
+        ``reload()`` first checks ``self._secrets_file_path.exists()``
+        and then calls ``_validate_secrets_file_security`` which
+        ``lstat()``s the same path. In the (rare, microsecond-window)
+        case where the file disappears between those two syscalls, the
+        validator raises ``FileNotFoundError``. The defensive
+        ``except FileNotFoundError`` branch must fail CLOSED to the
+        empty mapping — same end-state as the ``exists() == False`` arm
+        — rather than propagating the race up the stack.
+
+        The pragma previously documented why this branch was hard to
+        cover from a real race; CR-142 round-3 removed the pragma in
+        favour of this deterministic injection. We monkey-patch the
+        validator to raise ``FileNotFoundError`` AFTER ``exists()`` has
+        already returned True, simulating exactly the TOCTOU window.
+        The assertion checks the same fail-closed semantics
+        (empty file_secrets + cache version bump) the no-pragma branch
+        guarantees.
+        """
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text('discord_bot_token = "v1"\n')
+        path.chmod(0o600)
+        broker = SecretBroker(env={}, secrets_file=path, allow_inside_git_worktree=True)
+        assert broker.get("discord_bot_token") == "v1"
+
+        # Capture the pre-reload redactor version so we can assert the
+        # cache invalidation half of the fail-closed contract.
+        pre_version = broker._redactor_version
+
+        # The file is STILL on disk — ``exists()`` returns True — but
+        # the validator raises FileNotFoundError as if the file
+        # vanished between the ``exists()`` probe and the ``lstat()``.
+        def _raise_filenotfound(p: object) -> None:
+            raise FileNotFoundError(f"simulated TOCTOU race on {p}")
+
+        monkeypatch.setattr(
+            "alfred.security.secrets._validate_secrets_file_security",
+            _raise_filenotfound,
+        )
+        broker.reload()
+
+        # Fail-closed: file_secrets is the empty mapping, redactor
+        # cache has bumped, and ``get`` falls back to env (empty here
+        # → UnknownSecret) just like the file-actually-missing arm.
+        assert dict(broker._file_secrets) == {}
+        assert broker._redactor_version > pre_version
+        with pytest.raises(UnknownSecretError):
+            broker.get("discord_bot_token")
+
 
 # ---------------------------------------------------------------------------
 # Task 11: redactor cache + overflow

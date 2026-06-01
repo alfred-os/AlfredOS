@@ -224,6 +224,8 @@ def _is_tagged_content_t3_subscript_call(node: ast.Call) -> bool:
     - ``tiers.TaggedContent[T3](...)``     — qualified Attribute target
     - ``TaggedContent[tiers.T3](...)``     — qualified Attribute slice
     - ``tiers.TaggedContent[tiers.T3](...)`` — both qualified
+    - ``TaggedContent["T3"](...)``         — quoted string-form generic
+    - ``tiers.TaggedContent["T3"](...)``   — qualified target + quoted slice
 
     sec-S3-002: ``tag_t3_with_nonce`` checks the per-process nonce; the
     ``TaggedContent`` Pydantic field validator does NOT. A direct
@@ -236,14 +238,27 @@ def _is_tagged_content_t3_subscript_call(node: ast.Call) -> bool:
     The call target ``func`` is an ``ast.Subscript`` whose ``value`` is
     the identifier ``TaggedContent`` (covering bare + qualified forms
     via :func:`_arg_name`) and whose ``slice`` is the identifier ``T3``
-    (covering bare + qualified forms the same way).
+    (covering bare + qualified forms the same way). CR-142 round-3
+    extension: the quoted ``"T3"`` form parses as an ``ast.Constant``
+    rather than an ``ast.Name``, so :func:`_arg_name` returns ``None``
+    for it. Detect the quoted form explicitly so authors cannot bypass
+    the gate by string-quoting the generic argument.
     """
     func = node.func
     if not isinstance(func, ast.Subscript):
         return False
     if _arg_name(func.value) != "TaggedContent":
         return False
-    return _arg_name(func.slice) == "T3"
+    if _arg_name(func.slice) == "T3":
+        return True
+    # Quoted string-form generic: ``TaggedContent["T3"](...)`` parses
+    # the slice as ``ast.Constant("T3")``. Without this branch the gate
+    # admits the string-quoted bypass that mirrors the
+    # ``cast("TaggedContent[T2]", x)`` shape already covered in
+    # :func:`_is_cast_tagged_content_call`.
+    if isinstance(func.slice, ast.Constant) and isinstance(func.slice.value, str):
+        return func.slice.value == "T3"
+    return False
 
 
 def _is_cast_tagged_content_call(node: ast.Call) -> bool:

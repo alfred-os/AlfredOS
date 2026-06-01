@@ -86,6 +86,65 @@ def test_qualified_subscript_slice_is_flagged(tmp_path: Path) -> None:
     assert "TaggedContent[T3](...) direct subscript" in result.stderr
 
 
+def test_quoted_string_subscript_construction_is_flagged(tmp_path: Path) -> None:
+    """``TaggedContent["T3"](...)`` — quoted string-form generic argument.
+
+    CR-142 round-3 hardening: the slice ``"T3"`` parses as
+    ``ast.Constant("T3")`` rather than ``ast.Name("T3")``. Without the
+    explicit Constant branch the gate admits this shape — a quote-
+    quoting bypass that mirrors the ``cast("TaggedContent[T2]", x)``
+    string-form attack already covered for ``cast``. The new branch
+    pins the gate against any author who writes the quoted form
+    (deliberately or not).
+    """
+    bad = tmp_path / "attacker.py"
+    bad.write_text(
+        "from alfred.security.tiers import TaggedContent, T3\n"
+        'x = TaggedContent["T3"](content="evil", source="wire", tier=T3)\n'
+    )
+    result = _run(bad)
+    assert result.returncode != 0, (
+        f"Expected gate to flag quoted TaggedContent['T3'](...); got 0.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "TaggedContent[T3](...) direct subscript" in result.stderr
+
+
+def test_qualified_quoted_string_subscript_is_flagged(tmp_path: Path) -> None:
+    """``tiers.TaggedContent["T3"](...)`` — qualified target + quoted slice."""
+    bad = tmp_path / "attacker.py"
+    bad.write_text(
+        "from alfred.security import tiers\n"
+        'x = tiers.TaggedContent["T3"](content="evil", source="wire", tier=tiers.T3)\n'
+    )
+    result = _run(bad)
+    assert result.returncode != 0
+    assert "TaggedContent[T3](...) direct subscript" in result.stderr
+
+
+def test_quoted_non_t3_constant_subscript_is_not_flagged(tmp_path: Path) -> None:
+    """``TaggedContent["T2"](...)`` — Constant with non-T3 value is benign.
+
+    The Constant branch is shape-specific: only ``"T3"`` trips the gate.
+    A quoted ``"T2"`` is the broadcast-tier shape (other gates may or
+    may not police it; this gate's job is only T3 admission).
+    """
+    benign = tmp_path / "benign.py"
+    benign.write_text(
+        "class T2: pass\n"
+        "class TaggedContent:\n"
+        "    def __class_getitem__(cls, item):\n"
+        "        return cls\n"
+        "    def __init__(self, **kw): ...\n"
+        'x = TaggedContent["T2"](content="hi", source="tui", tier=T2)\n'
+    )
+    result = _run(benign)
+    assert result.returncode == 0, (
+        f"Expected quoted non-T3 constant to pass; got {result.returncode}.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
 def test_clean_file_passes(tmp_path: Path) -> None:
     """A file with no T3 patterns exits 0 — sanity check the gate isn't trip-happy."""
     clean = tmp_path / "innocent.py"

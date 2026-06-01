@@ -201,6 +201,17 @@ class PostgresBackend:
         loads the same truncated snapshot. Full cursor pagination is
         deferred to Slice 4+; the warning is the Slice-3 fail-loud
         contract.
+
+        CR-142 round-3 sec-002: explicit ``ORDER BY plugin_id,
+        hookpoint, subscriber_tier`` makes the truncation deterministic
+        when the cap is hit. Without it, Postgres can return arbitrary
+        rows under ``LIMIT`` — meaning two consecutive rebuilds on the
+        same row count could load DIFFERENT 10_000-row subsets, leaving
+        the in-memory policy non-reproducible. The three columns are
+        the natural composite identity of a grant (per the
+        ``UNIQUE (plugin_id, hookpoint, subscriber_tier)`` constraint
+        on ``plugin_grants``), so the ordering is both stable across
+        rebuilds and cheap on the existing index.
         """
         async with self._session() as session:
             result = await session.execute(
@@ -208,6 +219,7 @@ class PostgresBackend:
                     "SELECT plugin_id, subscriber_tier, hookpoint, "
                     "content_tier, proposal_branch "
                     "FROM plugin_grants WHERE state = 'approved' "
+                    "ORDER BY plugin_id, hookpoint, subscriber_tier "
                     "LIMIT :row_cap"
                 ),
                 {"row_cap": _LOAD_GRANTS_ROW_CAP},
