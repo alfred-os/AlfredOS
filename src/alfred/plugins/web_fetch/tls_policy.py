@@ -40,6 +40,7 @@ from urllib.parse import urlparse
 import structlog
 
 from alfred.errors import AlfredError
+from alfred.i18n import t
 
 log = structlog.get_logger(__name__)
 
@@ -78,16 +79,15 @@ class TlsPolicy:
         if self.skip_tls_verify:
             env = os.environ.get("ALFRED_ENV", "production")
             if env != "development":
-                # Operator-facing message — kept in English source.
-                # The CLI surface wraps any user-visible portion via t()
-                # at the rendering site; the exception string itself is
-                # for operator logs and stack traces.
-                raise TlsConfigError(
-                    f"web_fetch.skip_tls_verify=true is only permitted when "
-                    f"ALFRED_ENV=development; current ALFRED_ENV={env!r}. "
-                    "A MITM injecting prompt-injection payloads is the canonical T3 "
-                    "ingestion attack; disabled TLS verification is the bypass (spec §7.11)."
-                )
+                # Operator-facing message — routed through t() per
+                # CLAUDE.md i18n hard rule #1. The exception surfaces to
+                # operator CLI/TUI/logs when skip_tls_verify is turned on
+                # outside ALFRED_ENV=development. The msgid carries the
+                # spec §7.11 rationale (MITM = canonical T3 ingestion
+                # attack; TLS skip is the bypass) so the catalog edit is
+                # the single source of truth for the operator-visible
+                # wording across every locale.
+                raise TlsConfigError(t("web.fetch.tls.skip_refused_in_non_dev", env=env))
             log.warning(
                 "tls_policy.skip_enabled",
                 env=env,
