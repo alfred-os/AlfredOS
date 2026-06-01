@@ -13,12 +13,13 @@ this unit test validates the Protocol shape only.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
+
 from alfred.comms.mcp_protocol import (
     AdapterHealthResponse,
     CommsAdapterMCP,
     InboundMessage,
 )
-from pydantic import ValidationError
 
 
 class _EchoAdapter:
