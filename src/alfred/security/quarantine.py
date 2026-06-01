@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NewType
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from alfred.hooks.capability import CapabilityGate
@@ -239,40 +239,119 @@ async def downgrade_to_orchestrator(
 
 
 # ---------------------------------------------------------------------------
-# ExtractionResult discriminated-union stubs (full impl PR-S3-4)
+# ExtractionResult discriminated union (PR-S3-4 — full Pydantic shape;
+# spec §6.7).
 # ---------------------------------------------------------------------------
-# sec-002: PR-S3-3a imports ExtractionResult from alfred.security.quarantine
-# before PR-S3-4 merges. Declare the union type stubs here so the import
-# chain is satisfied. PR-S3-4 replaces these stubs with the full
-# QuarantinedExtractor implementation; it does NOT redefine the types.
+# PR-S3-1 shipped stubs (data+handle; reason+handle); PR-S3-3a's
+# DispatchResult union depends on these symbols at import time. PR-S3-4
+# (this code) promotes the stubs to the full Pydantic shape.
+#
+# The full shape preserves T3 provenance through the orchestrator:
+#
+#   * Extracted.data is annotated T3DerivedData (NewType over dict) — the
+#     type-level provenance tag survives serialisation round-trips and
+#     blocks implicit dict substitution at the trust-boundary call site.
+#   * downgrade_to_orchestrator() is the only path that escapes the tier;
+#     it writes downgrade_explicit=True to the audit row.
+#   * Extracted is NOT a dict subclass — duck-typing on __getitem__ does
+#     not work, callers MUST go through .data and the downgrade path.
+#
+# kind="malformed_output" is deliberately absent from both Extracted.kind
+# (Literal["extracted"]) and TypedRefusal.reason (closed Literal set). The
+# host transport treats unexpected kind values as PluginProtocolViolation
+# (spec §6.7 / prov-011), not as legitimate orchestrator outcomes.
+
+# Closed reason vocabulary for TypedRefusal. Audit rows pin
+# refusal_reason from this Literal so downstream consumers can branch on
+# a fixed-domain string without parsing free-form text.
+#
+# Vocabulary sources:
+#   * cannot_extract (plan §6.3)       — exhausted retries
+#   * refused_by_safety (plan §6.7)    — provider safety filter
+#   * ambiguous_input (plan §6.7)      — schema-incompatible input
+#   * provider_refused                  — structured provider refusal
+#   * provider_unavailable              — circuit breaker / supervisor down
+#   * dlp_outbound_refused              — DLP post-scan blocked the result
+#   * nonce_check_failed                — handle-id nonce mismatch (PR-S3-5)
+TypedRefusalReason = Literal[
+    "cannot_extract",
+    "refused_by_safety",
+    "ambiguous_input",
+    "provider_refused",
+    "provider_unavailable",
+    "dlp_outbound_refused",
+    "nonce_check_failed",
+]
+
+# Closed dispatch-path Literal — matches the three branches in spec §6.2
+# and the audit-row extraction_mode field. Any drift here breaks audit-row
+# continuity, so the closed set is enforced at the type level.
+ExtractionMode = Literal[
+    "native_constrained",
+    "json_object_unconstrained",
+    "prompt_embedded_fallback",
+]
 
 
-@dataclass(frozen=True, slots=True)
-class Extracted:
-    """Successful extraction result: validated structured data from T3 content.
+class Extracted(BaseModel):
+    """Successful structured extraction from T3 content (spec §6.7).
 
-    STUB shape — PR-S3-4 wires the full QuarantinedExtractor consumer.
-    The `.data` field is T3DerivedData (provenance-marked dict). Callers
-    must use downgrade_to_orchestrator() before injecting into privileged
-    prompts. See spec §5.5.
+    The .data field carries T3DerivedData — at runtime a dict, at type
+    level a NewType that mypy/pyright refuse to silently widen to dict.
+    The orchestrator MUST call :func:`downgrade_to_orchestrator` (which
+    writes ``downgrade_explicit=True`` to the audit row) before injecting
+    this value into a privileged prompt. The provenance tag IS the
+    escape-hatch gate.
+
+    Frozen so the audit-emit pipeline cannot mutate the result between
+    construction and persistence. extra="forbid" catches typos at the
+    transport boundary (a "kindd" field would silently survive a permissive
+    config and break audit-row consumers).
+
+    NOT a dict subclass — downstream code that duck-types
+    ``result["data"]`` will fail loudly, preventing accidental
+    transparent-T2 treatment of T3-derived structured data.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # kind discriminates the union at parse time when a Pydantic
+    # TypeAdapter is constructed against Annotated[Extracted | TypedRefusal,
+    # Field(discriminator="kind")]. The runtime alias is the plain union
+    # (core-011) — dispatch sites branch by isinstance.
+    kind: Literal["extracted"] = "extracted"
     data: T3DerivedData
-    handle: ContentHandle
+    extraction_mode: ExtractionMode
 
 
-@dataclass(frozen=True, slots=True)
-class TypedRefusal:
-    """Quarantine-LLM refusal: the model declined to extract from this content.
+class TypedRefusal(BaseModel):
+    """Quarantined extractor refusal (spec §6.7).
 
-    STUB shape — PR-S3-4 wires the full consumer. `reason` is a string
-    from a closed vocabulary (see spec §5.5 TypedRefusal.reason values).
+    The closed reason vocabulary is the audit-row boundary: free-form
+    reasons would leak provider-supplied (potentially T3-derived) text
+    into orchestrator-readable fields. A new refusal cause requires a
+    deliberate addition to :data:`TypedRefusalReason` and the matching
+    reviewer-gated audit-schema migration.
+
+    Frozen + extra="forbid" for the same audit-pipeline reasons as
+    Extracted.
     """
 
-    reason: str
-    handle: ContentHandle
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["typed_refusal"] = "typed_refusal"
+    reason: TypedRefusalReason
 
 
-# ExtractionResult discriminated union (spec §5.5).
-# PR-S3-3a's DispatchResult uses this as the extraction branch.
+# ExtractionResult: plain union of the two branches (core-011 — no
+# Annotated discriminator wrapper at the alias level). The transport-layer
+# DispatchResult flattens this union; dispatch sites branch by isinstance.
+# Pydantic TypeAdapter callers that need the kind discriminator wrap the
+# alias themselves at parse time:
+#
+#   TypeAdapter(Annotated[ExtractionResult, Field(discriminator="kind")])
+#
+# This keeps the runtime alias compatible with PR-S3-3a's
+# typing.get_args(DispatchResult) walk (which flattens nested unions one
+# level deep).
 ExtractionResult = Extracted | TypedRefusal
