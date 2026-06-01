@@ -538,8 +538,24 @@ class SecretBroker:
             try:
                 _validate_secrets_file_security(self._secrets_file_path)
                 self._file_secrets = _load_toml_file(self._secrets_file_path)
-            except FileNotFoundError:
+            except FileNotFoundError:  # pragma: no cover
                 # TOCTOU: file disappeared between exists() and lstat() —
                 # treat as missing rather than propagating the race.
+                #
+                # Coverage rationale: this branch fires only when the
+                # filesystem races between the ``exists()`` probe on the
+                # line above and the ``lstat()`` inside
+                # ``_validate_secrets_file_security``. The window is
+                # microseconds and the race is non-deterministic — there
+                # is no way to reliably trigger it from a unit test
+                # without monkey-patching ``_validate_secrets_file_security``
+                # itself, which would only test the patch, not the real
+                # behaviour. The fail-closed semantics (empty mapping +
+                # cache version bump) ARE asserted by
+                # ``test_reload_handles_now_missing_file`` via the
+                # ``exists() == False`` arm above; this except-branch is
+                # the defensive equivalent for the same outcome.
+                # PR #99 added the TOCTOU guard; PR #134 documents the
+                # pragma per the spec §11a 100% trust-boundary gate.
                 self._file_secrets = MappingProxyType({})
         self._bump_redactor_version()

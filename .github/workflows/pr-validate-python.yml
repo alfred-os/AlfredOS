@@ -323,7 +323,59 @@ jobs:
           uv run pytest "${test_targets[@]}" -q
 
   # -----------------------------------------------------------------
-  # Job 6: i18n catalog drift
+  # Job 6: tag(T3, ...) grep gate (Slice-3 spec §3.7-3.8)
+  # CLAUDE.md hard rule (security #3 + #5): the privileged orchestrator
+  # never sees raw T3 content; tagging is the boundary primitive. The
+  # grep gate is release-blocking — only `security/tiers.py` and
+  # `security/quarantine.py` may call `tag(T3, ...)`, and `cast(
+  # TaggedContent[...]` is a type-erasure bypass that discards provenance.
+  # `scripts/check_tag_t3.py` is the AST-based implementation; this job
+  # wires it into CI as a standalone gating check so it can be promoted
+  # to a required status independently of the other Python jobs.
+  # -----------------------------------------------------------------
+  tag-t3-grep:
+    name: tag(T3) grep gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check for Python source files
+        id: srccheck
+        run: |
+          set -euo pipefail
+          # Same guard pattern as the other Python jobs: pre-Slice-3 main
+          # may have no src/alfred/, in which case the gate is a no-op.
+          # The script is stdlib-only so no uv/python provisioning is
+          # needed when src/ is absent.
+          if [ -d src/alfred ] && find src/alfred -name '*.py' 2>/dev/null | grep -q .; then
+            echo "has_source=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_source=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Python source in src/alfred/ - skipping tag(T3) grep gate."
+          fi
+      - name: Set up Python
+        if: steps.srccheck.outputs.has_source == 'true'
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run check_tag_t3.py against src/alfred
+        if: steps.srccheck.outputs.has_source == 'true'
+        # stdlib-only script; no uv sync required. Releases-blocking per
+        # spec §3.7-3.8 — only `security/tiers.py` and `security/
+        # quarantine.py` may call `tag(T3, ...)`, and `cast(
+        # TaggedContent[...]` is a type-erasure bypass that discards
+        # provenance. The script exits 1 with violation messages on any
+        # non-approved file containing those patterns.
+        run: python3 scripts/check_tag_t3.py src/alfred
+
+  # -----------------------------------------------------------------
+  # Job 7: i18n catalog drift
   # CLAUDE.md hard rule (i18n #4): `pybabel extract` runs in pre-commit;
   # `pybabel compile --check` runs in CI. Catalog drift fails the build.
   # Splitting into its own gating job lets it be promoted to a required
