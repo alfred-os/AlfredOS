@@ -107,12 +107,8 @@ _BUCKET_COUNT: Final[int] = 256
 # breaker-state labels. We pin the literal values here (rather than
 # importing the enum) to keep ``observability`` import-side-effect-free —
 # the same pattern PR-S3-3a uses for ``alfred_stdio_transport_dispatch_seconds``.
-_ACTION_OUTCOME_DOMAIN: Final[frozenset[str]] = frozenset(
-    {"success", "timeout", "cancelled"}
-)
-_BREAKER_STATE_DOMAIN: Final[frozenset[str]] = frozenset(
-    {"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"}
-)
+_ACTION_OUTCOME_DOMAIN: Final[frozenset[str]] = frozenset({"success", "timeout", "cancelled"})
+_BREAKER_STATE_DOMAIN: Final[frozenset[str]] = frozenset({"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"})
 
 
 def bucket_user_id(user_id: str) -> str:
@@ -206,12 +202,8 @@ def record_action_duration(
     (perf-001) and the drift surfaces as an ``unknown`` bucket spike on
     Grafana instead of a silently-spawned new series.
     """
-    safe_action_outcome = (
-        action_outcome if action_outcome in _ACTION_OUTCOME_DOMAIN else "unknown"
-    )
-    safe_breaker_state = (
-        breaker_state if breaker_state in _BREAKER_STATE_DOMAIN else "UNKNOWN"
-    )
+    safe_action_outcome = action_outcome if action_outcome in _ACTION_OUTCOME_DOMAIN else "unknown"
+    safe_breaker_state = breaker_state if breaker_state in _BREAKER_STATE_DOMAIN else "UNKNOWN"
     ACTION_DURATION_HISTOGRAM.labels(
         user_id_bucket=bucket_user_id(user_id),
         action_outcome=safe_action_outcome,

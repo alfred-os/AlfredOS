@@ -198,7 +198,7 @@ def test_action_outcome_domain_constant_pins_closed_set() -> None:
     """
     from alfred.supervisor.observability import _ACTION_OUTCOME_DOMAIN
 
-    assert _ACTION_OUTCOME_DOMAIN == frozenset({"success", "timeout", "cancelled"})
+    assert frozenset({"success", "timeout", "cancelled"}) == _ACTION_OUTCOME_DOMAIN
 
 
 def test_breaker_state_domain_constant_pins_closed_set() -> None:
@@ -210,7 +210,7 @@ def test_breaker_state_domain_constant_pins_closed_set() -> None:
     """
     from alfred.supervisor.observability import _BREAKER_STATE_DOMAIN
 
-    assert _BREAKER_STATE_DOMAIN == frozenset({"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"})
+    assert frozenset({"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"}) == _BREAKER_STATE_DOMAIN
 
 
 def test_span_web_fetch_is_a_context_manager() -> None:
