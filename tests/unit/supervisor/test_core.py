@@ -454,6 +454,51 @@ async def test_stop_force_cancel_preserves_external_cancelled_error(
         await sup.stop()
 
 
+async def test_stop_force_cancel_preserves_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR PR-S3-3b R5 #3332700176: KeyboardInterrupt during stop() propagates.
+
+    An operator pressing Ctrl-C to force-abort a hung shutdown MUST be
+    honoured, not absorbed into ``cancelled_with_errors`` and the audit
+    row. The ``except BaseException`` arm re-raises KeyboardInterrupt
+    alongside CancelledError so the process exits promptly.
+    """
+    monkeypatch.setattr("alfred.supervisor.core._STOP_DRAIN_TIMEOUT_SECONDS", 0.001)
+    sup, _m = _build_supervisor()
+    await sup.start()
+
+    async def _ki_immediately(*_args: Any, **_kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("alfred.supervisor.core.asyncio.wait_for", _ki_immediately)
+
+    with pytest.raises(KeyboardInterrupt):
+        await sup.stop()
+
+
+async def test_stop_force_cancel_preserves_system_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR PR-S3-3b R5 #3332700176: SystemExit during stop() propagates.
+
+    Symmetric to the KeyboardInterrupt arm — SystemExit is a process-control
+    signal and MUST NOT be absorbed by the err-001 capture arm. Re-raising
+    keeps stop() honest about the shutdown signal it received.
+    """
+    monkeypatch.setattr("alfred.supervisor.core._STOP_DRAIN_TIMEOUT_SECONDS", 0.001)
+    sup, _m = _build_supervisor()
+    await sup.start()
+
+    async def _exit_immediately(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit(0)
+
+    monkeypatch.setattr("alfred.supervisor.core.asyncio.wait_for", _exit_immediately)
+
+    with pytest.raises(SystemExit):
+        await sup.stop()
+
+
 async def test_capability_monitor_heartbeat_is_scheduled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

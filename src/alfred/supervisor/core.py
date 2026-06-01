@@ -339,7 +339,13 @@ class Supervisor:
             # it so the audit row reflects the unclean shutdown
             # instead of letting the exception silently propagate out
             # of stop() and skip the audit emit + state cleanup below.
-            if isinstance(exc, asyncio.CancelledError):
+            #
+            # CR PR-S3-3b R5 #3332700176: ``SystemExit`` and
+            # ``KeyboardInterrupt`` are operator-control signals — an
+            # operator pressing Ctrl-C to force-abort a hung shutdown
+            # MUST be honoured, not absorbed into the audit row. Re-raise
+            # alongside ``CancelledError`` so the process exits promptly.
+            if isinstance(exc, (asyncio.CancelledError, SystemExit, KeyboardInterrupt)):
                 raise
             force_cancel_exc = exc
             _log.warning(
