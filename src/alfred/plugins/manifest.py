@@ -36,6 +36,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from alfred.i18n import t
 from alfred.plugins.errors import ManifestError, ManifestTierError, ManifestVersionError
 
 _VALID_SUBSCRIBER_TIERS: Final[frozenset[str]] = frozenset({"system", "operator", "user-plugin"})
@@ -72,7 +73,11 @@ class PluginManifest(BaseModel):
             raise ManifestTierError(value)
         if value not in _VALID_SUBSCRIBER_TIERS:
             raise ManifestError(
-                f"unknown subscriber_tier {value!r}; valid: {sorted(_VALID_SUBSCRIBER_TIERS)}"
+                t(
+                    "plugin.manifest_unknown_subscriber_tier",
+                    tier=repr(value),
+                    valid_tiers=", ".join(sorted(_VALID_SUBSCRIBER_TIERS)),
+                )
             )
         return value
 
@@ -93,7 +98,7 @@ def parse_manifest(raw: str) -> PluginManifest:
     try:
         data: dict[str, Any] = tomllib.loads(raw)
     except tomllib.TOMLDecodeError as exc:
-        raise ManifestError(f"manifest is not valid TOML: {exc}") from exc
+        raise ManifestError(t("plugin.manifest_invalid_toml", detail=str(exc))) from exc
 
     alfred_section = data.get("alfred", {})
     version = alfred_section.get("manifest_version")
@@ -107,15 +112,15 @@ def parse_manifest(raw: str) -> PluginManifest:
 
     plugin_section = data.get("plugin")
     if not isinstance(plugin_section, dict):
-        raise ManifestError("manifest is missing the required [plugin] table")
+        raise ManifestError(t("plugin.manifest_missing_plugin_section"))
 
     plugin_id = plugin_section.get("id")
     if not isinstance(plugin_id, str) or not plugin_id:
-        raise ManifestError("manifest [plugin] id is missing or not a string")
+        raise ManifestError(t("plugin.manifest_invalid_plugin_id"))
 
     subscriber_tier_raw = plugin_section.get("subscriber_tier")
     if not isinstance(subscriber_tier_raw, str):
-        raise ManifestError("manifest [plugin] subscriber_tier is missing or not a string")
+        raise ManifestError(t("plugin.manifest_invalid_subscriber_tier_type"))
 
     # Tier check happens HERE so ManifestTierError surfaces to the caller
     # un-wrapped. The Pydantic field_validator below catches the direct-
@@ -124,17 +129,20 @@ def parse_manifest(raw: str) -> PluginManifest:
         raise ManifestTierError(subscriber_tier_raw)
     if subscriber_tier_raw not in _VALID_SUBSCRIBER_TIERS:
         raise ManifestError(
-            f"unknown subscriber_tier {subscriber_tier_raw!r}; valid: "
-            f"{sorted(_VALID_SUBSCRIBER_TIERS)}"
+            t(
+                "plugin.manifest_unknown_subscriber_tier",
+                tier=repr(subscriber_tier_raw),
+                valid_tiers=", ".join(sorted(_VALID_SUBSCRIBER_TIERS)),
+            )
         )
 
     sandbox_profile = plugin_section.get("sandbox_profile", "user-plugin")
     if not isinstance(sandbox_profile, str):
-        raise ManifestError("manifest [plugin] sandbox_profile is not a string")
+        raise ManifestError(t("plugin.manifest_invalid_sandbox_profile_type"))
 
     platform_raw = plugin_section.get("platform")
     if platform_raw is not None and not isinstance(platform_raw, str):
-        raise ManifestError("manifest [plugin] platform is not a string")
+        raise ManifestError(t("plugin.manifest_invalid_platform_type"))
 
     return PluginManifest(
         manifest_version=1,
