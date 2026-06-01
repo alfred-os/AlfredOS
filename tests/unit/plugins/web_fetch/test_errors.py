@@ -50,7 +50,7 @@ def test_size_limit_exceeded_is_web_fetch_error() -> None:
     assert issubclass(WebFetchSizeLimitExceeded, WebFetchError)
 
 
-def test_canary_tripped_is_NOT_web_fetch_error() -> None:
+def test_canary_tripped_is_NOT_web_fetch_error() -> None:  # noqa: N802 -- emphasis intentional; the NOT is load-bearing
     """SECURITY INVARIANT (spec §7.10): the canary trip is a security event,
     not an operational fetch error. Collapsing it into the operational tree
     would let a ``except WebFetchError`` arm swallow a canary trip.
