@@ -241,11 +241,55 @@ class Supervisor:
         appears. Spec §10.5: the TaskGroup's cancellation semantics are
         load-bearing — cancelling it cascades to every supervised plugin
         task, which is exactly the shutdown shape we want.
+
+        devex-001 (F6): the :class:`CapabilityGateMonitor` heartbeat loop
+        is scheduled here as a supervised TaskGroup task. Spec §8.1 /
+        §10.4: the heartbeat polls the gate's backing store and emits
+        transition rows when the gate enters/exits fail-closed. Wiring
+        it as a TaskGroup task means a crashing heartbeat surfaces (via
+        the TaskGroup's aggregated exception) rather than dying
+        silently — the supervisor's observability surface stays loud.
         """
         async with asyncio.TaskGroup() as tg:
             self._task_group = tg
+            tg.create_task(self._capability_heartbeat_loop())
             self._started_event.set()
             await self._shutdown_event.wait()
+
+    async def _capability_heartbeat_loop(self) -> None:
+        """Run the capability-gate heartbeat until shutdown.
+
+        devex-001 (F6) — supervisor.heartbeat surface: polls the gate at
+        ``CapabilityGateMonitor._heartbeat_interval`` cadence until the
+        supervisor's :attr:`_shutdown_event` resolves. Each tick calls
+        :meth:`CapabilityGateMonitor.run_one_heartbeat` which emits at
+        most one transition row per cycle (entering or exiting
+        fail-closed).
+
+        The loop suspends on ``asyncio.wait_for(shutdown_event.wait(),
+        timeout=interval)`` so a clean shutdown propagates immediately
+        rather than waiting up to ``interval`` seconds. When the
+        ``shutdown_event`` resolves the wait_for returns successfully
+        and the loop exits.
+
+        Subscriber exceptions inside ``run_one_heartbeat`` propagate out
+        of this coroutine and into the TaskGroup, which cancels every
+        sibling task (the supervised plugin reader loops) and re-raises
+        the aggregated error from :meth:`_run`. The audit row inside
+        ``run_one_heartbeat`` is the loud-failure signal; the
+        TaskGroup-aggregated raise is the operator-facing escalation.
+        """
+        interval = self._capability_monitor._heartbeat_interval
+        while not self._shutdown_event.is_set():
+            await self._capability_monitor.run_one_heartbeat()
+            try:
+                # wait_for raises TimeoutError when the interval elapses
+                # without shutdown; we treat that as "next tick due" and
+                # loop back. Any other exception (e.g. external cancel)
+                # propagates.
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+            except TimeoutError:
+                continue
 
     async def stop(self) -> None:
         """Drain the supervised TaskGroup; persist breaker state; audit.
