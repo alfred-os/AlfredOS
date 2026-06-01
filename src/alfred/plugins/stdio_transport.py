@@ -79,6 +79,7 @@ from alfred.plugins._observability import (
     INBOUND_SCANNER_SCAN_DURATION,
     OUTBOUND_DLP_SCAN_DURATION,
     PLUGIN_SPAWN_DURATION,
+    bucket_plugin_id,
 )
 from alfred.plugins.content_store_base import ContentStoreBase, InMemoryContentStore
 from alfred.plugins.errors import DlpOutboundRefusedError
@@ -432,8 +433,11 @@ class StdioTransport:
                     with contextlib.suppress(OSError):
                         os.close(r_fd)
         finally:
+            # perf-003: bucket open-vocabulary plugin_id through the
+            # cardinality firewall so a runaway plugin fleet cannot leak
+            # unbounded series into the Prometheus index.
             PLUGIN_SPAWN_DURATION.labels(
-                plugin_id=self._plugin_id,
+                plugin_id=bucket_plugin_id(self._plugin_id),
                 outcome=spawn_outcome,
             ).observe(time.monotonic() - spawn_start)
 
@@ -664,8 +668,10 @@ class StdioTransport:
             outcome = "error"
             raise
         finally:
+            # perf-003: bucket open-vocabulary plugin_id through the
+            # cardinality firewall (see ``bucket_plugin_id`` docstring).
             DISPATCH_DURATION.labels(
-                plugin_id=self._plugin_id,
+                plugin_id=bucket_plugin_id(self._plugin_id),
                 method_shape=method_shape,
                 outcome=outcome,
             ).observe(time.monotonic() - dispatch_start)
