@@ -139,7 +139,12 @@ def _build_transport_returning_control(payload: dict[str, object]) -> AsyncMock:
 @pytest.mark.asyncio
 async def test_success_returns_handle_and_emits_ok_audit_row() -> None:
     """The success path returns the ContentHandle from transport.dispatch
-    and writes a ``result="ok"`` row keyed on its handle id."""
+    and writes a ``result="ok"`` row keyed on its handle id.
+
+    H6 / ar-001: the success row sets ``rate_limit_bucket=None`` —
+    the field's domain is the bucket tag that REFUSED the fetch, not
+    the netloc that succeeded. ``domain`` carries the netloc instead.
+    """
     audit = _build_audit()
     handle = await dispatch_web_fetch(
         url="https://example.com/page",
@@ -166,6 +171,10 @@ async def test_success_returns_handle_and_emits_ok_audit_row() -> None:
     assert subject["content_handle_id"] == "handle-uuid"
     assert subject["dlp_scan_result"] == "clean"
     assert subject["status_code"] == 200
+    # H6: success path leaves rate_limit_bucket=None — the bucket is the
+    # refusal tag, not the success domain.
+    assert subject["rate_limit_bucket"] is None
+    assert subject["domain"] == "example.com"
 
 
 @pytest.mark.asyncio
@@ -700,7 +709,17 @@ async def test_unexpected_dispatch_shape_raises_generic_error() -> None:
     """A transport that returns a shape outside the
     ``DispatchResult`` union (used here as an
     :class:`ExtractionResult`-shaped surrogate) surfaces as a generic
-    ``WebFetchError`` with the type name in the message."""
+    ``WebFetchError`` with the type name in the message.
+
+    H7 / err-001: the dispatch-shape-error path now emits a
+    ``result="dispatch_shape_error"`` audit row BEFORE raising — the
+    structlog event alone left no row in the audit DB for forensic
+    correlation, which broke the audit-graph invariant for a
+    trust-boundary anomaly.
+
+    C3 / i18n-001: the WebFetchError message routes through t(); the
+    shape name is the i18n placeholder.
+    """
     audit = _build_audit()
 
     class _UnknownResult:
@@ -722,6 +741,14 @@ async def test_unexpected_dispatch_shape_raises_generic_error() -> None:
             transport=transport,
         )
     assert "_UnknownResult" in str(excinfo.value)
+    # H7: audit row emitted with dispatch_shape_error result.
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "dispatch_shape_error"
+    assert call.kwargs["subject"]["dlp_scan_result"] == "dispatch_shape_error"
+    # trust_tier_of_result is T0 not T3 — there is no T3 content to
+    # quarantine because the transport never delivered a handle.
+    assert call.kwargs["subject"]["trust_tier_of_result"] == "T0"
 
 
 # ---------------------------------------------------------------------------
@@ -878,3 +905,219 @@ async def test_t3_tagging_contract_documented_on_success_handle(
     # ``.content`` field — see :mod:`alfred.security.quarantine`.
     assert isinstance(result, ContentHandle)
     assert not hasattr(result, "content")
+
+
+# ---------------------------------------------------------------------------
+# Commit 2 — H6 / H7 / C3 / C4 / M7 / devex-002 / devex-005: audit-row
+# fidelity + error-arm coverage + i18n catalogue.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dlp_scan_exception_emits_audit_row_then_raises() -> None:
+    """M7 / err-003: a DLP-scan exception emits a
+    ``result="dlp_scan_error"`` audit row BEFORE re-raising.
+
+    Without the row, a broker outage / regex panic on the security
+    path leaves no forensic trail — CLAUDE.md hard rule #7 (no silent
+    failures in security paths).
+    """
+    audit = _build_audit()
+
+    class _DlpExplodedError(RuntimeError):
+        pass
+
+    dlp = MagicMock()
+    dlp.scan = MagicMock(side_effect=_DlpExplodedError("broker offline"))
+
+    with pytest.raises(_DlpExplodedError):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-m7-dlp",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=dlp,
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+        )
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "dlp_scan_error"
+    assert call.kwargs["subject"]["dlp_scan_result"] == "dlp_scan_error"
+    # The audit row carries the pre-scan URL because the scan failed —
+    # we cannot trust the (uninitialised) clean_url. ``url`` is the raw
+    # parameter so the forensic trail still attributes the failure to
+    # the right caller.
+    assert call.kwargs["subject"]["url"] == "https://example.com/page"
+
+
+@pytest.mark.asyncio
+async def test_transport_exception_emits_audit_row_then_raises() -> None:
+    """M7 / err-004: a transport-layer exception emits a
+    ``result="transport_error"`` audit row BEFORE re-raising.
+
+    Subprocess death / broken pipe / framing error is a transport-
+    layer crash, not an in-band protocol violation; the closed-
+    vocabulary ``transport_error`` tag is distinct from
+    ``dispatch_shape_error``.
+    """
+    audit = _build_audit()
+
+    class _TransportCrashedError(RuntimeError):
+        pass
+
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(side_effect=_TransportCrashedError("broken pipe"))
+
+    with pytest.raises(_TransportCrashedError):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-m7-transport",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "transport_error"
+    assert call.kwargs["subject"]["dlp_scan_result"] == "transport_error"
+
+
+@pytest.mark.asyncio
+async def test_success_audit_write_failure_logs_loud_then_raises() -> None:
+    """M7 / err-005: a success-path audit-write failure must surface
+    loudly (structlog warning carrying the would-be subject) before
+    re-raising.
+
+    The dispatcher cannot synthesise a recoverable handle return when
+    the audit row never reached the DB — the structlog event is the
+    only forensic trail for the successful fetch.
+    """
+    audit = _build_audit()
+    # The success path issues ONE append_schema call; make it raise.
+    audit.append_schema = AsyncMock(side_effect=RuntimeError("audit DB down"))
+
+    with pytest.raises(RuntimeError, match="audit DB down"):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-m7-success-write",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+        )
+    # The append_schema was attempted once for the ok row.
+    assert audit.append_schema.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_headers_scanned_per_value_for_secret_leakage() -> None:
+    """M3 / arch-006: headers are scanned per-value and the redacted
+    values cross the wire — the original ``headers`` dict does NOT.
+
+    The pre-fix dispatcher scanned ``str(headers)`` (a side-effect for
+    the audit row) and then passed the raw dict to ``transport.dispatch``.
+    Header secrets leaked verbatim. This test pins the per-field redaction
+    path.
+    """
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+
+    # DLP that redacts anything starting with "Bearer ".
+    def _redact(s: str) -> str:
+        return "[REDACTED]" if s.startswith("Bearer ") else s
+
+    dlp = MagicMock()
+    dlp.scan = MagicMock(side_effect=_redact)
+
+    await dispatch_web_fetch(
+        url="https://example.com/page",
+        headers={"Authorization": "Bearer sk-abc123", "User-Agent": "alfred"},
+        user_id="user-1",
+        correlation_id="corr-m3",
+        config=_build_config(),
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=dlp,
+        audit=audit,
+        transport=transport,
+    )
+
+    args, _kwargs = transport.dispatch.await_args
+    sent_headers = args[1]["headers"]
+    # The redacted value flows through; the secret was never on the wire.
+    assert sent_headers["Authorization"] == "[REDACTED]"
+    # Non-secret header passes through unchanged.
+    assert sent_headers["User-Agent"] == "alfred"
+
+
+@pytest.mark.asyncio
+async def test_plugin_returned_message_routes_through_i18n() -> None:
+    """C4 / i18n-002: the generic WebFetchError fallback wraps the
+    plugin's message in the i18n catalogue. The plugin-supplied detail
+    is the placeholder, NOT the carrier string.
+    """
+    audit = _build_audit()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchError",
+            "message": "DNS resolution failed",
+        }
+    )
+    with pytest.raises(WebFetchError) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-c4",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    msg = str(excinfo.value)
+    # The catalogued carrier text appears; the plugin detail is embedded.
+    assert "DNS resolution failed" in msg
+    assert "plugin returned an error" in msg
+
+
+@pytest.mark.asyncio
+async def test_unexpected_dispatch_shape_message_routes_through_i18n() -> None:
+    """C3 / i18n-001: the unexpected-dispatch-shape WebFetchError text
+    routes through the catalogue. ``{shape}`` carries the Python type
+    name; the carrier text is catalogued.
+    """
+    audit = _build_audit()
+
+    class _BogusResult:
+        pass
+
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(return_value=_BogusResult())
+
+    with pytest.raises(WebFetchError) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-c3",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    msg = str(excinfo.value)
+    assert "_BogusResult" in msg
+    # Catalogued operator-facing text is present (pinned against pybabel
+    # fuzzy-copy drift).
+    assert "unexpected dispatch shape" in msg
