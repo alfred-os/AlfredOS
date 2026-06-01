@@ -38,14 +38,15 @@ and awaits the runner to drain. Plugin tasks added via
 What this PR does NOT do
 ------------------------
 
-PR-S3-3b Tasks 13-17 ship the Supervisor class and its public API.
-The full hookpoint registration table (``supervisor.breaker.tripped``,
-``supervisor.action_timeout``, ``plugin.lifecycle.*``) is Tasks 19-20;
-this PR's ``_register_hookpoints`` is the stub method that Tasks 19-20
-will populate. The CLI surface (``alfred supervisor status``,
-``alfred supervisor reset <component> --confirm``) is owned exclusively
-by PR-S3-6 (devex-001 / rvw-002 — shipping CLI here would race the
-Typer-based PR-S3-6 CLI on whichever merges second).
+PR-S3-3b Tasks 13-17 ship the Supervisor class and its public API;
+Tasks 19-20 populate ``_register_hookpoints`` with the full spec §14
+hookpoint table (``supervisor.breaker.tripped``,
+``supervisor.breaker.reset``, ``supervisor.action_timeout``,
+``plugin.lifecycle.*``). The CLI surface
+(``alfred supervisor status``, ``alfred supervisor reset <component>
+--confirm``) is owned exclusively by PR-S3-6 (devex-001 / rvw-002 —
+shipping CLI here would race the Typer-based PR-S3-6 CLI on whichever
+merges second).
 
 Self-healing restart scheduling (HALF_OPEN re-arm cadence, exponential
 backoff probe timing) is a Slice-4 concern — PR-S3-3b ships the
@@ -410,28 +411,72 @@ class Supervisor:
                 await breaker.load_from_db(session)
 
     # ------------------------------------------------------------------
-    # Hookpoint registration (stub — Tasks 19-20 populate)
+    # Hookpoint registration (spec §14 — Tasks 19-20)
     # ------------------------------------------------------------------
 
     def _register_hookpoints(self) -> None:
         """Register every supervisor hookpoint with the global registry.
 
-        PR-S3-3b Tasks 13-17 ship this as a stub method. Tasks 19-20
-        populate it with the full spec §14 hookpoint table:
+        Spec §14 enumerates the supervisor's six hookpoints. All of them
+        — including ``supervisor.action_timeout`` — are declared HERE,
+        from ``Supervisor.__init__``. Import-time registration in
+        ``deadline.py`` / ``breaker.py`` was rejected at plan review
+        (core-010): module-import side-effects break test isolation
+        because pytest collects every test module's imports before any
+        fixture runs, so a publisher's metadata would persist across
+        tests that expect a clean registry.
 
-        * ``supervisor.breaker.tripped``
-        * ``supervisor.breaker.reset``
-        * ``supervisor.action_timeout``
-        * ``plugin.lifecycle.loaded``
-        * ``plugin.lifecycle.crashed``
-        * ``plugin.lifecycle.quarantined``
+        Idempotency contract (rvw-pre-flight): tests routinely construct
+        multiple ``Supervisor`` instances per process (one per case);
+        the underlying :meth:`HookRegistry.register_hookpoint` is
+        already idempotent on equal metadata and strict on drift (see
+        ``alfred/hooks/registry.py:660``). The shape here — pin the six
+        entries to the public :data:`SYSTEM_ONLY_TIERS` /
+        :data:`SYSTEM_OPERATOR_TIERS` constants so every Supervisor
+        instance hands the registry the SAME frozenset objects — keeps
+        the re-registration a no-op rather than a drift raise.
 
-        The method exists now so the constructor signature is stable —
-        Tasks 19-20's diff is body-only, not signature-changing. core-010
-        rationale: all supervisor hookpoint registration MUST happen in
-        ``Supervisor.__init__`` (never at module-import time in
-        ``deadline.py`` or ``breaker.py``) to keep test isolation clean.
+        Per-hookpoint trust-tier rationale:
+
+        * ``supervisor.breaker.tripped`` — system-only emission of an
+          internal state-machine transition; user-plugin subscribers
+          would be a security smell (they'd see when the quarantine
+          fires) and operator subscribers add nothing the audit-graph
+          dashboards don't already surface. ``fail_closed=False``: a
+          crashing subscriber on this event is observability noise,
+          not a security regression — the breaker transition itself
+          is persisted to Postgres irrespective of the hook chain.
+        * ``supervisor.breaker.reset`` — operator-triggered command
+          (spec §10.8). System + operator tiers may subscribe (operator
+          for CLI confirmation flow, system for audit forwarding);
+          user-plugin locked out. ``fail_closed=False`` for the same
+          reason as ``.tripped``.
+        * ``supervisor.action_timeout`` — system-only emission from the
+          orchestrator's ``DeadlineWrapper`` arm (core-003). Same
+          posture as ``.tripped``.
+        * ``plugin.lifecycle.{loaded,crashed,quarantined}`` — three
+          system-only emissions covering the spec §10.3 lifecycle.
+          ``fail_closed=False`` consistent with the rest of the
+          supervisor's observability-shaped hookpoints.
         """
+        from alfred.hooks import SYSTEM_ONLY_TIERS, SYSTEM_OPERATOR_TIERS, get_registry
+
+        registry = get_registry()
+        hookpoints: tuple[tuple[str, frozenset[str], frozenset[str], bool], ...] = (
+            ("supervisor.breaker.tripped", SYSTEM_ONLY_TIERS, frozenset(), False),
+            ("supervisor.breaker.reset", SYSTEM_OPERATOR_TIERS, frozenset(), False),
+            ("supervisor.action_timeout", SYSTEM_ONLY_TIERS, frozenset(), False),
+            ("plugin.lifecycle.loaded", SYSTEM_ONLY_TIERS, frozenset(), False),
+            ("plugin.lifecycle.crashed", SYSTEM_ONLY_TIERS, frozenset(), False),
+            ("plugin.lifecycle.quarantined", SYSTEM_ONLY_TIERS, frozenset(), False),
+        )
+        for name, subscribable_tiers, refusable_tiers, fail_closed in hookpoints:
+            registry.register_hookpoint(
+                name=name,
+                subscribable_tiers=subscribable_tiers,
+                refusable_tiers=refusable_tiers,
+                fail_closed=fail_closed,
+            )
 
 
 __all__ = ["Supervisor"]
