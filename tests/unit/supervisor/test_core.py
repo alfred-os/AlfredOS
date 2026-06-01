@@ -289,6 +289,109 @@ async def test_reset_breaker_unknown_component_raises() -> None:
         await sup.reset_breaker("never-registered", operator_user_id="alfred")
 
 
+async def test_reset_breaker_persistence_failure_audits_and_reraises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR PR-S3-3b R5 #3332700182: SQLAlchemyError during persistence emits
+    ``result=persistence_failed`` BEFORE re-raising.
+
+    Previously, ``reset_breaker`` audited ``result="success"`` then committed —
+    so a commit failure left the audit graph showing a clean reset while the
+    on-disk state stayed pre-reset. A ``load_all_breakers`` on next boot
+    would silently re-open the breaker the operator believed they cleared.
+
+    Mirror the err-002 ``stop()`` pattern: persist first, audit on commit
+    success, audit ``persistence_failed`` and re-raise on SQLAlchemyError.
+    """
+    from sqlalchemy.exc import SQLAlchemyError
+
+    sup, m = _build_supervisor()
+    breaker = sup.get_or_create_breaker("quarantined-llm")
+    breaker.state = BreakerState.OPEN
+    breaker.trip_count = 3
+
+    # Patch the session_scope so its commit raises SQLAlchemyError.
+    @asynccontextmanager
+    async def _failing_session_scope() -> AsyncIterator[Any]:
+        session = AsyncMock()
+        session.commit = AsyncMock(side_effect=SQLAlchemyError("commit failed"))
+        yield session
+
+    monkeypatch.setattr(sup, "_session_scope", _failing_session_scope)
+
+    with pytest.raises(SQLAlchemyError):
+        await sup.reset_breaker("quarantined-llm", operator_user_id="alfred-the-operator")
+
+    # Exactly one supervisor.breaker.reset row landed — the persistence_failed
+    # one. NO success row leaked into the audit graph.
+    reset_calls = [
+        call
+        for call in m["audit"].append_schema.await_args_list
+        if call.kwargs.get("event") == "supervisor.breaker.reset"
+    ]
+    assert len(reset_calls) == 1
+    kwargs = reset_calls[0].kwargs
+    assert kwargs["result"] == "persistence_failed"
+    assert kwargs["actor_user_id"] == "alfred-the-operator"
+    # The subject carries the same correlation_id + old_state / new_state shape
+    # the success row would have — so dashboards can join failed resets onto
+    # the same component_id stream.
+    assert kwargs["subject"]["component_id"] == "quarantined-llm"
+    assert kwargs["subject"]["old_state"] == "OPEN"
+    assert kwargs["subject"]["new_state"] == "CLOSED"
+
+
+async def test_reset_breaker_audits_success_only_after_commit_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR PR-S3-3b R5 #3332700182: success row is emitted AFTER ``session.commit()``.
+
+    Pins the ordering invariant: the audit graph never shows a clean reset
+    until the persistence layer has accepted the new state. Test records
+    the order of operations via call_order list and asserts:
+    1. ``save_to_db`` ran before the audit success emit
+    2. ``commit`` ran before the audit success emit
+    """
+    sup, m = _build_supervisor()
+    breaker = sup.get_or_create_breaker("quarantined-llm")
+    breaker.state = BreakerState.OPEN
+    breaker.trip_count = 1
+
+    call_order: list[str] = []
+
+    # Record commit + audit ordering. ``save_to_db`` runs inside our fake
+    # session_scope; we track commit via a wrapped session.
+    @asynccontextmanager
+    async def _ordered_session_scope() -> AsyncIterator[Any]:
+        session = AsyncMock()
+
+        async def _commit() -> None:
+            call_order.append("commit")
+
+        session.commit = AsyncMock(side_effect=_commit)
+        yield session
+
+    monkeypatch.setattr(sup, "_session_scope", _ordered_session_scope)
+
+    original_append_schema = m["audit"].append_schema.side_effect
+
+    async def _track_audit(*_args: Any, **kwargs: Any) -> None:
+        if kwargs.get("event") == "supervisor.breaker.reset":
+            call_order.append(f"audit:{kwargs.get('result')}")
+        if original_append_schema is not None:
+            return await original_append_schema(*_args, **kwargs)
+        return None
+
+    m["audit"].append_schema.side_effect = _track_audit
+
+    await sup.reset_breaker("quarantined-llm", operator_user_id="alfred-the-operator")
+
+    # Commit lands BEFORE the success audit row.
+    assert "commit" in call_order
+    assert "audit:success" in call_order
+    assert call_order.index("commit") < call_order.index("audit:success")
+
+
 # ---------------------------------------------------------------------------
 # load_all_breakers — restart-time state restore
 # ---------------------------------------------------------------------------
