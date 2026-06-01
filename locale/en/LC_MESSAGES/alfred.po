@@ -166,6 +166,19 @@ msgstr "alfred error: {error}"
 msgid "tui.label_alfred"
 msgstr "alfred"
 
+# Slice-3 retrospective CR-142 round-3 sec-001 — TUI ingress runtime
+# allowlist guard. ``_ingest_tier`` is the source of truth for the
+# role x adapter mapping; this message fires if a future drift in
+# that helper widens the return set to T0/T3 (both of which would
+# never reach the open ``tag()`` path under the spec §3.6 contract).
+# tier_name carries the offending class name verbatim for forensic
+# attribution. Fail-loud at the boundary, not silently downstream.
+#: src/alfred/comms/tui.py:284
+msgid "comms.tui.ingress_tier_unexpected"
+msgstr ""
+"Unexpected ingress tier for comms.tui.input: {tier_name!r}; expected T1 "
+"or T2 per spec §3.6."
+
 #: src/alfred/hooks/errors.py:108
 msgid "hooks.refusal"
 msgstr "Hook {hook_id} refused action {action_id}: {reason}"
@@ -495,6 +508,63 @@ msgstr ""
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
 
+# Slice-3 retrospective fix DEVEX-001 — bare i18n keys emitted by
+# bin/alfred-plugin-launcher.sh on stderr. The supervisor renders these
+# from the catalog when persisting the matching audit row. The keys
+# themselves stay as the machine-readable stderr signal; these msgstrs
+# are the human-readable rendering.
+# CR-142 round-3 doc-001: promoted from obsolete (#~) to active msgids
+# via _launcher_i18n.py so pybabel extract sees them and they survive
+# every ``pybabel update`` pass. Without the registry module, pybabel
+# re-marks them ``#~`` on every sync (the launcher emits them from a
+# shell script that pybabel cannot parse).
+#: src/alfred/plugins/_launcher_i18n.py:36
+msgid "plugin.launcher_plugin_id_invalid"
+msgstr ""
+"Plugin spawn refused: the supplied plugin_id contained characters outside"
+" the safe charset [A-Za-z0-9._-]. The id is not echoed (it would round-"
+"trip into the audit stream)."
+
+#: src/alfred/plugins/_launcher_i18n.py:37
+msgid "plugin.launcher_unsandboxed_rejected"
+msgstr ""
+"Plugin spawn refused: ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 is a "
+"development-only escape hatch and was supplied outside development. Unset"
+" the flag or set ALFRED_ENV=development (never in production)."
+
+#: src/alfred/plugins/_launcher_i18n.py:38
+msgid "plugin.launcher_no_sandbox_policy"
+msgstr ""
+"Plugin spawn refused: no sandbox policy file at "
+"${{ALFRED_SANDBOX_POLICY_DIR}}/{plugin_id}.policy. Provision the policy "
+"file (see docs/runbooks/slice-3-plugins.md) or, for development only, set"
+" ALFRED_ENV=development + ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1."
+
+#: src/alfred/plugins/_launcher_i18n.py:39
+msgid "plugin.launcher_uid_drop_unavailable"
+msgstr ""
+"Plugin spawn refused: runuser is missing on this Linux host so the "
+"launcher cannot drop privilege to ${{ALFRED_PLUGIN_UID}} before exec. "
+"Install util-linux and retry."
+
+# Supervisor.config_insecure JSON events the launcher emits on
+# documented-deviation paths. The insecure_config_key is the
+# closed-vocabulary identifier the supervisor matches; the msgstr
+# is the operator-facing renderer.
+#: src/alfred/plugins/_launcher_i18n.py:40
+msgid "plugin.launcher_insecure_unsandboxed_dev"
+msgstr ""
+"Plugin {plugin_id} spawned WITHOUT a sandbox policy "
+"(ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 + ALFRED_ENV=development). This is "
+"a documented dev-only deviation; MUST NOT appear in production logs."
+
+#: src/alfred/plugins/_launcher_i18n.py:42
+msgid "plugin.launcher_insecure_uid_separation_macos"
+msgstr ""
+"Plugin {plugin_id} spawned WITHOUT UID separation (macOS dev host; "
+"runuser is Linux-only). Documented dev-only deviation; MUST NOT appear in"
+" production logs."
+
 # Slice-3 retrospective fix i18n-001 — plugins/errors.py raises that
 # previously used raw f-strings. Sibling families already used t().
 #: src/alfred/plugins/errors.py:80
@@ -689,64 +759,4 @@ msgstr ""
 
 #~ msgid "missing.key.example"
 #~ msgstr ""
-
-# Slice-3 retrospective fix DEVEX-001 — bare i18n keys emitted by
-# bin/alfred-plugin-launcher.sh on stderr. The supervisor renders these
-# from the catalog when persisting the matching audit row. The keys
-# themselves stay as the machine-readable stderr signal; these msgstrs
-# are the human-readable rendering.
-#~ msgid "plugin.launcher_plugin_id_invalid"
-#~ msgstr ""
-#~ "Plugin spawn refused: the supplied "
-#~ "plugin_id contained characters outside the "
-#~ "safe charset [A-Za-z0-9._-]. The id is"
-#~ " not echoed (it would round-trip "
-#~ "into the audit stream)."
-
-#~ msgid "plugin.launcher_unsandboxed_rejected"
-#~ msgstr ""
-#~ "Plugin spawn refused: "
-#~ "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 is a "
-#~ "development-only escape hatch and was "
-#~ "supplied outside development. Unset the "
-#~ "flag or set ALFRED_ENV=development (never "
-#~ "in production)."
-
-#~ msgid "plugin.launcher_no_sandbox_policy"
-#~ msgstr ""
-#~ "Plugin spawn refused: no sandbox policy"
-#~ " file at "
-#~ "${{ALFRED_SANDBOX_POLICY_DIR}}/{plugin_id}.policy. Provision "
-#~ "the policy file (see "
-#~ "docs/runbooks/slice-3-plugins.md) or, for "
-#~ "development only, set ALFRED_ENV=development +"
-#~ " ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1."
-
-#~ msgid "plugin.launcher_uid_drop_unavailable"
-#~ msgstr ""
-#~ "Plugin spawn refused: runuser is missing"
-#~ " on this Linux host so the "
-#~ "launcher cannot drop privilege to "
-#~ "${{ALFRED_PLUGIN_UID}} before exec. Install "
-#~ "util-linux and retry."
-
-# Slice-3 retrospective fix DEVEX-001 — supervisor.config_insecure JSON
-# events the launcher emits on documented-deviation paths. The
-# insecure_config_key is the closed-vocabulary identifier the supervisor
-# matches; the msgstr is the operator-facing renderer.
-#~ msgid "plugin.launcher_insecure_unsandboxed_dev"
-#~ msgstr ""
-#~ "Plugin {plugin_id} spawned WITHOUT a "
-#~ "sandbox policy (ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 "
-#~ "+ ALFRED_ENV=development). This is a "
-#~ "documented dev-only deviation; MUST NOT"
-#~ " appear in production logs."
-
-#~ msgid "plugin.launcher_insecure_uid_separation_macos"
-#~ msgstr ""
-#~ "Plugin {plugin_id} spawned WITHOUT UID "
-#~ "separation (macOS dev host; runuser is"
-#~ " Linux-only). Documented dev-only "
-#~ "deviation; MUST NOT appear in production"
-#~ " logs."
 
