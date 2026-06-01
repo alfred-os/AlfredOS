@@ -20,7 +20,7 @@ from typing import Any
 def test_recorded_extraction_fixture_returns_dict_shape(
     recorded_extraction_fixture: dict[str, Any],
 ) -> None:
-    """The default extraction fixture is a dict with request_body / response_body / extraction_mode."""
+    """Default fixture carries request_body / response_body / extraction_mode keys."""
     assert isinstance(recorded_extraction_fixture, dict)
     assert "request_body" in recorded_extraction_fixture
     assert "response_body" in recorded_extraction_fixture
@@ -48,10 +48,7 @@ def test_deepseek_fixture_json_object_shape(
     req = recorded_deepseek_extraction_fixture["request_body"]
     rf = req.get("response_format", {})
     assert rf.get("type") == "json_object"
-    assert (
-        recorded_deepseek_extraction_fixture["extraction_mode"]
-        == "json_object_unconstrained"
-    )
+    assert recorded_deepseek_extraction_fixture["extraction_mode"] == "json_object_unconstrained"
 
 
 def test_recorded_injection_fixture_carries_extracted_and_instruction(
