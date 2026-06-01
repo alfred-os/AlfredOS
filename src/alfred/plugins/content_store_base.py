@@ -23,14 +23,37 @@ The Redis-backed production store ships in PR-S3-5
 Both implementations satisfy the same :class:`ContentStoreBase` Protocol,
 so the supervisor wires whichever the operator configured without
 touching call-site code.
+
+**Production guard (sec-S3-003).** ``InMemoryContentStore`` is NOT
+production-safe (no TTL, no single-use, no cross-process visibility);
+a bootstrap that forgets to inject the Redis store would silently get
+the unsafe stub. The constructor consults ``ALFRED_ENV`` and refuses
+to instantiate outside ``{"", "development", "test"}`` — the same
+"unset / explicit dev / test" allowlist used elsewhere in the tree, but
+extended to permit ``"test"`` so the pytest suite can construct stubs
+without monkeypatching. This is loud rather than silent: a misconfigured
+production host trips ``RuntimeError`` at bootstrap rather than running
+under a stub store that drops single-use semantics on the floor.
+
+This module is NOT on the capability-gate ``_FORBIDDEN_ALFRED_ENV_READERS``
+list (sec-007); the env read here is the bootstrap-time safety check for
+the development/test stub, not a gate-construction decision.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import os
+from typing import Final, Protocol, runtime_checkable
 
+from alfred.errors import AlfredError
 from alfred.security.quarantine import ContentHandle
 from alfred.security.tiers import T3, TaggedContent
+
+# Allowlist of ``ALFRED_ENV`` values that may construct the stub store.
+# Unset / empty mirrors the gate-factory convention (a missing env var
+# in a developer's shell is the development default). ``"test"`` is the
+# pytest fixture environment.
+_DEV_TEST_ENVIRONMENTS: Final[frozenset[str]] = frozenset({"", "development", "test"})
 
 
 @runtime_checkable
@@ -82,6 +105,23 @@ class ContentStoreBase(Protocol):
         ...
 
 
+class InMemoryContentStoreProductionError(AlfredError):
+    """SECURITY EVENT: ``InMemoryContentStore`` constructed in a non-dev/test env.
+
+    sec-S3-003. The in-memory stub lacks production-safety properties
+    (no TTL, no single-use, no cross-process visibility). A bootstrap
+    that forgets to inject the Redis store would silently fall back to
+    this stub; the constructor's ``ALFRED_ENV`` check raises this
+    exception instead.
+
+    The fix is to inject the Redis-backed
+    :class:`alfred.plugins.web_fetch.content_store` ContentStore (PR-S3-5)
+    via the supervisor's bootstrap. ``StdioTransport.__init__`` accepts a
+    ``content_store=`` kwarg specifically so the right store is wired
+    explicitly per environment.
+    """
+
+
 class InMemoryContentStore:
     """In-memory content store for unit tests + Slice-3 pre-Redis usage.
 
@@ -92,9 +132,26 @@ class InMemoryContentStore:
     * inside the unit-test suite (where each test wants a fresh,
       hermetic store), and
     * in Slice-3 bootstrap before PR-S3-5 ships the Redis store.
+
+    sec-S3-003: the constructor refuses to run when ``ALFRED_ENV`` is
+    set to anything outside :data:`_DEV_TEST_ENVIRONMENTS`. A misconfigured
+    production host trips ``InMemoryContentStoreProductionError`` at
+    bootstrap rather than silently running under the stub.
     """
 
     def __init__(self) -> None:
+        # Direct ``os.environ`` read is fine here — this module is NOT on
+        # the sec-007 capability-gate forbidden-readers list (see
+        # tests/unit/security/test_default_strict_declarations_invariant.py).
+        # The read is the bootstrap-time stub-store safety check, not a
+        # gate-construction decision.
+        env = os.environ.get("ALFRED_ENV", "").strip()
+        if env not in _DEV_TEST_ENVIRONMENTS:
+            raise InMemoryContentStoreProductionError(
+                f"InMemoryContentStore is not production-safe (ALFRED_ENV={env!r}); "
+                "inject a Redis-backed ContentStore via StdioTransport(content_store=...) "
+                "or set ALFRED_ENV to 'development' / 'test' for stub usage."
+            )
         self._store: dict[str, TaggedContent[T3]] = {}
 
     def put(self, handle: ContentHandle, tagged_content: TaggedContent[T3]) -> None:
@@ -112,4 +169,5 @@ class InMemoryContentStore:
 __all__ = [
     "ContentStoreBase",
     "InMemoryContentStore",
+    "InMemoryContentStoreProductionError",
 ]

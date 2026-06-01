@@ -72,7 +72,11 @@ def test_re_exports_are_same_object_as_leaf() -> None:
         "alfred.plugins.manifest": ["PluginManifest", "parse_manifest"],
         "alfred.plugins.session": ["AlfredPluginSession"],
         "alfred.plugins.inbound_scanner": ["CanaryTrip", "InboundContentScanner"],
-        "alfred.plugins.content_store_base": ["ContentStoreBase", "InMemoryContentStore"],
+        "alfred.plugins.content_store_base": [
+            "ContentStoreBase",
+            "InMemoryContentStore",
+            "InMemoryContentStoreProductionError",
+        ],
         "alfred.plugins.stdio_transport": [
             "CanaryTripSecurityEvent",
             "NonceNotConfigured",
@@ -116,6 +120,7 @@ def test_expected_surface_present() -> None:
             "DispatchResult",
             "DlpOutboundRefusedError",
             "InMemoryContentStore",
+            "InMemoryContentStoreProductionError",
             "InboundContentScanner",
             "ManifestError",
             "ManifestTierError",
