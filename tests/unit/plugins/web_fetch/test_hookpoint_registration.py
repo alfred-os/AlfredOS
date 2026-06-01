@@ -16,13 +16,9 @@ from __future__ import annotations
 
 import pytest
 
-from alfred.hooks import HookError, HookRegistry, SYSTEM_ONLY_TIERS
+from alfred.hooks import SYSTEM_ONLY_TIERS, HookError, HookRegistry
 from alfred.hooks.context import HookContext
 from alfred.plugins.web_fetch import register_hookpoints
-
-# Re-use the canonical hook fixtures so the registration test runs
-# against a fresh per-test registry instead of the module singleton.
-pytest_plugins = ["tests.unit.hooks.conftest"]
 
 
 def test_tool_web_fetch_hookpoint_registered(
