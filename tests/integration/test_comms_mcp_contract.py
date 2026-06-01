@@ -59,7 +59,7 @@ except ImportError:
     AlfredPluginSession = None  # type: ignore[assignment,misc]
     DevGate = None  # type: ignore[assignment,misc]
 
-PLUGIN_DIR = Path(__file__).parent.parent.parent / "plugins" / "alfred-comms-test"
+PLUGIN_DIR = Path(__file__).parent.parent.parent / "plugins" / "alfred_comms_test"
 
 
 @pytest.mark.integration
