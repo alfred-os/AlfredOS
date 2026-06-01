@@ -45,7 +45,8 @@ def _manifest_path() -> Path:
     the test runnable from any cwd without depending on a fixture for the
     repo root.
     """
-    return Path(__file__).resolve().parents[3] / "plugins" / "alfred_quarantined_llm" / "manifest.toml"
+    repo_root = Path(__file__).resolve().parents[3]
+    return repo_root / "plugins" / "alfred_quarantined_llm" / "manifest.toml"
 
 
 def test_quarantined_llm_manifest_file_exists() -> None:
@@ -169,29 +170,35 @@ async def test_handle_ingest_stores_content_keyed_by_handle_id(
 
 
 @pytest.mark.asyncio
-async def test_handle_extract_dispatches_to_provider_dispatch(
+async def test_handle_extract_delegates_to_dispatch_extraction(
     _clear_content_cache: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``handle_extract`` reads the cached content + dispatches via the
-    provider-dispatch module. The provider object is passed through so
-    ``dispatch_extraction`` can branch on its capabilities.
+    """``handle_extract`` looks up the cached content, then delegates to
+    :func:`plugins.alfred_quarantined_llm.provider_dispatch.dispatch_extraction`.
+
+    The skeleton test pins only the delegation shape — the capability-
+    branched dispatch logic itself is Task 5. We monkeypatch
+    ``dispatch_extraction`` so this test stays scoped to the plugin
+    entry-point's responsibility (cache lookup + delegation).
     """
+    import plugins.alfred_quarantined_llm.provider_dispatch as pd
     import plugins.alfred_quarantined_llm.quarantine_plugin as qp
 
     await qp.handle_ingest("handle-xyz", '{"title": "hi"}')
 
-    # Fake provider with NATIVE_CONSTRAINED_GENERATION so dispatch picks
-    # the Anthropic-shaped path. The complete() coroutine returns an
-    # object with .tool_use_input populated — the same shape the
-    # provider-dispatch module expects.
-    class _ToolUseResponse:
-        tool_use_input: dict[str, Any] = {"title": "hi"}
+    captured: dict[str, Any] = {}
+
+    async def _fake_dispatch(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"kind": "extracted", "data": {}, "extraction_mode": "native_constrained"}
+
+    monkeypatch.setattr(pd, "dispatch_extraction", _fake_dispatch)
 
     fake_provider = AsyncMock()
     fake_provider.capabilities = lambda: frozenset(
         {ProviderCapability.NATIVE_CONSTRAINED_GENERATION}
     )
-    fake_provider.complete = AsyncMock(return_value=_ToolUseResponse())
 
     result = await qp.handle_extract(
         handle_id="handle-xyz",
@@ -199,39 +206,47 @@ async def test_handle_extract_dispatches_to_provider_dispatch(
         schema_version=1,
         provider=fake_provider,
     )
-    # dispatch returns the closed-domain extraction_mode for the
-    # capability-branched path it selected.
+    # The cached bytes flowed through to the dispatcher.
+    assert captured["content"] == b'{"title": "hi"}'
+    assert captured["schema_json"] == '{"type":"object"}'
+    assert captured["schema_version"] == 1
+    assert captured["provider"] is fake_provider
     assert result["extraction_mode"] == "native_constrained"
 
 
 @pytest.mark.asyncio
-async def test_handle_extract_returns_typed_refusal_on_unknown_handle(
+async def test_handle_extract_passes_empty_bytes_when_handle_missing(
     _clear_content_cache: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ingest never landed → the cache returns empty bytes → the
-    quarantined LLM cannot produce a valid extraction → ``cannot_extract``.
+    """An unknown handle id → empty bytes flow to ``dispatch_extraction``.
 
-    The skeleton MUST NOT raise on a missing handle_id (that would crash
-    the subprocess and bypass the audit row). It returns a TypedRefusal
-    instead, which the orchestrator's audit-emit path persists with
-    result="refused".
+    The skeleton MUST NOT raise on a missing handle_id — raising would
+    crash the subprocess and bypass the audit row. Instead the missing
+    handle yields empty bytes and lets the dispatcher's retry-exhaustion
+    path produce a TypedRefusal that the audit-emit path can persist with
+    result="refused" (Task 6 wires this in QuarantinedExtractor).
     """
+    import plugins.alfred_quarantined_llm.provider_dispatch as pd
     import plugins.alfred_quarantined_llm.quarantine_plugin as qp
 
-    # No ingest — cache is empty. Provider with NO capabilities so dispatch
-    # falls through to prompt_embedded_fallback. The fallback path emits
-    # the empty content into the prompt and the (faked) LLM returns
-    # malformed output, which exhausts retries and yields cannot_extract.
+    captured: dict[str, Any] = {}
+
+    async def _fake_dispatch(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"kind": "typed_refusal", "reason": "cannot_extract"}
+
+    monkeypatch.setattr(pd, "dispatch_extraction", _fake_dispatch)
+
     fake_provider = AsyncMock()
     fake_provider.capabilities = lambda: frozenset()
-    fake_response = type("R", (), {"content": "not json"})()
-    fake_provider.complete = AsyncMock(return_value=fake_response)
 
     result = await qp.handle_extract(
         handle_id="missing-handle",
-        schema_json='{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}',
+        schema_json='{"type":"object"}',
         schema_version=1,
         provider=fake_provider,
     )
+    assert captured["content"] == b""
     assert result["kind"] == "typed_refusal"
     assert result["reason"] == "cannot_extract"
