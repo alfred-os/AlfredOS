@@ -137,6 +137,15 @@ class InboundCanaryScanner:
     the set deterministically. Production wiring loads the operator's
     canary registry once at startup; rotating the registry mid-process
     is out of scope for Slice 3.
+
+    Connection lifecycle (perf-102): the scanner holds a long-lived
+    Redis client for the peek path. The constructor accepts either
+    ``redis_url`` (scanner mints + owns the client; closed via
+    :meth:`aclose`) or ``redis_client`` (externally supplied;
+    lifecycle owned by the host). Neither raises ``ValueError`` at
+    construction — falling back to a per-scan client would re-open the
+    perf-102 connection-churn. The host's shutdown path MUST call
+    :meth:`aclose` to release the URL-owned client.
     """
 
     def __init__(
@@ -144,8 +153,80 @@ class InboundCanaryScanner:
         *,
         content_store: ContentStore,
         known_canary_tokens: list[CanaryToken],
+        redis_url: str | None = None,
+        redis_client: aioredis.Redis | None = None,
     ) -> None:
+        """Construct a scanner with an explicit peek-client lifecycle.
+
+        Exactly-one-or-both of ``redis_url`` / ``redis_client`` must be
+        supplied. Neither is a non-functional configuration and raises
+        ``ValueError`` at construction so the misconfiguration is
+        impossible to ship past bootstrap — silently falling back to a
+        per-scan ``from_url(...)`` would re-introduce the
+        connection-churn (perf-102) the explicit lifecycle is designed
+        to remove.
+
+        ``redis_client`` (preferred for tests and for hosts that
+        already own a connection pool) is treated as externally-owned:
+        :meth:`aclose` does NOT close it; the host's shutdown path is
+        responsible. ``redis_url`` (preferred for production wiring
+        from a config file) makes the scanner the owner — the scanner
+        constructs the client lazily on first scan, holds it for the
+        process lifetime, and closes it on :meth:`aclose`.
+
+        Passing both is allowed and the explicit client wins; the URL
+        is recorded as ``_redis_url`` for forensic attribution but is
+        not used to mint a client. The asymmetric default (client beats
+        URL) matches the dependency-injection precedent: the host that
+        wires the explicit client is asserting intent.
+
+        Args:
+            content_store: Required for the delete path on a canary
+                trip. The store's URL is NOT used as a silent fallback
+                for the peek client (see module rationale above).
+            known_canary_tokens: Operator-registered vocabulary; see
+                class docstring.
+            redis_url: Redis connection URL the scanner will use to
+                mint its OWN long-lived peek client on first scan.
+                Mutually-optional with ``redis_client`` — at least one
+                must be supplied.
+            redis_client: Externally-supplied
+                :class:`redis.asyncio.Redis` client. Lifecycle owned
+                by the host. ``aclose()`` will NOT close this client.
+
+        Raises:
+            ValueError: Neither ``redis_url`` nor ``redis_client`` was
+                supplied. The scanner is non-functional in this
+                configuration; raise at construction so the
+                misconfiguration is caught at bootstrap rather than at
+                first scan (when a trip may already have content
+                in-flight).
+        """
+        if redis_url is None and redis_client is None:
+            # Hardcoded English: internal misconfiguration message
+            # never reaches a user surface; an operator who hits this
+            # is wiring code, not interacting via i18n'd channels.
+            msg = (
+                "InboundCanaryScanner requires one of redis_url or redis_client "
+                "(neither supplied). Per-scan client construction is no longer "
+                "supported — see perf-102."
+            )
+            raise ValueError(msg)
         self._store = content_store
+        self._redis_url = redis_url
+        # _peek_client is the long-lived client. Lazily minted from
+        # _redis_url on first scan when no explicit client was passed.
+        # ``cast`` rather than the ``redis_client | None`` shape so the
+        # scan path can call methods without re-narrowing every time.
+        self._peek_client: aioredis.Redis | None = redis_client
+        # _owns_client gates whether aclose() closes the underlying
+        # client. True for url-constructed clients (scanner is the
+        # owner); False for externally-supplied clients (host owns
+        # the lifecycle). The flag is fixed at construction and never
+        # mutates — a future refactor cannot accidentally close a
+        # host-owned client by passing redis_client=... but later
+        # setting _owns_client=True.
+        self._owns_client = redis_client is None
         # Patterns are compiled against ``str`` (the body is decoded
         # with ``errors='replace'`` at scan time) so a token match
         # surfaces regardless of the body's exact UTF-8 validity. An
@@ -159,6 +240,45 @@ class InboundCanaryScanner:
         self._patterns: tuple[re.Pattern[str], ...] = tuple(
             re.compile(re.escape(token.value), re.IGNORECASE) for token in known_canary_tokens
         )
+
+    async def _get_peek_client(self) -> aioredis.Redis:
+        """Return the long-lived peek client, minting on first call.
+
+        Two construction paths converge here:
+          * Explicit ``redis_client`` from __init__ — already set;
+            return as-is.
+          * Lazy mint from ``redis_url`` — construct once, cache, and
+            mark ``_owns_client=True`` so :meth:`aclose` closes it.
+
+        Lazy mint (not eager in __init__) because the scanner is
+        instantiated at host bootstrap before the asyncio event loop
+        starts; ``aioredis.from_url`` returns a Redis instance whose
+        connection pool ties into the running loop on first I/O.
+        Constructing at __init__ time would not crash but the pool
+        binding is cleaner when deferred to the first scan inside the
+        event loop.
+        """
+        if self._peek_client is None:
+            # _redis_url is non-None here because __init__ raised
+            # ValueError if both were None; mypy needs the assert to
+            # narrow ``str | None`` to ``str``.
+            assert self._redis_url is not None
+            self._peek_client = aioredis.from_url(self._redis_url, decode_responses=False)
+        return self._peek_client
+
+    async def aclose(self) -> None:
+        """Shut down the scanner's peek client if it owns one.
+
+        Idempotent: callable from supervisor SIGKILL paths without
+        coordinating with first-scan timing. Externally-supplied
+        clients are NOT closed — the host that injected the client
+        owns its lifecycle (the ``redis_client=...`` constructor path
+        is the dependency-injection contract).
+        """
+        if self._owns_client and self._peek_client is not None:
+            client = self._peek_client
+            self._peek_client = None
+            await client.aclose()
 
     async def scan(self, *, handle_id: str, source_url: str) -> None:
         """Scan the content store entry for canary tokens.
@@ -181,23 +301,21 @@ class InboundCanaryScanner:
                 fault so the orchestrator does NOT proceed with
                 unscanned content.
         """
-        # Open a fresh client against the same Redis URL. The scanner
-        # is a system-tier observer; giving it direct access to the
-        # store's internal client would couple two unrelated lifecycles
-        # (the store owns the extract path; the scanner owns the peek
-        # path). One connection per peek is acceptable cost — Slice-3
-        # rate limits cap fetch throughput at 30/minute per user, so
-        # the connection-churn is bounded.
-        client = aioredis.from_url(self._store.redis_url, decode_responses=False)
-        try:
-            key = f"alfred:content:{handle_id}"
-            # ``GETEX`` with no expiry option preserves the existing
-            # TTL (Redis 6.2+ default behaviour). This is the
-            # "read-only peek" primitive — value returns; TTL is
-            # untouched; key is not consumed.
-            body = cast("bytes | None", await client.getex(key))
-        finally:
-            await client.aclose()
+        # perf-102: the peek client is long-lived — minted lazily on
+        # first scan, held for the process lifetime, closed via
+        # :meth:`aclose`. Per-scan ``from_url`` + ``aclose`` (the
+        # pre-perf-102 shape) opened a TCP connection on every
+        # web.fetch trip; Slice-3 rate limits cap at 30 fetches/minute
+        # per user but the scanner runs on EVERY fetch across ALL
+        # users, so per-scan client construction was the highest-rate
+        # connection-churn in the trust-boundary path.
+        client = await self._get_peek_client()
+        key = f"alfred:content:{handle_id}"
+        # ``GETEX`` with no expiry option preserves the existing
+        # TTL (Redis 6.2+ default behaviour). This is the
+        # "read-only peek" primitive — value returns; TTL is
+        # untouched; key is not consumed.
+        body = cast("bytes | None", await client.getex(key))
 
         if body is None:
             # err-010: a missing handle means the canary check did NOT
