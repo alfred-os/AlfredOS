@@ -61,6 +61,91 @@ def test_build_dev_gate_returns_devgate_instance() -> None:
     assert gate.allow_system is False
 
 
+# ---------------------------------------------------------------------------
+# DEVEX-004 — bootstrap.gate_selected log event. An operator who typos
+# `ALFRED_ENV=prod` (instead of "production") still gets RealGate (safer-
+# by-default), but used to have no way to confirm that without grepping
+# code. The factory now emits an INFO-level structured log event on
+# every gate selection so the operator's log stream visibly records the
+# decision + the exact env value the bootstrap read.
+# ---------------------------------------------------------------------------
+
+
+def test_build_dev_gate_emits_gate_selected_log_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DevGate construction emits ``bootstrap.gate_selected`` with a warning.
+
+    The structlog event MUST include:
+    - ``gate="DevGate"`` (closed vocabulary; log filters match on it)
+    - ``alfred_env=<raw>`` so an operator can confirm the env value
+    - ``warning="..."`` so the fail-open posture is visible in dashboards
+
+    Uses :func:`structlog.testing.capture_logs` rather than ``caplog``
+    because the structlog config in this repo routes through structlog's
+    own pipeline (not stdlib logging) for INFO-level events.
+
+    DEVEX-004 fix.
+    """
+    import structlog.testing
+
+    monkeypatch.delenv("ALFRED_ENV", raising=False)
+    from alfred.bootstrap import gate_factory
+
+    importlib.reload(gate_factory)
+    with structlog.testing.capture_logs() as captured:
+        gate_factory.build_dev_gate()
+    events = [e for e in captured if e.get("event") == "bootstrap.gate_selected"]
+    assert events, f"expected bootstrap.gate_selected event; got {captured!r}"
+    entry = events[0]
+    assert entry["gate"] == "DevGate"
+    # The raw env value (unset → "(unset)") surfaces so an operator can
+    # confirm the bootstrap saw what they intended.
+    assert entry["alfred_env"] == "(unset)"
+    # Fail-open posture is visible in dashboards without having to know
+    # which filter to add.
+    assert "warning" in entry
+    assert "production" in entry["warning"].lower()
+
+
+@pytest.mark.asyncio
+async def test_build_real_gate_emits_gate_selected_log_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RealGate construction emits ``bootstrap.gate_selected`` carrying the raw env.
+
+    The DEVEX-004 audit trail is most useful in production — confirms an
+    operator's `ALFRED_ENV` setting actually made it to the bootstrap.
+    The raw_env value is echoed verbatim (no normalisation) so a typo
+    like ``prdouction`` shows up in the log line.
+    """
+    import structlog.testing
+
+    monkeypatch.setenv("ALFRED_ENV", "prdouction")  # operator typo
+    from alfred.bootstrap import gate_factory
+
+    importlib.reload(gate_factory)
+    backend = MagicMock()
+    backend.ping = AsyncMock(return_value=None)
+    backend.load_grants = AsyncMock(return_value=frozenset())
+    backend.get_sync_hash = AsyncMock(return_value=None)
+    audit_sink = MagicMock()
+    audit_sink.append_schema = AsyncMock(return_value=None)
+    with structlog.testing.capture_logs() as captured:
+        await gate_factory.build_real_gate(
+            backend=backend,
+            audit_sink=audit_sink,
+            start_heartbeat=False,
+        )
+    events = [e for e in captured if e.get("event") == "bootstrap.gate_selected"]
+    assert events, f"expected bootstrap.gate_selected event; got {captured!r}"
+    entry = events[0]
+    assert entry["gate"] == "RealGate"
+    # The exact raw value the bootstrap read must surface so the operator
+    # can self-diagnose a typo without grepping `os.environ` themselves.
+    assert entry["alfred_env"] == "prdouction"
+
+
 @pytest.mark.asyncio
 async def test_build_real_gate_returns_realgate_instance() -> None:
     """Build a :class:`RealGate` against the supplied backend + audit sink.
