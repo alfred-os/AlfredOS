@@ -31,8 +31,6 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from alfred.security.capability_gate.policy import GrantRow
 
 
@@ -212,24 +210,34 @@ async def test_real_gate_create_does_not_start_heartbeat_by_default() -> None:
     assert gate._heartbeat_task is None  # type: ignore[attr-defined]
 
 
-async def test_real_gate_rebuild_from_state_git_is_fail_loud_stub() -> None:
-    """``rebuild_from_state_git`` raises ``NotImplementedError`` when the head differs.
+async def test_real_gate_rebuild_from_state_git_calls_parser_on_cache_miss() -> None:
+    """PR-S3-6 wired the gitpython parser into ``rebuild_from_state_git``.
 
-    err-002 fix: the previous silent ``return`` left the policy cache
-    stale without surfacing the contract violation. PR-S3-6 wires the
-    real gitpython-backed parser; until then, the gate raises so
-    callers fail loudly at integration time rather than silently caching
-    nothing.
+    The PR-S3-2 era fail-loud :class:`NotImplementedError` stub
+    (err-002 acknowledgement) is gone. On a cache miss the gate calls
+    :func:`parse_state_git_head`, then :meth:`_apply_grants`, then emits
+    the ``plugin.grant.rebuilt`` audit row. Full end-to-end behaviour is
+    pinned in ``test_real_gate_rebuild_wiring.py``; this test pins the
+    no-stub contract from the ``test_real_gate`` perspective so a
+    regression that re-introduces the raise surfaces here.
 
-    The match string MUST cite the deferred-stub contract so a future
-    grep surfaces every site relying on the stub.
+    The parser itself is patched at the module-under-test boundary so
+    this unit-tier test does not require a real bare repo (full bare-repo
+    integration lives in the dedicated wiring suite).
     """
+    from unittest.mock import patch
+
     from alfred.security.capability_gate._gate import RealGate
 
     backend = _make_backend(sync_hash="old-hash")
     gate = await RealGate.create(backend=backend, audit_sink=_make_no_op_sink())
-    with pytest.raises(NotImplementedError, match=r"gitpython state\.git parser"):
+    with patch(
+        "alfred.security.capability_gate._gate.parse_state_git_head",
+        return_value=frozenset(),
+    ) as parse_mock:
         await gate.rebuild_from_state_git(state_git_head="new-hash")
+    parse_mock.assert_called_once()
+    backend.set_sync_hash.assert_awaited_once_with("new-hash")
 
 
 async def test_real_gate_rebuild_from_state_git_short_circuits_when_unchanged() -> None:

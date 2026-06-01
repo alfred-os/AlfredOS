@@ -285,6 +285,32 @@ SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS: Final[frozenset[str]] = frozenset
 )
 
 # ---------------------------------------------------------------------------
+# plugin.grant.rebuilt family
+# ---------------------------------------------------------------------------
+
+# Emitted by RealGate.rebuild_from_state_git on a successful state.git
+# parse → Postgres projection. One row per cache miss (the head changed
+# vs the cached sync hash); cache hits short-circuit silently per spec
+# §8.1. grant_count records the size of the freshly-projected snapshot
+# so an operator can correlate an unexpected churn between two adjacent
+# rebuilds with the proposal-merge that triggered it. commit_hash is
+# the full state.git HEAD SHA (not the 8-char display variant) — the
+# audit-graph correlator matches across full-length hashes.
+#
+# trust_tier_of_trigger: always "T0" — the supervisor bootstraps the
+# rebuild from a host-level proposal-merge signal, not user content.
+# actor_user_id: always None — there is no per-user actor; the
+# reviewer-approval row sits earlier in the audit graph and carries
+# the operator's canonical id.
+CAPABILITY_GATE_REBUILD_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "commit_hash",
+        "grant_count",
+        "correlation_id",
+    }
+)
+
+# ---------------------------------------------------------------------------
 # supervisor.config_insecure family
 # ---------------------------------------------------------------------------
 
