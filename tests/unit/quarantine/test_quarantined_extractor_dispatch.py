@@ -283,6 +283,67 @@ async def test_dispatch_propagates_non_validation_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_short_circuits_on_wall_clock_budget_breach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """perf-1 fix: the per-extraction wall-clock budget short-circuits to
+    cannot_extract before any further provider call lands.
+
+    The test compresses the budget to a value smaller than the first
+    monotonic-clock tick so the budget-check at the top of the loop
+    fires on the very first iteration. We monkeypatch ``time.monotonic``
+    to return a sequence that starts at 0 (the baseline captured in
+    ``deadline_monotonic = time.monotonic() + budget``) and then jumps
+    past the deadline on the next read.
+    """
+    from plugins.alfred_quarantined_llm import provider_dispatch as pd
+
+    bad = _json_object_response("definitely not json")
+    provider = AsyncMock()
+    provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
+    provider.complete = AsyncMock(return_value=bad)
+
+    # First read computes the deadline; every read after sits past it
+    # so the loop short-circuits before the first provider call. Use a
+    # callable that returns 0 once and then 9999.0 forever so we don't
+    # have to count interpreter-internal time.monotonic reads.
+    state = {"first": True}
+
+    def _fake_monotonic() -> float:
+        if state["first"]:
+            state["first"] = False
+            return 0.0
+        return 9999.0
+
+    monkeypatch.setattr(pd.time, "monotonic", _fake_monotonic)
+
+    result = await pd.dispatch_extraction(
+        content=b"",
+        schema_json='{"type":"object"}',
+        schema_version=1,
+        provider=provider,
+    )
+    assert result == {"kind": "typed_refusal", "reason": "cannot_extract"}
+    # And the provider was NEVER called — budget breach skipped dispatch.
+    provider.complete.assert_not_called()
+
+
+def test_cached_parsed_schema_refuses_non_object_json() -> None:
+    """The host-side schema cache refuses non-dict schema JSON.
+
+    ``schema_json`` is supposed to be the host's serialised Pydantic
+    schema; a non-object decode means a corrupt caller. Fail loud at
+    the cache layer rather than blowing up far from the source.
+    """
+    from plugins.alfred_quarantined_llm.provider_dispatch import (
+        _cached_parsed_schema,
+    )
+
+    with pytest.raises(TypeError, match="JSON object"):
+        _cached_parsed_schema("[]")
+
+
+@pytest.mark.asyncio
 async def test_dispatch_returns_provider_unavailable_on_httpx_error() -> None:
     """err-002 fix: ``provider_unavailable`` is no longer claim-only.
 
