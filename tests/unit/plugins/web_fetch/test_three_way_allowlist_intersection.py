@@ -342,3 +342,38 @@ def test_double_slash_normalised_for_benign_paths() -> None:
     # Double-slash collapses to single-slash via posixpath.normpath; the
     # candidate "/public/file" matches the entry "/public/".
     intersection.check("https://example.com/public//file")
+
+
+def test_normpath_dot_result_treated_as_root() -> None:
+    """A URL whose parsed path normalises to ``"."`` MUST be treated as ``"/"``.
+
+    ``posixpath.normpath('.')`` returns ``"."``, not ``"/"`` — without
+    the explicit ``norm_path == "."`` rewrite at allowlist.py L222-223
+    the candidate would become ``"./"`` and silently fail to match the
+    ``"/"`` root-prefix entry. Hits the branch coverage gap reported by
+    the trust-boundary 100% gate.
+
+    The only URL strings that reach ``urlparse(...).path == "."`` are
+    relative-style URLs with an empty netloc (e.g. ``"."`` itself, or
+    ``"foo/.."``). They legitimately reach the allowlist check from
+    upstream URL-construction bugs, so the branch matters even though
+    a well-formed ``https://...`` URL never triggers it.
+    """
+    from alfred.plugins.web_fetch.allowlist import (
+        AllowlistEntry,
+        AllowlistIntersection,
+        DomainNotAllowed,
+    )
+
+    intersection = AllowlistIntersection(
+        manifest=[AllowlistEntry("example.com", "/")],
+        operator=[AllowlistEntry("example.com", "/")],
+        session=[AllowlistEntry("example.com", "/")],
+    )
+
+    # A bare ``"."`` URL parses to netloc="" + path=".". ``netloc != "example.com"``
+    # so the candidate would not match anyway, but the normpath==. branch
+    # must still execute (norm_path is rewritten to "/" before the
+    # netloc comparison loop). Asserting on the refusal pins the branch.
+    with pytest.raises(DomainNotAllowed):
+        intersection.check(".")
