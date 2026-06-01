@@ -454,6 +454,79 @@ async def test_stop_force_cancel_preserves_external_cancelled_error(
         await sup.stop()
 
 
+async def test_capability_monitor_heartbeat_is_scheduled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """devex-001 (F6): the heartbeat loop runs while the supervisor is started.
+
+    Pins that ``Supervisor._run`` schedules the capability monitor's
+    heartbeat as a TaskGroup task. Before F6, ``CapabilityGateMonitor``
+    was constructed but its ``run_one_heartbeat`` was never called —
+    operators saw no transition rows even when the gate's backing
+    store dropped. The shrink-to-zero interval here makes the loop
+    spin tight so we observe multiple ticks during the test.
+    """
+    sup, _m = _build_supervisor()
+    # Shrink the heartbeat interval so the loop ticks fast enough for
+    # the test to observe more than one cycle. The monitor stores the
+    # interval as an instance attribute (constructor-injectable but
+    # patchable here without forking the supervisor constructor).
+    sup._capability_monitor._heartbeat_interval = 0.0
+    # Replace run_one_heartbeat with an AsyncMock so we can count calls
+    # without driving the monitor's full state machine.
+    sup._capability_monitor.run_one_heartbeat = AsyncMock()  # type: ignore[method-assign]
+
+    await sup.start()
+    # Yield the loop a few times so the heartbeat coroutine gets to run.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    await sup.stop()
+
+    assert sup._capability_monitor.run_one_heartbeat.await_count > 0
+
+
+async def test_capability_monitor_heartbeat_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """devex-001 (F6): a crashing heartbeat surfaces via the TaskGroup.
+
+    The TaskGroup aggregates per-task exceptions so a heartbeat failure
+    re-raises out of ``_run`` and bubbles back to the supervising
+    process — operators see the error instead of a silently-dead
+    heartbeat loop. The audit-row emission inside
+    ``CapabilityGateMonitor.run_one_heartbeat`` is the loud-failure
+    signal; the TaskGroup propagation is the escalation.
+    """
+    monkeypatch.setattr("alfred.supervisor.core._STOP_DRAIN_TIMEOUT_SECONDS", 0.001)
+    sup, _m = _build_supervisor()
+    sup._capability_monitor._heartbeat_interval = 0.0
+
+    boom = RuntimeError("heartbeat backing store check failed")
+    sup._capability_monitor.run_one_heartbeat = AsyncMock(  # type: ignore[method-assign]
+        side_effect=boom
+    )
+
+    await sup.start()
+    # Give the heartbeat task a chance to run + crash.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    # The TaskGroup's aggregated exception surfaces via stop() — the
+    # err-001 capture arm converts it into the cancelled_with_errors
+    # audit row rather than letting it silently propagate.
+    await sup.stop()
+
+    stopped_calls = [
+        call
+        for call in _m["audit"].append.await_args_list
+        if call.kwargs.get("event") == "supervisor.lifecycle.stopped"
+    ]
+    assert len(stopped_calls) == 1
+    # Either the err-001 force-cancel-await branch or the wait_for-re-raise
+    # branch captures the RuntimeError; both set result accordingly.
+    assert stopped_calls[0].kwargs["result"] == "cancelled_with_errors"
+    assert "error_type" in stopped_calls[0].kwargs["subject"]
+
+
 async def test_stop_persistence_failure_audits_and_reraises() -> None:
     """err-002 (F5): SQLAlchemyError during stop() persistence is loud + audited.
 
