@@ -793,6 +793,14 @@ class TestOrchestratorActionDeadline:
         # (Slice 4+ refines this via the OTel span hierarchy).
         assert subject["phase_at_timeout"] == "unknown"
         assert subject["correlation_id"] is not None
+        # ``action_duration_seconds`` is the actual wall-clock elapsed at the
+        # moment the deadline arm fired, NOT the configured deadline value.
+        # The slow router awaits 10s but is cancelled by the 1ms deadline;
+        # elapsed lands somewhere in [deadline, deadline + scheduler latency].
+        # Pinning ``>= deadline`` (rather than ``== deadline``) is what catches
+        # the regression where the field reported ``deadline_seconds`` itself.
+        assert isinstance(subject["action_duration_seconds"], float)
+        assert subject["action_duration_seconds"] >= subject["deadline_seconds"]
 
     async def test_timeout_emits_orchestrator_turn_cancelled_via_autocommit(self) -> None:
         """The orchestrator.turn cancellation row also goes to the autocommit writer.

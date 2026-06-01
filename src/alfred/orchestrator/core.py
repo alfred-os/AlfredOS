@@ -349,6 +349,7 @@ class Orchestrator:
                 await self._emit_supervisor_timeout_row(
                     user_id=user.slug,
                     correlation_id=trace_id,
+                    action_duration_seconds=time.monotonic() - action_start,
                 )
                 await self._emit_orchestrator_turn_cancelled_row_autocommit(
                     user=user,
@@ -446,6 +447,7 @@ class Orchestrator:
         *,
         user_id: str,
         correlation_id: str,
+        action_duration_seconds: float,
     ) -> None:
         """Emit the ``supervisor.action_timeout`` row + invoke the matching hookpoint.
 
@@ -468,6 +470,15 @@ class Orchestrator:
 
         ``phase_at_timeout="unknown"`` is the Slice-3 default;
         Slice-4+ resolves the in-flight phase from the OTel span hierarchy.
+
+        ``action_duration_seconds`` is the actual wall-clock elapsed from
+        ``action_start`` (``time.monotonic()`` delta) — NOT the configured
+        deadline. The deadline value lands on ``deadline_seconds`` so
+        operator dashboards can compare ``elapsed`` vs ``budget`` (the
+        ratio is the deadline-hit signal); reporting the configured value
+        on both fields would flatten the duration distribution to a single
+        point per deadline configuration.
+
         err-006: no ``try/except`` here — an autocommit-write failure must
         propagate so the operator-facing error is loud (CLAUDE.md hard
         rule #7). The DeadlineWrapper itself takes no audit responsibility
@@ -481,7 +492,7 @@ class Orchestrator:
             actor_persona="supervisor",
             subject={
                 "user_id": user_id,
-                "action_duration_seconds": self._deadline_wrapper.deadline_seconds,
+                "action_duration_seconds": action_duration_seconds,
                 "deadline_seconds": self._deadline_wrapper.deadline_seconds,
                 "phase_at_timeout": "unknown",
                 "correlation_id": correlation_id,
