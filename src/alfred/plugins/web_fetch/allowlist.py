@@ -42,6 +42,7 @@ intersection checks both the domain AND the path prefix at
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -71,10 +72,32 @@ class AllowlistEntry:
     ``Example.com`` (web servers are typically case-insensitive on
     domain, but the spec keeps the comparison literal to avoid surprise
     matches across operator typos).
+
+    ``path_prefix`` is normalised at construction time to end with ``/``
+    so segment-aligned matching is unambiguous: an entry for
+    ``/public`` matches ``/public/`` and ``/public/file`` but NOT
+    ``/publicadmin`` (CR-145 web-fetch security review — path-prefix
+    substring/traversal bypass).
     """
 
     domain: str
     path_prefix: str = "/"
+
+    def __post_init__(self) -> None:
+        # Normalise the path_prefix so segment-aligned matching is
+        # unambiguous. Without this, ``path_prefix="/public"`` would
+        # match request path ``/publicadmin/secret`` via str.startswith
+        # — a substring bypass that lets a path-prefix narrowing be
+        # silently widened. Storing the trailing slash forces
+        # segment-aligned comparison at check() time.
+        if not self.path_prefix.startswith("/"):
+            msg = f"AllowlistEntry.path_prefix must start with '/'; got {self.path_prefix!r}"
+            raise ValueError(msg)
+        normalised = self.path_prefix if self.path_prefix.endswith("/") else self.path_prefix + "/"
+        # frozen=True forbids __setattr__; use object.__setattr__ to
+        # bypass for the init-time normalisation (canonical Python idiom
+        # for frozen dataclass post-init coercion).
+        object.__setattr__(self, "path_prefix", normalised)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,9 +199,37 @@ class AllowlistIntersection:
         domain = parsed.netloc
         # A URL like "https://example.com" parses to path="" — normalise
         # to "/" so a manifest entry path_prefix="/" still matches.
-        path = parsed.path or "/"
+        raw_path = parsed.path or "/"
+
+        # CR-145 web-fetch security review — path-prefix substring /
+        # traversal bypass. Two defences must compose:
+        #
+        # 1) Reject explicit ``..`` segments OUTRIGHT. We deliberately
+        #    do NOT silently normalise these away because a path
+        #    containing ``..`` reaching here means upstream
+        #    URL-construction is buggy or the caller is malicious —
+        #    silently collapsing would let the audit row claim the
+        #    requested URL matched the allowlist when the operator-
+        #    submitted URL did not. The audit graph stays honest.
+        # 2) Normalise the request path with ``posixpath.normpath`` so
+        #    a benign ``/public//file`` (double slash) compares correctly
+        #    against ``/public/file``. Then append a trailing slash to
+        #    match the trailing-slash convention enforced on entries by
+        #    ``AllowlistEntry.__post_init__``.
+        if ".." in raw_path.split("/"):
+            raise DomainNotAllowed(domain)
+        norm_path = posixpath.normpath(raw_path)
+        if norm_path == ".":
+            norm_path = "/"
+        candidate = norm_path if norm_path.endswith("/") else norm_path + "/"
+
         for entry in self._effective:
-            if entry.domain == domain and path.startswith(entry.path_prefix):
+            # entry.path_prefix is guaranteed to end with "/" by
+            # AllowlistEntry.__post_init__, so this startswith is
+            # segment-aligned: "/public/" only matches "/public/..." and
+            # NEVER "/publicadmin/...". Defence-in-depth against the
+            # substring bypass.
+            if entry.domain == domain and candidate.startswith(entry.path_prefix):
                 return
         raise DomainNotAllowed(domain)
 
