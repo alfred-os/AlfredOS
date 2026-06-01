@@ -84,6 +84,36 @@ from prometheus_client import Histogram
 # prometheus_client's recommended 10k ceiling).
 _BUCKET_COUNT: Final[int] = 256
 
+# CR PR-S3-3b R5 #3332700190: closed domains for histogram labels.
+#
+# ``action_outcome`` and ``breaker_state`` are passthrough strings in the
+# emit-call signature. A bad caller value (typo, new state name introduced
+# elsewhere, T3 fragment threaded by mistake) would create unbounded
+# time-series cardinality on the Prometheus histogram and defeat the
+# bounded-metrics intent (PRD §7a.3 + perf-001).
+#
+# Normalisation pattern: pin each label to the spec's closed domain at the
+# emit boundary; any value outside the domain falls back to an explicit
+# ``"unknown"`` bucket so:
+#
+# * Operators see drift immediately (the ``"unknown"`` bucket spikes
+#   instead of a typo silently spawning a new series),
+# * The cardinality cap is enforced by construction (the domains are
+#   small finite sets), and
+# * Tests can pin the domain at module load by asserting the constants.
+#
+# Cross-PR contract: the BreakerState enum at
+# ``alfred.supervisor.breaker.BreakerState`` IS the source of truth for
+# breaker-state labels. We pin the literal values here (rather than
+# importing the enum) to keep ``observability`` import-side-effect-free —
+# the same pattern PR-S3-3a uses for ``alfred_stdio_transport_dispatch_seconds``.
+_ACTION_OUTCOME_DOMAIN: Final[frozenset[str]] = frozenset(
+    {"success", "timeout", "cancelled"}
+)
+_BREAKER_STATE_DOMAIN: Final[frozenset[str]] = frozenset(
+    {"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"}
+)
+
 
 def bucket_user_id(user_id: str) -> str:
     """Map ``user_id`` to one of :data:`_BUCKET_COUNT` stable hex buckets.
@@ -167,11 +197,25 @@ def record_action_duration(
     ``"UNKNOWN"`` when the supervisor is not wired (early-bootstrap or
     test-only paths). Pinning the label inside the enum domain keeps the
     Grafana legend stable.
+
+    CR PR-S3-3b R5 #3332700190: both ``action_outcome`` and
+    ``breaker_state`` are normalised to their closed domains before
+    landing on ``.labels(...)``. Any out-of-domain value (typo, future
+    state added elsewhere, mistakenly-threaded T3 fragment) falls back
+    to ``"unknown"`` / ``"UNKNOWN"`` so cardinality stays bounded
+    (perf-001) and the drift surfaces as an ``unknown`` bucket spike on
+    Grafana instead of a silently-spawned new series.
     """
+    safe_action_outcome = (
+        action_outcome if action_outcome in _ACTION_OUTCOME_DOMAIN else "unknown"
+    )
+    safe_breaker_state = (
+        breaker_state if breaker_state in _BREAKER_STATE_DOMAIN else "UNKNOWN"
+    )
     ACTION_DURATION_HISTOGRAM.labels(
         user_id_bucket=bucket_user_id(user_id),
-        action_outcome=action_outcome,
-        breaker_state=breaker_state,
+        action_outcome=safe_action_outcome,
+        breaker_state=safe_breaker_state,
     ).observe(duration_seconds)
 
 

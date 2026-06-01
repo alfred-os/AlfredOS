@@ -145,6 +145,74 @@ def test_record_duration_uses_bucket() -> None:
         mock_hist.labels.return_value.observe.assert_called_once_with(0.3)
 
 
+def test_action_outcome_out_of_domain_falls_back_to_unknown() -> None:
+    """CR PR-S3-3b R5 #3332700190: bad ``action_outcome`` values land on ``"unknown"``.
+
+    A passthrough string would let a caller typo (or a future label not in
+    the spec's closed set) silently spawn a new Prometheus series and
+    blow through the cardinality cap. Normalisation at the emit boundary
+    pins the label to the spec's three-value domain; anything else falls
+    into an explicit ``"unknown"`` bucket so operators see drift as a
+    bucket spike rather than a polluted series space.
+    """
+    from alfred.supervisor.observability import record_action_duration
+
+    with patch("alfred.supervisor.observability.ACTION_DURATION_HISTOGRAM") as mock_hist:
+        record_action_duration(
+            duration_seconds=0.1,
+            user_id="user-a",
+            action_outcome="not-a-real-outcome",
+            breaker_state="CLOSED",
+        )
+        assert mock_hist.labels.call_args.kwargs["action_outcome"] == "unknown"
+
+
+def test_breaker_state_out_of_domain_falls_back_to_unknown() -> None:
+    """CR PR-S3-3b R5 #3332700190: bad ``breaker_state`` values land on ``"UNKNOWN"``.
+
+    Symmetric to the ``action_outcome`` fallback. The closed domain pins
+    the four allowed labels (CLOSED, OPEN, HALF_OPEN, UNKNOWN); anything
+    else falls back to ``"UNKNOWN"`` so the breaker-state legend stays
+    stable across Slice-3+ refactors.
+    """
+    from alfred.supervisor.observability import record_action_duration
+
+    with patch("alfred.supervisor.observability.ACTION_DURATION_HISTOGRAM") as mock_hist:
+        record_action_duration(
+            duration_seconds=0.1,
+            user_id="user-a",
+            action_outcome="success",
+            breaker_state="GLITCHED",
+        )
+        assert mock_hist.labels.call_args.kwargs["breaker_state"] == "UNKNOWN"
+
+
+def test_action_outcome_domain_constant_pins_closed_set() -> None:
+    """The closed domain for ``action_outcome`` is the spec's three values.
+
+    Pinning the constant prevents accidental widening of the domain
+    (which would re-expose the unbounded-cardinality risk). Test fails
+    LOUD if the set changes — adding a new outcome requires updating
+    this assertion, the histogram label docs, and the PRD §7a.3 entry
+    in lockstep.
+    """
+    from alfred.supervisor.observability import _ACTION_OUTCOME_DOMAIN
+
+    assert _ACTION_OUTCOME_DOMAIN == frozenset({"success", "timeout", "cancelled"})
+
+
+def test_breaker_state_domain_constant_pins_closed_set() -> None:
+    """The closed domain for ``breaker_state`` matches BreakerState.
+
+    The four values are the BreakerState enum's three concrete states
+    plus the bootstrap ``"UNKNOWN"`` literal the orchestrator emits when
+    the supervisor isn't wired yet (Slice 3 default).
+    """
+    from alfred.supervisor.observability import _BREAKER_STATE_DOMAIN
+
+    assert _BREAKER_STATE_DOMAIN == frozenset({"CLOSED", "OPEN", "HALF_OPEN", "UNKNOWN"})
+
+
 def test_span_web_fetch_is_a_context_manager() -> None:
     """Sub-span shim for ``tool.web.fetch`` returns an entered/exited CM.
 
