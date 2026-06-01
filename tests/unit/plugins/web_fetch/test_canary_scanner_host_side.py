@@ -509,3 +509,167 @@ def test_canary_token_is_frozen() -> None:
     token = CanaryToken("VALUE")
     with pytest.raises(dataclasses.FrozenInstanceError):
         token.value = "MUTATED"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "blank_value",
+    [
+        "",  # literal empty
+        " ",  # single space
+        "    ",  # multiple spaces
+        "\t",  # tab
+        "\n",  # newline
+        "\r\n\t ",  # mixed whitespace
+    ],
+)
+def test_canary_token_rejects_blank_value(blank_value: str) -> None:
+    """CR-146 major: PRD §7.6 treats the canary registry as operator-
+    supplied input. ``re.escape("")`` produces a pattern that matches
+    every body at offset 0, so a single blank entry would quarantine
+    every web.fetch result. Fail fast at construction so the
+    misconfiguration is impossible to ship past bootstrap.
+    """
+    with pytest.raises(ValueError, match="must not be blank"):
+        CanaryToken(blank_value)
+
+
+@pytest.mark.parametrize(
+    ("source_url", "expected_sanitized"),
+    [
+        # Query string with bearer-style param — stripped entirely.
+        (
+            "https://example.com/api?token=abc123secret",
+            "https://example.com/api",
+        ),
+        # Userinfo (user:password@) — stripped entirely.
+        (
+            "https://alice:s3cret@example.com/path",
+            "https://example.com/path",
+        ),
+        # Fragment — stripped (fragments do not cross the wire on
+        # canonical fetchers, but operators copy URLs from browsers).
+        (
+            "https://example.com/page#section",
+            "https://example.com/page",
+        ),
+        # Port preserved — operators debugging a fault may need to
+        # distinguish :443 vs :8080 even if the path is generic.
+        (
+            "https://example.com:8443/path?secret=1",
+            "https://example.com:8443/path",
+        ),
+        # Combined — userinfo + query + fragment + port.
+        (
+            "https://user:pw@example.com:9443/admin?key=BEARER#frag",
+            "https://example.com:9443/admin",
+        ),
+        # No-path URL — sanitization preserves the empty path.
+        (
+            "https://example.com?q=1",
+            "https://example.com",
+        ),
+    ],
+)
+def test_sanitize_url_for_log_strips_sensitive_components(
+    source_url: str, expected_sanitized: str
+) -> None:
+    """CR-146 major: ``_sanitize_url_for_log`` strips query, fragment,
+    and userinfo from URLs that flow into operator-visible structlog
+    paths. Full URLs are still preserved on the typed exception ->
+    audit-row contract; only the breadcrumb is sanitized.
+    """
+    from alfred.plugins.web_fetch.canary_scanner import _sanitize_url_for_log
+
+    assert _sanitize_url_for_log(source_url) == expected_sanitized
+
+
+def test_sanitize_url_for_log_falls_back_on_unparseable_input() -> None:
+    """Defence-in-depth: a sanitization bug must NOT silently leak the
+    raw URL into the log. Non-string / unparseable input returns a
+    sentinel.
+    """
+    from alfred.plugins.web_fetch.canary_scanner import _sanitize_url_for_log
+
+    # ``urlparse`` on non-string can raise; the helper catches and
+    # falls back rather than emitting the raw repr.
+    assert _sanitize_url_for_log(None) == "<sanitize_failed>"  # type: ignore[arg-type]
+
+
+def test_sanitize_url_for_log_falls_back_on_invalid_port() -> None:
+    """``urlparse(...).port`` lazily parses the port string and raises
+    ``ValueError`` on a non-numeric port (``http://host:abc/``). Without
+    the wider try/except the raw URL would have leaked into the log
+    via the uncaught ValueError. The sanitizer catches and falls back.
+    """
+    from alfred.plugins.web_fetch.canary_scanner import _sanitize_url_for_log
+
+    assert _sanitize_url_for_log("http://example.com:notanumber/path") == "<sanitize_failed>"
+
+
+def test_sanitize_url_for_log_returns_path_only_for_schemeless_input() -> None:
+    """``urlparse("/foo/bar")`` returns scheme=""; host=""; path="/foo/bar".
+    Sanitizer returns ``"<sanitize_failed>"`` rather than emit a path-
+    only string that looks parseable but lacks attribution.
+    """
+    from alfred.plugins.web_fetch.canary_scanner import _sanitize_url_for_log
+
+    assert _sanitize_url_for_log("/just/a/path") == "<sanitize_failed>"
+
+
+@pytest.mark.asyncio
+async def test_canary_trip_log_sanitizes_query_string(
+    store: ContentStore,
+    scanner_factory: ScannerFactory,
+) -> None:
+    """The ``web_fetch.canary.tripped`` structlog event records the
+    sanitized URL — not the raw ``source_url`` with query secrets.
+    The full URL still rides on the typed WebFetchCanaryTripped
+    exception so the audit row stays intact.
+    """
+    body = b"content with CANARY-LOG-SANITIZE token"
+    raw_url = "https://attacker.test/exfil?token=BEARER_SECRET"
+    handle = await store.write(body=body, source_url=raw_url)
+    scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-LOG-SANITIZE")])
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(WebFetchCanaryTripped) as exc_info,
+    ):
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+
+    tripped_events = [e for e in captured if e.get("event") == "web_fetch.canary.tripped"]
+    assert len(tripped_events) == 1
+    sanitized = tripped_events[0]["source_url"]
+    # No query string in the log.
+    assert sanitized == "https://attacker.test/exfil"
+    assert "BEARER_SECRET" not in sanitized
+    # Full URL preserved on the audit-bound exception.
+    assert exc_info.value.source_url == raw_url
+
+
+@pytest.mark.asyncio
+async def test_missing_body_log_sanitizes_userinfo(
+    store: ContentStore,
+    scanner_factory: ScannerFactory,
+) -> None:
+    """The ``web_fetch.canary.missing_body`` log strips userinfo
+    (``user:password@``) — a regression there would leak credentials
+    into security logs."""
+    raw_url = "https://alice:hunter2@host.test/path"
+    scanner = scanner_factory(known_canary_tokens=[CanaryToken("X")])
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(CanaryScanError),
+    ):
+        # Deliberately use a handle id that does not exist in Redis;
+        # the scanner's GETEX returns None and the missing_body log
+        # fires before the canary regex even runs.
+        await scanner.scan(handle_id="nonexistent-handle-id-12345", source_url=raw_url)
+
+    missing_events = [e for e in captured if e.get("event") == "web_fetch.canary.missing_body"]
+    assert len(missing_events) == 1
+    sanitized = missing_events[0]["source_url"]
+    assert "alice" not in sanitized
+    assert "hunter2" not in sanitized
+    assert sanitized == "https://host.test/path"

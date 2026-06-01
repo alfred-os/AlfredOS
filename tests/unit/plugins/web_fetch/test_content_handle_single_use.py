@@ -217,3 +217,97 @@ def test_redis_url_property_exposed(redis_url: str) -> None:
     internal client. Coverage on the property pins the contract."""
     s = ContentStore(redis_url=redis_url)
     assert s.redis_url == redis_url
+
+
+# ---------------------------------------------------------------------------
+# CR-146 major: write-time TTL guard + URL redaction in debug log.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action_deadline", "max_retries", "per_retry", "slack"),
+    [
+        # All zero — ttl = 0
+        (0, 0, 0, 0),
+        # All negative — ttl < 0
+        (-10, 0, 0, 0),
+        # Slack negative wipes out the rest — ttl = -1
+        (10, 2, 5, -21),
+    ],
+)
+async def test_write_rejects_non_positive_ttl(
+    store: ContentStore,
+    action_deadline: int,
+    max_retries: int,
+    per_retry: int,
+    slack: int,
+) -> None:
+    """CR-146 major: PRD §7.2 makes the TTL knobs operator-tunable, but
+    a misconfig producing ``ttl <= 0`` would either crash Redis SET EX
+    at the wire or create an immediately-expiring key. Both shapes
+    corrupt the quarantine-extract path silently. Fail at write-time
+    with a clear error so the operator sees the bad config at boot.
+    """
+    with pytest.raises(ValueError, match="TTL must be positive"):
+        await store.write(
+            body=b"x",
+            source_url="https://example.com/",
+            action_deadline_seconds=action_deadline,
+            max_extraction_retries=max_retries,
+            per_retry_budget_seconds=per_retry,
+            slack_seconds=slack,
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_log_strips_sensitive_url_components(
+    store: ContentStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CR-146 major: the ``web_fetch.content_store.written`` debug log
+    records a sanitized URL (no query string, no userinfo). Full URL
+    stays on the in-memory ``ContentHandle`` and the audit-row path.
+    """
+    import structlog
+
+    raw_url = "https://alice:hunter2@example.com/path?token=BEARER_SECRET#frag"
+    with structlog.testing.capture_logs() as captured:
+        handle = await store.write(body=b"x", source_url=raw_url)
+
+    written_events = [e for e in captured if e.get("event") == "web_fetch.content_store.written"]
+    assert len(written_events) == 1
+    sanitized = written_events[0]["source_url"]
+    # Secrets MUST NOT appear in the log breadcrumb.
+    assert "BEARER_SECRET" not in sanitized
+    assert "hunter2" not in sanitized
+    assert "alice" not in sanitized
+    # Only scheme + host + path survive.
+    assert sanitized == "https://example.com/path"
+    # Full URL preserved on the handle — the audit row path reads
+    # ``handle.source_url`` so this must stay intact.
+    assert handle.source_url == raw_url
+
+
+def test_content_store_sanitize_url_for_log_fallbacks() -> None:
+    """``_sanitize_url_for_log`` falls back to a sentinel rather than
+    risk leaking the raw URL into the log on a malformed input."""
+    from alfred.plugins.web_fetch.content_store import _sanitize_url_for_log
+
+    # No scheme → fallback (we never log a host-only / path-only string
+    # that could be confused with a sanitized full URL).
+    assert _sanitize_url_for_log("/just/a/path") == "<sanitize_failed>"
+    # No host (scheme:opaque) → fallback.
+    assert _sanitize_url_for_log("mailto:x@y") == "<sanitize_failed>"
+    # Non-string input — urlparse raises, the helper catches.
+    assert _sanitize_url_for_log(None) == "<sanitize_failed>"  # type: ignore[arg-type]
+    # Port preserved alongside host so operators can distinguish
+    # 443 vs 8080 in the breadcrumb.
+    assert (
+        _sanitize_url_for_log("https://example.com:8443/path?x=1")
+        == "https://example.com:8443/path"
+    )
+    # Non-numeric port — ``urlparse(...).port`` raises ValueError on
+    # lazy access. Sanitizer catches and falls back rather than
+    # leaking the raw URL via an uncaught exception.
+    assert _sanitize_url_for_log("https://example.com:notanumber/p") == "<sanitize_failed>"

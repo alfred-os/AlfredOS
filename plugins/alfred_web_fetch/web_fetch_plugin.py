@@ -73,6 +73,43 @@ _ALLOWED_MIME_TYPES = frozenset(
 # value before dispatch.
 _DEFAULT_SIZE_LIMIT_BYTES = 5 * 1024 * 1024
 
+
+def _clamp_size_limit(raw: Any) -> int:
+    """Return a sane positive size limit, capped at the plugin hard cap.
+
+    CR-146 major: the plugin's module comment promises callers may
+    narrow the 5 MiB default but never widen — trusting the param
+    verbatim let a buggy or compromised caller make the subprocess
+    buffer arbitrary data into memory + Redis. Defence-in-depth: the
+    host already caps before dispatch, but the plugin owns its own
+    ceiling so a capability-bypass exploit at the host layer cannot
+    widen here.
+
+    Coercion shape:
+
+    * Non-int (str / float / None / list / dict) → default. ``int(...)``
+      raises on dict / list; we catch and silently normalise the
+      param-value layer because a malformed config is a quieter
+      operator misconfiguration class than a protocol-shape bug
+      (err-004 still handles the framing-layer cases loud).
+    * Non-positive (zero / negative) → default. A zero-cap fetch is a
+      pathological config; defaulting matches the "narrow not widen"
+      intent (the operator can configure a real lower bound via
+      host-side policy, this plugin never advertises a sub-1 cap).
+    * Above the hard cap → hard cap.
+
+    Pulled out as a pure helper so the trust-boundary clamp can be
+    unit-tested directly without spinning up the aiohttp / Redis stack.
+    """
+    try:
+        candidate = int(raw)
+    except (TypeError, ValueError):
+        candidate = _DEFAULT_SIZE_LIMIT_BYTES
+    if candidate <= 0:
+        candidate = _DEFAULT_SIZE_LIMIT_BYTES
+    return min(candidate, _DEFAULT_SIZE_LIMIT_BYTES)
+
+
 # perf-006 fix: a single ``ContentStore`` (and its Redis connection
 # pool) is shared across every dispatch in the plugin-subprocess
 # lifetime. Constructing a fresh store per dispatch would re-open a TCP
@@ -110,7 +147,10 @@ async def _handle_fetch(params: dict[str, Any]) -> dict[str, Any]:
     headers: dict[str, str] = params.get("headers", {})
     redis_url: str = params["redis_url"]
     skip_tls: bool = params.get("skip_tls_verify", False)
-    size_limit: int = params.get("size_limit_bytes", _DEFAULT_SIZE_LIMIT_BYTES)
+
+    # CR-146 major: plugin-side hard cap. See ``_clamp_size_limit``
+    # docstring for the coercion shape and rationale.
+    size_limit: int = _clamp_size_limit(params.get("size_limit_bytes", _DEFAULT_SIZE_LIMIT_BYTES))
 
     try:
         tls_policy = TlsPolicy(skip_tls_verify=skip_tls)

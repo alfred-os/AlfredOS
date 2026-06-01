@@ -50,6 +50,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Final, cast
+from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
 import structlog
@@ -60,6 +61,45 @@ from alfred.plugins.web_fetch.content_store import ContentStore
 from alfred.plugins.web_fetch.errors import WebFetchCanaryTripped
 
 _log = structlog.get_logger(__name__)
+
+
+def _sanitize_url_for_log(url: str) -> str:
+    """Return ``scheme://host/path`` with query + fragment + userinfo stripped.
+
+    CR-146 major: the scanner's fault-path log calls
+    (``missing_body`` / ``tripped`` / ``quarantine_failed``) are
+    operator-visible per PRD §7.6, and logging the raw ``source_url``
+    persists signed query params, bearer-style tokens, and userinfo
+    (``user:password@host``) into security logs. The full URL is still
+    preserved in the structured audit state path (the typed
+    :class:`WebFetchCanaryTripped` exception carries ``source_url``
+    intact for the ``tool.web.fetch.canary_tripped`` audit row); only
+    the structlog fault breadcrumb is sanitized.
+
+    Falls back to ``"<sanitize_failed>"`` if ``urlparse`` raises —
+    we never want a sanitization bug to silently leak the raw URL
+    into the log on a fault path.
+    """
+    # ``urlparse(...).port`` lazily parses the port and raises
+    # ``ValueError`` on a non-numeric port (``http://host:abc/``).
+    # Wrap the whole attribute read so the sanitizer cannot leak the
+    # raw URL via an uncaught ValueError on a malformed port.
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        path = parsed.path or ""
+        scheme = parsed.scheme or ""
+        # Preserve port-on-host attribution where relevant — operators
+        # debugging a fault need to distinguish ``host:443`` vs
+        # ``host:8080`` even if the path is generic.
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+    except (ValueError, TypeError, AttributeError):
+        return "<sanitize_failed>"
+    if not scheme:
+        return f"{host}{path}" if host else "<sanitize_failed>"
+    return f"{scheme}://{host}{path}"
+
 
 # Hookpoint registration constants — Task 6's
 # ``register_hookpoints`` wires these into ``HookRegistry``. The
@@ -120,6 +160,28 @@ class CanaryToken:
     """
 
     value: str
+
+    def __post_init__(self) -> None:
+        # CR-146 major: PRD §7.6 treats this registry as operator-
+        # supplied input and ``re.escape("")`` produces a pattern that
+        # matches every body at offset 0 — one blank entry in the
+        # registry would quarantine every web.fetch result and trip
+        # the canary path on benign content. Reject at construction so
+        # the misconfiguration is caught at bootstrap (loud) rather
+        # than at first scan (silent + impossible to attribute back to
+        # the registry load).
+        #
+        # Whitespace-only is the same hazard class as the literal empty
+        # string — ``re.escape(" ")`` matches every body that contains
+        # a space, which is also every body. Stripping first means a
+        # token of pure tabs/newlines also fails closed.
+        if not self.value.strip():
+            msg = (
+                "CanaryToken.value must not be blank — empty or whitespace-only "
+                "tokens compile to patterns that match every body and would "
+                "quarantine all web.fetch results (PRD §7.6)."
+            )
+            raise ValueError(msg)
 
 
 class InboundCanaryScanner:
@@ -323,10 +385,14 @@ class InboundCanaryScanner:
             # proceed believing the content was scanned — breaking the
             # §7.6 guarantee. Raise CanaryScanError so the hook
             # dispatcher surfaces the fault.
+            # CR-146 major: log a sanitized URL shape (scheme + host +
+            # path) so signed query params / bearer tokens never land
+            # in security logs. Full URL stays on the typed
+            # CanaryScanError -> audit-event path below.
             _log.error(
                 "web_fetch.canary.missing_body",
                 handle_id=handle_id,
-                source_url=source_url,
+                source_url=_sanitize_url_for_log(source_url),
                 note="handle consumed or expired before canary scan; scan did NOT run",
             )
             raise CanaryScanError(
@@ -343,10 +409,12 @@ class InboundCanaryScanner:
         body_text = body.decode("utf-8", errors="replace")
         for pattern in self._patterns:
             if pattern.search(body_text):
+                # CR-146 major: sanitized URL in the log; full URL
+                # rides on WebFetchCanaryTripped.source_url -> audit row.
                 _log.warning(
                     "web_fetch.canary.tripped",
                     handle_id=handle_id,
-                    source_url=source_url,
+                    source_url=_sanitize_url_for_log(source_url),
                     pattern=pattern.pattern,
                 )
                 # Quarantine BEFORE the raise — the handle must be gone
@@ -382,10 +450,13 @@ class InboundCanaryScanner:
                 try:
                     await self._store.delete(handle_id)
                 except RedisError as quarantine_exc:
+                    # CR-146 major: sanitized URL in the log so a
+                    # quarantine failure does not leak query-string
+                    # secrets into the operator-visible structlog.
                     _log.error(
                         "web_fetch.canary.quarantine_failed",
                         handle_id=handle_id,
-                        source_url=source_url,
+                        source_url=_sanitize_url_for_log(source_url),
                         pattern=pattern.pattern,
                         # Type name only — never str(exc) / exc.args
                         # (T3 content fragments may have ended up in

@@ -41,6 +41,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from typing import Final, cast
+from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
 import structlog
@@ -56,6 +57,38 @@ from alfred.security.quarantine import ContentHandle
 _log = structlog.get_logger(__name__)
 
 _KEY_PREFIX: Final[str] = "alfred:content:"
+
+
+def _sanitize_url_for_log(url: str) -> str:
+    """Return ``scheme://host/path`` (no query / fragment / userinfo).
+
+    CR-146 major: ``write`` runs for every fetch and the debug log
+    capturing ``source_url`` would persist signed query params,
+    userinfo (``user:password@host``), and bearer-style tokens in
+    operator-visible logs. The full URL is still preserved on the
+    in-memory :class:`ContentHandle` and on the audit-row path; only
+    this log breadcrumb is sanitized.
+
+    Falls back to ``"<sanitize_failed>"`` rather than risk silently
+    leaking the raw URL into the log if ``urlparse`` raises.
+    """
+    # ``urlparse(...).port`` lazily parses the port and raises
+    # ``ValueError`` on a non-numeric port. Wrap the whole attribute
+    # read so the sanitizer cannot leak the raw URL via an uncaught
+    # ValueError on a malformed port.
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        path = parsed.path or ""
+        scheme = parsed.scheme or ""
+    except (ValueError, TypeError, AttributeError):
+        return "<sanitize_failed>"
+    if not scheme or not host:
+        return "<sanitize_failed>"
+    return f"{scheme}://{host}{path}"
+
 
 # TTL-formula defaults pinned in code so a missing operator override
 # never surprises with a different effective TTL. Spec §7.2.
@@ -162,17 +195,42 @@ class ContentStore:
             + (max_extraction_retries * per_retry_budget_seconds)
             + slack_seconds
         )
+        # CR-146 major: PRD §7.2 makes these knobs operator-tunable, but
+        # nothing prevented a misconfig from computing ``ttl <= 0``. A
+        # zero or negative TTL would either make Redis ``SET ... EX``
+        # fail at the wire (turning a config error into a confusing
+        # runtime exception) or — depending on the Redis client
+        # version — create a key that expires immediately, which would
+        # corrupt the quarantine-extract path before any consumer
+        # could observe the handle. Fail at write-time with a clear
+        # error so the operator sees the bad config at boot rather than
+        # at first fetch.
+        if ttl <= 0:
+            msg = (
+                "web.fetch content-store TTL must be positive; computed "
+                f"{ttl}s from action_deadline={action_deadline_seconds}, "
+                f"max_extraction_retries={max_extraction_retries}, "
+                f"per_retry_budget={per_retry_budget_seconds}, "
+                f"slack={slack_seconds}. Operators tune these via "
+                "config/policies.yaml `web_fetch.content_store.*`."
+            )
+            raise ValueError(msg)
         key = f"{_KEY_PREFIX}{handle_id}"
         client = await self._get_client()
         await client.set(key, body, ex=ttl)
         # devex-005: normalise structlog event names under the
         # ``web_fetch.`` prefix so log consumers can filter by subsystem
         # without per-module exceptions.
+        #
+        # CR-146 major: log a sanitized URL shape so signed query
+        # params / userinfo never land in the persistent debug log.
+        # Full URL stays on the in-memory ``ContentHandle`` and the
+        # audit row.
         _log.debug(
             "web_fetch.content_store.written",
             handle_id=handle_id,
             ttl_seconds=ttl,
-            source_url=source_url,
+            source_url=_sanitize_url_for_log(source_url),
             body_bytes=len(body),
         )
         return ContentHandle(
