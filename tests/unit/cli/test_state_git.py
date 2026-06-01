@@ -52,7 +52,6 @@ from alfred.cli._state_git import (
     StateGitProposalClient,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -86,35 +85,47 @@ def bare_repo(tmp_path: Path) -> Path:
     """
     repo = tmp_path / "state.git"
     env = _git_env(tmp_path)
-    subprocess.run(
-        ["git", "init", "--bare", "--initial-branch=main", str(repo)],
+    # S603/S607: literal ``git`` argv under test control; no shell, no user input.
+    subprocess.run(  # noqa: S603
+        ["git", "init", "--bare", "--initial-branch=main", str(repo)],  # noqa: S607
         check=True,
         capture_output=True,
         env=env,
     )
     work = tmp_path / "seed"
     work.mkdir()
-    subprocess.run(
-        ["git", "clone", str(repo), str(work)],
+    subprocess.run(  # noqa: S603
+        ["git", "clone", str(repo), str(work)],  # noqa: S607
         check=True,
         capture_output=True,
         env=env,
     )
     (work / "README").write_text("seeded")
-    subprocess.run(
-        ["git", "-C", str(work), "add", "."],
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "add", "."],  # noqa: S607
         check=True,
         capture_output=True,
         env=env,
     )
-    subprocess.run(
-        ["git", "-C", str(work), "commit", "-m", "seed"],
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-C",
+            str(work),
+            "commit",
+            "-m",
+            "seed",
+        ],
         check=True,
         capture_output=True,
         env=env,
     )
-    subprocess.run(
-        ["git", "-C", str(work), "push", "origin", "main"],
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "push", "origin", "main"],  # noqa: S607
         check=True,
         capture_output=True,
         env=env,
@@ -148,8 +159,8 @@ def test_create_proposal_branch_exists_in_repo(bare_repo: Path) -> None:
         proposal_type="web-allowlist-add",
         payload={"domain": "example.com", "path_prefix": "/"},
     )
-    out = subprocess.run(
-        ["git", "--git-dir", str(bare_repo), "branch", "-a"],
+    out = subprocess.run(  # noqa: S603
+        ["git", "--git-dir", str(bare_repo), "branch", "-a"],  # noqa: S607
         capture_output=True,
         text=True,
         check=True,
@@ -173,8 +184,14 @@ def test_create_proposal_writes_payload_as_proposal_json(bare_repo: Path) -> Non
         proposal_type="policy-grant",
         payload={"plugin_id": "alfred.web-fetch", "hookpoint": "tool.web.fetch"},
     )
-    out = subprocess.run(
-        ["git", "--git-dir", str(bare_repo), "show", f"{result.branch}:proposal.json"],
+    out = subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "--git-dir",
+            str(bare_repo),
+            "show",
+            f"{result.branch}:proposal.json",
+        ],
         capture_output=True,
         text=True,
         check=True,
@@ -191,8 +208,16 @@ def test_create_proposal_commit_message_carries_proposal_id(bare_repo: Path) -> 
         proposal_type="policy-grant",
         payload={"plugin_id": "x"},
     )
-    out = subprocess.run(
-        ["git", "--git-dir", str(bare_repo), "log", "-1", "--format=%s", result.branch],
+    out = subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "--git-dir",
+            str(bare_repo),
+            "log",
+            "-1",
+            "--format=%s",
+            result.branch,
+        ],
         capture_output=True,
         text=True,
         check=True,
