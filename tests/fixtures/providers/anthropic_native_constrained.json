@@ -1,0 +1,34 @@
+{
+  "_doc": "Recorded Anthropic native-constrained (tool-use) extraction response (spec §6.2, prov-006). Provider returns JSON-schema-valid input by construction; the host trusts the tool_use.input wholesale rather than re-validating.",
+  "request_body": {
+    "model": "claude-3-5-haiku-20241022",
+    "max_tokens": 1024,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Extract the structured data described by the tool schema."
+      }
+    ],
+    "tools": [
+      {
+        "name": "extract_structured_data",
+        "description": "Emit the extracted fields conforming to the JSON schema.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "title": {"type": "string"}
+          },
+          "required": ["title"]
+        }
+      }
+    ],
+    "tool_choice": {"type": "tool", "name": "extract_structured_data"}
+  },
+  "response_body": {
+    "type": "tool_use",
+    "id": "toolu_recorded_001",
+    "name": "extract_structured_data",
+    "input": {"title": "Safe Article Title"}
+  },
+  "extraction_mode": "native_constrained"
+}

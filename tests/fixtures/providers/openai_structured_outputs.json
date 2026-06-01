@@ -1,0 +1,29 @@
+{
+  "_doc": "Recorded OpenAI structured-outputs extraction (spec §6.2, prov-006). `strict: true` is the spec invariant smoke-tested in Task 14; OpenAI without strict mode is not a NATIVE_CONSTRAINED_GENERATION provider.",
+  "request_body": {
+    "model": "gpt-4o-2024-08-06",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Extract the structured data described by the schema."
+      }
+    ],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "ArticleSchema",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "title": {"type": "string"}
+          },
+          "required": ["title"],
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "response_body": {"title": "Safe Article Title"},
+  "extraction_mode": "native_constrained"
+}

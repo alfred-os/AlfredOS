@@ -1,0 +1,15 @@
+{
+  "_doc": "Recorded DeepSeek-chat JSON-mode extraction (spec §6.2, prov-006). `response_format={\"type\":\"json_object\"}` is the deepseek-chat capability; deepseek-reasoner does NOT declare JSON_OBJECT_MODE (prov-009).",
+  "request_body": {
+    "model": "deepseek-chat",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Extract structured data as JSON matching the schema embedded in the prompt."
+      }
+    ],
+    "response_format": {"type": "json_object"}
+  },
+  "response_body": {"title": "Safe Article Title"},
+  "extraction_mode": "json_object_unconstrained"
+}
