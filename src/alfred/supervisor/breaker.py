@@ -269,6 +269,102 @@ class CircuitBreaker:
         self._backoff_seconds = _BACKOFF_INITIAL_SECONDS
         _log.info("supervisor.breaker.reset", component_id=self.component_id)
 
+    # ------------------------------------------------------------------
+    # Postgres persistence (Task 8)
+    # ------------------------------------------------------------------
+
+    async def load_from_db(
+        self,
+        session: AsyncSession,
+        *,
+        now: dt.datetime | None = None,
+    ) -> None:
+        """Load persisted state from Postgres at supervisor startup.
+
+        Spec §10.6 flap protection: if the persisted state is OPEN and
+        ``last_trip_at`` is < 1h ago, we stay OPEN on load. If
+        ``last_trip_at`` is older than the re-arm window, we transition
+        to HALF_OPEN — same logic as the runtime ``maybe_rearm``.
+
+        A missing row (first startup or post-truncate) leaves the
+        defaults from ``__init__`` untouched — CLOSED, trip_count=0.
+
+        An out-of-domain state column raises :class:`BreakStateError`.
+        The DB-side CHECK constraint forbids this; we re-pin it here to
+        defend against manual column edits or future schema drift.
+        """
+        # Local import: defers the alfred.memory.models load so module
+        # import-time on alfred.supervisor stays free of the memory layer
+        # (memory.models pulls in SQLAlchemy ORM machinery the rest of
+        # the supervisor surface doesn't need).
+        from alfred.memory.models import CircuitBreakerState as _Model
+
+        row: _Model | None = await session.get(_Model, self.component_id)
+        if row is None:
+            return  # new breaker; defaults already CLOSED
+
+        self.trip_count = row.trip_count
+        self.last_trip_at = row.last_trip_at
+        match row.state:
+            case BreakerState.CLOSED.value:
+                self.state = BreakerState.CLOSED
+            case BreakerState.OPEN.value:
+                self.state = BreakerState.OPEN
+                # Apply re-arm check using wall-clock at load (spec §10.6).
+                self.maybe_rearm(now=now)
+            case BreakerState.HALF_OPEN.value:
+                self.state = BreakerState.HALF_OPEN
+            case _:
+                raise BreakStateError(
+                    f"load_from_db: unknown state value {row.state!r} for "
+                    f"component_id={self.component_id!r}"
+                )
+
+    async def save_to_db(self, session: AsyncSession) -> None:
+        """Persist current state to Postgres. Call after every transition.
+
+        Uses ``session.merge`` for upsert semantics (INSERT or UPDATE by
+        primary key). The merged row carries the live-state surface
+        (state, trip_count, last_trip_at).
+
+        **Lost-update safety (PR-S3-3a CR-R3 fix).** Two coroutines
+        calling ``save_to_db`` on the same instance — e.g. a crash
+        handler and a manual reset — can interleave their read-modify-
+        write and lose a trip_count increment. The per-instance
+        ``_save_lock`` serialises all writes for that instance. Because
+        ``CircuitBreaker`` is a singleton per ``component_id``
+        (``Supervisor.get_or_create_breaker`` — Task 19), the
+        per-instance lock provides full correctness inside the single
+        event loop AlfredOS runs on. A future multi-process supervisor
+        would escalate to ``SELECT … FOR UPDATE`` on the row; out of
+        scope for Slice 3.
+
+        ``last_failure_type``, ``breaker_state`` (captured-at-trip), and
+        ``correlation_id`` are NOT written here — the trip path
+        (``Supervisor.on_crash`` / ``PluginLifecycle``) sets those on the
+        row directly via the audit-row schema. We carry only the
+        live-state surface that the breaker owns.
+
+        Migration 0010 declares no ``updated_at`` column on
+        ``circuit_breakers`` — Postgres records modify time via the WAL,
+        not as a row attribute. The integration test verifies the
+        write-then-read round-trip.
+        """
+        # Local import: defers the alfred.memory.models load so module
+        # import-time on alfred.supervisor stays free of the memory layer
+        # (memory.models pulls in SQLAlchemy ORM machinery the rest of
+        # the supervisor surface doesn't need).
+        from alfred.memory.models import CircuitBreakerState as _Model
+
+        async with self._save_lock:
+            row = _Model(
+                component_id=self.component_id,
+                state=self.state.value,
+                trip_count=self.trip_count,
+                last_trip_at=self.last_trip_at,
+            )
+            await session.merge(row)
+
 
 __all__ = [
     "BreakerState",
