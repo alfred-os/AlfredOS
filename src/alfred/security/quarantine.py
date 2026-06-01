@@ -26,12 +26,81 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, NewType
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NewType
+
+from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from pydantic import BaseModel
-
     from alfred.hooks.capability import CapabilityGate
+
+
+# ---------------------------------------------------------------------------
+# ExtractionSchema — ABC for quarantined-LLM structured extraction (ai-001)
+# ---------------------------------------------------------------------------
+
+
+class ExtractionSchema(BaseModel):
+    """ABC for Pydantic schemas the quarantined LLM extracts to.
+
+    ADR-0017 Decision 7 + ai-001 (slice-3 retrospective): every
+    extraction schema MUST carry ``schema_version: ClassVar[Literal[1]]``
+    so the audit row's ``schema_version`` field (see
+    :data:`alfred.audit.audit_row_schemas.QUARANTINE_EXTRACT_FIELDS`) is
+    populated from a value the type system can pin. Pre-fix the field
+    existed on the audit row but no class enforced it on extraction
+    schemas — a Slice-4 author could ship a schema with no version, or
+    with version 2, and the audit row would silently carry whatever was
+    bound at the call site (or, worse, omit it).
+
+    ``__init_subclass__`` enforces the invariant at class-construction
+    time, NOT at extraction-call time: a typo'd ``schema_version = 2``
+    fails ``import``-time, not run-time. The check uses ``Literal[1]``
+    at the type level and an equality check at the runtime level —
+    both are mandatory because Pydantic v2's metaclass doesn't enforce
+    ClassVar Literal narrowing on subclass declarations.
+
+    When :class:`QuarantinedExtractor.extract` lands in PR-S3-4 it will
+    type-hint ``schema: type[ExtractionSchema]`` so an
+    :class:`~pydantic.BaseModel` that forgets the version annotation is
+    refused at the call site (Pydantic-only schemas remain valid for
+    code outside the quarantine path; the ABC is the gate ONLY for the
+    extraction path).
+
+    Slice 4+: when the schema vocabulary evolves beyond v1, lift the
+    ``Literal[1]`` to ``Literal[1, 2]`` and migrate the audit_row_schemas
+    field to a discriminated union per version. Until then, the closed
+    set keeps the audit-side consumer's deserialisation single-branched.
+    """
+
+    # ClassVar so Pydantic does NOT treat ``schema_version`` as a model
+    # field (which would surface in ``.model_dump()`` and the wire
+    # format). The ABC's contract is "every subclass pins the value at
+    # the class level", not "every instance carries the value".
+    #
+    # ``Literal[1]`` makes mypy / pyright refuse a subclass that
+    # rebinds the value to anything but 1; the ``__init_subclass__``
+    # runtime check below is the defence-in-depth that survives
+    # ``# type: ignore`` and ``python -O`` (which doesn't strip class
+    # bodies but DOES strip asserts).
+    schema_version: ClassVar[Literal[1]] = 1
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Pydantic's metaclass calls this *after* it processes the
+        # subclass body, so ``cls.schema_version`` is the resolved
+        # ClassVar binding. A subclass that simply omits the
+        # annotation inherits the parent's ``1``; a subclass that
+        # rebinds to ``2`` (via ``schema_version: ClassVar[Literal[2]] = 2``
+        # — bypassing the Literal[1] static check with a wider literal
+        # in the subclass) fails the equality check below.
+        if getattr(cls, "schema_version", None) != 1:
+            raise TypeError(
+                "ExtractionSchema subclass "
+                f"{cls.__name__} must keep schema_version: "
+                "ClassVar[Literal[1]] = 1 — version bumps are not yet "
+                "supported (ADR-0017 Decision 7 / ai-001)."
+            )
+
 
 # ---------------------------------------------------------------------------
 # T3DerivedData — Slice-3 type-level provenance discriminant (spec §3.7)
@@ -104,7 +173,7 @@ class ContentHandle:
 
 async def quarantined_to_structured(
     handle: ContentHandle,
-    schema: type[BaseModel],
+    schema: type[ExtractionSchema],
     *,
     extractor: Any,
     gate: CapabilityGate,
@@ -117,6 +186,13 @@ async def quarantined_to_structured(
 
     STUB in PR-S3-1. Full implementation is PR-S3-4 (QuarantinedExtractor,
     ExtractionResult discriminated union, DLP post-scan, audit row).
+
+    ``schema`` is typed as :class:`type[ExtractionSchema]` (ai-001) so
+    a Pydantic schema that forgets to set ``schema_version: ClassVar[
+    Literal[1]] = 1`` is refused at the call site. The audit row's
+    ``schema_version`` field (see
+    :data:`alfred.audit.audit_row_schemas.QUARANTINE_EXTRACT_FIELDS`)
+    is populated from the class-level value the ABC enforces.
 
     The caller must hold check_content_clearance(plugin_id,
     hookpoint="quarantine.dereference", content_tier="T3") — a clearance
