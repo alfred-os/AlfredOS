@@ -161,6 +161,7 @@ jobs:
             --include='src/alfred/plugins/errors.py,src/alfred/plugins/transport.py,src/alfred/plugins/manifest.py,src/alfred/plugins/inbound_scanner.py,src/alfred/plugins/content_store_base.py,src/alfred/plugins/stdio_transport.py,src/alfred/plugins/session.py,src/alfred/plugins/_observability.py' \
             --fail-under=100
       - name: Web-fetch trust-boundary 100% line+branch coverage
+        id: web_fetch_cov_python
         # Slice-3 PR-S3-5's ``src/alfred/plugins/web_fetch/`` is the
         # web.fetch trust boundary (spec §7, §11a, ADR-0017). Every file
         # enumerated below mediates between the privileged orchestrator
@@ -216,6 +217,26 @@ jobs:
           uv run coverage report \
             --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
             --fail-under=100
+      - name: Web-fetch coverage gate — remediation hint
+        # devex-004: when the 100% trust-boundary gate fails the operator
+        # gets a wall of `coverage report` output and no obvious recipe
+        # for reproducing the failure locally. This step turns the gate
+        # failure into a self-service remediation card pointing at the
+        # exact files under contract and the precise pytest invocation
+        # that reproduces the failure on a laptop. Mirrors the Slice-2.5
+        # hooks-subsystem precedent for actionable CI failure messages.
+        if: failure() && steps.web_fetch_cov_python.outcome == 'failure'
+        run: |
+          echo "::error::Trust-boundary coverage gate failed for web_fetch."
+          echo "Files required at 100% line+branch:"
+          echo "  - src/alfred/plugins/web_fetch/{allowlist,tls_policy,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
+          echo ""
+          echo "Local reproduction:"
+          echo "  cd \$(git rev-parse --show-toplevel)"
+          echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
+          echo "    --cov=alfred.plugins.web_fetch.<module> --cov-branch --cov-fail-under=100 --cov-report=term-missing"
+          echo ""
+          echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
 
   integration:
     name: Integration
@@ -445,6 +466,7 @@ jobs:
             --include='src/alfred/providers/base.py,src/alfred/bootstrap/quarantine.py,plugins/alfred_quarantined_llm/__init__.py,plugins/alfred_quarantined_llm/provider_dispatch.py,plugins/alfred_quarantined_llm/quarantine_plugin.py' \
             --fail-under=100
       - name: Web-fetch trust-boundary 100% line+branch coverage (combined)
+        id: web_fetch_cov_combined
         # Combined-data mirror of the ``python`` job's web-fetch gate
         # (see the matching step above for the per-file rationale). The
         # web-fetch trust-boundary files are proven by unit-only data
@@ -459,6 +481,25 @@ jobs:
           uv run coverage report \
             --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
             --fail-under=100
+      - name: Web-fetch coverage gate — remediation hint (combined)
+        # devex-004 mirror: combined-job gate failure deserves the same
+        # actionable remediation card as the per-job gate above. The
+        # combined gate reads merged unit + integration coverage data,
+        # but the local-reproduction recipe targets the unit suite where
+        # web_fetch coverage is actually proven today (no integration
+        # test exercises the trust boundary yet).
+        if: failure() && steps.web_fetch_cov_combined.outcome == 'failure'
+        run: |
+          echo "::error::Trust-boundary coverage gate failed for web_fetch."
+          echo "Files required at 100% line+branch:"
+          echo "  - src/alfred/plugins/web_fetch/{allowlist,tls_policy,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
+          echo ""
+          echo "Local reproduction:"
+          echo "  cd \$(git rev-parse --show-toplevel)"
+          echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
+          echo "    --cov=alfred.plugins.web_fetch.<module> --cov-branch --cov-fail-under=100 --cov-report=term-missing"
+          echo ""
+          echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
 
   smoke:
     name: Smoke (end-to-end)
