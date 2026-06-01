@@ -630,7 +630,7 @@ class QuarantinedExtractor:
 
 
 # ---------------------------------------------------------------------------
-# quarantined_to_structured — STUB (full impl Task 7)
+# quarantined_to_structured — full impl (PR-S3-4 Task 7)
 # ---------------------------------------------------------------------------
 
 
@@ -641,18 +641,39 @@ async def quarantined_to_structured(
     extractor: QuarantinedExtractor,
     gate: CapabilityGate,
 ) -> ExtractionResult:
-    """Convert an opaque :class:`ContentHandle` into a typed result.
+    """Convert an opaque :class:`ContentHandle` into a typed
+    :class:`ExtractionResult`.
 
     THIS IS THE ONLY PATH by which T3-derived content reaches
     orchestrator-readable structured form. Any other path is a security
     violation (spec §3.4).
 
-    STUB in Task 6 (PR-S3-4). Task 7 lands the full implementation
-    (gate-first check + extractor delegate).
+    Gate-first ordering: ``gate.check_content_clearance(...,
+    hookpoint="quarantine.dereference", content_tier="T3")`` is consulted
+    BEFORE the extractor runs. A denial raises :class:`AlfredError`
+    without invoking the extractor — the gate's refusal accounting is the
+    audit-row escape for denied calls; this function's audit emission
+    (via the extractor) is reserved for granted calls.
+
+    ``gate`` is REQUIRED — no default, no ``| None`` (CR-138 R3): a
+    trust-boundary function whose gate can be elided through a default
+    arg is a function with a bypass path codified in its signature.
+
+    Returns the extractor's :class:`ExtractionResult` unchanged. A
+    :class:`TypedRefusal` is NOT translated to an exception — refusal
+    is a legitimate orchestrator outcome the caller branches on.
     """
-    raise NotImplementedError(
-        "quarantined_to_structured stub — full implementation is PR-S3-4 Task 7",
-    )
+    if not gate.check_content_clearance(
+        plugin_id="quarantine.dereference",
+        hookpoint="quarantine.dereference",
+        content_tier="T3",
+    ):
+        from alfred.errors import AlfredError
+
+        raise AlfredError(
+            "Content clearance denied for quarantine.dereference (T3)",
+        )
+    return await extractor.extract(handle, schema)
 
 
 # ---------------------------------------------------------------------------

@@ -11,12 +11,12 @@ import json
 from datetime import UTC, datetime, timedelta, tzinfo
 
 import pytest
-from pydantic import BaseModel
 
 from alfred.security.quarantine import (
     ContentHandle,
     Extracted,
     ExtractionResult,  # noqa: F401  --  import-chain assertion for PR-S3-3a (sec-002)
+    ExtractionSchema,
     T3DerivedData,
     TypedRefusal,
     downgrade_to_orchestrator,
@@ -129,52 +129,59 @@ def test_content_handle_rejects_tzinfo_returning_none_utcoffset() -> None:
         )
 
 
-def test_quarantined_to_structured_stub_raises_not_implemented() -> None:
-    """The stub raises NotImplementedError — full impl is PR-S3-4.
+def test_quarantined_to_structured_refuses_on_denied_gate() -> None:
+    """The full implementation (PR-S3-4 Task 7) refuses on a deny-gate.
+
+    Replaces the prior "stub raises NotImplementedError" pin. The new
+    contract is gate-first: a denied ``check_content_clearance(...,
+    content_tier="T3")`` raises :class:`AlfredError` BEFORE the
+    extractor runs (the extractor is :data:`None` here precisely to
+    catch any path that tried to invoke it).
 
     CR-138 finding #5: ``gate`` is non-optional at the trust boundary.
-    The stub is exercised here with a fixture gate that returns ``True``
-    for all clearance requests. PR-S3-4 will replace this with the real
-    capability-gate wiring.
+    CR-S3-2 R3 lesson: work must not happen before the gate check.
     """
+    from alfred.errors import AlfredError
+
     handle = ContentHandle(
         id="x",
         source_url="https://example.com",
         fetch_timestamp=datetime.now(tz=UTC),
     )
 
-    class _Schema(BaseModel):
-        schema_version: int = 1
-        title: str
+    class _Schema(ExtractionSchema):
+        title: str = ""
 
-    class _FixtureGate:
-        """Minimal CapabilityGate fixture: structurally satisfies the Protocol.
+    class _DenyGate:
+        """Minimal CapabilityGate fixture — fail-closed."""
 
-        Returns ``False`` (always-deny) — CR-138 R3 fix per CLAUDE.md hard
-        rule #4 (capability gate is not bypassable in tests). The
-        ``quarantined_to_structured`` stub raises ``NotImplementedError``
-        before consulting the gate, so the deny value is never observed;
-        but using ``return False`` (rather than ``return True``) keeps a
-        future copy-paste of this fixture from accidentally codifying an
-        always-allow pattern. When PR-S3-4 wires the real impl, a proper
-        fixture-grant pattern lands here.
-        """
+        def check(self, *, plugin_id: str, hookpoint: str, requested_tier: str) -> bool:
+            return False
 
-        def check(
-            self,
-            *,
-            plugin_id: str,
-            hookpoint: str,
-            requested_tier: str,
+        def check_plugin_load(self, *, plugin_id: str, manifest_tier: str) -> bool:
+            return False
+
+        def check_content_clearance(
+            self, *, plugin_id: str, hookpoint: str, content_tier: str
         ) -> bool:
             return False
 
-    with pytest.raises(NotImplementedError):
-        asyncio.run(quarantined_to_structured(handle, _Schema, extractor=None, gate=_FixtureGate()))
+    with pytest.raises(AlfredError):
+        # extractor=None is deliberate — a denied gate must NOT touch
+        # the extractor, so any path that tries would raise
+        # AttributeError on the None and the test would fail.
+        asyncio.run(
+            quarantined_to_structured(
+                handle,
+                _Schema,
+                extractor=None,  # type: ignore[arg-type]
+                gate=_DenyGate(),
+            )
+        )
 
 
 def test_downgrade_to_orchestrator_stub_raises_not_implemented() -> None:
-    """The stub raises NotImplementedError — full impl is PR-S3-4."""
+    """The stub raises NotImplementedError — full impl is PR-S3-4 Task 8."""
     data: T3DerivedData = T3DerivedData({"title": "x"})
     with pytest.raises(NotImplementedError):
         asyncio.run(downgrade_to_orchestrator(data, audit_row=None))  # type: ignore[arg-type]
