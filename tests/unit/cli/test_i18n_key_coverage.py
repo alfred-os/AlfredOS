@@ -1,11 +1,4 @@
-"""Verify t() keys used in Slice-3 CLI modules are declared in spec §11.5.
-
-This test holds the line that every i18n key spec §11.5 lists as a
-PR-S3-6 deliverable exists in ``locale/en/LC_MESSAGES/alfred.po`` with
-a real ``msgstr`` (i.e. ``t(key) != key``). A missing key returns the
-bare key string from :func:`t` — a developer-visible "this catalog
-slot is empty" signal — and any operator-facing CLI surface that hits
-the bare key is a hard regression of CLAUDE.md i18n rule #1.
+"""Verify CLI i18n keys are present, fully substituted, and semantically correct.
 
 Spec §11.5 splits ownership: the catalog-additions PR (PR-S3-0b) ships
 the canonical English bodies; implementing fork PRs may polish the
@@ -13,106 +6,289 @@ copy. Per Task 20 of the PR-S3-6 plan (lines 2396-2495) this PR adds
 the missing keys verbatim to keep the implementing surface unblocked,
 with the editorial-review pass deferred to the catalog-additions PR's
 copy review.
+
+**Why per-key fingerprints, not just ``result != key``** (i18n-001 /
+test-engineer carry-forward from web_fetch's prior pattern).
+
+The earlier shape of this test asserted only that ``t(key) != key``.
+That caught a missing msgstr but it did NOT catch a pybabel
+**fuzzy-match wrong-msgstr swap** -- a real-world failure mode where
+the build tool copies a similar-looking neighbouring msgstr onto a
+new msgid. PR-S3-5's ``web_fetch`` corpus first surfaced this with
+``web.fetch.error.redirect_refused``: pybabel populated it with the
+``tls_failure`` body, the assertion still passed (the result was
+non-empty and not the bare key), and the broken string only surfaced
+when an operator hit a real redirect.
+
+PR-S3-6 originally regressed back to ``t(key) != key`` for the CLI
+surface; this test re-establishes the per-key fingerprint pattern.
+
+i18n-002 placeholder-leak guard. ``alfred.i18n.t`` swallows
+``KeyError`` / ``IndexError`` from ``str.format`` and returns the
+unsubstituted template; a surviving ``{name}`` in the rendered string
+reveals either a placeholder we forgot to pass OR a typo in the
+catalog template. Both fail the test loudly so the build catches
+them.
+
+Adding a new ``t(...)`` call in this subsystem requires three edits:
+adding the msgid to ``locale/en/LC_MESSAGES/alfred.po`` with a REAL
+msgstr (not a pybabel fuzzy-copy of a neighbour), running
+``pybabel update`` + ``pybabel compile``, and adding a row to
+:data:`_FINGERPRINTS` below.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Final
 
 import pytest
 
 from alfred.i18n import t
 
-# Keys declared in spec §11.5 that this PR introduces or relies on.
-# Add new keys here as new t() calls are added to CLI modules in
-# subsequent batches of PR-S3-6 — the parametrised test below pins
-# each one against the catalog. PR-S3-7 follow-up: extend the set with
-# the keys that the live audit-row emission and Postgres-projection
-# wiring introduce (plugin.grant.status.{approved,denied,expired}
-# already land here because the status subcommand already references
-# the surface in the CLI module's deferred-stub note).
-_SPEC_11_5_KEYS_THIS_PR: frozenset[str] = frozenset(
-    {
-        # cli.plugin.grant.* — async-UX surfaces
-        "cli.plugin.grant.pending_review",
-        "cli.plugin.grant.denied",
-        "cli.plugin.grant.follow_up_command",
-        "cli.plugin.grant.status.pending",
-        "cli.plugin.grant.status.approved",
-        "cli.plugin.grant.status.denied",
-        "cli.plugin.grant.status.expired",
-        # cli.plugin.list / show columns + status hints
-        "cli.plugin.list.column.plugin_id",
-        "cli.plugin.list.column.subscriber_tier",
-        "cli.plugin.list.column.status",
-        "cli.plugin.list.column.manifest_version",
-        "cli.plugin.list.empty_hint",
-        "cli.plugin.list.not_implemented_yet",  # devex-011
-        "cli.plugin.show.field.plugin_id",
-        # cli.web.allowlist.* — async-UX surfaces
-        "cli.web.allowlist.pending_review",
-        "cli.web.allowlist.add.denied",
-        "cli.web.allowlist.remove.denied",
-        "cli.web.allowlist.added",
-        "cli.web.allowlist.removed",
-        # cli.web.allowlist.list columns + empty hint
-        "cli.web.allowlist.list.column.domain",
-        "cli.web.allowlist.list.column.path_prefix",
-        "cli.web.allowlist.list.column.granted_by",
-        "cli.web.allowlist.list.column.granted_at",
-        "cli.web.allowlist.list_empty",
-        # cli.config.* — quarantined-provider + set/get/list
-        "cli.config.quarantined_provider_pending_review",
-        "cli.config.web_fetch_budget_set",
-        "cli.config.set.denied",
-        "cli.config.set.unknown_key",
-        "cli.config.get.unknown_key",
-        "cli.config.get.not_set",
-        "cli.config.list.empty",
-        "cli.config.error.malformed_yaml",  # err-002
-        # cli.supervisor.reset.* — confirm + result surfaces
-        "cli.supervisor.reset.confirm_prompt",
-        "cli.supervisor.reset.rerun_hint",  # i18n-004 / devex-004
-        "cli.supervisor.reset.success",
-        "cli.supervisor.reset.component_not_found",
-        "cli.supervisor.reset.unexpected_error",  # devex-005
-        # cli.supervisor.status.* — table + empty hints
-        "cli.supervisor.status.column.component",
-        "cli.supervisor.status.column.state",
-        "cli.supervisor.status.column.trip_count",
-        "cli.supervisor.status.column.last_trip_at",
-        "cli.supervisor.status.empty_hint",
-        "cli.supervisor.status.no_supervisor_running",  # devex-013
-        "cli.supervisor.status.breaker_state.open",
-        "cli.supervisor.status.breaker_state.closed",
-        "cli.supervisor.status.breaker_state.half_open",
-        # cli.audit.graph + log surfaces
-        "cli.audit.graph.tier_help",
-        "cli.audit.graph.since_help",
-        "cli.audit.graph.since_invalid",  # devex-016
-        "cli.audit.graph.empty",
-        "cli.audit.graph.tier_header",
-        "cli.audit.graph.header",
-        "cli.audit.log.event_help",  # devex-008
-    }
-)
+# Per-key fingerprint table. Each entry pins:
+#   - the placeholder kwargs the msgstr template needs (so str.format
+#     succeeds and no ``{name}`` literal survives in the output);
+#   - one or more EXPECTED SUBSTRINGS -- at least one must appear in
+#     the rendered result (case-insensitively), anchoring the test to
+#     *this* msgstr's semantics and not a fuzzy-match neighbour's.
+#
+# The fingerprint vocabulary points at the load-bearing nouns of each
+# msgstr -- what a reviewer scanning a wrong fuzzy-swap would notice
+# missing. e.g. ``cli.supervisor.reset.success`` fingerprints on
+# "reset" + "audit row"; a fuzzy swap with the "denied" body contains
+# neither and the test fails.
+_FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = {
+    # cli.plugin.grant.* -- async-UX surfaces
+    "cli.plugin.grant.pending_review": (
+        {"branch": "proposal/policy-grant-aaaa", "proposal_id": "aaaa"},
+        ("queued", "reviewer"),
+    ),
+    "cli.plugin.grant.denied": (
+        {"reason": "push refused"},
+        ("denied",),
+    ),
+    "cli.plugin.grant.follow_up_command": (
+        {"proposal_id": "aaaa"},
+        ("alfred plugin grant", "status"),
+    ),
+    "cli.plugin.grant.status.pending": (
+        {"branch": "proposal/policy-grant-aaaa", "proposal_id": "aaaa"},
+        ("pending",),
+    ),
+    "cli.plugin.grant.status.approved": (
+        {"proposal_id": "aaaa", "merged_at": "2026-05-31"},
+        ("approved",),
+    ),
+    "cli.plugin.grant.status.denied": (
+        {"proposal_id": "aaaa", "reviewer": "ops"},
+        ("denied",),
+    ),
+    "cli.plugin.grant.status.expired": (
+        {"proposal_id": "aaaa"},
+        ("expired",),
+    ),
+    # cli.plugin.list / show surfaces
+    "cli.plugin.list.column.plugin_id": ({}, ("plugin",)),
+    "cli.plugin.list.column.subscriber_tier": ({}, ("tier",)),
+    "cli.plugin.list.column.status": ({}, ("status",)),
+    "cli.plugin.list.column.manifest_version": ({}, ("manifest", "version")),
+    "cli.plugin.list.empty_hint": ({}, ("plugin",)),
+    "cli.plugin.list.not_implemented_yet": (
+        {},
+        ("not", "implemented"),
+    ),
+    "cli.plugin.show.field.plugin_id": ({}, ("plugin",)),
+    # cli.web.allowlist.* -- async-UX surfaces
+    "cli.web.allowlist.pending_review": (
+        {"branch": "proposal/web-allowlist-add-aaaa", "proposal_id": "aaaa"},
+        ("allowlist", "reviewer"),
+    ),
+    "cli.web.allowlist.add.denied": (
+        {"reason": "push refused"},
+        ("allowlist", "add", "denied"),
+    ),
+    "cli.web.allowlist.remove.denied": (
+        {"reason": "push refused"},
+        ("allowlist", "remove", "denied"),
+    ),
+    "cli.web.allowlist.added": (
+        {"domain": "example.com"},
+        ("allowlist", "added"),
+    ),
+    "cli.web.allowlist.removed": (
+        {"domain": "example.com"},
+        ("allowlist", "removed"),
+    ),
+    # cli.web.allowlist.list columns + empty hint
+    "cli.web.allowlist.list.column.domain": ({}, ("domain",)),
+    "cli.web.allowlist.list.column.path_prefix": ({}, ("path",)),
+    "cli.web.allowlist.list.column.granted_by": ({}, ("granted",)),
+    "cli.web.allowlist.list.column.granted_at": ({}, ("granted",)),
+    "cli.web.allowlist.list_empty": (
+        {},
+        ("allowlist",),
+    ),
+    # cli.config.* -- quarantined-provider + set/get/list
+    "cli.config.quarantined_provider_pending_review": (
+        {"branch": "proposal/config-quarantined-provider-aaaa", "proposal_id": "aaaa"},
+        ("quarantined", "reviewer"),
+    ),
+    "cli.config.web_fetch_budget_set": (
+        {"limit": 50, "user_id": "u-1"},
+        ("budget",),
+    ),
+    "cli.config.set.denied": (
+        {"reason": "push refused"},
+        ("config", "denied"),
+    ),
+    "cli.config.set.unknown_key": (
+        {"key": "no-such-key", "valid_keys": "web-fetch-budget, ..."},
+        ("recognised", "valid keys"),
+    ),
+    "cli.config.get.unknown_key": (
+        {"key": "no-such-key", "valid_keys": "web-fetch-budget, ..."},
+        ("recognised", "valid keys"),
+    ),
+    "cli.config.get.not_set": (
+        {"key": "web-fetch-budget"},
+        ("not set", "policies.yaml"),
+    ),
+    "cli.config.list.empty": (
+        {},
+        ("policies.yaml",),
+    ),
+    "cli.config.error.malformed_yaml": (
+        # err-002 catalog addition. Fingerprint anchors on the recovery
+        # vocabulary so a future fuzzy swap with another "config refused"
+        # body surfaces.
+        {"yaml_path": "/etc/alfred/policies.yaml", "error": "expected ':'"},
+        ("malformed", "fix"),
+    ),
+    # cli.supervisor.reset.* -- confirm + result surfaces
+    "cli.supervisor.reset.confirm_prompt": (
+        {
+            "component": "quarantined-llm",
+            "trip_count": "-",
+            "last_trip_at": "-",
+        },
+        ("refusing", "--confirm"),
+    ),
+    "cli.supervisor.reset.rerun_hint": (
+        {"component": "quarantined-llm"},
+        ("re-run", "alfred supervisor reset"),
+    ),
+    "cli.supervisor.reset.success": (
+        {"component": "quarantined-llm"},
+        ("reset", "audit row"),
+    ),
+    "cli.supervisor.reset.component_not_found": (
+        {"component": "no-such"},
+        ("not found", "alfred supervisor status"),
+    ),
+    "cli.supervisor.reset.unexpected_error": (
+        {"component": "quarantined-llm", "error_type": "ConnectionError"},
+        ("failed", "audit log"),
+    ),
+    # cli.supervisor.status.* -- table + empty hints
+    "cli.supervisor.status.column.component": ({}, ("component",)),
+    "cli.supervisor.status.column.state": ({}, ("state",)),
+    "cli.supervisor.status.column.trip_count": ({}, ("trip",)),
+    "cli.supervisor.status.column.last_trip_at": ({}, ("trip",)),
+    "cli.supervisor.status.empty_hint": ({}, ("component",)),
+    "cli.supervisor.status.no_supervisor_running": (
+        {},
+        ("supervisor", "docker compose"),
+    ),
+    "cli.supervisor.status.breaker_state.open": ({}, ("open",)),
+    "cli.supervisor.status.breaker_state.closed": ({}, ("closed",)),
+    "cli.supervisor.status.breaker_state.half_open": ({}, ("half",)),
+    # cli.audit.graph + log surfaces
+    "cli.audit.graph.tier_help": (
+        {},
+        ("tier", "swimlane"),
+    ),
+    "cli.audit.graph.since_help": (
+        {},
+        ("lookback", "24h"),
+    ),
+    "cli.audit.graph.since_invalid": (
+        {"value": "abc", "example": "24h, 7d, or 30m"},
+        ("--since", "expected"),
+    ),
+    "cli.audit.graph.empty": (
+        {"tier": " (T3)", "since": "24h"},
+        ("no audit rows",),
+    ),
+    "cli.audit.graph.tier_header": (
+        {"tier": "T3"},
+        ("audit graph", "swimlane"),
+    ),
+    "cli.audit.graph.header": (
+        {},
+        ("audit graph", "all tiers"),
+    ),
+    "cli.audit.log.event_help": (
+        {},
+        ("event",),
+    ),
+}
 
 
-@pytest.mark.parametrize("key", sorted(_SPEC_11_5_KEYS_THIS_PR))
-def test_key_has_real_msgstr_in_catalog(key: str) -> None:
-    """Spec §11.5 key has a non-fallback translation in the live catalog.
+@pytest.mark.parametrize("key", sorted(_FINGERPRINTS.keys()))
+def test_cli_i18n_key_resolves_with_fingerprint(key: str) -> None:
+    """Key resolves to a non-empty, fully-substituted, semantically-correct string.
 
-    :func:`t` returns the input key when the catalog has no entry (or
-    when the entry's msgstr is the empty string). Any spec §11.5 key
-    that round-trips to itself indicates either (a) the catalog is
-    missing the entry, or (b) the pybabel compile step did not pick up
-    the addition. Either way, the operator-facing CLI surface that
-    routes through this key would render the bare key — a hard
-    regression of CLAUDE.md i18n rule #1.
+    Three checks, each defending a different failure mode:
+
+    1. ``result != key`` -- guards against a missing/empty msgstr
+       (gettext falls back to the bare key when there is no
+       translation).
+    2. No ``{`` or ``}`` survives in the output (i18n-002) -- guards
+       against a msgstr that references a placeholder we forgot to
+       supply or one that the template authored with the wrong name.
+       The earlier ``except (KeyError, IndexError)`` swallow in
+       :func:`alfred.i18n.t` returns the un-substituted template on
+       missing kwargs, so a surviving ``{`` reveals a placeholder
+       mismatch even when the runtime doesn't raise.
+    3. At least one fingerprint substring is present (i18n-001) --
+       guards against a pybabel fuzzy-match wrong-msgstr swap.
+       Substrings match case-insensitively so a future capitalisation
+       re-phrase ("PROPOSAL" -> "proposal") doesn't fail the test
+       for a non-substantive reason.
     """
-    rendered = t(key)
-    assert rendered != key, (
+    placeholders, fingerprints = _FINGERPRINTS[key]
+    result = t(key, **placeholders)
+
+    # (1) Catalog presence.
+    assert result != key, (
         f"i18n key {key!r} is missing from the catalog (or has an "
-        f"empty msgstr). t(key) returned the bare key — the operator "
-        f"would see {key!r} verbatim in the CLI. Add the canonical "
-        f"English text to locale/en/LC_MESSAGES/alfred.po + run "
+        f"empty msgstr). Add the canonical English text to "
+        f"locale/en/LC_MESSAGES/alfred.po + run "
         f"`pybabel compile -d locale -D alfred`."
+    )
+    assert result.strip(), (
+        f"i18n key {key!r} resolved to a whitespace-only string -- "
+        f"msgstr is present but empty after substitution; fix the "
+        f"msgstr in locale/en/LC_MESSAGES/alfred.po."
+    )
+
+    # (2) i18n-002: placeholder-leak guard. Surviving ``{`` / ``}``
+    # means either the test kwargs miss a placeholder OR the msgstr
+    # template references a name the call site does not pass.
+    assert "{" not in result and "}" not in result, (
+        f"i18n key {key!r} rendered with un-substituted placeholders -- "
+        f"either the test kwargs in _FINGERPRINTS[{key!r}] are missing a "
+        f"placeholder, or the msgstr template references a name the CLI "
+        f"call site does not pass. Got: {result!r}"
+    )
+
+    # (3) i18n-001: fingerprint check. The canonical defence against a
+    # pybabel fuzzy-match wrong-msgstr swap.
+    lowered = result.lower()
+    assert any(fp.lower() in lowered for fp in fingerprints), (
+        f"i18n key {key!r} rendered without any expected fingerprint -- "
+        f"pybabel fuzzy-match may have swapped the wrong msgstr onto "
+        f"this key (i18n-001). Expected one of {fingerprints!r}; "
+        f"got: {result!r}"
     )
