@@ -1,0 +1,92 @@
+# dns_rebinding_to_metadata.yaml — SSRF-class adversarial payload.
+# Spec §7.4 (allowlist + IP guard). Schema: tests/adversarial/payload_schema.py.
+#
+# Schema note: the payload-schema Category Literal does not include
+# ``ssrf`` (Slice-3 categories are prompt_injection / dlp / capability_bypass
+# / canary / inter_persona / hooks / tier_laundering / dlp_egress). Per the
+# task spec for sec-pr-s3-5-003 ("category=ssrf if the schema supports it;
+# otherwise use dlp_egress and document the threat is SSRF-class"), this
+# payload uses category=dlp_egress with the threat string + provenance
+# making the SSRF framing explicit.
+#
+# Attack: An attacker controls DNS for an allowlisted hostname
+# (``example.com``). On the first resolution (when the operator added
+# the domain to the allowlist) it returned a public IP and looked
+# legitimate. On the SECOND resolution — when the orchestrator actually
+# fetches — it returns ``169.254.169.254`` (AWS / Azure / GCP metadata)
+# / ``10.0.0.1`` (internal RFC1918) / ``127.0.0.1`` (loopback to Redis
+# / Postgres / local services). The three-way URL allowlist
+# (manifest ∩ operator ∩ session) matches on netloc, NOT on resolved IP,
+# so it cannot block this on its own.
+#
+# Defence (sec-pr-s3-5-003 / H3 — host_ip_guard.py):
+#   - dispatch_web_fetch calls check_url_host_ips() AFTER the allowlist
+#     passes and BEFORE the transport dispatch.
+#   - The guard pre-resolves the hostname via socket.getaddrinfo and
+#     classifies every returned address via ipaddress.ip_address.
+#   - Refuse on ANY internal IP in the resolution set (RFC1918,
+#     loopback, link-local, multicast, reserved) — defends against the
+#     multi-record DNS shape (one public + one internal).
+#   - Loopback exception: ONLY when (URL scheme == http) AND (URL host
+#     is literal 127.0.0.1 / localhost / ::1). The dual-AND defends
+#     against DNS rebinding to loopback for non-loopback URL hosts.
+#   - Emits a ``tool.web.fetch`` audit row with
+#     ``result=internal_ip_refused`` AND
+#     ``dlp_scan_result=internal_ip_refused`` BEFORE raising
+#     :class:`WebFetchInternalIPRefused`.
+#
+# Outcome: ``refused`` — the merge-blocking assertion is that the IP
+# guard refuses the fetch BEFORE the network call (transport.dispatch
+# is never reached) AND emits the typed audit row carrying the closed
+# refusal-class reason (rfc1918 / link_local / loopback).
+id: de-2026-003
+category: dlp_egress
+threat: >-
+  SSRF-class attack: DNS rebinding against an allowlisted hostname
+  (example.com). The attacker controls the authoritative DNS for the
+  allowlisted domain and returns an internal address on resolution
+  (169.254.169.254 AWS/Azure/GCP metadata, 10.0.0.1 RFC1918 internal
+  endpoint, 127.0.0.1 loopback to local Redis/Postgres). The three-way
+  URL allowlist matches on netloc — it does NOT check resolved IPs —
+  so this attack bypasses the URL allowlist completely. The host-IP
+  guard (sec-pr-s3-5-003 / H3) is the defence — it resolves the
+  hostname pre-dispatch and refuses internal IPs with a closed-vocabulary
+  reason (rfc1918 / link_local / loopback / multicast / reserved /
+  dns_failure / no_hostname) so audit consumers can pivot on attack
+  class. The guard MUST refuse BEFORE transport.dispatch is called AND
+  emit the typed audit row carrying internal_ip_refused.
+ingestion_path: web.fetch
+payload:
+  # Three SSRF rebinding shapes the guard must refuse.
+  url_under_attack: "https://example.com/api/data"
+  resolved_ip_aws_metadata: "169.254.169.254"
+  resolved_ip_rfc1918: "10.0.0.1"
+  resolved_ip_loopback: "127.0.0.1"
+  expected_refusal_reasons:
+    - "link_local"  # AWS / Azure / GCP metadata service
+    - "rfc1918"     # RFC1918 internal network
+    - "loopback"    # Local-host services (Redis / Postgres / Alfred state)
+  notes: >-
+    Each shape uses the SAME URL (https://example.com/api/data) — the
+    allowlist passes for the netloc. The DNS resolver is the attacker-
+    controlled element; the guard's defence is name-independent (it
+    classifies the resolved IP, not the URL). The multi-record DNS
+    variant (where the resolver returns a public IP PLUS an internal
+    one) is covered by ``test_mixed_resolution_refuses_if_any_ip_is_internal``
+    in tests/unit/plugins/web_fetch/test_host_ip_guard.py.
+expected_outcome: refused
+provenance: >-
+  Slice-3 PR-S3-5 security review sec-pr-s3-5-003 / H3 (HIGH). The
+  three-way URL allowlist on its own does not block DNS-rebinding to
+  cloud-metadata / RFC1918 / loopback — an upstream resolver that
+  hands back 169.254.169.254 for an allowlisted hostname (example.com)
+  would let the fetcher reach the AWS metadata service and exfiltrate
+  IAM credentials. The host-IP allowlist guard
+  (src/alfred/plugins/web_fetch/host_ip_guard.py) is the defence;
+  this payload is the merge-blocking adversarial proof.
+references:
+  - "spec §7.4 three-way URL allowlist (manifest ∩ operator ∩ session)"
+  - "sec-pr-s3-5-003 / H3 — security review finding: no connector-level IP-allowlist"
+  - "src/alfred/plugins/web_fetch/host_ip_guard.py — IP guard implementation"
+  - "OWASP SSRF cheat sheet — DNS rebinding section"
+  - "AWS Instance Metadata Service v1 (IMDSv1) credential exfiltration"
