@@ -21,7 +21,10 @@ Public surface this slice (Tasks 1-8 batch):
 
 from __future__ import annotations
 
-from alfred.security.capability_gate._gate import RealGate
-from alfred.security.capability_gate.policy import GatePolicy, GrantRow
+# Relative imports per PR-S3-1 R2 (CR reviewer F2): the package's own
+# re-exports stay relative so an external rename of
+# ``alfred.security.capability_gate`` requires no churn in this file.
+from ._gate import RealGate
+from .policy import GatePolicy, GrantRow
 
 __all__ = ["GatePolicy", "GrantRow", "RealGate"]

@@ -32,46 +32,24 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING
 
 import structlog
 
 from alfred.audit.audit_row_schemas import (
     SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS,
 )
-from alfred.security.capability_gate.policy import GatePolicy, GrantRow
+
+# CR reviewer F1: ``_AuditSink`` lives in ``_audit_protocols`` so the
+# gate and the proposal flow share ONE source of truth for the
+# audit-sink signature. Re-imported here so existing call sites that
+# reference ``alfred.security.capability_gate._gate._AuditSink`` continue
+# to type-check; the canonical home is the dedicated module.
+from ._audit_protocols import _AuditSink
+from .policy import GatePolicy, GrantRow
 
 if TYPE_CHECKING:
-    from alfred.security.capability_gate.backend import StorageBackend
-
-
-@runtime_checkable
-class _AuditSink(Protocol):
-    """Structural seam for the audit sink the gate writes to.
-
-    Matches :meth:`alfred.audit.log.AuditWriter.append_schema` keyword-only.
-    Kept private to this module — production wires the real ``AuditWriter``
-    and tests inject a spy with the same signature. Defending the seam
-    structurally (rather than importing ``AuditWriter`` here) keeps the
-    capability_gate package import-graph free of the audit subsystem's
-    SQLAlchemy dependency, matching the sec-007 layering posture: gate
-    code is hot-path; the audit writer is a sink, not a dependency.
-    """
-
-    async def append_schema(
-        self,
-        *,
-        fields: frozenset[str],
-        schema_name: str,
-        event: str,
-        actor_user_id: str | None,
-        subject: dict[str, Any],
-        trust_tier_of_trigger: str,
-        result: str,
-        cost_estimate_usd: float,
-        trace_id: str,
-    ) -> None:
-        raise NotImplementedError  # pragma: no cover
+    from .backend import StorageBackend
 
 
 _log = structlog.get_logger(__name__)
