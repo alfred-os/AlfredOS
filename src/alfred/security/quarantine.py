@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NewType, cast, get_args
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
@@ -542,8 +542,37 @@ class QuarantinedExtractor:
                     plugin_id=self._PLUGIN_ID,
                 )
             extraction_mode_narrowed = cast("ExtractionMode", extraction_mode_value)
+            # Orchestrator-side schema validation (arch-1 / AI-1). The
+            # plugin-side ``_validate_response`` only checks the response is
+            # a dict — full Pydantic validation against the caller-supplied
+            # schema class lives here, on the privileged side, where the
+            # type system can pin :class:`type[ExtractionSchema]`. Without
+            # this call a misbehaving quarantined LLM could return arbitrary
+            # dicts that bypass the schema, get audit-rowed as
+            # ``result=extracted``, and flow into the privileged
+            # orchestrator (PRD §7.1 / spec §6.4 invariant).
+            #
+            # ``ValidationError`` is routed through the protocol-violation
+            # audit path — the wire-format contract is "plugin emits
+            # schema-valid data"; a violation of that contract is a
+            # transport-layer event, not a legitimate refusal outcome
+            # (collapsing them would let a misbehaving plugin disguise
+            # schema-mismatches as ``result=refused`` audit rows).
+            data_dict = dict(data_obj) if isinstance(data_obj, dict) else {}
+            try:
+                schema.model_validate(data_dict)
+            except ValidationError:
+                await self._emit_protocol_violation_audit(
+                    correlation_id=correlation_id,
+                    schema_name=schema_name,
+                    schema_version=schema_version,
+                )
+                raise PluginProtocolViolation(
+                    method="quarantine.extract",
+                    plugin_id=self._PLUGIN_ID,
+                ) from None
             result = Extracted(
-                data=T3DerivedData(dict(data_obj) if isinstance(data_obj, dict) else {}),
+                data=T3DerivedData(data_dict),
                 extraction_mode=extraction_mode_narrowed,
             )
             audit_result = "extracted"
