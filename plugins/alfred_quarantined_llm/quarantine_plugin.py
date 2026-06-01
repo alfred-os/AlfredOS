@@ -53,6 +53,34 @@ _content_cache: dict[str, bytes] = {}
 # ---------------------------------------------------------------------------
 
 
+# Closed-vocabulary fd-3 framing-error discriminator tags (err-003 fix).
+# Printed to stderr before sys.exit(1) so the supervisor's child-died
+# notification carries a structured signal naming WHICH framing rule was
+# violated. Prior code collapsed all three failure modes into a bare
+# ``sys.exit(1)``, leaving operators to guess whether the header was
+# short, the body was short, or trailing bytes were present.
+_FD3_ERR_SHORT_HEADER = "short_header"
+_FD3_ERR_SHORT_BODY = "short_body"
+_FD3_ERR_TRAILING_BYTES = "trailing_bytes"
+
+
+def _emit_fd3_framing_error_and_exit(detail: str) -> None:
+    """Print a closed-vocab framing-error tag to stderr, then exit non-zero.
+
+    err-003 fix: keeps the three failure modes distinguishable from the
+    supervisor's perspective. The detail tag is one of
+    :data:`_FD3_ERR_SHORT_HEADER`, :data:`_FD3_ERR_SHORT_BODY`, or
+    :data:`_FD3_ERR_TRAILING_BYTES` — never free-form text, so no
+    attacker-controlled bytes can flow into the discriminator (the key
+    is never decoded before exit on these paths).
+    """
+    # The structured marker uses ``=`` separator so the supervisor's
+    # stderr scraper can parse it deterministically without word
+    # boundary heuristics.
+    print(f"plugin.launcher.framing_error={detail}", file=sys.stderr)
+    sys.exit(1)
+
+
 def _read_provider_key_from_fd3() -> str:
     """Read a 4-byte length-prefixed UTF-8 provider key from fd 3.
 
@@ -63,7 +91,10 @@ def _read_provider_key_from_fd3() -> str:
     Any framing error (short read, length lies, trailing bytes) exits the
     subprocess with a non-zero status BEFORE the MCP loop starts so the
     supervisor's child-died notification fires with a clear lifecycle
-    state rather than a confused "started but never registered" gap.
+    state rather than a confused "started but never registered" gap. The
+    three failure modes are distinguished via the closed-vocabulary
+    stderr tag emitted by :func:`_emit_fd3_framing_error_and_exit`
+    (err-003 fix).
 
     Called ONLY from :func:`main` — invoking this at module import
     time would hang the entire Python toolchain (sec-007). The contract
@@ -74,17 +105,17 @@ def _read_provider_key_from_fd3() -> str:
     if len(header) < 4:
         # Fail loud, fail early: the supervisor expects a registered key
         # before it routes any JSON-RPC traffic to this subprocess.
-        sys.exit(1)
+        _emit_fd3_framing_error_and_exit(_FD3_ERR_SHORT_HEADER)
     key_length = struct.unpack(">I", header)[0]
     key_bytes = os.read(3, key_length)
     if len(key_bytes) < key_length:
-        sys.exit(1)
+        _emit_fd3_framing_error_and_exit(_FD3_ERR_SHORT_BODY)
     # Validate fd 3 is empty after reading — trailing bytes mean the
     # supervisor framed the key wrong, which is a class of bug we want to
     # surface immediately, not paper over.
     extra = os.read(3, 1)
     if extra:
-        sys.exit(1)
+        _emit_fd3_framing_error_and_exit(_FD3_ERR_TRAILING_BYTES)
     return key_bytes.decode("utf-8")
 
 

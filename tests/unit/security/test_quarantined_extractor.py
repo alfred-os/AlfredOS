@@ -697,6 +697,45 @@ async def test_extract_rejects_payload_with_extra_field_when_schema_forbids(
 
 
 @pytest.mark.asyncio
+async def test_extract_emits_transport_failed_audit_on_dispatch_crash(
+    fake_audit_writer: MagicMock,
+) -> None:
+    """err-001 fix: a transport.dispatch crash lands a ``transport_failed``
+    audit row BEFORE the exception propagates.
+
+    Prior to the fix the orchestrator-side await was unwrapped — a
+    broken pipe / framing error / premature subprocess death would
+    silently leave the call without any audit attribution at all (the
+    very failure mode CLAUDE.md hard rule #7 forbids).
+
+    The audit row uses the closed-vocabulary ``transport_failed``
+    result tag, distinct from ``protocol_violation`` (in-band) and
+    ``refused`` (legitimate refusal).
+    """
+    from alfred.security.quarantine import QuarantinedExtractor
+
+    transport = MagicMock()
+    transport.dispatch = AsyncMock(side_effect=BrokenPipeError("subprocess died"))
+    extractor = QuarantinedExtractor(
+        transport=transport,
+        audit_writer=fake_audit_writer,
+    )
+
+    with pytest.raises(BrokenPipeError):
+        await extractor.extract(_make_handle(), _make_schema())
+
+    # The audit row landed BEFORE the raise.
+    assert fake_audit_writer.last_event == "quarantine.transport_failed"
+    last = fake_audit_writer.calls[-1]
+    subject = last["subject"]
+    assert subject["result"] == "transport_failed"
+    assert subject["extraction_mode"] == "none"
+    assert subject["trust_tier_of_trigger"] == "T3"
+    # And the closed-vocab tag does NOT leak the exception text.
+    assert "subprocess died" not in str(subject)
+
+
+@pytest.mark.asyncio
 async def test_extract_rejects_payload_with_wrong_field_types(
     fake_audit_writer: MagicMock,
 ) -> None:

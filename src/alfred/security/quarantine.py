@@ -511,14 +511,32 @@ class QuarantinedExtractor:
         # Wire dispatch. The handle id is the only T3-attribution token
         # that crosses the boundary; ``source_url`` is intentionally
         # withheld (it's forensic data, not a wire input).
-        result_raw = await self._transport.dispatch(
-            "quarantine.extract",
-            {
-                "handle_id": handle.id,
-                "schema_json": schema_json,
-                "schema_version": schema_version,
-            },
-        )
+        #
+        # err-001 fix: wrap the transport await so a crash here lands
+        # an audit row before propagating. The prior code had no
+        # try/except — a supervisor-side transport failure (broken
+        # pipe, framing error, premature subprocess death) would
+        # silently leave the call without any audit attribution. The
+        # ``transport_failed`` result tag is a closed-vocabulary value
+        # distinct from ``protocol_violation`` so audit consumers can
+        # tell transport-layer crashes apart from in-band protocol
+        # violations.
+        try:
+            result_raw = await self._transport.dispatch(
+                "quarantine.extract",
+                {
+                    "handle_id": handle.id,
+                    "schema_json": schema_json,
+                    "schema_version": schema_version,
+                },
+            )
+        except Exception:
+            await self._emit_transport_failed_audit(
+                correlation_id=correlation_id,
+                schema_name=schema_name,
+                schema_version=schema_version,
+            )
+            raise
 
         # Protocol-violation guard: non-ControlResult or wrong kind.
         if not isinstance(result_raw, ControlResult):
@@ -648,6 +666,51 @@ class QuarantinedExtractor:
 
         return result
 
+    async def _emit_transport_failed_audit(
+        self,
+        *,
+        correlation_id: str,
+        schema_name: str,
+        schema_version: int,
+    ) -> None:
+        """Audit a ``quarantine.transport_failed`` event (err-001 fix).
+
+        Emitted BEFORE the transport exception re-raises so the operator
+        log carries the failure even if the caller swallows it. The
+        ``transport_failed`` result tag is closed-vocabulary and
+        distinct from ``protocol_violation`` — a broken pipe / framing
+        error / premature subprocess death is a transport-layer crash,
+        not an in-band protocol violation.
+
+        We deliberately do NOT serialise the exception type or message
+        into the audit row: the exception may carry handle-id or
+        provider-key references through ``__cause__`` chains, and the
+        closed-vocabulary ``result`` tag is the structural defence
+        against that leakage.
+        """
+        from alfred.audit import audit_row_schemas
+
+        await self._audit_writer.append_schema(
+            fields=audit_row_schemas.QUARANTINE_EXTRACT_FIELDS,
+            schema_name="QUARANTINE_EXTRACT_FIELDS",
+            event="quarantine.transport_failed",
+            actor_user_id=None,
+            subject={
+                "extraction_mode": "none",
+                "provider": "quarantined-llm",
+                "schema_name": schema_name,
+                "schema_version": schema_version,
+                "retry_count": 0,
+                "trust_tier_of_trigger": "T3",
+                "result": "transport_failed",
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T3",
+            result="transport_failed",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
+        )
+
     async def _emit_protocol_violation_audit(
         self,
         *,
@@ -725,10 +788,9 @@ async def quarantined_to_structured(
         content_tier="T3",
     ):
         from alfred.errors import AlfredError
+        from alfred.i18n import t
 
-        raise AlfredError(
-            "Content clearance denied for quarantine.dereference (T3)",
-        )
+        raise AlfredError(t("security.quarantine.dereference_denied"))
     return await extractor.extract(handle, schema)
 
 
@@ -790,10 +852,9 @@ async def downgrade_to_orchestrator(
         content_tier="T3_derived",
     ):
         from alfred.errors import AlfredError
+        from alfred.i18n import t
 
-        raise AlfredError(
-            "Content clearance denied for t3.downgrade_to_orchestrator",
-        )
+        raise AlfredError(t("security.quarantine.downgrade_denied"))
 
     from alfred.audit import audit_row_schemas
 
