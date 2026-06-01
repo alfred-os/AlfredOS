@@ -251,6 +251,7 @@ class PluginLifecycle:
         self,
         *,
         plugin_id: str,
+        manifest_tier: str,
         exception_type: str,
         exit_code: int | None,
         signal: int | None,
@@ -277,6 +278,17 @@ class PluginLifecycle:
 
         Args:
             plugin_id: Stable plugin identifier.
+            manifest_tier: The plugin's declared subscriber tier
+                (``"system"`` / ``"user-plugin"`` / etc.) — lands on the
+                audit row's ``manifest_subscriber_tier`` field so
+                non-system plugin crashes are correctly attributed
+                (CR PR-S3-3b R5 #3332700199). Threaded from the
+                supervisor's crash handler, which has the manifest
+                handle for the crashing plugin. Spec §4.3 + PR-S3-3a
+                R1 — closed-domain validation lives in the gate at load
+                time; on the crash path we faithfully echo whatever the
+                manifest declared (the load gate already rejected
+                out-of-domain tiers).
             exception_type: Python *type name only* of the failure —
                 ``type(exc).__name__``. Spec §5.6 forbids ``str(exc)`` /
                 ``exc.args`` here because a misbehaving subprocess may
@@ -311,10 +323,13 @@ class PluginLifecycle:
         breaker_state_label = breaker.state.value
 
         # Symmetric-shape subject — the field set differs across the two
-        # emits, but the shared keys are computed once.
+        # emits, but the shared keys are computed once. ``manifest_tier``
+        # threaded from the caller so non-system plugin crashes attribute
+        # correctly (CR PR-S3-3b R5 #3332700199); previously hardcoded
+        # ``"system"`` here, which misattributed user-plugin crashes.
         base_subject: dict[str, object] = {
             "plugin_id": plugin_id,
-            "manifest_subscriber_tier": "system",
+            "manifest_subscriber_tier": manifest_tier,
             "manifest_version": _MANIFEST_VERSION_DEFAULT,
             "sandbox_profile": _SANDBOX_PROFILE_UNKNOWN,
             "exit_code": exit_code,

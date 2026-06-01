@@ -179,6 +179,7 @@ async def test_on_crash_increments_breaker_and_trips_at_threshold(
     for i in range(3):
         await pl.on_crash(
             plugin_id="test-plugin",
+            manifest_tier="system",
             exception_type="SubprocessExitedError",
             exit_code=1,
             signal=None,
@@ -206,6 +207,7 @@ async def test_on_crash_breaker_closed_emits_crashed_row(
 
     await pl.on_crash(
         plugin_id="p1",
+        manifest_tier="system",
         exception_type="SubprocessExitedError",
         exit_code=2,
         signal=None,
@@ -225,6 +227,7 @@ async def test_on_crash_breaker_closed_emits_crashed_row(
     assert kwargs["subject"]["exception_type"] == "SubprocessExitedError"
     assert kwargs["subject"]["exit_code"] == 2
     assert kwargs["subject"]["breaker_state"] == "CLOSED"
+    assert kwargs["subject"]["manifest_subscriber_tier"] == "system"
 
 
 @pytest.mark.asyncio
@@ -243,6 +246,7 @@ async def test_on_crash_breaker_opens_emits_quarantined_row(
     for i in range(3):
         await pl.on_crash(
             plugin_id="p1",
+            manifest_tier="system",
             exception_type="SubprocessExitedError",
             exit_code=1,
             signal=None,
@@ -280,6 +284,7 @@ async def test_on_crash_kill_succeeded_threads_into_quarantined_row(
     for i in range(3):
         await pl.on_crash(
             plugin_id="p1",
+            manifest_tier="system",
             exception_type="SubprocessExitedError",
             exit_code=1,
             signal=None,
@@ -310,6 +315,7 @@ async def test_on_crash_never_emits_raw_exception_string(
 
     await pl.on_crash(
         plugin_id="p1",
+        manifest_tier="system",
         exception_type="ValueError",
         exit_code=None,
         signal=None,
@@ -327,6 +333,79 @@ async def test_on_crash_never_emits_raw_exception_string(
 
 
 @pytest.mark.asyncio
+async def test_on_crash_threads_manifest_tier_for_non_system_plugin(
+    mock_gate: MagicMock, mock_audit: AsyncMock
+) -> None:
+    """CR PR-S3-3b R5 #3332700199: ``on_crash`` attributes the crashing
+    plugin's actual manifest tier, not a hardcoded ``"system"``.
+
+    Previously, ``base_subject`` pinned ``manifest_subscriber_tier="system"``
+    so a user-plugin crash would land on the audit graph with the wrong
+    tier — defeating the operator dashboard's "system crashes vs
+    user-plugin crashes" partition (spec §4.3 + PLUGIN_LIFECYCLE_FIELDS).
+
+    Drive: pass ``manifest_tier="user-plugin"`` and assert the audit row's
+    subject carries the threaded value verbatim on both the CLOSED-still
+    ``crashed`` shape and (in a sibling test) the OPEN-tripped
+    ``quarantined`` shape.
+    """
+    pl = PluginLifecycle(gate=mock_gate, audit=mock_audit)
+    breaker = _make_breaker()
+
+    await pl.on_crash(
+        plugin_id="user-tool-x",
+        manifest_tier="user-plugin",
+        exception_type="SubprocessExitedError",
+        exit_code=1,
+        signal=None,
+        restart_count=0,
+        breaker=breaker,
+        trace_id="trace-user",
+    )
+
+    kwargs = mock_audit.append_schema.call_args.kwargs
+    assert kwargs["event"] == "plugin.lifecycle.crashed"
+    assert kwargs["subject"]["manifest_subscriber_tier"] == "user-plugin"
+
+
+@pytest.mark.asyncio
+async def test_on_crash_threads_manifest_tier_through_quarantined_row(
+    mock_gate: MagicMock, mock_audit: AsyncMock
+) -> None:
+    """CR PR-S3-3b R5 #3332700199: ``manifest_tier`` reaches the
+    quarantined-row shape as well.
+
+    The quarantined branch is the more sensitive of the two — an operator
+    drilling into "what got quarantined and why" needs the manifest tier
+    to be the plugin's actual tier (so the dashboard's tier-partitioned
+    view is honest). Pre-load failures to threshold so the next on_crash
+    trips the breaker to OPEN.
+    """
+    pl = PluginLifecycle(gate=mock_gate, audit=mock_audit)
+    breaker = _make_breaker()
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    for i in range(2):
+        breaker.record_failure("SubprocessExitedError", now=base + dt.timedelta(seconds=i))
+
+    await pl.on_crash(
+        plugin_id="user-tool-x",
+        manifest_tier="user-plugin",
+        exception_type="SubprocessExitedError",
+        exit_code=1,
+        signal=None,
+        restart_count=3,
+        breaker=breaker,
+        trace_id="trace-user-quarantine",
+        now=base + dt.timedelta(seconds=2),
+    )
+
+    assert breaker.state == BreakerState.OPEN
+    kwargs = mock_audit.append_schema.call_args.kwargs
+    assert kwargs["event"] == "plugin.lifecycle.quarantined"
+    assert kwargs["subject"]["manifest_subscriber_tier"] == "user-plugin"
+
+
+@pytest.mark.asyncio
 async def test_on_crash_default_now_uses_wall_clock(
     mock_gate: MagicMock, mock_audit: AsyncMock
 ) -> None:
@@ -340,6 +419,7 @@ async def test_on_crash_default_now_uses_wall_clock(
     breaker = _make_breaker()
     await pl.on_crash(
         plugin_id="p1",
+        manifest_tier="system",
         exception_type="SubprocessExitedError",
         exit_code=1,
         signal=None,
@@ -433,6 +513,7 @@ async def test_on_crash_closed_invokes_lifecycle_crashed_hookpoint(
 
     await pl.on_crash(
         plugin_id="quarantined-llm",
+        manifest_tier="system",
         exception_type="SubprocessExitedError",
         exit_code=1,
         signal=None,
@@ -481,6 +562,7 @@ async def test_on_crash_open_invokes_lifecycle_quarantined_hookpoint(
 
     await pl.on_crash(
         plugin_id="quarantined-llm",
+        manifest_tier="system",
         exception_type="SubprocessExitedError",
         exit_code=1,
         signal=None,
