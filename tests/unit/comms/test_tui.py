@@ -43,8 +43,9 @@ from pytest import MonkeyPatch
 from textual.widgets import Input
 
 from alfred.comms.tui import AlfredTuiApp
+from alfred.identity.models import Authorization
 from alfred.memory.working import WorkingMemory
-from alfred.security.tiers import T2, TaggedContent
+from alfred.security.tiers import T1, T2, TaggedContent
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,22 +54,39 @@ class _FakeUser:
 
     Frozen so a test that mutates ``slug`` would surface as a hard error
     rather than as a silent mid-test identity swap.
+
+    ``authorization`` defaults to ``"standard"`` (NOT operator) so the
+    existing happy-path tests retain their T2 ingest expectation. The
+    arch-001 T1 test below constructs a separate fixture user with
+    ``authorization=Authorization.OPERATOR.value`` to exercise the T1
+    branch of ``_ingest_tier``.
     """
 
     slug: str = "operator"
     display_name: str = "Operator"
     language: str = "en-US"
+    authorization: str = "standard"
 
 
-def _build_doubles(orch_response: Any) -> tuple[AsyncMock, MagicMock, MagicMock, _FakeUser]:
+def _build_doubles(
+    orch_response: Any,
+    *,
+    user: _FakeUser | None = None,
+) -> tuple[AsyncMock, MagicMock, MagicMock, _FakeUser]:
     """Construct the four collaborators every TUI test needs.
 
     Returns ``(orch, resolver, pool, user)``. The pool's ``acquire`` returns
     a real :class:`WorkingMemory` instance — using a MagicMock there would
     accept any kwargs and hide a future signature drift. ``release`` stays
     an AsyncMock so tests can assert it was awaited.
+
+    ``user`` defaults to a standard-authorization fake (whose TUI input
+    is T2 per spec §3.6). The arch-001 T1 test passes a fixture user
+    with ``authorization=Authorization.OPERATOR.value`` to exercise the
+    T1 branch of ``_ingest_tier``.
     """
-    user = _FakeUser()
+    if user is None:
+        user = _FakeUser()
     resolver = MagicMock()
     resolver.get_operator = MagicMock(return_value=user)
     pool = MagicMock()
@@ -329,3 +347,91 @@ async def test_second_submit_while_busy_is_silently_ignored() -> None:
             _assert_dispatched_once(orch, user=user, expected_text="hi")
     finally:
         gate.set()
+
+
+# ---------------------------------------------------------------------------
+# arch-001 (slice-3 retrospective): T1 ingress from operator-role users.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_operator_role_user_input_tagged_t1_via_ingest_tier() -> None:
+    """An operator-role user typing in the TUI produces ``TaggedContent[T1]``.
+
+    Spec §3.6: TUI + operator → T1. Pre-fix the TUI hard-coded
+    ``tag(T2, ...)`` so T1 was reachable only via test fixtures —
+    production operator turns ran under T2. This test pins the new
+    production producer: the operator's TUI input lands at the
+    orchestrator already tagged T1, the audit row records T1, and the
+    dispatch path is otherwise identical to the T2 case.
+
+    The fake user carries
+    ``authorization=Authorization.OPERATOR.value="operator"`` — the
+    exact string :func:`alfred.identity._ingest._ingest_tier` compares
+    against. A typo here ("OPERATOR" vs "operator") would silently
+    fall through to T2 (the safer default), which is why the test
+    pulls the value from the enum rather than hard-coding the literal.
+    """
+    # ``replace`` is the immutable-dataclass update idiom; we need a
+    # distinct user from the default so the existing tests' T2
+    # expectation stays valid. The frozen=True flag on _FakeUser would
+    # refuse direct mutation.
+    from dataclasses import replace
+
+    base = _FakeUser()
+    operator_user = replace(base, authorization=Authorization.OPERATOR.value)
+    orch, resolver, pool, _user = _build_doubles(
+        orch_response="Good evening, sir.",
+        user=operator_user,
+    )
+    app = AlfredTuiApp(orchestrator=orch, identity_resolver=resolver, working_pool=pool)
+    async with app.run_test() as pilot:
+        app.query_one("#user_input", Input).focus()
+        await pilot.pause()
+        await pilot.press("h", "i")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        # Assert the orchestrator received a T1-tagged content wrapper.
+        assert orch.handle_user_message.await_count == 1
+        call = orch.handle_user_message.await_args
+        assert call is not None
+        content = call.kwargs["content"]
+        assert isinstance(content, TaggedContent)
+        assert content.tier is T1, (
+            f"Expected operator TUI input to be T1; got {content.tier.name!r}"
+        )
+        assert content.tier.name == "T1"
+        assert content.content == "hi"
+        # Source still points at the TUI adapter — same audit-traceable
+        # provenance string as the T2 path.
+        assert content.source == "comms.tui.input"
+
+
+@pytest.mark.asyncio
+async def test_non_operator_role_user_input_stays_tagged_t2() -> None:
+    """A standard-role user's TUI input stays T2.
+
+    Spec §3.6 is explicit: only operator-role + TUI yields T1. Standard,
+    trusted, read_only, or any unknown authorization value falls through
+    to T2. This test pins the fall-through case so a future
+    ``_ingest_tier`` refactor that accidentally widens T1 to all TUI
+    users is caught immediately.
+    """
+    orch, resolver, pool, _user = _build_doubles(
+        orch_response="hello there",
+        user=_FakeUser(authorization="standard"),
+    )
+    app = AlfredTuiApp(orchestrator=orch, identity_resolver=resolver, working_pool=pool)
+    async with app.run_test() as pilot:
+        app.query_one("#user_input", Input).focus()
+        await pilot.pause()
+        await pilot.press("h", "i")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        call = orch.handle_user_message.await_args
+        assert call is not None
+        content = call.kwargs["content"]
+        assert content.tier is T2
+        assert content.tier.name == "T2"
