@@ -1,0 +1,32 @@
+# AlfredOS comms-test reference plugin manifest — Slice 3 (spec §4.3, §9.1).
+#
+# manifest_version=1 is the integer Slice-3 baseline. The host refuses
+# any version > N+1 at handshake (spec §4.9), so bumping this here
+# without the corresponding host-side schema bump is a release-blocker.
+#
+# comms-008 fix: NO ``[[hooks]]`` blocks. ``lifecycle.start``,
+# ``lifecycle.stop``, ``inbound.message`` and ``adapter.health`` are
+# JSON-RPC methods on the plugin's own surface, NOT hookpoints
+# registered with the orchestrator's hook registry (spec §14 hookpoint
+# table). Declaring them as hook subscriptions would cause
+# ``RealGate.check_plugin_load`` to reject this manifest, since none of
+# the four appear in the spec §14 hookpoint table.
+alfred.manifest_version = 1
+
+[plugin]
+id = "alfred.comms-test"
+# subscriber_tier=user-plugin: this is a reference adapter that
+# processes only test/fixture content. It does NOT touch T3 user
+# content in production — it exists solely to validate the MCP wire
+# transport against a second consumer beyond the quarantined-LLM and
+# web-fetch plugins.
+subscriber_tier = "user-plugin"
+# sandbox_profile=user-plugin: restricted env, no FS writes outside
+# the per-plugin runtime dir, no network egress (the echo plugin sends
+# all output via JSON-RPC notifications, never directly).
+sandbox_profile = "user-plugin"
+# platform field reserved for Slice-4 comms-MCP extension (spec §4.3).
+# Optional in manifest_version=1, present-but-mandatory in version=2.
+# Reserving the line here documents intent without making this Slice 3
+# plugin Slice 4-shaped.
+# platform = "test"  # (commented — optional in v1)
