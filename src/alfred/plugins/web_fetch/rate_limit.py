@@ -195,11 +195,21 @@ class RateLimiter:
         # midnight does not double-count or under-count on the
         # transition. The 48h TTL gives the prior day's key time to
         # decay naturally without overlapping the next day.
-        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        #
+        # CR-146 minor: derive ``today`` and ``now_ms`` from one
+        # ``datetime.now(tz=UTC)`` call so a request that lands exactly
+        # at the 00:00 UTC boundary cannot get its date-key from one
+        # day and its timestamp from the next. The PRD §7.7 daily-
+        # rollover contract is meaningful at that exact boundary; a
+        # second ``now()`` could yield a daily_key from yesterday with
+        # an EXPIRESAT-style timestamp from today, miscounting the
+        # request against the wrong day's budget.
+        now = datetime.now(tz=UTC)
+        today = now.strftime("%Y-%m-%d")
         domain_key = f"alfred:rate:{domain}"
         user_key = f"alfred:rate:user:{user_id}"
         daily_key = f"alfred:fetch_budget:{user_id}:{today}"
-        now_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+        now_ms = int(now.timestamp() * 1000)
 
         script = await self._get_script()
         # Lua return is bytes under decode_responses=False; redis-py

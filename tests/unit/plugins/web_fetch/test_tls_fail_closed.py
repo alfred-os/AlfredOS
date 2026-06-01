@@ -75,9 +75,28 @@ def test_loopback_allowed_without_tls() -> None:
 
 
 def test_tls_failure_emits_audit_row_field() -> None:
-    """TLS errors carry dlp_scan_result='tls_verification_failed' for audit (spec §7.11)."""
+    """TLS errors carry the load-bearing audit attrs (spec §7.11).
+
+    CR-146 minor: the previous ``assert "tls" in str(err).lower() or
+    len(str(err)) > 0`` was vacuous — the ``or`` arm let ANY non-empty
+    message pass, so a regression that dropped the TLS wording from
+    the i18n msgstr would not have been caught. Assert the structured,
+    load-bearing fields directly: the typed ``url`` and ``detail``
+    attributes back the audit row, and the rendered message MUST name
+    "tls" so an operator scanning the structlog row sees the failure
+    class without parsing the structured payload.
+    """
     from alfred.plugins.web_fetch.errors import WebFetchTlsError
 
     err = WebFetchTlsError(url="https://bad.example.com/", detail="cert verify failed")
-    # The audit row field name is the canonical signal (tested in integration tests)
-    assert "tls" in str(err).lower() or len(str(err)) > 0
+    # Typed attrs back the audit row contract.
+    assert err.url == "https://bad.example.com/"
+    assert err.detail == "cert verify failed"
+    # Operator-facing message MUST name the TLS failure class (the
+    # rendered i18n msgstr carries "TLS verification failed"); a
+    # fuzzy-msgstr regression that swapped the body would fail here.
+    rendered = str(err).lower()
+    assert "tls" in rendered, (
+        f"WebFetchTlsError message lost the 'tls' wording — i18n fuzzy "
+        f"swap or msgstr regression? got: {str(err)!r}"
+    )
