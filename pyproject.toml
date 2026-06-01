@@ -78,6 +78,12 @@ packages = ["src/alfred"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# PR-S3-4: ``plugins/`` lives at the repo root and is imported as a top-level
+# package (``plugins.alfred_quarantined_llm.*``). It is NOT installed via the
+# wheel (it's the supervisor-launched MCP subprocess, not part of the
+# alfred-core package), so pytest needs an explicit pythonpath entry to
+# discover it during collection.
+pythonpath = ["."]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
 markers = [
