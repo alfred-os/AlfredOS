@@ -212,7 +212,7 @@ def test_maybe_rearm_noop_for_half_open() -> None:
     assert cb.state == BreakerState.HALF_OPEN
 
 
-def test_maybe_rearm_noop_when_last_trip_at_is_none() -> None:
+def test_maybe_rearm_noop_whenlast_trip_at_is_none() -> None:
     """OPEN without a known trip time stays OPEN — refuse to re-arm blind.
 
     Defensive: every legitimate trip records last_trip_at via _trip(). A
@@ -289,6 +289,42 @@ def test_record_probe_failure_outside_half_open_raises() -> None:
     cb.state = BreakerState.OPEN
     with pytest.raises(BreakStateError):
         cb.record_probe_failure("SubprocessExitedError")
+
+
+def test_record_probe_failure_accepts_frozen_now() -> None:
+    """CR PR-S3-3b R5 #3332700145: ``record_probe_failure`` honours the
+    module-level frozen-clock injection contract.
+
+    Module docstring (lines 28-30): "Every method that consults the clock
+    accepts a ``now`` keyword so tests run without sleeping." Before this
+    fix, ``record_probe_failure`` called ``dt.datetime.now(dt.UTC)``
+    directly — inconsistent with ``record_failure`` / ``maybe_rearm``
+    and impossible to pin in a frozen-time test. Inject ``now`` and
+    assert ``last_trip_at`` reflects the injection.
+    """
+    import datetime as dt
+
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    pinned = dt.datetime(2026, 7, 4, 13, 0, 0, tzinfo=dt.UTC)
+    cb.record_probe_failure("SubprocessExitedError", now=pinned)
+    assert cb.last_trip_at == pinned
+
+
+def test_record_probe_failure_default_now_uses_wall_clock() -> None:
+    """Omitting ``now=`` falls through to ``dt.datetime.now(dt.UTC)``.
+
+    Pins the production-call shape: the supervisor's HALF_OPEN probe
+    handler is wall-clock driven by default; the ``now`` kwarg exists
+    for test injection only. The breaker transitioned to OPEN — that's
+    the contract; we don't assert a specific timestamp here because
+    wall-clock varies.
+    """
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    cb.record_probe_failure("SubprocessExitedError")
+    assert cb.state == BreakerState.OPEN
+    assert cb.last_trip_at is not None
 
 
 # ---------------------------------------------------------------------------
