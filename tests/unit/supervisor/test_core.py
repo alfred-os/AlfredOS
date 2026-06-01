@@ -23,6 +23,7 @@ Public surface (``alfred.supervisor.__init__``):
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -369,6 +370,130 @@ async def test_stop_force_cancels_runner_on_drain_timeout(
 
 
 # Protocol-body coverage so the 100% gate doesn't flag the stubs as dead.
+
+
+# ---------------------------------------------------------------------------
+# F5 (err-001 / err-002) — stop() force-cancel await + persistence-failed audit
+# ---------------------------------------------------------------------------
+
+
+async def test_stop_force_cancel_awaits_runner_and_audits_taskgroup_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """err-001 (F5): a force-cancelled TaskGroup with a non-cancel error audits with errors.
+
+    Pins that ``stop()`` awaits the cancelled runner before claiming
+    shutdown completed. Without the await, TaskGroup-aggregated
+    exceptions from supervised plugin tasks would be silently dropped on
+    shutdown. The supervised task here raises ``RuntimeError`` which the
+    TaskGroup aggregates into an ``ExceptionGroup`` and re-raises on
+    runner exit — the stop() arm captures it and routes the audit row
+    through ``result="cancelled_with_errors"``.
+
+    The exception itself is NOT re-raised by stop() — the supervising
+    process is already shutting down; the audit row is the operator's
+    signal that shutdown was unclean.
+    """
+    monkeypatch.setattr("alfred.supervisor.core._STOP_DRAIN_TIMEOUT_SECONDS", 0.001)
+    sup, m = _build_supervisor()
+    await sup.start()
+
+    # Supervised task that runs longer than the drain budget AND raises a
+    # non-CancelledError when its TaskGroup is force-cancelled. The
+    # finally-arm raise becomes part of the TaskGroup's aggregated
+    # exception; the stop() arm captures it.
+    async def _hanging_with_error() -> None:
+        try:
+            await asyncio.sleep(10)
+        finally:
+            raise RuntimeError("plugin shutdown failed")
+
+    sup.register_plugin_task(_hanging_with_error())
+
+    # stop() does not re-raise — it audits the failed shutdown and returns.
+    await sup.stop()
+
+    # Audit row reflects the unclean shutdown — the operator sees
+    # "shutdown failed" via the audit graph.
+    stopped_calls = [
+        call
+        for call in m["audit"].append.await_args_list
+        if call.kwargs.get("event") == "supervisor.lifecycle.stopped"
+    ]
+    assert len(stopped_calls) == 1
+    kwargs = stopped_calls[0].kwargs
+    assert kwargs["result"] == "cancelled_with_errors"
+    assert "error_type" in kwargs["subject"]
+
+
+async def test_stop_force_cancel_preserves_external_cancelled_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """err-001 (F5): an external CancelledError during stop() propagates.
+
+    A non-TimeoutError CancelledError raised from inside ``wait_for``
+    (the supervising process cancelled the calling coroutine) must
+    re-raise, NOT be swallowed and audited as ``cancelled_with_errors``.
+    The audit path is for unclean shutdown — an external cancel of
+    stop() itself is the operator's signal to abort.
+    """
+    monkeypatch.setattr("alfred.supervisor.core._STOP_DRAIN_TIMEOUT_SECONDS", 0.001)
+    sup, _m = _build_supervisor()
+    await sup.start()
+
+    # Patch wait_for to immediately raise CancelledError so the err-001
+    # branch routes through the ``isinstance(exc, asyncio.CancelledError)``
+    # arm. This pins the operator-cancel-of-stop() path that the
+    # finding's "re-raise on CancelledError" requirement protects.
+    async def _cancel_immediately(*_args: Any, **_kwargs: Any) -> None:
+        raise asyncio.CancelledError("operator cancelled stop()")
+
+    monkeypatch.setattr("alfred.supervisor.core.asyncio.wait_for", _cancel_immediately)
+
+    with pytest.raises(asyncio.CancelledError):
+        await sup.stop()
+
+
+async def test_stop_persistence_failure_audits_and_reraises() -> None:
+    """err-002 (F5): SQLAlchemyError during stop() persistence is loud + audited.
+
+    The persistence block is wrapped in try/except so that an outage on
+    shutdown (Postgres unreachable, deadlock, etc.) lands in the audit
+    graph BEFORE the exception propagates. The audit writer opens its
+    own session per ``.append()`` call so the row commits even though
+    our persistence scope rolled back.
+
+    CLAUDE.md hard rule #7: the persistence failure MUST still propagate
+    so the operator-facing shutdown error is loud — we re-raise after
+    the audit row lands.
+    """
+    sup, m = _build_supervisor()
+    await sup.start()
+    # Register a breaker so the persistence loop has something to flush.
+    breaker = sup.get_or_create_breaker("quarantined-llm")
+
+    # Make the breaker's save_to_db raise an SQLAlchemyError so the
+    # persistence scope inside stop() trips into the err-002 branch.
+    from sqlalchemy.exc import SQLAlchemyError as _SQLAlchemyError
+
+    breaker.save_to_db = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_SQLAlchemyError("simulated outage")
+    )
+
+    with pytest.raises(_SQLAlchemyError):
+        await sup.stop()
+
+    # The lifecycle.stopped row carries result=persistence_failed and
+    # the offending exception type.
+    stopped_calls = [
+        call
+        for call in m["audit"].append.await_args_list
+        if call.kwargs.get("event") == "supervisor.lifecycle.stopped"
+    ]
+    assert len(stopped_calls) == 1
+    kwargs = stopped_calls[0].kwargs
+    assert kwargs["result"] == "persistence_failed"
+    assert kwargs["subject"]["error_type"] == "SQLAlchemyError"
 
 
 # ---------------------------------------------------------------------------
