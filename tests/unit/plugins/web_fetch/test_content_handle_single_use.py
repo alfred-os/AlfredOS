@@ -19,7 +19,7 @@ import asyncio
 import dataclasses
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -65,7 +65,7 @@ def test_content_handle_has_no_content_field() -> None:
     handle = ContentHandle(
         id=str(uuid.uuid4()),
         source_url="https://example.com/",
-        fetch_timestamp=datetime.now(tz=timezone.utc),
+        fetch_timestamp=datetime.now(tz=UTC),
     )
     assert not hasattr(handle, "content")
     assert not hasattr(handle, "body")
@@ -76,7 +76,7 @@ def test_content_handle_is_frozen() -> None:
     handle = ContentHandle(
         id=str(uuid.uuid4()),
         source_url="https://example.com/",
-        fetch_timestamp=datetime.now(tz=timezone.utc),
+        fetch_timestamp=datetime.now(tz=UTC),
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         handle.id = "new-id"  # type: ignore[misc]
@@ -209,3 +209,11 @@ async def test_close_is_idempotent(store: ContentStore) -> None:
     ``close()`` defensively without checking state first."""
     await store.close()
     await store.close()
+
+
+def test_redis_url_property_exposed(redis_url: str) -> None:
+    """The InboundCanaryScanner (Task 5) reads ``store.redis_url`` so it
+    can open its own peek-mode connection without touching the store's
+    internal client. Coverage on the property pins the contract."""
+    s = ContentStore(redis_url=redis_url)
+    assert s.redis_url == redis_url
