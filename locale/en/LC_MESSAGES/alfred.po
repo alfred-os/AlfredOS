@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-05-31 23:39+0100\n"
+"POT-Creation-Date: 2026-06-01 03:37+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -130,39 +130,39 @@ msgstr ""
 msgid "discord.budget_blocked"
 msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
 
-#: src/alfred/comms/tui.py:129 src/alfred/comms/tui.py:130
+#: src/alfred/comms/tui.py:141 src/alfred/comms/tui.py:142
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: src/alfred/comms/tui.py:131
+#: src/alfred/comms/tui.py:143
 msgid "tui.binding.cancel_turn"
 msgstr "Cancel turn"
 
-#: src/alfred/comms/tui.py:156
+#: src/alfred/comms/tui.py:168
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: src/alfred/comms/tui.py:181
+#: src/alfred/comms/tui.py:193
 msgid "tui.label_you"
 msgstr "you"
 
-#: src/alfred/comms/tui.py:186
+#: src/alfred/comms/tui.py:198
 msgid "tui.thinking"
 msgstr "thinking..."
 
-#: src/alfred/comms/tui.py:200
+#: src/alfred/comms/tui.py:212
 msgid "tui.turn_cancelled"
 msgstr "turn cancelled"
 
-#: src/alfred/comms/tui.py:203
+#: src/alfred/comms/tui.py:215
 msgid "tui.turn_timeout"
 msgstr "no response within {seconds}s; cancelled"
 
-#: src/alfred/comms/tui.py:208
+#: src/alfred/comms/tui.py:220
 msgid "tui.alfred_error"
 msgstr "alfred error: {error}"
 
-#: src/alfred/comms/tui.py:216
+#: src/alfred/comms/tui.py:228
 msgid "tui.label_alfred"
 msgstr "alfred"
 
@@ -518,13 +518,13 @@ msgstr ""
 "(valid: {valid_tiers}). Content trust tiers (T0-T3) are not subscriber "
 "tiers; see ADR-0017."
 
-#: src/alfred/plugins/errors.py:175
+#: src/alfred/plugins/errors.py:174
 msgid "plugin.protocol_violation"
 msgstr ""
 "Plugin {plugin_id} sent a disallowed JSON-RPC method {method} after the "
 "handshake."
 
-#: src/alfred/plugins/errors.py:195
+#: src/alfred/plugins/errors.py:193
 msgid "plugin.transport.dlp_outbound_refused"
 msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
@@ -563,7 +563,7 @@ msgstr "Plugin manifest [plugin] sandbox_profile is not a string."
 msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
-#: src/alfred/plugins/stdio_transport.py:604
+#: src/alfred/plugins/stdio_transport.py:608
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
@@ -593,28 +593,27 @@ msgstr ""
 # paths in alfred.security.tiers. Each error retains all the diagnostic
 # detail the prior f-string carried; the structured kwargs make the
 # strings re-renderable in a non-English UI at display time.
-#: src/alfred/security/tiers.py
+#: src/alfred/security/tiers.py:217
 msgid "security.tier_subclass_missing_name"
 msgstr "TrustTier subclass {subclass} must set a non-empty `name`."
 
-#: src/alfred/security/tiers.py
+#: src/alfred/security/tiers.py:225 src/alfred/security/tiers.py:396
 msgid "security.tier_unsupported"
 msgstr ""
 "Unsupported trust tier for this build: '{tier_name}' (approved: "
 "[{approved}])."
 
-#: src/alfred/security/tiers.py
+#: src/alfred/security/tiers.py:249
 msgid "security.tier_mismatch"
 msgstr ""
 "Cross-tier wire payload rejected: declared '{got}' but parser expects "
 "'{expected}' (spec §3.5)."
 
-#: src/alfred/security/tiers.py
+#: src/alfred/security/tiers.py:303
 msgid "security.tier_unknown_wire"
-msgstr ""
-"Unknown trust tier on wire: '{tier_name}' (approved: [{approved}])."
+msgstr "Unknown trust tier on wire: '{tier_name}' (approved: [{approved}])."
 
-#: src/alfred/security/tiers.py:439
+#: src/alfred/security/tiers.py:458
 msgid "security.tag_t3_unauthorized"
 msgstr ""
 "security.tag_t3_unauthorized: tag(T3, ...) refused — caller {caller} did "
