@@ -25,10 +25,10 @@ category: tier_laundering
 threat: >-
   An attacker times a long-running dispatch call (e.g. a slow inbound
   scanner) to overlap with an operator revoking the underlying
-  capability grant. Without atomic policy swap, the in-flight call
-  could complete under the OLD allowed policy while the audit log
-  records the NEW revoked state — letting the attacker dispatch one
-  more call than the audit graph attributes to the grant.
+  capability grant so that — absent atomic policy swap — the
+  in-flight call could complete under the OLD allowed policy while
+  the audit log records the NEW revoked state, letting the attacker
+  dispatch one more call than the audit graph attributes to the grant.
 ingestion_path: capability_gate
 payload:
   hookpoint: "tool.web.fetch"
