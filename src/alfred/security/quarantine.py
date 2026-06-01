@@ -568,7 +568,24 @@ class QuarantinedExtractor:
         audit_result: str
         audit_extraction_mode: str
         if payload_kind == "extracted":
-            data_obj = payload.get("data") or {}
+            # Strict ``data`` shape (PRD §7.1 boundary contract): missing
+            # or non-dict ``data`` is a protocol violation, NOT a permissively
+            # defaulted empty dict. Coercing to ``{}`` here would let a
+            # misbehaving plugin synthesise a valid Extracted outcome for
+            # any schema whose required fields all carry defaults, weakening
+            # the wire-format contract the dual-LLM split relies on.
+            data_field = payload.get("data")
+            if not isinstance(data_field, dict):
+                await self._emit_protocol_violation_audit(
+                    correlation_id=correlation_id,
+                    schema_name=schema_name,
+                    schema_version=schema_version,
+                )
+                raise PluginProtocolViolation(
+                    method="quarantine.extract",
+                    plugin_id=self._PLUGIN_ID,
+                )
+            data_obj = data_field
             extraction_mode_value = payload.get("extraction_mode")
             # Closed-set validator — anything outside the Literal is a
             # protocol violation. Defence-in-depth alongside Pydantic's
@@ -603,7 +620,10 @@ class QuarantinedExtractor:
             # transport-layer event, not a legitimate refusal outcome
             # (collapsing them would let a misbehaving plugin disguise
             # schema-mismatches as ``result=refused`` audit rows).
-            data_dict = dict(data_obj) if isinstance(data_obj, dict) else {}
+            # ``data_obj`` is already validated as a dict above — the
+            # ``isinstance`` short-circuit-to-{} fallback was removed because
+            # it masked protocol violations as permissively-defaulted dicts.
+            data_dict = dict(data_obj)
             try:
                 schema.model_validate(data_dict)
             except ValidationError:
@@ -824,7 +844,7 @@ async def downgrade_to_orchestrator(
     family.
 
     Gate-first ordering: ``check_content_clearance(...,
-    hookpoint="t3.downgrade_to_orchestrator", content_tier="T3_derived")``
+    hookpoint="t3.downgrade_to_orchestrator", content_tier="T3")``
     is consulted BEFORE the audit row writes. A denial raises
     :class:`AlfredError` with NO audit row from this family — the
     gate's own refusal accounting handles denied calls (typically the
@@ -846,10 +866,18 @@ async def downgrade_to_orchestrator(
     — that would bypass DLP and let downstream log consumers observe
     raw T3-derived content outside the privileged-orchestrator path.
     """
+    # Gate uses the closed PRD §7.1 tier vocabulary ({T0, T1, T2, T3}).
+    # ``T3_derived`` is an audit-row forensic label (see
+    # T3_DERIVED_DOWNGRADE_FIELDS source_tier) NOT a policy tier — passing
+    # it to the gate would drift policy off the canonical tier model.
+    # The source of this content is T3 (a quarantined-LLM extraction);
+    # the gate is asked to clear T3 crossing through the downgrade
+    # hookpoint. The forensic ``T3_derived`` provenance is recorded in
+    # the audit row below.
     if not gate.check_content_clearance(
         plugin_id="t3.downgrade_to_orchestrator",
         hookpoint="t3.downgrade_to_orchestrator",
-        content_tier="T3_derived",
+        content_tier="T3",
     ):
         from alfred.errors import AlfredError
         from alfred.i18n import t

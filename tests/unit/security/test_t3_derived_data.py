@@ -185,9 +185,10 @@ def test_downgrade_to_orchestrator_refuses_on_denied_gate() -> None:
 
     Replaces the prior "stub raises NotImplementedError" pin. The new
     contract is gate-first: a denied ``check_content_clearance(...,
-    content_tier="T3_derived")`` raises :class:`AlfredError` BEFORE the
-    audit row writes. The :data:`None` audit writer here would
-    AttributeError on any path that skipped the gate.
+    content_tier="T3")`` (PRD §7.1 canonical tier vocabulary) raises
+    :class:`AlfredError` BEFORE the audit row writes. The :data:`None`
+    audit writer here would AttributeError on any path that skipped the
+    gate.
     """
     from alfred.errors import AlfredError
 

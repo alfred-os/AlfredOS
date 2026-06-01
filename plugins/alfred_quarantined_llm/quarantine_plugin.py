@@ -176,7 +176,14 @@ async def handle_extract(
     # Local import: see docstring rationale above.
     from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
 
-    content = _content_cache.get(handle_id, b"")
+    # Single-use T3 handle (spec §7.2 GETDEL-equivalent): ``pop`` so the
+    # T3-derived bytes are released from the cache the moment the
+    # extractor consumes them. Using ``get`` would leave the payload
+    # resident in-process and allow replay against the same handle_id
+    # on a subsequent extract call — weakening the PRD §7.1 single-
+    # consumer boundary intent. The Redis-backed ContentStore (PR-S3-5)
+    # uses GETDEL for the same reason.
+    content = _content_cache.pop(handle_id, b"")
     return await dispatch_extraction(
         content=content,
         schema_json=schema_json,
@@ -202,15 +209,38 @@ async def main() -> None:  # pragma: no cover - subprocess entry (Task 11 wires 
     The provider build + MCP server loop are NotImplemented in the
     Slice-3 skeleton; the supervisor cold-start path doesn't exercise
     this entry point until Task 11 wires the recorded fixtures end-to-end.
+
+    Skeleton-failure containment (rvw): if either placeholder is reached
+    in a deployed build, the ``NotImplementedError`` is caught, logged
+    to stderr (the supervisor captures and audit-rows subprocess stderr
+    on lifecycle failure), and the process exits with status 78
+    (``EX_CONFIG``-equivalent — "config error: subprocess entrypoint
+    not yet implemented"). The raw ``NotImplementedError`` is NEVER
+    propagated unhandled — an unhandled exception out of ``asyncio.run``
+    would crash with a Python stack trace that doesn't carry the
+    "this entrypoint is a skeleton" signal the operator needs.
     """
     provider_key = _read_provider_key_from_fd3()
     try:
         provider = _build_provider(provider_key)
+    except NotImplementedError as exc:
+        print(
+            f"quarantine_plugin: subprocess entrypoint not yet implemented: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(78)
     finally:
         # del after handoff; the only remaining reference is inside
         # the provider client's SDK state.
         del provider_key
-    await _run_mcp_server(provider)
+    try:
+        await _run_mcp_server(provider)
+    except NotImplementedError as exc:
+        print(
+            f"quarantine_plugin: MCP server loop not yet implemented: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(78)
 
 
 def _build_provider(key: str) -> Any:  # pragma: no cover - Task 11 placeholder

@@ -51,6 +51,29 @@ def test_deepseek_fixture_json_object_shape(
     assert recorded_deepseek_extraction_fixture["extraction_mode"] == "json_object_unconstrained"
 
 
+def test_openai_fixture_structured_outputs_strict_shape(
+    recorded_openai_extraction_fixture: dict[str, Any],
+) -> None:
+    """OpenAI structured outputs: ``json_schema.strict=true`` (spec §6.2).
+
+    OpenAI without ``strict: true`` is NOT a ``NATIVE_CONSTRAINED_GENERATION``
+    provider — drift on this flag silently downgrades the extraction mode
+    from constrained-generation to prompt-embedded JSON, which weakens
+    the dual-LLM contract on the OpenAI path (PRD §7.1, spec §6.2).
+    """
+    req = recorded_openai_extraction_fixture["request_body"]
+    rf = req.get("response_format", {})
+    assert rf.get("type") == "json_schema", (
+        "OpenAI fixture must declare ``response_format.type=='json_schema''"
+    )
+    js = rf.get("json_schema", {})
+    assert js.get("strict") is True, (
+        "OpenAI fixture must pin ``json_schema.strict=true``; otherwise the"
+        " provider is not NATIVE_CONSTRAINED_GENERATION."
+    )
+    assert recorded_openai_extraction_fixture["extraction_mode"] == "native_constrained"
+
+
 def test_recorded_injection_fixture_carries_extracted_and_instruction(
     recorded_injection_fixture: dict[str, Any],
 ) -> None:

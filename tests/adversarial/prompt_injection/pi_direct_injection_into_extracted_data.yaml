@@ -18,9 +18,11 @@
 #    schema is dropped at validation time.
 #  - The `downgrade_to_orchestrator` gate requires
 #    `check_content_clearance(hookpoint=
-#    "t3.downgrade_to_orchestrator", content_tier="T3_derived")` before
-#    the dict is injected into a privileged prompt — without that
-#    capability grant the orchestrator never observes the derived data.
+#    "t3.downgrade_to_orchestrator", content_tier="T3")` (PRD §7.1
+#    canonical tier vocabulary) before the dict is injected into a
+#    privileged prompt — without that capability grant the orchestrator
+#    never observes the derived data. The ``T3_derived`` forensic
+#    provenance is recorded on the audit row's ``source_tier`` field.
 #
 # Outcome: `TypedRefusal` from the quarantined LLM OR an `Extracted`
 # whose `data` was validated against a schema that the attacker payload

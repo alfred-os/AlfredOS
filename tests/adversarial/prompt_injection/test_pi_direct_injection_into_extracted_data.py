@@ -18,9 +18,11 @@ injection laundering attempt fail-shut:
    PR-S3-4 lands the full extraction. The stub posture is itself a
    defence: any caller before PR-S3-4 fails loudly, preventing a
    silent partial-implementation that could ship without DLP post-scan.
-3. The downgrade path requires ``content_tier="T3_derived"``
-   clearance through :func:`downgrade_to_orchestrator` before injecting
-   :data:`T3DerivedData` into a privileged prompt (spec §3.7).
+3. The downgrade path requires ``content_tier="T3"`` clearance (PRD
+   §7.1 canonical tier vocabulary) through :func:`downgrade_to_
+   orchestrator` before injecting :data:`T3DerivedData` into a
+   privileged prompt (spec §3.7). The ``T3_derived`` forensic
+   provenance is recorded on the audit row's ``source_tier`` field.
 
 Outcome: the payload is **neutralized** — the orchestrator's prompt
 context never receives the injection text because every path between
