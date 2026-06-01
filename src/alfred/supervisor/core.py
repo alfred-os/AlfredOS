@@ -66,6 +66,7 @@ import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
+from alfred.i18n import t
 from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.capability_monitor import CapabilityGateMonitor
 from alfred.supervisor.errors import SupervisorError
@@ -223,7 +224,7 @@ class Supervisor:
                 and double-supervise every subsequent register call.
         """
         if self._run_task is not None:
-            raise RuntimeError("Supervisor.start() called twice without stop()")
+            raise RuntimeError(t("supervisor.start.already_started"))
         # Reset both events — the supervisor instance can in principle be
         # restarted (stop() then start()) and the events from the previous
         # cycle must not bleed into the new one.
@@ -429,10 +430,7 @@ class Supervisor:
                 immediately orphaned.
         """
         if self._task_group is None:
-            raise RuntimeError(
-                "register_plugin_task() called before Supervisor.start() "
-                "(or after stop()); no active TaskGroup to attach to"
-            )
+            raise RuntimeError(t("supervisor.register_plugin_task.no_active_task_group"))
         return self._task_group.create_task(coro)
 
     # ------------------------------------------------------------------
@@ -479,7 +477,7 @@ class Supervisor:
         """
         breaker = self._breakers.get(component_id)
         if breaker is None:
-            raise SupervisorError(f"No supervised component with id={component_id!r}")
+            raise SupervisorError(t("supervisor.no_such_component", component_id=component_id))
 
         old_state = breaker.state.value
         breaker.reset()
