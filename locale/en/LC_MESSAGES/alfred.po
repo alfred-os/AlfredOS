@@ -658,10 +658,38 @@ msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
 #: src/alfred/plugins/stdio_transport.py:608
+#: src/alfred/plugins/web_fetch/errors.py:134
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
 "subprocess has been quarantined."
+
+#: src/alfred/plugins/web_fetch/errors.py:51
+msgid "web.fetch.error.domain_not_allowed"
+msgstr ""
+"web.fetch refused: domain {domain!r} is not in the effective allowlist "
+"(manifest ∩ operator config ∩ per-session)."
+
+#: src/alfred/plugins/web_fetch/errors.py:66
+msgid "web.fetch.error.tls_failure"
+msgstr ""
+"web.fetch refused: TLS verification failed for {url!r} ({detail}). "
+"Production has no operator override; ALFRED_ENV=development is the only "
+"escape hatch."
+
+#: src/alfred/plugins/web_fetch/errors.py:81
+msgid "web.fetch.error.rate_limited"
+msgstr "web.fetch refused: rate limit exceeded for bucket {bucket!r}."
+
+#: src/alfred/plugins/web_fetch/errors.py:94
+msgid "web.fetch.error.mime_type_not_allowed"
+msgstr "web.fetch refused: response MIME type {mime_type!r} is not allowed."
+
+#: src/alfred/plugins/web_fetch/errors.py:109
+msgid "web.fetch.error.size_limit_exceeded"
+msgstr ""
+"web.fetch refused: response body {size} bytes exceeds the {limit}-byte "
+"limit."
 
 #: src/alfred/security/quarantine.py:813
 msgid "security.quarantine.dereference_denied"
