@@ -339,6 +339,49 @@ jobs:
           uv run coverage report \
             --include='src/alfred/supervisor/__init__.py,src/alfred/supervisor/errors.py,src/alfred/supervisor/breaker.py,src/alfred/supervisor/plugin_lifecycle.py,src/alfred/supervisor/deadline.py,src/alfred/supervisor/observability.py,src/alfred/supervisor/capability_monitor.py,src/alfred/supervisor/core.py' \
             --fail-under=100
+      - name: Quarantined-LLM trust-boundary 100% line+branch coverage (combined)
+        # Slice-3 PR-S3-4 introduces the quarantined-LLM extractor seam
+        # (spec §6.1-§6.8, ADR-0017). Every file enumerated below either
+        # carries the privileged orchestrator's trust contract or runs
+        # inside the `alfred-quarantine` UID subprocess that must NEVER
+        # see plaintext orchestrator secrets — a coverage hole here is a
+        # hole at the trust boundary:
+        #
+        #   * ``src/alfred/providers/base.py`` — the
+        #     :class:`ProviderCapability` enum + ``Provider`` Protocol +
+        #     ``register_provider`` registry (spec §6.1, prov-001/
+        #     arch-002). The capability set drives Anthropic tool-use
+        #     vs OpenAI strict:true vs DeepSeek JSON-mode branching in
+        #     the extractor; a missed branch silently downgrades a
+        #     constrained-generation provider to prompt-embedded.
+        #   * ``plugins/alfred_quarantined_llm/__init__.py`` — public
+        #     re-export surface. The package-import lock is the contract
+        #     every ``from plugins.alfred_quarantined_llm import ...``
+        #     site codes against.
+        #   * ``plugins/alfred_quarantined_llm/provider_dispatch.py`` —
+        #     capability-branched extractor dispatch (Anthropic tool-use
+        #     / OpenAI strict:true / DeepSeek JSON-mode / prompt-embedded
+        #     fallback). The branch matrix here is the wire-format
+        #     contract for every supported provider; a skipped branch is
+        #     a silent fallback to the wrong shape.
+        #   * ``plugins/alfred_quarantined_llm/quarantine_plugin.py`` —
+        #     the in-process plugin shell that hosts ``quarantine.ingest``
+        #     / ``quarantine.extract`` (spec §5.1). The handshake +
+        #     manifest validation + fd-3 provider-key path lives here;
+        #     a skipped branch on the launcher boundary is a CLAUDE.md
+        #     hard rule #6 (secrets-via-broker) violation candidate.
+        #
+        # Per-file ``--include`` mirrors the supervisor / plugins precedent
+        # so a new quarantined-LLM trust-boundary file gets added to this
+        # gate at the same PR it lands rather than silently shipped at
+        # < 100% coverage. Chained ``&&`` hashFiles guard per PR-S3-1 R1
+        # F1: ANY-match must NOT no-op the gate; ALL files must be
+        # present before the coverage report runs.
+        if: hashFiles('src/alfred/providers/base.py') != '' && hashFiles('plugins/alfred_quarantined_llm/__init__.py') != '' && hashFiles('plugins/alfred_quarantined_llm/provider_dispatch.py') != '' && hashFiles('plugins/alfred_quarantined_llm/quarantine_plugin.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/providers/base.py,plugins/alfred_quarantined_llm/__init__.py,plugins/alfred_quarantined_llm/provider_dispatch.py,plugins/alfred_quarantined_llm/quarantine_plugin.py' \
+            --fail-under=100
 
   smoke:
     name: Smoke (end-to-end)
