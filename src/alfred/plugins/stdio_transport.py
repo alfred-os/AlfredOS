@@ -36,8 +36,13 @@ silently downgrades T3 → untagged on retrieval.
 **Subprocess hardening (spec §5.3):**
 
 * Env scrubbing: the subprocess inherits a minimal env dict containing
-  only ``PATH`` (and i18n vars). Never ``os.environ`` — read attempts
-  are blocked by the AST guard in ``test_env_scrub_subprocess.py``.
+  only ``PATH``, i18n vars, and a SINGLE whitelisted ``ALFRED_ENV``
+  passthrough (arch-003 — needed for the documented dev-mode TLS
+  escape hatch in ``web_fetch/tls_policy.py``). Never ``os.environ`` —
+  read attempts are blocked by the AST guard in
+  ``test_env_scrub_subprocess.py``; the ``ALFRED_ENV`` value is read
+  in :mod:`alfred.plugins._env_passthrough`, the single sanctioned
+  parent-env reader for the plugin sandbox boundary.
 * fd-3 provider-key delivery: 4-byte big-endian length + N key bytes.
   Pipe fds are closed in ``finally`` so a spawn failure cannot leak
   them (rvw-pre-flight).
@@ -74,6 +79,7 @@ import structlog
 from alfred.audit import audit_row_schemas
 from alfred.errors import AlfredError
 from alfred.i18n import t
+from alfred.plugins._env_passthrough import alfred_env_for_subprocess
 from alfred.plugins._observability import (
     DISPATCH_DURATION,
     INBOUND_SCANNER_SCAN_DURATION,
@@ -312,10 +318,15 @@ class StdioTransport:
 
         * ``env=`` is built explicitly. No call site reads ``os.environ``
           (an AST guard in ``test_env_scrub_subprocess.py`` enforces this).
-          The subprocess gets ``PATH`` plus an opt-in
-          ``ALFRED_PROVIDER_KEY_FD`` entry naming the inherited pipe fd
-          when ``provider_key`` is supplied — no inherited credentials,
-          no ``PYTHONPATH``, no ``HOME``.
+          The subprocess gets ``PATH``, ``LANG``/``LC_ALL`` pinned to
+          ``C.UTF-8``, the whitelisted ``ALFRED_ENV`` passthrough
+          (arch-003 fix — sourced via
+          :func:`alfred.plugins._env_passthrough.alfred_env_for_subprocess`
+          so the AST guard against host-env reads in this module stays
+          intact), and an opt-in ``ALFRED_PROVIDER_KEY_FD`` entry
+          naming the inherited pipe fd when ``provider_key`` is
+          supplied — no other inherited credentials, no ``PYTHONPATH``,
+          no ``HOME``.
         * If ``provider_key`` is supplied, the host writes a length-
           prefixed frame (4-byte BE header + N bytes) on an inherited
           pipe fd. The child reads the numeric fd from
@@ -359,10 +370,22 @@ class StdioTransport:
         # silently run under the C locale. Pinning the values (rather
         # than reading from the parent's environ) keeps the env-scrub
         # invariant intact while delivering the documented contract.
+        #
+        # arch-003 fix: ``ALFRED_ENV`` is the SINGLE whitelisted
+        # passthrough from the parent's environment. Plugin subprocesses
+        # need it to honour the development escape hatch for TLS
+        # verification (``web_fetch/tls_policy.py``) — without it the
+        # subprocess always sees the env unset, defaults to
+        # ``"production"``, and refuses ``skip_tls_verify=True`` even in
+        # legitimate dev. The read is delegated to
+        # :func:`alfred_env_for_subprocess` (in a sibling module) so the
+        # AST guard against host-env reads in THIS file stays intact;
+        # no other parent-env key leaks.
         minimal_env: dict[str, str] = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
+            "ALFRED_ENV": alfred_env_for_subprocess(),
         }
         extra_fds: tuple[int, ...] = ()
         r_fd: int | None = None
