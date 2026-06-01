@@ -58,6 +58,18 @@ These three forces require one coherent ADR rather than three separate records b
 
 - The `manifest_version = 1` pin means any future manifest schema change that breaks backward compatibility requires incrementing to 2. This is intentional (explicit versioning discipline) rather than semver tolerance.
 - ADR-0009 status flips to superseded-for-new-adapters; existing Discord+TUI adapters are untouched through Slice 3.
+- **Audit attribution pattern for the deadline path.** One orchestrator action
+  timeout produces two audit rows from two writers: (1) the `supervisor.action_timeout`
+  row written by the orchestrator via an **autocommit writer** (independent of the
+  turn session) before re-raising `CancelledError`; (2) the normal
+  `orchestrator.turn.cancelled` row written by the existing rollback arm via the
+  session-bound writer (which is rolled back). Consumers querying the audit graph for
+  a cancelled turn must join on `trace_id` across both writers to see the full
+  picture. This split is deliberate: session-bound rows die with the transaction;
+  the autocommit row survives it. Every subsystem that emits a row on a failure path
+  inside a transactional scope must decide which writer to use. See
+  [docs/subsystems/supervisor.md](../subsystems/supervisor.md) — "DeadlineWrapper —
+  autocommit audit attribution".
 
 ## Alternatives considered
 
@@ -94,3 +106,4 @@ Rejected: `DevGate` fails open for `operator`/`user-plugin` without a backing st
   - #138 (PR-S3-1 — T1+T3 type system + nonce-gated `tag_t3_with_nonce`)
   - #139 (PR-S3-2 — Real `CapabilityGate` + `RealGate` + `GatePolicy` + `GrantRow`)
   - #140 (PR-S3-3a — MCP plugin transport: `StdioTransport`, `AlfredPluginSession`, `PluginManifest`, `InboundContentScanner`, `ContentStoreBase`)
+  - (TBD — PR-S3-3b — Supervisor: `CircuitBreaker`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints; Postgres persistence migration 0010)
