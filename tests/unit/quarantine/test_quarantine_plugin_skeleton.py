@@ -214,6 +214,103 @@ async def test_handle_extract_delegates_to_dispatch_extraction(
     assert result["extraction_mode"] == "native_constrained"
 
 
+# ---------------------------------------------------------------------------
+# fd-3 provider key read — sec-007 security boundary.
+# ---------------------------------------------------------------------------
+
+
+def _scripted_os_read(script: list[bytes]) -> Any:
+    """Return an ``os.read``-compatible callable that returns each item in
+    ``script`` on successive calls (regardless of fd / n).
+
+    The framing helper reads fd 3 in a fixed sequence (4-byte header,
+    length-N body, 1-byte trailing-emptiness probe). Tests script the
+    exact byte sequence each branch should observe.
+    """
+    calls = iter(script)
+
+    def _read(fd: int, n: int) -> bytes:
+        # Signature mirrors os.read(fd, n) for monkeypatch parity; the
+        # scripted form ignores both args and returns the next item.
+        return next(calls)
+
+    return _read
+
+
+def test_fd3_read_returns_decoded_key_on_well_formed_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: 4-byte length header + N-byte UTF-8 key + empty trailer.
+
+    The wire format pin (spec §5.3): big-endian 4-byte length, then the
+    key bytes, then no trailing bytes. Decode returns the original key.
+    """
+    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+
+    key = "sk-deepseek-abc123"
+    header = len(key).to_bytes(4, "big")
+    monkeypatch.setattr(
+        "os.read",
+        _scripted_os_read([header, key.encode(), b""]),
+    )
+    assert qp._read_provider_key_from_fd3() == key
+
+
+def test_fd3_read_exits_when_header_is_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short 4-byte header → ``sys.exit(1)`` before the MCP loop starts.
+
+    Supervisor-side contract: the subprocess MUST fail loudly when the
+    provider key isn't framed correctly, so the supervisor's
+    child-died notification fires with a clear lifecycle state rather
+    than a confused "started but never registered" gap.
+    """
+    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+
+    monkeypatch.setattr("os.read", _scripted_os_read([b"\x00\x00"]))
+    with pytest.raises(SystemExit) as exc_info:
+        qp._read_provider_key_from_fd3()
+    assert exc_info.value.code == 1
+
+
+def test_fd3_read_exits_when_body_is_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The header lies about length → ``sys.exit(1)``.
+
+    Defence against a supervisor-side framing bug or a partial-write
+    race. The subprocess refuses to start the MCP loop without a
+    complete key.
+    """
+    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+
+    header = (10).to_bytes(4, "big")  # claim 10 bytes
+    monkeypatch.setattr(
+        "os.read",
+        _scripted_os_read([header, b"short"]),  # actually 5 bytes
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        qp._read_provider_key_from_fd3()
+    assert exc_info.value.code == 1
+
+
+def test_fd3_read_exits_when_trailing_bytes_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trailing bytes after the framed key → ``sys.exit(1)``.
+
+    Any garbage after the key signals a supervisor-side framing bug;
+    we fail closed rather than try to recover and risk parsing a
+    second message as the key.
+    """
+    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+
+    key = "ok"
+    header = len(key).to_bytes(4, "big")
+    monkeypatch.setattr(
+        "os.read",
+        _scripted_os_read([header, key.encode(), b"garbage"]),
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        qp._read_provider_key_from_fd3()
+    assert exc_info.value.code == 1
+
+
 @pytest.mark.asyncio
 async def test_handle_extract_passes_empty_bytes_when_handle_missing(
     _clear_content_cache: None,
