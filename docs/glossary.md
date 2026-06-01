@@ -400,6 +400,166 @@ at call sites (no Pydantic discriminator field):
 See [StdioTransport](#stdiotransport) and
 [docs/subsystems/plugins.md](subsystems/plugins.md).
 
+## ExtractionResult
+
+The plain union `Extracted | TypedRefusal` (`src/alfred/security/quarantine.py:293`).
+The return type of `QuarantinedExtractor.extract()` and
+`quarantined_to_structured()`. Dispatch sites branch by `isinstance` — no
+Pydantic discriminator wrapper at the alias level (core-011). A
+`TypedRefusal` is a legitimate orchestrator outcome, not an exception; the
+caller is expected to branch on it. The transport-layer `DispatchResult`
+union (see [DispatchResult](#dispatchresult)) embeds `ExtractionResult` as
+one of its three branches.
+
+See [Extracted](#extracted), [TypedRefusal](#typedrefusal),
+[QuarantinedExtractor](#quarantinedextractor), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## Extracted
+
+Frozen Pydantic model for a successful structured extraction from T3 content
+(`src/alfred/security/quarantine.py:232`). Fields: `kind: Literal["extracted"]`
+(discriminator), `data: T3DerivedData`, `extraction_mode: ExtractionMode`.
+`extra="forbid"` prevents transport-boundary typos from silently surviving.
+The `data` field is a `T3DerivedData` `NewType` — at type-check time mypy
+refuses to widen it to `dict`, so callers must go through
+`downgrade_to_orchestrator()` before injecting the value into privileged
+prompts. Shipped in PR-S3-4 (#TBD).
+
+See [T3DerivedData](#t3deriveddata), [ExtractionMode](#extractionmode),
+[ExtractionResult](#extractionresult), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## TypedRefusal
+
+Frozen Pydantic model for a quarantined-LLM refusal (`src/alfred/security/quarantine.py:263`).
+Fields: `kind: Literal["typed_refusal"]` (discriminator), `reason:
+TypedRefusalReason`. The closed `reason` vocabulary is the structural
+enforcement that prevents provider-supplied free-form text (which is
+T3-derived) from entering audit-row fields. A `TypedRefusal` is not
+translated to an exception — it is a legitimate orchestrator outcome the
+caller branches on. Shipped in PR-S3-4 (#TBD).
+
+See [TypedRefusalReason](#typedrefusalreason), [ExtractionResult](#extractionresult),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## QuarantinedExtractor
+
+The orchestrator-side client of the quarantined-LLM plugin
+(`src/alfred/security/quarantine.py:327`). Dispatches `quarantine.extract`
+JSON-RPC calls via a `PluginTransport`, validates the response is a
+`ControlResult` with a recognised `kind`, and lifts the payload into the
+typed `Extracted | TypedRefusal` shape. Emits a `quarantine.extract` or
+`quarantine.protocol_violation` audit row on every call — the audit row
+lands before any raise so an operator reading the log sees the failure even
+if the caller swallows the exception (CLAUDE.md hard rule #7). The
+capability gate is consulted by the higher-level `quarantined_to_structured`
+function, not by the extractor — this keeps transport + audit-row
+concerns separate from gate concerns. Shipped in PR-S3-4 (#TBD).
+
+See [ExtractionResult](#extractionresult), [PluginTransport](#plugintransport),
+[alfred_quarantined_llm](#alfred_quarantined_llm),
+[ADR-0017 Decision 7](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## ExtractionMode
+
+Closed `Literal` of three dispatch-path labels
+(`src/alfred/security/quarantine.py:225`): `"native_constrained"` (Anthropic
+tool-use, schema-constrained by the provider), `"json_object_unconstrained"`
+(DeepSeek `json_object` mode, validated post-hoc by Pydantic), and
+`"prompt_embedded_fallback"` (schema embedded in the user prompt, parsed and
+validated by the host). The quarantined-LLM plugin selects the mode based
+on `ProviderCapability` flags. The mode appears verbatim in the
+`quarantine.extract` audit row's `extraction_mode` field, enabling forensic
+queries that break down extraction costs by dispatch path. Shipped in
+PR-S3-4 (#TBD).
+
+See [ProviderCapability](#providercapability), [QuarantinedExtractor](#quarantinedextractor),
+[ADR-0017 Decision 7](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## TypedRefusalReason
+
+Closed `Literal` vocabulary for `TypedRefusal.reason`
+(`src/alfred/security/quarantine.py:212`). Seven values: `cannot_extract`
+(retries exhausted), `refused_by_safety` (provider safety filter),
+`ambiguous_input` (schema-incompatible input), `provider_refused` (structured
+provider refusal), `provider_unavailable` (circuit breaker / supervisor down),
+`dlp_outbound_refused` (outbound DLP blocked the result), `nonce_check_failed`
+(handle-id nonce mismatch, enforced in PR-S3-5). Adding a new reason is a
+deliberate audit-schema migration — free-form text cannot appear here because
+provider-supplied error messages are T3-derived and would bypass DLP if
+echoed into audit rows. Shipped in PR-S3-4 (#TBD).
+
+See [TypedRefusal](#typedrefusal), [QuarantinedExtractor](#quarantinedextractor),
+[docs/subsystems/security.md](subsystems/security.md), and spec §6.7.
+
+## ProviderCapability
+
+`StrEnum` declared at `src/alfred/providers/base.py:22`. Closed set of
+capabilities a provider may declare, consulted by the quarantined-LLM
+dispatch path (spec §6.2) to select the `ExtractionMode`. Values:
+`NATIVE_CONSTRAINED_GENERATION` (Anthropic tool-use, schema-valid by
+construction), `JSON_OBJECT_MODE` (DeepSeek `json_object`, validated
+post-hoc), `TOOL_USE`, `VISION`, `LONG_CONTEXT_1M` (pre-declared for
+future routing per PRD §6.6). Every concrete `Provider` implementation
+declares its capabilities via the `capabilities() -> frozenset[ProviderCapability]`
+Protocol method; `register_provider` enforces this at decoration time.
+Shipped in PR-S3-4 (#TBD).
+
+See [ExtractionMode](#extractionmode),
+[ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## alfred_quarantined_llm
+
+The quarantined-LLM MCP plugin package at `plugins/alfred_quarantined_llm/`.
+Runs as an MCP stdio subprocess under the `alfred-quarantine` OS user
+(spec §5.2); the provider key is delivered over fd 3 rather than via env
+(spec §5.3). The plugin declares `subscriber_tier = "system"` and
+`sandbox_profile = "user-plugin"` in its manifest — subscriber tier grants
+orchestrator-internal hookpoints; the OS sandbox limits blast radius if the
+LLM provider's response-parsing path is compromised. Exposes two JSON-RPC
+methods: `quarantine.ingest` and `quarantine.extract`. The plugin id on the
+wire is `"alfred.quarantined-llm"`. Shipped in PR-S3-4 (#TBD).
+
+See [quarantine.ingest](#quarantineingest), [quarantine.extract](#quarantineextract),
+[quarantine (process)](#quarantine-process),
+[ADR-0017 Decision 4](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## quarantine.ingest
+
+JSON-RPC method exposed by the `alfred_quarantined_llm` plugin
+(`plugins/alfred_quarantined_llm/quarantine_plugin.py`). Signature:
+`quarantine.ingest(handle_id: str, context: str)`. Accepts T3 bytes from
+the plugin host and caches them under `handle_id` for a single subsequent
+`quarantine.extract` call. The single-use invariant is enforced by the
+content store (PR-S3-5 introduces the Redis-backed production store with
+atomic `GETDEL` semantics; the Slice-3 skeleton uses an in-process dict).
+Shipped in PR-S3-4 (#TBD).
+
+See [quarantine.extract](#quarantineextract), [alfred_quarantined_llm](#alfred_quarantined_llm),
+[ContentHandle](#contenthandle), and [docs/subsystems/security.md](subsystems/security.md).
+
+## quarantine.extract
+
+JSON-RPC method exposed by the `alfred_quarantined_llm` plugin
+(`plugins/alfred_quarantined_llm/quarantine_plugin.py`). Signature:
+`quarantine.extract(handle_id: str, schema_json: str, schema_version: int)`.
+Dereferences the T3 bytes stored under `handle_id`, calls the configured
+provider using the `ExtractionMode` that matches its `ProviderCapability`,
+and returns a discriminated-union JSON object whose `kind` is `"extracted"`
+or `"typed_refusal"`. Raw provider response bytes never cross back to the
+orchestrator process — only the typed result. Protocol violations (unexpected
+`kind`, non-`ControlResult` response) are a `quarantine.protocol_violation`
+audit event, not a `TypedRefusal`. Shipped in PR-S3-4 (#TBD).
+
+See [quarantine.ingest](#quarantineingest), [QuarantinedExtractor](#quarantinedextractor),
+[ExtractionResult](#extractionresult), [alfred_quarantined_llm](#alfred_quarantined_llm),
+and [docs/subsystems/security.md](subsystems/security.md).
+
 ## PluginTransport
 
 The `@runtime_checkable` Protocol (`src/alfred/plugins/transport.py`) every
