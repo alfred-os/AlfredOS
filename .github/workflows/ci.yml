@@ -160,6 +160,62 @@ jobs:
           uv run coverage report \
             --include='src/alfred/plugins/errors.py,src/alfred/plugins/transport.py,src/alfred/plugins/manifest.py,src/alfred/plugins/inbound_scanner.py,src/alfred/plugins/content_store_base.py,src/alfred/plugins/stdio_transport.py,src/alfred/plugins/session.py,src/alfred/plugins/_observability.py' \
             --fail-under=100
+      - name: Web-fetch trust-boundary 100% line+branch coverage
+        # Slice-3 PR-S3-5's ``src/alfred/plugins/web_fetch/`` is the
+        # web.fetch trust boundary (spec §7, §11a, ADR-0017). Every file
+        # enumerated below mediates between the privileged orchestrator
+        # and the untrusted-by-construction T3 fetch path — a coverage
+        # hole here is a hole at the trust boundary:
+        #
+        #   * ``src/alfred/plugins/web_fetch/errors.py`` — ``WebFetchError``
+        #     hierarchy + the ``WebFetchCanaryTripped`` SECURITY EVENT
+        #     (deliberately NOT a ``WebFetchError`` subclass per spec
+        #     §7.10 type discipline). A skipped leaf class means the
+        #     orchestrator's operational-error arm cannot disambiguate
+        #     failure modes or — worse — catches a canary trip as an
+        #     operational error.
+        #   * ``src/alfred/plugins/web_fetch/allowlist.py`` — the three-way
+        #     intersection (manifest ∩ operator ∩ session) + the
+        #     segment-aligned path-prefix matcher (CR-145 substring
+        #     bypass fix, commit 0ac4232) + the ``..`` traversal refusal.
+        #     A missed branch silently widens the allowlist past the
+        #     operator's cap.
+        #   * ``src/alfred/plugins/web_fetch/tls_policy.py`` — TLS
+        #     fail-closed in production with ``ALFRED_ENV=development`` as
+        #     the only escape hatch (spec §7.11). A skipped branch makes
+        #     the escape hatch always-on.
+        #   * ``src/alfred/plugins/web_fetch/content_store.py`` — Redis-
+        #     backed ``ContentHandle`` with single-use ``GETDEL`` semantics
+        #     (spec §7.5). A missed branch breaks the
+        #     dereference-then-delete contract — the same handle could be
+        #     dereferenced twice, defeating quarantine after a canary trip.
+        #   * ``src/alfred/plugins/web_fetch/rate_limit.py`` — Lua-atomic
+        #     three-bucket rate limiter (per_domain / per_user /
+        #     daily_budget) with race-condition prevention (spec §7.7).
+        #     A skipped branch silently permits over-quota requests.
+        #   * ``src/alfred/plugins/web_fetch/canary_scanner.py`` — the
+        #     ``InboundCanaryScanner`` registered as a system-tier
+        #     subscriber on the ``tool.web.fetch`` hookpoint (spec §7.6).
+        #     A missed branch means a canary token in T3 content
+        #     propagates through the dual-LLM boundary undetected. This
+        #     is CLAUDE.md hard rule #7 (no silent failures in security
+        #     paths) territory.
+        #   * ``src/alfred/plugins/web_fetch/fetch_dispatcher.py`` — the
+        #     dispatcher that composes allowlist + rate-limit + TLS +
+        #     scanner + audit row emission (spec §7.4). A skipped branch
+        #     skips one of those gates on the audit graph.
+        #
+        # Per-file ``--include`` mirrors the plugins / hooks / supervisor
+        # precedent so a new web-fetch trust-boundary file gets added to
+        # this gate at the same PR it lands rather than silently shipped
+        # at < 100% coverage. Chained ``&&`` hashFiles guard per
+        # PR-S3-1 R1 F1: ANY-match must NOT no-op the gate; ALL files
+        # must be present before the coverage report runs.
+        if: hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/tls_policy.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
+            --fail-under=100
 
   integration:
     name: Integration
@@ -387,6 +443,21 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/providers/base.py,src/alfred/bootstrap/quarantine.py,plugins/alfred_quarantined_llm/__init__.py,plugins/alfred_quarantined_llm/provider_dispatch.py,plugins/alfred_quarantined_llm/quarantine_plugin.py' \
+            --fail-under=100
+      - name: Web-fetch trust-boundary 100% line+branch coverage (combined)
+        # Combined-data mirror of the ``python`` job's web-fetch gate
+        # (see the matching step above for the per-file rationale). The
+        # web-fetch trust-boundary files are proven by unit-only data
+        # today — no integration test exercises them. The combined-job
+        # mirror exists for parity with every other Slice-3 trust
+        # boundary so an operator scanning the CI plan sees one gate per
+        # subsystem in both contexts; a future integration test that
+        # adds to the .coverage data will land here automatically.
+        # Chained ``&&`` hashFiles guard per PR-S3-1 R1 F1.
+        if: hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/tls_policy.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
             --fail-under=100
 
   smoke:
