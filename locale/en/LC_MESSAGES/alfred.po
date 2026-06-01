@@ -693,17 +693,24 @@ msgstr ""
 
 #: src/alfred/plugins/web_fetch/errors.py:109
 msgid "web.fetch.error.rate_limited"
-msgstr "web.fetch refused: rate limit exceeded for bucket {bucket!r}."
+msgstr ""
+"web.fetch refused: rate limit exceeded for bucket {bucket!r}. Operator "
+"can adjust the per-domain / per-user / daily-budget caps in "
+"config/policies.yaml under `web_fetch.rate_limits`."
 
 #: src/alfred/plugins/web_fetch/errors.py:122
 msgid "web.fetch.error.mime_type_not_allowed"
-msgstr "web.fetch refused: response MIME type {mime_type!r} is not allowed."
+msgstr ""
+"web.fetch refused: response MIME type {mime_type!r} is not allowed. "
+"Allowed MIME types are declared in the plugin manifest; operator can "
+"narrow via config/policies.yaml `web_fetch.allowed_mime_types`."
 
 #: src/alfred/plugins/web_fetch/errors.py:137
 msgid "web.fetch.error.size_limit_exceeded"
 msgstr ""
 "web.fetch refused: response body {size} bytes exceeds the {limit}-byte "
-"limit."
+"limit. Operator can adjust the size cap in config/policies.yaml "
+"`web_fetch.size_limit_bytes` (default 5 MiB)."
 
 # Slice-3 retrospective fix i18n-003 — TlsConfigError raised from
 # TlsPolicy.__post_init__ used a raw f-string. The exception bubbles up

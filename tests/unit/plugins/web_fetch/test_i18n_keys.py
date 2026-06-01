@@ -98,3 +98,58 @@ def test_i18n_key_resolves(key: str) -> None:
         "msgstr is present but empty after substitution; fix the "
         "msgstr in locale/en/LC_MESSAGES/alfred.po."
     )
+
+
+# devex-003 — operator-facing refusal messages MUST name the remediation
+# lever, not just the problem. An operator who sees "rate limit exceeded"
+# without knowing where the cap is configured cannot act; the message has
+# diagnosed the symptom but withheld the fix. The contract below pins the
+# substring that identifies the config knob — if a future i18n re-phrase
+# drops the pointer, the test surfaces it before merge.
+#
+# Each key maps to a tuple of substrings that must all appear in the
+# rendered message. ``config/policies.yaml`` anchors the file the operator
+# edits; the YAML path (``web_fetch.<knob>``) anchors which line.
+_REMEDIATION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "web.fetch.error.rate_limited",
+        ("config/policies.yaml", "web_fetch.rate_limits"),
+    ),
+    (
+        "web.fetch.error.mime_type_not_allowed",
+        ("config/policies.yaml", "web_fetch.allowed_mime_types"),
+    ),
+    (
+        "web.fetch.error.size_limit_exceeded",
+        ("config/policies.yaml", "web_fetch.size_limit_bytes"),
+    ),
+)
+
+
+@pytest.mark.parametrize(("key", "hints"), _REMEDIATION_HINTS)
+def test_error_message_names_remediation_lever(key: str, hints: tuple[str, ...]) -> None:
+    """Refusal message points at the config knob the operator can tune.
+
+    The operator-facing surface for a web.fetch refusal is the only
+    actionable signal an operator gets — the message must answer both
+    "what happened" AND "where do I change it". Naming the YAML file +
+    the specific knob lets the operator jump straight to the edit;
+    naming only the symptom forces them to dig through PRD / runbook /
+    source. devex-003 review finding (Slice-3 PR-S3-5).
+    """
+    from alfred.i18n import t
+
+    result = t(
+        key,
+        # Union of placeholders used by the three keys under test.
+        bucket="per_domain",
+        mime_type="application/pdf",
+        size=1000,
+        limit=5000,
+    )
+    for hint in hints:
+        assert hint in result, (
+            f"i18n key {key!r} renders without remediation hint {hint!r} — "
+            f"operator-facing refusal must name where the lever lives "
+            f"(devex-003). Got: {result!r}"
+        )
