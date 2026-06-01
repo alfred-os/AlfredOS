@@ -77,7 +77,7 @@ class PluginInvocationError(PluginError):
     """
 
     def __init__(self, method: str, detail: str) -> None:
-        super().__init__(f"plugin invocation failed for method {method!r}: {detail}")
+        super().__init__(t("plugin.invocation_failed", method=repr(method), detail=detail))
         self.method = method
         self.detail = detail
 
@@ -102,7 +102,7 @@ class QuarantinedUnavailable(PluginError):  # noqa: N818 -- name pinned by ADR-0
     """
 
     def __init__(self, reason: str) -> None:
-        super().__init__(f"quarantined LLM unavailable: {reason}")
+        super().__init__(t("plugin.quarantined_unavailable", reason=reason))
         self.reason = reason
 
 
@@ -171,9 +171,7 @@ class PluginProtocolViolation(PluginTransportError):  # noqa: N818 -- name pinne
     """
 
     def __init__(self, method: str, plugin_id: str) -> None:
-        super().__init__(
-            f"protocol violation from {plugin_id}: disallowed method {method!r} post-handshake"
-        )
+        super().__init__(t("plugin.protocol_violation", plugin_id=plugin_id, method=repr(method)))
         self.method = method
         self.plugin_id = plugin_id
 

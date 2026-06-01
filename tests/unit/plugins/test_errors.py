@@ -170,3 +170,41 @@ def test_every_leaf_can_be_raised_and_caught_as_plugin_error(
 ) -> None:
     with pytest.raises(PluginError):
         raise exc_cls(**kwargs)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# i18n-001 — three error leaves previously bypassed t(). After the
+# retrospective fix, every message resolves via the catalog. These tests
+# pin that the catalog-resolved message carries the operator-facing
+# prefix from locale/en/LC_MESSAGES/alfred.po, so a regression that
+# reverts to raw f-strings shows up immediately.
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_invocation_error_message_resolves_via_catalog() -> None:
+    exc = PluginInvocationError(method="web.fetch", detail="upstream timeout")
+    msg = str(exc)
+    # The catalog prefix is the operator-facing wording from
+    # locale/en/LC_MESSAGES/alfred.po. A raw f-string regression would
+    # start with the lower-case "plugin invocation failed" wording.
+    assert msg.startswith("Plugin invocation failed"), msg
+    assert "web.fetch" in msg
+    assert "upstream timeout" in msg
+
+
+def test_quarantined_unavailable_message_resolves_via_catalog() -> None:
+    exc = QuarantinedUnavailable(reason="subprocess crashed")
+    msg = str(exc)
+    assert msg.startswith("Quarantined LLM unavailable"), msg
+    assert "subprocess crashed" in msg
+
+
+def test_plugin_protocol_violation_message_resolves_via_catalog() -> None:
+    exc = PluginProtocolViolation(method="alfred/hooks.register", plugin_id="alfred.bad")
+    msg = str(exc)
+    # Catalog wording mentions the plugin id + the disallowed method.
+    assert "alfred.bad" in msg
+    assert "alfred/hooks.register" in msg
+    # Negative: the previous raw-f-string wording was lower-case "protocol
+    # violation from"; the catalog-rendered version is sentence-cased.
+    assert not msg.startswith("protocol violation from"), msg

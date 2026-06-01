@@ -495,6 +495,16 @@ msgstr ""
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
 
+# Slice-3 retrospective fix i18n-001 — plugins/errors.py raises that
+# previously used raw f-strings. Sibling families already used t().
+#: src/alfred/plugins/errors.py:80
+msgid "plugin.invocation_failed"
+msgstr "Plugin invocation failed for method {method}: {detail}."
+
+#: src/alfred/plugins/errors.py:105
+msgid "plugin.quarantined_unavailable"
+msgstr "Quarantined LLM unavailable: {reason}."
+
 #: src/alfred/plugins/errors.py:129
 msgid "plugin.manifest_version_mismatch"
 msgstr ""
@@ -508,11 +518,50 @@ msgstr ""
 "(valid: {valid_tiers}). Content trust tiers (T0-T3) are not subscriber "
 "tiers; see ADR-0017."
 
+#: src/alfred/plugins/errors.py:175
+msgid "plugin.protocol_violation"
+msgstr ""
+"Plugin {plugin_id} sent a disallowed JSON-RPC method {method} after the "
+"handshake."
+
 #: src/alfred/plugins/errors.py:195
 msgid "plugin.transport.dlp_outbound_refused"
 msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
 "matched."
+
+#: src/alfred/plugins/manifest.py:77 src/alfred/plugins/manifest.py:133
+msgid "plugin.manifest_unknown_subscriber_tier"
+msgstr ""
+"Plugin manifest subscriber_tier {tier} is unknown; valid values: "
+"{valid_tiers}."
+
+# Slice-3 retrospective fix DEVEX-002 — manifest parser raises that
+# previously bypassed t(). Each reason carries a distinct key so callers
+# can branch on the specific manifest defect (CLI rendering, audit row).
+#: src/alfred/plugins/manifest.py:101
+msgid "plugin.manifest_invalid_toml"
+msgstr "Plugin manifest is not valid TOML: {detail}."
+
+#: src/alfred/plugins/manifest.py:115
+msgid "plugin.manifest_missing_plugin_section"
+msgstr "Plugin manifest is missing the required [plugin] table."
+
+#: src/alfred/plugins/manifest.py:119
+msgid "plugin.manifest_invalid_plugin_id"
+msgstr "Plugin manifest [plugin] id is missing or not a non-empty string."
+
+#: src/alfred/plugins/manifest.py:123
+msgid "plugin.manifest_invalid_subscriber_tier_type"
+msgstr "Plugin manifest [plugin] subscriber_tier is missing or not a string."
+
+#: src/alfred/plugins/manifest.py:141
+msgid "plugin.manifest_invalid_sandbox_profile_type"
+msgstr "Plugin manifest [plugin] sandbox_profile is not a string."
+
+#: src/alfred/plugins/manifest.py:145
+msgid "plugin.manifest_invalid_platform_type"
+msgstr "Plugin manifest [plugin] platform is not a string."
 
 #: src/alfred/plugins/stdio_transport.py:604
 msgid "security.canary_tripped"
@@ -616,4 +665,64 @@ msgstr ""
 
 #~ msgid "missing.key.example"
 #~ msgstr ""
+
+# Slice-3 retrospective fix DEVEX-001 — bare i18n keys emitted by
+# bin/alfred-plugin-launcher.sh on stderr. The supervisor renders these
+# from the catalog when persisting the matching audit row. The keys
+# themselves stay as the machine-readable stderr signal; these msgstrs
+# are the human-readable rendering.
+#~ msgid "plugin.launcher_plugin_id_invalid"
+#~ msgstr ""
+#~ "Plugin spawn refused: the supplied "
+#~ "plugin_id contained characters outside the "
+#~ "safe charset [A-Za-z0-9._-]. The id is"
+#~ " not echoed (it would round-trip "
+#~ "into the audit stream)."
+
+#~ msgid "plugin.launcher_unsandboxed_rejected"
+#~ msgstr ""
+#~ "Plugin spawn refused: "
+#~ "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 is a "
+#~ "development-only escape hatch and was "
+#~ "supplied outside development. Unset the "
+#~ "flag or set ALFRED_ENV=development (never "
+#~ "in production)."
+
+#~ msgid "plugin.launcher_no_sandbox_policy"
+#~ msgstr ""
+#~ "Plugin spawn refused: no sandbox policy"
+#~ " file at "
+#~ "${{ALFRED_SANDBOX_POLICY_DIR}}/{plugin_id}.policy. Provision "
+#~ "the policy file (see "
+#~ "docs/runbooks/slice-3-plugins.md) or, for "
+#~ "development only, set ALFRED_ENV=development +"
+#~ " ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1."
+
+#~ msgid "plugin.launcher_uid_drop_unavailable"
+#~ msgstr ""
+#~ "Plugin spawn refused: runuser is missing"
+#~ " on this Linux host so the "
+#~ "launcher cannot drop privilege to "
+#~ "${{ALFRED_PLUGIN_UID}} before exec. Install "
+#~ "util-linux and retry."
+
+# Slice-3 retrospective fix DEVEX-001 — supervisor.config_insecure JSON
+# events the launcher emits on documented-deviation paths. The
+# insecure_config_key is the closed-vocabulary identifier the supervisor
+# matches; the msgstr is the operator-facing renderer.
+#~ msgid "plugin.launcher_insecure_unsandboxed_dev"
+#~ msgstr ""
+#~ "Plugin {plugin_id} spawned WITHOUT a "
+#~ "sandbox policy (ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 "
+#~ "+ ALFRED_ENV=development). This is a "
+#~ "documented dev-only deviation; MUST NOT"
+#~ " appear in production logs."
+
+#~ msgid "plugin.launcher_insecure_uid_separation_macos"
+#~ msgstr ""
+#~ "Plugin {plugin_id} spawned WITHOUT UID "
+#~ "separation (macOS dev host; runuser is"
+#~ " Linux-only). Documented dev-only "
+#~ "deviation; MUST NOT appear in production"
+#~ " logs."
 

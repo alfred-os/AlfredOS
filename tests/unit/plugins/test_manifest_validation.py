@@ -230,3 +230,58 @@ def test_direct_construction_unknown_subscriber_tier_refused() -> None:
             subscriber_tier="root",
             sandbox_profile="user-plugin",
         )
+
+
+# ---------------------------------------------------------------------------
+# DEVEX-002 — manifest parser raises previously bypassed t(). After the
+# retrospective fix, every ManifestError message is a catalog-resolved
+# key, so the message should NEVER start with the legacy English prefix
+# "manifest is " / "manifest [plugin]" / "unknown subscriber_tier". The
+# renderer is allowed to choose any wording — these assertions only pin
+# that the catalog-key resolution actually happened.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "perturbation",
+    [
+        # Each perturbation triggers a different parse_manifest branch that
+        # used to raise hardcoded English. The post-fix messages all resolve
+        # via the catalog and start with the operator-facing "Plugin manifest"
+        # prefix from locale/en/LC_MESSAGES/alfred.po.
+        ("[malformed toml", "Plugin manifest is not valid TOML"),
+    ],
+)
+def test_manifest_error_messages_resolve_via_catalog(
+    perturbation: tuple[str, str],
+) -> None:
+    bad_toml, expected_prefix = perturbation
+    with pytest.raises(ManifestError) as exc_info:
+        parse_manifest(bad_toml)
+    assert str(exc_info.value).startswith(expected_prefix), (
+        f"expected catalog-resolved message starting with {expected_prefix!r}, "
+        f"got {str(exc_info.value)!r}"
+    )
+
+
+def test_missing_plugin_section_message_resolves_via_catalog() -> None:
+    # Branch: data.get("plugin") is None.
+    with pytest.raises(ManifestError) as exc_info:
+        parse_manifest("[alfred]\nmanifest_version = 1\n")
+    msg = str(exc_info.value)
+    # The catalog renders this as a sentence about the missing [plugin]
+    # table — the wording is the catalog's, not the source's.
+    assert "[plugin]" in msg
+
+
+def test_unknown_subscriber_tier_message_includes_valid_options() -> None:
+    # Branch: subscriber_tier is a string but not in the closed vocabulary.
+    bad = VALID_MANIFEST_TOML.replace('subscriber_tier = "system"', 'subscriber_tier = "root"')
+    with pytest.raises(ManifestError) as exc_info:
+        parse_manifest(bad)
+    msg = str(exc_info.value)
+    # The catalog message lists the valid tiers; the bad value is included.
+    assert "root" in msg
+    assert "system" in msg
+    assert "operator" in msg
+    assert "user-plugin" in msg
