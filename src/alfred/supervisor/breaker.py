@@ -241,6 +241,34 @@ class CircuitBreaker:
         )
         self._trip(exception_type=exception_type, now=dt.datetime.now(dt.UTC))
 
+    # ------------------------------------------------------------------
+    # Operator-triggered reset (Task 7)
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Operator-triggered reset: any state → CLOSED.
+
+        Called by ``Supervisor.reset_breaker()`` after auditing a
+        ``supervisor.breaker.reset`` row. ``trip_count`` is NOT cleared —
+        it is a cumulative audit counter that must survive operator
+        intervention so dashboards can show "this component has tripped N
+        times across its lifetime."
+
+        Recent-failure window and backoff are cleared so the breaker
+        behaves identically to a freshly-constructed CLOSED breaker after
+        reset (pinned by ``test_reset_then_failures_can_trip_fresh``).
+        Otherwise stale window entries would immediately re-trip on the
+        next failure and defeat the operator override.
+
+        No raise from any source state — including CLOSED (silent no-op).
+        Hookpoint emission is the caller's responsibility (see module
+        docstring).
+        """
+        self.state = BreakerState.CLOSED
+        self._recent_failures.clear()
+        self._backoff_seconds = _BACKOFF_INITIAL_SECONDS
+        _log.info("supervisor.breaker.reset", component_id=self.component_id)
+
 
 __all__ = [
     "BreakerState",

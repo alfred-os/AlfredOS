@@ -289,3 +289,69 @@ def test_record_probe_failure_outside_half_open_raises() -> None:
     cb.state = BreakerState.OPEN
     with pytest.raises(BreakStateError):
         cb.record_probe_failure("SubprocessExitedError")
+
+
+# ---------------------------------------------------------------------------
+# reset() operator-triggered (Task 7)
+# ---------------------------------------------------------------------------
+
+
+def test_operator_reset_from_open_closes_and_preserves_trip_count() -> None:
+    """reset() transitions OPEN→CLOSED. trip_count is an audit counter — preserved."""
+    cb = _make_cb()
+    cb.state = BreakerState.OPEN
+    cb.trip_count = 5
+    cb.last_trip_at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+    cb.reset()
+    assert cb.state == BreakerState.CLOSED
+    assert cb.trip_count == 5  # NOT cleared — audit trail must survive reset
+
+
+def test_reset_from_closed_is_silent_noop() -> None:
+    """reset() from CLOSED is a no-op — no raise, no audit churn."""
+    cb = _make_cb()
+    assert cb.state == BreakerState.CLOSED
+    cb.reset()
+    assert cb.state == BreakerState.CLOSED
+
+
+def test_reset_from_half_open_closes() -> None:
+    """reset() from HALF_OPEN forces CLOSED — operator overrides the probe."""
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    cb.reset()
+    assert cb.state == BreakerState.CLOSED
+
+
+def test_reset_clears_recent_failures_and_backoff() -> None:
+    """reset() restores the failure window and backoff to a fresh state.
+
+    Without this, the next failure after operator reset would immediately
+    re-trip from stale window entries — defeating the operator override.
+    """
+    cb = _make_cb()
+    cb.state = BreakerState.OPEN
+    cb._recent_failures = [dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)] * 2
+    cb._backoff_seconds = 80.0
+    cb.reset()
+    assert cb._recent_failures == []
+    assert cb._backoff_seconds == _BACKOFF_INITIAL_SECONDS
+
+
+def test_reset_then_failures_can_trip_fresh() -> None:
+    """After reset, three failures inside the window cleanly re-trip.
+
+    End-to-end check that reset() leaves the breaker in a state
+    indistinguishable from a freshly-constructed CLOSED breaker (modulo
+    trip_count, which the operator wants preserved for audit).
+    """
+    cb = _make_cb()
+    cb.state = BreakerState.OPEN
+    cb.trip_count = 1
+    cb.last_trip_at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+    cb.reset()
+    base = dt.datetime(2026, 1, 1, 13, 0, tzinfo=dt.UTC)
+    for i in range(3):
+        cb.record_failure("SubprocessExitedError", now=base + dt.timedelta(seconds=i))
+    assert cb.state == BreakerState.OPEN
+    assert cb.trip_count == 2  # incremented past the prior 1
