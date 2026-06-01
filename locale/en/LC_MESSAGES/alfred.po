@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 20:36+0100\n"
+"POT-Creation-Date: 2026-06-01 20:59+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -658,7 +658,7 @@ msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
 #: src/alfred/plugins/stdio_transport.py:631
-#: src/alfred/plugins/web_fetch/errors.py:162
+#: src/alfred/plugins/web_fetch/errors.py:194
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
@@ -712,12 +712,29 @@ msgstr ""
 "limit. Operator can adjust the size cap in config/policies.yaml "
 "`web_fetch.size_limit_bytes` (default 5 MiB)."
 
+# sec-pr-s3-5-003 / H3 — host-IP allowlist guard against DNS-rebinding /
+# cloud-metadata SSRF. The URL allowlist matches on name; the IP guard
+# resolves the hostname and refuses RFC1918 / loopback / link-local /
+# multicast / reserved IPs. {url} is the URL the caller asked for;
+# {resolved_ip} is the offending IP the resolver returned (may be empty
+# when the refusal happened before resolution, e.g. no_hostname). The
+# exception's ``reason`` attribute carries the closed-vocabulary refusal
+# class (rfc1918 / link_local / loopback / multicast / reserved /
+# dns_failure / no_hostname) for audit pivoting.
+#: src/alfred/plugins/web_fetch/errors.py:165
+msgid "web.fetch.error.internal_ip_refused"
+msgstr ""
+"web.fetch refused: {url!r} resolved to internal address {resolved_ip!r}. "
+"Refused to prevent DNS-rebinding / cloud-metadata SSRF against an "
+"allowlisted hostname. Operator can review the IP-guard policy in "
+"src/alfred/plugins/web_fetch/host_ip_guard.py (spec §7.4)."
+
 # C4 / i18n-002 — generic WebFetchError fallback carrying the plugin's
 # message string. The plugin-supplied {message} is data (forensic
 # attribution), but the operator-facing WebFetchError surface MUST be
 # catalogued — wrapping the message in t() lets the carrier string be
 # localised while preserving the plugin detail as a placeholder.
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:469
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:612
 msgid "web.fetch.error.plugin_returned_message"
 msgstr "web.fetch plugin returned an error: {message}"
 
@@ -728,7 +745,7 @@ msgstr "web.fetch plugin returned an error: {message}"
 # operational-error arm catches it. The {shape} placeholder carries the
 # Python type name of the offending result (audit-forensic only — not
 # the value itself, which could be T3-derived).
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:516
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:659
 msgid "web.fetch.error.unexpected_dispatch_shape"
 msgstr ""
 "web.fetch returned an unexpected dispatch shape ({shape}). Expected "

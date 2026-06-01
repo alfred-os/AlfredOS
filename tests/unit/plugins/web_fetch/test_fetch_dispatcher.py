@@ -34,6 +34,7 @@ from alfred.plugins.web_fetch.allowlist import AllowlistEntry
 from alfred.plugins.web_fetch.errors import (
     WebFetchDomainNotAllowed,
     WebFetchError,
+    WebFetchInternalIPRefused,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
     WebFetchRedirectRefused,
@@ -1255,3 +1256,186 @@ async def test_unexpected_dispatch_shape_message_routes_through_i18n() -> None:
     # Catalogued operator-facing text is present (pinned against pybabel
     # fuzzy-copy drift).
     assert "unexpected dispatch shape" in msg
+
+
+# ---------------------------------------------------------------------------
+# sec-pr-s3-5-003 / H3 — host-IP allowlist guard against DNS-rebinding /
+# cloud-metadata SSRF. The dispatcher refuses URLs whose hostname resolves
+# to RFC1918 / loopback / link-local / multicast / reserved addresses
+# BEFORE the transport dispatch even though the URL passed the three-way
+# allowlist. The audit row uses the closed-vocabulary
+# ``internal_ip_refused`` tag so audit consumers can pivot on the attack.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_internal_ip_refused_emits_audit_row_then_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A URL whose hostname resolves to an internal IP is refused.
+
+    The DNS-rebinding case: ``example.com`` is in the three-way
+    allowlist (matches on netloc), but the resolver returns
+    ``10.0.0.1``. The IP guard refuses BEFORE the transport call,
+    emits a typed audit row with ``result="internal_ip_refused"``
+    so the forensic trail carries the attack class, and re-raises
+    :class:`WebFetchInternalIPRefused`.
+    """
+    import socket
+
+    def _fake(host: str, port: int | None, *args: Any, **kwargs: Any) -> Any:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("10.0.0.1", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake)
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+
+    with pytest.raises(WebFetchInternalIPRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-ssrf",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert excinfo.value.resolved_ip == "10.0.0.1"
+    assert excinfo.value.reason == "rfc1918"
+    # Parent-side guard refused BEFORE the transport was touched.
+    assert transport.dispatch.await_count == 0
+    # One audit row: the internal-IP refusal.
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "internal_ip_refused"
+    assert call.kwargs["subject"]["dlp_scan_result"] == "internal_ip_refused"
+
+
+@pytest.mark.asyncio
+async def test_internal_ip_refused_for_aws_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """169.254.169.254 (AWS / Azure metadata) is refused with reason=link_local."""
+    import socket
+
+    def _fake(host: str, port: int | None, *args: Any, **kwargs: Any) -> Any:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("169.254.169.254", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake)
+    audit = _build_audit()
+
+    with pytest.raises(WebFetchInternalIPRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-ssrf-aws",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+        )
+    assert excinfo.value.reason == "link_local"
+
+
+@pytest.mark.asyncio
+async def test_control_result_internal_ip_refused_maps_to_typed_exception() -> None:
+    """A ControlResult with ``type=WebFetchInternalIPRefused`` raises
+    :class:`WebFetchInternalIPRefused` preserving the refusal class.
+
+    The subprocess-side IP guard is defence-in-depth — when its
+    resolution catches an internal IP that the parent's resolution
+    missed (DNS rebinding race), the structured error envelope must
+    surface as the right typed exception on the orchestrator side so
+    the audit row carries the closed ``internal_ip_refused`` tag and
+    the host-side error-mapping arm preserves the attack-class
+    ``reason`` for forensic pivoting.
+    """
+    audit = _build_audit()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchInternalIPRefused",
+            "message": "https://example.com/ resolved to internal address 10.0.0.1",
+            "resolved_ip": "10.0.0.1",
+            "reason": "rfc1918",
+            "dlp_scan_result": "internal_ip_refused",
+        }
+    )
+    with pytest.raises(WebFetchInternalIPRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-ssrf-cr",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert excinfo.value.resolved_ip == "10.0.0.1"
+    assert excinfo.value.reason == "rfc1918"
+    # The audit row records the internal-IP refusal class.
+    assert audit.append_schema.await_count == 1
+    assert audit.append_schema.await_args.kwargs["result"] == "internal_ip_refused"
+
+
+@pytest.mark.asyncio
+async def test_control_result_internal_ip_refused_with_missing_fields_defaults() -> None:
+    """Defence-in-depth: a malformed plugin payload (missing
+    ``resolved_ip`` / ``reason``) defaults to empty / ``reserved``
+    rather than tripping a TypeError."""
+    audit = _build_audit()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchInternalIPRefused",
+            "message": "refused",
+        }
+    )
+    with pytest.raises(WebFetchInternalIPRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-ssrf-cr-defensive",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert excinfo.value.resolved_ip == ""
+    assert excinfo.value.reason == "reserved"
+
+
+@pytest.mark.asyncio
+async def test_control_result_internal_ip_refused_with_non_string_fields_defaults() -> None:
+    """Non-string ``resolved_ip`` / ``reason`` default rather than passing
+    through. Keeps the typed exception attributes well-typed at the
+    boundary."""
+    audit = _build_audit()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchInternalIPRefused",
+            "message": "refused",
+            "resolved_ip": 12345,  # not a string
+            "reason": ["not", "a", "string"],
+        }
+    )
+    with pytest.raises(WebFetchInternalIPRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-ssrf-cr-types",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert excinfo.value.resolved_ip == ""
+    assert excinfo.value.reason == "reserved"

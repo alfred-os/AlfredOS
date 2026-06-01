@@ -18,6 +18,7 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchCanaryTripped,
     WebFetchDomainNotAllowed,
     WebFetchError,
+    WebFetchInternalIPRefused,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
     WebFetchRedirectRefused,
@@ -57,6 +58,20 @@ def test_redirect_refused_is_web_fetch_error() -> None:
     security event (no canary trip) — the upstream merely tried to widen
     via a redirect; refusal is the normal protocol response."""
     assert issubclass(WebFetchRedirectRefused, WebFetchError)
+
+
+def test_internal_ip_refused_is_web_fetch_error() -> None:
+    """sec-pr-s3-5-003 / H3: the internal-IP refusal is an operational
+    error so the orchestrator's ``except WebFetchError`` arm surfaces it
+    cleanly. It IS a security-relevant refusal (DNS rebinding / cloud-
+    metadata SSRF) but the operational-vs-security-event split is about
+    whether the orchestrator should treat it as an incident requiring
+    quarantine + alert (canary trip) vs a refusal it can surface to the
+    caller as a recoverable error. SSRF-class refusals are the latter:
+    the fetch never happened, no T3 content reached the orchestrator,
+    no canary token tripped. The audit row carries the attack class
+    via the closed-vocabulary ``internal_ip_refused`` tag."""
+    assert issubclass(WebFetchInternalIPRefused, WebFetchError)
 
 
 def test_canary_tripped_is_NOT_web_fetch_error() -> None:  # noqa: N802 -- emphasis intentional; the NOT is load-bearing
@@ -101,6 +116,29 @@ def test_size_limit_exceeded_carries_size_attrs() -> None:
     assert err.limit_bytes == 5_242_880
 
 
+def test_internal_ip_refused_carries_url_resolved_ip_and_reason_attrs() -> None:
+    """The three attributes back the audit row and the forensic trail.
+
+    ``url`` is what the caller asked for; ``resolved_ip`` is what the
+    resolver returned (the attack-class evidence); ``reason`` is the
+    closed-vocabulary refusal class so audit consumers can pivot on
+    attack class (rfc1918 / link_local / loopback / etc).
+    """
+    err = WebFetchInternalIPRefused(
+        url="https://example.com/api/data",
+        resolved_ip="169.254.169.254",
+        reason="link_local",
+    )
+    assert err.url == "https://example.com/api/data"
+    assert err.resolved_ip == "169.254.169.254"
+    assert err.reason == "link_local"
+    # Operator-facing string surface mentions BOTH the URL and the
+    # offending IP so a glance at the structlog row tells the operator
+    # what was asked for and what the resolver returned.
+    assert "https://example.com/api/data" in str(err)
+    assert "169.254.169.254" in str(err)
+
+
 def test_redirect_refused_carries_status_and_target_attrs() -> None:
     """Both fields are recorded verbatim so reviewers see exactly where the
     redirect tried to point — silently dropping the target would weaken
@@ -127,6 +165,9 @@ def test_canary_tripped_carries_source_url_and_handle_id() -> None:
         WebFetchMimeTypeNotAllowed("text/x-evil"),
         WebFetchSizeLimitExceeded(size_bytes=1, limit_bytes=0),
         WebFetchRedirectRefused(status_code=301, redirect_target="http://a.example/"),
+        WebFetchInternalIPRefused(
+            url="https://x.example/", resolved_ip="10.0.0.1", reason="rfc1918"
+        ),
         WebFetchCanaryTripped(source_url="https://x.example", handle_id="id"),
     ],
 )

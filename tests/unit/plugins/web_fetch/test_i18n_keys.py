@@ -53,6 +53,12 @@ _WEB_FETCH_KEYS: tuple[str, ...] = (
     # known ``type`` tag. The plugin-supplied detail flows through
     # ``{message}``.
     "web.fetch.error.plugin_returned_message",
+    # sec-pr-s3-5-003 / H3 — host-IP allowlist guard against DNS-rebinding
+    # / cloud-metadata SSRF. The exception carries ``{url}`` and
+    # ``{resolved_ip}`` placeholders; the refusal-class reason
+    # vocabulary (rfc1918 / link_local / loopback / multicast /
+    # reserved / dns_failure / no_hostname) is the audit-row pivot.
+    "web.fetch.error.internal_ip_refused",
 )
 
 
@@ -97,6 +103,10 @@ def test_i18n_key_resolves(key: str) -> None:
         # plugin-side detail string verbatim through ``{message}``.
         shape="ExtractionResult",
         message="DNS resolution failed",
+        # sec-pr-s3-5-003 — internal_ip_refused carries the resolved
+        # IP through ``{resolved_ip}`` so operators can correlate with
+        # what the resolver returned at refusal time.
+        resolved_ip="10.0.0.1",
     )
     # If key is missing from catalog, t() returns the bare key string.
     # A properly defined key returns a translated string that is NOT the

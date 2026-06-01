@@ -60,12 +60,14 @@ from alfred.plugins.web_fetch.allowlist import AllowlistEntry, AllowlistIntersec
 from alfred.plugins.web_fetch.errors import (
     WebFetchDomainNotAllowed,
     WebFetchError,
+    WebFetchInternalIPRefused,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
     WebFetchRedirectRefused,
     WebFetchSizeLimitExceeded,
     WebFetchTlsError,
 )
+from alfred.plugins.web_fetch.host_ip_guard import check_url_host_ips
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
 from alfred.plugins.web_fetch.tls_policy import TlsPolicy
 from alfred.security.quarantine import ContentHandle
@@ -98,6 +100,7 @@ _ERROR_TYPE_MAP: Final[dict[str, type[WebFetchError]]] = {
     "WebFetchMimeTypeNotAllowed": WebFetchMimeTypeNotAllowed,
     "WebFetchSizeLimitExceeded": WebFetchSizeLimitExceeded,
     "WebFetchRedirectRefused": WebFetchRedirectRefused,
+    "WebFetchInternalIPRefused": WebFetchInternalIPRefused,
     "TlsConfigError": WebFetchTlsError,
 }
 
@@ -377,6 +380,51 @@ async def dispatch_web_fetch(
         )
         raise
 
+    # Step 2b: Host-IP allowlist guard (sec-pr-s3-5-003 / H3 SSRF defence).
+    #
+    # The three-way URL allowlist above matched on the URL netloc (the
+    # *name* the caller asked for) — it does NOT check the resolved IP.
+    # An attacker who controls DNS for an allowlisted domain can return
+    # an RFC1918 / cloud-metadata / loopback address (DNS rebinding) so
+    # the fetcher hits an internal endpoint anyway. The IP guard pre-
+    # resolves the hostname and refuses if ANY resolved IP is internal.
+    #
+    # Emit a typed audit row BEFORE re-raising so the forensic trail
+    # carries the refusal class (CLAUDE.md hard rule #7). The
+    # ``internal_ip_refused`` ``dlp_scan_result`` tag is closed-vocabulary
+    # so audit consumers can pivot by attack class against the
+    # rfc1918 / link_local / loopback / multicast / reserved /
+    # dns_failure / no_hostname reasons the host_ip_guard exception
+    # carries on its ``.reason`` attribute.
+    try:
+        check_url_host_ips(clean_url, TlsPolicy(skip_tls_verify=config.skip_tls_verify))
+    except WebFetchInternalIPRefused:
+        await audit.append_schema(
+            fields=WEB_FETCH_FIELDS,
+            schema_name="WEB_FETCH_FIELDS",
+            event="tool.web.fetch",
+            actor_user_id=user_id,
+            subject={
+                "url": clean_url,
+                "domain": domain,
+                "status_code": None,
+                "content_handle_id": None,
+                "fetch_depth": _FETCH_DEPTH,
+                "rate_limit_bucket": None,
+                "manifest_commit_hash": config.manifest_commit_hash,
+                "trust_tier_of_result": "T3",
+                "dlp_scan_result": "internal_ip_refused",
+                "canary_tripped": False,
+                "triggering_user_id": user_id,
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="internal_ip_refused",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
+        )
+        raise
+
     # Step 3: Lua-atomic rate-limit check (spec §7.7).
     try:
         await rate_limiter.check_and_increment(domain=domain, user_id=user_id)
@@ -538,6 +586,23 @@ async def dispatch_web_fetch(
             status_int = status_obj if isinstance(status_obj, int) else 0
             target_str = target_obj if isinstance(target_obj, str) else ""
             raise WebFetchRedirectRefused(status_code=status_int, redirect_target=target_str)
+        if exc_class is WebFetchInternalIPRefused:
+            # sec-pr-s3-5-003: the subprocess-side IP guard caught a
+            # DNS-rebinding race (the parent-side guard resolved to a
+            # safe IP; the subprocess's own resolution returned an
+            # internal one). The typed exception preserves the closed
+            # reason vocabulary so the audit row + structlog stream see
+            # the same attack class string the parent-side guard would
+            # have emitted.
+            resolved_obj = error_data.get("resolved_ip", "")
+            reason_obj = error_data.get("reason", "reserved")
+            resolved_str = resolved_obj if isinstance(resolved_obj, str) else ""
+            reason_str = reason_obj if isinstance(reason_obj, str) else "reserved"
+            raise WebFetchInternalIPRefused(
+                url=clean_url,
+                resolved_ip=resolved_str,
+                reason=reason_str,
+            )
         # C4 / i18n-002: the plugin-side ``message`` string is data, NOT
         # a localisable surface — wrap the WebFetchError carrier in t()
         # so the operator-visible error text is catalogued. The
