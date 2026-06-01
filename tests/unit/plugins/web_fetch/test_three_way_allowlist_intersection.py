@@ -233,3 +233,112 @@ class TestEmptyTiers:
         )
         with pytest.raises(DomainNotAllowed):
             ail.check("https://example.com/")
+
+
+# ---------------------------------------------------------------------------
+# CR-145 web-fetch security review: path-prefix substring/traversal bypass
+# ---------------------------------------------------------------------------
+
+
+def test_path_prefix_substring_bypass_rejected() -> None:
+    """An entry for ``/public`` MUST NOT match path ``/publicadmin``.
+
+    The naive ``str.startswith(path_prefix)`` check would silently widen
+    the operator's narrowing. ``AllowlistEntry.__post_init__`` normalises
+    every entry to end with ``/`` so segment-aligned matching is unambiguous.
+    """
+    from alfred.plugins.web_fetch.allowlist import (
+        AllowlistEntry,
+        AllowlistIntersection,
+        DomainNotAllowed,
+    )
+
+    intersection = AllowlistIntersection(
+        manifest=[AllowlistEntry("example.com", "/public")],
+        operator=[AllowlistEntry("example.com", "/public")],
+        session=[AllowlistEntry("example.com", "/public")],
+    )
+
+    with pytest.raises(DomainNotAllowed):
+        intersection.check("https://example.com/publicadmin/secret")
+
+
+def test_path_prefix_normalised_to_trailing_slash() -> None:
+    """Constructing ``AllowlistEntry("example.com", "/public")`` stores
+    ``path_prefix == "/public/"`` so ``str.startswith`` is segment-aligned.
+    """
+    from alfred.plugins.web_fetch.allowlist import AllowlistEntry
+
+    e = AllowlistEntry("example.com", "/public")
+    assert e.path_prefix == "/public/"
+
+    # Trailing slash already present: stays the same.
+    e2 = AllowlistEntry("example.com", "/public/")
+    assert e2.path_prefix == "/public/"
+
+
+def test_path_prefix_requires_leading_slash() -> None:
+    """A path_prefix without leading slash is a construction error.
+
+    Operator/manifest configs that pass ``"public"`` instead of
+    ``"/public"`` are malformed and must fail loud at construction time.
+    """
+    from alfred.plugins.web_fetch.allowlist import AllowlistEntry
+
+    with pytest.raises(ValueError, match="must start with '/'"):
+        AllowlistEntry("example.com", "public")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/public/../admin/secret",
+        "https://example.com/public/..",
+        "https://example.com/../public/file",
+        "https://example.com/..",
+    ],
+)
+def test_path_traversal_segments_rejected_outright(url: str) -> None:
+    """A request URL containing ``..`` MUST be refused without normalisation.
+
+    Silently collapsing ``..`` would let the audit row claim the
+    operator-submitted URL matched the allowlist when the literal URL
+    travelled outside the prefix. The audit graph must stay honest about
+    what was attempted.
+    """
+    from alfred.plugins.web_fetch.allowlist import (
+        AllowlistEntry,
+        AllowlistIntersection,
+        DomainNotAllowed,
+    )
+
+    intersection = AllowlistIntersection(
+        manifest=[AllowlistEntry("example.com", "/public")],
+        operator=[AllowlistEntry("example.com", "/public")],
+        session=[AllowlistEntry("example.com", "/public")],
+    )
+
+    with pytest.raises(DomainNotAllowed):
+        intersection.check(url)
+
+
+def test_double_slash_normalised_for_benign_paths() -> None:
+    """A benign ``//`` (double slash) in the path SHOULD match the
+    canonical prefix — operators copy-pasting URLs from logs sometimes
+    introduce stray slashes; the comparison should be robust to that
+    WITHOUT silently widening past ``..`` segments.
+    """
+    from alfred.plugins.web_fetch.allowlist import (
+        AllowlistEntry,
+        AllowlistIntersection,
+    )
+
+    intersection = AllowlistIntersection(
+        manifest=[AllowlistEntry("example.com", "/public")],
+        operator=[AllowlistEntry("example.com", "/public")],
+        session=[AllowlistEntry("example.com", "/public")],
+    )
+
+    # Double-slash collapses to single-slash via posixpath.normpath; the
+    # candidate "/public/file" matches the entry "/public/".
+    intersection.check("https://example.com/public//file")
