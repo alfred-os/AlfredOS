@@ -20,11 +20,12 @@
 id: tl-2026-005
 category: tier_laundering
 threat: >-
-  Attacker with code execution inside the privileged orchestrator
+  An attacker with code execution inside the privileged orchestrator
   process attempts to forge T3 content by calling tag_t3_with_nonce
-  without the live nonce token. The forged caller_module_unverified
-  label would read as orchestrator-internal, making the entry look
-  authoritative in operator-facing audit-log dashboards.
+  without the live nonce token, where the forged
+  caller_module_unverified label would read as orchestrator-internal
+  and make the entry look authoritative in operator-facing audit-log
+  dashboards.
 ingestion_path: capability_gate
 payload: |
   # Executed from a frame whose globals['__name__'] = 'alfred.core.orchestrator'
