@@ -13,13 +13,15 @@ This package is the public import surface for the rest of AlfredOS:
   but re-exported here so orchestrator code can ``from alfred.supervisor
   import QuarantinedUnavailable`` without crossing modules).
 
-Concrete classes (``Supervisor``, ``CircuitBreaker``, ``BreakerState``) are
-added by later PR-S3-3b tasks; this PR ships Tasks 1-3 (errors + ORM model +
-migration 0010) only.
+Concrete ``Supervisor`` and ``PluginLifecycle`` classes arrive in later
+PR-S3-3b tasks; this package currently exports the error hierarchy plus
+the :class:`~alfred.supervisor.breaker.CircuitBreaker` state machine
+(spec §10.2).
 """
 
 from __future__ import annotations
 
+from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.errors import (
     BreakStateError,
     QuarantinedUnavailable,
@@ -28,6 +30,8 @@ from alfred.supervisor.errors import (
 
 __all__ = [
     "BreakStateError",
+    "BreakerState",
+    "CircuitBreaker",
     "QuarantinedUnavailable",
     "SupervisorError",
 ]
