@@ -107,3 +107,4 @@ Rejected: `DevGate` fails open for `operator`/`user-plugin` without a backing st
   - #139 (PR-S3-2 — Real `CapabilityGate` + `RealGate` + `GatePolicy` + `GrantRow`)
   - #140 (PR-S3-3a — MCP plugin transport: `StdioTransport`, `AlfredPluginSession`, `PluginManifest`, `InboundContentScanner`, `ContentStoreBase`)
   - #144 (PR-S3-3b — Supervisor: `CircuitBreaker`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints; Postgres persistence migration 0010)
+  - #TBD (PR-S3-4 — `QuarantinedExtractor`; `ExtractionMode`; `TypedRefusalReason`; `ProviderCapability`; full `quarantined_to_structured` + `downgrade_to_orchestrator`; `T3_DERIVED_DOWNGRADE_FIELDS` audit schema anchor; `alfred_quarantined_llm` plugin; `quarantine.ingest` + `quarantine.extract` JSON-RPC surface; Decision 7's `schema_version: Literal[1]` enforcement via `ExtractionSchema.__init_subclass__`)

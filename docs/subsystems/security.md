@@ -66,17 +66,59 @@ and no plugin can acquire capabilities that were not explicitly granted.
   timezone-aware).
 - `T3DerivedData` — `NewType` over `dict[str, object]`. Type-level
   provenance marker for data extracted from T3 content.
-- `quarantined_to_structured(handle, schema, *, extractor, gate)` — the
-  ONLY path by which T3-derived content reaches orchestrator-readable
-  structured form. *Stub in Slice 3; full implementation PR-S3-4.*
-- `downgrade_to_orchestrator(data, *, audit_row)` — gate for injecting
-  `T3DerivedData` into privileged prompts. *Stub in Slice 3; full
-  implementation PR-S3-4.*
-- `ExtractionResult = Extracted | TypedRefusal` — extraction outcome union.
-- `Extracted` — successful extraction; carries `data: T3DerivedData` and
-  `handle: ContentHandle`.
-- `TypedRefusal` — quarantine LLM declined extraction; carries `reason`
-  (closed vocabulary) and `handle`.
+- `QuarantinedExtractor` — `src/alfred/security/quarantine.py:327` —
+  orchestrator-side client of the quarantined-LLM plugin. The only object
+  that dispatches `quarantine.extract` JSON-RPC calls and lifts
+  `ControlResult` payloads into typed `ExtractionResult` shapes. Takes
+  a `PluginTransport` and `AuditWriter` at construction; the capability
+  gate is consulted by `quarantined_to_structured`, not the extractor.
+  Shipped in PR-S3-4 (#TBD).
+- `ExtractionMode` — `src/alfred/security/quarantine.py:225` — closed
+  `Literal` of three dispatch-path labels: `"native_constrained"`,
+  `"json_object_unconstrained"`, `"prompt_embedded_fallback"`. Drives
+  which provider code path the quarantined-LLM plugin uses and appears
+  verbatim in `quarantine.extract` audit rows. Shipped in PR-S3-4 (#TBD).
+- `TypedRefusalReason` — `src/alfred/security/quarantine.py:212` — closed
+  `Literal` vocabulary for `TypedRefusal.reason`. Seven values:
+  `cannot_extract`, `refused_by_safety`, `ambiguous_input`,
+  `provider_refused`, `provider_unavailable`, `dlp_outbound_refused`,
+  `nonce_check_failed`. Free-form refusal text cannot appear in audit rows;
+  this is the structural enforcement. Shipped in PR-S3-4 (#TBD).
+- `ProviderCapability` — `src/alfred/providers/base.py:22` — `StrEnum`
+  whose values steer the quarantined-LLM extraction mode selection:
+  `NATIVE_CONSTRAINED_GENERATION` → Anthropic tool-use shape;
+  `JSON_OBJECT_MODE` → DeepSeek json_object path; neither → fallback.
+  Also pre-declares `TOOL_USE`, `VISION`, `LONG_CONTEXT_1M` for future
+  routing. Shipped in PR-S3-4 (#TBD).
+- `quarantined_to_structured(handle, schema, *, extractor, gate)` —
+  `src/alfred/security/quarantine.py:637` — the ONLY path by which
+  T3-derived content reaches orchestrator-readable structured form.
+  Gate-first: calls `gate.check_content_clearance(hookpoint=
+  "quarantine.dereference", content_tier="T3")` before invoking the
+  extractor. Shipped in PR-S3-4 (#TBD).
+- `downgrade_to_orchestrator(data, *, gate, audit_writer)` —
+  `src/alfred/security/quarantine.py:693` — gate-checked crossing of
+  `T3DerivedData` into a plain `dict` the orchestrator may inject into
+  privileged prompts. Writes a `quarantine.t3_derived_downgrade` audit row
+  with `T3_DERIVED_DOWNGRADE_FIELDS` on every allowed call; raises
+  `AlfredError` without an audit row on denial (the gate's own refusal
+  accounting handles that). Shipped in PR-S3-4 (#TBD).
+- `T3_DERIVED_DOWNGRADE_FIELDS` — `src/alfred/audit/audit_row_schemas.py:243`
+  — `frozenset[str]` naming the audit fields for every
+  `quarantine.t3_derived_downgrade` row. Payload values are never
+  serialised into these rows — only provenance metadata (source/target
+  tier, `correlation_id`, closed-vocabulary `downgrade_reason`).
+  Shipped in PR-S3-4 (#TBD).
+- `ExtractionResult = Extracted | TypedRefusal` — `src/alfred/security/quarantine.py:293`
+  — plain union (no Pydantic discriminator wrapper at the alias level;
+  dispatch sites branch by `isinstance`). Shipped in PR-S3-4 (#TBD).
+- `Extracted` — `src/alfred/security/quarantine.py:232` — frozen Pydantic
+  model for successful extraction; carries `data: T3DerivedData`,
+  `extraction_mode: ExtractionMode`, and `kind: Literal["extracted"]`.
+  Shipped in PR-S3-4 (#TBD).
+- `TypedRefusal` — `src/alfred/security/quarantine.py:263` — frozen Pydantic
+  model for quarantined-LLM refusals; carries `reason: TypedRefusalReason`
+  and `kind: Literal["typed_refusal"]`. Shipped in PR-S3-4 (#TBD).
 
 ### DLP (`src/alfred/security/dlp.py`)
 
@@ -188,7 +230,7 @@ large frames.
 
 | Subsystem | Slice 3 (this slice) | Deferred to | Anchor |
 |---|---|---|---|
-| Security | Full T0–T3 type system; nonce-gated `tag_t3_with_nonce`; `TaggedContent` wire format; `RealGate` + `GatePolicy` + `GrantRow`; `ContentHandle` + `T3DerivedData`; `ExtractionResult` stubs | Slice 4+: `quarantined_to_structured` full impl (PR-S3-4); `downgrade_to_orchestrator` full impl (PR-S3-4); `RealGate.rebuild_from_state_git` full impl (PR-S3-6); container isolation for quarantined LLM (ADR-0015) | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) |
+| Security | Full T0–T3 type system; nonce-gated `tag_t3_with_nonce`; `TaggedContent` wire format; `RealGate` + `GatePolicy` + `GrantRow`; `ContentHandle` + `T3DerivedData`; `QuarantinedExtractor` + `ExtractionMode` + `TypedRefusalReason` + `ProviderCapability`; full `quarantined_to_structured` + `downgrade_to_orchestrator` + `T3_DERIVED_DOWNGRADE_FIELDS` (all shipped in PR-S3-4 #TBD) | Slice 4+: `RealGate.rebuild_from_state_git` full impl (PR-S3-6); container isolation for quarantined LLM (ADR-0015) | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) |
 
 ## Cross-references
 
@@ -198,4 +240,4 @@ large frames.
 - [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Decision 1 (nonce gate), Decision 3 (two-axis naming), Decision 7 (wire-format versioning anchors).
 - [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md) — Slice-4 containerised quarantined LLM commitment.
 - Sibling subsystems: [plugins.md](plugins.md), [identity.md](identity.md), [hooks.md](hooks.md).
-- Glossary: [trust tier](../glossary.md#trust-tier), [T3 (untrusted-ingestion tier)](../glossary.md#t3-untrusted-ingestion-tier), [CapabilityGateNonce](../glossary.md#capabilitygatenonce), [dual-LLM split](../glossary.md#dual-llm-split), [RealGate](../glossary.md#realgate), [GatePolicy](../glossary.md#gatepolicy), [GrantRow](../glossary.md#grantrow).
+- Glossary: [trust tier](../glossary.md#trust-tier), [T3 (untrusted-ingestion tier)](../glossary.md#t3-untrusted-ingestion-tier), [CapabilityGateNonce](../glossary.md#capabilitygatenonce), [dual-LLM split](../glossary.md#dual-llm-split), [RealGate](../glossary.md#realgate), [GatePolicy](../glossary.md#gatepolicy), [GrantRow](../glossary.md#grantrow), [QuarantinedExtractor](../glossary.md#quarantinedextractor), [ExtractionMode](../glossary.md#extractionmode), [TypedRefusalReason](../glossary.md#typedrefusalreason), [ProviderCapability](../glossary.md#providercapability), [alfred_quarantined_llm](../glossary.md#alfred_quarantined_llm), [quarantine.ingest](../glossary.md#quarantineingest), [quarantine.extract](../glossary.md#quarantineextract), [Extracted](../glossary.md#extracted), [TypedRefusal](../glossary.md#typedrefusal), [ExtractionResult](../glossary.md#extractionresult).
