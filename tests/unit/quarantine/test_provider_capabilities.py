@@ -32,7 +32,6 @@ from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.base import Provider, ProviderCapability, register_provider
 from alfred.providers.deepseek import DeepSeekProvider
 
-
 # ---------------------------------------------------------------------------
 # ProviderCapability enum surface (Task 1)
 # ---------------------------------------------------------------------------
