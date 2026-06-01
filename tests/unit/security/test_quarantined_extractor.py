@@ -15,7 +15,7 @@ Coverage targets:
   ``isinstance`` time by the extractor (defence-in-depth — the type
   signature is the primary gate; this is the runtime backstop).
 * Returns a fully-typed :class:`ExtractionResult`
-  (:class:`Extracted` ∪ :class:`TypedRefusal`); never a raw dict.
+  (:class:`Extracted` or :class:`TypedRefusal`); never a raw dict.
 * Emits a ``quarantine.extract`` audit row using
   :data:`QUARANTINE_EXTRACT_FIELDS` via :meth:`AuditWriter.append_schema`.
 * On a non-:class:`ControlResult` transport response, raises
@@ -42,7 +42,6 @@ import pytest
 from pydantic import BaseModel
 
 from alfred.plugins.transport import ControlResult
-
 
 # ---------------------------------------------------------------------------
 # Local fixtures — kept inline so the test file is read in one pass.
@@ -422,6 +421,77 @@ async def test_extract_unexpected_payload_kind_is_protocol_violation(
     )
     with pytest.raises(PluginProtocolViolation):
         await extractor.extract(_make_handle(), _make_schema())
+
+
+@pytest.mark.asyncio
+async def test_extract_out_of_vocabulary_extraction_mode_is_protocol_violation(
+    fake_audit_writer: MagicMock,
+) -> None:
+    """An ``Extracted`` payload with an ``extraction_mode`` value outside
+    the closed :data:`ExtractionMode` Literal is a protocol violation.
+
+    The closed-vocabulary check is the structural defence against a
+    misbehaving plugin smuggling a free-form ``extraction_mode`` string
+    into the audit row (which would let attacker-influenced text into
+    a forensic-attribution field).
+    """
+    from alfred.plugins.errors import PluginProtocolViolation
+    from alfred.security.quarantine import QuarantinedExtractor
+
+    transport = MagicMock()
+    transport.dispatch = AsyncMock(
+        return_value=ControlResult(
+            method="quarantine.extract",
+            payload={
+                "kind": "extracted",
+                "data": {"title": "hello"},
+                "extraction_mode": "TOTALLY_MADE_UP_MODE",
+            },
+        ),
+    )
+    extractor = QuarantinedExtractor(
+        transport=transport,
+        audit_writer=fake_audit_writer,
+    )
+    with pytest.raises(PluginProtocolViolation):
+        await extractor.extract(_make_handle(), _make_schema())
+
+    # And the protocol-violation audit row landed BEFORE the raise.
+    assert fake_audit_writer.last_event == "quarantine.protocol_violation"
+
+
+@pytest.mark.asyncio
+async def test_extract_out_of_vocabulary_refusal_reason_is_protocol_violation(
+    fake_audit_writer: MagicMock,
+) -> None:
+    """A ``typed_refusal`` payload with a ``reason`` value outside the
+    closed :data:`TypedRefusalReason` Literal is a protocol violation.
+
+    Same closed-vocabulary defence as the extraction_mode case: a
+    free-form ``reason`` string would silently leak attacker text into
+    the audit row.
+    """
+    from alfred.plugins.errors import PluginProtocolViolation
+    from alfred.security.quarantine import QuarantinedExtractor
+
+    transport = MagicMock()
+    transport.dispatch = AsyncMock(
+        return_value=ControlResult(
+            method="quarantine.extract",
+            payload={
+                "kind": "typed_refusal",
+                "reason": "TOTALLY_MADE_UP_REASON",
+            },
+        ),
+    )
+    extractor = QuarantinedExtractor(
+        transport=transport,
+        audit_writer=fake_audit_writer,
+    )
+    with pytest.raises(PluginProtocolViolation):
+        await extractor.extract(_make_handle(), _make_schema())
+
+    assert fake_audit_writer.last_event == "quarantine.protocol_violation"
 
 
 # ---------------------------------------------------------------------------
