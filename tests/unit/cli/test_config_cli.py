@@ -195,3 +195,64 @@ def test_list_empty_yaml_emits_localised_notice(runner: CliRunner, tmp_path: Pat
         result = runner.invoke(config_app, ["list"])
     assert result.exit_code == 0, result.stderr
     assert result.stdout.strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# coverage-closing fixups — missing-file branches for set/get + empty list
+# ---------------------------------------------------------------------------
+
+
+def test_set_low_blast_creates_policies_yaml_when_missing(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Setting a low-blast key when policies.yaml does not exist creates it.
+
+    The setup path normally seeds an empty ``policies.yaml`` during
+    ``alfred-setup``, but a manually-wiped deployment can hit this
+    branch. Without it, the operator would have to ``touch`` the file
+    before any ``alfred config set`` call worked — a UX trap. The yaml
+    helper treats absent as empty-dict so the first set seeds the file.
+    """
+    policies = tmp_path / "fresh" / "policies.yaml"
+    assert not policies.exists()
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "web-fetch-budget", "25"])
+    assert result.exit_code == 0, result.stderr
+    assert policies.exists()
+    assert "user_daily_budget: 25" in policies.read_text()
+
+
+def test_get_returns_localised_notice_when_policies_yaml_missing(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """``get`` on a missing policies.yaml emits the same "not set" notice.
+
+    Distinguishing "file absent" from "key absent" is intentionally NOT
+    surfaced to the operator: in both cases the value is not set.
+    Pinning the missing-file path keeps the CLI from regressing into a
+    raw ``FileNotFoundError`` traceback on a fresh / wiped deployment.
+    """
+    policies = tmp_path / "never_existed.yaml"
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["get", "web-fetch-budget"])
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() != ""
+
+
+def test_list_existing_but_empty_yaml_emits_localised_notice(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A policies.yaml that exists but parses to empty also emits the notice.
+
+    The previous ``absent.yaml`` test covered the missing-file leg; this
+    one covers the file-exists-but-empty leg (operator ``touch`` after
+    setup, or YAML parsed to ``None``). Both legs route to the same
+    localised hint so silent-blank output cannot be misread as
+    "no policies are configured".
+    """
+    policies = tmp_path / "policies.yaml"
+    policies.write_text("")
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["list"])
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() != ""

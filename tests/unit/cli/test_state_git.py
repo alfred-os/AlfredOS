@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -283,3 +284,60 @@ def test_get_proposal_diff_raises_state_git_error_for_unknown_branch(
     client = StateGitProposalClient(state_git_path=bare_repo)
     with pytest.raises(StateGitError):
         client.get_proposal_diff("proposal/policy-grant-deadbeefdeadbeef")
+
+
+# ---------------------------------------------------------------------------
+# defensive filter + OSError handling — coverage gates for trust-boundary code
+# ---------------------------------------------------------------------------
+
+
+def test_list_pending_proposals_skips_non_proposal_lines(bare_repo: Path) -> None:
+    """``list_pending_proposals`` defensively filters non-``proposal/`` lines.
+
+    The git ``for-each-ref`` query is scoped to ``refs/heads/proposal/`` so
+    in practice every line will match. The defensive filter exists to
+    prevent a future git version (or a hand-edited ref) from leaking a
+    ``main`` row into ``alfred plugin grant list --pending``. Patches
+    the ``_run`` helper to inject the heterogeneous output a real-world
+    misconfiguration could produce.
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    mixed_output = (
+        "proposal/policy-grant-aaaaaaaaaaaaaaaa\n"
+        "main\n"
+        "\n"
+        "proposal/web-allowlist-add-bbbbbbbbbbbbbbbb\n"
+    )
+    with patch.object(client, "_run", return_value=mixed_output):
+        refs = client.list_pending_proposals()
+    branch_names = {r.branch for r in refs}
+    assert branch_names == {
+        "proposal/policy-grant-aaaaaaaaaaaaaaaa",
+        "proposal/web-allowlist-add-bbbbbbbbbbbbbbbb",
+    }
+    assert "main" not in branch_names
+
+
+def test_run_converts_os_error_to_state_git_error(bare_repo: Path) -> None:
+    """``_run`` surfaces ``OSError`` (e.g. missing ``git`` binary) as ``StateGitError``.
+
+    CLAUDE.md hard rule #7: the CLI's ``except StateGitError`` arm
+    narrows on this typed error to render a localised operator-facing
+    message. A bare ``OSError`` / ``FileNotFoundError`` would bypass that
+    localisation layer and leak Python's English traceback into operator
+    UX. Patches ``subprocess.run`` to raise ``FileNotFoundError`` (the
+    concrete ``OSError`` subclass that fires when ``git`` is missing from
+    the runtime ``PATH``).
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    with (
+        patch(
+            "alfred.cli._state_git.subprocess.run",
+            side_effect=FileNotFoundError("git not found"),
+        ),
+        pytest.raises(StateGitError) as excinfo,
+    ):
+        client.list_pending_proposals()
+    assert "state.git command failed" in str(excinfo.value)
+    # __cause__ pins the original OSError so the audit log can include it.
+    assert isinstance(excinfo.value.__cause__, FileNotFoundError)

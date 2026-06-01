@@ -212,3 +212,17 @@ def test_allowlist_list_empty_emits_hint(runner: CliRunner) -> None:
         result = runner.invoke(web_app, ["allowlist", "list"])
     assert result.exit_code == 0
     assert result.stdout.strip() != ""
+
+
+def test_list_allowlist_entries_default_is_empty_list() -> None:
+    """The pre-PR-S3-7 ``_list_allowlist_entries`` stub returns ``[]``.
+
+    Same projection-seam invariant as the plugin sub-app's
+    ``_list_pending_grants``: a fresh deployment has no operator-added
+    allowlist rows, so the seam returning anything other than ``[]``
+    until PR-S3-7 wires the Postgres ``web_allowlist`` projection would
+    be a silent-fake bug. Pinning the default keeps any drift visible.
+    """
+    from alfred.cli.web import _list_allowlist_entries
+
+    assert _list_allowlist_entries() == []
