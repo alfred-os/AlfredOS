@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 03:37+0100\n"
+"POT-Creation-Date: 2026-06-01 05:29+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -13,6 +13,10 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
+
+#: src/alfred/bootstrap/gate_factory.py:114
+msgid "bootstrap.gate_selected.devgate_warning"
+msgstr "fail-open capability stubs; do not use in production"
 
 #: src/alfred/cli/_bootstrap.py:98
 msgid "error.placeholder_api_key"
@@ -564,6 +568,13 @@ msgstr ""
 "Plugin {plugin_id} spawned WITHOUT UID separation (macOS dev host; "
 "runuser is Linux-only). Documented dev-only deviation; MUST NOT appear in"
 " production logs."
+
+#: src/alfred/plugins/content_store_base.py:153
+msgid "plugin.content_store.inmemory_not_production_safe"
+msgstr ""
+"InMemoryContentStore is not production-safe (ALFRED_ENV={env}); inject a "
+"Redis-backed ContentStore via StdioTransport(content_store=...) or set "
+"ALFRED_ENV to development or test for stub usage."
 
 # Slice-3 retrospective fix i18n-001 — plugins/errors.py raises that
 # previously used raw f-strings. Sibling families already used t().

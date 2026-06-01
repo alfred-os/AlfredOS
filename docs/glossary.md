@@ -304,7 +304,7 @@ not import `RealGate` directly; `alfred.bootstrap.gate_factory` selects
 between `RealGate` and `DevGate` based on `ALFRED_ENV`.
 
 See [GatePolicy](#gatepolicy), [GrantRow](#grantrow),
-[capability gate](glossary.md#capability-gate), and
+[capability gate](#capability-gate), and
 [docs/subsystems/security.md](subsystems/security.md).
 
 ## GatePolicy
@@ -369,7 +369,7 @@ large frames. The scanner matches bytes patterns — compiled with
 `re.escape` — so `CanaryTrip.frame_offset` is always a true byte offset,
 correct even for multi-byte UTF-8 content.
 
-See [OutboundDlp](glossary.md#outbounddlp) and
+See [OutboundDlp](#outbounddlp) and
 [docs/subsystems/plugins.md](subsystems/plugins.md).
 
 ## ContentStoreBase

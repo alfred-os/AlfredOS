@@ -86,9 +86,11 @@ ARGS
 ENVIRONMENT
     ALFRED_ENV
         "development" enables the unsandboxed escape hatch (see
-        ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED). Any other value (including
-        empty) is treated as production: the launcher refuses to spawn
-        without a sandbox policy file.
+        ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED). For launcher enforcement,
+        any other value (including empty) is treated as production: the
+        launcher refuses to spawn without a sandbox policy file. This
+        is launcher-local policy and is independent of the orchestrator
+        gate-selection mechanism described in README §Configuration.
 
     ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED
         Dev-only escape hatch. With ALFRED_ENV=development AND this set

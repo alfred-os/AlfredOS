@@ -122,9 +122,11 @@ directory, plugin UID, perf-gate force-run, redis maxmemory, state-git path).
 
 ### Gate selection
 
-The capability gate has two implementations: `RealGate` (Postgres-backed,
-production default) and `DevGate` (fail-open stubs, development-only). The
-selection mechanism is **opt-out of production** rather than opt-in:
+The capability gate has two implementations: `RealGate` (Postgres-backed)
+and `DevGate` (fail-open stubs, development-only). Selection is effectively
+**opt-out of DevGate**: only `ALFRED_ENV=development` (or unset/empty/whitespace,
+which short-circuits the bootstrap to DevGate) selects the stub. Anything else
+— including typos — falls through to `RealGate`:
 
 | `ALFRED_ENV` value | Gate constructed |
 | --- | --- |
