@@ -41,12 +41,33 @@ from typing import Annotated, Final
 
 import typer
 
+from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
 from alfred.cli._state_git import (
     ProposalResult,
     StateGitError,
     StateGitProposalClient,
 )
 from alfred.i18n import t
+
+# The CLI surface re-exports :data:`PLUGIN_GRANT_FIELDS` so the
+# audit-row shape stays a single source of truth between the
+# proposal-flow emission site
+# (``alfred.security.capability_gate.proposals.create_proposal_branch``)
+# and the eventual CLI-side audit-emission wiring (PR-S3-7). Importing
+# the constant here documents the contract that a future ``grant`` /
+# ``revoke`` audit-row emit MUST use these six fields verbatim — no
+# locally-copied tuple is permitted. The
+# :mod:`tests.unit.cli.test_plugin_grant_audit_wiring` test corpus
+# fails loudly if a refactor drops this import.
+#
+# Spec §14 hookpoint table: the four ``plugin.grant.*`` hookpoints
+# (``requested``, ``approved``, ``denied``, ``revoked``) are declared
+# at module-import time by
+# :func:`alfred.security.capability_gate.proposals.declare_hookpoints`.
+# The CLI's :class:`StateGitProposalClient` callers transitively load
+# that publisher, so by the time any operator runs ``alfred plugin
+# grant`` the registry already carries the four hookpoint metadata
+# records. No additional registration call is needed from this module.
 
 # Module-level seams. Tests patch these symbols.
 _state_git_client: StateGitProposalClient = StateGitProposalClient()
@@ -134,6 +155,15 @@ def _queue_grant_proposal(
             err=True,
         )
         raise typer.Exit(code=1) from exc
+    # Audit row: ``plugin.grant.requested`` — fields per
+    # :data:`PLUGIN_GRANT_FIELDS`. Full wiring is deferred to PR-S3-7
+    # when :class:`RealGate` Postgres tables are seeded; the proposal
+    # branch's state.git commit is materially auditable today via the
+    # state.git reflog (the proposal-flow tests in
+    # ``tests/unit/security/capability_gate/test_audit_wiring.py``
+    # pin the row shape). Required fields when wired up:
+    # ``plugin_id``, ``subscriber_tier``, ``hookpoint``,
+    # ``operator_user_id``, ``proposal_branch``, ``correlation_id``.
     _render_grant_pending(result)
 
 
@@ -286,6 +316,12 @@ def revoke(
             err=True,
         )
         raise typer.Exit(code=1) from exc
+    # Audit row: ``plugin.grant.revoked`` (in-flight ``requested``
+    # twin for the revocation path) — fields per the proposal-flow's
+    # PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS schema. Deferred to PR-S3-7
+    # alongside the grant emission for symmetry: until then, the
+    # ``proposal/policy-revoke-<id>`` branch is the durable audit
+    # surface visible through state.git's reflog.
     typer.echo(
         t(
             "cli.plugin.revoke.pending_review",
@@ -331,4 +367,4 @@ def plugin_show(
     typer.echo(t("cli.plugin.show.no_manifest_yet"))
 
 
-__all__ = ["plugin_app"]
+__all__ = ["PLUGIN_GRANT_FIELDS", "plugin_app"]
