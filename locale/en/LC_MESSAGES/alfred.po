@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 23:37+0100\n"
+"POT-Creation-Date: 2026-06-01 23:39+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -66,8 +66,7 @@ msgstr ""
 
 #: src/alfred/cli/audit.py:84 src/alfred/cli/audit.py:119
 msgid "cli.audit.graph.since_help"
-msgstr ""
-"Lookback window (unit-suffixed: 24h, 7d, 30m). Bare integers are rejected."
+msgstr "Lookback window (unit-suffixed: 24h, 7d, 30m). Bare integers are rejected."
 
 #: src/alfred/cli/audit.py:100 src/alfred/cli/audit.py:135
 msgid "cli.audit.graph.empty"
@@ -79,11 +78,11 @@ msgstr ""
 "Filter to a single trust-tier swimlane (T0, T1, T2, or T3). Omit to show "
 "every tier."
 
-#: src/alfred/cli/audit.py:141
+#: src/alfred/cli/audit.py:140
 msgid "cli.audit.graph.tier_header"
 msgstr "Audit graph — swimlane {tier}"
 
-#: src/alfred/cli/audit.py:143
+#: src/alfred/cli/audit.py:140
 msgid "cli.audit.graph.header"
 msgstr "Audit graph — all tiers"
 
