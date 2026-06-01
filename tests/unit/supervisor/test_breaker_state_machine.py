@@ -355,3 +355,137 @@ def test_reset_then_failures_can_trip_fresh() -> None:
         cb.record_failure("SubprocessExitedError", now=base + dt.timedelta(seconds=i))
     assert cb.state == BreakerState.OPEN
     assert cb.trip_count == 2  # incremented past the prior 1
+
+
+# ---------------------------------------------------------------------------
+# Hookpoint invocation helpers (Task 9) — err-001 / core-004
+# ---------------------------------------------------------------------------
+#
+# The helpers are standalone async functions in :mod:`alfred.supervisor.breaker`
+# that callers (``PluginLifecycle.on_crash`` Task 10; ``Supervisor.reset_breaker``
+# Task 20) await INSIDE their own TaskGroup. ``_trip()`` does NOT spawn
+# fire-and-forget hookpoint tasks (err-001 / core-004). These tests pin the
+# contract: helper signatures match the documented input shapes; helpers route
+# through :func:`alfred.hooks.invoke.invoke` with ``name`` as the positional
+# arg (core-004); ``_trip()`` does not call ``create_task`` on the running
+# loop (err-001 fire-and-forget regression guard).
+
+
+def test_trip_does_not_fire_and_forget_hookpoint() -> None:
+    """``_trip()`` must NOT spawn a fire-and-forget task (err-001 / core-004).
+
+    Hookpoint invocation is the caller's responsibility (``PluginLifecycle``
+    Task 10; ``Supervisor.reset_breaker`` Task 20). If a future refactor
+    re-introduces ``asyncio.get_running_loop().create_task(...)`` inside
+    ``_trip``, this test catches it. ``record_failure`` calls ``_trip`` on the
+    threshold-crossing call; we patch the loop accessor and assert
+    ``create_task`` is never reached.
+    """
+    from unittest.mock import patch
+
+    cb = _make_cb()
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    with patch("asyncio.get_running_loop") as mock_loop:
+        for i in range(3):
+            cb.record_failure(
+                "SubprocessExitedError",
+                now=base + dt.timedelta(seconds=i),
+            )
+    assert cb.state == BreakerState.OPEN
+    mock_loop.return_value.create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invoke_breaker_tripped_hookpoint_routes_through_invoke() -> None:
+    """``invoke_breaker_tripped_hookpoint`` awaits ``invoke`` with ``name`` positional.
+
+    Pins three invariants for the helper:
+
+    * It is ``async`` and awaitable — so callers stay inside the
+      ``TaskGroup`` that owns the breaker transition (no fire-and-forget).
+    * The first positional argument it passes to ``invoke`` is ``"supervisor.breaker.tripped"``
+      (core-004 — verbatim positional ``name``, never ``hookpoint=`` keyword).
+    * The ``HookContext.input`` carries the four breaker-tripped subject
+      fields callers must thread to the dispatcher: ``component_id``,
+      ``trip_count``, ``last_failure_type``, ``breaker_state="OPEN"``.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import invoke_breaker_tripped_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await invoke_breaker_tripped_hookpoint(
+            component_id="comp-A",
+            trip_count=3,
+            last_failure_type="SubprocessExitedError",
+        )
+    assert mock_invoke.await_count == 1
+    args, kwargs = mock_invoke.call_args
+    # core-004 — name passed as the first positional, not a keyword
+    assert args[0] == "supervisor.breaker.tripped"
+    ctx = args[1]
+    assert ctx.input["component_id"] == "comp-A"
+    assert ctx.input["trip_count"] == 3
+    assert ctx.input["last_failure_type"] == "SubprocessExitedError"
+    assert ctx.input["breaker_state"] == "OPEN"
+    assert ctx.kind == "post"
+    assert kwargs["kind"] == "post"
+    assert kwargs["fail_closed"] is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_breaker_reset_hookpoint_routes_through_invoke() -> None:
+    """``invoke_breaker_reset_hookpoint`` awaits ``invoke`` with the reset subject.
+
+    Mirrors the tripped-hookpoint helper but for the operator-initiated reset
+    path. ``old_state`` survives reset so the audit graph can tell apart a
+    no-op CLOSED reset from a true OPEN→CLOSED rescue.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import invoke_breaker_reset_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await invoke_breaker_reset_hookpoint(
+            component_id="comp-B",
+            old_state="OPEN",
+            new_state="CLOSED",
+            trip_count=4,
+            operator_user_id="alice",
+        )
+    assert mock_invoke.await_count == 1
+    args, kwargs = mock_invoke.call_args
+    assert args[0] == "supervisor.breaker.reset"
+    ctx = args[1]
+    assert ctx.input["component_id"] == "comp-B"
+    assert ctx.input["old_state"] == "OPEN"
+    assert ctx.input["new_state"] == "CLOSED"
+    assert ctx.input["trip_count"] == 4
+    assert ctx.input["operator_user_id"] == "alice"
+    assert ctx.kind == "post"
+    assert kwargs["kind"] == "post"
+    assert kwargs["fail_closed"] is False
+
+
+@pytest.mark.asyncio
+async def test_hookpoint_helpers_generate_distinct_correlation_ids() -> None:
+    """Each helper call mints a fresh correlation id so distinct trip rows are joinable.
+
+    A single shared module-level id would let two concurrent crash handlers
+    collapse onto the same audit row in downstream readers that index by
+    ``correlation_id``.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import invoke_breaker_tripped_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await invoke_breaker_tripped_hookpoint(
+            component_id="c", trip_count=1, last_failure_type="E"
+        )
+        await invoke_breaker_tripped_hookpoint(
+            component_id="c", trip_count=2, last_failure_type="E"
+        )
+    first_ctx = mock_invoke.call_args_list[0].args[1]
+    second_ctx = mock_invoke.call_args_list[1].args[1]
+    assert first_ctx.correlation_id != second_ctx.correlation_id

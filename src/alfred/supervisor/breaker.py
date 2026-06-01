@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import uuid as _uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from enum import StrEnum
@@ -366,7 +367,148 @@ class CircuitBreaker:
             await session.merge(row)
 
 
+# ---------------------------------------------------------------------------
+# Hookpoint invocation helpers (Task 9) — err-001 / core-004
+# ---------------------------------------------------------------------------
+#
+# Both helpers are intentionally **module-level coroutines** rather than
+# methods on :class:`CircuitBreaker`. The breaker's state machine is a pure
+# domain object (no I/O, no awaits); the hookpoint helpers do I/O (audit
+# emit via the dispatcher's sink) and so live one layer above the state
+# machine. Keeping them at module scope:
+#
+# * preserves the breaker's purity for the state-machine tests
+#   (``test_breaker_state_machine.py``), which never sleep and never touch
+#   the registry;
+# * lets the supervisor/plugin-lifecycle code call them with no instance
+#   handle when the breaker singleton is resolved elsewhere
+#   (``Supervisor.get_or_create_breaker`` — Task 19);
+# * removes the temptation to spawn ``asyncio.create_task(self._invoke(...))``
+#   from inside ``_trip`` — the helpers are ``async`` and must be awaited by
+#   the caller's ``TaskGroup`` (err-001 / core-004).
+
+
+async def invoke_breaker_tripped_hookpoint(
+    *,
+    component_id: str,
+    trip_count: int,
+    last_failure_type: str,
+) -> None:
+    """Invoke ``supervisor.breaker.tripped`` via the hook dispatcher.
+
+    Called by :class:`alfred.supervisor.plugin_lifecycle.PluginLifecycle`
+    after :meth:`CircuitBreaker.record_failure` transitions to OPEN. The
+    coroutine is awaited inside the caller's :class:`asyncio.TaskGroup` so
+    subscriber exceptions surface and chain timeouts honour the supervisor's
+    backstop. Fire-and-forget (``asyncio.get_running_loop().create_task``)
+    is forbidden by err-001 / core-004 — every Slice-3 review cycle has
+    re-pinned the rule.
+
+    Args:
+        component_id: The breaker's logical component (plugin_id, dispatch
+            target, etc.). Round-trips into the audit row's ``component_id``
+            field.
+        trip_count: Cumulative trip count after the state change. Survives
+            ``reset()`` (operator-triggered) so the row reflects lifetime
+            count, not since-last-reset.
+        last_failure_type: Python exception type name only — NEVER
+            ``str(exc)`` or ``exc.args``. Subprocess crash traces can carry
+            T3 fragments (spec §5.6); callers MUST funnel through
+            ``type(exc).__name__``.
+
+    Hookpoint metadata (registered by ``Supervisor.__init__`` — Task 20):
+        - ``subscribable_tiers``: system + operator (operator dashboards can
+          observe; no user-plugin subscribers).
+        - ``refusable_tiers``: empty — the breaker has already tripped; a
+          refusal would not roll back the state machine.
+        - ``fail_closed=False`` — observability stage; a crashing observer
+          must not stall the supervisor's restart loop.
+
+    Mirrors :data:`alfred.audit.audit_row_schemas.SUPERVISOR_BREAKER_TRIPPED_FIELDS`:
+    callers that build the audit row from the same fields keep the audit
+    schema and the hookpoint subject in lock-step.
+    """
+    # Deferred import: ``alfred.hooks.invoke`` re-exports through
+    # ``alfred.hooks.registry`` which in turn imports ``alfred.security`` —
+    # eagerly pulling that at ``alfred.supervisor.breaker`` import time would
+    # widen the import graph for the pure state-machine tests that do not
+    # need it. Local import keeps the state-machine path free of the hook
+    # subsystem when the helper is never called.
+    from alfred.hooks.context import HookContext
+    from alfred.hooks.invoke import invoke
+
+    # core-005 / freshness — each invocation mints its own correlation id so
+    # concurrent crash handlers do not collapse onto a single audit row.
+    correlation_id = str(_uuid.uuid4())
+    ctx: HookContext[dict[str, object]] = HookContext(
+        action_id="supervisor.breaker.tripped",
+        hookpoint="supervisor.breaker.tripped",
+        input={
+            "component_id": component_id,
+            "trip_count": trip_count,
+            "last_failure_type": last_failure_type,
+            "breaker_state": BreakerState.OPEN.value,
+            "correlation_id": correlation_id,
+        },
+        correlation_id=correlation_id,
+        kind="post",
+    )
+    # core-004 — ``invoke``'s first positional is ``name``; never
+    # ``hookpoint=`` keyword (that arg name does not exist on ``invoke``).
+    await invoke("supervisor.breaker.tripped", ctx, kind="post", fail_closed=False)
+
+
+async def invoke_breaker_reset_hookpoint(
+    *,
+    component_id: str,
+    old_state: str,
+    new_state: str,
+    trip_count: int,
+    operator_user_id: str,
+) -> None:
+    """Invoke ``supervisor.breaker.reset`` via the hook dispatcher.
+
+    Called by ``Supervisor.reset_breaker()`` (Task 20) after the breaker's
+    in-memory transition + ``save_to_db`` round-trip. ``old_state`` MUST
+    name the pre-reset state — a no-op CLOSED→CLOSED reset is auditable but
+    visibly distinct from a true OPEN→CLOSED rescue. ``trip_count`` is the
+    cumulative counter; ``reset()`` does not clear it so the row carries
+    the lifetime count.
+
+    Hookpoint metadata (Task 20):
+        - ``subscribable_tiers``: system + operator only.
+        - ``refusable_tiers``: empty — reset is an operator override; a
+          refusal would defeat the override.
+        - ``fail_closed=False``.
+
+    Mirrors :data:`alfred.audit.audit_row_schemas.SUPERVISOR_BREAKER_RESET_FIELDS`.
+    """
+    # See ``invoke_breaker_tripped_hookpoint`` for the deferred-import
+    # rationale.
+    from alfred.hooks.context import HookContext
+    from alfred.hooks.invoke import invoke
+
+    correlation_id = str(_uuid.uuid4())
+    ctx: HookContext[dict[str, object]] = HookContext(
+        action_id="supervisor.breaker.reset",
+        hookpoint="supervisor.breaker.reset",
+        input={
+            "component_id": component_id,
+            "old_state": old_state,
+            "new_state": new_state,
+            "trip_count": trip_count,
+            "operator_user_id": operator_user_id,
+            "correlation_id": correlation_id,
+        },
+        correlation_id=correlation_id,
+        kind="post",
+    )
+    await invoke("supervisor.breaker.reset", ctx, kind="post", fail_closed=False)
+
+
 __all__ = [
     "BreakerState",
     "CircuitBreaker",
+    "invoke_breaker_reset_hookpoint",
+    "invoke_breaker_tripped_hookpoint",
 ]
