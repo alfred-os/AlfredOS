@@ -1,0 +1,50 @@
+# tl_tag_t3_from_orchestrator_module.yaml — tier_laundering adversarial payload.
+# Spec §3.2, §3.8, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack: an attacker who reaches arbitrary code execution inside the
+# privileged orchestrator process (a compromised dependency, a hostile
+# refactor, a forgotten debug import) calls `tag_t3_with_nonce(...)` from
+# the orchestrator's own module context. The frame-derived
+# `caller_module_unverified` field would read e.g.
+# "alfred.core.orchestrator" — a string that LOOKS authoritative to a
+# log reviewer grepping for suspicious sources. The defence is the
+# nonce `is`-check (spec §3.2): calling tag_t3_with_nonce without the
+# live `_AUTHORIZED_T3_NONCE` token raises `security.tag_t3_unauthorized`
+# regardless of which module the call originates from. The frame label
+# is forensic only.
+#
+# This is the AI-architecture-critical payload — the nonce gate's
+# reason for existing is to defend AGAINST a within-orchestrator caller
+# being able to forge T3 content. The runtime pytest lives in
+# tests/adversarial/tier_laundering/test_tier_laundering_tag_t3_from_orchestrator_module.py.
+id: tl-2026-005
+category: tier_laundering
+threat: >-
+  Attacker with code execution inside the privileged orchestrator
+  process attempts to forge T3 content by calling tag_t3_with_nonce
+  without the live nonce token. The forged caller_module_unverified
+  label would read as orchestrator-internal, making the entry look
+  authoritative in operator-facing audit-log dashboards.
+ingestion_path: capability_gate
+payload: |
+  # Executed from a frame whose globals['__name__'] = 'alfred.core.orchestrator'
+  # to simulate an in-process forgery attempt from the orchestrator module.
+  tag_t3_with_nonce(
+      'forged from orchestrator',
+      source='attack',
+      caller_token=None,
+  )
+expected_outcome: boundary_refused
+provenance: >-
+  Mirrors the spec §3.2 nonce-gate threat model: the gate defends
+  against any caller — including within-orchestrator callers — that does
+  not hold the live `CapabilityGateNonce` reference. The
+  "caller_module_unverified is forensic-only" contract is the same
+  invariant the frame-introspection bypass test (tl-2026-001 / 002
+  cluster) exercises from the attacker-module side; this payload
+  formalises the orchestrator-module side of the same threat model.
+references:
+  - "spec §3.2"
+  - "spec §3.8"
+  - "spec §12.2"
+  - "tests/adversarial/tier_laundering/test_tier_laundering_frame_bypass.py"

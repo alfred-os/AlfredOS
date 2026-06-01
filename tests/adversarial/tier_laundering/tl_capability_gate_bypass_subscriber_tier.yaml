@@ -1,0 +1,46 @@
+# tl_capability_gate_bypass_subscriber_tier.yaml — tier_laundering adversarial payload.
+# Spec §4.3, §8.2, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack: a `user-plugin`-tier subscriber attempts to register on a
+# hookpoint whose declared `subscribable_tiers` set excludes
+# `user-plugin` — typically a T3-carrying integration hookpoint where
+# only `system` callers are admitted (the privileged path). The bypass
+# vector is the two-axis design (spec §4.3): the attacker hopes that
+# claiming an unrelated `subscriber_tier=user-plugin` slips past the
+# capability gate because the gate's content-tier axis is orthogonal.
+# The defence is `HookRegistry.register`'s closed-domain
+# `subscribable_tiers` check (#119) — a user-plugin subscriber on a
+# system-only hookpoint raises `HookError` with the registration tier
+# mismatch message, even when the gate would have admitted the same
+# call on a different hookpoint. The runtime pytest lives in
+# tests/adversarial/tier_laundering/test_tier_laundering_capability_gate_bypass.py.
+id: tl-2026-006
+category: tier_laundering
+threat: >-
+  A user-plugin-tier subscriber attempts to register on a system-only
+  hookpoint that carries T3 content (e.g. memory.episodic.record). The
+  attacker hopes the orthogonal subscriber_tier axis lets the
+  registration slip through even though the content-tier axis would
+  refuse, intending to receive T3 content (web pages, emails) as
+  subscriber payload.
+ingestion_path: capability_gate
+payload:
+  hookpoint: "memory.episodic.record.before_db_write"
+  requested_tier: "user-plugin"
+  expected_subscribable_tiers: ["system"]
+  attempted_action: "register-and-receive-t3-content"
+expected_outcome: refused
+provenance: >-
+  Mirrors spec §4.3 two-axis design and #119's subscribable_tiers
+  registration-time enforcement. The defence pattern is the same one
+  hk-2026-001 (tier_escalation) exercises for system-tier escalation;
+  this payload formalises the user-plugin → T3-carrying-hookpoint
+  variant. The runtime assertion uses the same HookRegistry +
+  DevGate(allow_system=False) wiring as the hooks adversarial corpus
+  baseline.
+references:
+  - "spec §4.3"
+  - "spec §8.2"
+  - "spec §12.2"
+  - "src/alfred/hooks/registry.py"
+  - "tests/adversarial/hooks/test_hk_2026_001_tier_escalation.py"

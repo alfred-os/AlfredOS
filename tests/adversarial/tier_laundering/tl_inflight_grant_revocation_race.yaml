@@ -1,0 +1,53 @@
+# tl_inflight_grant_revocation_race.yaml — tier_laundering adversarial payload.
+# Spec §8.1, §8.5, §12.2. Schema: tests/adversarial/payload_schema.py.
+#
+# Attack: a hostile (or stale) plugin holds a dispatch call open against
+# the gate; meanwhile the operator revokes the grant in state.git, the
+# reviewer merges, and `RealGate._apply_grants` updates the in-memory
+# policy. Without atomic policy swap + emit-on-revoke discipline, the
+# in-flight call could complete under the OLD policy while the audit
+# log records the new (revoked) state — leaving the operator unable to
+# tell whether the call was authorised at the time it dispatched.
+#
+# Defence (spec §8.1): `RealGate._apply_grants` swaps the immutable
+# `GatePolicy` snapshot atomically (single-threaded asyncio event loop)
+# — any hot-path `check` mid-flight sees either the old or new
+# snapshot, never a half-mutated one. The `_apply_grants` ordering is
+# revoke-removed-rows → upsert-new-rows → set-sync-hash → swap-in-memory
+# policy, and every revoke emits `plugin.grant.revoked` against the
+# state.git proposal_branch — the audit graph stays self-consistent.
+#
+# Outcome: the in-memory policy semantics under concurrent revoke are
+# the bypass-impossible posture (audit_row_emitted asserts the
+# revocation row is emitted before the policy swap completes).
+id: tl-2026-007
+category: tier_laundering
+threat: >-
+  An attacker times a long-running dispatch call (e.g. a slow inbound
+  scanner) to overlap with an operator revoking the underlying
+  capability grant. Without atomic policy swap, the in-flight call
+  could complete under the OLD allowed policy while the audit log
+  records the NEW revoked state — letting the attacker dispatch one
+  more call than the audit graph attributes to the grant.
+ingestion_path: capability_gate
+payload:
+  hookpoint: "tool.web.fetch"
+  plugin_id: "alfred.compromised-plugin"
+  in_flight_dispatch: "blocking_on_inbound_scan"
+  concurrent_action: "operator-revoke-grant-via-state.git"
+expected_outcome: audit_row_emitted
+provenance: >-
+  Mirrors spec §8.1 atomic-policy-swap contract and CR-139 finding #2
+  on _apply_grants revoke-then-upsert ordering. The audit-row
+  invariant follows §8.5: every grant lifecycle transition
+  (requested / approved / denied / revoked) emits exactly one
+  audit row against the proposal_branch. The pytest-level race
+  simulation lives alongside the runtime _apply_grants tests in
+  tests/unit/security/capability_gate/test_real_gate.py; this
+  adversarial payload formalises the threat-model contract.
+references:
+  - "spec §8.1"
+  - "spec §8.5"
+  - "spec §12.2"
+  - "src/alfred/security/capability_gate/_gate.py"
+  - "tests/unit/security/capability_gate/test_real_gate.py"

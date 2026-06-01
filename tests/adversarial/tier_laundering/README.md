@@ -42,11 +42,11 @@ graph — drift between the two is a release-blocker.
 |---|---|
 | `cast(TaggedContent[T2], t3_value)` bypass | PR-S3-1 Tasks 22 + 25 (`tl_cast_bypass.yaml` + `test_tier_laundering_cast_bypass.py`) |
 | Wire-format tier confusion (JSON + YAML) | PR-S3-1 Task 23 (`tl_wire_tier_confusion.yaml`) |
-| `tag(T3, ...)` from orchestrator module context | **TBD — Slice-3 follow-on (no current task)** — PR-S3-1 implements the per-process-nonce gate (spec §3.2) but no dedicated adversarial payload exercises the "called from orchestrator module" failure mode |
+| `tag(T3, ...)` from orchestrator module context | PR #134 retrospective (`tl_tag_t3_from_orchestrator_module.yaml` + `test_tier_laundering_tag_t3_from_orchestrator_module.py`) — formalises the within-orchestrator forgery branch of the §3.2 nonce-gate threat model |
 | Frame-introspection bypass (monkey-patch `sys.modules` to forge `__name__`) | PR-S3-1 Task 26 (`test_tier_laundering_frame_bypass.py`) |
-| Capability-gate bypass via `subscriber_tier=user-plugin` on T3-carrying hookpoint | **TBD — Slice-3 follow-on (no current task)** — PR-S3-2 implements the `subscriber_tier` axis but no adversarial payload exercises a user-plugin tier attempting to subscribe to a T3-carrying hookpoint |
+| Capability-gate bypass via `subscriber_tier=user-plugin` on T3-carrying hookpoint | PR #134 retrospective (`tl_capability_gate_bypass_subscriber_tier.yaml` + `test_tier_laundering_capability_gate_bypass.py`) — `subscribable_tiers` registration-time refusal on `memory.episodic.record.before_db_write` |
 | Post-handshake hook registration | PR-S3-3a (`tl_post_handshake_hook_register.yaml` + `test_post_handshake_hook_register_attack.py`) |
-| In-flight grant revocation race | **TBD — Slice-3 follow-on (no current task)** — PR-S3-2 covers the race in `tests/unit/` (`plugin.grant.revoked_inflight` audit row) but no `tier_laundering` adversarial payload formalises the attack |
+| In-flight grant revocation race | PR #134 retrospective (`tl_inflight_grant_revocation_race.yaml` + `test_tier_laundering_inflight_grant_revocation_race.py`) — atomic `_apply_grants` swap + revoke-before-upsert audit ordering |
 | Retry-guidance hygiene (strict token-set invariant + poisoned-input control) | PR-S3-4 (`test_tier_laundering_retry_guidance_hygiene.py`) |
 | `gc.get_objects()`-style T3 token retrieval (out-of-scope acknowledgement) | PR-S3-1 Task 24 (`tl_gc_traversal_out_of_scope.yaml`) — explicit out-of-scope label per spec §3.2 threat model limits |
 
