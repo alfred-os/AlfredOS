@@ -31,7 +31,11 @@ from ._observability import (
     OUTBOUND_DLP_SCAN_DURATION,
     PLUGIN_SPAWN_DURATION,
 )
-from .content_store_base import ContentStoreBase, InMemoryContentStore
+from .content_store_base import (
+    ContentStoreBase,
+    InMemoryContentStore,
+    InMemoryContentStoreProductionError,
+)
 from .errors import (
     DlpOutboundRefusedError,
     ManifestError,
@@ -67,6 +71,7 @@ __all__ = [
     "DispatchResult",
     "DlpOutboundRefusedError",
     "InMemoryContentStore",
+    "InMemoryContentStoreProductionError",
     "InboundContentScanner",
     "ManifestError",
     "ManifestTierError",
