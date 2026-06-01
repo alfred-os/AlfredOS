@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 23:33+0100\n"
+"POT-Creation-Date: 2026-06-01 23:37+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -44,6 +44,48 @@ msgstr "configuration is invalid: {detail}"
 #: src/alfred/cli/_bootstrap.py:101
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
+
+# PR-S3-6 Component F — alfred audit {log, graph} sub-app. The graph
+# subcommand surfaces a swimlane filtered by --tier T1|T2|T3 per spec
+# §11.3 ("alfred audit graph --tier T3 --since 24h").
+#: src/alfred/cli/audit.py:21
+msgid "cli.audit.help"
+msgstr "Inspect the audit log; filter the graph swimlane by trust tier."
+
+#: src/alfred/cli/audit.py:71
+msgid "cli.audit.graph.since_invalid"
+msgstr ""
+"Invalid --since value: {value}. Expected a unit-suffixed duration like "
+"{example}."
+
+#: src/alfred/cli/audit.py:80
+msgid "cli.audit.log.event_help"
+msgstr ""
+"Restrict to a single event name (e.g. plugin.lifecycle.crashed). Omit to "
+"show every event in the time window."
+
+#: src/alfred/cli/audit.py:84 src/alfred/cli/audit.py:119
+msgid "cli.audit.graph.since_help"
+msgstr ""
+"Lookback window (unit-suffixed: 24h, 7d, 30m). Bare integers are rejected."
+
+#: src/alfred/cli/audit.py:100 src/alfred/cli/audit.py:135
+msgid "cli.audit.graph.empty"
+msgstr "No audit rows{tier} in the last {since}."
+
+#: src/alfred/cli/audit.py:115
+msgid "cli.audit.graph.tier_help"
+msgstr ""
+"Filter to a single trust-tier swimlane (T0, T1, T2, or T3). Omit to show "
+"every tier."
+
+#: src/alfred/cli/audit.py:141
+msgid "cli.audit.graph.tier_header"
+msgstr "Audit graph — swimlane {tier}"
+
+#: src/alfred/cli/audit.py:143
+msgid "cli.audit.graph.header"
+msgstr "Audit graph — all tiers"
 
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.
@@ -321,7 +363,6 @@ msgstr ""
 
 # PR-S3-6 Component E — alfred supervisor sub-app (status read-only,
 # reset --confirm gate). T1-tier per spec §10.8.
-
 #: src/alfred/cli/supervisor.py:25
 msgid "cli.supervisor.help"
 msgstr "Inspect supervised components and reset tripped circuit breakers."
@@ -329,8 +370,8 @@ msgstr "Inspect supervised components and reset tripped circuit breakers."
 #: src/alfred/cli/supervisor.py:78
 msgid "cli.supervisor.status.no_supervisor_running"
 msgstr ""
-"Supervisor is not running. Start the Alfred stack with "
-"`docker compose up -d` and re-run `alfred supervisor status`."
+"Supervisor is not running. Start the Alfred stack with `docker compose up"
+" -d` and re-run `alfred supervisor status`."
 
 #: src/alfred/cli/supervisor.py:81
 msgid "cli.supervisor.status.empty_hint"
@@ -354,45 +395,36 @@ msgstr "TRIPS"
 msgid "cli.supervisor.status.column.last_trip_at"
 msgstr "LAST TRIP"
 
-msgid "cli.supervisor.status.breaker_state.open"
-msgstr "OPEN"
-
-msgid "cli.supervisor.status.breaker_state.closed"
-msgstr "CLOSED"
-
-msgid "cli.supervisor.status.breaker_state.half_open"
-msgstr "HALF_OPEN"
-
-#: src/alfred/cli/supervisor.py:120
+#: src/alfred/cli/supervisor.py:117
 msgid "cli.supervisor.reset.usage"
 msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 
-#: src/alfred/cli/supervisor.py:126 src/alfred/cli/supervisor.py:146
+#: src/alfred/cli/supervisor.py:122 src/alfred/cli/supervisor.py:142
 msgid "cli.supervisor.reset.confirm_prompt"
 msgstr ""
 "Refusing to reset {component} without --confirm.\n"
 "  trip_count:    {trip_count}\n"
 "  last_trip_at:  {last_trip_at}\n"
-"Pass --confirm to acknowledge that resetting may re-enable a plugin "
-"that just failed 3+ times in 5 minutes."
+"Pass --confirm to acknowledge that resetting may re-enable a plugin that "
+"just failed 3+ times in 5 minutes."
 
-#: src/alfred/cli/supervisor.py:156
+#: src/alfred/cli/supervisor.py:152
 msgid "cli.supervisor.reset.rerun_hint"
 msgstr "Re-run with: alfred supervisor reset {component} --confirm"
 
-#: src/alfred/cli/supervisor.py:195
+#: src/alfred/cli/supervisor.py:191
 msgid "cli.supervisor.reset.component_not_found"
 msgstr ""
-"Component not found: {component}. "
-"Run `alfred supervisor status` to list registered components."
+"Component not found: {component}. Run `alfred supervisor status` to list "
+"registered components."
 
-#: src/alfred/cli/supervisor.py:203 src/alfred/cli/supervisor.py:212
+#: src/alfred/cli/supervisor.py:199 src/alfred/cli/supervisor.py:208
 msgid "cli.supervisor.reset.unexpected_error"
 msgstr ""
-"Failed to reset {component}: {error_type}. "
-"Check `alfred audit log --event supervisor.breaker.reset --since 5m`."
+"Failed to reset {component}: {error_type}. Check `alfred audit log "
+"--event supervisor.breaker.reset --since 5m`."
 
-#: src/alfred/cli/supervisor.py:220
+#: src/alfred/cli/supervisor.py:216
 msgid "cli.supervisor.reset.success"
 msgstr "Reset circuit breaker for {component}. Audit row recorded."
 
@@ -1325,4 +1357,13 @@ msgstr ""
 #~ "  branch:       {branch}\n"
 #~ "  proposal_id:  {proposal_id}\n"
 #~ "The domain is still fetchable until the reviewer approves the proposal."
+
+#~ msgid "cli.supervisor.status.breaker_state.open"
+#~ msgstr "OPEN"
+
+#~ msgid "cli.supervisor.status.breaker_state.closed"
+#~ msgstr "CLOSED"
+
+#~ msgid "cli.supervisor.status.breaker_state.half_open"
+#~ msgstr "HALF_OPEN"
 
