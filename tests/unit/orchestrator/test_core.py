@@ -118,6 +118,15 @@ def _build(
     # used by the cancellation tests to make a specific record() call cancel
     # mid-await. Default = the shared mock created by `_make_episodic_audit`.
     episodic_factory: Any = None,
+    # PR-S3-3b Task 12: per-action deadline + autocommit audit writer for
+    # supervisor.action_timeout rows. The deadline defaults to a value far
+    # larger than any test's expected runtime so existing tests stay flake-
+    # free; timeout tests override to a sub-millisecond value. The autocommit
+    # writer defaults to a distinct mock so the test can assert that the
+    # session-bound writer (``m["audit"]``) is NOT the surface used by the
+    # timeout-row emission.
+    deadline_seconds: float = 30.0,
+    autocommit_audit: MagicMock | None = None,
 ) -> tuple[Orchestrator, dict[str, Any]]:
     if working is None:
         # A simple in-memory stand-in: append accumulates Turns; turns() returns
@@ -167,6 +176,9 @@ def _build(
     resolved_operator = operator if operator is not None else _default_operator()
     identity_resolver = MagicMock()
     identity_resolver.get_operator = MagicMock(return_value=resolved_operator)
+    if autocommit_audit is None:
+        autocommit_audit = MagicMock()
+        autocommit_audit.append = AsyncMock()
     kwargs: dict[str, Any] = {
         "identity_resolver": identity_resolver,
         "session_scope": scope,
@@ -174,6 +186,8 @@ def _build(
         "budget": budget,
         "episodic_factory": resolved_factory,
         "audit_factory": lambda _f: audit,
+        "autocommit_audit_factory": lambda _f: autocommit_audit,
+        "deadline_seconds": deadline_seconds,
     }
     if redactor is not None:
         kwargs["redactor"] = redactor
@@ -185,6 +199,7 @@ def _build(
         "session": session,
         "episodic": episodic,
         "audit": audit,
+        "autocommit_audit": autocommit_audit,
         "identity_resolver": identity_resolver,
         "operator": resolved_operator,
     }
@@ -664,3 +679,191 @@ class TestOrchestratorRedactsAuditSubject:
         audit_kwargs = m["audit"].append.await_args.kwargs
         assert "sk-LEAKED" not in audit_kwargs["subject"]["error"]
         assert "[REDACTED]" in audit_kwargs["subject"]["error"]
+
+
+class TestOrchestratorActionDeadline:
+    """Per-action deadline wraps ``handle_user_message`` body (spec §10.5).
+
+    PR-S3-3b Task 12 wires :class:`alfred.supervisor.deadline.DeadlineWrapper`
+    around the turn body. When the deadline fires:
+
+    * ``DeadlineWrapper.run`` re-raises ``asyncio.TimeoutError`` (core-002 —
+      never reclassifies a real cancel as timeout).
+    * The orchestrator's new ``except asyncio.TimeoutError`` arm emits the
+      ``supervisor.action_timeout`` audit row via the **autocommit** writer
+      so the row survives the outer session rollback (core-003 + CR-R3 #7).
+    * The orchestrator ALSO emits an ``orchestrator.turn`` ``result=cancelled``
+      row via the autocommit writer (CR-R3 #7 fix) — using the session-bound
+      writer would lose the row to the rollback that follows.
+    * The session is rolled back and ``CancelledError`` is re-raised so
+      higher-level cancellation handling stays unchanged.
+    """
+
+    async def test_timeout_emits_supervisor_action_timeout_via_autocommit(self) -> None:
+        """The supervisor.action_timeout row lands on the autocommit writer.
+
+        Asserts the row CARRIES the subject keys spec §10.5 / migration 0007
+        requires: ``user_id``, ``deadline_seconds``, ``phase_at_timeout``,
+        ``action_duration_seconds``, ``correlation_id``. The row also has
+        ``result="cancelled"`` per migration 0007.
+        """
+        # Slow router → the deadline fires before the provider returns.
+        router = MagicMock()
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+            return None  # pragma: no cover — deadline fires first
+
+        router.complete = AsyncMock(side_effect=_slow_complete)
+        orch, m = _build(router=router, deadline_seconds=0.001)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "deadline-fires")
+
+        # Both timeout-path rows landed on the AUTOCOMMIT writer, never the
+        # session-bound one (CR-R3 #7).
+        autocommit_events = [
+            call.kwargs["event"] for call in m["autocommit_audit"].append.await_args_list
+        ]
+        assert "supervisor.action_timeout" in autocommit_events
+        assert "orchestrator.turn" in autocommit_events
+        # The session-bound writer is NOT used for the timeout rows.
+        for call in m["audit"].append.await_args_list:
+            assert call.kwargs.get("event") != "supervisor.action_timeout"
+
+        # Inspect the supervisor.action_timeout row in detail.
+        timeout_call = next(
+            call
+            for call in m["autocommit_audit"].append.await_args_list
+            if call.kwargs.get("event") == "supervisor.action_timeout"
+        )
+        timeout_kwargs = timeout_call.kwargs
+        assert timeout_kwargs["result"] == "cancelled"
+        assert timeout_kwargs["actor_user_id"] == "bruce"
+        assert timeout_kwargs["actor_persona"] == "supervisor"
+        assert timeout_kwargs["trust_tier_of_trigger"] == "T0"
+        subject = timeout_kwargs["subject"]
+        assert subject["user_id"] == "bruce"
+        assert subject["deadline_seconds"] == 0.001
+        # phase_at_timeout is a best-effort label; "unknown" is the Slice 3 default
+        # (Slice 4+ refines this via the OTel span hierarchy).
+        assert subject["phase_at_timeout"] == "unknown"
+        assert subject["correlation_id"] is not None
+
+    async def test_timeout_emits_orchestrator_turn_cancelled_via_autocommit(self) -> None:
+        """The orchestrator.turn cancellation row also goes to the autocommit writer.
+
+        CR-R3 #7: emitting this row via the session-bound writer would lose it
+        when the parent session rolls back. Using the autocommit writer ensures
+        the row commits independently of the outer rollback.
+        """
+        router = MagicMock()
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+            return None  # pragma: no cover — deadline fires first
+
+        router.complete = AsyncMock(side_effect=_slow_complete)
+        orch, m = _build(router=router, deadline_seconds=0.001)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "deadline-fires")
+
+        # The orchestrator.turn cancellation row sits on the autocommit writer,
+        # NOT on the session-bound one — the session-bound writer would lose
+        # the row to the session.rollback that follows the timeout arm.
+        turn_calls = [
+            call
+            for call in m["autocommit_audit"].append.await_args_list
+            if call.kwargs.get("event") == "orchestrator.turn"
+        ]
+        assert len(turn_calls) == 1
+        kwargs = turn_calls[0].kwargs
+        assert kwargs["result"] == "cancelled"
+        assert kwargs["subject"]["phase"] == "turn_timeout"
+        assert kwargs["actor_user_id"] == "bruce"
+        # No orchestrator.turn cancellation row on the session-bound writer.
+        for call in m["audit"].append.await_args_list:
+            if call.kwargs.get("event") == "orchestrator.turn":
+                assert call.kwargs.get("result") != "cancelled"
+
+    async def test_timeout_rolls_back_user_content_session(self) -> None:
+        """The outer session.rollback() is called when the deadline fires."""
+        router = MagicMock()
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+            return None  # pragma: no cover — deadline fires first
+
+        router.complete = AsyncMock(side_effect=_slow_complete)
+        orch, m = _build(router=router, deadline_seconds=0.001)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "deadline-fires")
+
+        m["session"].rollback.assert_awaited()
+
+    async def test_timeout_reraises_cancelled_error_not_timeout(self) -> None:
+        """The orchestrator re-raises CancelledError after the timeout.
+
+        Spec §10.5 + plan §1453: the timeout path normalises onto the existing
+        cancellation contract so higher-level callers (the TUI, the adapter
+        loop) only have to handle one cancel-shaped propagation.
+        """
+        router = MagicMock()
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+            return None  # pragma: no cover — deadline fires first
+
+        router.complete = AsyncMock(side_effect=_slow_complete)
+        orch, m = _build(router=router, deadline_seconds=0.001)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "deadline-fires")
+
+    async def test_no_timeout_path_under_normal_completion(self) -> None:
+        """A normal-speed turn never emits supervisor.action_timeout.
+
+        Default deadline is 30s; a router that returns immediately must NOT
+        produce a timeout row even if the autocommit writer would accept one.
+        """
+        orch, m = _build()  # default deadline_seconds=30.0
+
+        reply = await _send(orch, m, "hi")
+        assert reply == "Very good, Sir."
+
+        # No autocommit-writer audit calls at all on the happy path — the
+        # only writes go to the session-bound writer.
+        assert m["autocommit_audit"].append.await_count == 0
+
+    async def test_external_cancellation_uses_session_bound_writer(self) -> None:
+        """A non-timeout CancelledError still uses the session-bound writer.
+
+        Pre-PR-S3-3b cancellation contract: operator-cancel mid-turn writes
+        the orchestrator.turn ``result=cancelled`` row via the session-bound
+        writer. The session is then rolled back — the row is intentionally
+        tied to the rolled-back work (the user did NOT consent to a
+        committed turn).
+
+        This test pins that the new timeout-path autocommit writer does NOT
+        accidentally absorb the existing non-timeout cancellation arm.
+        """
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=asyncio.CancelledError())
+        orch, m = _build(router=router)  # default 30s deadline; cancel is external
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "external-cancel")
+
+        # The non-timeout cancellation row is on the SESSION-BOUND writer (pre-PR-S3-3b).
+        # Autocommit writer is not touched.
+        assert m["autocommit_audit"].append.await_count == 0
+        # Session-bound writer recorded the cancellation row.
+        cancel_calls = [
+            call
+            for call in m["audit"].append.await_args_list
+            if call.kwargs.get("result") == "cancelled"
+            and call.kwargs.get("subject", {}).get("phase") == "turn_cancelled"
+        ]
+        assert len(cancel_calls) == 1

@@ -96,6 +96,7 @@ from alfred.personas.alfred import ALFRED_PERSONA, render_persona_prompt
 from alfred.providers.base import CompletionRequest, Message
 from alfred.providers.router import ProviderRouter
 from alfred.security.tiers import T1, T2, TaggedContent
+from alfred.supervisor.deadline import DeadlineWrapper
 
 if TYPE_CHECKING:
     from alfred.identity.models import User
@@ -204,6 +205,23 @@ class Orchestrator:
         audit_factory: Callable[
             [Callable[[], AbstractAsyncContextManager[AsyncSession]]], AuditWriter
         ] = lambda f: AuditWriter(session_factory=f),
+        # PR-S3-3b Task 12: the autocommit writer flushes the
+        # ``supervisor.action_timeout`` AND the timeout-derived
+        # ``orchestrator.turn result=cancelled`` row OUTSIDE the rolled-back
+        # session_scope (core-003 + CR-R3 #7). Production default re-uses
+        # the same factory shape against session_scope; the writer instance
+        # is still distinct from ``_audit`` so the test surface can
+        # observe each independently. AuditWriter already opens its own
+        # session per ``.append()`` so the row commits on a fresh
+        # transaction — the rollback of the parent session_scope cannot
+        # reach it.
+        autocommit_audit_factory: Callable[
+            [Callable[[], AbstractAsyncContextManager[AsyncSession]]], AuditWriter
+        ] = lambda f: AuditWriter(session_factory=f),
+        # Spec §10.5 per-action deadline default; tests inject sub-millisecond
+        # values to fire the deadline deterministically. Hot-reload is out of
+        # scope for PR-S3-3b — arch-002 owns reload semantics.
+        deadline_seconds: float = 30.0,
         redactor: Callable[[str], str] = lambda s: s,
     ) -> None:
         # Resolve the operator exactly once, here. Caching for the
@@ -218,11 +236,23 @@ class Orchestrator:
         self._budget = budget
         self._episodic_factory = episodic_factory
         self._audit_factory = audit_factory
+        self._autocommit_audit_factory = autocommit_audit_factory
         self._redactor = redactor
         # Audit writer is built once from the session_scope factory — it
         # opens its own session per `.append()` and is independent of the
         # per-turn user-content transaction below.
         self._audit = self._audit_factory(self._session_scope)
+        # Second writer purpose-built for the deadline-fired path. Logically
+        # distinct from ``self._audit`` even when both factories share the
+        # same session_scope underneath — the duality makes the wiring
+        # observable in tests and lets a future deployment swap an
+        # independent autocommit-isolation factory in without changing the
+        # call sites (core-003 + CR-R3 #7).
+        self._autocommit_audit = self._autocommit_audit_factory(self._session_scope)
+        # Per-action deadline wrapper — Task 11 ships a pure timing wrapper;
+        # the orchestrator owns the audit-row emission so the row can land
+        # outside the rolled-back session.
+        self._deadline_wrapper = DeadlineWrapper(deadline_seconds=deadline_seconds)
 
     async def handle_user_message(
         self,
@@ -259,23 +289,68 @@ class Orchestrator:
         trace_id = str(uuid.uuid4())
         async with self._session_scope() as session:
             try:
-                return await self._handle_turn(
+                # PR-S3-3b Task 12: wrap the turn body with the per-action
+                # deadline. ``_user_id`` and ``_correlation_id`` are consumed
+                # by ``DeadlineWrapper.run`` and NOT forwarded to
+                # ``_handle_turn`` (core-005 — see DeadlineWrapper docstring).
+                return await self._deadline_wrapper.run(
+                    self._handle_turn,
                     session,
                     user=user,
                     content=content,
                     working_memory=working_memory,
                     trace_id=trace_id,
+                    _user_id=user.slug,
+                    _correlation_id=trace_id,
                 )
+            except TimeoutError:
+                # PR-S3-3b Task 12 — the deadline fired. Two audit rows land
+                # on the AUTOCOMMIT writer so they survive the outer
+                # rollback (core-003 + CR-R3 #7):
+                #
+                #   1. ``supervisor.action_timeout`` — operator-facing
+                #      supervisor row carrying the deadline + phase label.
+                #   2. ``orchestrator.turn`` ``result=cancelled`` — the
+                #      turn's own cancellation row. Using the session-bound
+                #      writer here would lose the row when ``session.rollback()``
+                #      below runs; the autocommit writer flushes it in its
+                #      own session that the parent rollback cannot reach.
+                #
+                # We then re-raise ``CancelledError`` so existing
+                # cancellation-aware callers (TUI, adapter loops) keep their
+                # single-shape handling. The orchestrator's higher-level
+                # cancellation contract collapses "deadline expired" onto
+                # the same shape as operator-initiated cancel (spec §10.5).
+                await self._emit_supervisor_timeout_row(
+                    user_id=user.slug,
+                    correlation_id=trace_id,
+                )
+                await self._emit_orchestrator_turn_cancelled_row_autocommit(
+                    user=user,
+                    trace_id=trace_id,
+                    phase="turn_timeout",
+                )
+                await session.rollback()
+                raise asyncio.CancelledError("deadline expired") from None
             except asyncio.CancelledError:
-                # CLAUDE.md hard rule #7: cancellation at ANY awaited step in
-                # the turn (working-memory append, episodic write, pre-/post-
-                # provider audit) MUST write a `cancelled` audit row — not
-                # only cancellation that lands inside `_router.complete`.
-                # The inner provider-call branch (see `_handle_turn`) already
-                # audits-and-re-raises for the common case; this top-level arm
-                # is the backstop that catches any re-raised CancelledError
-                # (and any cancellation that lands elsewhere). Tagged with a
-                # distinct phase so the audit reader can tell the two apart.
+                # External cancellation (NOT timeout-derived). Session is
+                # alive; the session-bound ``_audit_cancellation`` flushes
+                # inside the active txn which we then roll back — the row
+                # is intentionally tied to the rolled-back work and is
+                # lost on rollback. That's the correct semantic for
+                # "user cancelled mid-turn; nothing committed."
+                #
+                # CLAUDE.md hard rule #7: cancellation at ANY awaited step
+                # in the turn (working-memory append, episodic write,
+                # pre-/post-provider audit) MUST write a ``cancelled``
+                # audit row — not only cancellation that lands inside
+                # ``_router.complete``. The inner provider-call branch
+                # (see ``_handle_turn``) already audits-and-re-raises for
+                # the common case; this top-level arm is the backstop
+                # that catches any re-raised CancelledError (and any
+                # cancellation that lands elsewhere). Tagged with a
+                # distinct phase so the audit reader can tell timeout
+                # apart from operator-cancel.
                 await self._audit_cancellation(user=user, trace_id=trace_id, phase="turn_cancelled")
                 await session.rollback()
                 raise
@@ -321,6 +396,77 @@ class Orchestrator:
                 error=self._redactor(str(audit_exc)),
                 error_type=type(audit_exc).__name__,
             )
+
+    async def _emit_supervisor_timeout_row(
+        self,
+        *,
+        user_id: str,
+        correlation_id: str,
+    ) -> None:
+        """Emit the ``supervisor.action_timeout`` row via the autocommit writer.
+
+        Spec §10.5 + migration 0007: the row's ``result`` is ``"cancelled"``
+        (the turn was cancelled by the deadline). The autocommit writer
+        flushes the row OUTSIDE the rolled-back parent session_scope
+        (core-003 + CR-R3 #7) — using ``self._audit`` here would risk losing
+        the row when ``session.rollback()`` runs in the caller.
+
+        ``phase_at_timeout="unknown"`` is the Slice-3 default;
+        Slice-4+ resolves the in-flight phase from the OTel span hierarchy.
+        err-006: no ``try/except`` here — an autocommit-write failure must
+        propagate so the operator-facing error is loud (CLAUDE.md hard
+        rule #7). The DeadlineWrapper itself takes no audit responsibility
+        (core-002, core-003); that contract lives end-to-end in this method.
+        """
+        await self._autocommit_audit.append(
+            event="supervisor.action_timeout",
+            actor_user_id=user_id,
+            actor_persona="supervisor",
+            subject={
+                "user_id": user_id,
+                "action_duration_seconds": self._deadline_wrapper.deadline_seconds,
+                "deadline_seconds": self._deadline_wrapper.deadline_seconds,
+                "phase_at_timeout": "unknown",
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="cancelled",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=correlation_id,
+        )
+
+    async def _emit_orchestrator_turn_cancelled_row_autocommit(
+        self,
+        *,
+        user: UserLike,
+        trace_id: str,
+        phase: str,
+    ) -> None:
+        """Emit ``orchestrator.turn`` ``result=cancelled`` via the autocommit writer.
+
+        CR-R3 #7: the timeout-derived cancellation row MUST use the autocommit
+        writer because the session-bound ``_audit_cancellation`` writes inside
+        the active txn that the timeout arm is about to roll back. The row
+        would be lost on rollback; the autocommit writer flushes the row in
+        a fresh session that the parent rollback cannot reach.
+
+        ``phase="turn_timeout"`` distinguishes this row from the
+        operator-cancel ``"turn_cancelled"`` row in the audit graph.
+        """
+        await self._autocommit_audit.append(
+            event="orchestrator.turn",
+            actor_user_id=user.slug,
+            actor_persona=_ALFRED_PERSONA_ID,
+            subject=_sanitize_subject({"phase": phase}, self._redactor),
+            trust_tier_of_trigger="T2",
+            result="cancelled",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=trace_id,
+            language=user.language,
+            persona_id=_ALFRED_PERSONA_ID,
+        )
 
     async def _handle_turn(
         self,
