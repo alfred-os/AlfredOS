@@ -8,6 +8,14 @@ messages if any non-approved file contains:
                                from outside the two approved homes
                                (``security/tiers.py`` and
                                ``security/quarantine.py``).
+- ``TaggedContent[T3](...)`` — direct subscript construction that bypasses
+                               the ``tag_t3_with_nonce`` capability gate.
+                               The Pydantic field validator on ``tier`` does
+                               NOT check the nonce; only ``tag_t3_with_nonce``
+                               does. Direct construction therefore admits
+                               raw T3 content without the per-process nonce
+                               check that closes the import-copy-and-call
+                               attack (spec §3.2). sec-S3-002.
 - ``cast(TaggedContent[...]``— type-erasure bypasses that discard provenance.
 - ``# type: ignore`` on a line containing ``TaggedContent`` — suppressing the
                                type error that prevents cast-bypass detection.
@@ -51,18 +59,18 @@ from pathlib import Path
 # bypass via newline-in-call is not relevant here either (the suppression
 # applies to a specific physical line).
 _TYPE_IGNORE_PATTERN: re.Pattern[str] = re.compile(r"TaggedContent.*#\s*type:\s*ignore")
-_TYPE_IGNORE_MESSAGE: str = (
-    "# type: ignore on TaggedContent line — fix the type, don't suppress"
-)
+_TYPE_IGNORE_MESSAGE: str = "# type: ignore on TaggedContent line — fix the type, don't suppress"
 
 # AST-detected call-site violations. Each entry describes the call name
 # and the shape of its first positional argument; ``_node_matches`` decides
 # whether a given ``ast.Call`` node trips the rule.
-_TAG_T3_MESSAGE: str = (
-    "tag(T3, ...) direct call — use tag_t3_with_nonce() with injected nonce"
-)
+_TAG_T3_MESSAGE: str = "tag(T3, ...) direct call — use tag_t3_with_nonce() with injected nonce"
 _CAST_TAGGED_CONTENT_MESSAGE: str = (
     "cast(TaggedContent[...]) — use AnyTaggedContent for observers (spec §3.3)"
+)
+_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE: str = (
+    "TaggedContent[T3](...) direct subscript construction — use "
+    "tag_t3_with_nonce() with injected nonce (spec §3.2, sec-S3-002)"
 )
 
 # Authorised non-test homes — resolved to absolute paths inside THIS repo
@@ -207,6 +215,37 @@ def _is_tag_t3_call(node: ast.Call) -> bool:
     return _arg_name(node.args[0]) == "T3"
 
 
+def _is_tagged_content_t3_subscript_call(node: ast.Call) -> bool:
+    """``TaggedContent[T3](...)`` — direct subscript construction.
+
+    Matches:
+
+    - ``TaggedContent[T3](...)``           — bare name + bare T3
+    - ``tiers.TaggedContent[T3](...)``     — qualified Attribute target
+    - ``TaggedContent[tiers.T3](...)``     — qualified Attribute slice
+    - ``tiers.TaggedContent[tiers.T3](...)`` — both qualified
+
+    sec-S3-002: ``tag_t3_with_nonce`` checks the per-process nonce; the
+    ``TaggedContent`` Pydantic field validator does NOT. A direct
+    subscript-construction call therefore admits raw T3 content without
+    the gate. The two authorised homes (``security/tiers.py`` for the
+    ``tag_t3_with_nonce`` body, ``security/quarantine.py`` for the
+    boundary that bridges T3 → T3DerivedData) are exempted via
+    ``_APPROVED_PATHS``; everywhere else this pattern trips the gate.
+
+    The call target ``func`` is an ``ast.Subscript`` whose ``value`` is
+    the identifier ``TaggedContent`` (covering bare + qualified forms
+    via :func:`_arg_name`) and whose ``slice`` is the identifier ``T3``
+    (covering bare + qualified forms the same way).
+    """
+    func = node.func
+    if not isinstance(func, ast.Subscript):
+        return False
+    if _arg_name(func.value) != "TaggedContent":
+        return False
+    return _arg_name(func.slice) == "T3"
+
+
 def _is_cast_tagged_content_call(node: ast.Call) -> bool:
     """``cast(TaggedContent[...], ...)`` — first arg subscripts ``TaggedContent``.
 
@@ -283,6 +322,9 @@ def _scan_file(path: Path) -> list[str]:
                 violations.append(f"  {snippet}")
             if _is_cast_tagged_content_call(node):
                 violations.append(f"{path}:{lineno}: {_CAST_TAGGED_CONTENT_MESSAGE}")
+                violations.append(f"  {snippet}")
+            if _is_tagged_content_t3_subscript_call(node):
+                violations.append(f"{path}:{lineno}: {_TAGGED_CONTENT_T3_SUBSCRIPT_MESSAGE}")
                 violations.append(f"  {snippet}")
 
     for lineno, line in enumerate(lines, 1):
