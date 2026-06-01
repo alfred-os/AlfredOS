@@ -381,4 +381,4 @@ ORDER BY created_at;
   [CircuitBreaker / BreakerState / CircuitBreakerState](../glossary.md#circuitbreaker--breakerstate--circuitbreakerstate),
   [supervisor.action_timeout hookpoint](../glossary.md#supervisoraction_timeout-hookpoint),
   [supervisor.breaker.tripped / supervisor.breaker.reset hookpoints](../glossary.md#supervisorbreakertripped--supervisorbreakerreset-hookpoints),
-  [supervisor.capability_gate_unavailable hookpoint](../glossary.md#supervisorcapability_gate_unavailable-hookpoint).
+  [supervisor.capability_gate_unavailable audit event](../glossary.md#supervisorcapability_gate_unavailable-audit-event).

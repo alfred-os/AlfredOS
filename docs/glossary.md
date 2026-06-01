@@ -933,17 +933,25 @@ See [`Hookpoint`](glossary.md#hookpoint),
 [CircuitBreaker / BreakerState / CircuitBreakerState](#circuitbreaker--breakerstate--circuitbreakerstate),
 and [docs/subsystems/supervisor.md](subsystems/supervisor.md).
 
-## supervisor.capability_gate_unavailable hookpoint
+## supervisor.capability_gate_unavailable audit event
 
-Fires on gate fail-closed entry and exit transitions. Emitted by
-`CapabilityGateMonitor._emit_transition()` via
-`AuditWriter.append_schema(event="supervisor.capability_gate_unavailable", ...)`.
-The `state_transition` subject field is `"entering_fail_closed"` or
-`"exiting_fail_closed"`; the `correlation_id` field links the two rows of the
-same outage window. `subscribable_tiers={"system"}` per spec §14;
-`fail_closed=False`. The outage timeline the operator dashboard renders is
-derived from these rows via a `GROUP BY correlation_id` join on the
-`audit_log` table.
+**Audit row, not a hookpoint.** Subscriber surface is the audit log itself —
+no `subscribable_tiers` exist because no hookpoint is registered for this
+event (the supervisor's spec §14 hookpoint table is the six entries
+declared by `Supervisor._register_hookpoints()`).
+
+Emitted by `CapabilityGateMonitor._emit_transition()` via
+`AuditWriter.append_schema(event="supervisor.capability_gate_unavailable",
+fields=SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS, ...)` on gate
+fail-closed entry and exit transitions. The `state_transition` subject
+field is `"entering_fail_closed"` or `"exiting_fail_closed"`; the
+`correlation_id` field links the two rows of the same outage window
+(err-014). Attribution: `actor_persona="supervisor"`,
+`actor_user_id=None`, `trust_tier_of_trigger="T0"`.
+
+The outage timeline the operator dashboard renders is derived from these
+rows via a `GROUP BY correlation_id` join on the `audit_log` table —
+no hookpoint subscription needed because the row IS the surface.
 
 See [`CapabilityGateMonitor`](#capabilitygatemonitor),
 [docs/subsystems/supervisor.md](subsystems/supervisor.md), and spec §10.4.
