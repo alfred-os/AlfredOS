@@ -21,8 +21,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from alfred.supervisor.breaker import BreakerState, CircuitBreaker
-from alfred.supervisor.errors import QuarantinedUnavailable
+from alfred.supervisor.breaker import (
+    _BACKOFF_INITIAL_SECONDS,
+    _BACKOFF_MAX_SECONDS,
+    _BACKOFF_MULTIPLIER,
+    BreakerState,
+    CircuitBreaker,
+)
+from alfred.supervisor.errors import BreakStateError, QuarantinedUnavailable
 
 
 def _make_cb(**kwargs: object) -> CircuitBreaker:
@@ -163,3 +169,123 @@ def test_assert_available_half_open_is_silent() -> None:
     cb = _make_cb()
     cb.state = BreakerState.HALF_OPEN
     cb.assert_available()  # no raise
+
+
+# ---------------------------------------------------------------------------
+# maybe_rearm / probe handlers (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_open_rearms_after_1h() -> None:
+    """OPEN→HALF_OPEN after the re-arm window elapses (spec §10.2)."""
+    cb = _make_cb()
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    cb.state = BreakerState.OPEN
+    cb.last_trip_at = base - dt.timedelta(seconds=3601)  # > 1h ago
+    cb.maybe_rearm(now=base)
+    assert cb.state == BreakerState.HALF_OPEN
+
+
+def test_open_does_not_rearm_before_1h() -> None:
+    """OPEN stays OPEN until the re-arm window elapses."""
+    cb = _make_cb()
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    cb.state = BreakerState.OPEN
+    cb.last_trip_at = base - dt.timedelta(seconds=1800)  # 30min ago
+    cb.maybe_rearm(now=base)
+    assert cb.state == BreakerState.OPEN
+
+
+def test_maybe_rearm_noop_for_closed() -> None:
+    """maybe_rearm is a no-op for non-OPEN states (defensive guard)."""
+    cb = _make_cb()
+    assert cb.state == BreakerState.CLOSED
+    cb.maybe_rearm(now=dt.datetime(2030, 1, 1, tzinfo=dt.UTC))
+    assert cb.state == BreakerState.CLOSED
+
+
+def test_maybe_rearm_noop_for_half_open() -> None:
+    """maybe_rearm is a no-op for HALF_OPEN — re-arm runs only from OPEN."""
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    cb.maybe_rearm(now=dt.datetime(2030, 1, 1, tzinfo=dt.UTC))
+    assert cb.state == BreakerState.HALF_OPEN
+
+
+def test_maybe_rearm_noop_when_last_trip_at_is_none() -> None:
+    """OPEN without a known trip time stays OPEN — refuse to re-arm blind.
+
+    Defensive: every legitimate trip records last_trip_at via _trip(). A
+    None here implies bad state and we leave the operator's reset path as
+    the only way out.
+    """
+    cb = _make_cb()
+    cb.state = BreakerState.OPEN
+    cb.last_trip_at = None
+    cb.maybe_rearm(now=dt.datetime(2030, 1, 1, tzinfo=dt.UTC))
+    assert cb.state == BreakerState.OPEN
+
+
+def test_maybe_rearm_default_now_uses_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting ``now=`` falls back to wall-clock now(UTC).
+
+    Pins the supervisor-scheduler default — the periodic re-arm sweep
+    calls ``maybe_rearm()`` with no arguments.
+    """
+    cb = _make_cb()
+    cb.state = BreakerState.OPEN
+    fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    cb.last_trip_at = fixed - dt.timedelta(hours=2)
+
+    class _FrozenDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:  # type: ignore[override]
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr("alfred.supervisor.breaker.dt", _patched_dt_module(_FrozenDateTime))
+    cb.maybe_rearm()
+    assert cb.state == BreakerState.HALF_OPEN
+
+
+def test_half_open_probe_success_closes_and_resets_backoff() -> None:
+    """A successful HALF_OPEN probe closes the breaker; backoff resets."""
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    cb._backoff_seconds = 80.0  # simulate post-failure backoff
+    cb.record_probe_success()
+    assert cb.state == BreakerState.CLOSED
+    assert cb._backoff_seconds == _BACKOFF_INITIAL_SECONDS
+
+
+def test_half_open_probe_failure_reopens_and_doubles_backoff() -> None:
+    """A failed HALF_OPEN probe reopens the breaker; backoff doubles."""
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    cb.record_probe_failure("SubprocessExitedError")
+    assert cb.state == BreakerState.OPEN
+    assert cb._backoff_seconds == _BACKOFF_INITIAL_SECONDS * _BACKOFF_MULTIPLIER
+
+
+def test_record_probe_failure_caps_backoff_at_max() -> None:
+    """Backoff caps at _BACKOFF_MAX_SECONDS — never grows unbounded."""
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    cb._backoff_seconds = _BACKOFF_MAX_SECONDS  # already at cap
+    cb.record_probe_failure("SubprocessExitedError")
+    assert cb._backoff_seconds == _BACKOFF_MAX_SECONDS
+
+
+def test_record_probe_success_outside_half_open_raises() -> None:
+    """Calling record_probe_success() outside HALF_OPEN is a protocol error."""
+    cb = _make_cb()
+    assert cb.state == BreakerState.CLOSED
+    with pytest.raises(BreakStateError):
+        cb.record_probe_success()
+
+
+def test_record_probe_failure_outside_half_open_raises() -> None:
+    """Calling record_probe_failure() outside HALF_OPEN is a protocol error."""
+    cb = _make_cb()
+    cb.state = BreakerState.OPEN
+    with pytest.raises(BreakStateError):
+        cb.record_probe_failure("SubprocessExitedError")

@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from alfred.supervisor.errors import QuarantinedUnavailable
+from alfred.supervisor.errors import BreakStateError, QuarantinedUnavailable
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -177,6 +177,69 @@ class CircuitBreaker:
         """
         if self.state == BreakerState.OPEN:
             raise QuarantinedUnavailable(self.component_id)
+
+    # ------------------------------------------------------------------
+    # OPEN→HALF_OPEN re-arm and probe handlers (Task 6)
+    # ------------------------------------------------------------------
+
+    def maybe_rearm(self, *, now: dt.datetime | None = None) -> None:
+        """Transition OPEN→HALF_OPEN when the re-arm window has elapsed.
+
+        Called by the supervisor's restart scheduler; the scheduler runs
+        this periodically against every OPEN breaker. No-op for CLOSED or
+        HALF_OPEN — the protocol only allows re-arm from OPEN.
+
+        If ``last_trip_at`` is None (defensive: should never happen on a
+        legitimate trip), we refuse to re-arm and leave the operator's
+        ``reset()`` path as the only way out. Pinned by
+        ``test_maybe_rearm_noop_when_last_trip_at_is_none``.
+        """
+        if self.state != BreakerState.OPEN:
+            return
+        if self.last_trip_at is None:
+            return
+        _now = now if now is not None else dt.datetime.now(dt.UTC)
+        elapsed = (_now - self.last_trip_at).total_seconds()
+        if elapsed >= self._re_arm_seconds:
+            self.state = BreakerState.HALF_OPEN
+            _log.info(
+                "supervisor.breaker.half_open",
+                component_id=self.component_id,
+                elapsed_seconds=elapsed,
+            )
+
+    def record_probe_success(self) -> None:
+        """HALF_OPEN probe succeeded — close the breaker and reset backoff.
+
+        The backoff counter is reset because the underlying fault has
+        cleared; if the next failure cycle tips us back into OPEN we
+        start a fresh exponential ramp.
+        """
+        if self.state != BreakerState.HALF_OPEN:
+            raise BreakStateError(
+                f"record_probe_success called in state {self.state!r} (expected HALF_OPEN)"
+            )
+        self.state = BreakerState.CLOSED
+        self._recent_failures.clear()
+        self._backoff_seconds = _BACKOFF_INITIAL_SECONDS
+        _log.info("supervisor.breaker.closed", component_id=self.component_id)
+
+    def record_probe_failure(self, exception_type: str) -> None:
+        """HALF_OPEN probe failed — reopen the breaker with doubled backoff.
+
+        Backoff is capped at ``_BACKOFF_MAX_SECONDS`` so a sustained crash
+        loop does not push the next re-arm attempt arbitrarily far into
+        the future. ``exception_type`` is the Python type name only
+        (spec §5.6 — never ``str(exc)``).
+        """
+        if self.state != BreakerState.HALF_OPEN:
+            raise BreakStateError(
+                f"record_probe_failure called in state {self.state!r} (expected HALF_OPEN)"
+            )
+        self._backoff_seconds = min(
+            self._backoff_seconds * _BACKOFF_MULTIPLIER, _BACKOFF_MAX_SECONDS
+        )
+        self._trip(exception_type=exception_type, now=dt.datetime.now(dt.UTC))
 
 
 __all__ = [
