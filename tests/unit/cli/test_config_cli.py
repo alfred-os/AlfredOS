@@ -44,9 +44,7 @@ def runner() -> CliRunner:
 # ---------------------------------------------------------------------------
 
 
-def test_set_low_blast_writes_int_to_policies_yaml(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_set_low_blast_writes_int_to_policies_yaml(runner: CliRunner, tmp_path: Path) -> None:
     """``web-fetch-budget 50`` writes ``50`` (as int) under web_fetch."""
     policies = tmp_path / "policies.yaml"
     policies.write_text("web_fetch:\n  user_daily_budget: 100\n")
@@ -100,9 +98,7 @@ def test_set_high_blast_quarantined_provider_queues_proposal(
     )
     with patch("alfred.cli.config._state_git_client") as mock_client:
         mock_client.create_proposal.return_value = proposal
-        result = runner.invoke(
-            config_app, ["set", "quarantined-provider", "anthropic"]
-        )
+        result = runner.invoke(config_app, ["set", "quarantined-provider", "anthropic"])
     assert result.exit_code == 0, result.stderr
     call_kwargs = mock_client.create_proposal.call_args.kwargs
     assert call_kwargs["proposal_type"] == "config-quarantined-provider"
@@ -121,9 +117,7 @@ def test_set_high_blast_uses_pending_review_language(runner: CliRunner) -> None:
     )
     with patch("alfred.cli.config._state_git_client") as mock_client:
         mock_client.create_proposal.return_value = proposal
-        result = runner.invoke(
-            config_app, ["set", "quarantined-provider", "anthropic"]
-        )
+        result = runner.invoke(config_app, ["set", "quarantined-provider", "anthropic"])
     assert "now active" not in result.stdout.lower()
     assert "pending" in result.stdout.lower() or "proposal" in result.stdout.lower()
 
@@ -132,9 +126,7 @@ def test_set_high_blast_surfaces_state_git_error(runner: CliRunner) -> None:
     """state.git failure on the high-blast path surfaces on stderr."""
     with patch("alfred.cli.config._state_git_client") as mock_client:
         mock_client.create_proposal.side_effect = StateGitError("push refused")
-        result = runner.invoke(
-            config_app, ["set", "quarantined-provider", "anthropic"]
-        )
+        result = runner.invoke(config_app, ["set", "quarantined-provider", "anthropic"])
     assert result.exit_code != 0
     assert result.stderr.strip() != ""
 
@@ -144,9 +136,7 @@ def test_set_high_blast_surfaces_state_git_error(runner: CliRunner) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_get_reads_int_value_from_policies_yaml(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_get_reads_int_value_from_policies_yaml(runner: CliRunner, tmp_path: Path) -> None:
     """``get web-fetch-budget`` reads the int value from policies.yaml."""
     policies = tmp_path / "policies.yaml"
     policies.write_text("web_fetch:\n  user_daily_budget: 75\n")
@@ -156,9 +146,7 @@ def test_get_reads_int_value_from_policies_yaml(
     assert "75" in result.stdout
 
 
-def test_get_unset_key_emits_localised_notice(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_get_unset_key_emits_localised_notice(runner: CliRunner, tmp_path: Path) -> None:
     """An unset key emits a localised "not set" notice, not empty stdout.
 
     Empty stdout would be misread by an operator as "value is empty";
@@ -185,16 +173,11 @@ def test_get_unknown_key_lists_valid_keys(runner: CliRunner) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_walks_policies_yaml_recursively(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_list_walks_policies_yaml_recursively(runner: CliRunner, tmp_path: Path) -> None:
     """``list`` prints every leaf as a dotted key."""
     policies = tmp_path / "policies.yaml"
     policies.write_text(
-        "web_fetch:\n"
-        "  user_daily_budget: 100\n"
-        "orchestrator:\n"
-        "  action_deadline_seconds: 30\n"
+        "web_fetch:\n  user_daily_budget: 100\norchestrator:\n  action_deadline_seconds: 30\n"
     )
     with patch("alfred.cli.config._policies_yaml_path", policies):
         result = runner.invoke(config_app, ["list"])
@@ -205,9 +188,7 @@ def test_list_walks_policies_yaml_recursively(
     assert "30" in result.stdout
 
 
-def test_list_empty_yaml_emits_localised_notice(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_list_empty_yaml_emits_localised_notice(runner: CliRunner, tmp_path: Path) -> None:
     """An empty (or missing) policies.yaml emits a localised notice."""
     policies = tmp_path / "absent.yaml"
     with patch("alfred.cli.config._policies_yaml_path", policies):

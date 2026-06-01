@@ -1163,3 +1163,80 @@ msgstr "granted_by"
 #: src/alfred/cli/web.py
 msgid "cli.web.allowlist.list.column.granted_at"
 msgstr "granted_at"
+
+# PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
+# Low-blast keys write to policies.yaml; high-blast keys (e.g.
+# quarantined-provider) queue a state.git reviewer-gated proposal.
+
+#: src/alfred/cli/config.py
+msgid "cli.config.help.group"
+msgstr "Get, set, or list operator configuration values."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.set.help.short"
+msgstr "Set an operator configuration key."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.set.arg.key"
+msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.set.arg.value"
+msgstr "New value (parsed as int/float when possible, else kept as string)."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.set.applied"
+msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.set.pending_review"
+msgstr ""
+"{key} change queued for reviewer approval (high-blast knob).\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The new value is NOT yet active — it activates when the reviewer "
+"approves the proposal and the supervisor reloads its configuration."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.set.unknown_key"
+msgstr ""
+"alfred config set refused: '{key}' is not a recognised configuration "
+"key. Valid keys: {valid_keys}."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.set.denied"
+msgstr "alfred config set denied: {reason}"
+
+#: src/alfred/cli/config.py
+msgid "cli.config.get.help.short"
+msgstr "Show the current value of an operator configuration key."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.get.arg.key"
+msgstr "Configuration key to read."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.get.value"
+msgstr "{key} = {value}"
+
+#: src/alfred/cli/config.py
+msgid "cli.config.get.not_set"
+msgstr ""
+"{key} is not set in policies.yaml — the system default applies. "
+"Set it with 'alfred config set {key} <value>'."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.get.unknown_key"
+msgstr ""
+"alfred config get refused: '{key}' is not a recognised configuration "
+"key. Valid keys: {valid_keys}."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.list.help.short"
+msgstr "List every operator configuration value from policies.yaml."
+
+#: src/alfred/cli/config.py
+msgid "cli.config.list.empty"
+msgstr ""
+"policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
+"to seed the file."
