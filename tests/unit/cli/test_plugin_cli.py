@@ -45,13 +45,14 @@ from alfred.cli.plugin import plugin_app
 
 @pytest.fixture()
 def runner() -> CliRunner:
-    """Typer test runner with split stderr.
+    """Typer test runner.
 
-    ``mix_stderr=False`` matters here because every error-path assertion
-    pins that the localised message lands on stderr — mixing the streams
-    would silently green a regression that prints the error to stdout.
+    Click 8.2 (which ships with Typer 0.16+) dropped the ``mix_stderr``
+    kwarg — ``Result.stdout`` and ``Result.stderr`` are always separate
+    properties now, so every error-path assertion below pins that the
+    localised message lands on stderr without per-runner configuration.
     """
-    return CliRunner(mix_stderr=False)
+    return CliRunner()
 
 
 @pytest.fixture()
@@ -72,9 +73,7 @@ def mock_proposal() -> ProposalResult:
 # ---------------------------------------------------------------------------
 
 
-def test_grant_prints_proposal_branch(
-    runner: CliRunner, mock_proposal: ProposalResult
-) -> None:
+def test_grant_prints_proposal_branch(runner: CliRunner, mock_proposal: ProposalResult) -> None:
     """Operator sees the branch name so they can git show the proposal."""
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
         mock_client.create_proposal.return_value = mock_proposal

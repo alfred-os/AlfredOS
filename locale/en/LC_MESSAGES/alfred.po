@@ -924,3 +924,155 @@ msgstr ""
 #~ msgid "missing.key.example"
 #~ msgstr ""
 
+# PR-S3-6 Component B — alfred plugin sub-app (reviewer-gated grant/revoke,
+# read-only list/show/status). Async-UX strings carry {branch} +
+# {proposal_id} so the operator can copy-paste the follow-up command.
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.help.group"
+msgstr "Manage plugin grants and inspect loaded plugins."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.help.group"
+msgstr "Queue, list, or check the status of capability-grant proposals."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.help.short"
+msgstr "Queue a reviewer-gated capability-grant proposal for a plugin."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.arg.plugin_id"
+msgstr "Plugin id from the manifest (e.g. alfred.web-fetch)."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.arg.subscriber_tier"
+msgstr "Subscriber tier the plugin is granted at (system, operator, user-plugin)."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.arg.hookpoint"
+msgstr "Hookpoint the grant applies to (e.g. tool.web.fetch)."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.usage_error"
+msgstr ""
+"Usage: alfred plugin grant <plugin_id> <subscriber_tier> <hookpoint>. "
+"Reserved subcommands: 'status <proposal_id>' and 'list [--pending]'."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.status.usage_error"
+msgstr "Usage: alfred plugin grant status <proposal_id>."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.pending_review"
+msgstr ""
+"Grant proposal queued for reviewer approval.\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The grant is NOT yet active — it activates when the reviewer agent "
+"approves the proposal and the supervisor rebuilds the capability "
+"projection."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.follow_up_command"
+msgstr "Check status with: alfred plugin grant status {proposal_id}"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.denied"
+msgstr "alfred plugin grant denied: {reason}"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.status.help.short"
+msgstr "Show the approval status of a queued grant proposal."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.status.arg.proposal_id"
+msgstr "The proposal_id printed when the grant was queued."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.status.pending"
+msgstr ""
+"Proposal {proposal_id} is pending reviewer approval. Branch: {branch}. "
+"Full status (pending / approved / denied / not_found) lands once the "
+"Postgres plugin_grants projection is wired (PR-S3-7)."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.list.help.short"
+msgstr "List capability grants, optionally restricted to pending proposals."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.list.flag.pending"
+msgstr "Restrict to unmerged proposals (queued but not yet reviewed)."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.list.empty"
+msgstr ""
+"No grants to display. Pending-proposal listing reads from the state.git "
+"branch index + Postgres plugin_grants projection; both surfaces fully "
+"land in PR-S3-7."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.list.column.plugin_id"
+msgstr "plugin_id"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.list.column.subscriber_tier"
+msgstr "tier"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.list.column.hookpoint"
+msgstr "hookpoint"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.grant.list.column.status"
+msgstr "status"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.revoke.help.short"
+msgstr "Queue a reviewer-gated revocation proposal for a plugin's grants."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.revoke.arg.plugin_id"
+msgstr "Plugin id whose grants will be revoked."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.revoke.pending_review"
+msgstr ""
+"Revocation proposal queued for reviewer approval.\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The revocation is NOT yet effective — it activates when the reviewer "
+"approves the proposal."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.revoke.denied"
+msgstr "alfred plugin revoke denied: {reason}"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.list.help.short"
+msgstr "List every plugin registered in the Postgres manifest projection."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.list.not_implemented_yet"
+msgstr ""
+"alfred plugin list is not yet implemented. Pulls the manifest "
+"projection from Postgres once RealGate is seeded (PR-S3-7). Until "
+"then, inspect plugins via the plugin manifest files under plugins/."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.show.help.short"
+msgstr "Show manifest details for a registered plugin."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.show.arg.plugin_id"
+msgstr "Plugin id to inspect."
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.show.plugin_id_label"
+msgstr "plugin_id: {plugin_id}"
+
+#: src/alfred/cli/plugin.py
+msgid "cli.plugin.show.no_manifest_yet"
+msgstr ""
+"No manifest data available yet. The Postgres manifest projection lands "
+"in PR-S3-7; until then, inspect the plugin's manifest.toml under "
+"plugins/ directly."
