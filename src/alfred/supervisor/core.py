@@ -1,0 +1,437 @@
+"""Supervisor — top-level coordinator for plugin lifecycle and circuit breakers.
+
+The Supervisor owns three things (spec §10.1, §10.5, §10.8):
+
+1. An ``asyncio.TaskGroup`` under which every supervised plugin's
+   stdio-reader task runs. Cancelling the group cascade-cancels all
+   reader tasks; each reader's finally arm handles its own subprocess
+   SIGTERM→SIGKILL escalation (the supervisor itself does not reach into
+   subprocess plumbing; that's plugin-transport concern).
+2. The per-component :class:`alfred.supervisor.breaker.CircuitBreaker`
+   map. One breaker per ``component_id`` —
+   :meth:`get_or_create_breaker` enforces the singleton invariant so
+   ``record_failure`` calls from different supervisor paths converge on
+   the same state machine.
+3. The operator API :meth:`reset_breaker`. Emits the
+   ``supervisor.breaker.reset`` audit row with operator attribution and
+   persists the new CLOSED state to Postgres.
+
+TaskGroup lifecycle (core-001 — Slice-3 plan-review landmine)
+-------------------------------------------------------------
+
+``asyncio.TaskGroup`` must be entered with ``async with`` before any
+``create_task()`` calls; the group's lifetime cannot span a constructor.
+The supervisor solves this with a long-lived internal ``_run()``
+coroutine that holds the TaskGroup open until ``_shutdown_event`` is
+set::
+
+    async def _run(self) -> None:
+        async with asyncio.TaskGroup() as tg:
+            self._task_group = tg
+            self._started_event.set()
+            await self._shutdown_event.wait()
+
+:meth:`start` spawns this runner; :meth:`stop` sets the shutdown event
+and awaits the runner to drain. Plugin tasks added via
+:meth:`register_plugin_task` join the group while it's active.
+
+What this PR does NOT do
+------------------------
+
+PR-S3-3b Tasks 13-17 ship the Supervisor class and its public API.
+The full hookpoint registration table (``supervisor.breaker.tripped``,
+``supervisor.action_timeout``, ``plugin.lifecycle.*``) is Tasks 19-20;
+this PR's ``_register_hookpoints`` is the stub method that Tasks 19-20
+will populate. The CLI surface (``alfred supervisor status``,
+``alfred supervisor reset <component> --confirm``) is owned exclusively
+by PR-S3-6 (devex-001 / rvw-002 — shipping CLI here would race the
+Typer-based PR-S3-6 CLI on whichever merges second).
+
+Self-healing restart scheduling (HALF_OPEN re-arm cadence, exponential
+backoff probe timing) is a Slice-4 concern — PR-S3-3b ships the
+breaker primitives (``maybe_rearm``, ``record_probe_success``) but
+not the scheduling loop that drives them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from collections.abc import Callable, Coroutine
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING, Any, Protocol
+
+import structlog
+
+from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
+from alfred.supervisor.breaker import CircuitBreaker
+from alfred.supervisor.capability_monitor import CapabilityGateMonitor
+from alfred.supervisor.errors import SupervisorError
+from alfred.supervisor.plugin_lifecycle import PluginLifecycle
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+_log = structlog.get_logger(__name__)
+
+# Spec §10.5 — graceful shutdown budget. After ``stop()`` sets the
+# shutdown event the supervisor waits up to this many seconds for the
+# TaskGroup to drain naturally. If any supervised task hangs past this
+# window, the runner is cancelled outright and the shutdown row is
+# emitted with the partial breaker count.
+_STOP_DRAIN_TIMEOUT_SECONDS: float = 10.0
+
+
+class _GateLike(Protocol):
+    """Structural type for the gate dependency the supervisor wraps.
+
+    The supervisor itself doesn't call methods on the gate — it holds the
+    reference so it can pass it to :class:`PluginLifecycle` and
+    :class:`CapabilityGateMonitor` at construction. The narrow Protocol
+    here keeps the constructor signature decoupled from the concrete
+    :class:`alfred.security.capability_gate.RealGate` for test purposes.
+
+    Tests pass ``MagicMock()`` (no methods asserted on the gate itself);
+    production passes a ``RealGate`` instance.
+    """
+
+
+class _AuditLike(Protocol):
+    """Structural type for the audit writer — ``append`` + ``append_schema``."""
+
+    async def append(
+        self,
+        *,
+        event: str,
+        actor_user_id: str | None,
+        subject: dict[str, Any],
+        trust_tier_of_trigger: str,
+        result: str,
+        cost_estimate_usd: float,
+        trace_id: str,
+        actor_persona: str = "alfred",
+        persona_id: str | None = None,
+        cost_actual_usd: float | None = None,
+        language: str = "en-US",
+    ) -> None:
+        raise NotImplementedError
+
+    async def append_schema(
+        self,
+        *,
+        fields: frozenset[str],
+        schema_name: str,
+        event: str,
+        actor_user_id: str | None,
+        subject: dict[str, Any],
+        trust_tier_of_trigger: str,
+        result: str,
+        cost_estimate_usd: float,
+        trace_id: str,
+        actor_persona: str = "alfred",
+        persona_id: str | None = None,
+        cost_actual_usd: float | None = None,
+        language: str = "en-US",
+    ) -> None:
+        raise NotImplementedError
+
+
+class Supervisor:
+    """Top-level supervisor for plugin lifecycle and circuit breakers.
+
+    Construction takes a ``session_scope`` factory (same pool as the
+    orchestrator), a capability gate, and an audit writer. The
+    supervisor immediately constructs a :class:`PluginLifecycle` and a
+    :class:`CapabilityGateMonitor` bound to those dependencies — both are
+    long-lived for the supervisor's lifetime.
+
+    Lifecycle:
+
+    * Construct: instance ready; ``_task_group`` is None.
+    * :meth:`start`: opens the supervised TaskGroup via an internal
+      ``_run()`` coroutine. Plugin tasks can be registered after
+      ``_started_event`` resolves.
+    * :meth:`register_plugin_task`: schedules a coroutine inside the
+      active TaskGroup. Raises if called before start or after stop.
+    * :meth:`stop`: sets the shutdown event; waits for the runner to
+      drain; persists every breaker's state to Postgres; emits the
+      ``supervisor.lifecycle.stopped`` audit row.
+
+    Operator API:
+
+    * :meth:`reset_breaker`: any state → CLOSED, emits
+      ``supervisor.breaker.reset`` with operator attribution, persists.
+    * :meth:`get_or_create_breaker`: singleton-per-component breaker.
+    * :meth:`load_all_breakers`: bulk-load every breaker's state from
+      Postgres (called once at process bootstrap before plugin spawns
+      so a previously-tripped breaker stays OPEN across restarts).
+    """
+
+    def __init__(
+        self,
+        *,
+        session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+        gate: _GateLike,
+        audit: _AuditLike,
+    ) -> None:
+        self._session_scope = session_scope
+        self._gate = gate
+        self._audit = audit
+        self._breakers: dict[str, CircuitBreaker] = {}
+        # PluginLifecycle and CapabilityGateMonitor share the gate and
+        # audit references; both are bound at construction so the
+        # supervisor surface stays narrow (start/stop/register/reset).
+        # Type-ignored: the structural protocols here are intentionally
+        # broader than the helper modules' Protocols (PluginLifecycle
+        # expects ``check_plugin_load``, CapabilityGateMonitor expects
+        # ``is_backing_store_available``) — the supervisor's _GateLike
+        # is empty because the supervisor itself never calls methods on
+        # the gate. Tests + production pass a RealGate that satisfies
+        # every relevant Protocol structurally.
+        self._lifecycle = PluginLifecycle(gate=gate, audit=audit)  # type: ignore[arg-type]
+        self._capability_monitor = CapabilityGateMonitor(
+            gate=gate,  # type: ignore[arg-type]
+            audit=audit,
+        )
+
+        # start/stop state — see class docstring for the lifecycle.
+        self._task_group: asyncio.TaskGroup | None = None
+        self._run_task: asyncio.Task[None] | None = None
+        self._shutdown_event: asyncio.Event = asyncio.Event()
+        self._started_event: asyncio.Event = asyncio.Event()
+
+        self._register_hookpoints()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Open the supervised TaskGroup and begin accepting plugin tasks.
+
+        Spawns an internal ``_run()`` task that holds the TaskGroup open
+        until :attr:`_shutdown_event` is set by :meth:`stop`. The await
+        on ``_started_event`` here ensures :attr:`_task_group` is
+        populated before this method returns, so callers can immediately
+        call :meth:`register_plugin_task` without a race.
+
+        Raises:
+            RuntimeError: ``start()`` called twice without an intervening
+                ``stop()``. Re-entrancy would orphan the first TaskGroup
+                and double-supervise every subsequent register call.
+        """
+        if self._run_task is not None:
+            raise RuntimeError("Supervisor.start() called twice without stop()")
+        # Reset both events — the supervisor instance can in principle be
+        # restarted (stop() then start()) and the events from the previous
+        # cycle must not bleed into the new one.
+        self._shutdown_event = asyncio.Event()
+        self._started_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        self._run_task = loop.create_task(self._run())
+        await self._started_event.wait()
+        _log.info("supervisor.started")
+
+    async def _run(self) -> None:
+        """Hold the TaskGroup open until ``_shutdown_event`` resolves.
+
+        This coroutine is the only place ``async with asyncio.TaskGroup()``
+        appears. Spec §10.5: the TaskGroup's cancellation semantics are
+        load-bearing — cancelling it cascades to every supervised plugin
+        task, which is exactly the shutdown shape we want.
+        """
+        async with asyncio.TaskGroup() as tg:
+            self._task_group = tg
+            self._started_event.set()
+            await self._shutdown_event.wait()
+
+    async def stop(self) -> None:
+        """Drain the supervised TaskGroup; persist breaker state; audit.
+
+        Idempotent if not started (no-op). After the TaskGroup drains:
+
+        1. Every breaker's current state is persisted to Postgres so a
+           restart-then-load-from-db round-trip restores the correct
+           state machine (spec §10.6).
+        2. ``supervisor.lifecycle.stopped`` audit row is emitted with the
+           component count so dashboards can show a clean-shutdown
+           timeline.
+
+        If the supervised TaskGroup does not drain within
+        :data:`_STOP_DRAIN_TIMEOUT_SECONDS` the runner is force-cancelled
+        and the row still emits — operators see "clean shutdown failed"
+        as the audit-graph signal.
+        """
+        if self._run_task is None:
+            return
+        _log.info("supervisor.stopping")
+        self._shutdown_event.set()
+        try:
+            await asyncio.wait_for(self._run_task, timeout=_STOP_DRAIN_TIMEOUT_SECONDS)
+        except TimeoutError:
+            self._run_task.cancel()
+            _log.warning("supervisor.stop_timeout_force_cancel")
+
+        # Persist breaker states. The session_scope is a fresh transaction
+        # — independent of any plugin-task transactions that may have
+        # been rolled back by their cancellation. CLAUDE.md hard rule #7:
+        # no try/except suppression here; persistence failure must
+        # propagate so the operator-facing shutdown is loud.
+        async with self._session_scope() as session:
+            for breaker in self._breakers.values():
+                await breaker.save_to_db(session)
+            await session.commit()
+
+        await self._audit.append(
+            event="supervisor.lifecycle.stopped",
+            actor_user_id=None,
+            actor_persona="supervisor",
+            subject={"component_count": len(self._breakers)},
+            trust_tier_of_trigger="T0",
+            result="success",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=str(uuid.uuid4()),
+        )
+        self._run_task = None
+        self._task_group = None
+
+    def register_plugin_task(
+        self,
+        coro: Coroutine[Any, Any, None],
+    ) -> asyncio.Task[None]:
+        """Schedule a supervised plugin coroutine inside the active TaskGroup.
+
+        Must be called between :meth:`start` and :meth:`stop`. The
+        returned task's lifetime is owned by the TaskGroup — cancelling
+        the supervisor cancels every task in the group, which is the
+        shutdown contract.
+
+        Raises:
+            RuntimeError: ``register_plugin_task`` called before
+                :meth:`start` or after :meth:`stop`. Without an active
+                TaskGroup the task would either run unsupervised or be
+                immediately orphaned.
+        """
+        if self._task_group is None:
+            raise RuntimeError(
+                "register_plugin_task() called before Supervisor.start() "
+                "(or after stop()); no active TaskGroup to attach to"
+            )
+        return self._task_group.create_task(coro)
+
+    # ------------------------------------------------------------------
+    # Breaker map
+    # ------------------------------------------------------------------
+
+    def get_or_create_breaker(self, component_id: str) -> CircuitBreaker:
+        """Return the breaker for ``component_id``, creating it if absent.
+
+        Singleton-per-component: two ``record_failure`` calls from
+        different supervisor paths against the same component_id must
+        converge on the same state machine, else the failure window's
+        sliding-window cutoff loses entries.
+        """
+        if component_id not in self._breakers:
+            self._breakers[component_id] = CircuitBreaker(
+                component_id=component_id,
+                session_scope=self._session_scope,
+            )
+        return self._breakers[component_id]
+
+    async def reset_breaker(
+        self,
+        component_id: str,
+        *,
+        operator_user_id: str,
+    ) -> None:
+        """Operator-triggered breaker reset (spec §10.8).
+
+        Any state → CLOSED via :meth:`CircuitBreaker.reset`. Emits a
+        ``supervisor.breaker.reset`` audit row with the operator's
+        attribution and a correlation_id, then persists the new CLOSED
+        state to Postgres so a restart preserves the reset.
+
+        Trust tier on the audit row is ``T1`` — this is an
+        operator-tier command (spec §3.6); distinct from the supervisor's
+        own T0 rows that describe internal state.
+
+        Raises:
+            SupervisorError: ``component_id`` is not registered. The
+                CLI surface (PR-S3-6) traps this and surfaces a clear
+                "no such component" message to the operator; raising
+                here makes the contract explicit.
+        """
+        breaker = self._breakers.get(component_id)
+        if breaker is None:
+            raise SupervisorError(f"No supervised component with id={component_id!r}")
+
+        old_state = breaker.state.value
+        breaker.reset()
+
+        correlation_id = str(uuid.uuid4())
+        await self._audit.append_schema(
+            fields=SUPERVISOR_BREAKER_RESET_FIELDS,
+            schema_name="SUPERVISOR_BREAKER_RESET_FIELDS",
+            event="supervisor.breaker.reset",
+            actor_user_id=operator_user_id,
+            actor_persona="supervisor",
+            subject={
+                "component_id": component_id,
+                "old_state": old_state,
+                "new_state": "CLOSED",
+                "trip_count": breaker.trip_count,
+                "operator_user_id": operator_user_id,
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T1",
+            result="success",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=correlation_id,
+        )
+
+        async with self._session_scope() as session:
+            await breaker.save_to_db(session)
+            await session.commit()
+
+    async def load_all_breakers(self) -> None:
+        """Restore every registered breaker's state from Postgres.
+
+        Called once at process bootstrap, AFTER every component's breaker
+        has been registered via :meth:`get_or_create_breaker` but BEFORE
+        plugin subprocess spawn. Spec §10.6: a previously-tripped breaker
+        stays OPEN across restarts if ``last_trip_at`` is within the
+        re-arm window — otherwise the operator's restart would silently
+        re-arm every quarantined plugin.
+        """
+        async with self._session_scope() as session:
+            for breaker in self._breakers.values():
+                await breaker.load_from_db(session)
+
+    # ------------------------------------------------------------------
+    # Hookpoint registration (stub — Tasks 19-20 populate)
+    # ------------------------------------------------------------------
+
+    def _register_hookpoints(self) -> None:
+        """Register every supervisor hookpoint with the global registry.
+
+        PR-S3-3b Tasks 13-17 ship this as a stub method. Tasks 19-20
+        populate it with the full spec §14 hookpoint table:
+
+        * ``supervisor.breaker.tripped``
+        * ``supervisor.breaker.reset``
+        * ``supervisor.action_timeout``
+        * ``plugin.lifecycle.loaded``
+        * ``plugin.lifecycle.crashed``
+        * ``plugin.lifecycle.quarantined``
+
+        The method exists now so the constructor signature is stable —
+        Tasks 19-20's diff is body-only, not signature-changing. core-010
+        rationale: all supervisor hookpoint registration MUST happen in
+        ``Supervisor.__init__`` (never at module-import time in
+        ``deadline.py`` or ``breaker.py``) to keep test isolation clean.
+        """
+
+
+__all__ = ["Supervisor"]
