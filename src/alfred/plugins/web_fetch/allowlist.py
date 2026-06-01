@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import posixpath
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from alfred.plugins.web_fetch.errors import WebFetchDomainNotAllowed
 
@@ -303,6 +303,16 @@ class AllowlistIntersection:
         # to "/" so a manifest entry path_prefix="/" still matches.
         raw_path = parsed.path or "/"
 
+        # CR-146 web-fetch security review — percent-encoded traversal
+        # bypass. Many upstream routers decode ``%2e%2e`` BEFORE prefix
+        # routing, so a URL like ``https://example.com/public/%2e%2e/admin``
+        # reaches the upstream's ``/admin`` path even though
+        # ``raw_path.split("/")`` shows ``public`` / ``%2e%2e`` / ``admin``
+        # and the literal-``..`` guard below would miss it. Decode FIRST
+        # via ``unquote`` so the literal-``..`` guard catches both
+        # encoded and unencoded traversal segments uniformly.
+        decoded_path = unquote(raw_path)
+
         # CR-145 web-fetch security review — path-prefix substring /
         # traversal bypass. Two defences must compose:
         #
@@ -318,9 +328,9 @@ class AllowlistIntersection:
         #    against ``/public/file``. Then append a trailing slash to
         #    match the trailing-slash convention enforced on entries by
         #    ``AllowlistEntry.__post_init__``.
-        if ".." in raw_path.split("/"):
+        if ".." in decoded_path.split("/"):
             raise DomainNotAllowed(domain)
-        norm_path = posixpath.normpath(raw_path)
+        norm_path = posixpath.normpath(decoded_path)
         if norm_path == ".":
             norm_path = "/"
         candidate = norm_path if norm_path.endswith("/") else norm_path + "/"
