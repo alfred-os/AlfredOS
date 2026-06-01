@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 23:26+0100\n"
+"POT-Creation-Date: 2026-06-01 23:33+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -319,6 +319,83 @@ msgstr ""
 " PR-S3-7; until then, inspect the plugin's manifest.toml under plugins/ "
 "directly."
 
+# PR-S3-6 Component E — alfred supervisor sub-app (status read-only,
+# reset --confirm gate). T1-tier per spec §10.8.
+
+#: src/alfred/cli/supervisor.py:25
+msgid "cli.supervisor.help"
+msgstr "Inspect supervised components and reset tripped circuit breakers."
+
+#: src/alfred/cli/supervisor.py:78
+msgid "cli.supervisor.status.no_supervisor_running"
+msgstr ""
+"Supervisor is not running. Start the Alfred stack with "
+"`docker compose up -d` and re-run `alfred supervisor status`."
+
+#: src/alfred/cli/supervisor.py:81
+msgid "cli.supervisor.status.empty_hint"
+msgstr ""
+"No supervised components registered. Plugins appear here once the "
+"orchestrator boots them (PR-S3-3b)."
+
+#: src/alfred/cli/supervisor.py:85
+msgid "cli.supervisor.status.column.component"
+msgstr "COMPONENT"
+
+#: src/alfred/cli/supervisor.py:86
+msgid "cli.supervisor.status.column.state"
+msgstr "STATE"
+
+#: src/alfred/cli/supervisor.py:87
+msgid "cli.supervisor.status.column.trip_count"
+msgstr "TRIPS"
+
+#: src/alfred/cli/supervisor.py:88
+msgid "cli.supervisor.status.column.last_trip_at"
+msgstr "LAST TRIP"
+
+msgid "cli.supervisor.status.breaker_state.open"
+msgstr "OPEN"
+
+msgid "cli.supervisor.status.breaker_state.closed"
+msgstr "CLOSED"
+
+msgid "cli.supervisor.status.breaker_state.half_open"
+msgstr "HALF_OPEN"
+
+#: src/alfred/cli/supervisor.py:120
+msgid "cli.supervisor.reset.usage"
+msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
+
+#: src/alfred/cli/supervisor.py:126 src/alfred/cli/supervisor.py:146
+msgid "cli.supervisor.reset.confirm_prompt"
+msgstr ""
+"Refusing to reset {component} without --confirm.\n"
+"  trip_count:    {trip_count}\n"
+"  last_trip_at:  {last_trip_at}\n"
+"Pass --confirm to acknowledge that resetting may re-enable a plugin "
+"that just failed 3+ times in 5 minutes."
+
+#: src/alfred/cli/supervisor.py:156
+msgid "cli.supervisor.reset.rerun_hint"
+msgstr "Re-run with: alfred supervisor reset {component} --confirm"
+
+#: src/alfred/cli/supervisor.py:195
+msgid "cli.supervisor.reset.component_not_found"
+msgstr ""
+"Component not found: {component}. "
+"Run `alfred supervisor status` to list registered components."
+
+#: src/alfred/cli/supervisor.py:203 src/alfred/cli/supervisor.py:212
+msgid "cli.supervisor.reset.unexpected_error"
+msgstr ""
+"Failed to reset {component}: {error_type}. "
+"Check `alfred audit log --event supervisor.breaker.reset --since 5m`."
+
+#: src/alfred/cli/supervisor.py:220
+msgid "cli.supervisor.reset.success"
+msgstr "Reset circuit breaker for {component}. Audit row recorded."
+
 # PR-S3-6 Component C — alfred web allowlist sub-app (reviewer-gated
 # add/remove, read-only list). Async-UX strings carry {branch} +
 # {proposal_id} so the operator can copy-paste the follow-up command.
@@ -354,9 +431,8 @@ msgstr ""
 "Allowlist-add proposal queued for reviewer approval.\n"
 "  branch:       {branch}\n"
 "  proposal_id:  {proposal_id}\n"
-"The domain is NOT yet fetchable — it activates when the reviewer "
-"approves the proposal and the supervisor rebuilds the web_allowlist "
-"projection."
+"The domain is NOT yet fetchable — it activates when the reviewer approves"
+" the proposal and the supervisor rebuilds the web_allowlist projection."
 
 #: src/alfred/cli/web.py:153
 msgid "cli.web.allowlist.remove.help.short"
