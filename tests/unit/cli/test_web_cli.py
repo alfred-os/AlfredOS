@@ -106,9 +106,7 @@ def test_allowlist_add_payload_carries_domain_and_path_prefix(
     """
     with patch("alfred.cli.web._state_git_client") as mock_client:
         mock_client.create_proposal.return_value = mock_add_proposal
-        runner.invoke(
-            web_app, ["allowlist", "add", "api.example.com", "--path-prefix", "/v1/"]
-        )
+        runner.invoke(web_app, ["allowlist", "add", "api.example.com", "--path-prefix", "/v1/"])
     call_kwargs = mock_client.create_proposal.call_args.kwargs
     assert call_kwargs["proposal_type"] == "web-allowlist-add"
     assert call_kwargs["payload"] == {
