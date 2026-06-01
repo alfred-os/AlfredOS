@@ -13,7 +13,12 @@ import httpx
 import structlog
 from openai import AsyncOpenAI
 
-from alfred.providers.base import CompletionRequest, CompletionResponse
+from alfred.providers.base import (
+    CompletionRequest,
+    CompletionResponse,
+    ProviderCapability,
+    register_provider,
+)
 
 _log = structlog.get_logger()
 
@@ -53,8 +58,31 @@ def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
     return (tokens_in / 1_000_000) * in_per_m + (tokens_out / 1_000_000) * out_per_m
 
 
+# Per-model capability table (prov-009). DeepSeek's feature set varies by
+# model: ``deepseek-chat`` supports JSON-object mode (``response_format=
+# {"type": "json_object"}``); ``deepseek-reasoner`` does NOT. A single
+# per-class constant would mis-classify reasoner and route to the wrong
+# dispatch branch in the quarantined-LLM router (spec §6.2).
+#
+# Unknown models fall through to the empty default, which routes to
+# ``prompt_embedded_fallback`` — the most-defensive branch and the same
+# fail-closed pattern the cost-pricing fallback above already uses.
+_DEEPSEEK_MODEL_CAPABILITIES: dict[str, frozenset[ProviderCapability]] = {
+    "deepseek-chat": frozenset({ProviderCapability.JSON_OBJECT_MODE}),
+    "deepseek-reasoner": frozenset(),
+}
+_DEEPSEEK_DEFAULT_CAPABILITIES: frozenset[ProviderCapability] = frozenset()
+
+
+@register_provider
 class DeepSeekProvider:
-    """OpenAI-compatible DeepSeek client wrapper."""
+    """OpenAI-compatible DeepSeek client wrapper.
+
+    Capability declaration is model-aware (prov-009) — ``deepseek-chat``
+    supports JSON-object mode; ``deepseek-reasoner`` does not. Use
+    :meth:`_capabilities_for_model` to query capabilities by model name
+    without constructing an instance (tests rely on this — prov-007).
+    """
 
     name = "deepseek"
 
@@ -64,6 +92,20 @@ class DeepSeekProvider:
     def __init__(self, *, client: Any, model: str) -> None:
         self._client = client
         self._model = model
+
+    @classmethod
+    def _capabilities_for_model(cls, model: str) -> frozenset[ProviderCapability]:
+        """Return the capability set for a given DeepSeek model name.
+
+        Class-level so capability-routing decisions can be made before
+        a provider instance exists (tests + the router both use this).
+        Unknown model → empty set → prompt_embedded_fallback dispatch.
+        """
+        return _DEEPSEEK_MODEL_CAPABILITIES.get(model, _DEEPSEEK_DEFAULT_CAPABILITIES)
+
+    def capabilities(self) -> frozenset[ProviderCapability]:
+        # Instance-side: dispatch on the bound model.
+        return self._capabilities_for_model(self._model)
 
     @classmethod
     def from_settings(cls, api_key: str, base_url: str, model: str) -> DeepSeekProvider:
