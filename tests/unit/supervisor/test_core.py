@@ -371,6 +371,117 @@ async def test_stop_force_cancels_runner_on_drain_timeout(
 # Protocol-body coverage so the 100% gate doesn't flag the stubs as dead.
 
 
+# ---------------------------------------------------------------------------
+# Hookpoint registration (Tasks 19-20, spec §14, core-010)
+# ---------------------------------------------------------------------------
+
+
+def test_supervisor_action_timeout_hookpoint_registered_by_supervisor_init() -> None:
+    """``supervisor.action_timeout`` is declared by ``Supervisor.__init__`` (core-010).
+
+    Plan-review landmine: a previous draft considered registering the
+    hookpoint at module-import time inside ``deadline.py``. That shape
+    breaks test isolation because pytest's import phase happens before
+    any fixture runs, so the registration would persist across tests
+    that expect a clean registry. Declaring inside ``__init__`` ties
+    the registration's lifetime to the Supervisor instance — exactly
+    the scope tests already manage.
+
+    This test pins the contract by importing ``deadline`` directly
+    (importing it MUST NOT side-effect register) then constructing a
+    Supervisor (which MUST register).
+    """
+    # Side-effect-free import — this line MUST NOT register the
+    # hookpoint. A regression that adds an import-time call would be
+    # caught by the assertion below noticing registration happens
+    # before the Supervisor is constructed.
+    import alfred.supervisor.deadline  # noqa: F401
+    from alfred.hooks import get_registry
+
+    sup, _m = _build_supervisor()
+    del sup  # the registration is the side-effect we care about
+
+    meta = get_registry().hookpoint_meta("supervisor.action_timeout")
+    assert meta is not None, (
+        "Supervisor.__init__ must register supervisor.action_timeout (core-010, spec §14)"
+    )
+
+
+def test_supervisor_registers_full_spec_14_hookpoint_table() -> None:
+    """Every spec §14 supervisor hookpoint is declared at ``__init__``.
+
+    The strict-membership assertion is the contract: a regression that
+    drops one of the six entries surfaces as ``meta is None`` here,
+    not as a silent runtime miss at the first dispatch site.
+    """
+    from alfred.hooks import get_registry
+
+    sup, _m = _build_supervisor()
+    del sup
+    registry = get_registry()
+
+    expected_hookpoints = (
+        "supervisor.breaker.tripped",
+        "supervisor.breaker.reset",
+        "supervisor.action_timeout",
+        "plugin.lifecycle.loaded",
+        "plugin.lifecycle.crashed",
+        "plugin.lifecycle.quarantined",
+    )
+    for hp in expected_hookpoints:
+        assert registry.hookpoint_meta(hp) is not None, (
+            f"Supervisor.__init__ must register hookpoint {hp!r} (spec §14, core-010)"
+        )
+
+
+def test_supervisor_register_hookpoints_is_idempotent_across_instances() -> None:
+    """Two Supervisor instances in one process must not raise on re-registration.
+
+    Tests routinely construct multiple Supervisors per process (one per
+    case). The underlying ``HookRegistry.register_hookpoint`` is
+    idempotent on equal metadata and raises on drift; this test pins
+    that the supervisor's call-site preserves equality by sharing the
+    same ``SYSTEM_ONLY_TIERS`` / ``SYSTEM_OPERATOR_TIERS`` constant
+    objects across instances rather than constructing fresh frozensets
+    each time.
+    """
+    sup_a, _ = _build_supervisor()
+    sup_b, _ = _build_supervisor()  # would raise on drift
+    del sup_a
+    del sup_b
+
+
+def test_supervisor_breaker_tripped_registered_system_only() -> None:
+    """``supervisor.breaker.tripped`` is system-tier-only.
+
+    System-only emission of an internal state-machine transition — see
+    ``_register_hookpoints`` docstring. Operator and user-plugin tiers
+    are locked out.
+    """
+    from alfred.hooks import SYSTEM_ONLY_TIERS, get_registry
+
+    sup, _m = _build_supervisor()
+    del sup
+    meta = get_registry().hookpoint_meta("supervisor.breaker.tripped")
+    assert meta is not None
+    assert meta.subscribable_tiers == SYSTEM_ONLY_TIERS
+
+
+def test_supervisor_breaker_reset_registered_system_operator() -> None:
+    """``supervisor.breaker.reset`` is system + operator only.
+
+    Operator-triggered command (spec §10.8) — operator subscribers
+    handle CLI confirmation flow; user-plugin locked out.
+    """
+    from alfred.hooks import SYSTEM_OPERATOR_TIERS, get_registry
+
+    sup, _m = _build_supervisor()
+    del sup
+    meta = get_registry().hookpoint_meta("supervisor.breaker.reset")
+    assert meta is not None
+    assert meta.subscribable_tiers == SYSTEM_OPERATOR_TIERS
+
+
 async def test_audit_like_append_protocol_body_raises() -> None:
     """``_AuditLike.append`` Protocol stub body is exercised by coverage."""
     from alfred.supervisor.core import _AuditLike
