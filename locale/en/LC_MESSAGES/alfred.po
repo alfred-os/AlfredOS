@@ -705,6 +705,20 @@ msgstr ""
 "web.fetch refused: response body {size} bytes exceeds the {limit}-byte "
 "limit."
 
+# Slice-3 retrospective fix i18n-003 — TlsConfigError raised from
+# TlsPolicy.__post_init__ used a raw f-string. The exception bubbles up
+# to the operator CLI/TUI when skip_tls_verify is toggled in a non-dev
+# environment, so it MUST route through t() per CLAUDE.md i18n hard
+# rule #1. {env} carries the offending ALFRED_ENV value so the operator
+# can correlate with what the process actually saw.
+#: src/alfred/plugins/web_fetch/tls_policy.py:90
+msgid "web.fetch.tls.skip_refused_in_non_dev"
+msgstr ""
+"web_fetch.skip_tls_verify=true is only permitted when "
+"ALFRED_ENV=development; current ALFRED_ENV={env!r}. A MITM injecting "
+"prompt-injection payloads is the canonical T3 ingestion attack; disabled "
+"TLS verification is the bypass (spec §7.11)."
+
 #: src/alfred/security/quarantine.py:813
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."

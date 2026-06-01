@@ -36,6 +36,13 @@ _WEB_FETCH_KEYS: tuple[str, ...] = (
     "web.fetch.error.mime_type_not_allowed",
     "web.fetch.error.size_limit_exceeded",
     "security.canary_tripped",
+    # Slice-3 retrospective fix i18n-003 — TlsPolicy.__post_init__ refusal
+    # message. Lives in tls_policy.py rather than errors.py because the
+    # raise happens at policy-construction time (config validation), not
+    # at fetch time. The key is in the web.fetch.tls.* namespace to keep
+    # the policy-validation surface distinct from the operational
+    # WebFetchError tree.
+    "web.fetch.tls.skip_refused_in_non_dev",
 )
 
 
@@ -72,6 +79,9 @@ def test_i18n_key_resolves(key: str) -> None:
         handle_id="wf_test_handle",
         status_code=301,
         redirect_target="https://internal.example.com/",
+        # i18n-003 — TlsPolicy refusal carries the offending env name so
+        # the operator sees what the process actually read.
+        env="staging",
     )
     # If key is missing from catalog, t() returns the bare key string.
     # A properly defined key returns a translated string that is NOT the
