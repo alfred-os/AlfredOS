@@ -262,3 +262,50 @@ def test_show_returns_localised_placeholder(runner: CliRunner) -> None:
     result = runner.invoke(plugin_app, ["show", "alfred.web-fetch"])
     assert result.exit_code == 0, result.stderr
     assert "alfred.web-fetch" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# coverage-closing fixups — empty-projection default + grant usage errors
+# ---------------------------------------------------------------------------
+
+
+def test_list_pending_grants_default_is_empty_list() -> None:
+    """The pre-PR-S3-7 ``_list_pending_grants`` stub returns ``[]``.
+
+    The stub is the projection seam that PR-S3-7 replaces with a Postgres
+    query. Until then, an empty list is the only correct value (no grants
+    have been applied in a fresh deployment). Pinning the default keeps a
+    future "return a placeholder row" change visible on review — the seam
+    must NOT pretend grants exist when the projection hasn't been wired.
+    """
+    from alfred.cli.plugin import _list_pending_grants
+
+    assert _list_pending_grants() == []
+
+
+def test_grant_status_without_proposal_id_raises_usage_error(runner: CliRunner) -> None:
+    """``alfred plugin grant status`` with no proposal_id exits non-zero.
+
+    Typer cannot enforce arity here because ``grant`` swallows ``ctx.args``
+    to support the shorthand ``grant <plugin> <tier> <hookpoint>`` form.
+    The dispatch helper validates arity itself and emits a localised
+    usage error on stderr; without this check a missing proposal_id would
+    crash with an ``IndexError`` instead of a friendly hint (devex-011).
+    """
+    result = runner.invoke(plugin_app, ["grant", "status"])
+    assert result.exit_code == 2
+    assert result.stderr.strip() != ""
+
+
+def test_grant_with_wrong_arity_raises_usage_error(runner: CliRunner) -> None:
+    """``alfred plugin grant <plugin>`` (missing tier + hookpoint) errors.
+
+    Same root cause as the status-arity guard: ``grant`` accepts variadic
+    positional args to multiplex between the reserved subcommands and the
+    shorthand grant-request form, so it must validate the shorthand arity
+    itself. Missing positionals produce a localised usage error rather
+    than a stack trace.
+    """
+    result = runner.invoke(plugin_app, ["grant", "alfred.web-fetch"])
+    assert result.exit_code == 2
+    assert result.stderr.strip() != ""
