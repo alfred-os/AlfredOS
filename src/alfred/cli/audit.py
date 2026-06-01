@@ -12,6 +12,7 @@ CLAUDE.md i18n rule #1. Depends on PR-S3-0a (``audit_row_schemas``).
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Annotated
 
 import typer
@@ -19,6 +20,28 @@ import typer
 from alfred.i18n import t
 
 audit_app = typer.Typer(help=t("cli.audit.help"), no_args_is_help=True)
+
+
+class _TierChoice(StrEnum):
+    """Closed set of valid ``--tier`` values for ``alfred audit graph``.
+
+    Spec §4.2 enumerates the four trust tiers (T0..T3). Accepting an
+    arbitrary string would silently render an empty graph for a typo
+    (e.g. ``--tier T5``) -- exactly the silent-failure pattern
+    CLAUDE.md hard rule #7 forbids. Typer maps the enum's values to a
+    closed CLI choice + raises :class:`typer.BadParameter` on miss.
+
+    sec-pr-s3-6-07 / devex-002 / cross-cutting R3: corroborated across
+    three reviewer passes. :class:`enum.StrEnum` keeps each member's
+    ``str`` identity, so ``_query_audit_log(tier=...)`` keeps its
+    string contract -- callers do not need to know whether a
+    ``--tier`` arg surfaced.
+    """
+
+    T0 = "T0"
+    T1 = "T1"
+    T2 = "T2"
+    T3 = "T3"
 
 
 def _query_audit_log(
@@ -111,7 +134,7 @@ def audit_log(
 @audit_app.command("graph")
 def audit_graph(
     tier: Annotated[
-        str | None,
+        _TierChoice | None,
         typer.Option("--tier", help=t("cli.audit.graph.tier_help")),
     ] = None,
     since: Annotated[
@@ -125,19 +148,31 @@ def audit_graph(
     tier's rows form a swimlane; ``--tier T3`` surfaces all web.fetch,
     quarantine.extract, and security.t3_boundary events so an operator
     can audit the privileged/quarantined boundary in one view.
+
+    sec-pr-s3-6-07: ``--tier`` is a closed :class:`_TierChoice` enum so
+    a typo (``--tier T5``) raises :class:`typer.BadParameter` at parse
+    time rather than silently rendering an empty graph.
     """
     since_hours = _parse_since(since)
 
-    rows = _query_audit_log(tier=tier, since_hours=since_hours)
+    # The downstream query stub speaks raw strings; collapse the enum
+    # back to its value at the boundary so the storage-layer integration
+    # in PR-S3-7 does not need to know the enum exists.
+    tier_value = tier.value if tier is not None else None
+    rows = _query_audit_log(tier=tier_value, since_hours=since_hours)
 
     if not rows:
-        tier_label = f" ({tier})" if tier else ""
+        tier_label = f" ({tier_value})" if tier_value else ""
         typer.echo(t("cli.audit.graph.empty", tier=tier_label, since=since))
         return
 
     # Render header. The tiered header carries the tier value so the
     # operator can tell at a glance which swimlane they're viewing.
-    label = t("cli.audit.graph.tier_header", tier=tier) if tier else t("cli.audit.graph.header")
+    label = (
+        t("cli.audit.graph.tier_header", tier=tier_value)
+        if tier_value
+        else t("cli.audit.graph.header")
+    )
     typer.echo(label)
     typer.echo("-" * 60)
 

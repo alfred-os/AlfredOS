@@ -251,3 +251,35 @@ def test_query_audit_log_stub_returns_empty_list() -> None:
 
     assert audit_module._query_audit_log(tier="T3", since_hours=24) == []
     assert audit_module._query_audit_log(tier=None, since_hours=1) == []
+
+
+def test_audit_graph_invalid_tier_rejected(runner: CliRunner) -> None:
+    """sec-pr-s3-6-07: ``--tier T5`` must raise BadParameter, not render empty.
+
+    The previous shape accepted any string and passed it to the query
+    stub, which returned ``[]`` for any unrecognised tier. The operator
+    saw the localised empty message and could not tell the difference
+    between "no rows in the window" and "you typo'd the tier name."
+    """
+    result = runner.invoke(audit_app, ["graph", "--tier", "T5", "--since", "24h"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    # Click/Typer's "Invalid value" surface — the exact phrasing depends
+    # on the click release but the literal "T5" must appear so the
+    # operator knows which value was refused.
+    assert "T5" in combined or "invalid" in combined.lower()
+
+
+def test_audit_graph_each_valid_tier_accepted(runner: CliRunner) -> None:
+    """Every tier in the closed set (T0..T3) is accepted by the parser."""
+    for tier in ("T0", "T1", "T2", "T3"):
+        with patch("alfred.cli.audit._query_audit_log", return_value=[]) as mock_query:
+            result = runner.invoke(audit_app, ["graph", "--tier", tier, "--since", "1h"])
+        assert result.exit_code == 0, (tier, result.output, result.stderr)
+        assert mock_query.call_args.kwargs.get("tier") == tier
+
+
+def test_audit_graph_invalid_tier_lowercase_rejected(runner: CliRunner) -> None:
+    """Tier values are case-sensitive — ``t3`` is not accepted."""
+    result = runner.invoke(audit_app, ["graph", "--tier", "t3", "--since", "24h"])
+    assert result.exit_code != 0
