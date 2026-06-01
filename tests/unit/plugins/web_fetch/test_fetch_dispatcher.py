@@ -36,6 +36,7 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchError,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
+    WebFetchRedirectRefused,
     WebFetchSizeLimitExceeded,
     WebFetchTlsError,
 )
@@ -338,6 +339,104 @@ async def test_control_result_size_error_maps_to_size_exception() -> None:
         )
     assert excinfo.value.size_bytes == 2048
     assert excinfo.value.limit_bytes == 1024
+
+
+@pytest.mark.asyncio
+async def test_control_result_redirect_refused_maps_to_redirect_exception() -> None:
+    """A ControlResult with redirect refusal raises
+    :class:`WebFetchRedirectRefused` carrying the status code and target.
+
+    SSRF guard (spec §7.4, CR-145): the plugin refuses 3xx upstream because
+    a follow-the-redirect path would let an allowlisted endpoint hand off
+    to an internal-IP / non-allowlisted target. This test pins the
+    error-type-map plumbing so the typed exception (and its audit row)
+    reaches the orchestrator instead of a generic WebFetchError.
+    """
+    audit = _build_audit()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchRedirectRefused",
+            "message": "Redirect refused: 302 -> 'http://10.0.0.1/internal'",
+            "status_code": 302,
+            "redirect_target": "http://10.0.0.1/internal",
+            "dlp_scan_result": "redirect_refused",
+        }
+    )
+    with pytest.raises(WebFetchRedirectRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/redir",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-redir",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert excinfo.value.status_code == 302
+    assert excinfo.value.redirect_target == "http://10.0.0.1/internal"
+
+
+@pytest.mark.asyncio
+async def test_control_result_redirect_refused_with_non_int_status_defaults() -> None:
+    """Defence-in-depth: a malformed plugin payload with a non-int
+    ``status_code`` defaults to 0 rather than raising TypeError. The
+    plugin always emits an int today but the dispatcher is the host-side
+    type-narrowing layer."""
+    audit = _build_audit()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchRedirectRefused",
+            "message": "Redirect refused",
+            "status_code": "302",  # str, not int — defensive coercion
+            "redirect_target": "http://attacker.example/",
+        }
+    )
+    with pytest.raises(WebFetchRedirectRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/redir",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-redir-defensive",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert excinfo.value.status_code == 0
+    assert excinfo.value.redirect_target == "http://attacker.example/"
+
+
+@pytest.mark.asyncio
+async def test_control_result_redirect_refused_with_non_str_target_defaults() -> None:
+    """Defence-in-depth: a malformed plugin payload with a non-str
+    ``redirect_target`` defaults to empty string rather than propagating
+    a non-str into the typed exception attribute."""
+    audit = _build_audit()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchRedirectRefused",
+            "message": "Redirect refused",
+            "status_code": 301,
+            "redirect_target": 12345,  # int, not str — defensive coercion
+        }
+    )
+    with pytest.raises(WebFetchRedirectRefused) as excinfo:
+        await dispatch_web_fetch(
+            url="https://example.com/redir",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-redir-target-defensive",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    assert excinfo.value.status_code == 301
+    assert excinfo.value.redirect_target == ""
 
 
 @pytest.mark.asyncio

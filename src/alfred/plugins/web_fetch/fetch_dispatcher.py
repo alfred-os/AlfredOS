@@ -61,6 +61,7 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchError,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
+    WebFetchRedirectRefused,
     WebFetchSizeLimitExceeded,
     WebFetchTlsError,
 )
@@ -94,6 +95,7 @@ _ERROR_TYPE_MAP: Final[dict[str, type[WebFetchError]]] = {
     "WebFetchTlsError": WebFetchTlsError,
     "WebFetchMimeTypeNotAllowed": WebFetchMimeTypeNotAllowed,
     "WebFetchSizeLimitExceeded": WebFetchSizeLimitExceeded,
+    "WebFetchRedirectRefused": WebFetchRedirectRefused,
     "TlsConfigError": WebFetchTlsError,
 }
 
@@ -323,6 +325,12 @@ async def dispatch_web_fetch(
             size_bytes = size_obj if isinstance(size_obj, int) else 0
             limit_bytes = limit_obj if isinstance(limit_obj, int) else _DEFAULT_SIZE_LIMIT_BYTES
             raise WebFetchSizeLimitExceeded(size_bytes=size_bytes, limit_bytes=limit_bytes)
+        if exc_class is WebFetchRedirectRefused:
+            status_obj = error_data.get("status_code", 0)
+            target_obj = error_data.get("redirect_target", "")
+            status_int = status_obj if isinstance(status_obj, int) else 0
+            target_str = target_obj if isinstance(target_obj, str) else ""
+            raise WebFetchRedirectRefused(status_code=status_int, redirect_target=target_str)
         # Fallback: generic WebFetchError carries the plugin's message.
         raise WebFetchError(message_str)
     else:

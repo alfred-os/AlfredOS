@@ -133,7 +133,34 @@ async def _handle_fetch(params: dict[str, Any]) -> dict[str, Any]:
     connector = aiohttp.TCPConnector(ssl=tls_policy.verify_ssl)
     async with aiohttp.ClientSession(connector=connector, timeout=fetch_timeout) as session:
         try:
-            async with session.get(url, headers=headers, allow_redirects=True) as resp:
+            # SSRF defence (spec §7.4, CR-145 security review): refuse
+            # redirects in-subprocess. The host validated the ORIGINAL
+            # URL against the three-way allowlist before dispatching;
+            # an HTTP 3xx hand-off would let an allowlisted endpoint
+            # redirect to an internal-IP / non-allowlisted target,
+            # silently widening the surface past the operator's cap.
+            # The host can re-dispatch to the redirect target through
+            # the full allowlist + rate-limit + audit machinery if it
+            # actually wants to follow.
+            async with session.get(url, headers=headers, allow_redirects=False) as resp:
+                if 300 <= resp.status < 400:
+                    redirect_target = resp.headers.get("Location", "")
+                    return {
+                        "error": {
+                            "code": -32005,
+                            "message": (
+                                f"Redirect refused: {resp.status} -> "
+                                f"{redirect_target!r}. Host must re-dispatch the "
+                                "redirect target through the allowlist."
+                            ),
+                            "data": {
+                                "type": "WebFetchRedirectRefused",
+                                "status_code": resp.status,
+                                "redirect_target": redirect_target,
+                                "dlp_scan_result": "redirect_refused",
+                            },
+                        }
+                    }
                 # MIME enforcement BEFORE reading body — refusing on
                 # content-type lets us bail before pulling a multi-MB
                 # payload that the host would reject anyway.

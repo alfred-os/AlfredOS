@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 14:34+0100\n"
+"POT-Creation-Date: 2026-06-01 14:38+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -658,7 +658,7 @@ msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
 #: src/alfred/plugins/stdio_transport.py:608
-#: src/alfred/plugins/web_fetch/errors.py:134
+#: src/alfred/plugins/web_fetch/errors.py:162
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
@@ -676,22 +676,30 @@ msgstr ""
 "web.fetch refused: domain {domain!r} is not in the effective allowlist "
 "(manifest ∩ operator config ∩ per-session)."
 
-#: src/alfred/plugins/web_fetch/errors.py:66
+#: src/alfred/plugins/web_fetch/errors.py:74
+msgid "web.fetch.error.redirect_refused"
+msgstr ""
+"web.fetch refused: upstream returned HTTP {status_code} redirecting to "
+"{redirect_target!r}. SSRF guard (spec §7.4): the plugin will not follow "
+"redirects in-subprocess — the host must re-dispatch the redirect target "
+"through the three-way allowlist."
+
+#: src/alfred/plugins/web_fetch/errors.py:94
 msgid "web.fetch.error.tls_failure"
 msgstr ""
 "web.fetch refused: TLS verification failed for {url!r} ({detail}). "
 "Production has no operator override; ALFRED_ENV=development is the only "
 "escape hatch."
 
-#: src/alfred/plugins/web_fetch/errors.py:81
+#: src/alfred/plugins/web_fetch/errors.py:109
 msgid "web.fetch.error.rate_limited"
 msgstr "web.fetch refused: rate limit exceeded for bucket {bucket!r}."
 
-#: src/alfred/plugins/web_fetch/errors.py:94
+#: src/alfred/plugins/web_fetch/errors.py:122
 msgid "web.fetch.error.mime_type_not_allowed"
 msgstr "web.fetch refused: response MIME type {mime_type!r} is not allowed."
 
-#: src/alfred/plugins/web_fetch/errors.py:109
+#: src/alfred/plugins/web_fetch/errors.py:137
 msgid "web.fetch.error.size_limit_exceeded"
 msgstr ""
 "web.fetch refused: response body {size} bytes exceeds the {limit}-byte "

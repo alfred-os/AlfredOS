@@ -20,6 +20,7 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchError,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
+    WebFetchRedirectRefused,
     WebFetchSizeLimitExceeded,
     WebFetchTlsError,
 )
@@ -48,6 +49,14 @@ def test_mime_type_not_allowed_is_web_fetch_error() -> None:
 
 def test_size_limit_exceeded_is_web_fetch_error() -> None:
     assert issubclass(WebFetchSizeLimitExceeded, WebFetchError)
+
+
+def test_redirect_refused_is_web_fetch_error() -> None:
+    """SSRF guard (spec §7.4): a refused 3xx is an operational error so the
+    orchestrator's ``except WebFetchError`` arm surfaces it cleanly. Not a
+    security event (no canary trip) — the upstream merely tried to widen
+    via a redirect; refusal is the normal protocol response."""
+    assert issubclass(WebFetchRedirectRefused, WebFetchError)
 
 
 def test_canary_tripped_is_NOT_web_fetch_error() -> None:  # noqa: N802 -- emphasis intentional; the NOT is load-bearing
@@ -92,6 +101,17 @@ def test_size_limit_exceeded_carries_size_attrs() -> None:
     assert err.limit_bytes == 5_242_880
 
 
+def test_redirect_refused_carries_status_and_target_attrs() -> None:
+    """Both fields are recorded verbatim so reviewers see exactly where the
+    redirect tried to point — silently dropping the target would weaken
+    the SSRF audit trail."""
+    err = WebFetchRedirectRefused(status_code=302, redirect_target="http://10.0.0.1/internal")
+    assert err.status_code == 302
+    assert err.redirect_target == "http://10.0.0.1/internal"
+    assert "302" in str(err)
+    assert "10.0.0.1" in str(err)
+
+
 def test_canary_tripped_carries_source_url_and_handle_id() -> None:
     err = WebFetchCanaryTripped(source_url="https://attacker.test/page", handle_id="abc-123")
     assert err.source_url == "https://attacker.test/page"
@@ -106,6 +126,7 @@ def test_canary_tripped_carries_source_url_and_handle_id() -> None:
         WebFetchRateLimited("per_user"),
         WebFetchMimeTypeNotAllowed("text/x-evil"),
         WebFetchSizeLimitExceeded(size_bytes=1, limit_bytes=0),
+        WebFetchRedirectRefused(status_code=301, redirect_target="http://a.example/"),
         WebFetchCanaryTripped(source_url="https://x.example", handle_id="id"),
     ],
 )

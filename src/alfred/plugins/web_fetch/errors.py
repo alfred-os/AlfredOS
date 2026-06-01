@@ -52,6 +52,34 @@ class WebFetchDomainNotAllowed(WebFetchError):  # noqa: N818 -- name pinned by s
         self.domain = domain
 
 
+class WebFetchRedirectRefused(WebFetchError):  # noqa: N818 -- name pinned by spec §7.4
+    """The upstream returned an HTTP 3xx redirect (spec §7.4 SSRF guard).
+
+    The plugin subprocess refuses to follow redirects: an allowlisted
+    endpoint could otherwise hand off to an internal-IP / non-allowlisted
+    target via ``Location:``, silently widening the surface past the
+    operator's three-way allowlist cap. The host can re-dispatch the
+    redirect target through the full allowlist + rate-limit + audit
+    machinery if it actually wants to follow.
+
+    ``status_code`` carries the 3xx status (301 / 302 / 303 / 307 / 308)
+    so audit rows can distinguish permanent-vs-temporary redirects;
+    ``redirect_target`` is the upstream ``Location`` value, recorded
+    verbatim so reviewers see exactly where the bypass attempt pointed.
+    """
+
+    def __init__(self, status_code: int, redirect_target: str) -> None:
+        super().__init__(
+            t(
+                "web.fetch.error.redirect_refused",
+                status_code=status_code,
+                redirect_target=redirect_target,
+            )
+        )
+        self.status_code = status_code
+        self.redirect_target = redirect_target
+
+
 class WebFetchTlsError(WebFetchError):
     """TLS verification failed (spec §7.11).
 
@@ -142,6 +170,7 @@ __all__ = [
     "WebFetchError",
     "WebFetchMimeTypeNotAllowed",
     "WebFetchRateLimited",
+    "WebFetchRedirectRefused",
     "WebFetchSizeLimitExceeded",
     "WebFetchTlsError",
 ]
