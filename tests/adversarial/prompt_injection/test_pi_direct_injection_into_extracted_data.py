@@ -101,14 +101,25 @@ def test_extracted_data_field_is_t3_derived_data_type() -> None:
     extracted dicts whose values came from injection-laundering
     attempts (the keys would be schema-validated, but the values are
     attacker-controlled strings).
+
+    :class:`Extracted` is a Pydantic v2 :class:`~pydantic.BaseModel`
+    (PR-S3-4 Task 3), not a dataclass — ``Extracted.model_fields``
+    is the introspection surface; :func:`dataclasses.fields` raises
+    ``TypeError`` on a BaseModel. The annotation is exposed via
+    ``FieldInfo.annotation`` rather than the dataclass ``.type``
+    string.
     """
-    extracted_field_types = {f.name: f.type for f in dataclass_fields(Extracted)}
-    assert "data" in extracted_field_types
-    # The type hint is a string at the dataclass boundary (PEP 563
-    # future-annotations); we compare by name rather than identity.
-    assert extracted_field_types["data"] == "T3DerivedData", (
+    extracted_field_annotations = {
+        name: field.annotation for name, field in Extracted.model_fields.items()
+    }
+    assert "data" in extracted_field_annotations
+    # The Pydantic FieldInfo carries the resolved annotation object —
+    # for a :data:`typing.NewType` over ``dict[str, object]`` that's the
+    # NewType callable itself. Compare by identity rather than the
+    # dataclass-era string compare.
+    assert extracted_field_annotations["data"] is T3DerivedData, (
         f"Extracted.data must be typed T3DerivedData (the provenance "
-        f"discriminant); got {extracted_field_types['data']!r}"
+        f"discriminant); got {extracted_field_annotations['data']!r}"
     )
     # And the NewType supertype IS dict[str, object] — operators can
     # rely on dict semantics inside the downgrade gate. ``__supertype__``
