@@ -39,7 +39,6 @@ from typing import Annotated, Final
 import typer
 
 from alfred.cli._state_git import (
-    ProposalResult,
     StateGitError,
     StateGitProposalClient,
 )
@@ -91,22 +90,12 @@ web_app.add_typer(allowlist_app, name="allowlist")
 # ---------------------------------------------------------------------------
 
 
-def _render_pending_review(result: ProposalResult, *, key: str) -> None:
-    """Print the canonical pending-review block for a queued proposal.
-
-    ``key`` selects the localised template — add vs remove carry slightly
-    different operator-facing copy ("not yet fetchable" vs "still
-    fetchable until the reviewer approves") because the operator's
-    next-step is different in each case. The helper centralises the
-    print-shape so a future format tweak only touches one site.
-    """
-    typer.echo(
-        t(
-            key,
-            branch=result.branch,
-            proposal_id=result.proposal_id,
-        )
-    )
+# Each pending-review surface inlines its own ``t()`` call at the use
+# site so pybabel's static extractor can resolve the key literal.
+# Indirect lookups via a variable (the natural DRY refactor) would
+# show up as obsoleted entries in the catalog and silently degrade
+# every render to the bare msgid — see PR-S3-6 batch-2 i18n catalog
+# regen experience.
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +136,13 @@ def allowlist_add(
             err=True,
         )
         raise typer.Exit(code=1) from exc
-    _render_pending_review(result, key="cli.web.allowlist.add.pending_review")
+    typer.echo(
+        t(
+            "cli.web.allowlist.add.pending_review",
+            branch=result.branch,
+            proposal_id=result.proposal_id,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +169,13 @@ def allowlist_remove(
             err=True,
         )
         raise typer.Exit(code=1) from exc
-    _render_pending_review(result, key="cli.web.allowlist.remove.pending_review")
+    typer.echo(
+        t(
+            "cli.web.allowlist.remove.pending_review",
+            branch=result.branch,
+            proposal_id=result.proposal_id,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
