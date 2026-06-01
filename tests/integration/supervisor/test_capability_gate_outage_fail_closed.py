@@ -391,6 +391,94 @@ async def test_emit_transition_direct_with_no_outage_id_falls_back_to_fresh_uuid
     assert cid != ""
 
 
+async def test_entering_audit_failure_does_not_advance_state(
+    mock_gate: MagicMock, audit: AsyncMock
+) -> None:
+    """CR PR-S3-3b R5 #3332700170: entering-transition state is NOT committed
+    until the audit emit lands.
+
+    Without this, a single sink failure during the entering branch would
+    leave ``_in_fail_closed=True`` with no entering row in the audit graph;
+    every subsequent heartbeat would short-circuit the transition because
+    the "already in fail-closed" branch fires before any emit, and the
+    outage would never be auditable (PRD §10.4 outage-transition contract).
+
+    Drive: first heartbeat raises from append_schema; verify state stayed
+    pristine; second heartbeat (with a recovered sink) successfully emits
+    the entering row.
+    """
+    monitor = CapabilityGateMonitor(gate=mock_gate, audit=audit)
+    mock_gate.is_backing_store_available.return_value = False
+    # First heartbeat: sink raises. State must NOT advance.
+    audit.append_schema.side_effect = RuntimeError("transient sink failure")
+    with pytest.raises(RuntimeError):
+        await monitor.run_one_heartbeat()
+    assert monitor._in_fail_closed is False
+    assert monitor._outage_correlation_id is None
+    assert monitor._denied_dispatch_count == 0
+
+    # Second heartbeat: sink recovers. Entering row lands; state advances.
+    audit.append_schema.side_effect = None
+    await monitor.run_one_heartbeat()
+    assert monitor._in_fail_closed is True
+    entering_calls = [
+        call
+        for call in audit.append_schema.await_args_list
+        if call.kwargs["event"] == "supervisor.capability_gate_unavailable"
+        and call.kwargs["subject"]["state_transition"] == "entering_fail_closed"
+    ]
+    # Two await attempts total (first raised, second succeeded); both carry
+    # the entering shape because the monitor RE-attempted the transition
+    # rather than silently skipping it.
+    assert len(entering_calls) == 2
+
+
+async def test_exiting_audit_failure_does_not_advance_state(
+    mock_gate: MagicMock, audit: AsyncMock
+) -> None:
+    """CR PR-S3-3b R5 #3332700170: exiting-transition state is NOT committed
+    until the audit emit lands.
+
+    Symmetric to the entering case — without commit-after-emit, a sink
+    failure during exit would leave the monitor stuck in ``_in_fail_closed``
+    state forever (the next heartbeat would see ``available=True`` AND
+    ``_in_fail_closed=False``, short-circuit, and the recovery row would
+    never land).
+    """
+    monitor = CapabilityGateMonitor(gate=mock_gate, audit=audit)
+    # Drive into fail-closed cleanly.
+    mock_gate.is_backing_store_available.return_value = False
+    await monitor.run_one_heartbeat()
+    assert monitor._in_fail_closed is True
+    outage_cid = monitor._outage_correlation_id
+    assert outage_cid is not None
+
+    # Recovery, but the sink raises. State must NOT advance.
+    mock_gate.is_backing_store_available.return_value = True
+    audit.append_schema.side_effect = RuntimeError("transient sink failure")
+    with pytest.raises(RuntimeError):
+        await monitor.run_one_heartbeat()
+    assert monitor._in_fail_closed is True
+    assert monitor._outage_correlation_id == outage_cid
+
+    # Sink recovers; next heartbeat (still available=True) re-attempts the
+    # exit and successfully emits the exiting row with the SAME correlation_id.
+    audit.append_schema.side_effect = None
+    await monitor.run_one_heartbeat()
+    assert monitor._in_fail_closed is False
+    exiting_calls = [
+        call
+        for call in audit.append_schema.await_args_list
+        if call.kwargs["event"] == "supervisor.capability_gate_unavailable"
+        and call.kwargs["subject"]["state_transition"] == "exiting_fail_closed"
+    ]
+    # Two exit attempts (first raised, second landed) — both bind the
+    # original outage's correlation_id.
+    assert len(exiting_calls) == 2
+    for call in exiting_calls:
+        assert call.kwargs["subject"]["correlation_id"] == outage_cid
+
+
 async def test_denied_count_resets_between_outages(mock_gate: MagicMock, audit: AsyncMock) -> None:
     """Denials counted during outage A do NOT contaminate outage B's rollup."""
     monitor = CapabilityGateMonitor(gate=mock_gate, audit=audit)
