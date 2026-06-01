@@ -50,6 +50,7 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchError,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
+    WebFetchRedirectRefused,
     WebFetchSizeLimitExceeded,
     WebFetchTlsError,
 )
@@ -116,6 +117,7 @@ __all__ = [
     "WebFetchError",
     "WebFetchMimeTypeNotAllowed",
     "WebFetchRateLimited",
+    "WebFetchRedirectRefused",
     "WebFetchSizeLimitExceeded",
     "WebFetchTlsError",
     "register_hookpoints",

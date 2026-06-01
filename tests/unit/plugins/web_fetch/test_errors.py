@@ -136,3 +136,35 @@ def test_every_exception_is_raise_able(exc: Exception) -> None:
     """
     with pytest.raises(type(exc)):
         raise exc
+
+
+def test_redirect_refused_is_re_exported_from_package() -> None:
+    """``WebFetchRedirectRefused`` is part of the ``alfred.plugins.web_fetch``
+    public surface (review finding ar-003).
+
+    Every other ``WebFetch*`` operational error is re-exported from the
+    package ``__init__``; the SSRF-guard redirect refusal sibling must be
+    too. An asymmetric public surface forces downstream consumers
+    (orchestrator ``except`` arms, integration tests, plugin authors)
+    to know the deep leaf-module path for one error and the package path
+    for the rest — a footgun that surfaces as ``ImportError`` only after
+    the redirect-refusal path is exercised.
+
+    The check pins both ``__all__`` membership (the documented contract)
+    and ``getattr`` resolution (the runtime surface), and asserts the
+    re-export is the SAME object as the leaf-module class so a future
+    refactor cannot accidentally rebind it.
+    """
+    import alfred.plugins.web_fetch as pkg
+    from alfred.plugins.web_fetch.errors import (
+        WebFetchRedirectRefused as LeafRedirectRefused,
+    )
+
+    assert "WebFetchRedirectRefused" in pkg.__all__, (
+        "alfred.plugins.web_fetch.__all__ missing 'WebFetchRedirectRefused' — "
+        "public-surface asymmetry vs sibling WebFetch* errors (review ar-003)."
+    )
+    assert pkg.WebFetchRedirectRefused is LeafRedirectRefused, (
+        "alfred.plugins.web_fetch.WebFetchRedirectRefused is not the same "
+        "object as the leaf-module class — re-export accidentally rebound."
+    )
