@@ -202,7 +202,21 @@ async def test_save_to_db_omits_trip_metadata_owned_by_caller() -> None:
     merged = session.merge.await_args.args[0]
     # last_failure_type / breaker_state / correlation_id are ORM-side
     # defaults — None / "CLOSED" / "" — until the audit-emit path writes them.
+    # CR PR-S3-3b R5 #3332700209: ``merged.last_failure_type is None`` is
+    # the contract assertion — it verifies the ORM row save_to_db built
+    # has the default last_failure_type (i.e. save_to_db did not pass a
+    # value for the trip-metadata fields owned by the audit-emit path).
+    # The previous follow-up assertion ``"last_failure_type" not in
+    # cb.__class__.__dict__`` checked the CircuitBreaker CLASS dict
+    # (which never had the attribute) rather than the
+    # CircuitBreakerState ORM instance under test — vacuous, so dropped.
     assert merged.last_failure_type is None
-    # Default attributes are populated by SQLAlchemy at flush time, so we
-    # check construction-time absence by reading the constructor kwargs.
-    assert "last_failure_type" not in cb.__class__.__dict__
+    # Also pin breaker_state / correlation_id are unset on the instance —
+    # any future change to save_to_db that started threading trip metadata
+    # would have set these to concrete values pre-flush, so we'd see a
+    # non-None attribute here. The column-level default= / server_default=
+    # values land only at flush time; on a freshly-constructed row,
+    # un-passed Mapped[str] columns surface as None until SQLAlchemy
+    # materialises the default.
+    assert merged.breaker_state is None
+    assert merged.correlation_id is None
