@@ -44,6 +44,7 @@ from alfred.plugins.web_fetch.fetch_dispatcher import (
     FetchDispatchConfig,
     dispatch_web_fetch,
 )
+from alfred.plugins.web_fetch.tls_policy import TlsConfigError
 from alfred.security.quarantine import ContentHandle
 
 
@@ -52,18 +53,33 @@ def _build_config(
     manifest: tuple[AllowlistEntry, ...] = (AllowlistEntry(domain="example.com"),),
     operator: tuple[AllowlistEntry, ...] = (AllowlistEntry(domain="example.com"),),
     session: tuple[AllowlistEntry, ...] = (AllowlistEntry(domain="example.com"),),
+    skip_tls_verify: bool = False,
+    redis_url: str = "redis://localhost:6379/0",
 ) -> FetchDispatchConfig:
     """Build a :class:`FetchDispatchConfig` with the common shape.
 
     The defaults set up a single example.com triple-intersection so a
     test that does not care about allowlist drift can call dispatch and
     reach the rate-limiter / transport branches.
+
+    ``redis_url`` (C2) is required at the config level — tests pin a
+    deterministic placeholder so the JSON-RPC payload assertion in
+    ``test_redis_url_threaded_through_to_dispatch`` stays bit-stable.
+
+    ``skip_tls_verify`` (H1 / H10) defaults to ``False`` so tests
+    exercise the production-safe shape; the parent-side
+    :class:`TlsPolicy` check passes silently for that value. Tests that
+    pin the parent-side refusal pass ``skip_tls_verify=True`` and rely on
+    a non-development ``ALFRED_ENV`` to surface the
+    :class:`TlsConfigError`.
     """
     return FetchDispatchConfig(
         manifest_allowed_entries=manifest,
         operator_allowed_entries=operator,
         session_allowed_entries=session,
         manifest_commit_hash="abc123",
+        redis_url=redis_url,
+        skip_tls_verify=skip_tls_verify,
     )
 
 
@@ -706,3 +722,159 @@ async def test_unexpected_dispatch_shape_raises_generic_error() -> None:
             transport=transport,
         )
     assert "_UnknownResult" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Commit 1 — C1 / C2 / H1+H10: T3 tagging contract, redis_url threading,
+# parent-side TlsPolicy.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_redis_url_threaded_through_to_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2 / arch-002: the JSON-RPC payload MUST carry ``redis_url``.
+
+    Without this key, the plugin subprocess's ``_handle_fetch`` would
+    ``KeyError`` on its first fetch. The parent-owned URL is the only
+    legitimate source; threading it through every dispatch keeps the
+    wire-format contract pinned in one place.
+    """
+    monkeypatch.setenv("ALFRED_ENV", "development")
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+    redis_url = "redis://operator-redis:6379/3"
+
+    await dispatch_web_fetch(
+        url="https://example.com/page",
+        headers={"User-Agent": "alfred"},
+        user_id="user-1",
+        correlation_id="corr-c2",
+        config=_build_config(redis_url=redis_url),
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=transport,
+    )
+
+    # The transport's dispatch was called with the JSON-RPC params dict
+    # as the second positional argument.
+    args, _kwargs = transport.dispatch.await_args
+    params = args[1]
+    assert params["redis_url"] == redis_url, (
+        f"FetchDispatchConfig.redis_url must thread into transport.dispatch params; got {params!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skip_tls_verify_threaded_through_to_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H1 / H10: ``skip_tls_verify`` flows from config to the subprocess.
+
+    Defence-in-depth: the parent-side :class:`TlsPolicy` check is the
+    authoritative gate; the subprocess-side check is the second line of
+    defence. The bit MUST be threaded explicitly through the wire so the
+    subprocess cannot drift into accepting bad TLS independently of the
+    parent's decision.
+    """
+    # ALFRED_ENV=development is required so the parent-side TlsPolicy
+    # check accepts skip_tls_verify=True at all (fail-closed default).
+    monkeypatch.setenv("ALFRED_ENV", "development")
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+
+    await dispatch_web_fetch(
+        url="https://example.com/page",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-h1-thread",
+        config=_build_config(skip_tls_verify=True),
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=transport,
+    )
+
+    args, _kwargs = transport.dispatch.await_args
+    params = args[1]
+    assert params["skip_tls_verify"] is True
+
+
+@pytest.mark.asyncio
+async def test_parent_tls_policy_refuses_skip_in_non_dev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H1 / H10 / arch-003 / sec-pr-s3-5-001 / ar-002.
+
+    The parent-side :class:`TlsPolicy` check fires BEFORE
+    ``transport.dispatch`` is called. In a non-development environment
+    a config with ``skip_tls_verify=True`` must raise
+    :class:`TlsConfigError` and never touch the subprocess — otherwise a
+    compromised orchestrator caller could rely solely on subprocess-side
+    enforcement and a buggy plugin would silently accept the bypass.
+    """
+    monkeypatch.setenv("ALFRED_ENV", "production")
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+
+    with pytest.raises(TlsConfigError):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-h1",
+            config=_build_config(skip_tls_verify=True),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+        )
+    # Parent-side check fires BEFORE the transport is touched.
+    assert transport.dispatch.await_count == 0
+    # The refusal happens before audit emission too — the TlsConfigError
+    # is the structural signal; refusal accounting at this layer would
+    # double-count with the supervisor-side ``supervisor.config_insecure``
+    # row that observes the same condition at startup.
+    assert audit.append_schema.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_t3_tagging_contract_documented_on_success_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C1 / arch-001: success path returns the opaque :class:`ContentHandle`.
+
+    The contract this test pins is structural, not behavioural — the
+    dispatcher relies on
+    :meth:`alfred.plugins.stdio_transport.StdioTransport._read_response`
+    having tagged the bytes T3 and persisted the wrapper into the
+    content store BEFORE returning the handle (see the docstring
+    "T3-tagging contract" block). This test fails loud if a future
+    refactor changes the success-path return type to something other
+    than :class:`ContentHandle` (e.g. directly returning bytes), because
+    that would break the dereference-site contract — the
+    quarantined-LLM plugin's ``get(handle_id)`` MUST be the unambiguous
+    "first host-side read" of the content.
+    """
+    monkeypatch.setenv("ALFRED_ENV", "development")
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+
+    result = await dispatch_web_fetch(
+        url="https://example.com/page",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-c1",
+        config=_build_config(),
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=transport,
+    )
+    # The structural pin: success returns ContentHandle (opaque), not
+    # bytes / TaggedContent / dict / etc. ContentHandle carries no
+    # ``.content`` field — see :mod:`alfred.security.quarantine`.
+    assert isinstance(result, ContentHandle)
+    assert not hasattr(result, "content")

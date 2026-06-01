@@ -66,6 +66,7 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchTlsError,
 )
 from alfred.plugins.web_fetch.rate_limit import RateLimiter
+from alfred.plugins.web_fetch.tls_policy import TlsPolicy
 from alfred.security.quarantine import ContentHandle
 
 if TYPE_CHECKING:
@@ -108,13 +109,30 @@ class FetchDispatchConfig:
     feed into :class:`AllowlistIntersection`; the
     ``manifest_commit_hash`` provides forensic correlation for the
     plugin version active at fetch time (spec §7.12).
+
+    ``redis_url`` (C2 / arch-002): the plugin subprocess's ``_handle_fetch``
+    reads ``params["redis_url"]`` to open its content-store connection. The
+    parent owns the connection-string source (operator config) and threads
+    it through every dispatch; making it part of the per-session immutable
+    config keeps the wire-format contract pinned at config-construction
+    time rather than re-resolving per fetch.
+
+    ``skip_tls_verify`` (H1 / H10 / arch-003 / sec-pr-s3-5-001): the dev
+    escape hatch documented in :mod:`alfred.plugins.web_fetch.tls_policy`.
+    Held on the config so the parent-side :class:`TlsPolicy` check fires
+    at construction time (defence-in-depth: a misconfigured production
+    operator who flips this bit trips ``TlsConfigError`` immediately —
+    before the value is forwarded to the subprocess where the
+    subprocess-side check is enforcement-of-last-resort).
     """
 
     manifest_allowed_entries: tuple[AllowlistEntry, ...]
     operator_allowed_entries: tuple[AllowlistEntry, ...]
     session_allowed_entries: tuple[AllowlistEntry, ...]
     manifest_commit_hash: str
+    redis_url: str
     plugin_id: str = "alfred.web-fetch"
+    skip_tls_verify: bool = False
 
 
 async def dispatch_web_fetch(
@@ -141,7 +159,34 @@ async def dispatch_web_fetch(
     canary trips surface via the host-side
     :class:`alfred.plugins.web_fetch.canary_scanner.InboundCanaryScanner`
     on the post-hookpoint, not through this function's exception arm.
+
+    T3-tagging contract (C1 / arch-001 / PRD §7.1): the returned
+    :class:`ContentHandle` is opaque — it carries no ``.content`` field.
+    The actual T3 tagging of the fetched bytes happens **inside the
+    transport** at :meth:`alfred.plugins.stdio_transport.StdioTransport._read_response`
+    (the canonical anchor: the transport calls ``tag_t3_with_nonce`` on
+    the decoded bytes and persists the wrapped :class:`~alfred.security.tiers.TaggedContent[T3]`
+    into the content store keyed by ``ContentHandle.id``). The dispatcher
+    pins this contract by returning ONLY a :class:`ContentHandle` on the
+    success path — by the time control reaches that ``return``, the
+    transport has already minted the handle AND written the T3-tagged
+    wrapper to the store. Per the task's option (b), the dereference
+    site (the quarantined-LLM plugin's ``get(handle_id)``) is the
+    unambiguous "first host-side read" of the content; the wrapper at
+    that point carries the nonce + provenance the dual-LLM split relies
+    on (PRD §7.1 invariant).
     """
+    # Parent-side TLS policy check (H1 / H10 / arch-003 / sec-pr-s3-5-001 /
+    # ar-002): construct :class:`TlsPolicy` BEFORE any subprocess dispatch
+    # so a non-development environment with ``skip_tls_verify=True`` fails
+    # loud in the parent — never reaching ``transport.dispatch``. The
+    # subprocess-side check is defence-in-depth; the parent-side check is
+    # the authoritative gate. Raises :class:`TlsConfigError` (which is an
+    # :class:`AlfredError`, not a :class:`WebFetchError` — the policy
+    # rejection is a config refusal, not an operational fetch error, so
+    # callers see a distinct exception class).
+    TlsPolicy(skip_tls_verify=config.skip_tls_verify)
+
     # Step 1: OutboundDlp on both fields (spec §7.9b). The plan called
     # this ``scan_fields`` but the actual OutboundDlp surface is a single
     # ``scan(text: str) -> str``; we run it once per field. ``str(headers)``
@@ -253,12 +298,25 @@ async def dispatch_web_fetch(
         raise
 
     # Step 4: Dispatch to the plugin subprocess via the transport.
+    #
+    # ``redis_url`` (C2 / arch-002): the plugin's ``_handle_fetch`` reads
+    # ``params["redis_url"]`` to open its content-store connection. Without
+    # this key the subprocess would ``KeyError`` on first real dispatch.
+    # The parent owns the connection-string source so the subprocess
+    # cannot synthesise its own — pin the URL at the wire-format boundary.
+    #
+    # ``skip_tls_verify`` (H1 / H10 / arch-003): forwarded so the
+    # subprocess-side :class:`TlsPolicy` check fires too (defence-in-depth
+    # — the parent-side check above is the authoritative gate, but the
+    # subprocess MUST also refuse to silently honour a flipped bit).
     result = await transport.dispatch(
         "web.fetch",
         {
             "url": clean_url,
             "headers": headers,
             "correlation_id": correlation_id,
+            "redis_url": config.redis_url,
+            "skip_tls_verify": config.skip_tls_verify,
         },
     )
 
