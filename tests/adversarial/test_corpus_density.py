@@ -59,10 +59,11 @@ def test_tier_laundering_corpus_has_payloads() -> None:
 def test_dlp_egress_corpus_has_payloads() -> None:
     """`tests/adversarial/dlp_egress/` must carry at least one payload.
 
-    PR-S3-5 (`web.fetch` plugin) ships the first two payloads here —
-    ``de-2026-001`` (canary token in HTML) and ``de-2026-002`` (the
-    documented cross-field secret-leak gap deferred to Slice 4). The
-    earlier `xfail(strict=True)` placeholder enforced the "dir
+    PR-S3-5 (`web.fetch` plugin) ships the first three payloads here —
+    ``de-2026-001`` (canary token in HTML), ``de-2026-002`` (the
+    documented cross-field secret-leak gap deferred to Slice 4), and
+    ``de-2026-003`` (DNS rebinding SSRF to cloud metadata / RFC1918).
+    The earlier `xfail(strict=True)` placeholder enforced the "dir
     populated by Slice 3" contract; with payloads landed the marker
     is gone and the count assertion stands on its own.
     """
