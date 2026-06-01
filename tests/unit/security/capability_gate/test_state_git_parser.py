@@ -36,8 +36,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from alfred.security.capability_gate._state_git_parser import parse_state_git_head
 from alfred.security.capability_gate.policy import GrantRow
 
@@ -233,17 +231,21 @@ def test_parse_state_git_head_returns_empty_for_missing_grants_tree(
     assert grants == frozenset()
 
 
-def test_parse_state_git_head_skips_invalid_grant_files(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_parse_state_git_head_skips_invalid_grant_files(tmp_path: Path) -> None:
     """A malformed grant file is logged + skipped, not silently accepted.
 
     CLAUDE.md hard rule #7: no silent failures in security paths. A
     blob that fails :class:`GrantRow` validation MUST surface in the
     structured log so an operator can investigate the corrupted grant,
     AND the rebuild MUST continue for the remaining well-formed grants.
+
+    Uses :func:`structlog.testing.capture_logs` because this project
+    routes structlog through its own ConsoleRenderer pipeline rather
+    than the stdlib ``logging`` bridge; pytest's ``caplog`` fixture
+    therefore misses the warning even though it lands on stdout.
     """
+    import structlog.testing
+
     valid_payload = {
         "plugin_id": "good.plugin",
         "subscriber_tier": "operator",
@@ -259,15 +261,23 @@ def test_parse_state_git_head_skips_invalid_grant_files(
         {"good.json": valid_payload, "broken.json": invalid_payload},
     )
 
-    with caplog.at_level("WARNING"):
+    with structlog.testing.capture_logs() as captured:
         grants = parse_state_git_head(repo_path, commit_hash)
 
     # The valid grant lands; the invalid one is skipped.
     assert any(g.plugin_id == "good.plugin" for g in grants)
     assert not any(g.plugin_id == "broken" for g in grants)
-    # The skip emits a structured warning so operators can correlate
-    # the corrupted blob with the commit hash.
-    assert any("skip_invalid_grant" in record.message for record in caplog.records)
+
+    # The skip emits one structured warning. The event tag is the
+    # load-bearing identifier the operator dashboards on; the path
+    # field surfaces the offending blob for correlation.
+    skipped = [
+        c for c in captured if c.get("event") == "capability_gate.rebuild.skip_invalid_grant"
+    ]
+    assert len(skipped) == 1, f"expected one skip warning, got: {captured!r}"
+    assert skipped[0]["log_level"] == "warning"
+    assert skipped[0]["path"] == "policies/grants/broken.json"
+    assert skipped[0]["commit_hash"] == commit_hash
 
 
 def test_parse_state_git_head_round_trips_wildcard_hookpoint(

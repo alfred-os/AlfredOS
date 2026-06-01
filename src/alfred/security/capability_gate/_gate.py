@@ -32,11 +32,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
 
 from alfred.audit.audit_row_schemas import (
+    CAPABILITY_GATE_REBUILD_FIELDS,
     SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS,
 )
 
@@ -46,6 +48,7 @@ from alfred.audit.audit_row_schemas import (
 # reference ``alfred.security.capability_gate._gate._AuditSink`` continue
 # to type-check; the canonical home is the dedicated module.
 from ._audit_protocols import _AuditSink
+from ._state_git_parser import parse_state_git_head
 from .policy import GatePolicy, GrantRow
 
 if TYPE_CHECKING:
@@ -61,6 +64,13 @@ _log = structlog.get_logger(__name__)
 _HEARTBEAT_INTERVAL_SECONDS: float = 10.0
 _FAIL_CLOSED_AFTER_SECONDS: float = 60.0
 _MAX_MISSED_HEARTBEATS: int = int(_FAIL_CLOSED_AFTER_SECONDS / _HEARTBEAT_INTERVAL_SECONDS)
+
+# Default state.git path per the Slice-3 operator runbook (spec §15.4).
+# sec-007 keeps env reads out of this module: the bootstrap layer
+# (:mod:`alfred.bootstrap.gate_factory`) reads ``ALFRED_STATE_GIT_PATH``
+# and threads the resolved Path into :meth:`RealGate.create` so this
+# module stays env-isolated. Tests override via the constructor arg.
+_DEFAULT_STATE_GIT_PATH: Path = Path("/var/lib/alfred/state.git")
 
 
 class RealGate:
@@ -85,10 +95,12 @@ class RealGate:
         policy: GatePolicy,
         backend: StorageBackend,
         audit_sink: _AuditSink,
+        state_git_path: Path = _DEFAULT_STATE_GIT_PATH,
     ) -> None:
         self._policy = policy
         self._backend = backend
         self._audit_sink = audit_sink
+        self._state_git_path = state_git_path
         self._fail_closed: bool = False
         self._missed_heartbeats: int = 0
         self._denied_dispatch_count: int = 0
@@ -100,14 +112,16 @@ class RealGate:
         *,
         backend: StorageBackend,
         audit_sink: _AuditSink,
+        state_git_path: Path = _DEFAULT_STATE_GIT_PATH,
         start_heartbeat: bool = False,
     ) -> RealGate:
         """Factory: load grants from Postgres, return a ready :class:`RealGate`.
 
         Spec §8.1: on AlfredOS startup, the host checks if the state.git
         HEAD differs from the cached commit hash; if so, the rebuild
-        runs (PR-S3-6 wiring). The initial load is always from Postgres
-        (fast); the state.git rebuild happens separately.
+        runs via :meth:`rebuild_from_state_git`. The initial load is
+        always from Postgres (fast); the state.git rebuild happens
+        separately.
 
         ``audit_sink`` is required (err-003). Pass a no-op sink in tests
         that do not need audit assertions; a missing audit sink would
@@ -117,6 +131,14 @@ class RealGate:
         not here, because the in-process Protocol matches the test fake
         without needing the production AuditWriter on the import path.
 
+        ``state_git_path`` is the bare state.git repo path used by the
+        rebuild parser (PR-S3-6 err-002 wiring). Defaults to
+        ``/var/lib/alfred/state.git`` per the Slice-3 operator runbook.
+        Production wires the resolved Path from
+        :mod:`alfred.bootstrap.gate_factory` (which performs the
+        ``ALFRED_STATE_GIT_PATH`` env read sec-007 forbids in this
+        module); tests inject a per-test bare repo.
+
         ``start_heartbeat`` defaults to ``False`` so unit tests can
         inspect / advance state without a background task racing them.
         Production bootstrap sets ``start_heartbeat=True`` after the
@@ -124,7 +146,12 @@ class RealGate:
         """
         grants = await backend.load_grants()
         policy = GatePolicy(grants=grants)
-        gate = cls(policy=policy, backend=backend, audit_sink=audit_sink)
+        gate = cls(
+            policy=policy,
+            backend=backend,
+            audit_sink=audit_sink,
+            state_git_path=state_git_path,
+        )
         if start_heartbeat:
             gate._heartbeat_task = asyncio.create_task(gate._heartbeat_loop())
         return gate
@@ -200,35 +227,27 @@ class RealGate:
         new HEAD commit hash; this method checks the cached hash and
         short-circuits if unchanged.
 
-        DEFERRED-STUB CONTRACT (err-002 acknowledgement):
+        PR-S3-6 err-002 wiring. Replaces PR-S3-2's fail-loud
+        :class:`NotImplementedError` stub with the real path:
 
-        PR-S3-2 intentionally ships this method as a fail-loud
-        :class:`NotImplementedError` rather than a working
-        implementation. The real ``parse_state_git_head``
-        (gitpython-backed) lands in PR-S3-6 Task 22a/22b. Rationale:
-        parsing the state.git ``policies/grants/`` tree requires
-        gitpython integration with the bare state.git repo, which is
-        first introduced by PR-S3-6 (the same PR that owns the
-        host-side proposal-merge → rebuild trigger). Pulling gitpython
-        forward into PR-S3-2 would inflate the slice scope by ~1 task
-        and one external dep without exercising the integration
-        end-to-end. The fail-loud stub keeps the slice scope tight
-        while making the deferred surface impossible to call
-        accidentally — any caller before PR-S3-6 merges raises,
-        surfacing the contract violation at integration time.
+        1. Cache-hit short-circuit on equal HEAD (no parse, no audit row
+           — the supervisor heartbeat calls this eagerly so a per-call
+           audit emit would balloon the log).
+        2. :func:`parse_state_git_head` reads the ``policies/grants/``
+           tree at the new HEAD. The synchronous gitpython call is
+           wrapped in :func:`asyncio.to_thread` so the asyncio event
+           loop stays unblocked on a cold-cache rebuild.
+        3. :meth:`_apply_grants` projects the snapshot into the Postgres
+           cache (upserts new grants, revokes absent ones, swaps the
+           in-memory policy atomically) and persists the new sync hash.
+        4. Audit row emit on success. Schema:
+           :data:`CAPABILITY_GATE_REBUILD_FIELDS`. Order matters: the
+           audit row goes LAST so a parser / apply failure does not
+           emit a "rebuilt" row for a partial state.
 
-        Per CLAUDE.md hard rule #7 this is the acceptable shape for a
-        deferred security path: loud, not silent. The previous shape
-        was a silent ``return`` that left the policy cache stale — the
-        err-002 fix replaces that with this raise so every caller
-        before PR-S3-6 fails loudly.
-
-        Callers that have already parsed state.git and hold
-        :class:`GrantRow` objects MUST use :meth:`_apply_grants`
-        directly until PR-S3-6 replaces the raise with:
-
-            grants = await parse_state_git_head(state_git_head)
-            await self._apply_grants(grants, commit_hash=state_git_head)
+        The state.git path comes from ``self._state_git_path``
+        (constructor-injected; sec-007 keeps env reads in
+        :mod:`alfred.bootstrap.gate_factory`).
         """
         cached = await self._backend.get_sync_hash()
         if cached == state_git_head:
@@ -237,11 +256,36 @@ class RealGate:
                 commit_hash=state_git_head,
             )
             return
-        msg = (
-            "rebuild_from_state_git requires gitpython state.git parser "
-            "(ships in PR-S3-6). Call _apply_grants() directly until then."
+
+        # gitpython reads are synchronous; offload so we do not block
+        # the event loop on a cold object DB read.
+        grants = await asyncio.to_thread(
+            parse_state_git_head,
+            self._state_git_path,
+            state_git_head,
         )
-        raise NotImplementedError(msg)
+        await self._apply_grants(grants, commit_hash=state_git_head)
+
+        # Audit emit LAST — a parse / apply failure must not surface a
+        # "rebuilt" row for a partial state. The audit row carries the
+        # grant_count so an operator can spot unexpected churn between
+        # adjacent rebuilds.
+        correlation_id = str(uuid.uuid4())
+        await self._audit_sink.append_schema(
+            fields=CAPABILITY_GATE_REBUILD_FIELDS,
+            schema_name="CAPABILITY_GATE_REBUILD_FIELDS",
+            event="plugin.grant.rebuilt",
+            actor_user_id=None,
+            subject={
+                "commit_hash": state_git_head,
+                "grant_count": len(grants),
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="success",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
+        )
 
     async def _apply_grants(
         self,

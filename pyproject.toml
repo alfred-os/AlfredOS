@@ -47,6 +47,15 @@ dependencies = [
   # web_fetch_plugin.py). Pinned >=3.9 because the plugin uses
   # ``ClientTimeout(connect=..., sock_read=...)`` which landed in 3.9.
   "aiohttp>=3.9,<4",
+  # PR-S3-6 (err-002): GitPython powers the state.git grant-policy parser
+  # (alfred.security.capability_gate._state_git_parser). The parser reads
+  # the policies/grants/ tree at a known commit hash and projects it into
+  # the Postgres plugin_grants table — the supervisor-side wiring that
+  # PR-S3-2 deferred via the fail-loud NotImplementedError stub. Pinned
+  # >=3.1 because the parser uses ``repo.commit(sha).tree[path]`` which
+  # has been stable since 3.1; pinned <4 because GitPython has not
+  # historically followed semver across major bumps.
+  "GitPython>=3.1,<4",
 ]
 
 [dependency-groups]
