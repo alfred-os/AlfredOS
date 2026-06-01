@@ -1090,6 +1090,140 @@ async def test_plugin_returned_message_routes_through_i18n() -> None:
     assert "plugin returned an error" in msg
 
 
+# ---------------------------------------------------------------------------
+# Commit 3 — H11 / H12: per-session AllowlistIntersection + once-only
+# broadening cap.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_per_session_allowlist_is_built_once_and_reused() -> None:
+    """H11 / perf-100: ``FetchDispatchConfig.allowlist`` is built ONCE in
+    ``__post_init__`` and reused across every fetch in the session.
+
+    The pre-fix dispatcher reconstructed
+    :class:`AllowlistIntersection` on every dispatch (O(manifest *
+    operator * session) work). This test pins the identity of the
+    cached object across multiple dispatches — a future regression
+    that re-builds per fetch fails the ``is`` check.
+    """
+    audit = _build_audit()
+    config = _build_config()
+    cached_allowlist = config.allowlist
+    transport_1 = _build_transport_returning_handle()
+    transport_2 = _build_transport_returning_handle()
+
+    await dispatch_web_fetch(
+        url="https://example.com/page-1",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-h11-1",
+        config=config,
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=transport_1,
+    )
+    await dispatch_web_fetch(
+        url="https://example.com/page-2",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-h11-2",
+        config=config,
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=transport_2,
+    )
+    # The allowlist object the config exposes is bit-for-bit identical
+    # across dispatches — proving the per-fetch reconstruction is gone.
+    assert config.allowlist is cached_allowlist
+
+
+@pytest.mark.asyncio
+async def test_broadening_cap_event_emitted_at_most_once_per_session() -> None:
+    """H12 / perf-101: the broadening-cap audit row is a manifest-load-
+    time event; it MUST NOT re-emit on every fetch.
+
+    Two dispatches against the same config must produce exactly ONE
+    broadening_capped row (not two). Subsequent dispatches see the
+    ``_broadening_cap_emitted`` latch and skip the emit loop.
+    """
+    audit = _build_audit()
+    manifest = (
+        AllowlistEntry(domain="example.com"),
+        AllowlistEntry(domain="evil.com"),  # capped — absent from operator
+    )
+    operator = (AllowlistEntry(domain="example.com"),)
+    session = (AllowlistEntry(domain="example.com"),)
+    config = _build_config(manifest=manifest, operator=operator, session=session)
+
+    await dispatch_web_fetch(
+        url="https://example.com/page-1",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-h12-1",
+        config=config,
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=_build_transport_returning_handle(),
+    )
+    await dispatch_web_fetch(
+        url="https://example.com/page-2",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-h12-2",
+        config=config,
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=_build_transport_returning_handle(),
+    )
+
+    # 1 broadening-cap row + 2 success rows = 3 total. Without the latch
+    # we'd see 2 broadening-cap rows + 2 success rows = 4.
+    broadening_calls = [
+        c
+        for c in audit.append_schema.await_args_list
+        if c.kwargs.get("event") == "web.allowlist.manifest_broadening_capped"
+    ]
+    assert len(broadening_calls) == 1, (
+        f"Expected exactly ONE broadening_capped row across two dispatches; "
+        f"got {len(broadening_calls)}. Cap-event emission is supposed to be "
+        f"manifest-load-time, not per-fetch (H12 / perf-101)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_broadening_cap_latches_even_when_manifest_had_no_capped_entries() -> None:
+    """Defence-in-depth: the ``_broadening_cap_emitted`` cell is latched
+    after the loop even when there were no events to emit.
+
+    A future refactor of ``broadening_cap_events()`` that made it non-
+    idempotent would otherwise re-trigger the cap-check loop on every
+    dispatch. The latch is the structural defence.
+    """
+    audit = _build_audit()
+    config = _build_config()  # default: no capped entries (manifest ⊆ operator)
+    assert config._broadening_cap_emitted == []  # initial state
+
+    await dispatch_web_fetch(
+        url="https://example.com/page",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-h12-latch",
+        config=config,
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=_build_transport_returning_handle(),
+    )
+    # Latched after the first dispatch even though the loop emitted
+    # zero broadening-cap rows.
+    assert config._broadening_cap_emitted == [True]
+
+
 @pytest.mark.asyncio
 async def test_unexpected_dispatch_shape_message_routes_through_i18n() -> None:
     """C3 / i18n-001: the unexpected-dispatch-shape WebFetchError text

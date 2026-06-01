@@ -44,7 +44,7 @@ which lost MIME / size / generic failure modes — the
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlparse
 
@@ -101,6 +101,16 @@ _ERROR_TYPE_MAP: Final[dict[str, type[WebFetchError]]] = {
     "TlsConfigError": WebFetchTlsError,
 }
 
+# H11 / perf-100: sentinel passed to the ``allowlist`` field's
+# ``default_factory`` so the dataclass machinery can run before
+# ``__post_init__`` overwrites it with the real intersection.
+# ``AllowlistIntersection([], [], [])`` is the canonical empty form —
+# its ``check()`` refuses every URL, so a config that somehow skipped
+# ``__post_init__`` fails closed at the first allowlist check.
+_SENTINEL_ALLOWLIST: Final[AllowlistIntersection] = AllowlistIntersection(
+    manifest=[], operator=[], session=[]
+)
+
 
 @dataclass(frozen=True, slots=True)
 class FetchDispatchConfig:
@@ -125,6 +135,29 @@ class FetchDispatchConfig:
     operator who flips this bit trips ``TlsConfigError`` immediately —
     before the value is forwarded to the subprocess where the
     subprocess-side check is enforcement-of-last-resort).
+
+    H11 / perf-100: ``allowlist`` is pre-built once in ``__post_init__``
+    and reused across every fetch in the session. The pre-fix code
+    re-constructed :class:`AllowlistIntersection` (O(manifest * operator
+    * session) work) on every dispatch, which is wasted CPU + GC churn
+    when the inputs are immutable. Holding the built intersection on
+    the per-session config preserves the spec invariant (immutable
+    config) and turns the per-fetch hot path into a single
+    ``allowlist.check(url)`` call.
+
+    H12 / perf-101: ``_broadening_cap_emitted`` is a mutable cell on
+    the otherwise-frozen config tracking whether the cap event has
+    been emitted in this session. ``broadening_cap_events()`` is a
+    manifest-load-time event (not per-fetch); emitting it on every
+    dispatch flooded the audit DB with redundant rows. The cell is a
+    single-element ``list`` rather than a bool so frozen+slots stays
+    intact (Python's frozen-dataclass guard refuses ``__setattr__``,
+    but ``list.append`` mutates in-place — the canonical
+    ``frozen-with-internal-cache`` idiom). Concurrency: the dispatcher
+    runs in asyncio; the read-then-append is single-shot per cell
+    creation, and the worst case under concurrent dispatch is a few
+    duplicate rows (forensic-redundant, not a security regression) so
+    no lock is needed at this layer.
     """
 
     manifest_allowed_entries: tuple[AllowlistEntry, ...]
@@ -134,6 +167,35 @@ class FetchDispatchConfig:
     redis_url: str
     plugin_id: str = "alfred.web-fetch"
     skip_tls_verify: bool = False
+    # H11 / H12: late-bound cached state. Both fields are ``init=False``
+    # so they don't appear in the generated ``__init__`` signature
+    # (callers still construct ``FetchDispatchConfig(manifest=..., ...)``).
+    # ``default_factory`` is the dataclass-idiomatic way to populate them
+    # at instance-construction time:
+    #   * ``allowlist`` is built in ``__post_init__`` because its inputs
+    #     come from the other fields; we seed it with a sentinel and
+    #     overwrite via ``object.__setattr__``.
+    #   * ``_broadening_cap_emitted`` starts empty — the dispatcher
+    #     appends a single token on first emission so subsequent
+    #     dispatches see a non-empty list and skip the loop.
+    allowlist: AllowlistIntersection = field(
+        init=False,
+        default_factory=lambda: _SENTINEL_ALLOWLIST,
+    )
+    _broadening_cap_emitted: list[bool] = field(init=False, default_factory=list)
+
+    def __post_init__(self) -> None:
+        # H11: build the AllowlistIntersection once. ``object.__setattr__``
+        # is the canonical Python idiom for frozen-dataclass post-init
+        # field population (the dataclass's __setattr__ is the source of
+        # the immutability; bypassing it at construction time is the
+        # pattern :pep:`557` documents).
+        allowlist = AllowlistIntersection(
+            manifest=list(self.manifest_allowed_entries),
+            operator=list(self.operator_allowed_entries),
+            session=list(self.session_allowed_entries),
+        )
+        object.__setattr__(self, "allowlist", allowlist)
 
 
 async def dispatch_web_fetch(
@@ -241,34 +303,50 @@ async def dispatch_web_fetch(
     domain = urlparse(clean_url).netloc
 
     # Step 2: Three-way allowlist intersection (spec §7.4).
-    allowlist = AllowlistIntersection(
-        manifest=list(config.manifest_allowed_entries),
-        operator=list(config.operator_allowed_entries),
-        session=list(config.session_allowed_entries),
-    )
+    #
+    # H11 / perf-100: the intersection is pre-built once on the per-
+    # session ``FetchDispatchConfig`` (see ``__post_init__``). The
+    # per-fetch hot path is now a single ``check()`` call, avoiding the
+    # O(manifest * operator * session) reconstruction per dispatch.
+    allowlist = config.allowlist
 
-    # Emit broadening-cap audit rows BEFORE the allowlist check — the
-    # cap is a manifest-load-time event, not a per-fetch event, but
-    # surfacing it here (rather than at session start) keeps the audit
-    # row tied to the correlation_id of the fetch that exposed the cap.
-    for cap_event in allowlist.broadening_cap_events():
-        await audit.append_schema(
-            fields=WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS,
-            schema_name="WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS",
-            event="web.allowlist.manifest_broadening_capped",
-            actor_user_id=user_id,
-            subject={
-                "plugin_id": config.plugin_id,
-                "manifest_domains": sorted(cap_event.manifest_domains),
-                "operator_allowed_domains": sorted(cap_event.operator_allowed_domains),
-                "capped_domains": [e.domain for e in cap_event.capped_domains],
-                "correlation_id": correlation_id,
-            },
-            trust_tier_of_trigger="T0",
-            result="capped",
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
-        )
+    # H12 / perf-101: the broadening-cap audit row is a manifest-load-
+    # time event (not per-fetch). The pre-fix code emitted it on every
+    # dispatch, flooding the audit DB. The ``_broadening_cap_emitted``
+    # cell on the config is the once-then-skip latch: an empty list
+    # means "not yet emitted", a non-empty list means "already emitted
+    # in this session" so we skip.
+    #
+    # We keep the audit-row content tied to the correlation_id of the
+    # FETCH that exposed the cap (forensic locality) rather than the
+    # session-start correlation id — operators tracing a fetch failure
+    # back to a manifest cap event need both ids on the same row.
+    if not config._broadening_cap_emitted:
+        for cap_event in allowlist.broadening_cap_events():
+            await audit.append_schema(
+                fields=WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS,
+                schema_name="WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS",
+                event="web.allowlist.manifest_broadening_capped",
+                actor_user_id=user_id,
+                subject={
+                    "plugin_id": config.plugin_id,
+                    "manifest_domains": sorted(cap_event.manifest_domains),
+                    "operator_allowed_domains": sorted(cap_event.operator_allowed_domains),
+                    "capped_domains": [e.domain for e in cap_event.capped_domains],
+                    "correlation_id": correlation_id,
+                },
+                trust_tier_of_trigger="T0",
+                result="capped",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+        # Mark emitted regardless of whether there were any events to
+        # emit — the loop is the manifest-load-time read; if the
+        # manifest had no capped entries today it will not magically
+        # grow them mid-session (the config is frozen). Latching after
+        # the loop guards against the rare case where a future refactor
+        # makes ``broadening_cap_events()`` non-idempotent.
+        config._broadening_cap_emitted.append(True)
 
     try:
         allowlist.check(clean_url)
