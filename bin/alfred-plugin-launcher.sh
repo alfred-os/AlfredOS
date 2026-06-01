@@ -62,9 +62,80 @@
 
 set -eu
 
-PLUGIN_ID="${1:?Usage: alfred-plugin-launcher.sh <plugin_id> <executable> [args...]}"
+# Help flag — must run BEFORE the charset validation so `--help` does not
+# trip the unsafe-charset refusal. The help text is the operator-facing
+# entry point; it documents the contract that the audit-row renderer
+# elsewhere localises. Doc-string itself is operator-facing English; the
+# launcher emits bare i18n keys only on the failure paths the supervisor
+# captures and translates. DEVEX-005 fix.
+case "${1:-}" in
+    -h | --help)
+        cat <<'HELP'
+alfred-plugin-launcher.sh — fail-closed plugin launcher (spec §4.8, §5.2).
+
+USAGE
+    alfred-plugin-launcher.sh <plugin_id> <executable> [args...]
+
+ARGS
+    plugin_id    Manifest-declared plugin id. Charset [A-Za-z0-9._-]+; any
+                 other character is refused (audit-stream integrity).
+    executable   Absolute path to the plugin entrypoint. The launcher
+                 exec's this after policy + UID-drop checks pass.
+    args...      Forwarded to the plugin.
+
+ENVIRONMENT
+    ALFRED_ENV
+        "development" enables the unsandboxed escape hatch (see
+        ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED). Any other value (including
+        empty) is treated as production: the launcher refuses to spawn
+        without a sandbox policy file.
+
+    ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED
+        Dev-only escape hatch. With ALFRED_ENV=development AND this set
+        to "1", the launcher spawns the plugin without a sandbox policy
+        and emits a supervisor.config_insecure audit JSON line on stderr.
+        Refused unconditionally outside development.
+
+    ALFRED_SANDBOX_POLICY_DIR
+        Directory containing per-plugin sandbox policy files. Default:
+        /etc/alfred/sandbox. The launcher reads <DIR>/<plugin_id>.policy
+        and refuses to spawn if the file is missing (production fail-
+        closed).
+
+    ALFRED_PLUGIN_UID
+        Target UID for the runuser-based UID drop on Linux. Default:
+        alfred-quarantine. Provision this account before deploying — the
+        operator runbook at docs/runbooks/slice-3-plugins.md has the
+        systemd-sysusers fragment.
+
+EXIT CODES
+    0    Success — exec'd the plugin (this process is replaced).
+    1    Refusal — bare i18n key emitted on stderr. The supervisor
+         captures stderr and renders the localised message from the
+         catalog. Possible keys:
+             plugin.launcher_plugin_id_invalid
+             plugin.launcher_unsandboxed_rejected
+             plugin.launcher_no_sandbox_policy
+             plugin.launcher_uid_drop_unavailable
+
+PLATFORM NOTES
+    Linux        UID-drop via `runuser`. Refuses if runuser is absent.
+    macOS / BSD  No runuser available; the launcher emits a
+                 launcher_uid_separation_unavailable_macos audit JSON
+                 line and exec's WITHOUT UID-drop (documented dev-only
+                 deviation; not for production).
+
+SEE ALSO
+    docs/runbooks/slice-3-plugins.md   Operator runbook
+    PRD §4.8, §5.2                     Spec for the launcher contract
+HELP
+        exit 0
+        ;;
+esac
+
+PLUGIN_ID="${1:?Usage: alfred-plugin-launcher.sh <plugin_id> <executable> [args...]  (try --help)}"
 shift
-EXECUTABLE="${1:?Usage: alfred-plugin-launcher.sh <plugin_id> <executable> [args...]}"
+EXECUTABLE="${1:?Usage: alfred-plugin-launcher.sh <plugin_id> <executable> [args...]  (try --help)}"
 shift
 
 # Charset-validate PLUGIN_ID at the entry point so every downstream

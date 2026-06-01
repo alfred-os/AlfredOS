@@ -442,3 +442,41 @@ def test_launcher_json_emission_only_after_charset_validation() -> None:
         "charset validation must precede the first JSON-emitting branch "
         "(CR PR #140 audit-stream integrity)"
     )
+
+
+# ---------------------------------------------------------------------------
+# DEVEX-005 — --help discoverability. A first-time operator running
+# `bin/alfred-plugin-launcher.sh --help` previously hit the unsafe-charset
+# refusal because `--` is not in [A-Za-z0-9._-]. The fix runs the help
+# branch BEFORE the charset gate; `--help` returns 0 + usage on stdout.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_launcher_help_flag_prints_usage_and_exits_zero(flag: str) -> None:
+    """``--help`` / ``-h`` short-circuits to a usage dump on stdout, exit 0.
+
+    The help branch MUST run before the charset validation — otherwise
+    `--help` (with its `--` prefix) trips the safe-charset refusal and
+    the operator sees `plugin.launcher_plugin_id_invalid` instead of
+    documentation. DEVEX-005 fix.
+    """
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
+        [str(_LAUNCHER), flag],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"--help must exit 0, got {result.returncode}"
+    # The help text documents the env-var surface so an operator can find
+    # ALFRED_SANDBOX_POLICY_DIR / ALFRED_PLUGIN_UID etc. without grepping.
+    assert b"USAGE" in result.stdout
+    assert b"ALFRED_ENV" in result.stdout
+    assert b"ALFRED_SANDBOX_POLICY_DIR" in result.stdout
+    assert b"EXIT CODES" in result.stdout
+    # The bare i18n key catalogue lives in the help text so operators can
+    # decode an audit row without round-tripping through the supervisor's
+    # renderer.
+    assert b"plugin.launcher_no_sandbox_policy" in result.stdout
+    # Negative: the charset refusal key must NOT appear on stderr —
+    # otherwise the help branch is downstream of the charset check.
+    assert b"plugin.launcher_plugin_id_invalid" not in result.stderr
