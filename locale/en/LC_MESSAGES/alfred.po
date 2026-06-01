@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 20:59+0100\n"
+"POT-Creation-Date: 2026-06-01 22:16+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -83,7 +83,10 @@ msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/cli/main.py:77
+#: src/alfred/cli/main.py:77 tests/unit/i18n/test_concurrent_language.py:68
+#: tests/unit/i18n/test_concurrent_language.py:70
+#: tests/unit/i18n/test_concurrent_language.py:75
+#: tests/unit/i18n/test_concurrent_language.py:77
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
@@ -99,7 +102,8 @@ msgstr "no"
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:141
+#: src/alfred/cli/main.py:141 tests/unit/i18n/test_translator.py:19
+#: tests/unit/i18n/test_translator.py:32
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
@@ -111,7 +115,7 @@ msgstr "fallback provider: {provider}"
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:144
+#: src/alfred/cli/main.py:144 tests/unit/i18n/test_translator.py:26
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
@@ -143,7 +147,7 @@ msgstr ""
 "your operator to run: `alfred user add --name <YourName> --discord-id "
 "{snowflake}`. The operator's audit log shows this DM."
 
-#: src/alfred/comms/discord.py:846
+#: src/alfred/comms/discord.py:846 tests/unit/comms/test_discord.py:539
 msgid "discord.budget_blocked"
 msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
 
@@ -196,17 +200,19 @@ msgstr ""
 "Unexpected ingress tier for comms.tui.input: {tier_name!r}; expected T1 "
 "or T2 per spec §3.6."
 
-#: src/alfred/hooks/errors.py:108
+#: src/alfred/hooks/errors.py:108 tests/unit/hooks/test_errors.py:227
 msgid "hooks.refusal"
 msgstr "Hook {hook_id} refused action {action_id}: {reason}"
 
-#: src/alfred/hooks/errors.py:135
+#: src/alfred/hooks/errors.py:135 tests/unit/hooks/test_errors.py:247
+#: tests/unit/hooks/test_registry.py:568
 msgid "hooks.subscriber_must_be_async"
 msgstr ""
 "Hook subscriber {name} must be `async def`. Add `async` to the function "
 "definition."
 
-#: src/alfred/hooks/errors.py:173
+#: src/alfred/hooks/errors.py:173 tests/unit/hooks/test_errors.py:194
+#: tests/unit/hooks/test_errors.py:209 tests/unit/hooks/test_errors.py:236
 msgid "hooks.subscriber_error"
 msgstr ""
 "Hook subscriber {name} raised an unexpected error (correlation "
@@ -658,13 +664,13 @@ msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
 #: src/alfred/plugins/stdio_transport.py:631
-#: src/alfred/plugins/web_fetch/errors.py:194
+#: src/alfred/plugins/web_fetch/errors.py:204
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
 "subprocess has been quarantined."
 
-#: src/alfred/plugins/web_fetch/content_store.py:77
+#: src/alfred/plugins/web_fetch/content_store.py:105
 msgid "web.fetch.error.content_handle_expired"
 msgstr ""
 "web.fetch content handle {handle_id!r} has expired or was already "
@@ -676,36 +682,41 @@ msgstr ""
 "web.fetch refused: domain {domain!r} is not in the effective allowlist "
 "(manifest ∩ operator config ∩ per-session)."
 
-#: src/alfred/plugins/web_fetch/errors.py:74
+# CR-146 major: ``redirect_target`` is attacker-controlled (the upstream
+# Location header) and must NOT appear in the caller-visible message —
+# leaking it back hands SSRF forensics to the requester. Full target
+# stays on WebFetchRedirectRefused.redirect_target for the audit row.
+#: src/alfred/plugins/web_fetch/errors.py:83
 msgid "web.fetch.error.redirect_refused"
 msgstr ""
-"web.fetch refused: upstream returned HTTP {status_code} redirecting to "
-"{redirect_target!r}. SSRF guard (spec §7.4): the plugin will not follow "
-"redirects in-subprocess — the host must re-dispatch the redirect target "
-"through the three-way allowlist."
+"web.fetch refused: upstream returned HTTP {status_code} redirect. SSRF "
+"guard (spec §7.4): the plugin will not follow redirects in-subprocess — "
+"the host must re-dispatch the redirect target through the three-way "
+"allowlist. Operators can inspect the refused Location target in the audit"
+" row (``WEB_FETCH_FIELDS.dlp_scan_result='redirect_refused'``)."
 
-#: src/alfred/plugins/web_fetch/errors.py:94
+#: src/alfred/plugins/web_fetch/errors.py:102
 msgid "web.fetch.error.tls_failure"
 msgstr ""
 "web.fetch refused: TLS verification failed for {url!r} ({detail}). "
 "Production has no operator override; ALFRED_ENV=development is the only "
 "escape hatch."
 
-#: src/alfred/plugins/web_fetch/errors.py:109
+#: src/alfred/plugins/web_fetch/errors.py:117
 msgid "web.fetch.error.rate_limited"
 msgstr ""
 "web.fetch refused: rate limit exceeded for bucket {bucket!r}. Operator "
 "can adjust the per-domain / per-user / daily-budget caps in "
 "config/policies.yaml under `web_fetch.rate_limits`."
 
-#: src/alfred/plugins/web_fetch/errors.py:122
+#: src/alfred/plugins/web_fetch/errors.py:130
 msgid "web.fetch.error.mime_type_not_allowed"
 msgstr ""
 "web.fetch refused: response MIME type {mime_type!r} is not allowed. "
 "Allowed MIME types are declared in the plugin manifest; operator can "
 "narrow via config/policies.yaml `web_fetch.allowed_mime_types`."
 
-#: src/alfred/plugins/web_fetch/errors.py:137
+#: src/alfred/plugins/web_fetch/errors.py:145
 msgid "web.fetch.error.size_limit_exceeded"
 msgstr ""
 "web.fetch refused: response body {size} bytes exceeds the {limit}-byte "
@@ -715,19 +726,24 @@ msgstr ""
 # sec-pr-s3-5-003 / H3 — host-IP allowlist guard against DNS-rebinding /
 # cloud-metadata SSRF. The URL allowlist matches on name; the IP guard
 # resolves the hostname and refuses RFC1918 / loopback / link-local /
-# multicast / reserved IPs. {url} is the URL the caller asked for;
-# {resolved_ip} is the offending IP the resolver returned (may be empty
-# when the refusal happened before resolution, e.g. no_hostname). The
+# multicast / reserved IPs.
+# CR-146 major: the caller-visible message intentionally does NOT
+# include ``{url}`` or ``{resolved_ip}`` — leaking the resolved IP back
+# to the requester turns the refusal into a metadata-IP / RFC1918
+# oracle. The audit row still records both fields off
+# ``self.url`` / ``self.resolved_ip`` (operator audience). The
 # exception's ``reason`` attribute carries the closed-vocabulary refusal
 # class (rfc1918 / link_local / loopback / multicast / reserved /
 # dns_failure / no_hostname) for audit pivoting.
-#: src/alfred/plugins/web_fetch/errors.py:165
+#: src/alfred/plugins/web_fetch/errors.py:179
 msgid "web.fetch.error.internal_ip_refused"
 msgstr ""
-"web.fetch refused: {url!r} resolved to internal address {resolved_ip!r}. "
-"Refused to prevent DNS-rebinding / cloud-metadata SSRF against an "
-"allowlisted hostname. Operator can review the IP-guard policy in "
-"src/alfred/plugins/web_fetch/host_ip_guard.py (spec §7.4)."
+"web.fetch refused: target resolved to an internal address. Refused to "
+"prevent DNS-rebinding / cloud-metadata SSRF against an allowlisted "
+"hostname. Operator can review the IP-guard policy in "
+"src/alfred/plugins/web_fetch/host_ip_guard.py (spec §7.4); the resolved "
+"IP and full URL are recorded on the audit row "
+"(``WEB_FETCH_FIELDS.dlp_scan_result='internal_ip_refused'``)."
 
 # C4 / i18n-002 — generic WebFetchError fallback carrying the plugin's
 # message string. The plugin-supplied {message} is data (forensic
@@ -798,23 +814,25 @@ msgstr ""
 # paths in alfred.security.tiers. Each error retains all the diagnostic
 # detail the prior f-string carried; the structured kwargs make the
 # strings re-renderable in a non-English UI at display time.
-#: src/alfred/security/tiers.py:217
+#: src/alfred/security/tiers.py:217 tests/unit/security/test_tiers_i18n.py:29
+#: tests/unit/security/test_tiers_i18n.py:80
 msgid "security.tier_subclass_missing_name"
 msgstr "TrustTier subclass {subclass} must set a non-empty `name`."
 
 #: src/alfred/security/tiers.py:225 src/alfred/security/tiers.py:396
+#: tests/unit/security/test_tiers_i18n.py:38
 msgid "security.tier_unsupported"
 msgstr ""
 "Unsupported trust tier for this build: '{tier_name}' (approved: "
 "[{approved}])."
 
-#: src/alfred/security/tiers.py:249
+#: src/alfred/security/tiers.py:249 tests/unit/security/test_tiers_i18n.py:46
 msgid "security.tier_mismatch"
 msgstr ""
 "Cross-tier wire payload rejected: declared '{got}' but parser expects "
 "'{expected}' (spec §3.5)."
 
-#: src/alfred/security/tiers.py:303
+#: src/alfred/security/tiers.py:303 tests/unit/security/test_tiers_i18n.py:54
 msgid "security.tier_unknown_wire"
 msgstr "Unknown trust tier on wire: '{tier_name}' (approved: [{approved}])."
 
@@ -843,6 +861,10 @@ msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
 "status` to list registered components."
+
+#: tests/unit/i18n/test_translator.py:23
+msgid "missing.key.example"
+msgstr ""
 
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""

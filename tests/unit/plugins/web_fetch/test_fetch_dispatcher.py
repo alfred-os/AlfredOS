@@ -208,7 +208,61 @@ async def test_broadening_cap_emits_capped_row_then_succeeds() -> None:
     first_call = audit.append_schema.await_args_list[0]
     assert first_call.kwargs["event"] == "web.allowlist.manifest_broadening_capped"
     assert first_call.kwargs["result"] == "capped"
-    assert "evil.com" in first_call.kwargs["subject"]["capped_domains"]
+    # CR-146 major: capped_domains now carries (domain, path_prefix)
+    # dicts rather than bare-domain strings — the bare-domain shape
+    # collapsed two manifest entries on the same domain with different
+    # prefixes (e.g. ``example.com/admin/`` vs ``example.com/private/``)
+    # into indistinguishable audit rows, losing forensic detail PRD
+    # §7.4 / §13 demand.
+    capped = first_call.kwargs["subject"]["capped_domains"]
+    assert any(entry["domain"] == "evil.com" for entry in capped)
+    # AllowlistEntry default path_prefix is "/" — the manifest entry
+    # ``AllowlistEntry(domain="evil.com")`` records its full
+    # (domain, path_prefix) shape in the audit row.
+    assert any(entry["domain"] == "evil.com" and entry["path_prefix"] == "/" for entry in capped)
+
+
+@pytest.mark.asyncio
+async def test_capped_domains_preserve_path_prefix_in_audit_row() -> None:
+    """CR-146 major: two manifest entries on the SAME domain capped
+    to different path prefixes must not collapse to a single bare
+    domain in the audit row. The dict-form ``(domain, path_prefix)``
+    keeps the forensic detail PRD §7.4 / §13 demand.
+    """
+    audit = _build_audit()
+    manifest = (
+        AllowlistEntry(domain="example.com"),
+        # Two evil.com entries on different prefixes — without the
+        # dict-form they would become a single ``"evil.com"`` string
+        # in the audit row, hiding which prefix the manifest tried to
+        # add.
+        AllowlistEntry(domain="evil.com", path_prefix="/admin"),
+        AllowlistEntry(domain="evil.com", path_prefix="/private"),
+    )
+    operator = (AllowlistEntry(domain="example.com"),)
+    session = (AllowlistEntry(domain="example.com"),)
+
+    await dispatch_web_fetch(
+        url="https://example.com/page",
+        headers={},
+        user_id="user-1",
+        correlation_id="corr-cr146-cap-prefix",
+        config=_build_config(manifest=manifest, operator=operator, session=session),
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=_build_transport_returning_handle(),
+    )
+
+    first_call = audit.append_schema.await_args_list[0]
+    capped = first_call.kwargs["subject"]["capped_domains"]
+    # Both capped entries on evil.com appear DISTINCTLY in the audit
+    # row (the bare-domain shape would have produced one collapsed
+    # entry).
+    assert {(e["domain"], e["path_prefix"]) for e in capped} >= {
+        ("evil.com", "/admin/"),
+        ("evil.com", "/private/"),
+    }
 
 
 @pytest.mark.asyncio
@@ -947,11 +1001,64 @@ async def test_dlp_scan_exception_emits_audit_row_then_raises() -> None:
     call = audit.append_schema.await_args
     assert call.kwargs["result"] == "dlp_scan_error"
     assert call.kwargs["subject"]["dlp_scan_result"] == "dlp_scan_error"
-    # The audit row carries the pre-scan URL because the scan failed —
-    # we cannot trust the (uninitialised) clean_url. ``url`` is the raw
-    # parameter so the forensic trail still attributes the failure to
-    # the right caller.
-    assert call.kwargs["subject"]["url"] == "https://example.com/page"
+    # CR-146 major: PRD §7.9b's fail-closed contract means the raw URL
+    # MUST NOT land in the audit row when the DLP scan failed — the
+    # unscanned URL may carry query-string secrets that the DLP would
+    # otherwise have redacted. Substitute a sentinel so a broker outage
+    # cannot become a secret-exfiltration path INTO audit storage.
+    assert call.kwargs["subject"]["url"] == "<REDACTED_DLP_FAILURE>"
+    # Host attribution survives via ``parsed.hostname`` (no userinfo,
+    # no port, no query) so operators can still pivot to the
+    # originating endpoint.
+    assert call.kwargs["subject"]["domain"] == "example.com"
+
+
+@pytest.mark.asyncio
+async def test_dlp_scan_exception_redacts_userinfo_and_query_in_audit() -> None:
+    """CR-146 major: a DLP outage MUST NOT let the raw URL flow into
+    audit storage. The userinfo (``user:password@``) and query string
+    (``?token=...``) are the attack-class fields — both must be absent
+    from the audit row's ``subject.url`` field. The ``domain`` field
+    is sourced from ``parsed.hostname`` so userinfo is stripped from
+    the host-attribution path too.
+    """
+    audit = _build_audit()
+
+    class _DlpExplodedError(RuntimeError):
+        pass
+
+    dlp = MagicMock()
+    dlp.scan = MagicMock(side_effect=_DlpExplodedError("broker offline"))
+
+    raw_url = "https://alice:hunter2@example.com/api?token=BEARER_SECRET"
+    with pytest.raises(_DlpExplodedError):
+        await dispatch_web_fetch(
+            url=raw_url,
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-cr146-dlp-redact",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=dlp,
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+        )
+
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "dlp_scan_error"
+    subject = call.kwargs["subject"]
+    # ``url`` field carries the redacted sentinel.
+    assert subject["url"] == "<REDACTED_DLP_FAILURE>"
+    # Defence-in-depth: explicit anti-leak assertions on the audit row
+    # body. Even if a future refactor changes the sentinel string, the
+    # secret components stay out.
+    audit_row_repr = repr(subject)
+    assert "BEARER_SECRET" not in audit_row_repr
+    assert "hunter2" not in audit_row_repr
+    assert "alice" not in audit_row_repr
+    # Host attribution survives via ``parsed.hostname`` — no userinfo.
+    assert subject["domain"] == "example.com"
 
 
 @pytest.mark.asyncio

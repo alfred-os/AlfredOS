@@ -66,6 +66,15 @@ class WebFetchRedirectRefused(WebFetchError):  # noqa: N818 -- name pinned by sp
     so audit rows can distinguish permanent-vs-temporary redirects;
     ``redirect_target`` is the upstream ``Location`` value, recorded
     verbatim so reviewers see exactly where the bypass attempt pointed.
+
+    CR-146 major: the caller-visible message intentionally does NOT
+    interpolate ``redirect_target`` — the Location header is attacker-
+    controlled and may carry signed query params, internal hostnames,
+    or metadata IPs. Leaking that string back to the requester (the
+    typed ``WebFetchError`` surfaces to the caller per PRD §7.10) would
+    hand SSRF forensics to the attacker. The full ``redirect_target``
+    stays on ``self.redirect_target`` for the audit row (where the
+    operator audience belongs).
     """
 
     def __init__(self, status_code: int, redirect_target: str) -> None:
@@ -73,7 +82,6 @@ class WebFetchRedirectRefused(WebFetchError):  # noqa: N818 -- name pinned by sp
             t(
                 "web.fetch.error.redirect_refused",
                 status_code=status_code,
-                redirect_target=redirect_target,
             )
         )
         self.status_code = status_code
@@ -157,16 +165,18 @@ class WebFetchInternalIPRefused(WebFetchError):  # noqa: N818 -- name pinned by 
     refusal happens before resolution — e.g. ``no_hostname`` / DNS
     failure); ``reason`` is the closed-vocabulary refusal class so
     audit rows can pivot on the attack shape.
+
+    CR-146 major: the caller-visible message intentionally does NOT
+    interpolate ``url`` or ``resolved_ip`` — leaking the resolved IP
+    back to the requester tells an SSRF attacker exactly which
+    internal address the resolver returned, weaponising the refusal
+    into a metadata-IP / RFC1918 oracle. The audit row still records
+    both fields off ``self.url`` / ``self.resolved_ip`` (operator
+    audience).
     """
 
     def __init__(self, url: str, resolved_ip: str, reason: str) -> None:
-        super().__init__(
-            t(
-                "web.fetch.error.internal_ip_refused",
-                url=url,
-                resolved_ip=resolved_ip,
-            )
-        )
+        super().__init__(t("web.fetch.error.internal_ip_refused"))
         self.url = url
         self.resolved_ip = resolved_ip
         self.reason = reason

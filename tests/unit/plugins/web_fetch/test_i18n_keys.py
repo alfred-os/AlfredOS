@@ -73,6 +73,14 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         # The pybabel-drift case that motivated this rewrite. Without
         # a fingerprint, a fuzzy-match swap copies tls_failure's body
         # onto this key and the old ``!= key`` assertion passes.
+        #
+        # CR-146 major: ``redirect_target`` is no longer interpolated
+        # into the caller-visible message (SSRF forensics stay on the
+        # audit row, not in the requester's surface). We still pass it
+        # below to defend against a future regression that re-adds the
+        # placeholder to the msgstr — ``str.format`` silently ignores
+        # extra kwargs, so the test keeps passing if the placeholder
+        # is removed, and the fingerprint check anchors semantics.
         {"status_code": 301, "redirect_target": "https://internal.example.com/"},
         ("redirect",),
     ),
@@ -113,8 +121,14 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     ),
     "web.fetch.error.internal_ip_refused": (
         # sec-pr-s3-5-003 / H3 — host-IP allowlist guard against
-        # DNS-rebinding / cloud-metadata SSRF. {resolved_ip} carries
-        # the offending IP the resolver returned.
+        # DNS-rebinding / cloud-metadata SSRF.
+        #
+        # CR-146 major: neither ``url`` nor ``resolved_ip`` is
+        # interpolated into the caller-visible message any more
+        # (leaking the resolved IP turns the refusal into a
+        # metadata-IP / RFC1918 oracle). Kwargs preserved here so a
+        # future regression that re-adds the placeholder gets caught
+        # by the placeholder-leak guard below.
         {"url": "https://example.com/", "resolved_ip": "10.0.0.1"},
         ("internal", "ip"),
     ),

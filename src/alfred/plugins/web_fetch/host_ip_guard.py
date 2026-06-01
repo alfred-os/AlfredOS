@@ -95,7 +95,12 @@ def classify_ip_refusal(ip_str: str) -> str | None:
     Returns ``None`` if the address is public (safe to fetch). The
     reason vocabulary is closed — ``rfc1918`` / ``link_local`` /
     ``loopback`` / ``multicast`` / ``reserved`` — so audit consumers
-    can pivot on the attack class.
+    can pivot on the attack class. The final ``not addr.is_global``
+    catch-all maps anything :mod:`ipaddress` does not class as
+    public — including the RFC6598 shared-address space
+    (100.64.0.0/10) carrier-grade NAT range that is neither
+    ``is_private`` nor ``is_reserved`` — to ``reserved`` so the
+    refusal stays fail-closed (CR-146).
 
     Args:
         ip_str: IPv4 or IPv6 string. Must parse via :func:`ipaddress.ip_address`.
@@ -130,6 +135,19 @@ def classify_ip_refusal(ip_str: str) -> str | None:
         # RFC1918 — what's left under ``is_private`` after the more
         # specific predicates above.
         return "rfc1918"
+    # CR-146 major: the RFC6598 shared-address space (100.64.0.0/10)
+    # is the canonical example of an address that is NEITHER
+    # ``is_private`` NOR ``is_reserved`` under :mod:`ipaddress`, yet
+    # ``is_global`` reports False — it's the carrier-grade NAT range
+    # used by ISPs for internal addressing. A successful fetch to a
+    # 100.64/10 address could reach an ISP-internal endpoint that an
+    # operator never authorised. Future Python stdlib classes ("Class
+    # E" / experimental allocations) may surface here too, so the
+    # catch-all maps every remaining non-global address to
+    # ``reserved`` rather than silently allowing it. Fail-closed
+    # matches the rest of the guard's discipline.
+    if not addr.is_global:
+        return "reserved"
     return None
 
 

@@ -123,31 +123,54 @@ def test_internal_ip_refused_carries_url_resolved_ip_and_reason_attrs() -> None:
     resolver returned (the attack-class evidence); ``reason`` is the
     closed-vocabulary refusal class so audit consumers can pivot on
     attack class (rfc1918 / link_local / loopback / etc).
+
+    CR-146 major: the caller-visible ``str(err)`` deliberately does
+    NOT leak ``url`` or ``resolved_ip`` — leaking the resolved IP back
+    to the requester turns the refusal into a metadata-IP / RFC1918
+    oracle. The audit row reads ``self.url`` / ``self.resolved_ip`` so
+    the operator audience still sees the forensics.
     """
     err = WebFetchInternalIPRefused(
         url="https://example.com/api/data",
         resolved_ip="169.254.169.254",
         reason="link_local",
     )
+    # Typed attrs preserved for the audit row.
     assert err.url == "https://example.com/api/data"
     assert err.resolved_ip == "169.254.169.254"
     assert err.reason == "link_local"
-    # Operator-facing string surface mentions BOTH the URL and the
-    # offending IP so a glance at the structlog row tells the operator
-    # what was asked for and what the resolver returned.
-    assert "https://example.com/api/data" in str(err)
-    assert "169.254.169.254" in str(err)
+    # CR-146 major: caller-visible message MUST NOT include the URL or
+    # the resolved IP. The audit row (subject + audit_result fields)
+    # records both via ``self.url`` / ``self.resolved_ip``.
+    message = str(err)
+    assert "https://example.com/api/data" not in message
+    assert "169.254.169.254" not in message
+    # The message still mentions the refusal class so operators know
+    # what happened without parsing the structured payload.
+    assert "internal" in message.lower()
 
 
 def test_redirect_refused_carries_status_and_target_attrs() -> None:
-    """Both fields are recorded verbatim so reviewers see exactly where the
-    redirect tried to point — silently dropping the target would weaken
-    the SSRF audit trail."""
+    """Both fields are recorded verbatim on ``self.*`` so the audit
+    row sees exactly where the redirect tried to point — silently
+    dropping the target would weaken the SSRF audit trail.
+
+    CR-146 major: the caller-visible ``str(err)`` deliberately does
+    NOT interpolate ``redirect_target`` — the Location header is
+    attacker-controlled and may carry signed query params or internal
+    hostnames. Status code is safe to surface (numeric, low-entropy);
+    redirect_target stays on the audit row only.
+    """
     err = WebFetchRedirectRefused(status_code=302, redirect_target="http://10.0.0.1/internal")
+    # Typed attrs preserved for the audit row.
     assert err.status_code == 302
     assert err.redirect_target == "http://10.0.0.1/internal"
+    # Status code is operator-safe (low-entropy enum-like) and stays
+    # in the user-facing message.
     assert "302" in str(err)
-    assert "10.0.0.1" in str(err)
+    # CR-146 major: target MUST NOT leak into the caller-visible string.
+    assert "10.0.0.1" not in str(err)
+    assert "/internal" not in str(err)
 
 
 def test_canary_tripped_carries_source_url_and_handle_id() -> None:
