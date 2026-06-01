@@ -2720,3 +2720,175 @@ uv run pytest tests/adversarial/test_payload_schema.py -v
 - `src/alfred/security/dlp.py::OutboundDlp.scan` (existing)
 - `src/alfred/plugins/transport.py::StdioTransport.dispatch` (PR-S3-3a)
 - `src/alfred/plugins/content_store.py::ContentHandle` (PR-S3-3a, authoritative; this plan's `content_store.py` is a Redis-specific extension)
+
+---
+
+## §8 As-shipped addendum (2026-06-01)
+
+The plan body above is the design as drafted on 2026-05-31. Between drafting
+and merge the implementation absorbed two review cycles (the
+9-reviewer `/review-pr` team + the CodeRabbit cloud cycle) plus an automated
+security-review pass against the corpus. The deviations below are the delta
+between the as-drafted plan and the as-shipped PR; they exist so the next
+slice can reconcile the spec against what actually shipped without
+re-deriving the changes from the commit log.
+
+### Allow_redirects flip — closes SSRF allowlist bypass
+
+The dispatcher in the plan body (Task 10) calls the upstream client with
+`allow_redirects=True`. As shipped (commit `04c48ed`,
+`fix(web-fetch): refuse upstream redirects to close SSRF allowlist bypass`)
+the dispatcher passes `allow_redirects=False` and raises
+`WebFetchRedirectRefused` when the upstream responds with a 3xx. Rationale
+was surfaced by CR-145 automated security review: following redirects after
+the allowlist check evaluated the first-hop URL widens the effective
+allowlist to "the union of every host every allowlisted upstream can
+redirect to", which is unbounded. The next-slice owner can model that as a
+fork in the spec §7.4 dispatcher pseudocode (one branch: refuse redirect;
+the other: re-run the full allowlist + TLS gates against the redirect
+target). Today we ship the conservative branch.
+
+### i18n catalog expanded from 6 to 11 keys
+
+The plan body §5 Spec Coverage Map enumerates six `web.fetch.error.*` keys
+from spec §11.5. As shipped, `locale/en/LC_MESSAGES/alfred.po` carries
+eleven `web.fetch.*` keys, pinned by
+`tests/unit/plugins/web_fetch/test_i18n_keys.py`:
+
+1. `web.fetch.error.content_handle_expired`
+2. `web.fetch.error.domain_not_allowed`
+3. `web.fetch.error.redirect_refused` *(new — pairs with the redirect refusal above)*
+4. `web.fetch.error.tls_failure`
+5. `web.fetch.error.rate_limited`
+6. `web.fetch.error.mime_type_not_allowed`
+7. `web.fetch.error.size_limit_exceeded`
+8. `web.fetch.error.internal_ip_refused` *(new — pairs with the host-IP allowlist)*
+9. `web.fetch.error.plugin_returned_message` *(new — dispatcher operational-error arm)*
+10. `web.fetch.error.unexpected_dispatch_shape` *(new — dispatcher protocol-violation arm)*
+11. `web.fetch.tls.skip_refused_in_non_dev` *(new — TLS-config-error message)*
+
+`test_i18n_keys.py` carries a per-key SHA-256 fingerprint of the msgstr
+body so any future pybabel-fuzzy-match drift fails the build instead of
+silently shipping a near-miss translation.
+
+### normpath == "." branch coverage gap
+
+Plan Task 3 (`allowlist.py`) reaches 100% line+branch on the
+`AllowlistIntersection.check` matcher only after the supplementary test
+in commit `7dfdf07`
+(`test(web-fetch): cover normpath==. branch in AllowlistIntersection.check`).
+The branch fires when the request URL has an empty path (`https://host`
+with no trailing `/`) and the manifest's path prefix is `/`; the
+gap was reachable but not exercised by the original test list.
+
+### Adversarial payload IDs: pi-2026-001 → pi-2026-004
+
+The plan body Task 14 reserves `pi-2026-001` for the HTML/JS/CSS prompt-
+injection corpus addition. The id collided with an earlier
+`pi-2026-001` already in the corpus from a Slice-2.5 PR. As shipped
+(commit `42024b9`) the new corpus payload is `pi-2026-004`; the
+adversarial-corpus skill's id-allocation rule is "next free integer in
+the namespace at merge time" so future payloads should continue from
+`pi-2026-005`.
+
+### Trust-boundary CI gate moved from pyproject.toml to ci.yml
+
+The plan body §6 Quality gates lists the `--cov-fail-under=100` invocation
+against the web-fetch trust boundary as a Makefile / pyproject.toml level
+gate. As shipped, the 100% line+branch contract is enforced by per-file
+`coverage report --include=... --fail-under=100` steps in
+`.github/workflows/ci.yml` — once in the `python` job and again in the
+`coverage-gates` combined-data job. This mirrors the Slice-2.5 precedent
+established by the hooks-subsystem gate (PR #112): per-file enumeration in
+the workflow makes adding a new trust-boundary file at the same PR it
+lands a visible code-review smell, where a pyproject.toml glob would
+silently absorb it at < 100% coverage. devex-004 (this addendum's sibling
+finding) adds an `if: failure()` remediation-hint step to both gates so
+the failure mode is self-service.
+
+### Post-review automated-workflow finding closures (2026-06-01)
+
+The post-review automated workflow run on 2026-06-01 closed the
+following findings against the as-shipped PR. Findings are listed by id;
+each was either fixed in a commit on this branch (sha cited where the fix
+is a discrete commit) or covered by a sibling finding's resolution.
+Findings flagged `DEFERRED` were explicitly punted to a follow-up issue
+with the issue number; an unlinked `DEFERRED` means "to file before
+merge".
+
+**Security:**
+- `sec-pr-s3-5-002` — three-way intersection path narrowing now preserves
+  the most-restrictive prefix when manifest, operator, and session
+  allowlists disagree (commit `f2f651e`).
+- `sec-pr-s3-5-003` — host-IP allowlist guards against DNS-rebinding
+  SSRF: the dispatcher resolves the request host once and compares the
+  resolved IP against the operator's allowed-IP list (commits `6fbf16c`,
+  `00f44aa`).
+
+**Architecture:**
+- `arch-001` — T3 tagging wired at the dispatcher boundary so every byte
+  exiting the plugin transport is `TaggedContent[T3]` before it reaches
+  the orchestrator (commit `fb5f76e`).
+- `arch-002` — `redis_url` now passed in JSON-RPC `params` rather than
+  via env var so the plugin subprocess composition matches the
+  `manifest_version=1` contract (commit `fb5f76e`).
+- `arch-003` — `ALFRED_ENV` pass-through in `stdio_transport.minimal_env`
+  so the TLS-config dev escape hatch is reachable from the subprocess
+  (commit `dbe5df2`).
+
+**i18n:**
+- `i18n-001`, `i18n-002` — dispatcher's hardcoded English error strings
+  now route through `t()` (commit `bfa452e`).
+- `i18n-003` — `TlsConfigError` message goes through `t()`
+  (commit `e0789ef`).
+- `i18n-004` — `test_i18n_keys.py` carries a per-key SHA-256 fingerprint
+  table so pybabel fuzzy-match drift fails the build
+  (commit `3847795`).
+
+**Performance:**
+- `perf-100`, `perf-101` — per-session `AllowlistIntersection` + once-only
+  broadening cap so the intersection is computed once per dispatch session
+  rather than per-request (commit `2201a4d`).
+- `perf-102` — long-lived canary Redis client: `InboundCanaryScanner`
+  holds a single Redis client across all hookpoint invocations rather
+  than constructing one per scan (commit `6af171e`).
+
+**Error-handling:**
+- `err-001`, `err-002` — audit row emitted on unexpected dispatch shape;
+  canary trip survives Redis transient errors (commits `266aff4`,
+  `bfa452e`).
+- `err-003`, `err-004`, `err-005` — audit-row gap closes on DLP scan
+  failure, transport failure, and audit-write failure: each failure mode
+  now writes a structured audit row before re-raising (commit `bfa452e`).
+
+**Developer experience:**
+- `devex-001` — `rate_limit_bucket` fidelity: the audit row records the
+  bucket identifier the rate limiter actually consulted, not a derived
+  approximation. *(DEFERRED — to file)*
+- `devex-002` — `dlp_scan_result` split so the audit row distinguishes
+  "DLP scanned, allowed" from "DLP scanned, blocked" from "DLP not
+  invoked". *(DEFERRED — to file)*
+- `devex-003` — error-message remediation hints point at the operator's
+  config lever (commit `a6072c5`).
+- `devex-004` — CI coverage gate prints remediation hint on failure
+  (this addendum's sibling finding, committed alongside).
+- `devex-005` — `structlog` prefix normalization across the dispatcher,
+  scanner, and rate limiter so an operator grepping the structured-log
+  stream sees one consistent namespace. *(DEFERRED — to file)*
+
+**As-reviewed (originating reviewer findings):**
+- `ar-001` — audit schema lie: the plan documented a field
+  (`fetch_outcome`) that the row schema didn't carry; row schema now
+  matches the dispatcher's actual emit
+  (commit `bfa452e`).
+- `ar-002` — `TlsPolicy` contract documented end-to-end so the dispatcher,
+  the plugin manifest, and the operator config agree on what
+  `skip_tls_verify` means and when it is permitted (commit `a8dec04`).
+- `ar-003` — `__init__.py` re-export surface includes
+  `WebFetchRedirectRefused` so downstream `from
+  alfred.plugins.web_fetch import ...` sites can branch on it
+  (commit `d79c1b6`).
+- `ar-004` — scope-acceptable: the hookpoint `subscribe()` call is
+  deferred to PR-S3-3a's supervisor lifecycle hook so the web-fetch
+  subscription happens at supervisor start-up rather than at module
+  import. *(DEFERRED — to file)*
