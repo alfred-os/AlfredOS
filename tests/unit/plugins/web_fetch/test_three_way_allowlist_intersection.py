@@ -377,3 +377,155 @@ def test_normpath_dot_result_treated_as_root() -> None:
     # netloc comparison loop). Asserting on the refusal pins the branch.
     with pytest.raises(DomainNotAllowed):
         intersection.check(".")
+
+
+# ---------------------------------------------------------------------------
+# sec-pr-s3-5-002: three-way intersection must respect path-prefix narrowing
+# ---------------------------------------------------------------------------
+#
+# The pre-fix construction was domain-keyed only: it built ``manifest_capped``
+# from ``e.domain in operator_domains`` and unconditionally preserved the
+# MANIFEST entry's path_prefix. That silently widened operator narrowing:
+# operator ``(d, /public/)`` + manifest ``(d, /admin/)`` → effective entry
+# carried path_prefix ``/admin/`` → ``https://d/admin/secret`` permitted.
+#
+# Fix: pair each manifest entry with operator entries on the same domain
+# where one prefix is an ancestor of the other; the narrower (longer) wins.
+# Disjoint sub-trees produce no effective entry AND surface as a
+# BroadeningCapEvent.capped_domains entry. Session narrows further per the
+# same rules.
+
+
+class TestThreeWayPathNarrowing:
+    """Path-prefix narrowing across all three tiers (sec-pr-s3-5-002)."""
+
+    def test_disjoint_path_subtrees_cap_to_empty(self) -> None:
+        """Manifest ``/admin/`` + operator ``/public/`` are disjoint —
+        no effective entry, broadening cap event records the drop.
+        """
+        ail = AllowlistIntersection(
+            manifest=[_entry("x.example.com", "/admin/")],
+            operator=[_entry("x.example.com", "/public/")],
+            session=[_entry("x.example.com", "/")],
+        )
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/admin/x")
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/public/x")
+        events = ail.broadening_cap_events()
+        assert events, "disjoint-subtree manifest entry must surface a cap event"
+        capped = events[0].capped_domains
+        assert any(e.domain == "x.example.com" and e.path_prefix == "/admin/" for e in capped)
+
+    def test_operator_narrows_manifest_root(self) -> None:
+        """Manifest ``/`` + operator ``/public/`` → effective ``/public/``.
+
+        The operator's narrower path wins because it is a descendant of
+        the manifest's root.
+        """
+        ail = AllowlistIntersection(
+            manifest=[_entry("x.example.com", "/")],
+            operator=[_entry("x.example.com", "/public/")],
+            session=[_entry("x.example.com", "/")],
+        )
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/admin/x")
+        ail.check("https://x.example.com/public/x")
+
+    def test_manifest_narrows_operator_root(self) -> None:
+        """Manifest ``/public/`` + operator ``/`` → effective ``/public/``.
+
+        Manifest can never widen past operator, but it can narrow further
+        WITHIN the operator's path. Operator ``/`` permits any sub-path;
+        manifest ``/public/`` is a descendant of ``/`` so the manifest's
+        narrower prefix becomes the effective constraint.
+        """
+        ail = AllowlistIntersection(
+            manifest=[_entry("x.example.com", "/public/")],
+            operator=[_entry("x.example.com", "/")],
+            session=[_entry("x.example.com", "/")],
+        )
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/admin/x")
+        ail.check("https://x.example.com/public/x")
+
+    def test_session_narrows_within_operator_path(self) -> None:
+        """Manifest ``/`` + operator ``/api/`` + session ``/api/v1/`` →
+        only ``/api/v1/*`` reachable.
+        """
+        ail = AllowlistIntersection(
+            manifest=[_entry("x.example.com", "/")],
+            operator=[_entry("x.example.com", "/api/")],
+            session=[_entry("x.example.com", "/api/v1/")],
+        )
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/api/v2/x")
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/api/")
+        ail.check("https://x.example.com/api/v1/x")
+
+    def test_session_disjoint_from_operator_path_caps_to_empty(self) -> None:
+        """Manifest ``/`` + operator ``/api/`` + session ``/web/`` →
+        disjoint session vs. (manifest∩operator) = ``/api/``; no effective
+        entry on this domain.
+        """
+        ail = AllowlistIntersection(
+            manifest=[_entry("x.example.com", "/")],
+            operator=[_entry("x.example.com", "/api/")],
+            session=[_entry("x.example.com", "/web/")],
+        )
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/api/x")
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/web/x")
+
+    def test_multiple_operator_paths_each_paired_independently(self) -> None:
+        """Operator declaring ``[(d,/api/), (d,/public/)]`` + manifest
+        ``[(d,/)]`` → effective entries cover both operator paths.
+        """
+        ail = AllowlistIntersection(
+            manifest=[_entry("x.example.com", "/")],
+            operator=[
+                _entry("x.example.com", "/api/"),
+                _entry("x.example.com", "/public/"),
+            ],
+            session=[_entry("x.example.com", "/")],
+        )
+        ail.check("https://x.example.com/api/x")
+        ail.check("https://x.example.com/public/x")
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/admin/x")
+
+    def test_equal_prefixes_produce_single_effective_entry(self) -> None:
+        """Manifest ``/public/`` + operator ``/public/`` + session ``/public/``
+        — equal prefixes resolve as the trivial-ancestor case.
+        """
+        ail = AllowlistIntersection(
+            manifest=[_entry("x.example.com", "/public/")],
+            operator=[_entry("x.example.com", "/public/")],
+            session=[_entry("x.example.com", "/public/")],
+        )
+        ail.check("https://x.example.com/public/x")
+        with pytest.raises(DomainNotAllowed):
+            ail.check("https://x.example.com/admin/x")
+
+    def test_capped_domains_carry_original_manifest_path_prefix(self) -> None:
+        """When a manifest entry is fully capped because no operator entry
+        on the same domain shares a prefix-chain, the cap event preserves
+        the original manifest path_prefix for forensic clarity.
+        """
+        ail = AllowlistIntersection(
+            manifest=[
+                _entry("x.example.com", "/admin/"),
+                _entry("y.example.com", "/"),  # capped by domain
+            ],
+            operator=[_entry("x.example.com", "/public/")],
+            session=[_entry("x.example.com", "/")],
+        )
+        events = ail.broadening_cap_events()
+        assert events
+        capped = list(events[0].capped_domains)
+        # x.example.com/admin/ — disjoint sub-tree cap.
+        assert any(e.domain == "x.example.com" and e.path_prefix == "/admin/" for e in capped)
+        # y.example.com/ — domain-level cap (operator does not list y.example.com at all).
+        assert any(e.domain == "y.example.com" and e.path_prefix == "/" for e in capped)
