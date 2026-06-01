@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 00:11+0100\n"
+"POT-Creation-Date: 2026-06-02 00:52+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -48,68 +48,74 @@ msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 # PR-S3-6 Component F — alfred audit {log, graph} sub-app. The graph
 # subcommand surfaces a swimlane filtered by --tier T1|T2|T3 per spec
 # §11.3 ("alfred audit graph --tier T3 --since 24h").
-#: src/alfred/cli/audit.py:21
+#: src/alfred/cli/audit.py:22
 msgid "cli.audit.help"
 msgstr "Inspect the audit log; filter the graph swimlane by trust tier."
 
-#: src/alfred/cli/audit.py:71
+#: src/alfred/cli/audit.py:94
 msgid "cli.audit.graph.since_invalid"
 msgstr ""
 "Invalid --since value: {value}. Expected a unit-suffixed duration like "
 "{example}."
 
-#: src/alfred/cli/audit.py:80
+#: src/alfred/cli/audit.py:103
 msgid "cli.audit.log.event_help"
 msgstr ""
 "Restrict to a single event name (e.g. plugin.lifecycle.crashed). Omit to "
 "show every event in the time window."
 
-#: src/alfred/cli/audit.py:84 src/alfred/cli/audit.py:119
+#: src/alfred/cli/audit.py:107 src/alfred/cli/audit.py:142
 msgid "cli.audit.graph.since_help"
 msgstr "Lookback window (unit-suffixed: 24h, 7d, 30m). Bare integers are rejected."
 
-#: src/alfred/cli/audit.py:100 src/alfred/cli/audit.py:135
+#: src/alfred/cli/audit.py:123 src/alfred/cli/audit.py:166
 msgid "cli.audit.graph.empty"
 msgstr "No audit rows{tier} in the last {since}."
 
-#: src/alfred/cli/audit.py:115
+#: src/alfred/cli/audit.py:138
 msgid "cli.audit.graph.tier_help"
 msgstr ""
 "Filter to a single trust-tier swimlane (T0, T1, T2, or T3). Omit to show "
 "every tier."
 
-#: src/alfred/cli/audit.py:140
+#: src/alfred/cli/audit.py:172
 msgid "cli.audit.graph.tier_header"
 msgstr "Audit graph — swimlane {tier}"
 
-#: src/alfred/cli/audit.py:140
+#: src/alfred/cli/audit.py:174
 msgid "cli.audit.graph.header"
 msgstr "Audit graph — all tiers"
+
+#: src/alfred/cli/config.py:78 src/alfred/cli/config.py:91
+msgid "cli.config.error.malformed_yaml"
+msgstr ""
+"alfred config refused: {yaml_path} is malformed and cannot be parsed."
+" YAML error: {error}. Fix the file and rerun the command."
 
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.
 # quarantined-provider) queue a state.git reviewer-gated proposal.
-#: src/alfred/cli/config.py:154
+#: src/alfred/cli/config.py:261
 msgid "cli.config.help.group"
 msgstr "Get, set, or list operator configuration values."
 
-#: src/alfred/cli/config.py:164
+#: src/alfred/cli/config.py:271
 msgid "cli.config.set.help.short"
 msgstr "Set an operator configuration key."
 
-#: src/alfred/cli/config.py:168
+#: src/alfred/cli/config.py:275
 msgid "cli.config.set.arg.key"
 msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
 
-#: src/alfred/cli/config.py:172
+#: src/alfred/cli/config.py:279
 msgid "cli.config.set.arg.value"
 msgstr "New value (parsed as int/float when possible, else kept as string)."
 
-#: src/alfred/cli/config.py:189
+#: src/alfred/cli/config.py:296
 msgid "cli.config.set.denied"
 msgstr "alfred config set denied: {reason}"
 
-#: src/alfred/cli/config.py:195
+#: src/alfred/cli/config.py:302
 msgid "cli.config.set.pending_review"
 msgstr ""
 "{key} change queued for reviewer approval (high-blast knob).\n"
@@ -118,45 +124,45 @@ msgstr ""
 "The new value is NOT yet active — it activates when the reviewer approves"
 " the proposal and the supervisor reloads its configuration."
 
-#: src/alfred/cli/config.py:207
+#: src/alfred/cli/config.py:314
 msgid "cli.config.set.unknown_key"
 msgstr ""
 "alfred config set refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:219
+#: src/alfred/cli/config.py:326
 msgid "cli.config.set.applied"
 msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
 
-#: src/alfred/cli/config.py:232
+#: src/alfred/cli/config.py:339
 msgid "cli.config.get.help.short"
 msgstr "Show the current value of an operator configuration key."
 
-#: src/alfred/cli/config.py:236
+#: src/alfred/cli/config.py:343
 msgid "cli.config.get.arg.key"
 msgstr "Configuration key to read."
 
-#: src/alfred/cli/config.py:249
+#: src/alfred/cli/config.py:356
 msgid "cli.config.get.unknown_key"
 msgstr ""
 "alfred config get refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:258
+#: src/alfred/cli/config.py:365
 msgid "cli.config.get.not_set"
 msgstr ""
 "{key} is not set in policies.yaml — the system default applies. Set it "
 "with 'alfred config set {key} <value>'."
 
-#: src/alfred/cli/config.py:260
+#: src/alfred/cli/config.py:367
 msgid "cli.config.get.value"
 msgstr "{key} = {value}"
 
-#: src/alfred/cli/config.py:284
+#: src/alfred/cli/config.py:391
 msgid "cli.config.list.help.short"
 msgstr "List every operator configuration value from policies.yaml."
 
-#: src/alfred/cli/config.py:288 src/alfred/cli/config.py:293
+#: src/alfred/cli/config.py:400 src/alfred/cli/config.py:404
 msgid "cli.config.list.empty"
 msgstr ""
 "policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
@@ -362,43 +368,43 @@ msgstr ""
 
 # PR-S3-6 Component E — alfred supervisor sub-app (status read-only,
 # reset --confirm gate). T1-tier per spec §10.8.
-#: src/alfred/cli/supervisor.py:25
+#: src/alfred/cli/supervisor.py:28
 msgid "cli.supervisor.help"
 msgstr "Inspect supervised components and reset tripped circuit breakers."
 
-#: src/alfred/cli/supervisor.py:78
+#: src/alfred/cli/supervisor.py:143
 msgid "cli.supervisor.status.no_supervisor_running"
 msgstr ""
 "Supervisor is not running. Start the Alfred stack with `docker compose up"
 " -d` and re-run `alfred supervisor status`."
 
-#: src/alfred/cli/supervisor.py:81
+#: src/alfred/cli/supervisor.py:146
 msgid "cli.supervisor.status.empty_hint"
 msgstr ""
 "No supervised components registered. Plugins appear here once the "
 "orchestrator boots them (PR-S3-3b)."
 
-#: src/alfred/cli/supervisor.py:85
+#: src/alfred/cli/supervisor.py:150
 msgid "cli.supervisor.status.column.component"
 msgstr "COMPONENT"
 
-#: src/alfred/cli/supervisor.py:86
+#: src/alfred/cli/supervisor.py:151
 msgid "cli.supervisor.status.column.state"
 msgstr "STATE"
 
-#: src/alfred/cli/supervisor.py:87
+#: src/alfred/cli/supervisor.py:152
 msgid "cli.supervisor.status.column.trip_count"
 msgstr "TRIPS"
 
-#: src/alfred/cli/supervisor.py:88
+#: src/alfred/cli/supervisor.py:153
 msgid "cli.supervisor.status.column.last_trip_at"
 msgstr "LAST TRIP"
 
-#: src/alfred/cli/supervisor.py:117
+#: src/alfred/cli/supervisor.py:182
 msgid "cli.supervisor.reset.usage"
 msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 
-#: src/alfred/cli/supervisor.py:122 src/alfred/cli/supervisor.py:142
+#: src/alfred/cli/supervisor.py:187 src/alfred/cli/supervisor.py:207
 msgid "cli.supervisor.reset.confirm_prompt"
 msgstr ""
 "Refusing to reset {component} without --confirm.\n"
@@ -407,23 +413,24 @@ msgstr ""
 "Pass --confirm to acknowledge that resetting may re-enable a plugin that "
 "just failed 3+ times in 5 minutes."
 
-#: src/alfred/cli/supervisor.py:152
+#: src/alfred/cli/supervisor.py:217
 msgid "cli.supervisor.reset.rerun_hint"
 msgstr "Re-run with: alfred supervisor reset {component} --confirm"
 
-#: src/alfred/cli/supervisor.py:191
-msgid "cli.supervisor.reset.component_not_found"
-msgstr ""
-"Component not found: {component}. Run `alfred supervisor status` to list "
-"registered components."
-
-#: src/alfred/cli/supervisor.py:199 src/alfred/cli/supervisor.py:208
+#: src/alfred/cli/supervisor.py:262 src/alfred/cli/supervisor.py:294
+#: src/alfred/cli/supervisor.py:308
 msgid "cli.supervisor.reset.unexpected_error"
 msgstr ""
 "Failed to reset {component}: {error_type}. Check `alfred audit log "
 "--event supervisor.breaker.reset --since 5m`."
 
-#: src/alfred/cli/supervisor.py:216
+#: src/alfred/cli/supervisor.py:286
+msgid "cli.supervisor.reset.component_not_found"
+msgstr ""
+"Component not found: {component}. Run `alfred supervisor status` to list "
+"registered components."
+
+#: src/alfred/cli/supervisor.py:316
 msgid "cli.supervisor.reset.success"
 msgstr "Reset circuit breaker for {component}. Audit row recorded."
 
