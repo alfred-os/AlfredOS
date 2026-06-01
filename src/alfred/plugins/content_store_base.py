@@ -46,6 +46,7 @@ import os
 from typing import Final, Protocol, runtime_checkable
 
 from alfred.errors import AlfredError
+from alfred.i18n import t
 from alfred.security.quarantine import ContentHandle
 from alfred.security.tiers import T3, TaggedContent
 
@@ -148,9 +149,10 @@ class InMemoryContentStore:
         env = os.environ.get("ALFRED_ENV", "").strip()
         if env not in _DEV_TEST_ENVIRONMENTS:
             raise InMemoryContentStoreProductionError(
-                f"InMemoryContentStore is not production-safe (ALFRED_ENV={env!r}); "
-                "inject a Redis-backed ContentStore via StdioTransport(content_store=...) "
-                "or set ALFRED_ENV to 'development' / 'test' for stub usage."
+                t(
+                    "plugin.content_store.inmemory_not_production_safe",
+                    env=repr(env),
+                )
             )
         self._store: dict[str, TaggedContent[T3]] = {}
 

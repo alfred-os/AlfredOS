@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from alfred.hooks.capability import DevGate
+from alfred.i18n import t
 
 _log = structlog.get_logger(__name__)
 
@@ -110,7 +111,7 @@ def build_dev_gate() -> DevGate:
         "bootstrap.gate_selected",
         gate="DevGate",
         alfred_env=raw_env or "(unset)",
-        warning="fail-open capability stubs; do not use in production",
+        warning=t("bootstrap.gate_selected.devgate_warning"),
     )
     return DevGate()
 

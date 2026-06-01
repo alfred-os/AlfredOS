@@ -74,11 +74,11 @@ def test_anon_subclass_raises_via_subclass_missing_name_key() -> None:
 
     with pytest.raises(ValidationError) as excinfo:
         TaggedContent(content="x", source="t", tier=_Anon)
-    # The English msgstr names the subclass and mentions "non-empty";
-    # if the catalog is wired correctly we see those substrings.
     msg = str(excinfo.value)
-    assert "_Anon" in msg
-    assert "non-empty" in msg or "name" in msg
+    # CR-142 R2: assert against the translated template, not English
+    # substrings — the test is then locale-stable.
+    expected = t("security.tier_subclass_missing_name", subclass="_Anon")
+    assert expected in msg
 
 
 def test_unsupported_tier_via_tag_uses_tier_unsupported_key() -> None:
