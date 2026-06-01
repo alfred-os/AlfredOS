@@ -249,7 +249,52 @@ def test_direct_construction_unknown_subscriber_tier_refused() -> None:
         # used to raise hardcoded English. The post-fix messages all resolve
         # via the catalog and start with the operator-facing "Plugin manifest"
         # prefix from locale/en/LC_MESSAGES/alfred.po.
-        ("[malformed toml", "Plugin manifest is not valid TOML"),
+        #
+        # CR-142 round-3 test-004: expanded coverage so each parse_manifest
+        # branch with its own i18n key is exercised here. The four added
+        # perturbations cover:
+        # - the [plugin] id missing/non-string branch
+        # - the [plugin] subscriber_tier non-string branch
+        # - the [plugin] sandbox_profile non-string branch
+        # - the [plugin] platform non-string branch
+        # Each branch had a separate ``plugin.manifest_*`` key landed in
+        # the DEVEX-002 pass; before this parametrize expansion only the
+        # malformed-TOML branch was pinned, leaving the other catalog
+        # keys silently un-asserted.
+        pytest.param(
+            ("[malformed toml", "Plugin manifest is not valid TOML"),
+            id="malformed_toml",
+        ),
+        pytest.param(
+            (
+                VALID_MANIFEST_TOML.replace('id = "alfred.test-plugin"\n', ""),
+                "Plugin manifest [plugin] id",
+            ),
+            id="missing_plugin_id",
+        ),
+        pytest.param(
+            (
+                VALID_MANIFEST_TOML.replace('subscriber_tier = "system"', "subscriber_tier = 42"),
+                "Plugin manifest [plugin] subscriber_tier",
+            ),
+            id="non_string_subscriber_tier",
+        ),
+        pytest.param(
+            (
+                VALID_MANIFEST_TOML.replace(
+                    'sandbox_profile = "user-plugin"', "sandbox_profile = 42"
+                ),
+                "Plugin manifest [plugin] sandbox_profile",
+            ),
+            id="non_string_sandbox_profile",
+        ),
+        pytest.param(
+            (
+                VALID_MANIFEST_TOML + "platform = 42\n",
+                "Plugin manifest [plugin] platform",
+            ),
+            id="non_string_platform",
+        ),
     ],
 )
 def test_manifest_error_messages_resolve_via_catalog(
