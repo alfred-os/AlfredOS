@@ -1,0 +1,28 @@
+# Quarantined-LLM plugin manifest (PR-S3-4, spec §5.1, ADR-0017 Decision 7).
+#
+# Two-axis declaration (spec §4.3):
+#   * alfred.manifest_version = 1 — pinned per ADR-0017 Decision 7.
+#   * [plugin] subscriber_tier = "system" — the quarantined LLM is a
+#     privileged-host subprocess, NOT a user-plugin. The supervisor's
+#     capability gate consults this value to decide which grants the
+#     plugin may request; "system" unlocks the orchestrator-internal
+#     hookpoints (security.quarantined.extract) the user-plugin tier
+#     never sees.
+#   * [plugin] sandbox_profile = "user-plugin" — even though the
+#     subscriber tier is "system", the subprocess runs under the
+#     user-plugin OS sandbox so a compromise in the LLM provider's
+#     response-parsing path cannot escalate beyond the supervisor's
+#     own privileges.
+#
+# The two axes are deliberately independent (spec §4.3). Conflating
+# subscriber_tier with the content trust tier (T0-T3) is the classic
+# shape of a tier-laundering bug; parse_manifest refuses any T0-T3
+# string in subscriber_tier with ManifestTierError.
+
+[alfred]
+manifest_version = 1
+
+[plugin]
+id = "alfred.quarantined-llm"
+subscriber_tier = "system"
+sandbox_profile = "user-plugin"
