@@ -664,6 +664,12 @@ msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
 "subprocess has been quarantined."
 
+#: src/alfred/plugins/web_fetch/content_store.py:77
+msgid "web.fetch.error.content_handle_expired"
+msgstr ""
+"web.fetch content handle {handle_id!r} has expired or was already "
+"extracted."
+
 #: src/alfred/plugins/web_fetch/errors.py:51
 msgid "web.fetch.error.domain_not_allowed"
 msgstr ""
