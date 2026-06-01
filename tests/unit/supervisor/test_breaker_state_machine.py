@@ -16,7 +16,24 @@ Test discipline:
 
 from __future__ import annotations
 
+import datetime as dt
+from unittest.mock import AsyncMock
+
+import pytest
+
 from alfred.supervisor.breaker import BreakerState, CircuitBreaker
+from alfred.supervisor.errors import QuarantinedUnavailable
+
+
+def _make_cb(**kwargs: object) -> CircuitBreaker:
+    """Construct a CircuitBreaker with a mocked session_scope.
+
+    Why an ``AsyncMock`` and not ``None``: later tests (Task 8) call
+    ``save_to_db`` via the real lock path; passing ``None`` would make
+    those tests harder to extend. For the pure state-machine tests in this
+    file the session is never touched.
+    """
+    return CircuitBreaker(component_id="test-plugin", session_scope=AsyncMock(), **kwargs)  # type: ignore[arg-type]
 
 
 def test_initial_state_is_closed() -> None:
@@ -30,3 +47,119 @@ def test_initial_state_is_closed() -> None:
 def test_breaker_state_enum_values() -> None:
     """Exactly three states — closed domain pinned by DB CHECK constraint."""
     assert {s.value for s in BreakerState} == {"CLOSED", "OPEN", "HALF_OPEN"}
+
+
+# ---------------------------------------------------------------------------
+# record_failure / assert_available (Task 5)
+# ---------------------------------------------------------------------------
+
+
+def test_single_failure_stays_closed() -> None:
+    """One failure does NOT trip the breaker — threshold is 3."""
+    cb = _make_cb()
+    cb.record_failure(
+        "SubprocessExitedError",
+        now=dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC),
+    )
+    assert cb.state == BreakerState.CLOSED
+    assert cb.trip_count == 0
+
+
+def test_three_failures_in_window_opens_breaker() -> None:
+    """Threshold failures inside the 5min window trip CLOSED→OPEN."""
+    cb = _make_cb()
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    for i in range(3):
+        cb.record_failure(
+            "SubprocessExitedError",
+            now=base + dt.timedelta(seconds=i * 60),
+        )
+    assert cb.state == BreakerState.OPEN
+    assert cb.trip_count == 1
+    assert cb.last_trip_at == base + dt.timedelta(seconds=120)
+
+
+def test_failures_outside_window_do_not_trip() -> None:
+    """Failures separated by >5min do not accumulate toward threshold."""
+    cb = _make_cb()
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    cb.record_failure("SubprocessExitedError", now=base)
+    cb.record_failure(
+        "SubprocessExitedError", now=base + dt.timedelta(seconds=400)
+    )  # outside 5min — drops the first
+    cb.record_failure(
+        "SubprocessExitedError", now=base + dt.timedelta(seconds=800)
+    )  # outside 5min — drops the second
+    assert cb.state == BreakerState.CLOSED
+
+
+def test_record_failure_in_open_state_is_noop() -> None:
+    """Once OPEN, additional failures are ignored — trip_count stays at 1."""
+    cb = _make_cb()
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    for i in range(3):
+        cb.record_failure("SubprocessExitedError", now=base + dt.timedelta(seconds=i))
+    assert cb.state == BreakerState.OPEN
+    cb.record_failure("SubprocessExitedError", now=base + dt.timedelta(seconds=10))
+    assert cb.trip_count == 1  # not incremented again
+
+
+def test_record_failure_default_now_uses_wall_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting ``now`` falls back to ``datetime.now(UTC)``.
+
+    Pins the production-path default — every callsite from
+    ``PluginLifecycle.on_crash`` (Task 10) relies on it.
+    """
+    cb = _make_cb()
+    fixed = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+
+    class _FrozenDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:  # type: ignore[override]
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr("alfred.supervisor.breaker.dt", _patched_dt_module(_FrozenDateTime))
+    cb.record_failure("SubprocessExitedError")
+    assert cb._recent_failures == [fixed]
+
+
+def _patched_dt_module(replacement: type[dt.datetime]) -> object:
+    """Return an object that proxies the ``datetime`` module with ``datetime`` swapped.
+
+    Lighter-weight than monkeypatching the real ``datetime`` class: replaces
+    just the attribute the production code reads (``dt.datetime``,
+    ``dt.timedelta``, ``dt.UTC``). Keeps the rest of the ``datetime`` API
+    untouched and isolated to this test.
+    """
+
+    class _ProxyModule:
+        datetime = replacement
+        timedelta = dt.timedelta
+        UTC = dt.UTC
+
+    return _ProxyModule()
+
+
+def test_assert_available_open_raises() -> None:
+    """OPEN breaker raises QuarantinedUnavailable on assert_available()."""
+    cb = _make_cb()
+    cb.state = BreakerState.OPEN
+    with pytest.raises(QuarantinedUnavailable):
+        cb.assert_available()
+
+
+def test_assert_available_closed_is_silent() -> None:
+    """CLOSED breaker passes assert_available() without raising."""
+    cb = _make_cb()
+    cb.assert_available()  # no raise
+
+
+def test_assert_available_half_open_is_silent() -> None:
+    """HALF_OPEN breaker allows the probe — assert_available() does not raise.
+
+    Only OPEN is fully closed to traffic. HALF_OPEN lets the probe through
+    so the lifecycle can attempt re-entry to CLOSED.
+    """
+    cb = _make_cb()
+    cb.state = BreakerState.HALF_OPEN
+    cb.assert_available()  # no raise

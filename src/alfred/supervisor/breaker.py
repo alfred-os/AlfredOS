@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from alfred.supervisor.errors import QuarantinedUnavailable
+
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -109,6 +111,72 @@ class CircuitBreaker:
         # safety for concurrent save_to_db callers. Per-instance (not class-level)
         # so unrelated breakers do not block each other.
         self._save_lock: asyncio.Lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Failure recording and trip transition (Task 5)
+    # ------------------------------------------------------------------
+
+    def record_failure(
+        self,
+        exception_type: str,
+        *,
+        now: dt.datetime | None = None,
+    ) -> None:
+        """Record a plugin failure. Trips CLOSED→OPEN at threshold.
+
+        ``exception_type`` MUST be the Python *type name* only — never
+        ``str(exc)`` or ``exc.args``. The subprocess crash message can
+        carry T3 fragments (spec §5.6); callers funnel through
+        ``type(exc).__name__`` to keep the trip audit row safe to display.
+
+        Sliding window: failures outside ``failure_window_seconds`` are
+        dropped each call. Three (configurable) failures inside the window
+        trip the breaker. While the breaker is OPEN we no-op — the
+        re-arm/reset paths own the transition out of OPEN.
+        """
+        if self.state == BreakerState.OPEN:
+            return  # already tripped; ignore additional failures
+
+        _now = now if now is not None else dt.datetime.now(dt.UTC)
+        cutoff = _now - dt.timedelta(seconds=self._failure_window_seconds)
+        self._recent_failures = [f for f in self._recent_failures if f > cutoff]
+        self._recent_failures.append(_now)
+
+        if len(self._recent_failures) >= self._failure_threshold:
+            self._trip(exception_type=exception_type, now=_now)
+
+    def _trip(self, *, exception_type: str, now: dt.datetime) -> None:
+        """Internal CLOSED/HALF_OPEN → OPEN transition.
+
+        ``trip_count`` is the cumulative audit counter; it survives reset()
+        and load-from-DB. ``last_trip_at`` is the wall-clock at trip time —
+        the re-arm path uses it to decide when HALF_OPEN becomes safe.
+
+        This method DOES NOT spawn a hookpoint task. Hookpoint invocation
+        is the caller's responsibility (Task 9 / ``PluginLifecycle``); see
+        the module docstring for the err-001 / core-004 rationale.
+        """
+        self.state = BreakerState.OPEN
+        self.trip_count += 1
+        self.last_trip_at = now
+        self._recent_failures.clear()
+        _log.warning(
+            "supervisor.breaker.tripped",
+            component_id=self.component_id,
+            trip_count=self.trip_count,
+            last_failure_type=exception_type,
+        )
+
+    def assert_available(self) -> None:
+        """Raise :class:`QuarantinedUnavailable` if the breaker is OPEN.
+
+        Called by ``PluginLifecycle`` before dispatching to a supervised
+        plugin. HALF_OPEN is intentionally permissive — the probe must run
+        to learn whether the underlying fault has cleared. Only OPEN is
+        fully closed to traffic.
+        """
+        if self.state == BreakerState.OPEN:
+            raise QuarantinedUnavailable(self.component_id)
 
 
 __all__ = [
