@@ -144,9 +144,7 @@ async def test_missing_body_raises_canary_scan_error(store: ContentStore) -> Non
     the orchestrator can quarantine/abort rather than proceeding with
     unscanned content.
     """
-    handle = await store.write(
-        body=b"<html>data</html>", source_url="https://example.com/missing"
-    )
+    handle = await store.write(body=b"<html>data</html>", source_url="https://example.com/missing")
     # Consume the handle out from under the scanner.
     await store.extract(handle.id)
     scanner = InboundCanaryScanner(
