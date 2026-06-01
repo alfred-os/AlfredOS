@@ -322,6 +322,54 @@ def test_path_traversal_segments_rejected_outright(url: str) -> None:
         intersection.check(url)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Lowercase ``%2e%2e`` — the canonical percent-encoded ``..``.
+        "https://example.com/public/%2e%2e/admin/secret",
+        # Uppercase variant — RFC 3986 says hex digits are
+        # case-insensitive; both forms decode to the same bytes.
+        "https://example.com/public/%2E%2E/admin/secret",
+        # Mixed-case + tail traversal.
+        "https://example.com/public/%2E%2e",
+        # Encoded leading traversal — climb above the prefix entirely.
+        "https://example.com/%2e%2e/public/file",
+        # Double-encoded variants where ``%`` itself is encoded as
+        # ``%25`` are NOT in scope (upstream would have to double-decode);
+        # we deliberately only cover the single-decode bypass the CR-146
+        # finding flagged, since that's the one upstream routers
+        # canonically decode before prefix routing.
+    ],
+)
+def test_percent_encoded_traversal_segments_rejected(url: str) -> None:
+    """CR-146 critical: percent-encoded ``..`` segments MUST be refused.
+
+    A URL like ``/public/%2e%2e/admin/secret`` would slip past a
+    literal-``..`` guard because ``raw_path.split("/")`` sees ``public`` /
+    ``%2e%2e`` / ``admin`` / ``secret`` — no literal ``..`` segment.
+    Upstream routers commonly decode ``%2e%2e`` before prefix-routing,
+    so the encoded URL actually reaches ``/admin/secret`` upstream while
+    the allowlist's prefix match (``/public/``) would have permitted it.
+    Decoding via ``urllib.parse.unquote`` BEFORE the literal-``..``
+    check closes the bypass without weakening the audit-honesty
+    invariant from CR-145.
+    """
+    from alfred.plugins.web_fetch.allowlist import (
+        AllowlistEntry,
+        AllowlistIntersection,
+        DomainNotAllowed,
+    )
+
+    intersection = AllowlistIntersection(
+        manifest=[AllowlistEntry("example.com", "/public")],
+        operator=[AllowlistEntry("example.com", "/public")],
+        session=[AllowlistEntry("example.com", "/public")],
+    )
+
+    with pytest.raises(DomainNotAllowed):
+        intersection.check(url)
+
+
 def test_double_slash_normalised_for_benign_paths() -> None:
     """A benign ``//`` (double slash) in the path SHOULD match the
     canonical prefix — operators copy-pasting URLs from logs sometimes
