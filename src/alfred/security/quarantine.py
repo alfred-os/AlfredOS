@@ -677,20 +677,101 @@ async def quarantined_to_structured(
 
 
 # ---------------------------------------------------------------------------
-# downgrade_to_orchestrator — STUB (full impl Task 8)
+# downgrade_to_orchestrator — full impl (PR-S3-4 Task 8)
 # ---------------------------------------------------------------------------
+
+
+# Closed-vocabulary downgrade-reason tags. The audit row carries this
+# string verbatim; free-form text here would let a caller leak T3
+# fragments into the audit log (spec §5.6). Adding a tag is a deliberate
+# audit-schema migration, not a per-call decision.
+_DOWNGRADE_REASON_DEFAULT: Literal["structured_extraction_consumed"] = (
+    "structured_extraction_consumed"
+)
 
 
 async def downgrade_to_orchestrator(
     data: T3DerivedData,
     *,
-    audit_row: object,
+    gate: CapabilityGate,
+    audit_writer: AuditWriter,
 ) -> dict[str, object]:
-    """Gate for injecting T3DerivedData into a privileged prompt.
+    """Gate-checked downgrade of :class:`T3DerivedData` to a plain dict.
 
-    STUB in Task 6 (PR-S3-4). Task 8 lands the full implementation
-    (gate-first check + T3_DERIVED_DOWNGRADE_FIELDS audit row).
+    Any orchestrator-output path that injects T3-derived data into a
+    privileged prompt MUST call this first. The gate check enforces
+    that the crossing is deliberate (``downgrade_explicit=True``); the
+    audit row records the trust transition with the
+    :data:`alfred.audit.audit_row_schemas.T3_DERIVED_DOWNGRADE_FIELDS`
+    family.
+
+    Gate-first ordering: ``check_content_clearance(...,
+    hookpoint="t3.downgrade_to_orchestrator", content_tier="T3_derived")``
+    is consulted BEFORE the audit row writes. A denial raises
+    :class:`AlfredError` with NO audit row from this family — the
+    gate's own refusal accounting handles denied calls (typically the
+    ``security.capability_gate.*`` audit family).
+
+    Emits ``quarantine.t3_derived_downgrade`` — NOT
+    ``identity.t1_downgrade`` (rvw-003). T1→T2 and T3-derived→T2 are
+    distinct trust transitions with separate forensic attribution; the
+    audit-row family separation is the type-level pin.
+
+    The returned dict carries the same key-value pairs as the input.
+    The :class:`T3DerivedData` provenance tag is intentionally retired
+    at this boundary; the audit row is the receipt that links the
+    plain dict back to its T3-derived origin.
+
+    The audit row carries provenance attribution ONLY (source/target
+    tier, correlation id, closed-vocabulary downgrade_reason). The
+    payload values themselves are NEVER serialised into the audit row
+    — that would bypass DLP and let downstream log consumers observe
+    raw T3-derived content outside the privileged-orchestrator path.
     """
-    raise NotImplementedError(
-        "downgrade_to_orchestrator stub — full implementation is PR-S3-4 Task 8",
+    if not gate.check_content_clearance(
+        plugin_id="t3.downgrade_to_orchestrator",
+        hookpoint="t3.downgrade_to_orchestrator",
+        content_tier="T3_derived",
+    ):
+        from alfred.errors import AlfredError
+
+        raise AlfredError(
+            "Content clearance denied for t3.downgrade_to_orchestrator",
+        )
+
+    from alfred.audit import audit_row_schemas
+
+    correlation_id = str(uuid.uuid4())
+    # extraction_id and quarantined_llm_invocation_id are forensic
+    # attribution slots the caller MAY thread through (Slice 4+). Until
+    # then they are explicitly ``None`` — append_schema's symmetric
+    # validation requires every declared field to be present in
+    # ``subject``, and ``None`` is the audit-graph sentinel for "not
+    # threaded through". The closed-vocabulary downgrade_reason tag is
+    # the immediate forensic linkage that ties the downgrade row back
+    # to the extraction that produced it.
+    await audit_writer.append_schema(
+        fields=audit_row_schemas.T3_DERIVED_DOWNGRADE_FIELDS,
+        schema_name="T3_DERIVED_DOWNGRADE_FIELDS",
+        event="quarantine.t3_derived_downgrade",
+        actor_user_id=None,
+        subject={
+            "extraction_id": None,
+            "quarantined_llm_invocation_id": None,
+            "source_tier": "T3_derived",
+            "target_tier": "T2",
+            "downgrade_reason": _DOWNGRADE_REASON_DEFAULT,
+            "trust_tier_of_trigger": "T3",
+            "trust_tier_of_response": "T2",
+            "downgrade_explicit": True,
+            "correlation_id": correlation_id,
+        },
+        trust_tier_of_trigger="T3",
+        result="allowed",
+        cost_estimate_usd=0.0,
+        trace_id=correlation_id,
     )
+    # ``data`` is a NewType over dict[str, object]; ``dict(data)`` builds
+    # a plain dict snapshot — the provenance tag is intentionally retired
+    # at this boundary. The audit row above is the receipt.
+    return dict(data)

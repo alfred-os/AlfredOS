@@ -180,11 +180,39 @@ def test_quarantined_to_structured_refuses_on_denied_gate() -> None:
         )
 
 
-def test_downgrade_to_orchestrator_stub_raises_not_implemented() -> None:
-    """The stub raises NotImplementedError — full impl is PR-S3-4 Task 8."""
+def test_downgrade_to_orchestrator_refuses_on_denied_gate() -> None:
+    """The full implementation (PR-S3-4 Task 8) refuses on a deny-gate.
+
+    Replaces the prior "stub raises NotImplementedError" pin. The new
+    contract is gate-first: a denied ``check_content_clearance(...,
+    content_tier="T3_derived")`` raises :class:`AlfredError` BEFORE the
+    audit row writes. The :data:`None` audit writer here would
+    AttributeError on any path that skipped the gate.
+    """
+    from alfred.errors import AlfredError
+
     data: T3DerivedData = T3DerivedData({"title": "x"})
-    with pytest.raises(NotImplementedError):
-        asyncio.run(downgrade_to_orchestrator(data, audit_row=None))  # type: ignore[arg-type]
+
+    class _DenyGate:
+        def check(self, *, plugin_id: str, hookpoint: str, requested_tier: str) -> bool:
+            return False
+
+        def check_plugin_load(self, *, plugin_id: str, manifest_tier: str) -> bool:
+            return False
+
+        def check_content_clearance(
+            self, *, plugin_id: str, hookpoint: str, content_tier: str
+        ) -> bool:
+            return False
+
+    with pytest.raises(AlfredError):
+        asyncio.run(
+            downgrade_to_orchestrator(
+                data,
+                gate=_DenyGate(),
+                audit_writer=None,  # type: ignore[arg-type]
+            )
+        )
 
 
 def test_extraction_result_types_importable_and_constructable() -> None:
