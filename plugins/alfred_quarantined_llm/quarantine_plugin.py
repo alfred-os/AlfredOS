@@ -159,7 +159,7 @@ async def handle_extract(
 # ---------------------------------------------------------------------------
 
 
-async def main() -> None:
+async def main() -> None:  # pragma: no cover - subprocess entry (Task 11 wires loop)
     """Entry point: read provider key from fd 3, then run the MCP server.
 
     The fd-3 read happens HERE, not at module load time (sec-007). The
@@ -182,7 +182,7 @@ async def main() -> None:
     await _run_mcp_server(provider)
 
 
-def _build_provider(key: str) -> Any:
+def _build_provider(key: str) -> Any:  # pragma: no cover - Task 11 placeholder
     """Construct the provider client from the fd-3 key.
 
     NotImplementedError in the Slice-3 skeleton — concrete provider
@@ -194,7 +194,7 @@ def _build_provider(key: str) -> Any:
     raise NotImplementedError("_build_provider: Slice-3 final pass (Task 11)")
 
 
-async def _run_mcp_server(provider: Any) -> None:
+async def _run_mcp_server(provider: Any) -> None:  # pragma: no cover - Task 11 placeholder
     """Enter the MCP stdio JSON-RPC loop.
 
     NotImplementedError in the Slice-3 skeleton — the loop body lands

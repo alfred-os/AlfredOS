@@ -322,6 +322,34 @@ def test_sanitize_validator_error_handles_json_decode_error() -> None:
         assert "absolutely" not in sanitised
 
 
+@pytest.mark.asyncio
+async def test_dispatch_treats_non_object_json_as_retry_eligible() -> None:
+    """The dispatcher's validator rejects non-object JSON (e.g. a JSON
+    array or scalar at the top level) as a malformed response and
+    retries — same retry path as a parse failure.
+
+    This is a Slice-3 shape-check (full Pydantic schema validation lands
+    in Slice 4 once the schema-class serialiser threads through). The
+    closed contract: extractions are objects.
+    """
+    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+
+    array_response = _json_object_response('["not", "an", "object"]')
+    provider = AsyncMock()
+    provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
+    provider.complete = AsyncMock(return_value=array_response)
+
+    result = await dispatch_extraction(
+        content=b'{"title": "hello"}',
+        schema_json='{"type":"object"}',
+        schema_version=1,
+        provider=provider,
+    )
+    # All attempts produced a non-object → retry exhaustion → refusal.
+    assert result["kind"] == "typed_refusal"
+    assert result["reason"] == "cannot_extract"
+
+
 def test_sanitize_validator_error_strips_nested_input_values() -> None:
     """Adversarial input that itself looks like a prompt MUST NOT carry
     through to the retry prompt via the validator-error string.
