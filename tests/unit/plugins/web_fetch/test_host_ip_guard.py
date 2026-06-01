@@ -85,6 +85,14 @@ def _fake_getaddrinfo(ip: str) -> Any:
         # Reserved / unspecified.
         ("0.0.0.0", "reserved"),  # noqa: S104 -- IP-classification test, not bind address
         ("::", "reserved"),
+        # CR-146 major: RFC6598 shared-address space (100.64.0.0/10) is
+        # neither ``is_private`` nor ``is_reserved`` under
+        # ``ipaddress``, but ``is_global`` is False — the final
+        # catch-all classifies it as "reserved" so carrier-grade NAT
+        # ranges stay fail-closed.
+        ("100.64.0.1", "reserved"),
+        ("100.64.0.0", "reserved"),
+        ("100.127.255.254", "reserved"),
     ],
 )
 def test_classify_ip_refusal_internal_targets(ip: str, expected_reason: str) -> None:

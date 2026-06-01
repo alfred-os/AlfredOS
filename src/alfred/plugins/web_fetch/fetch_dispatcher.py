@@ -277,14 +277,30 @@ async def dispatch_web_fetch(
         # idiomatic fix.
         clean_headers: dict[str, str] = {name: outbound_dlp.scan(v) for name, v in headers.items()}
     except Exception:
-        domain_for_audit = urlparse(url).netloc
+        # CR-146 major: PRD §7.9b's fail-closed contract means a DLP
+        # outage MUST NOT let an unscanned URL flow into audit storage —
+        # the raw URL may carry secrets in its query string or userinfo
+        # that the DLP would have redacted on a successful scan. Writing
+        # the raw value here would invert the fail-closed intent: a
+        # broker outage becomes a secret-exfiltration path INTO the
+        # audit log. Substitute a redacted sentinel in the
+        # caller-visible ``url`` field. Host attribution still works
+        # via ``parsed.hostname`` (no userinfo, no port) so an operator
+        # can still pivot the audit row to the originating endpoint
+        # without seeing the unscanned query string.
+        #
+        # ``parsed.hostname`` over ``parsed.netloc`` because netloc
+        # includes ``userinfo@`` when the URL carries credentials —
+        # exactly the form we are defending against here.
+        parsed_for_audit = urlparse(url)
+        domain_for_audit = parsed_for_audit.hostname or ""
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
             schema_name="WEB_FETCH_FIELDS",
             event="tool.web.fetch",
             actor_user_id=user_id,
             subject={
-                "url": url,
+                "url": "<REDACTED_DLP_FAILURE>",
                 "domain": domain_for_audit,
                 "status_code": None,
                 "content_handle_id": None,
@@ -335,7 +351,25 @@ async def dispatch_web_fetch(
                     "plugin_id": config.plugin_id,
                     "manifest_domains": sorted(cap_event.manifest_domains),
                     "operator_allowed_domains": sorted(cap_event.operator_allowed_domains),
-                    "capped_domains": [e.domain for e in cap_event.capped_domains],
+                    # CR-146 major: BroadeningCapEvent.capped_domains
+                    # carries (domain, path_prefix) tuples — collapsing
+                    # to bare domains loses the path-prefix granularity
+                    # PRD §7.4 / §13 demand for the audit trail. With
+                    # two manifest entries on the same domain capped to
+                    # different prefixes (e.g. ``example.com/admin/``
+                    # vs ``example.com/private/``) the bare-domain form
+                    # was indistinguishable; the dict-form preserves
+                    # the forensic detail reviewers need to attribute
+                    # the cap back to a specific manifest entry. The
+                    # audit-row schema (``capped_domains`` field in
+                    # WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS)
+                    # is a frozenset of field names — the shape change
+                    # is permitted under the field name without a
+                    # schema update.
+                    "capped_domains": [
+                        {"domain": e.domain, "path_prefix": e.path_prefix}
+                        for e in cap_event.capped_domains
+                    ],
                     "correlation_id": correlation_id,
                 },
                 trust_tier_of_trigger="T0",
