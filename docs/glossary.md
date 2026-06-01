@@ -75,27 +75,406 @@ See [ADR-0010](adr/0010-canonical-user-id-and-listen-notify.md) and
 
 A type-level discriminant carried by every content blob inside
 AlfredOS, indicating how much the system trusts the content's
-provenance. Slice 2 ships **T2 only**; T1, T3, and the dual-LLM split
-are deferred to Slice 3 per [ADR-0013](adr/0013-defer-t1-t3-and-dual-llm.md).
+provenance. Slice 3 ships the full closed T0–T3 model per
+[ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+superseding [ADR-0013](adr/0013-defer-t1-t3-and-dual-llm.md).
 
 | Tier | Source | Slice |
 |---|---|---|
 | `T0` | System-internal synthetic content (the system created it) | All |
-| `T1` | Operator-tier — TUI ingress + outbound from the operator | Slice 3 |
+| `T1` | Operator-tier — TUI ingress + operator-attributable outbound | Slice 3 |
 | `T2` | Authenticated user — Discord DM from a bound snowflake | Slice 2 |
 | `T3` | Untrusted external ingestion — web fetch, email, file, MCP tool output | Slice 3 |
 
-Slice 2's contract: the orchestrator accepts `TaggedContent[T2]` only.
-Slice 3 introduces `TaggedContent[T3]` as a new type-level discriminant
-(not a runtime flag) and the quarantined LLM that processes T3 content
-without the privileged orchestrator ever seeing the raw bytes.
+Each tier is a Python `TrustTier` subclass with a `name` class attribute
+(`"T0"`–`"T3"`). The closed allowlist `_APPROVED_TIERS` in
+`src/alfred/security/tiers.py` rejects any subclass outside the four
+approved tiers at both the `tag()` call site and the `TaggedContent`
+field validator. See [T1 (operator tier)](#t1-operator-tier) and
+[T3 (untrusted-ingestion tier)](#t3-untrusted-ingestion-tier) for the
+tier-specific entries.
 
 **Not to be confused with [hook tier](#hook-tier)** — `system` /
 `operator` / `user-plugin` are dispatch-order + capability gates on
 hook subscribers, an entirely separate axis from content provenance.
 
-See [ADR-0008](adr/0008-llm-output-trust-tier.md) and
-[ADR-0013](adr/0013-defer-t1-t3-and-dual-llm.md).
+See [ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+[ADR-0008](adr/0008-llm-output-trust-tier.md), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## T1 (operator tier)
+
+The `T1` `TrustTier` subclass (`src/alfred/security/tiers.py`). Marks
+content that originates from the TUI adapter when the authenticated user
+holds the `operator` authorization role. T1 is the ingress tier for
+operator-interactive sessions — it is trusted above T2 (authenticated
+user) because the operator configures the system and therefore the system
+extends elevated provenance to their inputs.
+
+T1 is NOT applied to Discord messages: Discord is broadcast-shaped and
+every Discord DM reaches the orchestrator as T2 regardless of the sender's
+authorization role. T1 applies to TUI stdout only in Slice 3; the ingest
+path is `src/alfred/identity/_ingest.py::_ingest_tier()`. See spec §3.1
+and §3.6.
+
+See [trust tier](#trust-tier) and
+[ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md).
+
+## T3 (untrusted-ingestion tier)
+
+The `T3` `TrustTier` subclass (`src/alfred/security/tiers.py`). Marks
+content arriving from fully untrusted sources: web fetches, email, file
+ingest, and MCP tool output. T3 is the load-bearing tier for the
+dual-LLM split: the privileged orchestrator never sees raw T3 bytes;
+only the quarantined LLM subprocess processes them, and only via the
+structured-extraction path that emits `T3DerivedData` back to the
+orchestrator.
+
+Constructing `TaggedContent[T3]` is capability-gated. The public `tag(T3,
+...)` function always raises; authorised call sites use
+`tag_t3_with_nonce(content, caller_token=<nonce>)` with a
+`CapabilityGateNonce` injected at bootstrap. This is the nonce gate that
+closes import-time forgery attacks.
+
+See [trust tier](#trust-tier), [CapabilityGateNonce](#capabilitygatenonce),
+[tag_t3_with_nonce](#tag_t3_with_nonce), [dual-LLM split](#dual-llm-split),
+and [ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md).
+
+## TaggedContent[T]
+
+The generic Pydantic model (`src/alfred/security/tiers.py`) that carries
+content alongside its [trust tier](#trust-tier). Type parameter `T` is a
+`TrustTier` subclass; the model is frozen (`model_config = ConfigDict(frozen=True)`)
+so a caller cannot rebind the `tier` field after construction. The `tier`
+field serialises to its `name` string on the wire and resolves back via
+`_resolve_tier_from_wire` on parse. Cross-tier wire attacks — a payload
+claiming `T2` but constructed as `T3` — are rejected by the
+`_validate_tier` field validator that compares the resolved tier against
+the generic parameter.
+
+See [trust tier](#trust-tier), [AnyTaggedContent](#anytaggedcontent), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## AnyTaggedContent
+
+The `@runtime_checkable` Protocol (`src/alfred/security/tiers.py`)
+exposing a read-only view of any `TaggedContent[T]` regardless of the
+tier type parameter. Observer code — audit writers, DLP scanners, logging
+paths — accepts `AnyTaggedContent` rather than a concrete
+`TaggedContent[T]` to avoid `cast()` proliferation. Mutators accept the
+concrete generic. The four Protocol members (`content`, `source`, `tier`,
+`metadata`) are all read-only `@property` declarations; `metadata` returns
+`Mapping[str, Any]` (not `dict`) so observers cannot statically mutate the
+metadata. See spec §3.3.
+
+See [TaggedContent[T]](#taggedcontentt) and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## CapabilityGateNonce
+
+A per-process opaque object (`src/alfred/security/tiers.py`,
+`class CapabilityGateNonce`). Constructed once at process start by
+`alfred.bootstrap.nonce_factory.create_and_register_t3_nonce()` and
+distributed via dependency injection to exactly two authorised call sites:
+`StdioTransport` and `quarantine_host`. The `tag_t3_with_nonce` gate
+compares by Python `is` (identity), not `==` (equality), so a caller who
+copies or reconstructs the object cannot forge the nonce. The
+`gc.get_objects()` traversal attack is acknowledged as out-of-scope in the
+adversarial corpus (`tl_gc_traversal_out_of_scope`) — an adversary with
+heap access already has full process compromise.
+
+See [T3 (untrusted-ingestion tier)](#t3-untrusted-ingestion-tier),
+[tag_t3_with_nonce](#tag_t3_with_nonce), and
+[ADR-0017 Decision 1](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md).
+
+## tag_t3_with_nonce
+
+The capability-gated factory (`src/alfred/security/tiers.py`) for
+constructing `TaggedContent[T3]`. The caller must pass the exact
+`CapabilityGateNonce` registered at bootstrap; the module-level
+`_AUTHORIZED_T3_NONCE` slot holds the single authorised instance.
+Passing `None` or a different object raises `ValueError` with i18n key
+`security.tag_t3_unauthorized` and emits a structlog warning
+`security.t3_boundary.refused`. A forensic frame-derived caller label
+appears in the warning; it is NOT a security gate (frame introspection is
+forgeable via `sys.modules` manipulation), only a forensic aid.
+
+See [CapabilityGateNonce](#capabilitygatenonce),
+[T3 (untrusted-ingestion tier)](#t3-untrusted-ingestion-tier), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## ContentHandle
+
+A frozen opaque reference (`src/alfred/security/quarantine.py`) to T3
+content held in the plugin host's content store. Fields: `id` (UUID
+string), `source_url` (audit attribution only — not the fetched bytes),
+`fetch_timestamp` (timezone-aware `datetime`; naive datetimes are
+rejected at construction). The orchestrator holds `ContentHandle`
+references; it never dereferences the bytes directly — there is
+intentionally no `.content` field. The quarantined-LLM plugin
+dereferences via `ContentStoreBase.get(handle.id)`. Each `id` is
+single-use; the Redis-backed production store atomically deletes on first
+successful extract; a second extract raises `ContentHandleExpired`.
+
+See [T3DerivedData](#t3deriveddata), [ContentStoreBase](#contentstorebase),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## T3DerivedData
+
+A `NewType` over `dict[str, object]` (`src/alfred/security/quarantine.py`).
+Type-level provenance marker for structured data that originated from T3
+content and was extracted by the quarantined LLM. At runtime it is a plain
+dict; at type-check time mypy treats it as distinct, so `cast(dict, ...)` on
+a `T3DerivedData` value triggers the CI `check_tag_t3.py` grep rule.
+Callers must pass `T3DerivedData` through `downgrade_to_orchestrator()`
+before injecting into privileged prompts; that function holds the
+capability-gate check and audit row write.
+
+See [ContentHandle](#contenthandle), [dual-LLM split](#dual-llm-split),
+and [docs/subsystems/security.md](subsystems/security.md).
+
+## StdioTransport
+
+The sole Slice-3 implementation of the `PluginTransport` Protocol
+(`src/alfred/plugins/stdio_transport.py`). Wraps the `model_context_protocol`
+SDK; manages the subprocess lifecycle; applies the outbound DLP +
+secret-substitution pipeline and the inbound canary-scan pipeline on every
+JSON-RPC frame. Content-bearing inbound frames produce a `ContentHandle`
+(T3 bytes go to the content store; the orchestrator never sees them).
+Control-plane frames produce a `ControlResult`. The subprocess is launched
+with a scrubbed env (only `PATH` + i18n vars) and receives the provider key
+over fd-3 rather than via env.
+
+See [PluginTransport](#plugintransport), [AlfredPluginSession](#alfredpluginsession),
+and [docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## AlfredPluginSession
+
+The lifecycle owner for a single plugin subprocess
+(`src/alfred/plugins/session.py`). Public construction is via the
+`async classmethod create(manifest_raw=..., audit_writer=..., gate=...)`
+factory — `__init__` is internal and skips the `plugin.lifecycle.load_refused`
+audit row on manifest failure. The session parses the manifest, runs the
+capability gate at handshake, emits `plugin.lifecycle.loaded` on success,
+and enforces post-handshake method restrictions — a plugin sending
+`alfred/hooks.register` post-handshake is SIGKILLed (kill lands before
+the audit row so the `signal='SIGKILL'` claim is always true).
+
+See [StdioTransport](#stdiotransport), [PluginManifest](#pluginmanifest),
+and [docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## PluginManifest
+
+The validated TOML manifest model (`src/alfred/plugins/manifest.py`).
+Fields: `manifest_version: Literal[1]`, `plugin_id: str`, `subscriber_tier: str`,
+`sandbox_profile: str`, `platform: str | None` (reserved for Slice-4
+comms-MCP rewrite). The `subscriber_tier` field is the subscriber-capability
+axis (`system` / `operator` / `user-plugin`) and is explicitly NOT the
+content trust tier — passing `T0`–`T3` as `subscriber_tier` raises
+`ManifestTierError`. A manifest presenting `manifest_version != 1` raises
+`ManifestVersionError` before any capability-gate check.
+
+See [ManifestError](#manifesterror), [subscriber_tier](#subscriber_tier),
+and [docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## ManifestError
+
+The error hierarchy root for every plugin manifest rejection
+(`src/alfred/plugins/errors.py`). Leaf subtypes: `ManifestVersionError`
+(`alfred.manifest_version` ≠ 1), `ManifestTierError` (content trust tier
+supplied as `subscriber_tier`), and plain `ManifestError` (malformed TOML,
+missing required field, unknown subscriber_tier label). All three produce a
+`plugin.lifecycle.load_refused` audit row before propagating to the
+supervisor.
+
+See [PluginManifest](#pluginmanifest) and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## RealGate
+
+The production `CapabilityGate` implementation
+(`src/alfred/security/capability_gate/_gate.py`). Backed by Postgres +
+state.git (spec §8.1). Three check methods: `check()` (subscriber-tier
+dispatch gate), `check_plugin_load()` (handshake gate), and
+`check_content_clearance()` (content-tier axis). A 10-second heartbeat
+loop pings the backing store; after 6 missed heartbeats (60 seconds) the
+gate trips to fail-closed and emits a
+`supervisor.capability_gate_unavailable` audit row. Production code does
+not import `RealGate` directly; `alfred.bootstrap.gate_factory` selects
+between `RealGate` and `DevGate` based on `ALFRED_ENV`.
+
+See [GatePolicy](#gatepolicy), [GrantRow](#grantrow),
+[capability gate](glossary.md#capability-gate), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## GatePolicy
+
+The immutable in-memory grant snapshot for the capability gate
+(`src/alfred/security/capability_gate/policy.py`). A frozen dataclass
+holding a `frozenset[GrantRow]`. Hot-path `check*` methods on `RealGate`
+dispatch through `GatePolicy` without touching Postgres. Rebuilt
+atomically on every state.git HEAD change; the empty default snapshot
+denies all checks (fail-closed bootstrap state). The matching algorithm
+is O(n) over the grant set — the expected n is low hundreds for a busy
+deployment.
+
+See [RealGate](#realgate), [GrantRow](#grantrow), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## GrantRow
+
+A frozen dataclass (`src/alfred/security/capability_gate/policy.py`)
+representing one capability grant row. Fields: `plugin_id`,
+`subscriber_tier` (subscriber-capability axis — NOT content trust tier),
+`hookpoint` (dotted action name or `"*"` wildcard), `content_tier` (T0–T3
+or `None`), `proposal_branch` (state.git branch that approved this grant).
+`GrantRow.__post_init__` validates `subscriber_tier` against the closed
+vocabulary `{"system", "operator", "user-plugin"}` and `content_tier`
+against `{"T0", "T1", "T2", "T3", None}` at construction time to prevent
+upstream parser bugs from smuggling non-PRD tiers into the in-memory
+snapshot.
+
+See [GatePolicy](#gatepolicy) and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## PluginGrant
+
+The SQLAlchemy ORM model for the `plugin_grants` Postgres table
+(`src/alfred/memory/models.py`). Column-for-column mirror of `GrantRow`
+(migration `0008_plugin_grants`, PR-S3-0b). `RealGate._apply_grants()`
+reads from this table at startup and after every state.git HEAD change;
+`StorageBackend.upsert_grant` / `revoke_grant` writes back to it.
+
+See [GrantRow](#grantrow) and [docs/subsystems/security.md](subsystems/security.md).
+
+## CapabilityGateSync
+
+*Alias for the `CapabilityGateSyncRow` ORM and `capability_gate_sync`
+table.* The Postgres table that persists the last-applied state.git commit
+hash so `RealGate` can skip a rebuild when the HEAD has not changed. One
+row per process; `StorageBackend.get_sync_hash()` / `set_sync_hash()`
+access it.
+
+See [RealGate](#realgate) and [docs/subsystems/security.md](subsystems/security.md).
+
+## InboundContentScanner
+
+The inbound DLP analog for plugin subprocesses
+(`src/alfred/plugins/inbound_scanner.py`). Scans raw JSON-RPC frames (as
+bytes, not decoded strings) for operator-registered canary tokens. Distinct
+from `OutboundDlp`: the disposition is always a `CanaryTrip` security event
+(quarantine trigger), never redact-and-continue. `StdioTransport.dispatch`
+wraps calls in `asyncio.to_thread` to keep the event loop responsive on
+large frames. The scanner matches bytes patterns — compiled with
+`re.escape` — so `CanaryTrip.frame_offset` is always a true byte offset,
+correct even for multi-byte UTF-8 content.
+
+See [OutboundDlp](glossary.md#outbounddlp) and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## ContentStoreBase
+
+The Protocol for T3 content stores (`src/alfred/plugins/content_store_base.py`).
+Methods: `put(handle, tagged_content)`, `get(handle_id)`, `delete(handle_id)`.
+The store persists the full `TaggedContent[T3]` wrapper (not raw bytes) so
+the nonce and provenance are preserved on retrieval; persisting raw bytes
+would silently downgrade T3 → untagged on read-back (tier-laundering
+vulnerability). Slice-3 ships `InMemoryContentStore` for unit tests and
+pre-Redis bootstrap; the Redis-backed production store lands in PR-S3-5.
+
+See [ContentHandle](#contenthandle) and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## DispatchResult
+
+The return-type union of `StdioTransport.dispatch()`
+(`src/alfred/plugins/transport.py`). Three shapes, branched by `isinstance`
+at call sites (no Pydantic discriminator field):
+
+- `ContentHandle` — content-bearing tools (e.g. `web.fetch`); T3 bytes
+  are in the content store, the caller receives the opaque handle only.
+- `ExtractionResult` — `quarantine.extract` calls; itself a union of
+  `Extracted` and `TypedRefusal`.
+- `ControlResult` — lifecycle, config, health-check methods; no T3 content.
+
+See [StdioTransport](#stdiotransport) and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## PluginTransport
+
+The `@runtime_checkable` Protocol (`src/alfred/plugins/transport.py`) every
+plugin transport implements. Surface: `async dispatch(method, params) ->
+DispatchResult` and `async close()`. Slice 3 ships `StdioTransport` as the
+sole implementation. HTTP transport is deferred to Slice 5+; in-process
+`MemoryTransport` is permanently excluded (would collapse process-boundary
+isolation). The supervisor and orchestrator hold a `PluginTransport`
+reference and do not import the concrete class.
+
+See [StdioTransport](#stdiotransport) and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## CircuitBreaker / BreakerState / CircuitBreakerState
+
+*Slice 3+ terms.* The circuit-breaker pattern governing quarantined-LLM
+subprocess restarts in the plugin supervisor. `BreakerState` is the enum
+of states: `CLOSED` (normal), `OPEN` (tripped — quarantine in effect),
+`HALF_OPEN` (recovery probe). `CircuitBreakerState` is the frozen
+dataclass tracking `trip_count`, `last_trip_at`, and the current
+`BreakerState`. The full supervisor with circuit-breaker logic ships in
+PR-S3-3b; the audit schema fields `breaker_state` and `trip_count` are
+defined in PR-S3-0a's `PLUGIN_LIFECYCLE_QUARANTINED_FIELDS`.
+
+See [docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## subscriber_tier
+
+The subscriber-capability axis on hook subscriptions and plugin manifests.
+Closed vocabulary: `system` / `operator` / `user-plugin`. Determines
+dispatch order (system → operator → user-plugin) and is the grant axis
+the `CapabilityGate` checks. **Not the same as content trust tier
+(T0–T3).** Conflating the two is the tier-laundering bug class that
+`ManifestTierError` and the `GatePolicy` validation guard against. See
+[ADR-0017 Decision 3](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md).
+
+See [hook tier](#hook-tier) and [GrantRow](#grantrow).
+
+## quarantine (process)
+
+The subprocess isolation mechanism for the quarantined LLM in Slice 3.
+The quarantined LLM runs as an MCP stdio subprocess under a dedicated
+`alfred-quarantine` OS user with a scrubbed environment (only `PATH` + i18n
+vars). The provider key is delivered over fd-3 rather than via env. This is
+*hybrid isolation* — process-level UID separation without container
+isolation. Container isolation (via `bwrap` policy) ships in Slice 4 per
+[ADR-0015](adr/0015-slice4-containerised-quarantined-llm.md). The
+`ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` guard in `bin/alfred-plugin-launcher.sh`
+enforces `$XDG_RUNTIME_DIR/alfred/plugin-<id>/` as the write root until the
+Slice-4 sandbox policy lands.
+
+See [dual-LLM split](#dual-llm-split),
+[ADR-0017 Decision 4](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+and [docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## dual-LLM split
+
+The architectural invariant (PRD §7.1) that divides LLM inference into two
+roles: the **privileged orchestrator** (sees T0–T2 content only, issues tool
+calls, manages personas) and the **quarantined LLM** (the sole legitimate
+processor of T3 content, runs as an MCP stdio subprocess, emits structured
+`ExtractionResult` only — never tool calls, never free text fed back as
+instructions). The split makes T3 isolation a process boundary rather than
+a taint annotation. The quarantined LLM cannot exfiltrate secrets because
+its subprocess env is scrubbed and it cannot call tools directly.
+
+Without the dual-LLM split, T3-tagging is taint annotation only and
+provides no actual isolation guarantee — the reason
+[ADR-0013](adr/0013-defer-t1-t3-and-dual-llm.md) deferred T3 rather
+than shipping it without the split. The split ships in Slice 3 together
+with the MCP transport that makes it possible (see
+[ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md)).
+
+See [quarantine (process)](#quarantine-process), [T3 (untrusted-ingestion tier)](#t3-untrusted-ingestion-tier),
+and [docs/subsystems/security.md](subsystems/security.md).
 
 ## Action
 
