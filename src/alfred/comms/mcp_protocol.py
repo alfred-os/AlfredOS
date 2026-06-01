@@ -5,7 +5,7 @@ This Protocol is DISTINCT from the in-process CommsAdapter Protocol at
 src/alfred/comms/adapter.py. Both coexist through Slice 3.
 
 The four methods pin the minimum wire shape the reference test plugin
-(plugins/alfred-comms-test/) validates against:
+(plugins/alfred_comms_test/) validates against:
 
 | Direction              | Method            | Payload                                            |
 |------------------------|-------------------|----------------------------------------------------|
