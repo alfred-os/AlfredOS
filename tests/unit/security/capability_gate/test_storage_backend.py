@@ -217,6 +217,121 @@ async def test_load_grants_maps_rows_to_grant_row() -> None:
     )
 
 
+async def test_load_grants_passes_limit_to_sql_query() -> None:
+    """perf-002: the ``load_grants`` SQL carries ``LIMIT :row_cap`` (10_000).
+
+    An unbounded ``SELECT * FROM plugin_grants`` is a denial-of-service
+    risk on a grant-table explosion. The cap is several orders of
+    magnitude above the expected count, so legitimate operators never
+    notice; pinning it here protects against a future refactor silently
+    dropping the LIMIT clause.
+    """
+    from alfred.security.capability_gate.backend import (
+        _LOAD_GRANTS_ROW_CAP,
+        PostgresBackend,
+    )
+
+    factory, session = _fake_session_factory()
+    backend = PostgresBackend(session_factory=factory)
+    await backend.load_grants()
+
+    session.execute.assert_awaited_once()
+    sql_arg = session.execute.await_args.args[0]
+    assert "LIMIT :row_cap" in str(sql_arg), (
+        f"load_grants SQL missing LIMIT clause; got: {sql_arg!s}"
+    )
+    # The cap is bound as a parameter so DB-level prepared-statement
+    # caching works and the value is auditable from the call site.
+    params = session.execute.await_args.args[1]
+    assert params == {"row_cap": _LOAD_GRANTS_ROW_CAP}
+
+
+async def test_load_grants_emits_warning_on_row_cap_hit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """perf-002: hitting the row cap emits ``capability_gate.load_grants.row_cap_hit``.
+
+    A returned row count equal to the cap means the table held >= cap
+    rows and the snapshot is truncated — the in-memory policy will
+    silently lose grants. CLAUDE.md hard rule #7 (no silent failures):
+    the warning surfaces the contract violation so the operator's
+    alerting catches it before a real grant is denied unnoticed.
+    """
+    import structlog
+
+    from alfred.security.capability_gate.backend import (
+        _LOAD_GRANTS_ROW_CAP,
+        PostgresBackend,
+    )
+
+    # Build exactly _LOAD_GRANTS_ROW_CAP minimal rows so the cap-hit
+    # branch fires. The closed-domain GrantRow constructor would object
+    # to bogus tier strings; we feed valid-looking ones.
+    rows: list[MagicMock] = []
+    for i in range(_LOAD_GRANTS_ROW_CAP):
+        row = MagicMock()
+        row.plugin_id = f"plugin.{i}"
+        row.subscriber_tier = "operator"
+        row.hookpoint = "tool.web.fetch"
+        row.content_tier = None
+        row.proposal_branch = f"proposal/policy-grant-{i}"
+        rows.append(row)
+
+    factory, session = _fake_session_factory()
+    result_mock = MagicMock()
+    result_mock.fetchall.return_value = rows
+    session.execute = AsyncMock(return_value=result_mock)
+
+    backend = PostgresBackend(session_factory=factory)
+    with structlog.testing.capture_logs() as log_entries:
+        result = await backend.load_grants()
+
+    assert len(result) == _LOAD_GRANTS_ROW_CAP
+    cap_hits = [
+        e for e in log_entries if e.get("event") == "capability_gate.load_grants.row_cap_hit"
+    ]
+    assert cap_hits, (
+        f"Expected capability_gate.load_grants.row_cap_hit warning; "
+        f"got events: {[e.get('event') for e in log_entries]}"
+    )
+    entry = cap_hits[0]
+    assert entry.get("log_level") == "warning"
+    assert entry.get("row_cap") == _LOAD_GRANTS_ROW_CAP
+    assert entry.get("row_count") == _LOAD_GRANTS_ROW_CAP
+
+
+async def test_load_grants_no_warning_under_row_cap() -> None:
+    """A normal-shaped grant set (well under the cap) emits NO cap-hit warning.
+
+    The warning is reserved for the explosion shape — emitting it on
+    every healthy rebuild would train operators to ignore it.
+    """
+    import structlog
+
+    from alfred.security.capability_gate.backend import PostgresBackend
+
+    row = MagicMock()
+    row.plugin_id = "plugin.normal"
+    row.subscriber_tier = "operator"
+    row.hookpoint = "tool.web.fetch"
+    row.content_tier = None
+    row.proposal_branch = "proposal/policy-grant-x"
+
+    factory, session = _fake_session_factory()
+    result_mock = MagicMock()
+    result_mock.fetchall.return_value = [row]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    backend = PostgresBackend(session_factory=factory)
+    with structlog.testing.capture_logs() as log_entries:
+        await backend.load_grants()
+
+    cap_hits = [
+        e for e in log_entries if e.get("event") == "capability_gate.load_grants.row_cap_hit"
+    ]
+    assert not cap_hits, f"Healthy rebuild should not emit cap-hit warning; got: {cap_hits!r}"
+
+
 async def test_upsert_grant_uses_correct_on_conflict_target() -> None:
     """``upsert_grant`` issues INSERT … ON CONFLICT (plugin_id, hookpoint, subscriber_tier).
 

@@ -40,9 +40,10 @@ import datetime as dt
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Protocol, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
 import sqlalchemy as sa
+import structlog
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -50,6 +51,22 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from alfred.security.capability_gate.policy import GrantRow
+
+_log = structlog.get_logger(__name__)
+
+# perf-002: hard cap on the ``SELECT ... FROM plugin_grants`` row count.
+# 10_000 is several orders of magnitude above the expected grant count for
+# a busy Slice-3+ deployment (low hundreds), so legitimate operators
+# never hit the cap. If the load *does* hit the cap, it signals one of:
+#  - a grant-table explosion (bug in the proposal flow / migration), or
+#  - an attacker enumerating grants via a runaway proposal loop.
+# Either way the supervisor needs to see it loudly — :meth:`load_grants`
+# emits a structlog warning when the returned row count equals the cap.
+#
+# Full cursor-based pagination is deferred to Slice 4+ (the expected
+# count makes pagination premature today); the warning + the cap together
+# are the Slice-3 fail-loud contract per CLAUDE.md hard rule #7.
+_LOAD_GRANTS_ROW_CAP: Final[int] = 10_000
 
 
 @runtime_checkable
@@ -175,16 +192,38 @@ class PostgresBackend:
         are historical attribution kept for audit-graph traversal.
         Letting any non-approved row leak into the in-memory policy would
         be a silent privilege escalation — CLAUDE.md hard rule #7.
+
+        perf-002: the SELECT is capped at :data:`_LOAD_GRANTS_ROW_CAP`
+        (10_000) rows — several orders of magnitude above the expected
+        grant count. If the cap is hit the method emits the
+        ``capability_gate.load_grants.row_cap_hit`` warning so operators
+        see the grant-table-explosion shape before the next rebuild
+        loads the same truncated snapshot. Full cursor pagination is
+        deferred to Slice 4+; the warning is the Slice-3 fail-loud
+        contract.
         """
         async with self._session() as session:
             result = await session.execute(
                 sa.text(
                     "SELECT plugin_id, subscriber_tier, hookpoint, "
                     "content_tier, proposal_branch "
-                    "FROM plugin_grants WHERE state = 'approved'"
-                )
+                    "FROM plugin_grants WHERE state = 'approved' "
+                    "LIMIT :row_cap"
+                ),
+                {"row_cap": _LOAD_GRANTS_ROW_CAP},
             )
             rows = result.fetchall()
+        if len(rows) >= _LOAD_GRANTS_ROW_CAP:
+            # The cap is a release-blocker shape: every subsequent
+            # rebuild will see the same truncated snapshot until the
+            # underlying table shrinks below the cap. Emit at WARNING
+            # level so the operator's alerting catches it without a
+            # silent demotion of the in-memory policy.
+            _log.warning(
+                "capability_gate.load_grants.row_cap_hit",
+                row_cap=_LOAD_GRANTS_ROW_CAP,
+                row_count=len(rows),
+            )
         return frozenset(
             GrantRow(
                 plugin_id=r.plugin_id,
