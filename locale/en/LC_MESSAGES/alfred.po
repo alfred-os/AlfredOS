@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-01 23:39+0100\n"
+"POT-Creation-Date: 2026-06-01 23:47+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -186,53 +186,53 @@ msgstr ""
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:199
+#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:222
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:200
+#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:223
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:221
+#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:244
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/cli/main.py:77
+#: src/alfred/cli/main.py:82
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:136
+#: src/alfred/cli/main.py:159
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:139
+#: src/alfred/cli/main.py:162
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:140
+#: src/alfred/cli/main.py:163
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:141
+#: src/alfred/cli/main.py:164
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:142
+#: src/alfred/cli/main.py:165
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:143
+#: src/alfred/cli/main.py:166
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:144
+#: src/alfred/cli/main.py:167
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:145
+#: src/alfred/cli/main.py:168
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 

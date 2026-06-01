@@ -41,7 +41,12 @@ from alfred.cli._bootstrap import (
     install_identity_factories_for_settings,
     load_settings_or_die,
 )
+from alfred.cli.audit import audit_app
+from alfred.cli.config import config_app
 from alfred.cli.discord_cmd import discord_app
+from alfred.cli.plugin import plugin_app
+from alfred.cli.supervisor import supervisor_app
+from alfred.cli.web import web_app
 from alfred.comms.adapter import build_tui_adapter
 from alfred.i18n import set_language, t
 from alfred.identity import (
@@ -101,6 +106,24 @@ app.add_typer(user_app, name="user", callback=_user_bootstrap)
 # construct their own dependency graph inside the callback so the
 # import cost only lands when an operator actually uses the surface.
 app.add_typer(discord_app, name="discord")
+
+# PR-S3-6 Component G: register the Slice-3 Typer groups. Each sub-app
+# already carries its own ``help=t(...)`` on its ``typer.Typer(...)``
+# constructor so the catalog routes the operator-facing strings once
+# at definition time (CLAUDE.md i18n rule #1). The CLI is the single
+# discovery surface — registration here is what makes
+# ``alfred plugin|web|config|supervisor|audit`` reachable for an
+# operator who has only the entry-point on their PATH.
+#
+# Order matches the plan section ordering (Components A→E in PR-S3-6
+# §1633-1671); test_subapp_appears_in_root_help asserts each one is
+# present in ``alfred --help`` so any silent drop here surfaces as a
+# unit-test red.
+app.add_typer(plugin_app, name="plugin")
+app.add_typer(web_app, name="web")
+app.add_typer(config_app, name="config")
+app.add_typer(supervisor_app, name="supervisor")
+app.add_typer(audit_app, name="audit")
 
 
 # ---------------------------------------------------------------------------
