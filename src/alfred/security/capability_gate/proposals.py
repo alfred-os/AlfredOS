@@ -48,15 +48,20 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
 from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry, get_registry
 
+# CR reviewer F1: the proposal flow and the gate share a single
+# audit-sink Protocol. See ``_audit_protocols`` for the rationale; the
+# proposal-flow audit-sink seam is the same shape as the gate's.
+from ._audit_protocols import _AuditSink
+
 if TYPE_CHECKING:
-    from alfred.security.capability_gate.backend import StorageBackend
+    from .backend import StorageBackend
 
 _log = structlog.get_logger(__name__)
 
@@ -113,34 +118,6 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
             refusable_tiers=frozenset(),
             fail_closed=False,
         )
-
-
-@runtime_checkable
-class _AuditSink(Protocol):
-    """Structural seam matching :meth:`AuditWriter.append_schema`.
-
-    Mirrors the same Protocol the :class:`RealGate` audit emit path uses
-    — production wires the real :class:`alfred.audit.log.AuditWriter`
-    and tests inject a spy with the same shape. Kept private to this
-    module so the proposal-flow public surface (just
-    :func:`create_proposal_branch` + the stub) does not leak the audit
-    subsystem's dependency graph.
-    """
-
-    async def append_schema(
-        self,
-        *,
-        fields: frozenset[str],
-        schema_name: str,
-        event: str,
-        actor_user_id: str | None,
-        subject: dict[str, Any],
-        trust_tier_of_trigger: str,
-        result: str,
-        cost_estimate_usd: float,
-        trace_id: str,
-    ) -> None:
-        raise NotImplementedError  # pragma: no cover
 
 
 async def create_proposal_branch(
