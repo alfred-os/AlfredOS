@@ -820,3 +820,130 @@ explicitly down the call stack. Each persona turn sets the
 `ContextVar` to the user's language at the orchestrator boundary;
 asyncio.TaskGroup copies the context per child, so concurrent turns
 do not leak language state across users.
+
+## Supervisor
+
+The top-level coordinator that owns plugin process lifecycle, the
+per-component [circuit breaker](#circuitbreaker--breakerstate--circuitbreakerstate) map, and the
+[CapabilityGateMonitor](#capabilitygatemonitor). Implemented at
+`src/alfred/supervisor/core.py::Supervisor`. The supervisor holds an
+`asyncio.TaskGroup` open for its entire lifetime via a long-lived
+internal `_run()` coroutine; every supervised plugin stdio-reader
+task lives inside this group, so a `stop()` call cascade-cancels all
+reader tasks cleanly. The supervisor exposes `reset_breaker()` as the
+operator API for manual CLOSED-state recovery; the CLI surface
+(`alfred supervisor reset <component>`) wires to this method in
+PR-S3-6. Breaker state survives restarts via Postgres persistence
+(`load_all_breakers()` at bootstrap). The supervisor's own audit rows
+carry `trust_tier_of_trigger="T0"` and `actor_persona="supervisor"`.
+
+See [ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+spec §4.8 and §10, and [docs/subsystems/supervisor.md](subsystems/supervisor.md).
+
+## DeadlineWrapper
+
+`asyncio.timeout` wrapper for orchestrator action paths
+(`src/alfred/supervisor/deadline.py::DeadlineWrapper`). Construction
+takes `deadline_seconds` (default 30 s per spec §10.5). Each
+`DeadlineWrapper.run()` call wraps the target async callable in its own
+`asyncio.timeout` block; only `asyncio.TimeoutError` is taken as "deadline
+exceeded" — a genuine `CancelledError` from an operator or system shutdown
+propagates unchanged (core-002). The wrapper itself is side-effect-free: it
+emits no audit rows. The `supervisor.action_timeout` audit row is the
+orchestrator's responsibility, written via an autocommit writer (independent
+of the session-bound transaction that the timeout rolls back), per the
+CR-S3-2 R3 lesson on autocommit-vs-session-bound audit write attribution.
+
+See [docs/subsystems/supervisor.md](subsystems/supervisor.md) and
+[ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md).
+
+## CapabilityGateMonitor
+
+Supervisor-side health monitor for the capability gate
+(`src/alfred/supervisor/capability_monitor.py::CapabilityGateMonitor`).
+Polls `gate.is_backing_store_available()` once per heartbeat cycle and
+emits `supervisor.capability_gate_unavailable` audit rows on state
+transitions only: `entering_fail_closed` when the backing store first
+becomes unreachable, `exiting_fail_closed` when it recovers. Both rows
+share a per-outage `_outage_correlation_id` (err-014) so the audit graph
+can answer "how long did this outage last" with a simple `GROUP BY` join.
+Distinct from `RealGate`'s internal heartbeat (which owns the 60-second
+fail-closed window enforcement): the monitor adds the transition-only rows
+the operator dashboard joins on. Emits carry `trust_tier_of_trigger="T0"`,
+`actor_persona="supervisor"`, and `actor_user_id=None` — no human actor
+initiates a self-healing probe.
+
+See [RealGate](glossary.md#realgate),
+[docs/subsystems/supervisor.md](subsystems/supervisor.md), and
+spec §8.1 / §10.4.
+
+## PluginLifecycle
+
+Thin orchestrator that wires the `CircuitBreaker` state machine and audit
+row emission together for plugin load and crash events
+(`src/alfred/supervisor/plugin_lifecycle.py::PluginLifecycle`). Two public
+methods: `start_plugin()` (gate-check at load; emits `plugin.lifecycle.loaded`
+or `plugin.lifecycle.load_refused`) and `on_crash()` (records failure in the
+breaker; emits `plugin.lifecycle.crashed` when the breaker stays CLOSED, or
+`plugin.lifecycle.quarantined` when the breaker trips to OPEN). Subprocess
+spawning, SIGKILL, and hookpoint invocation are NOT `PluginLifecycle`
+responsibilities — they belong to `Supervisor` and the breaker hookpoint
+helpers respectively, keeping the call graph one-directional:
+`Supervisor → PluginLifecycle → CircuitBreaker / AuditWriter`.
+
+See [CircuitBreaker / BreakerState / CircuitBreakerState](#circuitbreaker--breakerstate--circuitbreakerstate),
+[docs/subsystems/supervisor.md](subsystems/supervisor.md), and spec §10.3.
+
+## supervisor.action_timeout hookpoint
+
+Fires when an orchestrator action exceeds its deadline (as enforced by
+[`DeadlineWrapper`](#deadlinewrapper)). `subscribable_tiers={"system"}`;
+`refusable_tiers=frozenset()` (the deadline has already fired; refusal has
+no effect on the timed-out action); `fail_closed=False` (a crashing
+subscriber is observability noise, not a security regression). Registered
+by `Supervisor.__init__` from the `_register_hookpoints()` method
+(`src/alfred/supervisor/core.py`) per core-010's rule against import-time
+module-level hookpoint registration. The orchestrator emits this hookpoint
+via an autocommit audit writer, independent of the rolled-back turn session.
+
+See [`Hookpoint`](glossary.md#hookpoint),
+[docs/subsystems/supervisor.md](subsystems/supervisor.md), and spec §14.
+
+## supervisor.breaker.tripped / supervisor.breaker.reset hookpoints
+
+Two hookpoints that fire on circuit breaker state transitions
+(`src/alfred/supervisor/core.py`, `_register_hookpoints()`).
+
+- `supervisor.breaker.tripped` — fires after `CircuitBreaker._trip()`
+  transitions the breaker to OPEN. `subscribable_tiers={"system"}`;
+  `refusable_tiers=frozenset()` (the breaker has already tripped);
+  `fail_closed=False`.
+- `supervisor.breaker.reset` — fires after an operator-triggered
+  `Supervisor.reset_breaker()` call completes. `subscribable_tiers={"system",
+  "operator"}` (operator dashboards may subscribe); `refusable_tiers=frozenset()`
+  (refusal would defeat the operator override); `fail_closed=False`.
+
+Neither hookpoint spawns fire-and-forget tasks. Both are awaited inside the
+supervisor's `TaskGroup` so subscriber exceptions surface (err-001 /
+core-004). Hookpoint invocation is the `PluginLifecycle` / `Supervisor`
+caller's responsibility, not the `CircuitBreaker` state machine's — keeping
+the breaker a pure domain object.
+
+See [`Hookpoint`](glossary.md#hookpoint),
+[CircuitBreaker / BreakerState / CircuitBreakerState](#circuitbreaker--breakerstate--circuitbreakerstate),
+and [docs/subsystems/supervisor.md](subsystems/supervisor.md).
+
+## supervisor.capability_gate_unavailable hookpoint
+
+Fires on gate fail-closed entry and exit transitions. Emitted by
+`CapabilityGateMonitor._emit_transition()` via
+`AuditWriter.append_schema(event="supervisor.capability_gate_unavailable", ...)`.
+The `state_transition` subject field is `"entering_fail_closed"` or
+`"exiting_fail_closed"`; the `correlation_id` field links the two rows of the
+same outage window. `subscribable_tiers={"system"}` per spec §14;
+`fail_closed=False`. The outage timeline the operator dashboard renders is
+derived from these rows via a `GROUP BY correlation_id` join on the
+`audit_log` table.
+
+See [`CapabilityGateMonitor`](#capabilitygatemonitor),
+[docs/subsystems/supervisor.md](subsystems/supervisor.md), and spec §10.4.

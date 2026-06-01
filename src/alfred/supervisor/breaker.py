@@ -371,7 +371,7 @@ class CircuitBreaker:
 # Hookpoint invocation helpers (Task 9) — err-001 / core-004
 # ---------------------------------------------------------------------------
 #
-# Both helpers are intentionally **module-level coroutines** rather than
+# All helpers are intentionally **module-level coroutines** rather than
 # methods on :class:`CircuitBreaker`. The breaker's state machine is a pure
 # domain object (no I/O, no awaits); the hookpoint helpers do I/O (audit
 # emit via the dispatcher's sink) and so live one layer above the state
@@ -386,6 +386,67 @@ class CircuitBreaker:
 # * removes the temptation to spawn ``asyncio.create_task(self._invoke(...))``
 #   from inside ``_trip`` — the helpers are ``async`` and must be awaited by
 #   the caller's ``TaskGroup`` (err-001 / core-004).
+#
+# **Shared helper (S3-3b-R2).** Every supervisor-namespace hookpoint
+# invocation flows through :func:`_invoke_supervisor_hookpoint` so the
+# err-001 / core-004 no-fire-and-forget invariant lives in **one** place:
+# every chain enters via ``await invoke(...)``, never
+# ``loop.create_task(invoke(...))``. The thin per-hookpoint helpers below
+# only build their ``HookContext.input`` payload and delegate.
+
+
+async def _invoke_supervisor_hookpoint(
+    name: str,
+    payload: dict[str, object],
+    *,
+    fail_closed: bool = False,
+) -> None:
+    """Build a ``HookContext`` for ``name`` + ``payload`` and ``await invoke(...)``.
+
+    Shared helper for every supervisor-namespace hookpoint invocation. Pins
+    three invariants in ONE place (S3-3b-R2):
+
+    * **No fire-and-forget.** The helper is ``async`` and uses
+      ``await invoke(...)``; callers stay inside the supervisor's
+      ``TaskGroup`` so subscriber exceptions surface (err-001 / core-004).
+    * **Fresh correlation id per invocation.** Each call mints a new UUID
+      that is BOTH the ``ctx.correlation_id`` and the ``payload["correlation_id"]``
+      field — concurrent crash handlers never collapse onto a single audit
+      row in readers that index by ``correlation_id`` (core-005).
+    * **``invoke`` argv shape.** ``name`` is the first positional, ``ctx``
+      the second; ``kind`` + ``fail_closed`` are keyword-only. The
+      dispatcher does not accept ``hookpoint=`` as a keyword (core-004).
+
+    Args:
+        name: The hookpoint identifier. Must match a registered entry in
+            ``Supervisor._register_hookpoints``.
+        payload: The subject payload. A ``"correlation_id"`` field is
+            injected by this helper — callers MUST NOT supply it.
+        fail_closed: Defaults to ``False`` — supervisor hookpoints are
+            observability-shaped; a crashing subscriber must not stall the
+            supervisor. Override only for security-blocking hookpoints
+            where a subscriber refusal is the desired safety property.
+    """
+    # Deferred import: ``alfred.hooks.invoke`` re-exports through
+    # ``alfred.hooks.registry`` which in turn imports ``alfred.security`` —
+    # eagerly pulling that at ``alfred.supervisor.breaker`` import time would
+    # widen the import graph for the pure state-machine tests that do not
+    # need it. Local import keeps the state-machine path free of the hook
+    # subsystem when the helper is never called.
+    from alfred.hooks.context import HookContext
+    from alfred.hooks.invoke import invoke
+
+    correlation_id = str(_uuid.uuid4())
+    ctx: HookContext[dict[str, object]] = HookContext(
+        action_id=name,
+        hookpoint=name,
+        input={**payload, "correlation_id": correlation_id},
+        correlation_id=correlation_id,
+        kind="post",
+    )
+    # core-004 — ``invoke``'s first positional is ``name``; never
+    # ``hookpoint=`` keyword (that arg name does not exist on ``invoke``).
+    await invoke(name, ctx, kind="post", fail_closed=fail_closed)
 
 
 async def invoke_breaker_tripped_hookpoint(
@@ -428,34 +489,15 @@ async def invoke_breaker_tripped_hookpoint(
     callers that build the audit row from the same fields keep the audit
     schema and the hookpoint subject in lock-step.
     """
-    # Deferred import: ``alfred.hooks.invoke`` re-exports through
-    # ``alfred.hooks.registry`` which in turn imports ``alfred.security`` —
-    # eagerly pulling that at ``alfred.supervisor.breaker`` import time would
-    # widen the import graph for the pure state-machine tests that do not
-    # need it. Local import keeps the state-machine path free of the hook
-    # subsystem when the helper is never called.
-    from alfred.hooks.context import HookContext
-    from alfred.hooks.invoke import invoke
-
-    # core-005 / freshness — each invocation mints its own correlation id so
-    # concurrent crash handlers do not collapse onto a single audit row.
-    correlation_id = str(_uuid.uuid4())
-    ctx: HookContext[dict[str, object]] = HookContext(
-        action_id="supervisor.breaker.tripped",
-        hookpoint="supervisor.breaker.tripped",
-        input={
+    await _invoke_supervisor_hookpoint(
+        "supervisor.breaker.tripped",
+        {
             "component_id": component_id,
             "trip_count": trip_count,
             "last_failure_type": last_failure_type,
             "breaker_state": BreakerState.OPEN.value,
-            "correlation_id": correlation_id,
         },
-        correlation_id=correlation_id,
-        kind="post",
     )
-    # core-004 — ``invoke``'s first positional is ``name``; never
-    # ``hookpoint=`` keyword (that arg name does not exist on ``invoke``).
-    await invoke("supervisor.breaker.tripped", ctx, kind="post", fail_closed=False)
 
 
 async def invoke_breaker_reset_hookpoint(
@@ -483,27 +525,128 @@ async def invoke_breaker_reset_hookpoint(
 
     Mirrors :data:`alfred.audit.audit_row_schemas.SUPERVISOR_BREAKER_RESET_FIELDS`.
     """
-    # See ``invoke_breaker_tripped_hookpoint`` for the deferred-import
-    # rationale.
-    from alfred.hooks.context import HookContext
-    from alfred.hooks.invoke import invoke
-
-    correlation_id = str(_uuid.uuid4())
-    ctx: HookContext[dict[str, object]] = HookContext(
-        action_id="supervisor.breaker.reset",
-        hookpoint="supervisor.breaker.reset",
-        input={
+    await _invoke_supervisor_hookpoint(
+        "supervisor.breaker.reset",
+        {
             "component_id": component_id,
             "old_state": old_state,
             "new_state": new_state,
             "trip_count": trip_count,
             "operator_user_id": operator_user_id,
-            "correlation_id": correlation_id,
         },
-        correlation_id=correlation_id,
-        kind="post",
     )
-    await invoke("supervisor.breaker.reset", ctx, kind="post", fail_closed=False)
+
+
+async def invoke_supervisor_action_timeout_hookpoint(
+    *,
+    user_id: str,
+    deadline_seconds: float,
+    phase_at_timeout: str,
+) -> None:
+    """Invoke ``supervisor.action_timeout`` via the hook dispatcher.
+
+    Called by the orchestrator's deadline arm
+    (:meth:`alfred.orchestrator.core.Orchestrator._emit_supervisor_timeout_row`)
+    after the autocommit audit row lands, so subscribers see the same
+    transition the audit graph sees. Awaited inside the orchestrator's
+    request-handling coroutine so subscriber exceptions surface (err-001 /
+    core-004 — fire-and-forget forbidden).
+
+    Hookpoint metadata (registered by ``Supervisor.__init__``):
+        - ``subscribable_tiers``: system-only.
+        - ``refusable_tiers``: empty — the deadline has already fired; a
+          refusal would not roll back the timeout.
+        - ``fail_closed=False``.
+
+    Mirrors :data:`alfred.audit.audit_row_schemas.SUPERVISOR_ACTION_TIMEOUT_FIELDS`.
+    """
+    await _invoke_supervisor_hookpoint(
+        "supervisor.action_timeout",
+        {
+            "user_id": user_id,
+            "deadline_seconds": deadline_seconds,
+            "phase_at_timeout": phase_at_timeout,
+        },
+    )
+
+
+async def invoke_plugin_lifecycle_loaded_hookpoint(
+    *,
+    plugin_id: str,
+    manifest_subscriber_tier: str,
+    breaker_state: str,
+) -> None:
+    """Invoke ``plugin.lifecycle.loaded`` via the hook dispatcher.
+
+    Called by :meth:`alfred.supervisor.plugin_lifecycle.PluginLifecycle.start_plugin`
+    after a successful gate check + audit row. Hookpoint metadata is
+    system-only / ``fail_closed=False`` — observability shape.
+
+    Mirrors :data:`alfred.audit.audit_row_schemas.PLUGIN_LIFECYCLE_FIELDS`
+    on the keys consumed by subscribers (``plugin_id``,
+    ``manifest_subscriber_tier``, ``breaker_state``).
+    """
+    await _invoke_supervisor_hookpoint(
+        "plugin.lifecycle.loaded",
+        {
+            "plugin_id": plugin_id,
+            "manifest_subscriber_tier": manifest_subscriber_tier,
+            "breaker_state": breaker_state,
+        },
+    )
+
+
+async def invoke_plugin_lifecycle_crashed_hookpoint(
+    *,
+    plugin_id: str,
+    exception_type: str,
+    breaker_state: str,
+    restart_count: int,
+) -> None:
+    """Invoke ``plugin.lifecycle.crashed`` via the hook dispatcher.
+
+    Called by :meth:`alfred.supervisor.plugin_lifecycle.PluginLifecycle.on_crash`
+    on the breaker-still-CLOSED branch. ``exception_type`` is the Python
+    type name only — NEVER ``str(exc)`` or ``exc.args`` (spec §5.6).
+
+    Mirrors :data:`alfred.audit.audit_row_schemas.PLUGIN_LIFECYCLE_CRASHED_FIELDS`.
+    """
+    await _invoke_supervisor_hookpoint(
+        "plugin.lifecycle.crashed",
+        {
+            "plugin_id": plugin_id,
+            "exception_type": exception_type,
+            "breaker_state": breaker_state,
+            "restart_count": restart_count,
+        },
+    )
+
+
+async def invoke_plugin_lifecycle_quarantined_hookpoint(
+    *,
+    plugin_id: str,
+    trip_count: int,
+    kill_succeeded: bool,
+) -> None:
+    """Invoke ``plugin.lifecycle.quarantined`` via the hook dispatcher.
+
+    Called by :meth:`alfred.supervisor.plugin_lifecycle.PluginLifecycle.on_crash`
+    when ``record_failure`` tipped the breaker to OPEN. The matching
+    ``supervisor.breaker.tripped`` invocation (the lower-level state
+    transition) is the caller's responsibility — both hookpoints fire on
+    the same OPEN transition and downstream consumers can join on
+    ``plugin_id``.
+
+    Mirrors :data:`alfred.audit.audit_row_schemas.PLUGIN_LIFECYCLE_QUARANTINED_FIELDS`.
+    """
+    await _invoke_supervisor_hookpoint(
+        "plugin.lifecycle.quarantined",
+        {
+            "plugin_id": plugin_id,
+            "trip_count": trip_count,
+            "kill_succeeded": kill_succeeded,
+        },
+    )
 
 
 __all__ = [
@@ -511,4 +654,8 @@ __all__ = [
     "CircuitBreaker",
     "invoke_breaker_reset_hookpoint",
     "invoke_breaker_tripped_hookpoint",
+    "invoke_plugin_lifecycle_crashed_hookpoint",
+    "invoke_plugin_lifecycle_loaded_hookpoint",
+    "invoke_plugin_lifecycle_quarantined_hookpoint",
+    "invoke_supervisor_action_timeout_hookpoint",
 ]

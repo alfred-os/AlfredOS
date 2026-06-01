@@ -489,3 +489,170 @@ async def test_hookpoint_helpers_generate_distinct_correlation_ids() -> None:
     first_ctx = mock_invoke.call_args_list[0].args[1]
     second_ctx = mock_invoke.call_args_list[1].args[1]
     assert first_ctx.correlation_id != second_ctx.correlation_id
+
+
+# ---------------------------------------------------------------------------
+# Shared ``_invoke_supervisor_hookpoint`` helper (S3-3b-R2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invoke_supervisor_hookpoint_helper_routes_through_invoke() -> None:
+    """The shared helper awaits ``invoke`` with ``name`` positional + ctx (S3-3b-R2).
+
+    Pins the single-point-of-truth invariant: every supervisor hookpoint
+    invocation flows through the same helper, so the err-001 / core-004
+    no-fire-and-forget contract is enforced in ONE place. The thin
+    per-hookpoint helpers (tripped/reset/action_timeout/plugin.lifecycle.*)
+    delegate here.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import _invoke_supervisor_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await _invoke_supervisor_hookpoint(
+            "supervisor.test_helper",
+            {"foo": "bar", "baz": 7},
+        )
+    assert mock_invoke.await_count == 1
+    args, kwargs = mock_invoke.call_args
+    assert args[0] == "supervisor.test_helper"
+    ctx = args[1]
+    assert ctx.action_id == "supervisor.test_helper"
+    assert ctx.hookpoint == "supervisor.test_helper"
+    assert ctx.input["foo"] == "bar"
+    assert ctx.input["baz"] == 7
+    # The helper injects correlation_id and threads it through both ctx
+    # and the payload — concurrent invocations never collapse on shared
+    # state (core-005).
+    assert ctx.input["correlation_id"] == ctx.correlation_id
+    assert ctx.kind == "post"
+    assert kwargs["kind"] == "post"
+    # Default fail_closed is False — supervisor hookpoints are observability shape.
+    assert kwargs["fail_closed"] is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_supervisor_hookpoint_helper_honours_fail_closed_override() -> None:
+    """``fail_closed=True`` propagates to the dispatcher.
+
+    Pins the override path so a future security-blocking hookpoint
+    (where subscriber refusal should halt the action) can opt in
+    without forking the helper.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import _invoke_supervisor_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await _invoke_supervisor_hookpoint("supervisor.test_secure", {"k": "v"}, fail_closed=True)
+    _args, kwargs = mock_invoke.call_args
+    assert kwargs["fail_closed"] is True
+
+
+# ---------------------------------------------------------------------------
+# F2 — newly-wired hookpoint helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invoke_supervisor_action_timeout_hookpoint_payload() -> None:
+    """``invoke_supervisor_action_timeout_hookpoint`` threads the deadline-arm payload.
+
+    Pins the orchestrator's contract: the row's subject (user_id,
+    deadline_seconds, phase_at_timeout) round-trips through the hookpoint
+    ctx so a subscriber sees the same data the audit row does.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import invoke_supervisor_action_timeout_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await invoke_supervisor_action_timeout_hookpoint(
+            user_id="bruce",
+            deadline_seconds=30.0,
+            phase_at_timeout="unknown",
+        )
+    args, kwargs = mock_invoke.call_args
+    assert args[0] == "supervisor.action_timeout"
+    ctx = args[1]
+    assert ctx.input["user_id"] == "bruce"
+    assert ctx.input["deadline_seconds"] == 30.0
+    assert ctx.input["phase_at_timeout"] == "unknown"
+    assert ctx.input["correlation_id"] != ""
+    assert kwargs["fail_closed"] is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_plugin_lifecycle_loaded_hookpoint_payload() -> None:
+    """``invoke_plugin_lifecycle_loaded_hookpoint`` threads the start-plugin payload."""
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import invoke_plugin_lifecycle_loaded_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await invoke_plugin_lifecycle_loaded_hookpoint(
+            plugin_id="quarantined-llm",
+            manifest_subscriber_tier="system",
+            breaker_state="CLOSED",
+        )
+    args, _kwargs = mock_invoke.call_args
+    assert args[0] == "plugin.lifecycle.loaded"
+    ctx = args[1]
+    assert ctx.input["plugin_id"] == "quarantined-llm"
+    assert ctx.input["manifest_subscriber_tier"] == "system"
+    assert ctx.input["breaker_state"] == "CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_invoke_plugin_lifecycle_crashed_hookpoint_payload() -> None:
+    """``invoke_plugin_lifecycle_crashed_hookpoint`` threads on_crash payload (CLOSED path).
+
+    ``exception_type`` is the Python type name only (spec §5.6 — never
+    ``str(exc)`` / ``exc.args``).
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import invoke_plugin_lifecycle_crashed_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await invoke_plugin_lifecycle_crashed_hookpoint(
+            plugin_id="quarantined-llm",
+            exception_type="SubprocessExitedError",
+            breaker_state="CLOSED",
+            restart_count=2,
+        )
+    args, _kwargs = mock_invoke.call_args
+    assert args[0] == "plugin.lifecycle.crashed"
+    ctx = args[1]
+    assert ctx.input["plugin_id"] == "quarantined-llm"
+    assert ctx.input["exception_type"] == "SubprocessExitedError"
+    assert ctx.input["breaker_state"] == "CLOSED"
+    assert ctx.input["restart_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_invoke_plugin_lifecycle_quarantined_hookpoint_payload() -> None:
+    """``invoke_plugin_lifecycle_quarantined_hookpoint`` threads on_crash payload (OPEN path).
+
+    ``kill_succeeded`` reflects the actual SIGKILL outcome the supervisor
+    threaded through (CR-S3-3a F2/F3); ``trip_count`` is the cumulative
+    counter.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from alfred.supervisor.breaker import invoke_plugin_lifecycle_quarantined_hookpoint
+
+    with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
+        await invoke_plugin_lifecycle_quarantined_hookpoint(
+            plugin_id="quarantined-llm",
+            trip_count=3,
+            kill_succeeded=True,
+        )
+    args, _kwargs = mock_invoke.call_args
+    assert args[0] == "plugin.lifecycle.quarantined"
+    ctx = args[1]
+    assert ctx.input["plugin_id"] == "quarantined-llm"
+    assert ctx.input["trip_count"] == 3
+    assert ctx.input["kill_succeeded"] is True
