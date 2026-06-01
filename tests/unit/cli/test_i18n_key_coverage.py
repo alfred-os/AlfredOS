@@ -67,6 +67,7 @@ _SPEC_11_5_KEYS_THIS_PR: frozenset[str] = frozenset(
         "cli.config.get.unknown_key",
         "cli.config.get.not_set",
         "cli.config.list.empty",
+        "cli.config.error.malformed_yaml",  # err-002
         # cli.supervisor.reset.* — confirm + result surfaces
         "cli.supervisor.reset.confirm_prompt",
         "cli.supervisor.reset.rerun_hint",  # i18n-004 / devex-004

@@ -36,6 +36,9 @@ Module-level seams the tests patch:
 
 from __future__ import annotations
 
+import contextlib
+import os
+import tempfile
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -45,6 +48,56 @@ import yaml
 from alfred.cli._state_git import StateGitError as _StateGitError
 from alfred.cli._state_git import StateGitProposalClient
 from alfred.i18n import t
+
+
+def _safe_load_yaml(yaml_path: Path) -> dict[str, object]:
+    """Read + parse ``yaml_path`` with a localised error on malformed YAML.
+
+    err-002: every ``yaml.safe_load`` site in this module previously
+    re-raised the raw :class:`yaml.YAMLError` for the operator -- a
+    Python traceback bypassing the t() localisation layer. The wrapper
+    converts a parse failure into a :class:`typer.Exit(code=1)` with a
+    localised stderr message that names the file path so the operator
+    can recover (open the file, fix the syntax, retry the command).
+
+    Returns an empty dict for a non-existent file so the missing-file
+    leg of ``set`` / ``get`` / ``list`` keeps its previous semantics
+    without each caller re-implementing the exists-check.
+
+    ``data or {}`` collapses a YAML document that parses to ``None``
+    (the empty-document case) into a dict so downstream key navigation
+    keeps its dict contract.
+    """
+    if not yaml_path.exists():
+        return {}
+    try:
+        raw = yaml_path.read_text()
+        data = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as exc:
+        typer.echo(
+            t(
+                "cli.config.error.malformed_yaml",
+                yaml_path=str(yaml_path),
+                error=str(exc),
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    if not isinstance(data, dict):
+        # A top-level list / scalar is structurally wrong for
+        # policies.yaml; route through the same localised error so the
+        # operator gets a recovery path instead of a downstream AttributeError.
+        typer.echo(
+            t(
+                "cli.config.error.malformed_yaml",
+                yaml_path=str(yaml_path),
+                error=f"top-level YAML must be a mapping (got {type(data).__name__})",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    return data
+
 
 # Module-level seams. Tests patch these symbols.
 _state_git_client: StateGitProposalClient = StateGitProposalClient()
@@ -108,11 +161,16 @@ def _yaml_set(yaml_path: Path, dotted_key: str, value: object) -> None:
     path creating intermediate dicts as needed, writes the new value,
     and dumps the YAML back with ``default_flow_style=False`` so the
     file stays human-diff-friendly.
+
+    sec-pr-s3-6-06: the write uses a sibling tempfile + ``os.fsync`` +
+    atomic ``os.replace`` so a process kill mid-write cannot leave
+    ``policies.yaml`` truncated. The hot-reloader reading ``policies.yaml``
+    concurrently sees either the pre-call contents or the post-call
+    contents -- never a half-written file. The temp lives in the same
+    directory as the target so the rename is guaranteed atomic by POSIX
+    (cross-device rename is not).
     """
-    if yaml_path.exists():
-        data: dict[str, object] = yaml.safe_load(yaml_path.read_text()) or {}
-    else:
-        data = {}
+    data = _safe_load_yaml(yaml_path)
     keys = dotted_key.split(".")
     node: dict[str, object] = data
     for k in keys[:-1]:
@@ -125,7 +183,57 @@ def _yaml_set(yaml_path: Path, dotted_key: str, value: object) -> None:
             node = existing
     node[keys[-1]] = value
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
-    yaml_path.write_text(yaml.dump(data, default_flow_style=False))
+    _atomic_write_text(yaml_path, yaml.dump(data, default_flow_style=False))
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Write ``content`` to ``target`` via tempfile + fsync + atomic rename.
+
+    sec-pr-s3-6-06: a crash between ``write_text`` open + flush
+    previously left an empty ``policies.yaml`` -- the hot-reloader then
+    reset every operator knob to its built-in default at the next mtime
+    tick. The atomic-rename pattern is the standard POSIX recipe:
+
+      1. ``mkstemp`` in the SAME directory as the target so the eventual
+         rename stays on-device (atomic per POSIX).
+      2. ``write`` + ``fsync`` so the tempfile's data hits disk before
+         the rename publishes it.
+      3. ``os.replace`` so the rename is atomic vs concurrent readers.
+
+    On failure the tempfile is unlinked so we do not leak ``.tmp...``
+    droppings into the target directory.
+    """
+    parent = target.parent
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=str(parent),
+    )
+    try:
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            # The ``fd`` is owned by the ``with`` once it enters; if we
+            # raised before then the fd needs explicit close. The
+            # try/except inside the outer try guards the publish step
+            # below from running with corrupt content.
+            raise
+        # ``os.replace`` (not ``Path.replace``) because the test seam
+        # patches ``alfred.cli.config.os.replace`` to simulate rename
+        # failures; routing via ``Path.replace`` would bypass the seam.
+        os.replace(tmp_path, target)  # noqa: PTH105
+    except BaseException:
+        # Clean up the tempfile on any failure path so a crash here
+        # does not leave ``.policies.yaml.<random>.tmp`` debris.
+        # ``FileNotFoundError`` is the documented benign branch: the
+        # tempfile may already have been moved by ``os.replace`` before
+        # the failing operation, or never created if the open failed.
+        with contextlib.suppress(FileNotFoundError):
+            Path(tmp_path).unlink()
+        raise
 
 
 def _yaml_get(yaml_path: Path, dotted_key: str) -> object | None:
@@ -135,10 +243,14 @@ def _yaml_get(yaml_path: Path, dotted_key: str) -> object | None:
     is missing. Distinguishing "file absent" from "key absent" is left
     to callers that care; for the CLI surface both render the same
     "not set" message.
+
+    err-002: parse failures route through :func:`_safe_load_yaml`'s
+    localised malformed-YAML branch -- the operator sees a recovery
+    hint, not a raw :class:`yaml.YAMLError` traceback.
     """
     if not yaml_path.exists():
         return None
-    data: object = yaml.safe_load(yaml_path.read_text()) or {}
+    data: object = _safe_load_yaml(yaml_path)
     for k in dotted_key.split("."):
         if not isinstance(data, dict) or k not in data:
             return None
@@ -283,12 +395,16 @@ def _walk_flat(data: object, prefix: str, lines: list[str]) -> None:
 
 @config_app.command("list", help=t("cli.config.list.help.short"))
 def config_list() -> None:
-    """List all current operator configuration values from policies.yaml."""
+    """List all current operator configuration values from policies.yaml.
+
+    err-002: malformed YAML routes through :func:`_safe_load_yaml`'s
+    localised error so an operator who hand-edited the file mid-shift
+    sees a recovery hint instead of a raw :class:`yaml.YAMLError`.
+    """
     if not _policies_yaml_path.exists():
         typer.echo(t("cli.config.list.empty"))
         return
-    raw = _policies_yaml_path.read_text()
-    data = yaml.safe_load(raw) or {}
+    data = _safe_load_yaml(_policies_yaml_path)
     if not data:
         typer.echo(t("cli.config.list.empty"))
         return

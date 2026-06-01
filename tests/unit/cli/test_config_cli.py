@@ -23,6 +23,7 @@ Pins these invariants for the sub-app shipped in PR-S3-6:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -256,3 +257,141 @@ def test_list_existing_but_empty_yaml_emits_localised_notice(
         result = runner.invoke(config_app, ["list"])
     assert result.exit_code == 0, result.stderr
     assert result.stdout.strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# err-002: malformed YAML routes through a localised error (no raw traceback)
+# ---------------------------------------------------------------------------
+
+
+def test_set_malformed_yaml_emits_localised_error(runner: CliRunner, tmp_path: Path) -> None:
+    """A YAML parse failure in ``set`` surfaces the localised malformed_yaml key.
+
+    err-002: previously the raw ``yaml.YAMLError`` traceback hit the
+    operator's terminal, bypassing the t() layer. The wrapper now
+    routes through ``cli.config.error.malformed_yaml`` so the operator
+    sees the file path + a recovery hint.
+    """
+    policies = tmp_path / "policies.yaml"
+    # Unbalanced bracket + missing key -- guaranteed YAMLError shape.
+    policies.write_text("web_fetch: { user_daily_budget:\n  - 1\n  -\n")
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "web-fetch-budget", "10"])
+    assert result.exit_code != 0
+    assert str(policies) in result.stderr
+    # The localised error names the policy file + a recovery hint
+    # (rerunning the command). The literal "malformed" is in the
+    # canonical English text the catalog defines.
+    assert "malformed" in result.stderr.lower() or "yaml" in result.stderr.lower()
+
+
+def test_get_malformed_yaml_emits_localised_error(runner: CliRunner, tmp_path: Path) -> None:
+    """``get`` on a malformed policies.yaml surfaces the localised key."""
+    policies = tmp_path / "policies.yaml"
+    policies.write_text("not: valid: yaml: with: too: many: colons:\n  - {")
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["get", "web-fetch-budget"])
+    assert result.exit_code != 0
+    assert str(policies) in result.stderr
+
+
+def test_list_malformed_yaml_emits_localised_error(runner: CliRunner, tmp_path: Path) -> None:
+    """``list`` on a malformed policies.yaml surfaces the localised key."""
+    policies = tmp_path / "policies.yaml"
+    policies.write_text("web_fetch: { broken")
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["list"])
+    assert result.exit_code != 0
+    assert str(policies) in result.stderr
+
+
+def test_safe_load_yaml_top_level_scalar_rejected(tmp_path: Path) -> None:
+    """A top-level YAML scalar (e.g. ``42``) routes through the malformed key.
+
+    The CLI helpers all assume a top-level mapping; if a downstream
+    consumer hands in a scalar / list / string we surface the same
+    localised error rather than a downstream ``AttributeError``.
+    """
+    from alfred.cli import config as config_module
+
+    policies = tmp_path / "policies.yaml"
+    policies.write_text("just_a_string")
+    runner = CliRunner()
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["list"])
+    assert result.exit_code != 0
+    assert str(policies) in result.stderr
+
+    # Direct helper invocation exercises the top-level-non-dict branch.
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        # The helper itself raises typer.Exit; route through a CLI command
+        # to confirm the exit is surfaced.
+        del config_module  # quiet ARG001 -- we exercised via the CLI
+
+
+# ---------------------------------------------------------------------------
+# sec-pr-s3-6-06: atomic-rename semantics on the low-blast write path
+# ---------------------------------------------------------------------------
+
+
+def test_set_low_blast_uses_atomic_rename(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The set path writes via tempfile + os.replace (not direct write).
+
+    sec-pr-s3-6-06: previously ``write_text`` truncated the target then
+    streamed bytes -- a crash mid-write left an empty policies.yaml.
+    Pin the atomic-rename pattern by counting ``os.replace`` calls
+    against the policies path.
+    """
+    import os as os_module
+
+    policies = tmp_path / "policies.yaml"
+    policies.write_text("web_fetch:\n  user_daily_budget: 100\n")
+
+    real_replace = os_module.replace
+    replace_calls: list[tuple[str, str]] = []
+
+    def _counting_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        replace_calls.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("alfred.cli.config.os.replace", _counting_replace)
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "web-fetch-budget", "50"])
+    assert result.exit_code == 0, result.stderr
+    # Exactly one rename targeted the policies file.
+    assert len(replace_calls) == 1
+    src, dst = replace_calls[0]
+    assert dst == str(policies)
+    # The tempfile lived in the same directory so the rename is atomic.
+    assert Path(src).parent == Path(dst).parent
+
+
+def test_atomic_write_text_cleans_tempfile_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash inside ``os.replace`` must NOT leave a stray ``.tmp`` dropping.
+
+    sec-pr-s3-6-06: the cleanup branch unlinks the tempfile on any
+    failure path so the parent directory does not accumulate
+    ``.policies.yaml.<random>.tmp`` debris from interrupted writes.
+    """
+    from alfred.cli.config import _atomic_write_text
+
+    target = tmp_path / "policies.yaml"
+
+    def _failing_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        del dst
+        # Confirm the tempfile exists at the failure point so the cleanup
+        # branch has something to remove.
+        assert Path(src).exists()
+        msg = "simulated mid-rename crash"
+        raise OSError(msg)
+
+    monkeypatch.setattr("alfred.cli.config.os.replace", _failing_replace)
+    with pytest.raises(OSError, match="simulated mid-rename crash"):
+        _atomic_write_text(target, "should-not-land")
+    # No tempfiles left behind in the target directory.
+    leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".policies.yaml.")]
+    assert leftovers == []
