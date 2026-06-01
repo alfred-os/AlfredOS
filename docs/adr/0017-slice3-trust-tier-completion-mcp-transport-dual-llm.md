@@ -106,4 +106,4 @@ Rejected: `DevGate` fails open for `operator`/`user-plugin` without a backing st
   - #138 (PR-S3-1 — T1+T3 type system + nonce-gated `tag_t3_with_nonce`)
   - #139 (PR-S3-2 — Real `CapabilityGate` + `RealGate` + `GatePolicy` + `GrantRow`)
   - #140 (PR-S3-3a — MCP plugin transport: `StdioTransport`, `AlfredPluginSession`, `PluginManifest`, `InboundContentScanner`, `ContentStoreBase`)
-  - (TBD — PR-S3-3b — Supervisor: `CircuitBreaker`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints; Postgres persistence migration 0010)
+  - #144 (PR-S3-3b — Supervisor: `CircuitBreaker`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints; Postgres persistence migration 0010)
