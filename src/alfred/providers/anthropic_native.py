@@ -14,7 +14,12 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 
-from alfred.providers.base import CompletionRequest, CompletionResponse
+from alfred.providers.base import (
+    CompletionRequest,
+    CompletionResponse,
+    ProviderCapability,
+    register_provider,
+)
 
 _log = structlog.get_logger()
 
@@ -55,10 +60,24 @@ def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
     return (tokens_in / 1_000_000) * in_per_m + (tokens_out / 1_000_000) * out_per_m
 
 
+@register_provider
 class AnthropicProvider:
-    """Native Anthropic client wrapper. Slice 1 fallback provider."""
+    """Native Anthropic client wrapper. Slice 1 fallback provider.
+
+    Declares NATIVE_CONSTRAINED_GENERATION (spec §6.2): the tool-use shape
+    with ``input_schema`` under ``tools[]`` provides schema-constrained
+    generation at the provider level. This is the dispatch key the
+    quarantined-LLM router uses to pick the native path over JSON-mode
+    or prompt-embedded fallback (PR-S3-4).
+    """
 
     name = "anthropic"
+
+    # Class-level constant — no constructor required to read it (prov-007).
+    # frozenset so a caller cannot mutate the declared set.
+    CAPABILITIES: frozenset[ProviderCapability] = frozenset(
+        {ProviderCapability.NATIVE_CONSTRAINED_GENERATION}
+    )
 
     # `client` is typed Any because tests inject a MagicMock and the real
     # `AsyncAnthropic` doesn't expose a Protocol we can pin to. The from_settings
@@ -66,6 +85,13 @@ class AnthropicProvider:
     def __init__(self, *, client: Any, model: str) -> None:
         self._client = client
         self._model = model
+
+    def capabilities(self) -> frozenset[ProviderCapability]:
+        # AnthropicProvider's capabilities are model-invariant in Slice 3 —
+        # every Anthropic model we ship pricing for supports tool-use.
+        # A future model that drops tool-use would need a model-aware
+        # variant (see DeepSeekProvider for the pattern).
+        return self.CAPABILITIES
 
     @classmethod
     def from_settings(cls, api_key: str, model: str) -> AnthropicProvider:
