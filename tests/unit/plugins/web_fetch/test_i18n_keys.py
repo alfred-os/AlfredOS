@@ -43,6 +43,16 @@ _WEB_FETCH_KEYS: tuple[str, ...] = (
     # the policy-validation surface distinct from the operational
     # WebFetchError tree.
     "web.fetch.tls.skip_refused_in_non_dev",
+    # C3 / i18n-001 — fetch_dispatcher.py unexpected-dispatch-shape
+    # WebFetchError carrier. The Python type name of the bad result
+    # flows through ``{shape}``; the operator-facing wording is in the
+    # catalog.
+    "web.fetch.error.unexpected_dispatch_shape",
+    # C4 / i18n-002 — fetch_dispatcher.py generic WebFetchError fallback
+    # when the plugin returns a structured error envelope without a
+    # known ``type`` tag. The plugin-supplied detail flows through
+    # ``{message}``.
+    "web.fetch.error.plugin_returned_message",
 )
 
 
@@ -82,6 +92,11 @@ def test_i18n_key_resolves(key: str) -> None:
         # i18n-003 — TlsPolicy refusal carries the offending env name so
         # the operator sees what the process actually read.
         env="staging",
+        # C3 / C4 — unexpected-dispatch-shape carries the Python type
+        # name; the plugin-returned-message carrier surfaces the
+        # plugin-side detail string verbatim through ``{message}``.
+        shape="ExtractionResult",
+        message="DNS resolution failed",
     )
     # If key is missing from catalog, t() returns the bare key string.
     # A properly defined key returns a translated string that is NOT the
