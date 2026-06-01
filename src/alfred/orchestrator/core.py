@@ -80,6 +80,7 @@ provider output to T1 (operator-trust) and introduces T3 (untrusted).
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -97,6 +98,7 @@ from alfred.providers.base import CompletionRequest, Message
 from alfred.providers.router import ProviderRouter
 from alfred.security.tiers import T1, T2, TaggedContent
 from alfred.supervisor.deadline import DeadlineWrapper
+from alfred.supervisor.observability import record_action_duration
 
 if TYPE_CHECKING:
     from alfred.identity.models import User
@@ -287,13 +289,20 @@ class Orchestrator:
                 rule #7).
         """
         trace_id = str(uuid.uuid4())
+        # PR-S3-3b Task 14: stamp the start of the action for the per-turn
+        # Prometheus histogram. ``time.monotonic`` is the right clock here —
+        # immune to NTP step adjustments and never goes backwards across a
+        # suspended laptop or a leap second. ``record_action_duration`` runs
+        # on every exit branch (success / timeout / cancelled) so per-user p99
+        # captures every action regardless of outcome (spec §7a.3).
+        action_start = time.monotonic()
         async with self._session_scope() as session:
             try:
                 # PR-S3-3b Task 12: wrap the turn body with the per-action
                 # deadline. ``_user_id`` and ``_correlation_id`` are consumed
                 # by ``DeadlineWrapper.run`` and NOT forwarded to
                 # ``_handle_turn`` (core-005 — see DeadlineWrapper docstring).
-                return await self._deadline_wrapper.run(
+                reply = await self._deadline_wrapper.run(
                     self._handle_turn,
                     session,
                     user=user,
@@ -303,6 +312,20 @@ class Orchestrator:
                     _user_id=user.slug,
                     _correlation_id=trace_id,
                 )
+                # PR-S3-3b Task 14: success-path histogram observation. Wired
+                # post-return so a failed audit-write inside _handle_turn lands
+                # in the except arm below instead of double-observing. The
+                # ``breaker_state="UNKNOWN"`` literal is the Slice-3 default;
+                # PR-S3-4+ threads real breaker state from
+                # ``Supervisor.get_or_create_breaker`` once the supervisor is
+                # constructed at process bootstrap.
+                record_action_duration(
+                    duration_seconds=time.monotonic() - action_start,
+                    user_id=user.slug,
+                    action_outcome="success",
+                    breaker_state="UNKNOWN",
+                )
+                return reply
             except TimeoutError:
                 # PR-S3-3b Task 12 — the deadline fired. Two audit rows land
                 # on the AUTOCOMMIT writer so they survive the outer
@@ -330,6 +353,15 @@ class Orchestrator:
                     trace_id=trace_id,
                     phase="turn_timeout",
                 )
+                # PR-S3-3b Task 14: timeout-path histogram observation. Bound
+                # to the same trace_id as the supervisor.action_timeout audit
+                # row so dashboards can join the two by trace.
+                record_action_duration(
+                    duration_seconds=time.monotonic() - action_start,
+                    user_id=user.slug,
+                    action_outcome="timeout",
+                    breaker_state="UNKNOWN",
+                )
                 await session.rollback()
                 raise asyncio.CancelledError("deadline expired") from None
             except asyncio.CancelledError:
@@ -352,6 +384,16 @@ class Orchestrator:
                 # distinct phase so the audit reader can tell timeout
                 # apart from operator-cancel.
                 await self._audit_cancellation(user=user, trace_id=trace_id, phase="turn_cancelled")
+                # PR-S3-3b Task 14: cancelled-path histogram observation.
+                # Distinct outcome label from timeout — operator-initiated
+                # cancellation contributes to per-user p99 the same way
+                # successful turns do, just under a different label.
+                record_action_duration(
+                    duration_seconds=time.monotonic() - action_start,
+                    user_id=user.slug,
+                    action_outcome="cancelled",
+                    breaker_state="UNKNOWN",
+                )
                 await session.rollback()
                 raise
             except BaseException:

@@ -867,3 +867,107 @@ class TestOrchestratorActionDeadline:
             and call.kwargs.get("subject", {}).get("phase") == "turn_cancelled"
         ]
         assert len(cancel_calls) == 1
+
+
+class TestOrchestratorActionDurationHistogram:
+    """``alfred_orchestrator_action_duration_seconds`` emission (spec §7a.3).
+
+    PR-S3-3b Tasks 13 + 14 wire
+    :func:`alfred.supervisor.observability.record_action_duration` into the
+    orchestrator action path. The histogram observation lands on three
+    outcomes:
+
+    * ``success`` — fired after the provider response is audited and the
+      reply is about to return.
+    * ``timeout`` — fired from inside ``_emit_supervisor_timeout_row`` so
+      the histogram observation is bound to the same correlation as the
+      ``supervisor.action_timeout`` audit row.
+    * ``cancelled`` — fired from the session-bound cancellation arm so an
+      operator-initiated cancel still contributes to the per-user p99.
+
+    ``user_id`` is the raw slug; the observability module buckets it
+    internally (perf-001). ``breaker_state="UNKNOWN"`` is the Slice-3
+    default until Task 17's :class:`Supervisor` wires real breaker state
+    into the orchestrator (PR-S3-4+ scope).
+    """
+
+    async def test_success_path_records_duration(self, monkeypatch: Any) -> None:
+        """Happy-path turn observes one ``success`` outcome with the raw user_id."""
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            "alfred.orchestrator.core.record_action_duration",
+            recorder,
+        )
+
+        orch, m = _build()
+        reply = await _send(orch, m, "good morning")
+        assert reply == "Very good, Sir."
+
+        recorder.assert_called_once()
+        kwargs = recorder.call_args.kwargs
+        assert kwargs["user_id"] == "bruce"  # raw slug — bucketing happens inside
+        assert kwargs["action_outcome"] == "success"
+        assert kwargs["breaker_state"] == "UNKNOWN"
+        # Sanity: duration is non-negative real number.
+        assert isinstance(kwargs["duration_seconds"], float)
+        assert kwargs["duration_seconds"] >= 0.0
+
+    async def test_timeout_path_records_duration(self, monkeypatch: Any) -> None:
+        """Deadline-fired turn observes one ``timeout`` outcome."""
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            "alfred.orchestrator.core.record_action_duration",
+            recorder,
+        )
+
+        router = MagicMock()
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+            return None  # pragma: no cover — deadline fires first
+
+        router.complete = AsyncMock(side_effect=_slow_complete)
+        orch, m = _build(router=router, deadline_seconds=0.001)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "deadline-fires")
+
+        # Exactly one observation; outcome is "timeout" with the raw user_id.
+        recorder.assert_called_once()
+        kwargs = recorder.call_args.kwargs
+        assert kwargs["user_id"] == "bruce"
+        assert kwargs["action_outcome"] == "timeout"
+        assert kwargs["breaker_state"] == "UNKNOWN"
+        # The observed duration is bounded by the wall-clock that elapsed
+        # between handle_user_message entry and the timeout — it must be
+        # >= the configured deadline (sub-millisecond) and < the test's
+        # generous upper bound.
+        assert kwargs["duration_seconds"] >= 0.0
+        assert kwargs["duration_seconds"] < 5.0
+
+    async def test_external_cancellation_records_duration(self, monkeypatch: Any) -> None:
+        """Operator-cancelled turn observes one ``cancelled`` outcome.
+
+        Distinct from the timeout path: this is a CancelledError raised by
+        the provider call mid-turn (operator interrupt), not the deadline
+        wrapper firing. The histogram contract pins both outcomes so
+        per-user p99 captures every action regardless of how it ended.
+        """
+        recorder = MagicMock()
+        monkeypatch.setattr(
+            "alfred.orchestrator.core.record_action_duration",
+            recorder,
+        )
+
+        router = MagicMock()
+        router.complete = AsyncMock(side_effect=asyncio.CancelledError())
+        orch, m = _build(router=router)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "external-cancel")
+
+        recorder.assert_called_once()
+        kwargs = recorder.call_args.kwargs
+        assert kwargs["user_id"] == "bruce"
+        assert kwargs["action_outcome"] == "cancelled"
+        assert kwargs["breaker_state"] == "UNKNOWN"
