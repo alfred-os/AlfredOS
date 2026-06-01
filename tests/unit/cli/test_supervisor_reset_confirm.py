@@ -155,16 +155,140 @@ def test_status_empty_rows_renders_hint(runner: CliRunner) -> None:
 
 
 def test_reset_unexpected_error_routes_through_generic_message(runner: CliRunner) -> None:
-    """A non-"not found" exception from ``reset_breaker`` uses the unexpected_error key."""
+    """A non-"not found" connection-shape error uses the unexpected_error key.
+
+    err-001 / cross-cutting R4: the except clause now narrows to
+    ``SupervisorError``, ``ConnectionError``, ``asyncio.TimeoutError``.
+    A ``ConnectionError`` is the realistic non-domain failure (Postgres
+    drop mid-transaction); it must still route through the localised
+    error key.
+    """
     mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(side_effect=RuntimeError("postgres connection lost"))
+    mock_supervisor.reset_breaker = AsyncMock(
+        side_effect=ConnectionError("postgres connection lost")
+    )
     with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
         result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
     assert result.exit_code != 0
     combined = (result.output or "") + (result.stderr or "")
     # The generic-error catalog entry includes both {component} and {error_type}.
     assert "quarantined-llm" in combined
-    assert "RuntimeError" in combined
+    assert "ConnectionError" in combined
+
+
+def test_reset_programmer_bug_propagates_loud(runner: CliRunner) -> None:
+    """err-001 / R4: a non-domain bug (e.g. ``KeyError``) MUST propagate.
+
+    The previous bare ``except Exception`` swallowed every shape and
+    mapped to the generic error key, silently turning a typed-method-
+    signature drift into a benign-looking operator-facing failure. The
+    narrowed except clause now only catches the four typed shapes; an
+    AttributeError / TypeError / KeyError bubbles up so the bug is
+    loud in the operator's structlog stream + the CLI tracebacks at
+    once.
+    """
+    mock_supervisor = AsyncMock()
+    mock_supervisor.reset_breaker = AsyncMock(side_effect=KeyError("breaker_id"))
+    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
+        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
+    # ``CliRunner`` captures the exception rather than re-raising; we
+    # assert the exit code is non-zero AND the exception is the typed
+    # KeyError (not Typer.Exit) so the bug surface is preserved.
+    assert result.exit_code != 0
+    assert isinstance(result.exception, KeyError)
+
+
+def test_reset_emits_attempt_audit_row_before_reset_breaker(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sec-pr-s3-6-04: the attempt audit row fires BEFORE ``reset_breaker``.
+
+    A crash inside ``reset_breaker`` (Postgres dropped, breaker-lock
+    contention, ...) must still leave a forensic trail. Pin the
+    ordering by recording call sequence into a shared list -- the
+    attempt-audit call MUST appear before the reset_breaker call.
+    """
+    calls: list[str] = []
+
+    def _record_attempt(*, component_id: str) -> None:
+        # Signature mirrors the production helper; the test only cares
+        # about the call order, not the structlog kwargs.
+        del component_id
+        calls.append("attempt_audit")
+
+    async def _reset_breaker(*, component_id: str, operator_user_id: str | None) -> None:
+        del component_id, operator_user_id
+        calls.append("reset_breaker")
+
+    mock_supervisor = AsyncMock()
+    mock_supervisor.reset_breaker = AsyncMock(side_effect=_reset_breaker)
+    monkeypatch.setattr(
+        "alfred.cli.supervisor._emit_breaker_reset_attempt_audit",
+        _record_attempt,
+    )
+    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
+        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert calls == ["attempt_audit", "reset_breaker"]
+
+
+def test_reset_attempt_audit_row_survives_supervisor_crash(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash inside ``reset_breaker`` must NOT suppress the attempt row.
+
+    Validates the forensic-trail guarantee from sec-pr-s3-6-04: the
+    attempt-audit emission lands even if the reset call itself fails.
+    """
+    audit_emissions: list[str] = []
+
+    def _record_attempt(*, component_id: str) -> None:
+        audit_emissions.append(component_id)
+
+    mock_supervisor = AsyncMock()
+    mock_supervisor.reset_breaker = AsyncMock(side_effect=ConnectionError("postgres lost"))
+    monkeypatch.setattr(
+        "alfred.cli.supervisor._emit_breaker_reset_attempt_audit",
+        _record_attempt,
+    )
+    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
+        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
+    # Reset failed, but the attempt row was emitted FIRST -- the audit
+    # graph still has the operator-intent breadcrumb.
+    assert result.exit_code != 0
+    assert audit_emissions == ["quarantined-llm"]
+
+
+def test_emit_breaker_reset_attempt_audit_uses_schema_fields() -> None:
+    """The attempt-audit helper carries the SUPERVISOR_BREAKER_RESET_FIELDS shape.
+
+    sec-pr-s3-6-04: when PR-S3-7 swaps the structlog emit for the real
+    ``AuditWriter.append_schema`` call, the kwargs ALREADY match the
+    declared field set. This test pins the contract: the helper's
+    payload covers every required SUPERVISOR_BREAKER_RESET_FIELDS entry.
+    """
+    from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
+    from alfred.cli import supervisor as supervisor_module
+
+    captured: dict[str, object] = {}
+
+    def _capture(event: str, **kwargs: object) -> None:
+        del event
+        captured.update(kwargs)
+
+    class _FakeLogger:
+        def info(self, event: str, **kwargs: object) -> None:
+            _capture(event, **kwargs)
+
+    original = supervisor_module._log
+    try:
+        supervisor_module._log = _FakeLogger()  # type: ignore[assignment]
+        supervisor_module._emit_breaker_reset_attempt_audit(component_id="quarantined-llm")
+    finally:
+        supervisor_module._log = original
+    # Every declared field is present in the kwargs the helper sent.
+    for field in SUPERVISOR_BREAKER_RESET_FIELDS:
+        assert field in captured, f"helper omitted {field!r} from the audit payload"
 
 
 def test_reset_supervisor_error_without_not_found_routes_generic(runner: CliRunner) -> None:
@@ -220,15 +344,16 @@ def test_reset_import_error_fallback_uses_generic_message(
 ) -> None:
     """If importing ``alfred.supervisor.errors`` fails, the generic branch still fires.
 
-    Defensive coverage: the lazy import in the except arm is wrapped in
-    its own try/except so a broken supervisor namespace doesn't leak a
-    raw traceback. We simulate that broken namespace by replacing the
-    module entry with a sentinel that raises on attribute access.
+    err-001 / cross-cutting R4: the import now lives ABOVE the
+    ``asyncio.run`` call so the except-clause type binding is
+    statically resolvable. A broken supervisor namespace still routes
+    through the localised key + non-zero exit -- but the rendered
+    error_type is ``ImportError`` rather than the original failure
+    type, because the ImportError fires first.
     """
     import sys
 
     mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(side_effect=RuntimeError("boom"))
 
     # Force ``from alfred.supervisor.errors import SupervisorError`` to raise.
     monkeypatch.setitem(sys.modules, "alfred.supervisor.errors", None)
@@ -238,4 +363,4 @@ def test_reset_import_error_fallback_uses_generic_message(
     assert result.exit_code != 0
     combined = (result.output or "") + (result.stderr or "")
     assert "quarantined-llm" in combined
-    assert "RuntimeError" in combined
+    assert "ImportError" in combined

@@ -16,13 +16,64 @@ i18n rule #1. The audit row for ``reset`` carries ``operator_user_id`` per
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Annotated
 
+import structlog
 import typer
 
+from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
 from alfred.i18n import t
 
 supervisor_app = typer.Typer(help=t("cli.supervisor.help"), no_args_is_help=True)
+_log = structlog.get_logger(__name__)
+
+
+def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
+    """Emit a fail-loud audit-row stand-in BEFORE calling ``reset_breaker``.
+
+    sec-pr-s3-6-04: a crash inside :meth:`Supervisor.reset_breaker` (e.g.
+    Postgres connection lost mid-transaction) previously left no
+    forensic trail at all -- the only audit row the path emitted lived
+    inside the supervisor itself, post-write. By logging the attempt
+    BEFORE we cross into the supervisor we guarantee an audit-graph
+    breadcrumb pointing at the operator intent regardless of whether
+    the reset actually lands.
+
+    Fields mirror :data:`SUPERVISOR_BREAKER_RESET_FIELDS` so the eventual
+    PR-S3-7 wiring (an ``AuditWriter`` instance reachable from the sync
+    CLI bootstrap) can simply replace the structlog call with
+    ``await audit_writer.append_schema(...)`` without restructuring the
+    emit site. ``operator_user_id`` is intentionally ``None`` for now --
+    devex-007 / spec §10.8 defer the attribution wiring to PR-S3-7; a
+    follow-up issue tracks the gap, but this row going out unsigned is
+    strictly better than no row at all (CLAUDE.md hard rule #7).
+
+    The structlog redactor in :mod:`alfred.cli._bootstrap` runs in front
+    of every output processor so any accidental secret-shaped string in
+    ``component_id`` is masked before render.
+    """
+    # ``correlation_id`` ties the attempt row to the eventual
+    # supervisor-side reset row (when PR-S3-7 wires the live emit) so
+    # the audit-graph forensic traversal can join the two halves.
+    correlation_id = str(uuid.uuid4())
+    _log.info(
+        "supervisor.breaker.reset.attempted",
+        schema_name="SUPERVISOR_BREAKER_RESET_FIELDS",
+        component_id=component_id,
+        # PR-S3-7 reads the live breaker state to fill the next three
+        # fields; the placeholders keep the row shape stable until then.
+        old_state="OPEN",
+        new_state="CLOSED",
+        trip_count=None,
+        operator_user_id=None,
+        correlation_id=correlation_id,
+        # ``schema_fields`` round-trips the declared field set so a
+        # log-grepping audit collector can validate the row at parse
+        # time and surface schema drift if ``SUPERVISOR_BREAKER_RESET_FIELDS``
+        # gains a key without this emitter being updated.
+        schema_fields=sorted(SUPERVISOR_BREAKER_RESET_FIELDS),
+    )
 
 
 def _get_supervisor() -> object:
@@ -68,13 +119,27 @@ def supervisor_status() -> None:
     ``alfred supervisor status`` →
     ``alfred supervisor reset <component> --confirm``.
     """
-    # devex-013: disambiguate empty state — supervisor not running vs
+    # devex-013: disambiguate empty state -- supervisor not running vs
     # genuinely empty. The probe is the supervisor lookup itself; failing
     # there means the bootstrap could not reach a live supervisor.
+    #
+    # err-001 / cross-cutting R4: narrow the except clause to the three
+    # shapes a "supervisor not reachable" failure actually produces:
+    #
+    # * ``RuntimeError`` -- :func:`_get_supervisor` raises this until
+    #   PR-S3-3b ships ``Supervisor.get_instance``; the test
+    #   ``test_status_no_supervisor_running_exits_nonzero`` pins it.
+    # * ``ConnectionError`` -- Postgres / supervisor IPC unreachable.
+    # * ``asyncio.TimeoutError`` -- supervisor lookup hung past its
+    #   deadline.
+    #
+    # Anything else (``AttributeError``, ``TypeError``, ``KeyError``,
+    # ...) is a programmer bug and MUST propagate so the operator sees a
+    # full traceback in the structlog stream and the bug surfaces loud.
     try:
         _get_supervisor()
         rows = _list_breaker_states()
-    except Exception as exc:
+    except (RuntimeError, ConnectionError, TimeoutError) as exc:
         typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
         raise typer.Exit(code=1) from exc
     if not rows:
@@ -156,12 +221,52 @@ def supervisor_reset(
 
     supervisor = _get_supervisor()
 
+    # sec-pr-s3-6-04: emit the forensic-attempt audit row BEFORE crossing
+    # into the supervisor. A crash inside ``reset_breaker`` (Postgres
+    # connection lost mid-transaction, breaker-state lock contention,
+    # ...) previously left no trail at all. The order here is
+    # load-bearing: attempt-row first, reset call second; if the audit
+    # emission itself fails, the reset is aborted (the structlog stream
+    # is the operator's last forensic backstop and silently skipping
+    # the row would violate CLAUDE.md hard rule #7).
+    _emit_breaker_reset_attempt_audit(component_id=component_id)
+
     # devex-007: operator_user_id=None is a known placeholder. Full T1
     # attribution requires wiring IdentityResolver.resolve() from the CLI
     # session in PR-S3-7. Human judgment required: surface an unmistakable
     # error if attribution cannot be resolved, or emit None and let the
     # audit row carry NULL (weaker audit story). Decision deferred to
-    # PR-S3-7; see devex-007 + spec §10.8.
+    # PR-S3-7; see devex-007 + spec §10.8. A follow-up issue tracks the
+    # operator_user_id wiring; the attempt-row above going out unsigned
+    # is strictly better than no row at all.
+    #
+    # err-001 / cross-cutting R4: narrow the except shape to
+    # ``SupervisorError`` (every supervisor-domain failure mode the
+    # spec models) plus ``ConnectionError`` / ``asyncio.TimeoutError``
+    # (the two connection-shape failures that surface inside
+    # ``asyncio.run`` when the supervisor IPC drops mid-call). A bare
+    # ``except Exception`` would mask programmer bugs
+    # (typed-method-signature drift, ``KeyError`` from a refactored
+    # payload) -- those MUST propagate so the bug is loud.
+    #
+    # The lazy import lives at the top of the try-block so the
+    # except-clause narrowing has the type bound; an ImportError here
+    # surfaces as a non-zero exit through the same localised path.
+    try:
+        from alfred.supervisor.errors import SupervisorError
+    except ImportError as exc:
+        # Defensive: a broken supervisor namespace must not deny the
+        # operator the localised error -- fall back to the generic key.
+        typer.echo(
+            t(
+                "cli.supervisor.reset.unexpected_error",
+                component=component_id,
+                error_type="ImportError",
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+
     try:
         asyncio.run(
             supervisor.reset_breaker(  # type: ignore[attr-defined]  # PR-S3-3b ships the singleton
@@ -169,40 +274,21 @@ def supervisor_reset(
                 operator_user_id=None,
             )
         )
-    except Exception as exc:
-        # devex-005: map specific error types to distinct messages so
-        # operators can distinguish "wrong component ID" from "supervisor
-        # unavailable". Import lazily to avoid bootstrap cost on the
-        # happy path of other CLI commands.
-        try:
-            from alfred.supervisor.errors import (
-                SupervisorError,
+    except SupervisorError as exc:
+        # devex-005: distinguish "wrong component id" from "supervisor
+        # unavailable". ``ComponentNotFoundError`` is a future-PR-S3-7
+        # refinement; until then any :class:`SupervisorError` carrying
+        # "not found" in its message is treated as the component-
+        # missing branch.
+        if "not found" in str(exc).lower():
+            typer.echo(
+                t(
+                    "cli.supervisor.reset.component_not_found",
+                    component=component_id,
+                ),
+                err=True,
             )
-
-            # ``ComponentNotFoundError`` is a future-PR-S3-7 refinement.
-            # Until then any :class:`SupervisorError` carrying "not found"
-            # in its message is treated as the component-missing branch.
-            component_not_found = (
-                isinstance(exc, SupervisorError) and "not found" in str(exc).lower()
-            )
-            if component_not_found:
-                typer.echo(
-                    t(
-                        "cli.supervisor.reset.component_not_found",
-                        component=component_id,
-                    ),
-                    err=True,
-                )
-            else:
-                typer.echo(
-                    t(
-                        "cli.supervisor.reset.unexpected_error",
-                        component=component_id,
-                        error_type=type(exc).__name__,
-                    ),
-                    err=True,
-                )
-        except ImportError:
+        else:
             typer.echo(
                 t(
                     "cli.supervisor.reset.unexpected_error",
@@ -211,6 +297,20 @@ def supervisor_reset(
                 ),
                 err=True,
             )
+        raise typer.Exit(code=1) from exc
+    except (ConnectionError, TimeoutError) as exc:
+        # Connection-shape failures route through the generic
+        # unexpected_error key -- the operator's next step is to check
+        # whether the supervisor process is alive, not to retry with a
+        # different component id.
+        typer.echo(
+            t(
+                "cli.supervisor.reset.unexpected_error",
+                component=component_id,
+                error_type=type(exc).__name__,
+            ),
+            err=True,
+        )
         raise typer.Exit(code=1) from exc
 
     typer.echo(t("cli.supervisor.reset.success", component=component_id))
