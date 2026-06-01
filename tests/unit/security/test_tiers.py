@@ -115,5 +115,8 @@ class TestTagHelper:
         class ImpostorTier(TrustTier):
             name = "T9"
 
-        with pytest.raises(ValueError, match="unsupported trust tier"):
+        # The error message ships via t("security.tier_unsupported", ...)
+        # (slice-3 retrospective arch-003), so we match the case-insensitive
+        # phrase rather than the prior hardcoded lowercase form.
+        with pytest.raises(ValueError, match=r"(?i)unsupported trust tier"):
             tag(ImpostorTier, content="x", source="test")

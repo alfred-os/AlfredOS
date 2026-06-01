@@ -209,13 +209,23 @@ class TaggedContent[TierT: TrustTier](BaseModel):
            check is skipped for legacy untyped construction sites.
         """
         if not value.name:
+            # arch-003 (slice-3 retrospective): catalog-key i18n. The
+            # operator may not read English; the audit row carries the
+            # raw key so a non-English UI can re-render at display time.
             raise ValueError(
-                f"TrustTier subclass {value.__name__} must set a non-empty `name`",
+                t(
+                    "security.tier_subclass_missing_name",
+                    subclass=value.__name__,
+                )
             )
         if value not in _APPROVED_TIERS:
             approved = sorted(t_cls.name for t_cls in _APPROVED_TIERS)
             raise ValueError(
-                f"unsupported trust tier for this build: {value.name!r} (approved: {approved})"
+                t(
+                    "security.tier_unsupported",
+                    tier_name=value.name,
+                    approved=", ".join(approved),
+                )
             )
         # Cross-tier guard: the generic argument (when present) MUST match.
         # __pydantic_generic_metadata__["args"] is a tuple of the type
@@ -235,9 +245,11 @@ class TaggedContent[TierT: TrustTier](BaseModel):
                 and value is not expected_tier
             ):
                 raise ValueError(
-                    "cross-tier wire payload rejected: declared "
-                    f"{value.name!r} but parser expects "
-                    f"{expected_tier.name!r} (spec §3.5)"
+                    t(
+                        "security.tier_mismatch",
+                        got=value.name,
+                        expected=expected_tier.name,
+                    )
                 )
         return value
 
@@ -287,7 +299,11 @@ class TaggedContent[TierT: TrustTier](BaseModel):
             if resolved is None:
                 approved = sorted(t_cls.name for t_cls in _APPROVED_TIERS)
                 raise ValueError(
-                    f"unknown trust tier on wire: {tier_name!r} (approved: {approved})"
+                    t(
+                        "security.tier_unknown_wire",
+                        tier_name=tier_name,
+                        approved=", ".join(approved),
+                    )
                 )
             data = {**data, "tier": resolved}
         return data
@@ -376,8 +392,11 @@ def tag(
     if tier not in _APPROVED_TIERS:
         approved = sorted(t_cls.name for t_cls in _APPROVED_TIERS)
         raise ValueError(
-            f"unsupported trust tier for this build: "
-            f"{getattr(tier, 'name', tier)!r} (approved: {approved})"
+            t(
+                "security.tier_unsupported",
+                tier_name=getattr(tier, "name", str(tier)),
+                approved=", ".join(approved),
+            )
         )
     return TaggedContent[tier](  # type: ignore[valid-type]
         content=content, source=source, tier=tier, metadata=dict(metadata)

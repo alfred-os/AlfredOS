@@ -589,6 +589,31 @@ msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
 "{path} && chmod 600 {path}`."
 
+# Slice-3 retrospective arch-003 — i18n the four hardcoded English raise
+# paths in alfred.security.tiers. Each error retains all the diagnostic
+# detail the prior f-string carried; the structured kwargs make the
+# strings re-renderable in a non-English UI at display time.
+#: src/alfred/security/tiers.py
+msgid "security.tier_subclass_missing_name"
+msgstr "TrustTier subclass {subclass} must set a non-empty `name`."
+
+#: src/alfred/security/tiers.py
+msgid "security.tier_unsupported"
+msgstr ""
+"Unsupported trust tier for this build: '{tier_name}' (approved: "
+"[{approved}])."
+
+#: src/alfred/security/tiers.py
+msgid "security.tier_mismatch"
+msgstr ""
+"Cross-tier wire payload rejected: declared '{got}' but parser expects "
+"'{expected}' (spec §3.5)."
+
+#: src/alfred/security/tiers.py
+msgid "security.tier_unknown_wire"
+msgstr ""
+"Unknown trust tier on wire: '{tier_name}' (approved: [{approved}])."
+
 #: src/alfred/security/tiers.py:439
 msgid "security.tag_t3_unauthorized"
 msgstr ""
