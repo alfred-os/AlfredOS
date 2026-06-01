@@ -88,3 +88,9 @@ Rejected: `DevGate` fails open for `operator`/`user-plugin` without a backing st
 - [ADR-0016](0016-slice4-discord-tui-comms-mcp-rewrite.md) — Slice-4 Discord/TUI comms-MCP migration commitment
 - [Design spec](../superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md) — complete Slice-3 design; §§1.3, 3.2, 4.1, 4.2, 4.3, 5.5, 5.7, 7a.1, 8.4, 10.1 govern the decisions above.
 - Code anchors: `src/alfred/security/secrets.py:228-279` (UID ownership check), `src/alfred/hooks/capability.py` (existing capability gate seam).
+- Implementing PRs:
+  - #135 (PR-S3-0a — design + plan + audit_row_schemas)
+  - #136 (PR-S3-0b — migrations 0007-0009 + Docker/Redis/state.git infra)
+  - #138 (PR-S3-1 — T1+T3 type system + nonce-gated `tag_t3_with_nonce`)
+  - #139 (PR-S3-2 — Real `CapabilityGate` + `RealGate` + `GatePolicy` + `GrantRow`)
+  - #140 (PR-S3-3a — MCP plugin transport: `StdioTransport`, `AlfredPluginSession`, `PluginManifest`, `InboundContentScanner`, `ContentStoreBase`)

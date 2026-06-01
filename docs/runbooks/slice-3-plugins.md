@@ -200,7 +200,7 @@ production), and that the absence of a sandbox policy file is intentional.
 
 - PRD §4.8 — supervisor + launcher contract
 - PRD §5.2 — sandbox policy directory + UID drop
-- [ADR-0017](../adr/0017-mcp-plugin-transport-conventions.md) — manifest
+- [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — manifest
   shape, error hierarchy, QuarantinedUnavailable location.
 - [`tests/unit/plugins/test_plugin_launcher_stub.py`](../../tests/unit/plugins/test_plugin_launcher_stub.py)
   — every invariant pinned by a test; read alongside the script.

@@ -28,12 +28,15 @@ AlfredOS/
 ├── CONTRIBUTING.md                 # how to contribute
 ├── SECURITY.md                     # vulnerability reporting
 ├── docker-compose.yaml             # default deployment
-├── bin/                            # CLI + setup scripts (alfred-setup.sh, alfred-setup.ps1)
+├── bin/                            # CLI + setup scripts (alfred-setup.sh, alfred-setup.ps1, alfred-plugin-launcher.sh, alfred-state-git-seed.sh)
 ├── src/alfred/                     # Python core
 │   ├── core/                       # orchestrator, loop, plugin registry, event bus
 │   ├── personas/                   # persona registry & routing
 │   ├── memory/                     # 6-layer memory subsystem
 │   ├── security/                   # trust tiers, DLP, secret broker, capability gate
+│   │   └── capability_gate/        # RealGate, GatePolicy, GrantRow, StorageBackend
+│   ├── plugins/                    # MCP plugin transport, session, manifest, content store
+│   ├── supervisor/                 # plugin supervisor, circuit breaker (Slice 3+)
 │   ├── providers/                  # LLM provider adapters (Anthropic, OpenAI, internal-CLI)
 │   ├── caching/                    # prompt cache, semantic cache, embedding cache
 │   ├── reviewer/                   # reviewer-gate client
@@ -53,9 +56,12 @@ AlfredOS/
     ├── adr/                        # Architecture Decision Records
     ├── glossary.md                 # single vocabulary source — every system-specific term defined once here, linked elsewhere
     ├── runbooks/                   # operator-facing deployment walkthroughs (e.g. slice-2-discord-smoke.md)
-    ├── subsystems/                 # per-subsystem deep-docs (identity, comms, …) — the hub-and-spoke pattern Slice 3 grows
+    ├── subsystems/                 # per-subsystem deep-docs — hub-and-spoke, one file per subsystem
     │   ├── identity.md             # identity / multi-user / IdentityResolver / canonical user id
-    │   └── comms.md                # CommsAdapter / DiscordAdapter / OutboundDlp / RateLimiter
+    │   ├── comms.md                # CommsAdapter / DiscordAdapter / OutboundDlp / RateLimiter
+    │   ├── hooks.md                # hookpoints, hook kinds, hook tiers, dispatcher
+    │   ├── security.md             # trust tiers (T0-T3), nonce gate, capability gate (Slice 3)
+    │   └── plugins.md              # MCP transport, StdioTransport, session lifecycle (Slice 3)
     └── superpowers/specs/          # design docs (this is the path the brainstorming skill expects)
 ```
 
