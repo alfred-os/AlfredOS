@@ -399,6 +399,7 @@ async def _invoke_supervisor_hookpoint(
     name: str,
     payload: dict[str, object],
     *,
+    subscribable_tiers: frozenset[str],
     fail_closed: bool = False,
 ) -> None:
     """Build a ``HookContext`` for ``name`` + ``payload`` and ``await invoke(...)``.
@@ -422,6 +423,13 @@ async def _invoke_supervisor_hookpoint(
             ``Supervisor._register_hookpoints``.
         payload: The subject payload. A ``"correlation_id"`` field is
             injected by this helper — callers MUST NOT supply it.
+        subscribable_tiers: The tier set the hookpoint was registered
+            with. Threaded verbatim to :func:`invoke` so the dispatcher's
+            publisher-side drift check (``invoked_subscribable_tiers``
+            vs declared) compares equal — the per-hookpoint helpers
+            below import the matching ``SYSTEM_ONLY_TIERS`` /
+            ``SYSTEM_OPERATOR_TIERS`` constants from ``alfred.hooks`` and
+            pass them through unchanged.
         fail_closed: Defaults to ``False`` — supervisor hookpoints are
             observability-shaped; a crashing subscriber must not stall the
             supervisor. Override only for security-blocking hookpoints
@@ -446,7 +454,13 @@ async def _invoke_supervisor_hookpoint(
     )
     # core-004 — ``invoke``'s first positional is ``name``; never
     # ``hookpoint=`` keyword (that arg name does not exist on ``invoke``).
-    await invoke(name, ctx, kind="post", fail_closed=fail_closed)
+    await invoke(
+        name,
+        ctx,
+        kind="post",
+        subscribable_tiers=subscribable_tiers,
+        fail_closed=fail_closed,
+    )
 
 
 async def invoke_breaker_tripped_hookpoint(
@@ -489,6 +503,11 @@ async def invoke_breaker_tripped_hookpoint(
     callers that build the audit row from the same fields keep the audit
     schema and the hookpoint subject in lock-step.
     """
+    # Deferred import to keep the breaker module's import graph tight —
+    # ``alfred.hooks`` pulls the gate and registry; the state-machine
+    # paths in this module must not eager-import either.
+    from alfred.hooks import SYSTEM_ONLY_TIERS
+
     await _invoke_supervisor_hookpoint(
         "supervisor.breaker.tripped",
         {
@@ -497,6 +516,7 @@ async def invoke_breaker_tripped_hookpoint(
             "last_failure_type": last_failure_type,
             "breaker_state": BreakerState.OPEN.value,
         },
+        subscribable_tiers=SYSTEM_ONLY_TIERS,
     )
 
 
@@ -525,6 +545,8 @@ async def invoke_breaker_reset_hookpoint(
 
     Mirrors :data:`alfred.audit.audit_row_schemas.SUPERVISOR_BREAKER_RESET_FIELDS`.
     """
+    from alfred.hooks import SYSTEM_OPERATOR_TIERS
+
     await _invoke_supervisor_hookpoint(
         "supervisor.breaker.reset",
         {
@@ -534,6 +556,7 @@ async def invoke_breaker_reset_hookpoint(
             "trip_count": trip_count,
             "operator_user_id": operator_user_id,
         },
+        subscribable_tiers=SYSTEM_OPERATOR_TIERS,
     )
 
 
@@ -560,6 +583,8 @@ async def invoke_supervisor_action_timeout_hookpoint(
 
     Mirrors :data:`alfred.audit.audit_row_schemas.SUPERVISOR_ACTION_TIMEOUT_FIELDS`.
     """
+    from alfred.hooks import SYSTEM_ONLY_TIERS
+
     await _invoke_supervisor_hookpoint(
         "supervisor.action_timeout",
         {
@@ -567,6 +592,7 @@ async def invoke_supervisor_action_timeout_hookpoint(
             "deadline_seconds": deadline_seconds,
             "phase_at_timeout": phase_at_timeout,
         },
+        subscribable_tiers=SYSTEM_ONLY_TIERS,
     )
 
 
@@ -586,6 +612,8 @@ async def invoke_plugin_lifecycle_loaded_hookpoint(
     on the keys consumed by subscribers (``plugin_id``,
     ``manifest_subscriber_tier``, ``breaker_state``).
     """
+    from alfred.hooks import SYSTEM_ONLY_TIERS
+
     await _invoke_supervisor_hookpoint(
         "plugin.lifecycle.loaded",
         {
@@ -593,6 +621,7 @@ async def invoke_plugin_lifecycle_loaded_hookpoint(
             "manifest_subscriber_tier": manifest_subscriber_tier,
             "breaker_state": breaker_state,
         },
+        subscribable_tiers=SYSTEM_ONLY_TIERS,
     )
 
 
@@ -611,6 +640,8 @@ async def invoke_plugin_lifecycle_crashed_hookpoint(
 
     Mirrors :data:`alfred.audit.audit_row_schemas.PLUGIN_LIFECYCLE_CRASHED_FIELDS`.
     """
+    from alfred.hooks import SYSTEM_ONLY_TIERS
+
     await _invoke_supervisor_hookpoint(
         "plugin.lifecycle.crashed",
         {
@@ -619,6 +650,7 @@ async def invoke_plugin_lifecycle_crashed_hookpoint(
             "breaker_state": breaker_state,
             "restart_count": restart_count,
         },
+        subscribable_tiers=SYSTEM_ONLY_TIERS,
     )
 
 
@@ -639,6 +671,8 @@ async def invoke_plugin_lifecycle_quarantined_hookpoint(
 
     Mirrors :data:`alfred.audit.audit_row_schemas.PLUGIN_LIFECYCLE_QUARANTINED_FIELDS`.
     """
+    from alfred.hooks import SYSTEM_ONLY_TIERS
+
     await _invoke_supervisor_hookpoint(
         "plugin.lifecycle.quarantined",
         {
@@ -646,6 +680,7 @@ async def invoke_plugin_lifecycle_quarantined_hookpoint(
             "trip_count": trip_count,
             "kill_succeeded": kill_succeeded,
         },
+        subscribable_tiers=SYSTEM_ONLY_TIERS,
     )
 
 

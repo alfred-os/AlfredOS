@@ -49,7 +49,13 @@ from alfred.audit.audit_row_schemas import (
     PLUGIN_LIFECYCLE_FIELDS,
     PLUGIN_LIFECYCLE_QUARANTINED_FIELDS,
 )
-from alfred.supervisor.breaker import BreakerState, CircuitBreaker
+from alfred.supervisor.breaker import (
+    BreakerState,
+    CircuitBreaker,
+    invoke_plugin_lifecycle_crashed_hookpoint,
+    invoke_plugin_lifecycle_loaded_hookpoint,
+    invoke_plugin_lifecycle_quarantined_hookpoint,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -227,6 +233,14 @@ class PluginLifecycle:
             manifest_tier=manifest_tier,
             trace_id=trace_id,
         )
+        # arch-s3-3b-001: invoke the loaded hookpoint AFTER the audit row
+        # so subscribers see the same transition the audit graph sees.
+        # Awaited inline (no fire-and-forget) — err-001 / core-004.
+        await invoke_plugin_lifecycle_loaded_hookpoint(
+            plugin_id=plugin_id,
+            manifest_subscriber_tier=manifest_tier,
+            breaker_state=breaker_state_label,
+        )
         return "loaded"
 
     # ------------------------------------------------------------------
@@ -336,6 +350,17 @@ class PluginLifecycle:
                 kill_succeeded=kill_succeeded,
                 trace_id=trace_id,
             )
+            # arch-s3-3b-001: invoke the quarantined hookpoint AFTER the
+            # audit row. The matching ``supervisor.breaker.tripped``
+            # invocation (lower-level state transition) is the caller's
+            # responsibility — both fire on the same OPEN transition and
+            # downstream consumers join on ``plugin_id``. Awaited inline —
+            # err-001 / core-004.
+            await invoke_plugin_lifecycle_quarantined_hookpoint(
+                plugin_id=plugin_id,
+                trip_count=breaker.trip_count,
+                kill_succeeded=kill_succeeded,
+            )
             return
 
         await self._audit.append_schema(
@@ -357,6 +382,14 @@ class PluginLifecycle:
             exception_type=exception_type,
             restart_count=restart_count,
             trace_id=trace_id,
+        )
+        # arch-s3-3b-001: invoke the crashed hookpoint AFTER the audit row
+        # on the CLOSED-still path. Awaited inline — err-001 / core-004.
+        await invoke_plugin_lifecycle_crashed_hookpoint(
+            plugin_id=plugin_id,
+            exception_type=exception_type,
+            breaker_state=breaker_state_label,
+            restart_count=restart_count,
         )
 
 

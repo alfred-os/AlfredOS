@@ -179,6 +179,12 @@ def _build(
     if autocommit_audit is None:
         autocommit_audit = MagicMock()
         autocommit_audit.append = AsyncMock()
+        # S-S3-3b-1: the supervisor.action_timeout row migrated from
+        # ``append`` to ``append_schema`` (PR-S3-0a symmetric validation).
+        # The session-bound writer remains on ``append`` until its rows
+        # are similarly migrated; the autocommit writer now uses both APIs
+        # in parallel until every emit site converts.
+        autocommit_audit.append_schema = AsyncMock()
     kwargs: dict[str, Any] = {
         "identity_resolver": identity_resolver,
         "session_scope": scope,
@@ -687,6 +693,16 @@ class TestOrchestratorActionDeadline:
     PR-S3-3b Task 12 wires :class:`alfred.supervisor.deadline.DeadlineWrapper`
     around the turn body. When the deadline fires:
 
+    Fixture note (arch-s3-3b-001 F2): the deadline arm now invokes
+    ``supervisor.action_timeout`` via the hook dispatcher AFTER the audit
+    row lands. The hookpoint is registered at runtime by
+    ``Supervisor.__init__``; orchestrator-only unit tests don't construct
+    one, so the autouse ``_silence_action_timeout_hook`` fixture patches
+    ``alfred.hooks.invoke.invoke`` to a no-op AsyncMock for every test in
+    this class. Tests that need to assert the invocation shape patch
+    ``invoke`` themselves (which supersedes the autouse patch via the
+    inner-scope context manager).
+
     * ``DeadlineWrapper.run`` re-raises ``asyncio.TimeoutError`` (core-002 —
       never reclassifies a real cancel as timeout).
     * The orchestrator's new ``except asyncio.TimeoutError`` arm emits the
@@ -698,6 +714,23 @@ class TestOrchestratorActionDeadline:
     * The session is rolled back and ``CancelledError`` is re-raised so
       higher-level cancellation handling stays unchanged.
     """
+
+    @pytest.fixture(autouse=True)
+    def _silence_action_timeout_hook(self) -> Any:
+        """Patch ``invoke`` to a no-op so the deadline tests don't need a registered hookpoint.
+
+        At runtime the supervisor.action_timeout hookpoint is declared by
+        ``Supervisor.__init__``. Orchestrator-only unit tests don't
+        construct a Supervisor, so the registry is in its bare state and
+        firing the hookpoint trips strict-mode "undeclared hookpoint"
+        enforcement. Patching ``invoke`` at the dispatcher boundary keeps
+        each test small without coupling it to the supervisor's
+        registration side effect.
+        """
+        from unittest.mock import patch as _patch
+
+        with _patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as _patched:
+            yield _patched
 
     async def test_timeout_emits_supervisor_action_timeout_via_autocommit(self) -> None:
         """The supervisor.action_timeout row lands on the autocommit writer.
@@ -720,13 +753,19 @@ class TestOrchestratorActionDeadline:
         with pytest.raises(asyncio.CancelledError):
             await _send(orch, m, "deadline-fires")
 
-        # Both timeout-path rows landed on the AUTOCOMMIT writer, never the
-        # session-bound one (CR-R3 #7).
-        autocommit_events = [
+        # S-S3-3b-1: the supervisor.action_timeout row now lands via
+        # ``append_schema`` (PR-S3-0a symmetric validation); the
+        # orchestrator.turn cancellation row remains on ``append`` until
+        # its schema constant lands. Both must hit the AUTOCOMMIT writer,
+        # never the session-bound one (CR-R3 #7).
+        autocommit_schema_events = [
+            call.kwargs["event"] for call in m["autocommit_audit"].append_schema.await_args_list
+        ]
+        autocommit_append_events = [
             call.kwargs["event"] for call in m["autocommit_audit"].append.await_args_list
         ]
-        assert "supervisor.action_timeout" in autocommit_events
-        assert "orchestrator.turn" in autocommit_events
+        assert "supervisor.action_timeout" in autocommit_schema_events
+        assert "orchestrator.turn" in autocommit_append_events
         # The session-bound writer is NOT used for the timeout rows.
         for call in m["audit"].append.await_args_list:
             assert call.kwargs.get("event") != "supervisor.action_timeout"
@@ -734,10 +773,15 @@ class TestOrchestratorActionDeadline:
         # Inspect the supervisor.action_timeout row in detail.
         timeout_call = next(
             call
-            for call in m["autocommit_audit"].append.await_args_list
+            for call in m["autocommit_audit"].append_schema.await_args_list
             if call.kwargs.get("event") == "supervisor.action_timeout"
         )
         timeout_kwargs = timeout_call.kwargs
+        # PR-S3-0a contract: schema constant + name pair surface on the call.
+        from alfred.audit.audit_row_schemas import SUPERVISOR_ACTION_TIMEOUT_FIELDS
+
+        assert timeout_kwargs["fields"] is SUPERVISOR_ACTION_TIMEOUT_FIELDS
+        assert timeout_kwargs["schema_name"] == "SUPERVISOR_ACTION_TIMEOUT_FIELDS"
         assert timeout_kwargs["result"] == "cancelled"
         assert timeout_kwargs["actor_user_id"] == "bruce"
         assert timeout_kwargs["actor_persona"] == "supervisor"
@@ -822,6 +866,45 @@ class TestOrchestratorActionDeadline:
         with pytest.raises(asyncio.CancelledError):
             await _send(orch, m, "deadline-fires")
 
+    async def test_timeout_invokes_supervisor_action_timeout_hookpoint(
+        self, _silence_action_timeout_hook: AsyncMock
+    ) -> None:
+        """The deadline arm invokes ``supervisor.action_timeout`` (arch-s3-3b-001).
+
+        Pins the previously-unwired hookpoint invocation. The
+        ``Supervisor._register_hookpoints`` call declares the hookpoint
+        but the row-emit path had no matching ``invoke(...)`` until F2 —
+        subscribers attached for ``supervisor.action_timeout`` silently
+        never fired. The orchestrator's deadline arm now awaits the
+        hookpoint invocation after the autocommit audit row lands.
+        """
+        router = MagicMock()
+
+        async def _slow_complete(*_args: Any, **_kwargs: Any) -> Any:
+            await asyncio.sleep(10)
+            return None  # pragma: no cover — deadline fires first
+
+        router.complete = AsyncMock(side_effect=_slow_complete)
+        orch, m = _build(router=router, deadline_seconds=0.001)
+
+        with pytest.raises(asyncio.CancelledError):
+            await _send(orch, m, "deadline-fires")
+
+        # At least one ``invoke(...)`` call had ``"supervisor.action_timeout"``
+        # as its first positional argument. The dispatcher is the only owner
+        # of the chain timeout window — the test inspects the call shape,
+        # not the chain outcome.
+        action_timeout_calls = [
+            call
+            for call in _silence_action_timeout_hook.call_args_list
+            if call.args and call.args[0] == "supervisor.action_timeout"
+        ]
+        assert len(action_timeout_calls) == 1
+        ctx = action_timeout_calls[0].args[1]
+        assert ctx.input["user_id"] == "bruce"
+        assert ctx.input["deadline_seconds"] == 0.001
+        assert ctx.input["phase_at_timeout"] == "unknown"
+
     async def test_no_timeout_path_under_normal_completion(self) -> None:
         """A normal-speed turn never emits supervisor.action_timeout.
 
@@ -836,6 +919,7 @@ class TestOrchestratorActionDeadline:
         # No autocommit-writer audit calls at all on the happy path — the
         # only writes go to the session-bound writer.
         assert m["autocommit_audit"].append.await_count == 0
+        assert m["autocommit_audit"].append_schema.await_count == 0
 
     async def test_external_cancellation_uses_session_bound_writer(self) -> None:
         """A non-timeout CancelledError still uses the session-bound writer.
@@ -859,6 +943,7 @@ class TestOrchestratorActionDeadline:
         # The non-timeout cancellation row is on the SESSION-BOUND writer (pre-PR-S3-3b).
         # Autocommit writer is not touched.
         assert m["autocommit_audit"].append.await_count == 0
+        assert m["autocommit_audit"].append_schema.await_count == 0
         # Session-bound writer recorded the cancellation row.
         cancel_calls = [
             call
@@ -913,7 +998,15 @@ class TestOrchestratorActionDurationHistogram:
         assert kwargs["duration_seconds"] >= 0.0
 
     async def test_timeout_path_records_duration(self, monkeypatch: Any) -> None:
-        """Deadline-fired turn observes one ``timeout`` outcome."""
+        """Deadline-fired turn observes one ``timeout`` outcome.
+
+        F2 — the deadline arm now also fires ``supervisor.action_timeout``
+        through the hook dispatcher; patch ``invoke`` so the registry's
+        strict-mode "undeclared hookpoint" check (which would normally
+        require a Supervisor registration side effect) is bypassed.
+        """
+        from unittest.mock import patch as _patch
+
         recorder = MagicMock()
         monkeypatch.setattr(
             "alfred.orchestrator.core.record_action_duration",
@@ -929,7 +1022,10 @@ class TestOrchestratorActionDurationHistogram:
         router.complete = AsyncMock(side_effect=_slow_complete)
         orch, m = _build(router=router, deadline_seconds=0.001)
 
-        with pytest.raises(asyncio.CancelledError):
+        with (
+            _patch("alfred.hooks.invoke.invoke", new=AsyncMock()),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await _send(orch, m, "deadline-fires")
 
         # Exactly one observation; outcome is "timeout" with the raw user_id.

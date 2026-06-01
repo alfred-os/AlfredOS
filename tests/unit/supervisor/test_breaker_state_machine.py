@@ -508,12 +508,14 @@ async def test_invoke_supervisor_hookpoint_helper_routes_through_invoke() -> Non
     """
     from unittest.mock import AsyncMock, patch
 
+    from alfred.hooks import SYSTEM_ONLY_TIERS
     from alfred.supervisor.breaker import _invoke_supervisor_hookpoint
 
     with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
         await _invoke_supervisor_hookpoint(
             "supervisor.test_helper",
             {"foo": "bar", "baz": 7},
+            subscribable_tiers=SYSTEM_ONLY_TIERS,
         )
     assert mock_invoke.await_count == 1
     args, kwargs = mock_invoke.call_args
@@ -531,6 +533,9 @@ async def test_invoke_supervisor_hookpoint_helper_routes_through_invoke() -> Non
     assert kwargs["kind"] == "post"
     # Default fail_closed is False — supervisor hookpoints are observability shape.
     assert kwargs["fail_closed"] is False
+    # The tier set the supervisor registered with threads to the dispatcher
+    # so the publisher-drift check (declared vs invoked) compares equal.
+    assert kwargs["subscribable_tiers"] == SYSTEM_ONLY_TIERS
 
 
 @pytest.mark.asyncio
@@ -543,10 +548,16 @@ async def test_invoke_supervisor_hookpoint_helper_honours_fail_closed_override()
     """
     from unittest.mock import AsyncMock, patch
 
+    from alfred.hooks import SYSTEM_ONLY_TIERS
     from alfred.supervisor.breaker import _invoke_supervisor_hookpoint
 
     with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
-        await _invoke_supervisor_hookpoint("supervisor.test_secure", {"k": "v"}, fail_closed=True)
+        await _invoke_supervisor_hookpoint(
+            "supervisor.test_secure",
+            {"k": "v"},
+            subscribable_tiers=SYSTEM_ONLY_TIERS,
+            fail_closed=True,
+        )
     _args, kwargs = mock_invoke.call_args
     assert kwargs["fail_closed"] is True
 
@@ -566,6 +577,7 @@ async def test_invoke_supervisor_action_timeout_hookpoint_payload() -> None:
     """
     from unittest.mock import AsyncMock, patch
 
+    from alfred.hooks import SYSTEM_ONLY_TIERS
     from alfred.supervisor.breaker import invoke_supervisor_action_timeout_hookpoint
 
     with patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as mock_invoke:
@@ -582,6 +594,10 @@ async def test_invoke_supervisor_action_timeout_hookpoint_payload() -> None:
     assert ctx.input["phase_at_timeout"] == "unknown"
     assert ctx.input["correlation_id"] != ""
     assert kwargs["fail_closed"] is False
+    # The supervisor declared this hookpoint as system-only; the helper
+    # threads the same tier set so the dispatcher's publisher-drift
+    # check passes.
+    assert kwargs["subscribable_tiers"] == SYSTEM_ONLY_TIERS
 
 
 @pytest.mark.asyncio

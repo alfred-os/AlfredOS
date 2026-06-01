@@ -89,6 +89,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alfred.audit.audit_row_schemas import SUPERVISOR_ACTION_TIMEOUT_FIELDS
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetError, BudgetGuard, UnknownBudgetUserError
 from alfred.memory.episodic import EpisodicMemory
@@ -97,6 +98,7 @@ from alfred.personas.alfred import ALFRED_PERSONA, render_persona_prompt
 from alfred.providers.base import CompletionRequest, Message
 from alfred.providers.router import ProviderRouter
 from alfred.security.tiers import T1, T2, TaggedContent
+from alfred.supervisor.breaker import invoke_supervisor_action_timeout_hookpoint
 from alfred.supervisor.deadline import DeadlineWrapper
 from alfred.supervisor.observability import record_action_duration
 
@@ -445,13 +447,24 @@ class Orchestrator:
         user_id: str,
         correlation_id: str,
     ) -> None:
-        """Emit the ``supervisor.action_timeout`` row via the autocommit writer.
+        """Emit the ``supervisor.action_timeout`` row + invoke the matching hookpoint.
 
         Spec §10.5 + migration 0007: the row's ``result`` is ``"cancelled"``
         (the turn was cancelled by the deadline). The autocommit writer
         flushes the row OUTSIDE the rolled-back parent session_scope
         (core-003 + CR-R3 #7) — using ``self._audit`` here would risk losing
         the row when ``session.rollback()`` runs in the caller.
+
+        Uses :meth:`AuditWriter.append_schema` against
+        :data:`SUPERVISOR_ACTION_TIMEOUT_FIELDS` so PR-S3-0a's symmetric
+        missing/extra-field guard catches drift between the schema constant
+        and this emit site (S-S3-3b-1).
+
+        After the row commits, invokes the
+        ``supervisor.action_timeout`` hookpoint — registered by
+        ``Supervisor.__init__`` but previously never fired (arch-s3-3b-001).
+        Subscribers see the same transition the audit graph sees. Awaited
+        inline (no fire-and-forget) — err-001 / core-004.
 
         ``phase_at_timeout="unknown"`` is the Slice-3 default;
         Slice-4+ resolves the in-flight phase from the OTel span hierarchy.
@@ -460,7 +473,9 @@ class Orchestrator:
         rule #7). The DeadlineWrapper itself takes no audit responsibility
         (core-002, core-003); that contract lives end-to-end in this method.
         """
-        await self._autocommit_audit.append(
+        await self._autocommit_audit.append_schema(
+            fields=SUPERVISOR_ACTION_TIMEOUT_FIELDS,
+            schema_name="SUPERVISOR_ACTION_TIMEOUT_FIELDS",
             event="supervisor.action_timeout",
             actor_user_id=user_id,
             actor_persona="supervisor",
@@ -476,6 +491,13 @@ class Orchestrator:
             cost_estimate_usd=0.0,
             cost_actual_usd=0.0,
             trace_id=correlation_id,
+        )
+        # arch-s3-3b-001: invoke the matching hookpoint AFTER the audit row
+        # so subscribers see the same transition the audit graph sees.
+        await invoke_supervisor_action_timeout_hookpoint(
+            user_id=user_id,
+            deadline_seconds=self._deadline_wrapper.deadline_seconds,
+            phase_at_timeout="unknown",
         )
 
     async def _emit_orchestrator_turn_cancelled_row_autocommit(

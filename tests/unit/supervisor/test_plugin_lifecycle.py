@@ -39,6 +39,25 @@ from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.plugin_lifecycle import PluginLifecycle
 
 
+@pytest.fixture(autouse=True)
+def _silence_plugin_lifecycle_hooks() -> Any:
+    """Patch ``invoke`` to a no-op so plugin_lifecycle tests don't need declared hookpoints.
+
+    arch-s3-3b-001 F2: ``start_plugin`` and ``on_crash`` now invoke the
+    matching ``plugin.lifecycle.*`` hookpoints AFTER their audit rows. At
+    runtime these are declared by ``Supervisor.__init__``; the bare
+    PluginLifecycle unit tests don't construct a Supervisor, so the
+    registry has them undeclared and strict-mode firing trips. Patching
+    ``invoke`` at the dispatcher boundary keeps each test small without
+    coupling it to the supervisor's registration side effect. Tests that
+    assert the invocation shape use the yielded mock directly.
+    """
+    from unittest.mock import patch as _patch
+
+    with _patch("alfred.hooks.invoke.invoke", new=AsyncMock()) as _patched:
+        yield _patched
+
+
 @pytest.fixture
 def mock_gate() -> MagicMock:
     """A gate that permits everything by default — tests flip to False where needed."""
@@ -331,6 +350,165 @@ async def test_on_crash_default_now_uses_wall_clock(
     # No assertion on the timestamp — wall-clock varies. The breaker did
     # accept the failure, that's the contract.
     assert mock_audit.append_schema.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# F2 — plugin.lifecycle.* hookpoint invocations (arch-s3-3b-001)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_plugin_loaded_invokes_lifecycle_loaded_hookpoint(
+    mock_gate: MagicMock,
+    mock_audit: AsyncMock,
+    _silence_plugin_lifecycle_hooks: AsyncMock,
+) -> None:
+    """A successful load fires ``plugin.lifecycle.loaded`` after the audit row.
+
+    Pins the previously-unwired invocation (arch-s3-3b-001). Subscribers
+    see the same transition the audit graph sees.
+    """
+    pl = PluginLifecycle(gate=mock_gate, audit=mock_audit)
+    breaker = _make_breaker()
+
+    result = await pl.start_plugin(
+        plugin_id="quarantined-llm",
+        manifest_tier="system",
+        breaker=breaker,
+        trace_id="trace-load",
+    )
+
+    assert result == "loaded"
+    loaded_calls = [
+        call
+        for call in _silence_plugin_lifecycle_hooks.call_args_list
+        if call.args and call.args[0] == "plugin.lifecycle.loaded"
+    ]
+    assert len(loaded_calls) == 1
+    ctx = loaded_calls[0].args[1]
+    assert ctx.input["plugin_id"] == "quarantined-llm"
+    assert ctx.input["manifest_subscriber_tier"] == "system"
+    assert ctx.input["breaker_state"] == "CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_start_plugin_load_refused_does_not_fire_loaded_hookpoint(
+    mock_gate: MagicMock,
+    mock_audit: AsyncMock,
+    _silence_plugin_lifecycle_hooks: AsyncMock,
+) -> None:
+    """Gate refusal SKIPS the lifecycle.loaded invocation.
+
+    A refused load is not a loaded plugin; the hookpoint must not fire.
+    The existing load_refused audit row carries the "didn't load" signal.
+    """
+    mock_gate.check_plugin_load.return_value = False
+    pl = PluginLifecycle(gate=mock_gate, audit=mock_audit)
+    breaker = _make_breaker()
+
+    await pl.start_plugin(
+        plugin_id="quarantined-llm",
+        manifest_tier="system",
+        breaker=breaker,
+        trace_id="trace-refused",
+    )
+
+    loaded_calls = [
+        call
+        for call in _silence_plugin_lifecycle_hooks.call_args_list
+        if call.args and call.args[0] == "plugin.lifecycle.loaded"
+    ]
+    assert loaded_calls == []
+
+
+@pytest.mark.asyncio
+async def test_on_crash_closed_invokes_lifecycle_crashed_hookpoint(
+    mock_gate: MagicMock,
+    mock_audit: AsyncMock,
+    _silence_plugin_lifecycle_hooks: AsyncMock,
+) -> None:
+    """A crash that leaves the breaker CLOSED fires ``plugin.lifecycle.crashed``."""
+    pl = PluginLifecycle(gate=mock_gate, audit=mock_audit)
+    breaker = _make_breaker()
+
+    await pl.on_crash(
+        plugin_id="quarantined-llm",
+        exception_type="SubprocessExitedError",
+        exit_code=1,
+        signal=None,
+        restart_count=2,
+        breaker=breaker,
+        trace_id="trace-crash",
+    )
+
+    crashed_calls = [
+        call
+        for call in _silence_plugin_lifecycle_hooks.call_args_list
+        if call.args and call.args[0] == "plugin.lifecycle.crashed"
+    ]
+    quarantined_calls = [
+        call
+        for call in _silence_plugin_lifecycle_hooks.call_args_list
+        if call.args and call.args[0] == "plugin.lifecycle.quarantined"
+    ]
+    assert len(crashed_calls) == 1
+    assert quarantined_calls == []
+    ctx = crashed_calls[0].args[1]
+    assert ctx.input["plugin_id"] == "quarantined-llm"
+    assert ctx.input["exception_type"] == "SubprocessExitedError"
+    assert ctx.input["breaker_state"] == "CLOSED"
+    assert ctx.input["restart_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_on_crash_open_invokes_lifecycle_quarantined_hookpoint(
+    mock_gate: MagicMock,
+    mock_audit: AsyncMock,
+    _silence_plugin_lifecycle_hooks: AsyncMock,
+) -> None:
+    """A crash that trips the breaker OPEN fires ``plugin.lifecycle.quarantined``.
+
+    The matching ``supervisor.breaker.tripped`` invocation (lower-level
+    state transition) is the caller's responsibility — both fire on the
+    same OPEN transition.
+    """
+    pl = PluginLifecycle(gate=mock_gate, audit=mock_audit)
+    breaker = _make_breaker()
+    # Pre-load failures so the next on_crash trips the breaker to OPEN.
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    for i in range(2):
+        breaker.record_failure("SubprocessExitedError", now=base + dt.timedelta(seconds=i))
+
+    await pl.on_crash(
+        plugin_id="quarantined-llm",
+        exception_type="SubprocessExitedError",
+        exit_code=1,
+        signal=None,
+        restart_count=3,
+        breaker=breaker,
+        trace_id="trace-quarantine",
+        kill_succeeded=True,
+        now=base + dt.timedelta(seconds=2),
+    )
+
+    assert breaker.state == BreakerState.OPEN
+    crashed_calls = [
+        call
+        for call in _silence_plugin_lifecycle_hooks.call_args_list
+        if call.args and call.args[0] == "plugin.lifecycle.crashed"
+    ]
+    quarantined_calls = [
+        call
+        for call in _silence_plugin_lifecycle_hooks.call_args_list
+        if call.args and call.args[0] == "plugin.lifecycle.quarantined"
+    ]
+    # Quarantined fires; crashed does not (mutually exclusive on this crash).
+    assert quarantined_calls != []
+    assert crashed_calls == []
+    ctx = quarantined_calls[0].args[1]
+    assert ctx.input["plugin_id"] == "quarantined-llm"
+    assert ctx.input["trip_count"] == 1
+    assert ctx.input["kill_succeeded"] is True
 
 
 # ---------------------------------------------------------------------------
