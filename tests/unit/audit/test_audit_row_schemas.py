@@ -178,16 +178,22 @@ def test_t3_derived_downgrade_distinct_from_t1_downgrade() -> None:
     assert "user_id" not in audit_row_schemas.T3_DERIVED_DOWNGRADE_FIELDS
 
 
-def test_plugin_grant_requested_fields_aliases_plugin_grant_fields() -> None:
-    """PLUGIN_GRANT_REQUESTED_FIELDS is the same object as PLUGIN_GRANT_FIELDS.
+def test_plugin_grant_requested_fields_supersets_plugin_grant_fields() -> None:
+    """PLUGIN_GRANT_REQUESTED_FIELDS supersets PLUGIN_GRANT_FIELDS with the T1 tag.
 
-    Stage 3 (arch-001 / cross-cutting R2): the reviewer-gated CLI emits the
-    ``plugin.grant.requested`` row through the helper, which references this
-    name for emit-site clarity. The two constants are intentionally identical
-    so the schema-module test corpus stays the single source of truth — a
-    drift between them is a refactor bug that this assertion fails loudly on.
+    CR-149 round-6: the requested-side row tags the operator-typed CLI
+    ingress with ``trust_tier_of_trigger="T1"`` so the audit-graph
+    swimlane (``alfred audit graph --tier T1``) surfaces it in the
+    operator-action lane. The lifecycle constant (``PLUGIN_GRANT_FIELDS``)
+    stays narrower because the eventual ``plugin.grant.rebuilt`` twin
+    fires off a host-level supervisor merge (T0). PRD §7.1 + CLAUDE.md
+    hard rule #3 require the ingress-side tag; this assertion fails
+    loudly if either constant drifts from the documented superset
+    contract.
     """
-    assert audit_row_schemas.PLUGIN_GRANT_REQUESTED_FIELDS is audit_row_schemas.PLUGIN_GRANT_FIELDS
+    assert audit_row_schemas.PLUGIN_GRANT_FIELDS <= audit_row_schemas.PLUGIN_GRANT_REQUESTED_FIELDS
+    assert "trust_tier_of_trigger" in audit_row_schemas.PLUGIN_GRANT_REQUESTED_FIELDS
+    assert "trust_tier_of_trigger" not in audit_row_schemas.PLUGIN_GRANT_FIELDS
 
 
 def test_web_allowlist_requested_fields_exact() -> None:
@@ -205,6 +211,8 @@ def test_web_allowlist_requested_fields_exact() -> None:
             "path_prefix",
             "operator_user_id",
             "proposal_branch",
+            # CR-149 round-6: operator-CLI ingress carries the T1 tag.
+            "trust_tier_of_trigger",
             "correlation_id",
         }
     )
@@ -225,6 +233,8 @@ def test_config_set_requested_fields_exact() -> None:
             "config_key",
             "operator_user_id",
             "proposal_branch",
+            # CR-149 round-6: operator-CLI ingress carries the T1 tag.
+            "trust_tier_of_trigger",
             "correlation_id",
         }
     )

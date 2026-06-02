@@ -182,6 +182,14 @@ def _queue_grant_proposal(
             # Until then the audit row carries ``None`` and the eventual
             # upgrade is a single emit-site edit.
             "operator_user_id": None,
+            # CR-149 round-6: operator-typed CLI ingress is the canonical
+            # T1 swimlane (PRD §7.1). The reviewer-gated capability
+            # request originates from a real operator at the CLI; the
+            # tag pins the row to the operator-action lane so audit-graph
+            # queries (``alfred audit graph --tier T1``) surface it
+            # alongside its eventual ``plugin.grant.rebuilt`` (T0) merge
+            # twin.
+            "trust_tier_of_trigger": "T1",
         },
         client=_state_git_client,
     )

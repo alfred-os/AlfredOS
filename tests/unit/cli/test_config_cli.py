@@ -592,6 +592,11 @@ def test_set_high_blast_emits_audit_row_before_state_git_write(
     _, audit_kwargs = call_order[audit_indices[0]]
     assert audit_kwargs["config_key"] == "quarantined-provider"
     assert "value" not in audit_kwargs
+    # CR-149 round-6: the row tags the operator-typed CLI ingress with
+    # ``trust_tier_of_trigger="T1"`` so ``alfred audit graph --tier T1``
+    # surfaces the row in the operator-action swimlane (PRD §7.1 +
+    # CLAUDE.md hard rule #3).
+    assert audit_kwargs["trust_tier_of_trigger"] == "T1"
 
 
 def test_set_low_blast_emits_no_audit_row(runner: CliRunner, tmp_path: Path) -> None:

@@ -842,6 +842,8 @@ def test_queue_proposal_or_exit_emits_audit_row_before_state_git_write(
                     "subscriber_tier": "system",
                     "hookpoint": "tool.web.fetch",
                     "operator_user_id": None,
+                    # CR-149 round-6: operator-CLI ingress carries the T1 tag.
+                    "trust_tier_of_trigger": "T1",
                 },
                 client=_OrderTrackingClient(),  # type: ignore[arg-type]
             )
@@ -900,6 +902,8 @@ def test_queue_proposal_or_exit_emits_audit_row_even_when_state_git_fails() -> N
                     "subscriber_tier": "system",
                     "hookpoint": "tool.web.fetch",
                     "operator_user_id": None,
+                    # CR-149 round-6: T1 ingress tag.
+                    "trust_tier_of_trigger": "T1",
                 },
                 client=_FailingClient(),  # type: ignore[arg-type]
             )
@@ -1009,6 +1013,8 @@ def test_queue_proposal_or_exit_refuses_caller_overriding_proposal_branch() -> N
                 "subscriber_tier": "system",
                 "hookpoint": "tool.web.fetch",
                 "operator_user_id": None,
+                # CR-149 round-6: T1 ingress tag.
+                "trust_tier_of_trigger": "T1",
                 "proposal_branch": "proposal/policy-grant-deadbeefdeadbeef",
             },
         )
@@ -1036,6 +1042,8 @@ def test_queue_proposal_or_exit_refuses_caller_overriding_correlation_id() -> No
                 "subscriber_tier": "system",
                 "hookpoint": "tool.web.fetch",
                 "operator_user_id": None,
+                # CR-149 round-6: T1 ingress tag.
+                "trust_tier_of_trigger": "T1",
                 "correlation_id": "deadbeef-dead-beef-dead-beefdeadbeef",
             },
         )
@@ -1101,6 +1109,11 @@ def test_queue_proposal_or_exit_emit_helper_refuses_extra_keys() -> None:
                 "subscriber_tier": "system",
                 "hookpoint": "tool.web.fetch",
                 "operator_user_id": None,
+                # CR-149 round-6: include the canonical T1 ingress tag so
+                # the only difference between subject and declared
+                # fields is the stray fragment — the assertion target
+                # remains "unexpected fields", not "missing required".
+                "trust_tier_of_trigger": "T1",
                 "stray_t3_fragment": "secret-shaped",
             },
         )
@@ -1151,6 +1164,8 @@ def test_queue_proposal_or_exit_pre_generated_id_is_used_by_client(
                     "subscriber_tier": "system",
                     "hookpoint": "tool.web.fetch",
                     "operator_user_id": None,
+                    # CR-149 round-6: T1 ingress tag.
+                    "trust_tier_of_trigger": "T1",
                 },
                 client=client,
             )

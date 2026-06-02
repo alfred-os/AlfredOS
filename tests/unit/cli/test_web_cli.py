@@ -208,6 +208,58 @@ def test_allowlist_remove_payload_carries_domain(
     assert payload.domain == "example.com"
 
 
+def test_allowlist_add_audit_row_carries_t1_trust_tier(
+    runner: CliRunner, mock_add_proposal: ProposalResult
+) -> None:
+    """CR-149 round-6: ``web.allowlist.requested`` row tags T1 on add.
+
+    Same rationale as the plugin-grant regression — operator-typed
+    CLI ingress declares its swimlane. The
+    ``WEB_ALLOWLIST_REQUESTED_FIELDS`` constant now carries the field
+    so the symmetric-keys helper would reject a drop at the emit site;
+    this assertion pins the value to ``"T1"`` so a refactor that swaps
+    to ``"T0"`` (or drops it entirely) surfaces here.
+    """
+    captured: list[dict[str, object]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        if event == "web.allowlist.requested":
+            captured.append(kwargs)
+
+    with (
+        patch("alfred.cli.web._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        mock_client.create_proposal_from_payload.return_value = mock_add_proposal
+        result = runner.invoke(web_app, ["allowlist", "add", "example.com"])
+    assert result.exit_code == 0, result.stderr
+    assert len(captured) == 1, captured
+    assert captured[0]["trust_tier_of_trigger"] == "T1"
+
+
+def test_allowlist_remove_audit_row_carries_t1_trust_tier(
+    runner: CliRunner, mock_remove_proposal: ProposalResult
+) -> None:
+    """CR-149 round-6: ``web.allowlist.requested`` row tags T1 on remove."""
+    captured: list[dict[str, object]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        if event == "web.allowlist.requested":
+            captured.append(kwargs)
+
+    with (
+        patch("alfred.cli.web._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        mock_client.create_proposal_from_payload.return_value = mock_remove_proposal
+        result = runner.invoke(web_app, ["allowlist", "remove", "example.com"])
+    assert result.exit_code == 0, result.stderr
+    assert len(captured) == 1, captured
+    assert captured[0]["trust_tier_of_trigger"] == "T1"
+
+
 def test_allowlist_remove_surfaces_state_git_error(runner: CliRunner) -> None:
     """State.git failure on the remove path surfaces too."""
     with patch("alfred.cli.web._state_git_client") as mock_client:
