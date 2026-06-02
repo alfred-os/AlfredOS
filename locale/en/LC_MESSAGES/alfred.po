@@ -45,37 +45,38 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/_state_git.py:545
+#: src/alfred/cli/_state_git.py:635
 msgid "cli.state_git.error.path_missing"
 msgstr ""
-"/var/lib/alfred/state.git does not exist. Run `alfred-setup` to "
-"initialise the reviewer-gate state repo."
+"{state_git_path} does not exist. Run `alfred-setup` to initialise the "
+"reviewer-gate state repo."
 
-#: src/alfred/cli/_state_git.py:546
+#: src/alfred/cli/_state_git.py:636
 msgid "cli.state_git.error.git_missing"
 msgstr "`git` is not installed on PATH. Install git and re-run the command."
 
-#: src/alfred/cli/_state_git.py:547
+#: src/alfred/cli/_state_git.py:637
 msgid "cli.state_git.error.push_rejected"
 msgstr ""
 "Reviewer-gate push rejected. Check `alfred audit log --event "
 "plugin.grant.requested --since 5m` for the typed error detail."
 
-#: src/alfred/cli/_validators.py:94
+#: src/alfred/cli/_validators.py:112
 msgid "cli.validators.plugin_id_invalid"
 msgstr ""
-"Invalid plugin id {value!r}. Plugin ids must start with a lowercase "
-"letter and contain only lowercase letters, digits, dot, underscore, or "
-"hyphen (regex: ^[a-z][a-z0-9._-]+$)."
+"Invalid plugin id {value!r}. Plugin ids are dot-separated segments; each "
+"segment must start with a lowercase letter, end with a lowercase letter "
+"or digit, and contain only lowercase letters, digits, underscore, or "
+"hyphen. No empty, leading, or trailing segments."
 
-#: src/alfred/cli/_validators.py:151
+#: src/alfred/cli/_validators.py:169
 msgid "cli.validators.subscriber_tier_invalid"
 msgstr ""
 "Invalid subscriber tier {value!r}. Subscriber tiers (the capability axis)"
 " must be one of: {valid_tiers}. Note: this is orthogonal to the content "
 "trust tier (T0..T3) used by `alfred audit graph --tier`."
 
-#: src/alfred/cli/_validators.py:212
+#: src/alfred/cli/_validators.py:230
 msgid "cli.validators.hookpoint_registry_empty"
 msgstr ""
 "Cannot validate hookpoint {value!r}: the hook registry is empty, no "
@@ -83,15 +84,15 @@ msgstr ""
 " the CLI bootstrap did not import the publisher modules; rerun the "
 "command after a full `alfred` startup."
 
-#: src/alfred/cli/_validators.py:218
+#: src/alfred/cli/_validators.py:236
 msgid "cli.validators.hookpoint_invalid"
 msgstr ""
 "Unknown hookpoint {value!r}. No publisher has declared a hookpoint by "
 "that name. Closest matches: {suggestions}. Run `alfred audit log --event "
 "hook.registry.declared` for the full registered set."
 
-#: src/alfred/cli/_validators.py:286 src/alfred/cli/_validators.py:308
-#: src/alfred/cli/_validators.py:321
+#: src/alfred/cli/_validators.py:304 src/alfred/cli/_validators.py:326
+#: src/alfred/cli/_validators.py:339
 msgid "cli.validators.domain_invalid"
 msgstr ""
 "Invalid domain {value!r}. Pass a bare lowercase domain (e.g. example.com "
@@ -99,21 +100,21 @@ msgstr ""
 "letters, digits, dot, hyphen; must end with a TLD of at least two "
 "letters."
 
-#: src/alfred/cli/_validators.py:294
+#: src/alfred/cli/_validators.py:312
 msgid "cli.validators.domain_with_scheme"
 msgstr ""
 "Refusing domain {value!r}: drop the scheme (http://, https://). The "
 "allowlist takes a bare domain; the path component is the separate "
 "`--path-prefix` flag."
 
-#: src/alfred/cli/_validators.py:303
+#: src/alfred/cli/_validators.py:321
 msgid "cli.validators.domain_with_path"
 msgstr ""
 "Refusing domain {value!r}: domain arguments cannot contain `..` or path "
 "separators (`/`, `\\`). Pass the bare host; scope the path with the "
 "separate `--path-prefix` flag."
 
-#: src/alfred/cli/_validators.py:361
+#: src/alfred/cli/_validators.py:379
 msgid "cli.validators.quarantined_provider_invalid"
 msgstr ""
 "Invalid quarantined-provider {value!r}. The quarantined provider must be "
@@ -167,7 +168,8 @@ msgstr "Audit graph — swimlane {tier}"
 msgid "cli.audit.graph.header"
 msgstr "Audit graph — all tiers"
 
-#: src/alfred/cli/config.py:80 src/alfred/cli/config.py:93
+#: src/alfred/cli/config.py:80 src/alfred/cli/config.py:101
+#: src/alfred/cli/config.py:226
 msgid "cli.config.error.malformed_yaml"
 msgstr ""
 "alfred config refused: {yaml_path} is malformed and cannot be parsed. "
@@ -176,41 +178,41 @@ msgstr ""
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.
 # quarantined-provider) queue a state.git reviewer-gated proposal.
-#: src/alfred/cli/config.py:299
+#: src/alfred/cli/config.py:326
 msgid "cli.config.help.group"
 msgstr "Get, set, or list operator configuration values."
 
-#: src/alfred/cli/config.py:309
+#: src/alfred/cli/config.py:336
 msgid "cli.config.set.help.short"
 msgstr "Set an operator configuration key."
 
-#: src/alfred/cli/config.py:313
+#: src/alfred/cli/config.py:340
 msgid "cli.config.set.arg.key"
 msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
 
-#: src/alfred/cli/config.py:317
+#: src/alfred/cli/config.py:344
 msgid "cli.config.set.arg.value"
 msgstr "New value (parsed as int/float when possible, else kept as string)."
 
-#: src/alfred/cli/config.py:383
+#: src/alfred/cli/config.py:410
 msgid "cli.config.set.unknown_key"
 msgstr ""
 "alfred config set refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:395
+#: src/alfred/cli/config.py:422
 msgid "cli.config.set.applied"
 msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
 
-#: src/alfred/cli/config.py:408
+#: src/alfred/cli/config.py:435
 msgid "cli.config.get.help.short"
 msgstr "Show the current value of an operator configuration key."
 
-#: src/alfred/cli/config.py:412
+#: src/alfred/cli/config.py:439
 msgid "cli.config.get.arg.key"
 msgstr "Configuration key to read."
 
-#: src/alfred/cli/config.py:433
+#: src/alfred/cli/config.py:460
 msgid "cli.config.get.reviewer_gated_set_only"
 msgstr ""
 "'{key}' is a reviewer-gated (high-blast) configuration key. Its value "
@@ -219,37 +221,37 @@ msgstr ""
 " routing.yaml. There is no `alfred config get` surface for reviewer-gated"
 " keys in this release."
 
-#: src/alfred/cli/config.py:441
+#: src/alfred/cli/config.py:468
 msgid "cli.config.get.unknown_key"
 msgstr ""
 "alfred config get refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:450
+#: src/alfred/cli/config.py:477
 msgid "cli.config.get.not_set"
 msgstr ""
 "{key} is not set in policies.yaml — the system default applies. Set it "
 "with 'alfred config set {key} <value>'."
 
-#: src/alfred/cli/config.py:452
+#: src/alfred/cli/config.py:479
 msgid "cli.config.get.value"
 msgstr "{key} = {value}"
 
-#: src/alfred/cli/config.py:476
+#: src/alfred/cli/config.py:503
 msgid "cli.config.list.help.short"
 msgstr "List every operator configuration value from policies.yaml."
 
-#: src/alfred/cli/config.py:485 src/alfred/cli/config.py:489
+#: src/alfred/cli/config.py:512 src/alfred/cli/config.py:516
 msgid "cli.config.list.empty"
 msgstr ""
 "policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
 "to seed the file."
 
-#: src/alfred/cli/config.py:506
+#: src/alfred/cli/config.py:540
 msgid "cli.config.set.denied"
 msgstr "alfred config set denied: {reason}"
 
-#: src/alfred/cli/config.py:507
+#: src/alfred/cli/config.py:542
 msgid "cli.config.set.pending_review"
 msgstr ""
 "{key} change queued for reviewer approval (high-blast knob).\n"
@@ -433,11 +435,11 @@ msgstr ""
 " PR-S3-7; until then, inspect the plugin's manifest.toml under plugins/ "
 "directly."
 
-#: src/alfred/cli/plugin.py:514
+#: src/alfred/cli/plugin.py:521
 msgid "cli.plugin.grant.denied"
 msgstr "alfred plugin grant denied: {reason}"
 
-#: src/alfred/cli/plugin.py:515
+#: src/alfred/cli/plugin.py:522
 msgid "cli.plugin.grant.pending_review"
 msgstr ""
 "Grant proposal queued for reviewer approval.\n"
@@ -447,11 +449,11 @@ msgstr ""
 "approves the proposal and the supervisor rebuilds the capability "
 "projection."
 
-#: src/alfred/cli/plugin.py:516
+#: src/alfred/cli/plugin.py:523
 msgid "cli.plugin.revoke.denied"
 msgstr "alfred plugin revoke denied: {reason}"
 
-#: src/alfred/cli/plugin.py:517
+#: src/alfred/cli/plugin.py:524
 msgid "cli.plugin.revoke.pending_review"
 msgstr ""
 "Revocation proposal queued for reviewer approval.\n"
@@ -588,11 +590,11 @@ msgstr "granted_by"
 msgid "cli.web.allowlist.list.column.granted_at"
 msgstr "granted_at"
 
-#: src/alfred/cli/web.py:279
+#: src/alfred/cli/web.py:287
 msgid "cli.web.allowlist.add.denied"
 msgstr "alfred web allowlist add denied: {reason}"
 
-#: src/alfred/cli/web.py:280
+#: src/alfred/cli/web.py:288
 msgid "cli.web.allowlist.add.pending_review"
 msgstr ""
 "Allowlist-add proposal queued for reviewer approval.\n"
@@ -601,11 +603,11 @@ msgstr ""
 "The domain is NOT yet fetchable — it activates when the reviewer approves"
 " the proposal and the supervisor rebuilds the web_allowlist projection."
 
-#: src/alfred/cli/web.py:281
+#: src/alfred/cli/web.py:289
 msgid "cli.web.allowlist.remove.denied"
 msgstr "alfred web allowlist remove denied: {reason}"
 
-#: src/alfred/cli/web.py:282
+#: src/alfred/cli/web.py:291
 msgid "cli.web.allowlist.remove.pending_review"
 msgstr ""
 "Allowlist-remove proposal queued for reviewer approval.\n"
