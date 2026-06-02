@@ -1115,3 +1115,100 @@ no hookpoint subscription needed because the row IS the surface.
 
 See [`CapabilityGateMonitor`](#capabilitygatemonitor),
 [docs/subsystems/supervisor.md](subsystems/supervisor.md), and spec §10.4.
+
+## Sandbox profile
+
+The per-plugin OS-level sandbox configuration declared in the plugin
+manifest (`sandbox_profile` field, e.g. `"user-plugin"`). Declared
+independently of [`subscriber_tier`](#subscriber_tier) — the
+quarantined-LLM plugin has `subscriber_tier=system` (it processes T3
+content on behalf of the system) but runs in the `user-plugin`-class
+sandbox profile (no `ALFRED_*` env vars, fs writes restricted to
+`$XDG_RUNTIME_DIR/alfred/plugin-<id>/`, network allowlist only).
+Per-OS sandbox policy files (Linux `bwrap`, macOS `sandbox-exec`) ship
+in Slice 4 alongside [ADR-0015](adr/0015-slice4-containerised-quarantined-llm.md).
+In Slice 3, `bin/alfred-plugin-launcher.sh` fails closed when no policy
+file is present; `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` unlocks Slice-3
+subprocess plugins in `ALFRED_ENV=development` only. The sandbox profile
+is orthogonal to both the subscriber-capability axis (see
+[hook tier](#hook-tier)) and the content trust tier (see
+[trust tier](#trust-tier)) — it constrains *what the plugin process
+can do*, not *what the plugin is trusted to receive*.
+
+See spec §4.3, §4.8, and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## JSON_OBJECT_MODE
+
+A [`ProviderCapability`](#providercapability) enum value indicating the
+provider supports `response_format={"type": "json_object"}` but does
+NOT enforce a schema. DeepSeek-chat is the Slice-3 `JSON_OBJECT_MODE`
+provider; [`QuarantinedExtractor`](#quarantinedextractor) routes it
+through the same retry-and-validate path as the
+`prompt_embedded_fallback` [`ExtractionMode`](#extractionmode). The
+selected mode is recorded in the audit row as
+`extraction_mode="json_object_unconstrained"` to distinguish
+best-effort post-hoc validation (DeepSeek) from true schema enforcement
+(Anthropic, OpenAI). The distinction is forensic-load-bearing:
+extraction failures in `JSON_OBJECT_MODE` are weighted toward
+schema-incompatibility rather than provider-side malformation.
+
+See spec §6.2, [ExtractionMode](#extractionmode), and
+[docs/subsystems/security.md](subsystems/security.md).
+
+## WebFetchError
+
+The exception hierarchy for `web.fetch` failures
+(`src/alfred/plugins/web_fetch/errors.py`, shipped PR-S3-5).
+Subclasses: `WebFetchDomainNotAllowed`, `WebFetchTlsError`,
+`WebFetchRateLimited`, `WebFetchMimeTypeNotAllowed`,
+`WebFetchSizeLimitExceeded`. All user-facing error strings route
+through `t()` (CLAUDE.md i18n rule #1). The hierarchy is fail-loud —
+no `except Exception: pass` is permitted on a `WebFetchError`; the
+plugin surfaces the typed subclass and the orchestrator translates it
+to a `t()` message at the user boundary. `WebFetchCanaryTripped` is
+explicitly NOT a subclass of `WebFetchError` — it is a separate
+security-event hierarchy (see below) because a canary trip is a DLP
+*event*, not a fetch *failure*.
+
+See [WebFetchCanaryTripped](#webfetchcanarytripped), spec §7.10, and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## WebFetchCanaryTripped
+
+A distinct `AlfredError` subclass (NOT a [`WebFetchError`](#webfetcherror)
+subclass) that signals a canary token was detected in fetched T3
+content (`src/alfred/plugins/web_fetch/errors.py`, shipped PR-S3-5).
+This is a SECURITY EVENT, not a fetch failure: it emits a
+`tool.web.fetch.canary_tripped` audit row, quarantines the content
+handle, and raises with `t("security.canary_tripped", url=source_url)`.
+There is no silent-degradation path; the user receives an error and
+the operator sees the audit event (CLAUDE.md hard rule #7 — no silent
+failures in security paths). The separation from `WebFetchError`
+prevents `except WebFetchError` blocks from accidentally swallowing
+canary trips.
+
+See [WebFetchError](#webfetcherror),
+[InboundContentScanner](#inboundcontentscanner), spec §7.6, §7.10, and
+[docs/subsystems/plugins.md](subsystems/plugins.md).
+
+## QuarantinedUnavailable
+
+The exception the orchestrator catches when the quarantined-LLM plugin
+is unavailable (`src/alfred/plugins/errors.py`, shipped PR-S3-3b). A
+distinct top-level exception, NOT a subclass of `HookSubscriberError`
+or [`WebFetchError`](#webfetcherror) — its lifecycle is
+supervisor-state, not subscriber-dispatch. The orchestrator responds
+with `t("orchestrator.quarantine_unavailable")` — "I can't process
+external content right now; please retry in a few minutes." There is
+no silent T3-self-processing fallback; the user-visible message is a
+hard invariant (CLAUDE.md hard rule #7). The
+[`CircuitBreaker`](#circuitbreaker--breakerstate--circuitbreakerstate)
+in `src/alfred/supervisor/` raises this when the quarantined-LLM
+breaker state is `OPEN`; the [`Supervisor`](#supervisor)
+re-emits on `HALF_OPEN` probes that fail.
+
+See [Supervisor](#supervisor),
+[CircuitBreaker / BreakerState / CircuitBreakerState](#circuitbreaker--breakerstate--circuitbreakerstate),
+spec §5.5, §10.2, and
+[docs/subsystems/supervisor.md](subsystems/supervisor.md).
