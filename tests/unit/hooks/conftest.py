@@ -115,9 +115,19 @@ def fresh_registry() -> Iterator[HookRegistry]:
     Captures the pre-test registry at fixture entry; restores it on
     teardown so the module-level singleton is bit-for-bit identical
     after the test (no leaked subscribers, no swapped gate). The gate
-    is :func:`make_deny_all_gate` (a :class:`RealGate` over an
-    empty-grants snapshot — every check denies) and the sink is the
-    registry's own default :class:`StructlogAuditSink`.
+    is :func:`make_permissive_fixture_gate` (the Slice-2.5
+    ``DevGate()``-parity test shim: operator + user-plugin granted
+    unconditionally, system denied) and the sink is the registry's own
+    default :class:`StructlogAuditSink`.
+
+    Note: this fixture is the **fixture-parity** path — Slice-3 spec
+    §15.1 mandates that deny-path security tests construct the strict
+    :class:`RealGate` semantics directly via
+    :func:`tests.helpers.gates.make_deny_all_gate`. The permissive
+    posture here is for the hundreds of Slice-2.5 test bodies that
+    register an ``operator``-tier subscriber under an arbitrary
+    module-named ``plugin_id`` and then exercise non-gate code paths.
+    See ADR-0019 for the boundary.
 
     ``strict_declarations=False`` is set so the pre-#119 test bodies
     that register against ad-hoc hookpoint names without an explicit
@@ -143,8 +153,12 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     (Task 7's @hook decorator tests, etc.). The default-deny on
     ``system`` is the production posture; this fixture is the explicit
     opt-in for tests that need to exercise the granted-system code
-    path. Backed by :func:`make_allow_system_gate` — a :class:`RealGate`
-    over a single wildcard ``system``-tier grant.
+    path. Backed by :func:`make_permissive_fixture_gate` with
+    ``allow_system=True`` — the Slice-2.5 ``DevGate(allow_system=True)``-
+    parity test shim, NOT :class:`RealGate`. Deny-path security tests
+    that need the strict-RealGate semantics around a system-tier
+    subscriber use :func:`tests.helpers.gates.make_allow_system_gate`
+    directly (see ADR-0019).
 
     ``strict_declarations=False`` — same rationale as
     :func:`fresh_registry`.
@@ -167,9 +181,14 @@ def strict_registry() -> Iterator[HookRegistry]:
 
     Tests in ``test_registration_enforcement.py`` use this to pin the
     strict-declaration contract (undeclared hookpoint refuses
-    subscriber registration). The gate is :func:`make_allow_system_gate`
-    so a test that exercises a system-tier subscriber on a declared
-    hookpoint passes both gates.
+    subscriber registration). The gate is
+    :func:`make_permissive_fixture_gate` with ``allow_system=True`` so
+    a test that exercises a system-tier subscriber on a declared
+    hookpoint passes both axes (the strict-hookpoint axis under test
+    AND the permissive-tier axis from the fixture-parity shim). Tests
+    that need the strict :class:`RealGate` semantics for the system
+    tier use :func:`tests.helpers.gates.make_allow_system_gate`
+    directly (see ADR-0019).
     """
     prior = get_registry()
     registry = HookRegistry(
@@ -195,7 +214,11 @@ def spy_registry_allow_system(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
     * **System permitted at the gate** so a ``system``-tier subscriber
       can be registered without tripping the default-deny on the
       system tier. The gate comes from
-      :func:`make_allow_system_gate`.
+      :func:`make_permissive_fixture_gate` with ``allow_system=True``
+      (the fixture-parity shim, not :class:`RealGate` — deny-path
+      security tests that need a strict-RealGate granted-system
+      posture construct :func:`tests.helpers.gates.make_allow_system_gate`
+      directly per ADR-0019).
     * **Spy sink observable** so fault-path audit rows
       (:data:`HOOKS_REFUSAL`, :data:`HOOKS_UNAUTHORIZED_REFUSAL`,
       :data:`HOOKS_REENTRY_BYPASS`) land on the test recorder rather
