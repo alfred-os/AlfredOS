@@ -9,7 +9,7 @@ runtime API; production callers never re-enter them.
 that may read the production-environment env key for the purpose of
 selecting which :class:`alfred.security.capability_gate._gate.RealGate`
 construction the supervisor wires — the development branch (no
-grants, in-process stub backend, no heartbeat) or the production
+grants, in-memory stub backend, no heartbeat) or the production
 branch (Postgres backend, full grant table, heartbeat running). PR-S3-7
 removed the Slice-2.5 :class:`DevGate` from ``src/`` entirely (spec
 §15.1 flag-day); both bootstrap branches now construct

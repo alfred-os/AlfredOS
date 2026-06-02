@@ -25,7 +25,7 @@ Why two callables rather than one ``build_gate()`` factory:
 
 * :func:`build_dev_gate` and :func:`build_real_gate` differ in their
   dependency set. ``build_dev_gate`` constructs a no-grant
-  :class:`RealGate` in-process via a stub backend; ``build_real_gate``
+  :class:`RealGate` over an in-memory stub backend; ``build_real_gate``
   needs a real :class:`StorageBackend` and an :class:`AuditWriter`.
   Pushing the env read down into a single ``build_gate()`` would
   either pull both dependency trees into every bootstrap path or hide
@@ -91,11 +91,11 @@ def is_production() -> bool:
     return value not in {"", _DEVELOPMENT}
 
 
-def _make_in_process_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
+def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
     """Return a :class:`StorageBackend`-shaped stub with no Postgres I/O.
 
     PR-S3-7 (spec §15.1): with :class:`DevGate` removed, the development
-    bootstrap path constructs a :class:`RealGate` over an in-process
+    bootstrap path constructs a :class:`RealGate` over an in-memory
     backend stub instead of touching Postgres. The stub satisfies the
     structural :class:`StorageBackend` Protocol without any database
     connection so ``alfred chat`` / ``alfred status`` in a development
@@ -150,7 +150,7 @@ def build_dev_gate() -> RealGate:
 
     Spec §15.1 (flag-day): :class:`DevGate` was removed from ``src/``
     in PR-S3-7. The development bootstrap now constructs a
-    :class:`RealGate` with an empty grant snapshot and an in-process
+    :class:`RealGate` with an empty grant snapshot and an in-memory
     backend stub (no Postgres). Every :meth:`RealGate.check` call
     denies fail-closed — the only safe default when no operator-grant
     table is wired. Developers who need granted-system semantics for
@@ -188,7 +188,7 @@ def build_dev_gate() -> RealGate:
     )
     return RealGate(
         policy=GatePolicy(grants=frozenset()),
-        backend=_make_in_process_backend(),
+        backend=_make_in_memory_backend(),
         audit_sink=_make_no_op_audit_sink(),
     )
 

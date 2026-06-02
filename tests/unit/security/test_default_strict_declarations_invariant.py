@@ -3,7 +3,7 @@
 Spec §8.4 + PR-S3-7 (spec §15.1 flag-day):
 :class:`alfred.security.capability_gate._gate.RealGate` is now BOTH
 the production and the development gate. The dev branch wires it with
-an empty grant snapshot and an in-process backend stub (no Postgres);
+an empty grant snapshot and an in-memory backend stub (no Postgres);
 the production branch wires it with a real
 :class:`alfred.security.capability_gate.backend.PostgresBackend` and
 the heartbeat running. The Slice-2.5 :class:`DevGate` was removed in
@@ -53,7 +53,7 @@ def test_build_dev_gate_returns_realgate_with_empty_grants() -> None:
     PR-S3-7 (spec §15.1 flag-day): the Slice-2.5 :class:`DevGate`
     was removed from ``src/``; the development bootstrap path now
     constructs a :class:`RealGate` with an empty grant snapshot, an
-    in-process backend stub, and no heartbeat. Every check denies
+    in-memory backend stub, and no heartbeat. Every check denies
     fail-closed — the safer default in the absence of a real grant
     table. A developer who needs granted-system semantics for local
     iteration uses :mod:`tests.helpers.gates` or seeds a real Postgres
