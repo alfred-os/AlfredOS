@@ -175,9 +175,7 @@ def test_sync_writer_and_async_shim_produce_identical_blob(
 
     # Sync writer.
     sync_client = StateGitProposalClient(state_git_path=bare_repo)
-    sync_result = sync_client.create_proposal_from_payload(
-        payload, proposal_id=proposal_id_sync
-    )
+    sync_result = sync_client.create_proposal_from_payload(payload, proposal_id=proposal_id_sync)
 
     # Async shim — patched to bind the test's bare_repo. The shim
     # constructs its own StateGitProposalClient internally; patching
