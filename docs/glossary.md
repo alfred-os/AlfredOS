@@ -98,7 +98,24 @@ tier-specific entries.
 `operator` / `user-plugin` are dispatch-order + capability gates on
 hook subscribers, an entirely separate axis from content provenance.
 
-See [ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+Slice 3 introduces first-class `TaggedContent[T1]` and
+`TaggedContent[T3]` type parameters:
+
+- **`TaggedContent[T1]`** — authenticated-user-trusted content. `T1`
+  values are emitted by [`IdentityResolver`](#identityresolver) when a
+  verified platform identity is confirmed. The type enforces that T1
+  content came from an authenticated source; `IdentityResolver` is the
+  only authorised producer (spec §3.1).
+- **`TaggedContent[T3]`** — external-untrusted content. `T3` values are
+  produced only via the capability-gated `tag(T3, ...)` factory at the
+  [`StdioTransport`](#stdiotransport) boundary and in
+  `plugins/quarantine_host.py`. Any other call site raises `ValueError`
+  (spec §3.2).
+
+See [T1 (operator tier)](#t1-operator-tier),
+[T3 (untrusted-ingestion tier)](#t3-untrusted-ingestion-tier),
+[tag_t3_with_nonce](#tag_t3_with_nonce),
+[ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
 [ADR-0008](adr/0008-llm-output-trust-tier.md), and
 [docs/subsystems/security.md](subsystems/security.md).
 
@@ -710,6 +727,18 @@ share the word "tier" only.
 See spec §6.1, [`docs/subsystems/hooks.md`](subsystems/hooks.md), and
 [ADR-0014](adr/0014-pluggable-hooks-for-every-action.md).
 
+**Orthogonality with content trust tier:** A `system`-tier plugin
+(subscriber tier) can process T3 content (content trust tier) — these
+two axes are independent. Using `subscriber_tier="T3"` in a plugin
+manifest is a security error refused at handshake with
+[`ManifestTierError`](#manifesterror) → a `plugin.lifecycle.load_refused`
+audit row (T3 is not a valid subscriber tier; the valid values are
+`system`, `operator`, `user-plugin`).
+
+See [trust tier](#trust-tier) for the content-provenance axis and
+[Capability gate](#capability-gate) for the orthogonal
+`check_content_clearance` method that gates content-tier access.
+
 ## HookRefusal
 
 The exception a `pre` subscriber raises to short-circuit the chain
@@ -914,8 +943,29 @@ hard rule #7).
 The runtime enforcement surface for plugin permissions. Every tool call
 passes through the capability gate, which consults the plugin's
 manifest, the per-user grant table, and the current request context.
-Slice 3 lands the full surface alongside the MCP plugin transport;
-Slice 2 ships only the data-model placeholders.
+Slice 3 lands the full surface alongside the MCP plugin transport. The
+Protocol gains two sibling methods alongside `check()` (all shipped by
+PR-S3-2):
+
+- `check_plugin_load(*, plugin_id, manifest_tier) -> bool` — gates
+  plugin load at handshake time; called by
+  [`AlfredPluginSession`](#alfredpluginsession) before any capability
+  grants are consulted.
+- `check_content_clearance(*, plugin_id, hookpoint, content_tier) -> bool`
+  — gates content-tier access: T3 content must not reach T2-only paths.
+  Orthogonal to subscriber [hook tier](#hook-tier)
+  (`system` / `operator` / `user-plugin`) — a `system`-tier plugin can
+  process T3 content; these two axes are independent.
+
+When Postgres is unavailable, all three methods return `False`
+(fail-closed). The 60-second heartbeat window bounds staleness before
+in-process subscribers also see fail-closed. `DevGate` (removed at end
+of Slice 3 in PR-S3-7) implemented both new methods as fail-open
+(`True`) for backward compatibility during the slice.
+
+See [RealGate](#realgate), spec §8.2,
+[ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+and [docs/subsystems/plugins.md](subsystems/plugins.md).
 
 ## DLP
 
@@ -1212,3 +1262,44 @@ See [Supervisor](#supervisor),
 [CircuitBreaker / BreakerState / CircuitBreakerState](#circuitbreaker--breakerstate--circuitbreakerstate),
 spec §5.5, §10.2, and
 [docs/subsystems/supervisor.md](subsystems/supervisor.md).
+
+## CommsAdapterMCP
+
+The MCP-shaped `Protocol` for comms adapters, defined in
+`src/alfred/comms/mcp_protocol.py` (shipped PR-S3-6). Distinct from the
+in-process [`CommsAdapter Protocol`](#commsadapter-protocol) (which
+remains for `DiscordAdapter` / `TuiAdapter` through Slice 3). The
+Slice-3 stub validates transport and handshake only — four wire
+methods: `lifecycle.start`, `lifecycle.stop`, `inbound.message`,
+`adapter.health`. The full message-contract definition is co-defined
+in [ADR-0016](adr/0016-slice4-discord-tui-comms-mcp-rewrite.md) when
+Slice 4 implements the Discord rewrite. Two Protocols coexisting is a
+deliberate Slice-3 bounded deviation — the in-process Protocol owns
+runtime behaviour, the MCP Protocol owns the future wire contract so
+implementer subagents have a stable surface to target.
+
+See [CommsAdapter Protocol](#commsadapter-protocol),
+[ADR-0009](adr/0009-comms-adapter-protocol-slice2-only.md),
+[ADR-0016](adr/0016-slice4-discord-tui-comms-mcp-rewrite.md), and
+[docs/subsystems/comms.md](subsystems/comms.md).
+
+## quarantined_to_structured
+
+The single legitimate crossing point where T3-derived data enters
+orchestrator-readable form (`src/alfred/security/quarantine.py`,
+shipped PR-S3-4). Any other path that claims to convert T3 content is
+a security violation detectable by grepping for callers outside
+[`QuarantinedExtractor`](#quarantinedextractor). The caller must hold
+`check_content_clearance(hookpoint="quarantine.dereference",
+content_tier="T3")` on the capability gate — distinct from the
+`tag.T3` clearance, which is plugin-host-internal. Raw provider
+response bytes never cross back to the orchestrator process untyped;
+the return type is [`ExtractionResult`](#extractionresult) only. The
+function emits the `quarantine.extract` audit row before returning, so
+the audit trail captures the dereference even if a downstream caller
+swallows the result (CLAUDE.md hard rule #7).
+
+See [QuarantinedExtractor](#quarantinedextractor),
+[ExtractionResult](#extractionresult),
+[T3DerivedData](#t3deriveddata), spec §3.4, and
+[docs/subsystems/security.md](subsystems/security.md).
