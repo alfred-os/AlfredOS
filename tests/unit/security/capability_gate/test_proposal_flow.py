@@ -348,9 +348,16 @@ async def test_write_proposal_shim_validates_payload() -> None:
         _write_proposal_to_state_git,
     )
 
+    # CR-149 round-10 (3339423491): a canonical
+    # ``proposal/policy-grant-<16 hex>`` branch keeps the failure pinned
+    # to the Pydantic subscriber_tier refusal. The prior
+    # ``proposal/policy-grant-stubtest`` value was itself a malformed
+    # branch (8-char suffix, non-hex) and would raise ValueError from
+    # the branch-suffix check if the test ever flipped to hit it,
+    # diluting the closed-set guarantee this test is meant to pin.
     with pytest.raises(ValidationError):
         await _write_proposal_to_state_git(
-            branch_name="proposal/policy-grant-stubtest",
+            branch_name="proposal/policy-grant-deadbeefdeadbeef",
             plugin_id="p",
             subscriber_tier="not-a-tier",  # closed-set refusal
             hookpoint="h",

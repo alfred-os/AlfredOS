@@ -178,14 +178,23 @@ def test_comms_test_plugin_non_string_method_returns_invalid_request() -> None:
     not _MAIN_PATH.exists(),
     reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
 )
-def test_comms_test_plugin_missing_method_notification_suppressed() -> None:
-    """CR-149 round-6.5: notification-shape malformed frame emits no reply.
+def test_comms_test_plugin_missing_method_emits_invalid_request_with_null_id() -> None:
+    """CR-149 round-10 (3339423468): malformed object frames ALWAYS reply.
 
-    A frame with no ``id`` (notification per §4.1.2) AND no ``method``
-    is still malformed, but the spec forbids replying to
-    notifications. The plugin must drop the frame silently rather than
-    emit an Invalid Request envelope that would desynchronise the
-    host's request/notification state machine.
+    JSON-RPC 2.0 §5.1 (Error object): "If there was an error in
+    detecting the id in the Request object (e.g. Parse error / Invalid
+    Request), it MUST be Null." The notification-suppression contract
+    (§4.1.2) applies only to *valid* Request objects that omit ``id``.
+    When the request is fundamentally invalid (no ``method``, wrong
+    type for ``method``), the host cannot disambiguate
+    "intended notification" from "malformed request" — the server MUST
+    treat the frame as malformed and emit ``-32600`` with ``id: null``
+    so strict hosts are not left waiting for a reply that never
+    arrives (PRD §9).
+
+    The prior shape gated the reply on ``has_response_id`` and dropped
+    the frame entirely, regressing the spec compliance the broader
+    request-object refusal pins.
     """
     bad_frame = json.dumps({"jsonrpc": "2.0"})
     result = subprocess.run(  # noqa: S603
@@ -200,9 +209,44 @@ def test_comms_test_plugin_missing_method_notification_suppressed() -> None:
         f"plugin exited with code {result.returncode}; stderr={result.stderr!r}"
     )
     lines = [line for line in result.stdout.splitlines() if line.strip()]
-    assert lines == [], (
-        f"notification-shape malformed frame must not produce a reply, got {result.stdout!r}"
+    assert len(lines) == 1, (
+        f"expected exactly one Invalid Request frame, got {len(lines)}: {result.stdout!r}"
     )
+    response = json.loads(lines[0])
+    assert response.get("jsonrpc") == "2.0", response
+    # ``id`` is null per §5.1 because the request did not detect one.
+    assert response.get("id") is None, response
+    err = response.get("error", {})
+    assert err.get("code") == -32600, response
+    assert err.get("message") == "Invalid Request", response
+
+
+def test_comms_test_plugin_non_string_method_no_id_emits_invalid_request_with_null_id() -> None:
+    """CR-149 round-10 (3339423468): non-string ``method`` with no id replies.
+
+    Sister case of the missing-method test above: ``{"method": 1}`` is
+    fundamentally invalid per §4.1, so even without ``id`` the plugin
+    MUST emit ``-32600`` with ``id: null``. The prior ``has_response_id``
+    gating dropped this frame silently.
+    """
+    bad_frame = json.dumps({"jsonrpc": "2.0", "method": 1})
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(_MAIN_PATH)],
+        input=bad_frame + "\n",
+        capture_output=True,
+        text=True,
+        timeout=_SMOKE_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1
+    response = json.loads(lines[0])
+    assert response.get("jsonrpc") == "2.0"
+    assert response.get("id") is None, response
+    err = response.get("error", {})
+    assert err.get("code") == -32600
+    assert err.get("message") == "Invalid Request"
 
 
 @pytest.mark.skipif(

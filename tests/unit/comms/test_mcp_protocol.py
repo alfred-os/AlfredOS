@@ -67,6 +67,60 @@ def test_inbound_message_rejects_missing_platform() -> None:
         InboundMessage(platform_user_id="12345", content="hi", language="en")  # type: ignore[call-arg]
 
 
+@pytest.mark.parametrize(
+    "language",
+    [
+        # human name instead of tag
+        "english",
+        # underscore instead of hyphen
+        "en_US",
+        # uppercase primary subtag
+        "EN-us",
+        # primary subtag too long
+        "english-US",
+        # explicit empty
+        "",
+        # bare hyphen
+        "-",
+        # numeric region with wrong width
+        "en-12",
+        # garbage
+        "1234",
+    ],
+)
+def test_inbound_message_refuses_non_bcp47_language(language: str) -> None:
+    """CR-149 round-10 (3339361793): malformed locale tags fail at parse time.
+
+    Without the field validator any string flowed through the wire
+    boundary alongside the ``extra='forbid'`` schema-drift refusal —
+    the orchestrator then received tags that no localiser would
+    recognise. Pin the conservative BCP-47 shape so a malformed locale
+    fails Pydantic validation at ingress (PRD §9.1).
+    """
+    with pytest.raises(ValidationError):
+        InboundMessage(
+            platform="discord",
+            platform_user_id="12345",
+            content="hi",
+            language=language,
+        )
+
+
+@pytest.mark.parametrize(
+    "language",
+    ["en", "fr", "pt-BR", "en-US", "es-419", "zh", "zh-CN"],
+)
+def test_inbound_message_accepts_canonical_bcp47_language(language: str) -> None:
+    """The conservative BCP-47 grammar accepts every Slice-3 adapter case."""
+    msg = InboundMessage(
+        platform="discord",
+        platform_user_id="12345",
+        content="hi",
+        language=language,
+    )
+    assert msg.language == language
+
+
 def test_adapter_health_response_status_values() -> None:
     ok = AdapterHealthResponse(status="ok", detail="all good")
     assert ok.status == "ok"
