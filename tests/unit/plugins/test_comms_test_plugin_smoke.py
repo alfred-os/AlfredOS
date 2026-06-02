@@ -1,0 +1,125 @@
+"""Thin subprocess+stdio smoke test for the comms-test reference plugin.
+
+Spec §9.1 + comms-002: the reference echo plugin
+(``plugins.alfred_comms_test.main``) is a hand-rolled MCP stdio server
+speaking line-delimited JSON-RPC. The richer round-trip tests live in
+``tests/integration/test_comms_mcp_contract.py``; this file is the
+single thinnest smoke test the reviewer asked for — spawn the plugin
+via :func:`subprocess.Popen`, write ONE JSON-RPC line, read ONE response
+line, assert the echo round-trips. Used to catch packaging / wiring
+breakage where the plugin fails to start at all (missing ``__main__``
+guard, ImportError in the module body, broken ``sys.path`` under
+``python -m plugins.alfred_comms_test.main``).
+
+Why subprocess.Popen rather than the asyncio variant in the integration
+tests:
+
+* The reviewer recommendation explicitly called for the synchronous
+  Popen pattern so this smoke test can run as a unit-level test with
+  no integration marker. Asyncio subprocess work requires an event
+  loop and pytest-asyncio's auto-mode; spawning via ``subprocess.Popen``
+  + ``communicate(input=...)`` is loop-free and fast (~50 ms wall on
+  a healthy box).
+* The integration tests assert the multi-frame ordering (response then
+  notification) which needs incremental reads. A single round-trip
+  fits ``communicate`` cleanly.
+
+The test is decorated with no marker — it runs in the default unit
+suite. ``MAIN_PATH.exists()`` skip guards against the plugin dir being
+removed from a future packaging refactor without breaking the smoke
+collection.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+# Resolve to the repo's plugin dir relative to this test file so the
+# smoke test runs regardless of cwd (unit suite, IDE, makefile, etc.).
+_PLUGIN_DIR: Path = Path(__file__).parent.parent.parent.parent / "plugins" / "alfred_comms_test"
+_MAIN_PATH: Path = _PLUGIN_DIR / "main.py"
+
+# Generous so a slow CI worker still completes within the budget; tight
+# enough that a wedged plugin fails loud rather than hangs the suite.
+# Single-frame echo on a healthy box returns within ~10 ms, so 5 s is
+# a 500x cushion.
+_SMOKE_TIMEOUT_S: float = 5.0
+
+
+@pytest.mark.skipif(
+    not _MAIN_PATH.exists(),
+    reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
+)
+def test_comms_test_plugin_subprocess_health_round_trip() -> None:
+    """One ``adapter.health`` JSON-RPC frame in, one response frame out.
+
+    Smoke-test contract:
+
+    * The plugin starts cleanly under the test runner's interpreter via
+      ``python -m plugins.alfred_comms_test.main``.
+    * It reads ONE line-delimited JSON-RPC request on stdin.
+    * It writes ONE line-delimited JSON-RPC response on stdout matching
+      the request ``id``.
+    * stdin EOF after the single frame causes the plugin to drain its
+      loop (``reader.readline()`` returns ``b""``) and exit 0.
+
+    ``adapter.health`` rather than ``lifecycle.start`` because the
+    health probe is a single-response method — ``lifecycle.start`` emits
+    BOTH a response AND a notification, which ``communicate(input=...)``
+    captures as concatenated lines and complicates the single-frame
+    assertion this smoke test pins. The integration test in
+    ``tests/integration/test_comms_mcp_contract.py`` covers the multi-
+    frame ordering.
+
+    Without :func:`lifecycle.start` first the plugin reports
+    ``status=degraded`` (the ``_running`` global stays False) — that's
+    the expected pre-start payload per the plugin's docstring. The
+    smoke test asserts on the response *shape*, not on the value of
+    ``status``, so either valid Literal (``ok`` / ``degraded``) satisfies
+    the contract.
+    """
+    request = json.dumps({"jsonrpc": "2.0", "id": 42, "method": "adapter.health", "params": {}})
+
+    # ``subprocess.run`` is a thin wrapper over Popen + communicate; we
+    # use it here because it gives us the timeout, capture, and EOF
+    # semantics in one call without managing the pipes manually.
+    # ``check=False`` because non-zero exit codes are surfaced via the
+    # ``returncode`` assertion below — communicating the failure mode
+    # explicitly beats letting CalledProcessError mask the captured
+    # stderr.
+    result = subprocess.run(
+        [sys.executable, "-m", "plugins.alfred_comms_test.main"],
+        input=request + "\n",
+        capture_output=True,
+        text=True,
+        timeout=_SMOKE_TIMEOUT_S,
+        check=False,
+    )
+
+    # Plugin should exit cleanly after stdin EOF.
+    assert result.returncode == 0, (
+        f"plugin exited with code {result.returncode}; stderr={result.stderr!r}"
+    )
+
+    # Exactly one response line on stdout; trailing newline trimmed.
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, (
+        f"expected exactly one response frame, got {len(lines)}: {result.stdout!r}"
+    )
+
+    response = json.loads(lines[0])
+    assert response.get("id") == 42, (
+        f"response id must echo request id=42, got {response.get('id')!r}"
+    )
+    # ``result`` envelope (not ``error``) — health is always answerable.
+    assert "result" in response, f"expected result envelope, got {response!r}"
+    payload = response["result"]
+    # Slice-3 narrow Literal (comms-009): {"ok", "degraded"}.
+    assert payload.get("status") in {"ok", "degraded"}, (
+        f"adapter.health status must be the comms-009 Literal, got {payload!r}"
+    )
