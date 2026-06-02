@@ -37,6 +37,7 @@ localisation layer.
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import subprocess
 import tempfile
@@ -106,6 +107,49 @@ _GRANTS_TREE_PATH: Final[str] = "policies/grants"
 # writer's id width so the audit-graph correlator can join across both
 # writers without a width-mismatch wart.
 _PROPOSAL_ID_BYTES: Final[int] = 8
+
+# CR-149 round-3: caller-supplied proposal IDs are embedded verbatim
+# into the branch name (``proposal/<type>-<proposal_id>``) AND the
+# on-disk grant path (``policies/grants/<plugin_id>/<proposal_id>.json``).
+# A non-canonical value with ``/``, ``..``, or wrong width can create
+# invalid refs or escape the canonical grants-tree layout — exactly
+# the parse-time refusal surface ADR-0018's round-trip contract
+# depends on. The pattern below pins the closed shape
+# :func:`secrets.token_hex` produces (16 lowercase hex chars) so any
+# non-conforming caller fails loud at the public API boundary.
+_PROPOSAL_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _validated_proposal_id(proposal_id: str) -> str:
+    """Refuse caller-supplied proposal ids outside the 16-hex-char shape.
+
+    Spec §8.3 / ADR-0018: every proposal id embedded in a state.git
+    branch + grants-tree path is unpredictable + width-stable. The
+    :func:`secrets.token_hex(_PROPOSAL_ID_BYTES)` generator is the
+    canonical source on the no-id path; this validator is the matching
+    parse-time refusal for caller-supplied ids so the boundary fails
+    closed regardless of which entry point produced the value (PRD
+    §11.3 reviewer-gated boundary discipline).
+
+    Critical refusals:
+
+    * ``/``, ``..`` — would escape the canonical grants-tree layout or
+      compose an invalid ref.
+    * Uppercase / non-hex — collides with the writer's normalised form
+      and would silently route the audit-graph correlator to a
+      different bucket on the join key.
+    * Wrong length — desynchronises the joinable id space between the
+      two writers (the proposal-flow async writer + this sync CLI
+      writer both share the same 16-hex contract).
+
+    Returns ``proposal_id`` unchanged on success so callers chain the
+    validated value into the branch / path composition without a
+    second rebind.
+    """
+    if not _PROPOSAL_ID_RE.fullmatch(proposal_id):
+        msg = "proposal_id must be 16 lowercase hex characters"
+        raise ValueError(msg)
+    return proposal_id
 
 
 class StateGitError(AlfredError):
@@ -241,6 +285,12 @@ class StateGitProposalClient:
         """
         if proposal_id is None:
             proposal_id = secrets.token_hex(_PROPOSAL_ID_BYTES)
+        else:
+            # CR-149 round-3: caller-supplied ids reach the branch
+            # name AND the on-disk grants-tree path verbatim. Refuse
+            # anything outside the 16-hex-char shape here so a typo /
+            # malicious value cannot escape the canonical layout.
+            proposal_id = _validated_proposal_id(proposal_id)
         type_tag = _branch_type_tag_for(payload)
         branch = f"{_BRANCH_PREFIX}{type_tag}-{proposal_id}"
         return self._write_branch(
@@ -300,6 +350,12 @@ class StateGitProposalClient:
         # without width-mismatch warts.
         if proposal_id is None:
             proposal_id = secrets.token_hex(_PROPOSAL_ID_BYTES)
+        else:
+            # CR-149 round-3: same caller-supplied-id refusal as in
+            # :meth:`create_proposal_from_payload`. The legacy entry
+            # point is still on the public surface so the boundary
+            # must close here too.
+            proposal_id = _validated_proposal_id(proposal_id)
         branch = f"{_BRANCH_PREFIX}{proposal_type}-{proposal_id}"
         payload_json = json.dumps(payload, indent=2, sort_keys=True)
 
@@ -530,6 +586,33 @@ def _hint_key_for(kind: StateGitErrorKind) -> str:
     }[kind]
 
 
+def _render_hint(kind: StateGitErrorKind, *, state_git_path: Path) -> str:
+    """Render the localised hint for ``kind``, threading the configured path.
+
+    CR-149 round-3: the ``PATH_MISSING`` hint previously hard-coded
+    ``/var/lib/alfred/state.git`` in the msgstr. The bootstrap now
+    threads ``state_git_path`` through the gate / client constructors
+    so the operator can deploy at a non-default path (e.g. a per-host
+    bind volume). The catalog msgstr now carries a ``{state_git_path}``
+    placeholder; this renderer substitutes the actual configured path
+    so a misconfigured deployment surfaces the right remediation target.
+
+    Only ``PATH_MISSING`` references the path today — ``GIT_MISSING``
+    points at PATH and ``PUSH_REJECTED`` points at the audit log, both
+    of which are path-agnostic. Passing ``state_git_path`` as a kwarg
+    on the other branches is harmless (``t()`` ignores unused kwargs)
+    so we keep the call shape uniform for future hints.
+    """
+    # perf-001 / lazy-import discipline: same pattern as the pybabel
+    # anchor shim below — :mod:`alfred.i18n` pulls in the catalog
+    # loader which has its own startup cost. Defer the import so the
+    # ``alfred --help`` surface (which never touches this branch)
+    # stays light.
+    from alfred.i18n import t
+
+    return t(_hint_key_for(kind), state_git_path=str(state_git_path))
+
+
 def _register_hint_keys_for_pybabel() -> tuple[str, ...]:
     """Surface the three hint keys to pybabel's static extractor.
 
@@ -538,11 +621,18 @@ def _register_hint_keys_for_pybabel() -> tuple[str, ...]:
     otherwise hide these keys and the catalog would silently miss
     them. The function is never called at runtime -- the return value
     only documents the canonical key list for grep.
+
+    CR-149 round-3: pass a representative ``state_git_path`` kwarg so
+    the ``path_missing`` body fully renders rather than leaking the
+    literal ``{state_git_path}`` placeholder. The validation test
+    that lives next to this shim asserts a fully-substituted render so
+    a regression in the catalog msgstr (e.g. dropping the placeholder)
+    surfaces here as a placeholder-leak failure.
     """
     from alfred.i18n import t
 
     return (
-        t("cli.state_git.error.path_missing"),
+        t("cli.state_git.error.path_missing", state_git_path="/var/lib/alfred/state.git"),
         t("cli.state_git.error.git_missing"),
         t("cli.state_git.error.push_rejected"),
     )
@@ -877,13 +967,15 @@ def queue_proposal_or_exit(
             proposal_id=proposal_id,
         )
     except StateGitError as exc:
-        hint_key = _hint_key_for(exc.kind)
         # ``reason`` carries the localised hint matching the failure
         # kind, NOT the raw argv (devex-004). Existing catalog keys
         # already take ``{reason}`` so this maps cleanly across plugin,
         # web, and config sub-apps without a catalog edit at call sites.
+        # CR-149 round-3: render the hint through ``_render_hint`` so the
+        # ``PATH_MISSING`` body interpolates the operator-configured
+        # state.git path rather than the hard-coded default literal.
         typer.echo(
-            t(denied_key, reason=t(hint_key)),
+            t(denied_key, reason=_render_hint(exc.kind, state_git_path=state_git._repo)),
             err=True,
         )
         raise typer.Exit(code=1) from exc

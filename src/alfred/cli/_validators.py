@@ -62,9 +62,10 @@ from alfred.i18n import t
 # Plugin id — dotted-lowercase identifier
 # ---------------------------------------------------------------------------
 
-# ``^[a-z][a-z0-9._-]+$`` — start with a lowercase letter; allow lowercase
-# letters, digits, dot, underscore, hyphen for the remainder. Matches the
-# shape of every first-party plugin id shipped in this repo today
+# Per-segment shape: every dot-separated segment starts with a
+# lowercase letter, must end with a lowercase letter or digit, and may
+# carry any of ``a-z0-9._-`` in between. Matches the shape of every
+# first-party plugin id shipped in this repo today
 # (``alfred.web-fetch``, ``alfred_comms_test``, ``alfred.memory.episodic``).
 # Critical refusals at this boundary:
 #
@@ -76,9 +77,26 @@ from alfred.i18n import t
 #   in the broader documentation, but the registry normalises to lowercase
 #   internally; refusing uppercase at the CLI boundary surfaces the typo
 #   immediately rather than after a confusing "no such plugin" message.
-# * Empty / single-character — the ``+`` quantifier after the first
-#   character requires at least two characters total.
-_PLUGIN_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9._-]+$")
+# * CR-149 round-3 — empty / leading / trailing dot or separator
+#   segments. The previous shape ``^[a-z][a-z0-9._-]+$`` accepted
+#   malformed ids like ``alfred.``, ``alfred-``, ``alfred_``, or
+#   ``alfred..web-fetch`` that would reach reviewer-gated proposal
+#   payloads as-is. The new pattern requires:
+#   - every dot-separated segment to start with a lowercase letter,
+#   - every segment to end with a lowercase letter or digit (no
+#     trailing ``-`` / ``_`` / ``.``),
+#   so ``alfred.``, ``alfred-``, ``alfred_``, ``alfred..x``, and ``.x``
+#   all fail closed at the CLI boundary per PRD §11.3.
+# * Empty plugin id — the head ``[a-z]`` plus the segment grammar
+#   require at least one segment.
+#
+# Segment grammar: ``[a-z](?:[a-z0-9_-]*[a-z0-9])?`` — a single letter,
+# OR a letter followed by zero-or-more interior chars and a final
+# alphanumeric. Both ``a`` and ``a1`` and ``a-b`` are accepted; ``a-``
+# is not.
+_PLUGIN_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[a-z](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z](?:[a-z0-9_-]*[a-z0-9])?)*$"
+)
 
 
 def validate_plugin_id(value: str) -> str:
