@@ -207,7 +207,7 @@ When you learn something about the project, the user, or how to work here that f
 7. Use the `superpowers:verification-before-completion` skill before claiming done.
 8. Ask the user. Don't make decisions you cannot defend.
 
-**First-run seed (Slice 3+):** every `alfred plugin grant`, `alfred web allowlist add/remove`, and `alfred config set` call writes a proposal branch to `/var/lib/alfred/state.git`. If the repo doesn't exist yet, `bin/alfred-setup.sh` runs `bin/alfred-state-git-seed.sh` inside the `alfred-core` container, which is just `git init --bare /var/lib/alfred/state.git` + a seeded `main` branch. Safe to re-run; idempotent. If you see `bootstrap.capability_gate_unseeded` at startup, run the seed script.
+**First-run seed (Slice 3+):** every `alfred plugin grant`, `alfred web allowlist add/remove`, and the reviewer-gated (high-blast) keys of `alfred config set` write a proposal branch to `/var/lib/alfred/state.git` (low-blast `config set` keys write `policies.yaml` directly per the command table above). If the repo doesn't exist yet, `bin/alfred-setup.sh` runs `bin/alfred-state-git-seed.sh` inside the `alfred-core` container, which is just `git init --bare /var/lib/alfred/state.git` + a seeded `main` branch. Safe to re-run; idempotent. If you see `bootstrap.capability_gate_unseeded` at startup, run the seed script.
 
 ## Do not
 

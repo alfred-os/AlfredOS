@@ -24,7 +24,7 @@ Ship `_DevGateLikeFixture` (and its public constructor `make_permissive_fixture_
 
 * Mimics the Slice-2.5 `DevGate` semantics: operator and user-plugin tiers granted unconditionally, system gated on the `allow_system` flag, `plugin_id` and `hookpoint` ignored.
 * Is structurally a `alfred.hooks.capability.CapabilityGate` (the Protocol is `@runtime_checkable`) so dispatcher code that type-narrows via `isinstance` works with it. It is **not** a parallel production gate hierarchy — it is a test double.
-* Is private (`_DevGateLikeFixture` — leading underscore) and lives in `tests/helpers/`. The AST guard `tests/unit/hooks/test_devgate_removed.py` plus the public-surface invariant test enforce that no `src/` code can import it.
+* Is private (`_DevGateLikeFixture` — leading underscore) and lives in `tests/helpers/`. The import-surface regression test `tests/unit/hooks/test_devgate_removed.py` pins that `DevGate` is unimportable from `alfred.hooks` / `alfred.hooks.capability`; the AST-level layering guard `tests/unit/security/test_capability_gate_ast_no_os_import.py` (extended per ADR-0019 layering invariant to also reject `from tests.helpers` / `import tests.helpers` inside the capability-gate modules) enforces that no `src/` code can import the shim itself.
 * Carries a deliberately loud lockdown docstring (the class docstring + the `make_permissive_fixture_gate` constructor docstring + this ADR) so a reviewer who sees `make_permissive_fixture_gate` in a deny-path security test rejects the PR on sight.
 
 **Deny-path security tests use `make_deny_all_gate` / `make_allow_system_gate`** — both constructed over `RealGate` so the assertion's load-bearing target is the production gate, not the shim. Stage 3 of #134 audited and migrated every adversarial / security deny-path test (`hk-2026-001` tier-escalation, `hk-2026-002` registration-tier-rejection, tier-laundering capability-gate-bypass) to the RealGate helpers; the migration is locked in by the `test_devgate_removed.py` AST guard.
@@ -62,6 +62,7 @@ The fixture-parity helpers (`fresh_registry`, `fresh_registry_allow_system`, `sp
 
 * [`tests/helpers/gates.py`](../../tests/helpers/gates.py) — the shim source. Module docstring + `_DevGateLikeFixture` class docstring + `make_permissive_fixture_gate` constructor docstring all carry the lockdown rules.
 * [`src/alfred/bootstrap/gate_factory.py`](../../src/alfred/bootstrap/gate_factory.py) — the production-side `_make_in_memory_backend` + `_make_no_op_audit_sink` stub builders the helper deliberately duplicates.
-* [`tests/unit/hooks/test_devgate_removed.py`](../../tests/unit/hooks/test_devgate_removed.py) — AST guard that pins `DevGate`'s removal from `src/`.
+* [`tests/unit/hooks/test_devgate_removed.py`](../../tests/unit/hooks/test_devgate_removed.py) — import-surface regression test that pins `DevGate`'s absence from `alfred.hooks` and `alfred.hooks.capability`.
+* [`tests/unit/security/test_capability_gate_ast_no_os_import.py`](../../tests/unit/security/test_capability_gate_ast_no_os_import.py) — AST-level layering guard for the capability-gate modules (sec-007 extension); also the static-check site for the `src/alfred/` MUST NOT import `tests/helpers/` layering invariant pinned in this ADR.
 * [`tests/unit/hooks/conftest.py`](../../tests/unit/hooks/conftest.py) — the registry-fixture family that consumes the shim.
 * Stage 3 of #134 — the migration commits (`a9265ea`, `6701efa`, `0af1781`) that audited every adversarial / security deny-path test and pointed it at `make_deny_all_gate`.
