@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 00:52+0100\n"
+"POT-Creation-Date: 2026-06-02 01:00+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -44,6 +44,22 @@ msgstr "configuration is invalid: {detail}"
 #: src/alfred/cli/_bootstrap.py:101
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
+
+#: src/alfred/cli/_state_git.py:387
+msgid "cli.state_git.error.path_missing"
+msgstr ""
+"/var/lib/alfred/state.git does not exist. Run `alfred-setup` to "
+"initialise the reviewer-gate state repo."
+
+#: src/alfred/cli/_state_git.py:388
+msgid "cli.state_git.error.git_missing"
+msgstr "`git` is not installed on PATH. Install git and re-run the command."
+
+#: src/alfred/cli/_state_git.py:389
+msgid "cli.state_git.error.push_rejected"
+msgstr ""
+"Reviewer-gate push rejected. Check `alfred audit log --event "
+"plugin.grant.requested --since 5m` for the typed error detail."
 
 # PR-S3-6 Component F — alfred audit {log, graph} sub-app. The graph
 # subcommand surfaces a swimlane filtered by --tier T1|T2|T3 per spec
@@ -86,36 +102,36 @@ msgstr "Audit graph — swimlane {tier}"
 msgid "cli.audit.graph.header"
 msgstr "Audit graph — all tiers"
 
-#: src/alfred/cli/config.py:78 src/alfred/cli/config.py:91
+#: src/alfred/cli/config.py:79 src/alfred/cli/config.py:92
 msgid "cli.config.error.malformed_yaml"
 msgstr ""
-"alfred config refused: {yaml_path} is malformed and cannot be parsed."
-" YAML error: {error}. Fix the file and rerun the command."
+"alfred config refused: {yaml_path} is malformed and cannot be parsed. "
+"YAML error: {error}. Fix the file and rerun the command."
 
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.
 # quarantined-provider) queue a state.git reviewer-gated proposal.
-#: src/alfred/cli/config.py:261
+#: src/alfred/cli/config.py:266
 msgid "cli.config.help.group"
 msgstr "Get, set, or list operator configuration values."
 
-#: src/alfred/cli/config.py:271
+#: src/alfred/cli/config.py:276
 msgid "cli.config.set.help.short"
 msgstr "Set an operator configuration key."
 
-#: src/alfred/cli/config.py:275
+#: src/alfred/cli/config.py:280
 msgid "cli.config.set.arg.key"
 msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
 
-#: src/alfred/cli/config.py:279
+#: src/alfred/cli/config.py:284
 msgid "cli.config.set.arg.value"
 msgstr "New value (parsed as int/float when possible, else kept as string)."
 
-#: src/alfred/cli/config.py:296
+#: src/alfred/cli/config.py:301
 msgid "cli.config.set.denied"
 msgstr "alfred config set denied: {reason}"
 
-#: src/alfred/cli/config.py:302
+#: src/alfred/cli/config.py:307
 msgid "cli.config.set.pending_review"
 msgstr ""
 "{key} change queued for reviewer approval (high-blast knob).\n"
@@ -124,45 +140,45 @@ msgstr ""
 "The new value is NOT yet active — it activates when the reviewer approves"
 " the proposal and the supervisor reloads its configuration."
 
-#: src/alfred/cli/config.py:314
+#: src/alfred/cli/config.py:319
 msgid "cli.config.set.unknown_key"
 msgstr ""
 "alfred config set refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:326
+#: src/alfred/cli/config.py:331
 msgid "cli.config.set.applied"
 msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
 
-#: src/alfred/cli/config.py:339
+#: src/alfred/cli/config.py:344
 msgid "cli.config.get.help.short"
 msgstr "Show the current value of an operator configuration key."
 
-#: src/alfred/cli/config.py:343
+#: src/alfred/cli/config.py:348
 msgid "cli.config.get.arg.key"
 msgstr "Configuration key to read."
 
-#: src/alfred/cli/config.py:356
+#: src/alfred/cli/config.py:361
 msgid "cli.config.get.unknown_key"
 msgstr ""
 "alfred config get refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:365
+#: src/alfred/cli/config.py:370
 msgid "cli.config.get.not_set"
 msgstr ""
 "{key} is not set in policies.yaml — the system default applies. Set it "
 "with 'alfred config set {key} <value>'."
 
-#: src/alfred/cli/config.py:367
+#: src/alfred/cli/config.py:372
 msgid "cli.config.get.value"
 msgstr "{key} = {value}"
 
-#: src/alfred/cli/config.py:391
+#: src/alfred/cli/config.py:396
 msgid "cli.config.list.help.short"
 msgstr "List every operator configuration value from policies.yaml."
 
-#: src/alfred/cli/config.py:400 src/alfred/cli/config.py:404
+#: src/alfred/cli/config.py:405 src/alfred/cli/config.py:409
 msgid "cli.config.list.empty"
 msgstr ""
 "policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
