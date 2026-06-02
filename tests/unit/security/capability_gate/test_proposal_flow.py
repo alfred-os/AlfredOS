@@ -144,10 +144,21 @@ async def test_create_proposal_emits_grant_requested_audit_row() -> None:
     """Spec §8.5: ``plugin.grant.requested`` audit row emits on proposal creation.
 
     err-005 fix: audit_sink is required. The row carries the full
-    PLUGIN_GRANT_FIELDS payload — plugin_id, subscriber_tier, hookpoint,
-    operator_user_id, proposal_branch, correlation_id — so the
-    audit-graph can follow the proposal forward to merge / revocation.
+    PLUGIN_GRANT_REQUESTED_FIELDS payload — plugin_id, subscriber_tier,
+    hookpoint, operator_user_id, proposal_branch, correlation_id,
+    trust_tier_of_trigger — so the audit-graph can follow the proposal
+    forward to merge / revocation.
+
+    CR-149 round-7: the emit site uses ``PLUGIN_GRANT_REQUESTED_FIELDS``
+    (the operator-CLI ingress superset) so the row carries
+    ``trust_tier_of_trigger="T1"`` and lands in the T1 swimlane of
+    ``alfred audit graph --tier T1`` alongside its sibling CLI emit
+    paths (web-allowlist, config-set). The terminal
+    ``plugin.grant.rebuilt`` row (still on ``PLUGIN_GRANT_FIELDS``)
+    sits in the T0 lane because it fires post-merge from a host-level
+    rebuild signal.
     """
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
     from alfred.security.capability_gate.proposals import create_proposal_branch
 
     backend = _make_backend()
@@ -169,11 +180,20 @@ async def test_create_proposal_emits_grant_requested_audit_row() -> None:
     requested = [e for e in emitted if e["event"] == "plugin.grant.requested"]
     assert len(requested) == 1
     row = requested[0]
+    assert row["schema_name"] == "PLUGIN_GRANT_REQUESTED_FIELDS"
     assert row["plugin_id"] == "test.plugin"
     assert row["subscriber_tier"] == "system"
     assert row["hookpoint"] == "tool.web.fetch"
     assert row["operator_user_id"] == "op@example.com"
     assert row["proposal_branch"].startswith("proposal/policy-grant-")
+    # CR-149 round-7: the T1 swimlane tag now lives on the row itself,
+    # not just on the writer kwarg.
+    assert row["trust_tier_of_trigger"] == "T1"
+    # The subject's key set MUST equal the declared field set so the
+    # symmetric ``AuditWriter.append_schema`` check accepts the row.
+    declared = set(PLUGIN_GRANT_REQUESTED_FIELDS)
+    metadata = {"event", "schema_name"}
+    assert set(row.keys()) - metadata == declared
     # correlation_id is a UUID4 str.
     assert isinstance(row["correlation_id"], str)
     uuid.UUID(row["correlation_id"])
