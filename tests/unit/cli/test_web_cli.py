@@ -226,3 +226,58 @@ def test_list_allowlist_entries_default_is_empty_list() -> None:
     from alfred.cli.web import _list_allowlist_entries
 
     assert _list_allowlist_entries() == []
+
+
+# ---------------------------------------------------------------------------
+# sec-pr-s3-6-01 — closed-set domain validator wiring: BadParameter trio
+# ---------------------------------------------------------------------------
+
+
+def test_allowlist_add_refuses_url_with_scheme(runner: CliRunner) -> None:
+    """``alfred web allowlist add https://example.com`` raises BadParameter.
+
+    sec-pr-s3-6-01: the proposal's ``domain`` field expects the bare
+    host. The :func:`validate_domain` callback surfaces a dedicated
+    "drop the scheme" hint before the proposal-write call runs.
+    """
+    with patch("alfred.cli.web._state_git_client") as mock_client:
+        result = runner.invoke(web_app, ["allowlist", "add", "https://example.com"])
+    assert result.exit_code == 2
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_allowlist_add_refuses_path_traversal(runner: CliRunner) -> None:
+    """``alfred web allowlist add ../etc`` raises BadParameter.
+
+    Defence-in-depth on top of the regex — a ``..`` substring or any
+    path separator is refused with its own localised body so the
+    operator sees an explicit hint rather than a generic regex failure.
+    """
+    with patch("alfred.cli.web._state_git_client") as mock_client:
+        result = runner.invoke(web_app, ["allowlist", "add", "../../etc/passwd"])
+    assert result.exit_code == 2
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_allowlist_add_refuses_off_shape_domain(runner: CliRunner) -> None:
+    """``alfred web allowlist add not-a-domain`` raises BadParameter.
+
+    Anything outside the bare-domain regex (single-label, mixed-case,
+    TLD too short) is refused at parse time.
+    """
+    with patch("alfred.cli.web._state_git_client") as mock_client:
+        result = runner.invoke(web_app, ["allowlist", "add", "Example.com"])
+    assert result.exit_code == 2
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_allowlist_remove_refuses_url_with_scheme(runner: CliRunner) -> None:
+    """``alfred web allowlist remove https://...`` raises BadParameter.
+
+    The remove path validates ``domain`` against the same rules as
+    ``add`` — the proposal payload must carry a bare host either way.
+    """
+    with patch("alfred.cli.web._state_git_client") as mock_client:
+        result = runner.invoke(web_app, ["allowlist", "remove", "http://example.com"])
+    assert result.exit_code == 2
+    mock_client.create_proposal.assert_not_called()

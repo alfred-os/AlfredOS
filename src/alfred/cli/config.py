@@ -47,6 +47,7 @@ import yaml
 
 from alfred.cli._state_git import StateGitError as _StateGitError
 from alfred.cli._state_git import StateGitProposalClient
+from alfred.cli._validators import validate_quarantined_provider
 from alfred.i18n import t
 
 
@@ -284,6 +285,14 @@ def config_set(
     set enumerated on stderr.
     """
     if key in _HIGH_BLAST_KEYS:
+        # sec-pr-s3-6-01: validate the high-blast value against the
+        # closed set BEFORE writing the proposal. A typo or malicious
+        # string reaching state.git is exactly the parse-time refusal
+        # surface :mod:`alfred.cli._validators` exists to close. The
+        # dispatch is keyed on ``key`` so a future second high-blast
+        # knob plugs in a per-key validator without touching this branch.
+        if key == "quarantined-provider":
+            value = validate_quarantined_provider(value)
         try:
             result = _state_git_client.create_proposal(
                 proposal_type=f"config-{key}",

@@ -395,3 +395,60 @@ def test_atomic_write_text_cleans_tempfile_on_failure(
     # No tempfiles left behind in the target directory.
     leftovers = [p for p in tmp_path.iterdir() if p.name.startswith(".policies.yaml.")]
     assert leftovers == []
+
+
+# ---------------------------------------------------------------------------
+# sec-pr-s3-6-01 — closed-set quarantined-provider validator wiring
+# ---------------------------------------------------------------------------
+
+
+def test_set_quarantined_provider_refuses_unknown_provider(
+    runner: CliRunner,
+) -> None:
+    """``set quarantined-provider openai`` raises BadParameter.
+
+    sec-pr-s3-6-01: only the closed set of declared providers
+    (``anthropic`` + ``deepseek`` today) is allowed. An unknown
+    provider id would otherwise land in a state.git proposal that the
+    reviewer either has to notice or merge — the validator closes the
+    parse-time refusal surface.
+    """
+    with patch("alfred.cli.config._state_git_client") as mock_client:
+        result = runner.invoke(config_app, ["set", "quarantined-provider", "openai"])
+    assert result.exit_code == 2
+    # No proposal write — refusal short-circuited before the state.git call.
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_set_quarantined_provider_refuses_path_traversal(
+    runner: CliRunner,
+) -> None:
+    """``set quarantined-provider ../etc/passwd`` raises BadParameter.
+
+    The path-traversal canary on the high-blast knob: outside the
+    closed set, refused with a localised body that enumerates the
+    valid providers.
+    """
+    with patch("alfred.cli.config._state_git_client") as mock_client:
+        result = runner.invoke(
+            config_app,
+            ["set", "quarantined-provider", "../../../etc/passwd"],
+        )
+    assert result.exit_code == 2
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_set_quarantined_provider_refuses_mixed_case_id(runner: CliRunner) -> None:
+    """``set quarantined-provider Anthropic`` raises BadParameter.
+
+    Validator is case-sensitive on purpose so the operator does not
+    end up with a saved-vs-displayed mismatch on the next
+    ``config get`` call.
+    """
+    with patch("alfred.cli.config._state_git_client") as mock_client:
+        result = runner.invoke(
+            config_app,
+            ["set", "quarantined-provider", "Anthropic"],
+        )
+    assert result.exit_code == 2
+    mock_client.create_proposal.assert_not_called()
