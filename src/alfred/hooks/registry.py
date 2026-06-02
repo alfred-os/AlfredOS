@@ -995,11 +995,51 @@ class HookRegistry:
         # and re-raise on the calling thread so a sink failure is not
         # silently dropped; bound the join so a slow / hung sink trips
         # the structlog fallback rather than stalling :meth:`register`.
+        #
+        # err-002 — exactly-once row, double-emit prevention:
+        #
+        # ``thread.join(timeout=...)`` is bounded but the daemon keeps
+        # running after the bound expires. If the sink eventually
+        # completes (e.g. a 600ms Postgres connect that beat the 500ms
+        # window by 100ms), the daemon would emit the row to the sink
+        # AFTER the calling thread already fired the structlog
+        # fallback — two rows for the same correlation_id, which the
+        # audit-graph correlator treats as a double-emit.
+        #
+        # The ``emit_claim`` :class:`threading.Lock` is the mutual-
+        # exclusion seam: at the emit decision point, whichever thread
+        # acquires the lock first emits its row; the other observes
+        # the lock is taken (via ``acquire(blocking=False)``) and
+        # skips. CRITICAL: the daemon's ``_drive`` acquires the lock
+        # under ``blocking=False`` BEFORE calling ``sink.emit``, and
+        # the calling thread's post-timeout fallback path acquires
+        # under ``blocking=False`` BEFORE calling
+        # ``_fallback_to_structlog``. Whichever side acquires the lock
+        # holds it for the duration of its own emit, ensuring the
+        # other side's racy acquire fails (returns ``False``) and the
+        # other emit is suppressed.
+        #
+        # The Lock is NEVER released — once a row has been emitted,
+        # any second emit attempt for the same correlation_id is a
+        # bug, so we leak the Lock instance with the function frame's
+        # garbage collection and the "second emitter" arm becomes a
+        # silent no-op. There is no reuse: the Lock is local to this
+        # call and lives only as long as the daemon thread + the
+        # calling thread's fallback decision.
         sink = self.sink
         exc_holder: list[BaseException] = []
+        emit_claim = threading.Lock()
 
         def _drive() -> None:
             try:
+                # Acquire the emit-claim BEFORE calling the sink. If
+                # the calling thread has already won the claim (its
+                # post-timeout fallback fired), the acquire returns
+                # ``False`` and we skip the sink call entirely — the
+                # row has already landed on the structlog fallback
+                # path, so emitting again would double-emit.
+                if not emit_claim.acquire(blocking=False):
+                    return
                 asyncio.run(
                     sink.emit(
                         event=event,
@@ -1021,12 +1061,22 @@ class HookRegistry:
             # surfaces the same fields plus ``reason=sink_emit_timeout``
             # so an operator can correlate the fallback row with the
             # primary sink's downstream backpressure.
-            _fallback_to_structlog(
-                event=event,
-                correlation_id=correlation_id,
-                fields=fields,
-                reason="sink_emit_timeout",
-            )
+            #
+            # err-002: only fire the fallback if we win the emit-claim.
+            # The race window is small but real — between
+            # ``thread.is_alive()`` returning ``True`` here and the
+            # claim acquisition below, the daemon's emit may have
+            # completed (it acquired the claim, ran ``asyncio.run``,
+            # released the frame). If the daemon already holds the
+            # claim, our ``acquire(blocking=False)`` returns ``False``
+            # and we skip the fallback — the sink got the row.
+            if emit_claim.acquire(blocking=False):
+                _fallback_to_structlog(
+                    event=event,
+                    correlation_id=correlation_id,
+                    fields=fields,
+                    reason="sink_emit_timeout",
+                )
             return
         if exc_holder:
             raise exc_holder[0]
