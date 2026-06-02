@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 11:08+0100\n"
+"POT-Creation-Date: 2026-06-02 13:18+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -16,7 +16,11 @@ msgstr ""
 
 #: src/alfred/bootstrap/gate_factory.py:159
 msgid "bootstrap.gate_selected.devgate_warning"
-msgstr "fail-open capability stubs; do not use in production"
+msgstr ""
+"Bootstrap selected RealGate (fail-closed default) for the development "
+"environment. Every capability check denies until operator-issued grants "
+"land via `alfred plugin grant`. MUST NOT appear on production stacks: "
+"production wires RealGate against Postgres, not the in-process stub."
 
 #: src/alfred/bootstrap/quarantine.py:59
 msgid "bootstrap.providers_blank_error"
