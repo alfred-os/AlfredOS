@@ -787,12 +787,16 @@ async def quarantined_to_structured(
     orchestrator-readable structured form. Any other path is a security
     violation (spec §3.4).
 
-    Gate-first ordering: ``gate.check_content_clearance(...,
+    Gate-first ordering:
+    ``gate.check_content_clearance(plugin_id="alfred.quarantined-llm",
     hookpoint="quarantine.dereference", content_tier="T3")`` is consulted
     BEFORE the extractor runs. A denial raises :class:`AlfredError`
     without invoking the extractor — the gate's refusal accounting is the
     audit-row escape for denied calls; this function's audit emission
-    (via the extractor) is reserved for granted calls.
+    (via the extractor) is reserved for granted calls. ``plugin_id`` is
+    pinned to :attr:`QuarantinedExtractor._PLUGIN_ID` so the audit-graph
+    join key matches the extractor's own audit rows; see CR-156 round 1
+    finding #3 (boundary doc alignment) and ``docs/subsystems/quarantine.md``.
 
     ``gate`` is REQUIRED — no default, no ``| None`` (CR-138 R3): a
     trust-boundary function whose gate can be elided through a default
@@ -803,7 +807,7 @@ async def quarantined_to_structured(
     is a legitimate orchestrator outcome the caller branches on.
     """
     if not gate.check_content_clearance(
-        plugin_id="quarantine.dereference",
+        plugin_id=QuarantinedExtractor._PLUGIN_ID,
         hookpoint="quarantine.dereference",
         content_tier="T3",
     ):

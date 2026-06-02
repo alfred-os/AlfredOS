@@ -1389,11 +1389,11 @@ msgstr ""
 "prompt-injection payloads is the canonical T3 ingestion attack; disabled "
 "TLS verification is the bypass (spec §7.11)."
 
-#: src/alfred/security/quarantine.py:813
+#: src/alfred/security/quarantine.py:817
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:885
+#: src/alfred/security/quarantine.py:889
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
