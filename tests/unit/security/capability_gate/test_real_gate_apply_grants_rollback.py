@@ -224,6 +224,51 @@ async def test_apply_grants_mid_revoke_failure_emits_rollback_row_and_reraises()
     assert subject["grant_count"] == 0
 
 
+async def test_apply_grants_rollback_correlation_id_shared_between_audit_and_log() -> None:
+    """CR-149 round-6: the audit row and the structlog warning share one correlation_id.
+
+    Previously the audit emitter minted its own UUID locally and the
+    adjacent ``_log.warning`` carried none — a repeated rebuild on the
+    same ``commit_hash`` was unjoinable between the audit stream and
+    the structlog stream during incident review. The trust-boundary
+    forensic bridge (``src/alfred/security/**`` — highest scrutiny)
+    requires the join. This test pins that the audit subject's
+    ``correlation_id`` matches the ``correlation_id`` kwarg the
+    structlog warning carries.
+    """
+    from unittest.mock import patch
+
+    from alfred.security.capability_gate._gate import RealGate
+
+    backend = _make_backend()
+    backend.apply_atomic = AsyncMock(side_effect=_make_sqlalchemy_error("boom"))
+    sink = _make_audit_sink()
+    gate = await RealGate.create(backend=backend, audit_sink=sink)
+
+    captured_log_kwargs: list[dict[str, object]] = []
+
+    def _capture_warning(event: str, **kwargs: object) -> None:
+        if event == "capability_gate.rebuild.rolled_back":
+            captured_log_kwargs.append(kwargs)
+
+    with patch("alfred.security.capability_gate._gate._log") as mock_log:
+        mock_log.warning = _capture_warning
+        with pytest.raises(SQLAlchemyError):
+            await gate._apply_grants(frozenset(), commit_hash="shared-id-hash")
+
+    sink.append_schema.assert_awaited_once()
+    audit_kwargs = sink.append_schema.await_args.kwargs
+    audit_correlation_id = audit_kwargs["subject"]["correlation_id"]
+    # ``trace_id`` and ``subject["correlation_id"]`` are intentionally
+    # identical (the row's primary join key + the AuditWriter's tracing
+    # field both point at the same UUID).
+    assert audit_kwargs["trace_id"] == audit_correlation_id
+
+    assert len(captured_log_kwargs) == 1, captured_log_kwargs
+    log_correlation_id = captured_log_kwargs[0]["correlation_id"]
+    assert log_correlation_id == audit_correlation_id
+
+
 async def test_apply_grants_mid_revoke_failure_does_not_swap_policy() -> None:
     """Rollback leaves the previous in-memory policy authoritative.
 

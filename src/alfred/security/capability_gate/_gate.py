@@ -281,43 +281,52 @@ class RealGate:
                 state_git_head,
             )
         except Exception as exc:
+            # CR-149 round-6: mint the correlation_id HERE and thread it
+            # through both the audit row and the adjacent structured
+            # log so an incident-response query that surfaces one can
+            # join to the other. Previously the audit emitter minted
+            # its own UUID locally and the log line carried no id, so
+            # a repeated rebuild on the same commit_hash was unjoinable
+            # between the two streams — the on-call lost the forensic
+            # bridge ``src/alfred/security/**`` (highest-scrutiny
+            # surface) is supposed to carry.
+            correlation_id = str(uuid.uuid4())
             await self._emit_rebuild_rolled_back_audit(
                 commit_hash=state_git_head,
                 grant_count=0,
+                correlation_id=correlation_id,
             )
             _log.warning(
                 "capability_gate.rebuild.parser_failed",
                 commit_hash=state_git_head,
                 error_type=type(exc).__name__,
+                correlation_id=correlation_id,
             )
             raise
-        await self._apply_grants(grants, commit_hash=state_git_head)
+
+        # CR-149 round-6: mint the rebuild-flow correlation_id BEFORE
+        # ``_apply_grants`` so the success-arm structlog line emitted
+        # by :meth:`_apply_grants` AND the success-arm audit row
+        # emitted below both carry the SAME id. The SQL-rollback arm
+        # inside ``_apply_grants`` also picks up this id so its audit
+        # + log streams join too — without the shared identifier the
+        # ``src/alfred/security/**`` forensic bridge would silently
+        # break (highest-scrutiny surface; CLAUDE.md hard rule #7).
+        correlation_id = str(uuid.uuid4())
+        await self._apply_grants(
+            grants,
+            commit_hash=state_git_head,
+            correlation_id=correlation_id,
+        )
 
         # Audit emit LAST — a parse / apply failure must not surface a
         # "rebuilt" row for a partial state. The audit row carries the
         # grant_count so an operator can spot unexpected churn between
         # adjacent rebuilds.
-        correlation_id = str(uuid.uuid4())
-        # ``trust_tier_of_trigger`` lives in BOTH the schema field set and
-        # the row subject so the audit-graph swimlane placement is driven
-        # by the row payload rather than relying on the kwarg sitting
-        # outside the schema. The supervisor bootstraps the rebuild from
-        # a host-level proposal-merge signal, never user content — T0.
-        await self._audit_sink.append_schema(
-            fields=CAPABILITY_GATE_REBUILD_FIELDS,
-            schema_name="CAPABILITY_GATE_REBUILD_FIELDS",
-            event="plugin.grant.rebuilt",
-            actor_user_id=None,
-            subject={
-                "commit_hash": state_git_head,
-                "grant_count": len(grants),
-                "trust_tier_of_trigger": "T0",
-                "correlation_id": correlation_id,
-            },
-            trust_tier_of_trigger="T0",
-            result="success",
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
+        await self._emit_rebuild_success_audit(
+            commit_hash=state_git_head,
+            grant_count=len(grants),
+            correlation_id=correlation_id,
         )
 
     async def _apply_grants(
@@ -325,6 +334,7 @@ class RealGate:
         grants: frozenset[GrantRow],
         *,
         commit_hash: str,
+        correlation_id: str | None = None,
     ) -> None:
         """Replace the in-memory policy with the new grants and sync to Postgres.
 
@@ -398,9 +408,19 @@ class RealGate:
             # ``str(exc)`` / ``exc.args`` because they may carry T3
             # content fragments). The full success row continues to emit
             # from :meth:`rebuild_from_state_git` after this method returns.
+            #
+            # CR-149 round-6: reuse the caller-supplied correlation_id
+            # (or mint one) for both the audit row and the structlog
+            # warning so the two streams join on a single identifier.
+            # Without this, an incident investigator who finds the
+            # structlog warning could not jump to the matching
+            # ``plugin.grant.rebuilt`` row (and vice versa) — the
+            # trust-boundary forensic bridge would silently break.
+            rollback_correlation_id = correlation_id or str(uuid.uuid4())
             await self._emit_rebuild_rolled_back_audit(
                 commit_hash=commit_hash,
                 grant_count=len(grants),
+                correlation_id=rollback_correlation_id,
             )
             _log.warning(
                 "capability_gate.rebuild.rolled_back",
@@ -408,6 +428,7 @@ class RealGate:
                 revoked_count=len(revoked),
                 commit_hash=commit_hash,
                 backing_store_error_type=type(exc).__name__,
+                correlation_id=rollback_correlation_id,
             )
             raise
 
@@ -418,11 +439,54 @@ class RealGate:
         # committed, so a rollback leaves the previous policy
         # authoritative.
         self._policy = GatePolicy(grants=grants)
+        # CR-149 round-6: emit the success log with the caller-supplied
+        # correlation_id so it joins to the matching ``plugin.grant.rebuilt``
+        # audit row. Stale call sites (the integration tests that drive
+        # ``_apply_grants`` directly) pass ``None``; the
+        # ``structlog`` key remains present with the explicit ``None``
+        # so the schema stays uniform across call sites and a log-
+        # grepping consumer can distinguish "no rebuild correlation
+        # assigned" from "field accidentally dropped".
         _log.info(
             "capability_gate.rebuild.complete",
             grant_count=len(grants),
             revoked_count=len(revoked),
             commit_hash=commit_hash,
+            correlation_id=correlation_id,
+        )
+
+    async def _emit_rebuild_success_audit(
+        self,
+        *,
+        commit_hash: str,
+        grant_count: int,
+        correlation_id: str,
+    ) -> None:
+        """Emit one ``plugin.grant.rebuilt`` row with ``result="success"``.
+
+        CR-149 round-6: extracted from :meth:`rebuild_from_state_git`
+        so the success arm and the rollback arm share the same audit
+        emit shape (subject keys, ``trust_tier_of_trigger``, ``trace_id``).
+        The caller passes ``correlation_id`` rather than minting it
+        locally so the structlog stream and the audit row join on a
+        single identifier — same forensic-joinability contract as the
+        rollback path documents.
+        """
+        await self._audit_sink.append_schema(
+            fields=CAPABILITY_GATE_REBUILD_FIELDS,
+            schema_name="CAPABILITY_GATE_REBUILD_FIELDS",
+            event="plugin.grant.rebuilt",
+            actor_user_id=None,
+            subject={
+                "commit_hash": commit_hash,
+                "grant_count": grant_count,
+                "trust_tier_of_trigger": "T0",
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="success",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
         )
 
     # ------------------------------------------------------------------
@@ -541,6 +605,7 @@ class RealGate:
         *,
         commit_hash: str,
         grant_count: int,
+        correlation_id: str,
     ) -> None:
         """Emit one ``plugin.grant.rebuilt`` row with ``result="rolled_back"``.
 
@@ -558,8 +623,12 @@ class RealGate:
         schema is symmetric-strict and would reject extra subject keys.
         Operators correlate via ``correlation_id`` / ``trace_id``: the
         audit row and the structured log share the same UUID.
+
+        CR-149 round-6: ``correlation_id`` is now a REQUIRED kwarg
+        rather than locally minted. The caller mints the id and
+        reuses it for the adjacent ``_log.warning`` so the audit
+        stream and the structlog stream join on a single identifier.
         """
-        correlation_id = str(uuid.uuid4())
         await self._audit_sink.append_schema(
             fields=CAPABILITY_GATE_REBUILD_FIELDS,
             schema_name="CAPABILITY_GATE_REBUILD_FIELDS",

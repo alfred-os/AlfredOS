@@ -174,7 +174,48 @@ class WebAllowlistProposal(StateGitProposalPayload):
 
     action: Literal["add", "remove"]
     domain: str
-    path_prefix: str | None = "/"
+    # CR-149 round-6: the field default is ``None`` so every non-CLI
+    # producer (a future async writer, a state.git replay tool, a
+    # malformed test fixture) constructs the spec §11.1 canonical
+    # whole-entry-delete shape unless it explicitly opts into a
+    # per-prefix scope. The previous ``"/"`` default silently turned
+    # a ``WebAllowlistProposal(action="remove", domain=...)`` into
+    # "remove root-prefix only" — a Spec §11.1 ambiguity that
+    # undermined reviewer-gated intent. The
+    # :func:`_normalize_path_prefix_for_add` validator below restores
+    # the ``"/"`` default for ``action="add"`` so the CLI's add path
+    # keeps its previous shape when the operator omits the flag,
+    # while ``action="remove"`` defaults to the whole-entry contract.
+    path_prefix: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_path_prefix_for_add(cls, values: object) -> object:
+        """Coerce omitted ``path_prefix`` to ``"/"`` on the add path.
+
+        CR-149 round-6: paired with the field-default flip above, this
+        validator keeps the historical CLI shape (``alfred web
+        allowlist add example.com`` ≡ ``--path-prefix /``) while
+        ensuring the remove path defaults to whole-entry deletion
+        (``path_prefix=None``). The ``mode="before"`` hook only fires
+        when the field was OMITTED from the input dict: an explicit
+        ``path_prefix=None`` flows through unchanged, so the
+        downstream ``_check_action_path_prefix_invariant`` still
+        rejects ``action="add", path_prefix=None`` loud-and-clear.
+
+        ``isinstance(values, dict)`` keeps Pydantic's accepted input
+        shapes intact — model-from-dict, model-from-kwargs (which
+        Pydantic normalises to dict before this hook), model-from-
+        existing-instance round-trip (which arrives non-dict and
+        already has the field set on the prior instance).
+        """
+        if (
+            isinstance(values, dict)
+            and values.get("action") == "add"
+            and "path_prefix" not in values
+        ):
+            return {**values, "path_prefix": "/"}
+        return values
 
     @model_validator(mode="after")
     def _check_action_path_prefix_invariant(self) -> Self:
