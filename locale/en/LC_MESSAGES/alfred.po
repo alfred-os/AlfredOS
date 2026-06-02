@@ -58,8 +58,10 @@ msgstr "`git` is not installed on PATH. Install git and re-run the command."
 #: src/alfred/cli/_state_git.py:832
 msgid "cli.state_git.error.push_rejected"
 msgstr ""
-"Reviewer-gate push rejected. Check `alfred audit log --event "
-"plugin.grant.requested --since 5m` for the typed error detail."
+"Reviewer-gate push rejected. Check the alfred structured logs for the "
+"`state_git.push_rejected` event (carries the git stderr detail) and the "
+"corresponding `*.requested` audit breadcrumb for the operator action that "
+"triggered it."
 
 #: src/alfred/cli/_validators.py:112
 msgid "cli.validators.plugin_id_invalid"
