@@ -85,7 +85,7 @@ from typing import Any, Final
 import structlog
 
 from alfred.hooks.audit_sink import HOOKS_TIER_REJECTED, AuditSink, StructlogAuditSink
-from alfred.hooks.capability import CapabilityGate, DevGate
+from alfred.hooks.capability import CapabilityGate
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import (
     HookError,
@@ -1096,14 +1096,80 @@ Module-private; do not read directly.
 """
 
 
+@dataclass(frozen=True, slots=True)
+class _DenyAllGate:
+    """Fail-closed bootstrap gate — denies every check.
+
+    PR-S3-7 removed :class:`DevGate` from ``src/``. The
+    :func:`get_registry` lazy fallback previously constructed a
+    :class:`DevGate` so first-call sites (the ``@hook`` decorator at
+    module import time before bootstrap wires the real gate) got a
+    working registry. Replacing that with the production
+    :class:`RealGate` is impossible without a Postgres backend in scope;
+    replacing it with nothing crashes any first-call site.
+
+    The fail-closed posture here is the only safe default: production
+    bootstrap (:mod:`alfred.bootstrap.gate_factory`) MUST construct a
+    real gate and install it via :func:`set_registry` before any
+    capability-sensitive dispatch lands. If a call site lands on this
+    gate it means bootstrap hasn't run yet — denying every check
+    surfaces the mis-sequencing loudly instead of silently authorising
+    a dispatch (CLAUDE.md hard rule #7).
+
+    The class is private — production code never imports it. Tests
+    that need ergonomic deny-path / granted-path fixtures use the
+    helpers in :mod:`tests.helpers.gates` over :class:`RealGate`.
+    """
+
+    def check(
+        self,
+        *,
+        plugin_id: str,
+        hookpoint: str,
+        requested_tier: str,
+    ) -> bool:
+        """Always denies."""
+        del plugin_id, hookpoint, requested_tier
+        return False
+
+    def check_plugin_load(
+        self,
+        *,
+        plugin_id: str,
+        manifest_tier: str,
+    ) -> bool:
+        """Always denies plugin load."""
+        del plugin_id, manifest_tier
+        return False
+
+    def check_content_clearance(
+        self,
+        *,
+        plugin_id: str,
+        hookpoint: str,
+        content_tier: str,
+    ) -> bool:
+        """Always denies content-tier access."""
+        del plugin_id, hookpoint, content_tier
+        return False
+
+
 def get_registry() -> HookRegistry:
     """Return the active :class:`HookRegistry` singleton.
 
     Lazily constructs the default registry on first call — a
-    :class:`HookRegistry` with a default :class:`DevGate` (deny
-    ``system`` tier) and the registry's own default
+    :class:`HookRegistry` with a fail-closed bootstrap gate
+    (:class:`_DenyAllGate`) and the registry's own default
     :class:`StructlogAuditSink` bound to
     ``structlog.get_logger("alfred.hooks")``.
+
+    The fail-closed bootstrap gate is the PR-S3-7 replacement for the
+    Slice-2.5 :class:`DevGate` lazy default. Production bootstrap
+    (:mod:`alfred.bootstrap.gate_factory`) wires the real
+    :class:`alfred.security.capability_gate._gate.RealGate` and
+    installs it via :func:`set_registry` before any dispatch lands;
+    test fixtures swap a :class:`HookRegistry` with a test-helper gate
+    (see :mod:`tests.helpers.gates`).
 
     Subsequent calls return the same instance until
     :func:`set_registry` swaps it. The ``@hook`` decorator (Task 7)
@@ -1113,7 +1179,7 @@ def get_registry() -> HookRegistry:
     """
     global _registry
     if _registry is None:
-        _registry = HookRegistry(gate=DevGate())
+        _registry = HookRegistry(gate=_DenyAllGate())
     return _registry
 
 

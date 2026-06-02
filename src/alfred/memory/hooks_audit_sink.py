@@ -243,12 +243,12 @@ class EpisodicAuditSink:
         the test body so other tests aren't affected.
 
         Imports and call sequence (illustrative — not a runnable doctest;
-        the ``DevGate(allow_system=True)`` posture is a test-only
-        convenience, the production posture refuses ``system`` until
-        Slice-3 promotes the wiring)::
+        the ``make_allow_system_gate()`` helper is the test-only seam,
+        the production posture wires :class:`RealGate` via
+        :mod:`alfred.bootstrap.gate_factory` which refuses ``system``
+        unless a Postgres-backed grant exists)::
 
             >>> from alfred.audit.log import AuditWriter
-            >>> from alfred.hooks.capability import DevGate
             >>> from alfred.hooks.registry import (
             ...     HookRegistry,
             ...     get_registry,
@@ -256,12 +256,13 @@ class EpisodicAuditSink:
             ... )
             >>> from alfred.memory.db import build_session_scope
             >>> from alfred.settings import Settings  # noqa: F401
+            >>> from tests.helpers.gates import make_allow_system_gate
             >>>
             >>> session_factory = build_session_scope(settings)
             >>> writer = AuditWriter(session_factory=session_factory)
             >>> sink = EpisodicAuditSink(audit=writer)
             >>> registry = HookRegistry(
-            ...     gate=DevGate(allow_system=True),
+            ...     gate=make_allow_system_gate(),
             ...     sink=sink,
             ... )
             >>> prior = get_registry()

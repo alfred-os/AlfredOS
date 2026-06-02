@@ -1,55 +1,57 @@
 """Bootstrap factory for capability-gate selection.
 
-Spec §8.4: :class:`alfred.security.capability_gate._gate.RealGate` is the
-production default; :class:`alfred.hooks.capability.DevGate` is the
-development default. This module is the SINGLE allowed reader of
+Spec §8.4: :class:`alfred.security.capability_gate._gate.RealGate` is
+the production gate. PR-S3-7 (spec §15.1 flag-day) removed the dev-time
+:class:`DevGate` from ``src/`` entirely; this factory now constructs a
+:class:`RealGate` in BOTH the development and production branches —
+the development branch wires it with no grants (so every check denies
+fail-closed) and skips the heartbeat, the production branch wires the
+full Postgres-backed grant table with the heartbeat running.
+
+The :func:`is_production` env read is the SINGLE allowed reader of
 ``ALFRED_ENV`` for the purpose of gate selection — sec-007 forbids the
 read inside the gate logic itself, where an env-at-import-time read
 would make construction depend on global state rather than injected
 configuration.
 
-The ``os.environ`` read in :func:`is_production` is the sec-007
-exception. The capability-gate modules (``hooks/capability.py``,
+The capability-gate modules (``hooks/capability.py``,
 ``security/capability_gate/{policy,_gate,backend,proposals}.py``) MUST
 NOT contain the literal string ``"ALFRED_ENV"`` — that invariant is
 enforced by ``tests/unit/security/test_default_strict_declarations_invariant.py``
 (behavioural) and ``tests/unit/security/test_capability_gate_ast_no_os_import.py``
 (broader ``import os`` guard for the same modules).
 
-Why three callables rather than one ``build_gate()`` factory:
+Why two callables rather than one ``build_gate()`` factory:
 
 * :func:`build_dev_gate` and :func:`build_real_gate` differ in their
-  dependency set (DevGate is zero-dep; RealGate needs a
-  :class:`StorageBackend` and an :class:`AuditWriter`). Pushing the env
-  read down into a single ``build_gate()`` would either pull both
-  dependency trees into bootstrap or hide the conditional from the
-  call site.
+  dependency set. ``build_dev_gate`` constructs a no-grant
+  :class:`RealGate` in-process via a stub backend; ``build_real_gate``
+  needs a real :class:`StorageBackend` and an :class:`AuditWriter`.
+  Pushing the env read down into a single ``build_gate()`` would
+  either pull both dependency trees into every bootstrap path or hide
+  the conditional from the call site.
 * The call site (the supervisor bootstrap, PR-S3-3b) consults
   :func:`is_production` to decide which dependency tree to construct,
   then calls the matching builder explicitly. That keeps the
   dependency-construction sequencing visible at the call site.
-
-This file deliberately does not import :class:`RealGate` at module
-top-level — the import would pull SQLAlchemy + asyncpg into every
-process that constructs a :class:`DevGate`. The lazy import inside
-:func:`build_real_gate` keeps DevGate-only paths free of the heavy
-dependency tree.
 """
 
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
 
 import structlog
 
-from alfred.hooks.capability import DevGate
 from alfred.i18n import t
+from alfred.security.capability_gate._gate import RealGate
+from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
-    from alfred.security.capability_gate._gate import RealGate
     from alfred.security.capability_gate.backend import StorageBackend
 
 
@@ -88,32 +90,79 @@ def is_production() -> bool:
     return value not in {"", _DEVELOPMENT}
 
 
-def build_dev_gate() -> DevGate:
-    """Construct the development-default :class:`DevGate`.
+def _make_in_process_backend(grants: Iterable[GrantRow] = ()) -> Any:
+    """Return a :class:`StorageBackend`-shaped stub with no Postgres I/O.
 
-    Spec §8.4: DevGate's :meth:`check_plugin_load` and
-    :meth:`check_content_clearance` are fail-open stubs through
-    Slice 3 (flag-day removal in PR-S3-7). The bootstrap default is
-    ``allow_system=False`` — the safer posture. A developer who needs
-    system-tier access in a one-off script can construct
-    ``DevGate(allow_system=True)`` directly; the bootstrap factory
-    does not surface the flag because the production-equivalent path
-    (RealGate consulting a grant table) has no analogue.
+    PR-S3-7 (spec §15.1): with :class:`DevGate` removed, the development
+    bootstrap path constructs a :class:`RealGate` over an in-process
+    backend stub instead of touching Postgres. The stub satisfies the
+    structural :class:`StorageBackend` Protocol without any database
+    connection so ``alfred chat`` / ``alfred status`` in a development
+    environment doesn't depend on a running database.
+    """
+    backend = MagicMock()
+    backend.ping = AsyncMock(return_value=None)
+    backend.load_grants = AsyncMock(return_value=frozenset(grants))
+    backend.get_sync_hash = AsyncMock(return_value=None)
+    backend.set_sync_hash = AsyncMock(return_value=None)
+    backend.upsert_grant = AsyncMock(return_value=None)
+    backend.revoke_grant = AsyncMock(return_value=None)
+    backend.apply_atomic = AsyncMock(return_value=None)
+    return backend
+
+
+def _make_no_op_audit_sink() -> Any:
+    """Return an audit-sink stub for the development gate.
+
+    err-003: :class:`RealGate` requires an audit sink so fail-closed
+    state transitions cannot land silently. The development bootstrap
+    doesn't have a real :class:`AuditWriter` wired (no Postgres
+    backend), so a stub satisfies the constructor contract — and the
+    no-grant policy means the gate denies every check on the hot path
+    without ever transitioning to fail-closed (no heartbeat) so the
+    sink is never called in practice.
+    """
+    sink = MagicMock()
+    sink.append_schema = AsyncMock(return_value=None)
+    return sink
+
+
+def build_dev_gate() -> RealGate:
+    """Construct the development-default gate — a fail-closed :class:`RealGate`.
+
+    Spec §15.1 (flag-day): :class:`DevGate` was removed from ``src/``
+    in PR-S3-7. The development bootstrap now constructs a
+    :class:`RealGate` with an empty grant snapshot and an in-process
+    backend stub (no Postgres). Every :meth:`RealGate.check` call
+    denies fail-closed — the only safe default when no operator-grant
+    table is wired. Developers who need granted-system semantics for
+    local iteration should construct the gate via the test helpers in
+    :mod:`tests.helpers.gates` or stand up a real Postgres + seeded
+    grants table.
+
+    The heartbeat is NOT started: with the stub backend's ping always
+    succeeding, the heartbeat would loop forever doing nothing, and a
+    development supervisor that never calls
+    :meth:`RealGate.stop_heartbeat` would leak the task at shutdown.
 
     DEVEX-004: emits an INFO-level structlog event so the operator's
-    log stream visibly carries which gate is wired at bootstrap.
-    DevGate is fail-open — operators should never see this in
-    production. The event name is closed-vocabulary so log filters
-    can alert on it directly.
+    log stream visibly carries which gate is wired at bootstrap. The
+    development gate denies every check by default — operators should
+    never see this in production. The event name is closed-vocabulary
+    so log filters can alert on it directly.
     """
     raw_env = os.environ.get(_ENV_KEY, "").strip()
     _log.info(
         "bootstrap.gate_selected",
-        gate="DevGate",
+        gate="DevelopmentRealGate",
         alfred_env=raw_env or "(unset)",
         warning=t("bootstrap.gate_selected.devgate_warning"),
     )
-    return DevGate()
+    return RealGate(
+        policy=GatePolicy(grants=frozenset()),
+        backend=_make_in_process_backend(),
+        audit_sink=_make_no_op_audit_sink(),
+    )
 
 
 async def build_real_gate(
@@ -139,13 +188,14 @@ async def build_real_gate(
             ``False`` in unit tests where the background task would
             race the runner.
 
-    The :class:`RealGate` import is lazy so DevGate-only callers do
-    not pay the SQLAlchemy + asyncpg import cost. The factory is
-    ``async`` because :meth:`RealGate.create` runs the initial
-    Postgres grant load before returning a ready instance.
+    PR-S3-7 (spec §15.1) folded the development branch onto the same
+    :class:`RealGate` type (with a stub backend and no heartbeat) so
+    the import graph is symmetric — :class:`RealGate` is imported at
+    module top-level rather than lazily inside this function, since
+    both :func:`build_dev_gate` and :func:`build_real_gate` need it.
+    The factory is ``async`` because :meth:`RealGate.create` runs the
+    initial Postgres grant load before returning a ready instance.
     """
-    from alfred.security.capability_gate._gate import RealGate
-
     # DEVEX-004: emit the bootstrap-time gate-selected event before the
     # await so the log line ALWAYS lands even if RealGate.create fails
     # (the failure shape is useful operator forensics with this context).
