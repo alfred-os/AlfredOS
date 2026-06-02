@@ -69,7 +69,7 @@ def _make_spy_sink() -> tuple[Any, list[dict[str, Any]]]:
         schema_name: str,
         event: str,
         subject: dict[str, Any],
-        **_unused: Any,
+        **top_level: Any,
     ) -> None:
         if set(subject.keys()) != fields:
             msg = (
@@ -78,7 +78,21 @@ def _make_spy_sink() -> tuple[Any, list[dict[str, Any]]]:
                 f"{sorted(fields)!r} for {schema_name}"
             )
             raise AssertionError(msg)
-        emitted.append({"event": event, "schema_name": schema_name, **subject})
+        # CR-149 round-8: capture the top-level kwargs separately so
+        # tests can assert on them (e.g. ``trust_tier_of_trigger``)
+        # without relying on the row's subject-side copy alone. The
+        # PRD §7.1 swimlane query reads the writer's top-level
+        # ``trust_tier_of_trigger`` arg, not the subject-side echo, so
+        # a regression that drops the writer kwarg but keeps the
+        # subject copy would otherwise pass silently.
+        emitted.append(
+            {
+                "event": event,
+                "schema_name": schema_name,
+                **subject,
+                "_top_level": dict(top_level),
+            }
+        )
 
     sink = MagicMock()
     sink.append_schema = _append_schema
@@ -189,10 +203,16 @@ async def test_create_proposal_emits_grant_requested_audit_row() -> None:
     # CR-149 round-7: the T1 swimlane tag now lives on the row itself,
     # not just on the writer kwarg.
     assert row["trust_tier_of_trigger"] == "T1"
+    # CR-149 round-8: the PRD §7.1 swimlane query (``alfred audit graph
+    # --tier T1``) reads the writer's TOP-LEVEL ``trust_tier_of_trigger``
+    # kwarg, not the subject-side echo. Pinning both ensures a
+    # regression that drops the writer kwarg but leaves the subject
+    # copy in place can't pass silently.
+    assert row["_top_level"].get("trust_tier_of_trigger") == "T1"
     # The subject's key set MUST equal the declared field set so the
     # symmetric ``AuditWriter.append_schema`` check accepts the row.
     declared = set(PLUGIN_GRANT_REQUESTED_FIELDS)
-    metadata = {"event", "schema_name"}
+    metadata = {"event", "schema_name", "_top_level"}
     assert set(row.keys()) - metadata == declared
     # correlation_id is a UUID4 str.
     assert isinstance(row["correlation_id"], str)
