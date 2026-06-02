@@ -387,6 +387,43 @@ def test_run_classifies_missing_repo_as_path_missing(tmp_path: Path) -> None:
     assert excinfo.value.kind == StateGitErrorKind.PATH_MISSING
 
 
+def test_run_classifies_generic_oserror_as_push_rejected(bare_repo: Path) -> None:
+    """A non-FileNotFoundError ``OSError`` (e.g. PermissionError) tags PUSH_REJECTED.
+
+    Covers the catch-all ``except OSError`` arm in ``_run``. The CLI
+    surface for PUSH_REJECTED is the generic "check audit log" hint --
+    operator next-action is the same whether the cause was
+    permission-denied or push-refused, so they share the kind.
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    with (
+        patch(
+            "alfred.cli._state_git.subprocess.run",
+            side_effect=PermissionError("denied"),
+        ),
+        pytest.raises(StateGitError) as excinfo,
+    ):
+        client.list_pending_proposals()
+    assert excinfo.value.kind == StateGitErrorKind.PUSH_REJECTED
+
+
+def test_register_hint_keys_for_pybabel_returns_real_msgstrs() -> None:
+    """The pybabel-visibility shim resolves to non-bare catalog renders.
+
+    The function is never called at runtime but it MUST work when
+    invoked -- otherwise a future refactor that decides to call it for
+    e.g. catalog validation would silently get the bare msgids. Pin it.
+    """
+    from alfred.cli._state_git import _register_hint_keys_for_pybabel
+
+    rendered = _register_hint_keys_for_pybabel()
+    assert len(rendered) == 3
+    # Each rendered string is non-trivially different from its msgid.
+    for body in rendered:
+        assert "cli.state_git.error." not in body
+        assert body.strip() != ""
+
+
 def test_run_classifies_nonzero_return_as_push_rejected(bare_repo: Path) -> None:
     """A non-zero subprocess return tags PUSH_REJECTED.
 
