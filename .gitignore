@@ -18,13 +18,15 @@ htmlcov/
 .env.*
 !.env.example
 
-# Docker / runtime state — never commit. The negation below exempts
+# Docker / runtime state — never commit. The negations below exempt
 # the in-tree ``src/alfred/state/`` Python package (ADR-0018 — typed
-# state.git proposal payloads); the runtime state.git store at
-# ``/var/lib/alfred/state.git`` and any developer-mounted ``./state/``
-# bind volume still matches.
+# state.git proposal payloads) and the matching
+# ``tests/integration/state/`` round-trip suite; the runtime state.git
+# store at ``/var/lib/alfred/state.git`` and any developer-mounted
+# ``./state/`` bind volume still matches.
 state/
 !src/alfred/state/
+!tests/integration/state/
 data/
 *.db
 *.sqlite*

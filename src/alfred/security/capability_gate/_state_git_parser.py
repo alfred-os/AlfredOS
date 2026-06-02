@@ -6,6 +6,14 @@ is a derived projection. This module owns the
 :meth:`alfred.security.capability_gate._gate.RealGate.rebuild_from_state_git`
 invokes on every cache miss.
 
+ADR-0018 Decision 4: the parser traverses ``policies/grants/`` recursively
+so the per-plugin nested layout
+(``policies/grants/<plugin_id>/<grant_id>.json``) written by the
+canonical writers re-hydrates by construction. Pre-ADR-0018 flat-layout
+grants at ``policies/grants/<file>.json`` continue to project unchanged
+— ``tree.traverse()`` yields both the legacy flat blobs and the new
+nested blobs in deterministic order.
+
 Why a dedicated module:
 
 * **Trust-boundary scrutiny.** A bug here mis-projects the capability
@@ -93,9 +101,25 @@ def parse_state_git_head(state_git_path: Path, commit_hash: str) -> frozenset[Gr
         return frozenset()
 
     rows: list[GrantRow] = []
-    for blob in grants_tree.blobs:
+    # ADR-0018 Decision 4: traverse subtrees recursively so the
+    # ``policies/grants/<plugin_id>/<grant_id>.json`` layout the new
+    # writers produce round-trips. ``tree.traverse()`` walks every
+    # nested blob in deterministic order — the same blob set the
+    # historical single-level ``grants_tree.blobs`` scan returned for
+    # legacy flat-layout grants stays included.
+    for blob in grants_tree.traverse():
+        # ``traverse`` yields both Blob and Tree nodes; filter to blobs
+        # via the ``type`` discriminator gitpython exposes. JSON-only —
+        # a future ADR that flips the format flips this guard too.
+        if blob.type != "blob":  # type: ignore[union-attr]
+            continue
+        if not blob.path.endswith(".json"):  # type: ignore[union-attr]
+            # Skip README / .gitkeep / future YAML peer files so the
+            # parser stays JSON-only by structural guard, not by
+            # ``except yaml.YAMLError`` after the fact.
+            continue
         try:
-            raw = json.loads(blob.data_stream.read())
+            raw = json.loads(blob.data_stream.read())  # type: ignore[union-attr]
             rows.append(GrantRow(**raw))
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             # CLAUDE.md hard rule #7: skip-and-log, never silently accept.
@@ -106,7 +130,7 @@ def parse_state_git_head(state_git_path: Path, commit_hash: str) -> frozenset[Gr
             # leak into the structured log without re-review.
             _log.warning(
                 "capability_gate.rebuild.skip_invalid_grant",
-                path=blob.path,
+                path=blob.path,  # type: ignore[union-attr]
                 error_type=type(exc).__name__,
                 commit_hash=commit_hash,
             )
