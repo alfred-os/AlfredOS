@@ -96,10 +96,15 @@ AlfredOS/
 | All quality gates | `make check` (lint + format + type + test) |
 | Local stack up | `docker compose up -d` |
 | TUI conversation | `alfred chat` |
-| Inspect state | `alfred status` (Slice 1); `alfred audit log` / `alfred audit graph --since 24h` (planned — Slice 3+) |
-| Inspect a user's memory | `alfred memory show <user>` (planned — Slice 3+) |
+| Inspect state | `alfred status` (Slice 1); `alfred audit log` / `alfred audit graph --since 24h` (Slice 3) |
+| Inspect a user's memory | `alfred memory show <user>` (planned — Slice 4+) |
 | Cost report | `alfred cost report --since 7d --by persona` (planned — Slice 4+) |
 | Manage users | `alfred user add|list|show|set|remove|bind|unbind` (see ADR-0010) |
+| Plugin management | `alfred plugin grant <id> <tier> <hookpoint>` · `alfred plugin grant status <id>` · `alfred plugin grant list --pending` · `alfred plugin revoke <id>` (Slice 3; `alfred plugin list` / `show` hidden from `--help` per arch-006 follow-up) |
+| Web fetch allowlist | `alfred web allowlist add <domain>` · `alfred web allowlist remove <domain>` · `alfred web allowlist list` (Slice 3) |
+| Config (reviewer-gated) | `alfred config set quarantined-provider <value>` · `alfred config set web-fetch-budget <user> <n>` · `alfred config get <key>` · `alfred config list` (Slice 3) |
+| Supervisor | `alfred supervisor status` · `alfred supervisor reset <component> --confirm` (Slice 3) |
+| Audit (extended) | `alfred audit graph --tier T0|T1|T2|T3 --since 24h` (Slice 3) |
 
 If a command lacks a slice marker, flag it. Commands
 marked `(planned — Slice N+)` are scheduled — do NOT implement ahead of
@@ -193,6 +198,8 @@ When you learn something about the project, the user, or how to work here that f
 6. Use the `superpowers:test-driven-development` skill before any feature.
 7. Use the `superpowers:verification-before-completion` skill before claiming done.
 8. Ask the user. Don't make decisions you cannot defend.
+
+**First-run seed (Slice 3+):** every `alfred plugin grant`, `alfred web allowlist add/remove`, and `alfred config set` call writes a proposal branch to `/var/lib/alfred/state.git`. If the repo doesn't exist yet, `bin/alfred-setup.sh` runs `bin/alfred-state-git-seed.sh` inside the `alfred-core` container, which is just `git init --bare /var/lib/alfred/state.git` + a seeded `main` branch. Safe to re-run; idempotent. If you see `bootstrap.capability_gate_unseeded` at startup, run the seed script.
 
 ## Do not
 
