@@ -13,7 +13,7 @@ explicitly noting that "the rewrite is intentional" and that "the Slice-3
 reviewer gate re-checks PRD §5 compliance." Slice 3 ships the `PluginTransport`
 Protocol and `StdioTransport` implementation (ADR-0017 §4) plus a
 `CommsAdapterMCP` Protocol stub and a reference test plugin
-(`plugins/alfred-comms-test/`). The in-process adapters remain unchanged
+(`plugins/alfred_comms_test/`). The in-process adapters remain unchanged
 through Slice 3.
 
 PRD §5 requires all comms surfaces to speak MCP. The MCP transport is now
