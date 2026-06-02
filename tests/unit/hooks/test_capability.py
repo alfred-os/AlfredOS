@@ -1,177 +1,264 @@
-"""Tests for ``alfred.hooks.capability`` — the two-gate security primitive.
+"""CapabilityGate Protocol + RealGate deny-path tests.
 
-The capability gate is the load-bearing security seam between a hook
-subscriber's *requested* trust tier and the runtime's *granted* trust
-tier. Slice 2.5 ships the Protocol (the seam every gate implementation
-must honour) plus a dev-time default (:class:`DevGate`) that returns
-predictable answers without persisting state or reading the environment.
+``DevGate`` was removed in PR-S3-7 (spec §15.1 flag-day). These tests
+assert the deny-path invariants against the real :class:`RealGate`
+implementation, constructed via the :mod:`tests.helpers.gates`
+factories that wrap :class:`RealGate` with an in-memory stub backend
+(no testcontainer, no Postgres).
 
-Invariants pinned here — these are CLAUDE.md hard rules, not stylistic
-preferences:
+Hard rules preserved:
 
-* **Hard rule #4 (capability layer)** — never bypass the gate. The deny
-  paths assert against the *real* :class:`DevGate` refusal, never a
-  stub or "always allow" double. The unknown-tier and ``system``-without-
-  ``allow_system`` branches MUST return ``False`` and the test verifies
-  that directly.
-* **Hard rule #7 (no silent failures)** — an unknown / typo'd / case-
-  mismatched tier string is a *loud* refusal-via-fail-closed default,
-  not an exception-swallowed pass. The parametrize over ``"root"``, ``""``,
-  ``"SYSTEM"`` and ``"None"`` pins every deny branch.
-* **sec-007 (no env flag)** — ``allow_system`` is constructor-only. The
-  env-isolation test sets ``ALFRED_HOOKS_ALLOW_SYSTEM`` via monkeypatch
-  before constructing ``DevGate()`` (no arg) and asserts ``system`` is
-  STILL denied. Task-4 will add an AST-scan regression guard against
-  ``os`` import in ``capability.py``; this test is the behavioural pin.
-* **Structural subtyping** — :class:`DevGate` satisfies the
+* **CLAUDE.md hard rule #4** — never bypass the capability layer. The
+  deny paths assert against the real :class:`RealGate` refusal, never
+  a stub or "always allow" double. The unknown-tier and
+  no-grant-for-system branches MUST return ``False`` and the test
+  verifies that directly.
+* **CLAUDE.md hard rule #7** — no silent failures. An unknown / typo'd
+  / case-mismatched tier denies fail-closed. Empty string,
+  alternate-case variants of known tiers (``"SYSTEM"``), and unknown
+  names (``"root"``) all return ``False`` even when a system-tier
+  grant exists for the (plugin_id, hookpoint) pair.
+* **sec-007 (no env reads)** — :mod:`alfred.hooks.capability` imports
+  nothing from :mod:`os`. The AST-scan in :func:`test_capability_py_reads_no_env`
+  is the source-level pin against any future re-introduction;
+  ``ALFRED_ENV`` selection lives in
+  :mod:`alfred.bootstrap.gate_factory`, not in :mod:`capability`.
+* **Structural subtyping** — :class:`RealGate` satisfies the
   :class:`CapabilityGate` Protocol structurally. Pinning
-  ``isinstance(DevGate(), CapabilityGate)`` lets dispatcher code in
-  Task-10 type-narrow on ``CapabilityGate`` without a registry of
+  ``isinstance(make_deny_all_gate(), CapabilityGate)`` lets dispatcher
+  code type-narrow on :class:`CapabilityGate` without a registry of
   concrete subclasses.
-* **Keyword-only contract** — both the constructor's ``allow_system``
-  parameter and the ``check`` method's ``plugin_id`` / ``hookpoint`` /
-  ``requested_tier`` parameters are keyword-only. Positional invocation
-  raises :class:`TypeError`. The spec contract reads ``*,`` for a reason:
-  a caller cannot accidentally swap, say, ``plugin_id`` and ``hookpoint``
-  via positional args.
+* **§15.1 flag-day** — :class:`DevGate` is gone from ``src/``. The
+  regression guard at the bottom of this file asserts the import
+  raises :class:`ImportError`; the dedicated
+  ``test_devgate_removed.py`` module is the small focused twin.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import ast
+from pathlib import Path
 
 import pytest
 
-from alfred.hooks.capability import CapabilityGate, DevGate
+from alfred.hooks.capability import CapabilityGate
+from tests.helpers.gates import make_allow_system_gate, make_deny_all_gate
 
 
-def test_default_devgate_refuses_system() -> None:
-    """``DevGate()`` (no constructor arg) denies the ``system`` tier.
+def test_realgate_deny_all_with_empty_store() -> None:
+    """:class:`RealGate` with an empty grant store denies all check() calls.
 
-    The default-deny on ``system`` is the operator-tier guardrail: a hook
-    cannot escalate to system-level capability just by asking. Granting
-    ``system`` requires explicit constructor opt-in via ``allow_system``.
+    This is the equivalent deny-path invariant that ``DevGate()``
+    (no args) provided — no grants ⇒ every check denies fail-closed
+    (spec §8.1).
     """
-    gate = DevGate()
-    assert gate.check(plugin_id="p", hookpoint="h", requested_tier="system") is False
+    gate = make_deny_all_gate()
+    assert not gate.check(plugin_id="test", hookpoint="tool.web.fetch", requested_tier="system")
+    assert not gate.check(plugin_id="test", hookpoint="tool.web.fetch", requested_tier="operator")
+    assert not gate.check(
+        plugin_id="test", hookpoint="tool.web.fetch", requested_tier="user-plugin"
+    )
 
 
-def test_default_devgate_grants_operator() -> None:
-    """``DevGate()`` always grants the ``operator`` tier.
-
-    ``operator`` is the AlfredOS default tier for first-party hooks; the
-    dev-time gate grants it unconditionally so local development does
-    not require a fixture grant for every operator-tier subscriber.
-    """
-    gate = DevGate()
-    assert gate.check(plugin_id="p", hookpoint="h", requested_tier="operator") is True
-
-
-def test_default_devgate_grants_user_plugin() -> None:
-    """``DevGate()`` always grants the ``user-plugin`` tier.
-
-    ``user-plugin`` is the bundled-plugin tier — the comms adapters,
-    integrations, and personas the user has explicitly installed. The
-    dev-time gate grants it unconditionally so a third-party plugin
-    author can iterate without re-wiring the gate.
-    """
-    gate = DevGate()
-    assert gate.check(plugin_id="p", hookpoint="h", requested_tier="user-plugin") is True
-
-
-def test_devgate_with_allow_system_grants_system() -> None:
-    """``DevGate(allow_system=True)`` grants the ``system`` tier.
-
-    The constructor-only opt-in is the only way for ``system`` to flip
-    to ``True``. Task-4's AST-scan regression guards against adding an
-    env-read or runtime setter; this test pins the positive grant path
-    through the legitimate constructor seam.
-    """
-    gate = DevGate(allow_system=True)
-    assert gate.check(plugin_id="p", hookpoint="h", requested_tier="system") is True
-
-
-@pytest.mark.parametrize("unknown_tier", ["root", "", "SYSTEM", "None"])
-def test_devgate_refuses_unknown_tier_fail_closed(unknown_tier: str) -> None:
+@pytest.mark.parametrize("bad_tier", ["SYSTEM", "System", "root", "None", "t3"])
+def test_realgate_deny_unknown_tier(bad_tier: str) -> None:
     """Unknown / typo'd / case-mismatched tier strings deny (fail-closed).
 
-    Empty string, alternate-case variants of known tiers, and unknown
-    tier names ALL deny — even with ``allow_system=True`` set. The
-    default-deny on an unrecognised input is the CLAUDE.md hard-rule-#7
-    "no silent failures" contract: a typo'd tier in a hook decorator
-    surfaces as an immediate refusal, not as silently-granted access.
+    CLAUDE.md hard rule #7: no silent failures. Unrecognised input
+    denies even when a wildcard system grant exists for the
+    (plugin_id, hookpoint) pair — the grant table is exact-match on
+    the tier string, so ``"SYSTEM"`` (uppercase) never matches a
+    stored ``"system"`` grant.
     """
-    gate = DevGate(allow_system=True)
-    assert gate.check(plugin_id="p", hookpoint="h", requested_tier=unknown_tier) is False
+    gate = make_allow_system_gate(plugin_id="test", hookpoint="*")
+    assert not gate.check(plugin_id="test", hookpoint="anything", requested_tier=bad_tier), (
+        f"Expected deny for tier={bad_tier!r}"
+    )
 
 
-def test_devgate_satisfies_capability_gate_protocol() -> None:
-    """``DevGate`` is structurally a :class:`CapabilityGate`.
+def test_realgate_deny_empty_string_tier() -> None:
+    """An empty tier string denies — the empty-string deny path is its own row.
 
-    The Protocol is ``@runtime_checkable`` so dispatcher code (Task-10)
-    can type-narrow with ``isinstance`` without a registry of concrete
-    gate classes. Both the deny-by-default and allow-system-True
-    constructions satisfy the structural check — the structural
-    membership is independent of the gate's internal flag state.
+    Parametrising the empty string alongside the alphabetic bad tiers
+    in :func:`test_realgate_deny_unknown_tier` produces an ugly pytest
+    nodeid (``[]``). Keeping the empty-string case as its own test
+    keeps the report readable while preserving the deny-path coverage.
     """
-    assert isinstance(DevGate(), CapabilityGate)
-    assert isinstance(DevGate(allow_system=True), CapabilityGate)
+    gate = make_allow_system_gate(plugin_id="test", hookpoint="*")
+    assert not gate.check(plugin_id="test", hookpoint="anything", requested_tier="")
 
 
-def test_check_rejects_positional_args() -> None:
-    """``DevGate().check`` is keyword-only on every parameter.
+def test_realgate_with_system_grant_allows_system() -> None:
+    """:class:`RealGate` with a seeded system-tier grant allows check() for system.
+
+    Equivalent to ``DevGate(allow_system=True)`` — the grant exists,
+    so the check passes for the (plugin_id, hookpoint, ``"system"``)
+    triple that matches the seeded row.
+    """
+    gate = make_allow_system_gate(plugin_id="test-plugin", hookpoint="tool.web.fetch")
+    assert gate.check(
+        plugin_id="test-plugin",
+        hookpoint="tool.web.fetch",
+        requested_tier="system",
+    )
+
+
+def test_realgate_with_system_grant_wildcard_matches_any_hookpoint() -> None:
+    """A wildcard system grant covers every hookpoint at that plugin id.
+
+    The default ``hookpoint="*"`` on :func:`make_allow_system_gate`
+    mirrors the convention used by the Slice-2.5 fixtures, where
+    ``DevGate(allow_system=True)`` granted ``system`` regardless of
+    the hookpoint argument. The :class:`alfred.security.capability_gate.policy.GatePolicy`
+    wildcard semantics preserve that posture under :class:`RealGate`.
+    """
+    gate = make_allow_system_gate()  # plugin_id="test-plugin", hookpoint="*"
+    assert gate.check(
+        plugin_id="test-plugin",
+        hookpoint="anything.at.all",
+        requested_tier="system",
+    )
+
+
+def test_realgate_with_system_grant_denies_other_plugin() -> None:
+    """A system grant for one plugin does NOT cover a different plugin.
+
+    The grant table is keyed on ``plugin_id``; a wildcard system grant
+    for ``test-plugin`` denies the same tier request from
+    ``other-plugin``. This is the load-bearing invariant that prevents
+    one plugin's grant from authorising another plugin's dispatch.
+    """
+    gate = make_allow_system_gate(plugin_id="test-plugin")
+    assert not gate.check(
+        plugin_id="other-plugin",
+        hookpoint="tool.web.fetch",
+        requested_tier="system",
+    )
+
+
+def test_realgate_check_plugin_load_deny_without_grant() -> None:
+    """:meth:`RealGate.check_plugin_load` returns ``False`` without a grant.
+
+    Spec §8.2: plugin-load is gated against the same (plugin_id,
+    manifest_tier) projection — no grant means the supervisor refuses
+    to open the plugin's stdio transport.
+    """
+    gate = make_deny_all_gate()
+    assert not gate.check_plugin_load(plugin_id="new-plugin", manifest_tier="system")
+    assert not gate.check_plugin_load(plugin_id="new-plugin", manifest_tier="operator")
+
+
+def test_realgate_check_content_clearance_deny_without_grant() -> None:
+    """:meth:`RealGate.check_content_clearance` returns ``False`` without a grant.
+
+    Spec §8.2 / Fork 7: T3 content must not reach T2-only paths. With
+    no content-tier grant the gate denies on every content tier —
+    fail-closed default on the orthogonal trust axis.
+    """
+    gate = make_deny_all_gate()
+    assert not gate.check_content_clearance(plugin_id="test", hookpoint="tag.T3", content_tier="T3")
+
+
+def test_realgate_satisfies_capability_gate_protocol() -> None:
+    """:class:`RealGate` is structurally a :class:`CapabilityGate`.
+
+    The Protocol is ``@runtime_checkable``; the test-helper factories
+    return :class:`RealGate` instances, so the structural membership
+    check passes against the production gate type — no parallel test
+    gate hierarchy.
+    """
+    assert isinstance(make_deny_all_gate(), CapabilityGate)
+    assert isinstance(make_allow_system_gate(), CapabilityGate)
+
+
+def test_realgate_check_is_keyword_only() -> None:
+    """:meth:`RealGate.check` is keyword-only on every parameter.
 
     The verbatim spec §0 signature reads ``check(self, *, plugin_id,
     hookpoint, requested_tier) -> bool`` — the ``*,`` is the contract.
     A caller cannot accidentally swap ``plugin_id`` and ``hookpoint``
     via positional args; the type system enforces the boundary.
     """
-    gate = DevGate()
+    gate = make_deny_all_gate()
     with pytest.raises(TypeError):
         gate.check("p", "h", "operator")  # type: ignore[misc]
 
 
-def test_constructor_rejects_positional_args() -> None:
-    """``DevGate(...)`` is keyword-only on ``allow_system``.
+def test_capability_module_has_no_devgate() -> None:
+    """``DevGate`` must not exist in :mod:`alfred.hooks.capability`.
 
-    The same ``*,`` discipline applies to the constructor: a future
-    addition of a second flag could not be silently confused with
-    ``allow_system`` via positional args.
+    Regression guard per spec §15.1: the flag-day PR removes the
+    Slice-2.5 :class:`DevGate` class. The dedicated
+    ``test_devgate_removed.py`` test is the focused twin; this
+    assertion lives alongside the rest of the capability surface so a
+    re-introduction surfaces here as well.
     """
-    with pytest.raises(TypeError):
-        DevGate(True)  # type: ignore[misc]  # noqa: FBT003 -- asserting that positional bool is rejected is the point of this test.
+    with pytest.raises(ImportError):
+        from alfred.hooks.capability import DevGate  # type: ignore[attr-defined]  # noqa: F401
 
 
-def test_devgate_does_not_read_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """sec-007: ``allow_system`` is constructor-only — never env-driven.
+def test_capability_py_reads_no_env() -> None:
+    """:mod:`alfred.hooks.capability` must not read environment variables.
 
-    Setting ``ALFRED_HOOKS_ALLOW_SYSTEM=true`` in the environment must
-    NOT cause ``DevGate()`` (with no constructor arg) to grant
-    ``system``. The behavioural pin here complements the AST-scan
-    regression guard Task-4 lands against ``os`` imports in
-    ``capability.py``.
+    sec-007: ``ALFRED_ENV`` selection lives in
+    :mod:`alfred.bootstrap.gate_factory`, not here. The AST scan asserts
+    no ``os.environ`` attribute access, no ``os.environ.get``-style call,
+    and no ``os.getenv`` call appears in the module source. The
+    behavioural pin against env-driven gate behaviour now lives in
+    ``test_capability_sec007.py``; this is the source-level guard.
     """
-    monkeypatch.setenv("ALFRED_HOOKS_ALLOW_SYSTEM", "true")
-    monkeypatch.setenv("ALFRED_ALLOW_SYSTEM", "1")
-    gate = DevGate()
-    assert gate.check(plugin_id="p", hookpoint="h", requested_tier="system") is False
+    source = Path("src/alfred/hooks/capability.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    class EnvReadVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.violations: list[tuple[int, str]] = []
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if (
+                isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id == "os"
+                and node.value.attr == "environ"
+            ):
+                self.violations.append((node.lineno, "os.environ.attr"))
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if isinstance(node.func, ast.Attribute):
+                if (
+                    isinstance(node.func.value, ast.Attribute)
+                    and isinstance(node.func.value.value, ast.Name)
+                    and node.func.value.value.id == "os"
+                    and node.func.value.attr == "environ"
+                ):
+                    self.violations.append((node.lineno, "os.environ.method"))
+                if (
+                    isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "os"
+                    and node.func.attr == "getenv"
+                ):
+                    self.violations.append((node.lineno, "os.getenv"))
+            self.generic_visit(node)
+
+    visitor = EnvReadVisitor()
+    visitor.visit(tree)
+    assert not visitor.violations, (
+        "capability.py must not read environment variables (sec-007). "
+        f"Violations: {visitor.violations}"
+    )
 
 
 def test_capability_gate_protocol_has_check_plugin_load() -> None:
     """:class:`CapabilityGate` Protocol exposes ``check_plugin_load``.
 
-    PR-S3-2 (spec §8.2) extends the Protocol with the
-    ``check_plugin_load`` method so the supervisor can refuse a plugin at
-    handshake time when no subscriber-tier grant exists. The signature is
-    keyword-only on ``plugin_id`` / ``manifest_tier`` and every gate
-    implementation MUST honour it — the Protocol membership is the only
-    way the supervisor's type-narrowing finds the method.
+    PR-S3-2 (spec §8.2) extended the Protocol with this method so the
+    supervisor can refuse a plugin at handshake time when no
+    subscriber-tier grant exists. The signature is keyword-only on
+    ``plugin_id`` / ``manifest_tier`` and every gate implementation
+    MUST honour it.
     """
     import inspect
-
-    from alfred.hooks.capability import CapabilityGate
 
     assert "check_plugin_load" in dir(CapabilityGate)
     sig = inspect.signature(CapabilityGate.check_plugin_load)
@@ -182,96 +269,15 @@ def test_capability_gate_protocol_has_check_plugin_load() -> None:
 def test_capability_gate_protocol_has_check_content_clearance() -> None:
     """:class:`CapabilityGate` Protocol exposes ``check_content_clearance``.
 
-    PR-S3-2 (spec §8.2) extends the Protocol with
-    ``check_content_clearance`` — the orthogonal content-trust axis. The
-    quarantined-LLM plugin host and StdioTransport are the only
-    authorised callers for ``content_tier="T3"``; every other caller
-    receives a refusal. The Protocol signature is the gate-side contract
-    every implementation must honour.
+    PR-S3-2 (spec §8.2) extended the Protocol with the orthogonal
+    content-trust axis. The quarantined-LLM plugin host and
+    StdioTransport are the only authorised callers for
+    ``content_tier="T3"``; every other caller receives a refusal.
     """
     import inspect
-
-    from alfred.hooks.capability import CapabilityGate
 
     assert "check_content_clearance" in dir(CapabilityGate)
     sig = inspect.signature(CapabilityGate.check_content_clearance)
     assert "plugin_id" in sig.parameters
     assert "hookpoint" in sig.parameters
     assert "content_tier" in sig.parameters
-
-
-def test_devgate_check_plugin_load_returns_true_by_default() -> None:
-    """``DevGate.check_plugin_load`` is fail-open for Slice-3 co-existence.
-
-    Spec §8.4: ``DevGate`` implements the two new Protocol methods to
-    fail-open (returning ``True``) so Slice-2.5 tests that pre-date the
-    Protocol extension still pass. PR-S3-7 flag-day removes ``DevGate``;
-    until then the fail-open stub is deliberate, not an oversight.
-    """
-    from alfred.hooks.capability import DevGate
-
-    gate = DevGate()
-    assert gate.check_plugin_load(plugin_id="test.plugin", manifest_tier="operator") is True
-
-
-def test_devgate_check_content_clearance_returns_true_by_default() -> None:
-    """``DevGate.check_content_clearance`` is fail-open for Slice-3 co-existence.
-
-    Same rationale as ``check_plugin_load``: the two new Protocol methods
-    are fail-open stubs on ``DevGate`` for backward compatibility with
-    Slice-2.5 dispatch tests. Spec §8.4; PR-S3-7 removes ``DevGate`` on
-    flag-day.
-    """
-    from alfred.hooks.capability import DevGate
-
-    gate = DevGate()
-    assert (
-        gate.check_content_clearance(
-            plugin_id="test.plugin",
-            hookpoint="tool.web.fetch",
-            content_tier="T3",
-        )
-        is True
-    )
-
-
-def test_devgate_satisfies_extended_capability_gate_protocol() -> None:
-    """``DevGate`` with the two new methods still satisfies :class:`CapabilityGate`.
-
-    The Protocol is ``@runtime_checkable`` so the structural membership
-    check runs at runtime. After Task-2 adds ``check_plugin_load`` and
-    ``check_content_clearance`` to both the Protocol and ``DevGate``, the
-    ``isinstance`` check below MUST still pass — otherwise dispatcher
-    code that type-narrows on :class:`CapabilityGate` loses ``DevGate``
-    coverage for the new methods.
-    """
-    from alfred.hooks.capability import CapabilityGate, DevGate
-
-    assert isinstance(DevGate(), CapabilityGate)
-
-
-def test_devgate_is_frozen_and_rejects_post_init_mutation() -> None:
-    """sec-007 (frozen-mutation): ``DevGate`` is a frozen dataclass.
-
-    A caller cannot bypass the gate at runtime via
-    ``setattr(gate, "allow_system", True)`` because the dataclass is
-    ``frozen=True``. This is the language-level pin behind the sec-007
-    "constructor-only" contract — privacy on the attribute name is no
-    longer load-bearing because mutation is impossible at any
-    visibility.
-
-    The check covers both the default-deny and the constructor-opted-in
-    constructions: the frozen-ness is an instance property, independent
-    of the initial ``allow_system`` value.
-    """
-    gate = DevGate()
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        gate.allow_system = True  # type: ignore[misc]
-    # Still denies system post-attempt — the bypass produced no effect.
-    assert gate.check(plugin_id="p", hookpoint="h", requested_tier="system") is False
-
-    permitted = DevGate(allow_system=True)
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        permitted.allow_system = False  # type: ignore[misc]
-    # The grant survives the failed mutation.
-    assert permitted.check(plugin_id="p", hookpoint="h", requested_tier="system") is True
