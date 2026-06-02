@@ -38,10 +38,28 @@ Slice 4 rewrites Discord and TUI as MCP plugins.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Final, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+# CR-149 round-10 (3339361793): BCP-47 language-tag shape pinned at the
+# wire boundary so a malformed locale (``"english"``, ``"en_US"`` with
+# an underscore, ``"EN-us"`` reversed casing of an explicit region) is
+# refused alongside the existing ``extra="forbid"`` schema-drift check.
+# The grammar is the conservative subset every Slice-3 adapter needs:
+#
+#   * primary subtag — 2-3 lowercase letters (ISO 639-1/2/3)
+#   * optional region subtag — 2 uppercase letters (ISO 3166-1) OR 3
+#     digits (UN M.49). Separated from the primary by a single ``-``.
+#
+# Wider BCP-47 features (script subtags, variant subtags, extensions,
+# private-use ``x-`` blocks) are deferred to ADR-0016 when comms-MCP
+# Slice 4 widens the contract; until then any input that does not
+# match the conservative shape fails Pydantic validation at parse time
+# rather than silently flowing into the orchestrator.
+_BCP47_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z]{2,3}(?:-(?:[A-Z]{2}|[0-9]{3}))?$")
 
 # comms-002 fix: architect cross-check confirmed method names are literal
 # JSON-RPC method names (NOT MCP tools/call subjects). AlfredPluginSession.dispatch
@@ -83,6 +101,27 @@ class InboundMessage(BaseModel):
     platform_user_id: str
     content: str
     language: str
+
+    @field_validator("language")
+    @classmethod
+    def _validate_bcp47(cls, value: str) -> str:
+        """Refuse language tags that do not match the conservative BCP-47 shape.
+
+        CR-149 round-10 (3339361793): without this validator the field
+        accepted any string, letting malformed locale tags (``"english"``,
+        ``"en_US"``, ``"EN-us"``) cross the wire boundary alongside the
+        existing ``extra="forbid"`` schema-drift refusal. The grammar
+        pinned here is the conservative subset every Slice-3 adapter
+        supplies; widening it to the full BCP-47 surface is an ADR-0016
+        decision when comms-MCP plugins replace the in-process adapters.
+        """
+        if not _BCP47_PATTERN.fullmatch(value):
+            msg = (
+                f"language {value!r} is not a valid BCP-47 tag "
+                "(expected e.g. 'en', 'en-US', 'pt-BR', or 'es-419')"
+            )
+            raise ValueError(msg)
+        return value
 
 
 class AdapterHealthResponse(BaseModel):

@@ -292,8 +292,19 @@ async def _serve_stdin_stdout() -> None:
         # missing ``id`` (notification shape) does not.
         method = request.get("method")
         if not isinstance(method, str) or not method:
-            if has_response_id:
-                _emit(_build_invalid_request(req_id))
+            # CR-149 round-10 (3339423468): JSON-RPC 2.0 §5.1 (Error
+            # object) — "If there was an error in detecting the id in
+            # the Request object (e.g. Parse error / Invalid Request),
+            # it MUST be Null." A frame like ``{}`` or
+            # ``{"method": 1}`` is a malformed request object, NOT a
+            # notification — the host cannot disambiguate the two
+            # cases when the request is fundamentally invalid, so the
+            # specification requires emitting an Invalid Request
+            # response with ``id: null`` regardless. The prior
+            # ``has_response_id`` gate dropped the frame entirely and
+            # strict hosts waited for an error reply that never
+            # arrived.
+            _emit(_build_invalid_request(req_id if has_response_id else None))
             continue
 
         if method == _METHOD_LIFECYCLE_START:
