@@ -210,17 +210,10 @@ def _atomic_write_text(target: Path, content: str) -> None:
         dir=str(parent),
     )
     try:
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
-                f.flush()
-                os.fsync(f.fileno())
-        except BaseException:
-            # The ``fd`` is owned by the ``with`` once it enters; if we
-            # raised before then the fd needs explicit close. The
-            # try/except inside the outer try guards the publish step
-            # below from running with corrupt content.
-            raise
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
         # ``os.replace`` (not ``Path.replace``) because the test seam
         # patches ``alfred.cli.config.os.replace`` to simulate rename
         # failures; routing via ``Path.replace`` would bypass the seam.
