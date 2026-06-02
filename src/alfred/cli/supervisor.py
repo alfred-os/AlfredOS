@@ -168,8 +168,40 @@ def supervisor_status() -> None:
     # Anything else (``AttributeError``, ``TypeError``, ``KeyError``,
     # ...) is a programmer bug and MUST propagate so the operator sees a
     # full traceback in the structlog stream and the bug surfaces loud.
+    # CR-149 round-5 (sec-pr-s3-6-cr-149-r5): split the supervisor probe
+    # and the read-path call into separate try blocks so the
+    # ``NotImplementedError`` handler scopes ONLY to
+    # :func:`_list_breaker_states`. A ``NotImplementedError`` escaping
+    # from :func:`_get_supervisor` -- or from any module it lazily
+    # imports (e.g. an abstract method left unwired during a refactor of
+    # :class:`alfred.supervisor.core.Supervisor`) -- is a genuine
+    # bootstrap bug and MUST surface a full traceback, not the friendly
+    # "read path unavailable" hint. Mapping a probe-side
+    # ``NotImplementedError`` to the localised read-path message
+    # silently lied about the failure shape and regressed CLAUDE.md
+    # hard rule #7 on a T1 operator surface.
+    #
+    # ``NotImplementedError`` is a subclass of ``RuntimeError`` in
+    # CPython, so the probe-side ``except (RuntimeError, ...)`` arm
+    # would otherwise swallow it and route to the localised
+    # "supervisor not running" hint -- equally a silent lie about the
+    # actual failure shape. The explicit ``except NotImplementedError:
+    # raise`` before the RuntimeError arm pins the propagation contract
+    # in code rather than relying on a future reader spotting the MRO
+    # quirk.
     try:
         _get_supervisor()
+    except NotImplementedError:
+        # Probe-side NotImplementedError is a bootstrap bug; let it
+        # propagate so the operator sees the typed traceback rather
+        # than the friendly "supervisor not running" hint that the
+        # RuntimeError handler below would otherwise emit (per
+        # Python's NotImplementedError-is-a-RuntimeError MRO).
+        raise
+    except (RuntimeError, ConnectionError, TimeoutError) as exc:
+        typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
+        raise typer.Exit(code=1) from exc
+    try:
         rows = _list_breaker_states()
     except NotImplementedError as exc:
         # CR-149 round-4: the read-path is not yet wired (Postgres
@@ -181,7 +213,12 @@ def supervisor_status() -> None:
         # PRD §10.8 forensic contract).
         typer.echo(t("cli.supervisor.status.read_path_unavailable"), err=True)
         raise typer.Exit(code=1) from exc
-    except (RuntimeError, ConnectionError, TimeoutError) as exc:
+    except (ConnectionError, TimeoutError) as exc:
+        # Once the Postgres projection lands the read-path can also fail
+        # for bootstrap / IPC reasons; treat those as "supervisor not
+        # running" the same way the probe does, so the operator sees
+        # one shape of fail-loud message regardless of which side of
+        # the bootstrap actually broke.
         typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
         raise typer.Exit(code=1) from exc
     if not rows:

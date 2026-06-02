@@ -681,6 +681,60 @@ def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
         )
 
 
+def test_queue_proposal_or_exit_denial_path_handles_client_without_repo_attribute(
+    tmp_path: Path,
+) -> None:
+    """CR-149 round-5: a duck-typed fake client without ``_repo`` must NOT crash.
+
+    ``queue_proposal_or_exit`` documents ``client`` as an injectable
+    seam (tests / mocks / future async-bridge callers). The denial
+    path previously reached directly into ``state_git._repo`` to
+    render the localised hint, so any duck-typed fake that only
+    implemented :meth:`create_proposal_from_payload` turned a typed
+    :class:`StateGitError` into :class:`AttributeError` -- regressing
+    CLAUDE.md hard rule #7 on the operator-facing denial surface.
+    Pin the defensive ``getattr`` fallback: the typed denial body
+    still renders (against the production state.git default) and
+    ``typer.Exit(1)`` is the surfaced exception, not AttributeError.
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    class _NoRepoFakeClient:
+        """A minimal duck-typed fake; deliberately omits ``_repo``."""
+
+        def create_proposal_from_payload(self, **_: object) -> ProposalResult:
+            raise StateGitError("ignored", kind=StateGitErrorKind.PATH_MISSING)
+
+    del tmp_path  # only here to share fixture-shape with sibling tests
+    app = typer.Typer()
+
+    @app.command("queue")
+    def _queue() -> None:
+        from alfred.state.proposal_payloads import PluginGrantProposal
+
+        queue_proposal_or_exit(
+            payload=PluginGrantProposal(
+                plugin_id="alfred.test",
+                subscriber_tier="system",
+                hookpoint="tool.web.fetch",
+            ),
+            denied_key="cli.plugin.grant.denied",
+            pending_review_key="cli.plugin.grant.pending_review",
+            client=_NoRepoFakeClient(),  # type: ignore[arg-type]
+        )
+
+    result = CliRunner().invoke(app, [])
+    # The typed denial path fires (exit 1), NOT an AttributeError leak.
+    assert result.exit_code == 1, (result.output, result.stderr, result.exception)
+    assert not isinstance(result.exception, AttributeError), (
+        f"denial path leaked AttributeError instead of typer.Exit: {result.exception!r}"
+    )
+    # The localised hint renders against the production default
+    # ``/var/lib/alfred/state.git`` because the fake omits ``_repo``.
+    assert "/var/lib/alfred/state.git" in result.stderr
+
+
 def test_queue_proposal_or_exit_pending_review_extra_kwargs_forwarded(
     bare_repo: Path,
 ) -> None:

@@ -974,8 +974,18 @@ def queue_proposal_or_exit(
         # CR-149 round-3: render the hint through ``_render_hint`` so the
         # ``PATH_MISSING`` body interpolates the operator-configured
         # state.git path rather than the hard-coded default literal.
+        #
+        # CR-149 round-5 (devex-cr149-r5): :func:`queue_proposal_or_exit`
+        # documents ``client`` as an injectable seam. Reaching directly
+        # into ``state_git._repo`` made a typed :class:`StateGitError`
+        # surface as :class:`AttributeError` whenever a test or future
+        # caller injected a duck-typed fake that only implements
+        # :meth:`create_proposal_from_payload`. Use a defensive
+        # ``getattr`` with the production default so the denial path
+        # stays loud-but-typed (CLAUDE.md hard rule #7).
+        state_git_path = getattr(state_git, "_repo", Path("/var/lib/alfred/state.git"))
         typer.echo(
-            t(denied_key, reason=_render_hint(exc.kind, state_git_path=state_git._repo)),
+            t(denied_key, reason=_render_hint(exc.kind, state_git_path=state_git_path)),
             err=True,
         )
         raise typer.Exit(code=1) from exc
