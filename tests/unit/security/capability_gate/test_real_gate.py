@@ -38,7 +38,15 @@ def _make_backend(
     grants: frozenset[GrantRow] | None = None,
     sync_hash: str | None = None,
 ) -> Any:
-    """Return a stub StorageBackend with pre-loaded grants."""
+    """Return a stub StorageBackend with pre-loaded grants.
+
+    sec-pr-s3-6-02: ``apply_atomic`` is the atomic primitive
+    :meth:`RealGate._apply_grants` calls (one transaction wrapping all
+    revokes + upserts + the sync-hash set). The per-op AsyncMocks stay
+    available for tests that exercise ``backend.upsert_grant`` etc.
+    directly (the proposal flow, integration round-trip) without going
+    through the gate.
+    """
     backend = MagicMock()
     backend.ping = AsyncMock(return_value=None)
     backend.load_grants = AsyncMock(return_value=grants or frozenset())
@@ -46,6 +54,7 @@ def _make_backend(
     backend.set_sync_hash = AsyncMock(return_value=None)
     backend.upsert_grant = AsyncMock(return_value=None)
     backend.revoke_grant = AsyncMock(return_value=None)
+    backend.apply_atomic = AsyncMock(return_value=None)
     return backend
 
 
@@ -237,7 +246,10 @@ async def test_real_gate_rebuild_from_state_git_calls_parser_on_cache_miss() -> 
     ) as parse_mock:
         await gate.rebuild_from_state_git(state_git_head="new-hash")
     parse_mock.assert_called_once()
-    backend.set_sync_hash.assert_awaited_once_with("new-hash")
+    # sec-pr-s3-6-02: the apply now flows through ``apply_atomic`` so
+    # the revokes / upserts / sync-hash commit in one transaction.
+    backend.apply_atomic.assert_awaited_once()
+    assert backend.apply_atomic.await_args.kwargs["commit_hash"] == "new-hash"
 
 
 async def test_real_gate_rebuild_from_state_git_short_circuits_when_unchanged() -> None:
@@ -362,6 +374,12 @@ async def test_real_gate_apply_grants_swaps_policy_and_persists() -> None:
     rebuild_from_state_git is fully wired in PR-S3-6. The grants must
     land in both the policy snapshot (for next hot-path check) and
     Postgres (for the next process to load on startup).
+
+    sec-pr-s3-6-02: the persist work flows through the single
+    :meth:`StorageBackend.apply_atomic` call so the revoke, upsert,
+    and sync-hash set commit atomically. The per-op AsyncMocks are
+    NOT awaited by the gate — they remain available for the
+    proposal flow / integration round-trip.
     """
     from alfred.security.capability_gate._gate import RealGate
 
@@ -380,11 +398,18 @@ async def test_real_gate_apply_grants_swaps_policy_and_persists() -> None:
         commit_hash="new-head-hash",
     )
 
-    # Backend received the upsert and sync-hash set.
-    backend.upsert_grant.assert_awaited_once_with(new_grant)
-    backend.set_sync_hash.assert_awaited_once_with("new-head-hash")
-    # No revokes: the previous snapshot was empty.
+    # Backend received exactly one atomic-apply call carrying the
+    # upsert + the (empty) revoke set + the sync hash.
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    assert set(kwargs["upserts"]) == {new_grant}
+    assert set(kwargs["revokes"]) == set()
+    assert kwargs["commit_hash"] == "new-head-hash"
+    # The per-op methods are not bypassed: the gate goes through
+    # ``apply_atomic`` exclusively now.
+    backend.upsert_grant.assert_not_awaited()
     backend.revoke_grant.assert_not_awaited()
+    backend.set_sync_hash.assert_not_awaited()
 
     # In-memory policy now answers the new grant positively.
     assert (
@@ -402,10 +427,10 @@ async def test_real_gate_apply_grants_revokes_absent_grants_in_postgres() -> Non
 
     The previous in-memory snapshot is the source of truth for what
     was approved. A grant that disappears from the new ``grants`` set
-    is a revocation and MUST trigger
-    :meth:`StorageBackend.revoke_grant` — otherwise the Postgres row
-    survives the in-memory swap and the next process startup
-    resurrects the capability.
+    is a revocation and MUST flow into
+    :meth:`StorageBackend.apply_atomic`'s ``revokes`` payload —
+    otherwise the Postgres row survives the in-memory swap and the
+    next process startup resurrects the capability.
     """
     from alfred.security.capability_gate._gate import RealGate
 
@@ -422,12 +447,11 @@ async def test_real_gate_apply_grants_revokes_absent_grants_in_postgres() -> Non
     # Apply an empty grant set — the existing grant becomes a revocation.
     await gate._apply_grants(frozenset(), commit_hash="post-revoke-hash")
 
-    backend.revoke_grant.assert_awaited_once_with(
-        plugin_id="legacy.plugin",
-        hookpoint="tool.web.fetch",
-        subscriber_tier="operator",
-    )
-    backend.set_sync_hash.assert_awaited_once_with("post-revoke-hash")
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    assert set(kwargs["revokes"]) == {existing}
+    assert set(kwargs["upserts"]) == set()
+    assert kwargs["commit_hash"] == "post-revoke-hash"
     # In-memory policy now denies.
     assert (
         gate.check(
@@ -443,9 +467,10 @@ async def test_real_gate_apply_grants_does_not_revoke_unchanged_grants() -> None
     """Idempotent re-apply: a grant present in both snapshots is not revoked.
 
     The delta is ``previous - new``. A re-applied identical snapshot
-    has an empty difference and triggers zero
-    :meth:`StorageBackend.revoke_grant` calls — re-running the
-    rebuild during a state.git resync must not churn the table.
+    has an empty difference, so the :meth:`apply_atomic` call carries
+    an empty ``revokes`` set. The upsert is still issued (idempotent
+    at the ON CONFLICT level) so a re-run after a transient outage
+    converges on the expected state.
     """
     from alfred.security.capability_gate._gate import RealGate
 
@@ -462,5 +487,7 @@ async def test_real_gate_apply_grants_does_not_revoke_unchanged_grants() -> None
     # Re-apply the same snapshot.
     await gate._apply_grants(frozenset({keeper}), commit_hash="same-hash")
 
-    backend.revoke_grant.assert_not_awaited()
-    backend.upsert_grant.assert_awaited_once_with(keeper)
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    assert set(kwargs["revokes"]) == set()
+    assert set(kwargs["upserts"]) == {keeper}

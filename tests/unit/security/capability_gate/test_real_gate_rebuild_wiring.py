@@ -59,7 +59,13 @@ def _make_backend(
     grants: frozenset[GrantRow] | None = None,
     sync_hash: str | None = None,
 ) -> Any:
-    """Stub StorageBackend matching ``test_real_gate``'s helper shape."""
+    """Stub StorageBackend matching ``test_real_gate``'s helper shape.
+
+    sec-pr-s3-6-02: ``apply_atomic`` is the atomic primitive
+    :meth:`RealGate._apply_grants` calls; the per-op AsyncMocks remain
+    on the stub so call sites that bypass the gate (proposal flow,
+    integration round-trip) still exercise the per-op surface.
+    """
     backend = MagicMock()
     backend.ping = AsyncMock(return_value=None)
     backend.load_grants = AsyncMock(return_value=grants or frozenset())
@@ -67,6 +73,7 @@ def _make_backend(
     backend.set_sync_hash = AsyncMock(return_value=None)
     backend.upsert_grant = AsyncMock(return_value=None)
     backend.revoke_grant = AsyncMock(return_value=None)
+    backend.apply_atomic = AsyncMock(return_value=None)
     return backend
 
 
@@ -170,6 +177,7 @@ async def test_rebuild_short_circuits_when_head_unchanged(tmp_path: Path) -> Non
 
     await gate.rebuild_from_state_git(state_git_head=head)
 
+    backend.apply_atomic.assert_not_awaited()
     backend.set_sync_hash.assert_not_awaited()
     backend.upsert_grant.assert_not_awaited()
     backend.revoke_grant.assert_not_awaited()
@@ -216,8 +224,11 @@ async def test_rebuild_parses_and_applies_grants_from_state_git(tmp_path: Path) 
         content_tier=None,
         proposal_branch="proposal/policy-grant-abc",
     )
-    backend.upsert_grant.assert_awaited_once_with(expected)
-    backend.set_sync_hash.assert_awaited_once_with(new_head)
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    assert set(kwargs["upserts"]) == {expected}
+    assert set(kwargs["revokes"]) == set()
+    assert kwargs["commit_hash"] == new_head
     # Hot-path check honours the freshly-applied grant.
     assert (
         gate.check(
@@ -301,9 +312,13 @@ async def test_rebuild_applies_empty_snapshot_when_no_grants_tree(
     await gate.rebuild_from_state_git(state_git_head=new_head)
 
     # No grants to upsert; sync hash still advances so subsequent
-    # rebuilds short-circuit on the same head.
-    backend.upsert_grant.assert_not_awaited()
-    backend.set_sync_hash.assert_awaited_once_with(new_head)
+    # rebuilds short-circuit on the same head. The atomic call carries
+    # the empty payload + the new commit hash.
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    assert set(kwargs["upserts"]) == set()
+    assert set(kwargs["revokes"]) == set()
+    assert kwargs["commit_hash"] == new_head
     # An empty policy denies every check.
     assert (
         gate.check(
@@ -348,10 +363,12 @@ async def test_rebuild_uses_state_git_path_from_constructor(tmp_path: Path) -> N
 
     await gate.rebuild_from_state_git(state_git_head=head_a)
 
-    # The upsert MUST carry repo-a's grant, not some default.
-    backend.upsert_grant.assert_awaited_once()
-    upserted = backend.upsert_grant.await_args.args[0]
-    assert upserted.plugin_id == "repo-a.plugin"
+    # The atomic apply MUST carry repo-a's grant, not some default.
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    upserts = list(kwargs["upserts"])
+    assert len(upserts) == 1
+    assert upserts[0].plugin_id == "repo-a.plugin"
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +413,6 @@ async def test_rebuild_is_idempotent_on_second_call_with_same_head(
     backend.get_sync_hash = AsyncMock(return_value=head)
     await gate.rebuild_from_state_git(state_git_head=head)
 
-    # Single upsert, single audit row — the second call short-circuited.
-    backend.upsert_grant.assert_awaited_once()
+    # Single atomic apply, single audit row — the second call short-circuited.
+    backend.apply_atomic.assert_awaited_once()
     sink.append_schema.assert_awaited_once()
