@@ -22,12 +22,13 @@ If you are reading this for the first time, also skim
 Confirm operator-tier auth before proceeding:
 
 ```shell
-alfred user show $USER   # expect role: operator
+alfred user show $USER   # expect authorization: operator
 ```
 
-If your user is not bound or does not hold operator role, run
-`alfred user set $USER role=operator` (requires an existing root
-operator already bound). See
+If your user is not bound or does not hold operator authorization, run
+`alfred user set $USER --authorization operator` (requires an existing
+root operator already bound). The flag form is `--authorization`, not
+`role=`; see `alfred user set --help` for the full option set, and
 [docs/subsystems/identity.md](../subsystems/identity.md) for the
 user-binding workflow.
 
@@ -127,16 +128,10 @@ alfred status
 alfred supervisor status
 ```
 
-PR-S3-6 does not extend `alfred status` with gate health. The Slice-3
+Slice 3 does not extend `alfred status` with gate health. The Slice-3
 `alfred status` output is identical to the Slice-2 output (provider +
-budget lines). Use `alfred plugin grant list` to inspect gate state in
-Slice 3.
-
-Current Slice-3 `alfred status` output (unchanged from Slice 2):
-
-| Condition | Output |
-|---|---|
-| Any `ALFRED_ENV` (Slice 3) | Slice-2 provider/budget lines — no `gate:` line |
+budget lines, no `gate:` line). Use `alfred plugin grant list` to
+inspect gate state in Slice 3.
 
 *Slice 3.x+: gate health (`gate: RealGate (state.git: ok, postgres: ok)`)
 ships in a follow-up PR that extends `alfred status` with a
@@ -194,16 +189,23 @@ trust-tier model that drives the allowlist enforcement.
 
 Slice-3 keys supported by `config set`:
 
-| Short alias | Canonical key |
-|---|---|
-| `extraction-max-retries` | `quarantine.extraction_max_retries` |
-| `action-deadline` | `orchestrator.action_deadline_seconds` |
+| Short alias | Canonical key | Blast | Notes |
+|---|---|---|---|
+| `web-fetch-budget` | `web_fetch.user_daily_budget` | low | Per-user daily web-fetch handle budget. Mutates `policies.yaml`; hot-reloader picks up the change on the next mtime tick. |
+| `operator-fetch-budget` | `web_fetch.operator_daily_budget` | low | Operator-tier daily handle budget (separate pool from per-user). |
+| `extraction-max-retries` | `quarantine.extraction_max_retries` | low | Max retries the quarantined extractor performs before emitting `TypedRefusal(reason="cannot_extract")`. |
+| `action-deadline` | `orchestrator.action_deadline_seconds` | low | Per-action orchestrator deadline (supervised). |
+| `user-agent` | `web_fetch.user_agent` | low | UA string the web-fetch plugin advertises. |
+| `quarantined-provider` | (no `policies.yaml` projection — written into `routing.yaml [quarantine]` by the reviewer-gate merge) | **high** | Switches the quarantined LLM provider. Reviewer-gated: queues a state.git proposal, `config get quarantined-provider` is refused (set-only). See [docs/runbooks/slice-3-quarantined-llm.md](./slice-3-quarantined-llm.md) for the full proposal walkthrough. |
 
-The previous `alfred config quarantined-provider` command was never
-shipped — changing the quarantined provider is done by editing
-`config/routing.yaml` `[quarantine]` and queueing a state.git proposal
-manually. See [docs/runbooks/slice-3-quarantined-llm.md](./slice-3-quarantined-llm.md)
-for the proposal walkthrough.
+`config set quarantined-provider <value>` is the operator-facing CLI for
+switching the quarantined provider. The closed-set validator in
+`alfred.cli._validators.validate_quarantined_provider` rejects any
+unknown value at parse time; on success the command emits
+`config.set.requested` to the audit log and prints the proposal id.
+Reviewer approval then merges the change into `routing.yaml [quarantine]`
+and the supervisor reloads the quarantined-LLM plugin on the next
+reconcile tick.
 
 ### `alfred supervisor`
 
@@ -218,23 +220,38 @@ surfaces a typed refusal rather than executing.
 ### `alfred audit graph --tier`
 
 Slice 3 extends the existing `alfred audit graph` with a
-`--tier {T1|T2|T3}` filter. Each tier produces a swimlane view of audit
-rows attributed to that tier:
+`--tier {T0|T1|T2|T3}` filter. Each tier produces a swimlane view of
+audit rows attributed to that tier:
 
 ```shell
 alfred audit graph --tier T3 --since 24h
 ```
 
-The validated tier set is closed (T1/T2/T3); passing `--tier T5` or
-any out-of-set string raises a typed refusal at argument-parse time,
-not after the query runs. See
+The validated tier set is closed (`T0`, `T1`, `T2`, `T3` — see
+`_TierChoice` in `src/alfred/cli/audit.py`); passing `--tier T5` or any
+out-of-set string raises a typed refusal at argument-parse time, not
+after the query runs. See
 [docs/subsystems/security.md](../subsystems/security.md) for the
 tier model.
 
 `alfred audit log --event <family>` is the per-family detail view used
-throughout this runbook; the `--event` flag itself is Slice-4 work,
-so until it ships use `alfred audit graph --since <window>` and grep
-the row family from the output.
+throughout this runbook. The CLI surface ships in Slice 3
+(`alfred audit log --help` documents `--event` and `--since`); the
+Postgres-backed query layer it dispatches to lands in PR-S3-7. Until
+that PR merges, the command surfaces a typed `AuditBackendUnavailable`
+refusal with the localised message keyed
+`cli.audit.backend_unavailable`:
+
+```
+alfred audit backend not yet wired (PR-S3-7). Until then the storage-layer
+SQL query is unimplemented; running ``alfred audit log`` / ``alfred audit
+graph`` cannot return rows. Track the unblock in PR-S3-7.
+```
+
+Until then use `alfred audit graph --since <window>` and grep the row
+family from the output. Once PR-S3-7's storage layer is in, the same
+`alfred audit log --event <family>` invocations throughout this runbook
+return rows directly.
 
 ## Provider routing changes
 
@@ -418,16 +435,20 @@ alfred supervisor reset quarantined-llm --confirm
 alfred supervisor reset web-fetch --confirm
 ```
 
-**`gate: RealGate (FAIL-CLOSED — backing store unavailable)`**
+**RealGate trips fail-closed — every `check*` returns `False`**
 
-Cause: Postgres or state.git is unreachable.
+Cause: Postgres or state.git is unreachable, so the 60-second heartbeat
+budget elapsed without a successful ping.
 
-Fix: verify `docker compose ps` shows `alfred-db` healthy, then:
+Symptom: every dispatch through the capability gate is denied; the
+audit stream shows `supervisor.capability_gate_unavailable` with
+`state_transition="entering_fail_closed"`. `alfred status` does not
+expose this directly in Slice 3 (the gate-health line is Slice-3.x+
+work); the audit graph is the definitive surface.
 
-```shell
-alfred status
-```
-
+Fix: verify `docker compose ps` shows `alfred-db` healthy and
+`/var/lib/alfred/state.git` is readable, then run
+`alfred audit graph --since 5m` to confirm the fail-closed transition.
 When the backing store recovers, `RealGate` exits fail-closed
 automatically. One `supervisor.capability_gate_unavailable` audit row
 is emitted on exit from fail-closed (with
@@ -452,12 +473,19 @@ Fix:
 
 1. Check `config/routing.yaml` has a `[quarantine]` block with
    `provider`, `model`, and `secret_id`.
-2. Inspect recent crash events (Slice-3 `alfred audit graph` is the
-   available surface; `alfred audit log --event` ships in Slice 4):
+2. Inspect recent crash events. The Slice-3 CLI ships both
+   `alfred audit graph --since <window>` and
+   `alfred audit log --event <family> --since <window>`. Until PR-S3-7
+   wires the Postgres-backed storage layer, both commands surface
+   `AuditBackendUnavailable` (see the audit-log surface change above);
+   once PR-S3-7 lands the per-family query returns directly. Until
+   then, use the audit graph and grep:
 
    ```shell
    alfred audit graph --since 5m
    # then grep for plugin.lifecycle.crashed rows
+   # After PR-S3-7 backend wires:
+   #   alfred audit log --event plugin.lifecycle.crashed --since 5m
    ```
 
 3. After fixing the config:
@@ -469,7 +497,7 @@ Slice 3 does not yet ship Grafana dashboards or Prometheus alert
 manifests in-tree (`ops/` lands in Slice 4 alongside the formal
 observability stack). The available operator surfaces are:
 
-- **`alfred audit graph --tier T1|T2|T3 --since <window>`** — the
+- **`alfred audit graph --tier T0|T1|T2|T3 --since <window>`** — the
   primary forensic surface. Use it after any reviewer-gate action
   or supervisor breaker trip.
 - **`alfred supervisor status`** — per-component circuit-breaker
@@ -489,22 +517,37 @@ audit graph and `docker compose logs`.
 
 ## Backwards-compatibility notes
 
-The Slice-2.5 DevGate (`alfred.hooks.capability.DevGate`) is scheduled
-for removal at the end of Slice 3 per
+The Slice-2.5 `DevGate` (`alfred.hooks.capability.DevGate`) is removed
+as of the PR-S3-7 flag-day per
 [ADR-0017 Decision 7](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md).
-Until removal, DevGate remains the dev-default selected by
-`build_dev_gate()` when `ALFRED_ENV` is unset or `development`. Production
-deployments must set `ALFRED_ENV=production` so the bootstrap selects
-`RealGate`. The flag-day migration in PR-S3-7 deletes the DevGate
-fallback path; after that any deployment without `ALFRED_ENV=production`
-fails-closed at startup.
+`RealGate` is now the sole production gate. The development bootstrap
+still calls `build_dev_gate()` (the function name is preserved for
+import-graph stability), but the function now constructs a
+**fail-closed `RealGate`** — empty grant snapshot, in-process backend
+stub, heartbeat disabled — instead of the old permissive `DevGate`. Every
+`check*` call against the dev gate now denies fail-closed; developers
+who need granted-system semantics for local iteration should construct
+the gate via the test helpers in `tests/helpers/gates/` or stand up a
+real Postgres + seeded grants table.
 
-Affected paths after the Slice-3 flag-day:
+The lazy-default at the `HookRegistry` boundary
+(`src/alfred/hooks/registry.py::_DenyAllGate`) is the equivalent
+fail-closed sentinel for any `@hook` decorator that registers before
+the bootstrap wires the real gate via `set_registry()`. Both paths
+preserve CLAUDE.md hard rule #7: no silent authorisation at boundary
+mis-sequencing.
 
-- `src/alfred/bootstrap/gate_factory.py` — `build_dev_gate()` is removed.
-- `src/alfred/hooks/capability.py` — `DevGate` class is removed.
-- `tests/unit/hooks/test_capability_devgate.py` — tests are removed
-  (the behaviour they pin no longer exists).
+Affected paths after the PR-S3-7 flag-day:
+
+- `src/alfred/bootstrap/gate_factory.py` — `build_dev_gate()` retained,
+  now returns a fail-closed `RealGate` (see the docstring on the
+  function for the deliberate two-callable shape).
+- `src/alfred/hooks/capability.py` — `DevGate` class removed.
+- `src/alfred/hooks/registry.py::_DenyAllGate` — new fail-closed
+  bootstrap sentinel for the `HookRegistry` lazy default.
+- `tests/unit/hooks/test_capability_devgate.py` — removed (the
+  behaviour it pinned no longer exists); replaced by RealGate
+  deny-path tests under the same directory.
 - `docs/runbooks/slice-3-plugins.md` — the "Step 3 — Verify gate
   selection" table simplifies to "RealGate, always".
 
@@ -523,10 +566,35 @@ additively.
 | `alfred plugin grant list --pending` shows stuck proposal | reviewer-agent not running | `alfred plugin grant status <id>` | start reviewer agent (`docker compose up -d alfred-reviewer`); inspect its logs |
 | `supervisor.breaker.tripped` for `quarantined-llm` | bad provider config or missing API key | `alfred audit graph --since 10m` then grep `plugin.lifecycle.crashed` | fix `config/routing.yaml` `[quarantine]` + secret; `alfred supervisor reset quarantined-llm --confirm` |
 | `supervisor.config_insecure` warnings | `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` set | `alfred audit graph --since 1h` | remove env var in production compose |
-| `gate: RealGate (FAIL-CLOSED — backing store unavailable)` | Postgres or state.git unreachable | `alfred status` + `docker compose ps` | restore the backing store; gate exits fail-closed automatically |
+| `supervisor.capability_gate_unavailable` audit rows (every dispatch denied) | Postgres or state.git unreachable past the 60 s heartbeat budget | `alfred audit graph --since 5m` + `docker compose ps` | restore the backing store; gate exits fail-closed automatically — single audit row marks the transition out |
 | `web.fetch` raises `DomainNotAllowed` | domain missing from allowlist | `alfred web allowlist list` | queue `alfred web allowlist add <domain>`; wait for reviewer approval |
 | `alembic upgrade head` fails on `0007` | Slice-2 schema diverged | `docker compose logs alfred-db` | inspect failed migration, fix Postgres state, retry |
 | `bootstrap.capability_gate_unseeded` chat message | first run after compose-up without seeding | user-facing chat surface | run Step 2 and the two supervisor resets |
+
+### Typed-exception → audit-event mapping (err-003)
+
+When an operator surface raises a typed Slice-3 exception, the
+corresponding audit-event family is the canonical forensic anchor.
+The Slice-3 mapping:
+
+| Typed exception | Originating module | Audit event |
+|---|---|---|
+| `AuditBackendUnavailable` | `src/alfred/cli/audit.py` | none (CLI-side guard; backend wires the events in PR-S3-7) |
+| `PluginProtocolViolation` | `src/alfred/security/quarantine.py` | `quarantine.protocol_violation` |
+| `QuarantinedUnavailable` | `src/alfred/security/quarantine.py` | `supervisor.breaker.tripped` with `component="quarantined-llm"` |
+| `WebFetchCanaryTripped` | `plugins/alfred_web_fetch/` | `security.canary_tripped` |
+| `WebFetchError` (domain refused) | `plugins/alfred_web_fetch/` | `web.fetch.domain_refused` |
+| `StateGitError` (proposal write refused) | `src/alfred/cli/_state_git.py` | `state_git.proposal_failed` |
+| `ManifestError` (plugin load handshake) | `src/alfred/plugins/manifest.py` | `plugin.lifecycle.load_refused` |
+| `CircuitBreakerOpen` | `src/alfred/supervisor/` | `supervisor.breaker.tripped` |
+| `AlfredError` (`security.quarantine.dereference_denied`) | `src/alfred/security/quarantine.py` | gate-side `security.capability_gate.*` row (per spec §8.2) |
+| `AlfredError` (`security.quarantine.downgrade_denied`) | `src/alfred/security/quarantine.py` | gate-side `security.capability_gate.*` row |
+
+Use the audit-event family in the right column with
+`alfred audit graph --since <window>` (or `alfred audit log --event …`
+once PR-S3-7 wires the backend) to confirm the typed-exception came
+from where the stack trace claims and to surface neighbouring rows
+(retry counts, denied dispatch counts, breaker trip history).
 
 ## Rollback
 
