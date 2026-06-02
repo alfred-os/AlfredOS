@@ -165,12 +165,19 @@ def _handle_adapter_health(_params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_method_not_found(method: str) -> dict[str, Any]:
-    """Build the JSON-RPC ``-32601`` error envelope for unknown methods."""
+    """Build the JSON-RPC ``-32601`` error envelope for unknown methods.
+
+    CR-149 protocol compliance: every wire frame this plugin emits
+    carries the mandatory ``jsonrpc: "2.0"`` member so a strict host
+    parser (the future ``StdioTransport`` round-trip in Slice 4) does
+    not reject our reply as malformed.
+    """
     return {
+        "jsonrpc": "2.0",
         "error": {
             "code": -32601,
             "message": f"Method not found: {method}",
-        }
+        },
     }
 
 
@@ -180,13 +187,41 @@ def _build_parse_error(detail: str) -> dict[str, Any]:
     err-004 boundary discipline: malformed JSON returns a structured
     response so the orchestrator never hangs waiting for a frame that
     never arrives.
+
+    CR-149: includes the mandatory ``jsonrpc: "2.0"`` member so the
+    error envelope is wire-compliant on the spec §9 surface.
     """
     return {
+        "jsonrpc": "2.0",
         "id": None,
         "error": {
             "code": -32700,
             "message": "Parse error",
             "data": {"detail": detail},
+        },
+    }
+
+
+def _build_invalid_request(req_id: object) -> dict[str, Any]:
+    """Build the JSON-RPC ``-32600`` error envelope for non-object requests.
+
+    CR-149: ``json.loads`` legally returns lists, strings, numbers, or
+    ``null`` for valid JSON that is NOT a JSON-RPC request. The
+    previous code called ``.get(...)`` unconditionally and crashed the
+    subprocess on the first such frame, leaving the host hanging
+    waiting for a response. The Invalid Request envelope is the
+    spec-compliant reply — the host observes the structured error and
+    proceeds.
+
+    ``req_id`` is echoed back when it can be extracted; otherwise we
+    follow the spec and pass ``None``.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {
+            "code": -32600,
+            "message": "Invalid Request",
         },
     }
 
@@ -223,12 +258,30 @@ async def _serve_stdin_stdout() -> None:
             _emit(_build_parse_error(str(exc)))
             continue
 
+        # CR-149: ``json.loads`` legally returns lists / strings / numbers /
+        # ``None`` for valid JSON that does NOT conform to the JSON-RPC
+        # request shape. Calling ``.get(...)`` unconditionally would
+        # crash the subprocess on the first such frame, leaving the
+        # host hanging on a never-arriving response. We refuse the
+        # frame with a structured Invalid Request envelope (-32600)
+        # and continue the loop so the boundary stays resilient.
+        if not isinstance(request, dict):
+            _emit(_build_invalid_request(None))
+            continue
+
         method = request.get("method", "")
         req_id = request.get("id")
         params = request.get("params") or {}
 
         if method == _METHOD_LIFECYCLE_START:
-            response: dict[str, Any] = {"result": _handle_lifecycle_start(params)}
+            # CR-149 protocol compliance: every reply envelope carries
+            # ``jsonrpc: "2.0"`` alongside ``result`` / ``id`` so the
+            # spec §9 wire surface accepts the frame without rejecting
+            # it as version-less.
+            response: dict[str, Any] = {
+                "jsonrpc": "2.0",
+                "result": _handle_lifecycle_start(params),
+            }
             # comms-003: emit the plugin → host inbound.message
             # notification after the lifecycle handler runs so the host
             # observes the response → notification ordering.
@@ -237,9 +290,9 @@ async def _serve_stdin_stdout() -> None:
             _emit(_build_inbound_message_notification())
             continue
         if method == _METHOD_LIFECYCLE_STOP:
-            response = {"result": _handle_lifecycle_stop(params)}
+            response = {"jsonrpc": "2.0", "result": _handle_lifecycle_stop(params)}
         elif method == _METHOD_ADAPTER_HEALTH:
-            response = {"result": _handle_adapter_health(params)}
+            response = {"jsonrpc": "2.0", "result": _handle_adapter_health(params)}
         else:
             response = _build_method_not_found(method)
 

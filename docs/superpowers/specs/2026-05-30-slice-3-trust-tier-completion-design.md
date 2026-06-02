@@ -743,7 +743,7 @@ The message-contract definition (full field schema, error shapes, rate-limit sig
 
 **Identity-resolver placement (Slice 3):** comms-MCP plugins send raw `(platform, platform_user_id)` over the wire via `inbound.message`; the orchestrator resolves identity before invoking `_ingest_tier`. The host-side `identity.resolve` callback (where a future adapter could call the orchestrator-side resolver over MCP) is Slice 4+. This decision is explicit: keeping resolution in-process to the orchestrator in Slice 3 avoids introducing a new callback wire type before ADR-0016 is finalized.
 
-A reference test plugin (`plugins/alfred_comms_test/`) exercises the contract: it is an MCP plugin that echoes messages back to the orchestrator, used in `tests/integration/test_comms_mcp_contract.py`. (Renamed from `alfred-comms-test` to `alfred_comms_test` so mypy's package-discovery walker treats the directory as an importable Python package — hyphens make it invisible.)
+A reference test plugin (`plugins/alfred_comms_test/`) exercises the contract: it is an MCP plugin that emits a one-shot `inbound.message` startup notification after the host's `lifecycle.start` call lands, proving the spec §9.1 `lifecycle.start` → `inbound.message` notification path. It does NOT implement a general request/response echo surface — the Slice-3 contract the integration test in `tests/integration/test_comms_mcp_contract.py` pins is "startup notification round-trip", not "every host message gets echoed back". (Renamed from `alfred-comms-test` to `alfred_comms_test` so mypy's package-discovery walker treats the directory as an importable Python package — hyphens make it invisible.)
 
 ### 9.2 Existing Discord+TUI adapters keep working in-process
 
