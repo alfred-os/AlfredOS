@@ -190,11 +190,13 @@ trust-tier model that drives the allowlist enforcement.
 
 | Command | Tier | Reviewer-gated | Notes |
 |---|---|---|---|
-| `alfred config set <key> <value>` | T1 | yes | writes `config/policies.yaml` via state.git proposal |
-| `alfred config get <key>` | T1 | no | reads current value |
+| `alfred config set <key> <value>` | T1 | depends on blast | low-blast keys mutate `config/policies.yaml` directly and the hot-reloader picks up the change on the next mtime tick; high-blast keys (currently `quarantined-provider` — see the per-key table below) queue a state.git proposal and require reviewer approval before they take effect |
+| `alfred config get <key>` | T1 | no | reads current value (refused for write-only keys like `quarantined-provider`) |
 | `alfred config list` | T1 | no | renders all keys |
 
-Slice-3 keys supported by `config set`:
+Slice-3 keys supported by `config set` — the ``Blast`` column governs
+whether the command performs a direct ``policies.yaml`` mutation
+(low-blast) or queues a reviewer-gated state.git proposal (high-blast):
 
 | Short alias | Canonical key | Blast | Notes |
 |---|---|---|---|
@@ -510,25 +512,35 @@ Fix:
 
 Slice 3 does not yet ship Grafana dashboards or Prometheus alert
 manifests in-tree (`ops/` lands in Slice 4 alongside the formal
-observability stack). The available operator surfaces are:
+observability stack). The audit query CLI is also Slice-3-incomplete:
+both `alfred audit log` and `alfred audit graph` refuse with
+`AuditBackendUnavailable` until the Postgres-backed query layer lands
+(see PRD §7.1). Until that wires, the available operator surfaces are:
 
-- **`alfred audit graph --tier T0|T1|T2|T3 --since <window>`** — the
-  primary forensic surface. Use it after any reviewer-gate action
-  or supervisor breaker trip.
+- **`docker compose logs alfred-core`** — the temporary forensic
+  surface for Slice 3. Filter by event family
+  (e.g. `grep capability_gate_denied`,
+  `grep supervisor.breaker.tripped`, `grep plugin.lifecycle.crashed`)
+  to inspect the structured-logged audit stream. Redacted via the
+  structlog redactor.
 - **`alfred supervisor status`** — per-component circuit-breaker
   state. Run periodically (every few minutes during a fresh
   migration); a breaker stuck OPEN past its cool-down window means
   the underlying crash repeats.
-- **`docker compose logs alfred-core`** — orchestrator-level
-  structured logs; redacted via the structlog redactor.
 - **`docker compose logs alfred-redis`** — content-store and
   rate-limit counter health. A `LOADING Redis is loading the dataset
   in memory` line during a restart is benign; a `MISCONF` line is
   not.
+- **`alfred audit log --event …`** / **`alfred audit graph --tier …
+  --since <window>`** — wire targets for the query CLI once the
+  storage layer ships. Both commands currently refuse with
+  `AuditBackendUnavailable`; the operator runbook treats them as the
+  forensic surface from Slice 4 onwards.
 
-When `ops/` ships in Slice 4, this section will gain dashboard URLs
-and PromQL queries. Until then, plan to drive observability from the
-audit graph and `docker compose logs`.
+When `ops/` ships in Slice 4 alongside the audit query layer, this
+section will gain dashboard URLs, PromQL queries, and the
+`alfred audit …` commands as the primary forensic path. Until then,
+drive observability from `docker compose logs alfred-core`.
 
 ## Backwards-compatibility notes
 
