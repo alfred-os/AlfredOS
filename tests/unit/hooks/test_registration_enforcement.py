@@ -42,7 +42,7 @@ from alfred.hooks.audit_sink import HOOKS_TIER_REJECTED
 from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookpointMeta, HookRegistry
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_deny_all_gate
 from tests.unit.hooks.conftest import SpyAuditSink
 
 # ──────────────────────────────────────────────────────────────────────
@@ -75,7 +75,13 @@ def test_default_strict_declarations_is_true_in_production_singleton() -> None:
     async def _noop_local(_ctx: HookContext[Any]) -> None:
         """Async no-op."""
 
-    reg = HookRegistry(gate=make_default_test_gate())
+    # Slice-3 spec §15.1: assert the strict-declaration deny path
+    # against :class:`RealGate` (:func:`make_deny_all_gate`) so a
+    # regression in RealGate's deny semantics cannot be hidden by
+    # the test-only shim. The strict-declaration check fires BEFORE
+    # the gate consult in :meth:`HookRegistry.register`, so the
+    # gate's deny posture is defense-in-depth here.
+    reg = HookRegistry(gate=make_deny_all_gate())
     with pytest.raises(HookError, match="not declared"):
         reg.register(
             hook_fn=_noop_local,
@@ -460,9 +466,14 @@ def test_subscriber_tier_not_in_allowlist_refuses(
     The shape exercised here is the spec line 696-697 adversarial:
     ``user-plugin`` tier rejected on
     ``subscribable_tiers={"system","operator"}``.
+
+    Slice-3 spec §15.1: asserts against :class:`RealGate`
+    (:func:`make_deny_all_gate`). The tier-allowlist check fires
+    BEFORE the gate consult, so the gate's deny posture is
+    defense-in-depth here.
     """
     registry = HookRegistry(
-        gate=make_default_test_gate(),
+        gate=make_deny_all_gate(),
         sink=spy_sink,
         strict_declarations=True,
     )
@@ -544,9 +555,14 @@ def test_tier_rejection_audit_row_is_emitted_synchronously(
 
     Pinned here so a future refactor to a fire-and-forget background
     task would surface as this test failing.
+
+    Slice-3 spec §15.1: asserts the tier-allowlist deny path against
+    :class:`RealGate` (:func:`make_deny_all_gate`); the gate's deny
+    posture is defense-in-depth here (the tier-allowlist check fires
+    first).
     """
     registry = HookRegistry(
-        gate=make_default_test_gate(),
+        gate=make_deny_all_gate(),
         sink=spy_sink,
         strict_declarations=True,
     )
@@ -588,11 +604,16 @@ def test_tier_rejection_inside_running_loop_emits_synchronously(
     Pinned here as a regression guard — a future refactor that drops
     the running-loop arm would surface as this test raising
     :class:`RuntimeError`.
+
+    Slice-3 spec §15.1: asserts the tier-allowlist deny path against
+    :class:`RealGate` (:func:`make_deny_all_gate`); the gate's deny
+    posture is defense-in-depth here (the tier-allowlist check fires
+    first).
     """
 
     async def _provoke() -> None:
         registry = HookRegistry(
-            gate=make_default_test_gate(),
+            gate=make_deny_all_gate(),
             sink=spy_sink,
             strict_declarations=True,
         )
@@ -807,8 +828,13 @@ def test_emit_sync_no_running_loop_arm_bounds_stalling_sink() -> None:
     at module-import time would hang the entire process startup.
     """
     sink = _StallingAuditSink()
+    # Slice-3 spec §15.1: deny-path security tests assert against
+    # :class:`RealGate` (:func:`make_deny_all_gate`). The tier-
+    # allowlist check fires before the gate consult, so the gate's
+    # deny posture is defense-in-depth here — the load-bearing
+    # assertion is the bounded sink stall, not the gate's outcome.
     registry = HookRegistry(
-        gate=make_default_test_gate(),
+        gate=make_deny_all_gate(),
         sink=sink,
         strict_declarations=True,
     )

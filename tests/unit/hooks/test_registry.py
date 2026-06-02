@@ -48,13 +48,15 @@ Invariants pinned here:
   ``hooks.subscriber_must_be_async`` catalog-rendered message. The
   language-toggle assertion pins the i18n-rule-#1 contract for the
   rejection message (operator-facing string → ``t()``).
-* **Gate refusal at register** — a :func:`make_default_test_gate`
-  (the post-PR-S3-7 fixture-parity gate; ``operator`` /
-  ``user-plugin`` granted, ``system`` denied) refusing a
-  ``tier="system"`` subscriber raises :class:`HookError`.
-  The registry deliberately does NOT emit an audit
-  row at register-time (sink.emit is async; register is sync); the
-  decision is documented in :class:`HookRegistry`'s class docstring.
+* **Gate refusal at register** — a :func:`make_deny_all_gate` (the
+  production :class:`RealGate` over an empty :class:`GatePolicy` —
+  every check denies) refusing a ``tier="system"`` subscriber raises
+  :class:`HookError`. Slice-3 spec §15.1 mandates this assertion
+  surface against :class:`RealGate` so a regression in its deny path
+  cannot be hidden by a shim. The registry deliberately does NOT
+  emit an audit row at register-time (sink.emit is async; register
+  is sync); the decision is documented in :class:`HookRegistry`'s
+  class docstring.
 * **Registration sequence monotonicity** — two consecutive
   :meth:`register` calls assign strictly-increasing
   ``registration_seq`` values. The dispatcher leans on the monotonic
@@ -89,7 +91,7 @@ from alfred.hooks.registry import (
     set_registry,
 )
 from alfred.i18n import set_language, t
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_default_test_gate, make_deny_all_gate
 from tests.unit.hooks.conftest import SpyAuditSink
 
 # ──────────────────────────────────────────────────────────────────────
@@ -587,21 +589,25 @@ def test_register_sync_rejection_message_honours_active_language(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_register_raises_hook_error_when_gate_refuses_system_tier(
-    fresh_registry: HookRegistry,
-) -> None:
-    """A subscriber requesting ``tier="system"`` against the default
-    fixture-parity gate (:func:`make_default_test_gate`, system denied
-    unless ``allow_system=True``) is refused — register raises
+def test_register_raises_hook_error_when_gate_refuses_system_tier() -> None:
+    """A subscriber requesting ``tier="system"`` against a
+    :class:`RealGate` empty-policy gate (:func:`make_deny_all_gate`,
+    the production deny posture) is refused — register raises
     :class:`HookError`.
 
     The decision (documented in :class:`HookRegistry`'s docstring):
     register is SYNC and does NOT emit an audit row itself. The audit
     row for refusals happens at DISPATCH time in Tasks 9-12. At
     register-time the failure surfaces loudly via the raise.
+
+    Slice-3 spec §15.1 mandates deny-path security tests assert
+    against :class:`RealGate`. Uses inline construction (not the
+    :func:`fresh_registry` fixture) so a regression in
+    :meth:`RealGate.check`'s deny path surfaces here, not in the shim.
     """
+    registry = HookRegistry(gate=make_deny_all_gate(), strict_declarations=False)
     with pytest.raises(HookError):
-        fresh_registry.register(
+        registry.register(
             hook_fn=_noop_pre,
             hookpoint="action.privileged",
             kind="pre",
@@ -609,23 +615,26 @@ def test_register_raises_hook_error_when_gate_refuses_system_tier(
         )
 
 
-def test_register_gate_refusal_does_not_record_subscriber(
-    fresh_registry: HookRegistry,
-) -> None:
+def test_register_gate_refusal_does_not_record_subscriber() -> None:
     """A failed register call leaves no trace: lookup on the rejected
     (hookpoint, kind) still returns the ``_EMPTY`` singleton.
 
     Pins "fail-closed": a denied registration MUST NOT silently appear
     in the chain at dispatch time.
+
+    Slice-3 spec §15.1: asserts against :class:`RealGate`'s deny path
+    (:func:`make_deny_all_gate`) so a RealGate regression cannot pass
+    via shim logic.
     """
+    registry = HookRegistry(gate=make_deny_all_gate(), strict_declarations=False)
     with pytest.raises(HookError):
-        fresh_registry.register(
+        registry.register(
             hook_fn=_noop_pre,
             hookpoint="action.privileged",
             kind="pre",
             tier="system",
         )
-    assert fresh_registry.subscribers_for("action.privileged", "pre") is _EMPTY
+    assert registry.subscribers_for("action.privileged", "pre") is _EMPTY
 
 
 def test_register_grants_system_tier_when_gate_allows_it(
