@@ -124,9 +124,15 @@ def _parse_since(since: str) -> int:
             minutes = int(raw[:-1])
             if minutes <= 0:
                 raise ValueError
-            # Round to the nearest hour, clamping to 1 so a 5-minute window
-            # still surfaces *something* rather than collapsing to zero.
-            return max(1, minutes // 60) if minutes >= 60 else 1
+            # CR-149 round-10 (3339423474): the query layer is
+            # hour-granular, so ceil the minute window to the next
+            # whole hour. The previous shape floored ``90m`` to
+            # ``1h``, dropping the oldest 30 minutes from the
+            # selection and hiding audit rows during incident review.
+            # Ceiling guarantees the requested window is never
+            # narrowed; the smallest selectable lookback stays at
+            # one hour (``1m`` → ``1h``).
+            return (minutes + 59) // 60
     except ValueError:
         # Fall through to the BadParameter below — explicit beats silent.
         pass
