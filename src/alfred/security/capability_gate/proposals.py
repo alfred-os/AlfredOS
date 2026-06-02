@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 
 import structlog
 
-from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
+from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
 from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry, get_registry
 
 # CR reviewer F1: the proposal flow and the gate share a single
@@ -234,9 +234,19 @@ async def create_proposal_branch(
         operator_user_id=operator_user_id,
     )
 
+    # CR-149 round-7: ``plugin.grant.requested`` is the operator-typed
+    # ingress and MUST land in the T1 swimlane of the audit graph (PRD
+    # §7.1 + CLAUDE.md hard rule #3). The schema constant
+    # :data:`PLUGIN_GRANT_REQUESTED_FIELDS` is the
+    # :data:`PLUGIN_GRANT_FIELDS` superset that adds
+    # ``trust_tier_of_trigger`` so :meth:`AuditWriter.append_schema`'s
+    # symmetric-key check accepts the tag. Without the tag the row
+    # round-trips into the T0 lane alongside the post-merge
+    # ``plugin.grant.rebuilt`` row and the operator-attribution
+    # forensic signal vanishes.
     await audit_sink.append_schema(
-        fields=PLUGIN_GRANT_FIELDS,
-        schema_name="PLUGIN_GRANT_FIELDS",
+        fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+        schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
         event="plugin.grant.requested",
         actor_user_id=operator_user_id,
         subject={
@@ -246,6 +256,7 @@ async def create_proposal_branch(
             "operator_user_id": operator_user_id,
             "proposal_branch": branch_name,
             "correlation_id": correlation_id,
+            "trust_tier_of_trigger": "T1",
         },
         trust_tier_of_trigger="T1",
         result="requested",
