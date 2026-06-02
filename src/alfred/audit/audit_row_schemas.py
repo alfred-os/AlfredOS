@@ -94,7 +94,8 @@ PLUGIN_GRANT_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Operator-CLI ingress superset for the ``plugin.grant.requested`` row.
+# Operator-CLI ingress superset for the ``plugin.grant.requested`` row
+# AND its sibling ``plugin.grant.revoke.requested`` row.
 #
 # CR-149 round-6: the previous alias to :data:`PLUGIN_GRANT_FIELDS`
 # meant the requested-side row could not carry ``trust_tier_of_trigger``
@@ -107,6 +108,17 @@ PLUGIN_GRANT_FIELDS: Final[frozenset[str]] = frozenset(
 # (PRD §7.1 + CLAUDE.md hard rule #3). Widening this constant lets
 # every emit site attach ``trust_tier_of_trigger="T1"`` and surface in
 # ``alfred audit graph --tier T1`` without drift.
+#
+# CR-149 round-7: the same superset now also backs the revoke request
+# row. ``alfred plugin revoke`` is the second operator-typed CLI
+# ingress for the plugin-grant subsystem; it queues a reviewer-gated
+# proposal exactly like ``alfred plugin grant`` does, just with the
+# opposite intent. Leaving the revoke row on :data:`PLUGIN_GRANT_FIELDS`
+# (which does not carry ``trust_tier_of_trigger``) sank it into the T0
+# lane next to the post-merge rebuild row and broke the audit-graph
+# consistency the grant path's round-6 fix established. Both request
+# rows now share this schema so an operator's audit-graph filter on
+# ``--tier T1`` surfaces every reviewer-gated CLI ingress uniformly.
 PLUGIN_GRANT_REQUESTED_FIELDS: Final[frozenset[str]] = PLUGIN_GRANT_FIELDS | frozenset(
     {"trust_tier_of_trigger"}
 )

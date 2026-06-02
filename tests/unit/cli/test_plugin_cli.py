@@ -540,9 +540,9 @@ def test_grant_emits_no_audit_row_when_validator_refuses(runner: CliRunner) -> N
 def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> None:
     """``alfred plugin revoke`` emits the requested audit row BEFORE state.git.
 
-    The revoke path uses :data:`PLUGIN_GRANT_FIELDS` with ``subscriber_tier``
-    + ``hookpoint`` as ``None`` — revoke targets the plugin's whole grant
-    surface, not a per-grant scoping.
+    The revoke path uses :data:`PLUGIN_GRANT_REQUESTED_FIELDS` with
+    ``subscriber_tier`` + ``hookpoint`` as ``None`` — revoke targets
+    the plugin's whole grant surface, not a per-grant scoping.
 
     CR-149: the audit event is ``plugin.grant.revoke.requested``
     (proposal-enqueue / requested-state row), NOT the terminal
@@ -551,6 +551,11 @@ def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> Non
     leaves the ``plugin_grants`` table; collapsing the two into a
     single event name skewed downstream consumers that joined on
     "is this grant gone yet?".
+
+    CR-149 round-7: the row schema upgraded to
+    ``PLUGIN_GRANT_REQUESTED_FIELDS`` so the revoke row carries
+    ``trust_tier_of_trigger="T1"`` for swimlane uniformity with the
+    grant request row.
     """
     mock_revoke_proposal = ProposalResult(
         proposal_id="deadbeefdeadbeef",
@@ -614,6 +619,49 @@ def test_grant_audit_row_carries_t1_trust_tier(
     assert result.exit_code == 0, result.stderr
     assert len(captured) == 1, captured
     assert captured[0]["trust_tier_of_trigger"] == "T1"
+
+
+def test_revoke_audit_row_carries_t1_trust_tier(runner: CliRunner) -> None:
+    """CR-149 round-7: the ``plugin.grant.revoke.requested`` row tags T1.
+
+    Mirror of :func:`test_grant_audit_row_carries_t1_trust_tier`. The
+    revoke CLI is the second operator-typed CLI ingress for the plugin-
+    grant subsystem (PRD §7.1 + CLAUDE.md hard rule #3) so the audit
+    row MUST carry ``trust_tier_of_trigger="T1"`` for swimlane uniformity
+    with the grant request path. Leaving the revoke row on
+    ``PLUGIN_GRANT_FIELDS`` (no ``trust_tier_of_trigger`` key) sank it
+    into the T0 lane alongside post-merge rebuild rows and broke
+    ``alfred audit graph --tier T1`` for revoke proposals.
+
+    A future refactor that drops the tag from the CLI's
+    ``audit_subject_partial`` would land the row in the wrong swimlane
+    and fail the symmetric-keys check at
+    :func:`queue_proposal_or_exit`.
+    """
+    captured: list[dict[str, object]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        if event == "plugin.grant.revoke.requested":
+            captured.append(kwargs)
+
+    mock_revoke_proposal = ProposalResult(
+        proposal_id="deadbeefdeadbeef",
+        branch="proposal/policy-revoke-deadbeefdeadbeef",
+    )
+
+    with (
+        patch("alfred.cli.plugin._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        mock_client.create_proposal_from_payload.return_value = mock_revoke_proposal
+        result = runner.invoke(plugin_app, ["revoke", "alfred.web-fetch"])
+    assert result.exit_code == 0, result.stderr
+    assert len(captured) == 1, captured
+    assert captured[0]["trust_tier_of_trigger"] == "T1"
+    # Schema-name field round-trips so a log-grepping audit collector
+    # can validate the row at parse time and surface schema drift.
+    assert captured[0]["schema_name"] == "PLUGIN_GRANT_REQUESTED_FIELDS"
 
 
 def test_grant_emits_audit_row_even_on_state_git_failure(runner: CliRunner) -> None:

@@ -400,21 +400,32 @@ def revoke(
     :func:`alfred.cli._validators.validate_plugin_id`.
 
     Stage 3 (arch-001 / cross-cutting R2): the audit-row stand-in fires
-    via :data:`PLUGIN_GRANT_FIELDS` BEFORE the state.git write. The
-    ``subscriber_tier`` + ``hookpoint`` fields are ``None`` on the
-    revoke path because a revocation targets every grant against the
-    plugin (not a single hookpoint or tier); the audit family carries
-    the fields anyway so the audit-graph correlator's join condition
-    with the grant-request row stays uniform. The CLI request is
-    distinct from the supervisor-side in-flight revocation denial
-    (which uses :data:`PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS`); the two
-    families capture different events at different layers.
+    via :data:`PLUGIN_GRANT_REQUESTED_FIELDS` BEFORE the state.git
+    write. The ``subscriber_tier`` + ``hookpoint`` fields are ``None``
+    on the revoke path because a revocation targets every grant
+    against the plugin (not a single hookpoint or tier); the audit
+    family carries the fields anyway so the audit-graph correlator's
+    join condition with the grant-request row stays uniform. The CLI
+    request is distinct from the supervisor-side in-flight revocation
+    denial (which uses :data:`PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS`);
+    the two families capture different events at different layers.
+
+    CR-149 round-7: the revoke request row now carries
+    ``trust_tier_of_trigger="T1"`` to mirror the grant request path's
+    round-6 fix. ``alfred plugin revoke`` is the second operator-typed
+    CLI ingress for the plugin-grant subsystem, so the audit-graph
+    swimlane (PRD §7.1) MUST land in the T1 lane uniformly with the
+    grant request row. Leaving the revoke row on
+    :data:`PLUGIN_GRANT_FIELDS` (no ``trust_tier_of_trigger``) made
+    the audit graph inconsistent across the two ingress paths and
+    broke the ``alfred audit graph --tier T1`` filter for revoke
+    proposals.
 
     perf-001: ``audit_row_schemas`` is imported lazily here for the
     same reason as :func:`_queue_grant_proposal` — keep the typer
     --help surface light.
     """
-    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
 
     # CR-149: the audit event for the proposal-enqueue path is
     # ``plugin.grant.revoke.requested`` (an inflight / requested
@@ -427,16 +438,20 @@ def revoke(
     # operator sees "revoked" rows for proposals the reviewer has
     # not even seen yet) and breaks the trust-sensitive
     # request → approval → terminal-state correlation downstream
-    # consumers depend on. The schema (``PLUGIN_GRANT_FIELDS``) is
-    # unchanged because the row shape is the same — only the event
-    # name differs between request-time and apply-time.
+    # consumers depend on.
+    #
+    # CR-149 round-7: schema upgraded to
+    # ``PLUGIN_GRANT_REQUESTED_FIELDS`` so the row carries
+    # ``trust_tier_of_trigger="T1"`` for swimlane uniformity with
+    # the grant-request row (the shared schema's docstring covers
+    # both rows now).
     queue_proposal_or_exit(
         payload=PluginRevokeProposal(plugin_id=plugin_id),
         denied_key="cli.plugin.revoke.denied",
         pending_review_key="cli.plugin.revoke.pending_review",
         audit_event="plugin.grant.revoke.requested",
-        audit_schema_name="PLUGIN_GRANT_FIELDS",
-        audit_fields=PLUGIN_GRANT_FIELDS,
+        audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+        audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
         audit_subject_partial={
             "plugin_id": plugin_id,
             # Revoke targets every grant against the plugin; no per-
@@ -448,6 +463,12 @@ def revoke(
             "hookpoint": None,
             # devex-007: PR-S3-7 wires IdentityResolver.
             "operator_user_id": None,
+            # CR-149 round-7: T1 swimlane tag — same rationale as the
+            # grant path. ``alfred plugin revoke`` is operator-typed
+            # CLI ingress (PRD §7.1 + CLAUDE.md hard rule #3) and
+            # MUST surface in ``alfred audit graph --tier T1``
+            # uniformly with the grant request row.
+            "trust_tier_of_trigger": "T1",
         },
         client=_state_git_client,
     )
