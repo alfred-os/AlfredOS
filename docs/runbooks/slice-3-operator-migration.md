@@ -532,9 +532,12 @@ import-graph stability), but the function now constructs a
 **fail-closed `RealGate`** — empty grant snapshot, in-process backend
 stub, heartbeat disabled — instead of the old permissive `DevGate`. Every
 `check*` call against the dev gate now denies fail-closed; developers
-who need granted-system semantics for local iteration should construct
-the gate via the test helpers in `tests/helpers/gates.py` or stand up a
-real Postgres + seeded grants table.
+who need granted-system semantics for local iteration should stand up a
+real Postgres + seeded `plugin_grants` table (the same shape the
+production gate consults). The helpers in `tests/helpers/gates.py` are
+**test-only** per ADR-0019 — they coexist with `RealGate` inside the
+`tests/` tree and must not be imported from `src/` or used for local
+iteration outside the test harness.
 
 The lazy-default at the `HookRegistry` boundary
 (`src/alfred/hooks/registry.py::_DenyAllGate`) is the equivalent
