@@ -412,3 +412,159 @@ def test_revoke_refuses_invalid_plugin_id(runner: CliRunner) -> None:
         result = runner.invoke(plugin_app, ["revoke", "../../../etc/passwd"])
     assert result.exit_code == 2
     mock_client.create_proposal.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 (arch-001 / cross-cutting R2): per-CLI audit-row emission
+# ---------------------------------------------------------------------------
+
+
+def test_grant_emits_audit_row_before_state_git_write(
+    runner: CliRunner, mock_proposal: ProposalResult
+) -> None:
+    """``alfred plugin grant`` emits ``plugin.grant.requested`` BEFORE state.git.
+
+    Stage 3 / arch-001: the audit-row stand-in fires through
+    :func:`queue_proposal_or_exit` with the
+    :data:`PLUGIN_GRANT_REQUESTED_FIELDS` schema. The CLI's call site
+    must supply the required subject keys; this test pins that contract.
+    """
+    call_order: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        call_order.append(f"audit:{event}")
+
+    with (
+        patch("alfred.cli.plugin._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+
+        def _side_effect(**_: object) -> ProposalResult:
+            call_order.append("state_git")
+            return mock_proposal
+
+        mock_client.create_proposal.side_effect = _side_effect
+        result = runner.invoke(
+            plugin_app,
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
+        )
+    assert result.exit_code == 0, result.stderr
+    # The audit event fired exactly once, BEFORE state.git.
+    audit_calls = [c for c in call_order if c.startswith("audit:plugin.grant.requested")]
+    assert len(audit_calls) == 1, call_order
+    audit_idx = call_order.index(audit_calls[0])
+    state_idx = call_order.index("state_git")
+    assert audit_idx < state_idx, call_order
+
+
+def test_grant_emits_no_audit_row_when_validator_refuses(runner: CliRunner) -> None:
+    """Parser-time refusal must NOT emit an audit row.
+
+    The closed-set validators reject malformed input BEFORE the dispatch
+    body runs. No proposal exists in that case, so no
+    ``plugin.grant.requested`` row should fire — the row is reserved
+    for queued proposals, not refused parses.
+    """
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    with (
+        patch("alfred.cli.plugin._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        result = runner.invoke(
+            plugin_app,
+            # Path-traversal plugin id — refused by validate_plugin_id.
+            ["grant", "../../../etc/passwd", "system", "plugin.grant.requested"],
+        )
+    assert result.exit_code == 2
+    # No audit row fired; no proposal exists to anchor it to.
+    assert "plugin.grant.requested" not in audit_events
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> None:
+    """``alfred plugin revoke`` emits ``plugin.grant.revoked`` BEFORE state.git.
+
+    The revoke path uses :data:`PLUGIN_GRANT_FIELDS` with ``subscriber_tier``
+    + ``hookpoint`` as ``None`` — revoke targets the plugin's whole grant
+    surface, not a per-grant scoping.
+    """
+    mock_revoke_proposal = ProposalResult(
+        proposal_id="deadbeefdeadbeef",
+        branch="proposal/policy-revoke-deadbeefdeadbeef",
+    )
+    call_order: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        call_order.append(f"audit:{event}")
+
+    with (
+        patch("alfred.cli.plugin._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+
+        def _side_effect(**_: object) -> ProposalResult:
+            call_order.append("state_git")
+            return mock_revoke_proposal
+
+        mock_client.create_proposal.side_effect = _side_effect
+        result = runner.invoke(plugin_app, ["revoke", "alfred.web-fetch"])
+    assert result.exit_code == 0, result.stderr
+    audit_calls = [c for c in call_order if c.startswith("audit:plugin.grant.revoked")]
+    assert len(audit_calls) == 1, call_order
+    audit_idx = call_order.index(audit_calls[0])
+    state_idx = call_order.index("state_git")
+    assert audit_idx < state_idx, call_order
+
+
+def test_grant_emits_audit_row_even_on_state_git_failure(runner: CliRunner) -> None:
+    """A state.git failure leaves the operator-intent audit row.
+
+    CLAUDE.md hard rule #7: the breadcrumb survives the failed write.
+    """
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    with (
+        patch("alfred.cli.plugin._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        mock_client.create_proposal.side_effect = StateGitError("nope")
+        result = runner.invoke(
+            plugin_app,
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
+        )
+    assert result.exit_code != 0
+    # Audit row was emitted despite the state.git failure.
+    assert "plugin.grant.requested" in audit_events
+
+
+def test_grant_pending_message_surfaces_list_pending_followup(
+    runner: CliRunner, mock_proposal: ProposalResult
+) -> None:
+    """devex-006: the pending-review block surfaces the ``grant list --pending`` hint.
+
+    Until Stage 3 the follow-up was reachable only from the empty-list
+    message itself — an operator who queued multiple grants in a shift
+    had no path to find them. The hint MUST appear alongside the
+    pending-review block so the follow-up is discoverable.
+    """
+    with patch("alfred.cli.plugin._state_git_client") as mock_client:
+        mock_client.create_proposal.return_value = mock_proposal
+        result = runner.invoke(
+            plugin_app,
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
+        )
+    assert result.exit_code == 0, result.stderr
+    # The hint mentions the ``grant list --pending`` follow-up verbatim
+    # so an operator scanning stdout can find the lookup path.
+    assert "grant list --pending" in result.stdout
