@@ -26,13 +26,17 @@ Module-level seams the tests patch:
 * ``_list_pending_grants`` — Postgres projection stub for
   ``alfred plugin grant list --pending``; PR-S3-7 swaps in the real query.
 
-Audit-row emission for the grant/revoke paths is currently scoped to the
-state.git write itself (every proposal commit is materially auditable in
-state.git's reflog). The Postgres ``plugin_grants`` projection emits its
-own ``plugin.grant.requested`` row when ``RealGate.rebuild_from_state_git``
-ingests the merged branch; the per-CLI-call audit row is therefore
-intentionally deferred to PR-S3-7 to avoid double-counting the same
-event in the audit graph.
+Audit-row emission. Stage 3 (arch-001 / cross-cutting R2) closes the
+silent-skip gap: every reviewer-gated CLI command emits a ``*.requested``
+audit-row stand-in BEFORE the state.git write via the
+:func:`alfred.cli._state_git.queue_proposal_or_exit` helper. The grant
+path uses :data:`PLUGIN_GRANT_REQUESTED_FIELDS`; the revoke path uses
+:data:`PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS`. Both rows carry the auto-
+generated ``proposal_branch`` + ``correlation_id`` so the audit-graph
+correlator can join the CLI emit with the eventual projection-merge row
+the reviewer-side rebuild emits. The PR-S3-7 swap from structlog to
+:class:`alfred.audit.AuditWriter` is a single-line replacement inside
+:func:`queue_proposal_or_exit` — no per-command changes needed.
 """
 
 from __future__ import annotations
@@ -41,11 +45,13 @@ from typing import Annotated, Final
 
 import typer
 
-from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
+from alfred.audit.audit_row_schemas import (
+    PLUGIN_GRANT_FIELDS,
+    PLUGIN_GRANT_REQUESTED_FIELDS,
+)
 from alfred.cli._state_git import (
-    ProposalResult,
-    StateGitError,
     StateGitProposalClient,
+    queue_proposal_or_exit,
 )
 from alfred.cli._validators import (
     validate_hookpoint,
@@ -108,68 +114,65 @@ plugin_app = typer.Typer(
 )
 
 
-def _render_grant_pending(result: ProposalResult) -> None:
-    """Print the canonical pending-review block for a queued grant.
-
-    Single helper so the grant + revoke surfaces stay byte-identical in
-    formatting — a divergence here would surface as a UAT nit and force
-    a fixup commit. The follow-up command is emitted as a separate line
-    so an operator can copy-paste the ``alfred plugin grant status <id>``
-    string without picking it out of a prose paragraph.
-    """
-    typer.echo(
-        t(
-            "cli.plugin.grant.pending_review",
-            branch=result.branch,
-            proposal_id=result.proposal_id,
-        )
-    )
-    typer.echo(
-        t(
-            "cli.plugin.grant.follow_up_command",
-            proposal_id=result.proposal_id,
-        )
-    )
-
-
 def _queue_grant_proposal(
     *,
     plugin_id: str,
     subscriber_tier: str,
     hookpoint: str,
 ) -> None:
-    """Write a ``policy-grant`` proposal and print the pending-review block.
+    """Write a ``policy-grant`` proposal via the shared helper.
 
-    Hoisted out of the Typer command so the error-path and success-path
-    are testable as a pure function. The ``except`` arm narrows on
-    :class:`StateGitError` only — broader catches would swallow
-    ``KeyboardInterrupt`` and violate CLAUDE.md hard rule #7.
+    Stage 3 (arch-001 / cross-cutting R2): consolidated through
+    :func:`queue_proposal_or_exit` so the audit-row stand-in fires
+    BEFORE the state.git write. The per-command body now only supplies
+    the i18n keys + the audit subject; the helper handles the typer
+    error mapping, the localised denial hint, and the symmetric
+    audit-field validation.
+
+    The follow-up ``alfred plugin grant status <id>`` line stays a
+    separate typer.echo (the helper's pending-review block does not
+    render it) so the operator can copy-paste it cleanly. The list-
+    pending follow-up (devex-006) is bundled into the pending-review
+    catalog entry itself.
     """
-    try:
-        result = _state_git_client.create_proposal(
-            proposal_type=_PROPOSAL_TYPE_GRANT,
-            payload={
-                "plugin_id": plugin_id,
-                "subscriber_tier": subscriber_tier,
-                "hookpoint": hookpoint,
-            },
+    result = queue_proposal_or_exit(
+        proposal_type=_PROPOSAL_TYPE_GRANT,
+        payload={
+            "plugin_id": plugin_id,
+            "subscriber_tier": subscriber_tier,
+            "hookpoint": hookpoint,
+        },
+        denied_key="cli.plugin.grant.denied",
+        pending_review_key="cli.plugin.grant.pending_review",
+        audit_event="plugin.grant.requested",
+        audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+        audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+        audit_subject_partial={
+            "plugin_id": plugin_id,
+            "subscriber_tier": subscriber_tier,
+            "hookpoint": hookpoint,
+            # devex-007: PR-S3-7 wires the IdentityResolver bridge.
+            # Until then the audit row carries ``None`` and the eventual
+            # upgrade is a single emit-site edit.
+            "operator_user_id": None,
+        },
+        client=_state_git_client,
+    )
+    # Follow-up command line. Kept separate from the helper's pending-
+    # review block so the operator can copy-paste the status command
+    # without picking it out of a prose paragraph.
+    typer.echo(
+        t(
+            "cli.plugin.grant.follow_up_command",
+            proposal_id=result.proposal_id,
         )
-    except StateGitError as exc:
-        typer.echo(
-            t("cli.plugin.grant.denied", reason=str(exc)),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-    # Audit row: ``plugin.grant.requested`` — fields per
-    # :data:`PLUGIN_GRANT_FIELDS`. Full wiring is deferred to PR-S3-7
-    # when :class:`RealGate` Postgres tables are seeded; the proposal
-    # branch's state.git commit is materially auditable today via the
-    # state.git reflog (the proposal-flow tests in
-    # ``tests/unit/security/capability_gate/test_audit_wiring.py``
-    # pin the row shape). Required fields when wired up:
-    # ``plugin_id``, ``subscriber_tier``, ``hookpoint``,
-    # ``operator_user_id``, ``proposal_branch``, ``correlation_id``.
-    _render_grant_pending(result)
+    )
+    # devex-006: surface the ``grant list --pending`` follow-up so an
+    # operator who queued multiple grants in a shift can find them
+    # without grepping the structlog stream. Until Stage 3 this hint
+    # only existed in the empty-list message, which an operator who
+    # never called the list command would never see.
+    typer.echo(t("cli.plugin.grant.list_pending_hint"))
 
 
 # ---------------------------------------------------------------------------
@@ -328,30 +331,39 @@ def revoke(
 
     sec-pr-s3-6-01: ``plugin_id`` is parser-time-validated via
     :func:`alfred.cli._validators.validate_plugin_id`.
+
+    Stage 3 (arch-001 / cross-cutting R2): the audit-row stand-in fires
+    via :data:`PLUGIN_GRANT_FIELDS` BEFORE the state.git write. The
+    ``subscriber_tier`` + ``hookpoint`` fields are ``None`` on the
+    revoke path because a revocation targets every grant against the
+    plugin (not a single hookpoint or tier); the audit family carries
+    the fields anyway so the audit-graph correlator's join condition
+    with the grant-request row stays uniform. The CLI request is
+    distinct from the supervisor-side in-flight revocation denial
+    (which uses :data:`PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS`); the two
+    families capture different events at different layers.
     """
-    try:
-        result = _state_git_client.create_proposal(
-            proposal_type=_PROPOSAL_TYPE_REVOKE,
-            payload={"plugin_id": plugin_id},
-        )
-    except StateGitError as exc:
-        typer.echo(
-            t("cli.plugin.revoke.denied", reason=str(exc)),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-    # Audit row: ``plugin.grant.revoked`` (in-flight ``requested``
-    # twin for the revocation path) — fields per the proposal-flow's
-    # PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS schema. Deferred to PR-S3-7
-    # alongside the grant emission for symmetry: until then, the
-    # ``proposal/policy-revoke-<id>`` branch is the durable audit
-    # surface visible through state.git's reflog.
-    typer.echo(
-        t(
-            "cli.plugin.revoke.pending_review",
-            branch=result.branch,
-            proposal_id=result.proposal_id,
-        )
+    queue_proposal_or_exit(
+        proposal_type=_PROPOSAL_TYPE_REVOKE,
+        payload={"plugin_id": plugin_id},
+        denied_key="cli.plugin.revoke.denied",
+        pending_review_key="cli.plugin.revoke.pending_review",
+        audit_event="plugin.grant.revoked",
+        audit_schema_name="PLUGIN_GRANT_FIELDS",
+        audit_fields=PLUGIN_GRANT_FIELDS,
+        audit_subject_partial={
+            "plugin_id": plugin_id,
+            # Revoke targets every grant against the plugin; no per-
+            # tier or per-hookpoint scoping. The audit fields are
+            # ``None`` so the join condition with the grant-side row
+            # (which has specific values) stays uniform across the
+            # family.
+            "subscriber_tier": None,
+            "hookpoint": None,
+            # devex-007: PR-S3-7 wires IdentityResolver.
+            "operator_user_id": None,
+        },
+        client=_state_git_client,
     )
 
 
@@ -394,4 +406,25 @@ def plugin_show(
     typer.echo(t("cli.plugin.show.no_manifest_yet"))
 
 
-__all__ = ["PLUGIN_GRANT_FIELDS", "plugin_app"]
+def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
+    """Surface the four proposal-flow i18n keys to pybabel's static extractor.
+
+    Stage 3 (cross-cutting R5): :func:`queue_proposal_or_exit` consumes
+    the ``denied_key`` + ``pending_review_key`` strings via parameter
+    (not literal :func:`t` call), so the pybabel AST walker would
+    otherwise drop the four keys to the obsoleted block when re-running
+    ``pybabel update``. Surfacing them here pins them as live entries.
+    Same pattern as :func:`alfred.cli._state_git._register_hint_keys_for_pybabel`.
+
+    The function is never called at runtime — the return value only
+    documents the canonical key list for grep + extractor visibility.
+    """
+    return (
+        t("cli.plugin.grant.denied"),
+        t("cli.plugin.grant.pending_review"),
+        t("cli.plugin.revoke.denied"),
+        t("cli.plugin.revoke.pending_review"),
+    )
+
+
+__all__ = ["PLUGIN_GRANT_FIELDS", "PLUGIN_GRANT_REQUESTED_FIELDS", "plugin_app"]

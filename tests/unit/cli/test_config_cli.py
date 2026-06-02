@@ -452,3 +452,118 @@ def test_set_quarantined_provider_refuses_mixed_case_id(runner: CliRunner) -> No
         )
     assert result.exit_code == 2
     mock_client.create_proposal.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 (arch-001 / cross-cutting R2): per-CLI audit-row emission
+# ---------------------------------------------------------------------------
+
+
+def test_set_high_blast_emits_audit_row_before_state_git_write(
+    runner: CliRunner,
+) -> None:
+    """High-blast ``config set`` emits ``config.set.requested`` BEFORE state.git."""
+    call_order: list[tuple[str, dict[str, object]]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        call_order.append((f"audit:{event}", dict(kwargs)))
+
+    with (
+        patch("alfred.cli.config._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+
+        def _side_effect(**_: object) -> ProposalResult:
+            call_order.append(("state_git", {}))
+            return ProposalResult(
+                proposal_id="ff001122ff001122",
+                branch="proposal/config-quarantined-provider-ff001122ff001122",
+            )
+
+        mock_client.create_proposal.side_effect = _side_effect
+        result = runner.invoke(
+            config_app,
+            ["set", "quarantined-provider", "anthropic"],
+        )
+    assert result.exit_code == 0, result.stderr
+    audit_indices = [i for i, (label, _) in enumerate(call_order) if label.startswith("audit:")]
+    state_indices = [i for i, (label, _) in enumerate(call_order) if label == "state_git"]
+    assert len(audit_indices) == 1, call_order
+    assert audit_indices[0] < state_indices[0]
+    # Audit subject carries config_key but NOT the value (CLAUDE.md
+    # hard rule #6: a future high-blast knob whose value carries
+    # secret material would silently leak otherwise).
+    _, audit_kwargs = call_order[audit_indices[0]]
+    assert audit_kwargs["config_key"] == "quarantined-provider"
+    assert "value" not in audit_kwargs
+
+
+def test_set_low_blast_emits_no_audit_row(runner: CliRunner, tmp_path: Path) -> None:
+    """Low-blast keys (no reviewer gate) MUST NOT emit ``config.set.requested``.
+
+    The CLI mutates ``policies.yaml`` directly for these — there is no
+    proposal flow to anchor an audit row to. The row family is the
+    high-blast-only signal.
+    """
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    yaml_path = tmp_path / "policies.yaml"
+
+    with (
+        patch("alfred.cli.config._policies_yaml_path", yaml_path),
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        result = runner.invoke(config_app, ["set", "web-fetch-budget", "30"])
+    assert result.exit_code == 0, result.stderr
+    assert "config.set.requested" not in audit_events
+
+
+def test_set_high_blast_emits_no_audit_row_when_validator_refuses(
+    runner: CliRunner,
+) -> None:
+    """A parser-time refusal of the high-blast value MUST NOT emit a row."""
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    with (
+        patch("alfred.cli.config._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        result = runner.invoke(
+            config_app,
+            ["set", "quarantined-provider", "../../etc/passwd"],
+        )
+    assert result.exit_code != 0
+    assert "config.set.requested" not in audit_events
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_set_high_blast_emits_audit_row_even_on_state_git_failure(
+    runner: CliRunner,
+) -> None:
+    """A state.git failure leaves the operator-intent audit row."""
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    with (
+        patch("alfred.cli.config._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        mock_client.create_proposal.side_effect = StateGitError("nope")
+        result = runner.invoke(
+            config_app,
+            ["set", "quarantined-provider", "anthropic"],
+        )
+    assert result.exit_code != 0
+    assert "config.set.requested" in audit_events

@@ -281,3 +281,121 @@ def test_allowlist_remove_refuses_url_with_scheme(runner: CliRunner) -> None:
         result = runner.invoke(web_app, ["allowlist", "remove", "http://example.com"])
     assert result.exit_code == 2
     mock_client.create_proposal.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 (arch-001 / cross-cutting R2): per-CLI audit-row emission
+# ---------------------------------------------------------------------------
+
+
+def test_allowlist_add_emits_audit_row_before_state_git_write(
+    runner: CliRunner, mock_add_proposal: ProposalResult
+) -> None:
+    """``alfred web allowlist add`` emits ``web.allowlist.requested`` BEFORE state.git.
+
+    Stage 3 / arch-001: ``action="add"`` distinguishes from the remove
+    path so the audit-graph correlator can join the CLI emit with the
+    eventual projection-merge row.
+    """
+    call_order: list[tuple[str, dict[str, object]]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        call_order.append((f"audit:{event}", dict(kwargs)))
+
+    with (
+        patch("alfred.cli.web._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+
+        def _side_effect(**_: object) -> ProposalResult:
+            call_order.append(("state_git", {}))
+            return mock_add_proposal
+
+        mock_client.create_proposal.side_effect = _side_effect
+        result = runner.invoke(web_app, ["allowlist", "add", "api.example.com"])
+    assert result.exit_code == 0, result.stderr
+    # Audit event fired exactly once before state.git.
+    audit_indices = [i for i, (label, _) in enumerate(call_order) if label.startswith("audit:")]
+    state_indices = [i for i, (label, _) in enumerate(call_order) if label == "state_git"]
+    assert len(audit_indices) == 1, call_order
+    assert audit_indices[0] < state_indices[0]
+    # The audit subject carries action="add" and the domain.
+    _, audit_kwargs = call_order[audit_indices[0]]
+    assert audit_kwargs["action"] == "add"
+    assert audit_kwargs["domain"] == "api.example.com"
+
+
+def test_allowlist_remove_emits_audit_row_before_state_git_write(
+    runner: CliRunner, mock_remove_proposal: ProposalResult
+) -> None:
+    """``alfred web allowlist remove`` emits ``web.allowlist.requested`` BEFORE state.git.
+
+    Stage 3 / arch-001: ``action="remove"``. ``path_prefix`` is ``None``
+    because remove targets an entry as a whole.
+    """
+    call_order: list[tuple[str, dict[str, object]]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        call_order.append((f"audit:{event}", dict(kwargs)))
+
+    with (
+        patch("alfred.cli.web._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+
+        def _side_effect(**_: object) -> ProposalResult:
+            call_order.append(("state_git", {}))
+            return mock_remove_proposal
+
+        mock_client.create_proposal.side_effect = _side_effect
+        result = runner.invoke(web_app, ["allowlist", "remove", "api.example.com"])
+    assert result.exit_code == 0, result.stderr
+    audit_indices = [i for i, (label, _) in enumerate(call_order) if label.startswith("audit:")]
+    state_indices = [i for i, (label, _) in enumerate(call_order) if label == "state_git"]
+    assert len(audit_indices) == 1, call_order
+    assert audit_indices[0] < state_indices[0]
+    _, audit_kwargs = call_order[audit_indices[0]]
+    assert audit_kwargs["action"] == "remove"
+    assert audit_kwargs["path_prefix"] is None
+
+
+def test_allowlist_add_emits_no_audit_row_when_validator_refuses(runner: CliRunner) -> None:
+    """A parser-time refusal must NOT emit a ``web.allowlist.requested`` row."""
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    with (
+        patch("alfred.cli.web._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        result = runner.invoke(web_app, ["allowlist", "add", "../../etc/passwd"])
+    assert result.exit_code == 2
+    assert "web.allowlist.requested" not in audit_events
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_allowlist_add_emits_audit_row_even_on_state_git_failure(runner: CliRunner) -> None:
+    """A state.git failure leaves the operator-intent audit row.
+
+    Mirrors the plugin-grant pattern: CLAUDE.md hard rule #7 forbids
+    the silent-skip alternative.
+    """
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    with (
+        patch("alfred.cli.web._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        mock_client.create_proposal.side_effect = StateGitError("nope")
+        result = runner.invoke(web_app, ["allowlist", "add", "api.example.com"])
+    assert result.exit_code != 0
+    assert "web.allowlist.requested" in audit_events

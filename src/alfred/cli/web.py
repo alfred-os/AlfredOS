@@ -22,14 +22,17 @@ Module-level seams the tests patch:
 * ``_list_allowlist_entries`` — Postgres projection stub for
   ``alfred web allowlist list``; PR-S3-7 swaps in the real query.
 
-Why the CLI does not write a per-call audit row here. The state.git
-proposal-branch commit itself is the durable forensic record for the
-``add``/``remove`` paths; the Postgres ``web_allowlist`` projection
-emits its own ``web.allowlist.changed`` row when the reviewer merges
-the proposal and the supervisor rebuilds. Emitting a CLI-side row
-would double-count the same event in the audit graph. Cross-reference:
+Audit-row emission. Stage 3 (arch-001 / cross-cutting R2) closes the
+silent-skip gap: both ``add`` and ``remove`` emit a
+``web.allowlist.requested`` row stand-in via
+:data:`alfred.audit.audit_row_schemas.WEB_ALLOWLIST_REQUESTED_FIELDS`
+BEFORE the state.git write. The ``action`` field distinguishes
+``"add"`` from ``"remove"`` so the audit-graph correlator can join the
+CLI emit with the eventual projection-merge row the supervisor emits
+post-reviewer-approval. Cross-reference:
 :data:`alfred.audit.audit_row_schemas.WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS`
-— the manifest-side row family the projection eventually populates.
+— the manifest-side row family the projection eventually populates;
+the requested-side row is the CLI-time twin.
 """
 
 from __future__ import annotations
@@ -38,9 +41,10 @@ from typing import Annotated, Final
 
 import typer
 
+from alfred.audit.audit_row_schemas import WEB_ALLOWLIST_REQUESTED_FIELDS
 from alfred.cli._state_git import (
-    StateGitError,
     StateGitProposalClient,
+    queue_proposal_or_exit,
 )
 from alfred.cli._validators import validate_domain
 from alfred.i18n import t
@@ -131,27 +135,30 @@ def allowlist_add(
 
     Does NOT activate the entry. Spec §11.1: allowlist additions widen
     the trust surface and require reviewer approval + human merge.
+
+    Stage 3 (arch-001): the audit-row stand-in fires via
+    :data:`WEB_ALLOWLIST_REQUESTED_FIELDS` with ``action="add"``
+    BEFORE the state.git write.
     """
-    try:
-        result = _state_git_client.create_proposal(
-            proposal_type=_PROPOSAL_TYPE_ADD,
-            payload={
-                "domain": domain,
-                "path_prefix": path_prefix,
-            },
-        )
-    except StateGitError as exc:
-        typer.echo(
-            t("cli.web.allowlist.add.denied", reason=str(exc)),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-    typer.echo(
-        t(
-            "cli.web.allowlist.add.pending_review",
-            branch=result.branch,
-            proposal_id=result.proposal_id,
-        )
+    queue_proposal_or_exit(
+        proposal_type=_PROPOSAL_TYPE_ADD,
+        payload={
+            "domain": domain,
+            "path_prefix": path_prefix,
+        },
+        denied_key="cli.web.allowlist.add.denied",
+        pending_review_key="cli.web.allowlist.add.pending_review",
+        audit_event="web.allowlist.requested",
+        audit_schema_name="WEB_ALLOWLIST_REQUESTED_FIELDS",
+        audit_fields=WEB_ALLOWLIST_REQUESTED_FIELDS,
+        audit_subject_partial={
+            "action": "add",
+            "domain": domain,
+            "path_prefix": path_prefix,
+            # devex-007: PR-S3-7 wires IdentityResolver.
+            "operator_user_id": None,
+        },
+        client=_state_git_client,
     )
 
 
@@ -175,24 +182,30 @@ def allowlist_remove(
     sec-pr-s3-6-01: same parser-time domain validation as ``add`` so an
     operator cannot queue a remove proposal against a malformed string
     that the projection would silently ignore.
+
+    Stage 3 (arch-001): the audit-row stand-in fires via
+    :data:`WEB_ALLOWLIST_REQUESTED_FIELDS` with ``action="remove"``
+    BEFORE the state.git write. ``path_prefix`` is ``None`` on the
+    remove path because the operator targets an entire allowlist entry,
+    not a single path-prefix slice (the audit family carries the field
+    anyway so the join condition with the add-side row stays uniform).
     """
-    try:
-        result = _state_git_client.create_proposal(
-            proposal_type=_PROPOSAL_TYPE_REMOVE,
-            payload={"domain": domain},
-        )
-    except StateGitError as exc:
-        typer.echo(
-            t("cli.web.allowlist.remove.denied", reason=str(exc)),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-    typer.echo(
-        t(
-            "cli.web.allowlist.remove.pending_review",
-            branch=result.branch,
-            proposal_id=result.proposal_id,
-        )
+    queue_proposal_or_exit(
+        proposal_type=_PROPOSAL_TYPE_REMOVE,
+        payload={"domain": domain},
+        denied_key="cli.web.allowlist.remove.denied",
+        pending_review_key="cli.web.allowlist.remove.pending_review",
+        audit_event="web.allowlist.requested",
+        audit_schema_name="WEB_ALLOWLIST_REQUESTED_FIELDS",
+        audit_fields=WEB_ALLOWLIST_REQUESTED_FIELDS,
+        audit_subject_partial={
+            "action": "remove",
+            "domain": domain,
+            # Remove targets the entry as a whole; no per-prefix scope.
+            "path_prefix": None,
+            "operator_user_id": None,
+        },
+        client=_state_git_client,
     )
 
 
@@ -223,6 +236,23 @@ def allowlist_list() -> None:
         granted_by = str(row.get("granted_by", ""))
         granted_at = str(row.get("granted_at", ""))
         typer.echo(f"{domain:<40}  {path_prefix:<20}  {granted_by:<15}  {granted_at:<20}")
+
+
+def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
+    """Surface the four proposal-flow i18n keys to pybabel's static extractor.
+
+    Stage 3 (cross-cutting R5): :func:`queue_proposal_or_exit` consumes
+    the ``denied_key`` + ``pending_review_key`` strings via parameter,
+    so the pybabel AST walker would otherwise drop the four keys to
+    the obsoleted block. Surfacing them here pins them as live entries.
+    Same pattern as :func:`alfred.cli._state_git._register_hint_keys_for_pybabel`.
+    """
+    return (
+        t("cli.web.allowlist.add.denied"),
+        t("cli.web.allowlist.add.pending_review"),
+        t("cli.web.allowlist.remove.denied"),
+        t("cli.web.allowlist.remove.pending_review"),
+    )
 
 
 __all__ = ["allowlist_app", "web_app"]

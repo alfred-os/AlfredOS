@@ -45,8 +45,8 @@ from typing import Annotated, Final
 import typer
 import yaml
 
-from alfred.cli._state_git import StateGitError as _StateGitError
-from alfred.cli._state_git import StateGitProposalClient
+from alfred.audit.audit_row_schemas import CONFIG_SET_REQUESTED_FIELDS
+from alfred.cli._state_git import StateGitProposalClient, queue_proposal_or_exit
 from alfred.cli._validators import validate_quarantined_provider
 from alfred.i18n import t
 
@@ -293,24 +293,26 @@ def config_set(
         # knob plugs in a per-key validator without touching this branch.
         if key == "quarantined-provider":
             value = validate_quarantined_provider(value)
-        try:
-            result = _state_git_client.create_proposal(
-                proposal_type=f"config-{key}",
-                payload={"key": key, "value": value},
-            )
-        except _StateGitError as exc:
-            typer.echo(
-                t("cli.config.set.denied", reason=str(exc)),
-                err=True,
-            )
-            raise typer.Exit(code=1) from exc
-        typer.echo(
-            t(
-                "cli.config.set.pending_review",
-                key=key,
-                branch=result.branch,
-                proposal_id=result.proposal_id,
-            )
+        # Stage 3 (arch-001 / cross-cutting R2): the audit-row stand-in
+        # fires via :data:`CONFIG_SET_REQUESTED_FIELDS` BEFORE the
+        # state.git write. CLAUDE.md hard rule #6: the audit row carries
+        # ``config_key`` only — the value lives in the proposal payload
+        # the reviewer reads, never in the audit log.
+        queue_proposal_or_exit(
+            proposal_type=f"config-{key}",
+            payload={"key": key, "value": value},
+            denied_key="cli.config.set.denied",
+            pending_review_key="cli.config.set.pending_review",
+            pending_review_extra_kwargs={"key": key},
+            audit_event="config.set.requested",
+            audit_schema_name="CONFIG_SET_REQUESTED_FIELDS",
+            audit_fields=CONFIG_SET_REQUESTED_FIELDS,
+            audit_subject_partial={
+                "config_key": key,
+                # devex-007: PR-S3-7 wires IdentityResolver.
+                "operator_user_id": None,
+            },
+            client=_state_git_client,
         )
         return
 
@@ -414,6 +416,20 @@ def config_list() -> None:
     _walk_flat(data, prefix="", lines=lines)
     for line in lines:
         typer.echo(line)
+
+
+def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
+    """Surface the high-blast proposal-flow i18n keys to pybabel.
+
+    Stage 3 (cross-cutting R5): :func:`queue_proposal_or_exit` consumes
+    the ``denied_key`` + ``pending_review_key`` strings via parameter,
+    so the pybabel AST walker would otherwise drop the keys. Same
+    pattern as :func:`alfred.cli._state_git._register_hint_keys_for_pybabel`.
+    """
+    return (
+        t("cli.config.set.denied"),
+        t("cli.config.set.pending_review"),
+    )
 
 
 __all__ = ["config_app"]
