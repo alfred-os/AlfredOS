@@ -242,6 +242,54 @@ def test_create_proposal_from_payload_refuses_non_canonical_proposal_id(
         client.create_proposal_from_payload(payload, proposal_id="../escape")
 
 
+@pytest.mark.parametrize(
+    "bad_type",
+    [
+        # path-traversal / ref injection
+        "policy-grant/escape",
+        "../policy-grant",
+        "policy/../grant",
+        # whitespace — illegal in branch names
+        "policy grant",
+        "policy-grant ",
+        " policy-grant",
+        "policy\tgrant",
+        # uppercase — canonical writer emits lowercase
+        "Policy-Grant",
+        "POLICY-GRANT",
+        # underscores / punctuation outside the closed set
+        "policy_grant",
+        "policy.grant",
+        "policy@grant",
+        # empty / leading-or-trailing dash
+        "",
+        "-policy-grant",
+        "policy-grant-",
+        "policy--grant",
+    ],
+)
+def test_create_proposal_refuses_non_canonical_proposal_type(
+    bare_repo: Path, bad_type: str
+) -> None:
+    """Caller-supplied ``proposal_type`` outside the dash-canonical shape is refused.
+
+    CR-149 round-6: PRD §8.3 requires every state.git branch ref to
+    parse cleanly against git's ref-name rules — ``/``, ``..``,
+    whitespace, or mixed casing drift from the documented shape and
+    only surface deep inside the git subprocess. Refuse at the public
+    API boundary via :class:`ValueError` so the legacy entry point
+    fails closed the same way as the typed ``create_proposal_from_payload``
+    path (which is already pinned by the
+    :class:`StateGitProposalPayload.proposal_type` ClassVar).
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    with pytest.raises(ValueError, match="lowercase dash-separated"):
+        client.create_proposal(
+            bad_type,
+            {"plugin_id": "alfred.web-fetch"},
+        )
+
+
 def test_create_proposal_writes_payload_as_proposal_json(bare_repo: Path) -> None:
     """The proposal branch commits the payload as ``proposal.json`` at repo root."""
     client = StateGitProposalClient(state_git_path=bare_repo)
@@ -304,6 +352,56 @@ def test_create_proposal_raises_state_git_error_on_missing_repo(tmp_path: Path) 
     # Raw argv MUST NOT appear in the operator-facing exception string.
     assert "git clone" not in str(excinfo.value)
     assert "/var/lib" not in str(excinfo.value)
+
+
+def test_push_rejected_emits_structured_log_with_sanitised_stderr(
+    bare_repo: Path,
+) -> None:
+    """CR-149 round-6: a non-zero git return code logs the sanitised stderr.
+
+    Previously the stderr only landed as an exception note via
+    ``add_note``; :func:`queue_proposal_or_exit` catches
+    :class:`StateGitError` and never surfaces those notes, so the
+    detailed git error was unrecoverable from the structlog stream.
+    The structured ``state_git.push_rejected`` warning now carries the
+    sanitised stderr so on-call sees the diagnostic alongside the
+    typed exception. The bootstrap redactor still masks secret-shape
+    strings; ``strip()`` keeps the line single-line searchable.
+    """
+    import subprocess as _subprocess
+
+    captured: list[dict[str, object]] = []
+
+    def _log_warning(event: str, **kwargs: object) -> None:
+        if event == "state_git.push_rejected":
+            captured.append(kwargs)
+
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    # Simulate a non-zero git return code with stderr the real subprocess
+    # would emit (e.g. clone target already exists). The patched
+    # ``subprocess.run`` returns a CompletedProcess shape; the production
+    # code dispatches on ``result.returncode``.
+    fake_result = _subprocess.CompletedProcess(
+        args=["git", "clone", "src", "dst"],
+        returncode=128,
+        stdout="",
+        stderr="fatal: destination path 'dst' already exists and is not an empty directory.\n",
+    )
+    with (
+        patch("alfred.cli._state_git._log") as mock_log,
+        patch("alfred.cli._state_git.subprocess.run", return_value=fake_result),
+    ):
+        mock_log.warning = _log_warning
+        with pytest.raises(StateGitError) as excinfo:
+            client.create_proposal("policy-grant", {"plugin_id": "x"})
+    assert excinfo.value.kind == StateGitErrorKind.PUSH_REJECTED
+    assert len(captured) == 1, captured
+    kwargs = captured[0]
+    # The sanitised stderr is the load-bearing field: on-call grep target.
+    assert "destination path" in str(kwargs["sanitised_stderr"])
+    assert kwargs["returncode"] == 128
+    # The argv field carries the failing command for forensic correlation.
+    assert kwargs["argv"][0] == "git"
 
 
 # ---------------------------------------------------------------------------
