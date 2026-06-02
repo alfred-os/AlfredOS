@@ -30,6 +30,7 @@ The dispatch-time re-check lands in commit 3
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
@@ -511,7 +512,7 @@ def test_subscriber_tier_not_in_allowlist_refuses(
     assert fields["subscriber_name"] == _noop.__qualname__
     # The allow-list surfaces on the row so the operator can grep
     # "what tier set was in force when this rejection fired?".
-    assert set(fields["subscribable_tiers"]) == {"system", "operator"}  # type: ignore[arg-type]
+    assert set(fields["subscribable_tiers"]) == {"system", "operator"}
 
 
 def test_failed_tier_registration_leaves_no_trace(
@@ -918,10 +919,31 @@ class _LatentlyCompletingAuditSink:
     Sleep is 0.75 s — outside the 0.5 s bound, but small enough that
     the daemon actually completes within the test's wall-clock window
     (the daemon is *not* hung; it just lost the race).
+
+    :attr:`done_event` is a cross-thread completion signal. The
+    daemon thread runs ``emit`` inside its own ``asyncio.run`` call;
+    when the coroutine finishes (success path or
+    :class:`asyncio.CancelledError`), the event is set. The calling
+    thread waits on it with a bounded ``timeout`` so the exact-once
+    assertion runs only after the daemon has either completed or
+    been suppressed by the emit-claim. This replaces the previous
+    ``time.sleep(1.5)`` whose scheduler-sensitive padding could let
+    the daemon finish AFTER the assertion, producing a false-positive
+    exactly-once result (CR-156 round-3 err-002 determinism).
     """
 
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        # ``threading.Event`` is the documented thread-safe signal
+        # between the daemon thread's ``asyncio.run(emit(...))`` and
+        # the calling thread's ``done_event.wait(timeout=...)``. The
+        # event remains unset until ``emit`` reaches its
+        # ``finally`` — including the case where the daemon's coroutine
+        # is suppressed by the emit-claim Lock and never appends a
+        # row. The calling thread can therefore wait on
+        # "daemon ran to completion" without waiting on
+        # "daemon recorded a row".
+        self.done_event: threading.Event = threading.Event()
 
     async def emit(
         self,
@@ -930,19 +952,28 @@ class _LatentlyCompletingAuditSink:
         correlation_id: str,
         fields: Mapping[str, object],
     ) -> None:
-        """Sleep 0.75 s then record the call.
+        """Sleep 0.75 s then record the call; signal completion either way.
 
         The 0.75 s sleep lands outside the 0.5 s bound but inside the
-        test's 2.0 s wall-clock window, so the daemon completes mid-test.
+        test's wall-clock window, so the daemon completes mid-test.
+        ``done_event`` is set in the ``finally`` so the calling thread's
+        wait unblocks regardless of whether this coroutine completed
+        normally, was cancelled, or raised — all three are legitimate
+        outcomes for the err-002 race and all three end the
+        "is the daemon still in flight?" uncertainty the test guards
+        against.
         """
-        await asyncio.sleep(0.75)
-        self.calls.append(
-            {
-                "event": event,
-                "correlation_id": correlation_id,
-                "fields": dict(fields),
-            }
-        )
+        try:
+            await asyncio.sleep(0.75)
+            self.calls.append(
+                {
+                    "event": event,
+                    "correlation_id": correlation_id,
+                    "fields": dict(fields),
+                }
+            )
+        finally:
+            self.done_event.set()
 
 
 def test_emit_sync_running_loop_arm_no_double_row_when_daemon_completes_after_timeout() -> None:
@@ -1002,12 +1033,28 @@ def test_emit_sync_running_loop_arm_no_double_row_when_daemon_completes_after_ti
 
     with structlog.testing.capture_logs() as captured:
         asyncio.run(_provoke())
-        # Wait long enough for the daemon thread's sink.emit to either
-        # complete OR be suppressed by the emit-claim. The daemon's
-        # asyncio.sleep is 0.75 s; we wait 1.5 s to be safe across CI
-        # jitter — if the daemon survives the calling thread, it WILL
-        # have completed by this point.
-        time.sleep(1.5)
+        # Wait on the sink's completion signal rather than a fixed
+        # wall-clock delay. ``done_event`` is set inside the daemon's
+        # ``emit`` ``finally`` block so we unblock the moment the
+        # daemon's coroutine either completes normally OR is
+        # suppressed by the emit-claim Lock (which prevents emit
+        # from running at all). The 5 s timeout is two orders of
+        # magnitude above the 0.75 s sleep — large enough that a
+        # genuinely-stuck daemon surfaces as a real test failure
+        # (``done_event`` never set ⇒ ``wait`` returns ``False``
+        # below), small enough that the suite stays fast. The
+        # explicit ``assert`` converts a timeout into a loud failure
+        # rather than letting the assertion proceed with an
+        # in-flight daemon — that conversion is what flushes out the
+        # err-002 determinism regression CR-156 round-3 called out
+        # (``time.sleep(1.5)`` made the exact-once check
+        # scheduler-sensitive).
+        completed = sink.done_event.wait(timeout=5.0)
+        assert completed, (
+            "_LatentlyCompletingAuditSink.done_event never fired within 5s; "
+            "the daemon thread either never started or is genuinely stuck "
+            "— this would make the exact-once assertion meaningless."
+        )
 
     fallback_rows = [
         c

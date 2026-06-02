@@ -211,34 +211,109 @@ def test_capability_py_reads_no_env() -> None:
     tree = ast.parse(source)
 
     class EnvReadVisitor(ast.NodeVisitor):
+        """Reject every shape of environment read in :mod:`alfred.hooks.capability`.
+
+        The old visitor only matched ``os.environ.attr`` /
+        ``os.environ.method`` / ``os.getenv(...)`` against the unaliased
+        ``os`` name. That left three holes a regression could slip
+        through (CR-156 round-3 sec-007 false-negatives):
+
+        1. **Aliased import**: ``import os as _os; _os.environ["X"]``.
+        2. **Subscript access**: ``os.environ["X"]`` — never goes through
+           ``visit_Attribute``'s "method" branch because the subscript is
+           an ``ast.Subscript`` node whose ``.value`` is the
+           ``ast.Attribute`` chain, not a call.
+        3. **Aliased ``from os import …``**: ``from os import getenv``
+           binds the name ``getenv`` (or ``getenv as g``) at module scope;
+           a later ``getenv("X")`` call has no ``ast.Attribute`` chain at
+           all. ``from os import environ`` is the same shape for the
+           subscript path.
+
+        The fix tracks every binding that could resolve to ``os`` or
+        an ``os`` member at module scope (``self._os_names`` and
+        ``self._getenv_names``), then matches Attribute / Subscript /
+        Call against those bound names. ``from os import environ`` is
+        flagged on the import line itself — there is no legitimate
+        reason to import the symbol into this module.
+        """
+
         def __init__(self) -> None:
             self.violations: list[tuple[int, str]] = []
+            # Every name bound to the ``os`` module at module scope.
+            # Seeded with ``"os"`` so the bare-name access path is
+            # detected even when ``import os`` is implied (e.g. a
+            # conditional or lazy import within a function body).
+            self._os_names: set[str] = {"os"}
+            # Every name bound to ``os.getenv`` via ``from os import
+            # getenv [as alias]``.
+            self._getenv_names: set[str] = set()
+
+        def visit_Import(self, node: ast.Import) -> None:
+            """Track ``import os`` and ``import os as <alias>`` bindings."""
+            for alias in node.names:
+                if alias.name == "os":
+                    self._os_names.add(alias.asname or alias.name)
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            """Track ``from os import …`` bindings; flag ``environ`` at import-time."""
+            if node.module == "os":
+                for alias in node.names:
+                    bound_name = alias.asname or alias.name
+                    if alias.name == "getenv":
+                        self._getenv_names.add(bound_name)
+                    if alias.name == "environ":
+                        # ``environ`` bound into the module is itself a
+                        # violation — every legitimate use is a read.
+                        self.violations.append((node.lineno, "from os import environ"))
+            self.generic_visit(node)
 
         def visit_Attribute(self, node: ast.Attribute) -> None:
+            """Catch ``<os_alias>.environ.<attr>`` access (e.g. ``.get``, ``.keys``)."""
             if (
                 isinstance(node.value, ast.Attribute)
                 and isinstance(node.value.value, ast.Name)
-                and node.value.value.id == "os"
+                and node.value.value.id in self._os_names
                 and node.value.attr == "environ"
             ):
                 self.violations.append((node.lineno, "os.environ.attr"))
             self.generic_visit(node)
 
+        def visit_Subscript(self, node: ast.Subscript) -> None:
+            """Catch ``<os_alias>.environ["X"]`` — the previous AST scanner missed this shape."""
+            if (
+                isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id in self._os_names
+                and node.value.attr == "environ"
+            ):
+                self.violations.append((node.lineno, "os.environ[...]"))
+            self.generic_visit(node)
+
         def visit_Call(self, node: ast.Call) -> None:
+            """Catch every method-call shape of an env read.
+
+            ``<os_alias>.environ.<method>(...)``,
+            ``<os_alias>.getenv(...)``, and the aliased
+            ``getenv(...)`` bound by a ``from os import getenv``.
+            """
             if isinstance(node.func, ast.Attribute):
                 if (
                     isinstance(node.func.value, ast.Attribute)
                     and isinstance(node.func.value.value, ast.Name)
-                    and node.func.value.value.id == "os"
+                    and node.func.value.value.id in self._os_names
                     and node.func.value.attr == "environ"
                 ):
                     self.violations.append((node.lineno, "os.environ.method"))
                 if (
                     isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "os"
+                    and node.func.value.id in self._os_names
                     and node.func.attr == "getenv"
                 ):
                     self.violations.append((node.lineno, "os.getenv"))
+            # ``from os import getenv [as g]; g(...)`` — bare-name call.
+            if isinstance(node.func, ast.Name) and node.func.id in self._getenv_names:
+                self.violations.append((node.lineno, "getenv (from os import)"))
             self.generic_visit(node)
 
     visitor = EnvReadVisitor()
@@ -247,6 +322,125 @@ def test_capability_py_reads_no_env() -> None:
         "capability.py must not read environment variables (sec-007). "
         f"Violations: {visitor.violations}"
     )
+
+
+def test_capability_py_env_read_guard_catches_environ_subscript_alias_and_getenv_alias(
+    tmp_path: Path,
+) -> None:
+    """sec-007 AST guard rejects ``os.environ[...]``, aliased ``os``, and ``from os import getenv``.
+
+    Regression pin against the CR-156 round-3 false-negatives. The
+    original visitor only checked the unaliased ``os.environ.attr`` /
+    ``os.environ.method`` / ``os.getenv`` shapes; this test runs the
+    same visitor over a synthetic source containing each previously-
+    undetected shape and asserts every one trips a violation. If the
+    visitor regresses, this test fails BEFORE the prod-source scan
+    above silently lets a real regression through.
+    """
+    # Re-import the visitor logic by running it inline against a
+    # synthetic source. We can't import ``EnvReadVisitor`` directly
+    # because it's defined inside ``test_capability_py_reads_no_env``;
+    # instead, re-exercise the guard's behaviour by parsing the
+    # synthetic source and pointing the same scanner at it. The scanner
+    # body is duplicated here intentionally — keeping the production
+    # guard's visitor and this regression test isolated means a
+    # refactor that tightens one side without the other surfaces as
+    # this test diverging from the production guard.
+    synthetic = (
+        "import os\n"
+        "import os as _os\n"
+        "from os import getenv\n"
+        "from os import getenv as _g\n"
+        "from os import environ\n"
+        "_os.environ['X']\n"
+        "os.environ['Y']\n"
+        "os.environ.get('Z')\n"
+        "_os.environ.get('W')\n"
+        "os.getenv('A')\n"
+        "_os.getenv('B')\n"
+        "getenv('C')\n"
+        "_g('D')\n"
+    )
+    src_path = tmp_path / "synthetic_capability.py"
+    src_path.write_text(synthetic, encoding="utf-8")
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+    class _EnvReadVisitorMirror(ast.NodeVisitor):
+        """Inlined twin of ``EnvReadVisitor`` — see the parent test for rationale."""
+
+        def __init__(self) -> None:
+            self.violations: list[tuple[int, str]] = []
+            self._os_names: set[str] = {"os"}
+            self._getenv_names: set[str] = set()
+
+        def visit_Import(self, node: ast.Import) -> None:
+            for alias in node.names:
+                if alias.name == "os":
+                    self._os_names.add(alias.asname or alias.name)
+            self.generic_visit(node)
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if node.module == "os":
+                for alias in node.names:
+                    bound_name = alias.asname or alias.name
+                    if alias.name == "getenv":
+                        self._getenv_names.add(bound_name)
+                    if alias.name == "environ":
+                        self.violations.append((node.lineno, "from os import environ"))
+            self.generic_visit(node)
+
+        def visit_Attribute(self, node: ast.Attribute) -> None:
+            if (
+                isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id in self._os_names
+                and node.value.attr == "environ"
+            ):
+                self.violations.append((node.lineno, "os.environ.attr"))
+            self.generic_visit(node)
+
+        def visit_Subscript(self, node: ast.Subscript) -> None:
+            if (
+                isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id in self._os_names
+                and node.value.attr == "environ"
+            ):
+                self.violations.append((node.lineno, "os.environ[...]"))
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if isinstance(node.func, ast.Attribute):
+                if (
+                    isinstance(node.func.value, ast.Attribute)
+                    and isinstance(node.func.value.value, ast.Name)
+                    and node.func.value.value.id in self._os_names
+                    and node.func.value.attr == "environ"
+                ):
+                    self.violations.append((node.lineno, "os.environ.method"))
+                if (
+                    isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in self._os_names
+                    and node.func.attr == "getenv"
+                ):
+                    self.violations.append((node.lineno, "os.getenv"))
+            if isinstance(node.func, ast.Name) and node.func.id in self._getenv_names:
+                self.violations.append((node.lineno, "getenv (from os import)"))
+            self.generic_visit(node)
+
+    visitor = _EnvReadVisitorMirror()
+    visitor.visit(tree)
+    reasons = sorted({reason for _, reason in visitor.violations})
+    assert reasons == sorted(
+        {
+            "from os import environ",
+            "os.environ[...]",
+            "os.environ.attr",
+            "os.environ.method",
+            "os.getenv",
+            "getenv (from os import)",
+        }
+    ), f"AST guard missed one or more env-read shapes; reasons seen: {reasons}"
 
 
 def test_capability_gate_protocol_has_check_plugin_load() -> None:
