@@ -272,6 +272,11 @@ class RealGate:
         # grant_count so an operator can spot unexpected churn between
         # adjacent rebuilds.
         correlation_id = str(uuid.uuid4())
+        # ``trust_tier_of_trigger`` lives in BOTH the schema field set and
+        # the row subject so the audit-graph swimlane placement is driven
+        # by the row payload rather than relying on the kwarg sitting
+        # outside the schema. The supervisor bootstraps the rebuild from
+        # a host-level proposal-merge signal, never user content — T0.
         await self._audit_sink.append_schema(
             fields=CAPABILITY_GATE_REBUILD_FIELDS,
             schema_name="CAPABILITY_GATE_REBUILD_FIELDS",
@@ -280,6 +285,7 @@ class RealGate:
             subject={
                 "commit_hash": state_git_head,
                 "grant_count": len(grants),
+                "trust_tier_of_trigger": "T0",
                 "correlation_id": correlation_id,
             },
             trust_tier_of_trigger="T0",
@@ -375,6 +381,7 @@ class RealGate:
                 subject={
                     "commit_hash": commit_hash,
                     "grant_count": len(grants),
+                    "trust_tier_of_trigger": "T0",
                     "correlation_id": correlation_id,
                 },
                 trust_tier_of_trigger="T0",

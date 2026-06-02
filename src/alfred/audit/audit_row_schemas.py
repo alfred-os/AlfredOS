@@ -315,6 +315,7 @@ CAPABILITY_GATE_REBUILD_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "commit_hash",
         "grant_count",
+        "trust_tier_of_trigger",
         "correlation_id",
     }
 )
