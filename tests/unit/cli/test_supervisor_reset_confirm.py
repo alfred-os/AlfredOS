@@ -578,3 +578,27 @@ def test_reset_import_error_fallback_uses_generic_message(
     combined = (result.output or "") + (result.stderr or "")
     assert "quarantined-llm" in combined
     assert "ImportError" in combined
+
+
+def test_reset_help_does_not_leak_runtime_placeholders(runner: CliRunner) -> None:
+    """CR-149 round-10 (3339423484): ``--help`` must NOT show unresolved templates.
+
+    ``cli.supervisor.reset.confirm_prompt`` is the runtime refusal body and
+    still carries ``{component}``, ``{trip_count}``, and ``{last_trip_at}``
+    placeholders. Typer renders the ``help=`` string verbatim, so wiring the
+    runtime key would surface literal ``{component}`` to an operator running
+    ``alfred supervisor reset --help``. The dedicated
+    ``cli.supervisor.reset.confirm_help`` key carries a static body so
+    ``--help`` reads cleanly. This test pins the contract so a future
+    refactor that re-points ``help=`` at the runtime template fails loudly.
+    """
+    result = runner.invoke(supervisor_app, ["reset", "--help"])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # No unresolved Python format placeholders may survive in ``--help``.
+    for placeholder in ("{component}", "{trip_count}", "{last_trip_at}"):
+        assert placeholder not in result.output, (
+            f"`alfred supervisor reset --help` leaked the runtime placeholder "
+            f"{placeholder!r}; the ``help=`` argument must point at the static "
+            "``cli.supervisor.reset.confirm_help`` key, not the templated "
+            "``confirm_prompt`` body."
+        )
