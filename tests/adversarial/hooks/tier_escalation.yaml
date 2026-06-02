@@ -7,7 +7,7 @@ payload:
   requested_tier: system
   attempted_action: refuse
 expected_outcome: refused
-provenance: "Derived from Slice-2.5 spec §6.1/§6.3 two-gate model and the Slice-2.5 DevGate deny path (§6.2); post-PR-S3-7 the deny-path semantics are preserved via the fixture-parity gate (tests.helpers.gates.make_default_test_gate)"
+provenance: "Derived from Slice-2.5 spec §6.1/§6.3 two-gate model and the Slice-2.5 DevGate deny path (§6.2); post-PR-S3-7 the deny-path semantics are asserted against RealGate via tests.helpers.gates.make_deny_all_gate (Slice-3 spec §15.1)"
 references:
   - "spec §6.1"
   - "spec §6.3"

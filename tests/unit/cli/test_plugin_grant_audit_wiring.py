@@ -44,7 +44,7 @@ from alfred.security.capability_gate.proposals import (
     HOOKPOINT_GRANT_REQUESTED,
     HOOKPOINT_GRANT_REVOKED,
 )
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_permissive_fixture_gate
 
 
 def test_plugin_cli_imports_plugin_grant_fields_constant() -> None:
@@ -84,7 +84,7 @@ def test_plugin_cli_imports_plugin_grant_fields_constant() -> None:
 def isolated_registry(request: pytest.FixtureRequest) -> HookRegistry:
     """Install a fresh :class:`HookRegistry` and restore on teardown.
 
-    The default fixture-parity gate (:func:`make_default_test_gate`,
+    The default fixture-parity gate (:func:`make_permissive_fixture_gate`,
     ``allow_system=False``) denies the ``system`` tier — fine here
     because :meth:`HookRegistry.register_hookpoint` does not consult
     the gate (the gate only fires on subscriber registration). Swap-
@@ -93,7 +93,7 @@ def isolated_registry(request: pytest.FixtureRequest) -> HookRegistry:
     :mod:`tests.unit.identity.test_t1_hookpoint_declaration`.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_default_test_gate())
+    registry = HookRegistry(gate=make_permissive_fixture_gate())
     set_registry(registry)
 
     def _restore() -> None:

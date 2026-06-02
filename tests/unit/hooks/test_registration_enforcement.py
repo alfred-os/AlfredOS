@@ -435,8 +435,8 @@ def test_subscriber_tier_in_allowlist_succeeds(
         fail_closed=True,
     )
     # ``operator`` IS in the allow-list. The fixture-parity gate (via
-    # :func:`make_default_test_gate`) also grants ``operator``; both
-    # gates pass.
+    # :func:`make_permissive_fixture_gate`) also grants ``operator``;
+    # both gates pass.
     strict_registry.register(
         hook_fn=_noop,
         hookpoint="before_db_write",

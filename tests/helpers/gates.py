@@ -20,9 +20,12 @@ Two helper shapes ship here:
   with zero grants or one wildcard system grant respectively. These
   are the canonical post-removal deny-path / granted-path helpers and
   they consult the same :class:`alfred.security.capability_gate.policy.GatePolicy`
-  code the production hot path uses.
+  code the production hot path uses. **Deny-path security tests
+  MUST use these** (Slice-3 spec §15.1) — asserting against
+  :class:`RealGate`'s deny path is what prevents a RealGate regression
+  from being hidden by a test-side shim.
 
-* :func:`make_default_test_gate` (and the implementing
+* :func:`make_permissive_fixture_gate` (and the implementing
   :class:`_DevGateLikeFixture`) — a pure test fixture gate that
   mimics the Slice-2.5 ``DevGate(...)`` semantics: operator and
   user-plugin are always granted, system is gated on
@@ -43,29 +46,41 @@ Two helper shapes ship here:
   gate hierarchy — it is a test double, kept out of ``src/`` per the
   flag-day removal.
 
+  **NEVER use** :func:`make_permissive_fixture_gate` **for a deny-
+  path security test.** The shim's permissive posture makes the
+  deny outcome a function of shim logic, not :class:`RealGate`'s
+  grant policy — a RealGate regression would be invisible. Use
+  :func:`make_deny_all_gate` instead. The naming pin is deliberately
+  loud: a reviewer who sees ``make_permissive_fixture_gate`` in a
+  test whose assertion is ``HookError raised`` should ask "why are
+  you asserting a deny outcome against a permissive gate?".
+
 Tests that want the strict RealGate semantics (empty grants ⇒ deny
 operator too, exact plugin_id match) use :func:`make_deny_all_gate`
 directly. The fixture family in
 :mod:`tests.unit.hooks.conftest` is composed of
-``make_default_test_gate``-style fixtures so the Slice-2.5
+:func:`make_permissive_fixture_gate`-style fixtures so the Slice-2.5
 test bodies don't need per-test rework.
 
 Usage::
 
     from tests.helpers.gates import (
         make_allow_system_gate,
-        make_default_test_gate,
         make_deny_all_gate,
+        make_permissive_fixture_gate,
     )
 
-    # Strict RealGate semantics (every check denies):
+    # Strict RealGate semantics (every check denies) — the deny-path
+    # security-test canonical helper:
     gate = make_deny_all_gate()
 
-    # DevGate-default parity (operator + user-plugin granted, system denied):
-    gate = make_default_test_gate()
+    # DevGate-default parity (operator + user-plugin granted, system denied).
+    # NEVER for deny-path security tests; only for tests whose semantic
+    # legitimately requires operator + user-plugin to register cleanly:
+    gate = make_permissive_fixture_gate()
 
     # DevGate(allow_system=True) parity (everything granted):
-    gate = make_default_test_gate(allow_system=True)
+    gate = make_permissive_fixture_gate(allow_system=True)
 
     # RealGate with one wildcard system grant for a specific plugin id:
     gate = make_allow_system_gate(plugin_id="alfred.web-fetch")
@@ -135,7 +150,9 @@ def make_deny_all_gate() -> CapabilityGate:
     including for ``operator`` and ``user-plugin`` tiers (RealGate does
     not have the Slice-2.5 ``DevGate`` "operator always granted"
     shortcut). Tests that need the DevGate-default fixture-parity
-    semantics use :func:`make_default_test_gate` instead.
+    semantics use :func:`make_permissive_fixture_gate` instead —
+    but only for tests whose semantic legitimately requires a
+    permissive gate (never for deny-path security tests).
 
     Synchronous construction (no ``await``) so this can be called from
     pytest fixtures without ``@pytest.mark.asyncio`` overhead — bypasses
@@ -165,7 +182,7 @@ def make_allow_system_gate(
     under that plugin_id. Tests that need the broader
     ``DevGate(allow_system=True)``-style posture (operator /
     user-plugin / system all granted regardless of plugin_id) use
-    :func:`make_default_test_gate` with ``allow_system=True``.
+    :func:`make_permissive_fixture_gate` with ``allow_system=True``.
 
     The default ``plugin_id="test-plugin"`` is a placeholder; tests
     that rely on a specific plugin id should pass it explicitly.
@@ -196,12 +213,47 @@ def make_allow_system_gate(
 class _DevGateLikeFixture:
     """Test-only fixture gate that mimics Slice-2.5 ``DevGate`` semantics.
 
-    The Slice-2.5 ``DevGate(...)`` granted ``operator`` and
-    ``user-plugin`` unconditionally and gated ``system`` on a
-    constructor-set ``allow_system`` flag. The fixture-parity gate
-    here reproduces that behaviour so the Slice-2.5 test bodies that
-    registered subscribers under arbitrary module-named ``plugin_id``
-    values keep working without per-test rework.
+    **THIS IS NOT** :class:`RealGate`. It is a permissive test
+    fixture: operator and user-plugin tiers are granted
+    UNCONDITIONALLY (no grant-table consult), and system is gated on
+    the constructor-set ``allow_system`` flag. Plugin id and
+    hookpoint are ignored entirely.
+
+    **DO NOT use for deny-path security tests.** Slice-3 spec §15.1
+    mandates deny-path security tests assert against :class:`RealGate`
+    (via :func:`make_deny_all_gate`) so a regression in RealGate's
+    deny path cannot be hidden by this shim's "always allow operator
+    + user-plugin" semantics. A reviewer who sees this class —
+    or its public constructor :func:`make_permissive_fixture_gate` —
+    in a test asserting ``HookError raised`` should reject the
+    PR: the assertion's load-bearing target is the shim, not the
+    production gate.
+
+    **Legitimate uses** (Slice-3 spec §15.1 — "tests that genuinely
+    need the shim's 'operator + user-plugin allowed unconditionally'
+    semantics because they're testing OTHER code paths, not the gate"):
+
+    * Dispatcher fault-semantics tests that register an operator-tier
+      hook and exercise the chain's timeout / exception / re-entry
+      paths (:mod:`tests.unit.hooks.test_fault_semantics`,
+      :mod:`tests.unit.hooks.test_dispatch_publisher_drift`).
+    * Hookpoint declaration / metadata tests that never call
+      :meth:`HookRegistry.register` (:mod:`tests.unit.identity.test_t1_hookpoint_declaration`,
+      :mod:`tests.unit.security.capability_gate.test_audit_wiring`,
+      :mod:`tests.unit.cli.test_plugin_grant_audit_wiring`).
+    * Positive-control tests where the gate must grant so the
+      hookpoint-allowlist arm becomes the test's load-bearing
+      assertion (the deny-path arm pairs with this in
+      :mod:`tests.unit.hooks.test_registration_enforcement`).
+    * Plugin-load contract tests that exercise the shim's
+      ``check_plugin_load`` fail-open posture (Slice-2.5 parity;
+      :mod:`tests.integration.test_comms_mcp_contract`).
+    * Performance benchmarks that need a constant-time grant decision
+      so the measurement target is the dispatcher hot path, not the
+      gate's grant lookup (:mod:`tests.perf.test_hook_dispatch_perf`).
+    * The :func:`fresh_registry`-family fixtures themselves
+      (:mod:`tests.unit.hooks.conftest`), which underpin hundreds of
+      non-gate tests.
 
     The class is private and lives in :mod:`tests.helpers.gates` so
     no ``src/`` code can import it. It is **structurally** a
@@ -278,14 +330,24 @@ class _DevGateLikeFixture:
         return True
 
 
-def make_default_test_gate(*, allow_system: bool = False) -> CapabilityGate:
-    """Return a fixture-parity gate matching Slice-2.5 ``DevGate`` semantics.
+def make_permissive_fixture_gate(*, allow_system: bool = False) -> CapabilityGate:
+    """Return a permissive fixture-parity gate matching Slice-2.5 ``DevGate`` semantics.
 
     ``operator`` and ``user-plugin`` are always granted; ``system``
     grants iff ``allow_system=True``. The gate ignores ``plugin_id``
     and ``hookpoint`` (per the Slice-2.5 :class:`DevGate` shape), so
     a test that registers a subscriber under an arbitrary module-named
     plugin id continues to register cleanly.
+
+    **NEVER use for deny-path security tests** — Slice-3 spec §15.1
+    mandates those assert against :class:`RealGate` (via
+    :func:`make_deny_all_gate`). See :class:`_DevGateLikeFixture`'s
+    docstring for the full list of legitimate uses (dispatcher fault
+    paths, hookpoint declaration metadata, positive controls,
+    plugin-load contract, performance benchmarks, the
+    :func:`fresh_registry` fixture family). The "permissive" name
+    is deliberately loud: a reviewer who sees this in a test asserting
+    refusal should question why.
 
     Used by the registry-fixture family in
     :mod:`tests.unit.hooks.conftest` — the Slice-2.5 test bodies that
@@ -305,6 +367,6 @@ def make_default_test_gate(*, allow_system: bool = False) -> CapabilityGate:
 
 __all__ = [
     "make_allow_system_gate",
-    "make_default_test_gate",
     "make_deny_all_gate",
+    "make_permissive_fixture_gate",
 ]

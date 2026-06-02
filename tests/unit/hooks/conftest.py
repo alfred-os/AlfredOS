@@ -12,7 +12,7 @@ Four fixtures ship:
 
 * :func:`fresh_registry` — the canonical default. Installs a brand-new
   :class:`HookRegistry` with the fixture-parity gate constructed via
-  :func:`tests.helpers.gates.make_default_test_gate` (operator and
+  :func:`tests.helpers.gates.make_permissive_fixture_gate` (operator and
   user-plugin granted, system denied — matching the Slice-2.5
   ``DevGate()`` semantics) and the registry's own default
   :class:`StructlogAuditSink`. The pre-test registry is captured at
@@ -20,7 +20,7 @@ Four fixtures ship:
   via the module-level singleton is impossible.
 * :func:`fresh_registry_allow_system` — same shape, but the gate
   grants the ``system`` tier as well via
-  :func:`tests.helpers.gates.make_default_test_gate` with
+  :func:`tests.helpers.gates.make_permissive_fixture_gate` with
   ``allow_system=True``. Used by tests that need to register a
   system-tier subscriber (Task 7's @hook decorator unit tests, Task 9's
   chain-deadline tests).
@@ -47,7 +47,7 @@ production :class:`RealGate` semantics (empty grants ⇒ deny everything
 including operator, exact ``plugin_id`` match) construct
 :func:`tests.helpers.gates.make_deny_all_gate` /
 :func:`tests.helpers.gates.make_allow_system_gate` directly; the
-fixtures here use :func:`tests.helpers.gates.make_default_test_gate`
+fixtures here use :func:`tests.helpers.gates.make_permissive_fixture_gate`
 to preserve the Slice-2.5 ergonomic shape for the test bodies that
 register an ``operator``-tier subscriber under an arbitrary
 module-named ``plugin_id``.
@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_permissive_fixture_gate
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +127,7 @@ def fresh_registry() -> Iterator[HookRegistry]:
     the strict contract use the :func:`strict_registry` fixture.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_default_test_gate(), strict_declarations=False)
+    registry = HookRegistry(gate=make_permissive_fixture_gate(), strict_declarations=False)
     set_registry(registry)
     try:
         yield registry
@@ -151,7 +151,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_default_test_gate(allow_system=True), strict_declarations=False
+        gate=make_permissive_fixture_gate(allow_system=True), strict_declarations=False
     )
     set_registry(registry)
     try:
@@ -173,7 +173,7 @@ def strict_registry() -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_default_test_gate(allow_system=True),
+        gate=make_permissive_fixture_gate(allow_system=True),
         strict_declarations=True,
     )
     set_registry(registry)
@@ -214,7 +214,7 @@ def spy_registry_allow_system(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_default_test_gate(allow_system=True),
+        gate=make_permissive_fixture_gate(allow_system=True),
         sink=spy_sink,
         strict_declarations=False,
     )

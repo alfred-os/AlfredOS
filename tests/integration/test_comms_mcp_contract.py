@@ -55,7 +55,7 @@ import pytest
 
 from alfred.audit import audit_row_schemas
 from alfred.plugins.session import AlfredPluginSession
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_permissive_fixture_gate
 
 PLUGIN_DIR: Path = Path(__file__).parent.parent.parent / "plugins" / "alfred_comms_test"
 MANIFEST_PATH: Path = PLUGIN_DIR / "manifest.toml"
@@ -167,7 +167,7 @@ async def test_comms_test_plugin_handshake(
       either field.
 
     Also verifies that the post-PR-S3-7 fixture-parity gate
-    (:func:`make_default_test_gate`) accepts the manifest — the
+    (:func:`make_permissive_fixture_gate`) accepts the manifest — the
     gate's ``check_plugin_load`` returns True for the
     ``user-plugin`` subscriber tier (operator + user-plugin are
     granted unconditionally by the fixture); pinning the manifest
@@ -218,7 +218,7 @@ async def test_comms_test_plugin_handshake(
     # manifest (the operator / user-plugin tiers are granted
     # unconditionally; pinning the call site here surfaces any future
     # tightening of the gate's plugin-load semantics).
-    real_gate = make_default_test_gate()
+    real_gate = make_permissive_fixture_gate()
     assert real_gate.check_plugin_load(plugin_id="alfred.comms-test", manifest_tier="user-plugin")
 
 
