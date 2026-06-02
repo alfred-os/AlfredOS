@@ -2,52 +2,92 @@
 
 ``DevGate`` was removed from ``src/alfred/hooks/capability.py`` at the
 end of Slice 3 (PR-S3-7, spec §15.1). This module re-establishes the
-ergonomic deny-path / system-grant fixture shapes the old ``DevGate(...)``
-constructions used to provide — but ONLY for use in tests, never in
-production code. Importing from ``tests.helpers.*`` inside ``src/`` is a
-layering violation; the public-surface invariant test pins that the
-``alfred.hooks`` package exports no ``DevGate`` symbol.
+ergonomic deny-path / system-grant fixture shapes the old
+``DevGate(...)`` constructions used to provide — but ONLY for use in
+tests, never in production code. Importing from ``tests.helpers.*``
+inside ``src/`` is a layering violation; the public-surface invariant
+test pins that the ``alfred.hooks`` package exports no ``DevGate``
+symbol.
 
 The production gate is :class:`alfred.security.capability_gate._gate.RealGate`,
 constructed by :mod:`alfred.bootstrap.gate_factory` based on the
-``ALFRED_ENV`` env var. Tests that need the deny-path semantics of the
-old ``DevGate`` use :func:`make_deny_all_gate` here, which wraps
-:class:`RealGate` with an in-memory stub backend (no testcontainer, no
-Postgres) seeded with an empty grant set — every check call denies by
-fail-closed default (spec §8.1 / CLAUDE.md hard rule #7).
+``ALFRED_ENV`` env var.
 
-Tests that need the granted-system semantics use
-:func:`make_allow_system_gate`, which seeds a single ``system``-tier
-grant covering the requested ``(plugin_id, hookpoint)`` pair so the
-production gate code path returns ``True`` for that exact triple
-(equivalent to the old ``DevGate(allow_system=True).check(...)`` answer
-in a deny-by-default world).
+Two helper shapes ship here:
+
+* :func:`make_deny_all_gate` / :func:`make_allow_system_gate` —
+  :class:`RealGate` wrapped over an in-memory stub backend, seeded
+  with zero grants or one wildcard system grant respectively. These
+  are the canonical post-removal deny-path / granted-path helpers and
+  they consult the same :class:`alfred.security.capability_gate.policy.GatePolicy`
+  code the production hot path uses.
+
+* :func:`make_default_test_gate` (and the implementing
+  :class:`_DevGateLikeFixture`) — a pure test fixture gate that
+  mimics the Slice-2.5 ``DevGate(...)`` semantics: operator and
+  user-plugin are always granted, system is gated on
+  ``allow_system``. This is the **fixture-parity** path the
+  :func:`tests.unit.hooks.conftest.fresh_registry` family uses so
+  the Slice-2.5 tests that registered an ``operator``-tier subscriber
+  via the default fixture keep working without per-test rework. The
+  fixture-parity gate is NOT :class:`RealGate`-shaped — it deliberately
+  ignores ``plugin_id`` / ``hookpoint`` the same way ``DevGate`` did,
+  so a test that registers under an arbitrary module-named ``plugin_id``
+  (the default attribution shape in :class:`alfred.hooks.registry.HookRegistry.register`)
+  continues to register cleanly.
+
+  The fixture-parity gate is **structurally** a
+  :class:`alfred.hooks.capability.CapabilityGate` (the Protocol is
+  ``@runtime_checkable``) so dispatcher code that type-narrows on the
+  Protocol still works with it. It is **not** a parallel production
+  gate hierarchy — it is a test double, kept out of ``src/`` per the
+  flag-day removal.
+
+Tests that want the strict RealGate semantics (empty grants ⇒ deny
+operator too, exact plugin_id match) use :func:`make_deny_all_gate`
+directly. The fixture family in
+:mod:`tests.unit.hooks.conftest` is composed of
+``make_default_test_gate``-style fixtures so the Slice-2.5
+test bodies don't need per-test rework.
 
 Usage::
 
-    from tests.helpers.gates import make_allow_system_gate, make_deny_all_gate
-
-    gate = make_deny_all_gate()           # all checks deny
-    gate = make_allow_system_gate()       # one wildcard system-tier grant
-    gate = make_allow_system_gate(        # narrowed grant
-        plugin_id="alfred.web-fetch",
-        hookpoint="tool.web.fetch",
+    from tests.helpers.gates import (
+        make_allow_system_gate,
+        make_default_test_gate,
+        make_deny_all_gate,
     )
 
-The factories return the production :class:`RealGate` type so isinstance
-checks against :class:`alfred.hooks.capability.CapabilityGate` continue
-to pass — the test shim does NOT introduce a parallel gate hierarchy.
+    # Strict RealGate semantics (every check denies):
+    gate = make_deny_all_gate()
+
+    # DevGate-default parity (operator + user-plugin granted, system denied):
+    gate = make_default_test_gate()
+
+    # DevGate(allow_system=True) parity (everything granted):
+    gate = make_default_test_gate(allow_system=True)
+
+    # RealGate with one wildcard system grant for a specific plugin id:
+    gate = make_allow_system_gate(plugin_id="alfred.web-fetch")
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from alfred.hooks.capability import CapabilityGate
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
+
+# The three tier strings the fixture-parity gate recognises. Module-level
+# so a maintainer changing the closed set surfaces the change next to
+# the policy logic (mirrors the layout :mod:`alfred.security.capability_gate.policy`
+# uses for its own closed-domain set).
+_FIXTURE_TIERS_GRANTED_UNCONDITIONALLY: frozenset[str] = frozenset({"operator", "user-plugin"})
+_FIXTURE_TIER_GATED_BY_ALLOW_SYSTEM: str = "system"
 
 
 def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> Any:
@@ -89,11 +129,13 @@ def _make_no_op_audit_sink() -> Any:
 def make_deny_all_gate() -> CapabilityGate:
     """Return a :class:`RealGate` with an empty grant store.
 
-    Equivalent to the old ``DevGate()`` (no args) for deny-path tests:
-    no grants ⇒ every :meth:`RealGate.check` /
+    Strict RealGate semantics: every :meth:`RealGate.check` /
     :meth:`RealGate.check_plugin_load` /
-    :meth:`RealGate.check_content_clearance` call returns ``False``
-    (spec §8.1 fail-closed default).
+    :meth:`RealGate.check_content_clearance` call returns ``False`` —
+    including for ``operator`` and ``user-plugin`` tiers (RealGate does
+    not have the Slice-2.5 ``DevGate`` "operator always granted"
+    shortcut). Tests that need the DevGate-default fixture-parity
+    semantics use :func:`make_default_test_gate` instead.
 
     Synchronous construction (no ``await``) so this can be called from
     pytest fixtures without ``@pytest.mark.asyncio`` overhead — bypasses
@@ -116,18 +158,17 @@ def make_allow_system_gate(
 ) -> CapabilityGate:
     """Return a :class:`RealGate` with one ``system``-tier grant seeded.
 
-    Equivalent to the old ``DevGate(allow_system=True)`` for granted-
-    system tests, but the new shape consults the grant table — a
-    ``system`` request that doesn't match ``(plugin_id, hookpoint,
-    "system")`` still denies. Tests that need the broad "every system
-    request grants" posture should pass the default ``hookpoint="*"``
-    (wildcard) so any hookpoint matches under that plugin_id.
+    Strict RealGate semantics: a ``system`` request that doesn't match
+    ``(plugin_id, hookpoint, "system")`` still denies. Tests that need
+    the broad "every system request grants" posture should pass the
+    default ``hookpoint="*"`` (wildcard) so any hookpoint matches
+    under that plugin_id. Tests that need the broader
+    ``DevGate(allow_system=True)``-style posture (operator /
+    user-plugin / system all granted regardless of plugin_id) use
+    :func:`make_default_test_gate` with ``allow_system=True``.
 
-    The default ``plugin_id="test-plugin"`` matches the convention used
-    by the pre-removal ``HookRegistry(gate=DevGate(allow_system=True))``
-    fixtures, where ``plugin_id`` was unused — every registration
-    succeeded because ``DevGate`` ignored the parameter. Tests that
-    rely on a specific plugin id should pass it explicitly.
+    The default ``plugin_id="test-plugin"`` is a placeholder; tests
+    that rely on a specific plugin id should pass it explicitly.
 
     The seeded grant carries:
 
@@ -151,4 +192,119 @@ def make_allow_system_gate(
     )
 
 
-__all__ = ["make_allow_system_gate", "make_deny_all_gate"]
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _DevGateLikeFixture:
+    """Test-only fixture gate that mimics Slice-2.5 ``DevGate`` semantics.
+
+    The Slice-2.5 ``DevGate(...)`` granted ``operator`` and
+    ``user-plugin`` unconditionally and gated ``system`` on a
+    constructor-set ``allow_system`` flag. The fixture-parity gate
+    here reproduces that behaviour so the Slice-2.5 test bodies that
+    registered subscribers under arbitrary module-named ``plugin_id``
+    values keep working without per-test rework.
+
+    The class is private and lives in :mod:`tests.helpers.gates` so
+    no ``src/`` code can import it. It is **structurally** a
+    :class:`alfred.hooks.capability.CapabilityGate` (the Protocol is
+    ``@runtime_checkable``); the dispatcher's type-narrowing finds it
+    via :func:`isinstance` exactly as it would the production
+    :class:`RealGate`.
+
+    Frozen+slots discipline mirrors the production gate types — the
+    test fixture can't drift away from the production posture.
+    """
+
+    allow_system: bool = False
+
+    def check(
+        self,
+        *,
+        plugin_id: str,
+        hookpoint: str,
+        requested_tier: str,
+    ) -> bool:
+        """Return the DevGate-shaped yes/no for the requested tier.
+
+        ``operator`` / ``user-plugin`` always grant; ``system`` grants
+        iff ``allow_system=True``. Unknown / typo'd / case-mismatched
+        tiers deny fail-closed. The ``plugin_id`` and ``hookpoint``
+        parameters are accepted per the Protocol contract but unused —
+        same shape as the Slice-2.5 ``DevGate``.
+        """
+        del plugin_id, hookpoint
+        if requested_tier in _FIXTURE_TIERS_GRANTED_UNCONDITIONALLY:
+            return True
+        if requested_tier == _FIXTURE_TIER_GATED_BY_ALLOW_SYSTEM:
+            return self.allow_system
+        return False
+
+    def check_plugin_load(
+        self,
+        *,
+        plugin_id: str,
+        manifest_tier: str,
+    ) -> bool:
+        """Fixture-parity stub: defer to :meth:`check` with wildcard hookpoint.
+
+        Slice-2.5 ``DevGate.check_plugin_load`` was a fail-open stub
+        for the same reason — until a real grant table existed, plugin
+        load couldn't be gated meaningfully. The fixture preserves
+        that semantic: a plugin load passes iff the subscriber tier
+        it declares passes the :meth:`check` rules above.
+        """
+        return self.check(
+            plugin_id=plugin_id,
+            hookpoint="*",
+            requested_tier=manifest_tier,
+        )
+
+    def check_content_clearance(
+        self,
+        *,
+        plugin_id: str,
+        hookpoint: str,
+        content_tier: str,
+    ) -> bool:
+        """Fixture-parity stub: fail-open on the content-tier axis.
+
+        Slice-2.5 ``DevGate.check_content_clearance`` returned
+        ``True`` unconditionally so dispatch tests didn't double-gate
+        on the orthogonal content axis. The fixture preserves that
+        posture — tests that exercise the content-tier deny path
+        construct :class:`RealGate` via :func:`make_deny_all_gate`
+        instead.
+        """
+        del plugin_id, hookpoint, content_tier
+        return True
+
+
+def make_default_test_gate(*, allow_system: bool = False) -> CapabilityGate:
+    """Return a fixture-parity gate matching Slice-2.5 ``DevGate`` semantics.
+
+    ``operator`` and ``user-plugin`` are always granted; ``system``
+    grants iff ``allow_system=True``. The gate ignores ``plugin_id``
+    and ``hookpoint`` (per the Slice-2.5 :class:`DevGate` shape), so
+    a test that registers a subscriber under an arbitrary module-named
+    plugin id continues to register cleanly.
+
+    Used by the registry-fixture family in
+    :mod:`tests.unit.hooks.conftest` — the Slice-2.5 test bodies that
+    register an ``operator``-tier subscriber under a default fixture
+    keep working without per-test rework. Tests that need strict
+    :class:`RealGate` semantics (empty grants ⇒ deny operator too,
+    exact ``plugin_id`` match) use :func:`make_deny_all_gate` /
+    :func:`make_allow_system_gate` directly.
+
+    The returned object is structurally a
+    :class:`alfred.hooks.capability.CapabilityGate` (:func:`isinstance`
+    check passes) but is not a :class:`RealGate` instance — it's the
+    private :class:`_DevGateLikeFixture` test double.
+    """
+    return _DevGateLikeFixture(allow_system=allow_system)
+
+
+__all__ = [
+    "make_allow_system_gate",
+    "make_default_test_gate",
+    "make_deny_all_gate",
+]

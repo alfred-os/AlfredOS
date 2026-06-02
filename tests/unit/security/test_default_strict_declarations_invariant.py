@@ -1,19 +1,25 @@
 """Bootstrap gate-selection invariant tests (PR-S3-2 Task 13).
 
-Spec §8.4: :class:`alfred.security.capability_gate._gate.RealGate` is the
-production default; :class:`alfred.hooks.capability.DevGate` is the
-development default. :mod:`alfred.bootstrap.gate_factory` is the ONLY
-module in ``src/alfred/`` that may read ``ALFRED_ENV`` for the purpose
-of selecting between the two — sec-007 forbids the read inside the gate
-itself, where an env-at-import-time read would make the gate's
-construction depend on global state rather than injected configuration.
+Spec §8.4 + PR-S3-7 (spec §15.1 flag-day):
+:class:`alfred.security.capability_gate._gate.RealGate` is now BOTH
+the production and the development gate. The dev branch wires it with
+an empty grant snapshot and an in-process backend stub (no Postgres);
+the production branch wires it with a real
+:class:`alfred.security.capability_gate.backend.PostgresBackend` and
+the heartbeat running. The Slice-2.5 :class:`DevGate` was removed in
+PR-S3-7. :mod:`alfred.bootstrap.gate_factory` is the ONLY module in
+``src/alfred/`` that may read ``ALFRED_ENV`` for the purpose of
+selecting which RealGate construction the supervisor wires — sec-007
+forbids the read inside the gate itself, where an env-at-import-time
+read would make the gate's construction depend on global state
+rather than injected configuration.
 
 Two invariants under test:
 
 1. **Behavioural** — :func:`build_dev_gate` returns a
-   :class:`DevGate`; :func:`build_real_gate` returns a
-   :class:`RealGate` constructed against the supplied backend and audit
-   sink.
+   :class:`RealGate` over an empty grant snapshot (every check denies
+   fail-closed); :func:`build_real_gate` returns a :class:`RealGate`
+   constructed against the supplied backend and audit sink.
 2. **Source-level** — :mod:`alfred.hooks.capability`,
    :mod:`alfred.security.capability_gate.policy`, and
    :mod:`alfred.security.capability_gate._gate` MUST NOT contain a
@@ -41,24 +47,27 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
-def test_build_dev_gate_returns_devgate_instance() -> None:
-    """:func:`build_dev_gate` returns a :class:`DevGate`.
+def test_build_dev_gate_returns_realgate_with_empty_grants() -> None:
+    """:func:`build_dev_gate` returns a fail-closed :class:`RealGate`.
 
-    DevGate is the development default per spec §8.4. The factory takes
-    no arguments — DevGate's constructor accepts an optional
-    ``allow_system`` flag, but the bootstrap default is the safer
-    ``allow_system=False``. Operator-tier subscribers still pass; only
-    system-tier subscribers are gated by the flag.
+    PR-S3-7 (spec §15.1 flag-day): the Slice-2.5 :class:`DevGate`
+    was removed from ``src/``; the development bootstrap path now
+    constructs a :class:`RealGate` with an empty grant snapshot, an
+    in-process backend stub, and no heartbeat. Every check denies
+    fail-closed — the safer default in the absence of a real grant
+    table. A developer who needs granted-system semantics for local
+    iteration uses :mod:`tests.helpers.gates` or seeds a real Postgres
+    grants table.
     """
     from alfred.bootstrap import gate_factory
-    from alfred.hooks.capability import DevGate
+    from alfred.security.capability_gate._gate import RealGate
 
     gate = gate_factory.build_dev_gate()
-    assert isinstance(gate, DevGate)
-    # The bootstrap default MUST be allow_system=False — the safer
-    # posture; a developer who needs system-tier access in a one-off
-    # script can construct DevGate(allow_system=True) directly.
-    assert gate.allow_system is False
+    assert isinstance(gate, RealGate)
+    # Empty grant snapshot ⇒ every check denies fail-closed.
+    assert not gate.check(plugin_id="any", hookpoint="any", requested_tier="operator")
+    assert not gate.check(plugin_id="any", hookpoint="any", requested_tier="system")
+    assert not gate.check(plugin_id="any", hookpoint="any", requested_tier="user-plugin")
 
 
 # ---------------------------------------------------------------------------
@@ -74,12 +83,16 @@ def test_build_dev_gate_returns_devgate_instance() -> None:
 def test_build_dev_gate_emits_gate_selected_log_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DevGate construction emits ``bootstrap.gate_selected`` with a warning.
+    """Dev-bootstrap gate construction emits ``bootstrap.gate_selected``.
 
     The structlog event MUST include:
-    - ``gate="DevGate"`` (closed vocabulary; log filters match on it)
+    - ``gate="DevelopmentRealGate"`` (PR-S3-7 closed vocabulary; log
+      filters match on it — distinct from the production
+      ``gate="RealGate"`` so an operator can spot the dev-branch wire
+      reaching production by mistake)
     - ``alfred_env=<raw>`` so an operator can confirm the env value
-    - ``warning="..."`` so the fail-open posture is visible in dashboards
+    - ``warning="..."`` so the fail-closed-by-default posture is
+      visible in dashboards
 
     Uses :func:`structlog.testing.capture_logs` rather than ``caplog``
     because the structlog config in this repo routes through structlog's
@@ -98,12 +111,12 @@ def test_build_dev_gate_emits_gate_selected_log_event(
     events = [e for e in captured if e.get("event") == "bootstrap.gate_selected"]
     assert events, f"expected bootstrap.gate_selected event; got {captured!r}"
     entry = events[0]
-    assert entry["gate"] == "DevGate"
+    assert entry["gate"] == "DevelopmentRealGate"
     # The raw env value (unset → "(unset)") surfaces so an operator can
     # confirm the bootstrap saw what they intended.
     assert entry["alfred_env"] == "(unset)"
-    # Fail-open posture is visible in dashboards without having to know
-    # which filter to add.
+    # The dev-branch posture warning surfaces in dashboards without
+    # having to know which filter to add.
     assert "warning" in entry
     assert "production" in entry["warning"].lower()
 
@@ -191,7 +204,9 @@ def test_is_production_defaults_to_false_when_env_unset(
 
     The default posture is development. An unset env var must not silently
     promote a test process to production-gate mode — the developer
-    receives DevGate's predictable answers unless they explicitly opt in.
+    receives the dev-branch :class:`RealGate` (post-PR-S3-7) with an
+    empty grant snapshot (every check denies fail-closed) unless they
+    explicitly opt in.
     """
     monkeypatch.delenv("ALFRED_ENV", raising=False)
     from alfred.bootstrap import gate_factory

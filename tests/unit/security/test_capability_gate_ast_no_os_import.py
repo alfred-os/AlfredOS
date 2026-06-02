@@ -9,7 +9,9 @@ capability-gate module must route through that bootstrap seam.
 
 This test is the source-level guard that backs the runtime invariant.
 Mirrors the sec-007 guard the Slice-2.5 PR-A landing pinned on
-:mod:`alfred.hooks.capability` (the DevGate file).
+:mod:`alfred.hooks.capability` (now Protocol-only — the Slice-2.5
+:class:`DevGate` class was removed in PR-S3-7, but the no-env-read
+contract still applies to the file).
 
 What the scan rejects:
 
@@ -91,11 +93,14 @@ def test_no_os_import_in_capability_gate_module(module_path: Path) -> None:
 
     Spec §8.4: ``ALFRED_ENV`` selection lives in
     :mod:`alfred.bootstrap.gate_factory`. The capability gate's hot-path
-    modules — Protocol + DevGate, GatePolicy, RealGate, StorageBackend,
-    and the proposal flow — must be DI-driven. A leaked ``import os``
-    would invite a future refactor that reads the env inside the gate
-    itself, undoing the bootstrap-seam isolation that makes the
-    invariant testable from the constructor surface.
+    modules — :class:`CapabilityGate` Protocol, :class:`GatePolicy`,
+    :class:`RealGate`, :class:`StorageBackend`, and the proposal flow
+    — must be DI-driven. A leaked ``import os`` would invite a future
+    refactor that reads the env inside the gate itself, undoing the
+    bootstrap-seam isolation that makes the invariant testable from
+    the constructor surface. PR-S3-7 removed the Slice-2.5
+    :class:`DevGate` class from ``alfred.hooks.capability``; the
+    no-os-import contract still applies to the now-Protocol-only file.
 
     On failure the diagnostic lists every offending line so the fix
     site is unambiguous — relocate the read to

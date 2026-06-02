@@ -86,8 +86,12 @@ class RealGate:
 
     Production code does NOT import this class directly: the bootstrap
     factory in :mod:`alfred.bootstrap.gate_factory` chooses between
-    :class:`RealGate` and :class:`alfred.hooks.capability.DevGate` based
-    on ``ALFRED_ENV``; that's the sec-007 env-isolation seam.
+    the development-branch construction (no grants, in-process stub
+    backend, no heartbeat) and the production-branch construction
+    (Postgres backend, heartbeat running) based on ``ALFRED_ENV``;
+    that's the sec-007 env-isolation seam. PR-S3-7 removed the
+    Slice-2.5 :class:`DevGate` from ``src/``; both bootstrap branches
+    now construct :class:`RealGate`.
     """
 
     def __init__(

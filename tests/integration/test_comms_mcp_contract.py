@@ -54,8 +54,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from alfred.audit import audit_row_schemas
-from alfred.hooks.capability import DevGate
 from alfred.plugins.session import AlfredPluginSession
+from tests.helpers.gates import make_default_test_gate
 
 PLUGIN_DIR: Path = Path(__file__).parent.parent.parent / "plugins" / "alfred_comms_test"
 MANIFEST_PATH: Path = PLUGIN_DIR / "manifest.toml"
@@ -166,11 +166,13 @@ async def test_comms_test_plugin_handshake(
       pinning that a refactor of the parse path cannot silently drop
       either field.
 
-    Also verifies that :class:`DevGate` itself (not just a mock) accepts
-    the manifest — the gate's ``check_plugin_load`` is a Slice-3
-    co-existence stub returning True unconditionally; pinning the
-    manifest against the real class catches a regression that would
-    require a non-trivial gate change.
+    Also verifies that the post-PR-S3-7 fixture-parity gate
+    (:func:`make_default_test_gate`) accepts the manifest — the
+    gate's ``check_plugin_load`` returns True for the
+    ``user-plugin`` subscriber tier (operator + user-plugin are
+    granted unconditionally by the fixture); pinning the manifest
+    against the real fixture catches a regression that would require
+    a non-trivial gate change.
     """
     assert MANIFEST_PATH.exists(), (
         f"Reference plugin manifest missing at {MANIFEST_PATH}; comms-MCP §9.1 "
@@ -212,10 +214,11 @@ async def test_comms_test_plugin_handshake(
         manifest_tier="user-plugin",
     )
 
-    # And the DevGate stub the production wiring uses also accepts the
-    # manifest (the Slice-3 fail-open shim; pinning the call site here
-    # surfaces any future tightening of the gate's plugin-load semantics).
-    real_gate = DevGate(allow_system=False)
+    # And the post-PR-S3-7 fixture-parity gate also accepts the
+    # manifest (the operator / user-plugin tiers are granted
+    # unconditionally; pinning the call site here surfaces any future
+    # tightening of the gate's plugin-load semantics).
+    real_gate = make_default_test_gate()
     assert real_gate.check_plugin_load(plugin_id="alfred.comms-test", manifest_tier="user-plugin")
 
 

@@ -69,11 +69,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from alfred.hooks import HookContext, HookRefusal, HookSubscriberError
-from alfred.hooks.capability import DevGate
 from alfred.hooks.invoke import ERROR_EXC_METADATA_KEY
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.memory.episodic import EpisodicMemory, EpisodicRecordInput, declare_hookpoints
 from alfred.memory.models import Episode
+from tests.helpers.gates import make_default_test_gate
 
 # Representative kwargs covering every parameter — including non-default
 # values for the six fields with defaults — so the "fields match input"
@@ -177,11 +177,13 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     ``refusable_tiers={"system"}`` — verifying that the system-only
     refusal contract holds and that a ``fail_closed=True`` chain raises
     :class:`HookSubscriberError` when a system-tier subscriber crashes
-    requires a registry whose :class:`DevGate` permits system-tier
-    registration. The pre-test singleton is captured and restored on
-    teardown so the test never leaks a permissive registry into a
-    sibling test (CLAUDE.md hard rule #4 — the gate is the security
-    layer; tests do not stub it away with an always-allow shim).
+    requires a registry whose fixture-parity gate
+    (:func:`make_default_test_gate(allow_system=True)`) permits
+    system-tier registration. The pre-test singleton is captured and
+    restored on teardown so the test never leaks a permissive
+    registry into a sibling test (CLAUDE.md hard rule #4 — the gate
+    is the security layer; tests do not stub it away with an
+    always-allow shim).
 
     Mirrors the fixture shape in :mod:`tests.unit.hooks.conftest` but
     lives here because the memory unit tests sit on a sibling tree and
@@ -189,7 +191,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     directory.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate(allow_system=True))
+    registry = HookRegistry(gate=make_default_test_gate(allow_system=True))
     set_registry(registry)
     # #119 — declare the episodic publisher's hookpoints on the fresh
     # registry BEFORE any subscriber registers. Production code reaches

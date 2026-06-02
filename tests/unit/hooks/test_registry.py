@@ -48,9 +48,11 @@ Invariants pinned here:
   ``hooks.subscriber_must_be_async`` catalog-rendered message. The
   language-toggle assertion pins the i18n-rule-#1 contract for the
   rejection message (operator-facing string → ``t()``).
-* **Gate refusal at register** — a :class:`DevGate` (default-deny on
-  ``system``) refusing a ``tier="system"`` subscriber raises
-  :class:`HookError`. The registry deliberately does NOT emit an audit
+* **Gate refusal at register** — a :func:`make_default_test_gate`
+  (the post-PR-S3-7 fixture-parity gate; ``operator`` /
+  ``user-plugin`` granted, ``system`` denied) refusing a
+  ``tier="system"`` subscriber raises :class:`HookError`.
+  The registry deliberately does NOT emit an audit
   row at register-time (sink.emit is async; register is sync); the
   decision is documented in :class:`HookRegistry`'s class docstring.
 * **Registration sequence monotonicity** — two consecutive
@@ -75,7 +77,6 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from alfred.hooks.audit_sink import StructlogAuditSink
-from alfred.hooks.capability import DevGate
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import (
@@ -88,6 +89,7 @@ from alfred.hooks.registry import (
     set_registry,
 )
 from alfred.i18n import set_language, t
+from tests.helpers.gates import make_default_test_gate
 from tests.unit.hooks.conftest import SpyAuditSink
 
 # ──────────────────────────────────────────────────────────────────────
@@ -254,7 +256,9 @@ def test_subscribers_sorted_by_tier_then_registration_seq(
     function-pure; hypothesis disallows pytest fixtures on the
     parameter list.
     """
-    registry = HookRegistry(gate=DevGate(allow_system=True), strict_declarations=False)
+    registry = HookRegistry(
+        gate=make_default_test_gate(allow_system=True), strict_declarations=False
+    )
 
     # Register one subscriber per element of the insertion order.
     # Each registration captures the seq it received so we can assert
@@ -394,7 +398,7 @@ def test_set_registry_swaps_the_active_singleton() -> None:
     so the harness-wide singleton is untouched after this test.
     """
     prior = get_registry()
-    other = HookRegistry(gate=DevGate())
+    other = HookRegistry(gate=make_default_test_gate())
     try:
         set_registry(other)
         assert get_registry() is other
@@ -481,7 +485,7 @@ def test_registry_exposes_injected_sink_via_public_attribute(
     copy or proxy. The PR-B DB-backed sink replaces this attribute at
     construction time; no source change to dispatch.
     """
-    registry = HookRegistry(gate=DevGate(), sink=spy_sink)
+    registry = HookRegistry(gate=make_default_test_gate(), sink=spy_sink)
     assert registry.sink is spy_sink
 
 
@@ -493,7 +497,7 @@ def test_registry_default_sink_is_structlog_audit_sink() -> None:
     has an obvious "before" to point at. The default's logger is the
     project's structlog handle ``alfred.hooks``.
     """
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     assert isinstance(registry.sink, StructlogAuditSink)
 
 
@@ -586,9 +590,10 @@ def test_register_sync_rejection_message_honours_active_language(
 def test_register_raises_hook_error_when_gate_refuses_system_tier(
     fresh_registry: HookRegistry,
 ) -> None:
-    """A subscriber requesting ``tier="system"`` against a default
-    :class:`DevGate` (``allow_system=False``) is refused — register
-    raises :class:`HookError`.
+    """A subscriber requesting ``tier="system"`` against the default
+    fixture-parity gate (:func:`make_default_test_gate`, system denied
+    unless ``allow_system=True``) is refused — register raises
+    :class:`HookError`.
 
     The decision (documented in :class:`HookRegistry`'s docstring):
     register is SYNC and does NOT emit an audit row itself. The audit
@@ -664,7 +669,15 @@ def test_register_unknown_tier_raises_hook_error_before_bucket_mutation() -> Non
     class _AlwaysAllowGate:
         """Adversarial gate — grants every requested tier, including
         unknown strings. The early tier-validation must catch the
-        misuse here, not the sort step."""
+        misuse here, not the sort step.
+
+        Implements the full :class:`CapabilityGate` Protocol surface
+        (the three methods; PR-S3-2 added the two plugin-load /
+        content-clearance methods to the Protocol). Structural-typing
+        check in :func:`isinstance` against
+        :class:`CapabilityGate` passes only when all three are
+        present.
+        """
 
         def check(
             self,
@@ -674,6 +687,25 @@ def test_register_unknown_tier_raises_hook_error_before_bucket_mutation() -> Non
             requested_tier: str,
         ) -> bool:
             del plugin_id, hookpoint, requested_tier
+            return True
+
+        def check_plugin_load(
+            self,
+            *,
+            plugin_id: str,
+            manifest_tier: str,
+        ) -> bool:
+            del plugin_id, manifest_tier
+            return True
+
+        def check_content_clearance(
+            self,
+            *,
+            plugin_id: str,
+            hookpoint: str,
+            content_tier: str,
+        ) -> bool:
+            del plugin_id, hookpoint, content_tier
             return True
 
     registry = HookRegistry(gate=_AlwaysAllowGate(), strict_declarations=False)

@@ -50,7 +50,6 @@ EXPECTED_PUBLIC_SURFACE: Final[frozenset[str]] = frozenset(
     {
         "AuditSink",
         "CapabilityGate",
-        "DevGate",
         "HookContext",
         "HookError",
         "HookKind",
@@ -70,16 +69,18 @@ EXPECTED_PUBLIC_SURFACE: Final[frozenset[str]] = frozenset(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 1. ``__all__`` equals the spec'd 14-symbol set, exactly
+# 1. ``__all__`` equals the spec'd 13-symbol set, exactly (post-PR-S3-7)
 # ──────────────────────────────────────────────────────────────────────
 
 
 def test_all_contains_exactly_the_spec_surface() -> None:
-    """``alfred.hooks.__all__`` equals the 14-symbol spec §3.1 set.
+    """``alfred.hooks.__all__`` equals the 13-symbol spec §3.1 set (post-PR-S3-7).
 
-    Set-equality, not subset — adding a 15th symbol is a spec change and must
-    fail this test. The reverse failure (missing a symbol) catches accidental
-    deletion during refactors.
+    Set-equality, not subset — adding a 14th symbol is a spec change
+    and must fail this test. The reverse failure (missing a symbol)
+    catches accidental deletion during refactors. PR-S3-7 dropped
+    ``DevGate`` from the surface in the flag-day removal (spec
+    §15.1); the count went from 14 to 13.
     """
     assert set(hooks_pkg.__all__) == EXPECTED_PUBLIC_SURFACE
 
@@ -136,7 +137,7 @@ def test_reexports_are_identity_equal_to_submodule_origins() -> None:
     callers that mixed import styles.
     """
     from alfred.hooks.audit_sink import AuditSink
-    from alfred.hooks.capability import CapabilityGate, DevGate
+    from alfred.hooks.capability import CapabilityGate
     from alfred.hooks.context import HookContext, HookKind
     from alfred.hooks.decorators import hook
     from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
@@ -152,7 +153,6 @@ def test_reexports_are_identity_equal_to_submodule_origins() -> None:
 
     assert hooks_pkg.AuditSink is AuditSink
     assert hooks_pkg.CapabilityGate is CapabilityGate
-    assert hooks_pkg.DevGate is DevGate
     assert hooks_pkg.HookContext is HookContext
     assert hooks_pkg.HookKind is HookKind
     assert hooks_pkg.HookError is HookError
@@ -400,7 +400,6 @@ def test_exported_classes_are_classes() -> None:
     assert isinstance(hooks_pkg.HookError, type)
     assert isinstance(hooks_pkg.HookRefusal, type)
     assert isinstance(hooks_pkg.HookSubscriberError, type)
-    assert isinstance(hooks_pkg.DevGate, type)
     assert isinstance(hooks_pkg.HookRegistry, type)
 
 

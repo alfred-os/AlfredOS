@@ -241,11 +241,13 @@ def _register_n_passthrough_pre_subscribers(
 ) -> None:
     """Register ``n`` pass-through async ``pre`` subscribers on ``hookpoint``.
 
-    Operator-tier by default — :class:`DevGate` grants operator and
-    user-plugin without a flag (the perf gate's fresh_registry fixture
-    does NOT pass ``allow_system=True``). Each subscriber returns its
-    input unchanged; the bench measures the spawn-await-fold cycle the
-    dispatcher pays per subscriber, NOT any subscriber-internal cost.
+    Operator-tier by default — the post-PR-S3-7 fixture-parity gate
+    (:func:`make_default_test_gate`) grants operator and user-plugin
+    without an ``allow_system=True`` flag (the perf gate's
+    ``fresh_registry`` fixture does NOT pass ``allow_system=True``).
+    Each subscriber returns its input unchanged; the bench measures
+    the spawn-await-fold cycle the dispatcher pays per subscriber,
+    NOT any subscriber-internal cost.
     """
     for i in range(n):
         registry.register(

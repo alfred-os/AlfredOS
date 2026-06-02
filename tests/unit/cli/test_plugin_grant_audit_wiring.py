@@ -32,7 +32,6 @@ from __future__ import annotations
 import pytest
 
 from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
-from alfred.hooks.capability import DevGate
 from alfred.hooks.registry import (
     SYSTEM_ONLY_TIERS,
     HookRegistry,
@@ -45,6 +44,7 @@ from alfred.security.capability_gate.proposals import (
     HOOKPOINT_GRANT_REQUESTED,
     HOOKPOINT_GRANT_REVOKED,
 )
+from tests.helpers.gates import make_default_test_gate
 
 
 def test_plugin_cli_imports_plugin_grant_fields_constant() -> None:
@@ -84,15 +84,16 @@ def test_plugin_cli_imports_plugin_grant_fields_constant() -> None:
 def isolated_registry(request: pytest.FixtureRequest) -> HookRegistry:
     """Install a fresh :class:`HookRegistry` and restore on teardown.
 
-    The default :class:`DevGate` denies the ``system`` tier — fine here
-    because :meth:`HookRegistry.register_hookpoint` does not consult the
-    gate (the gate only fires on subscriber registration). Swap-and-
-    restore so a sibling test's view of the global singleton is
+    The default fixture-parity gate (:func:`make_default_test_gate`,
+    ``allow_system=False``) denies the ``system`` tier — fine here
+    because :meth:`HookRegistry.register_hookpoint` does not consult
+    the gate (the gate only fires on subscriber registration). Swap-
+    and-restore so a sibling test's view of the global singleton is
     unaffected — same pattern as
     :mod:`tests.unit.identity.test_t1_hookpoint_declaration`.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     set_registry(registry)
 
     def _restore() -> None:
