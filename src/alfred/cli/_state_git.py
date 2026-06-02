@@ -275,13 +275,29 @@ def _legacy_payload_from_dict(
     if proposal_type.startswith(f"{WebAllowlistProposal.proposal_type}-"):
         # ``web-allowlist-{action}`` — parse the action off the tag so
         # the typed payload carries the closed-set Literal value.
+        #
+        # CR-149 round-10 (3339361774): canonical legacy shapes
+        # (``{"action": "add", ...}``) carry ``action`` in BOTH the
+        # type-tag and the payload dict. Splatting the payload as-is
+        # would raise ``TypeError: got multiple values for keyword
+        # argument 'action'`` before Pydantic ever validates the
+        # value. Strip the composite discriminator from the payload
+        # copy so the parsed value from the tag wins and the legacy
+        # round-trip remains lossless.
         action = proposal_type[len(WebAllowlistProposal.proposal_type) + 1 :]
-        return WebAllowlistProposal(action=action, **payload)  # type: ignore[arg-type]
+        payload_without_action = {k: v for k, v in payload.items() if k != "action"}
+        return WebAllowlistProposal(action=action, **payload_without_action)  # type: ignore[arg-type]
     if proposal_type.startswith(f"{ConfigSetProposal.proposal_type}-"):
         # ``config-{config_key}`` — parse the config_key off the tag
         # so the typed payload carries the closed-set Literal value.
+        # See the WebAllowlistProposal branch above for the
+        # discriminator-dedup rationale (CR-149 round-10).
         config_key = proposal_type[len(ConfigSetProposal.proposal_type) + 1 :]
-        return ConfigSetProposal(config_key=config_key, **payload)  # type: ignore[arg-type]
+        payload_without_config_key = {k: v for k, v in payload.items() if k != "config_key"}
+        return ConfigSetProposal(
+            config_key=config_key,  # type: ignore[arg-type]
+            **payload_without_config_key,  # type: ignore[arg-type]
+        )
     # Unknown type tag — no typed model yet. Test corpus seam only;
     # production callers always pass a canonical tag.
     return None

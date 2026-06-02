@@ -20,15 +20,22 @@ htmlcov/
 
 # Docker / runtime state — never commit. The negations below exempt
 # the in-tree ``src/alfred/state/`` Python package (ADR-0018 — typed
-# state.git proposal payloads) and the matching
-# ``tests/integration/state/`` round-trip suite; the runtime state.git
-# store at ``/var/lib/alfred/state.git`` and any developer-mounted
-# ``./state/`` bind volume still matches.
+# state.git proposal payloads), the matching
+# ``tests/integration/state/`` round-trip suite, and the
+# ``tests/unit/state/`` model-validator regression suite; the runtime
+# state.git store at ``/var/lib/alfred/state.git`` and any
+# developer-mounted ``./state/`` bind volume still match.
 state/
 !src/alfred/state/
 !src/alfred/state/**
 !tests/integration/state/
 !tests/integration/state/**
+!tests/unit/state/
+!tests/unit/state/**
+# Re-mask Python build artifacts that the un-negation above re-exposed.
+tests/unit/state/__pycache__/
+tests/integration/state/__pycache__/
+src/alfred/state/__pycache__/
 data/
 *.db
 *.sqlite*

@@ -41,9 +41,128 @@ Hard rules honoured here:
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal, Self
+import re
+from typing import ClassVar, Final, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# CR-149 round-10 (3339361798): canonical field-shape patterns for the
+# proposal payloads. Mirrored from ``alfred.cli._validators`` so a
+# non-CLI producer (a future async writer, a state.git replay tool, a
+# malformed test fixture) gets the same parse-time refusal semantics
+# the CLI applies — without introducing a reverse-direction import
+# from this neutral package back into ``alfred.cli``. The two sources
+# are pinned in lockstep by the closed-set tests in
+# :mod:`tests.unit.state.test_proposal_payloads` (paste-drift guard).
+#
+# * ``_PLUGIN_ID_PATTERN`` — dotted-lowercase identifier, every segment
+#   begins with a letter and ends with an alphanumeric. Matches the
+#   shape of every first-party plugin id today
+#   (``alfred.web-fetch``, ``alfred_comms_test``).
+# * ``_HOOKPOINT_PATTERN`` — dotted segments OR a single ``*`` wildcard.
+#   The wildcard form anchors a plugin-load grant (every hookpoint);
+#   the dotted form names a specific publisher boundary.
+# * ``_DOMAIN_PATTERN`` — bare lowercase domain shape. Per-label rules
+#   (RFC 1035 §2.3.1) are enforced via :data:`_DOMAIN_LABEL_PATTERN`.
+_PLUGIN_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[a-z](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z](?:[a-z0-9_-]*[a-z0-9])?)*$"
+)
+# Hookpoint segments accept upper- and lower-case letters and digits in
+# the body so production names like ``t3.downgrade_to_orchestrator`` and
+# tier-tagged fixtures like ``tag.T3`` (the content-tier tag hookpoint
+# used by the capability-gate round-trip suite) both pass. The shape
+# stays restrictive enough to refuse path traversal (``..``), path
+# separators (``/``), and whitespace — the load-bearing failure modes
+# the closed-shape check exists to surface.
+_HOOKPOINT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:\*|[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?(?:\.[A-Za-z](?:[A-Za-z0-9_-]*[A-Za-z0-9])?)*)$"
+)
+_DOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
+_DOMAIN_LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
+
+
+def _check_plugin_id(value: str) -> str:
+    """Refuse plugin ids that do not match the dotted-lowercase shape.
+
+    Mirrors :func:`alfred.cli._validators.validate_plugin_id` at the
+    Pydantic-model boundary so a non-CLI producer that constructs a
+    proposal payload directly cannot smuggle a malformed plugin_id
+    (path traversal, uppercase, trailing separator) past the writer.
+    """
+    if not _PLUGIN_ID_PATTERN.fullmatch(value):
+        msg = f"plugin_id {value!r} is not a valid dotted-lowercase identifier"
+        raise ValueError(msg)
+    return value
+
+
+def _check_hookpoint(value: str) -> str:
+    """Refuse hookpoints that are not a dotted name or the ``*`` wildcard.
+
+    The closed shape pins the on-disk projection: a downstream consumer
+    can split on ``.`` and route per-segment without first sanitising
+    the value. Per-segment grammar accepts mixed casing + digits so the
+    content-tier tag hookpoints (``tag.T3``) and the
+    snake_case publisher names (``t3.downgrade_to_orchestrator``) both
+    pass alongside the canonical lowercase tool hookpoints.
+    """
+    if not _HOOKPOINT_PATTERN.fullmatch(value):
+        msg = (
+            f"hookpoint {value!r} must be a dotted-segment name (letters / "
+            "digits / underscores / hyphens, no path separators or whitespace) "
+            "or the '*' wildcard"
+        )
+        raise ValueError(msg)
+    return value
+
+
+def _check_domain(value: str) -> str:
+    """Refuse domains that look like URLs or include path traversal shapes.
+
+    Mirrors :func:`alfred.cli._validators.validate_domain` minus the
+    Typer-specific localised error messages — the model-layer refusal
+    surfaces as a :class:`pydantic.ValidationError`.
+    """
+    if not value:
+        msg = "domain must be a non-empty bare hostname"
+        raise ValueError(msg)
+    if ".." in value or "/" in value or "\\" in value:
+        msg = f"domain {value!r} must not include path separators or traversal"
+        raise ValueError(msg)
+    if not _DOMAIN_PATTERN.fullmatch(value):
+        msg = f"domain {value!r} is not a valid bare lowercase hostname"
+        raise ValueError(msg)
+    labels = value.split(".")
+    if not all(_DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels):
+        msg = f"domain {value!r} contains an invalid label per RFC 1035 §2.3.1"
+        raise ValueError(msg)
+    return value
+
+
+# Closed set: providers the quarantined-LLM config knob may name. Mirrors
+# :data:`alfred.cli._validators._ALLOWED_QUARANTINED_PROVIDERS`; the
+# closed-set test in :mod:`tests.unit.state.test_proposal_payloads` pins
+# the two sources in lockstep so a new provider lands by widening both
+# constants in one commit.
+_ALLOWED_QUARANTINED_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "deepseek"})
+
+
+def _check_quarantined_provider(value: str) -> str:
+    """Refuse provider ids outside the closed set.
+
+    Mirrors :func:`alfred.cli._validators.validate_quarantined_provider`
+    at the Pydantic-model boundary so a non-CLI producer cannot smuggle
+    a non-declared provider id into ``ConfigSetProposal.value`` when
+    ``config_key="quarantined-provider"``.
+    """
+    if value not in _ALLOWED_QUARANTINED_PROVIDERS:
+        msg = (
+            f"quarantined-provider {value!r} is not in the declared set "
+            f"({sorted(_ALLOWED_QUARANTINED_PROVIDERS)})"
+        )
+        raise ValueError(msg)
+    return value
 
 
 class StateGitProposalPayload(BaseModel):
@@ -122,6 +241,20 @@ class PluginGrantProposal(StateGitProposalPayload):
     hookpoint: str
     content_tier: Literal["T0", "T1", "T2", "T3"] | None = None
 
+    # CR-149 round-10 (3339361798): enforce dotted-lowercase / wildcard
+    # shapes at the model boundary so a non-CLI producer cannot land a
+    # malformed plugin_id / hookpoint in state.git. Mirrors the closed
+    # shapes the CLI validators apply at parse time.
+    @field_validator("plugin_id")
+    @classmethod
+    def _validate_plugin_id(cls, value: str) -> str:
+        return _check_plugin_id(value)
+
+    @field_validator("hookpoint")
+    @classmethod
+    def _validate_hookpoint(cls, value: str) -> str:
+        return _check_hookpoint(value)
+
 
 class PluginRevokeProposal(StateGitProposalPayload):
     """Reviewer-gated revocation proposal — drops every grant against ``plugin_id``.
@@ -135,6 +268,13 @@ class PluginRevokeProposal(StateGitProposalPayload):
     proposal_type: ClassVar[str] = "policy-revoke"
 
     plugin_id: str
+
+    # CR-149 round-10 (3339361798): mirrors the grant-side refusal so
+    # both proposal families share parse-time field-shape semantics.
+    @field_validator("plugin_id")
+    @classmethod
+    def _validate_plugin_id(cls, value: str) -> str:
+        return _check_plugin_id(value)
 
 
 class WebAllowlistProposal(StateGitProposalPayload):
@@ -174,6 +314,15 @@ class WebAllowlistProposal(StateGitProposalPayload):
 
     action: Literal["add", "remove"]
     domain: str
+
+    # CR-149 round-10 (3339361798): refuse domains that look like URLs
+    # or include path-traversal shapes at the model boundary so a
+    # non-CLI producer cannot land a malformed domain in state.git.
+    @field_validator("domain")
+    @classmethod
+    def _validate_domain(cls, value: str) -> str:
+        return _check_domain(value)
+
     # CR-149 round-6: the field default is ``None`` so every non-CLI
     # producer (a future async writer, a state.git replay tool, a
     # malformed test fixture) constructs the spec §11.1 canonical
@@ -265,6 +414,14 @@ class ConfigSetProposal(StateGitProposalPayload):
 
     config_key: Literal["quarantined-provider"]
     value: str
+
+    # CR-149 round-10 (3339361798): pin the provider value to the
+    # declared closed set at the model boundary so a non-CLI producer
+    # cannot land an unknown provider id in state.git.
+    @field_validator("value")
+    @classmethod
+    def _validate_value(cls, value: str) -> str:
+        return _check_quarantined_provider(value)
 
 
 __all__ = [
