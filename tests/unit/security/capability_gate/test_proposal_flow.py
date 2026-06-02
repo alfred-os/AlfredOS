@@ -319,6 +319,48 @@ async def test_write_proposal_shim_validates_payload() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "bad_branch",
+    [
+        # empty suffix
+        "proposal/policy-grant-",
+        # path-separator embedded in suffix — would escape grants-tree layout
+        "proposal/policy-grant-deadbe/efdeadbeef",
+        # mixed casing
+        "proposal/policy-grant-DEADBEEFDEADBEEF",
+        # wrong width (8 chars)
+        "proposal/policy-grant-deadbeef",
+        # wrong width (32 chars)
+        "proposal/policy-grant-deadbeefdeadbeefdeadbeefdeadbeef",
+        # non-hex
+        "proposal/policy-grant-deadbeef-notahex",
+    ],
+)
+async def test_write_proposal_shim_refuses_non_canonical_suffix(bad_branch: str) -> None:
+    """CR-149 round-6: ``_write_proposal_to_state_git`` validates the suffix shape.
+
+    The previous prefix-only check accepted any string starting with
+    ``proposal/policy-grant-`` — including empty suffixes, embedded
+    path separators (ref injection / grants-tree escape), and
+    non-canonical widths. On this PRD §7.1 + §8.3 trust-boundary
+    surface a malformed ref desyncs the audit branch from the
+    persisted ref. Refuse at the public-API boundary so the sync
+    writer never sees an attacker-controlled or refactor-typo'd
+    proposal id.
+    """
+    from alfred.security.capability_gate.proposals import _write_proposal_to_state_git
+
+    with pytest.raises(ValueError, match="16-character lowercase hex"):
+        await _write_proposal_to_state_git(
+            branch_name=bad_branch,
+            plugin_id="alfred.test",
+            subscriber_tier="operator",
+            hookpoint="tool.web.fetch",
+            content_tier=None,
+            operator_user_id="op@example.com",
+        )
+
+
 async def test_create_proposal_branch_unpatched_shim_propagates_state_git_failure() -> None:
     """Un-patched ``create_proposal_branch`` surfaces a sync-writer failure.
 

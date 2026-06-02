@@ -289,6 +289,63 @@ async def test_rebuild_emits_capability_gate_rebuilt_audit_row(tmp_path: Path) -
     assert subject["grant_count"] == 1
 
 
+async def test_rebuild_success_correlation_id_shared_between_audit_and_complete_log(
+    tmp_path: Path,
+) -> None:
+    """CR-149 round-6: success-arm audit + ``rebuild.complete`` log share a correlation_id.
+
+    The rebuild flow now mints ONE correlation_id at the
+    :meth:`rebuild_from_state_git` boundary and threads it through
+    both the success-arm audit row AND the
+    ``capability_gate.rebuild.complete`` structlog line. Without the
+    shared id, an incident query that surfaces one stream could not
+    join to the other — the trust-boundary forensic bridge would
+    silently break.
+    """
+    from unittest.mock import patch
+
+    from alfred.security.capability_gate._gate import RealGate
+
+    payload = {
+        "plugin_id": "alfred.web-fetch",
+        "subscriber_tier": "operator",
+        "hookpoint": "tool.web.fetch",
+        "content_tier": None,
+        "proposal_branch": "proposal/policy-grant-abc",
+    }
+    repo_path, new_head = _seed_state_git(tmp_path, {"g.json": payload})
+
+    backend = _make_backend(sync_hash="old-hash")
+    sink = _make_audit_sink()
+    gate = await RealGate.create(
+        backend=backend,
+        audit_sink=sink,
+        state_git_path=repo_path,
+    )
+
+    captured_complete_kwargs: list[dict[str, object]] = []
+
+    def _capture_info(event: str, **kwargs: object) -> None:
+        if event == "capability_gate.rebuild.complete":
+            captured_complete_kwargs.append(kwargs)
+
+    with patch("alfred.security.capability_gate._gate._log") as mock_log:
+        mock_log.info = _capture_info
+        # ``debug`` is exercised by the cache-skip path; the test only
+        # asserts on ``info``, but stub ``debug`` so unexpected calls
+        # do not crash the captor.
+        mock_log.debug = lambda *_a, **_kw: None
+        await gate.rebuild_from_state_git(state_git_head=new_head)
+
+    sink.append_schema.assert_awaited_once()
+    audit_kwargs = sink.append_schema.await_args.kwargs
+    audit_correlation_id = audit_kwargs["subject"]["correlation_id"]
+    assert audit_kwargs["trace_id"] == audit_correlation_id
+
+    assert len(captured_complete_kwargs) == 1, captured_complete_kwargs
+    assert captured_complete_kwargs[0]["correlation_id"] == audit_correlation_id
+
+
 # ---------------------------------------------------------------------------
 # Empty grants tree
 # ---------------------------------------------------------------------------

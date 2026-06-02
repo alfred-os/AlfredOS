@@ -45,6 +45,7 @@ construction.
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import uuid
 from typing import TYPE_CHECKING, Final, Literal, cast
@@ -80,6 +81,13 @@ _GRANT_HOOKPOINTS: Final[tuple[str, ...]] = (
     HOOKPOINT_GRANT_DENIED,
     HOOKPOINT_GRANT_REVOKED,
 )
+
+# CR-149 round-6: canonical proposal-id shape — 16 lowercase hex
+# characters. Mirrors
+# :data:`alfred.cli._state_git._PROPOSAL_ID_RE` so the async writer
+# and the sync writer share a single validator surface; a future
+# tightening of the id namespace lands in one place.
+_PROPOSAL_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{16}$")
 
 
 def declare_hookpoints(registry: HookRegistry | None = None) -> None:
@@ -351,6 +359,24 @@ async def _write_proposal_to_state_git(
         )
         raise ValueError(msg)
     proposal_id = branch_name[len(expected_prefix) :]
+    # CR-149 round-6: validate the suffix shape too. The prefix check
+    # accepted anything starting with ``proposal/policy-grant-`` —
+    # including an empty suffix, embedded ``/`` (which would escape
+    # the canonical ref + grants-tree path), and non-hex characters.
+    # On this PRD §7.1 + §8.3 trust-boundary surface a malformed ref
+    # would desync the audit branch from the persisted ref, breaking
+    # the audit-graph join. Pin the canonical
+    # :func:`secrets.token_hex(8)` shape — 16 lowercase hex characters
+    # — so the sync writer (which embeds ``proposal_id`` into both
+    # the branch name and ``policies/grants/<plugin_id>/<id>.json``)
+    # never sees an attacker-controlled or refactor-typo'd value.
+    if _PROPOSAL_ID_RE.fullmatch(proposal_id) is None:
+        msg = (
+            f"_write_proposal_to_state_git: branch_name {branch_name!r} "
+            "must end with a 16-character lowercase hex proposal id "
+            f"(got suffix {proposal_id!r})."
+        )
+        raise ValueError(msg)
 
     client = StateGitProposalClient()
     result = await asyncio.to_thread(

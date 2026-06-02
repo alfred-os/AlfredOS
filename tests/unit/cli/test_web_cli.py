@@ -153,6 +153,40 @@ def test_web_allowlist_proposal_action_remove_allows_none_path_prefix() -> None:
     assert payload.path_prefix is None
 
 
+def test_web_allowlist_proposal_remove_default_is_none() -> None:
+    """CR-149 round-6: omitting ``path_prefix`` on the remove path defaults to ``None``.
+
+    Spec §11.1: whole-entry deletion is encoded as ``path_prefix=None``.
+    The previous field default was ``"/"`` so a non-CLI producer that
+    constructed ``WebAllowlistProposal(action="remove", domain=...)``
+    silently emitted "remove root-prefix only" instead of "remove
+    whole entry". Defaulting to ``None`` makes the spec-canonical
+    shape the path-of-least-resistance, while a ``mode="before"``
+    normalizer restores the historical ``"/"`` for the add path so
+    the CLI's add surface keeps working.
+    """
+    from alfred.state.proposal_payloads import WebAllowlistProposal
+
+    payload = WebAllowlistProposal(action="remove", domain="example.com")
+    assert payload.path_prefix is None
+
+
+def test_web_allowlist_proposal_add_default_normalises_to_root() -> None:
+    """CR-149 round-6: omitting ``path_prefix`` on the add path normalises to ``"/"``.
+
+    Pairs with the remove-default flip: the ``mode="before"``
+    normalizer restores the historical ``"/"`` default ONLY when the
+    field is omitted on ``action="add"``. An explicit
+    ``path_prefix=None`` on the add path is still refused by
+    ``_check_action_path_prefix_invariant`` (the existing
+    round-3 boundary stays loud).
+    """
+    from alfred.state.proposal_payloads import WebAllowlistProposal
+
+    payload = WebAllowlistProposal(action="add", domain="example.com")
+    assert payload.path_prefix == "/"
+
+
 def test_allowlist_add_default_path_prefix_is_root(
     runner: CliRunner, mock_add_proposal: ProposalResult
 ) -> None:
