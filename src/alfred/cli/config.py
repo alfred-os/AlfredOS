@@ -45,7 +45,6 @@ from typing import Annotated, Final
 import typer
 import yaml
 
-from alfred.audit.audit_row_schemas import CONFIG_SET_REQUESTED_FIELDS
 from alfred.cli._state_git import StateGitProposalClient, queue_proposal_or_exit
 from alfred.cli._validators import validate_quarantined_provider
 from alfred.i18n import t
@@ -294,6 +293,14 @@ def config_set(
         # knob plugs in a per-key validator without touching this branch.
         if key == "quarantined-provider":
             value = validate_quarantined_provider(value)
+        # perf-001: ``audit_row_schemas`` lives under the ``alfred.audit``
+        # package whose ``__init__`` eagerly pulls in :class:`AuditEntry`
+        # from :mod:`alfred.memory.models` (~140 ms of SQLAlchemy ORM).
+        # The constant is only needed on the high-blast write path so the
+        # import is deferred here rather than at module top, keeping the
+        # ``alfred --help`` surface light.
+        from alfred.audit.audit_row_schemas import CONFIG_SET_REQUESTED_FIELDS
+
         # Stage 3 (arch-001 / cross-cutting R2): the audit-row stand-in
         # fires via :data:`CONFIG_SET_REQUESTED_FIELDS` BEFORE the
         # state.git write. CLAUDE.md hard rule #6: the audit row carries

@@ -41,14 +41,10 @@ the reviewer-side rebuild emits. The PR-S3-7 swap from structlog to
 
 from __future__ import annotations
 
-from typing import Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Final
 
 import typer
 
-from alfred.audit.audit_row_schemas import (
-    PLUGIN_GRANT_FIELDS,
-    PLUGIN_GRANT_REQUESTED_FIELDS,
-)
 from alfred.cli._state_git import (
     StateGitProposalClient,
     queue_proposal_or_exit,
@@ -63,6 +59,17 @@ from alfred.state.proposal_payloads import (
     PluginGrantProposal,
     PluginRevokeProposal,
 )
+
+if TYPE_CHECKING:
+    # Type-only re-exports for the constants returned by ``__getattr__``.
+    # The runtime import lives inside the command bodies + the lazy
+    # module-attribute hook so ``alfred --help`` does not pay the
+    # ~140 ms SQLAlchemy ORM load that the parent ``alfred.audit``
+    # package init triggers.
+    from alfred.audit.audit_row_schemas import (
+        PLUGIN_GRANT_FIELDS,
+        PLUGIN_GRANT_REQUESTED_FIELDS,
+    )
 
 # The CLI surface re-exports :data:`PLUGIN_GRANT_FIELDS` so the
 # audit-row shape stays a single source of truth between the
@@ -142,7 +149,15 @@ def _queue_grant_proposal(
     render it) so the operator can copy-paste it cleanly. The list-
     pending follow-up (devex-006) is bundled into the pending-review
     catalog entry itself.
+
+    perf-001: ``audit_row_schemas`` is imported lazily here — the
+    constant is only needed on the grant-request emit path, and its
+    parent ``alfred.audit`` package init eagerly loads
+    :mod:`alfred.memory.models` (~140 ms of SQLAlchemy ORM). Deferring
+    keeps ``alfred plugin --help`` light.
     """
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
     result = queue_proposal_or_exit(
         payload=PluginGrantProposal(
             plugin_id=plugin_id,
@@ -354,7 +369,13 @@ def revoke(
     distinct from the supervisor-side in-flight revocation denial
     (which uses :data:`PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS`); the two
     families capture different events at different layers.
+
+    perf-001: ``audit_row_schemas`` is imported lazily here for the
+    same reason as :func:`_queue_grant_proposal` — keep the typer
+    --help surface light.
     """
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
+
     queue_proposal_or_exit(
         payload=PluginRevokeProposal(plugin_id=plugin_id),
         denied_key="cli.plugin.revoke.denied",
@@ -436,6 +457,49 @@ def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
         t("cli.plugin.revoke.denied"),
         t("cli.plugin.revoke.pending_review"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Lazy module-attribute resolution for the audit-row-schema re-exports
+# ---------------------------------------------------------------------------
+#
+# perf-001: ``test_plugin_grant_audit_wiring.py`` asserts
+# ``alfred.cli.plugin.PLUGIN_GRANT_FIELDS is PLUGIN_GRANT_FIELDS`` to pin
+# the contract that the CLI's audit-row schema name resolves to the same
+# canonical constant as ``alfred.audit.audit_row_schemas`` ships. Eagerly
+# importing the constants at module-top forced the parent ``alfred.audit``
+# package init to load :mod:`alfred.memory.models` (SQLAlchemy ORM, ~140 ms)
+# on every ``alfred --help`` invocation that imported any sub-app.
+#
+# PEP 562's module-level ``__getattr__`` defers the import until the
+# attribute is actually read. The test contract (``plugin.PLUGIN_GRANT_FIELDS
+# is X``) keeps working because Python caches ``__getattr__`` resolutions
+# the same way it caches regular module attributes — repeat reads return
+# the same object. Any unknown attribute raises the standard
+# ``AttributeError`` rather than silently importing something unintended.
+_LAZY_AUDIT_SCHEMA_NAMES: Final[frozenset[str]] = frozenset(
+    {"PLUGIN_GRANT_FIELDS", "PLUGIN_GRANT_REQUESTED_FIELDS"}
+)
+
+
+def __getattr__(name: str) -> object:
+    """Lazy resolver for the audit-row-schema re-exports.
+
+    Resolves :data:`PLUGIN_GRANT_FIELDS` and
+    :data:`PLUGIN_GRANT_REQUESTED_FIELDS` from
+    :mod:`alfred.audit.audit_row_schemas` on first access. Caches by
+    setting the resolved value as a real module attribute so repeat
+    reads do not re-trigger the import lookup.
+    """
+    if name in _LAZY_AUDIT_SCHEMA_NAMES:
+        import alfred.audit.audit_row_schemas as schemas
+
+        value = getattr(schemas, name)
+        # Cache so subsequent attribute reads bypass __getattr__.
+        globals()[name] = value
+        return value
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
 
 
 __all__ = ["PLUGIN_GRANT_FIELDS", "PLUGIN_GRANT_REQUESTED_FIELDS", "plugin_app"]

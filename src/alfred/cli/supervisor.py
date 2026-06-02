@@ -22,7 +22,6 @@ from typing import Annotated
 import structlog
 import typer
 
-from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
 from alfred.i18n import t
 
 supervisor_app = typer.Typer(help=t("cli.supervisor.help"), no_args_is_help=True)
@@ -52,7 +51,16 @@ def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
     The structlog redactor in :mod:`alfred.cli._bootstrap` runs in front
     of every output processor so any accidental secret-shaped string in
     ``component_id`` is masked before render.
+
+    perf-001: :mod:`alfred.audit.audit_row_schemas` is imported lazily
+    inside the function body because the parent package's ``__init__``
+    eagerly loads :class:`alfred.memory.models.AuditEntry`, pulling the
+    SQLAlchemy ORM (~140 ms) into every ``alfred --help`` invocation
+    that imports this sub-app. Deferring the constant lookup to the
+    actual emit path keeps the typer surface light.
     """
+    from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
+
     # ``correlation_id`` ties the attempt row to the eventual
     # supervisor-side reset row (when PR-S3-7 wires the live emit) so
     # the audit-graph forensic traversal can join the two halves.
