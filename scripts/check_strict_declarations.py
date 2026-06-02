@@ -81,8 +81,12 @@ def main() -> int:
         print(f"FAIL: {src_dir} does not exist", file=sys.stderr)
         return 1
 
-    res = subprocess.run(
-        ["grep", "-rnE", _PATTERN, str(src_dir)],
+    # S603/S607: ``grep`` is intentionally invoked by PATH lookup with a
+    # hard-coded argv (regex literal + repo-resolved src/ path). No untrusted
+    # input flows through this subprocess; the security stage's CI is the
+    # only caller. The findings are doc-level FPs for this guard.
+    res = subprocess.run(  # noqa: S603
+        ["grep", "-rnE", _PATTERN, str(src_dir)],  # noqa: S607
         capture_output=True,
         text=True,
         check=False,
