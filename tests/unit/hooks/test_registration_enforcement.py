@@ -906,30 +906,37 @@ def test_emit_sync_no_running_loop_arm_bounds_stalling_sink() -> None:
 
 class _LatentlyCompletingAuditSink:
     """Structural :class:`alfred.hooks.audit_sink.AuditSink` whose
-    :meth:`emit` sleeps just long enough to land AFTER the
-    :data:`_EMIT_SYNC_THREAD_JOIN_SECONDS` bound.
+    :meth:`emit` sleeps longer than the
+    :data:`_EMIT_SYNC_THREAD_JOIN_SECONDS` bound, then commits.
 
-    Pins err-002: when the daemon thread's emit completes AFTER the
-    calling thread has fired the structlog fallback, the sink and the
-    fallback must NOT both record a row for the same correlation_id.
-    The :class:`threading.Lock` emit-claim ensures whichever side
-    acquires it first emits its row; the other side observes the
-    claim is taken and skips.
+    Pins err-002 under the CR-156 round-6 rewrite (3342416844): the
+    daemon-thread arm of :meth:`HookRegistry._emit_sync` no longer
+    acquires the emit-claim Lock BEFORE calling ``sink.emit`` — that
+    earlier shape risked a stalled sink holding the lock and silently
+    suppressing the calling thread's structlog fallback, dropping the
+    row entirely (a CLAUDE.md hard-rule-#7 violation). The current
+    shape runs ``sink.emit`` FIRST, without holding the lock, and
+    only attempts ``emit_claim.acquire`` AFTER the sink returns. The
+    contract is AT-LEAST-ONCE: the row is guaranteed to land on at
+    least one channel (sink and/or structlog fallback); the rare
+    "sink completes after the bound" race may double-emit, and the
+    audit-graph correlator dedupes by ``(event, correlation_id,
+    hookpoint)`` downstream.
 
     Sleep is 0.75 s — outside the 0.5 s bound, but small enough that
     the daemon actually completes within the test's wall-clock window
-    (the daemon is *not* hung; it just lost the race).
+    (the daemon is *not* hung; it just lost the timing race).
 
-    :attr:`done_event` is a cross-thread completion signal. The
-    daemon thread runs ``emit`` inside its own ``asyncio.run`` call;
-    when the coroutine finishes (success path or
-    :class:`asyncio.CancelledError`), the event is set. The calling
-    thread waits on it with a bounded ``timeout`` so the exact-once
-    assertion runs only after the daemon has either completed or
-    been suppressed by the emit-claim. This replaces the previous
-    ``time.sleep(1.5)`` whose scheduler-sensitive padding could let
-    the daemon finish AFTER the assertion, producing a false-positive
-    exactly-once result (CR-156 round-3 err-002 determinism).
+    :attr:`done_event` is a cross-thread completion signal CR-156
+    round-6 (3342416860) repaired: it's now set unconditionally from
+    the sink's ``finally`` block — which fires regardless of whether
+    ``emit`` returned normally, was cancelled, or raised — so a
+    calling thread that waits on it always unblocks the moment the
+    sink's coroutine settles. This is the only path the test waits
+    on; the daemon-thread wrapper itself does NOT set
+    :attr:`done_event` because (under the post-emit-acquire shape)
+    the daemon always calls ``sink.emit`` before returning, and the
+    sink's own finally guarantees the signal.
     """
 
     def __init__(self) -> None:
@@ -937,12 +944,9 @@ class _LatentlyCompletingAuditSink:
         # ``threading.Event`` is the documented thread-safe signal
         # between the daemon thread's ``asyncio.run(emit(...))`` and
         # the calling thread's ``done_event.wait(timeout=...)``. The
-        # event remains unset until ``emit`` reaches its
-        # ``finally`` — including the case where the daemon's coroutine
-        # is suppressed by the emit-claim Lock and never appends a
-        # row. The calling thread can therefore wait on
-        # "daemon ran to completion" without waiting on
-        # "daemon recorded a row".
+        # event is set inside ``emit``'s ``finally`` so the calling
+        # thread can wait on "the sink coroutine has settled" without
+        # racing on the daemon's post-emit ``acquire`` step.
         self.done_event: threading.Event = threading.Event()
 
     async def emit(
@@ -956,12 +960,11 @@ class _LatentlyCompletingAuditSink:
 
         The 0.75 s sleep lands outside the 0.5 s bound but inside the
         test's wall-clock window, so the daemon completes mid-test.
-        ``done_event`` is set in the ``finally`` so the calling thread's
-        wait unblocks regardless of whether this coroutine completed
-        normally, was cancelled, or raised — all three are legitimate
-        outcomes for the err-002 race and all three end the
-        "is the daemon still in flight?" uncertainty the test guards
-        against.
+        ``done_event`` is set in the ``finally`` so the calling
+        thread's wait unblocks regardless of whether this coroutine
+        completed normally, was cancelled, or raised — all three are
+        legitimate outcomes and all three end the "is the daemon
+        still in flight?" uncertainty the test guards against.
         """
         try:
             await asyncio.sleep(0.75)
@@ -976,37 +979,137 @@ class _LatentlyCompletingAuditSink:
             self.done_event.set()
 
 
-def test_emit_sync_running_loop_arm_no_double_row_when_daemon_completes_after_timeout() -> None:
-    """err-002: the daemon-thread arm of :meth:`HookRegistry._emit_sync`
-    MUST NOT double-emit the row when the sink completes AFTER the
-    calling thread has fired the structlog fallback.
+class _FastCompletingAuditSink:
+    """Structural :class:`AuditSink` whose ``emit`` returns near-instantly.
 
-    The race: the daemon's :func:`asyncio.run` invocation can outlive
-    the bounded ``thread.join(timeout=_EMIT_SYNC_THREAD_JOIN_SECONDS)``.
-    A sink that takes 0.75 s to complete (versus the 0.5 s bound) will
-    have the calling thread proceed to the timeout fallback BEFORE the
-    sink's emit returns. Without the emit-claim Lock, this produces
-    two rows for the same correlation_id — the daemon's sink row plus
-    the calling thread's structlog fallback row.
+    Used to pin the happy path of the CR-156 round-6 rewrite: when
+    the sink completes well inside the
+    :data:`_EMIT_SYNC_THREAD_JOIN_SECONDS` bound, the daemon's
+    post-emit ``emit_claim.acquire`` succeeds, no fallback fires,
+    and the row lands EXACTLY ONCE on the sink. This is the
+    typical-production case (sink is a fast structlog write or a
+    well-tuned DB connection).
+    """
 
-    With the emit-claim Lock:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.done_event: threading.Event = threading.Event()
 
-    * The calling thread acquires the claim (``acquire(blocking=False)``)
-      before firing the fallback. If the daemon already holds the
-      claim (it acquired it before calling ``asyncio.run``), the
-      calling thread's ``acquire`` returns ``False`` and the fallback
-      is skipped — the sink will record the row.
-    * The daemon's ``_drive`` acquires the claim before calling
-      ``sink.emit``. If the calling thread already won (post-timeout
-      fallback fired), the daemon's ``acquire`` returns ``False`` and
-      the sink call is skipped — the row is on the structlog
-      fallback.
+    async def emit(
+        self,
+        *,
+        event: str,
+        correlation_id: str,
+        fields: Mapping[str, object],
+    ) -> None:
+        """Record the call immediately and signal completion."""
+        try:
+            self.calls.append(
+                {
+                    "event": event,
+                    "correlation_id": correlation_id,
+                    "fields": dict(fields),
+                }
+            )
+        finally:
+            self.done_event.set()
 
-    Whichever side acquires the claim first emits. The other side
-    observes the claim is taken and emits nothing.
 
-    Test assertion: the sum of (rows recorded on the spy sink) + (rows
-    captured on the ``audit_fallback`` channel) is EXACTLY ONE.
+def test_emit_sync_running_loop_arm_fast_sink_no_fallback() -> None:
+    """err-002 happy path: a sink that completes well inside the
+    join bound emits EXACTLY ONCE on the sink, and the calling
+    thread's structlog fallback does NOT fire.
+
+    With the CR-156 round-6 rewrite (3342416844) the daemon now
+    calls ``sink.emit`` first WITHOUT holding the claim, then
+    attempts ``emit_claim.acquire`` after the sink returns. In the
+    fast-sink case the daemon's post-emit acquire wins (the calling
+    thread's join completes before its own timeout-branch runs), so
+    the claim stays held and the calling thread's post-timeout
+    fallback never enters. Exactly one row on the sink.
+    """
+    sink = _FastCompletingAuditSink()
+    registry = HookRegistry(
+        gate=make_deny_all_gate(),
+        sink=sink,
+        strict_declarations=True,
+    )
+    registry.register_hookpoint(
+        name="before_db_write",
+        subscribable_tiers=frozenset({"system", "operator"}),
+        refusable_tiers=frozenset({"system"}),
+        fail_closed=True,
+    )
+
+    async def _provoke() -> None:
+        """Trigger the running-loop arm via the tier-rejection raise."""
+        with pytest.raises(HookError, match="not allowed on hookpoint"):
+            registry.register(
+                hook_fn=_noop,
+                hookpoint="before_db_write",
+                kind="pre",
+                tier="user-plugin",
+            )
+
+    with structlog.testing.capture_logs() as captured:
+        asyncio.run(_provoke())
+        # Even with a fast sink, wait on the explicit completion
+        # signal so the assertion doesn't race the daemon's post-emit
+        # ``acquire``. 5 s is generous against a near-instant sink.
+        completed = sink.done_event.wait(timeout=5.0)
+        assert completed, (
+            "_FastCompletingAuditSink.done_event never fired within 5s; "
+            "the daemon thread either never started or is genuinely stuck."
+        )
+
+    fallback_rows = [
+        c
+        for c in captured
+        if c.get("event") == HOOKS_TIER_REJECTED and c.get("reason") == "sink_emit_timeout"
+    ]
+    sink_rows = [c for c in sink.calls if c["event"] == HOOKS_TIER_REJECTED]
+    assert len(sink_rows) == 1, (
+        f"Expected exactly one sink row on the happy path; got {sink_rows!r}"
+    )
+    assert len(fallback_rows) == 0, (
+        f"Fast sink must NOT trigger the structlog fallback; got {fallback_rows!r}. "
+        f"This signals the daemon's post-emit ``emit_claim.acquire`` lost the race "
+        f"with the calling thread's timeout-fallback branch."
+    )
+
+
+def test_emit_sync_running_loop_arm_stalled_sink_at_least_once() -> None:
+    """err-002 stalled-sink path: a sink that takes 0.75 s to complete
+    against a 0.5 s join bound lands the row on AT LEAST ONE channel.
+
+    The CR-156 round-6 rewrite (3342416844) trades the previous
+    "exactly once or no row at all" failure mode for an explicit
+    AT-LEAST-ONCE contract:
+
+    * The daemon now calls ``sink.emit`` WITHOUT first acquiring the
+      claim, so a stalled sink does not block the calling thread's
+      fallback (the prior bug: lock-held-during-stall left rows
+      landing NOWHERE — a CLAUDE.md hard-rule-#7 violation).
+    * The calling thread's post-timeout fallback acquires the claim
+      under ``acquire(blocking=False)``. With the daemon no longer
+      holding it during the stall, the acquire succeeds and the
+      fallback fires.
+    * When the sink eventually returns (after the bound), the daemon
+      attempts its own post-emit acquire. That acquire now fails
+      because the calling thread won; the daemon exits silently.
+      The sink HAS already committed its row, AND the fallback also
+      committed its row — two rows for the same ``correlation_id``,
+      which the audit-graph correlator dedupes by
+      ``(event, correlation_id, hookpoint)`` downstream.
+
+    The test assertion is AT LEAST ONE (not exactly one): with
+    ``sleep(0.75)`` past the ``0.5`` bound, the realistic outcome is
+    one fallback row plus one (late) sink row, totalling two. On
+    fast hardware the daemon's emit may occasionally beat the join
+    bound by a few ms (1 row); on slow hardware the wait-for race
+    consistently lands both (2 rows). Both are correct under the new
+    contract. The release-blocker is ZERO rows; the test rejects
+    that case loudly.
     """
     sink = _LatentlyCompletingAuditSink()
     registry = HookRegistry(
@@ -1033,27 +1136,18 @@ def test_emit_sync_running_loop_arm_no_double_row_when_daemon_completes_after_ti
 
     with structlog.testing.capture_logs() as captured:
         asyncio.run(_provoke())
-        # Wait on the sink's completion signal rather than a fixed
-        # wall-clock delay. ``done_event`` is set inside the daemon's
-        # ``emit`` ``finally`` block so we unblock the moment the
-        # daemon's coroutine either completes normally OR is
-        # suppressed by the emit-claim Lock (which prevents emit
-        # from running at all). The 5 s timeout is two orders of
-        # magnitude above the 0.75 s sleep — large enough that a
-        # genuinely-stuck daemon surfaces as a real test failure
-        # (``done_event`` never set ⇒ ``wait`` returns ``False``
-        # below), small enough that the suite stays fast. The
-        # explicit ``assert`` converts a timeout into a loud failure
-        # rather than letting the assertion proceed with an
-        # in-flight daemon — that conversion is what flushes out the
-        # err-002 determinism regression CR-156 round-3 called out
-        # (``time.sleep(1.5)`` made the exact-once check
-        # scheduler-sensitive).
+        # Wait on the sink's own ``finally`` signal — CR-156 round-6
+        # (3342416860) restored this as the source-of-truth for "the
+        # sink coroutine has settled". The previous shape risked the
+        # signal never firing if the daemon skipped ``emit``; under
+        # the new post-emit-acquire shape the daemon ALWAYS calls
+        # ``emit`` and the ``finally`` block always runs, so the
+        # signal is reliable.
         completed = sink.done_event.wait(timeout=5.0)
         assert completed, (
             "_LatentlyCompletingAuditSink.done_event never fired within 5s; "
             "the daemon thread either never started or is genuinely stuck "
-            "— this would make the exact-once assertion meaningless."
+            "— this would make the at-least-once assertion meaningless."
         )
 
     fallback_rows = [
@@ -1063,9 +1157,25 @@ def test_emit_sync_running_loop_arm_no_double_row_when_daemon_completes_after_ti
     ]
     sink_rows = [c for c in sink.calls if c["event"] == HOOKS_TIER_REJECTED]
     total_rows = len(fallback_rows) + len(sink_rows)
-    assert total_rows == 1, (
-        f"Expected EXACTLY one audit row across (sink + fallback); "
+    assert total_rows >= 1, (
+        f"Expected AT LEAST one audit row across (sink + fallback); "
         f"got sink={len(sink_rows)}, fallback={len(fallback_rows)}. "
-        f"This is err-002: the emit-claim Lock failed to suppress one "
-        f"side of the race."
+        f"ZERO rows is a CLAUDE.md hard-rule-#7 violation — the "
+        f"register-time rejection lost its audit attribution entirely."
+    )
+    # In the stalled-sink scenario the calling-thread fallback path
+    # is the load-bearing safety net. Assert it engaged: a stall
+    # where the fallback DIDN'T fire (and the sink eventually did)
+    # is still correct under the at-least-once contract, but it
+    # would also be the case if the post-emit-acquire ordering
+    # silently regressed. Pin the fallback explicitly so a future
+    # regression to "lock-held-during-stall" surfaces as a test
+    # failure rather than a flaky pass.
+    assert len(fallback_rows) >= 1, (
+        f"Expected the calling-thread structlog fallback to fire when "
+        f"the sink stalls past the join bound (CLAUDE.md hard-rule-#7 "
+        f"escape path); got 0 fallback rows. If this assertion fails, "
+        f"either the daemon is re-acquiring the claim before the sink "
+        f"call (regression of CR-156 round-6 3342416844) or the test "
+        f"sink is somehow beating the 0.5 s bound."
     )
