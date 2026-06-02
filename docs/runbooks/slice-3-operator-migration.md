@@ -81,9 +81,10 @@ and the corresponding capability checks deny fail-closed. There is no
 dedicated `alfred chat` startup hint for the unseeded state in this
 release (the design-doc-tracked `cli.chat.capability_gate_unseeded`
 key does not yet exist in the catalog); the symptom surfaces as plugin
-operations refusing in the chat surface. Confirm the cause with
-`alfred audit log --event plugin.lifecycle.load_refused --since 5m`,
-seed `state.git` per the block above, then run
+operations refusing in the chat surface. Until the audit storage layer
+is wired, confirm the cause via the structured audit stream —
+`docker compose logs alfred-core | grep plugin.lifecycle.load_refused` —
+then seed `state.git` per the block above and run
 `alfred supervisor reset quarantined-llm --confirm` (and the matching
 reset for any other refused component).
 
@@ -241,23 +242,30 @@ after the query runs. See
 tier model.
 
 `alfred audit log --event <family>` is the per-family detail view used
-throughout this runbook. The CLI surface ships in Slice 3
-(`alfred audit log --help` documents `--event` and `--since`). The
-Postgres-backed storage/query layer the CLI dispatches to is not yet
-wired in the Slice-3 cut — until the storage layer lands the command
-surfaces a typed `AuditBackendUnavailable` refusal with the localised
-message keyed `cli.audit.backend_unavailable`:
+throughout this runbook. The CLI surfaces — both `alfred audit log` and
+`alfred audit graph` — ship in Slice 3 (`alfred audit log --help`
+documents `--event` and `--since`; `alfred audit graph --help`
+documents `--tier` and `--since`). The Postgres-backed storage/query
+layer **both commands** dispatch to is not yet wired in the Slice-3
+cut — until the storage layer lands, both commands surface a typed
+`AuditBackendUnavailable` refusal with the localised message keyed
+`cli.audit.backend_unavailable`:
 
 ```
 alfred audit backend not yet wired. The storage-layer SQL query is
 unimplemented; running ``alfred audit log`` / ``alfred audit graph``
-cannot return rows. Use ``alfred audit graph --since <window>`` and grep
-by family as a temporary workaround.
+cannot return rows. Inspect ``docker compose logs alfred-core`` for the
+structured audit stream as a temporary forensic surface; the per-event
+CLI invocations throughout this runbook return rows once the storage
+layer lands.
 ```
 
-As a workaround use `alfred audit graph --since <window>` and grep the
-row family from the output. Once the storage layer is wired, the same
-`alfred audit log --event <family>` invocations throughout this runbook
+Until the storage layer is wired, the operator surfaces below
+(`alfred audit log --event ...` and `alfred audit graph --since ...`)
+both refuse with `AuditBackendUnavailable`. Inspect the structured
+audit stream via `docker compose logs alfred-core` (filtered with `grep`
+on the audit event family) as the temporary forensic surface. Once the
+storage layer is wired, the same invocations throughout this runbook
 return rows directly.
 
 ## Provider routing changes
@@ -451,15 +459,17 @@ Symptom: every dispatch through the capability gate is denied; the
 audit stream shows `supervisor.capability_gate_unavailable` with
 `state_transition="entering_fail_closed"`. `alfred status` does not
 expose this directly in Slice 3 (the gate-health line is Slice-3.x+
-work); the audit graph is the definitive surface.
+work); until the audit storage layer wires, the structured audit stream
+in `docker compose logs alfred-core` is the definitive surface.
 
 Fix: verify `docker compose ps` shows `alfred-db` healthy and
-`/var/lib/alfred/state.git` is readable, then run
-`alfred audit graph --since 5m` to confirm the fail-closed transition.
-When the backing store recovers, `RealGate` exits fail-closed
-automatically. One `supervisor.capability_gate_unavailable` audit row
-is emitted on exit from fail-closed (with
-`state_transition="exiting_fail_closed"` and `denied_dispatch_count=N`).
+`/var/lib/alfred/state.git` is readable, then inspect
+`docker compose logs alfred-core | grep supervisor.capability_gate_unavailable`
+to confirm the fail-closed transition. When the backing store recovers,
+`RealGate` exits fail-closed automatically. One
+`supervisor.capability_gate_unavailable` audit row is emitted on exit
+from fail-closed (with `state_transition="exiting_fail_closed"` and
+`denied_dispatch_count=N`).
 
 **`supervisor.config_insecure` in audit stream**
 
@@ -481,16 +491,14 @@ Fix:
 1. Check `config/routing.yaml` has a `[quarantine]` block with
    `provider`, `model`, and `secret_id`.
 2. Inspect recent crash events. The Slice-3 CLI ships both
-   `alfred audit graph --since <window>` and
-   `alfred audit log --event <family> --since <window>`. Until the
-   Postgres-backed storage layer is wired, `alfred audit log` surfaces
-   `AuditBackendUnavailable` (see the audit-log surface change above);
-   once the storage layer lands the per-family query returns directly.
-   As a workaround, use the audit graph and grep:
+   `alfred audit log --event <family> --since <window>` and
+   `alfred audit graph --tier <tier> --since <window>`, but until the
+   Postgres-backed storage layer is wired, **both** surface
+   `AuditBackendUnavailable` (see the audit-log surface change above).
+   Until then use the structured audit stream:
 
    ```shell
-   alfred audit graph --since 5m
-   # then grep for plugin.lifecycle.crashed rows
+   docker compose logs alfred-core | grep plugin.lifecycle.crashed
    # Once the audit storage layer is wired:
    #   alfred audit log --event plugin.lifecycle.crashed --since 5m
    ```
@@ -627,18 +635,20 @@ output rather than an `AlfredError` subclass.
 | `web.fetch` raises `DomainNotAllowed` | `WebFetchError` (subclass `DomainNotAllowed`) | `plugins/alfred_web_fetch/` | `web.fetch.domain_refused` | domain missing from allowlist | queue `alfred web allowlist add <domain>`; wait for reviewer approval |
 | `web.fetch` raises `WebFetchTlsError` | `WebFetchTlsError` | `plugins/alfred_web_fetch/` | `web.fetch.tls_error` | upstream TLS failure or untrusted cert | verify the upstream cert chain; if a custom CA is required, mount it into the plugin sandbox |
 | `web.fetch` raises `WebFetchCanaryTripped` | `WebFetchCanaryTripped` | `plugins/alfred_web_fetch/` | `tool.web.fetch.canary_tripped` | DLP canary fired on fetched content | quarantine the handle, audit-graph the canary row, follow the DLP runbook |
-| Quarantined extractor refuses (`cannot_extract`) | `AlfredError` (`security.quarantine.protocol_violation`) | `src/alfred/security/quarantine.py` | `quarantine.protocol_violation` | upstream schema/payload mismatch | confirm `extraction-max-retries`; inspect `alfred audit graph --since 5m` for the violation row |
+| Quarantined extractor refuses (`cannot_extract`) | `AlfredError` (`security.quarantine.protocol_violation`) | `src/alfred/security/quarantine.py` | `quarantine.protocol_violation` | upstream schema/payload mismatch | confirm `extraction-max-retries`; `docker compose logs alfred-core | grep quarantine.protocol_violation` for the violation row (`alfred audit log/graph` once the storage layer wires) |
 | Quarantined dereference denied | `AlfredError` (`security.quarantine.dereference_denied`) | `src/alfred/security/quarantine.py` | gate-side `security.capability_gate.*` row (per spec §8.2) | hookpoint not granted at quarantine tier | queue `alfred plugin grant <id> quarantined …`; wait for reviewer approval |
 | Quarantined downgrade denied | `AlfredError` (`security.quarantine.downgrade_denied`) | `src/alfred/security/quarantine.py` | gate-side `security.capability_gate.*` row | privilege-downgrade requested from privileged context | inspect originating call site — privileged context must not request a quarantined downgrade |
-| `alfred audit log/graph` refuses with `AuditBackendUnavailable` | `AuditBackendUnavailable` | `src/alfred/cli/audit.py` | none (CLI-side guard; backend wires the events once the storage layer lands) | Postgres-backed audit query layer not yet wired | use `alfred audit graph --since <window>` and grep by family as the workaround |
+| `alfred audit log/graph` refuses with `AuditBackendUnavailable` | `AuditBackendUnavailable` | `src/alfred/cli/audit.py` | none (CLI-side guard; backend wires the events once the storage layer lands) | Postgres-backed audit query layer not yet wired | inspect the structured audit stream via `docker compose logs alfred-core` (grep by family) until the storage layer lands |
 | `alembic upgrade head` fails on `0007` | — (Alembic surfaces its own exception) | `src/alfred/db/migrations/` | — (`docker compose logs alfred-db`) | Slice-2 schema diverged | inspect failed migration, fix Postgres state, retry |
 | `bootstrap.capability_gate_unseeded` chat message | — (user-surface message; no typed exception) | `src/alfred/bootstrap/` | `plugin.lifecycle.load_refused` | first run after compose-up without seeding | run Step 2 and the two supervisor resets |
 
-Use the audit family column with `alfred audit graph --since <window>`
-(or `alfred audit log --event …` once the storage layer is wired) to
-confirm the typed-exception came from where the stack trace claims and
-to surface neighbouring rows (retry counts, denied dispatch counts,
-breaker trip history).
+Use the audit family column with `alfred audit log --event …` or
+`alfred audit graph --tier … --since <window>` once the storage layer
+is wired. Until then both commands refuse with `AuditBackendUnavailable`;
+the temporary forensic surface is `docker compose logs alfred-core`
+filtered by event family. Either path confirms the typed-exception came
+from where the stack trace claims and surfaces neighbouring rows (retry
+counts, denied dispatch counts, breaker trip history).
 
 ## Rollback
 
@@ -671,8 +681,9 @@ discards the Postgres projection; the next `upgrade head` rebuilds it.
 
 ```shell
 alfred status         # expect Slice-2 output (no gate: line)
-alfred audit graph --since 1m
+docker compose logs alfred-core --since 1m | grep -E 'plugin\.lifecycle\.|supervisor\.'
 # expect no Slice-3 audit families (plugin.lifecycle.*, supervisor.*)
+# (alfred audit log/graph once the storage layer wires)
 ```
 
 ## Related docs
