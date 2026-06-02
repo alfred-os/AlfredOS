@@ -124,7 +124,7 @@ def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
     result to :class:`RealGate.__init__`'s ``backend: StorageBackend``
     parameter, so the structural type hint is the load-bearing contract.
     Mirrors the production-side stub builder
-    :func:`alfred.bootstrap.gate_factory._make_in_process_backend` (the
+    :func:`alfred.bootstrap.gate_factory._make_in_memory_backend` (the
     pair is duplicated by design per ADR-0019 — the production stub
     cannot live under ``src/`` AND be importable from tests, and the
     test stub cannot live under ``tests/`` AND be importable from

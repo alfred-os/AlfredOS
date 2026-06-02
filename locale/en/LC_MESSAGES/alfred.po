@@ -14,7 +14,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: src/alfred/bootstrap/gate_factory.py:169
+#: src/alfred/bootstrap/gate_factory.py:187
 msgid "bootstrap.gate_selected.dev_default"
 msgstr ""
 "Bootstrap selected RealGate (fail-closed default) for the development "
