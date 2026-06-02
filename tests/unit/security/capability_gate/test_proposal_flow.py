@@ -395,6 +395,141 @@ async def test_create_proposal_audit_row_emitted_after_state_git_write() -> None
     backend.upsert_grant.assert_not_awaited()
 
 
+async def test_write_proposal_happy_path_returns_writer_branch(
+    tmp_path: Any,
+) -> None:
+    """``_write_proposal_to_state_git`` returns the sync writer's branch on success.
+
+    Pins the line 360 return path (after the prefix guard + Pydantic
+    validation + ``asyncio.to_thread`` round-trip). The shim's contract
+    is that the returned branch name ROUND-TRIPS the caller-supplied
+    ``branch_name`` exactly — a deviation would split the audit-row
+    branch field from the durably persisted state.git ref.
+
+    Uses a real bare state.git repo so the sync writer succeeds end-to-end
+    without monkeypatching :class:`StateGitProposalClient` itself.
+    """
+    # Build a bare state.git repo at the default path so the un-patched
+    # StateGitProposalClient() default discovers it. We pin the writer's
+    # constructor path explicitly via the ALFRED_STATE_GIT_PATH env
+    # surface — see :class:`StateGitProposalClient` default handling.
+    import subprocess
+    from pathlib import Path
+
+    from alfred.security.capability_gate.proposals import (
+        _write_proposal_to_state_git,
+    )
+    from alfred.state.proposal_payloads import PluginGrantProposal
+
+    repo: Path = tmp_path / "state.git"
+    subprocess.run(  # noqa: S603
+        ["git", "init", "--bare", "--initial-branch=main", str(repo)],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    # Seed a main branch so the writer can branch off it.
+    work: Path = tmp_path / "seed"
+    subprocess.run(  # noqa: S603
+        ["git", "clone", str(repo), str(work)],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    (work / "README").write_text("seed")
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "add", "."],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-C",
+            str(work),
+            "commit",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "push", "origin", "main"],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+
+    # Patch the StateGitProposalClient source so the lazy import inside
+    # the shim picks up the temp-repo-bound subclass. The shim does
+    # ``from alfred.cli._state_git import StateGitProposalClient`` at
+    # call time, so patching at the source module is the binding seen.
+    from unittest.mock import patch
+
+    from alfred.cli._state_git import StateGitProposalClient as _RealClient
+
+    expected_id = "deadbeefdeadbeef"
+    expected_branch = f"proposal/{PluginGrantProposal.proposal_type}-{expected_id}"
+
+    class _BoundClient(_RealClient):  # type: ignore[misc]
+        """Subclass that pins the bare state.git path to our temp repo."""
+
+        def __init__(self) -> None:
+            super().__init__(state_git_path=repo)
+
+    with patch(
+        "alfred.cli._state_git.StateGitProposalClient",
+        new=_BoundClient,
+    ):
+        branch = await _write_proposal_to_state_git(
+            branch_name=expected_branch,
+            plugin_id="alfred-foo",
+            subscriber_tier="user-plugin",
+            hookpoint="tool.web.fetch",
+            content_tier=None,
+            operator_user_id="op@example.com",
+        )
+
+    # The shim returns the writer's branch — must round-trip the
+    # caller-supplied branch_name exactly.
+    assert branch == expected_branch
+
+
+async def test_write_proposal_rejects_branch_name_without_canonical_prefix() -> None:
+    """``_write_proposal_to_state_git`` MUST refuse a branch_name that
+    does not start with ``proposal/policy-grant-``.
+
+    ADR-0018 R2: the audit row a peer caller has ALREADY emitted carries
+    the branch name verbatim — a divergence between the audit-row
+    branch and the state.git-writer branch would break the
+    audit-graph join. Refusing at the shim boundary (rather than letting
+    the sync writer compose its own derived name) preserves the
+    invariant that the audit row is the persistence-success signal.
+
+    The structural refusal is closed-set: any other prefix is a bug or a
+    malicious tag that MUST NOT reach the sync writer. A Pydantic
+    :class:`ValueError` is the right shape — peer callers catch the
+    structured error and never observe a half-written branch.
+    """
+    from alfred.security.capability_gate.proposals import (
+        _write_proposal_to_state_git,
+    )
+
+    with pytest.raises(ValueError, match=r"does not match expected prefix"):
+        await _write_proposal_to_state_git(
+            # Wrong prefix — e.g. an operator typo or an injected branch
+            # name from a compromised peer caller.
+            branch_name="proposal/web-allowlist-deadbeef",
+            plugin_id="alfred-foo",
+            subscriber_tier="user-plugin",
+            hookpoint="tool.web.fetch",
+            content_tier=None,
+            operator_user_id="op@example.com",
+        )
+
+
 def test_write_proposal_log_does_not_emit_operator_user_id() -> None:
     """CR-139 R2: the operational structlog event must NOT carry the
     raw ``operator_user_id`` (an email). PII discipline — the structlog

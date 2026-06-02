@@ -291,7 +291,13 @@ def config_set(
         # surface :mod:`alfred.cli._validators` exists to close. The
         # dispatch is keyed on ``key`` so a future second high-blast
         # knob plugs in a per-key validator without touching this branch.
-        if key == "quarantined-provider":
+        # ``no branch`` because today ``_HIGH_BLAST_KEYS`` is the single
+        # closed set ``{"quarantined-provider"}``; the ``else`` arm is
+        # structurally unreachable until a second high-blast key lands
+        # and the dispatch grows a real ``elif``. The discriminator is
+        # kept for that day so the open-coded one-arm conditional is
+        # not a soft-fail "all keys take the same validator" pattern.
+        if key == "quarantined-provider":  # pragma: no branch
             value = validate_quarantined_provider(value)
         # perf-001: ``audit_row_schemas`` lives under the ``alfred.audit``
         # package whose ``__init__`` eagerly pulls in :class:`AuditEntry`

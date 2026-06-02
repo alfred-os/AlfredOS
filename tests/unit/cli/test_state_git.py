@@ -1005,3 +1005,36 @@ def test_create_proposal_accepts_pre_generated_proposal_id(bare_repo: Path) -> N
     )
     assert result.proposal_id == "deadbeefdeadbeef"
     assert result.branch == "proposal/policy-grant-deadbeefdeadbeef"
+
+
+def test_create_proposal_from_payload_generates_id_when_omitted(bare_repo: Path) -> None:
+    """``create_proposal_from_payload`` falls back to :func:`secrets.token_hex`
+    when the caller does not pass ``proposal_id``.
+
+    Pins the ``if proposal_id is None`` branch (ADR-0018 typed-payload
+    entry point, line 242-243 of :mod:`alfred.cli._state_git`). Without
+    this branch, peer callers that omit the id would silently get the
+    string "None" wired into the branch name — exactly the kind of
+    soft-fail CLAUDE.md hard rule #7 forbids.
+
+    The generated id MUST be 16 lowercase hex chars (token_hex(8)) so
+    every other downstream parser (audit-graph join, parse_state_git_head
+    branch-name discriminator) keeps observing a uniform width.
+    """
+    from alfred.state.proposal_payloads import PluginGrantProposal
+
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    payload = PluginGrantProposal(
+        plugin_id="alfred.test-plugin",
+        subscriber_tier="operator",
+        hookpoint="tool.web.fetch",
+        content_tier=None,
+        operator_user_id="op@example.com",
+    )
+
+    result = client.create_proposal_from_payload(payload)
+
+    # Sixteen hex chars = secrets.token_hex(8).
+    assert len(result.proposal_id) == 16
+    assert all(c in "0123456789abcdef" for c in result.proposal_id)
+    assert result.branch == f"proposal/policy-grant-{result.proposal_id}"
