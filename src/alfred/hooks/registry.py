@@ -1132,7 +1132,24 @@ class _DenyAllGate:
         hookpoint: str,
         requested_tier: str,
     ) -> bool:
-        """Always denies."""
+        """Deny every subscriber-registration capability check.
+
+        Fail-closed bootstrap default. The supervisor installs
+        :class:`alfred.security.capability_gate._gate.RealGate` via
+        :func:`set_registry` before the first plugin load; until then
+        every check refuses to prevent a subscriber landing against an
+        empty policy. A call site that reaches this gate has skipped
+        the bootstrap step — denying loudly surfaces the mis-sequencing
+        instead of silently authorising the dispatch (CLAUDE.md hard
+        rule #7).
+
+        The ``plugin_id`` / ``hookpoint`` / ``requested_tier`` arguments
+        are accepted per the
+        :class:`alfred.hooks.capability.CapabilityGate` Protocol contract
+        but ignored — the deny outcome is unconditional, so threading
+        the arguments into the decision would create the false
+        impression that some combination could grant.
+        """
         del plugin_id, hookpoint, requested_tier
         return False
 
@@ -1142,7 +1159,16 @@ class _DenyAllGate:
         plugin_id: str,
         manifest_tier: str,
     ) -> bool:
-        """Always denies plugin load."""
+        """Deny every plugin-load capability check.
+
+        Fail-closed bootstrap default — same rationale as :meth:`check`.
+        A plugin attempting to load before bootstrap wires the real gate
+        is refused so the empty-policy state can never authorise a
+        plugin's declared subscriber tier. The
+        :class:`alfred.hooks.capability.CapabilityGate` Protocol's
+        plugin-load axis is honoured structurally; the arguments are
+        accepted but the decision is unconditional.
+        """
         del plugin_id, manifest_tier
         return False
 
@@ -1153,7 +1179,16 @@ class _DenyAllGate:
         hookpoint: str,
         content_tier: str,
     ) -> bool:
-        """Always denies content-tier access."""
+        """Deny every content-tier capability check.
+
+        Fail-closed bootstrap default — same rationale as :meth:`check`.
+        The orthogonal content-tier axis (trust-tier-of-trigger gating)
+        defers to the unconditional deny: with no grant table loaded,
+        no subscriber should see content of any tier. The
+        :class:`alfred.hooks.capability.CapabilityGate` Protocol's
+        content-clearance axis is honoured structurally; the arguments
+        are accepted but the decision is unconditional.
+        """
         del plugin_id, hookpoint, content_tier
         return False
 
