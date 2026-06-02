@@ -406,6 +406,64 @@ def test_status_handles_read_path_unavailable(runner: CliRunner) -> None:
     assert "unavailable" in combined.lower() or "implemented" in combined.lower()
 
 
+def test_status_read_path_connection_error_routes_through_no_supervisor_hint(
+    runner: CliRunner,
+) -> None:
+    """CR-149 round-5: a read-path ``ConnectionError`` routes through the no-supervisor hint.
+
+    The round-5 split added a separate ``except (ConnectionError, TimeoutError)``
+    arm scoped to :func:`_list_breaker_states` so the operator sees one
+    shape of fail-loud message regardless of which side of the bootstrap
+    actually broke once the Postgres projection lands. Pin the arm so a
+    future refactor cannot regress to either silently swallowing the
+    error or raising the wrong localised hint.
+    """
+    with (
+        patch("alfred.cli.supervisor._get_supervisor", return_value=object()),
+        patch(
+            "alfred.cli.supervisor._list_breaker_states",
+            side_effect=ConnectionError("postgres connection lost"),
+        ),
+    ):
+        result = runner.invoke(supervisor_app, ["status"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    # The "no supervisor running" hint MUST appear; the "read path
+    # unavailable" hint MUST NOT.
+    assert "unavailable" not in combined.lower()
+    assert "read path" not in combined.lower()
+    assert "supervisor" in combined.lower() or "running" in combined.lower()
+
+
+def test_status_probe_not_implemented_propagates_loud(runner: CliRunner) -> None:
+    """CR-149 round-5: a ``NotImplementedError`` from ``_get_supervisor`` MUST propagate.
+
+    The prior shape wrapped both the probe and the read-path call in a
+    single ``except NotImplementedError`` block, so a NotImplementedError
+    leaking out of the supervisor bootstrap (e.g. an abstract method
+    left unwired during a Supervisor refactor) would silently surface
+    as the friendly "read path unavailable" hint instead of the loud
+    traceback the bug deserves. Pin the split: a probe-side
+    NotImplementedError now bubbles up as the typed exception so the
+    operator sees a real traceback (CLAUDE.md hard rule #7).
+    """
+    with patch(
+        "alfred.cli.supervisor._get_supervisor",
+        side_effect=NotImplementedError("supervisor.get_instance abstract"),
+    ):
+        result = runner.invoke(supervisor_app, ["status"])
+    # CliRunner captures the un-handled exception rather than re-raising.
+    # Pin the exit-non-zero + the typed exception identity so the
+    # bug-shape stays observable to the operator.
+    assert result.exit_code != 0
+    assert isinstance(result.exception, NotImplementedError)
+    # The "read path unavailable" hint MUST NOT appear -- the probe-side
+    # NotImplementedError is a programmer bug, not a wiring gap.
+    combined = (result.output or "") + (result.stderr or "")
+    assert "unavailable" not in combined.lower()
+    assert "read path" not in combined.lower()
+
+
 def test_get_supervisor_invokes_singleton_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
     """When PR-S3-3b lands ``get_instance``, ``_get_supervisor`` returns its result."""
     from alfred.cli import supervisor as supervisor_module
