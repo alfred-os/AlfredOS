@@ -59,14 +59,19 @@ def t1_rows() -> list[dict[str, object]]:
 def test_audit_graph_tier_t3_filters_rows(
     runner: CliRunner, t3_rows: list[dict[str, object]]
 ) -> None:
-    """``--tier T3`` must pass ``tier="T3"`` to the query helper."""
+    """``--tier T3`` must pass ``tier="T3"`` to the query helper.
+
+    CR-149 round-10 (3339361809): the prior assertion fell back to a
+    stringified-call substring match (``"T3" in str(call_kwargs)``)
+    which would pass on a parser regression that smuggled ``T3`` into
+    a different kwarg. Pin the parsed ``tier`` kwarg exactly.
+    """
     with patch("alfred.cli.audit._query_audit_log") as mock_query:
         mock_query.return_value = t3_rows
         result = runner.invoke(audit_app, ["graph", "--tier", "T3", "--since", "24h"])
     assert result.exit_code == 0, (result.output, result.stderr)
     mock_query.assert_called_once()
-    call_kwargs = mock_query.call_args
-    assert call_kwargs.kwargs.get("tier") == "T3" or "T3" in str(call_kwargs)
+    assert mock_query.call_args.kwargs["tier"] == "T3"
 
 
 def test_audit_graph_tier_t3_renders_row(
@@ -83,14 +88,18 @@ def test_audit_graph_tier_t3_renders_row(
 def test_audit_graph_tier_t1_filters_rows(
     runner: CliRunner, t1_rows: list[dict[str, object]]
 ) -> None:
-    """``--tier T1`` must pass ``tier="T1"`` to the query helper."""
+    """``--tier T1`` must pass ``tier="T1"`` to the query helper.
+
+    CR-149 round-10 (3339361809): mirror of the T3 case — pin the
+    parsed ``tier`` kwarg exactly so a parser regression cannot pass
+    through a stringified-call substring coincidence.
+    """
     with patch("alfred.cli.audit._query_audit_log") as mock_query:
         mock_query.return_value = t1_rows
         result = runner.invoke(audit_app, ["graph", "--tier", "T1", "--since", "24h"])
     assert result.exit_code == 0, (result.output, result.stderr)
     mock_query.assert_called_once()
-    call_kwargs = mock_query.call_args
-    assert call_kwargs.kwargs.get("tier") == "T1" or "T1" in str(call_kwargs)
+    assert mock_query.call_args.kwargs["tier"] == "T1"
 
 
 def test_audit_graph_no_tier_shows_all(runner: CliRunner) -> None:
@@ -128,7 +137,14 @@ def test_audit_graph_renders_header_when_rows_exist(
 
 
 def test_audit_graph_without_tier_renders_all_header(runner: CliRunner) -> None:
-    """The unfiltered header label fires when rows exist + ``--tier`` is omitted."""
+    """The unfiltered header label fires when rows exist + ``--tier`` is omitted.
+
+    CR-149 round-10 (3339361814): the previous shape only asserted the
+    row body rendered, so a regression that dropped the localised
+    all-tiers header (``cli.audit.graph.header`` → ``"Audit graph —
+    all tiers"``) would still pass. Pin the header copy explicitly so
+    the header presence and the row body are both verified.
+    """
     rows = [
         {
             "event": "tool.web.fetch",
@@ -141,7 +157,10 @@ def test_audit_graph_without_tier_renders_all_header(runner: CliRunner) -> None:
     with patch("alfred.cli.audit._query_audit_log", return_value=rows):
         result = runner.invoke(audit_app, ["graph", "--since", "24h"])
     assert result.exit_code == 0
-    # All-tier header fires; the row body renders the event name.
+    # Pin both halves of the contract: the localised all-tiers header
+    # AND the row body. A future catalog edit that drops "all tiers"
+    # fails this test loudly rather than slipping through on the row.
+    assert "all tiers" in result.output.lower()
     assert "tool.web.fetch" in result.output
 
 
@@ -175,11 +194,18 @@ def test_audit_log_subcommand_renders_rows(runner: CliRunner) -> None:
 
 
 def test_audit_log_empty_renders_hint(runner: CliRunner) -> None:
-    """An empty audit log must surface the 'no rows' hint."""
+    """An empty audit log must surface the 'no rows' hint.
+
+    CR-149 round-10 (3339423488): the prior fallback
+    (``"no " in result.output.lower()``) was broad enough to match
+    unrelated output, so the localised empty-state copy could drift
+    without the test noticing. Pin the dedicated empty-message body
+    exactly so a catalog edit that drops "No audit rows" fails loudly.
+    """
     with patch("alfred.cli.audit._query_audit_log", return_value=[]):
         result = runner.invoke(audit_app, ["log", "--since", "1h"])
     assert result.exit_code == 0
-    assert "No audit rows" in result.output or "no " in result.output.lower()
+    assert "No audit rows" in result.output
 
 
 def test_audit_log_no_event_filter_lists_all(runner: CliRunner) -> None:
@@ -206,11 +232,19 @@ def test_audit_log_no_event_filter_lists_all(runner: CliRunner) -> None:
 
 
 def test_audit_graph_empty_rows_renders_localised_empty(runner: CliRunner) -> None:
-    """No rows + a tier filter should render the localised empty message."""
+    """No rows + a tier filter should render the localised empty message.
+
+    CR-149 round-10 (3339423488): the prior fallback
+    (``"T1" in result.output``) could be satisfied by the tier label
+    alone on any unrelated banner. Pin both halves of the contract
+    explicitly: the dedicated empty-message body AND the tier context
+    appear together so the localised branch is fully covered.
+    """
     with patch("alfred.cli.audit._query_audit_log", return_value=[]):
         result = runner.invoke(audit_app, ["graph", "--tier", "T1", "--since", "24h"])
     assert result.exit_code == 0
-    assert "No audit rows" in result.output or "T1" in result.output
+    assert "No audit rows" in result.output
+    assert "T1" in result.output
 
 
 def test_audit_graph_since_days_parses(runner: CliRunner) -> None:
@@ -230,9 +264,29 @@ def test_audit_graph_since_minutes_parses(runner: CliRunner) -> None:
 
 
 def test_audit_graph_since_minutes_over_hour_parses(runner: CliRunner) -> None:
-    """``--since 120m`` rounds down to 2 hours."""
+    """``--since 120m`` resolves to 2 hours."""
     with patch("alfred.cli.audit._query_audit_log", return_value=[]) as mock_query:
         result = runner.invoke(audit_app, ["graph", "--since", "120m"])
+    assert result.exit_code == 0
+    assert mock_query.call_args.kwargs.get("since_hours") == 2
+
+
+def test_audit_graph_since_minutes_ceils_to_next_whole_hour(runner: CliRunner) -> None:
+    """CR-149 round-10 (3339423474): ``--since 90m`` rounds UP to 2h.
+
+    The prior ``minutes // 60`` shape silently floored ``90m`` to 1h,
+    dropping the oldest 30 minutes from the selected window and hiding
+    audit rows during incident review. The query layer is hour-granular,
+    so ceiling guarantees the requested lookback is never narrowed.
+    """
+    with patch("alfred.cli.audit._query_audit_log", return_value=[]) as mock_query:
+        result = runner.invoke(audit_app, ["graph", "--since", "90m"])
+    assert result.exit_code == 0
+    assert mock_query.call_args.kwargs.get("since_hours") == 2
+
+    # 61m → 2h (one minute past the hour mark still expands).
+    with patch("alfred.cli.audit._query_audit_log", return_value=[]) as mock_query:
+        result = runner.invoke(audit_app, ["graph", "--since", "61m"])
     assert result.exit_code == 0
     assert mock_query.call_args.kwargs.get("since_hours") == 2
 

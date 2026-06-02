@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from alfred.comms.mcp_protocol import InboundMessage
+from alfred.comms.mcp_protocol import WIRE_METHOD_NAMES, InboundMessage
 
 
 @pytest.fixture
@@ -106,9 +106,22 @@ def test_canonical_user_id_never_sent_to_plugin(
 
     # Simulate the host dispatching lifecycle + health calls to the plugin.
     # These are the methods documented in WIRE_METHOD_NAMES (mcp_protocol).
-    mock_dispatch("lifecycle.start", {})
-    mock_dispatch("adapter.health", {})
-    mock_dispatch("lifecycle.stop", {})
+    #
+    # CR-149 round-10 (3339361825): bind the wire-method strings to the
+    # exported :data:`WIRE_METHOD_NAMES` mapping so a protocol rename
+    # in ``mcp_protocol.py`` makes this test fail loudly rather than
+    # silently aging out of the real wire surface (PRD §9.1).
+    lifecycle_start_method = WIRE_METHOD_NAMES["lifecycle_start"]
+    adapter_health_method = WIRE_METHOD_NAMES["adapter_health"]
+    lifecycle_stop_method = WIRE_METHOD_NAMES["lifecycle_stop"]
+    # Belt-and-braces: pin the literal wire-method names so a future
+    # mapping refactor that swaps the values also fails this test.
+    assert lifecycle_start_method == "lifecycle.start"
+    assert adapter_health_method == "adapter.health"
+    assert lifecycle_stop_method == "lifecycle.stop"
+    mock_dispatch(lifecycle_start_method, {})
+    mock_dispatch(adapter_health_method, {})
+    mock_dispatch(lifecycle_stop_method, {})
 
     # The inbound message stays on the host side — there should be no
     # dispatch call that carries the canonical id either as a key or as

@@ -72,6 +72,22 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"proposal_id": "aaaa"},
         ("alfred plugin grant", "status"),
     ),
+    # cli.plugin.revoke.* -- async-UX surfaces
+    #
+    # CR-149 round-10 (3339361819): the revoke keys are rendered by
+    # the shipped CLI (``alfred plugin revoke <id>``) but were only
+    # covered by the pybabel-anchor presence tests below. Those catch
+    # a missing msgid and a surviving ``{placeholder}`` but not the
+    # fuzzy-copy/wrong-msgstr swap this fingerprint table is meant
+    # to detect. Mirroring the grant entries closes the semantic gap.
+    "cli.plugin.revoke.pending_review": (
+        {"branch": "proposal/policy-revoke-aaaa", "proposal_id": "aaaa"},
+        ("revocation", "reviewer"),
+    ),
+    "cli.plugin.revoke.denied": (
+        {"reason": "push refused"},
+        ("denied",),
+    ),
     "cli.plugin.grant.status.pending": (
         {"branch": "proposal/policy-grant-aaaa", "proposal_id": "aaaa"},
         ("pending",),
