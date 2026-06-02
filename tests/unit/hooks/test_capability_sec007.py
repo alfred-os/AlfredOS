@@ -45,8 +45,14 @@ _CAPABILITY_PATH = (
 
 _REMEDIATION = (
     "src/alfred/hooks/capability.py must not read the environment. "
-    "`allow_system` is constructor-only by the sec-007 contract; see the "
-    "Slice-2.5 pluggable-hooks spec §6.3."
+    "Post-PR-S3-7 flag-day the file is Protocol-only: the Slice-2.5 "
+    "DevGate class with its `allow_system` constructor kwarg is gone, "
+    "and any future gate implementation that lands here MUST take its "
+    "grants from a constructor-injected store (RealGate's Postgres + "
+    "state.git path is the reference). The env-isolation seam lives in "
+    "`alfred.bootstrap.gate_factory` — env vars like `ALFRED_ENV` are "
+    "read there and threaded through `RealGate.create(...)`. See the "
+    "pluggable-hooks spec §6.3 and ADR-0017 Decision 7."
 )
 
 
