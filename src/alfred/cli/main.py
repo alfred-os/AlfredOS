@@ -21,63 +21,38 @@ CLAUDE.md hard rules honoured at this layer:
 The structlog redactor (``_redact``) is installed in front of every log
 processor chain so any secret value caught by ``SecretBroker.redact()`` is
 masked before it leaves the process.
+
+Module-load discipline (PR-S3-6 perf-001)
+-----------------------------------------
+
+The chat-graph dependency chain — :class:`Orchestrator`,
+:class:`BudgetGuard`, :class:`WorkingMemoryPool`, :class:`EpisodicMemory`,
+:class:`AuditWriter`, :class:`OutboundDlp`, the SQLAlchemy engine +
+provider adapters — costs hundreds of milliseconds at import time. Every
+``alfred --help`` invocation previously pulled the entire graph just to
+render the typer surface. The heavy imports are now scoped inside the
+functions that need them (``_chat_main`` for the chat path,
+``status`` / ``_user_bootstrap`` for the lighter Settings-only surfaces)
+so module load only pays for the typer registration + i18n catalog.
+
+Tests assert the discipline:
+``tests/unit/cli/test_main_lazy_imports.py`` introspects ``sys.modules``
+after a fresh ``import alfred.cli.main`` and fails if
+``alfred.providers`` or ``alfred.memory`` were eagerly pulled in.
 """
 
 from __future__ import annotations
 
-import asyncio
-import subprocess
-
 import typer
-from sqlalchemy.exc import SQLAlchemyError
 
-from alfred.audit.log import AuditWriter
-from alfred.budget.guard import BudgetGuard
-from alfred.cli._bootstrap import (
-    build_adapter_dlp_audit_sink,
-    build_broker,
-    build_router,
-    configure_logging,
-    install_identity_factories_for_settings,
-    load_settings_or_die,
-)
 from alfred.cli.audit import audit_app
 from alfred.cli.config import config_app
 from alfred.cli.discord_cmd import discord_app
 from alfred.cli.plugin import plugin_app
 from alfred.cli.supervisor import supervisor_app
 from alfred.cli.web import web_app
-from alfred.comms.adapter import build_tui_adapter
 from alfred.i18n import set_language, t
-from alfred.identity import (
-    InProcessTokenBucketRateLimiter,
-    Platform,
-)
 from alfred.identity.cli import user_app
-from alfred.memory.db import build_session_scope, healthcheck
-from alfred.memory.episodic import EpisodicMemory
-from alfred.memory.working_pool import WorkingMemoryPool
-from alfred.orchestrator.core import Orchestrator
-from alfred.security.dlp import OutboundDlp
-
-# Underscore-prefixed re-exports keep the public test surface stable
-# (e.g. ``tests/unit/cli/test_main.py`` imports
-# ``_build_adapter_dlp_audit_sink``). Pre-D2 these lived inline here;
-# they were extracted into :mod:`alfred.cli._bootstrap` to break the
-# ``main`` <-> ``discord_cmd`` import cycle.
-#
-# Only the aliases this module actually references at runtime — or that
-# tests import by underscore name — are kept. ``structlog_audit_sink``
-# and ``sync_db_url`` previously had stubs here too; they were dead
-# (only consumed inside ``_bootstrap``) and CodeQL flagged them as
-# unused globals. Callers that want them import from ``_bootstrap``
-# directly.
-_load_settings_or_die = load_settings_or_die
-_build_broker = build_broker
-_build_router = build_router
-_configure_logging = configure_logging
-_install_identity_factories = install_identity_factories_for_settings
-_build_adapter_dlp_audit_sink = build_adapter_dlp_audit_sink
 
 app = typer.Typer(help=t("cli.help.root"), no_args_is_help=True)
 
@@ -91,12 +66,21 @@ def _user_bootstrap() -> None:
     registration** of ``user_app`` — direct ``user_app`` invocations (e.g.
     ``tests/unit/identity/test_cli.py``) skip the bootstrap and use the
     monkeypatched factories they install themselves. Settings load through
-    ``_load_settings_or_die`` so an unconfigured operator hits the same
+    ``load_settings_or_die`` so an unconfigured operator hits the same
     friendly ``.env`` error path as ``alfred chat`` / ``alfred status``.
+
+    perf-001: ``_bootstrap`` is imported lazily inside the callback rather
+    than at module top so ``alfred --help`` (which never invokes this
+    callback) does not pay the broker + SQLAlchemy + provider import cost.
     """
-    settings = _load_settings_or_die()
+    from alfred.cli._bootstrap import (
+        install_identity_factories_for_settings,
+        load_settings_or_die,
+    )
+
+    settings = load_settings_or_die()
     set_language(settings.operator_language)
-    _install_identity_factories(settings)
+    install_identity_factories_for_settings(settings)
 
 
 app.add_typer(user_app, name="user", callback=_user_bootstrap)
@@ -127,6 +111,39 @@ app.add_typer(audit_app, name="audit")
 
 
 # ---------------------------------------------------------------------------
+# Lazy re-export: ``_build_adapter_dlp_audit_sink``
+# ---------------------------------------------------------------------------
+#
+# ``tests/unit/cli/test_main.py`` imports
+# ``_build_adapter_dlp_audit_sink`` directly from this module to exercise
+# the adapter-DLP audit-sink contract without booting the TUI. Pre-perf-001
+# the symbol lived as an eager module-level alias of
+# ``alfred.cli._bootstrap.build_adapter_dlp_audit_sink``. That alias forced
+# ``_bootstrap`` (and its provider + SQLAlchemy chain) into the import
+# graph of every ``alfred --help`` invocation.
+#
+# ``__getattr__`` (PEP 562) preserves the public test surface — the import
+# ``from alfred.cli.main import _build_adapter_dlp_audit_sink`` still
+# resolves — while deferring the ``_bootstrap`` import until the symbol is
+# actually read. ``alfred --help`` never touches the attribute, so the
+# heavy chain is not pulled in on the help path.
+def __getattr__(name: str) -> object:
+    """Lazy module-attribute lookup for the ``_bootstrap`` re-export.
+
+    Only resolves ``_build_adapter_dlp_audit_sink`` — every other
+    attribute access falls through to the standard ``AttributeError`` so a
+    typo in a test import surfaces loudly rather than silently importing
+    something unintended.
+    """
+    if name == "_build_adapter_dlp_audit_sink":
+        from alfred.cli._bootstrap import build_adapter_dlp_audit_sink
+
+        return build_adapter_dlp_audit_sink
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
@@ -138,13 +155,18 @@ def status() -> None:
     Used by operators to confirm their `.env` is loaded and the slice-1
     providers are wired correctly before they invoke ``alfred chat``. Exits
     zero on success; non-zero on Settings load failure (via
-    ``_load_settings_or_die``).
+    ``load_settings_or_die``).
+
+    perf-001: ``_bootstrap`` imports lazily — ``alfred --help`` never
+    invokes ``status`` and so should not pay the provider chain's cost.
     """
-    settings = _load_settings_or_die()
-    broker = _build_broker(settings)
+    from alfred.cli._bootstrap import build_broker, load_settings_or_die
+
+    settings = load_settings_or_die()
+    broker = build_broker(settings)
     set_language(settings.operator_language)
     # The runtime fallback exists iff the broker can mint an Anthropic key
-    # (see ``_build_router``). Surfacing the configured name as-is would
+    # (see ``build_router``). Surfacing the configured name as-is would
     # claim a fallback the operator hasn't actually wired up — and using a
     # hardcoded "yes"/"no" leaks English regardless of operator_language.
     # Derive both from a single boolean and pull the yes/no from the
@@ -175,7 +197,13 @@ def chat() -> None:
     Synchronous Typer entry point; the async wiring lives in
     ``_chat_main`` and is dispatched via ``asyncio.run``. Catch-and-translate
     happens inside ``_chat_main`` so the user never sees a raw traceback.
+
+    perf-001: ``asyncio`` imports lazily so the ``alfred --help`` path —
+    which never invokes ``chat`` — does not pay even the stdlib asyncio
+    cost.
     """
+    import asyncio
+
     asyncio.run(_chat_main())
 
 
@@ -188,7 +216,12 @@ def migrate() -> None:
     bypass of the ``alfred`` entrypoint) means operators only ever interact
     with one blessed command surface, and the container can keep
     ``ENTRYPOINT ["alfred"]`` without per-call ``--entrypoint`` overrides.
+
+    perf-001: ``subprocess`` imports lazily — ``alfred --help`` does not
+    need the subprocess machinery just to render the migrate surface.
     """
+    import subprocess
+
     # List-form is the secure invocation (no shell, no injection). Alembic
     # ships in our own venv and `alfred` runs with that venv's bin/ on PATH
     # (set by the Dockerfile + uv-managed dev shell), so the partial-path
@@ -205,10 +238,41 @@ async def _chat_main() -> None:
     Postgres down, etc. — so each is mapped to a ``t()``-routed error
     message before exiting non-zero. The TUI itself never sees these
     failures because they happen before it launches.
+
+    perf-001: every heavy import (orchestrator graph, broker, providers,
+    SQLAlchemy session scope, DLP, audit writer, comms adapter factory)
+    is scoped to this function body so ``alfred --help`` and the
+    lightweight subcommands (``status``, ``migrate``, sub-app ``--help``)
+    do not pay the chat-graph load cost at module import time.
     """
-    settings = _load_settings_or_die()
-    broker = _build_broker(settings)
-    _configure_logging(broker)
+    import asyncio
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from alfred.audit.log import AuditWriter
+    from alfred.budget.guard import BudgetGuard
+    from alfred.cli._bootstrap import (
+        build_adapter_dlp_audit_sink,
+        build_broker,
+        build_router,
+        configure_logging,
+        install_identity_factories_for_settings,
+        load_settings_or_die,
+    )
+    from alfred.comms.adapter import build_tui_adapter
+    from alfred.identity import (
+        InProcessTokenBucketRateLimiter,
+        Platform,
+    )
+    from alfred.memory.db import build_session_scope, healthcheck
+    from alfred.memory.episodic import EpisodicMemory
+    from alfred.memory.working_pool import WorkingMemoryPool
+    from alfred.orchestrator.core import Orchestrator
+    from alfred.security.dlp import OutboundDlp
+
+    settings = load_settings_or_die()
+    broker = build_broker(settings)
+    configure_logging(broker)
     set_language(settings.operator_language)
 
     session_scope = build_session_scope(settings)
@@ -233,18 +297,18 @@ async def _chat_main() -> None:
     # row — surface the friendly hint that points at
     # ``alfred user add --authorization operator``.
     #
-    # ``_install_identity_factories`` doubles as both the resolver
-    # construction and the wiring for the ``alfred user *`` subcommands
-    # in the same process, so a Slice-2 operator who launches the TUI
-    # then opens another shell to add a second user gets coherent
-    # version-counter behaviour without two engines.
-    resolver = _install_identity_factories(settings)
+    # ``install_identity_factories_for_settings`` doubles as both the
+    # resolver construction and the wiring for the ``alfred user *``
+    # subcommands in the same process, so a Slice-2 operator who
+    # launches the TUI then opens another shell to add a second user
+    # gets coherent version-counter behaviour without two engines.
+    resolver = install_identity_factories_for_settings(settings)
     operator = await asyncio.to_thread(resolver.resolve, Platform.TUI, settings.operator_name)
     if operator is None:
         typer.echo(t("cli.user.error.no_operator"), err=True)
         raise typer.Exit(code=2)
 
-    router = _build_router(broker, settings)
+    router = build_router(broker, settings)
     # PR-B Phase 1: per-user BudgetGuard. The loader resolves a canonical
     # ``user_id`` (the resolver's slug) to the live ``User`` row; the
     # guard reads ``daily_budget_usd`` off the row on first-touch and on
@@ -259,7 +323,7 @@ async def _chat_main() -> None:
     budget = BudgetGuard(
         user_loader=lambda user_id: resolver.show(slug=user_id),
         per_call_max_usd=settings.per_call_max_usd,
-        version_counter=resolver.version_counter,  # type: ignore[attr-defined]  # reason: PR-B Phase 1 — counter promoted via ``_install_identity_factories``; Phase 5 makes it a typed property on IdentityResolver
+        version_counter=resolver.version_counter,  # type: ignore[attr-defined]  # reason: PR-B Phase 1 — counter promoted via ``install_identity_factories_for_settings``; Phase 5 makes it a typed property on IdentityResolver
     )
 
     # PR-B Phase 5: pool replaces the slice-1 single ``WorkingMemory()`` +
@@ -301,10 +365,10 @@ async def _chat_main() -> None:
     # async ``AuditWriter.append`` on the running event loop so the
     # synchronous ``_AuditSink`` contract stays satisfied without
     # blocking the scan path. The audit writer is constructed against
-    # the same async session_scope ``_install_identity_factories`` uses
-    # so audit + identity writes share lifecycle.
+    # the same async session_scope ``install_identity_factories_for_settings``
+    # uses so audit + identity writes share lifecycle.
     adapter_audit_writer = AuditWriter(session_factory=session_scope)
-    adapter_dlp_audit_sink = _build_adapter_dlp_audit_sink(
+    adapter_dlp_audit_sink = build_adapter_dlp_audit_sink(
         audit_writer=adapter_audit_writer,
         operator_user_id=operator.slug,
         language=settings.operator_language,
