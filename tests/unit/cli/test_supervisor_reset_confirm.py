@@ -61,12 +61,18 @@ def test_reset_success_message_rendered(runner: CliRunner) -> None:
 
 
 def test_reset_unknown_component_exits_nonzero(runner: CliRunner) -> None:
-    """``SupervisorError`` (e.g. component-not-found) must surface as a CLI failure."""
-    from alfred.supervisor.errors import SupervisorError
+    """``NoSuchComponentError`` (component-not-found) must surface as a CLI failure.
+
+    CR-149 round-7: the unknown-component dispatch now narrows on the
+    typed :class:`NoSuchComponentError` subclass instead of an English
+    substring scan of ``str(exc)``. The body text is irrelevant — any
+    raise of the class routes to the ``component_not_found`` branch.
+    """
+    from alfred.supervisor.errors import NoSuchComponentError
 
     mock_supervisor = AsyncMock()
     mock_supervisor.reset_breaker = AsyncMock(
-        side_effect=SupervisorError("Component not found: no-such-plugin")
+        side_effect=NoSuchComponentError("Component not found: no-such-plugin")
     )
     with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
         result = runner.invoke(supervisor_app, ["reset", "no-such-plugin", "--confirm"])
@@ -78,21 +84,25 @@ def test_reset_unknown_component_exits_nonzero(runner: CliRunner) -> None:
 def test_reset_canonical_no_supervised_component_routes_to_component_not_found(
     runner: CliRunner,
 ) -> None:
-    """CR-149 round-6: canonical ``supervisor.no_such_component`` wording
-    routes to the operator-targeted ``component_not_found`` branch.
+    """CR-149 round-7: typed ``NoSuchComponentError`` routes to the
+    operator-targeted ``component_not_found`` branch.
 
-    The repo's :func:`t("supervisor.no_such_component")` catalog entry
-    renders "No supervised component with id ..." (see
-    ``locale/en/LC_MESSAGES/alfred.po``). The previous CLI handler
-    only matched "not found"; the canonical wording fell through to
-    ``unexpected_error`` and the operator lost the targeted guidance
-    the T1 surface owes them (Spec §10.8 / §11.3).
+    Round-6 closed the gap where the canonical
+    :func:`t("supervisor.no_such_component")` wording fell through to
+    the generic ``unexpected_error`` key (the previous dispatch only
+    matched the English substring "not found"). Round-6's fix added a
+    second substring branch matching "no supervised component" — but
+    that still breaks the moment the operator's locale is anything
+    other than English, or even a catalog copy-edit shortens the
+    wording. Round-7 replaces the substring dispatch with a typed
+    :class:`NoSuchComponentError` ``except`` arm. The body wording is
+    no longer load-bearing for routing; only the class is.
     """
-    from alfred.supervisor.errors import SupervisorError
+    from alfred.supervisor.errors import NoSuchComponentError
 
     mock_supervisor = AsyncMock()
     mock_supervisor.reset_breaker = AsyncMock(
-        side_effect=SupervisorError(
+        side_effect=NoSuchComponentError(
             "No supervised component with id 'no-such-plugin'. "
             "Run `alfred supervisor status` to list registered components."
         )
@@ -103,10 +113,45 @@ def test_reset_canonical_no_supervised_component_routes_to_component_not_found(
     combined = (result.output or "") + (result.stderr or "")
     # The component-not-found catalog entry names the component id and
     # offers the recovery hint; the unexpected_error catalog entry
-    # surfaces ``type(exc).__name__`` (``SupervisorError``) instead —
-    # the absence of the type name is the regression target.
+    # surfaces ``type(exc).__name__`` (``NoSuchComponentError``)
+    # instead — the absence of the type name is the regression target.
     assert "no-such-plugin" in combined
+    assert "NoSuchComponentError" not in combined
     assert "SupervisorError" not in combined
+
+
+def test_reset_no_such_component_is_locale_immune(runner: CliRunner) -> None:
+    """CR-149 round-7: a non-English body still routes correctly.
+
+    Pins the load-bearing property of the round-7 typed dispatch:
+    the routing depends on the exception class, NOT on
+    :func:`str(exc).lower()`. A non-English catalog msgstr (Spanish
+    placeholder text below — never seen the English substrings
+    "not found" or "no supervised component") MUST still land on the
+    operator-targeted ``component_not_found`` hint. The pre-round-7
+    substring branch would have fallen through to
+    ``cli.supervisor.reset.unexpected_error`` and lost the PRD §10.8
+    / §11.3 operator guidance the T1 surface owes a non-English
+    operator.
+    """
+    from alfred.supervisor.errors import NoSuchComponentError
+
+    # Spanish stand-in for the catalog body — no overlap with the
+    # legacy English substrings the round-6 dispatch matched.
+    mock_supervisor = AsyncMock()
+    mock_supervisor.reset_breaker = AsyncMock(
+        side_effect=NoSuchComponentError(
+            "Ningún componente supervisado con id 'no-such-plugin'."
+        )
+    )
+    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
+        result = runner.invoke(supervisor_app, ["reset", "no-such-plugin", "--confirm"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    # Routed to the operator-targeted branch — the catalog renders the
+    # component id, not the exception type name.
+    assert "no-such-plugin" in combined
+    assert "NoSuchComponentError" not in combined
 
 
 def test_status_renders_table_header(runner: CliRunner) -> None:

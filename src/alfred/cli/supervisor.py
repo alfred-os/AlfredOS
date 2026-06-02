@@ -355,7 +355,10 @@ def supervisor_reset(
     # except-clause narrowing has the type bound; an ImportError here
     # surfaces as a non-zero exit through the same localised path.
     try:
-        from alfred.supervisor.errors import SupervisorError
+        from alfred.supervisor.errors import (
+            NoSuchComponentError,
+            SupervisorError,
+        )
     except ImportError as exc:
         # Defensive: a broken supervisor namespace must not deny the
         # operator the localised error -- fall back to the generic key.
@@ -376,41 +379,40 @@ def supervisor_reset(
                 operator_user_id=None,
             )
         )
+    except NoSuchComponentError as exc:
+        # CR-149 round-7: typed-exception dispatch. The previous shape
+        # branched on English substrings in ``str(exc).lower()`` to
+        # decide whether to render the operator-targeted
+        # ``component_not_found`` hint, which silently broke under
+        # non-English operator languages and catalog copy-edits — the
+        # exact CLAUDE.md hard rule #7 silent-skip shape on a T1
+        # surface. :class:`NoSuchComponentError` is a typed
+        # :class:`SupervisorError` subclass raised by
+        # :meth:`Supervisor.reset_breaker` when the operator-supplied
+        # ``component_id`` is not registered, so the dispatch now
+        # routes off the class — locale-immune by construction.
+        typer.echo(
+            t(
+                "cli.supervisor.reset.component_not_found",
+                component=component_id,
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
     except SupervisorError as exc:
-        # devex-005: distinguish "wrong component id" from "supervisor
-        # unavailable". ``ComponentNotFoundError`` is a future-PR-S3-7
-        # refinement; until then any :class:`SupervisorError` carrying
-        # the canonical missing-component wording is treated as the
-        # component-missing branch.
-        #
-        # CR-149 round-6: the canonical missing-component message in
-        # this repo is ``supervisor.no_such_component`` →
-        # "No supervised component with id ..." (see
-        # ``locale/en/LC_MESSAGES/alfred.po`` + ``supervisor/core.py``).
-        # The previous shape only matched "not found", so the normal
-        # missing-component path fell through to ``unexpected_error``
-        # and the operator lost the targeted guidance the T1 surface
-        # requires (Spec §10.8 / §11.3). Match both the legacy "not
-        # found" string AND the canonical wording so a future tweak
-        # to one does not silently route the wrong branch.
-        message = str(exc).lower()
-        if "not found" in message or "no supervised component" in message:
-            typer.echo(
-                t(
-                    "cli.supervisor.reset.component_not_found",
-                    component=component_id,
-                ),
-                err=True,
-            )
-        else:
-            typer.echo(
-                t(
-                    "cli.supervisor.reset.unexpected_error",
-                    component=component_id,
-                    error_type=type(exc).__name__,
-                ),
-                err=True,
-            )
+        # Every other supervisor-domain failure surfaces through the
+        # generic ``unexpected_error`` key. The ``NoSuchComponentError``
+        # arm above runs first because MRO lookup tries the most
+        # specific class match before falling through to the parent
+        # ``SupervisorError`` branch.
+        typer.echo(
+            t(
+                "cli.supervisor.reset.unexpected_error",
+                component=component_id,
+                error_type=type(exc).__name__,
+            ),
+            err=True,
+        )
         raise typer.Exit(code=1) from exc
     except (ConnectionError, TimeoutError) as exc:
         # Connection-shape failures route through the generic

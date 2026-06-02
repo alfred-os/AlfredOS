@@ -69,7 +69,7 @@ from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
 from alfred.i18n import t
 from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.capability_monitor import CapabilityGateMonitor
-from alfred.supervisor.errors import SupervisorError
+from alfred.supervisor.errors import NoSuchComponentError, SupervisorError
 from alfred.supervisor.plugin_lifecycle import PluginLifecycle
 
 if TYPE_CHECKING:
@@ -476,14 +476,25 @@ class Supervisor:
         own T0 rows that describe internal state.
 
         Raises:
-            SupervisorError: ``component_id`` is not registered. The
-                CLI surface (PR-S3-6) traps this and surfaces a clear
-                "no such component" message to the operator; raising
-                here makes the contract explicit.
+            NoSuchComponentError: ``component_id`` is not registered. A
+                typed :class:`SupervisorError` subclass so the CLI
+                surface (PR-S3-6) can ``except NoSuchComponentError``
+                separately from the generic ``SupervisorError`` arm.
+                CR-149 round-7 replaced the previous English-substring
+                dispatch in the CLI with a typed-exception narrow —
+                non-English operator languages and catalog copy-edits
+                no longer break the missing-component branch.
         """
         breaker = self._breakers.get(component_id)
         if breaker is None:
-            raise SupervisorError(t("supervisor.no_such_component", component_id=component_id))
+            # CR-149 round-7: raise the typed subclass. The catalog-
+            # backed body still flows through ``str(exc)`` for the
+            # forensic structlog stream + reviewer-side audit row, but
+            # the CLI ``except`` arm now narrows on the class, not the
+            # English substring.
+            raise NoSuchComponentError(
+                t("supervisor.no_such_component", component_id=component_id)
+            )
 
         old_state = breaker.state.value
         breaker.reset()
