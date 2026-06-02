@@ -398,6 +398,11 @@ def config_set(
                 "config_key": key,
                 # devex-007: PR-S3-7 wires IdentityResolver.
                 "operator_user_id": None,
+                # CR-149 round-6: operator-typed CLI ingress for a
+                # high-blast config knob — T1 swimlane (PRD §7.1 +
+                # CLAUDE.md hard rule #3). Same rationale as the other
+                # reviewer-gated emit sites.
+                "trust_tier_of_trigger": "T1",
             },
             client=_state_git_client,
         )

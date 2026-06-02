@@ -167,6 +167,9 @@ def allowlist_add(
             "path_prefix": path_prefix,
             # devex-007: PR-S3-7 wires IdentityResolver.
             "operator_user_id": None,
+            # CR-149 round-6: operator-typed CLI ingress — T1 swimlane.
+            # Same rationale as the plugin-grant emit site.
+            "trust_tier_of_trigger": "T1",
         },
         client=_state_git_client,
     )
@@ -232,6 +235,8 @@ def allowlist_remove(
             # Remove targets the entry as a whole; no per-prefix scope.
             "path_prefix": None,
             "operator_user_id": None,
+            # CR-149 round-6: operator-typed CLI ingress — T1 swimlane.
+            "trust_tier_of_trigger": "T1",
         },
         client=_state_git_client,
     )

@@ -581,6 +581,41 @@ def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> Non
     assert audit_idx < state_idx, call_order
 
 
+def test_grant_audit_row_carries_t1_trust_tier(
+    runner: CliRunner, mock_proposal: ProposalResult
+) -> None:
+    """CR-149 round-6: the ``plugin.grant.requested`` row tags T1.
+
+    PRD §7.1 + CLAUDE.md hard rule #3: every operator-typed CLI
+    ingress declares its trust tier so ``alfred audit graph --tier T1``
+    surfaces the row in the operator-action swimlane. The
+    ``PLUGIN_GRANT_REQUESTED_FIELDS`` constant now carries the field;
+    this regression test pins the emit-site contract — a future
+    refactor that drops the tag from the CLI's
+    ``audit_subject_partial`` would land the row in the wrong swimlane
+    and fail the symmetric-keys check at the helper.
+    """
+    captured: list[dict[str, object]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        if event == "plugin.grant.requested":
+            captured.append(kwargs)
+
+    with (
+        patch("alfred.cli.plugin._state_git_client") as mock_client,
+        patch("alfred.cli._state_git._log") as mock_log,
+    ):
+        mock_log.info = _log_info
+        mock_client.create_proposal_from_payload.return_value = mock_proposal
+        result = runner.invoke(
+            plugin_app,
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
+        )
+    assert result.exit_code == 0, result.stderr
+    assert len(captured) == 1, captured
+    assert captured[0]["trust_tier_of_trigger"] == "T1"
+
+
 def test_grant_emits_audit_row_even_on_state_git_failure(runner: CliRunner) -> None:
     """A state.git failure leaves the operator-intent audit row.
 

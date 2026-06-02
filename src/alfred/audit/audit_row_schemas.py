@@ -94,14 +94,22 @@ PLUGIN_GRANT_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Alias for emit-site clarity — every reviewer-gated CLI command that
-# queues a ``plugin.grant.requested`` row references this name so the
-# call site documents the event family without re-stating the field
-# tuple. The alias is the same object (``frozenset`` is hashable +
-# immutable) so ``PLUGIN_GRANT_REQUESTED_FIELDS is PLUGIN_GRANT_FIELDS``
-# holds and the schema-module test corpus stays the single source of
-# truth for grant audit-row shape (arch-001 / cross-cutting R2).
-PLUGIN_GRANT_REQUESTED_FIELDS: Final[frozenset[str]] = PLUGIN_GRANT_FIELDS
+# Operator-CLI ingress superset for the ``plugin.grant.requested`` row.
+#
+# CR-149 round-6: the previous alias to :data:`PLUGIN_GRANT_FIELDS`
+# meant the requested-side row could not carry ``trust_tier_of_trigger``
+# because :meth:`AuditWriter.append_schema` enforces symmetric keys.
+# The terminal ``plugin.grant.rebuilt`` row (still on the lifecycle
+# constant) lives in the T0 swimlane — the supervisor merges in
+# response to a host-level state.git signal, not a user-typed CLI
+# command. The ``*.requested`` row is the operator-typed ingress, so
+# the canonical swimlane is T1 and the schema MUST allow the tag
+# (PRD §7.1 + CLAUDE.md hard rule #3). Widening this constant lets
+# every emit site attach ``trust_tier_of_trigger="T1"`` and surface in
+# ``alfred audit graph --tier T1`` without drift.
+PLUGIN_GRANT_REQUESTED_FIELDS: Final[frozenset[str]] = PLUGIN_GRANT_FIELDS | frozenset(
+    {"trust_tier_of_trigger"}
+)
 
 # ---------------------------------------------------------------------------
 # quarantine.extract family
@@ -404,6 +412,12 @@ WEB_ALLOWLIST_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
         "path_prefix",
         "operator_user_id",
         "proposal_branch",
+        # CR-149 round-6: operator-CLI ingress — every reviewer-gated
+        # CLI command MUST tag the trust tier of its trigger so the
+        # audit-graph swimlane (``alfred audit graph --tier``) renders
+        # the row in the correct T1 lane. PRD §7.1 + CLAUDE.md hard
+        # rule #3.
+        "trust_tier_of_trigger",
         "correlation_id",
     }
 )
@@ -438,6 +452,12 @@ CONFIG_SET_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
         "config_key",
         "operator_user_id",
         "proposal_branch",
+        # CR-149 round-6: operator-CLI ingress for high-blast config
+        # mutations — the row carries the T1 tag so the audit-graph
+        # swimlane shows the operator-typed origin (PRD §7.1 +
+        # CLAUDE.md hard rule #3). Same rationale as the plugin-grant
+        # and web-allowlist requested families.
+        "trust_tier_of_trigger",
         "correlation_id",
     }
 )
