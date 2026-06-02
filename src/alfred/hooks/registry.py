@@ -996,50 +996,66 @@ class HookRegistry:
         # silently dropped; bound the join so a slow / hung sink trips
         # the structlog fallback rather than stalling :meth:`register`.
         #
-        # err-002 — exactly-once row, double-emit prevention:
+        # err-002 — at-least-once row, fallback never suppressed by sink:
         #
         # ``thread.join(timeout=...)`` is bounded but the daemon keeps
         # running after the bound expires. If the sink eventually
         # completes (e.g. a 600ms Postgres connect that beat the 500ms
         # window by 100ms), the daemon would emit the row to the sink
         # AFTER the calling thread already fired the structlog
-        # fallback — two rows for the same correlation_id, which the
-        # audit-graph correlator treats as a double-emit.
+        # fallback — two rows for the same correlation_id. The
+        # audit-graph correlator dedupes by ``(event, correlation_id,
+        # hookpoint)`` downstream so a double row is recoverable; a
+        # MISSING row is not (CLAUDE.md hard rule #7).
         #
         # The ``emit_claim`` :class:`threading.Lock` is the mutual-
-        # exclusion seam: at the emit decision point, whichever thread
-        # acquires the lock first emits its row; the other observes
-        # the lock is taken (via ``acquire(blocking=False)``) and
-        # skips. CRITICAL: the daemon's ``_drive`` acquires the lock
-        # under ``blocking=False`` BEFORE calling ``sink.emit``, and
-        # the calling thread's post-timeout fallback path acquires
-        # under ``blocking=False`` BEFORE calling
-        # ``_fallback_to_structlog``. Whichever side acquires the lock
-        # holds it for the duration of its own emit, ensuring the
-        # other side's racy acquire fails (returns ``False``) and the
-        # other emit is suppressed.
+        # exclusion seam for the FALLBACK path, NOT for the sink call.
+        # CR-156 round-6 (3342416844) caught a subtle regression in
+        # the previous shape, which acquired the lock BEFORE running
+        # ``sink.emit``: a sink that stalled past the join bound left
+        # the calling thread unable to acquire the claim (the daemon
+        # held it) and therefore unable to fire the fallback — the row
+        # landed NOWHERE if the sink never returned. That violated
+        # CLAUDE.md hard rule #7.
         #
-        # The Lock is NEVER released — once a row has been emitted,
-        # any second emit attempt for the same correlation_id is a
-        # bug, so we leak the Lock instance with the function frame's
-        # garbage collection and the "second emitter" arm becomes a
-        # silent no-op. There is no reuse: the Lock is local to this
-        # call and lives only as long as the daemon thread + the
-        # calling thread's fallback decision.
+        # The current shape:
+        #
+        # 1. The daemon's ``_drive`` calls ``sink.emit`` UNCONDITIONALLY
+        #    and WITHOUT holding the lock. Whatever the sink commits,
+        #    it commits without the daemon's lock state blocking the
+        #    calling thread's fallback.
+        # 2. After the sink call returns, the daemon attempts
+        #    ``emit_claim.acquire(blocking=False)``. If the acquire
+        #    succeeds the daemon was the sole emitter — happy path,
+        #    exactly one row. If the acquire fails the calling
+        #    thread's fallback already won the claim and fired a
+        #    fallback row; in that case the sink ALSO emitted a row,
+        #    so two rows for the same ``correlation_id`` exist (the
+        #    rare "sink completed after the bound" race). The
+        #    correlator dedupes downstream.
+        # 3. The calling thread's post-timeout path acquires the claim
+        #    under ``blocking=False`` BEFORE calling
+        #    ``_fallback_to_structlog``. If the daemon already acquired
+        #    the claim (sink committed between ``is_alive()`` and the
+        #    fallback decision), the fallback skips — the sink got
+        #    the row.
+        #
+        # The Lock is NEVER released — once acquired, it stays held
+        # for the lifetime of the function frame. There is no reuse:
+        # the Lock is local to this call and lives only as long as
+        # the daemon thread + the calling thread's fallback decision.
         sink = self.sink
         exc_holder: list[BaseException] = []
         emit_claim = threading.Lock()
 
         def _drive() -> None:
             try:
-                # Acquire the emit-claim BEFORE calling the sink. If
-                # the calling thread has already won the claim (its
-                # post-timeout fallback fired), the acquire returns
-                # ``False`` and we skip the sink call entirely — the
-                # row has already landed on the structlog fallback
-                # path, so emitting again would double-emit.
-                if not emit_claim.acquire(blocking=False):
-                    return
+                # Call the sink FIRST — without holding the claim — so
+                # a stalled sink does NOT block the calling thread's
+                # fallback path (CR-156 round-6 3342416844). The sink
+                # commits its row when it completes; whether it
+                # completed before or after the join bound is
+                # observable to the calling thread via the claim.
                 asyncio.run(
                     sink.emit(
                         event=event,
@@ -1049,6 +1065,18 @@ class HookRegistry:
                 )
             except BaseException as e:
                 exc_holder.append(e)
+                return
+            # Sink returned. Try to claim the emit slot. If the
+            # acquire succeeds we were the sole emitter — no fallback
+            # ran. If it fails the calling thread's fallback already
+            # won and fired its row; the sink's row also landed (we
+            # only got here because ``sink.emit`` returned), so two
+            # rows exist for this ``correlation_id`` and the
+            # correlator dedupes downstream. There is nothing the
+            # daemon can do to un-emit the sink's row, so we simply
+            # return without further action.
+            if not emit_claim.acquire(blocking=False):
+                return
 
         thread = threading.Thread(target=_drive, daemon=True)
         thread.start()
@@ -1065,11 +1093,11 @@ class HookRegistry:
             # err-002: only fire the fallback if we win the emit-claim.
             # The race window is small but real — between
             # ``thread.is_alive()`` returning ``True`` here and the
-            # claim acquisition below, the daemon's emit may have
-            # completed (it acquired the claim, ran ``asyncio.run``,
-            # released the frame). If the daemon already holds the
-            # claim, our ``acquire(blocking=False)`` returns ``False``
-            # and we skip the fallback — the sink got the row.
+            # claim acquisition below, the daemon's sink call may have
+            # completed (its post-emit ``acquire`` won the claim). If
+            # the daemon already holds the claim, our
+            # ``acquire(blocking=False)`` returns ``False`` and we
+            # skip the fallback — the sink got the row.
             if emit_claim.acquire(blocking=False):
                 _fallback_to_structlog(
                     event=event,
