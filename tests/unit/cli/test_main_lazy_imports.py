@@ -95,9 +95,16 @@ def _modules_loaded_after_importing_main() -> list[str]:
     # ``PYTHONPATH`` shenanigans that could mask a real regression.
     # Cannot use ``-S`` because we need ``alfred`` on ``sys.path``,
     # which the parent's ``.venv`` provides via ``site``.
+    # CR-149: the docstring above promises ``-I`` but the previous
+    # argv omitted it, letting the child inherit the ambient user /
+    # site environment. A real lazy-import regression could hide
+    # behind a customisation hook that preloads ``alfred.*`` before
+    # ``import alfred.cli.main`` runs in the child. Adding the flag
+    # makes the snapshot honest.
     child = subprocess.run(
         [
             sys.executable,
+            "-I",
             "-c",
             (
                 "import alfred.cli.main; "

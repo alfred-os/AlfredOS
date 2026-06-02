@@ -27,11 +27,13 @@ recovers the literal msgid arguments so the assertion compares
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from alfred.i18n import set_language, t
+from alfred.i18n import t
+from alfred.i18n.translator import _active_lang
 
 ANCHOR_MODULE = (
     Path(__file__).resolve().parents[3] / "src" / "alfred" / "i18n" / "_deferred_key_anchors.py"
@@ -66,15 +68,27 @@ _ANCHORED_KEYS: tuple[str, ...] = _extract_anchored_msgids(ANCHOR_MODULE)
 
 
 @pytest.fixture(autouse=True)
-def _pin_english() -> None:
-    """Pin the resolver to en-US.
+def _pin_english() -> Iterator[None]:
+    """Pin the resolver to en-US, restoring the prior locale on teardown.
 
     Other tests in the suite swap the active language. Without an
     explicit reset the presence check could run against a catalog
     that genuinely lacks the key (e.g. a partial future fr-FR
     catalog) and fail for an unrelated reason.
+
+    CR-149: ``set_language`` mutates the per-coroutine
+    :class:`contextvars.ContextVar`. The previous fixture pinned
+    ``en-US`` but never put the prior value back, so any subsequent
+    test that relied on the suite-wide default would observe the
+    leaked ``en-US`` value and could fail in an order-dependent way.
+    We capture the prior token via :meth:`ContextVar.set` and reset
+    it in teardown so the boundary is symmetric.
     """
-    set_language("en-US")
+    token = _active_lang.set("en-US")
+    try:
+        yield
+    finally:
+        _active_lang.reset(token)
 
 
 def test_anchor_module_has_entries() -> None:

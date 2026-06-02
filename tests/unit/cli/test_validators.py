@@ -332,6 +332,34 @@ def test_validate_domain_bad_parameter_carries_param_hint() -> None:
     assert excinfo.value.param_hint == "'domain'"
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        # CR-149: leading hyphen on a label — RFC 1035 §2.3.1 forbids
+        # this; the bulk regex previously accepted it because the
+        # character class allowed the hyphen anywhere.
+        "-foo.com",
+        # CR-149: trailing hyphen on a label — symmetric to leading.
+        "foo-.com",
+        # CR-149: trailing hyphen on the second-level label even when
+        # the TLD is well-formed (one of the load-bearing reviewer-gate
+        # bypasses the prior regex permitted).
+        "foo-bar-.com",
+    ],
+)
+def test_validate_domain_refuses_off_label_hyphens(bad: str) -> None:
+    """CR-149: per-label DNS rules are enforced after the bulk pattern.
+
+    The bulk pattern ``^[a-z0-9.-]+\\.[a-z]{2,}$`` accepts hyphens
+    anywhere in the label, including leading and trailing
+    positions. RFC 1035 §2.3.1 forbids both; the new per-label
+    regex closes the gap so reviewers do not see proposals carrying
+    DNS-invalid hostnames.
+    """
+    with pytest.raises(typer.BadParameter):
+        validate_domain(bad)
+
+
 # ---------------------------------------------------------------------------
 # validate_quarantined_provider
 # ---------------------------------------------------------------------------

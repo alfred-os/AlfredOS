@@ -33,13 +33,31 @@ def _load_discord_allowlist() -> tuple[str, ...] | None:
     inside an ``except ImportError`` branch (rightly so), and a
     runtime lookup sidesteps that without weakening the production
     constant's ``Final`` typing.
+
+    CR-149: the exception arm narrows to
+    :class:`ModuleNotFoundError` AND verifies ``e.name`` names the
+    discord adapter module specifically. A real import regression
+    inside the adapter — e.g. a ``ModuleNotFoundError`` from one of
+    *its* dependencies, or any other ``ImportError`` shape — now
+    propagates instead of silently triggering the
+    ``HAS_DISCORD=False`` skip. Without this narrowing, a refactor
+    that breaks an internal Discord adapter import would convert
+    every spec §9.2/§9.3 invariant assertion into a SKIPPED test,
+    defeating the Slice-2 allowlist guard (CLAUDE.md hard rule #3).
     """
     try:
         import importlib
 
         module = importlib.import_module("alfred.comms.discord")
-    except ImportError:
-        return None
+    except ModuleNotFoundError as exc:
+        # Only treat the "alfred.comms.discord module itself does not
+        # exist" case as "Discord adapter not yet shipped". Any other
+        # ModuleNotFoundError (e.g. ``ModuleNotFoundError: discord``
+        # raised from inside the adapter) is a real regression and
+        # MUST propagate.
+        if exc.name == "alfred.comms.discord":
+            return None
+        raise
     fields = getattr(module, "_ALLOWLIST_FIELDS", None)
     if fields is None:
         return None

@@ -245,12 +245,67 @@ def test_audit_graph_since_garbage_suffix_rejected(runner: CliRunner) -> None:
     assert result.exit_code != 0
 
 
-def test_query_audit_log_stub_returns_empty_list() -> None:
-    """``_query_audit_log`` is a stub until PR-S3-7 wires the SQL query."""
-    from alfred.cli import audit as audit_module
+@pytest.mark.parametrize(
+    "value",
+    ["0h", "0d", "0m", "-1h", "-7d", "-30m"],
+)
+def test_audit_graph_since_non_positive_rejected(runner: CliRunner, value: str) -> None:
+    """CR-149: non-positive ``--since`` values are refused for every unit.
 
-    assert audit_module._query_audit_log(tier="T3", since_hours=24) == []
-    assert audit_module._query_audit_log(tier=None, since_hours=1) == []
+    The prior shape silently accepted ``0h`` / ``0d`` (zero-hour
+    windows) and rounded negative minutes to one hour, handing the
+    query layer impossible windows that could never select rows. The
+    parser now rejects them with :class:`typer.BadParameter` so the
+    operator sees the typo at the boundary instead of an empty render.
+    """
+    result = runner.invoke(audit_app, ["graph", "--since", value])
+    assert result.exit_code != 0, (value, result.output, result.stderr)
+
+
+def test_query_audit_log_stub_raises_backend_unavailable() -> None:
+    """``_query_audit_log`` raises until PR-S3-7 wires the SQL query.
+
+    CR-149: the stub previously returned ``[]`` which made every real
+    ``alfred audit log`` / ``alfred audit graph`` invocation render
+    the localised "no rows" message — silently conflating "no audit
+    rows" with "the audit subsystem is not yet wired". The stub now
+    raises :class:`AuditBackendUnavailable`; the CLI catches that and
+    emits the dedicated "backend not wired" message instead.
+    """
+    from alfred.cli import audit as audit_module
+    from alfred.cli.audit import AuditBackendUnavailable
+
+    with pytest.raises(AuditBackendUnavailable):
+        audit_module._query_audit_log(tier="T3", since_hours=24)
+    with pytest.raises(AuditBackendUnavailable):
+        audit_module._query_audit_log(tier=None, since_hours=1)
+
+
+def test_audit_log_surfaces_backend_unavailable_message(runner: CliRunner) -> None:
+    """``alfred audit log`` exits non-zero with the localised unavailable hint.
+
+    CR-149 coverage: the production code path (no patch on
+    ``_query_audit_log``) routes :class:`AuditBackendUnavailable`
+    into the ``cli.audit.backend_unavailable`` localised body and
+    exits with code 1, so the operator sees the truth instead of the
+    misleading empty-rows render.
+    """
+    result = runner.invoke(audit_app, ["log", "--since", "24h"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    assert "PR-S3-7" in combined or "not yet wired" in combined.lower()
+
+
+def test_audit_graph_surfaces_backend_unavailable_message(runner: CliRunner) -> None:
+    """``alfred audit graph`` also surfaces the unavailable hint loudly.
+
+    CR-149: symmetric with :func:`test_audit_log_surfaces_backend_unavailable_message`
+    for the graph entry point.
+    """
+    result = runner.invoke(audit_app, ["graph", "--since", "24h"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    assert "PR-S3-7" in combined or "not yet wired" in combined.lower()
 
 
 def test_audit_graph_invalid_tier_rejected(runner: CliRunner) -> None:

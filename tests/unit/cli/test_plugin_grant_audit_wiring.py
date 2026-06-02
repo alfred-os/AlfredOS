@@ -44,7 +44,6 @@ from alfred.security.capability_gate.proposals import (
     HOOKPOINT_GRANT_DENIED,
     HOOKPOINT_GRANT_REQUESTED,
     HOOKPOINT_GRANT_REVOKED,
-    declare_hookpoints,
 )
 
 
@@ -113,11 +112,27 @@ def test_plugin_grant_hookpoints_declared_via_cli_module_import(
     layer via :class:`StateGitProposalClient`; the proposal module's
     module-level ``declare_hookpoints()`` call ensures the hookpoints
     are present in the active registry before any CLI command runs.
-    The :func:`declare_hookpoints` call is idempotent on equal metadata,
-    so a re-declaration here against the test's fresh registry succeeds
-    without raising.
+
+    CR-149: the previous shape called ``declare_hookpoints`` directly
+    against the isolated registry, which proves the helper is
+    idempotent but does NOT prove the spec §14 contract that
+    "importing the proposal stack registers ``plugin.grant.*`` on the
+    active registry". The proposal module's module-level import
+    already executed before ``isolated_registry`` swapped the
+    singleton — so the original test passed trivially. We now use
+    :func:`importlib.reload` against ``alfred.security.capability_gate.proposals``
+    so its module-level ``declare_hookpoints(get_registry())`` call
+    re-runs against the freshly-installed isolated registry. This
+    catches a regression that drops the module-level call (the
+    invariant the CLI relies on) by inspecting the registry the
+    reload populated, not one the test populated by hand.
     """
-    declare_hookpoints(isolated_registry)
+    import importlib
+
+    import alfred.security.capability_gate.proposals as proposals_mod
+
+    importlib.reload(proposals_mod)
+
     for name in (
         HOOKPOINT_GRANT_REQUESTED,
         HOOKPOINT_GRANT_APPROVED,

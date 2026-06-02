@@ -99,18 +99,48 @@ def fake_audit_writer() -> MagicMock:
 
 @pytest.fixture
 def fake_gate() -> MagicMock:
-    """Capability gate stand-in: ``check_plugin_load`` returns True.
+    """Capability gate stand-in keyed on an explicit fixture grant.
 
-    The real :class:`DevGate.check_plugin_load` also returns True
-    unconditionally (Slice-3 co-existence stub, see capability.py
-    docstring). The fake here mirrors that contract while keeping the
-    test free of a CapabilityGate dataclass dependency for the assertion
-    on the ``check_plugin_load(plugin_id=..., manifest_tier=...)`` call
-    shape.
+    CR-149: the previous shape returned ``True`` unconditionally from
+    both ``check_plugin_load`` and ``check_content_clearance``, which
+    is the "always allow" stub coding-guidelines explicitly forbid.
+    A regression in :class:`AlfredPluginSession` that stopped
+    consulting the gate would still pass the handshake test because
+    the always-allow shim approved every call. PRD §7.1 coverage on
+    a trust-boundary path needs the gate to assert against an
+    explicit grant policy.
+
+    The fixture grant pins the manifest the reference plugin actually
+    ships (``plugin_id="alfred.comms-test"`` at
+    ``manifest_tier="user-plugin"``) and refuses anything else. Any
+    refactor that calls the gate with a different plugin id or tier
+    surfaces here as ``check_plugin_load → False`` rather than
+    silently approving the wrong plugin. ``check_content_clearance``
+    follows the same principle: only the manifest's declared
+    content tier is permitted.
     """
+    granted_plugin_id = "alfred.comms-test"
+    granted_manifest_tier = "user-plugin"
+
+    def _check_plugin_load(*, plugin_id: str, manifest_tier: str) -> bool:
+        return plugin_id == granted_plugin_id and manifest_tier == granted_manifest_tier
+
+    def _check_content_clearance(
+        *,
+        plugin_id: str,
+        content_tier: str,
+        **_: object,
+    ) -> bool:
+        # The reference plugin's manifest declares ``user-plugin`` as
+        # its subscriber tier; the corresponding content tier the
+        # fixture grant authorises is ``T2`` (the highest non-T3
+        # tier a user-plugin may consume). A regression that probes
+        # for T3 here is exactly the leak this fixture must catch.
+        return plugin_id == granted_plugin_id and content_tier in {"T1", "T2"}
+
     gate = MagicMock()
-    gate.check_plugin_load.return_value = True
-    gate.check_content_clearance.return_value = True
+    gate.check_plugin_load.side_effect = _check_plugin_load
+    gate.check_content_clearance.side_effect = _check_content_clearance
     return gate
 
 

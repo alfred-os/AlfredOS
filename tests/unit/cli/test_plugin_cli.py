@@ -349,6 +349,47 @@ def test_grant_with_wrong_arity_raises_usage_error(runner: CliRunner) -> None:
     assert result.stderr.strip() != ""
 
 
+def test_grant_list_with_unknown_flag_raises_usage_error(runner: CliRunner) -> None:
+    """CR-149: ``alfred plugin grant list --pendng`` (typo) fails closed.
+
+    The previous parser only checked whether ``"--pending"`` was a
+    MEMBER of ``extra`` and silently rendered the non-pending list
+    for any other token. A flag typo would therefore render the
+    "wrong" surface without warning. The strict parser refuses any
+    shape outside ``[]`` / ``["--pending"]`` and emits the usage
+    error.
+    """
+    result = runner.invoke(plugin_app, ["grant", "list", "--pendng"])
+    assert result.exit_code == 2
+    assert result.stderr.strip() != ""
+
+
+def test_grant_list_with_extra_positional_raises_usage_error(runner: CliRunner) -> None:
+    """CR-149: ``alfred plugin grant list foo`` (extra positional) fails closed.
+
+    Same root cause as the flag-typo case: stray tokens after
+    ``list`` were silently dropped. The strict parser now refuses
+    any shape that is not exactly the documented surface.
+    """
+    result = runner.invoke(plugin_app, ["grant", "list", "foo"])
+    assert result.exit_code == 2
+    assert result.stderr.strip() != ""
+
+
+def test_grant_status_with_extra_positional_raises_usage_error(runner: CliRunner) -> None:
+    """CR-149: ``alfred plugin grant status p1 p2`` fails closed.
+
+    The reserved ``status`` subcommand expects exactly one extra
+    positional (the proposal id). Mismatched arity now routes
+    through the dedicated status usage-error rather than silently
+    re-interpreting the second arg as another proposal id or
+    spuriously falling through to the grant-request path.
+    """
+    result = runner.invoke(plugin_app, ["grant", "status", "p1", "p2"])
+    assert result.exit_code == 2
+    assert result.stderr.strip() != ""
+
+
 # ---------------------------------------------------------------------------
 # sec-pr-s3-6-01 — closed-set validator wiring: BadParameter trio
 # ---------------------------------------------------------------------------
@@ -497,11 +538,19 @@ def test_grant_emits_no_audit_row_when_validator_refuses(runner: CliRunner) -> N
 
 
 def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> None:
-    """``alfred plugin revoke`` emits ``plugin.grant.revoked`` BEFORE state.git.
+    """``alfred plugin revoke`` emits the requested audit row BEFORE state.git.
 
     The revoke path uses :data:`PLUGIN_GRANT_FIELDS` with ``subscriber_tier``
     + ``hookpoint`` as ``None`` — revoke targets the plugin's whole grant
     surface, not a per-grant scoping.
+
+    CR-149: the audit event is ``plugin.grant.revoke.requested``
+    (proposal-enqueue / requested-state row), NOT the terminal
+    ``plugin.grant.revoked``. The terminal row lives on the
+    rebuild/apply path once the reviewer-approved revoke actually
+    leaves the ``plugin_grants`` table; collapsing the two into a
+    single event name skewed downstream consumers that joined on
+    "is this grant gone yet?".
     """
     mock_revoke_proposal = ProposalResult(
         proposal_id="deadbeefdeadbeef",
@@ -525,7 +574,7 @@ def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> Non
         mock_client.create_proposal_from_payload.side_effect = _side_effect
         result = runner.invoke(plugin_app, ["revoke", "alfred.web-fetch"])
     assert result.exit_code == 0, result.stderr
-    audit_calls = [c for c in call_order if c.startswith("audit:plugin.grant.revoked")]
+    audit_calls = [c for c in call_order if c == "audit:plugin.grant.revoke.requested"]
     assert len(audit_calls) == 1, call_order
     audit_idx = call_order.index(audit_calls[0])
     state_idx = call_order.index("state_git")

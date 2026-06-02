@@ -531,6 +531,17 @@ async def test_apply_atomic_runs_all_sql_inside_one_session() -> None:
     # single-transaction contract holds.
     session.begin.assert_called_once()
 
+    # CR-149: ``begin.assert_called_once`` only pins ONE transaction;
+    # an implementation that opens a SECOND session (e.g. to call
+    # ``set_sync_hash`` against a fresh acquisition) would still
+    # satisfy that assertion because the same context-manager mock
+    # is reused on every call. ``factory.assert_called_once`` pins
+    # ONE session acquisition, closing the loophole. The contract
+    # docstring on :meth:`apply_atomic` already promises "one
+    # session, one transaction"; this assertion makes both halves
+    # of the promise enforceable.
+    factory.assert_called_once()
+
     # The execute mock saw every SQL: 2 deletes + 1 insert + 1 sync-hash
     # upsert = 4 calls in revoke-then-upsert-then-sync-hash order.
     assert session.execute.await_count == 4

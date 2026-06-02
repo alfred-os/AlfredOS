@@ -100,8 +100,25 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     ),
     "cli.plugin.show.field.plugin_id": ({}, ("plugin",)),
     # cli.web.allowlist.* -- async-UX surfaces
-    "cli.web.allowlist.pending_review": (
+    #
+    # CR-149: the keys the live CLI renders are the per-action
+    # ``cli.web.allowlist.add.pending_review`` /
+    # ``cli.web.allowlist.remove.pending_review`` pair (wired via
+    # ``queue_proposal_or_exit(pending_review_key=...)`` in
+    # ``src/alfred/cli/web.py``) and ``cli.web.allowlist.list.empty``
+    # for the empty-list message. The bare ``cli.web.allowlist.pending_review``
+    # + ``cli.web.allowlist.list_empty`` entries also live in the
+    # catalog as deferred key anchors (see
+    # ``src/alfred/i18n/_deferred_key_anchors.py``) for a future PR's
+    # surface; they are fingerprinted by
+    # :mod:`tests.unit.i18n.test_deferred_key_anchors` already. This
+    # table pins the keys THIS PR's CLI actually renders.
+    "cli.web.allowlist.add.pending_review": (
         {"branch": "proposal/web-allowlist-add-aaaa", "proposal_id": "aaaa"},
+        ("allowlist", "reviewer"),
+    ),
+    "cli.web.allowlist.remove.pending_review": (
+        {"branch": "proposal/web-allowlist-remove-aaaa", "proposal_id": "aaaa"},
         ("allowlist", "reviewer"),
     ),
     "cli.web.allowlist.add.denied": (
@@ -112,27 +129,34 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"reason": "push refused"},
         ("allowlist", "remove", "denied"),
     ),
-    "cli.web.allowlist.added": (
-        {"domain": "example.com"},
-        ("allowlist", "added"),
-    ),
-    "cli.web.allowlist.removed": (
-        {"domain": "example.com"},
-        ("allowlist", "removed"),
-    ),
     # cli.web.allowlist.list columns + empty hint
     "cli.web.allowlist.list.column.domain": ({}, ("domain",)),
     "cli.web.allowlist.list.column.path_prefix": ({}, ("path",)),
     "cli.web.allowlist.list.column.granted_by": ({}, ("granted",)),
     "cli.web.allowlist.list.column.granted_at": ({}, ("granted",)),
-    "cli.web.allowlist.list_empty": (
+    "cli.web.allowlist.list.empty": (
         {},
         ("allowlist",),
     ),
     # cli.config.* -- quarantined-provider + set/get/list
-    "cli.config.quarantined_provider_pending_review": (
-        {"branch": "proposal/config-quarantined-provider-aaaa", "proposal_id": "aaaa"},
-        ("quarantined", "reviewer"),
+    #
+    # CR-149: ``cli.config.set.pending_review`` is the key the live CLI
+    # renders for the high-blast quarantined-provider flow (wired via
+    # ``queue_proposal_or_exit(pending_review_key="cli.config.set.pending_review")``
+    # in ``src/alfred/cli/config.py``). The legacy
+    # ``cli.config.quarantined_provider_pending_review`` entry stays
+    # in the catalog as a deferred key anchor (see
+    # ``src/alfred/i18n/_deferred_key_anchors.py``) for parity with the
+    # rest of the deferred surface; the deferred-anchor presence test
+    # in :mod:`tests.unit.i18n.test_deferred_key_anchors` fingerprints
+    # it. This table pins the key the CLI actually renders today.
+    "cli.config.set.pending_review": (
+        {
+            "branch": "proposal/config-quarantined-provider-aaaa",
+            "proposal_id": "aaaa",
+            "key": "quarantined-provider",
+        },
+        ("reviewer", "high-blast"),
     ),
     "cli.config.web_fetch_budget_set": (
         {"limit": 50, "user_id": "u-1"},

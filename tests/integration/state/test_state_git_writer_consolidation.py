@@ -150,18 +150,30 @@ def test_plugin_grant_proposal_lands_under_policies_grants_tree(
     assert "proposal.json" not in out.stdout
 
 
-def test_sync_writer_and_async_shim_produce_identical_blob(
+def test_sync_writer_and_async_shim_produce_semantically_identical_blob(
     bare_repo: Path,
 ) -> None:
-    """Byte-equality: the sync writer and the async shim write the same blob.
+    """Semantic JSON equality: sync writer and async shim project the same payload.
+
+    CR-149 docstring fix: the previous shape claimed "byte-equality"
+    but the assertion (``json.loads`` → dict equality) only proves
+    semantic JSON equality — divergent key ordering, whitespace, or
+    newline handling between the two writers would still pass. The
+    docstring (and the test name) now match what the assertion
+    actually proves: every typed field in the proposal payload
+    round-trips identically through both writer entry points. If a
+    future audit-time round-trip relies on byte-equality, a separate
+    test should diff the canonical-JSON encodings of both blobs;
+    today's contract is "the typed fields match", which this
+    assertion enforces.
 
     Both writer entry points now flow through
     :meth:`StateGitProposalClient.create_proposal_from_payload`. The
     test patches ``StateGitProposalClient`` so the async shim binds
     to the test's ``bare_repo`` path; both calls then materialise
     against the same repo with the same proposal id forced via the
-    ``proposal_id`` parameter so the on-disk blob is byte-for-byte
-    comparable.
+    ``proposal_id`` parameter so the typed-field comparison is
+    deterministic.
     """
     payload = PluginGrantProposal(
         plugin_id="alfred.web-fetch",
@@ -225,8 +237,15 @@ def test_sync_writer_and_async_shim_produce_identical_blob(
     ).stdout
 
     # Normalise the per-call ``proposal_branch`` attribution so the
-    # byte-equality test does not flag the deterministic id-suffix
-    # difference. Every other field MUST match exactly.
+    # semantic-equality assertion does not flag the deterministic
+    # id-suffix difference. Every other typed field MUST match
+    # exactly. CR-149: this is semantic JSON equality (dict ==), not
+    # byte-equality; the writers go through the same Pydantic
+    # ``model_dump_json`` path so divergent whitespace or key order
+    # has never been observed in practice, but a future writer that
+    # adopts a different serialiser would slip past this check
+    # silently. A separate byte-diff test would close that gap; the
+    # current contract is "typed fields round-trip".
     sync_obj = json.loads(sync_blob)
     async_obj = json.loads(async_blob)
     sync_obj.pop("proposal_branch")
