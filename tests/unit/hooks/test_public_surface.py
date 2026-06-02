@@ -1,6 +1,6 @@
 """Tests for ``alfred.hooks`` — the public-surface lock (spec §3.1).
 
-Pins the exact 17-symbol public surface of the hooks subsystem. The lock is
+Pins the exact 16-symbol public surface of the hooks subsystem. The lock is
 load-bearing for three independent reasons:
 
 * **sec-008** — ``_invoke_internal`` is the privileged bypass path used by the
@@ -18,9 +18,10 @@ load-bearing for three independent reasons:
   invariants this test pins. The two together — public surface ∧ 100% — are
   the durable contract.
 
-Spec verbatim (§3.1) lists 14 names; #119 review Group F adds 3 publisher-
-facing tier-set constants (``OPEN_TIERS``, ``SYSTEM_OPERATOR_TIERS``,
-``SYSTEM_ONLY_TIERS``) bringing the total to 17. Anything else — ``Flow`` (only
+Spec verbatim (§3.1) lists 14 names; PR-S3-7 (spec §15.1) drops ``DevGate``
+in the flag-day removal, leaving 13 base symbols. #119 review Group F adds 3
+publisher-facing tier-set constants (``OPEN_TIERS``, ``SYSTEM_OPERATOR_TIERS``,
+``SYSTEM_ONLY_TIERS``) bringing the post-PR-S3-7 total to 16. Anything else — ``Flow`` (only
 reachable via ``invoking()`` per Task-13's M-3 discussion), ``Subscriber`` (the
 registry's internal carrier; introspection callers reach into
 ``alfred.hooks.registry``), ``StructlogAuditSink`` (the default
@@ -40,7 +41,8 @@ import pytest
 import alfred.hooks as hooks_pkg
 
 # ──────────────────────────────────────────────────────────────────────
-# The canonical 17-symbol public surface (spec §3.1 + #119 review Group F)
+# The canonical 16-symbol public surface (spec §3.1 minus DevGate, plus
+# #119 review Group F tier constants — post-PR-S3-7)
 # ──────────────────────────────────────────────────────────────────────
 #
 # Sorted alphabetically — the canonical order ``ruff`` (RUF022) enforces on
@@ -69,18 +71,20 @@ EXPECTED_PUBLIC_SURFACE: Final[frozenset[str]] = frozenset(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 1. ``__all__`` equals the spec'd 13-symbol set, exactly (post-PR-S3-7)
+# 1. ``__all__`` equals the 16-symbol post-PR-S3-7 surface, exactly
 # ──────────────────────────────────────────────────────────────────────
 
 
 def test_all_contains_exactly_the_spec_surface() -> None:
-    """``alfred.hooks.__all__`` equals the 13-symbol spec §3.1 set (post-PR-S3-7).
+    """``alfred.hooks.__all__`` equals the 16-symbol public surface (post-PR-S3-7).
 
-    Set-equality, not subset — adding a 14th symbol is a spec change
+    Set-equality, not subset — adding a 17th symbol is a spec change
     and must fail this test. The reverse failure (missing a symbol)
-    catches accidental deletion during refactors. PR-S3-7 dropped
-    ``DevGate`` from the surface in the flag-day removal (spec
-    §15.1); the count went from 14 to 13.
+    catches accidental deletion during refactors. The 16 symbols are
+    13 base (spec §3.1's 14 minus ``DevGate``, removed in the PR-S3-7
+    flag-day per spec §15.1) plus 3 tier-set constants (``OPEN_TIERS``,
+    ``SYSTEM_OPERATOR_TIERS``, ``SYSTEM_ONLY_TIERS``) added in `#119`
+    review Group F.
     """
     assert set(hooks_pkg.__all__) == EXPECTED_PUBLIC_SURFACE
 

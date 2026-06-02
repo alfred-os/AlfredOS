@@ -58,16 +58,38 @@ def test_build_dev_gate_returns_realgate_with_empty_grants() -> None:
     table. A developer who needs granted-system semantics for local
     iteration uses :mod:`tests.helpers.gates` or seeds a real Postgres
     grants table.
+
+    CR-156 round 1 finding #8: the gate's public surface expanded in
+    PR-S3-7 to include :meth:`RealGate.check_plugin_load` and
+    :meth:`RealGate.check_content_clearance` (spec §8.2). All three
+    deny paths must be pinned here — a bypass regression in
+    ``check_plugin_load`` or ``check_content_clearance`` would slip
+    through if only :meth:`check` were asserted, and per
+    ``docs/glossary.md`` the gate's fail-closed contract spans every
+    method.
     """
     from alfred.bootstrap import gate_factory
     from alfred.security.capability_gate._gate import RealGate
 
     gate = gate_factory.build_dev_gate()
     assert isinstance(gate, RealGate)
-    # Empty grant snapshot ⇒ every check denies fail-closed.
+    # Empty grant snapshot ⇒ every check denies fail-closed across the
+    # full gate surface (spec §8.2 — three orthogonal methods).
     assert not gate.check(plugin_id="any", hookpoint="any", requested_tier="operator")
     assert not gate.check(plugin_id="any", hookpoint="any", requested_tier="system")
     assert not gate.check(plugin_id="any", hookpoint="any", requested_tier="user-plugin")
+    # check_plugin_load: subscriber-capability axis (plugin handshake
+    # gate, spec §8.2 / PR-S3-3a).
+    assert not gate.check_plugin_load(plugin_id="any", manifest_tier="system")
+    assert not gate.check_plugin_load(plugin_id="any", manifest_tier="operator")
+    assert not gate.check_plugin_load(plugin_id="any", manifest_tier="user-plugin")
+    # check_content_clearance: orthogonal T0-T3 content axis (spec §8.2
+    # Fork 7 — T3 content must not reach T2-only paths under empty grants).
+    assert not gate.check_content_clearance(
+        plugin_id="any",
+        hookpoint="any",
+        content_tier="T3",
+    )
 
 
 # ---------------------------------------------------------------------------

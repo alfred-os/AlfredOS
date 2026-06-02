@@ -131,10 +131,13 @@ async def test_gate_clearance_consulted_before_extractor(
 async def test_gate_check_uses_t3_content_tier(
     fake_handle: ContentHandle, fake_extractor_extracted: MagicMock
 ) -> None:
-    """``check_content_clearance`` is called with ``content_tier="T3"``
-    and ``hookpoint="quarantine.dereference"``. The closed-vocabulary
-    tier label is the audit-graph contract — typos here silently widen
-    the clearance.
+    """``check_content_clearance`` is called with the closed-vocabulary
+    ``plugin_id="alfred.quarantined-llm"``, ``content_tier="T3"``, and
+    ``hookpoint="quarantine.dereference"``. The plugin_id is pinned to
+    :attr:`QuarantinedExtractor._PLUGIN_ID` so the audit-graph join key
+    matches the extractor's own audit rows — CR-156 round 1 finding #3
+    explicitly called the boundary-doc / implementation drift here.
+    Typos in any of these silently widen the clearance.
     """
     seen: dict[str, Any] = {}
 
@@ -163,6 +166,7 @@ async def test_gate_check_uses_t3_content_tier(
         extractor=fake_extractor_extracted,
         gate=_RecordingGate(),
     )
+    assert seen["plugin_id"] == "alfred.quarantined-llm"
     assert seen["content_tier"] == "T3"
     assert seen["hookpoint"] == "quarantine.dereference"
 
