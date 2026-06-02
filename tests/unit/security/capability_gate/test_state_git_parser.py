@@ -302,3 +302,171 @@ def test_parse_state_git_head_round_trips_wildcard_hookpoint(
     grants = parse_state_git_head(repo_path, commit_hash)
 
     assert any(g.hookpoint == "*" for g in grants)
+
+
+def _seed_repo_with_nested_grants_and_sidecars(tmp_path: Path) -> tuple[Path, str]:
+    """Seed a state.git with a nested subtree + non-JSON sidecars.
+
+    Layout:
+      ``policies/grants/.gitkeep``                       (non-JSON top-level)
+      ``policies/grants/README.md``                      (non-JSON top-level)
+      ``policies/grants/flat.json``                      (legacy flat layout)
+      ``policies/grants/nested-plugin/grant1.json``      (ADR-0018 nested)
+      ``policies/grants/nested-plugin/.gitkeep``         (non-JSON in subtree)
+
+    Pins both ``parse_state_git_head`` skip branches:
+    * non-JSON siblings at every depth are ignored by the suffix guard
+      (line 120 — :func:`alfred.security.capability_gate._state_git_parser`).
+    * intermediate Tree nodes returned by ``tree.traverse()`` are skipped
+      by the type discriminator (line 115).
+    """
+    repo = tmp_path / "state.git"
+    env = _git_env(tmp_path)
+    subprocess.run(  # noqa: S603
+        ["git", "init", "--bare", "--initial-branch=main", str(repo)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    work = tmp_path / "seed"
+    work.mkdir()
+    subprocess.run(  # noqa: S603
+        ["git", "clone", str(repo), str(work)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    grants_dir = work / "policies" / "grants"
+    nested_dir = grants_dir / "nested-plugin"
+    nested_dir.mkdir(parents=True)
+
+    # Non-JSON sidecars at top level — exercise the .json suffix guard.
+    (grants_dir / ".gitkeep").write_text("")
+    (grants_dir / "README.md").write_text("# operator note")
+
+    # Legacy flat-layout grant.
+    (grants_dir / "flat.json").write_text(
+        json.dumps(
+            {
+                "plugin_id": "legacy.flat",
+                "subscriber_tier": "operator",
+                "hookpoint": "tool.web.fetch",
+                "content_tier": None,
+                "proposal_branch": "proposal/policy-grant-flat",
+            }
+        )
+    )
+
+    # Nested grant — the ADR-0018 canonical layout.
+    (nested_dir / "grant1.json").write_text(
+        json.dumps(
+            {
+                "plugin_id": "nested.plugin",
+                "subscriber_tier": "system",
+                "hookpoint": "tool.web.fetch",
+                "content_tier": None,
+                "proposal_branch": "proposal/policy-grant-nested",
+            }
+        )
+    )
+    # Non-JSON sidecar inside the subtree — exercises the suffix guard
+    # after ``tree.traverse()`` has descended past the Tree node.
+    (nested_dir / ".gitkeep").write_text("")
+
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "add", "."],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-C",
+            str(work),
+            "commit",
+            "-m",
+            "seed nested + sidecars",
+        ],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    head_proc = subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "rev-parse", "HEAD"],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    commit_hash = head_proc.stdout.strip()
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "push", "origin", "main"],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    return repo, commit_hash
+
+
+def test_parse_state_git_head_skips_non_json_sidecars(tmp_path: Path) -> None:
+    """``.gitkeep`` + ``README.md`` siblings under ``policies/grants/`` are skipped.
+
+    Pins the suffix guard at line 120 of ``_state_git_parser.py``: a
+    future YAML peer file or operator README MUST NOT throw the parser
+    into a :class:`json.JSONDecodeError` warn-skip loop. The structural
+    guard sidesteps the JSON parser entirely.
+
+    Asserts:
+    * The two legitimate grants still project (legacy flat + nested).
+    * NO ``capability_gate.rebuild.skip_invalid_grant`` warning fires
+      for the sidecars (the suffix guard is BEFORE the json.loads try).
+    """
+    import structlog.testing
+
+    repo_path, commit_hash = _seed_repo_with_nested_grants_and_sidecars(tmp_path)
+
+    with structlog.testing.capture_logs() as captured:
+        grants = parse_state_git_head(repo_path, commit_hash)
+
+    plugin_ids = {g.plugin_id for g in grants}
+    assert plugin_ids == {"legacy.flat", "nested.plugin"}, (
+        f"expected both legacy flat + nested grants; got {plugin_ids!r}"
+    )
+
+    # The skip-invalid-grant warning is for malformed BLOBS, never for
+    # sidecars filtered out by the structural guard.
+    skipped = [
+        c for c in captured if c.get("event") == "capability_gate.rebuild.skip_invalid_grant"
+    ]
+    assert skipped == [], (
+        f"sidecars MUST be skipped by suffix guard before the warn-skip "
+        f"loop; got warnings: {skipped!r}"
+    )
+
+
+def test_parse_state_git_head_recurses_into_nested_plugin_subtree(
+    tmp_path: Path,
+) -> None:
+    """ADR-0018 nested ``policies/grants/<plugin>/<grant>.json`` round-trips.
+
+    Pins the type discriminator at line 114-115 of
+    ``_state_git_parser.py``: ``tree.traverse()`` yields the subtree
+    node ``nested-plugin`` itself BEFORE the contained blobs, and the
+    parser MUST skip the Tree object to avoid a TypeError on
+    ``blob.path.endswith``. Without the type guard the parser would
+    surface a misleading skip warning on the directory entry; with it,
+    only real blobs reach the JSON path.
+    """
+    repo_path, commit_hash = _seed_repo_with_nested_grants_and_sidecars(tmp_path)
+
+    grants = parse_state_git_head(repo_path, commit_hash)
+
+    nested = [g for g in grants if g.plugin_id == "nested.plugin"]
+    assert len(nested) == 1
+    assert nested[0].subscriber_tier == "system"
+    assert nested[0].proposal_branch == "proposal/policy-grant-nested"

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 03:03+0100\n"
+"POT-Creation-Date: 2026-06-02 03:40+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -184,55 +184,55 @@ msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
 msgid "cli.config.set.arg.value"
 msgstr "New value (parsed as int/float when possible, else kept as string)."
 
-#: src/alfred/cli/config.py:338
+#: src/alfred/cli/config.py:344
 msgid "cli.config.set.unknown_key"
 msgstr ""
 "alfred config set refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:350
+#: src/alfred/cli/config.py:356
 msgid "cli.config.set.applied"
 msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
 
-#: src/alfred/cli/config.py:363
+#: src/alfred/cli/config.py:369
 msgid "cli.config.get.help.short"
 msgstr "Show the current value of an operator configuration key."
 
-#: src/alfred/cli/config.py:367
+#: src/alfred/cli/config.py:373
 msgid "cli.config.get.arg.key"
 msgstr "Configuration key to read."
 
-#: src/alfred/cli/config.py:380
+#: src/alfred/cli/config.py:386
 msgid "cli.config.get.unknown_key"
 msgstr ""
 "alfred config get refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:389
+#: src/alfred/cli/config.py:395
 msgid "cli.config.get.not_set"
 msgstr ""
 "{key} is not set in policies.yaml — the system default applies. Set it "
 "with 'alfred config set {key} <value>'."
 
-#: src/alfred/cli/config.py:391
+#: src/alfred/cli/config.py:397
 msgid "cli.config.get.value"
 msgstr "{key} = {value}"
 
-#: src/alfred/cli/config.py:415
+#: src/alfred/cli/config.py:421
 msgid "cli.config.list.help.short"
 msgstr "List every operator configuration value from policies.yaml."
 
-#: src/alfred/cli/config.py:424 src/alfred/cli/config.py:428
+#: src/alfred/cli/config.py:430 src/alfred/cli/config.py:434
 msgid "cli.config.list.empty"
 msgstr ""
 "policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
 "to seed the file."
 
-#: src/alfred/cli/config.py:445
+#: src/alfred/cli/config.py:451
 msgid "cli.config.set.denied"
 msgstr "alfred config set denied: {reason}"
 
-#: src/alfred/cli/config.py:446
+#: src/alfred/cli/config.py:452
 msgid "cli.config.set.pending_review"
 msgstr ""
 "{key} change queued for reviewer approval (high-blast knob).\n"

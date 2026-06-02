@@ -292,3 +292,62 @@ def test_cli_i18n_key_resolves_with_fingerprint(key: str) -> None:
         f"this key (i18n-001). Expected one of {fingerprints!r}; "
         f"got: {result!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Pybabel-visibility anchor functions (cross-cutting R5)
+# ---------------------------------------------------------------------------
+#
+# :func:`queue_proposal_or_exit` consumes the ``denied_key`` +
+# ``pending_review_key`` strings via parameter, so the pybabel AST walker
+# cannot find them statically. Each sub-app declares a private
+# ``_register_proposal_keys_for_pybabel`` shim that returns the live
+# ``t(...)`` renders — never called at runtime but it MUST work when
+# invoked. A future refactor that decides to use it for e.g. catalog
+# validation would silently get the bare msgids if the shim broke; pin
+# the live shape here so the regression is loud.
+
+
+def test_cli_plugin_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> None:
+    """``alfred.cli.plugin._register_proposal_keys_for_pybabel`` renders
+    four non-bare strings for the grant/revoke denied + pending_review
+    key pairs. Mirrors
+    :func:`alfred.cli._state_git._register_hint_keys_for_pybabel` shape.
+    """
+    from alfred.cli.plugin import _register_proposal_keys_for_pybabel
+
+    rendered = _register_proposal_keys_for_pybabel()
+    assert len(rendered) == 4
+    for body in rendered:
+        # Bare msgid would still contain the dotted-path prefix.
+        assert not body.startswith("cli.plugin.grant.")
+        assert not body.startswith("cli.plugin.revoke.")
+        assert body.strip() != ""
+
+
+def test_cli_web_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> None:
+    """``alfred.cli.web._register_proposal_keys_for_pybabel`` renders
+    four non-bare strings for the allowlist add/remove denied + pending
+    pairs.
+    """
+    from alfred.cli.web import _register_proposal_keys_for_pybabel
+
+    rendered = _register_proposal_keys_for_pybabel()
+    assert len(rendered) == 4
+    for body in rendered:
+        assert not body.startswith("cli.web.allowlist.")
+        assert body.strip() != ""
+
+
+def test_cli_config_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> None:
+    """``alfred.cli.config._register_proposal_keys_for_pybabel`` renders
+    two non-bare strings for ``config.set.denied`` +
+    ``config.set.pending_review``.
+    """
+    from alfred.cli.config import _register_proposal_keys_for_pybabel
+
+    rendered = _register_proposal_keys_for_pybabel()
+    assert len(rendered) == 2
+    for body in rendered:
+        assert not body.startswith("cli.config.set.")
+        assert body.strip() != ""
