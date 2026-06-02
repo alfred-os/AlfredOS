@@ -90,16 +90,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from typing import cast
+from unittest.mock import create_autospec
 
 from alfred.hooks.capability import CapabilityGate
+from alfred.security.capability_gate._audit_protocols import _AuditSink
 from alfred.security.capability_gate._gate import RealGate
+from alfred.security.capability_gate.backend import StorageBackend
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
-
-if TYPE_CHECKING:
-    from alfred.security.capability_gate._audit_protocols import _AuditSink
-    from alfred.security.capability_gate.backend import StorageBackend
 
 # The three tier strings the fixture-parity gate recognises. Module-level
 # so a maintainer changing the closed set surfaces the change next to
@@ -113,11 +111,24 @@ def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
     """Return a :class:`StorageBackend`-shaped stub pre-loaded with ``grants``.
 
     The stub satisfies the structural :class:`StorageBackend` Protocol
-    without any database I/O: every async method is an :class:`AsyncMock`.
+    without any database I/O. Built via
+    :func:`unittest.mock.create_autospec` against the Protocol with
+    ``spec_set=True``: every async method auto-binds as an
+    :class:`AsyncMock` whose signature matches the Protocol's, so a
+    typo'd method name or an unexpected keyword on a hot-path call
+    (e.g. ``backend.apply_atomic(revoke=...)`` instead of
+    ``revokes=...``) raises :class:`AttributeError` /
+    :class:`TypeError` immediately instead of silently accepting the
+    call. Without ``spec_set`` a regression in :meth:`RealGate._apply_grants`
+    could swap a kwarg name and keep tests green — CLAUDE.md hard rule
+    #7 (no silent failures in security paths) forbids that shape.
+
     Tests that drive the test-shim gate consult the in-memory
     :class:`GatePolicy` snapshot, not the backend, so the backend's
     return values only matter on the heartbeat path — which tests can
-    opt out of by leaving ``start_heartbeat=False``.
+    opt out of by leaving ``start_heartbeat=False``. ``load_grants``
+    gets a seeded return value so :class:`RealGate.__init__` can read
+    a deterministic snapshot when callers pass ``grants``.
 
     Return type is the :class:`StorageBackend` Protocol, not :class:`Any`:
     the Protocol is ``@runtime_checkable`` and the caller feeds the
@@ -130,15 +141,14 @@ def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
     test stub cannot live under ``tests/`` AND be importable from
     ``src/``).
     """
-    backend = MagicMock()
-    backend.ping = AsyncMock(return_value=None)
-    backend.load_grants = AsyncMock(return_value=frozenset(grants))
-    backend.get_sync_hash = AsyncMock(return_value=None)
-    backend.set_sync_hash = AsyncMock(return_value=None)
-    backend.upsert_grant = AsyncMock(return_value=None)
-    backend.revoke_grant = AsyncMock(return_value=None)
-    backend.apply_atomic = AsyncMock(return_value=None)
-    return backend
+    backend = create_autospec(StorageBackend, spec_set=True, instance=True)
+    backend.load_grants.return_value = frozenset(grants)
+    # ``create_autospec`` returns ``Any`` (per the stdlib stubs); the cast
+    # restores the Protocol contract for the caller. ``isinstance`` against
+    # the ``@runtime_checkable`` Protocol still passes at runtime — the
+    # cast carries the type information across the mypy boundary that the
+    # mock library's typing erases.
+    return cast(StorageBackend, backend)
 
 
 def _make_no_op_audit_sink() -> _AuditSink:
@@ -151,17 +161,26 @@ def _make_no_op_audit_sink() -> _AuditSink:
     satisfies the constructor contract without inflating the test
     surface area.
 
+    Built via :func:`unittest.mock.create_autospec` against the
+    :class:`_AuditSink` Protocol with ``spec_set=True``: a future
+    addition to the Protocol surfaces here as an
+    :class:`AttributeError`, and a kwarg-name drift on
+    :meth:`_AuditSink.append_schema` (e.g. ``schema=...`` instead of
+    ``schema_name=...``) raises :class:`TypeError` immediately. Without
+    ``spec_set`` a security regression could rename a kwarg and keep
+    tests green — CLAUDE.md hard rule #7 forbids that shape.
+
     Return type is the :class:`_AuditSink` Protocol (shared with
     :mod:`alfred.security.capability_gate.proposals` per
     :mod:`alfred.security.capability_gate._audit_protocols`), not
-    :class:`Any`: a future addition to the Protocol surfaces here as a
-    mypy failure rather than a silent runtime :class:`AttributeError`.
-    Mirrors :func:`alfred.bootstrap.gate_factory._make_no_op_audit_sink`
+    :class:`Any`. Mirrors
+    :func:`alfred.bootstrap.gate_factory._make_no_op_audit_sink`
     (duplicated by design per ADR-0019).
     """
-    sink = MagicMock()
-    sink.append_schema = AsyncMock(return_value=None)
-    return sink
+    # ``create_autospec`` returns ``Any`` (per the stdlib stubs); the cast
+    # restores the Protocol contract for the caller. ``isinstance`` against
+    # the ``@runtime_checkable`` Protocol still passes at runtime.
+    return cast(_AuditSink, create_autospec(_AuditSink, spec_set=True, instance=True))
 
 
 def make_deny_all_gate() -> CapabilityGate:
