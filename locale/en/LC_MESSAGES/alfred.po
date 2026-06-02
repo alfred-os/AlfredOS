@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 01:40+0100\n"
+"POT-Creation-Date: 2026-06-02 02:15+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -45,17 +45,17 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/_state_git.py:406
+#: src/alfred/cli/_state_git.py:517
 msgid "cli.state_git.error.path_missing"
 msgstr ""
 "/var/lib/alfred/state.git does not exist. Run `alfred-setup` to "
 "initialise the reviewer-gate state repo."
 
-#: src/alfred/cli/_state_git.py:407
+#: src/alfred/cli/_state_git.py:518
 msgid "cli.state_git.error.git_missing"
 msgstr "`git` is not installed on PATH. Install git and re-run the command."
 
-#: src/alfred/cli/_state_git.py:408
+#: src/alfred/cli/_state_git.py:519
 msgid "cli.state_git.error.push_rejected"
 msgstr ""
 "Reviewer-gate push rejected. Check `alfred audit log --event "
@@ -159,7 +159,7 @@ msgstr "Audit graph — swimlane {tier}"
 msgid "cli.audit.graph.header"
 msgstr "Audit graph — all tiers"
 
-#: src/alfred/cli/config.py:80 src/alfred/cli/config.py:93
+#: src/alfred/cli/config.py:81 src/alfred/cli/config.py:94
 msgid "cli.config.error.malformed_yaml"
 msgstr ""
 "alfred config refused: {yaml_path} is malformed and cannot be parsed. "
@@ -168,71 +168,71 @@ msgstr ""
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.
 # quarantined-provider) queue a state.git reviewer-gated proposal.
-#: src/alfred/cli/config.py:260
+#: src/alfred/cli/config.py:261
 msgid "cli.config.help.group"
 msgstr "Get, set, or list operator configuration values."
 
-#: src/alfred/cli/config.py:270
+#: src/alfred/cli/config.py:271
 msgid "cli.config.set.help.short"
 msgstr "Set an operator configuration key."
 
-#: src/alfred/cli/config.py:274
+#: src/alfred/cli/config.py:275
 msgid "cli.config.set.arg.key"
 msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
 
-#: src/alfred/cli/config.py:278
+#: src/alfred/cli/config.py:279
 msgid "cli.config.set.arg.value"
 msgstr "New value (parsed as int/float when possible, else kept as string)."
 
-#: src/alfred/cli/config.py:323
+#: src/alfred/cli/config.py:331
 msgid "cli.config.set.unknown_key"
 msgstr ""
 "alfred config set refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:335
+#: src/alfred/cli/config.py:343
 msgid "cli.config.set.applied"
 msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
 
-#: src/alfred/cli/config.py:348
+#: src/alfred/cli/config.py:356
 msgid "cli.config.get.help.short"
 msgstr "Show the current value of an operator configuration key."
 
-#: src/alfred/cli/config.py:352
+#: src/alfred/cli/config.py:360
 msgid "cli.config.get.arg.key"
 msgstr "Configuration key to read."
 
-#: src/alfred/cli/config.py:365
+#: src/alfred/cli/config.py:373
 msgid "cli.config.get.unknown_key"
 msgstr ""
 "alfred config get refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:374
+#: src/alfred/cli/config.py:382
 msgid "cli.config.get.not_set"
 msgstr ""
 "{key} is not set in policies.yaml — the system default applies. Set it "
 "with 'alfred config set {key} <value>'."
 
-#: src/alfred/cli/config.py:376
+#: src/alfred/cli/config.py:384
 msgid "cli.config.get.value"
 msgstr "{key} = {value}"
 
-#: src/alfred/cli/config.py:400
+#: src/alfred/cli/config.py:408
 msgid "cli.config.list.help.short"
 msgstr "List every operator configuration value from policies.yaml."
 
-#: src/alfred/cli/config.py:409 src/alfred/cli/config.py:413
+#: src/alfred/cli/config.py:417 src/alfred/cli/config.py:421
 msgid "cli.config.list.empty"
 msgstr ""
 "policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
 "to seed the file."
 
-#: src/alfred/cli/config.py:430
+#: src/alfred/cli/config.py:438
 msgid "cli.config.set.denied"
 msgstr "alfred config set denied: {reason}"
 
-#: src/alfred/cli/config.py:431
+#: src/alfred/cli/config.py:439
 msgid "cli.config.set.pending_review"
 msgstr ""
 "{key} change queued for reviewer approval (high-blast knob).\n"
@@ -318,109 +318,109 @@ msgstr "per-call max USD: {amount}"
 # PR-S3-6 Component B — alfred plugin sub-app (reviewer-gated grant/revoke,
 # read-only list/show/status). Async-UX strings carry {branch} +
 # {proposal_id} so the operator can copy-paste the follow-up command.
-#: src/alfred/cli/plugin.py:112
+#: src/alfred/cli/plugin.py:120
 msgid "cli.plugin.help.group"
 msgstr "Manage plugin grants and inspect loaded plugins."
 
-#: src/alfred/cli/plugin.py:166
+#: src/alfred/cli/plugin.py:178
 msgid "cli.plugin.grant.follow_up_command"
 msgstr "Check status with: alfred plugin grant status {proposal_id}"
 
-#: src/alfred/cli/plugin.py:175
+#: src/alfred/cli/plugin.py:187
 msgid "cli.plugin.grant.list_pending_hint"
 msgstr "See all queued grants with: alfred plugin grant list --pending"
 
-#: src/alfred/cli/plugin.py:204
+#: src/alfred/cli/plugin.py:216
 msgid "cli.plugin.grant.help.short"
 msgstr "Queue a reviewer-gated capability-grant proposal for a plugin."
 
-#: src/alfred/cli/plugin.py:211
+#: src/alfred/cli/plugin.py:223
 msgid "cli.plugin.grant.arg.plugin_id"
 msgstr "Plugin id from the manifest (e.g. alfred.web-fetch)."
 
-#: src/alfred/cli/plugin.py:231
+#: src/alfred/cli/plugin.py:243
 msgid "cli.plugin.grant.status.usage_error"
 msgstr "Usage: alfred plugin grant status <proposal_id>."
 
-#: src/alfred/cli/plugin.py:240
+#: src/alfred/cli/plugin.py:252
 msgid "cli.plugin.grant.usage_error"
 msgstr ""
 "Usage: alfred plugin grant <plugin_id> <subscriber_tier> <hookpoint>. "
 "Reserved subcommands: 'status <proposal_id>' and 'list [--pending]'."
 
-#: src/alfred/cli/plugin.py:279
+#: src/alfred/cli/plugin.py:291
 msgid "cli.plugin.grant.status.pending"
 msgstr ""
 "Proposal {proposal_id} is pending reviewer approval. Branch: {branch}. "
 "Full status (pending / approved / denied / not_found) lands once the "
 "Postgres plugin_grants projection is wired (PR-S3-7)."
 
-#: src/alfred/cli/plugin.py:295
+#: src/alfred/cli/plugin.py:307
 msgid "cli.plugin.grant.list.empty"
 msgstr ""
 "No grants to display. Pending-proposal listing reads from the state.git "
 "branch index + Postgres plugin_grants projection; both surfaces fully "
 "land in PR-S3-7."
 
-#: src/alfred/cli/plugin.py:300
+#: src/alfred/cli/plugin.py:312
 msgid "cli.plugin.grant.list.column.plugin_id"
 msgstr "plugin_id"
 
-#: src/alfred/cli/plugin.py:301
+#: src/alfred/cli/plugin.py:313
 msgid "cli.plugin.grant.list.column.subscriber_tier"
 msgstr "tier"
 
-#: src/alfred/cli/plugin.py:302
+#: src/alfred/cli/plugin.py:314
 msgid "cli.plugin.grant.list.column.hookpoint"
 msgstr "hookpoint"
 
-#: src/alfred/cli/plugin.py:303
+#: src/alfred/cli/plugin.py:315
 msgid "cli.plugin.grant.list.column.status"
 msgstr "status"
 
-#: src/alfred/cli/plugin.py:320
+#: src/alfred/cli/plugin.py:332
 msgid "cli.plugin.revoke.help.short"
 msgstr "Queue a reviewer-gated revocation proposal for a plugin's grants."
 
-#: src/alfred/cli/plugin.py:325
+#: src/alfred/cli/plugin.py:337
 msgid "cli.plugin.revoke.arg.plugin_id"
 msgstr "Plugin id whose grants will be revoked."
 
-#: src/alfred/cli/plugin.py:375
+#: src/alfred/cli/plugin.py:386
 msgid "cli.plugin.list.help.short"
 msgstr "List every plugin registered in the Postgres manifest projection."
 
-#: src/alfred/cli/plugin.py:385
+#: src/alfred/cli/plugin.py:396
 msgid "cli.plugin.list.not_implemented_yet"
 msgstr ""
 "alfred plugin list is not yet implemented. Pulls the manifest projection "
 "from Postgres once RealGate is seeded (PR-S3-7). Until then, inspect "
 "plugins via the plugin manifest files under plugins/."
 
-#: src/alfred/cli/plugin.py:389
+#: src/alfred/cli/plugin.py:400
 msgid "cli.plugin.show.help.short"
 msgstr "Show manifest details for a registered plugin."
 
-#: src/alfred/cli/plugin.py:394
+#: src/alfred/cli/plugin.py:405
 msgid "cli.plugin.show.arg.plugin_id"
 msgstr "Plugin id to inspect."
 
-#: src/alfred/cli/plugin.py:405
+#: src/alfred/cli/plugin.py:416
 msgid "cli.plugin.show.plugin_id_label"
 msgstr "plugin_id: {plugin_id}"
 
-#: src/alfred/cli/plugin.py:406
+#: src/alfred/cli/plugin.py:417
 msgid "cli.plugin.show.no_manifest_yet"
 msgstr ""
 "No manifest data available yet. The Postgres manifest projection lands in"
 " PR-S3-7; until then, inspect the plugin's manifest.toml under plugins/ "
 "directly."
 
-#: src/alfred/cli/plugin.py:423
+#: src/alfred/cli/plugin.py:434
 msgid "cli.plugin.grant.denied"
 msgstr "alfred plugin grant denied: {reason}"
 
-#: src/alfred/cli/plugin.py:424
+#: src/alfred/cli/plugin.py:435
 msgid "cli.plugin.grant.pending_review"
 msgstr ""
 "Grant proposal queued for reviewer approval.\n"
@@ -430,11 +430,11 @@ msgstr ""
 "approves the proposal and the supervisor rebuilds the capability "
 "projection."
 
-#: src/alfred/cli/plugin.py:425
+#: src/alfred/cli/plugin.py:436
 msgid "cli.plugin.revoke.denied"
 msgstr "alfred plugin revoke denied: {reason}"
 
-#: src/alfred/cli/plugin.py:426
+#: src/alfred/cli/plugin.py:437
 msgid "cli.plugin.revoke.pending_review"
 msgstr ""
 "Revocation proposal queued for reviewer approval.\n"
@@ -514,68 +514,68 @@ msgstr "Reset circuit breaker for {component}. Audit row recorded."
 # PR-S3-6 Component C — alfred web allowlist sub-app (reviewer-gated
 # add/remove, read-only list). Async-UX strings carry {branch} +
 # {proposal_id} so the operator can copy-paste the follow-up command.
-#: src/alfred/cli/web.py:82
+#: src/alfred/cli/web.py:85
 msgid "cli.web.help.group"
 msgstr "Manage web-fetch policy (domain allowlist, per-domain limits)."
 
-#: src/alfred/cli/web.py:87
+#: src/alfred/cli/web.py:90
 msgid "cli.web.allowlist.help.group"
 msgstr "Manage the web-fetch domain allowlist."
 
-#: src/alfred/cli/web.py:111
+#: src/alfred/cli/web.py:114
 msgid "cli.web.allowlist.add.help.short"
 msgstr "Queue a reviewer-gated proposal to add a domain to the allowlist."
 
-#: src/alfred/cli/web.py:116
+#: src/alfred/cli/web.py:119
 msgid "cli.web.allowlist.add.arg.domain"
 msgstr "Domain to add (e.g. api.example.com)."
 
-#: src/alfred/cli/web.py:124
+#: src/alfred/cli/web.py:127
 msgid "cli.web.allowlist.add.flag.path_prefix"
 msgstr ""
 "Path prefix the entry scopes to (default '/'). Narrower prefixes (e.g. "
 "'/v1/') restrict the allowlist to a single API surface."
 
-#: src/alfred/cli/web.py:170
+#: src/alfred/cli/web.py:173
 msgid "cli.web.allowlist.remove.help.short"
 msgstr "Queue a reviewer-gated proposal to remove a domain from the allowlist."
 
-#: src/alfred/cli/web.py:175
+#: src/alfred/cli/web.py:178
 msgid "cli.web.allowlist.remove.arg.domain"
 msgstr "Domain to remove."
 
-#: src/alfred/cli/web.py:217
+#: src/alfred/cli/web.py:226
 msgid "cli.web.allowlist.list.help.short"
 msgstr "List the current web-fetch domain allowlist."
 
-#: src/alfred/cli/web.py:222
+#: src/alfred/cli/web.py:231
 msgid "cli.web.allowlist.list.empty"
 msgstr ""
 "No allowlist entries to display. The web_allowlist projection is empty "
 "(no operator-added entries yet, or the Postgres projection is not yet "
 "wired — PR-S3-7)."
 
-#: src/alfred/cli/web.py:226
+#: src/alfred/cli/web.py:235
 msgid "cli.web.allowlist.list.column.domain"
 msgstr "domain"
 
-#: src/alfred/cli/web.py:227
+#: src/alfred/cli/web.py:236
 msgid "cli.web.allowlist.list.column.path_prefix"
 msgstr "path_prefix"
 
-#: src/alfred/cli/web.py:228
+#: src/alfred/cli/web.py:237
 msgid "cli.web.allowlist.list.column.granted_by"
 msgstr "granted_by"
 
-#: src/alfred/cli/web.py:229
+#: src/alfred/cli/web.py:238
 msgid "cli.web.allowlist.list.column.granted_at"
 msgstr "granted_at"
 
-#: src/alfred/cli/web.py:251
+#: src/alfred/cli/web.py:260
 msgid "cli.web.allowlist.add.denied"
 msgstr "alfred web allowlist add denied: {reason}"
 
-#: src/alfred/cli/web.py:252
+#: src/alfred/cli/web.py:261
 msgid "cli.web.allowlist.add.pending_review"
 msgstr ""
 "Allowlist-add proposal queued for reviewer approval.\n"
@@ -584,11 +584,11 @@ msgstr ""
 "The domain is NOT yet fetchable — it activates when the reviewer approves"
 " the proposal and the supervisor rebuilds the web_allowlist projection."
 
-#: src/alfred/cli/web.py:253
+#: src/alfred/cli/web.py:262
 msgid "cli.web.allowlist.remove.denied"
 msgstr "alfred web allowlist remove denied: {reason}"
 
-#: src/alfred/cli/web.py:254
+#: src/alfred/cli/web.py:263
 msgid "cli.web.allowlist.remove.pending_review"
 msgstr ""
 "Allowlist-remove proposal queued for reviewer approval.\n"
