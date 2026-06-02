@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import structlog
@@ -52,6 +52,7 @@ from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 _log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
+    from alfred.security.capability_gate._audit_protocols import _AuditSink
     from alfred.security.capability_gate.backend import StorageBackend
 
 
@@ -90,7 +91,7 @@ def is_production() -> bool:
     return value not in {"", _DEVELOPMENT}
 
 
-def _make_in_process_backend(grants: Iterable[GrantRow] = ()) -> Any:
+def _make_in_process_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
     """Return a :class:`StorageBackend`-shaped stub with no Postgres I/O.
 
     PR-S3-7 (spec §15.1): with :class:`DevGate` removed, the development
@@ -99,6 +100,14 @@ def _make_in_process_backend(grants: Iterable[GrantRow] = ()) -> Any:
     structural :class:`StorageBackend` Protocol without any database
     connection so ``alfred chat`` / ``alfred status`` in a development
     environment doesn't depend on a running database.
+
+    Return type is the :class:`StorageBackend` Protocol, not :class:`Any`:
+    the Protocol is ``@runtime_checkable`` and the caller
+    (:func:`build_dev_gate`) feeds the result to
+    :class:`RealGate.__init__`'s ``backend: StorageBackend`` parameter
+    so the structural type hint is the load-bearing contract. A future
+    addition to the Protocol surfaces here as a mypy failure rather
+    than a silent runtime :class:`AttributeError`.
     """
     backend = MagicMock()
     backend.ping = AsyncMock(return_value=None)
@@ -111,7 +120,7 @@ def _make_in_process_backend(grants: Iterable[GrantRow] = ()) -> Any:
     return backend
 
 
-def _make_no_op_audit_sink() -> Any:
+def _make_no_op_audit_sink() -> _AuditSink:
     """Return an audit-sink stub for the development gate.
 
     err-003: :class:`RealGate` requires an audit sink so fail-closed
@@ -121,6 +130,15 @@ def _make_no_op_audit_sink() -> Any:
     no-grant policy means the gate denies every check on the hot path
     without ever transitioning to fail-closed (no heartbeat) so the
     sink is never called in practice.
+
+    Return type is the :class:`_AuditSink` Protocol (shared with
+    :mod:`alfred.security.capability_gate.proposals` per
+    :mod:`alfred.security.capability_gate._audit_protocols`) so the
+    caller's :class:`RealGate.__init__` ``audit_sink: _AuditSink``
+    parameter binds against a structural Protocol rather than an
+    untyped :class:`Any`. A future addition to the Protocol surfaces
+    here as a mypy failure rather than a silent runtime
+    :class:`AttributeError`.
     """
     sink = MagicMock()
     sink.append_schema = AsyncMock(return_value=None)
