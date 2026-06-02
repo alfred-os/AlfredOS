@@ -365,6 +365,56 @@ def test_create_proposal_compat_shim_validates_payload(bare_repo: Path) -> None:
         )
 
 
+def test_create_proposal_compat_shim_strips_composite_discriminator_keys(
+    bare_repo: Path,
+) -> None:
+    """CR-149 round-10 (3339361774): composite legacy payloads round-trip.
+
+    Canonical legacy callers (the integration corpus, a state.git replay
+    tool) pass the discriminator key inside ``payload`` too:
+    ``create_proposal("web-allowlist-add", {"action": "add", ...})``.
+    The prior shim splatted the dict, raising ``TypeError: got multiple
+    values for keyword argument 'action'`` before Pydantic ever saw the
+    payload. The fix strips ``action`` / ``config_key`` from the payload
+    copy so the parsed discriminator wins and the legacy round-trip
+    stays lossless.
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+
+    # web-allowlist-add with explicit ``action`` in the payload.
+    add_result = client.create_proposal(
+        proposal_type="web-allowlist-add",
+        payload={
+            "action": "add",
+            "domain": "example.com",
+            "path_prefix": "/v1",
+        },
+    )
+    assert add_result.branch.startswith("proposal/web-allowlist-add-")
+
+    # web-allowlist-remove with the same composite shape — exercises the
+    # twin branch in the dispatcher.
+    remove_result = client.create_proposal(
+        proposal_type="web-allowlist-remove",
+        payload={
+            "action": "remove",
+            "domain": "example.com",
+            "path_prefix": None,
+        },
+    )
+    assert remove_result.branch.startswith("proposal/web-allowlist-remove-")
+
+    # config-<key> with the matching ``config_key`` in the payload.
+    config_result = client.create_proposal(
+        proposal_type="config-quarantined-provider",
+        payload={
+            "config_key": "quarantined-provider",
+            "value": "anthropic",
+        },
+    )
+    assert config_result.branch.startswith("proposal/config-quarantined-provider-")
+
+
 def test_create_proposal_compat_shim_lands_at_typed_on_disk_path(bare_repo: Path) -> None:
     """CR-149 round-7: ``policy-grant`` legacy calls now land at the typed path.
 

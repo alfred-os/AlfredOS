@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -44,14 +45,22 @@ from alfred.state.proposal_payloads import PluginGrantProposal
 
 
 def _git_env(home: Path) -> dict[str, str]:
-    """Minimal env so git ignores the developer's global config."""
+    """Minimal env so git ignores the developer's global config.
+
+    CR-149 round-10 (3339361803): inherit the runner ``PATH`` so the
+    integration suite still locates ``git`` on hosts (CI runners,
+    Homebrew-installed dev boxes) where the binary lives outside
+    ``/usr/bin:/bin``. Sandboxing the git author / committer identity
+    and HOME is the security-relevant part; the executable lookup is
+    not.
+    """
     return {
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t",
         "HOME": str(home),
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
     }
 
 
