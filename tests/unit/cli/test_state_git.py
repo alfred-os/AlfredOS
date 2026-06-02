@@ -481,10 +481,15 @@ def test_queue_proposal_or_exit_happy_path_emits_pending_review(
 
     @app.command("queue")
     def _queue() -> None:
+        from alfred.state.proposal_payloads import PluginGrantProposal
+
         client = StateGitProposalClient(state_git_path=bare_repo)
         queue_proposal_or_exit(
-            proposal_type="policy-grant",
-            payload={"plugin_id": "alfred.test"},
+            payload=PluginGrantProposal(
+                plugin_id="alfred.test",
+                subscriber_tier="system",
+                hookpoint="tool.web.fetch",
+            ),
             denied_key="cli.plugin.grant.denied",
             pending_review_key="cli.plugin.grant.pending_review",
             client=client,
@@ -517,7 +522,7 @@ def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
         def __init__(self, kind: StateGitErrorKind) -> None:
             self._kind = kind
 
-        def create_proposal(self, **_: object) -> ProposalResult:
+        def create_proposal_from_payload(self, **_: object) -> ProposalResult:
             raise StateGitError("ignored", kind=self._kind)
 
     for kind in StateGitErrorKind:
@@ -525,9 +530,14 @@ def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
 
         @app.command("queue")
         def _queue(kind: StateGitErrorKind = kind) -> None:
+            from alfred.state.proposal_payloads import PluginGrantProposal
+
             queue_proposal_or_exit(
-                proposal_type="policy-grant",
-                payload={"plugin_id": "x"},
+                payload=PluginGrantProposal(
+                    plugin_id="alfred.test",
+                    subscriber_tier="system",
+                    hookpoint="tool.web.fetch",
+                ),
                 denied_key="cli.plugin.grant.denied",
                 pending_review_key="cli.plugin.grant.pending_review",
                 client=_FailingClient(kind),  # type: ignore[arg-type]
@@ -564,10 +574,14 @@ def test_queue_proposal_or_exit_pending_review_extra_kwargs_forwarded(
 
     @app.command("queue")
     def _queue() -> None:
+        from alfred.state.proposal_payloads import ConfigSetProposal
+
         client = StateGitProposalClient(state_git_path=bare_repo)
         queue_proposal_or_exit(
-            proposal_type="config-quarantined-provider",
-            payload={"key": "quarantined-provider", "value": "anthropic"},
+            payload=ConfigSetProposal(
+                config_key="quarantined-provider",
+                value="anthropic",
+            ),
             denied_key="cli.config.set.denied",
             pending_review_key="cli.config.set.pending_review",
             pending_review_extra_kwargs={"key": "quarantined-provider"},
@@ -604,20 +618,19 @@ def test_queue_proposal_or_exit_emits_audit_row_before_state_git_write(
     call_order: list[str] = []
 
     class _OrderTrackingClient:
-        """Records when ``create_proposal`` runs vs when the audit fires.
+        """Records when ``create_proposal_from_payload`` runs vs when the audit fires.
 
         ``_log.info`` is patched to append before this method, so the
         relative order is observable in ``call_order``.
         """
 
-        def create_proposal(
+        def create_proposal_from_payload(
             self,
             *,
-            proposal_type: str,
-            payload: dict[str, object],
+            payload: object,
             proposal_id: str,
         ) -> ProposalResult:
-            del proposal_type, payload
+            del payload
             call_order.append("state_git")
             return ProposalResult(
                 proposal_id=proposal_id,
@@ -631,11 +644,16 @@ def test_queue_proposal_or_exit_emits_audit_row_before_state_git_write(
 
     @app.command("queue")
     def _queue() -> None:
+        from alfred.state.proposal_payloads import PluginGrantProposal
+
         with patch("alfred.cli._state_git._log") as mock_log:
             mock_log.info = _log_info
             queue_proposal_or_exit(
-                proposal_type="policy-grant",
-                payload={"plugin_id": "alfred.test"},
+                payload=PluginGrantProposal(
+                    plugin_id="alfred.test",
+                    subscriber_tier="system",
+                    hookpoint="tool.web.fetch",
+                ),
                 denied_key="cli.plugin.grant.denied",
                 pending_review_key="cli.plugin.grant.pending_review",
                 audit_event="plugin.grant.requested",
@@ -677,18 +695,23 @@ def test_queue_proposal_or_exit_emits_audit_row_even_when_state_git_fails() -> N
         audit_events.append((event, kwargs))
 
     class _FailingClient:
-        def create_proposal(self, **_: object) -> ProposalResult:
+        def create_proposal_from_payload(self, **_: object) -> ProposalResult:
             raise StateGitError("nope", kind=StateGitErrorKind.PUSH_REJECTED)
 
     app = typer.Typer()
 
     @app.command("queue")
     def _queue() -> None:
+        from alfred.state.proposal_payloads import PluginGrantProposal
+
         with patch("alfred.cli._state_git._log") as mock_log:
             mock_log.info = _log_info
             queue_proposal_or_exit(
-                proposal_type="policy-grant",
-                payload={"plugin_id": "alfred.test"},
+                payload=PluginGrantProposal(
+                    plugin_id="alfred.test",
+                    subscriber_tier="system",
+                    hookpoint="tool.web.fetch",
+                ),
                 denied_key="cli.plugin.grant.denied",
                 pending_review_key="cli.plugin.grant.pending_review",
                 audit_event="plugin.grant.requested",
@@ -735,12 +758,17 @@ def test_queue_proposal_or_exit_no_audit_when_kwargs_omitted(bare_repo: Path) ->
 
     @app.command("queue")
     def _queue() -> None:
+        from alfred.state.proposal_payloads import PluginGrantProposal
+
         with patch("alfred.cli._state_git._log") as mock_log:
             mock_log.info = _log_info
             client = StateGitProposalClient(state_git_path=bare_repo)
             queue_proposal_or_exit(
-                proposal_type="policy-grant",
-                payload={"plugin_id": "alfred.test"},
+                payload=PluginGrantProposal(
+                    plugin_id="alfred.test",
+                    subscriber_tier="system",
+                    hookpoint="tool.web.fetch",
+                ),
                 denied_key="cli.plugin.grant.denied",
                 pending_review_key="cli.plugin.grant.pending_review",
                 client=client,
@@ -759,11 +787,15 @@ def test_queue_proposal_or_exit_audit_kwargs_must_be_all_or_none() -> None:
     refactor bug surfaces at the emit site.
     """
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+    from alfred.state.proposal_payloads import PluginGrantProposal
 
     with pytest.raises(ValueError, match="must all be supplied together"):
         queue_proposal_or_exit(
-            proposal_type="policy-grant",
-            payload={"plugin_id": "x"},
+            payload=PluginGrantProposal(
+                plugin_id="alfred.test",
+                subscriber_tier="system",
+                hookpoint="tool.web.fetch",
+            ),
             denied_key="cli.plugin.grant.denied",
             pending_review_key="cli.plugin.grant.pending_review",
             # Only two of the four supplied — refused.
@@ -780,11 +812,15 @@ def test_queue_proposal_or_exit_refuses_caller_overriding_proposal_branch() -> N
     loud raise surfaces the bug at the emit site.
     """
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+    from alfred.state.proposal_payloads import PluginGrantProposal
 
     with pytest.raises(ValueError, match="proposal_branch"):
         queue_proposal_or_exit(
-            proposal_type="policy-grant",
-            payload={"plugin_id": "x"},
+            payload=PluginGrantProposal(
+                plugin_id="alfred.test",
+                subscriber_tier="system",
+                hookpoint="tool.web.fetch",
+            ),
             denied_key="cli.plugin.grant.denied",
             pending_review_key="cli.plugin.grant.pending_review",
             audit_event="plugin.grant.requested",
@@ -803,11 +839,15 @@ def test_queue_proposal_or_exit_refuses_caller_overriding_proposal_branch() -> N
 def test_queue_proposal_or_exit_refuses_caller_overriding_correlation_id() -> None:
     """``audit_subject_partial`` must not pre-set ``correlation_id``."""
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+    from alfred.state.proposal_payloads import PluginGrantProposal
 
     with pytest.raises(ValueError, match="correlation_id"):
         queue_proposal_or_exit(
-            proposal_type="policy-grant",
-            payload={"plugin_id": "x"},
+            payload=PluginGrantProposal(
+                plugin_id="alfred.test",
+                subscriber_tier="system",
+                hookpoint="tool.web.fetch",
+            ),
             denied_key="cli.plugin.grant.denied",
             pending_review_key="cli.plugin.grant.pending_review",
             audit_event="plugin.grant.requested",
@@ -832,13 +872,17 @@ def test_queue_proposal_or_exit_emit_helper_validates_symmetric_key_set() -> Non
     shadowing the real field (spec §5.6).
     """
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+    from alfred.state.proposal_payloads import PluginGrantProposal
 
     # Missing the ``hookpoint`` and ``operator_user_id`` keys — both
     # surface in the error message.
     with pytest.raises(ValueError, match="missing required fields"):
         queue_proposal_or_exit(
-            proposal_type="policy-grant",
-            payload={"plugin_id": "x"},
+            payload=PluginGrantProposal(
+                plugin_id="alfred.test",
+                subscriber_tier="system",
+                hookpoint="tool.web.fetch",
+            ),
             denied_key="cli.plugin.grant.denied",
             pending_review_key="cli.plugin.grant.pending_review",
             audit_event="plugin.grant.requested",
@@ -860,11 +904,15 @@ def test_queue_proposal_or_exit_emit_helper_refuses_extra_keys() -> None:
     runtime guard.
     """
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+    from alfred.state.proposal_payloads import PluginGrantProposal
 
     with pytest.raises(ValueError, match="unexpected fields"):
         queue_proposal_or_exit(
-            proposal_type="policy-grant",
-            payload={"plugin_id": "x"},
+            payload=PluginGrantProposal(
+                plugin_id="alfred.test",
+                subscriber_tier="system",
+                hookpoint="tool.web.fetch",
+            ),
             denied_key="cli.plugin.grant.denied",
             pending_review_key="cli.plugin.grant.pending_review",
             audit_event="plugin.grant.requested",
@@ -904,12 +952,17 @@ def test_queue_proposal_or_exit_pre_generated_id_is_used_by_client(
 
     @app.command("queue")
     def _queue() -> None:
+        from alfred.state.proposal_payloads import PluginGrantProposal
+
         with patch("alfred.cli._state_git._log") as mock_log:
             mock_log.info = _log_info
             client = StateGitProposalClient(state_git_path=bare_repo)
             queue_proposal_or_exit(
-                proposal_type="policy-grant",
-                payload={"plugin_id": "x"},
+                payload=PluginGrantProposal(
+                    plugin_id="alfred.test",
+                    subscriber_tier="system",
+                    hookpoint="tool.web.fetch",
+                ),
                 denied_key="cli.plugin.grant.denied",
                 pending_review_key="cli.plugin.grant.pending_review",
                 audit_event="plugin.grant.requested",

@@ -105,7 +105,7 @@ def mock_proposal() -> ProposalResult:
 def test_grant_prints_proposal_branch(runner: CliRunner, mock_proposal: ProposalResult) -> None:
     """Operator sees the branch name so they can git show the proposal."""
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_proposal
         result = runner.invoke(
             plugin_app,
             ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
@@ -120,7 +120,7 @@ def test_grant_prints_follow_up_status_command(
     """The follow-up ``grant status`` command is shown verbatim so an
     operator can copy-paste it without guessing the proposal_id."""
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_proposal
         result = runner.invoke(
             plugin_app,
             ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
@@ -139,7 +139,7 @@ def test_grant_uses_pending_review_not_success(
     the proposal branch and RealGate.rebuild_from_state_git fires.
     """
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_proposal
         result = runner.invoke(
             plugin_app,
             ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
@@ -161,24 +161,28 @@ def test_grant_passes_structured_payload_to_client(
     fields to decide approve/reject, so the field shape is load-bearing.
     """
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_proposal
         runner.invoke(
             plugin_app,
             ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
         )
-    mock_client.create_proposal.assert_called_once()
-    call_kwargs = mock_client.create_proposal.call_args.kwargs
-    assert call_kwargs["proposal_type"] == "policy-grant"
+    mock_client.create_proposal_from_payload.assert_called_once()
+    call_kwargs = mock_client.create_proposal_from_payload.call_args.kwargs
+    # ADR-0018: typed payload replaces the (proposal_type, dict) surface.
+    from alfred.state.proposal_payloads import PluginGrantProposal
+
     payload = call_kwargs["payload"]
-    assert payload["plugin_id"] == "alfred.web-fetch"
-    assert payload["subscriber_tier"] == "system"
-    assert payload["hookpoint"] == "plugin.grant.requested"
+    assert isinstance(payload, PluginGrantProposal)
+    assert payload.proposal_type == "policy-grant"
+    assert payload.plugin_id == "alfred.web-fetch"
+    assert payload.subscriber_tier == "system"
+    assert payload.hookpoint == "plugin.grant.requested"
 
 
 def test_grant_surfaces_state_git_error_on_stderr(runner: CliRunner) -> None:
     """A failed proposal write MUST surface — CLAUDE.md hard rule #7."""
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.side_effect = StateGitError(
+        mock_client.create_proposal_from_payload.side_effect = StateGitError(
             "state.git command failed: git push"
         )
         result = runner.invoke(
@@ -249,19 +253,24 @@ def test_revoke_writes_policy_revoke_proposal(runner: CliRunner) -> None:
         branch="proposal/policy-revoke-deadbeefdeadbeef",
     )
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_proposal
         result = runner.invoke(plugin_app, ["revoke", "alfred.web-fetch"])
     assert result.exit_code == 0, result.stderr
-    call_kwargs = mock_client.create_proposal.call_args.kwargs
-    assert call_kwargs["proposal_type"] == "policy-revoke"
-    assert call_kwargs["payload"] == {"plugin_id": "alfred.web-fetch"}
+    # ADR-0018: typed PluginRevokeProposal replaces the dict payload.
+    from alfred.state.proposal_payloads import PluginRevokeProposal
+
+    call_kwargs = mock_client.create_proposal_from_payload.call_args.kwargs
+    payload = call_kwargs["payload"]
+    assert isinstance(payload, PluginRevokeProposal)
+    assert payload.proposal_type == "policy-revoke"
+    assert payload.plugin_id == "alfred.web-fetch"
     assert mock_proposal.branch in result.stdout
 
 
 def test_revoke_surfaces_state_git_error(runner: CliRunner) -> None:
     """Revoke failure surfaces on stderr (hard rule #7)."""
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.side_effect = StateGitError("nope")
+        mock_client.create_proposal_from_payload.side_effect = StateGitError("nope")
         result = runner.invoke(plugin_app, ["revoke", "alfred.web-fetch"])
     assert result.exit_code != 0
     assert result.stderr.strip() != ""
@@ -362,7 +371,7 @@ def test_grant_refuses_path_traversal_in_plugin_id(runner: CliRunner) -> None:
     assert "plugin_id" in result.stderr.lower() or "invalid" in result.stderr.lower()
     # The proposal write MUST NOT have been called — the parse-time
     # refusal short-circuited before the dispatch body.
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_grant_refuses_invalid_subscriber_tier(runner: CliRunner) -> None:
@@ -380,7 +389,7 @@ def test_grant_refuses_invalid_subscriber_tier(runner: CliRunner) -> None:
         )
     assert result.exit_code == 2
     assert "subscriber_tier" in result.stderr.lower() or "invalid" in result.stderr.lower()
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_grant_refuses_unknown_hookpoint(runner: CliRunner) -> None:
@@ -398,7 +407,7 @@ def test_grant_refuses_unknown_hookpoint(runner: CliRunner) -> None:
         )
     assert result.exit_code == 2
     assert "hookpoint" in result.stderr.lower() or "invalid" in result.stderr.lower()
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_revoke_refuses_invalid_plugin_id(runner: CliRunner) -> None:
@@ -411,7 +420,7 @@ def test_revoke_refuses_invalid_plugin_id(runner: CliRunner) -> None:
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
         result = runner.invoke(plugin_app, ["revoke", "../../../etc/passwd"])
     assert result.exit_code == 2
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +453,7 @@ def test_grant_emits_audit_row_before_state_git_write(
             call_order.append("state_git")
             return mock_proposal
 
-        mock_client.create_proposal.side_effect = _side_effect
+        mock_client.create_proposal_from_payload.side_effect = _side_effect
         result = runner.invoke(
             plugin_app,
             ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
@@ -484,7 +493,7 @@ def test_grant_emits_no_audit_row_when_validator_refuses(runner: CliRunner) -> N
     assert result.exit_code == 2
     # No audit row fired; no proposal exists to anchor it to.
     assert "plugin.grant.requested" not in audit_events
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> None:
@@ -513,7 +522,7 @@ def test_revoke_emits_audit_row_before_state_git_write(runner: CliRunner) -> Non
             call_order.append("state_git")
             return mock_revoke_proposal
 
-        mock_client.create_proposal.side_effect = _side_effect
+        mock_client.create_proposal_from_payload.side_effect = _side_effect
         result = runner.invoke(plugin_app, ["revoke", "alfred.web-fetch"])
     assert result.exit_code == 0, result.stderr
     audit_calls = [c for c in call_order if c.startswith("audit:plugin.grant.revoked")]
@@ -538,7 +547,7 @@ def test_grant_emits_audit_row_even_on_state_git_failure(runner: CliRunner) -> N
         patch("alfred.cli._state_git._log") as mock_log,
     ):
         mock_log.info = _log_info
-        mock_client.create_proposal.side_effect = StateGitError("nope")
+        mock_client.create_proposal_from_payload.side_effect = StateGitError("nope")
         result = runner.invoke(
             plugin_app,
             ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
@@ -559,7 +568,7 @@ def test_grant_pending_message_surfaces_list_pending_followup(
     pending-review block so the follow-up is discoverable.
     """
     with patch("alfred.cli.plugin._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_proposal
         result = runner.invoke(
             plugin_app,
             ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],

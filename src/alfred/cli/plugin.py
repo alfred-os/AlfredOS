@@ -59,6 +59,10 @@ from alfred.cli._validators import (
     validate_subscriber_tier,
 )
 from alfred.i18n import t
+from alfred.state.proposal_payloads import (
+    PluginGrantProposal,
+    PluginRevokeProposal,
+)
 
 # The CLI surface re-exports :data:`PLUGIN_GRANT_FIELDS` so the
 # audit-row shape stays a single source of truth between the
@@ -83,12 +87,16 @@ from alfred.i18n import t
 # Module-level seams. Tests patch these symbols.
 _state_git_client: StateGitProposalClient = StateGitProposalClient()
 
-# Proposal-type tags used in the branch name. The schema is shared with
-# ``alfred.security.capability_gate.proposals._write_proposal_to_state_git``
-# (the async writer that consolidates with this one in PR-S3-7). Any change
-# here MUST land there simultaneously — see _state_git.py module docstring.
-_PROPOSAL_TYPE_GRANT: Final[str] = "policy-grant"
-_PROPOSAL_TYPE_REVOKE: Final[str] = "policy-revoke"
+# Proposal-type tags used in the branch name. ADR-0018 moved the
+# canonical discriminator onto the typed Pydantic payloads, but the
+# audit-row stand-in references ``_PROPOSAL_TYPE_GRANT`` /
+# ``_PROPOSAL_TYPE_REVOKE`` by name in regression tests; keeping the
+# constants here as local mirrors of the payload ``proposal_type``
+# ClassVars preserves those references without re-introducing a parallel
+# string the caller has to keep in sync. The single source of truth is
+# the Pydantic model; these constants merely surface it locally.
+_PROPOSAL_TYPE_GRANT: Final[str] = PluginGrantProposal.proposal_type
+_PROPOSAL_TYPE_REVOKE: Final[str] = PluginRevokeProposal.proposal_type
 
 
 def _list_pending_grants() -> list[dict[str, object]]:
@@ -136,12 +144,16 @@ def _queue_grant_proposal(
     catalog entry itself.
     """
     result = queue_proposal_or_exit(
-        proposal_type=_PROPOSAL_TYPE_GRANT,
-        payload={
-            "plugin_id": plugin_id,
-            "subscriber_tier": subscriber_tier,
-            "hookpoint": hookpoint,
-        },
+        payload=PluginGrantProposal(
+            plugin_id=plugin_id,
+            # The validator's :class:`SubscriberTier` StrEnum value is
+            # already the closed-set string the Pydantic model expects;
+            # the Literal at the model layer pins it again so a typo
+            # introduced between the validator and this construction
+            # site fails at construction.
+            subscriber_tier=subscriber_tier,  # type: ignore[arg-type]
+            hookpoint=hookpoint,
+        ),
         denied_key="cli.plugin.grant.denied",
         pending_review_key="cli.plugin.grant.pending_review",
         audit_event="plugin.grant.requested",
@@ -344,8 +356,7 @@ def revoke(
     families capture different events at different layers.
     """
     queue_proposal_or_exit(
-        proposal_type=_PROPOSAL_TYPE_REVOKE,
-        payload={"plugin_id": plugin_id},
+        payload=PluginRevokeProposal(plugin_id=plugin_id),
         denied_key="cli.plugin.revoke.denied",
         pending_review_key="cli.plugin.revoke.pending_review",
         audit_event="plugin.grant.revoked",

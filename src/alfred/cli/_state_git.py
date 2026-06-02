@@ -49,6 +49,12 @@ from typing import Final
 import structlog
 
 from alfred.errors import AlfredError
+from alfred.state.proposal_payloads import (
+    ConfigSetProposal,
+    PluginGrantProposal,
+    StateGitProposalPayload,
+    WebAllowlistProposal,
+)
 
 
 class StateGitErrorKind(StrEnum):
@@ -81,11 +87,19 @@ class StateGitErrorKind(StrEnum):
     PUSH_REJECTED = "push_rejected"
 
 
-# Branch-name schema. Shared with
-# ``alfred.security.capability_gate.proposals._write_proposal_to_state_git``;
-# any change here must land there simultaneously per devex-006.
+# Branch-name schema. ADR-0018 consolidates the two writers around this
+# constant; the async-shim entry point (``proposals.create_proposal_branch``)
+# now bridges through :meth:`StateGitProposalClient.create_proposal_from_payload`
+# rather than duplicating the prefix.
 _BRANCH_PREFIX: Final[str] = "proposal/"
 _PROPOSAL_FILENAME: Final[str] = "proposal.json"
+
+# ADR-0018 Decision 3: plugin-grant proposals land at this directory so
+# :func:`alfred.security.capability_gate._state_git_parser.parse_state_git_head`
+# re-hydrates them on the post-merge rebuild. Centralised so the writer
+# and the parser share a single literal — a drift would silently break
+# the round-trip.
+_GRANTS_TREE_PATH: Final[str] = "policies/grants"
 
 # ``token_hex(8)`` yields 16 hex characters — collision in a single
 # state.git lifetime is statistically zero. Matches the proposal-flow
@@ -181,6 +195,61 @@ class StateGitProposalClient:
         """
         self._repo = state_git_path
 
+    def create_proposal_from_payload(
+        self,
+        payload: StateGitProposalPayload,
+        *,
+        proposal_id: str | None = None,
+    ) -> ProposalResult:
+        """Create a proposal branch from a typed :class:`StateGitProposalPayload`.
+
+        ADR-0018 typed entry point. The legacy
+        :meth:`create_proposal` ``(proposal_type, dict)`` shape stays
+        as a thin compatibility wrapper that constructs the matching
+        model — every new caller MUST use this method so the
+        Pydantic validator runs against the payload BEFORE state.git
+        sees it.
+
+        The method dispatches on the concrete payload type to derive
+        both the branch-name suffix (e.g. ``"web-allowlist-add"``
+        composed from ``proposal_type`` + ``action``) and the on-disk
+        layout:
+
+        * :class:`PluginGrantProposal` lands at
+          ``policies/grants/<plugin_id>/<grant_id>.json`` so the
+          :func:`alfred.security.capability_gate._state_git_parser.parse_state_git_head`
+          round-trips it directly.
+        * Every other type writes a single ``proposal.json`` at the
+          repo root — their merged-tree projections live in different
+          tables (web allowlist → ``web_allowlist`` row;
+          config-set → operator-config projection).
+
+        Args:
+            payload: a frozen :class:`StateGitProposalPayload`
+                subclass instance. Construct via the model's
+                ``__init__`` so Pydantic validation runs against the
+                fields BEFORE this method is called.
+            proposal_id: optional pre-generated 16-hex-char identifier
+                (same semantics as :meth:`create_proposal`).
+
+        Returns:
+            :class:`ProposalResult` with the canonical branch name and
+            raw proposal id.
+
+        Raises:
+            StateGitError: if any git subprocess fails.
+        """
+        if proposal_id is None:
+            proposal_id = secrets.token_hex(_PROPOSAL_ID_BYTES)
+        type_tag = _branch_type_tag_for(payload)
+        branch = f"{_BRANCH_PREFIX}{type_tag}-{proposal_id}"
+        return self._write_branch(
+            branch=branch,
+            type_tag=type_tag,
+            proposal_id=proposal_id,
+            files=_on_disk_files_for(payload, proposal_id=proposal_id),
+        )
+
     def create_proposal(
         self,
         proposal_type: str,
@@ -234,13 +303,55 @@ class StateGitProposalClient:
         branch = f"{_BRANCH_PREFIX}{proposal_type}-{proposal_id}"
         payload_json = json.dumps(payload, indent=2, sort_keys=True)
 
+        # Legacy callers always write a single ``proposal.json`` at the
+        # repo root. The typed entry point (:meth:`create_proposal_from_payload`)
+        # routes through the same :meth:`_write_branch` helper but
+        # composes a richer file map.
+        return self._write_branch(
+            branch=branch,
+            type_tag=proposal_type,
+            proposal_id=proposal_id,
+            files={_PROPOSAL_FILENAME: payload_json},
+        )
+
+    def _write_branch(
+        self,
+        *,
+        branch: str,
+        type_tag: str,
+        proposal_id: str,
+        files: dict[str, str],
+    ) -> ProposalResult:
+        """Materialize ``files`` on ``branch`` and push to ``origin``.
+
+        Internal helper shared between :meth:`create_proposal` (legacy
+        dict shape) and :meth:`create_proposal_from_payload` (typed
+        ADR-0018 shape). Keeps the git-subprocess sequence identical
+        across both entry points so the audit-trail tests that pin
+        the subprocess shape do not branch on which entry point was
+        used.
+
+        Args:
+            branch: full ``proposal/...`` branch name.
+            type_tag: the type tag embedded in the commit message
+                (e.g. ``"policy-grant"`` or ``"web-allowlist-add"``).
+                Distinct from ``branch`` so the commit message can be
+                shorter than the branch name without re-deriving it.
+            proposal_id: raw 16-hex-char id (echoed back in the result).
+            files: dict mapping repo-relative path → file contents.
+                Parents are created as needed (so
+                ``policies/grants/<plugin_id>/<grant_id>.json`` lands at
+                the right depth without each caller mkdir-ing).
+        """
         with tempfile.TemporaryDirectory() as work_dir:
             work = Path(work_dir)
             self._run(["git", "clone", str(self._repo), str(work)])
             self._run(["git", "-C", str(work), "checkout", "-b", branch])
-            proposal_file = work / _PROPOSAL_FILENAME
-            proposal_file.write_text(payload_json)
-            self._run(["git", "-C", str(work), "add", _PROPOSAL_FILENAME])
+            for rel_path, contents in files.items():
+                dest = work / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(contents)
+                self._run(["git", "-C", str(work), "add", rel_path])
             # ``-c`` flags scope identity to this commit so the wrapper
             # never depends on the developer's global git config (which
             # may carry signing keys or commit hooks that block in CI).
@@ -255,7 +366,7 @@ class StateGitProposalClient:
                     str(work),
                     "commit",
                     "-m",
-                    f"proposal({proposal_type}): {proposal_id}",
+                    f"proposal({type_tag}): {proposal_id}",
                 ]
             )
             self._run(["git", "-C", str(work), "push", "origin", branch])
@@ -501,10 +612,75 @@ def _emit_requested_audit_row(
     )
 
 
+def _branch_type_tag_for(payload: StateGitProposalPayload) -> str:
+    """Derive the branch-name type tag from a typed payload.
+
+    ADR-0018 Decision 2: most payload types map straight through their
+    ``proposal_type`` ClassVar. Two compose a richer tag from a payload
+    field so the branch reads naturally to the reviewer:
+
+    * :class:`WebAllowlistProposal` → ``"web-allowlist-{action}"``
+      (so ``proposal/web-allowlist-add-<hex>``,
+      ``proposal/web-allowlist-remove-<hex>``).
+    * :class:`ConfigSetProposal` → ``"config-{config_key}"``
+      (so ``proposal/config-quarantined-provider-<hex>``).
+
+    The two composition rules are centralised here so the writer never
+    sees the composition logic inline — adding a third composition rule
+    in a future PR lands in one place.
+    """
+    if isinstance(payload, WebAllowlistProposal):
+        return f"{payload.proposal_type}-{payload.action}"
+    if isinstance(payload, ConfigSetProposal):
+        return f"{payload.proposal_type}-{payload.config_key}"
+    return payload.proposal_type
+
+
+def _on_disk_files_for(
+    payload: StateGitProposalPayload,
+    *,
+    proposal_id: str,
+) -> dict[str, str]:
+    """Map a typed payload to the repo-relative file paths it lands at.
+
+    ADR-0018 Decision 3: plugin-grant proposals materialize at
+    ``policies/grants/<plugin_id>/<grant_id>.json`` so the parser
+    round-trips them. Every other type writes the legacy
+    ``proposal.json`` at the repo root — their merged-tree projections
+    live in different tables (web allowlist → ``web_allowlist`` row;
+    config-set → operator-config projection).
+
+    The grant blob's on-disk shape mirrors
+    :class:`alfred.security.capability_gate.policy.GrantRow` exactly:
+    ``plugin_id``, ``subscriber_tier``, ``hookpoint``, ``content_tier``,
+    ``proposal_branch``. The ``proposal_branch`` field is composed here
+    so the parser sees the branch name attribution without the caller
+    having to thread it through the typed payload itself (the branch
+    name is known only at write time).
+    """
+    if isinstance(payload, PluginGrantProposal):
+        branch_name = f"{_BRANCH_PREFIX}{payload.proposal_type}-{proposal_id}"
+        grant_blob = {
+            "plugin_id": payload.plugin_id,
+            "subscriber_tier": payload.subscriber_tier,
+            "hookpoint": payload.hookpoint,
+            "content_tier": payload.content_tier,
+            "proposal_branch": branch_name,
+        }
+        rel_path = f"{_GRANTS_TREE_PATH}/{payload.plugin_id}/{proposal_id}.json"
+        return {rel_path: json.dumps(grant_blob, indent=2, sort_keys=True)}
+
+    # Every other payload type carries its full state in the
+    # proposal.json blob at the repo root. Pydantic's mode='json' dump
+    # is stable across runs (deterministic key ordering, no environment-
+    # dependent timestamps).
+    payload_dict = payload.model_dump(mode="json")
+    return {_PROPOSAL_FILENAME: json.dumps(payload_dict, indent=2, sort_keys=True)}
+
+
 def queue_proposal_or_exit(
     *,
-    proposal_type: str,
-    payload: dict[str, object],
+    payload: StateGitProposalPayload,
     denied_key: str,
     pending_review_key: str,
     pending_review_extra_kwargs: dict[str, object] | None = None,
@@ -545,12 +721,13 @@ def queue_proposal_or_exit(
     so the emit site never has to thread either through the call.
 
     Args:
-        proposal_type: short dash-separated tag identifying the proposal
-            family (``"policy-grant"``, ``"web-allowlist-add"``, ...).
-            Forwarded to :meth:`StateGitProposalClient.create_proposal`
-            verbatim; the branch name carries this as a prefix.
-        payload: structured dict the reviewer reads. MUST NOT contain
-            raw secret values (CLAUDE.md hard rule #6).
+        payload: typed :class:`StateGitProposalPayload` subclass instance
+            (ADR-0018). The writer derives the branch-name type tag
+            from the payload's discriminator (``proposal_type``
+            ClassVar + composition rules in :func:`_branch_type_tag_for`).
+            Pydantic validation runs at construction time — a typo at
+            the call site fails BEFORE this helper executes.
+            MUST NOT contain raw secret values (CLAUDE.md hard rule #6).
         denied_key: i18n key for the denial message rendered on
             :class:`StateGitError`. The kwargs are ``reason`` (a
             localised hint matching the error kind) + ``detail`` (the
@@ -626,9 +803,13 @@ def queue_proposal_or_exit(
     # Pre-generate the proposal id + branch BEFORE the state.git write
     # so the audit row can carry both. The same width / source the
     # client uses internally so a future tightening of the id namespace
-    # only needs to land in :data:`_PROPOSAL_ID_BYTES`.
+    # only needs to land in :data:`_PROPOSAL_ID_BYTES`. The branch
+    # composition routes through :func:`_branch_type_tag_for` so the
+    # type tag matches the writer's view exactly (no parallel string
+    # the caller has to keep in sync).
     proposal_id = secrets.token_hex(_PROPOSAL_ID_BYTES)
-    branch = f"{_BRANCH_PREFIX}{proposal_type}-{proposal_id}"
+    type_tag = _branch_type_tag_for(payload)
+    branch = f"{_BRANCH_PREFIX}{type_tag}-{proposal_id}"
     correlation_id = str(uuid.uuid4())
 
     if (
@@ -663,8 +844,7 @@ def queue_proposal_or_exit(
         )
 
     try:
-        result = state_git.create_proposal(
-            proposal_type=proposal_type,
+        result = state_git.create_proposal_from_payload(
             payload=payload,
             proposal_id=proposal_id,
         )

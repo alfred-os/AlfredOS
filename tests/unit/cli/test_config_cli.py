@@ -98,15 +98,18 @@ def test_set_high_blast_quarantined_provider_queues_proposal(
         branch="proposal/config-quarantined-provider-cc778899cc778899",
     )
     with patch("alfred.cli.config._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = proposal
+        mock_client.create_proposal_from_payload.return_value = proposal
         result = runner.invoke(config_app, ["set", "quarantined-provider", "anthropic"])
     assert result.exit_code == 0, result.stderr
-    call_kwargs = mock_client.create_proposal.call_args.kwargs
-    assert call_kwargs["proposal_type"] == "config-quarantined-provider"
-    assert call_kwargs["payload"] == {
-        "key": "quarantined-provider",
-        "value": "anthropic",
-    }
+    # ADR-0018: the typed payload replaced the (proposal_type, dict)
+    # surface. Assert against the Pydantic model instead.
+    from alfred.state.proposal_payloads import ConfigSetProposal
+
+    call_kwargs = mock_client.create_proposal_from_payload.call_args.kwargs
+    payload = call_kwargs["payload"]
+    assert isinstance(payload, ConfigSetProposal)
+    assert payload.config_key == "quarantined-provider"
+    assert payload.value == "anthropic"
     assert proposal.branch in result.stdout
 
 
@@ -117,7 +120,7 @@ def test_set_high_blast_uses_pending_review_language(runner: CliRunner) -> None:
         branch="proposal/config-quarantined-provider-cc778899cc778899",
     )
     with patch("alfred.cli.config._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = proposal
+        mock_client.create_proposal_from_payload.return_value = proposal
         result = runner.invoke(config_app, ["set", "quarantined-provider", "anthropic"])
     assert "now active" not in result.stdout.lower()
     assert "pending" in result.stdout.lower() or "proposal" in result.stdout.lower()
@@ -126,7 +129,7 @@ def test_set_high_blast_uses_pending_review_language(runner: CliRunner) -> None:
 def test_set_high_blast_surfaces_state_git_error(runner: CliRunner) -> None:
     """state.git failure on the high-blast path surfaces on stderr."""
     with patch("alfred.cli.config._state_git_client") as mock_client:
-        mock_client.create_proposal.side_effect = StateGitError("push refused")
+        mock_client.create_proposal_from_payload.side_effect = StateGitError("push refused")
         result = runner.invoke(config_app, ["set", "quarantined-provider", "anthropic"])
     assert result.exit_code != 0
     assert result.stderr.strip() != ""
@@ -417,7 +420,7 @@ def test_set_quarantined_provider_refuses_unknown_provider(
         result = runner.invoke(config_app, ["set", "quarantined-provider", "openai"])
     assert result.exit_code == 2
     # No proposal write — refusal short-circuited before the state.git call.
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_set_quarantined_provider_refuses_path_traversal(
@@ -435,7 +438,7 @@ def test_set_quarantined_provider_refuses_path_traversal(
             ["set", "quarantined-provider", "../../../etc/passwd"],
         )
     assert result.exit_code == 2
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_set_quarantined_provider_refuses_mixed_case_id(runner: CliRunner) -> None:
@@ -451,7 +454,7 @@ def test_set_quarantined_provider_refuses_mixed_case_id(runner: CliRunner) -> No
             ["set", "quarantined-provider", "Anthropic"],
         )
     assert result.exit_code == 2
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +484,7 @@ def test_set_high_blast_emits_audit_row_before_state_git_write(
                 branch="proposal/config-quarantined-provider-ff001122ff001122",
             )
 
-        mock_client.create_proposal.side_effect = _side_effect
+        mock_client.create_proposal_from_payload.side_effect = _side_effect
         result = runner.invoke(
             config_app,
             ["set", "quarantined-provider", "anthropic"],
@@ -543,7 +546,7 @@ def test_set_high_blast_emits_no_audit_row_when_validator_refuses(
         )
     assert result.exit_code != 0
     assert "config.set.requested" not in audit_events
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_set_high_blast_emits_audit_row_even_on_state_git_failure(
@@ -560,7 +563,7 @@ def test_set_high_blast_emits_audit_row_even_on_state_git_failure(
         patch("alfred.cli._state_git._log") as mock_log,
     ):
         mock_log.info = _log_info
-        mock_client.create_proposal.side_effect = StateGitError("nope")
+        mock_client.create_proposal_from_payload.side_effect = StateGitError("nope")
         result = runner.invoke(
             config_app,
             ["set", "quarantined-provider", "anthropic"],
