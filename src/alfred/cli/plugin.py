@@ -510,11 +510,18 @@ def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
     The function is never called at runtime — the return value only
     documents the canonical key list for grep + extractor visibility.
     """
+    # CR-149 round-3: pass representative kwargs so each rendered
+    # body fully substitutes its placeholders (``{reason}`` for the
+    # denied keys; ``{branch}`` + ``{proposal_id}`` for the
+    # pending-review keys). The earlier no-kwarg shape leaked the
+    # literal ``{...}`` placeholders, which weakens the callable-
+    # validation seam :mod:`tests.unit.cli.test_i18n_key_coverage`
+    # depends on.
     return (
-        t("cli.plugin.grant.denied"),
-        t("cli.plugin.grant.pending_review"),
-        t("cli.plugin.revoke.denied"),
-        t("cli.plugin.revoke.pending_review"),
+        t("cli.plugin.grant.denied", reason="example"),
+        t("cli.plugin.grant.pending_review", branch="example", proposal_id="0123456789abcdef"),
+        t("cli.plugin.revoke.denied", reason="example"),
+        t("cli.plugin.revoke.pending_review", branch="example", proposal_id="0123456789abcdef"),
     )
 
 

@@ -274,12 +274,24 @@ def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
     so the pybabel AST walker would otherwise drop the four keys to
     the obsoleted block. Surfacing them here pins them as live entries.
     Same pattern as :func:`alfred.cli._state_git._register_hint_keys_for_pybabel`.
+
+    CR-149 round-3: pass representative kwargs so the rendered bodies
+    fully substitute every placeholder the msgstr carries (``{reason}``
+    for ``.denied``; ``{branch}`` + ``{proposal_id}`` for
+    ``.pending_review``). Without the kwargs the shim returned templates
+    with the literal ``{...}`` markers, undercutting the callable-
+    validation seam contract the adjacent
+    :mod:`tests.unit.cli.test_i18n_key_coverage` tests enforce.
     """
     return (
-        t("cli.web.allowlist.add.denied"),
-        t("cli.web.allowlist.add.pending_review"),
-        t("cli.web.allowlist.remove.denied"),
-        t("cli.web.allowlist.remove.pending_review"),
+        t("cli.web.allowlist.add.denied", reason="example"),
+        t("cli.web.allowlist.add.pending_review", branch="example", proposal_id="0123456789abcdef"),
+        t("cli.web.allowlist.remove.denied", reason="example"),
+        t(
+            "cli.web.allowlist.remove.pending_review",
+            branch="example",
+            proposal_id="0123456789abcdef",
+        ),
     )
 
 

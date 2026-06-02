@@ -73,7 +73,7 @@ def _safe_load_yaml(yaml_path: Path) -> dict[str, object]:
         return {}
     try:
         raw = yaml_path.read_text()
-        data = yaml.safe_load(raw) or {}
+        data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         typer.echo(
             t(
@@ -84,6 +84,14 @@ def _safe_load_yaml(yaml_path: Path) -> dict[str, object]:
             err=True,
         )
         raise typer.Exit(code=1) from exc
+    # CR-149 round-3: only the "empty document" case coalesces to ``{}``.
+    # The previous shape ``yaml.safe_load(raw) or {}`` silently turned
+    # falsy top-level shapes (``[]``, ``false``, ``0``, ``""``) into an
+    # empty mapping — the next ``config set`` would then overwrite the
+    # file rather than failing loud on the structural error. On an
+    # operator surface that is a must-fix.
+    if data is None:
+        data = {}
     if not isinstance(data, dict):
         # A top-level list / scalar is structurally wrong for
         # policies.yaml; route through the same localised error so the
@@ -197,12 +205,31 @@ def _yaml_set(yaml_path: Path, dotted_key: str, value: object) -> None:
     node: dict[str, object] = data
     for k in keys[:-1]:
         existing = node.get(k)
-        if not isinstance(existing, dict):
+        if existing is None:
             new_child: dict[str, object] = {}
             node[k] = new_child
             node = new_child
-        else:
+        elif isinstance(existing, dict):
             node = existing
+        else:
+            # CR-149 round-3: an existing non-mapping path segment is a
+            # structural error in ``policies.yaml`` — silently
+            # replacing it with ``{}`` would destroy operator config
+            # state. Fail loud on the malformed-YAML branch so the
+            # operator's recovery lever (open the file, fix the
+            # offending key, retry) surfaces instead of overwriting
+            # the bad shape. The structural error message names the
+            # offending key segment so the operator can grep
+            # ``policies.yaml`` for it.
+            typer.echo(
+                t(
+                    "cli.config.error.malformed_yaml",
+                    yaml_path=str(yaml_path),
+                    error=f"path segment {k!r} must be a mapping",
+                ),
+                err=True,
+            )
+            raise typer.Exit(code=1)
     node[keys[-1]] = value
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(yaml_path, yaml.dump(data, default_flow_style=False))
@@ -502,9 +529,21 @@ def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
     so the pybabel AST walker would otherwise drop the keys. Same
     pattern as :func:`alfred.cli._state_git._register_hint_keys_for_pybabel`.
     """
+    # CR-149 round-3: pass representative kwargs so each rendered
+    # body fully substitutes its placeholders (``{reason}`` for
+    # ``.denied``; ``{key}`` + ``{branch}`` + ``{proposal_id}`` for
+    # ``.pending_review``). Without the kwargs the rendered string
+    # carried the literal ``{...}`` placeholders, undercutting the
+    # callable-validation seam the adjacent i18n-coverage tests rely
+    # on.
     return (
-        t("cli.config.set.denied"),
-        t("cli.config.set.pending_review"),
+        t("cli.config.set.denied", reason="example"),
+        t(
+            "cli.config.set.pending_review",
+            key="example",
+            branch="example",
+            proposal_id="0123456789abcdef",
+        ),
     )
 
 
