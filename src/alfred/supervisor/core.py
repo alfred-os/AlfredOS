@@ -69,7 +69,7 @@ from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
 from alfred.i18n import t
 from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.capability_monitor import CapabilityGateMonitor
-from alfred.supervisor.errors import NoSuchComponentError, SupervisorError
+from alfred.supervisor.errors import NoSuchComponentError
 from alfred.supervisor.plugin_lifecycle import PluginLifecycle
 
 if TYPE_CHECKING:
