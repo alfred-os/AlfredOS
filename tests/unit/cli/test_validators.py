@@ -50,7 +50,7 @@ from alfred.cli._validators import (
     ],
 )
 def test_validate_plugin_id_accepts_canonical_shapes(valid: str) -> None:
-    """The regex ``^[a-z][a-z0-9._-]+$`` admits every first-party plugin id."""
+    """The per-segment plugin-id pattern admits every first-party plugin id."""
     assert validate_plugin_id(valid) == valid
 
 
@@ -71,14 +71,21 @@ def test_validate_plugin_id_accepts_canonical_shapes(valid: str) -> None:
         "1alfred",
         ".alfred",
         "_alfred",
-        # too short
-        "a",
         # empty
         "",
         # disallowed punctuation
         "alfred/web",
         "alfred:web",
         "alfred@web",
+        # CR-149 round-3 — empty / leading / trailing dot or
+        # separator segments. The prior regex ``^[a-z][a-z0-9._-]+$``
+        # silently accepted these; the per-segment pattern fails closed.
+        "alfred.",
+        "alfred-",
+        "alfred_",
+        "alfred..web-fetch",
+        "alfred.web-fetch.",
+        ".alfred.web-fetch",
     ],
 )
 def test_validate_plugin_id_refuses_out_of_set_shapes(bad: str) -> None:

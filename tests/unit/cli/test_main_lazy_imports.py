@@ -172,9 +172,17 @@ def test_alfred_cli_main_lazy_load_keeps_help_surface_intact() -> None:
     asserted here as a sanity backstop against a refactor that silently
     deletes a registration call alongside the lazy-import work.
     """
+    # CR-149 round-3: ``-I`` mirrors the earlier probe in this
+    # module. Without it the child inherits the developer's
+    # ``sitecustomize`` / ``PYTHONPATH``, so a hostile sitecustomize
+    # could keep ``alfred --help`` green while the isolated-import
+    # path is genuinely broken. The lazy-load discipline this test
+    # guards depends on a clean import environment — isolated mode
+    # delivers it.
     child = subprocess.run(
         [
             sys.executable,
+            "-I",
             "-c",
             (
                 "from typer.testing import CliRunner; "

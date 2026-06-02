@@ -36,6 +36,7 @@ the gitpython integration is exercised end-to-end (no mocked parser).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -45,13 +46,18 @@ from alfred.security.capability_gate.policy import GrantRow
 
 
 def _git_env(home: Path) -> dict[str, str]:
+    # CR-149 round-3 (extension of the parser fix): inherit the
+    # current PATH rather than hard-coding ``/usr/bin:/bin`` so the
+    # helper works on runners where git lives elsewhere (Homebrew,
+    # Nix, container images with a pinned binary). Only HOME + the
+    # git identity stay sandboxed.
     return {
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t",
         "HOME": str(home),
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.environ.get("PATH", ""),
     }
 
 
@@ -416,3 +422,59 @@ async def test_rebuild_is_idempotent_on_second_call_with_same_head(
     # Single atomic apply, single audit row — the second call short-circuited.
     backend.apply_atomic.assert_awaited_once()
     sink.append_schema.assert_awaited_once()
+
+
+async def test_rebuild_parser_failure_emits_rolled_back_audit_then_reraises(
+    tmp_path: Path,
+) -> None:
+    """A parser-side rebuild failure emits ``plugin.grant.rebuilt`` rolled_back, then re-raises.
+
+    CR-149 round-3: a bad state.git head (corrupted commit, missing
+    tree, raised gitpython error) previously propagated through
+    :func:`asyncio.to_thread` before any ``plugin.grant.rebuilt`` row
+    landed — the capability projection stayed on the previous snapshot
+    AND the trust-boundary audit trail had no forensic record that the
+    privileged rebuild attempt failed at all. CLAUDE.md hard rule #7
+    requires that pre-DB failure surfaces in the audit log too. Pin
+    the row + the re-raise here so a future change that swallows the
+    exception or skips the audit emit surfaces on the trust-boundary
+    suite, not silently in production.
+    """
+    from unittest.mock import patch
+
+    import pytest
+
+    from alfred.security.capability_gate._gate import RealGate
+
+    repo_path, _ = _seed_state_git(tmp_path, {})
+    backend = _make_backend(sync_hash="old-hash")
+    sink = _make_audit_sink()
+    gate = await RealGate.create(
+        backend=backend,
+        audit_sink=sink,
+        state_git_path=repo_path,
+    )
+
+    # Force the parser to raise a representative GitPython-shaped
+    # exception. The exact type does not matter (the gate catches
+    # ``Exception``); pinning ``RuntimeError`` keeps the test
+    # gitpython-independent.
+    parser_error = RuntimeError("bad state.git head")
+    with (
+        patch(
+            "alfred.security.capability_gate._gate.parse_state_git_head",
+            side_effect=parser_error,
+        ),
+        pytest.raises(RuntimeError, match=r"bad state\.git head"),
+    ):
+        await gate.rebuild_from_state_git(state_git_head="totally-bogus-hash")
+
+    # Exactly one audit row landed with the rolled_back result.
+    sink.append_schema.assert_awaited_once()
+    kwargs = sink.append_schema.await_args.kwargs
+    assert kwargs["event"] == "plugin.grant.rebuilt"
+    assert kwargs["result"] == "rolled_back"
+    assert kwargs["subject"]["commit_hash"] == "totally-bogus-hash"
+    # The in-memory snapshot was never swapped — ``apply_atomic`` was
+    # never reached because the parser raised first.
+    backend.apply_atomic.assert_not_awaited()

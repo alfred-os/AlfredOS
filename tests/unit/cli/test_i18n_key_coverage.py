@@ -347,6 +347,12 @@ def test_cli_plugin_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> 
         assert not body.startswith("cli.plugin.grant.")
         assert not body.startswith("cli.plugin.revoke.")
         assert body.strip() != ""
+        # CR-149 round-3: the shim passes representative kwargs so the
+        # rendered body fully substitutes every placeholder. A leaked
+        # ``{`` / ``}`` means the shim regressed to the no-kwarg shape
+        # OR the msgstr carries a placeholder the shim does not
+        # supply — both surface as i18n-coverage failures here.
+        assert "{" not in body and "}" not in body
 
 
 def test_cli_web_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> None:
@@ -361,6 +367,8 @@ def test_cli_web_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> Non
     for body in rendered:
         assert not body.startswith("cli.web.allowlist.")
         assert body.strip() != ""
+        # CR-149 round-3: see plugin equivalent above.
+        assert "{" not in body and "}" not in body
 
 
 def test_cli_config_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> None:
@@ -375,3 +383,5 @@ def test_cli_config_register_proposal_keys_anchors_resolve_to_real_msgstrs() -> 
     for body in rendered:
         assert not body.startswith("cli.config.set.")
         assert body.strip() != ""
+        # CR-149 round-3: see plugin equivalent above.
+        assert "{" not in body and "}" not in body

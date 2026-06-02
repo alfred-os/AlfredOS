@@ -151,11 +151,16 @@ def test_plugin_grant_hookpoints_declared_via_cli_module_import(
         # approval, which is an exfiltration path the system-only
         # restriction closes.
         #
-        # sec-pr-s3-6-05: ``fail_closed=True`` because a crashing
-        # observer on a security-relevant flow MUST NOT let the grant
-        # go live with a missing audit row. The SYSTEM_ONLY_TIERS lock
-        # ensures only system-tier code can subscribe, so flipping
-        # fail_closed cannot regress user-plugin availability.
+        # CR-149 round-3: ``fail_closed=False`` matches the spec §14
+        # hookpoint table for every ``plugin.grant.*`` row. The
+        # trust-boundary audit row that pins the reviewer's decision
+        # is emitted via the supervisor's
+        # :meth:`AuditWriter.append_schema` BEFORE the observer chain
+        # runs, so a crashing observer cannot hide the grant from the
+        # audit log — the row is already durable. The earlier
+        # ``fail_closed=True`` choice (sec-pr-s3-6-05) was an override
+        # that drifted from the spec table; round-3 reviewer pushed
+        # back and the implementation now follows the spec.
         assert meta.subscribable_tiers == SYSTEM_ONLY_TIERS
         assert meta.refusable_tiers == frozenset()
-        assert meta.fail_closed is True
+        assert meta.fail_closed is False

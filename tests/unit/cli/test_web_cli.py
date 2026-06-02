@@ -118,6 +118,41 @@ def test_allowlist_add_payload_carries_domain_and_path_prefix(
     assert payload.path_prefix == "/v1/"
 
 
+def test_web_allowlist_proposal_action_add_rejects_none_path_prefix() -> None:
+    """CR-149 round-3: ``WebAllowlistProposal(action="add", path_prefix=None)`` is refused.
+
+    The docstring already documented the invariant — ``add`` carries a
+    real path-prefix; ``remove`` encodes whole-entry deletion via
+    ``None``. The CLI's add path defaults ``path_prefix`` to ``"/"``
+    so the bad shape never reached the model from the CLI, but any
+    non-CLI producer (async writer, state.git replay tool, malformed
+    test fixture) could still emit an ambiguous add proposal and
+    drift from spec §11.1's add-vs-remove semantics. The
+    ``@model_validator`` closes that boundary at construction.
+    """
+    from pydantic import ValidationError
+
+    from alfred.state.proposal_payloads import WebAllowlistProposal
+
+    with pytest.raises(ValidationError, match="path_prefix"):
+        WebAllowlistProposal(action="add", domain="example.com", path_prefix=None)
+
+
+def test_web_allowlist_proposal_action_remove_allows_none_path_prefix() -> None:
+    """The ``remove`` path permits ``path_prefix=None`` (whole-entry delete).
+
+    Pairs with the add-side rejection: the ``remove`` path's canonical
+    shape is ``path_prefix=None`` (the CLI's documented choice for
+    whole-entry deletion), so the validator MUST NOT block it.
+    Constructing the payload succeeds.
+    """
+    from alfred.state.proposal_payloads import WebAllowlistProposal
+
+    payload = WebAllowlistProposal(action="remove", domain="example.com", path_prefix=None)
+    assert payload.action == "remove"
+    assert payload.path_prefix is None
+
+
 def test_allowlist_add_default_path_prefix_is_root(
     runner: CliRunner, mock_add_proposal: ProposalResult
 ) -> None:

@@ -199,6 +199,19 @@ async def test_comms_test_plugin_handshake(
     assert subject["manifest_version"] == 1
     assert subject["sandbox_profile"] == "user-plugin"
 
+    # CR-149 round-3: pin that ``_on_handshake_complete`` actually
+    # consulted the gate. The fixture grant authorises exactly the
+    # reference plugin's manifest tier; a regression that drops the
+    # gate consult entirely would still pass the audit-row assertions
+    # above (because the session would skip the check and go straight
+    # to the lifecycle row). Asserting against the mock's call_args
+    # closes that bypass — the trust-boundary suite must verify the
+    # gate consultation, not just its post-conditions.
+    fake_gate.check_plugin_load.assert_called_once_with(
+        plugin_id="alfred.comms-test",
+        manifest_tier="user-plugin",
+    )
+
     # And the DevGate stub the production wiring uses also accepts the
     # manifest (the Slice-3 fail-open shim; pinning the call site here
     # surfaces any future tightening of the gate's plugin-load semantics).

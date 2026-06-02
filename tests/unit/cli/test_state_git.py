@@ -180,6 +180,68 @@ def test_create_proposal_id_is_unique_per_call(bare_repo: Path) -> None:
     assert r1.branch != r2.branch
 
 
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        # path-traversal — embeds into the on-disk grants tree path
+        "../../etc/passwd",
+        "../bad-id",
+        # wrong width
+        "deadbeef",  # 8 chars
+        "deadbeef" * 4,  # 32 chars
+        "",
+        # wrong case / non-hex
+        "DEADBEEFDEADBEEF",
+        "Deadbeefdeadbeef",
+        "deadbeef-deadbef",
+        "deadbeef!deadbef",
+        # ref-shape attack — embeds a slash into the branch name
+        "deadbeefdead/eef",
+    ],
+)
+def test_create_proposal_refuses_non_canonical_proposal_id(bare_repo: Path, bad_id: str) -> None:
+    """Caller-supplied proposal ids outside the 16-hex-char shape are refused.
+
+    CR-149 round-3: spec §8.3 + ADR-0018 require every state.git
+    branch / grants-tree path id to be exactly 16 lowercase hex
+    characters. The previous shape trusted caller-supplied ids
+    verbatim, which let a typo OR a malicious value (``../``, ``/``,
+    wrong width, uppercase) compose an invalid ref or escape the
+    canonical grants-tree layout. Refuse at the public API boundary
+    via :class:`ValueError`.
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    with pytest.raises(ValueError, match="16 lowercase hex"):
+        client.create_proposal(
+            "policy-grant",
+            {"plugin_id": "alfred.web-fetch"},
+            proposal_id=bad_id,
+        )
+
+
+def test_create_proposal_from_payload_refuses_non_canonical_proposal_id(
+    bare_repo: Path,
+) -> None:
+    """The typed entry point also refuses caller-supplied non-canonical ids.
+
+    CR-149 round-3: the typed ``create_proposal_from_payload`` API is
+    the canonical entry point for ADR-0018 payloads but the legacy
+    ``create_proposal`` is still public — both surfaces must close the
+    boundary. Pins that the typed path applies the same validator.
+    """
+    from alfred.state.proposal_payloads import PluginGrantProposal
+
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    payload = PluginGrantProposal(
+        plugin_id="alfred.web-fetch",
+        subscriber_tier="user-plugin",
+        hookpoint="tool.web.fetch",
+        content_tier=None,
+    )
+    with pytest.raises(ValueError, match="16 lowercase hex"):
+        client.create_proposal_from_payload(payload, proposal_id="../escape")
+
+
 def test_create_proposal_writes_payload_as_proposal_json(bare_repo: Path) -> None:
     """The proposal branch commits the payload as ``proposal.json`` at repo root."""
     client = StateGitProposalClient(state_git_path=bare_repo)
@@ -412,10 +474,14 @@ def test_run_does_not_treat_unreadable_repo_as_missing(tmp_path: Path) -> None:
         pytest.raises(StateGitError) as excinfo,
     ):
         client.list_pending_proposals()
-    # The pre-check arm catches FileNotFoundError ONLY; the PermissionError
-    # falls through to the subprocess arm and maps to PUSH_REJECTED via
-    # the catch-all OSError handler. Either way it must NOT be PATH_MISSING.
-    assert excinfo.value.kind != StateGitErrorKind.PATH_MISSING
+    # CR-149 round-3: pin the exact classification, not just
+    # "not PATH_MISSING". A future change that mis-routed unreadable
+    # repos to GIT_MISSING (also wrong; the operator's recovery lever
+    # is "check audit log + filesystem ACLs", not "install git") would
+    # still pass the weaker inequality assertion. PUSH_REJECTED is the
+    # canonical kind for the "access denied" path per CLAUDE.md hard
+    # rule #7 / PRD §4.1.
+    assert excinfo.value.kind == StateGitErrorKind.PUSH_REJECTED
 
 
 def test_run_classifies_generic_oserror_as_push_rejected(bare_repo: Path) -> None:
@@ -453,6 +519,13 @@ def test_register_hint_keys_for_pybabel_returns_real_msgstrs() -> None:
     for body in rendered:
         assert "cli.state_git.error." not in body
         assert body.strip() != ""
+        # CR-149 round-3: the shim passes representative kwargs so the
+        # ``path_missing`` body interpolates its ``{state_git_path}``
+        # placeholder. A leaked ``{`` or ``}`` means either the msgstr
+        # template carries an additional placeholder the shim does not
+        # cover, or the shim regressed to the no-kwarg form that the
+        # CR finding flagged.
+        assert "{" not in body and "}" not in body
 
 
 def test_run_classifies_nonzero_return_as_push_rejected(bare_repo: Path) -> None:
@@ -550,12 +623,20 @@ def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
     from alfred.i18n import t
 
     class _FailingClient:
-        def __init__(self, kind: StateGitErrorKind) -> None:
+        def __init__(self, kind: StateGitErrorKind, repo: Path) -> None:
             self._kind = kind
+            # CR-149 round-3: ``_render_hint`` threads the client's
+            # ``_repo`` into the localised PATH_MISSING hint so the
+            # operator sees the configured state.git path rather than
+            # the hard-coded default. The fake client mirrors the
+            # real attribute so the test exercises the same render
+            # path.
+            self._repo = repo
 
         def create_proposal_from_payload(self, **_: object) -> ProposalResult:
             raise StateGitError("ignored", kind=self._kind)
 
+    fake_repo = tmp_path / "fake-state.git"
     for kind in StateGitErrorKind:
         app = typer.Typer()
 
@@ -571,21 +652,33 @@ def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
                 ),
                 denied_key="cli.plugin.grant.denied",
                 pending_review_key="cli.plugin.grant.pending_review",
-                client=_FailingClient(kind),  # type: ignore[arg-type]
+                client=_FailingClient(kind, fake_repo),  # type: ignore[arg-type]
             )
 
         result = CliRunner().invoke(app, [])
         assert result.exit_code != 0, (kind, result.output, result.stderr)
         # The exact catalog text for the kind's hint appears in stderr.
+        # CR-149 round-3: PATH_MISSING now interpolates ``state_git_path``;
+        # pass the same value the helper threads so the rendered hint
+        # matches what the user-facing stderr will carry.
         hint = t(
             {
                 StateGitErrorKind.PATH_MISSING: "cli.state_git.error.path_missing",
                 StateGitErrorKind.GIT_MISSING: "cli.state_git.error.git_missing",
                 StateGitErrorKind.PUSH_REJECTED: "cli.state_git.error.push_rejected",
-            }[kind]
+            }[kind],
+            state_git_path=str(fake_repo),
         )
         # A non-trivial fragment of the hint shows up on stderr.
-        assert hint.split(".")[0] in result.stderr, (kind, hint, result.stderr)
+        # ``hint.split(".")[0]`` worked for the prior hard-coded
+        # ``/var/lib/alfred/state`` prefix; with the path now
+        # operator-configured the assertion shifts to the path the
+        # test supplied so it stays meaningful across deployments.
+        assert str(fake_repo) in result.stderr or hint.split(" ")[0] in result.stderr, (
+            kind,
+            hint,
+            result.stderr,
+        )
 
 
 def test_queue_proposal_or_exit_pending_review_extra_kwargs_forwarded(

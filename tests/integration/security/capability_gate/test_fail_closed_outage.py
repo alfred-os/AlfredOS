@@ -53,7 +53,13 @@ pytestmark = pytest.mark.integration
 
 
 def _make_failing_backend() -> Any:
-    """Return a stub backend whose ``ping`` raises :class:`ConnectionError`."""
+    """Return a stub backend whose ``ping`` raises :class:`ConnectionError`.
+
+    sec-pr-s3-6-02: the rebuild path now calls ``apply_atomic`` as the
+    single atomic primitive (revokes + upserts + sync-hash inside one
+    transaction). The legacy per-op mutators stay on the stub because
+    earlier helpers / proposal-flow callsites still reference them.
+    """
     backend = MagicMock()
     backend.ping = AsyncMock(side_effect=ConnectionError("db down"))
     backend.load_grants = AsyncMock(return_value=frozenset())
@@ -61,6 +67,7 @@ def _make_failing_backend() -> Any:
     backend.set_sync_hash = AsyncMock(return_value=None)
     backend.upsert_grant = AsyncMock(return_value=None)
     backend.revoke_grant = AsyncMock(return_value=None)
+    backend.apply_atomic = AsyncMock(return_value=None)
     return backend
 
 
