@@ -166,10 +166,44 @@ def test_get_unset_key_emits_localised_notice(runner: CliRunner, tmp_path: Path)
 
 
 def test_get_unknown_key_lists_valid_keys(runner: CliRunner) -> None:
-    """Unknown key → stderr lists every valid key."""
+    """Unknown key → stderr lists every valid key.
+
+    CR-149: the listed keys are the GET-readable set only — high-blast
+    keys live in the ``set``-only set (they route through the
+    reviewer-gated proposal flow and never land in ``policies.yaml``),
+    so listing them as "valid keys" on a ``get`` failure path
+    contradicted the same command's refusal to render them.
+    """
     result = runner.invoke(config_app, ["get", "no-such-key"])
     assert result.exit_code != 0
     assert "web-fetch-budget" in result.stderr
+    # CR-149: ``quarantined-provider`` is a high-blast key — it cannot
+    # be ``get``-read, so it MUST NOT appear in the GET unknown-key
+    # message that advertises "valid keys".
+    assert "quarantined-provider" not in result.stderr
+
+
+def test_get_high_blast_key_emits_reviewer_gated_set_only_message(
+    runner: CliRunner,
+) -> None:
+    """CR-149: ``config get quarantined-provider`` emits the dedicated hint.
+
+    The previous shape routed the high-blast key through the
+    unknown-key branch, which told the operator "the key is valid"
+    (via ``_valid_keys_csv``) while simultaneously refusing to render
+    it. The dedicated branch now distinguishes "high-blast / set-only"
+    from "unknown" so the operator gets actionable guidance: the
+    value lives in ``routing.yaml`` after the reviewer merges the
+    proposal, not in ``policies.yaml``.
+    """
+    result = runner.invoke(config_app, ["get", "quarantined-provider"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    # The localised body names ``reviewer-gated`` and / or the
+    # routing.yaml endpoint so the operator knows where the value
+    # actually lives.
+    lowered = combined.lower()
+    assert "reviewer-gated" in lowered or "high-blast" in lowered or "routing.yaml" in lowered
 
 
 # ---------------------------------------------------------------------------

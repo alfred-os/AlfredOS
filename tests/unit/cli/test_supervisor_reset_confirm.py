@@ -109,7 +109,11 @@ def test_status_renders_all_three_breaker_states(runner: CliRunner) -> None:
             "trip_count": 1,
             "last_trip_at": "2026-05-31T11:00:00Z",
         },
-        # Unknown state falls back to the CLOSED label without leaking the raw enum.
+        # CR-149: an unknown enum value renders the explicit
+        # "unknown" label rather than silently masquerading as the
+        # CLOSED label. The previous shape lied about breaker health
+        # by defaulting unknown values to ``closed``; failing loud
+        # is the operator surface contract on T1 status (spec §11.3).
         {"component": "comp-unknown", "state": "BOGUS", "trip_count": 0, "last_trip_at": None},
     ]
     with (
@@ -124,6 +128,10 @@ def test_status_renders_all_three_breaker_states(runner: CliRunner) -> None:
     assert "comp-unknown" in result.output
     # Unknown enum must not leak through the table.
     assert "BOGUS" not in result.output
+    # CR-149: the explicit "UNKNOWN" localised label is rendered for
+    # the unrecognised breaker state, so the operator sees a tripped /
+    # unsupported state instead of a fabricated CLOSED reading.
+    assert "UNKNOWN" in result.output
 
 
 def test_status_no_supervisor_running_exits_nonzero(runner: CliRunner) -> None:
@@ -133,6 +141,31 @@ def test_status_no_supervisor_running_exits_nonzero(runner: CliRunner) -> None:
         side_effect=RuntimeError("supervisor not wired"),
     ):
         result = runner.invoke(supervisor_app, ["status"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    assert "supervisor" in combined.lower() or "running" in combined.lower()
+
+
+def test_reset_no_supervisor_running_routes_through_localised_hint(
+    runner: CliRunner,
+) -> None:
+    """CR-149: ``reset`` surfaces the localised hint when the supervisor is down.
+
+    The prior shape called ``_get_supervisor()`` outside any
+    exception handler, so a missing / unreachable supervisor raised
+    a raw Python traceback through Typer. Spec §11.3 makes ``reset``
+    an operator surface, not a debug surface — the error path now
+    mirrors :func:`supervisor_status`'s narrow handler and emits
+    the ``cli.supervisor.status.no_supervisor_running`` localised
+    body before exiting code 1. The attempt-row is NOT emitted on
+    this path because the operator never actually crossed the
+    supervisor boundary.
+    """
+    with patch(
+        "alfred.cli.supervisor._get_supervisor",
+        side_effect=RuntimeError("supervisor not wired"),
+    ):
+        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
     assert result.exit_code != 0
     combined = (result.output or "") + (result.stderr or "")
     assert "supervisor" in combined.lower() or "running" in combined.lower()

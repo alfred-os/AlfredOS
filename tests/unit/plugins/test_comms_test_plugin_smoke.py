@@ -55,6 +55,47 @@ _SMOKE_TIMEOUT_S: float = 5.0
     not _MAIN_PATH.exists(),
     reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
 )
+def test_comms_test_plugin_handles_non_object_json_with_invalid_request() -> None:
+    """CR-149: a non-object JSON frame returns a structured Invalid Request.
+
+    ``json.loads`` legally returns lists / strings / numbers / null
+    for valid JSON that does NOT conform to the JSON-RPC request
+    shape. The previous code called ``.get(...)`` unconditionally
+    and crashed the subprocess on the first such frame, leaving the
+    host hanging waiting for a response that would never arrive.
+    The plugin now emits a JSON-RPC ``-32600`` Invalid Request
+    envelope and stays in its receive loop.
+    """
+    # A bare JSON array — valid JSON, invalid JSON-RPC request.
+    bad_frame = json.dumps([1, 2, 3])
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(_MAIN_PATH)],
+        input=bad_frame + "\n",
+        capture_output=True,
+        text=True,
+        timeout=_SMOKE_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"plugin exited with code {result.returncode}; stderr={result.stderr!r}"
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, (
+        f"expected exactly one Invalid Request frame, got {len(lines)}: {result.stdout!r}"
+    )
+    response = json.loads(lines[0])
+    # JSON-RPC 2.0 Invalid Request envelope shape.
+    assert response.get("jsonrpc") == "2.0", response
+    assert response.get("id") is None, response
+    err = response.get("error", {})
+    assert err.get("code") == -32600, response
+    assert err.get("message") == "Invalid Request", response
+
+
+@pytest.mark.skipif(
+    not _MAIN_PATH.exists(),
+    reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
+)
 def test_comms_test_plugin_subprocess_health_round_trip() -> None:
     """One ``adapter.health`` JSON-RPC frame in, one response frame out.
 
@@ -92,8 +133,18 @@ def test_comms_test_plugin_subprocess_health_round_trip() -> None:
     # ``returncode`` assertion below — communicating the failure mode
     # explicitly beats letting CalledProcessError mask the captured
     # stderr.
-    result = subprocess.run(
-        [sys.executable, "-m", "plugins.alfred_comms_test.main"],
+    # CR-149: invoke the resolved script path (``_MAIN_PATH``) rather
+    # than ``-m plugins.alfred_comms_test.main``. The ``-m`` form
+    # depends on the subprocess' cwd being the repo root so the
+    # ``plugins`` package is importable; running this smoke test from
+    # an IDE / a subdirectory / a future workflow that changes cwd
+    # would otherwise fail with ``ModuleNotFoundError: plugins`` even
+    # though the script exists. Direct script invocation is
+    # cwd-independent and matches how the integration test in
+    # ``tests/integration/test_comms_mcp_contract.py`` already spawns
+    # the plugin.
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(_MAIN_PATH)],
         input=request + "\n",
         capture_output=True,
         text=True,
@@ -118,6 +169,13 @@ def test_comms_test_plugin_subprocess_health_round_trip() -> None:
     )
     # ``result`` envelope (not ``error``) — health is always answerable.
     assert "result" in response, f"expected result envelope, got {response!r}"
+    # CR-149: every wire frame carries the mandatory ``jsonrpc: "2.0"``
+    # member so a strict host parser accepts the reply. The previous
+    # shape omitted the version on success / method-not-found / parse-
+    # error envelopes, which is a JSON-RPC 2.0 protocol violation.
+    assert response.get("jsonrpc") == "2.0", (
+        f"every response frame must carry jsonrpc=2.0 per spec §9, got {response!r}"
+    )
     payload = response["result"]
     # Slice-3 narrow Literal (comms-009): {"ok", "degraded"}.
     assert payload.get("status") in {"ok", "degraded"}, (
