@@ -535,3 +535,66 @@ async def test_rebuild_parser_failure_emits_rolled_back_audit_then_reraises(
     # The in-memory snapshot was never swapped — ``apply_atomic`` was
     # never reached because the parser raised first.
     backend.apply_atomic.assert_not_awaited()
+
+
+async def test_rebuild_parser_failure_correlation_id_shared_between_audit_and_log(
+    tmp_path: Path,
+) -> None:
+    """CR-149 round-6: parser-failure arm shares correlation_id between audit + log.
+
+    The success and ``_apply_grants`` rollback arms each pin the
+    forensic-joinability contract (audit ``trace_id`` + structlog
+    ``correlation_id`` carry the same UUID). The parser-failure arm
+    runs the same shape — mint one id, thread it through
+    :meth:`_emit_rebuild_rolled_back_audit` AND the adjacent
+    ``capability_gate.rebuild.parser_failed`` warning — so the
+    trust-boundary forensic bridge (``src/alfred/security/**``,
+    highest scrutiny) joins the two streams on a single identifier.
+    Without this regression test a future refactor could silently
+    revert the parser-failed arm to locally-minted ids and break the
+    join for the most security-critical failure shape (a corrupted
+    state.git head).
+    """
+    from unittest.mock import patch
+
+    import pytest
+
+    from alfred.security.capability_gate._gate import RealGate
+
+    repo_path, _ = _seed_state_git(tmp_path, {})
+    backend = _make_backend(sync_hash="old-hash")
+    sink = _make_audit_sink()
+    gate = await RealGate.create(
+        backend=backend,
+        audit_sink=sink,
+        state_git_path=repo_path,
+    )
+
+    captured_log_kwargs: list[dict[str, object]] = []
+
+    def _capture_warning(event: str, **kwargs: object) -> None:
+        if event == "capability_gate.rebuild.parser_failed":
+            captured_log_kwargs.append(kwargs)
+
+    parser_error = RuntimeError("bad state.git head")
+    with (
+        patch("alfred.security.capability_gate._gate._log") as mock_log,
+        patch(
+            "alfred.security.capability_gate._gate.parse_state_git_head",
+            side_effect=parser_error,
+        ),
+        pytest.raises(RuntimeError, match=r"bad state\.git head"),
+    ):
+        mock_log.warning = _capture_warning
+        mock_log.info = lambda *_a, **_kw: None
+        mock_log.debug = lambda *_a, **_kw: None
+        await gate.rebuild_from_state_git(state_git_head="totally-bogus-hash")
+
+    sink.append_schema.assert_awaited_once()
+    audit_kwargs = sink.append_schema.await_args.kwargs
+    audit_correlation_id = audit_kwargs["subject"]["correlation_id"]
+    # ``trace_id`` mirrors the subject's correlation_id by construction.
+    assert audit_kwargs["trace_id"] == audit_correlation_id
+
+    assert len(captured_log_kwargs) == 1, captured_log_kwargs
+    assert captured_log_kwargs[0]["correlation_id"] == audit_correlation_id
