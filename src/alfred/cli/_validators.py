@@ -244,6 +244,20 @@ def validate_hookpoint(value: str) -> str:
 #   the allowlist takes ASCII only. The reviewer rejects anything else.
 _DOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9.-]+\.[a-z]{2,}$")
 
+# CR-149: a single DNS label per the DNS naming rules. ``^[a-z0-9]`` and
+# ``[a-z0-9]$`` anchor each label so leading / trailing hyphens are
+# refused (RFC 1035 §2.3.1). The middle character class ``[a-z0-9-]{0,61}``
+# caps the label length at 63 and allows the hyphen only between
+# alphanumerics. Used to validate every dot-separated label of the
+# operator-supplied domain after the bulk-pattern check, so
+# ``example..com`` (empty label), ``-foo.com`` (leading hyphen) and
+# ``foo-.com`` (trailing hyphen) are rejected at the parser boundary
+# rather than landing in a state.git proposal payload the reviewer
+# would then either notice or accidentally merge.
+_DOMAIN_LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
+
 
 def validate_domain(value: str) -> str:
     """Refuse domains that look like URLs or include path traversal shapes.
@@ -290,6 +304,19 @@ def validate_domain(value: str) -> str:
             param_hint="'domain'",
         )
     if not _DOMAIN_PATTERN.fullmatch(value):
+        raise typer.BadParameter(
+            t("cli.validators.domain_invalid", value=value),
+            param_hint="'domain'",
+        )
+    # CR-149: the bulk pattern accepts ``example..com``, ``-foo.com``
+    # and ``foo-.com`` because it does not constrain individual labels.
+    # The per-label fullmatch closes those failure modes: empty labels
+    # (consecutive dots), leading hyphens, and trailing hyphens are
+    # all refused with the same localised body so the operator sees a
+    # consistent "domain not in allowlist shape" hint regardless of
+    # which RFC 1035 rule was violated.
+    labels = value.split(".")
+    if not all(_DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels):
         raise typer.BadParameter(
             t("cli.validators.domain_invalid", value=value),
             param_hint="'domain'",

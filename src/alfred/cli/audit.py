@@ -44,6 +44,22 @@ class _TierChoice(StrEnum):
     T3 = "T3"
 
 
+class AuditBackendUnavailable(RuntimeError):  # noqa: N818
+    """The audit-log backend is not yet wired into the CLI.
+
+    CR-149: the previous shape collapsed "backend not implemented yet"
+    into "no matching rows", so ``alfred audit log`` / ``alfred audit
+    graph`` rendered the localised "no audit rows" message for every
+    real invocation. That is the silent-failure pattern CLAUDE.md
+    hard rule #7 forbids on operator surfaces — the operator could
+    not tell the difference between "the system has no audit rows"
+    and "the audit subsystem is not yet plumbed". The stub now raises
+    this loud sentinel; the command handlers catch it and surface a
+    dedicated localised message that names PR-S3-7 as the unblock
+    point.
+    """
+
+
 def _query_audit_log(
     *,
     tier: str | None = None,
@@ -53,9 +69,15 @@ def _query_audit_log(
 
     PR-S3-0b extends the CHECK constraint; the production query is wired
     once the async Postgres session scope is reachable from the CLI
-    bootstrap. Returns an empty list as a stub until then — tests patch
-    this with fixture rows so the rendering layer is exercised
-    independently of the storage layer.
+    bootstrap. Tests patch this with fixture rows so the rendering
+    layer is exercised independently of the storage layer.
+
+    CR-149: until the storage layer lands, the stub raises
+    :class:`AuditBackendUnavailable` rather than silently returning
+    ``[]``. The command handlers catch the exception and emit a
+    dedicated "backend not wired" message, so an operator running
+    ``alfred audit log`` against a Slice-3 build sees the truth
+    instead of a misleading empty-results render.
 
     Parameters are keyword-only on purpose: the call sites all pass
     ``tier=`` + ``since_hours=`` so the mocked assertions can read both
@@ -64,9 +86,12 @@ def _query_audit_log(
     # PR-S3-7 wires: build_session_scope(settings) → AsyncSession →
     # SELECT * FROM audit_log WHERE (:tier IS NULL OR trust_tier_of_trigger = :tier)
     #                          AND timestamp >= now() - INTERVAL ':hours hours'
-    # Until then the empty list keeps the CLI deterministic.
-    del tier, since_hours
-    return []
+    # Until then the stub raises so the CLI never reports false-empty.
+    msg = (
+        f"audit backend not wired (tier={tier!r}, since_hours={since_hours}); "
+        "the SQL query is plumbed in PR-S3-7"
+    )
+    raise AuditBackendUnavailable(msg)
 
 
 def _parse_since(since: str) -> int:
@@ -75,15 +100,30 @@ def _parse_since(since: str) -> int:
     devex-016: invalid input raises :class:`typer.BadParameter` rather
     than silently defaulting to 24h. Bare integers are rejected — a unit
     suffix is required so the operator's intent is unambiguous.
+
+    CR-149: non-positive values (``0h``, ``-1d``, ``0m``) are
+    rejected for every supported unit. The prior shape silently
+    accepted ``0h`` / ``0d`` as zero-hour windows and ``-5m`` as one
+    hour, handing the query layer impossible windows. A non-positive
+    lookback can never select rows; surfacing :class:`typer.BadParameter`
+    at parse time keeps the failure loud (CLAUDE.md hard rule #7).
     """
     raw = since.strip().lower()
     try:
         if raw.endswith("h"):
-            return int(raw[:-1])
+            hours = int(raw[:-1])
+            if hours <= 0:
+                raise ValueError
+            return hours
         if raw.endswith("d"):
-            return int(raw[:-1]) * 24
+            days = int(raw[:-1])
+            if days <= 0:
+                raise ValueError
+            return days * 24
         if raw.endswith("m"):
             minutes = int(raw[:-1])
+            if minutes <= 0:
+                raise ValueError
             # Round to the nearest hour, clamping to 1 so a 5-minute window
             # still surfaces *something* rather than collapsing to zero.
             return max(1, minutes // 60) if minutes >= 60 else 1
@@ -116,7 +156,11 @@ def audit_log(
     swimlane.
     """
     since_hours = _parse_since(since)
-    rows = _query_audit_log(tier=None, since_hours=since_hours)
+    try:
+        rows = _query_audit_log(tier=None, since_hours=since_hours)
+    except AuditBackendUnavailable as exc:
+        typer.echo(t("cli.audit.backend_unavailable"), err=True)
+        raise typer.Exit(code=1) from exc
     if event:
         rows = [r for r in rows if r.get("event") == event]
     if not rows:
@@ -159,7 +203,15 @@ def audit_graph(
     # back to its value at the boundary so the storage-layer integration
     # in PR-S3-7 does not need to know the enum exists.
     tier_value = tier.value if tier is not None else None
-    rows = _query_audit_log(tier=tier_value, since_hours=since_hours)
+    try:
+        rows = _query_audit_log(tier=tier_value, since_hours=since_hours)
+    except AuditBackendUnavailable as exc:
+        # CR-149: the stub raises this until PR-S3-7 wires the SQL
+        # query; emit the dedicated "backend not yet wired" message
+        # so the operator does not confuse "no rows" with "the audit
+        # subsystem is not plumbed".
+        typer.echo(t("cli.audit.backend_unavailable"), err=True)
+        raise typer.Exit(code=1) from exc
 
     if not rows:
         tier_label = f" ({tier_value})" if tier_value else ""

@@ -65,14 +65,26 @@ def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
     # supervisor-side reset row (when PR-S3-7 wires the live emit) so
     # the audit-graph forensic traversal can join the two halves.
     correlation_id = str(uuid.uuid4())
+    # CR-149 sec-pr-s3-6-cr-149: the attempt row is emitted BEFORE
+    # ``reset_breaker`` runs, so we do not yet know the breaker's
+    # actual state. The previous shape unconditionally wrote
+    # ``old_state="OPEN"`` and ``new_state="CLOSED"`` into the
+    # forensic trail, which is a false transition the moment the
+    # component does not exist or the reset later fails. Spec §10.8
+    # requires auditable operator actions, not invented state.
+    # ``None`` (rendered as JSON ``null`` by the structlog renderer)
+    # is the explicit "not yet known" sentinel; PR-S3-7 will read the
+    # live breaker via ``Supervisor.get_breaker_state`` and emit a
+    # second, terminal row carrying the real transition after the
+    # reset succeeds. Until then the attempt row stays honest: we
+    # observed an operator-initiated reset attempt against
+    # ``component_id``; the transition is unknown.
     _log.info(
         "supervisor.breaker.reset.attempted",
         schema_name="SUPERVISOR_BREAKER_RESET_FIELDS",
         component_id=component_id,
-        # PR-S3-7 reads the live breaker state to fill the next three
-        # fields; the placeholders keep the row shape stable until then.
-        old_state="OPEN",
-        new_state="CLOSED",
+        old_state=None,
+        new_state=None,
         trip_count=None,
         operator_user_id=None,
         correlation_id=correlation_id,
@@ -165,14 +177,21 @@ def supervisor_status() -> None:
     for row in rows:
         state_raw = str(row.get("state", ""))
         # Map the breaker-state enum to a localised label so the table is
-        # readable in every operator language. Unknown values fall back to
-        # the CLOSED label so we never leak an untranslated enum string.
+        # readable in every operator language.
+        #
+        # CR-149: an unknown enum value now renders an explicit
+        # ``unknown`` label rather than silently mapping to ``closed``.
+        # The prior shape lied about breaker health on a T1 operator
+        # surface: a new or corrupt enum value would surface as the
+        # localised CLOSED string, hiding a tripped / unsupported
+        # state from the operator. Spec §11.3 is operator-facing
+        # status; CLAUDE.md hard rule #7 requires failing loud.
         state_key_map = {
             "OPEN": "cli.supervisor.status.breaker_state.open",
             "CLOSED": "cli.supervisor.status.breaker_state.closed",
             "HALF_OPEN": "cli.supervisor.status.breaker_state.half_open",
         }
-        state_label = t(state_key_map.get(state_raw, "cli.supervisor.status.breaker_state.closed"))
+        state_label = t(state_key_map.get(state_raw, "cli.supervisor.status.breaker_state.unknown"))
         last_trip = str(row.get("last_trip_at") or "-")
         # rvw-010: hardcoded column widths mis-render in CJK locales (code-point
         # width vs display width). Deferred to a follow-up that swaps in
@@ -227,7 +246,23 @@ def supervisor_reset(
         )
         raise typer.Exit(code=1)
 
-    supervisor = _get_supervisor()
+    # CR-149: probe the supervisor BEFORE emitting the attempt-row.
+    # The previous shape called ``_get_supervisor()`` outside any
+    # exception handler, so a missing / unreachable supervisor raised
+    # a raw traceback instead of the localised "supervisor not
+    # running" hint the ``status`` command already uses. Spec §11.3
+    # makes ``reset`` an operator surface, not a debug surface — the
+    # error path here mirrors :func:`supervisor_status` exactly. The
+    # attempt-row is emitted only AFTER the probe succeeds so a
+    # supervisor that was never reachable does not generate a misleading
+    # forensic breadcrumb (the operator never actually crossed the
+    # boundary; rolling a fake row would invent state per CR-149
+    # finding #14's pattern).
+    try:
+        supervisor = _get_supervisor()
+    except (RuntimeError, ConnectionError, TimeoutError) as exc:
+        typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
+        raise typer.Exit(code=1) from exc
 
     # sec-pr-s3-6-04: emit the forensic-attempt audit row BEFORE crossing
     # into the supervisor. A crash inside ``reset_breaker`` (Postgres

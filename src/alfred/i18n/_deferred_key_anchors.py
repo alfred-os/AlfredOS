@@ -100,6 +100,13 @@ def _anchor_deferred_keys() -> tuple[str, ...]:
         t("cli.supervisor.status.breaker_state.open"),
         t("cli.supervisor.status.breaker_state.closed"),
         t("cli.supervisor.status.breaker_state.half_open"),
+        # CR-149: ``unknown`` is the default branch when ``state_raw``
+        # falls outside the closed-set enum. The anchor keeps pybabel
+        # finding the key even though it is reached only through the
+        # ``state_key_map.get(..., "cli.supervisor.status.breaker_state.unknown")``
+        # default — extracting the literal at this anchor closes the
+        # extraction gap.
+        t("cli.supervisor.status.breaker_state.unknown"),
     )
 
 

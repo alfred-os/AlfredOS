@@ -205,14 +205,21 @@ def allowlist_remove(
     """
     from alfred.audit.audit_row_schemas import WEB_ALLOWLIST_REQUESTED_FIELDS
 
+    # CR-149: the remove proposal explicitly sets ``path_prefix=None``
+    # so the on-disk payload, the audit row, and the eventual merge
+    # consumer all agree on whole-entry deletion. The prior shape
+    # left ``path_prefix`` at the model default (``"/"``) — the audit
+    # row recorded ``None`` ("remove entry") but the proposal payload
+    # the reviewer saw still said ``"/"`` ("remove root prefix only").
+    # That mismatch could silently turn a whole-entry delete into a
+    # root-prefix-only delete, defeating spec §11.1's reviewer-gated
+    # intent. The model field is nullable for the remove path; the
+    # add path still defaults to ``"/"``.
     queue_proposal_or_exit(
         payload=WebAllowlistProposal(
             action="remove",
             domain=domain,
-            # Remove targets the entry as a whole; ``path_prefix`` keeps
-            # its model-level default. The audit row carries ``None``
-            # below so the join condition with the add-side row stays
-            # uniform across the family.
+            path_prefix=None,
         ),
         denied_key="cli.web.allowlist.remove.denied",
         pending_review_key="cli.web.allowlist.remove.pending_review",
