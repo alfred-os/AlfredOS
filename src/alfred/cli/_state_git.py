@@ -119,6 +119,19 @@ _PROPOSAL_ID_BYTES: Final[int] = 8
 # non-conforming caller fails loud at the public API boundary.
 _PROPOSAL_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{16}$")
 
+# CR-149 round-6: caller-supplied ``proposal_type`` strings are
+# embedded into both the branch name (``proposal/<type>-<id>``) and
+# the commit message. Inputs containing ``/``, ``..``, whitespace, or
+# mixed casing drift from PRD §8.3's branch-name contract and only
+# fail deep inside git. The typed entry point
+# (:meth:`create_proposal_from_payload`) already pins the type via
+# :func:`_branch_type_tag_for`; this regex closes the legacy
+# :meth:`create_proposal` surface so both writers fail at the same
+# boundary. Canonical shape: lowercase ASCII letters / digits in
+# dash-separated tokens (e.g. ``"policy-grant"``, ``"web-allowlist-add"``,
+# ``"config-quarantined-provider"``).
+_PROPOSAL_TYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
 
 def _validated_proposal_id(proposal_id: str) -> str:
     """Refuse caller-supplied proposal ids outside the 16-hex-char shape.
@@ -150,6 +163,35 @@ def _validated_proposal_id(proposal_id: str) -> str:
         msg = "proposal_id must be 16 lowercase hex characters"
         raise ValueError(msg)
     return proposal_id
+
+
+def _validated_proposal_type(proposal_type: str) -> str:
+    """Refuse caller-supplied proposal types outside the dash-canonical shape.
+
+    CR-149 round-6: the legacy :meth:`StateGitProposalClient.create_proposal`
+    entry point splices ``proposal_type`` straight into the branch
+    name and commit message. Inputs containing ``/``, ``..``,
+    whitespace, or mixed casing drift from PRD §8.3's branch-name
+    contract and only surface deep inside git's ref parser — exactly
+    the silent-skip shape CLAUDE.md hard rule #7 forbids.
+
+    The typed entry point (:meth:`create_proposal_from_payload`)
+    closes this boundary via :func:`_branch_type_tag_for` (the
+    ``proposal_type`` ClassVar is hard-coded on the Pydantic model);
+    this validator gives the legacy public API the same parse-time
+    refusal so both writers fail at the same shape.
+
+    Returns ``proposal_type`` unchanged on success so callers chain
+    the validated value into branch composition without a second
+    rebind.
+    """
+    if not _PROPOSAL_TYPE_RE.fullmatch(proposal_type):
+        msg = (
+            "proposal_type must be lowercase dash-separated tokens "
+            "(e.g. 'policy-grant', 'web-allowlist-add')"
+        )
+        raise ValueError(msg)
+    return proposal_type
 
 
 class StateGitError(AlfredError):
@@ -342,6 +384,15 @@ class StateGitProposalClient:
                 permission error, push rejected, …). The CLI narrows on
                 this to render a localised operator-facing error.
         """
+        # CR-149 round-6: refuse non-canonical ``proposal_type`` strings
+        # BEFORE the id is generated. The legacy entry point splices
+        # the type into both the branch name and the commit message;
+        # an input with ``/``, ``..``, whitespace, or mixed casing
+        # drifts from PRD §8.3 and would only surface as a deep
+        # git-ref error. The typed entry point closes this shape via
+        # the Pydantic ``proposal_type`` ClassVar; the legacy public
+        # API needs the same parse-time refusal.
+        proposal_type = _validated_proposal_type(proposal_type)
         # ``secrets.token_hex`` is cryptographically unpredictable per
         # the :mod:`secrets` contract — spec §8.3 requires the branch
         # namespace stay opaque so an adversary reading the audit log
@@ -558,9 +609,27 @@ class StateGitProposalClient:
             # lands only in the structured-log stream the bootstrap's
             # redactor processes. The exception carries the tag the CLI
             # uses to pick a localised hint.
+            #
+            # CR-149 round-6: previously the stderr only landed as an
+            # exception note (``err.add_note``).
+            # :func:`queue_proposal_or_exit` catches :class:`StateGitError`
+            # and never surfaces those notes, so clone / push / diff
+            # failures lost their only detailed diagnostic. Emit a
+            # structured log entry BEFORE raising so on-call sees the
+            # sanitised stderr in the structlog stream (the
+            # bootstrap's redactor handles secret-shape masking;
+            # ``strip()`` collapses trailing newlines so the log entry
+            # is single-line searchable).
+            sanitised_stderr = result.stderr.strip()
+            _log.warning(
+                "state_git.push_rejected",
+                argv=cmd,
+                returncode=result.returncode,
+                sanitised_stderr=sanitised_stderr,
+            )
             msg = "state.git push rejected"
             err = StateGitError(msg, kind=StateGitErrorKind.PUSH_REJECTED)
-            err.add_note(f"git stderr: {result.stderr.strip()}")
+            err.add_note(f"git stderr: {sanitised_stderr}")
             raise err
         return result.stdout
 
