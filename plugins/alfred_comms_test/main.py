@@ -41,6 +41,23 @@ import json
 import sys
 from typing import Any, Final
 
+# R8 (PR-S3-6 polish): construct the inbound.message params from the
+# canonical :class:`alfred.comms.mcp_protocol.InboundMessage` Pydantic
+# model and dump it, rather than authoring a dict literal that drifts
+# from the wire schema. Pydantic raises ValidationError at construction
+# time if a field is missing — catching the same kinds of regressions
+# the host's ``extra="forbid"`` check catches at receive time, but on
+# the sender side.
+#
+# Plugin-side import discipline: the canonical reference plugin
+# ``alfred_web_fetch.web_fetch_plugin`` already imports from
+# ``alfred.plugins.web_fetch.*``, so a controlled, side-effect-free
+# import from ``alfred.comms.mcp_protocol`` is consistent with the
+# existing convention. The supervisor's trust boundary is enforced by
+# process isolation + the capability gate, not by import-level
+# ignorance.
+from alfred.comms.mcp_protocol import InboundMessage
+
 try:
     # Optional probe so the file imports on an interpreter that does not
     # have the ``mcp`` SDK wheel installed. Slice 3 ships without the
@@ -57,9 +74,12 @@ except ImportError:
 
 # comms-002: literal JSON-RPC method names on the wire. Mirrors the
 # ``WIRE_METHOD_NAMES`` mapping in ``alfred.comms.mcp_protocol`` so the
-# plugin and the host agree on the wire vocabulary without a runtime
-# import (the plugin runs in a subprocess and must not import the host
-# package — that would defeat the trust-boundary the supervisor sets up).
+# plugin and the host agree on the wire vocabulary. Duplicating the
+# string constants here keeps the wire vocabulary readable from the
+# plugin source without needing to chase the mapping in the host
+# package — a documentation choice, not a trust-boundary one. The
+# supervisor's trust boundary is enforced by process isolation + the
+# capability gate at the host, not by import-level ignorance.
 _METHOD_LIFECYCLE_START: Final[str] = "lifecycle.start"
 _METHOD_LIFECYCLE_STOP: Final[str] = "lifecycle.stop"
 _METHOD_ADAPTER_HEALTH: Final[str] = "adapter.health"
@@ -84,16 +104,25 @@ def _build_inbound_message_notification() -> dict[str, Any]:
     Adding an ``id`` would make it a request and the host would block
     waiting for a response that the host does not send for upstream
     inbound traffic.
+
+    R8 (PR-S3-6 polish): the ``params`` payload is now sourced from
+    :class:`alfred.comms.mcp_protocol.InboundMessage` and serialised
+    via ``model_dump()``. The earlier dict literal could silently
+    drift from the wire schema; constructing the model raises
+    :class:`pydantic.ValidationError` at build time if a field is
+    missing or wrongly typed, matching what the host's
+    ``extra="forbid"`` check enforces on receive.
     """
+    params = InboundMessage(
+        platform="test",
+        platform_user_id="echo-plugin",
+        content="echo plugin started",
+        language="en-US",
+    ).model_dump()
     return {
         "jsonrpc": "2.0",
         "method": _NOTIFICATION_INBOUND_MESSAGE,
-        "params": {
-            "platform": "test",
-            "platform_user_id": "echo-plugin",
-            "content": "echo plugin started",
-            "language": "en-US",
-        },
+        "params": params,
     }
 
 
