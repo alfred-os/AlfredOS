@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 02:38+0100\n"
+"POT-Creation-Date: 2026-06-02 03:01+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -747,45 +747,45 @@ msgstr ""
 "— valid tiers are {valid_tiers}. Check for typos on the publisher's "
 "subscribable_tiers / refusable_tiers args."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:62
+#: src/alfred/i18n/_deferred_key_anchors.py:68
 msgid "cli.plugin.grant.status.approved"
 msgstr "approved"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:63
+#: src/alfred/i18n/_deferred_key_anchors.py:69
 msgid "cli.plugin.grant.status.denied"
 msgstr "denied"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:64
+#: src/alfred/i18n/_deferred_key_anchors.py:70
 msgid "cli.plugin.grant.status.expired"
 msgstr "expired"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:68
+#: src/alfred/i18n/_deferred_key_anchors.py:74
 msgid "cli.plugin.list.column.plugin_id"
 msgstr "plugin_id"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:69
+#: src/alfred/i18n/_deferred_key_anchors.py:75
 msgid "cli.plugin.list.column.subscriber_tier"
 msgstr "subscriber_tier"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:70
+#: src/alfred/i18n/_deferred_key_anchors.py:76
 msgid "cli.plugin.list.column.status"
 msgstr "status"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:71
+#: src/alfred/i18n/_deferred_key_anchors.py:77
 msgid "cli.plugin.list.column.manifest_version"
 msgstr "manifest_version"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:72
+#: src/alfred/i18n/_deferred_key_anchors.py:78
 msgid "cli.plugin.list.empty_hint"
 msgstr ""
 "No plugins registered. Run `alfred plugin grant <plugin_id> <tier> "
 "<hookpoint>` to queue a grant proposal."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:77
+#: src/alfred/i18n/_deferred_key_anchors.py:83
 msgid "cli.plugin.show.field.plugin_id"
 msgstr "plugin_id"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:81
+#: src/alfred/i18n/_deferred_key_anchors.py:87
 msgid "cli.web.allowlist.pending_review"
 msgstr ""
 "Allowlist proposal queued for reviewer approval.\n"
@@ -794,21 +794,21 @@ msgstr ""
 "The fetch surface is unchanged until the reviewer approves the proposal "
 "and the supervisor rebuilds the web_allowlist projection."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:82
+#: src/alfred/i18n/_deferred_key_anchors.py:88
 msgid "cli.web.allowlist.added"
 msgstr "Added {domain} to the web fetch allowlist."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:83
+#: src/alfred/i18n/_deferred_key_anchors.py:89
 msgid "cli.web.allowlist.removed"
 msgstr "Removed {domain} from the web fetch allowlist."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:84
+#: src/alfred/i18n/_deferred_key_anchors.py:90
 msgid "cli.web.allowlist.list_empty"
 msgstr ""
 "No allowlist entries. Run `alfred web allowlist add <domain>` to queue a "
 "grant proposal."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:87
+#: src/alfred/i18n/_deferred_key_anchors.py:93
 msgid "cli.config.quarantined_provider_pending_review"
 msgstr ""
 "Quarantined-provider config proposal queued for reviewer approval.\n"
@@ -817,19 +817,19 @@ msgstr ""
 "The current provider stays active until the reviewer approves the "
 "proposal and the supervisor reloads routing.yaml."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:88
+#: src/alfred/i18n/_deferred_key_anchors.py:94
 msgid "cli.config.web_fetch_budget_set"
 msgstr "Set per-user web-fetch budget to {limit} fetches/day for {user_id}."
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:94
+#: src/alfred/i18n/_deferred_key_anchors.py:100
 msgid "cli.supervisor.status.breaker_state.open"
 msgstr "OPEN"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:95
+#: src/alfred/i18n/_deferred_key_anchors.py:101
 msgid "cli.supervisor.status.breaker_state.closed"
 msgstr "CLOSED"
 
-#: src/alfred/i18n/_pr_s3_7_key_anchors.py:96
+#: src/alfred/i18n/_deferred_key_anchors.py:102
 msgid "cli.supervisor.status.breaker_state.half_open"
 msgstr "HALF_OPEN"
 
