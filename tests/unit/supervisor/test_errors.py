@@ -27,6 +27,7 @@ from alfred.plugins.errors import (
 )
 from alfred.supervisor.errors import (
     BreakStateError,
+    NoSuchComponentError,
     QuarantinedUnavailable,
     SupervisorError,
 )
@@ -98,4 +99,44 @@ def test_break_state_error_caught_as_alfred_error() -> None:
         assert "invalid transition" in str(exc)
     else:  # pragma: no cover - defensive
         msg = "BreakStateError did not propagate as AlfredError"
+        raise AssertionError(msg)
+
+
+# ---------------------------------------------------------------------------
+# NoSuchComponentError — typed subclass for the missing-component dispatch.
+# CR-149 round-7 replaced the CLI's English-substring branch with an
+# ``except NoSuchComponentError`` arm so non-English operator locales (and
+# catalog copy-edits) no longer break the missing-component routing.
+# ---------------------------------------------------------------------------
+
+
+def test_no_such_component_error_is_supervisor_error() -> None:
+    """NoSuchComponentError descends from SupervisorError.
+
+    The subclass relationship is load-bearing: any legacy ``except
+    SupervisorError`` arm in caller code keeps catching the typed
+    subclass without an explicit upgrade. The new typed-narrow
+    ``except NoSuchComponentError`` in the CLI runs FIRST because
+    Python's MRO matches the most-specific class before falling
+    through to the parent arm.
+    """
+    assert issubclass(NoSuchComponentError, SupervisorError)
+
+
+def test_no_such_component_error_caught_as_supervisor_error() -> None:
+    """A ``NoSuchComponentError`` raise is caught by ``except SupervisorError``.
+
+    Pins the round-7 contract that the CLI's generic
+    ``except SupervisorError`` arm catches the typed subclass when the
+    more-specific ``except NoSuchComponentError`` arm above it has
+    already been removed (e.g. a CLI refactor restructuring the
+    dispatch). The legacy callers all continue to function.
+    """
+    try:
+        raise NoSuchComponentError("no such component")
+    except SupervisorError as exc:
+        assert isinstance(exc, NoSuchComponentError)
+        assert "no such component" in str(exc)
+    else:  # pragma: no cover - defensive
+        msg = "NoSuchComponentError did not propagate as SupervisorError"
         raise AssertionError(msg)

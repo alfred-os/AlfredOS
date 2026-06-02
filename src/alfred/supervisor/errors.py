@@ -56,8 +56,35 @@ class BreakStateError(SupervisorError):
     """
 
 
+class NoSuchComponentError(SupervisorError):
+    """Raised when an operator references a component_id the supervisor has not registered.
+
+    CR-149 round-7: the previous shape raised a bare :class:`SupervisorError`
+    whose ``str(exc)`` carried the catalog-backed
+    ``supervisor.no_such_component`` message. The CLI ``reset`` handler
+    then branched on English substrings (``"not found"``,
+    ``"no supervised component"``) inside ``str(exc).lower()`` to decide
+    whether to render the operator-targeted
+    ``cli.supervisor.reset.component_not_found`` hint or fall through to
+    the generic ``cli.supervisor.reset.unexpected_error`` key. A
+    non-English operator language (or even a copy-edit to the catalog
+    msgstr) would silently break the dispatch and lose the
+    PRD §10.8 / §11.3 operator guidance — the localised-substring branch
+    is the exact CLAUDE.md hard rule #7 silent-skip shape.
+
+    The typed subclass closes that boundary: callers ``except``
+    ``NoSuchComponentError`` to dispatch to the targeted hint, and
+    ``except SupervisorError`` catches every other supervisor-domain
+    failure. The exception body still carries the localised message
+    (constructed via :func:`alfred.i18n.t` at the raise site) so the
+    structlog stream and reviewer-side forensics see the operator-
+    language text; the CLI dispatch routes off the class, not the body.
+    """
+
+
 __all__ = [
     "BreakStateError",
+    "NoSuchComponentError",
     "QuarantinedUnavailable",
     "SupervisorError",
 ]

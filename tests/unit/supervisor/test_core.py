@@ -282,11 +282,24 @@ async def test_reset_breaker_resets_state_and_audits() -> None:
 
 
 async def test_reset_breaker_unknown_component_raises() -> None:
-    """Reset for an unregistered component raises ``SupervisorError``."""
+    """Reset for an unregistered component raises ``NoSuchComponentError``.
+
+    CR-149 round-7: the raise upgraded from a bare
+    :class:`SupervisorError` to the typed
+    :class:`NoSuchComponentError` subclass so the CLI can dispatch
+    locale-immune. Both ``except`` arms still apply — the new class is
+    a :class:`SupervisorError` subclass — but the typed-class match is
+    the load-bearing routing contract.
+    """
+    from alfred.supervisor.errors import NoSuchComponentError
+
     sup, _m = _build_supervisor()
 
-    with pytest.raises(SupervisorError, match="No supervised component"):
+    with pytest.raises(NoSuchComponentError, match="No supervised component"):
         await sup.reset_breaker("never-registered", operator_user_id="alfred")
+    # Subclass relationship pinned so the legacy ``except
+    # SupervisorError`` arm in any other caller keeps catching.
+    assert issubclass(NoSuchComponentError, SupervisorError)
 
 
 async def test_reset_breaker_persistence_failure_audits_and_reraises(
