@@ -86,27 +86,33 @@ AlfredOS/
 
 ## Commands you should know
 
-| Purpose | Command |
-|---|---|
-| Set up dev environment | `bin/dev-setup.sh` (creates `.venv`, installs deps, pulls test fixtures) |
-| Run unit tests | `uv run pytest tests/unit -q` |
-| Run integration tests | `uv run pytest tests/integration` (boots ephemeral containers) |
-| Run smoke tests | `uv run pytest tests/smoke` (requires `docker compose up` running) |
-| Run adversarial suite | `uv run pytest tests/adversarial` (release-blocking) |
-| Lint + format check | `uv run ruff check . && uv run ruff format --check .` |
-| Type check | `uv run mypy src/ && uv run pyright src/` |
-| All quality gates | `make check` (lint + format + type + test) |
-| Local stack up | `docker compose up -d` |
-| TUI conversation | `alfred chat` |
-| Inspect state | `alfred status` (Slice 1); `alfred audit log` / `alfred audit graph --since 24h` (Slice 3) |
-| Inspect a user's memory | `alfred memory show <user>` (planned — Slice 4+) |
-| Cost report | `alfred cost report --since 7d --by persona` (planned — Slice 4+) |
-| Manage users | `alfred user add|list|show|set|remove|bind|unbind` (see ADR-0010) |
-| Plugin management | `alfred plugin grant <id> <tier> <hookpoint>` · `alfred plugin grant status <id>` · `alfred plugin grant list --pending` · `alfred plugin revoke <id>` (Slice 3; `alfred plugin list` / `show` hidden from `--help` per arch-006 follow-up) |
-| Web fetch allowlist | `alfred web allowlist add <domain>` · `alfred web allowlist remove <domain>` · `alfred web allowlist list` (Slice 3) |
-| Config (reviewer-gated + direct) | `alfred config set <key> <value>` (high-blast keys queue a state.git proposal; low-blast keys write `policies.yaml` directly) · `alfred config get <key>` · `alfred config list` (Slice 3) — see `alfred config set --help` for the closed key set (`quarantined-provider`, `web-fetch-budget`, `operator-fetch-budget`, `extraction-max-retries`, `action-deadline`, `user-agent`) |
-| Supervisor | `alfred supervisor status` · `alfred supervisor reset <component> --confirm` (Slice 3) |
-| Audit (extended) | `alfred audit graph --tier T0|T1|T2|T3 --since 24h` (Slice 3) |
+The **Available** column names the slice in which the command first
+shipped. `Slice 4+` rows are planned but not yet implemented — the
+binary will surface them as `TypedRefusal(reason="not_implemented")`
+or `--help` will simply not list them; do not assume them present.
+
+| Purpose | Available | Command |
+|---|---|---|
+| Set up dev environment | Slice 1 | `bin/dev-setup.sh` (creates `.venv`, installs deps, pulls test fixtures) |
+| Run unit tests | Slice 1 | `uv run pytest tests/unit -q` |
+| Run integration tests | Slice 1 | `uv run pytest tests/integration` (boots ephemeral containers) |
+| Run smoke tests | Slice 1 | `uv run pytest tests/smoke` (requires `docker compose up` running) |
+| Run adversarial suite | Slice 1 | `uv run pytest tests/adversarial` (release-blocking) |
+| Lint + format check | Slice 1 | `uv run ruff check . && uv run ruff format --check .` |
+| Type check | Slice 1 | `uv run mypy src/ && uv run pyright src/` |
+| All quality gates | Slice 1 | `make check` (lint + format + type + test) |
+| Local stack up | Slice 1 | `docker compose up -d` |
+| TUI conversation | Slice 1 | `alfred chat` |
+| Status snapshot | Slice 1 | `alfred status` |
+| Inspect audit log/graph | Slice 3 | `alfred audit log` / `alfred audit graph --since 24h` |
+| Inspect a user's memory | Slice 4+ (planned) | `alfred memory show <user>` |
+| Cost report | Slice 4+ (planned) | `alfred cost report --since 7d --by persona` |
+| Manage users | Slice 1 | `alfred user add|list|show|set|remove|bind|unbind` (see ADR-0010) |
+| Plugin management | Slice 3 | `alfred plugin grant <id> <tier> <hookpoint>` · `alfred plugin grant status <id>` · `alfred plugin grant list --pending` · `alfred plugin revoke <id>` (`alfred plugin list` / `show` hidden from `--help` per arch-006 follow-up) |
+| Web fetch allowlist | Slice 3 | `alfred web allowlist add <domain>` · `alfred web allowlist remove <domain>` · `alfred web allowlist list` |
+| Config (reviewer-gated + direct) | Slice 3 | `alfred config set <key> <value>` (high-blast keys queue a state.git proposal; low-blast keys write `policies.yaml` directly) · `alfred config get <key>` · `alfred config list` — see `alfred config set --help` for the closed key set (`quarantined-provider`, `web-fetch-budget`, `operator-fetch-budget`, `extraction-max-retries`, `action-deadline`, `user-agent`) |
+| Supervisor | Slice 3 | `alfred supervisor status` · `alfred supervisor reset <component> --confirm` |
+| Audit (extended) | Slice 3 | `alfred audit graph --tier T0|T1|T2|T3 --since 24h` |
 
 If a command lacks a slice marker, flag it. Commands
 marked `(planned — Slice N+)` are scheduled — do NOT implement ahead of
