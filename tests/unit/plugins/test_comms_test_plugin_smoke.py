@@ -96,6 +96,119 @@ def test_comms_test_plugin_handles_non_object_json_with_invalid_request() -> Non
     not _MAIN_PATH.exists(),
     reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
 )
+def test_comms_test_plugin_missing_method_returns_invalid_request() -> None:
+    """CR-149 round-6.5: object frame with no ``method`` returns -32600.
+
+    JSON-RPC 2.0 §4.1 / §5.1: ``method`` is a required member and MUST
+    be a string. The prior implementation called
+    ``request.get("method", "")`` and let the empty-string fallback
+    flow into ``_build_method_not_found`` (-32601), which is the wrong
+    code per spec — the request object itself is malformed, not the
+    method name. This test pins the corrected -32600 (Invalid Request)
+    envelope so a future refactor cannot regress the spec compliance.
+
+    The frame carries an ``id`` so the plugin is required to reply
+    (per §4.2 the reply is suppressed only for notifications, which
+    omit ``id``); the spec-mandated reply shape is the Invalid Request
+    envelope with the request's ``id`` echoed back.
+    """
+    bad_frame = json.dumps({"jsonrpc": "2.0", "id": 7})
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(_MAIN_PATH)],
+        input=bad_frame + "\n",
+        capture_output=True,
+        text=True,
+        timeout=_SMOKE_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"plugin exited with code {result.returncode}; stderr={result.stderr!r}"
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, (
+        f"expected exactly one Invalid Request frame, got {len(lines)}: {result.stdout!r}"
+    )
+    response = json.loads(lines[0])
+    assert response.get("jsonrpc") == "2.0", response
+    # ``id`` is echoed back per spec §5.1 when the request supplied one.
+    assert response.get("id") == 7, response
+    err = response.get("error", {})
+    assert err.get("code") == -32600, response
+    assert err.get("message") == "Invalid Request", response
+
+
+@pytest.mark.skipif(
+    not _MAIN_PATH.exists(),
+    reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
+)
+def test_comms_test_plugin_non_string_method_returns_invalid_request() -> None:
+    """CR-149 round-6.5: object frame with non-string ``method`` returns -32600.
+
+    Same spec contract as the missing-method case — ``method`` MUST be
+    a string per JSON-RPC 2.0 §4.1. ``{"method": 1}`` previously
+    flowed through ``_build_method_not_found(1)`` and emitted a -32601
+    envelope with a non-string method name interpolated into the
+    message — both protocol-incorrect.
+    """
+    bad_frame = json.dumps({"jsonrpc": "2.0", "id": 8, "method": 1})
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(_MAIN_PATH)],
+        input=bad_frame + "\n",
+        capture_output=True,
+        text=True,
+        timeout=_SMOKE_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"plugin exited with code {result.returncode}; stderr={result.stderr!r}"
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, (
+        f"expected exactly one Invalid Request frame, got {len(lines)}: {result.stdout!r}"
+    )
+    response = json.loads(lines[0])
+    assert response.get("jsonrpc") == "2.0", response
+    assert response.get("id") == 8, response
+    err = response.get("error", {})
+    assert err.get("code") == -32600, response
+    assert err.get("message") == "Invalid Request", response
+
+
+@pytest.mark.skipif(
+    not _MAIN_PATH.exists(),
+    reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
+)
+def test_comms_test_plugin_missing_method_notification_suppressed() -> None:
+    """CR-149 round-6.5: notification-shape malformed frame emits no reply.
+
+    A frame with no ``id`` (notification per §4.1.2) AND no ``method``
+    is still malformed, but the spec forbids replying to
+    notifications. The plugin must drop the frame silently rather than
+    emit an Invalid Request envelope that would desynchronise the
+    host's request/notification state machine.
+    """
+    bad_frame = json.dumps({"jsonrpc": "2.0"})
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(_MAIN_PATH)],
+        input=bad_frame + "\n",
+        capture_output=True,
+        text=True,
+        timeout=_SMOKE_TIMEOUT_S,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"plugin exited with code {result.returncode}; stderr={result.stderr!r}"
+    )
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines == [], (
+        f"notification-shape malformed frame must not produce a reply, got {result.stdout!r}"
+    )
+
+
+@pytest.mark.skipif(
+    not _MAIN_PATH.exists(),
+    reason=f"reference plugin missing at {_MAIN_PATH} (packaging change?)",
+)
 def test_comms_test_plugin_subprocess_health_round_trip() -> None:
     """One ``adapter.health`` JSON-RPC frame in, one response frame out.
 

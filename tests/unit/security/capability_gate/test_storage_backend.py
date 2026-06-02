@@ -552,6 +552,156 @@ async def test_apply_atomic_runs_all_sql_inside_one_session() -> None:
     assert "INSERT INTO capability_gate_sync" in sql_strings[3]
 
 
+async def test_apply_atomic_sorts_inputs_by_composite_grant_key() -> None:
+    """CR-149 round-6.5: set-like inputs are sorted before SQL execution.
+
+    :meth:`PostgresBackend.apply_atomic` receives :class:`frozenset`-
+    shaped inputs from the gate (the parser returns
+    ``frozenset[GrantRow]`` and the diff is computed by set algebra).
+    Python's set iteration order is hash-seeded and therefore
+    unspecified between runs — without an explicit sort the per-row
+    SQL/audit sequence would shuffle between rebuilds, breaking the
+    audit-graph linkage invariants the tier_laundering adversarial
+    corpus relies on.
+
+    Feed a :class:`frozenset` whose iteration order is intentionally
+    NOT sorted (lexicographically descending plugin_ids) and assert
+    the SQL execution order matches the composite key
+    ``(plugin_id, hookpoint, subscriber_tier, content_tier, proposal_branch)``.
+    The DELETE statements (revokes) fire first in sorted order, then
+    the INSERTs (upserts) in sorted order, then the sync-hash
+    upsert. ``str(call.args[0])`` plus ``call.args[1]`` (the bound
+    parameters) gives us enough granularity to pin every row's
+    ordering by ``plugin_id`` — the leading component of the sort
+    key — without coupling the assertion to internal SQL formatting.
+    """
+    from alfred.security.capability_gate.backend import PostgresBackend
+    from alfred.security.capability_gate.policy import GrantRow
+
+    factory, session = _fake_session_factory()
+    backend = PostgresBackend(session_factory=factory)
+
+    # Build the inputs in NON-sorted order. ``frozenset`` does not
+    # preserve insertion order, but constructing from a deliberately
+    # reversed iterable proves the sort applies regardless of any
+    # accidental insertion-order preservation in the underlying
+    # hash table layout.
+    revokes = frozenset(
+        {
+            GrantRow(
+                plugin_id="z.last",
+                subscriber_tier="operator",
+                hookpoint="tool.z",
+                content_tier=None,
+                proposal_branch="proposal/policy-grant-z",
+            ),
+            GrantRow(
+                plugin_id="a.first",
+                subscriber_tier="operator",
+                hookpoint="tool.a",
+                content_tier=None,
+                proposal_branch="proposal/policy-grant-a",
+            ),
+            GrantRow(
+                plugin_id="m.middle",
+                subscriber_tier="operator",
+                hookpoint="tool.m",
+                content_tier=None,
+                proposal_branch="proposal/policy-grant-m",
+            ),
+        }
+    )
+    upserts = frozenset(
+        {
+            GrantRow(
+                plugin_id="y.new",
+                subscriber_tier="operator",
+                hookpoint="tool.y",
+                content_tier=None,
+                proposal_branch="proposal/policy-grant-y",
+            ),
+            GrantRow(
+                plugin_id="b.new",
+                subscriber_tier="operator",
+                hookpoint="tool.b",
+                content_tier=None,
+                proposal_branch="proposal/policy-grant-b",
+            ),
+        }
+    )
+
+    await backend.apply_atomic(
+        revokes=revokes,
+        upserts=upserts,
+        commit_hash="atomic-deterministic-hash",
+    )
+
+    # 3 revokes + 2 upserts + 1 sync-hash = 6 SQL executions.
+    assert session.execute.await_count == 6
+    # The bound-parameter dicts carry the per-row identity; extract
+    # the plugin_id from each call's params to verify the ordering.
+    call_args = session.execute.await_args_list
+    revoke_plugin_ids = [call.args[1]["plugin_id"] for call in call_args[:3]]
+    upsert_plugin_ids = [call.args[1]["plugin_id"] for call in call_args[3:5]]
+    # Both batches execute in lexicographic-ascending plugin_id order
+    # — the leading component of the composite sort key.
+    assert revoke_plugin_ids == ["a.first", "m.middle", "z.last"]
+    assert upsert_plugin_ids == ["b.new", "y.new"]
+    # The trailing call is always the sync-hash upsert.
+    assert "INSERT INTO capability_gate_sync" in str(call_args[5].args[0])
+
+
+async def test_grant_sort_key_breaks_ties_with_full_composite() -> None:
+    """CR-149 round-6.5: the sort key uses every typed GrantRow field.
+
+    Two grants that share ``plugin_id`` + ``hookpoint`` +
+    ``subscriber_tier`` (the unique-key triple) must still sort
+    deterministically when they disagree on ``content_tier`` or
+    ``proposal_branch``. Pin the full composite so a future
+    refactor that drops trailing components from the key would
+    surface here rather than as a flaky audit-graph diff.
+
+    ``content_tier=None`` coerces to ``""`` for the tuple
+    comparison, sorting before any non-None tier value — pin that
+    too so a refactor cannot regress to ``None``-vs-string
+    TypeError at sort time.
+    """
+    from alfred.security.capability_gate.backend import _grant_sort_key
+    from alfred.security.capability_gate.policy import GrantRow
+
+    g_none = GrantRow(
+        plugin_id="p",
+        subscriber_tier="operator",
+        hookpoint="h",
+        content_tier=None,
+        proposal_branch="proposal/policy-grant-1",
+    )
+    g_t2 = GrantRow(
+        plugin_id="p",
+        subscriber_tier="operator",
+        hookpoint="h",
+        content_tier="T2",
+        proposal_branch="proposal/policy-grant-1",
+    )
+    g_t3 = GrantRow(
+        plugin_id="p",
+        subscriber_tier="operator",
+        hookpoint="h",
+        content_tier="T3",
+        proposal_branch="proposal/policy-grant-1",
+    )
+    g_t2_other_branch = GrantRow(
+        plugin_id="p",
+        subscriber_tier="operator",
+        hookpoint="h",
+        content_tier="T2",
+        proposal_branch="proposal/policy-grant-2",
+    )
+
+    sorted_keys = sorted([g_t3, g_t2_other_branch, g_t2, g_none], key=_grant_sort_key)
+    assert sorted_keys == [g_none, g_t2, g_t2_other_branch, g_t3]
+
+
 async def test_apply_atomic_empty_batches_still_set_sync_hash() -> None:
     """Empty revokes + empty upserts → only the ``set_sync_hash`` SQL fires.
 
