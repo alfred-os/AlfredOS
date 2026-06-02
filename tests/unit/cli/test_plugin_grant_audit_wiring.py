@@ -130,11 +130,17 @@ def test_plugin_grant_hookpoints_declared_via_cli_module_import(
             "the CLI's grant flow would emit hookpoint invocations "
             "the registry rejects with HookpointNotDeclared."
         )
-        # Spec §14: system-only subscribable, no refusable tier, fail
-        # open. The CLI inherits these — a user-plugin subscriber to
+        # Spec §14: system-only subscribable, no refusable tier. The
+        # CLI inherits these -- a user-plugin subscriber to
         # ``plugin.grant.approved`` would observe every operator grant
         # approval, which is an exfiltration path the system-only
         # restriction closes.
+        #
+        # sec-pr-s3-6-05: ``fail_closed=True`` because a crashing
+        # observer on a security-relevant flow MUST NOT let the grant
+        # go live with a missing audit row. The SYSTEM_ONLY_TIERS lock
+        # ensures only system-tier code can subscribe, so flipping
+        # fail_closed cannot regress user-plugin availability.
         assert meta.subscribable_tiers == SYSTEM_ONLY_TIERS
         assert meta.refusable_tiers == frozenset()
-        assert meta.fail_closed is False
+        assert meta.fail_closed is True
