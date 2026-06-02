@@ -2,8 +2,10 @@
 
 Spec §8.1 (Fork 7) — hybrid storage (state.git source of truth + Postgres
 runtime cache). Spec §8.2 — three keyword-only methods on every gate
-implementation. Spec §8.4 — co-exists with :class:`DevGate` until the
-PR-S3-7 flag-day removal.
+implementation. Spec §8.4 — sole implementation post-PR-S3-7 flag-day:
+the Slice-2.5 :class:`DevGate` is gone from ``src/`` entirely;
+:class:`RealGate` is constructed for both development and production
+deployments via :mod:`alfred.bootstrap.gate_factory`.
 
 This file lands incrementally across PR-S3-2:
 

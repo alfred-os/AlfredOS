@@ -1,7 +1,7 @@
 """AlfredOS pluggable hooks subsystem — public surface (spec §3.1).
 
 This package exposes the contract every hook author, every subscriber, and
-every dispatch site in the orchestrator codes against. The thirteen names
+every dispatch site in the orchestrator codes against. The sixteen names
 listed in :data:`__all__` ARE the spec'd surface; nothing else may be
 imported from the top-level package.
 
