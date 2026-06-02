@@ -371,16 +371,33 @@ consumer's deserialisation single-branched.
 
 ### T3 provenance survival
 
-The `T3DerivedData` `NewType` is a Slice-3 lightweight discriminant.
-The adversarial corpus includes a `tier_laundering` payload that
-verifies `type(result.data)` is `T3DerivedData` (not plain `dict`)
-through `quarantined_to_structured` and through a DB write/read
-round-trip — confirming the `NewType` survives serialisation (spec
-§12.3). Because `NewType` is a no-op at runtime, the test pins the
-provenance at the call-site `isinstance` boundary through round-trip
-fixtures rather than through `type()`. Slice 4 promotes this to a full
-type parameter on `TaggedContent` and the survival check graduates to
-a structural type assertion.
+The `T3DerivedData` `NewType` is a Slice-3 lightweight discriminant —
+a **static-typing construct** whose guarantees are enforced at call
+sites (mypy / pyright surfaces a tag-confusion bug at type-check time)
+rather than as a runtime type. `NewType` is a no-op at runtime: the
+underlying object remains a plain `dict`, so `type(result.data) is
+T3DerivedData` is **false** at runtime — there is no separate class to
+compare against.
+
+The adversarial corpus's `tier_laundering` payload therefore pins
+provenance two ways, both at call-site boundaries rather than via
+`type()`:
+
+1. **Static typing** — `quarantined_to_structured`'s return signature
+   binds `result.data: T3DerivedData`. A call site that passes the
+   value to a function expecting plain `dict[str, object]` without
+   going through `downgrade_to_orchestrator` (the only sanctioned
+   `T3DerivedData → dict` boundary) fails type-check.
+2. **DB write/read round-trip** — the audit-row + episodic-write paths
+   preserve the underlying dict-shape across serialisation, and the
+   read-side `isinstance(value, dict)` + `provenance == "T3_derived"`
+   audit attribution survive. The round-trip fixture confirms the
+   provenance tag is pinned through the storage boundary even though
+   `NewType` itself doesn't add a runtime class marker.
+
+Slice 4 promotes this to a full type parameter on `TaggedContent` and
+the survival check graduates to a structural runtime type assertion
+(`isinstance(..., TaggedContent)` against a concrete generic carrier).
 
 ### `quarantined_to_structured` correlation
 

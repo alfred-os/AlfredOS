@@ -101,11 +101,15 @@ hook subscribers, an entirely separate axis from content provenance.
 Slice 3 introduces first-class `TaggedContent[T1]` and
 `TaggedContent[T3]` type parameters:
 
-- **`TaggedContent[T1]`** — authenticated-user-trusted content. `T1`
-  values are emitted by [`IdentityResolver`](#identityresolver) when a
-  verified platform identity is confirmed. The type enforces that T1
-  content came from an authenticated source; `IdentityResolver` is the
-  only authorised producer (spec §3.1).
+- **`TaggedContent[T1]`** — operator-tier content. `T1` values are the
+  ingress tier for operator-interactive sessions (e.g. the TUI adapter
+  when the authenticated user holds the `operator` authorization role).
+  The type enforces that T1 content came from an operator-authenticated
+  source. `IdentityResolver` is the canonical producer for
+  authenticated-platform-identity content — verified platform identities
+  emit `TaggedContent[T2]` (authenticated-user tier), distinct from T1
+  (operator tier). See [T1 (operator tier)](#t1-operator-tier) and the
+  trust-tier model below.
 - **`TaggedContent[T3]`** — external-untrusted content. `T3` values are
   produced only via the capability-gated `tag(T3, ...)` factory at the
   [`StdioTransport`](#stdiotransport) boundary and in
