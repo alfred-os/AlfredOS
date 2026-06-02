@@ -1172,10 +1172,10 @@ def test_emit_sync_running_loop_arm_stalled_sink_at_least_once() -> None:
     # regression to "lock-held-during-stall" surfaces as a test
     # failure rather than a flaky pass.
     assert len(fallback_rows) >= 1, (
-        f"Expected the calling-thread structlog fallback to fire when "
-        f"the sink stalls past the join bound (CLAUDE.md hard-rule-#7 "
-        f"escape path); got 0 fallback rows. If this assertion fails, "
-        f"either the daemon is re-acquiring the claim before the sink "
-        f"call (regression of CR-156 round-6 3342416844) or the test "
-        f"sink is somehow beating the 0.5 s bound."
+        "Expected the calling-thread structlog fallback to fire when "
+        "the sink stalls past the join bound (CLAUDE.md hard-rule-#7 "
+        "escape path); got 0 fallback rows. If this assertion fails, "
+        "either the daemon is re-acquiring the claim before the sink "
+        "call (regression of CR-156 round-6 3342416844) or the test "
+        "sink is somehow beating the 0.5 s bound."
     )
