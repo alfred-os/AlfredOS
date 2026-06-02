@@ -181,8 +181,22 @@ async def test_rebuild_short_circuits_when_head_unchanged(tmp_path: Path) -> Non
         state_git_path=repo_path,
     )
 
-    await gate.rebuild_from_state_git(state_git_head=head)
+    # CR-149 round-6.5: pin the Spec §8.1 short-circuit at the parser
+    # boundary too. The downstream ``apply_atomic`` / ``set_sync_hash``
+    # / audit-sink ``append_schema`` assertions below prove "no apply
+    # / no audit", but a regression that still walked ``state.git``
+    # (paid the I/O cost for nothing) before deciding to skip the
+    # apply would still satisfy them silently. Patching
+    # :func:`parse_state_git_head` at its import site inside
+    # :mod:`alfred.security.capability_gate._gate` and asserting it
+    # is NEVER called pins the I/O-level short-circuit too — the
+    # cache-hit branch returns BEFORE any state.git walk happens.
+    from unittest.mock import patch
 
+    with patch("alfred.security.capability_gate._gate.parse_state_git_head") as mock_parse_head:
+        await gate.rebuild_from_state_git(state_git_head=head)
+
+    mock_parse_head.assert_not_called()
     backend.apply_atomic.assert_not_awaited()
     backend.set_sync_hash.assert_not_awaited()
     backend.upsert_grant.assert_not_awaited()

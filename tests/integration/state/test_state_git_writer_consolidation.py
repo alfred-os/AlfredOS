@@ -211,6 +211,15 @@ def test_sync_writer_and_async_shim_produce_semantically_identical_blob(
             )
         )
 
+    # CR-149 round-6.5: pin the ADR-0018 audit/state.git join invariant
+    # — the returned branch MUST be the caller-supplied branch verbatim.
+    # If the sync writer ever rewrites the ref (e.g. namespacing
+    # ``proposal/...`` under ``proposals/...`` mid-call), this suite
+    # would otherwise still pass with the audit breadcrumb pointing at
+    # a divergent branch name. The equality assertion makes any silent
+    # rewrite fail loud at the writer-boundary contract.
+    assert async_branch == f"proposal/policy-grant-{proposal_id_async}"
+
     sync_blob = subprocess.run(  # noqa: S603
         [  # noqa: S607
             "git",
@@ -361,6 +370,12 @@ def test_parse_state_git_head_round_trips_typed_payload_via_async_shim(
                 operator_user_id="op@example.com",
             )
         )
+
+    # CR-149 round-6.5: same ADR-0018 audit/state.git join invariant
+    # pinned on the round-trip variant — the returned branch MUST be
+    # the caller-supplied branch verbatim. See the writer-equality
+    # commentary on the consolidation test above for the rationale.
+    assert branch == f"proposal/policy-grant-{proposal_id}"
 
     env = _git_env(tmp_path)
     merge_clone = tmp_path / "merge"
