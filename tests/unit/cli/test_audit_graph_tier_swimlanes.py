@@ -107,12 +107,24 @@ def test_audit_graph_no_tier_shows_all(runner: CliRunner) -> None:
 def test_audit_graph_renders_header_when_rows_exist(
     runner: CliRunner, t3_rows: list[dict[str, object]]
 ) -> None:
-    """The tier_header label must render when ``--tier`` is set + rows exist."""
+    """The tier_header label must render when ``--tier`` is set + rows exist.
+
+    CR-149 round-6.5: the prior assertion ``"swimlane" in lower OR "T3"
+    in output`` short-circuited on the row payload's own ``T3``,
+    silently passing even if the en-catalog header copy disappeared.
+    Pin both halves of the header contract explicitly — the "swimlane"
+    copy AND the selected tier appear together — so a future catalog
+    edit that drops the localised header would fail this test loudly
+    rather than slipping through because the data row still carries
+    the tier marker.
+    """
     with patch("alfred.cli.audit._query_audit_log", return_value=t3_rows):
         result = runner.invoke(audit_app, ["graph", "--tier", "T3", "--since", "24h"])
     assert result.exit_code == 0
-    # The header label includes the word "swimlane" + the tier (en catalog).
-    assert "swimlane" in result.output.lower() or "T3" in result.output
+    # Pin both the header copy and the selected tier — independently —
+    # so neither half of the contract can regress silently.
+    assert "swimlane" in result.output.lower()
+    assert "T3" in result.output
 
 
 def test_audit_graph_without_tier_renders_all_header(runner: CliRunner) -> None:
