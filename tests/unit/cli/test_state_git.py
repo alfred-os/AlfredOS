@@ -387,6 +387,37 @@ def test_run_classifies_missing_repo_as_path_missing(tmp_path: Path) -> None:
     assert excinfo.value.kind == StateGitErrorKind.PATH_MISSING
 
 
+def test_run_does_not_treat_unreadable_repo_as_missing(tmp_path: Path) -> None:
+    """A ``PermissionError`` on the repo path MUST NOT map to PATH_MISSING.
+
+    CR-149 round-2: the pre-check used ``Path.exists()`` which collapses
+    "genuinely missing" and "present but unreadable" into the same False
+    return. The "run alfred-setup" hint that PATH_MISSING surfaces would
+    mislead an operator whose real problem is access. After the fix the
+    pre-check uses ``stat()`` and catches ONLY ``FileNotFoundError``;
+    ``PermissionError`` propagates and the subprocess arm's catch-all
+    maps it to PUSH_REJECTED so the operator sees the audit-log hint.
+    """
+    bound = tmp_path / "state.git"
+    client = StateGitProposalClient(state_git_path=bound)
+    # Patch ``Path.stat`` so the pre-check raises PermissionError; the
+    # subprocess.run that follows isn't called because the OSError
+    # surfaces from the pre-check arm. The mapping arm under test is
+    # the explicit "FileNotFoundError-only" filter we added.
+    with (
+        patch(
+            "pathlib.Path.stat",
+            side_effect=PermissionError("EACCES on stat"),
+        ),
+        pytest.raises(StateGitError) as excinfo,
+    ):
+        client.list_pending_proposals()
+    # The pre-check arm catches FileNotFoundError ONLY; the PermissionError
+    # falls through to the subprocess arm and maps to PUSH_REJECTED via
+    # the catch-all OSError handler. Either way it must NOT be PATH_MISSING.
+    assert excinfo.value.kind != StateGitErrorKind.PATH_MISSING
+
+
 def test_run_classifies_generic_oserror_as_push_rejected(bare_repo: Path) -> None:
     """A non-FileNotFoundError ``OSError`` (e.g. PermissionError) tags PUSH_REJECTED.
 

@@ -441,20 +441,38 @@ class StateGitProposalClient:
           (devex-004: leaking ``git push origin proposal/...`` taught
           the operator nothing).
         """
-        # CR-149 sec-pr-s3-6-cr-149: the bound repo path check runs
-        # BEFORE ``subprocess.run`` so the common "operator hasn't
-        # bootstrapped state.git yet" case maps to
-        # :attr:`StateGitErrorKind.PATH_MISSING` regardless of how the
-        # argv shape encodes the path. ``git clone <missing>`` and
-        # ``git --git-dir=<missing>`` both return a non-zero exit code
-        # without raising ``FileNotFoundError``; relying on the
-        # exception alone would fall through to :attr:`PUSH_REJECTED`
-        # and render the wrong recovery hint (CLAUDE.md hard rule #7,
-        # PRD §4.1 onboarding). The pre-check makes the error mapping
-        # independent of the git CLI's argv-dispatch quirks.
-        if not self._repo.exists():
+        # CR-149 round-2: the bound repo path check runs BEFORE
+        # ``subprocess.run`` so the common "operator hasn't bootstrapped
+        # state.git yet" case maps to :attr:`StateGitErrorKind.PATH_MISSING`
+        # regardless of how the argv shape encodes the path
+        # (``git clone <missing>``/``git --git-dir=<missing>`` both return
+        # a non-zero exit without raising ``FileNotFoundError`` from
+        # ``subprocess``, so relying on exception alone falls through to
+        # :attr:`PUSH_REJECTED` with the wrong recovery hint — CLAUDE.md
+        # hard rule #7, PRD §4.1).
+        #
+        # Use ``stat`` not ``exists``: ``Path.exists`` returns False for
+        # genuinely-missing AND for present-but-permission-denied paths,
+        # which would surface the "run alfred-setup" hint to an operator
+        # whose real problem is access. Catch ONLY ``FileNotFoundError``;
+        # let ``PermissionError`` and other ``OSError`` subclasses
+        # propagate so the existing arm below maps them to
+        # :attr:`PUSH_REJECTED` (the operator's actionable signal there
+        # is "check audit log + filesystem ACLs", not bootstrap).
+        try:
+            self._repo.stat()
+        except FileNotFoundError as exc:
             msg = "state.git repo missing"
-            raise StateGitError(msg, kind=StateGitErrorKind.PATH_MISSING)
+            raise StateGitError(msg, kind=StateGitErrorKind.PATH_MISSING) from exc
+        except OSError as exc:
+            # PermissionError and other access-denied shapes — the
+            # operator's actionable signal here is "check audit log +
+            # filesystem ACLs", not "bootstrap state.git". Map to
+            # PUSH_REJECTED matching the catch-all downstream. Keeping
+            # this branch ABOVE the subprocess.run preserves the
+            # "no subprocess fork on a doomed pre-check" property.
+            msg = "state.git pre-check failed"
+            raise StateGitError(msg, kind=StateGitErrorKind.PUSH_REJECTED) from exc
         try:
             # S603/S607: ``cmd[0]`` is always the literal ``"git"`` constructed
             # from this module's hard-coded argv lists; the only operator-
