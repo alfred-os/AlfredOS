@@ -30,12 +30,29 @@ Implementation history:
 
 Hard-rule invariants:
 
-* **CLAUDE.md hard rule #4** — never bypass the capability layer. Every
-  gate implementation MUST consult its grant table; no shortcut return.
+* **CLAUDE.md hard rule #4** — never bypass the capability layer.
+  Every PRODUCTION gate implementation (today: :class:`RealGate` and
+  any future operator-grant gate consulting a different store) MUST
+  consult its grant table via
+  :class:`alfred.security.capability_gate.policy.GrantRow`; no shortcut
+  return.
+
+  **Bootstrap-sentinel carve-out:** the module-level
+  :class:`alfred.hooks.registry._DenyAllGate` is a legitimate
+  :class:`CapabilityGate` implementation that satisfies hard rule #4 by
+  *unconditionally* denying — it is the fail-closed lazy default for
+  any ``@hook`` decorator that registers before
+  :mod:`alfred.bootstrap.gate_factory` installs :class:`RealGate` via
+  :func:`alfred.hooks.set_registry`. Because every call returns
+  ``False`` regardless of inputs, no bypass is possible; the rule's
+  intent (no shortcut to *grant*) is preserved. See
+  ``docs/glossary.md#_denyallgate`` for the lazy-default boundary spec.
+
 * **CLAUDE.md hard rule #7** — no silent failures. An unknown / typo'd /
   case-mismatched tier denies fail-closed — the production
   :class:`RealGate` rejects via the closed-domain check in
-  :class:`alfred.security.capability_gate.policy.GrantRow`.
+  :class:`alfred.security.capability_gate.policy.GrantRow`; the
+  bootstrap sentinel :class:`_DenyAllGate` rejects unconditionally.
 * **sec-007 (no env reads)** — this module imports nothing from
   :mod:`os` (no ``import os``, no ``os.environ`` / ``os.getenv``).
   ``ALFRED_ENV`` selection lives in :mod:`alfred.bootstrap.gate_factory`;
