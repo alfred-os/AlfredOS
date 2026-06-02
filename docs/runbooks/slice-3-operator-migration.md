@@ -76,10 +76,16 @@ history.
 encapsulates these two steps is tracked as a follow-up.*
 
 If you skip this step, every plugin start (quarantined-LLM,
-web-fetch) emits `plugin.lifecycle.load_refused` and you will see a
-user-facing chat message keyed `cli.chat.capability_gate_unseeded`
-instructing you to seed `state.git` and then run
-`alfred supervisor reset quarantined-llm --confirm`.
+web-fetch) emits `plugin.lifecycle.load_refused` on the audit stream
+and the corresponding capability checks deny fail-closed. There is no
+dedicated `alfred chat` startup hint for the unseeded state in this
+release (the design-doc-tracked `cli.chat.capability_gate_unseeded`
+key does not yet exist in the catalog); the symptom surfaces as plugin
+operations refusing in the chat surface. Confirm the cause with
+`alfred audit log --event plugin.lifecycle.load_refused --since 5m`,
+seed `state.git` per the block above, then run
+`alfred supervisor reset quarantined-llm --confirm` (and the matching
+reset for any other refused component).
 
 **Step 3 — Apply database migrations**
 
