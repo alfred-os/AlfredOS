@@ -189,6 +189,13 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"yaml_path": "/etc/alfred/policies.yaml", "error": "expected ':'"},
         ("malformed", "fix"),
     ),
+    "cli.config.error.read_failed": (
+        # CR-149 round-6: OSError on policies.yaml read routes through
+        # a dedicated key so the operator sees a permission-recovery
+        # hint instead of a raw traceback.
+        {"yaml_path": "/etc/alfred/policies.yaml", "error": "Permission denied"},
+        ("read", "permissions"),
+    ),
     # cli.supervisor.reset.* -- confirm + result surfaces
     "cli.supervisor.reset.confirm_prompt": (
         {

@@ -380,9 +380,21 @@ def supervisor_reset(
         # devex-005: distinguish "wrong component id" from "supervisor
         # unavailable". ``ComponentNotFoundError`` is a future-PR-S3-7
         # refinement; until then any :class:`SupervisorError` carrying
-        # "not found" in its message is treated as the component-
-        # missing branch.
-        if "not found" in str(exc).lower():
+        # the canonical missing-component wording is treated as the
+        # component-missing branch.
+        #
+        # CR-149 round-6: the canonical missing-component message in
+        # this repo is ``supervisor.no_such_component`` →
+        # "No supervised component with id ..." (see
+        # ``locale/en/LC_MESSAGES/alfred.po`` + ``supervisor/core.py``).
+        # The previous shape only matched "not found", so the normal
+        # missing-component path fell through to ``unexpected_error``
+        # and the operator lost the targeted guidance the T1 surface
+        # requires (Spec §10.8 / §11.3). Match both the legacy "not
+        # found" string AND the canonical wording so a future tweak
+        # to one does not silently route the wrong branch.
+        message = str(exc).lower()
+        if "not found" in message or "no supervised component" in message:
             typer.echo(
                 t(
                     "cli.supervisor.reset.component_not_found",

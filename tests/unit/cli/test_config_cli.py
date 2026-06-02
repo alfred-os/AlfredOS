@@ -301,6 +301,39 @@ def test_list_existing_but_empty_yaml_emits_localised_notice(
 # ---------------------------------------------------------------------------
 
 
+def test_set_unreadable_yaml_emits_localised_error(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """CR-149 round-6: an OSError on policies.yaml read surfaces a localised key.
+
+    The previous shape only routed ``yaml.YAMLError`` through the
+    localised path, so an unreadable file (PermissionError, transient
+    OSError) dumped a raw Python traceback to stderr. CLAUDE.md hard
+    rule #7 forbids raw failure shapes on the T1 surface; the new
+    ``cli.config.error.read_failed`` key gives the operator the file
+    path + a recovery hint without picking it out of a traceback.
+    """
+    policies = tmp_path / "policies.yaml"
+    # Use a non-existent file under a path the exists-check is patched
+    # to claim exists, then patch read_text to raise OSError. Mirrors a
+    # real EACCES on the parent directory after a successful stat.
+    policies.write_text("web_fetch: {}\n")
+    with (
+        patch("alfred.cli.config._policies_yaml_path", policies),
+        patch.object(
+            type(policies),
+            "read_text",
+            side_effect=PermissionError("Permission denied"),
+        ),
+    ):
+        result = runner.invoke(config_app, ["set", "web-fetch-budget", "10"])
+    assert result.exit_code != 0
+    assert str(policies) in result.stderr
+    # The catalog msgstr names the OS-level error so the operator
+    # diagnoses the cause without a traceback.
+    assert "Permission denied" in result.stderr or "permission" in result.stderr.lower()
+
+
 def test_set_malformed_yaml_emits_localised_error(runner: CliRunner, tmp_path: Path) -> None:
     """A YAML parse failure in ``set`` surfaces the localised malformed_yaml key.
 
