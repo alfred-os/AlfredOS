@@ -165,13 +165,21 @@ def test_declare_hookpoints_uses_no_refusable_tiers() -> None:
         )
 
 
-def test_declare_hookpoints_fail_closed_is_false() -> None:
-    """Observers must not stall the reviewer-approved grant path.
+def test_declare_hookpoints_fail_closed_is_true() -> None:
+    """A crashing observer MUST short-circuit a reviewer-gated grant.
 
-    Spec §14: ``fail_closed=False`` means a crashing subscriber does
-    not block the publisher. Inverting this would let a buggy
-    observability plugin block every grant approval — a denial-of-
-    service shape we explicitly do not accept.
+    sec-pr-s3-6-05: previously :func:`declare_hookpoints` registered
+    each ``plugin.grant.*`` event with ``fail_closed=False`` -- a
+    crashing audit-row writer would let the grant go live silently and
+    the operator could not later reconstruct who approved it, when, or
+    against which payload. CLAUDE.md hard rule #7 forbids that silent
+    audit-skip on a security-relevant flow.
+
+    The SYSTEM_ONLY_TIERS lock keeps user-plugin subscribers out of
+    the chain entirely, so flipping fail_closed cannot regress
+    availability for ordinary plugin code -- only system-tier
+    observers can subscribe at all. Inside that system-tier chain,
+    fail-closed is the correct stance.
     """
     registry = HookRegistry(gate=DevGate())
     declare_hookpoints(registry)
@@ -183,7 +191,7 @@ def test_declare_hookpoints_fail_closed_is_false() -> None:
     ):
         meta = registry.hookpoint_meta(name)
         assert meta is not None, f"{name} missing from registry"
-        assert meta.fail_closed is False, f"{name} declared fail_closed=True"
+        assert meta.fail_closed is True, f"{name} declared fail_closed=False"
 
 
 def test_declare_hookpoints_is_idempotent() -> None:
