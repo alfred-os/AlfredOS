@@ -108,5 +108,12 @@ def test_deny_all_gate_is_frozen_slots_dataclass() -> None:
     import dataclasses
 
     assert dataclasses.is_dataclass(gate)
+    # CR-156 round-5: the prior pin (is_dataclass + zero fields) would
+    # still pass if a future refactor dropped ``frozen=True`` while
+    # keeping ``slots=True``. Assert frozen + slots directly so the
+    # immutability contract is the thing under test, not a downstream
+    # symptom of it.
+    assert type(gate).__dataclass_params__.frozen is True
+    assert hasattr(type(gate), "__slots__")
     fields = dataclasses.fields(gate)
     assert fields == ()  # zero state — pure denial.

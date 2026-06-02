@@ -151,36 +151,58 @@ async def test_create_with_start_heartbeat_true_schedules_task() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _drive_one_failing_iteration(gate: Any, backend: Any) -> None:
+    """Drive ``gate._heartbeat_loop`` through exactly one failing ping, then cancel.
+
+    CR-156 round-5 (3342278556): the old pattern rewired
+    ``gate_module.asyncio.sleep`` process-wide so any concurrent task
+    that hit ``asyncio.sleep()`` during these tests would see the fake
+    and could fail nondeterministically. We instead wrap the failing
+    ``backend.ping`` so it signals an :class:`asyncio.Event` after
+    raising, run the heartbeat loop as its own task, await the Event
+    (one ping observed), then cancel. The loop's natural cancellation
+    point is the ``await asyncio.sleep`` at the bottom of the body —
+    no stdlib mutation required.
+
+    Ordering: ``backend.ping`` raises BEFORE the loop body's exception
+    handler runs, but the handler's increment + (sometimes) emit are
+    synchronous to the next ``await asyncio.sleep`` — cancellation
+    cannot land between ``ping`` returning and ``sleep`` being awaited,
+    so the assertions in the calling test see fully-applied state.
+    """
+    ping_seen = asyncio.Event()
+    failing_ping = backend.ping
+
+    async def _ping_then_signal() -> None:
+        try:
+            await failing_ping()
+        finally:
+            ping_seen.set()
+
+    backend.ping = _ping_then_signal
+    task = asyncio.create_task(gate._heartbeat_loop())
+    try:
+        await ping_seen.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 async def test_heartbeat_loop_increments_counter_on_ping_failure() -> None:
     """One failed ping bumps ``_missed_heartbeats`` from 0 to 1.
 
-    Stubs ``asyncio.sleep`` so the loop iterates without consuming wall
-    time, then cancels after one cycle. The counter increment is the
-    only side effect we assert on; the boundary-crossing entering-row
-    emit is covered by the next test.
+    Drives a single failing-ping iteration via
+    :func:`_drive_one_failing_iteration` and cancels the loop task.
+    The counter increment is the only side effect we assert on; the
+    boundary-crossing entering-row emit is covered by the next test.
     """
-    from alfred.security.capability_gate import _gate as gate_module
+    from alfred.security.capability_gate._gate import RealGate
 
     backend = _make_failing_backend()
-    gate = await gate_module.RealGate.create(
-        backend=backend, audit_sink=_no_op_sink(), start_heartbeat=False
-    )
+    gate = await RealGate.create(backend=backend, audit_sink=_no_op_sink(), start_heartbeat=False)
 
-    iterations = 0
-
-    async def _fake_sleep(_seconds: float) -> None:
-        nonlocal iterations
-        iterations += 1
-        if iterations >= 1:
-            raise asyncio.CancelledError
-
-    original_sleep = gate_module.asyncio.sleep
-    gate_module.asyncio.sleep = _fake_sleep  # type: ignore[assignment]
-    try:
-        with pytest.raises(asyncio.CancelledError):
-            await gate._heartbeat_loop()
-    finally:
-        gate_module.asyncio.sleep = original_sleep  # type: ignore[assignment]
+    await _drive_one_failing_iteration(gate, backend)
 
     assert gate._missed_heartbeats == 1
     assert gate._fail_closed is False
@@ -199,26 +221,14 @@ async def test_heartbeat_loop_transitions_to_fail_closed() -> None:
     in the integration suite; this test only asserts the happy-path flip
     + audit-row emit.
     """
-    from alfred.security.capability_gate import _gate as gate_module
-    from alfred.security.capability_gate._gate import _MAX_MISSED_HEARTBEATS
+    from alfred.security.capability_gate._gate import _MAX_MISSED_HEARTBEATS, RealGate
 
     sink, emitted = _make_spy_sink()
     backend = _make_failing_backend()
-    gate = await gate_module.RealGate.create(
-        backend=backend, audit_sink=sink, start_heartbeat=False
-    )
+    gate = await RealGate.create(backend=backend, audit_sink=sink, start_heartbeat=False)
     gate._missed_heartbeats = _MAX_MISSED_HEARTBEATS - 1
 
-    async def _fake_sleep(_seconds: float) -> None:
-        raise asyncio.CancelledError
-
-    original_sleep = gate_module.asyncio.sleep
-    gate_module.asyncio.sleep = _fake_sleep  # type: ignore[assignment]
-    try:
-        with pytest.raises(asyncio.CancelledError):
-            await gate._heartbeat_loop()
-    finally:
-        gate_module.asyncio.sleep = original_sleep  # type: ignore[assignment]
+    await _drive_one_failing_iteration(gate, backend)
 
     assert gate._fail_closed is True
     assert gate._missed_heartbeats == _MAX_MISSED_HEARTBEATS
@@ -231,6 +241,36 @@ async def test_heartbeat_loop_transitions_to_fail_closed() -> None:
     assert emitted[0]["denied_dispatch_count"] is None
 
 
+async def _drive_one_succeeding_iteration(gate: Any, backend: Any) -> None:
+    """Drive ``gate._heartbeat_loop`` through exactly one successful ping, then cancel.
+
+    Twin of :func:`_drive_one_failing_iteration` for tests that need the
+    success arm of the loop body (counter reset + optional exit-row
+    emit) without the failure arm. Wraps ``backend.ping`` so it signals
+    an :class:`asyncio.Event` after returning normally — the loop body's
+    success arm runs to completion (synchronous through to the next
+    ``await asyncio.sleep``) before cancellation can land, so the
+    calling test sees fully-applied state.
+    """
+    ping_seen = asyncio.Event()
+    succeeding_ping = backend.ping
+
+    async def _ping_then_signal() -> None:
+        try:
+            await succeeding_ping()
+        finally:
+            ping_seen.set()
+
+    backend.ping = _ping_then_signal
+    task = asyncio.create_task(gate._heartbeat_loop())
+    try:
+        await ping_seen.wait()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
 async def test_heartbeat_loop_recovery_emits_exiting_row() -> None:
     """A successful ping after fail-closed emits ``exiting_fail_closed`` + resets state.
 
@@ -239,28 +279,17 @@ async def test_heartbeat_loop_recovery_emits_exiting_row() -> None:
     row with the cumulative count and clears both the flag and the
     counters.
     """
-    from alfred.security.capability_gate import _gate as gate_module
+    from alfred.security.capability_gate._gate import RealGate
 
     sink, emitted = _make_spy_sink()
     backend = _make_failing_backend()
     backend.ping = AsyncMock(return_value=None)
-    gate = await gate_module.RealGate.create(
-        backend=backend, audit_sink=sink, start_heartbeat=False
-    )
+    gate = await RealGate.create(backend=backend, audit_sink=sink, start_heartbeat=False)
     gate._fail_closed = True
     gate._denied_dispatch_count = 7
     gate._missed_heartbeats = 6
 
-    async def _fake_sleep(_seconds: float) -> None:
-        raise asyncio.CancelledError
-
-    original_sleep = gate_module.asyncio.sleep
-    gate_module.asyncio.sleep = _fake_sleep  # type: ignore[assignment]
-    try:
-        with pytest.raises(asyncio.CancelledError):
-            await gate._heartbeat_loop()
-    finally:
-        gate_module.asyncio.sleep = original_sleep  # type: ignore[assignment]
+    await _drive_one_succeeding_iteration(gate, backend)
 
     assert gate._fail_closed is False
     assert gate._missed_heartbeats == 0
@@ -278,28 +307,17 @@ async def test_heartbeat_loop_success_when_already_open_is_no_op() -> None:
     gate was never tripped MUST NOT emit ``exiting_fail_closed``. The
     counter still resets to 0 (idempotent on already-zero).
     """
-    from alfred.security.capability_gate import _gate as gate_module
+    from alfred.security.capability_gate._gate import RealGate
 
     sink, emitted = _make_spy_sink()
     backend = _make_failing_backend()
     backend.ping = AsyncMock(return_value=None)
-    gate = await gate_module.RealGate.create(
-        backend=backend, audit_sink=sink, start_heartbeat=False
-    )
+    gate = await RealGate.create(backend=backend, audit_sink=sink, start_heartbeat=False)
     # Simulate a previous transient failure that didn't reach the
     # threshold — counter is mid-air; gate is still open.
     gate._missed_heartbeats = 3
 
-    async def _fake_sleep(_seconds: float) -> None:
-        raise asyncio.CancelledError
-
-    original_sleep = gate_module.asyncio.sleep
-    gate_module.asyncio.sleep = _fake_sleep  # type: ignore[assignment]
-    try:
-        with pytest.raises(asyncio.CancelledError):
-            await gate._heartbeat_loop()
-    finally:
-        gate_module.asyncio.sleep = original_sleep  # type: ignore[assignment]
+    await _drive_one_succeeding_iteration(gate, backend)
 
     assert gate._fail_closed is False
     assert gate._missed_heartbeats == 0

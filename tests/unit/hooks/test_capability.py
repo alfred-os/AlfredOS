@@ -207,7 +207,16 @@ def test_capability_py_reads_no_env() -> None:
     behavioural pin against env-driven gate behaviour now lives in
     ``test_capability_sec007.py``; this is the source-level guard.
     """
-    source = Path("src/alfred/hooks/capability.py").read_text(encoding="utf-8")
+    # CR-156 round-5: resolve relative to this test module, not the process
+    # CWD. Running the test from an IDE or a subdirectory would otherwise
+    # turn the sec-007 guard into a FileNotFoundError instead of a real
+    # regression check. parents[3] walks tests/unit/hooks → tests/unit →
+    # tests → <repo-root>; the layout-invariant test below the AST guard
+    # is the structural pin on that walk.
+    capability_path = (
+        Path(__file__).resolve().parents[3] / "src" / "alfred" / "hooks" / "capability.py"
+    )
+    source = capability_path.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
     class EnvReadVisitor(ast.NodeVisitor):
