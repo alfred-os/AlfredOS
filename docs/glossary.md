@@ -331,7 +331,7 @@ construct the same `RealGate` class with different dependency wiring:
   grant snapshot, an in-process backend stub (no Postgres connection),
   and the heartbeat disabled. Every `check*` call denies; developers
   who need granted-system semantics for local iteration use the
-  helpers in `tests/helpers/gates/`.
+  helpers in `tests/helpers/gates.py`.
 - `build_real_gate()` returns the production-wired `RealGate` with the
   real Postgres `StorageBackend`, the production `AuditWriter`, and
   the heartbeat enabled.
