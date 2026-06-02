@@ -301,9 +301,7 @@ def test_list_existing_but_empty_yaml_emits_localised_notice(
 # ---------------------------------------------------------------------------
 
 
-def test_set_unreadable_yaml_emits_localised_error(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_set_unreadable_yaml_emits_localised_error(runner: CliRunner, tmp_path: Path) -> None:
     """CR-149 round-6: an OSError on policies.yaml read surfaces a localised key.
 
     The previous shape only routed ``yaml.YAMLError`` through the
