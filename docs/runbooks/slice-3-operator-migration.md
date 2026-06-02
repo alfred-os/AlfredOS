@@ -242,20 +242,21 @@ tier model.
 
 `alfred audit log --event <family>` is the per-family detail view used
 throughout this runbook. The CLI surface ships in Slice 3
-(`alfred audit log --help` documents `--event` and `--since`); the
-Postgres-backed query layer it dispatches to lands in PR-S3-7. Until
-that PR merges, the command surfaces a typed `AuditBackendUnavailable`
-refusal with the localised message keyed
-`cli.audit.backend_unavailable`:
+(`alfred audit log --help` documents `--event` and `--since`). The
+Postgres-backed storage/query layer the CLI dispatches to is not yet
+wired in the Slice-3 cut — until the storage layer lands the command
+surfaces a typed `AuditBackendUnavailable` refusal with the localised
+message keyed `cli.audit.backend_unavailable`:
 
 ```
-alfred audit backend not yet wired (PR-S3-7). Until then the storage-layer
-SQL query is unimplemented; running ``alfred audit log`` / ``alfred audit
-graph`` cannot return rows. Track the unblock in PR-S3-7.
+alfred audit backend not yet wired. The storage-layer SQL query is
+unimplemented; running ``alfred audit log`` / ``alfred audit graph``
+cannot return rows. Use ``alfred audit graph --since <window>`` and grep
+by family as a temporary workaround.
 ```
 
-Until then use `alfred audit graph --since <window>` and grep the row
-family from the output. Once PR-S3-7's storage layer is in, the same
+As a workaround use `alfred audit graph --since <window>` and grep the
+row family from the output. Once the storage layer is wired, the same
 `alfred audit log --event <family>` invocations throughout this runbook
 return rows directly.
 
@@ -481,16 +482,16 @@ Fix:
    `provider`, `model`, and `secret_id`.
 2. Inspect recent crash events. The Slice-3 CLI ships both
    `alfred audit graph --since <window>` and
-   `alfred audit log --event <family> --since <window>`. Until PR-S3-7
-   wires the Postgres-backed storage layer, both commands surface
+   `alfred audit log --event <family> --since <window>`. Until the
+   Postgres-backed storage layer is wired, `alfred audit log` surfaces
    `AuditBackendUnavailable` (see the audit-log surface change above);
-   once PR-S3-7 lands the per-family query returns directly. Until
-   then, use the audit graph and grep:
+   once the storage layer lands the per-family query returns directly.
+   As a workaround, use the audit graph and grep:
 
    ```shell
    alfred audit graph --since 5m
    # then grep for plugin.lifecycle.crashed rows
-   # After PR-S3-7 backend wires:
+   # Once the audit storage layer is wired:
    #   alfred audit log --event plugin.lifecycle.crashed --since 5m
    ```
 
@@ -578,8 +579,10 @@ Three migration paths, in order of preference:
    up -d`), seed `state.git` (Step 2), and queue per-grant proposals
    via `alfred plugin grant <plugin_id> system <hookpoint>`. The
    local reviewer-agent auto-approves in dev mode (`ALFRED_ENV=development`
-   short-circuits the human-approval gate; see
-   [docs/subsystems/reviewer.md](../subsystems/reviewer.md)).
+   short-circuits the human-approval gate; the reviewer subsystem
+   deep-doc lands in a follow-up PR — for now the source of truth is
+   `src/alfred/reviewer/` and the design notes in
+   [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md)).
 2. **Set `ALFRED_ENV=development`** to opt into the in-process
    dev-gate fail-closed sentinel without standing up Postgres. The
    gate still denies every check, but `alfred chat` emits a
@@ -623,16 +626,16 @@ output rather than an `AlfredError` subclass.
 | `supervisor.capability_gate_unavailable` audit rows (every dispatch denied) | — (gate denies are returned as `False`, not raised) | `src/alfred/security/capability_gate.py` (`RealGate`) | `supervisor.capability_gate_unavailable` | Postgres or state.git unreachable past the 60 s heartbeat budget | restore the backing store; gate exits fail-closed automatically — single audit row marks the transition out |
 | `web.fetch` raises `DomainNotAllowed` | `WebFetchError` (subclass `DomainNotAllowed`) | `plugins/alfred_web_fetch/` | `web.fetch.domain_refused` | domain missing from allowlist | queue `alfred web allowlist add <domain>`; wait for reviewer approval |
 | `web.fetch` raises `WebFetchTlsError` | `WebFetchTlsError` | `plugins/alfred_web_fetch/` | `web.fetch.tls_error` | upstream TLS failure or untrusted cert | verify the upstream cert chain; if a custom CA is required, mount it into the plugin sandbox |
-| `web.fetch` raises `WebFetchCanaryTripped` | `WebFetchCanaryTripped` | `plugins/alfred_web_fetch/` | `security.canary_tripped` | DLP canary fired on fetched content | quarantine the handle, audit-graph the canary row, follow the DLP runbook |
+| `web.fetch` raises `WebFetchCanaryTripped` | `WebFetchCanaryTripped` | `plugins/alfred_web_fetch/` | `tool.web.fetch.canary_tripped` | DLP canary fired on fetched content | quarantine the handle, audit-graph the canary row, follow the DLP runbook |
 | Quarantined extractor refuses (`cannot_extract`) | `AlfredError` (`security.quarantine.protocol_violation`) | `src/alfred/security/quarantine.py` | `quarantine.protocol_violation` | upstream schema/payload mismatch | confirm `extraction-max-retries`; inspect `alfred audit graph --since 5m` for the violation row |
 | Quarantined dereference denied | `AlfredError` (`security.quarantine.dereference_denied`) | `src/alfred/security/quarantine.py` | gate-side `security.capability_gate.*` row (per spec §8.2) | hookpoint not granted at quarantine tier | queue `alfred plugin grant <id> quarantined …`; wait for reviewer approval |
 | Quarantined downgrade denied | `AlfredError` (`security.quarantine.downgrade_denied`) | `src/alfred/security/quarantine.py` | gate-side `security.capability_gate.*` row | privilege-downgrade requested from privileged context | inspect originating call site — privileged context must not request a quarantined downgrade |
-| `alfred audit log/graph` refuses with `AuditBackendUnavailable` | `AuditBackendUnavailable` | `src/alfred/cli/audit.py` | none (CLI-side guard; backend wires the events in PR-S3-7) | Postgres-backed audit query layer not yet wired | track PR-S3-7; until then use `alfred audit graph --since <window>` |
+| `alfred audit log/graph` refuses with `AuditBackendUnavailable` | `AuditBackendUnavailable` | `src/alfred/cli/audit.py` | none (CLI-side guard; backend wires the events once the storage layer lands) | Postgres-backed audit query layer not yet wired | use `alfred audit graph --since <window>` and grep by family as the workaround |
 | `alembic upgrade head` fails on `0007` | — (Alembic surfaces its own exception) | `src/alfred/db/migrations/` | — (`docker compose logs alfred-db`) | Slice-2 schema diverged | inspect failed migration, fix Postgres state, retry |
 | `bootstrap.capability_gate_unseeded` chat message | — (user-surface message; no typed exception) | `src/alfred/bootstrap/` | `plugin.lifecycle.load_refused` | first run after compose-up without seeding | run Step 2 and the two supervisor resets |
 
 Use the audit family column with `alfred audit graph --since <window>`
-(or `alfred audit log --event …` once PR-S3-7 wires the backend) to
+(or `alfred audit log --event …` once the storage layer is wired) to
 confirm the typed-exception came from where the stack trace claims and
 to surface neighbouring rows (retry counts, denied dispatch counts,
 breaker trip history).
