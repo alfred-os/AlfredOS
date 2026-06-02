@@ -367,11 +367,43 @@ def test_get_supervisor_raises_when_singleton_missing() -> None:
         supervisor_module._get_supervisor()
 
 
-def test_list_breaker_states_stub_returns_empty_list() -> None:
-    """``_list_breaker_states`` is a stub until PR-S3-3b wires the SQL query."""
+def test_list_breaker_states_raises_not_implemented() -> None:
+    """``_list_breaker_states`` raises ``NotImplementedError`` until the read path lands.
+
+    CR-149 round-4: the prior stub returned ``[]`` which collapsed two
+    operationally-distinct conditions (no components vs. read-path
+    not implemented) into a single empty-state message. Fail closed
+    with the explicit typed error; the supervisor_status handler
+    converts it into the localised "status unavailable" message.
+    """
     from alfred.cli import supervisor as supervisor_module
 
-    assert supervisor_module._list_breaker_states() == []
+    with pytest.raises(NotImplementedError, match="read path not implemented"):
+        supervisor_module._list_breaker_states()
+
+
+def test_status_handles_read_path_unavailable(runner: CliRunner) -> None:
+    """``alfred supervisor status`` surfaces a localised "status unavailable" hint
+    when ``_list_breaker_states`` raises ``NotImplementedError``.
+
+    CR-149 round-4 regression: pre-fix, the same NotImplementedError
+    would have leaked as a raw traceback (uncaught). Pin the typed
+    error path + the catalog-routed message so a future refactor
+    cannot silently regress to the empty-state hint.
+    """
+    with (
+        patch("alfred.cli.supervisor._get_supervisor", return_value=object()),
+        patch(
+            "alfred.cli.supervisor._list_breaker_states",
+            side_effect=NotImplementedError("read path not implemented"),
+        ),
+    ):
+        result = runner.invoke(supervisor_app, ["status"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    # The hint must mention "unavailable" or "implemented" so the operator
+    # sees this is a wiring gap, not "no components yet".
+    assert "unavailable" in combined.lower() or "implemented" in combined.lower()
 
 
 def test_get_supervisor_invokes_singleton_when_available(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -124,10 +124,22 @@ def _get_supervisor() -> object:
 def _list_breaker_states() -> list[dict[str, object]]:
     """Query the ``circuit_breakers`` Postgres table for all component states.
 
-    Depends on PR-S3-3b migration 0010 + the SQLAlchemy model. Returns an
-    empty list until PR-S3-3b merges; tests patch this with fixture rows.
+    Depends on PR-S3-3b migration 0010 + the SQLAlchemy model wiring (the
+    Postgres projection lands in a follow-up PR). Until then this MUST
+    fail closed: returning ``[]`` collapsed "the read-path is not yet
+    implemented" with "the supervisor has zero registered components",
+    so an operator running ``alfred supervisor status`` saw the empty
+    hint and could not tell which condition held. CR-149 round-4 +
+    CLAUDE.md hard rule #7 forbid the silent-failure shape on T1
+    operator surfaces.
+
+    Tests patch this with fixture rows OR with a return value to exercise
+    the populated table path; production callers see the typed
+    ``NotImplementedError`` and the supervisor_status handler converts it
+    into a localised "status unavailable" message.
     """
-    return []
+    msg = "breaker status unavailable: read path not implemented"
+    raise NotImplementedError(msg)
 
 
 @supervisor_app.command("status")
@@ -159,6 +171,16 @@ def supervisor_status() -> None:
     try:
         _get_supervisor()
         rows = _list_breaker_states()
+    except NotImplementedError as exc:
+        # CR-149 round-4: the read-path is not yet wired (Postgres
+        # projection for circuit_breakers lands in a follow-up PR).
+        # Surface that explicitly to the operator rather than mapping
+        # to the "no components yet" hint — silently returning the
+        # empty-state message would lie about the system's actual
+        # state and break the discovery path (CLAUDE.md hard rule #7,
+        # PRD §10.8 forensic contract).
+        typer.echo(t("cli.supervisor.status.read_path_unavailable"), err=True)
+        raise typer.Exit(code=1) from exc
     except (RuntimeError, ConnectionError, TimeoutError) as exc:
         typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
         raise typer.Exit(code=1) from exc
