@@ -342,6 +342,64 @@ def test_list_malformed_yaml_emits_localised_error(runner: CliRunner, tmp_path: 
     assert str(policies) in result.stderr
 
 
+@pytest.mark.parametrize(
+    "yaml_body",
+    [
+        # CR-149 round-3: ``yaml.safe_load(raw) or {}`` previously
+        # coalesced every falsy top-level shape into an empty mapping.
+        # Each of these is a structurally-wrong policies.yaml; the
+        # operator surface must fail loud, not silently overwrite.
+        "[]\n",  # list
+        "false\n",  # bool
+        "0\n",  # int zero
+        '""\n',  # empty string
+    ],
+)
+def test_set_falsy_top_level_yaml_rejected(
+    runner: CliRunner, tmp_path: Path, yaml_body: str
+) -> None:
+    """Falsy but non-None top-level YAML shapes surface as malformed_yaml.
+
+    CR-149 round-3 (config.py:87): the prior ``yaml.safe_load(raw) or {}``
+    coalesced ``[]`` / ``false`` / ``0`` / ``""`` to ``{}``. The next
+    ``set`` would overwrite the file with the new contents, destroying
+    the operator's intended (but malformed) shape. Surfacing the
+    malformed_yaml error gives the operator a real recovery path.
+    """
+    policies = tmp_path / "policies.yaml"
+    policies.write_text(yaml_body)
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "web-fetch-budget", "10"])
+    assert result.exit_code != 0
+    assert str(policies) in result.stderr
+
+
+def test_set_existing_non_mapping_path_segment_rejected(runner: CliRunner, tmp_path: Path) -> None:
+    """An existing non-mapping path segment fails loud, not silently overwritten.
+
+    CR-149 round-3 (config.py:205): the prior ``_yaml_set`` loop
+    silently replaced a non-mapping intermediate segment (e.g.
+    ``web_fetch: 1``) with ``{}`` then continued walking, destroying
+    operator state. The new shape surfaces the structural error so
+    the operator can fix the offending key without losing the rest of
+    ``policies.yaml``.
+    """
+    policies = tmp_path / "policies.yaml"
+    # ``web_fetch`` is a list rather than a mapping — the ``set``
+    # path needs to walk into it, but the segment is a non-mapping.
+    policies.write_text("web_fetch:\n  - oops\n")
+    with patch("alfred.cli.config._policies_yaml_path", policies):
+        result = runner.invoke(config_app, ["set", "web-fetch-budget", "10"])
+    assert result.exit_code != 0
+    assert str(policies) in result.stderr
+    # The error names the offending segment so the operator can grep it.
+    assert "web_fetch" in result.stderr
+    # The file is still on disk untouched — the failure happened
+    # BEFORE the atomic-rename write, so the original list is
+    # preserved for the operator to fix.
+    assert "- oops" in policies.read_text()
+
+
 def test_safe_load_yaml_top_level_scalar_rejected(tmp_path: Path) -> None:
     """A top-level YAML scalar (e.g. ``42``) routes through the malformed key.
 

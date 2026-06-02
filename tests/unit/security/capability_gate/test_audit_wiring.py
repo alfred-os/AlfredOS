@@ -165,21 +165,25 @@ def test_declare_hookpoints_uses_no_refusable_tiers() -> None:
         )
 
 
-def test_declare_hookpoints_fail_closed_is_true() -> None:
-    """A crashing observer MUST short-circuit a reviewer-gated grant.
+def test_declare_hookpoints_fail_closed_is_false() -> None:
+    """``plugin.grant.*`` hookpoints follow spec §14: ``fail_closed=False``.
 
-    sec-pr-s3-6-05: previously :func:`declare_hookpoints` registered
-    each ``plugin.grant.*`` event with ``fail_closed=False`` -- a
-    crashing audit-row writer would let the grant go live silently and
-    the operator could not later reconstruct who approved it, when, or
-    against which payload. CLAUDE.md hard rule #7 forbids that silent
-    audit-skip on a security-relevant flow.
+    CR-149 round-3: spec §14's hookpoint table classifies every
+    ``plugin.grant.*`` row as ``fail_closed=False``. The trust-boundary
+    audit row that pins the reviewer's decision is emitted via the
+    supervisor's :meth:`AuditWriter.append_schema` BEFORE the observer
+    chain runs, so a crashing observer cannot hide the grant from the
+    audit log — the row is already durable. Keeping the chain on
+    ``fail_closed=False`` honours the spec contract and prevents an
+    observer crash from stalling the privileged grant flow.
 
-    The SYSTEM_ONLY_TIERS lock keeps user-plugin subscribers out of
-    the chain entirely, so flipping fail_closed cannot regress
-    availability for ordinary plugin code -- only system-tier
-    observers can subscribe at all. Inside that system-tier chain,
-    fail-closed is the correct stance.
+    The ``SYSTEM_ONLY_TIERS`` lock keeps user-plugin subscribers out
+    of the chain entirely, so the availability / safety trade-off is
+    bounded to system-tier observers regardless of this flag.
+
+    The earlier sec-pr-s3-6-05 override (``fail_closed=True``) drifted
+    from the spec table; round-3 reviewer pushed back and the
+    implementation now follows the spec.
     """
     registry = HookRegistry(gate=DevGate())
     declare_hookpoints(registry)
@@ -191,7 +195,7 @@ def test_declare_hookpoints_fail_closed_is_true() -> None:
     ):
         meta = registry.hookpoint_meta(name)
         assert meta is not None, f"{name} missing from registry"
-        assert meta.fail_closed is True, f"{name} declared fail_closed=False"
+        assert meta.fail_closed is False, f"{name} declared fail_closed=True"
 
 
 def test_declare_hookpoints_is_idempotent() -> None:

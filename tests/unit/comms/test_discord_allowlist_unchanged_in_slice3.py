@@ -58,9 +58,21 @@ def _load_discord_allowlist() -> tuple[str, ...] | None:
         if exc.name == "alfred.comms.discord":
             return None
         raise
-    fields = getattr(module, "_ALLOWLIST_FIELDS", None)
-    if fields is None:
-        return None
+    # CR-149 round-3: once the module imports successfully, a missing
+    # ``_ALLOWLIST_FIELDS`` constant is a real regression — not a
+    # "pre-Slice-2" skip signal. The earlier ``return None`` shape
+    # collapsed both cases into ``HAS_DISCORD=False`` and silently
+    # SKIPPED the spec §9.2/§9.3 invariant tests, defeating the
+    # Slice-2 guard. Fail loud here so the missing constant surfaces
+    # as a test FAILURE.
+    try:
+        fields = module._ALLOWLIST_FIELDS  # type: ignore[attr-defined]
+    except AttributeError as exc:
+        msg = (
+            "alfred.comms.discord no longer defines _ALLOWLIST_FIELDS; "
+            "Spec §9.2/§9.3 invariant guard cannot run."
+        )
+        raise AssertionError(msg) from exc
     return tuple(fields)
 
 

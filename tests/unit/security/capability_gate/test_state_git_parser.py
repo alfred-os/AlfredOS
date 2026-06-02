@@ -33,6 +33,7 @@ replaces PR-S3-2's fail-loud stub) lives in
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -41,14 +42,22 @@ from alfred.security.capability_gate.policy import GrantRow
 
 
 def _git_env(home: Path) -> dict[str, str]:
-    """Minimal env so git ignores the developer's global config."""
+    """Minimal env so git ignores the developer's global config.
+
+    CR-149 round-3: inherit the current ``PATH`` rather than
+    hard-coding ``/usr/bin:/bin``. The hard-coded literal broke on
+    runners where git lives elsewhere (macOS Homebrew under
+    ``/opt/homebrew``, Nix profiles, AlfredOS dev containers with a
+    pinned git under ``/usr/local``). Only ``HOME`` + the git identity
+    are sandboxed here; the binary discovery path inherits.
+    """
     return {
         "GIT_AUTHOR_NAME": "t",
         "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t",
         "HOME": str(home),
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.environ.get("PATH", ""),
     }
 
 
@@ -447,6 +456,135 @@ def test_parse_state_git_head_skips_non_json_sidecars(tmp_path: Path) -> None:
         f"sidecars MUST be skipped by suffix guard before the warn-skip "
         f"loop; got warnings: {skipped!r}"
     )
+
+
+def _seed_repo_with_raw_blobs(
+    tmp_path: Path,
+    raw_blobs: dict[str, bytes],
+) -> tuple[Path, str]:
+    """Build a bare state.git repo with ``policies/grants/`` raw-byte payloads.
+
+    CR-149 round-3 (UnicodeDecodeError coverage): the JSON-string seeder
+    only round-trips valid UTF-8 text. To exercise the parser's
+    ``UnicodeDecodeError`` skip-and-log path we need to write bytes
+    that the JSON layer's UTF-8 decode rejects BEFORE the JSON parse
+    runs. This helper writes the raw bytes verbatim so the resulting
+    git blob carries the exact byte sequence the test supplies.
+    """
+    repo = tmp_path / "state.git"
+    env = _git_env(tmp_path)
+    subprocess.run(  # noqa: S603
+        ["git", "init", "--bare", "--initial-branch=main", str(repo)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    work = tmp_path / "seed"
+    work.mkdir()
+    subprocess.run(  # noqa: S603
+        ["git", "clone", str(repo), str(work)],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    grants_dir = work / "policies" / "grants"
+    grants_dir.mkdir(parents=True)
+    for filename, blob in raw_blobs.items():
+        (grants_dir / filename).write_bytes(blob)
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "add", "."],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-C",
+            str(work),
+            "commit",
+            "-m",
+            "seed raw blobs",
+        ],
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    head_proc = subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "rev-parse", "HEAD"],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    commit_hash = head_proc.stdout.strip()
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(work), "push", "origin", "main"],  # noqa: S607
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    return repo, commit_hash
+
+
+def test_parse_state_git_head_skips_invalid_utf8_grant_blobs(tmp_path: Path) -> None:
+    """A grant blob with invalid UTF-8 bytes is logged + skipped.
+
+    CR-149 round-3 + PRD §7.1 + CLAUDE.md hard rule #7: ``json.loads``
+    on bytes decodes UTF-8 BEFORE the JSON parse, raising
+    :class:`UnicodeDecodeError` on a malformed byte sequence. The
+    parser MUST treat that exception identically to the JSON parse
+    errors: skip-and-log, never silently accept and never abort the
+    rebuild. A single corrupted blob would otherwise wedge the gate
+    against every subsequent grant in the same commit.
+    """
+    import structlog.testing
+
+    valid_payload = {
+        "plugin_id": "good.plugin",
+        "subscriber_tier": "operator",
+        "hookpoint": "tool.web.fetch",
+        "content_tier": None,
+        "proposal_branch": "proposal/policy-grant-good",
+    }
+    # 0xff alone is not a valid UTF-8 byte. Pairing it with otherwise
+    # well-formed JSON syntax pins that the failure is the UTF-8
+    # decode, not the JSON parse.
+    invalid_utf8 = b'{"plugin_id": "x"}\xff'
+
+    repo_path, commit_hash = _seed_repo_with_raw_blobs(
+        tmp_path,
+        {
+            "good.json": json.dumps(valid_payload).encode("utf-8"),
+            "bad-utf8.json": invalid_utf8,
+        },
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        grants = parse_state_git_head(repo_path, commit_hash)
+
+    # The valid grant still projects.
+    assert any(g.plugin_id == "good.plugin" for g in grants)
+    # The malformed-UTF-8 blob is skipped (no row for it).
+    assert not any(g.plugin_id == "x" for g in grants)
+
+    # And the skip path emits the structured warning — pinning the
+    # rebuild's forensic surface against a future regression that
+    # swallows the failure silently.
+    skipped = [
+        c for c in captured if c.get("event") == "capability_gate.rebuild.skip_invalid_grant"
+    ]
+    assert len(skipped) == 1, f"expected one skip warning, got: {captured!r}"
+    assert skipped[0]["log_level"] == "warning"
+    assert skipped[0]["path"] == "policies/grants/bad-utf8.json"
+    # The exception type name confirms the new UnicodeDecodeError arm
+    # caught the bytes — a regression that drops the new arm would
+    # surface as a raised UnicodeDecodeError, not a skip log.
+    assert skipped[0]["error_type"] == "UnicodeDecodeError"
 
 
 def test_parse_state_git_head_recurses_into_nested_plugin_subtree(

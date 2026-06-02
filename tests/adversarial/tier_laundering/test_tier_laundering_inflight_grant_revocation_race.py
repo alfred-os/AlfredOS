@@ -140,6 +140,16 @@ async def test_inflight_check_under_revoked_grant_denies_after_apply() -> None:
     # The post-swap sync hash MUST also land — the audit-graph
     # forensic-traversal layer keys off it.
     assert kwargs["commit_hash"] == "commit-after-revoke"
+    # CR-149 round-3: pin that the legacy per-op mutators stay
+    # silent. sec-pr-s3-6-02 collapsed revoke / upsert / sync-hash
+    # into ONE atomic transaction; a regression that re-introduces
+    # the split would still pass the ``apply_atomic`` assertion above
+    # if any of the legacy mutators ALSO fires. Negative-assert each
+    # one so the exact split-transaction shape this corpus exists
+    # to catch surfaces on regression.
+    backend.revoke_grant.assert_not_awaited()
+    backend.upsert_grant.assert_not_awaited()
+    backend.set_sync_hash.assert_not_awaited()
 
     # 3. The post-swap check denies. The race shape — "in-flight call
     #    completes under old policy AFTER the swap is observable" — is
@@ -195,6 +205,14 @@ async def test_revoke_then_upsert_ordering_preserves_audit_graph() -> None:
     assert set(kwargs["revokes"]) == {original_grant}
     assert set(kwargs["upserts"]) == {new_grant}
     assert kwargs["commit_hash"] == "commit-after-swap"
+    # CR-149 round-3 (same rationale as the in-flight test above):
+    # the legacy per-op mutators stay silent so a regression that
+    # re-introduces the split-transaction shape fails loud on the
+    # adversarial-corpus surface, not silently in a downstream
+    # consumer.
+    backend.revoke_grant.assert_not_awaited()
+    backend.upsert_grant.assert_not_awaited()
+    backend.set_sync_hash.assert_not_awaited()
 
     # And the gate now answers per the new policy: the old hookpoint
     # denies, the new one admits.
