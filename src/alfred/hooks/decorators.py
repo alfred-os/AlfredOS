@@ -88,8 +88,10 @@ def hook(
             (``"pre"`` / ``"post"`` / ``"error"`` / ``"cancel"``).
         tier: The trust tier the subscriber requests. Keyword-only; one
             of ``"system"`` / ``"operator"`` / ``"user-plugin"``. The
-            capability gate (default :class:`alfred.hooks.capability.DevGate`)
-            denies anything else; an unknown literal is also caught at
+            capability gate (the production gate is
+            :class:`alfred.security.capability_gate._gate.RealGate`,
+            wired by :mod:`alfred.bootstrap.gate_factory`) denies
+            anything else; an unknown literal is also caught at
             mypy-strict time as a :class:`typing.Literal` mismatch.
 
     Returns:

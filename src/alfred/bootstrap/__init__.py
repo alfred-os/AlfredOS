@@ -7,9 +7,13 @@ runtime API; production callers never re-enter them.
 
 :mod:`alfred.bootstrap.gate_factory` is the ONE module in ``src/alfred/``
 that may read the production-environment env key for the purpose of
-selecting between :class:`alfred.security.capability_gate._gate.RealGate`
-and :class:`alfred.hooks.capability.DevGate` (sec-007 explicit exception
-— spec §8.4). The capability-gate modules themselves
+selecting which :class:`alfred.security.capability_gate._gate.RealGate`
+construction the supervisor wires — the development branch (no
+grants, in-process stub backend, no heartbeat) or the production
+branch (Postgres backend, full grant table, heartbeat running). PR-S3-7
+removed the Slice-2.5 :class:`DevGate` from ``src/`` entirely (spec
+§15.1 flag-day); both bootstrap branches now construct
+:class:`RealGate`. The capability-gate modules themselves
 (``hooks/capability.py``,
 ``security/capability_gate/{policy,_gate,backend,proposals}.py``) are
 import-os-forbidden and contain no literal references to the env key;

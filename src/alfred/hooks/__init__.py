@@ -1,9 +1,18 @@
 """AlfredOS pluggable hooks subsystem — public surface (spec §3.1).
 
 This package exposes the contract every hook author, every subscriber, and
-every dispatch site in the orchestrator codes against. The fourteen names
+every dispatch site in the orchestrator codes against. The thirteen names
 listed in :data:`__all__` ARE the spec'd surface; nothing else may be
 imported from the top-level package.
+
+Note: ``DevGate`` was removed in PR-S3-7 (spec §15.1 flag-day). The dev-
+time default that lived under this name in Slice-2.5 is gone from
+``src/`` entirely; the production gate is
+:class:`alfred.security.capability_gate._gate.RealGate`, constructed by
+:mod:`alfred.bootstrap.gate_factory`. Tests that previously relied on
+``DevGate`` deny-path / granted-path fixtures use the helpers in
+:mod:`tests.helpers.gates` (test-only) which wrap :class:`RealGate`
+with an in-memory stub backend.
 
 Submodule-only by design (NOT re-exported here):
 
@@ -30,7 +39,7 @@ line+branch coverage gate wired in ``.github/workflows/ci.yml``.
 """
 
 from alfred.hooks.audit_sink import AuditSink
-from alfred.hooks.capability import CapabilityGate, DevGate
+from alfred.hooks.capability import CapabilityGate
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.decorators import hook
 from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
@@ -50,7 +59,6 @@ __all__ = [
     "SYSTEM_OPERATOR_TIERS",
     "AuditSink",
     "CapabilityGate",
-    "DevGate",
     "HookContext",
     "HookError",
     "HookKind",
