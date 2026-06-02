@@ -45,17 +45,17 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/_state_git.py:704
+#: src/alfred/cli/_state_git.py:830
 msgid "cli.state_git.error.path_missing"
 msgstr ""
 "{state_git_path} does not exist. Run `alfred-setup` to initialise the "
 "reviewer-gate state repo."
 
-#: src/alfred/cli/_state_git.py:705
+#: src/alfred/cli/_state_git.py:831
 msgid "cli.state_git.error.git_missing"
 msgstr "`git` is not installed on PATH. Install git and re-run the command."
 
-#: src/alfred/cli/_state_git.py:706
+#: src/alfred/cli/_state_git.py:832
 msgid "cli.state_git.error.push_rejected"
 msgstr ""
 "Reviewer-gate push rejected. Check `alfred audit log --event "
@@ -411,41 +411,41 @@ msgstr "Queue a reviewer-gated revocation proposal for a plugin's grants."
 msgid "cli.plugin.revoke.arg.plugin_id"
 msgstr "Plugin id whose grants will be revoked."
 
-#: src/alfred/cli/plugin.py:461
+#: src/alfred/cli/plugin.py:482
 msgid "cli.plugin.list.help.short"
 msgstr "List every plugin registered in the Postgres manifest projection."
 
-#: src/alfred/cli/plugin.py:479
+#: src/alfred/cli/plugin.py:500
 msgid "cli.plugin.list.not_implemented_yet"
 msgstr ""
 "alfred plugin list is not yet implemented. Pulls the manifest projection "
 "from Postgres once RealGate is seeded (PR-S3-7). Until then, inspect "
 "plugins via the plugin manifest files under plugins/."
 
-#: src/alfred/cli/plugin.py:483
+#: src/alfred/cli/plugin.py:504
 msgid "cli.plugin.show.help.short"
 msgstr "Show manifest details for a registered plugin."
 
-#: src/alfred/cli/plugin.py:488
+#: src/alfred/cli/plugin.py:509
 msgid "cli.plugin.show.arg.plugin_id"
 msgstr "Plugin id to inspect."
 
-#: src/alfred/cli/plugin.py:504
+#: src/alfred/cli/plugin.py:525
 msgid "cli.plugin.show.plugin_id_label"
 msgstr "plugin_id: {plugin_id}"
 
-#: src/alfred/cli/plugin.py:505
+#: src/alfred/cli/plugin.py:526
 msgid "cli.plugin.show.no_manifest_yet"
 msgstr ""
 "No manifest data available yet. The Postgres manifest projection lands in"
 " PR-S3-7; until then, inspect the plugin's manifest.toml under plugins/ "
 "directly."
 
-#: src/alfred/cli/plugin.py:529
+#: src/alfred/cli/plugin.py:550
 msgid "cli.plugin.grant.denied"
 msgstr "alfred plugin grant denied: {reason}"
 
-#: src/alfred/cli/plugin.py:530
+#: src/alfred/cli/plugin.py:551
 msgid "cli.plugin.grant.pending_review"
 msgstr ""
 "Grant proposal queued for reviewer approval.\n"
@@ -455,11 +455,11 @@ msgstr ""
 "approves the proposal and the supervisor rebuilds the capability "
 "projection."
 
-#: src/alfred/cli/plugin.py:531
+#: src/alfred/cli/plugin.py:552
 msgid "cli.plugin.revoke.denied"
 msgstr "alfred plugin revoke denied: {reason}"
 
-#: src/alfred/cli/plugin.py:532
+#: src/alfred/cli/plugin.py:553
 msgid "cli.plugin.revoke.pending_review"
 msgstr ""
 "Revocation proposal queued for reviewer approval.\n"
@@ -528,20 +528,20 @@ msgstr ""
 msgid "cli.supervisor.reset.rerun_hint"
 msgstr "Re-run with: alfred supervisor reset {component} --confirm"
 
-#: src/alfred/cli/supervisor.py:364 src/alfred/cli/supervisor.py:408
-#: src/alfred/cli/supervisor.py:422
+#: src/alfred/cli/supervisor.py:367 src/alfred/cli/supervisor.py:410
+#: src/alfred/cli/supervisor.py:424
 msgid "cli.supervisor.reset.unexpected_error"
 msgstr ""
 "Failed to reset {component}: {error_type}. Check `alfred audit log "
 "--event supervisor.breaker.reset --since 5m`."
 
-#: src/alfred/cli/supervisor.py:400
+#: src/alfred/cli/supervisor.py:396
 msgid "cli.supervisor.reset.component_not_found"
 msgstr ""
 "Component not found: {component}. Run `alfred supervisor status` to list "
 "registered components."
 
-#: src/alfred/cli/supervisor.py:430
+#: src/alfred/cli/supervisor.py:432
 msgid "cli.supervisor.reset.success"
 msgstr "Reset circuit breaker for {component}. Audit row recorded."
 
@@ -1449,7 +1449,7 @@ msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:486
+#: src/alfred/supervisor/core.py:495
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
