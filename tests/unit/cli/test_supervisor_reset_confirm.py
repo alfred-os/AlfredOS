@@ -15,7 +15,7 @@ Depends on PR-S3-3b (``Supervisor.reset_breaker``, :class:`CircuitBreaker`,
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -161,14 +161,28 @@ def test_reset_no_supervisor_running_routes_through_localised_hint(
     this path because the operator never actually crossed the
     supervisor boundary.
     """
-    with patch(
-        "alfred.cli.supervisor._get_supervisor",
-        side_effect=RuntimeError("supervisor not wired"),
+    audit_emit = MagicMock()
+    with (
+        patch(
+            "alfred.cli.supervisor._get_supervisor",
+            side_effect=RuntimeError("supervisor not wired"),
+        ),
+        patch(
+            "alfred.cli.supervisor._emit_breaker_reset_attempt_audit",
+            side_effect=audit_emit,
+        ),
     ):
         result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
     assert result.exit_code != 0
     combined = (result.output or "") + (result.stderr or "")
     assert "supervisor" in combined.lower() or "running" in combined.lower()
+    # CR-149 round-2: the attempt-audit MUST NOT fire when the probe
+    # itself crashed BEFORE the operator action crossed the boundary.
+    # A regression that moves ``_emit_breaker_reset_attempt_audit`` back
+    # above ``_get_supervisor`` would still pass the message-text
+    # assertion above; pinning the call count keeps the PRD §10.8
+    # forensic contract structural.
+    assert audit_emit.call_count == 0
 
 
 def test_status_empty_rows_renders_hint(runner: CliRunner) -> None:

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 03:40+0100\n"
+"POT-Creation-Date: 2026-06-02 04:57+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -45,17 +45,17 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/_state_git.py:527
+#: src/alfred/cli/_state_git.py:545
 msgid "cli.state_git.error.path_missing"
 msgstr ""
 "/var/lib/alfred/state.git does not exist. Run `alfred-setup` to "
 "initialise the reviewer-gate state repo."
 
-#: src/alfred/cli/_state_git.py:528
+#: src/alfred/cli/_state_git.py:546
 msgid "cli.state_git.error.git_missing"
 msgstr "`git` is not installed on PATH. Install git and re-run the command."
 
-#: src/alfred/cli/_state_git.py:529
+#: src/alfred/cli/_state_git.py:547
 msgid "cli.state_git.error.push_rejected"
 msgstr ""
 "Reviewer-gate push rejected. Check `alfred audit log --event "
