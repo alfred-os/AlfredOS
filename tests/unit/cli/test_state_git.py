@@ -151,12 +151,28 @@ def bare_repo(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _valid_grant_payload(plugin_id: str = "alfred.web-fetch") -> dict[str, object]:
+    """Return a dict that constructs a valid :class:`PluginGrantProposal`.
+
+    CR-149 round-7: the legacy ``create_proposal((proposal_type, dict))``
+    surface is now a compat shim that routes through Pydantic
+    validation. Every test fixture supplies a payload satisfying the
+    typed model so the shim's :class:`pydantic.ValidationError` branch
+    fires only when the test explicitly asserts the validation guard.
+    """
+    return {
+        "plugin_id": plugin_id,
+        "subscriber_tier": "operator",
+        "hookpoint": "tool.web.fetch",
+    }
+
+
 def test_create_proposal_returns_branch_name(bare_repo: Path) -> None:
     """``create_proposal`` returns a :class:`ProposalResult` with the canonical branch shape."""
     client = StateGitProposalClient(state_git_path=bare_repo)
     result = client.create_proposal(
         proposal_type="policy-grant",
-        payload={"plugin_id": "alfred.web-fetch", "hookpoint": "tool.web.fetch"},
+        payload=_valid_grant_payload(),
     )
     assert isinstance(result, ProposalResult)
     assert result.branch.startswith("proposal/policy-grant-")
@@ -184,8 +200,8 @@ def test_create_proposal_branch_exists_in_repo(bare_repo: Path) -> None:
 def test_create_proposal_id_is_unique_per_call(bare_repo: Path) -> None:
     """Every ``create_proposal`` call yields a distinct proposal_id."""
     client = StateGitProposalClient(state_git_path=bare_repo)
-    r1 = client.create_proposal("policy-grant", {"plugin_id": "a"})
-    r2 = client.create_proposal("policy-grant", {"plugin_id": "b"})
+    r1 = client.create_proposal("policy-grant", _valid_grant_payload("a.plugin"))
+    r2 = client.create_proposal("policy-grant", _valid_grant_payload("b.plugin"))
     assert r1.proposal_id != r2.proposal_id
     assert r1.branch != r2.branch
 
@@ -224,7 +240,7 @@ def test_create_proposal_refuses_non_canonical_proposal_id(bare_repo: Path, bad_
     with pytest.raises(ValueError, match="16 lowercase hex"):
         client.create_proposal(
             "policy-grant",
-            {"plugin_id": "alfred.web-fetch"},
+            _valid_grant_payload(),
             proposal_id=bad_id,
         )
 
@@ -296,16 +312,113 @@ def test_create_proposal_refuses_non_canonical_proposal_type(
     with pytest.raises(ValueError, match="lowercase dash-separated"):
         client.create_proposal(
             bad_type,
-            {"plugin_id": "alfred.web-fetch"},
+            _valid_grant_payload(),
         )
 
 
-def test_create_proposal_writes_payload_as_proposal_json(bare_repo: Path) -> None:
-    """The proposal branch commits the payload as ``proposal.json`` at repo root."""
+def test_create_proposal_compat_shim_validates_payload(bare_repo: Path) -> None:
+    """CR-149 round-7: the legacy entry point now validates typed payloads.
+
+    The legacy ``create_proposal((proposal_type, dict))`` surface used
+    to write ``payload`` straight to ``proposal.json`` without running
+    any Pydantic invariant — a typo at the dispatcher
+    (``subscribe_tier`` vs ``subscriber_tier``) landed in the proposal
+    branch verbatim and either silently dropped in the projection
+    downstream or broke the audit-graph join. ADR-0018 consolidated
+    every state.git payload on the typed
+    :class:`StateGitProposalPayload`; the round-7 compat-shim refactor
+    routes the legacy surface through the same Pydantic invariant so
+    the typo fails BEFORE state.git is touched.
+    """
+    from pydantic import ValidationError
+
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    # Incomplete grant dict — missing ``subscriber_tier`` + ``hookpoint``.
+    # The pre-round-7 shape silently wrote this to ``proposal.json``;
+    # the shim now raises :class:`ValidationError` before any git
+    # subprocess runs.
+    with pytest.raises(ValidationError):
+        client.create_proposal("policy-grant", {"plugin_id": "x"})
+
+    # Typo'd field name — extra='forbid' on the typed model surfaces
+    # this as ValidationError. The pre-round-7 shape wrote the typo
+    # verbatim and broke the audit-graph join silently.
+    with pytest.raises(ValidationError):
+        client.create_proposal(
+            "policy-grant",
+            {
+                "plugin_id": "alfred.web-fetch",
+                "subscribe_tier": "operator",  # typo: subscribe_tier vs subscriber_tier
+                "hookpoint": "tool.web.fetch",
+            },
+        )
+
+    # Bad closed-set value — the Literal validator fires before write.
+    with pytest.raises(ValidationError):
+        client.create_proposal(
+            "policy-grant",
+            {
+                "plugin_id": "alfred.web-fetch",
+                "subscriber_tier": "not-a-tier",
+                "hookpoint": "tool.web.fetch",
+            },
+        )
+
+
+def test_create_proposal_compat_shim_lands_at_typed_on_disk_path(bare_repo: Path) -> None:
+    """CR-149 round-7: ``policy-grant`` legacy calls now land at the typed path.
+
+    The shim delegates to :meth:`create_proposal_from_payload`, which
+    routes :class:`PluginGrantProposal` payloads to the canonical
+    ``policies/grants/<plugin_id>/<proposal_id>.json`` layout (ADR-0018
+    Decision 3). This regression test pins the consolidation so a future
+    refactor that splits the two writers re-introduces ADR-0018's drift.
+    """
     client = StateGitProposalClient(state_git_path=bare_repo)
     result = client.create_proposal(
         proposal_type="policy-grant",
-        payload={"plugin_id": "alfred.web-fetch", "hookpoint": "tool.web.fetch"},
+        payload=_valid_grant_payload(),
+    )
+
+    # The canonical path lives one directory deeper than the legacy
+    # root-level ``proposal.json`` — assert the file the shim wrote
+    # round-trips at the typed layout.
+    out = subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "--git-dir",
+            str(bare_repo),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            result.branch,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    files = out.stdout.splitlines()
+    assert f"policies/grants/alfred.web-fetch/{result.proposal_id}.json" in files
+    # Legacy root-level ``proposal.json`` MUST NOT appear — the shim's
+    # delegation routes through the typed file layout so the round-trip
+    # via ``parse_state_git_head`` works by construction.
+    assert "proposal.json" not in files
+
+
+def test_create_proposal_writes_payload_as_proposal_json(bare_repo: Path) -> None:
+    """The proposal branch commits the payload at the canonical typed-payload path.
+
+    CR-149 round-7: the compat shim now routes ``policy-grant`` payloads
+    through :meth:`create_proposal_from_payload`, so the on-disk file
+    lands at ``policies/grants/<plugin_id>/<proposal_id>.json`` per
+    ADR-0018 Decision 3. The test asserts the grant blob's content
+    against that path; the legacy unvalidated raw-dict path now fires
+    only for not-yet-typed proposal types (test-corpus seam).
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    result = client.create_proposal(
+        proposal_type="policy-grant",
+        payload=_valid_grant_payload(),
     )
     out = subprocess.run(  # noqa: S603
         [  # noqa: S607
@@ -313,7 +426,7 @@ def test_create_proposal_writes_payload_as_proposal_json(bare_repo: Path) -> Non
             "--git-dir",
             str(bare_repo),
             "show",
-            f"{result.branch}:proposal.json",
+            f"{result.branch}:policies/grants/alfred.web-fetch/{result.proposal_id}.json",
         ],
         capture_output=True,
         text=True,
@@ -329,7 +442,7 @@ def test_create_proposal_commit_message_carries_proposal_id(bare_repo: Path) -> 
     client = StateGitProposalClient(state_git_path=bare_repo)
     result = client.create_proposal(
         proposal_type="policy-grant",
-        payload={"plugin_id": "x"},
+        payload=_valid_grant_payload("x.plugin"),
     )
     out = subprocess.run(  # noqa: S603
         [  # noqa: S607
@@ -358,7 +471,7 @@ def test_create_proposal_raises_state_git_error_on_missing_repo(tmp_path: Path) 
     """
     client = StateGitProposalClient(state_git_path=tmp_path / "does-not-exist")
     with pytest.raises(StateGitError) as excinfo:
-        client.create_proposal("policy-grant", {"plugin_id": "x"})
+        client.create_proposal("policy-grant", _valid_grant_payload("x.plugin"))
     # Raw argv MUST NOT appear in the operator-facing exception string.
     assert "git clone" not in str(excinfo.value)
     assert "/var/lib" not in str(excinfo.value)
@@ -403,7 +516,7 @@ def test_push_rejected_emits_structured_log_with_sanitised_stderr(
     ):
         mock_log.warning = _log_warning
         with pytest.raises(StateGitError) as excinfo:
-            client.create_proposal("policy-grant", {"plugin_id": "x"})
+            client.create_proposal("policy-grant", _valid_grant_payload("x.plugin"))
     assert excinfo.value.kind == StateGitErrorKind.PUSH_REJECTED
     assert len(captured) == 1, captured
     kwargs = captured[0]
@@ -428,7 +541,7 @@ def test_list_pending_proposals_empty_when_no_proposals(bare_repo: Path) -> None
 def test_list_pending_proposals_returns_every_proposal_branch(bare_repo: Path) -> None:
     """Every ``proposal/...`` branch surfaces; non-proposal branches are filtered out."""
     client = StateGitProposalClient(state_git_path=bare_repo)
-    r1 = client.create_proposal("policy-grant", {"plugin_id": "a"})
+    r1 = client.create_proposal("policy-grant", _valid_grant_payload("a.plugin"))
     r2 = client.create_proposal("web-allowlist-add", {"domain": "b.com"})
     pending = client.list_pending_proposals()
     refs = {p.branch for p in pending}
@@ -446,14 +559,22 @@ def test_list_pending_proposals_returns_every_proposal_branch(bare_repo: Path) -
 
 
 def test_get_proposal_diff_contains_payload_json(bare_repo: Path) -> None:
-    """``get_proposal_diff`` surfaces the proposal.json content for reviewer display."""
+    """``get_proposal_diff`` surfaces the typed-payload grant-blob content.
+
+    CR-149 round-7: the compat shim routes ``policy-grant`` payloads
+    through the typed entry point so the grant blob lands at
+    ``policies/grants/<plugin_id>/<proposal_id>.json`` (ADR-0018
+    Decision 3) instead of the legacy root-level ``proposal.json``.
+    The diff now references the canonical path; the plugin_id check
+    remains the load-bearing reviewer-visibility signal.
+    """
     client = StateGitProposalClient(state_git_path=bare_repo)
     result = client.create_proposal(
         proposal_type="policy-grant",
-        payload={"plugin_id": "alfred.web-fetch", "hookpoint": "tool.web.fetch"},
+        payload=_valid_grant_payload(),
     )
     diff = client.get_proposal_diff(result.branch)
-    assert "proposal.json" in diff
+    assert "policies/grants/alfred.web-fetch" in diff
     assert "alfred.web-fetch" in diff
 
 
@@ -1301,7 +1422,7 @@ def test_create_proposal_accepts_pre_generated_proposal_id(bare_repo: Path) -> N
     client = StateGitProposalClient(state_git_path=bare_repo)
     result = client.create_proposal(
         "policy-grant",
-        {"plugin_id": "x"},
+        _valid_grant_payload("x.plugin"),
         proposal_id="deadbeefdeadbeef",
     )
     assert result.proposal_id == "deadbeefdeadbeef"

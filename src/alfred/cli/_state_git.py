@@ -53,6 +53,7 @@ from alfred.errors import AlfredError
 from alfred.state.proposal_payloads import (
     ConfigSetProposal,
     PluginGrantProposal,
+    PluginRevokeProposal,
     StateGitProposalPayload,
     WebAllowlistProposal,
 )
@@ -192,6 +193,98 @@ def _validated_proposal_type(proposal_type: str) -> str:
         )
         raise ValueError(msg)
     return proposal_type
+
+
+# CR-149 round-7: composite-type dispatch table for the legacy
+# ``(proposal_type, dict)`` entry point. ADR-0018 consolidated every
+# state.git payload onto a typed Pydantic model; the legacy shape
+# survived as a thin compat shim so existing test fixtures don't churn,
+# but the shim MUST drive every dict through Pydantic validation BEFORE
+# the writer touches state.git. Otherwise a typo at the dispatcher
+# (``subscribe_tier`` vs ``subscriber_tier``) lands in the proposal
+# branch as-is and either silently drops in the projection downstream
+# or breaks the audit-graph join — exactly the silent-drift CLAUDE.md
+# hard rule #7 + ADR-0018 close.
+#
+# Two of the four payload types have composite branch tags
+# (``web-allowlist-{action}``, ``config-{config_key}``) and need a
+# small parse step BEFORE construction so the dict can drop the
+# ``action``/``config_key`` field the caller embedded in the branch
+# tag. The dispatcher below handles the parse so callers can keep the
+# canonical "branch tag is the type" mental model.
+def _legacy_payload_from_dict(
+    proposal_type: str,
+    payload: dict[str, object],
+) -> StateGitProposalPayload | None:
+    """Map a legacy ``(proposal_type, dict)`` shape to a typed payload.
+
+    CR-149 round-7: the canonical entry point is
+    :meth:`StateGitProposalClient.create_proposal_from_payload` which
+    takes a typed :class:`StateGitProposalPayload` and runs Pydantic
+    validation at construction. The legacy
+    :meth:`StateGitProposalClient.create_proposal` accepted a raw dict
+    that bypassed every Pydantic invariant — leaving a typo at the
+    dispatcher (``subscribe_tier`` vs ``subscriber_tier``) to land in
+    the proposal branch verbatim and silently drop downstream.
+
+    This helper closes that boundary: every canonical ``proposal_type``
+    has a typed-model class, and the helper constructs the matching
+    instance from ``payload``. Pydantic's ``extra='forbid'`` +
+    closed-set ``Literal`` validators raise
+    :class:`pydantic.ValidationError` at construction so the typo fails
+    BEFORE state.git sees it.
+
+    Composite type tags (``web-allowlist-add``, ``web-allowlist-remove``,
+    ``config-<key>``) parse here too: the dispatcher routes
+    ``web-allowlist-{action}`` to :class:`WebAllowlistProposal` with the
+    matching ``action`` field, and ``config-{config_key}`` to
+    :class:`ConfigSetProposal` with the matching ``config_key`` field.
+    This keeps the legacy caller's "branch tag IS the type" surface
+    intact.
+
+    Returns ``None`` for ``proposal_type`` values that have no typed
+    model yet (test corpus only — production callers always use a
+    canonical type). The :meth:`create_proposal` shim then falls back
+    to the raw-dict write path for those values, emitting a structured
+    warning so the gap is visible in the log stream. A future ADR that
+    adds a typed model for the new ``proposal_type`` lands here in one
+    edit.
+
+    Args:
+        proposal_type: dash-canonical type tag (already validated by
+            :func:`_validated_proposal_type`).
+        payload: the legacy dict payload — passed straight to the
+            Pydantic model constructor; field names + values are
+            validated by the model.
+
+    Returns:
+        Typed :class:`StateGitProposalPayload` instance on a known
+        type tag, or ``None`` when no typed model exists. The
+        ``None`` branch is the test-corpus seam; production callers
+        always hit a known tag.
+
+    Raises:
+        pydantic.ValidationError: if ``payload`` does not satisfy
+            the typed model's field requirements. This is the
+            load-bearing failure mode the shim exists to surface.
+    """
+    if proposal_type == PluginGrantProposal.proposal_type:
+        return PluginGrantProposal(**payload)  # type: ignore[arg-type]
+    if proposal_type == PluginRevokeProposal.proposal_type:
+        return PluginRevokeProposal(**payload)  # type: ignore[arg-type]
+    if proposal_type.startswith(f"{WebAllowlistProposal.proposal_type}-"):
+        # ``web-allowlist-{action}`` — parse the action off the tag so
+        # the typed payload carries the closed-set Literal value.
+        action = proposal_type[len(WebAllowlistProposal.proposal_type) + 1 :]
+        return WebAllowlistProposal(action=action, **payload)  # type: ignore[arg-type]
+    if proposal_type.startswith(f"{ConfigSetProposal.proposal_type}-"):
+        # ``config-{config_key}`` — parse the config_key off the tag
+        # so the typed payload carries the closed-set Literal value.
+        config_key = proposal_type[len(ConfigSetProposal.proposal_type) + 1 :]
+        return ConfigSetProposal(config_key=config_key, **payload)  # type: ignore[arg-type]
+    # Unknown type tag — no typed model yet. Test corpus seam only;
+    # production callers always pass a canonical tag.
+    return None
 
 
 class StateGitError(AlfredError):
@@ -393,6 +486,39 @@ class StateGitProposalClient:
         # the Pydantic ``proposal_type`` ClassVar; the legacy public
         # API needs the same parse-time refusal.
         proposal_type = _validated_proposal_type(proposal_type)
+
+        # CR-149 round-7: compat-shim discipline. ADR-0018 consolidated
+        # every state.git payload onto a typed Pydantic model; this
+        # legacy entry point now constructs the typed payload from the
+        # dict (where a canonical model exists) and delegates to
+        # :meth:`create_proposal_from_payload`. That routes the legacy
+        # surface through the same Pydantic validation as new callers
+        # so a typo at the dispatcher (``subscribe_tier`` vs
+        # ``subscriber_tier``) fails with
+        # :class:`pydantic.ValidationError` at the shim BEFORE state.git
+        # is touched, instead of landing in proposal.json verbatim and
+        # silently dropping in the projection downstream. CR-149 round-7
+        # explicitly identified the raw-dict path as the ADR-0018 schema
+        # drift this consolidation exists to close.
+        typed = _legacy_payload_from_dict(proposal_type, payload)
+        if typed is not None:
+            return self.create_proposal_from_payload(
+                typed,
+                proposal_id=proposal_id,
+            )
+
+        # No typed model maps to this ``proposal_type`` — the legacy
+        # raw-dict path stays as a narrow test-corpus seam so a future
+        # not-yet-typed proposal type stays writeable while the
+        # canonical path (every production caller) routes through
+        # Pydantic. The structured warning surfaces the gap in the log
+        # stream so on-call sees the unvalidated write.
+        _log.warning(
+            "state_git.legacy_unvalidated_proposal",
+            proposal_type=proposal_type,
+            payload_keys=sorted(payload.keys()),
+        )
+
         # ``secrets.token_hex`` is cryptographically unpredictable per
         # the :mod:`secrets` contract — spec §8.3 requires the branch
         # namespace stay opaque so an adversary reading the audit log
@@ -410,10 +536,10 @@ class StateGitProposalClient:
         branch = f"{_BRANCH_PREFIX}{proposal_type}-{proposal_id}"
         payload_json = json.dumps(payload, indent=2, sort_keys=True)
 
-        # Legacy callers always write a single ``proposal.json`` at the
-        # repo root. The typed entry point (:meth:`create_proposal_from_payload`)
-        # routes through the same :meth:`_write_branch` helper but
-        # composes a richer file map.
+        # Legacy fallback: writes a single ``proposal.json`` at the
+        # repo root. Production callers never reach this branch — the
+        # ``_legacy_payload_from_dict`` dispatcher above covers every
+        # canonical type.
         return self._write_branch(
             branch=branch,
             type_tag=proposal_type,
