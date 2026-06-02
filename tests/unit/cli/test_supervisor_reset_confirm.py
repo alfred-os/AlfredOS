@@ -140,9 +140,7 @@ def test_reset_no_such_component_is_locale_immune(runner: CliRunner) -> None:
     # legacy English substrings the round-6 dispatch matched.
     mock_supervisor = AsyncMock()
     mock_supervisor.reset_breaker = AsyncMock(
-        side_effect=NoSuchComponentError(
-            "Ningún componente supervisado con id 'no-such-plugin'."
-        )
+        side_effect=NoSuchComponentError("Ningún componente supervisado con id 'no-such-plugin'.")
     )
     with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
         result = runner.invoke(supervisor_app, ["reset", "no-such-plugin", "--confirm"])
