@@ -2774,3 +2774,74 @@ uv run pytest tests/unit/comms/test_mcp_protocol.py \
 - **PRD §7.4** — audit log + CLI surface.
 - **`src/alfred/comms/adapter.py`** — the existing in-process `CommsAdapter` Protocol that `CommsAdapterMCP` coexists with through Slice 3.
 - **`src/alfred/hooks/registry.py`** — `SYSTEM_ONLY_TIERS`, `SYSTEM_OPERATOR_TIERS` constants referenced in hookpoint registrations.
+
+---
+
+## §8 As-shipped addendum (2026-06-02)
+
+Captured during PR-S3-6 stabilisation. Plan-vs-shipped deltas worth pinning so a future reader does not chase phantom files or wonder why a deliberate divergence happened. The deltas are deliberate; this section is the audit trail.
+
+### §8.1 Plugin directory rename — `alfred-comms-test` → `alfred_comms_test`
+
+The plan (§3 file structure + §4 Component I, lines 75-77, 1981, 2050-2052, 2087, 2181) names the reference echo plugin directory `plugins/alfred-comms-test/`. The directory shipped as `plugins/alfred_comms_test/` (commit `0df306b`).
+
+Why: mypy's package-discovery walker only treats a directory as an importable Python package when its name is a valid Python identifier. Hyphens disqualify the name, so the strict-mode mypy gate could not see the package's contents and the trust-boundary tests against the plugin source silently degraded to "no module to check". Snake-case matches the existing `alfred_quarantined_llm` + `alfred_web_fetch` directories.
+
+Knock-on: spec §9.1 line 746 + §15 line 1306, ADR-0009:66, and ADR-0016:16 all referenced the hyphenated path. Stage 8 polish pass corrected all four references.
+
+### §8.2 Dual state.git proposal writers consolidated — see ADR-0018
+
+Tasks 1-4 (Component A: `StateGitProposalClient`) and the inline state.git writer in `src/alfred/security/proposals.create_proposal_branch` ended up as two separate code paths writing to the same backend. Plan did not anticipate the overlap because the existing `proposals.create_proposal_branch` predates the CLI-side writer that Component A introduces.
+
+Reconciliation: ADR-0018 (Stage 4 of the polish loop) pins `StateGitProposalClient` as the single load-bearing implementation; `proposals.create_proposal_branch` becomes a thin shim that constructs the canonical `StateGitProposalPayload` and delegates. Round-trip parser `parse_state_git_head` validates both entry points produce equivalent SHA-anchored heads.
+
+### §8.3 Closed-set validators on plugin / web / config inputs (Stage 2)
+
+Plan §4 Tasks 5-15 establish the CLI surface; per-arg validation was implicit ("typer typer.Argument(...)"). Stage 2 of the polish loop introduced `src/alfred/cli/_validators.py` with closed-set Pydantic validators for plugin id, tier, hookpoint, and domain. Wired into `alfred plugin grant`, `alfred web allowlist add/remove`, `alfred config set`. Closes a class of silent-acceptance bugs where a typo (`wallowlist`) was promoted to a queued reviewer-gated proposal.
+
+### §8.4 Audit-row at proposal time (Stage 3)
+
+Plan §4 Task 16 stops at writing the state.git branch. Stage 3 added `cli/_validators.queue_proposal_or_exit`: every CLI surface that queues a reviewer-gated proposal now emits an `AUDIT_…_REQUESTED` row *before* the state.git write. Three new schemas (`PLUGIN_GRANT_REQUESTED_FIELDS`, `WEB_ALLOWLIST_REQUESTED_FIELDS`, `CONFIG_SET_REQUESTED_FIELDS`) cover the surface. Closes a reviewer-visibility gap: a queued-but-never-merged proposal previously left no audit footprint.
+
+### §8.5 CLI startup latency fix (Stage 6)
+
+Plan did not anticipate that registering five new sub-apps in `cli/main.py` would push `alfred --help` past the perf budget. Stage 6 (`b0b8f37`, `7ed5093`) introduced lazy-import patterns for `alfred.providers`, `alfred.audit.audit_row_schemas`, and `alfred.memory.models`; a smoke test (`test_main_lazy_imports.py`) pins the contract that `alfred.providers` is *not* imported during `alfred --help`.
+
+### §8.6 `_apply_grants` atomic transaction (Stage 7)
+
+Plan §4 Task 17 wires `_apply_grants` as the post-merge hook. Original implementation iterated grants without a transaction boundary; a partial failure mid-loop left the gate in a split state (some grants live, others not). Stage 7 (`2e993bd`, `0427d75`) wrapped the loop in a SQLAlchemy `session.begin()` + rollback path, with a `PLUGIN_GRANT_APPLY_FAILED` audit row emitted on rollback. Closes a security-engineer finding from the /review-pr pass.
+
+### §8.7 Per-key fingerprint coverage restored (Stage 1)
+
+Plan §4 Task 21 names `test_i18n_key_coverage.py` and a `_FINGERPRINTS` table. An earlier polish pass briefly regressed this to a simpler `result != key` check. Stage 1 (`f988017`) restored the per-key fingerprint table, defending against pybabel fuzzy-match wrong-msgstr swaps (i18n-001) as documented in PR-S3-5's `web_fetch` corpus.
+
+### §8.8 Glossary additions deferred to PR-S3-7
+
+The PR-S3-6 build surfaced six terms that warrant glossary entries:
+
+- `CommsAdapterMCP` — the MCP-shaped comms adapter Protocol stub (`src/alfred/comms/mcp_protocol.py`).
+- `InboundMessage` — Pydantic wire model for adapter → orchestrator `inbound.message` calls; `extra="forbid"` per sec-pr-s3-6-03.
+- `AdapterHealthResponse` — Pydantic wire model for the `adapter.health` reply (`Literal["ok", "degraded"]`, comms-009).
+- `WIRE_METHOD_NAMES` — load-bearing mapping in `alfred.comms.mcp_protocol` from canonical Python names (`lifecycle_start`) to literal JSON-RPC method strings (`"lifecycle.start"`). Comms-MCP plugins and host must agree on this set.
+- `StateGitProposalClient` — single load-bearing state.git proposal-branch writer (ADR-0018); previously two implementations.
+- async-UX — the queued-pending-reviewer pattern used by every high-blast CLI surface (plugin grant, web allowlist, quarantined-provider config). Distinguished from sync CLI commands by the `cli.*.pending_review` localised message + the `proposal/<type>-<id>` branch reference.
+
+Glossary ownership: per the [PR-S3-7 plan](./2026-05-31-slice-3-pr-s3-7-docs-glossary-runbook.md), `docs/glossary.md` and `docs/subsystems/cli.md` are PR-S3-7's responsibility. Captured here as the canonical list for PR-S3-7 to consume.
+
+### §8.9 Test-filename rename map (plan §3 vs as-shipped)
+
+| Plan name (§3 table)                                 | As-shipped name                                                       |
+|---|---|
+| `tests/unit/cli/test_plugin_grant_async_ux.py`       | `tests/unit/cli/test_plugin_cli.py` + `test_plugin_grant_audit_wiring.py` |
+| `tests/unit/cli/test_web_allowlist.py`               | `tests/unit/cli/test_web_cli.py`                                      |
+| `tests/unit/cli/test_config_commands.py`             | `tests/unit/cli/test_config_cli.py`                                   |
+
+All other plan §3 test filenames shipped as-named. Rename rationale: aligning with the existing `test_<module>_cli.py` convention in `tests/unit/cli/` (e.g. `test_audit_graph_tier_swimlanes.py`, `test_supervisor_reset_confirm.py`) keeps the test-discovery order predictable and matches the CLI sub-app structure 1:1.
+
+### §8.10 Anchor module renamed — `_pr_s3_7_key_anchors.py` → `_deferred_key_anchors.py`
+
+Stage 8 (arch-005): the catalog-anchor module's filename tied a load-bearing pybabel anchor to a single PR identifier. The file's purpose — keeping spec §11.5 keys alive while their live `t()` call sites are deferred to a future PR — is PR-agnostic. Renamed to the semantic form; helper function `_anchor_pr_s3_7_keys` → `_anchor_deferred_keys` to match. Presence test (`tests/unit/i18n/test_deferred_key_anchors.py`, R7) asserts every anchored key resolves through the production resolver — catches catalog↔anchor drift in either direction.
+
+### §8.11 Plugin list/show hidden from `--help` (arch-006)
+
+`alfred plugin list` / `show` ship as "not implemented yet" stubs reachable via the typer dispatch tree. Stage 8 added `hidden=True` to both decorators so they are reachable for an operator who types the verb deliberately, but no longer advertised in `alfred plugin --help`. The Postgres manifest projection that wires them properly lands in a deferred PR.
