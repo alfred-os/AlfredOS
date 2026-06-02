@@ -579,3 +579,376 @@ def test_queue_proposal_or_exit_pending_review_extra_kwargs_forwarded(
     # The ``{key}`` placeholder is substituted -- not left as a literal.
     assert "quarantined-provider" in result.stdout
     assert "{key}" not in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 (arch-001 / cross-cutting R2): audit-row emission BEFORE state.git
+# ---------------------------------------------------------------------------
+
+
+def test_queue_proposal_or_exit_emits_audit_row_before_state_git_write(
+    bare_repo: Path,
+) -> None:
+    """The audit-row stand-in fires BEFORE the state.git proposal write.
+
+    Stage 3 / arch-001: the ordering is load-bearing. A crash inside
+    ``create_proposal`` (bare repo missing, git push rejected, ...) MUST
+    still leave the operator-intent breadcrumb in the audit stream.
+    CLAUDE.md hard rule #7 forbids the silent-skip alternative.
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    call_order: list[str] = []
+
+    class _OrderTrackingClient:
+        """Records when ``create_proposal`` runs vs when the audit fires.
+
+        ``_log.info`` is patched to append before this method, so the
+        relative order is observable in ``call_order``.
+        """
+
+        def create_proposal(
+            self,
+            *,
+            proposal_type: str,
+            payload: dict[str, object],
+            proposal_id: str,
+        ) -> ProposalResult:
+            del proposal_type, payload
+            call_order.append("state_git")
+            return ProposalResult(
+                proposal_id=proposal_id,
+                branch=f"proposal/policy-grant-{proposal_id}",
+            )
+
+    def _log_info(event: str, **_: object) -> None:
+        call_order.append(f"audit:{event}")
+
+    app = typer.Typer()
+
+    @app.command("queue")
+    def _queue() -> None:
+        with patch("alfred.cli._state_git._log") as mock_log:
+            mock_log.info = _log_info
+            queue_proposal_or_exit(
+                proposal_type="policy-grant",
+                payload={"plugin_id": "alfred.test"},
+                denied_key="cli.plugin.grant.denied",
+                pending_review_key="cli.plugin.grant.pending_review",
+                audit_event="plugin.grant.requested",
+                audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+                audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+                audit_subject_partial={
+                    "plugin_id": "alfred.test",
+                    "subscriber_tier": "system",
+                    "hookpoint": "tool.web.fetch",
+                    "operator_user_id": None,
+                },
+                client=_OrderTrackingClient(),  # type: ignore[arg-type]
+            )
+
+    _ = bare_repo  # state.git path unused by the patched client
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Audit emit MUST come strictly before the state.git call.
+    audit_idx = next(i for i, label in enumerate(call_order) if label.startswith("audit:"))
+    state_idx = call_order.index("state_git")
+    assert audit_idx < state_idx, call_order
+
+
+def test_queue_proposal_or_exit_emits_audit_row_even_when_state_git_fails() -> None:
+    """A state.git failure MUST NOT skip the audit-row emission.
+
+    The breadcrumb pointing at operator intent survives a crashed
+    ``create_proposal``. CLAUDE.md hard rule #7: no silent failures in
+    security paths.
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    audit_events: list[tuple[str, dict[str, object]]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        audit_events.append((event, kwargs))
+
+    class _FailingClient:
+        def create_proposal(self, **_: object) -> ProposalResult:
+            raise StateGitError("nope", kind=StateGitErrorKind.PUSH_REJECTED)
+
+    app = typer.Typer()
+
+    @app.command("queue")
+    def _queue() -> None:
+        with patch("alfred.cli._state_git._log") as mock_log:
+            mock_log.info = _log_info
+            queue_proposal_or_exit(
+                proposal_type="policy-grant",
+                payload={"plugin_id": "alfred.test"},
+                denied_key="cli.plugin.grant.denied",
+                pending_review_key="cli.plugin.grant.pending_review",
+                audit_event="plugin.grant.requested",
+                audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+                audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+                audit_subject_partial={
+                    "plugin_id": "alfred.test",
+                    "subscriber_tier": "system",
+                    "hookpoint": "tool.web.fetch",
+                    "operator_user_id": None,
+                },
+                client=_FailingClient(),  # type: ignore[arg-type]
+            )
+
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code != 0
+    # Exactly one audit event was emitted despite the state.git failure.
+    assert len(audit_events) == 1, audit_events
+    event_name, kwargs = audit_events[0]
+    assert event_name == "plugin.grant.requested"
+    # The branch + correlation_id were auto-filled by the helper so the
+    # row carries the forensic anchor even though the branch was never
+    # durably written.
+    assert kwargs["proposal_branch"].startswith("proposal/policy-grant-")
+    assert "correlation_id" in kwargs
+
+
+def test_queue_proposal_or_exit_no_audit_when_kwargs_omitted(bare_repo: Path) -> None:
+    """Legacy call sites without audit kwargs do NOT emit a row.
+
+    The four audit kwargs are opt-in (all-or-none). Existing tests in
+    this module that pass none of them are the regression bar for
+    "legacy shape stays working."
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    audit_events: list[str] = []
+
+    def _log_info(event: str, **_: object) -> None:
+        audit_events.append(event)
+
+    app = typer.Typer()
+
+    @app.command("queue")
+    def _queue() -> None:
+        with patch("alfred.cli._state_git._log") as mock_log:
+            mock_log.info = _log_info
+            client = StateGitProposalClient(state_git_path=bare_repo)
+            queue_proposal_or_exit(
+                proposal_type="policy-grant",
+                payload={"plugin_id": "alfred.test"},
+                denied_key="cli.plugin.grant.denied",
+                pending_review_key="cli.plugin.grant.pending_review",
+                client=client,
+            )
+
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    assert audit_events == []
+
+
+def test_queue_proposal_or_exit_audit_kwargs_must_be_all_or_none() -> None:
+    """Supplying a subset of the four audit kwargs raises ValueError.
+
+    All-or-none discipline: a partial port from a legacy call site
+    cannot silently skip the audit emission. The raise is loud so the
+    refactor bug surfaces at the emit site.
+    """
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    with pytest.raises(ValueError, match="must all be supplied together"):
+        queue_proposal_or_exit(
+            proposal_type="policy-grant",
+            payload={"plugin_id": "x"},
+            denied_key="cli.plugin.grant.denied",
+            pending_review_key="cli.plugin.grant.pending_review",
+            # Only two of the four supplied — refused.
+            audit_event="plugin.grant.requested",
+            audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+        )
+
+
+def test_queue_proposal_or_exit_refuses_caller_overriding_proposal_branch() -> None:
+    """``audit_subject_partial`` must not pre-set ``proposal_branch``.
+
+    The helper auto-fills the field from the pre-generated branch name;
+    a caller-supplied value would silently lose to the auto-fill. The
+    loud raise surfaces the bug at the emit site.
+    """
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    with pytest.raises(ValueError, match="proposal_branch"):
+        queue_proposal_or_exit(
+            proposal_type="policy-grant",
+            payload={"plugin_id": "x"},
+            denied_key="cli.plugin.grant.denied",
+            pending_review_key="cli.plugin.grant.pending_review",
+            audit_event="plugin.grant.requested",
+            audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+            audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+            audit_subject_partial={
+                "plugin_id": "x",
+                "subscriber_tier": "system",
+                "hookpoint": "tool.web.fetch",
+                "operator_user_id": None,
+                "proposal_branch": "proposal/policy-grant-deadbeefdeadbeef",
+            },
+        )
+
+
+def test_queue_proposal_or_exit_refuses_caller_overriding_correlation_id() -> None:
+    """``audit_subject_partial`` must not pre-set ``correlation_id``."""
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    with pytest.raises(ValueError, match="correlation_id"):
+        queue_proposal_or_exit(
+            proposal_type="policy-grant",
+            payload={"plugin_id": "x"},
+            denied_key="cli.plugin.grant.denied",
+            pending_review_key="cli.plugin.grant.pending_review",
+            audit_event="plugin.grant.requested",
+            audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+            audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+            audit_subject_partial={
+                "plugin_id": "x",
+                "subscriber_tier": "system",
+                "hookpoint": "tool.web.fetch",
+                "operator_user_id": None,
+                "correlation_id": "deadbeef-dead-beef-dead-beefdeadbeef",
+            },
+        )
+
+
+def test_queue_proposal_or_exit_emit_helper_validates_symmetric_key_set() -> None:
+    """Audit-row emit raises if subject keys do not equal declared fields.
+
+    Mirrors :meth:`AuditWriter.append_schema` so the eventual PR-S3-7
+    swap is structurally identical. Both missing AND extra keys raise
+    — the symmetric check defends against typo'd field names silently
+    shadowing the real field (spec §5.6).
+    """
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    # Missing the ``hookpoint`` and ``operator_user_id`` keys — both
+    # surface in the error message.
+    with pytest.raises(ValueError, match="missing required fields"):
+        queue_proposal_or_exit(
+            proposal_type="policy-grant",
+            payload={"plugin_id": "x"},
+            denied_key="cli.plugin.grant.denied",
+            pending_review_key="cli.plugin.grant.pending_review",
+            audit_event="plugin.grant.requested",
+            audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+            audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+            audit_subject_partial={
+                "plugin_id": "x",
+                "subscriber_tier": "system",
+            },
+        )
+
+
+def test_queue_proposal_or_exit_emit_helper_refuses_extra_keys() -> None:
+    """The symmetric key check refuses keys not declared in ``audit_fields``.
+
+    Spec §5.6: an emitter accidentally persisting ``str(exc)``,
+    ``exc.args``, or any other undeclared field could leak T3 fragments
+    into the audit row's JSONB column. The symmetric check is the
+    runtime guard.
+    """
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    with pytest.raises(ValueError, match="unexpected fields"):
+        queue_proposal_or_exit(
+            proposal_type="policy-grant",
+            payload={"plugin_id": "x"},
+            denied_key="cli.plugin.grant.denied",
+            pending_review_key="cli.plugin.grant.pending_review",
+            audit_event="plugin.grant.requested",
+            audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+            audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+            audit_subject_partial={
+                "plugin_id": "x",
+                "subscriber_tier": "system",
+                "hookpoint": "tool.web.fetch",
+                "operator_user_id": None,
+                "stray_t3_fragment": "secret-shaped",
+            },
+        )
+
+
+def test_queue_proposal_or_exit_pre_generated_id_is_used_by_client(
+    bare_repo: Path,
+) -> None:
+    """The helper-generated proposal id is passed through to ``create_proposal``.
+
+    The branch in the audit row and the branch in the state.git push
+    MUST match — a divergence would break the audit-graph correlator's
+    join.
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+
+    audit_events: list[dict[str, object]] = []
+
+    def _log_info(event: str, **kwargs: object) -> None:
+        del event
+        audit_events.append(kwargs)
+
+    app = typer.Typer()
+
+    @app.command("queue")
+    def _queue() -> None:
+        with patch("alfred.cli._state_git._log") as mock_log:
+            mock_log.info = _log_info
+            client = StateGitProposalClient(state_git_path=bare_repo)
+            queue_proposal_or_exit(
+                proposal_type="policy-grant",
+                payload={"plugin_id": "x"},
+                denied_key="cli.plugin.grant.denied",
+                pending_review_key="cli.plugin.grant.pending_review",
+                audit_event="plugin.grant.requested",
+                audit_schema_name="PLUGIN_GRANT_REQUESTED_FIELDS",
+                audit_fields=PLUGIN_GRANT_REQUESTED_FIELDS,
+                audit_subject_partial={
+                    "plugin_id": "x",
+                    "subscriber_tier": "system",
+                    "hookpoint": "tool.web.fetch",
+                    "operator_user_id": None,
+                },
+                client=client,
+            )
+
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # Audit row's branch field appears in stdout's pending-review block
+    # (rendered via ``branch=result.branch``).
+    assert len(audit_events) == 1
+    audit_branch = str(audit_events[0]["proposal_branch"])
+    assert audit_branch in result.stdout
+    assert audit_branch.startswith("proposal/policy-grant-")
+    # 16 hex chars after the prefix — the canonical id width.
+    suffix = audit_branch.removeprefix("proposal/policy-grant-")
+    assert len(suffix) == 16
+
+
+def test_create_proposal_accepts_pre_generated_proposal_id(bare_repo: Path) -> None:
+    """``create_proposal`` honours a caller-supplied proposal_id.
+
+    The pre-generation is the bridge that lets
+    :func:`queue_proposal_or_exit` emit the audit row with the resolved
+    branch name BEFORE the state.git write.
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    result = client.create_proposal(
+        "policy-grant",
+        {"plugin_id": "x"},
+        proposal_id="deadbeefdeadbeef",
+    )
+    assert result.proposal_id == "deadbeefdeadbeef"
+    assert result.branch == "proposal/policy-grant-deadbeefdeadbeef"

@@ -40,10 +40,13 @@ import json
 import secrets
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
+
+import structlog
 
 from alfred.errors import AlfredError
 
@@ -182,6 +185,8 @@ class StateGitProposalClient:
         self,
         proposal_type: str,
         payload: dict[str, object],
+        *,
+        proposal_id: str | None = None,
     ) -> ProposalResult:
         """Create a proposal branch with the payload committed as ``proposal.json``.
 
@@ -198,6 +203,16 @@ class StateGitProposalClient:
             payload: structured dict the reviewer reads to make the
                 approve/reject decision. MUST NOT contain raw secret
                 values — see module docstring.
+            proposal_id: optional pre-generated 16-hex-char identifier.
+                Stage 3 (arch-001 / cross-cutting R2): the
+                :func:`queue_proposal_or_exit` helper pre-generates the
+                id so it can emit the ``*.requested`` audit row stand-in
+                with the resolved branch name BEFORE this method writes
+                to state.git. The audit row would otherwise either fire
+                without the branch (broken correlation) or fire after a
+                successful write (no row on crash). Callers that do not
+                emit a per-proposal audit row pass ``None`` and the
+                method generates the id internally as before.
 
         Returns:
             :class:`ProposalResult` with ``proposal_id`` (raw hex) and
@@ -208,7 +223,14 @@ class StateGitProposalClient:
                 permission error, push rejected, …). The CLI narrows on
                 this to render a localised operator-facing error.
         """
-        proposal_id = secrets.token_hex(_PROPOSAL_ID_BYTES)
+        # ``secrets.token_hex`` is cryptographically unpredictable per
+        # the :mod:`secrets` contract — spec §8.3 requires the branch
+        # namespace stay opaque so an adversary reading the audit log
+        # cannot enumerate future proposal ids. Caller-supplied ids must
+        # honour the same width so the audit-graph correlator joins
+        # without width-mismatch warts.
+        if proposal_id is None:
+            proposal_id = secrets.token_hex(_PROPOSAL_ID_BYTES)
         branch = f"{_BRANCH_PREFIX}{proposal_type}-{proposal_id}"
         payload_json = json.dumps(payload, indent=2, sort_keys=True)
 
@@ -387,6 +409,98 @@ def _register_hint_keys_for_pybabel() -> tuple[str, ...]:
     )
 
 
+# Module-level structlog binding. Stage 3 (arch-001 / cross-cutting R2):
+# the helper emits a fail-loud audit-row stand-in via structlog BEFORE
+# the state.git write. The bootstrap's structlog redactor (see
+# :mod:`alfred.cli._bootstrap`) runs in front of every output processor
+# so any accidental secret-shaped string in the subject is masked before
+# render. PR-S3-7 swaps the structlog stand-in for an
+# :class:`alfred.audit.AuditWriter` call once the sync-from-CLI bridge
+# lands; until then this is the same pattern :mod:`alfred.cli.supervisor`
+# uses for ``_emit_breaker_reset_attempt_audit`` (sec-pr-s3-6-04).
+_log = structlog.get_logger(__name__)
+
+
+def _emit_requested_audit_row(
+    *,
+    event: str,
+    schema_name: str,
+    fields: frozenset[str],
+    subject: dict[str, object],
+) -> None:
+    """Emit the ``*.requested`` audit-row stand-in BEFORE the state.git write.
+
+    Stage 3 (arch-001 / cross-cutting R2): every reviewer-gated CLI
+    command MUST leave a forensic breadcrumb at the moment the operator
+    queues the proposal. The supervisor CLI established the pattern
+    (see :func:`alfred.cli.supervisor._emit_breaker_reset_attempt_audit`,
+    sec-pr-s3-6-04): emit via structlog now, swap for
+    :class:`alfred.audit.AuditWriter` in PR-S3-7 without restructuring
+    the emit site.
+
+    Ordering rationale: BEFORE the state.git write so a crash inside
+    ``create_proposal`` (the bare repo missing, ``git push`` rejected,
+    permission error mid-clone, ...) still leaves the operator-intent
+    row in the structlog stream. The supervisor reset-breaker path
+    documents the same load-bearing order: "attempt-row first, reset
+    call second; if the audit emission itself fails, the reset is
+    aborted." CLAUDE.md hard rule #7 forbids the silent-skip alternative.
+
+    Validation: ``subject.keys()`` must match ``fields`` exactly. The
+    symmetric check defends against typo'd field names silently
+    shadowing the real field, and against a refactor accidentally
+    persisting an undeclared field (which spec §5.6 forbids because the
+    field could carry T3 content fragments). Same shape as
+    :meth:`alfred.audit.AuditWriter.append_schema` so the eventual
+    PR-S3-7 swap is structurally identical.
+
+    Args:
+        event: dotted event name (``"plugin.grant.requested"`` etc.) —
+            the structlog key the audit-graph correlator joins on.
+        schema_name: the importable identifier of ``fields`` (e.g.
+            ``"PLUGIN_GRANT_REQUESTED_FIELDS"``) — threaded into the
+            structlog payload so a log-grepping audit collector can
+            validate the row at parse time.
+        fields: the :class:`frozenset` of declared field names
+            (a constant from :mod:`alfred.audit.audit_row_schemas`).
+        subject: structured dict of the row's fields. Keys MUST equal
+            ``fields`` exactly; values MUST NOT carry T3 content
+            fragments (spec §5.6).
+
+    Raises:
+        ValueError: if ``subject.keys()`` does not equal ``fields``.
+            The raise is loud so a refactor that drops a field surfaces
+            at the emit site instead of producing a malformed row.
+    """
+    missing = fields - subject.keys()
+    extra = subject.keys() - fields
+    if missing or extra:
+        # Mirror :meth:`AuditWriter.append_schema`'s message shape so the
+        # eventual PR-S3-7 swap is a drop-in replacement. The schema
+        # name appears in the message so on-call can map the row back
+        # to :mod:`alfred.audit.audit_row_schemas` without grepping.
+        msg_parts = [f"audit emit for event={event!r} (schema={schema_name})"]
+        if missing:
+            msg_parts.append(f"subject missing required fields: {sorted(missing)!r}")
+        if extra:
+            msg_parts.append(f"subject has unexpected fields: {sorted(extra)!r}")
+        msg_parts.append(
+            f"declared fields for {schema_name} are {sorted(fields)!r}; "
+            f"consult alfred.audit.audit_row_schemas.{schema_name}"
+        )
+        raise ValueError("; ".join(msg_parts))
+    _log.info(
+        event,
+        schema_name=schema_name,
+        # ``schema_fields`` round-trips the declared field set so a
+        # log-grepping audit collector can validate the row at parse
+        # time and surface schema drift if the constant gains a key
+        # without this emit site being updated.
+        schema_fields=sorted(fields),
+        **subject,
+    )
+
+
 def queue_proposal_or_exit(
     *,
     proposal_type: str,
@@ -394,6 +508,10 @@ def queue_proposal_or_exit(
     denied_key: str,
     pending_review_key: str,
     pending_review_extra_kwargs: dict[str, object] | None = None,
+    audit_event: str | None = None,
+    audit_schema_name: str | None = None,
+    audit_fields: frozenset[str] | None = None,
+    audit_subject_partial: dict[str, object] | None = None,
     client: StateGitProposalClient | None = None,
 ) -> ProposalResult:
     """Queue a reviewer-gated proposal and surface the canonical async-UX block.
@@ -412,6 +530,20 @@ def queue_proposal_or_exit(
       a structured channel as well as text to stderr) flips every call
       site in one edit.
 
+    Stage 3 (arch-001 / cross-cutting R2): the helper now ALSO emits a
+    fail-loud ``*.requested`` audit-row stand-in BEFORE writing to
+    state.git. The four audit kwargs (``audit_event``,
+    ``audit_schema_name``, ``audit_fields``, ``audit_subject_partial``)
+    must all be supplied together; passing them separately is a typer
+    bug at the call site. The helper pre-generates the
+    :func:`secrets.token_hex` proposal id so the audit row can carry
+    the resolved branch name + correlation_id BEFORE the state.git
+    write — without that, a crash inside ``create_proposal`` would
+    leave no forensic trail (the silent-skip CLAUDE.md hard rule #7
+    forbids). The partial subject the caller passes is augmented with
+    the auto-generated ``proposal_branch`` + ``correlation_id`` keys
+    so the emit site never has to thread either through the call.
+
     Args:
         proposal_type: short dash-separated tag identifying the proposal
             family (``"policy-grant"``, ``"web-allowlist-add"``, ...).
@@ -429,6 +561,23 @@ def queue_proposal_or_exit(
             into ``t(pending_review_key, ...)`` -- for callers whose
             catalog template references additional placeholders (e.g.
             the ``cli.config.set.pending_review`` shape carries ``key``).
+        audit_event: dotted event name for the audit row stand-in
+            (``"plugin.grant.requested"`` etc.). Must be supplied
+            alongside the other three audit kwargs; supplying it without
+            them raises :class:`ValueError`.
+        audit_schema_name: importable identifier of ``audit_fields``
+            (e.g. ``"PLUGIN_GRANT_REQUESTED_FIELDS"``). Surfaces in the
+            structlog payload so a log-grepping collector can validate
+            the row at parse time.
+        audit_fields: declared field set for the audit row (a constant
+            from :mod:`alfred.audit.audit_row_schemas`). Used for the
+            symmetric key-set check that mirrors
+            :meth:`AuditWriter.append_schema`.
+        audit_subject_partial: the caller's portion of the audit row
+            subject — every key in ``audit_fields`` EXCEPT
+            ``proposal_branch`` and ``correlation_id`` (the helper
+            auto-fills both). Passing the same keys here is a refactor
+            bug surfaced as :class:`ValueError`.
         client: state.git client. Defaults to the module-level
             :data:`_default_client` for production use; tests inject a
             mock.
@@ -441,7 +590,15 @@ def queue_proposal_or_exit(
 
     Raises:
         typer.Exit(code=1): on any :class:`StateGitError`, after
-        emitting the localised denial message + the kind-specific hint.
+            emitting the localised denial message + the kind-specific
+            hint. The audit row stand-in has already been emitted at
+            this point (the breadcrumb pointing at operator intent
+            survives the state.git failure).
+        ValueError: if any of the four audit kwargs is supplied without
+            the others, or if ``audit_subject_partial`` carries
+            ``proposal_branch`` / ``correlation_id`` (the helper
+            auto-fills both), or if the final subject's keys do not
+            match ``audit_fields`` after augmentation.
     """
     # Lazy import keeps this module importable from CLI bootstrap without
     # forcing typer/i18n at import time -- ``_state_git`` is loaded by
@@ -451,11 +608,65 @@ def queue_proposal_or_exit(
 
     from alfred.i18n import t
 
+    audit_args = (audit_event, audit_schema_name, audit_fields, audit_subject_partial)
+    audit_supplied = sum(1 for arg in audit_args if arg is not None)
+    if audit_supplied not in (0, len(audit_args)):
+        # All-or-none: supplying a subset is always a refactor bug.
+        # The raise is loud so a partial port from a legacy call site
+        # cannot silently skip the audit row.
+        msg = (
+            "queue_proposal_or_exit: audit_event, audit_schema_name, "
+            "audit_fields, and audit_subject_partial must all be supplied "
+            f"together (got {audit_supplied}/{len(audit_args)})."
+        )
+        raise ValueError(msg)
+
     state_git = client if client is not None else _state_git_client
+
+    # Pre-generate the proposal id + branch BEFORE the state.git write
+    # so the audit row can carry both. The same width / source the
+    # client uses internally so a future tightening of the id namespace
+    # only needs to land in :data:`_PROPOSAL_ID_BYTES`.
+    proposal_id = secrets.token_hex(_PROPOSAL_ID_BYTES)
+    branch = f"{_BRANCH_PREFIX}{proposal_type}-{proposal_id}"
+    correlation_id = str(uuid.uuid4())
+
+    if (
+        audit_event is not None
+        and audit_schema_name is not None
+        and audit_fields is not None
+        and audit_subject_partial is not None
+    ):
+        # Refuse caller-supplied ``proposal_branch`` / ``correlation_id``
+        # so the auto-fill never silently shadows operator-typed data.
+        # A future ADR that wants the caller to override either would
+        # land an explicit knob, not a quiet last-write-wins.
+        reserved = {"proposal_branch", "correlation_id"} & audit_subject_partial.keys()
+        if reserved:
+            msg = (
+                "queue_proposal_or_exit: audit_subject_partial must NOT carry "
+                f"helper-auto-filled keys: {sorted(reserved)!r}. The helper "
+                "fills proposal_branch + correlation_id from the pre-generated "
+                "branch + uuid."
+            )
+            raise ValueError(msg)
+        subject = {
+            **audit_subject_partial,
+            "proposal_branch": branch,
+            "correlation_id": correlation_id,
+        }
+        _emit_requested_audit_row(
+            event=audit_event,
+            schema_name=audit_schema_name,
+            fields=audit_fields,
+            subject=subject,
+        )
+
     try:
         result = state_git.create_proposal(
             proposal_type=proposal_type,
             payload=payload,
+            proposal_id=proposal_id,
         )
     except StateGitError as exc:
         hint_key = _hint_key_for(exc.kind)
