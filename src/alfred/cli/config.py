@@ -49,6 +49,7 @@ from alfred.audit.audit_row_schemas import CONFIG_SET_REQUESTED_FIELDS
 from alfred.cli._state_git import StateGitProposalClient, queue_proposal_or_exit
 from alfred.cli._validators import validate_quarantined_provider
 from alfred.i18n import t
+from alfred.state.proposal_payloads import ConfigSetProposal
 
 
 def _safe_load_yaml(yaml_path: Path) -> dict[str, object]:
@@ -299,8 +300,15 @@ def config_set(
         # ``config_key`` only — the value lives in the proposal payload
         # the reviewer reads, never in the audit log.
         queue_proposal_or_exit(
-            proposal_type=f"config-{key}",
-            payload={"key": key, "value": value},
+            payload=ConfigSetProposal(
+                # The Literal["quarantined-provider"] on the model
+                # rejects any other key at construction; the
+                # ``_HIGH_BLAST_KEYS`` membership check above is the
+                # parallel CLI guard, but the model is the typed seam
+                # that ADR-0018 makes load-bearing.
+                config_key=key,  # type: ignore[arg-type]
+                value=value,
+            ),
             denied_key="cli.config.set.denied",
             pending_review_key="cli.config.set.pending_review",
             pending_review_extra_kwargs={"key": key},

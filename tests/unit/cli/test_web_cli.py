@@ -72,7 +72,7 @@ def test_allowlist_add_prints_proposal_branch(
 ) -> None:
     """Operator sees the proposal branch name to git show the proposal."""
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_add_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_add_proposal
         result = runner.invoke(web_app, ["allowlist", "add", "example.com"])
     assert result.exit_code == 0, result.stderr
     assert mock_add_proposal.branch in result.stdout
@@ -88,7 +88,7 @@ def test_allowlist_add_uses_pending_review_language(
     truthfully claim the domain is fetchable until the proposal merges.
     """
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_add_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_add_proposal
         result = runner.invoke(web_app, ["allowlist", "add", "example.com"])
     assert "now allowed" not in result.stdout.lower()
     assert "is now fetchable" not in result.stdout.lower()
@@ -105,14 +105,17 @@ def test_allowlist_add_payload_carries_domain_and_path_prefix(
     Defaulting path_prefix to ``/`` matches the spec §7.4 normalisation.
     """
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_add_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_add_proposal
         runner.invoke(web_app, ["allowlist", "add", "api.example.com", "--path-prefix", "/v1/"])
-    call_kwargs = mock_client.create_proposal.call_args.kwargs
-    assert call_kwargs["proposal_type"] == "web-allowlist-add"
-    assert call_kwargs["payload"] == {
-        "domain": "api.example.com",
-        "path_prefix": "/v1/",
-    }
+    # ADR-0018: typed WebAllowlistProposal replaces the dict payload.
+    from alfred.state.proposal_payloads import WebAllowlistProposal
+
+    call_kwargs = mock_client.create_proposal_from_payload.call_args.kwargs
+    payload = call_kwargs["payload"]
+    assert isinstance(payload, WebAllowlistProposal)
+    assert payload.action == "add"
+    assert payload.domain == "api.example.com"
+    assert payload.path_prefix == "/v1/"
 
 
 def test_allowlist_add_default_path_prefix_is_root(
@@ -120,16 +123,19 @@ def test_allowlist_add_default_path_prefix_is_root(
 ) -> None:
     """When --path-prefix is omitted, the payload defaults to ``/``."""
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_add_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_add_proposal
         runner.invoke(web_app, ["allowlist", "add", "example.com"])
-    call_kwargs = mock_client.create_proposal.call_args.kwargs
-    assert call_kwargs["payload"]["path_prefix"] == "/"
+    call_kwargs = mock_client.create_proposal_from_payload.call_args.kwargs
+    payload = call_kwargs["payload"]
+    # Pydantic model exposes the field directly; the default ``/`` lands
+    # when --path-prefix is omitted.
+    assert payload.path_prefix == "/"
 
 
 def test_allowlist_add_surfaces_state_git_error(runner: CliRunner) -> None:
     """State.git failure surfaces on stderr (CLAUDE.md hard rule #7)."""
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.side_effect = StateGitError("push refused")
+        mock_client.create_proposal_from_payload.side_effect = StateGitError("push refused")
         result = runner.invoke(web_app, ["allowlist", "add", "example.com"])
     assert result.exit_code != 0
     assert result.stderr.strip() != ""
@@ -145,7 +151,7 @@ def test_allowlist_remove_prints_proposal_branch(
 ) -> None:
     """Remove is reviewer-gated; same async-UX as add."""
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_remove_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_remove_proposal
         result = runner.invoke(web_app, ["allowlist", "remove", "example.com"])
     assert result.exit_code == 0, result.stderr
     assert mock_remove_proposal.branch in result.stdout
@@ -155,17 +161,22 @@ def test_allowlist_remove_payload_carries_domain(
     runner: CliRunner, mock_remove_proposal: ProposalResult
 ) -> None:
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.return_value = mock_remove_proposal
+        mock_client.create_proposal_from_payload.return_value = mock_remove_proposal
         runner.invoke(web_app, ["allowlist", "remove", "example.com"])
-    call_kwargs = mock_client.create_proposal.call_args.kwargs
-    assert call_kwargs["proposal_type"] == "web-allowlist-remove"
-    assert call_kwargs["payload"] == {"domain": "example.com"}
+    # ADR-0018: typed WebAllowlistProposal with action="remove".
+    from alfred.state.proposal_payloads import WebAllowlistProposal
+
+    call_kwargs = mock_client.create_proposal_from_payload.call_args.kwargs
+    payload = call_kwargs["payload"]
+    assert isinstance(payload, WebAllowlistProposal)
+    assert payload.action == "remove"
+    assert payload.domain == "example.com"
 
 
 def test_allowlist_remove_surfaces_state_git_error(runner: CliRunner) -> None:
     """State.git failure on the remove path surfaces too."""
     with patch("alfred.cli.web._state_git_client") as mock_client:
-        mock_client.create_proposal.side_effect = StateGitError("nope")
+        mock_client.create_proposal_from_payload.side_effect = StateGitError("nope")
         result = runner.invoke(web_app, ["allowlist", "remove", "example.com"])
     assert result.exit_code != 0
     assert result.stderr.strip() != ""
@@ -243,7 +254,7 @@ def test_allowlist_add_refuses_url_with_scheme(runner: CliRunner) -> None:
     with patch("alfred.cli.web._state_git_client") as mock_client:
         result = runner.invoke(web_app, ["allowlist", "add", "https://example.com"])
     assert result.exit_code == 2
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_allowlist_add_refuses_path_traversal(runner: CliRunner) -> None:
@@ -256,7 +267,7 @@ def test_allowlist_add_refuses_path_traversal(runner: CliRunner) -> None:
     with patch("alfred.cli.web._state_git_client") as mock_client:
         result = runner.invoke(web_app, ["allowlist", "add", "../../etc/passwd"])
     assert result.exit_code == 2
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_allowlist_add_refuses_off_shape_domain(runner: CliRunner) -> None:
@@ -268,7 +279,7 @@ def test_allowlist_add_refuses_off_shape_domain(runner: CliRunner) -> None:
     with patch("alfred.cli.web._state_git_client") as mock_client:
         result = runner.invoke(web_app, ["allowlist", "add", "Example.com"])
     assert result.exit_code == 2
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_allowlist_remove_refuses_url_with_scheme(runner: CliRunner) -> None:
@@ -280,7 +291,7 @@ def test_allowlist_remove_refuses_url_with_scheme(runner: CliRunner) -> None:
     with patch("alfred.cli.web._state_git_client") as mock_client:
         result = runner.invoke(web_app, ["allowlist", "remove", "http://example.com"])
     assert result.exit_code == 2
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +323,7 @@ def test_allowlist_add_emits_audit_row_before_state_git_write(
             call_order.append(("state_git", {}))
             return mock_add_proposal
 
-        mock_client.create_proposal.side_effect = _side_effect
+        mock_client.create_proposal_from_payload.side_effect = _side_effect
         result = runner.invoke(web_app, ["allowlist", "add", "api.example.com"])
     assert result.exit_code == 0, result.stderr
     # Audit event fired exactly once before state.git.
@@ -349,7 +360,7 @@ def test_allowlist_remove_emits_audit_row_before_state_git_write(
             call_order.append(("state_git", {}))
             return mock_remove_proposal
 
-        mock_client.create_proposal.side_effect = _side_effect
+        mock_client.create_proposal_from_payload.side_effect = _side_effect
         result = runner.invoke(web_app, ["allowlist", "remove", "api.example.com"])
     assert result.exit_code == 0, result.stderr
     audit_indices = [i for i, (label, _) in enumerate(call_order) if label.startswith("audit:")]
@@ -376,7 +387,7 @@ def test_allowlist_add_emits_no_audit_row_when_validator_refuses(runner: CliRunn
         result = runner.invoke(web_app, ["allowlist", "add", "../../etc/passwd"])
     assert result.exit_code == 2
     assert "web.allowlist.requested" not in audit_events
-    mock_client.create_proposal.assert_not_called()
+    mock_client.create_proposal_from_payload.assert_not_called()
 
 
 def test_allowlist_add_emits_audit_row_even_on_state_git_failure(runner: CliRunner) -> None:
@@ -395,7 +406,7 @@ def test_allowlist_add_emits_audit_row_even_on_state_git_failure(runner: CliRunn
         patch("alfred.cli._state_git._log") as mock_log,
     ):
         mock_log.info = _log_info
-        mock_client.create_proposal.side_effect = StateGitError("nope")
+        mock_client.create_proposal_from_payload.side_effect = StateGitError("nope")
         result = runner.invoke(web_app, ["allowlist", "add", "api.example.com"])
     assert result.exit_code != 0
     assert "web.allowlist.requested" in audit_events

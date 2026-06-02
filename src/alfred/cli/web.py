@@ -48,15 +48,18 @@ from alfred.cli._state_git import (
 )
 from alfred.cli._validators import validate_domain
 from alfred.i18n import t
+from alfred.state.proposal_payloads import WebAllowlistProposal
 
 # Module-level seams. Tests patch these symbols.
 _state_git_client: StateGitProposalClient = StateGitProposalClient()
 
-# Proposal-type tags. Shared with the async writer (see
-# alfred.security.capability_gate.proposals); any change here must land
-# there simultaneously to keep the reviewer-side branch parser in sync.
-_PROPOSAL_TYPE_ADD: Final[str] = "web-allowlist-add"
-_PROPOSAL_TYPE_REMOVE: Final[str] = "web-allowlist-remove"
+# Proposal-type tags. ADR-0018 moved the canonical discriminator onto
+# the typed :class:`WebAllowlistProposal` payload's ``action`` field
+# (composed with ``proposal_type`` by :func:`_branch_type_tag_for`).
+# These constants stay for the regression tests that pin the resolved
+# branch name.
+_PROPOSAL_TYPE_ADD: Final[str] = f"{WebAllowlistProposal.proposal_type}-add"
+_PROPOSAL_TYPE_REMOVE: Final[str] = f"{WebAllowlistProposal.proposal_type}-remove"
 
 # Default path_prefix used when --path-prefix is omitted. Matches spec
 # §7.4 normalisation: an unspecified prefix scopes the allowlist entry
@@ -141,11 +144,11 @@ def allowlist_add(
     BEFORE the state.git write.
     """
     queue_proposal_or_exit(
-        proposal_type=_PROPOSAL_TYPE_ADD,
-        payload={
-            "domain": domain,
-            "path_prefix": path_prefix,
-        },
+        payload=WebAllowlistProposal(
+            action="add",
+            domain=domain,
+            path_prefix=path_prefix,
+        ),
         denied_key="cli.web.allowlist.add.denied",
         pending_review_key="cli.web.allowlist.add.pending_review",
         audit_event="web.allowlist.requested",
@@ -191,8 +194,14 @@ def allowlist_remove(
     anyway so the join condition with the add-side row stays uniform).
     """
     queue_proposal_or_exit(
-        proposal_type=_PROPOSAL_TYPE_REMOVE,
-        payload={"domain": domain},
+        payload=WebAllowlistProposal(
+            action="remove",
+            domain=domain,
+            # Remove targets the entry as a whole; ``path_prefix`` keeps
+            # its model-level default. The audit row carries ``None``
+            # below so the join condition with the add-side row stays
+            # uniform across the family.
+        ),
         denied_key="cli.web.allowlist.remove.denied",
         pending_review_key="cli.web.allowlist.remove.pending_review",
         audit_event="web.allowlist.requested",
