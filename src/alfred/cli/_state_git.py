@@ -41,10 +41,42 @@ import secrets
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
 from alfred.errors import AlfredError
+
+
+class StateGitErrorKind(StrEnum):
+    """Tag distinguishing the three real state.git failure modes.
+
+    devex-004: previously every git subprocess failure surfaced as a
+    single ``StateGitError`` whose ``str(exc)`` carried the raw argv +
+    stderr. The CLI top-level handler echoed that string to the
+    operator, leaking ``-C /var/lib/alfred/state.git push origin
+    proposal/...`` -- noise that taught the operator nothing
+    actionable. Tagging the error mode lets the CLI map each kind to a
+    localised hint pointing at the operator's actual recovery lever
+    (start the stack, install git, fix the gate config, ...).
+
+    Three modes the wrapper actually distinguishes:
+
+    * :attr:`PATH_MISSING` -- ``/var/lib/alfred/state.git`` does not
+      exist on disk. The operator hasn't run ``alfred-setup`` yet.
+    * :attr:`GIT_MISSING` -- the ``git`` binary is not on PATH. Almost
+      always means the container image is wrong or the operator is
+      running outside the supported environment.
+    * :attr:`PUSH_REJECTED` -- everything else (push refused,
+      permission denied, branch already exists, ...). The structured
+      log carries the real stderr for the operator's structlog stream;
+      the CLI surface stays generic so we do not leak argv.
+    """
+
+    PATH_MISSING = "path_missing"
+    GIT_MISSING = "git_missing"
+    PUSH_REJECTED = "push_rejected"
+
 
 # Branch-name schema. Shared with
 # ``alfred.security.capability_gate.proposals._write_proposal_to_state_git``;
@@ -65,7 +97,23 @@ class StateGitError(AlfredError):
     Subclasses :class:`AlfredError` so the CLI top-level dispatch can
     narrow on the AlfredOS error hierarchy without swallowing unrelated
     exceptions (e.g. :class:`KeyboardInterrupt`).
+
+    Carries a :class:`StateGitErrorKind` tag (devex-004) so the CLI
+    handler can map to a localised hint matching the recovery lever,
+    rather than echoing the raw git argv. ``kind`` defaults to
+    :attr:`StateGitErrorKind.PUSH_REJECTED` so existing callers that
+    raise ``StateGitError("...")`` without classification keep working
+    -- the test corpus exercises that legacy shape too.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: StateGitErrorKind = StateGitErrorKind.PUSH_REJECTED,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,9 +290,23 @@ class StateGitProposalClient:
         """Run a git subprocess; raise :class:`StateGitError` on failure.
 
         Centralises the failure-shape conversion so every callsite raises
-        the same typed error. ``capture_output=True`` keeps stderr off
-        the operator's terminal until the CLI explicitly chooses to
-        surface it (post-redaction).
+        the same typed error tagged with a :class:`StateGitErrorKind`
+        (devex-004). ``capture_output=True`` keeps stderr off the
+        operator's terminal until the CLI explicitly chooses to surface
+        it (post-redaction).
+
+        Failure-mode classification:
+
+        * :class:`FileNotFoundError` -- distinguishes "git missing"
+          from "state.git repo missing" by checking whether the bound
+          repo path actually exists. Both surface as the typed error
+          with the matching :class:`StateGitErrorKind`.
+        * Non-zero return code -- catch-all
+          :attr:`StateGitErrorKind.PUSH_REJECTED`. The structlog stream
+          carries the real stderr for the operator's forensic record;
+          the exception message intentionally does NOT embed the argv
+          (devex-004: leaking ``git push origin proposal/...`` taught
+          the operator nothing).
         """
         try:
             # S603/S607: ``cmd[0]`` is always the literal ``"git"`` constructed
@@ -258,20 +320,176 @@ class StateGitProposalClient:
                 text=True,
                 check=False,
             )
+        except FileNotFoundError as exc:
+            # ``FileNotFoundError`` fires when ``git`` itself is missing
+            # OR when ``-C <missing-path>`` is passed. Distinguish via
+            # the bound repo path so the CLI can render the matching
+            # recovery hint.
+            if not self._repo.exists():
+                msg = "state.git repo missing"
+                raise StateGitError(msg, kind=StateGitErrorKind.PATH_MISSING) from exc
+            msg = "git binary missing"
+            raise StateGitError(msg, kind=StateGitErrorKind.GIT_MISSING) from exc
         except OSError as exc:
-            # Includes FileNotFoundError when ``git`` itself is missing
-            # — surface as the same typed error so the CLI narrows once.
-            msg = f"state.git command failed: {' '.join(cmd)}\n{exc}"
-            raise StateGitError(msg) from exc
+            # Other OS-level errors (permission denied, exec format
+            # error, ...) surface as PUSH_REJECTED -- the operator's
+            # next action is the same generic "check audit log" path.
+            msg = "state.git subprocess failed"
+            raise StateGitError(msg, kind=StateGitErrorKind.PUSH_REJECTED) from exc
         if result.returncode != 0:
-            msg = f"state.git command failed: {' '.join(cmd)}\nstderr: {result.stderr.strip()}"
-            raise StateGitError(msg)
+            # The real stderr never enters the exception ``str`` -- it
+            # lands only in the structured-log stream the bootstrap's
+            # redactor processes. The exception carries the tag the CLI
+            # uses to pick a localised hint.
+            msg = "state.git push rejected"
+            err = StateGitError(msg, kind=StateGitErrorKind.PUSH_REJECTED)
+            err.add_note(f"git stderr: {result.stderr.strip()}")
+            raise err
         return result.stdout
+
+
+def _hint_key_for(kind: StateGitErrorKind) -> str:
+    """Return the localised hint key matching a :class:`StateGitErrorKind`.
+
+    Centralised so every CLI helper that consumes :class:`StateGitError`
+    routes through the same kind -> key mapping. Adding a new
+    :class:`StateGitErrorKind` value requires adding the matching
+    catalog entry + a row here in the same PR.
+
+    The string literals below are referenced verbatim by
+    :func:`_register_hint_keys_for_pybabel` so the pybabel static
+    extractor picks them up despite the indirection through this
+    mapping. Without that registration block the catalog would silently
+    miss the keys and ``t(hint_key)`` would render the bare msgid.
+    """
+    return {
+        StateGitErrorKind.PATH_MISSING: "cli.state_git.error.path_missing",
+        StateGitErrorKind.GIT_MISSING: "cli.state_git.error.git_missing",
+        StateGitErrorKind.PUSH_REJECTED: "cli.state_git.error.push_rejected",
+    }[kind]
+
+
+def _register_hint_keys_for_pybabel() -> tuple[str, ...]:
+    """Surface the three hint keys to pybabel's static extractor.
+
+    pybabel walks the AST looking for :func:`t` calls with literal
+    string arguments; the indirection in :func:`_hint_key_for` would
+    otherwise hide these keys and the catalog would silently miss
+    them. The function is never called at runtime -- the return value
+    only documents the canonical key list for grep.
+    """
+    from alfred.i18n import t
+
+    return (
+        t("cli.state_git.error.path_missing"),
+        t("cli.state_git.error.git_missing"),
+        t("cli.state_git.error.push_rejected"),
+    )
+
+
+def queue_proposal_or_exit(
+    *,
+    proposal_type: str,
+    payload: dict[str, object],
+    denied_key: str,
+    pending_review_key: str,
+    pending_review_extra_kwargs: dict[str, object] | None = None,
+    client: StateGitProposalClient | None = None,
+) -> ProposalResult:
+    """Queue a reviewer-gated proposal and surface the canonical async-UX block.
+
+    Cross-cutting R5 (DRY): five copies of ``try / except StateGitError /
+    echo denied / exit 1 / echo pending_review`` previously lived across
+    :mod:`alfred.cli.plugin`, :mod:`alfred.cli.web`, and
+    :mod:`alfred.cli.config`. Each copy independently constructed the
+    denied + pending-review echo blocks. Consolidating here means:
+
+    * Every reviewer-gated CLI command produces structurally identical
+      stderr on failure (operator can grep / parse the prefix).
+    * The localised hint mapping from :class:`StateGitErrorKind` lives
+      in one place.
+    * A future ADR that changes the async-UX block (e.g. emits JSON to
+      a structured channel as well as text to stderr) flips every call
+      site in one edit.
+
+    Args:
+        proposal_type: short dash-separated tag identifying the proposal
+            family (``"policy-grant"``, ``"web-allowlist-add"``, ...).
+            Forwarded to :meth:`StateGitProposalClient.create_proposal`
+            verbatim; the branch name carries this as a prefix.
+        payload: structured dict the reviewer reads. MUST NOT contain
+            raw secret values (CLAUDE.md hard rule #6).
+        denied_key: i18n key for the denial message rendered on
+            :class:`StateGitError`. The kwargs are ``reason`` (a
+            localised hint matching the error kind) + ``detail`` (the
+            short typed error message, for the audit log).
+        pending_review_key: i18n key for the success-queued message.
+            Kwargs supplied automatically: ``branch``, ``proposal_id``.
+        pending_review_extra_kwargs: optional extra kwargs to forward
+            into ``t(pending_review_key, ...)`` -- for callers whose
+            catalog template references additional placeholders (e.g.
+            the ``cli.config.set.pending_review`` shape carries ``key``).
+        client: state.git client. Defaults to the module-level
+            :data:`_default_client` for production use; tests inject a
+            mock.
+
+    Returns:
+        The :class:`ProposalResult` for the queued branch. Most callers
+        ignore the return value; ``alfred plugin grant`` uses it to emit
+        the ``follow_up_command`` line on a separate ``typer.echo`` so
+        the operator can copy-paste the status sub-command.
+
+    Raises:
+        typer.Exit(code=1): on any :class:`StateGitError`, after
+        emitting the localised denial message + the kind-specific hint.
+    """
+    # Lazy import keeps this module importable from CLI bootstrap without
+    # forcing typer/i18n at import time -- ``_state_git`` is loaded by
+    # several non-CLI consumers (the audit-graph correlator, the
+    # reviewer-gate state machine) that have no Typer dependency.
+    import typer
+
+    from alfred.i18n import t
+
+    state_git = client if client is not None else _state_git_client
+    try:
+        result = state_git.create_proposal(
+            proposal_type=proposal_type,
+            payload=payload,
+        )
+    except StateGitError as exc:
+        hint_key = _hint_key_for(exc.kind)
+        # ``reason`` carries the localised hint matching the failure
+        # kind, NOT the raw argv (devex-004). Existing catalog keys
+        # already take ``{reason}`` so this maps cleanly across plugin,
+        # web, and config sub-apps without a catalog edit at call sites.
+        typer.echo(
+            t(denied_key, reason=t(hint_key)),
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    kwargs: dict[str, object] = {
+        "branch": result.branch,
+        "proposal_id": result.proposal_id,
+    }
+    if pending_review_extra_kwargs is not None:
+        kwargs.update(pending_review_extra_kwargs)
+    typer.echo(t(pending_review_key, **kwargs))
+    return result
+
+
+# Backwards-compatible module-level singleton other modules import.
+# Kept as a re-bindable seam so existing tests that patch
+# ``alfred.cli.plugin._state_git_client`` etc. keep their patching path;
+# the helper above defaults to this when no explicit client is passed.
+_state_git_client: StateGitProposalClient = StateGitProposalClient()
 
 
 __all__ = [
     "ProposalRef",
     "ProposalResult",
     "StateGitError",
+    "StateGitErrorKind",
     "StateGitProposalClient",
+    "queue_proposal_or_exit",
 ]

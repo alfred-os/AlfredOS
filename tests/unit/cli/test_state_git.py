@@ -50,7 +50,9 @@ from alfred.cli._state_git import (
     ProposalRef,
     ProposalResult,
     StateGitError,
+    StateGitErrorKind,
     StateGitProposalClient,
+    queue_proposal_or_exit,
 )
 
 # ---------------------------------------------------------------------------
@@ -228,10 +230,18 @@ def test_create_proposal_commit_message_carries_proposal_id(bare_repo: Path) -> 
 
 
 def test_create_proposal_raises_state_git_error_on_missing_repo(tmp_path: Path) -> None:
-    """A non-existent state.git path surfaces as :class:`StateGitError`."""
+    """A non-existent state.git path surfaces as :class:`StateGitError`.
+
+    devex-004: the error is tagged :attr:`StateGitErrorKind.PUSH_REJECTED`
+    (or PATH_MISSING when subprocess raises FileNotFoundError on the
+    bound repo path). The exception ``str`` does NOT carry the raw argv.
+    """
     client = StateGitProposalClient(state_git_path=tmp_path / "does-not-exist")
-    with pytest.raises(StateGitError):
+    with pytest.raises(StateGitError) as excinfo:
         client.create_proposal("policy-grant", {"plugin_id": "x"})
+    # Raw argv MUST NOT appear in the operator-facing exception string.
+    assert "git clone" not in str(excinfo.value)
+    assert "/var/lib" not in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +338,14 @@ def test_run_converts_os_error_to_state_git_error(bare_repo: Path) -> None:
     UX. Patches ``subprocess.run`` to raise ``FileNotFoundError`` (the
     concrete ``OSError`` subclass that fires when ``git`` is missing from
     the runtime ``PATH``).
+
+    devex-004: when the bound repo path EXISTS, the FileNotFoundError
+    is attributable to ``git`` itself missing -- the error tag is
+    :attr:`StateGitErrorKind.GIT_MISSING` so the CLI surfaces the
+    "install git" hint rather than the "run alfred-setup" hint.
     """
+    from alfred.cli._state_git import StateGitErrorKind
+
     client = StateGitProposalClient(state_git_path=bare_repo)
     with (
         patch(
@@ -338,6 +355,190 @@ def test_run_converts_os_error_to_state_git_error(bare_repo: Path) -> None:
         pytest.raises(StateGitError) as excinfo,
     ):
         client.list_pending_proposals()
-    assert "state.git command failed" in str(excinfo.value)
+    # devex-004: exception ``str`` no longer echoes the raw argv.
+    assert excinfo.value.kind == StateGitErrorKind.GIT_MISSING
     # __cause__ pins the original OSError so the audit log can include it.
     assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+
+
+# ---------------------------------------------------------------------------
+# devex-004: StateGitError carries a structured kind tag
+# ---------------------------------------------------------------------------
+
+
+def test_run_classifies_missing_repo_as_path_missing(tmp_path: Path) -> None:
+    """A FileNotFoundError + non-existent repo path tags PATH_MISSING.
+
+    The CLI surface maps PATH_MISSING to the "run alfred-setup" hint;
+    GIT_MISSING to the "install git" hint. Distinguishing the two at
+    the typed-error layer means each CLI sub-app does not need to
+    re-implement the classification.
+    """
+    missing = tmp_path / "does-not-exist"
+    client = StateGitProposalClient(state_git_path=missing)
+    with (
+        patch(
+            "alfred.cli._state_git.subprocess.run",
+            side_effect=FileNotFoundError("git -C ... not found"),
+        ),
+        pytest.raises(StateGitError) as excinfo,
+    ):
+        client.list_pending_proposals()
+    assert excinfo.value.kind == StateGitErrorKind.PATH_MISSING
+
+
+def test_run_classifies_nonzero_return_as_push_rejected(bare_repo: Path) -> None:
+    """A non-zero subprocess return tags PUSH_REJECTED.
+
+    The structured ``add_note`` carries the real stderr for forensic
+    grep, but the exception ``str`` does NOT echo the argv -- that's
+    the operator-leaking pattern devex-004 forbids.
+    """
+
+    class _FakeResult:
+        returncode = 1
+        stdout = ""
+        stderr = "fatal: remote rejected push"
+
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    with (
+        patch(
+            "alfred.cli._state_git.subprocess.run",
+            return_value=_FakeResult(),
+        ),
+        pytest.raises(StateGitError) as excinfo,
+    ):
+        client.list_pending_proposals()
+    assert excinfo.value.kind == StateGitErrorKind.PUSH_REJECTED
+    # The ``str`` MUST NOT carry the raw argv or git's English stderr;
+    # the structured ``__notes__`` channel (PEP 678) preserves the
+    # stderr for forensic capture without putting it on the
+    # operator-facing surface.
+    surface = str(excinfo.value)
+    assert "git --git-dir" not in surface
+    assert "for-each-ref" not in surface
+    assert "refs/heads" not in surface
+    assert "fatal: remote rejected push" not in surface
+    # PEP 678 note channel carries the stderr.
+    assert any("fatal: remote rejected push" in note for note in excinfo.value.__notes__)
+
+
+# ---------------------------------------------------------------------------
+# Cross-cutting R5: queue_proposal_or_exit DRY helper
+# ---------------------------------------------------------------------------
+
+
+def test_queue_proposal_or_exit_happy_path_emits_pending_review(
+    bare_repo: Path,
+) -> None:
+    """The success path emits the localised pending_review block.
+
+    Cross-cutting R5: every CLI sub-app should call this helper rather
+    than re-implementing the try/except dance. Validates the success
+    branch against the real catalog so the helper is wired correctly.
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    app = typer.Typer()
+
+    @app.command("queue")
+    def _queue() -> None:
+        client = StateGitProposalClient(state_git_path=bare_repo)
+        queue_proposal_or_exit(
+            proposal_type="policy-grant",
+            payload={"plugin_id": "alfred.test"},
+            denied_key="cli.plugin.grant.denied",
+            pending_review_key="cli.plugin.grant.pending_review",
+            client=client,
+        )
+
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # The pending_review block is rendered from the catalog -- not the
+    # bare msgid string.
+    assert "cli.plugin.grant.pending_review" not in result.stdout
+    # Branch name (with the canonical prefix) appears in the output.
+    assert "proposal/policy-grant-" in result.stdout
+
+
+def test_queue_proposal_or_exit_renders_localised_hint_for_each_kind(
+    tmp_path: Path,
+) -> None:
+    """Each :class:`StateGitErrorKind` routes through its own hint key.
+
+    The denial message carries the localised hint string matching the
+    error kind. We exercise all three kinds against three patched
+    clients to confirm the dispatch table.
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    from alfred.i18n import t
+
+    class _FailingClient:
+        def __init__(self, kind: StateGitErrorKind) -> None:
+            self._kind = kind
+
+        def create_proposal(self, **_: object) -> ProposalResult:
+            raise StateGitError("ignored", kind=self._kind)
+
+    for kind in StateGitErrorKind:
+        app = typer.Typer()
+
+        @app.command("queue")
+        def _queue(kind: StateGitErrorKind = kind) -> None:
+            queue_proposal_or_exit(
+                proposal_type="policy-grant",
+                payload={"plugin_id": "x"},
+                denied_key="cli.plugin.grant.denied",
+                pending_review_key="cli.plugin.grant.pending_review",
+                client=_FailingClient(kind),  # type: ignore[arg-type]
+            )
+
+        result = CliRunner().invoke(app, [])
+        assert result.exit_code != 0, (kind, result.output, result.stderr)
+        # The exact catalog text for the kind's hint appears in stderr.
+        hint = t(
+            {
+                StateGitErrorKind.PATH_MISSING: "cli.state_git.error.path_missing",
+                StateGitErrorKind.GIT_MISSING: "cli.state_git.error.git_missing",
+                StateGitErrorKind.PUSH_REJECTED: "cli.state_git.error.push_rejected",
+            }[kind]
+        )
+        # A non-trivial fragment of the hint shows up on stderr.
+        assert hint.split(".")[0] in result.stderr, (kind, hint, result.stderr)
+
+
+def test_queue_proposal_or_exit_pending_review_extra_kwargs_forwarded(
+    bare_repo: Path,
+) -> None:
+    """``pending_review_extra_kwargs`` lets callers thread their own placeholders.
+
+    The ``cli.config.set.pending_review`` catalog entry references a
+    ``{key}`` placeholder beyond the helper's standard
+    ``branch`` + ``proposal_id``; the helper's signature accommodates
+    callers like that via the optional kwargs forward.
+    """
+    import typer
+    from typer.testing import CliRunner
+
+    app = typer.Typer()
+
+    @app.command("queue")
+    def _queue() -> None:
+        client = StateGitProposalClient(state_git_path=bare_repo)
+        queue_proposal_or_exit(
+            proposal_type="config-quarantined-provider",
+            payload={"key": "quarantined-provider", "value": "anthropic"},
+            denied_key="cli.config.set.denied",
+            pending_review_key="cli.config.set.pending_review",
+            pending_review_extra_kwargs={"key": "quarantined-provider"},
+            client=client,
+        )
+
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 0, (result.output, result.stderr)
+    # The ``{key}`` placeholder is substituted -- not left as a literal.
+    assert "quarantined-provider" in result.stdout
+    assert "{key}" not in result.stdout
