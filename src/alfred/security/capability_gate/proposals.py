@@ -29,26 +29,25 @@ the silent privilege-escalation CLAUDE.md hard rule #2 forbids.
 sec-007: this module does NOT ``import os`` — ``ALFRED_ENV`` reads
 live in :mod:`alfred.bootstrap.gate_factory`.
 
-Implementation status:
-
-* :func:`create_proposal_branch` — PR-S3-2 ships the full proposal-
-  creation flow: identifier generation, audit row, and the
-  patch-friendly call to :func:`_write_proposal_to_state_git`.
-* :func:`_write_proposal_to_state_git` — PR-S3-2 ships a fail-loud
-  :class:`NotImplementedError` stub (CR-139 finding #5). PR-S3-6
-  replaces the body with the gitpython integration that writes the
-  branch into ``/var/lib/alfred/state.git``. The function is kept as
-  a separate ``async def`` so the proposal-flow unit and integration
-  tests can patch it cleanly; an un-patched call raises so a caller
-  cannot accidentally emit ``plugin.grant.requested`` for a branch
-  that was never durably written.
+ADR-0018 consolidation. The Stage-4 PR consolidates the dual state.git
+writer surface: :func:`_write_proposal_to_state_git` was previously a
+fail-loud :class:`NotImplementedError` stub awaiting PR-S3-6's gitpython
+integration. The Stage-4 implementation replaces the stub with a thin
+asyncio shim that constructs a :class:`PluginGrantProposal` and awaits
+:func:`asyncio.to_thread` to call into
+:class:`alfred.cli._state_git.StateGitProposalClient` — the canonical
+sync writer. Both writers now produce the same on-disk shape
+(``policies/grants/<plugin_id>/<grant_id>.json``); the round-trip
+through :func:`._state_git_parser.parse_state_git_head` works by
+construction.
 """
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import structlog
 
@@ -257,55 +256,64 @@ async def _write_proposal_to_state_git(
     content_tier: str | None,
     operator_user_id: str,
 ) -> str:
-    """Write the proposal branch to ``/var/lib/alfred/state.git``.
+    """Asynchronously write the proposal branch to ``/var/lib/alfred/state.git``.
 
-    DEFERRED-STUB CONTRACT (PR-S3-2 + CR-139 finding #5):
+    ADR-0018 async shim. The previous PR-S3-2 fail-loud
+    :class:`NotImplementedError` stub is replaced here with a thin
+    bridge to the canonical sync writer
+    (:class:`alfred.cli._state_git.StateGitProposalClient`). The shim:
 
-    PR-S3-2 ships this function as a fail-loud
-    :class:`NotImplementedError`. The real gitpython implementation
-    lands alongside the CLI in PR-S3-6 (``alfred plugin grant``);
-    until then, an un-patched call MUST NOT silently succeed: the
-    previous structured-log stub returned the branch name unchanged
-    and let :func:`create_proposal_branch` emit
-    ``plugin.grant.requested`` for a branch that was never durably
-    written. The audit row then pointed at a nonexistent branch,
-    breaking the PRD §6.4 reviewer-gate flow and the audit-graph
-    forensic-traversal guarantee.
+    1. Constructs a :class:`alfred.state.proposal_payloads.PluginGrantProposal`
+       — Pydantic validation runs at construction so a typo at the
+       call site fails BEFORE state.git is touched.
+    2. Pre-derives the proposal id from ``branch_name`` so the sync
+       writer produces the exact branch the caller already emitted
+       into the audit row.
+    3. Awaits :func:`asyncio.to_thread` so the synchronous git
+       subprocess sequence runs off the event loop. The bridge is the
+       single place async callers cross over to the sync writer; the
+       sync surface itself remains the canonical writer (ADR-0018
+       Decision 1, Option A).
 
-    Matches the err-002 shape used by
-    :meth:`RealGate.rebuild_from_state_git`: deferred state.git
-    integration is loud, never silent (CLAUDE.md hard rule #7). Unit
-    tests patch this function via
-    :func:`unittest.mock.patch`; the integration tier (which exercises
-    the un-patched path) asserts the raise.
+    PII discipline (CR-139 R2 / sec-pr-s3-6 baseline): ``operator_user_id``
+    is canonically an email and MUST NOT appear in the operational
+    structlog stream. The structlog redactor does not scrub user
+    identifiers; the function logs the length marker instead so an
+    operator can still diagnose missing-id bugs without exposing the
+    canonical id. The full id lives only in the audit-row fields where
+    it belongs.
 
-    PR-S3-6 replaces the body with::
-
-        repo = git.Repo("/var/lib/alfred/state.git")
-        # ... branch + commit ...
+    The function remains a separate ``async def`` so the proposal-flow
+    unit tests can patch it via :func:`unittest.mock.patch` (the
+    sync-writer mocking is one layer deeper and noisier). The shim's
+    body is small enough that the byte-equality test against
+    :meth:`StateGitProposalClient.create_proposal_from_payload`
+    suffices to pin the behavioural invariant.
 
     Args:
-        branch_name: full branch name (``proposal/policy-grant-<hex>``).
+        branch_name: full branch name (``proposal/policy-grant-<hex>``)
+            — the proposal id is parsed off the suffix so the sync
+            writer's branch matches the audit row's exactly.
         plugin_id, subscriber_tier, hookpoint, content_tier,
-            operator_user_id: proposal payload — written into the
-            state.git tree by the PR-S3-6 implementation.
-
-    Raises:
-        NotImplementedError: always, until PR-S3-6 wires gitpython.
+            operator_user_id: proposal payload fields. Closed-set
+            validation runs at the Pydantic model boundary; a bad
+            value here raises :class:`pydantic.ValidationError`.
 
     Returns:
-        The post-fix function never returns under PR-S3-2; the return
-        annotation is retained for the PR-S3-6 implementation, which
-        will return the resolved branch ref name after the commit
-        lands.
+        The state.git branch name actually written by the sync writer.
+        Round-trips ``branch_name`` on success — the two MUST match so
+        the caller's audit-row branch field is the authoritative
+        readout.
+
+    Raises:
+        pydantic.ValidationError: if any payload field is outside the
+            closed set (typo on subscriber_tier, content_tier, ...).
+        StateGitError: from the sync writer on subprocess failure
+            (missing repo, push rejected, git binary missing).
     """
-    # PII discipline (CR-139 R2): operator_user_id is canonically an email
-    # and MUST NOT appear in the operational structlog stream. The structlog
-    # redactor (alfred.cli._bootstrap._redact) scrubs secret-shaped strings
-    # via SecretBroker.redact + the generic API-key regex but does NOT scrub
-    # user identifiers. Pass a length marker instead so operators can still
-    # diagnose missing-id bugs without exposing the canonical id; the full
-    # id lives only in the audit-row fields where it belongs.
+    from alfred.cli._state_git import StateGitProposalClient
+    from alfred.state.proposal_payloads import PluginGrantProposal
+
     _log.info(
         "capability_gate.proposal.write_attempted",
         branch_name=branch_name,
@@ -315,13 +323,41 @@ async def _write_proposal_to_state_git(
         content_tier=content_tier,
         operator_user_id_len=len(operator_user_id),
     )
-    msg = (
-        "_write_proposal_to_state_git requires gitpython state.git "
-        "integration (ships in PR-S3-6). Until then this function is a "
-        "fail-loud stub; unit tests must patch it before calling "
-        "create_proposal_branch."
+
+    # Pydantic's Literal-bound fields refuse anything outside the
+    # closed set. The ``cast`` documents the runtime-safe narrowing —
+    # ``subscriber_tier`` and ``content_tier`` are validated by the
+    # CLI/manifest layer before reaching this shim, but the cast is
+    # the explicit marker so a future caller bypassing that path
+    # surfaces the assumption.
+    payload = PluginGrantProposal(
+        plugin_id=plugin_id,
+        subscriber_tier=cast(Literal["system", "operator", "user-plugin"], subscriber_tier),
+        hookpoint=hookpoint,
+        content_tier=cast(Literal["T0", "T1", "T2", "T3"] | None, content_tier),
+        operator_user_id=operator_user_id,
     )
-    raise NotImplementedError(msg)
+
+    # Parse the proposal id off the caller-supplied branch name so the
+    # sync writer materialises the exact branch the audit row already
+    # references. A divergence here would break the audit-graph join.
+    expected_prefix = f"proposal/{PluginGrantProposal.proposal_type}-"
+    if not branch_name.startswith(expected_prefix):
+        msg = (
+            f"_write_proposal_to_state_git: branch_name {branch_name!r} "
+            f"does not match expected prefix {expected_prefix!r}; refusing "
+            "to write a branch the caller's audit row cannot find."
+        )
+        raise ValueError(msg)
+    proposal_id = branch_name[len(expected_prefix) :]
+
+    client = StateGitProposalClient()
+    result = await asyncio.to_thread(
+        client.create_proposal_from_payload,
+        payload,
+        proposal_id=proposal_id,
+    )
+    return result.branch
 
 
 # Module-init declaration — spec §6.2 / #119 discipline: publishers
