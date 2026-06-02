@@ -152,11 +152,21 @@ def build_dev_gate() -> RealGate:
     so log filters can alert on it directly.
     """
     raw_env = os.environ.get(_ENV_KEY, "").strip()
+    # Translators: load-bearing security vocabulary. "Fail-closed" means
+    # every capability check DENIES until an operator-issued grant lands;
+    # do NOT swap it for "fail-open" (the inverted semantics shipped in
+    # the pre-flag-day DevGate). The string surfaces on operator
+    # dashboards as the warning field on the bootstrap.gate_selected
+    # structlog event; the word "production" must remain so the
+    # invariant test in
+    # tests/unit/security/test_default_strict_declarations_invariant.py
+    # (which asserts ``"production" in entry["warning"].lower()``)
+    # continues to hold across localisations.
     _log.info(
         "bootstrap.gate_selected",
         gate="DevelopmentRealGate",
         alfred_env=raw_env or "(unset)",
-        warning=t("bootstrap.gate_selected.devgate_warning"),
+        warning=t("bootstrap.gate_selected.dev_default"),
     )
     return RealGate(
         policy=GatePolicy(grants=frozenset()),
