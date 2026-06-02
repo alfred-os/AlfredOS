@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import (
     CAPABILITY_GATE_REBUILD_FIELDS,
@@ -302,48 +303,100 @@ class RealGate:
         Persistence delta (CR-139 finding #2): the previous in-memory
         snapshot is the source of truth for what was approved. Any
         grant in the previous snapshot but NOT in ``grants`` is a
-        revocation — :meth:`StorageBackend.revoke_grant` removes the
-        Postgres row. Without this, the runtime cache stayed
+        revocation — :meth:`StorageBackend.apply_atomic` removes the
+        Postgres rows. Without this, the runtime cache stayed
         in-memory-revoked but Postgres-approved; the next process
         restart loaded the stale row and resurrected the capability —
         a CLAUDE.md hard-rule #2 silent privilege-escalation shape.
 
-        Ordering: revoke removed rows, upsert new / changed rows, set
-        the sync hash, swap the in-memory policy. The reordering is
-        idempotent: a re-applied identical snapshot is a no-op at every
-        stage. On any DB failure the in-memory policy is NOT swapped —
-        the previous policy stays authoritative until a future rebuild
-        succeeds.
+        Atomicity (sec-pr-s3-6-02 / perf-002 / err-003): the previous
+        shape ran the revokes, upserts, and ``set_sync_hash`` as
+        separate transactions. A driver error mid-revoke (or between
+        the revoke pass and the upsert pass) left Postgres with a
+        partially-mutated grant table AND no sync-hash update — silent
+        split-brain. CLAUDE.md hard rule #7 (no silent failures in
+        security paths) requires all-or-nothing. The work is now
+        delegated to :meth:`StorageBackend.apply_atomic`, which runs
+        every SQL row inside one ``async with session.begin()`` block.
+        On :class:`sqlalchemy.exc.SQLAlchemyError`, the transaction
+        rolls back, this method emits a ``plugin.grant.rebuilt`` audit
+        row with ``result="rolled_back"`` (err-003: every state-change
+        attempt surfaces in the audit log, success OR failure), and
+        re-raises so the orchestrator's exception path fires.
+
+        Ordering: revokes are computed first, ``apply_atomic`` runs
+        them before the upserts, then the sync-hash set lands LAST
+        inside the same transaction. The in-memory policy is swapped
+        ONLY after the transaction commits — on rollback the previous
+        policy stays authoritative until a future rebuild succeeds.
 
         Note on grant identity: :class:`GrantRow` equality / hashing is
         structural (frozen dataclass with slots). The
         ``previous - grants`` set difference yields every row whose
         ``(plugin_id, subscriber_tier, hookpoint, content_tier,
         proposal_branch)`` tuple disappeared from the new snapshot.
-        Backend ``revoke_grant`` keys on
+        The backend's revoke SQL keys on
         ``(plugin_id, hookpoint, subscriber_tier)`` so a row whose
         ``content_tier`` or ``proposal_branch`` changed (but key didn't)
-        is a revoke-then-upsert — the upsert below recreates it with
-        the new payload. That's the correct semantics: a
-        content-tier widening is a separate reviewer decision from the
-        original grant, and the Postgres row should reflect the latest
-        approved shape.
+        is a revoke-then-upsert — the upsert recreates it with the new
+        payload inside the same transaction. That's the correct
+        semantics: a content-tier widening is a separate reviewer
+        decision from the original grant, and the Postgres row should
+        reflect the latest approved shape.
+
+        Raises:
+            sqlalchemy.exc.SQLAlchemyError: Re-raised from the backend
+                after the rollback audit row is emitted. The
+                in-memory policy is NOT swapped on this path.
         """
         previous_grants = self._policy.grants
         revoked = previous_grants - grants
-        for grant in revoked:
-            await self._backend.revoke_grant(
-                plugin_id=grant.plugin_id,
-                hookpoint=grant.hookpoint,
-                subscriber_tier=grant.subscriber_tier,
+        try:
+            await self._backend.apply_atomic(
+                revokes=revoked,
+                upserts=grants,
+                commit_hash=commit_hash,
             )
-        for grant in grants:
-            await self._backend.upsert_grant(grant)
-        await self._backend.set_sync_hash(commit_hash)
+        except SQLAlchemyError as exc:
+            # err-003: a partial-failure rebuild MUST surface in the audit
+            # log. The previous shape emitted ``result="success"`` only on
+            # the happy path — a rollback after revoke 1 succeeded but
+            # revoke 2 raised left no audit signal at all. We capture
+            # ``type(exc).__name__`` only (spec §5.6: never persist
+            # ``str(exc)`` / ``exc.args`` because they may carry T3
+            # content fragments). The full success row continues to emit
+            # from :meth:`rebuild_from_state_git` after this method returns.
+            correlation_id = str(uuid.uuid4())
+            await self._audit_sink.append_schema(
+                fields=CAPABILITY_GATE_REBUILD_FIELDS,
+                schema_name="CAPABILITY_GATE_REBUILD_FIELDS",
+                event="plugin.grant.rebuilt",
+                actor_user_id=None,
+                subject={
+                    "commit_hash": commit_hash,
+                    "grant_count": len(grants),
+                    "correlation_id": correlation_id,
+                },
+                trust_tier_of_trigger="T0",
+                result="rolled_back",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+            _log.warning(
+                "capability_gate.rebuild.rolled_back",
+                grant_count=len(grants),
+                revoked_count=len(revoked),
+                commit_hash=commit_hash,
+                backing_store_error_type=type(exc).__name__,
+            )
+            raise
+
         # Atomic policy swap (single-threaded asyncio event loop). The
         # frozen :class:`GatePolicy` semantics mean any hot-path check
         # mid-flight sees either the old or new snapshot — never a
-        # half-mutated state.
+        # half-mutated state. The swap runs ONLY after ``apply_atomic``
+        # committed, so a rollback leaves the previous policy
+        # authoritative.
         self._policy = GatePolicy(grants=grants)
         _log.info(
             "capability_gate.rebuild.complete",

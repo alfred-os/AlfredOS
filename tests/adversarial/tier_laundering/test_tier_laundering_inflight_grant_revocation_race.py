@@ -48,6 +48,11 @@ def _make_backend() -> Any:
     as the runtime invariant — the corpus contract is "the gate's
     in-memory policy is atomically swapped against the production
     StorageBackend Protocol", not against a bespoke fake.
+
+    sec-pr-s3-6-02: ``apply_atomic`` is the single atomic primitive the
+    gate calls now (revokes + upserts + sync-hash inside one
+    transaction); the per-op AsyncMocks remain available because other
+    callers (the proposal flow, integration round-trip) still use them.
     """
     backend = MagicMock()
     backend.ping = AsyncMock(return_value=None)
@@ -56,6 +61,7 @@ def _make_backend() -> Any:
     backend.set_sync_hash = AsyncMock(return_value=None)
     backend.upsert_grant = AsyncMock(return_value=None)
     backend.revoke_grant = AsyncMock(return_value=None)
+    backend.apply_atomic = AsyncMock(return_value=None)
     return backend
 
 
@@ -120,18 +126,20 @@ async def test_inflight_check_under_revoked_grant_denies_after_apply() -> None:
     #    _apply_grants with the new (empty) snapshot.
     await gate._apply_grants(frozenset(), commit_hash="commit-after-revoke")
 
-    # The disappeared grant triggers a backend.revoke_grant call —
-    # this is the Postgres-projection side of the audit graph (every
-    # in-memory revoke MUST land in the persistence layer too;
-    # CR-139 finding #2 codified this).
-    backend.revoke_grant.assert_awaited_once_with(
-        plugin_id="alfred.compromised-plugin",
-        hookpoint="tool.web.fetch",
-        subscriber_tier="user-plugin",
-    )
+    # The disappeared grant flows into ``apply_atomic``'s revokes
+    # payload — this is the Postgres-projection side of the audit graph
+    # (every in-memory revoke MUST land in the persistence layer too;
+    # CR-139 finding #2 codified this). sec-pr-s3-6-02 collapses the
+    # revoke / upsert / sync-hash sequence into ONE transaction so the
+    # operator cannot observe a half-mutated state from a parallel
+    # forensic-traversal query.
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    assert set(kwargs["revokes"]) == {grant}
+    assert set(kwargs["upserts"]) == set()
     # The post-swap sync hash MUST also land — the audit-graph
     # forensic-traversal layer keys off it.
-    backend.set_sync_hash.assert_awaited_once_with("commit-after-revoke")
+    assert kwargs["commit_hash"] == "commit-after-revoke"
 
     # 3. The post-swap check denies. The race shape — "in-flight call
     #    completes under old policy AFTER the swap is observable" — is
@@ -147,15 +155,15 @@ async def test_inflight_check_under_revoked_grant_denies_after_apply() -> None:
 
 
 async def test_revoke_then_upsert_ordering_preserves_audit_graph() -> None:
-    """``_apply_grants`` calls revoke BEFORE upsert; sync_hash lands LAST.
+    """``_apply_grants`` collapses revoke + upsert + sync_hash into ONE atomic apply.
 
-    Pins the spec §8.1 ordering. The audit graph traversal relies on
-    "every disappeared grant produced one revoke_grant before any new
-    grant produced its upsert" — without that, a content-tier-widening
-    change could land its new upsert BEFORE the old grant's revoke
-    audit row, producing a brief window where Postgres reports the
-    expanded grant while the state.git proposal_branch still cites the
-    original.
+    Pins the spec §8.1 ordering. sec-pr-s3-6-02 hardens it further:
+    the revoke + upsert + sync-hash now run inside ONE database
+    transaction so a parallel forensic-traversal query cannot observe
+    a half-mutated state. The audit graph traversal relies on "every
+    disappeared grant produced one revoke before any new grant
+    produced its upsert" — the ``apply_atomic`` contract delivers both
+    the order AND the all-or-nothing visibility.
     """
     original_grant = GrantRow(
         plugin_id="alfred.web-fetch",
@@ -180,16 +188,13 @@ async def test_revoke_then_upsert_ordering_preserves_audit_graph() -> None:
     )
     await gate._apply_grants(frozenset({new_grant}), commit_hash="commit-after-swap")
 
-    # Revoke fires exactly once for the disappeared grant.
-    backend.revoke_grant.assert_awaited_once_with(
-        plugin_id="alfred.web-fetch",
-        hookpoint="tool.web.fetch",
-        subscriber_tier="user-plugin",
-    )
-    # Upsert fires exactly once for the new grant.
-    backend.upsert_grant.assert_awaited_once_with(new_grant)
-    # The sync hash lands AFTER both — the audit-graph terminal anchor.
-    backend.set_sync_hash.assert_awaited_once_with("commit-after-swap")
+    # Single atomic-apply call carries the revoke, the upsert, and the
+    # sync hash in one transaction.
+    backend.apply_atomic.assert_awaited_once()
+    kwargs = backend.apply_atomic.await_args.kwargs
+    assert set(kwargs["revokes"]) == {original_grant}
+    assert set(kwargs["upserts"]) == {new_grant}
+    assert kwargs["commit_hash"] == "commit-after-swap"
 
     # And the gate now answers per the new policy: the old hookpoint
     # denies, the new one admits.

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from typing import Final, Protocol, runtime_checkable
 
@@ -120,6 +120,55 @@ class StorageBackend(Protocol):
 
     async def set_sync_hash(self, commit_hash: str) -> None:
         """Record the state.git commit hash after a successful rebuild."""
+        ...
+
+    async def apply_atomic(
+        self,
+        *,
+        revokes: Iterable[GrantRow],
+        upserts: Iterable[GrantRow],
+        commit_hash: str,
+    ) -> None:
+        """Apply revokes + upserts + sync hash inside ONE transaction.
+
+        sec-pr-s3-6-02 / perf-002 / err-003: the previous shape ran each
+        of these as its own ``async with session.begin()`` block, so a
+        database error mid-revoke (or between the revoke pass and the
+        upsert pass, or before ``set_sync_hash`` lands) left Postgres
+        with a partially-mutated grant table AND no sync-hash update — a
+        silent split-brain shape. CLAUDE.md hard rule #7 (no silent
+        failures in security paths) requires all-or-nothing: either every
+        row in the snapshot lands and the sync hash advances, or NONE of
+        them do and Postgres looks exactly like it did before the call.
+
+        Atomicity contract:
+
+        * One transaction. All revokes, all upserts, and the sync-hash
+          set complete inside the same ``BEGIN``/``COMMIT`` block.
+        * Any :class:`sqlalchemy.exc.SQLAlchemyError` raised by the
+          driver mid-flight rolls the entire transaction back. The
+          caller (:meth:`RealGate._apply_grants`) catches and emits an
+          audit row with ``result="rolled_back"`` before re-raising.
+        * Idempotent in the success path: a re-applied identical
+          snapshot is a no-op at every SQL row (``DELETE`` of an absent
+          row, ``ON CONFLICT DO UPDATE`` to the same values, ``UPSERT``
+          of the same sync hash).
+
+        Ordering inside the transaction matches the previous per-method
+        sequence so the spec §8.1 audit-graph invariant ("revoke before
+        any new grant's upsert") holds: revokes first, then upserts,
+        then ``set_sync_hash``. The single transaction collapses these
+        into one observable commit point; readers either see the entire
+        new snapshot or the entire old one.
+
+        Returns:
+            ``None`` on success.
+
+        Raises:
+            sqlalchemy.exc.SQLAlchemyError: Any driver-level error
+                during DELETE / INSERT / UPSERT triggers the transaction
+                rollback and is re-raised to the caller.
+        """
         ...
 
 
@@ -247,6 +296,103 @@ class PostgresBackend:
             for r in rows
         )
 
+    # ------------------------------------------------------------------
+    # SQL-only helpers (no transaction management).
+    #
+    # sec-pr-s3-6-02: the public per-op methods below each open their
+    # own ``async with session.begin()`` so external callers (tests,
+    # integration round-trip, the proposal flow) get one-shot atomicity.
+    # ``apply_atomic`` needs the *opposite* — many ops in one
+    # transaction — so the SQL lives in these helpers, which both the
+    # per-op methods and ``apply_atomic`` invoke. There is exactly ONE
+    # source of truth for each SQL string.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _execute_upsert_grant(session: AsyncSession, grant: GrantRow) -> None:
+        """Run the upsert SQL on an existing open session.
+
+        The SQL string here is the single source of truth for the
+        upsert shape; see :meth:`upsert_grant` for the docstring
+        explaining the ON CONFLICT target, the NOT NULL column
+        population strategy, and the ``state='approved'`` semantics.
+        """
+        now = dt.datetime.now(dt.UTC)
+        await session.execute(
+            sa.text(
+                "INSERT INTO plugin_grants "
+                "(id, created_at, plugin_id, subscriber_tier, hookpoint, "
+                "content_tier, proposal_branch, correlation_id, state) "
+                "VALUES (:id, :created_at, :plugin_id, :subscriber_tier, "
+                ":hookpoint, :content_tier, :proposal_branch, "
+                ":correlation_id, :state) "
+                "ON CONFLICT (plugin_id, hookpoint, subscriber_tier) "
+                "DO UPDATE SET content_tier = EXCLUDED.content_tier, "
+                "proposal_branch = EXCLUDED.proposal_branch"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "created_at": now,
+                "plugin_id": grant.plugin_id,
+                "subscriber_tier": grant.subscriber_tier,
+                "hookpoint": grant.hookpoint,
+                "content_tier": grant.content_tier,
+                "proposal_branch": grant.proposal_branch,
+                "correlation_id": str(uuid.uuid4()),
+                "state": "approved",
+            },
+        )
+
+    @staticmethod
+    async def _execute_revoke_grant(
+        session: AsyncSession,
+        *,
+        plugin_id: str,
+        hookpoint: str,
+        subscriber_tier: str,
+    ) -> None:
+        """Run the revoke DELETE on an existing open session.
+
+        Idempotent (no error if the row is absent). The DELETE filter
+        keys on all three uniqueness columns so a sibling grant (same
+        plugin, different hookpoint or tier) is not collected.
+        """
+        await session.execute(
+            sa.text(
+                "DELETE FROM plugin_grants "
+                "WHERE plugin_id = :plugin_id "
+                "AND hookpoint = :hookpoint "
+                "AND subscriber_tier = :subscriber_tier"
+            ),
+            {
+                "plugin_id": plugin_id,
+                "hookpoint": hookpoint,
+                "subscriber_tier": subscriber_tier,
+            },
+        )
+
+    @staticmethod
+    async def _execute_set_sync_hash(
+        session: AsyncSession,
+        commit_hash: str,
+    ) -> None:
+        """Run the singleton-row upsert on an existing open session.
+
+        mem-004: ``capability_gate_sync`` is the migration-0009 singleton
+        table; the INTEGER PK has ``CHECK (id = 1)`` so this INSERT
+        always targets ``id = 1`` and falls into the ``ON CONFLICT``
+        update path on every call after the first.
+        """
+        await session.execute(
+            sa.text(
+                "INSERT INTO capability_gate_sync (id, commit_hash) "
+                "VALUES (1, :commit_hash) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "commit_hash = EXCLUDED.commit_hash"
+            ),
+            {"commit_hash": commit_hash},
+        )
+
     async def upsert_grant(self, grant: GrantRow) -> None:
         """Insert one grant or update on the (plugin_id, hookpoint, subscriber_tier) conflict.
 
@@ -277,32 +423,8 @@ class PostgresBackend:
         per-grant correlation upstream to the per-rebuild trace via
         ``state_git_commit_hash`` (populated by ``set_sync_hash``).
         """
-        now = dt.datetime.now(dt.UTC)
         async with self._session() as session:
-            await session.execute(
-                sa.text(
-                    "INSERT INTO plugin_grants "
-                    "(id, created_at, plugin_id, subscriber_tier, hookpoint, "
-                    "content_tier, proposal_branch, correlation_id, state) "
-                    "VALUES (:id, :created_at, :plugin_id, :subscriber_tier, "
-                    ":hookpoint, :content_tier, :proposal_branch, "
-                    ":correlation_id, :state) "
-                    "ON CONFLICT (plugin_id, hookpoint, subscriber_tier) "
-                    "DO UPDATE SET content_tier = EXCLUDED.content_tier, "
-                    "proposal_branch = EXCLUDED.proposal_branch"
-                ),
-                {
-                    "id": uuid.uuid4(),
-                    "created_at": now,
-                    "plugin_id": grant.plugin_id,
-                    "subscriber_tier": grant.subscriber_tier,
-                    "hookpoint": grant.hookpoint,
-                    "content_tier": grant.content_tier,
-                    "proposal_branch": grant.proposal_branch,
-                    "correlation_id": str(uuid.uuid4()),
-                    "state": "approved",
-                },
-            )
+            await self._execute_upsert_grant(session, grant)
 
     async def revoke_grant(
         self,
@@ -313,18 +435,11 @@ class PostgresBackend:
     ) -> None:
         """Delete one grant; idempotent (no error if absent)."""
         async with self._session() as session:
-            await session.execute(
-                sa.text(
-                    "DELETE FROM plugin_grants "
-                    "WHERE plugin_id = :plugin_id "
-                    "AND hookpoint = :hookpoint "
-                    "AND subscriber_tier = :subscriber_tier"
-                ),
-                {
-                    "plugin_id": plugin_id,
-                    "hookpoint": hookpoint,
-                    "subscriber_tier": subscriber_tier,
-                },
+            await self._execute_revoke_grant(
+                session,
+                plugin_id=plugin_id,
+                hookpoint=hookpoint,
+                subscriber_tier=subscriber_tier,
             )
 
     async def get_sync_hash(self) -> str | None:
@@ -349,12 +464,41 @@ class PostgresBackend:
         lifetime (one set per state.git rebuild).
         """
         async with self._session() as session:
-            await session.execute(
-                sa.text(
-                    "INSERT INTO capability_gate_sync (id, commit_hash) "
-                    "VALUES (1, :commit_hash) "
-                    "ON CONFLICT (id) DO UPDATE SET "
-                    "commit_hash = EXCLUDED.commit_hash"
-                ),
-                {"commit_hash": commit_hash},
-            )
+            await self._execute_set_sync_hash(session, commit_hash)
+
+    async def apply_atomic(
+        self,
+        *,
+        revokes: Iterable[GrantRow],
+        upserts: Iterable[GrantRow],
+        commit_hash: str,
+    ) -> None:
+        """Apply revokes + upserts + sync-hash in ONE transaction.
+
+        sec-pr-s3-6-02 / perf-002 / err-003: see the
+        :meth:`StorageBackend.apply_atomic` Protocol docstring for the
+        full atomicity contract. The implementation here runs the
+        existing SQL helpers inside a single ``async with
+        session.begin()`` block — any :class:`sqlalchemy.exc.SQLAlchemyError`
+        rolls back the entire transaction and propagates to the caller
+        unchanged.
+
+        ``revokes`` and ``upserts`` are materialised once via
+        :func:`list` because the caller (the gate) may pass a single-use
+        generator-like iterable; the SQL execution iterates in deterministic
+        revoke-then-upsert order so the audit-graph invariant pinned by
+        the tier_laundering adversarial suite holds.
+        """
+        revoke_list = list(revokes)
+        upsert_list = list(upserts)
+        async with self._session() as session:
+            for grant in revoke_list:
+                await self._execute_revoke_grant(
+                    session,
+                    plugin_id=grant.plugin_id,
+                    hookpoint=grant.hookpoint,
+                    subscriber_tier=grant.subscriber_tier,
+                )
+            for grant in upsert_list:
+                await self._execute_upsert_grant(session, grant)
+            await self._execute_set_sync_hash(session, commit_hash)
