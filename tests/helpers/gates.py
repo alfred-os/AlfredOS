@@ -90,12 +90,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 from alfred.hooks.capability import CapabilityGate
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
+
+if TYPE_CHECKING:
+    from alfred.security.capability_gate._audit_protocols import _AuditSink
+    from alfred.security.capability_gate.backend import StorageBackend
 
 # The three tier strings the fixture-parity gate recognises. Module-level
 # so a maintainer changing the closed set surfaces the change next to
@@ -105,7 +109,7 @@ _FIXTURE_TIERS_GRANTED_UNCONDITIONALLY: frozenset[str] = frozenset({"operator", 
 _FIXTURE_TIER_GATED_BY_ALLOW_SYSTEM: str = "system"
 
 
-def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> Any:
+def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
     """Return a :class:`StorageBackend`-shaped stub pre-loaded with ``grants``.
 
     The stub satisfies the structural :class:`StorageBackend` Protocol
@@ -114,6 +118,17 @@ def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> Any:
     :class:`GatePolicy` snapshot, not the backend, so the backend's
     return values only matter on the heartbeat path — which tests can
     opt out of by leaving ``start_heartbeat=False``.
+
+    Return type is the :class:`StorageBackend` Protocol, not :class:`Any`:
+    the Protocol is ``@runtime_checkable`` and the caller feeds the
+    result to :class:`RealGate.__init__`'s ``backend: StorageBackend``
+    parameter, so the structural type hint is the load-bearing contract.
+    Mirrors the production-side stub builder
+    :func:`alfred.bootstrap.gate_factory._make_in_process_backend` (the
+    pair is duplicated by design per ADR-0019 — the production stub
+    cannot live under ``src/`` AND be importable from tests, and the
+    test stub cannot live under ``tests/`` AND be importable from
+    ``src/``).
     """
     backend = MagicMock()
     backend.ping = AsyncMock(return_value=None)
@@ -126,7 +141,7 @@ def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> Any:
     return backend
 
 
-def _make_no_op_audit_sink() -> Any:
+def _make_no_op_audit_sink() -> _AuditSink:
     """Return an audit-sink stub for tests that don't assert on rows.
 
     err-003: :meth:`RealGate.create` requires an audit sink so a
@@ -135,6 +150,14 @@ def _make_no_op_audit_sink() -> Any:
     audit emission isn't the property under test — the no-op sink
     satisfies the constructor contract without inflating the test
     surface area.
+
+    Return type is the :class:`_AuditSink` Protocol (shared with
+    :mod:`alfred.security.capability_gate.proposals` per
+    :mod:`alfred.security.capability_gate._audit_protocols`), not
+    :class:`Any`: a future addition to the Protocol surfaces here as a
+    mypy failure rather than a silent runtime :class:`AttributeError`.
+    Mirrors :func:`alfred.bootstrap.gate_factory._make_no_op_audit_sink`
+    (duplicated by design per ADR-0019).
     """
     sink = MagicMock()
     sink.append_schema = AsyncMock(return_value=None)
