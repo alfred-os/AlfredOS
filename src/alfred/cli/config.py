@@ -123,14 +123,35 @@ _KEY_TO_YAML_PATH: Final[dict[str, str]] = {
 
 
 def _valid_keys_csv() -> str:
-    """Return every valid CLI key sorted + comma-separated.
+    """Return every valid CLI ``set`` key sorted + comma-separated.
 
     Used by the unknown-key error message so the operator sees the
     closed set in alphabetical order regardless of dict insertion
     order. Centralised so a future addition to either set is reflected
     automatically.
+
+    Both the low-blast (``policies.yaml``-backed) keys and the
+    high-blast (reviewer-gated) keys are valid set targets — ``set``
+    is the surface that routes high-blast keys through the proposal
+    flow.
     """
     return ", ".join(sorted(set(_KEY_TO_YAML_PATH) | _HIGH_BLAST_KEYS))
+
+
+def _valid_get_keys_csv() -> str:
+    """Return the keys ``config get`` can actually read.
+
+    CR-149: the previous shape reused :func:`_valid_keys_csv` for the
+    ``get`` unknown-key path, which advertised ``quarantined-provider``
+    (a high-blast knob whose value never lives in ``policies.yaml``)
+    as a readable key. The operator then read "key is valid" while
+    the same command refused to render it — a Spec §11.2 UX
+    contradiction. ``get`` is restricted to the low-blast key set
+    that ``policies.yaml`` actually stores; high-blast keys are
+    surfaced via the dedicated "reviewer-gated / set-only" branch in
+    :func:`config_get`.
+    """
+    return ", ".join(sorted(_KEY_TO_YAML_PATH))
 
 
 def _parse_scalar(value: str) -> int | float | str:
@@ -219,6 +240,24 @@ def _atomic_write_text(target: Path, content: str) -> None:
         # patches ``alfred.cli.config.os.replace`` to simulate rename
         # failures; routing via ``Path.replace`` would bypass the seam.
         os.replace(tmp_path, target)  # noqa: PTH105
+        # CR-149: ``write + fsync(file) + rename`` guarantees the new
+        # data hits disk and the rename is atomic vs concurrent
+        # readers, but on POSIX the directory entry that points at the
+        # renamed file is only durable once the *containing directory*
+        # is also fsynced. Without the directory fsync, a power loss
+        # between the rename and the next directory metadata flush can
+        # lose the rename and leave the operator with the old
+        # ``policies.yaml`` — defeating the sec-pr-s3-6-06 crash-safety
+        # claim. The ``OSError`` suppression is the POSIX-portability
+        # branch: some platforms (Windows, certain FUSE mounts) do not
+        # support directory ``fsync``; the helper still publishes the
+        # file atomically there even without the durability guarantee.
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except BaseException:
         # Clean up the tempfile on any failure path so a crash here
         # does not leave ``.policies.yaml.<random>.tmp`` debris.
@@ -379,13 +418,29 @@ def config_get(
     because they don't live in ``policies.yaml`` (their value lives in
     routing.yaml + the supervisor config that the proposal merges into).
     """
+    # CR-149: distinguish "high-blast key, not readable here" from
+    # "unknown key". The high-blast set is a valid target for
+    # ``set`` (it routes through the reviewer-gated proposal flow)
+    # but the value never lands in ``policies.yaml``; the prior
+    # shape rejected it with the same "did you mean..." message used
+    # for typos, listing ``quarantined-provider`` among the "valid
+    # keys" while simultaneously refusing to render it. The dedicated
+    # branch below surfaces the truth: this key exists, but its
+    # value lives in ``routing.yaml`` after the reviewer merges the
+    # proposal — see ``alfred config set quarantined-provider ...``.
+    if key in _HIGH_BLAST_KEYS:
+        typer.echo(
+            t("cli.config.get.reviewer_gated_set_only", key=key),
+            err=True,
+        )
+        raise typer.Exit(code=1)
     yaml_key = _KEY_TO_YAML_PATH.get(key)
     if yaml_key is None:
         typer.echo(
             t(
                 "cli.config.get.unknown_key",
                 key=key,
-                valid_keys=_valid_keys_csv(),
+                valid_keys=_valid_get_keys_csv(),
             ),
             err=True,
         )

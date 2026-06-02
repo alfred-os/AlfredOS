@@ -142,9 +142,27 @@ class WebAllowlistProposal(StateGitProposalPayload):
 
     ``action`` is the closed Literal ``"add" | "remove"`` so a future
     third value can land only via a typed update — not by a CLI typo.
-    ``path_prefix`` defaults to ``"/"`` matching the spec §7.4
-    normalisation rule (an unspecified prefix scopes the entry to every
-    path under the domain).
+
+    ``path_prefix`` semantics:
+
+    * On ``action="add"`` the field defaults to ``"/"`` matching the
+      spec §7.4 normalisation rule — an unspecified prefix scopes
+      the entry to every path under the domain.
+    * On ``action="remove"`` the field is ``None`` to encode
+      whole-entry deletion. The previous shape left ``path_prefix``
+      at its model default (``"/"``), so a reviewer reading the
+      proposal saw "remove `/` prefix only" while the parallel
+      audit row recorded ``path_prefix=None`` ("remove whole entry"),
+      and the downstream merge-side consumer could silently turn a
+      whole-entry delete into a root-prefix-only delete (CR-149 +
+      spec §11.1 reviewer-gated intent). Making the field nullable
+      keeps the payload, the audit row, and the eventual merge
+      handler all agreeing on "remove targets the whole entry".
+
+    Validation: when ``action="add"`` the field must be a string
+    (``None`` is rejected); when ``action="remove"`` either ``None``
+    OR a string is accepted, but the CLI always sends ``None`` so
+    the on-disk shape stays uniform across the remove family.
     """
 
     # Two on-disk types share this model — ``web-allowlist-add`` and
@@ -156,7 +174,7 @@ class WebAllowlistProposal(StateGitProposalPayload):
 
     action: Literal["add", "remove"]
     domain: str
-    path_prefix: str = "/"
+    path_prefix: str | None = "/"
 
 
 class ConfigSetProposal(StateGitProposalPayload):

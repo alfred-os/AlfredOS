@@ -252,17 +252,49 @@ def grant(
     parsed off ``ctx.args``).
     """
     extra = list(ctx.args)
-    if first in _GRANT_RESERVED_SUBCOMMANDS:
-        if first == "status":
-            if len(extra) != 1:
-                typer.echo(t("cli.plugin.grant.status.usage_error"), err=True)
-                raise typer.Exit(code=2)
-            _do_grant_status(extra[0])
-            return
-        # first == "list"
-        pending = "--pending" in extra
-        _do_grant_list(pending=pending)
+    # CR-149: the reserved-subcommand branch only fires when the
+    # token sequence EXACTLY matches the subcommand's allowed shape:
+    #
+    # * ``grant status <proposal_id>``      — first == "status", len(extra) == 1
+    # * ``grant list``                       — first == "list",   extra == []
+    # * ``grant list --pending``             — first == "list",   extra == ["--pending"]
+    #
+    # Any other shape (extra tokens, flag typos, mismatched count)
+    # falls through to the normal grant-request path and surfaces the
+    # usage error there. Two failure modes the previous shape
+    # silently swallowed:
+    #
+    # 1. Plugin ids named ``status`` / ``list`` could never be
+    #    granted: the reserved-name branch consumed them
+    #    unconditionally, treating ``grant status foo bar`` as
+    #    ``status foo bar`` (one positional too many → usage error)
+    #    and ``grant list user-plugin tool.x`` as
+    #    ``list user-plugin tool.x`` (silently accepting the
+    #    extras because the list branch only checked for
+    #    ``--pending`` membership).
+    # 2. ``grant list --pendng`` (typo) silently rendered the
+    #    non-pending list with no warning — the parser accepted
+    #    every token whose membership test for ``"--pending"``
+    #    returned False.
+    #
+    # Failing closed here means the operator gets the usage error
+    # on a typo instead of silently observing the wrong surface.
+    if first == "status" and len(extra) == 1:
+        _do_grant_status(extra[0])
         return
+    if first == "list" and (extra == [] or extra == ["--pending"]):
+        _do_grant_list(pending=extra == ["--pending"])
+        return
+    if first in _GRANT_RESERVED_SUBCOMMANDS:
+        # Reserved verb with mismatched extra tokens — emit the
+        # usage error rather than falling through to the
+        # grant-request path, which would interpret e.g. ``status``
+        # as a plugin id and demand two extra positionals.
+        if first == "status":
+            typer.echo(t("cli.plugin.grant.status.usage_error"), err=True)
+        else:
+            typer.echo(t("cli.plugin.grant.usage_error"), err=True)
+        raise typer.Exit(code=2)
     if len(extra) != 2:
         typer.echo(t("cli.plugin.grant.usage_error"), err=True)
         raise typer.Exit(code=2)
@@ -376,11 +408,25 @@ def revoke(
     """
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_FIELDS
 
+    # CR-149: the audit event for the proposal-enqueue path is
+    # ``plugin.grant.revoke.requested`` (an inflight / requested
+    # row), NOT the terminal ``plugin.grant.revoked``. The proposal
+    # is not yet approved or applied at this point: the reviewer
+    # has to approve it, and the rebuild/apply path then emits the
+    # terminal ``plugin.grant.revoked`` audit row when the row
+    # actually leaves the ``plugin_grants`` table. Collapsing the
+    # two into a single name skews ``alfred audit graph`` (the
+    # operator sees "revoked" rows for proposals the reviewer has
+    # not even seen yet) and breaks the trust-sensitive
+    # request → approval → terminal-state correlation downstream
+    # consumers depend on. The schema (``PLUGIN_GRANT_FIELDS``) is
+    # unchanged because the row shape is the same — only the event
+    # name differs between request-time and apply-time.
     queue_proposal_or_exit(
         payload=PluginRevokeProposal(plugin_id=plugin_id),
         denied_key="cli.plugin.revoke.denied",
         pending_review_key="cli.plugin.revoke.pending_review",
-        audit_event="plugin.grant.revoked",
+        audit_event="plugin.grant.revoke.requested",
         audit_schema_name="PLUGIN_GRANT_FIELDS",
         audit_fields=PLUGIN_GRANT_FIELDS,
         audit_subject_partial={
