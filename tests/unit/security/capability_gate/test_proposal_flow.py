@@ -290,47 +290,57 @@ async def test_create_proposal_default_content_tier_is_none() -> None:
     assert captured["content_tier"] is None
 
 
-async def test_write_proposal_stub_raises_not_implemented() -> None:
-    """CR-139 finding #5: the PR-S3-2 stub is fail-loud, not silent.
+async def test_write_proposal_shim_validates_payload() -> None:
+    """ADR-0018 / Stage 4: the previous PR-S3-2 NotImplementedError stub
+    is replaced with a thin shim into
+    :class:`alfred.cli._state_git.StateGitProposalClient` (see
+    :doc:`/docs/adr/0018-state-git-proposal-writer-consolidation`).
 
-    Spec §6.4 / §8.3: the real state.git write lands in PR-S3-6
-    alongside the CLI wiring. Until then, calling the stub MUST raise
-    :class:`NotImplementedError` so a caller cannot accidentally emit
-    ``plugin.grant.requested`` for a branch that was never durably
-    written. Matches the err-002 shape used by
-    :meth:`RealGate.rebuild_from_state_git`.
+    Pydantic's Literal-bound ``subscriber_tier`` refuses anything
+    outside the closed set, so a typo at the call site fails at the
+    model boundary BEFORE the sync writer touches state.git. This test
+    replaces the legacy ``NotImplementedError`` regression with the
+    Pydantic-validation guarantee.
     """
+    from pydantic import ValidationError
+
     from alfred.security.capability_gate.proposals import (
         _write_proposal_to_state_git,
     )
 
-    with pytest.raises(NotImplementedError, match=r"PR-S3-6"):
+    with pytest.raises(ValidationError):
         await _write_proposal_to_state_git(
             branch_name="proposal/policy-grant-stubtest",
             plugin_id="p",
-            subscriber_tier="operator",
+            subscriber_tier="not-a-tier",  # closed-set refusal
             hookpoint="h",
             content_tier=None,
             operator_user_id="op@example.com",
         )
 
 
-async def test_create_proposal_branch_unpatched_stub_propagates_raise() -> None:
-    """Un-patched ``create_proposal_branch`` propagates the stub's raise.
+async def test_create_proposal_branch_unpatched_shim_propagates_state_git_failure() -> None:
+    """Un-patched ``create_proposal_branch`` surfaces a sync-writer failure.
 
-    The audit row MUST NOT emit when the state.git write hasn't
-    landed. Since :func:`_write_proposal_to_state_git` is fail-loud
-    until PR-S3-6, an un-patched call to
-    :func:`create_proposal_branch` MUST surface the
-    :class:`NotImplementedError` directly to the caller and leave the
-    audit sink untouched.
+    ADR-0018: the previous PR-S3-2 ``NotImplementedError`` stub is
+    replaced with the asyncio shim into
+    :class:`alfred.cli._state_git.StateGitProposalClient`. In a unit
+    environment the default state.git path
+    (``/var/lib/alfred/state.git``) does not exist, so the un-patched
+    shim must propagate a :class:`StateGitError` (typed) — never let
+    the audit row emit for a branch the writer could not durably
+    persist. CLAUDE.md hard rule #7 forbids the silent skip.
+
+    The original "NotImplementedError" surface is preserved as a
+    structural invariant: the audit sink stays untouched on failure.
     """
+    from alfred.cli._state_git import StateGitError
     from alfred.security.capability_gate.proposals import create_proposal_branch
 
     backend = _make_backend()
     sink, emitted = _make_spy_sink()
 
-    with pytest.raises(NotImplementedError, match=r"PR-S3-6"):
+    with pytest.raises(StateGitError):
         await create_proposal_branch(
             plugin_id="p",
             subscriber_tier="operator",
@@ -392,11 +402,18 @@ def test_write_proposal_log_does_not_emit_operator_user_id() -> None:
     via SecretBroker.redact + the generic API-key regex but does NOT
     scrub user identifiers. The full id is available in the audit-row
     fields where it belongs.
+
+    ADR-0018: the previous NotImplementedError stub is now the asyncio
+    shim into the sync writer. In a unit environment the default
+    state.git path does not exist, so the shim raises
+    :class:`StateGitError` after the structlog event is emitted; the
+    PII assertion checks the event payload, not the failure mode.
     """
     import asyncio
 
     import structlog.testing
 
+    from alfred.cli._state_git import StateGitError
     from alfred.security.capability_gate.proposals import (
         _write_proposal_to_state_git,
     )
@@ -404,11 +421,18 @@ def test_write_proposal_log_does_not_emit_operator_user_id() -> None:
     canonical_email = "alice@example.com"
     with (
         structlog.testing.capture_logs() as captured,
-        pytest.raises(NotImplementedError),
+        # The shim's downstream sync writer surfaces a StateGitError when
+        # the default state.git path does not exist (PATH_MISSING). The
+        # structlog event fires BEFORE the sync writer is invoked so the
+        # PII discipline assertion still observes the event payload.
+        pytest.raises(StateGitError),
     ):
         asyncio.run(
             _write_proposal_to_state_git(
-                branch_name="proposal/p1",
+                # Match the canonical ``proposal/policy-grant-<hex>``
+                # prefix so the branch-name guard passes and execution
+                # reaches the structlog emit + sync writer.
+                branch_name="proposal/policy-grant-deadbeefdeadbeef",
                 plugin_id="alfred-foo",
                 subscriber_tier="user-plugin",
                 hookpoint="plugin.foo",
