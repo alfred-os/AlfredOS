@@ -1303,3 +1303,23 @@ See [QuarantinedExtractor](#quarantinedextractor),
 [ExtractionResult](#extractionresult),
 [T3DerivedData](#t3deriveddata), spec §3.4, and
 [docs/subsystems/security.md](subsystems/security.md).
+
+## Provenance
+
+The lineage metadata that survives [`quarantined_to_structured`](#quarantined_to_structured)
+and identifies the content-trust origin of a value. In Slice 3,
+provenance is expressed as the [`T3DerivedData`](#t3deriveddata)
+`NewType`: a value carrying `T3DerivedData` originated from T3
+(external, untrusted) content and must pass through
+`downgrade_to_orchestrator()` before reaching privileged prompts.
+Slice 4 promotes provenance to a full type-parameter axis on
+`TaggedContent[T, Provenance]`. Distinct from [trust tier](#trust-tier)
+— trust tier describes the *source* of data at ingestion time;
+provenance follows the data through transformation steps and survives
+the dual-LLM split.
+
+See [T3DerivedData](#t3deriveddata),
+[quarantined_to_structured](#quarantined_to_structured),
+[trust tier](#trust-tier),
+[dual-LLM split](#dual-llm-split), spec §3.7, and
+[docs/subsystems/security.md](subsystems/security.md).
