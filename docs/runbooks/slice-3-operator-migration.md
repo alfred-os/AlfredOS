@@ -533,7 +533,7 @@ import-graph stability), but the function now constructs a
 stub, heartbeat disabled — instead of the old permissive `DevGate`. Every
 `check*` call against the dev gate now denies fail-closed; developers
 who need granted-system semantics for local iteration should construct
-the gate via the test helpers in `tests/helpers/gates/` or stand up a
+the gate via the test helpers in `tests/helpers/gates.py` or stand up a
 real Postgres + seeded grants table.
 
 The lazy-default at the `HookRegistry` boundary
