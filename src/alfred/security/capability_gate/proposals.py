@@ -94,16 +94,27 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
 
     Spec §14 (hookpoint table): the four ``plugin.grant.*`` events are
     post-only observability stages (no ``pre`` chain, no refusable
-    tier set), subscribers come from the system tier only because the
+    tier set). Subscribers come from the system tier only because the
     grant-lifecycle observers run inside the supervisor process and
     must not be extendable by an untrusted plugin (a user-plugin
     subscriber of ``plugin.grant.approved`` would see every operator
-    grant approval — that's an exfiltration path on its own), and
-    ``fail_closed=False`` because a crashing observer must not stall
-    a reviewer-approved grant.
+    grant approval -- that's an exfiltration path on its own).
+
+    sec-pr-s3-6-05: ``fail_closed=True``. The SYSTEM_ONLY_TIERS lock
+    keeps user-plugin subscribers out of the chain entirely, so
+    flipping fail_closed cannot regress availability for ordinary
+    user-plugin code -- only system-tier observers can subscribe at
+    all. Inside that system-tier chain, a crashing observer SHOULD
+    short-circuit the grant flow: a reviewer-gated capability grant
+    that the observer cannot record reliably is exactly the silent
+    audit-skip CLAUDE.md hard rule #7 forbids. The previous
+    ``fail_closed=False`` rationale ("a crashing observer must not
+    stall a reviewer-approved grant") would let the audit-row emission
+    fail silently while the grant goes live -- the operator cannot
+    later reconstruct who approved it, when, or against which payload.
 
     Idempotent on equal metadata (:meth:`HookRegistry.register_hookpoint`
-    semantics) — re-importing under pytest test isolation is safe.
+    semantics) -- re-importing under pytest test isolation is safe.
 
     Args:
         registry: The :class:`HookRegistry` to declare against.
@@ -116,7 +127,7 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
             name=hookpoint,
             subscribable_tiers=SYSTEM_ONLY_TIERS,
             refusable_tiers=frozenset(),
-            fail_closed=False,
+            fail_closed=True,
         )
 
 
