@@ -21,6 +21,7 @@ CONSTANT_NAMES: Final[tuple[str, ...]] = (
     "PLUGIN_LIFECYCLE_CRASHED_FIELDS",
     "PLUGIN_LIFECYCLE_QUARANTINED_FIELDS",
     "PLUGIN_GRANT_FIELDS",
+    "PLUGIN_GRANT_REQUESTED_FIELDS",
     "QUARANTINE_EXTRACT_FIELDS",
     "WEB_FETCH_FIELDS",
     "SUPERVISOR_BREAKER_RESET_FIELDS",
@@ -33,6 +34,8 @@ CONSTANT_NAMES: Final[tuple[str, ...]] = (
     "SUPERVISOR_CONFIG_INSECURE_FIELDS",
     "SUPERVISOR_ACTION_TIMEOUT_FIELDS",
     "WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS",
+    "WEB_ALLOWLIST_REQUESTED_FIELDS",
+    "CONFIG_SET_REQUESTED_FIELDS",
     "DLP_OUTBOUND_REFUSED_FIELDS",
     "SUPERVISOR_BREAKER_TRIPPED_FIELDS",
 )
@@ -173,6 +176,70 @@ def test_t3_derived_downgrade_distinct_from_t1_downgrade() -> None:
     # T3-derived must NOT carry user_id (T3-derived downgrade is per-extraction,
     # not per-user — forensic attribution flows via quarantined_llm_invocation_id).
     assert "user_id" not in audit_row_schemas.T3_DERIVED_DOWNGRADE_FIELDS
+
+
+def test_plugin_grant_requested_fields_aliases_plugin_grant_fields() -> None:
+    """PLUGIN_GRANT_REQUESTED_FIELDS is the same object as PLUGIN_GRANT_FIELDS.
+
+    Stage 3 (arch-001 / cross-cutting R2): the reviewer-gated CLI emits the
+    ``plugin.grant.requested`` row through the helper, which references this
+    name for emit-site clarity. The two constants are intentionally identical
+    so the schema-module test corpus stays the single source of truth — a
+    drift between them is a refactor bug that this assertion fails loudly on.
+    """
+    assert audit_row_schemas.PLUGIN_GRANT_REQUESTED_FIELDS is audit_row_schemas.PLUGIN_GRANT_FIELDS
+
+
+def test_web_allowlist_requested_fields_exact() -> None:
+    """WEB_ALLOWLIST_REQUESTED_FIELDS exact field list.
+
+    Stage 3 / arch-001: emitted at the moment ``alfred web allowlist
+    add|remove`` queues a state.git proposal. The ``action`` field
+    distinguishes the two reviewer-gated entry points so the audit graph
+    can join the CLI emit with the eventual projection-side merge row.
+    """
+    assert audit_row_schemas.WEB_ALLOWLIST_REQUESTED_FIELDS == frozenset(  # noqa: SIM300
+        {
+            "action",
+            "domain",
+            "path_prefix",
+            "operator_user_id",
+            "proposal_branch",
+            "correlation_id",
+        }
+    )
+
+
+def test_config_set_requested_fields_exact() -> None:
+    """CONFIG_SET_REQUESTED_FIELDS exact field list.
+
+    Stage 3 / arch-001: emitted at the moment ``alfred config set`` queues
+    a high-blast-key proposal. Crucially does NOT include ``value`` — that
+    field is reserved for the proposal payload the reviewer reads, never
+    for the audit row (CLAUDE.md hard rule #6: a future high-blast knob
+    whose value carries secret material would silently leak to the audit
+    log otherwise).
+    """
+    assert audit_row_schemas.CONFIG_SET_REQUESTED_FIELDS == frozenset(  # noqa: SIM300
+        {
+            "config_key",
+            "operator_user_id",
+            "proposal_branch",
+            "correlation_id",
+        }
+    )
+
+
+def test_config_set_requested_fields_excludes_value() -> None:
+    """The config-set audit family MUST NOT carry the ``value`` key.
+
+    CLAUDE.md hard rule #6: audit rows are structured records of
+    identifiers + policy knobs. ``value`` lives in the proposal payload
+    (which the reviewer reads) but never in the audit log — a future
+    operator-secrets knob would silently leak into the audit table
+    otherwise.
+    """
+    assert "value" not in audit_row_schemas.CONFIG_SET_REQUESTED_FIELDS
 
 
 def test_no_typing_constructs_leaked() -> None:

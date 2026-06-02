@@ -94,6 +94,15 @@ PLUGIN_GRANT_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Alias for emit-site clarity — every reviewer-gated CLI command that
+# queues a ``plugin.grant.requested`` row references this name so the
+# call site documents the event family without re-stating the field
+# tuple. The alias is the same object (``frozenset`` is hashable +
+# immutable) so ``PLUGIN_GRANT_REQUESTED_FIELDS is PLUGIN_GRANT_FIELDS``
+# holds and the schema-module test corpus stays the single source of
+# truth for grant audit-row shape (arch-001 / cross-cutting R2).
+PLUGIN_GRANT_REQUESTED_FIELDS: Final[frozenset[str]] = PLUGIN_GRANT_FIELDS
+
 # ---------------------------------------------------------------------------
 # quarantine.extract family
 # ---------------------------------------------------------------------------
@@ -354,6 +363,80 @@ WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS: Final[frozenset[str]] = frozens
         "manifest_domains",
         "operator_allowed_domains",
         "capped_domains",
+        "correlation_id",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# web.allowlist.requested family
+# ---------------------------------------------------------------------------
+
+# Emitted by the ``alfred web allowlist add`` / ``alfred web allowlist
+# remove`` CLI surfaces (arch-001 / cross-cutting R2) at the moment the
+# operator queues a reviewer-gated proposal. The row stand-in goes out
+# BEFORE the state.git write so a crash mid-write still leaves a
+# forensic breadcrumb pointing at operator intent — see the supervisor
+# CLI's ``_emit_breaker_reset_attempt_audit`` precedent (sec-pr-s3-6-04).
+#
+# action: ``"add"`` | ``"remove"`` — distinguishes the two reviewer-
+#   gated entry points so the audit graph can join an ``add`` request
+#   with the eventual ``web.allowlist.changed`` row the projection emits
+#   on reviewer merge. Distinct from the manifest-broadening capped
+#   family which fires at manifest load, not operator request.
+# operator_user_id: canonical user_id of the human operator who queued
+#   the proposal. PR-S3-7 wires the IdentityResolver bridge; until then
+#   the emit site passes ``None`` (devex-007) and the row carries the
+#   tag so the eventual upgrade is a single emit-site edit.
+# proposal_branch: full ``proposal/web-allowlist-{add,remove}-<hex>``
+#   name written into state.git. Carried so the audit-graph correlator
+#   can join the CLI-side row with the reviewer-merge row by branch.
+# path_prefix: same default + semantics as the CLI flag (``"/"`` when
+#   omitted). Carried so the reviewer payload + audit row stay
+#   structurally identical.
+# domain: the bare domain (not URL, no scheme). Closed-set validator
+#   refuses URL-shaped inputs at parse time so this field never carries
+#   path-traversal or scheme injection material.
+WEB_ALLOWLIST_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "action",
+        "domain",
+        "path_prefix",
+        "operator_user_id",
+        "proposal_branch",
+        "correlation_id",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# config.set.requested family
+# ---------------------------------------------------------------------------
+
+# Emitted by the ``alfred config set`` CLI surface on the high-blast-key
+# branch (arch-001 / cross-cutting R2). Low-blast keys mutate
+# ``config/policies.yaml`` directly and do NOT emit through this family
+# — they have no reviewer gate so the audit-graph traversal does not
+# need to join a CLI emit to a reviewer-merge.
+#
+# CLAUDE.md hard rule #6 (secrets in the broker, not in payload): the
+# row does NOT carry ``value`` even though the proposal payload does.
+# A future high-blast knob whose value carries secret material (the
+# quarantined-provider knob does not today, but a hypothetical
+# operator-secrets knob could) would silently leak the secret into the
+# audit log if ``value`` lived here. The audit row carries only the
+# config_key + the proposal-flow metadata; the reviewer reads the value
+# from the proposal payload itself.
+#
+# config_key: the closed-set CLI key ("quarantined-provider" today).
+#   The known set lives in :data:`alfred.cli.config._HIGH_BLAST_KEYS`.
+# operator_user_id: same semantics as the plugin-grant + web-allowlist
+#   families — PR-S3-7 wires the resolver, the row carries the tag
+#   today as ``None`` (devex-007).
+# proposal_branch: full ``proposal/config-<key>-<hex>`` name.
+CONFIG_SET_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "config_key",
+        "operator_user_id",
+        "proposal_branch",
         "correlation_id",
     }
 )
