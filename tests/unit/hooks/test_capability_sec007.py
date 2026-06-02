@@ -291,6 +291,15 @@ def test_format_hits_renders_remediation_pointer(tmp_path: Path) -> None:
 
     A future reader debugging a CI failure should be able to act on the
     assertion text alone — no need to grep for ``sec-007`` separately.
+
+    The remediation keywords pinned here track the post-PR-S3-7
+    flag-day text (CR-156 round-6 3342416855):
+
+    * ``"constructor-injected"`` — the rule a future gate
+      implementation that lands in ``capability.py`` must honour.
+    * ``"gate_factory"`` — the env-isolation seam name; a developer
+      who hits this remediation message should know where ``ALFRED_ENV``
+      legitimately reads from.
     """
     fixture = tmp_path / "violator.py"
     fixture.write_text('import os\nv = os.getenv("X")\n')
@@ -299,7 +308,8 @@ def test_format_hits_renders_remediation_pointer(tmp_path: Path) -> None:
     assert "sec-007" in rendered
     assert str(fixture) in rendered
     assert "line 2" in rendered
-    assert "constructor-only" in rendered
+    assert "constructor-injected" in rendered
+    assert "gate_factory" in rendered
 
 
 def test_scanner_ignores_clean_module(tmp_path: Path) -> None:
