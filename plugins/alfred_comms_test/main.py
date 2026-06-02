@@ -270,6 +270,14 @@ async def _serve_stdin_stdout() -> None:
             continue
 
         method = request.get("method", "")
+        # CR-149 round-3 (JSON-RPC §4.1.2): a frame is a notification
+        # iff the ``id`` member is absent — NOT iff it is null. The
+        # prior ``request.get("id")`` collapsed those two cases and the
+        # subprocess replied to notifications, desynchronising the
+        # host's request/notification state machine. Detect membership
+        # explicitly so an explicit ``id: null`` is still a request
+        # (per spec §4.1) while a missing key suppresses the reply.
+        has_response_id = "id" in request
         req_id = request.get("id")
         params = request.get("params") or {}
 
@@ -285,8 +293,9 @@ async def _serve_stdin_stdout() -> None:
             # comms-003: emit the plugin → host inbound.message
             # notification after the lifecycle handler runs so the host
             # observes the response → notification ordering.
-            response["id"] = req_id
-            _emit(response)
+            if has_response_id:
+                response["id"] = req_id
+                _emit(response)
             _emit(_build_inbound_message_notification())
             continue
         if method == _METHOD_LIFECYCLE_STOP:
@@ -296,8 +305,11 @@ async def _serve_stdin_stdout() -> None:
         else:
             response = _build_method_not_found(method)
 
-        response["id"] = req_id
-        _emit(response)
+        # CR-149 round-3: same notification suppression here so the
+        # generic-path branch honours the JSON-RPC §4.1.2 contract.
+        if has_response_id:
+            response["id"] = req_id
+            _emit(response)
 
 
 if __name__ == "__main__":
