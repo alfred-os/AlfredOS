@@ -40,6 +40,7 @@ Hard invariants pinned here:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -65,8 +66,17 @@ def _git_env(home: Path) -> dict[str, str]:
 
     Forces a known-good HOME so git does not pick up the developer's
     global config (which can carry signing keys / commit hooks that
-    break in CI). PATH stays POSIX-minimal so the test does not depend
-    on the user's shell rc.
+    break in CI).
+
+    CR-149 round-6: PATH inherits the runner's current ``PATH`` rather
+    than being hard-coded to ``"/usr/bin:/bin"``. The hard-coded shape
+    only worked on Linux runners where ``git`` lives at ``/usr/bin/git``;
+    GitHub Actions macOS runners install git via Homebrew at
+    ``/opt/homebrew/bin/git`` (Apple Silicon) or ``/usr/local/bin/git``
+    (Intel) — both outside the previous PATH, which made every test
+    in this module fail with ``FileNotFoundError: git``. Inheriting the
+    runner PATH keeps the HOME sandbox intact while letting the
+    subprocess find git wherever it actually lives.
     """
     return {
         "GIT_AUTHOR_NAME": "t",
@@ -74,7 +84,7 @@ def _git_env(home: Path) -> dict[str, str]:
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@t",
         "HOME": str(home),
-        "PATH": "/usr/bin:/bin",
+        "PATH": os.environ.get("PATH", ""),
     }
 
 
