@@ -14,7 +14,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: src/alfred/bootstrap/gate_factory.py:114
+#: src/alfred/bootstrap/gate_factory.py:159
 msgid "bootstrap.gate_selected.devgate_warning"
 msgstr "fail-open capability stubs; do not use in production"
 
@@ -472,18 +472,18 @@ msgstr ""
 
 # PR-S3-6 Component E — alfred supervisor sub-app (status read-only,
 # reset --confirm gate). T1-tier per spec §10.8.
-#: src/alfred/cli/supervisor.py:27
+#: src/alfred/cli/supervisor.py:28
 msgid "cli.supervisor.help"
 msgstr "Inspect supervised components and reset tripped circuit breakers."
 
-#: src/alfred/cli/supervisor.py:202 src/alfred/cli/supervisor.py:222
-#: src/alfred/cli/supervisor.py:332
+#: src/alfred/cli/supervisor.py:267 src/alfred/cli/supervisor.py:287
+#: src/alfred/cli/supervisor.py:397
 msgid "cli.supervisor.status.no_supervisor_running"
 msgstr ""
 "Supervisor is not running. Start the Alfred stack with `docker compose up"
 " -d` and re-run `alfred supervisor status`."
 
-#: src/alfred/cli/supervisor.py:214
+#: src/alfred/cli/supervisor.py:279
 msgid "cli.supervisor.status.read_path_unavailable"
 msgstr ""
 "Breaker status unavailable: the read-path is not yet implemented. The "
@@ -491,39 +491,39 @@ msgstr ""
 "then, supervisor reset is the diagnostic surface (`alfred supervisor "
 "reset <component> --confirm`)."
 
-#: src/alfred/cli/supervisor.py:225
+#: src/alfred/cli/supervisor.py:290
 msgid "cli.supervisor.status.empty_hint"
 msgstr ""
 "No supervised components registered. Plugins appear here once the "
 "orchestrator boots them (PR-S3-3b)."
 
-#: src/alfred/cli/supervisor.py:229
+#: src/alfred/cli/supervisor.py:294
 msgid "cli.supervisor.status.column.component"
 msgstr "COMPONENT"
 
-#: src/alfred/cli/supervisor.py:230
+#: src/alfred/cli/supervisor.py:295
 msgid "cli.supervisor.status.column.state"
 msgstr "STATE"
 
-#: src/alfred/cli/supervisor.py:231
+#: src/alfred/cli/supervisor.py:296
 msgid "cli.supervisor.status.column.trip_count"
 msgstr "TRIPS"
 
-#: src/alfred/cli/supervisor.py:232
+#: src/alfred/cli/supervisor.py:297
 msgid "cli.supervisor.status.column.last_trip_at"
 msgstr "LAST TRIP"
 
-#: src/alfred/cli/supervisor.py:268
+#: src/alfred/cli/supervisor.py:333
 msgid "cli.supervisor.reset.usage"
 msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 
-#: src/alfred/cli/supervisor.py:282
+#: src/alfred/cli/supervisor.py:347
 msgid "cli.supervisor.reset.confirm_help"
 msgstr ""
 "Acknowledge that resetting the circuit breaker may re-enable a plugin "
 "that just failed 3+ times in 5 minutes. Required for any reset."
 
-#: src/alfred/cli/supervisor.py:302
+#: src/alfred/cli/supervisor.py:367
 msgid "cli.supervisor.reset.confirm_prompt"
 msgstr ""
 "Refusing to reset {component} without --confirm.\n"
@@ -532,24 +532,24 @@ msgstr ""
 "Pass --confirm to acknowledge that resetting may re-enable a plugin that "
 "just failed 3+ times in 5 minutes."
 
-#: src/alfred/cli/supervisor.py:312
+#: src/alfred/cli/supervisor.py:377
 msgid "cli.supervisor.reset.rerun_hint"
 msgstr "Re-run with: alfred supervisor reset {component} --confirm"
 
-#: src/alfred/cli/supervisor.py:376 src/alfred/cli/supervisor.py:419
-#: src/alfred/cli/supervisor.py:433
+#: src/alfred/cli/supervisor.py:439 src/alfred/cli/supervisor.py:482
+#: src/alfred/cli/supervisor.py:496
 msgid "cli.supervisor.reset.unexpected_error"
 msgstr ""
 "Failed to reset {component}: {error_type}. Check `alfred audit log "
 "--event supervisor.breaker.reset --since 5m`."
 
-#: src/alfred/cli/supervisor.py:405
+#: src/alfred/cli/supervisor.py:468
 msgid "cli.supervisor.reset.component_not_found"
 msgstr ""
 "Component not found: {component}. Run `alfred supervisor status` to list "
 "registered components."
 
-#: src/alfred/cli/supervisor.py:441
+#: src/alfred/cli/supervisor.py:504
 msgid "cli.supervisor.reset.success"
 msgstr "Reset circuit breaker for {component}. Audit row recorded."
 
