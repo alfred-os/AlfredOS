@@ -41,7 +41,6 @@ from typing import Annotated, Final
 
 import typer
 
-from alfred.audit.audit_row_schemas import WEB_ALLOWLIST_REQUESTED_FIELDS
 from alfred.cli._state_git import (
     StateGitProposalClient,
     queue_proposal_or_exit,
@@ -142,7 +141,15 @@ def allowlist_add(
     Stage 3 (arch-001): the audit-row stand-in fires via
     :data:`WEB_ALLOWLIST_REQUESTED_FIELDS` with ``action="add"``
     BEFORE the state.git write.
+
+    perf-001: ``audit_row_schemas`` is imported lazily here — its
+    parent ``alfred.audit`` package init eagerly loads
+    :mod:`alfred.memory.models` (SQLAlchemy ORM, ~140 ms), and the
+    constant is only needed when the operator actually queues an
+    allowlist mutation. ``alfred web allowlist --help`` does not pay.
     """
+    from alfred.audit.audit_row_schemas import WEB_ALLOWLIST_REQUESTED_FIELDS
+
     queue_proposal_or_exit(
         payload=WebAllowlistProposal(
             action="add",
@@ -192,7 +199,12 @@ def allowlist_remove(
     remove path because the operator targets an entire allowlist entry,
     not a single path-prefix slice (the audit family carries the field
     anyway so the join condition with the add-side row stays uniform).
+
+    perf-001: same lazy-import rationale as :func:`allowlist_add` — the
+    constant only matters when an operator actually issues the mutation.
     """
+    from alfred.audit.audit_row_schemas import WEB_ALLOWLIST_REQUESTED_FIELDS
+
     queue_proposal_or_exit(
         payload=WebAllowlistProposal(
             action="remove",
