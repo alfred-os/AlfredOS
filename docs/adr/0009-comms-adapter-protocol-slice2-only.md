@@ -63,9 +63,14 @@ the constraint retroactively.
   "Superseded by 00NN".
 
 Slice 3 ships a `CommsAdapterMCP` Protocol stub (`src/alfred/comms/mcp_protocol.py`)
-and a reference test plugin (`plugins/alfred-comms-test/`) that validates the MCP
+and a reference test plugin (`plugins/alfred_comms_test/`) that validates the MCP
 comms transport contract. The existing `DiscordAdapter` and `TuiAdapter` remain
 in-process through Slice 3, untouched. ADR-0016 commits Slice 4 to the full rewrite.
+
+(Plugin directory renamed from `alfred-comms-test` to `alfred_comms_test` during
+PR-S3-6 implementation: mypy's package-discovery walker only treats directories
+with valid Python identifiers as importable packages, so the hyphenated form
+was invisible to typing.)
 
 ## Alternatives considered
 

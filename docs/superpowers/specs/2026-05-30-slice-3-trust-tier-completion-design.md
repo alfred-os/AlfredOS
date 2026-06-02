@@ -743,7 +743,7 @@ The message-contract definition (full field schema, error shapes, rate-limit sig
 
 **Identity-resolver placement (Slice 3):** comms-MCP plugins send raw `(platform, platform_user_id)` over the wire via `inbound.message`; the orchestrator resolves identity before invoking `_ingest_tier`. The host-side `identity.resolve` callback (where a future adapter could call the orchestrator-side resolver over MCP) is Slice 4+. This decision is explicit: keeping resolution in-process to the orchestrator in Slice 3 avoids introducing a new callback wire type before ADR-0016 is finalized.
 
-A reference test plugin (`plugins/alfred-comms-test/`) exercises the contract: it is an MCP plugin that echoes messages back to the orchestrator, used in `tests/integration/test_comms_mcp_contract.py`.
+A reference test plugin (`plugins/alfred_comms_test/`) exercises the contract: it is an MCP plugin that echoes messages back to the orchestrator, used in `tests/integration/test_comms_mcp_contract.py`. (Renamed from `alfred-comms-test` to `alfred_comms_test` so mypy's package-discovery walker treats the directory as an importable Python package — hyphens make it invisible.)
 
 ### 9.2 Existing Discord+TUI adapters keep working in-process
 
@@ -1303,7 +1303,7 @@ The `superpowers:writing-plans` skill owns the formal plan suite. This section i
 
 8. **PR-S3-6 — Operator CLI surface + ADR-0009 comms-MCP contract:**
    - All `alfred plugin`, `alfred web allowlist`, `alfred config`, `alfred supervisor reset`, `alfred supervisor status` CLI commands.
-   - `src/alfred/comms/mcp_protocol.py` + `plugins/alfred-comms-test/` reference plugin.
+   - `src/alfred/comms/mcp_protocol.py` + `plugins/alfred_comms_test/` reference plugin.
    - `alfred audit graph --tier T3` extension.
 
 9. **PR-S3-7 — Flag-day: `DevGate` removal + integration test gate:**
