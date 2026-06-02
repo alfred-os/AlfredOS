@@ -69,6 +69,36 @@ _log = structlog.get_logger(__name__)
 _LOAD_GRANTS_ROW_CAP: Final[int] = 10_000
 
 
+def _grant_sort_key(grant: GrantRow) -> tuple[str, str, str, str, str]:
+    """Composite sort key over every typed :class:`GrantRow` field.
+
+    CR-149 round-6.5: :meth:`PostgresBackend.apply_atomic` receives
+    :class:`frozenset`-shaped inputs from the gate (the parser returns
+    ``frozenset[GrantRow]`` and the diff is computed by set algebra).
+    ``list(...)`` alone preserves Python's set iteration order, which
+    is hash-seeded and therefore unspecified between runs. Sorting by
+    this composite key before iterating pins the per-row SQL/audit
+    sequence so a rebuild always issues the same INSERT / UPDATE
+    order — the audit-graph linkage assertions in the
+    tier_laundering adversarial corpus rely on this determinism.
+
+    The key includes every typed field, ordered most-specific-first,
+    so two grants that disagree on ``content_tier`` (e.g.
+    ``("alfred.web-fetch", "*", "operator", "T2", "branch")`` and
+    ``("alfred.web-fetch", "*", "operator", "T3", "branch")``) sort
+    deterministically rather than relying on set hash ordering.
+    ``content_tier`` is coerced to ``""`` for the ``None`` case so the
+    tuple comparison stays well-typed under ``mypy --strict``.
+    """
+    return (
+        grant.plugin_id,
+        grant.hookpoint,
+        grant.subscriber_tier,
+        grant.content_tier or "",
+        grant.proposal_branch,
+    )
+
+
 @runtime_checkable
 class StorageBackend(Protocol):
     """Structural Protocol for the :class:`RealGate` backing store.
@@ -501,9 +531,21 @@ class PostgresBackend:
         generator-like iterable; the SQL execution iterates in deterministic
         revoke-then-upsert order so the audit-graph invariant pinned by
         the tier_laundering adversarial suite holds.
+
+        CR-149 round-6.5: the inputs are naturally :class:`frozenset`-
+        shaped (the parser returns ``frozenset[GrantRow]`` and the
+        policy diff is computed via set algebra), so ``list(...)``
+        alone preserves an unspecified iteration order that can shuffle
+        the audit-row sequence between calls. Sorting by the composite
+        grant key — every typed field, in a fixed lexicographic order —
+        pins the per-row SQL/audit sequence so a rebuild always issues
+        the same INSERT / UPDATE order. The audit-graph linkage
+        assertions in the tier_laundering adversarial corpus rely on
+        this deterministic ordering to compare against recorded
+        fixtures.
         """
-        revoke_list = list(revokes)
-        upsert_list = list(upserts)
+        revoke_list = sorted(revokes, key=_grant_sort_key)
+        upsert_list = sorted(upserts, key=_grant_sort_key)
         async with self._session() as session:
             for grant in revoke_list:
                 await self._execute_revoke_grant(

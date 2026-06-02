@@ -269,7 +269,6 @@ async def _serve_stdin_stdout() -> None:
             _emit(_build_invalid_request(None))
             continue
 
-        method = request.get("method", "")
         # CR-149 round-3 (JSON-RPC §4.1.2): a frame is a notification
         # iff the ``id`` member is absent — NOT iff it is null. The
         # prior ``request.get("id")`` collapsed those two cases and the
@@ -280,6 +279,22 @@ async def _serve_stdin_stdout() -> None:
         has_response_id = "id" in request
         req_id = request.get("id")
         params = request.get("params") or {}
+
+        # CR-149 round-6.5 (JSON-RPC §4.1 / §5.1): the ``method`` member
+        # is required and MUST be a non-empty string. Frames like
+        # ``{}`` or ``{"method": 1}`` previously fell through to
+        # ``_build_method_not_found`` (-32601), which is the wrong code
+        # — the spec mandates ``-32600 Invalid Request`` whenever the
+        # request object itself is malformed (method missing or wrong
+        # type). The notification-suppression contract still applies:
+        # only emit the reply when ``has_response_id`` is True so an
+        # explicit ``id: null`` still gets a structured error while a
+        # missing ``id`` (notification shape) does not.
+        method = request.get("method")
+        if not isinstance(method, str) or not method:
+            if has_response_id:
+                _emit(_build_invalid_request(req_id))
+            continue
 
         if method == _METHOD_LIFECYCLE_START:
             # CR-149 protocol compliance: every reply envelope carries
