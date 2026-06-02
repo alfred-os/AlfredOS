@@ -896,3 +896,129 @@ def test_emit_sync_no_running_loop_arm_bounds_stalling_sink() -> None:
     # The failed register leaves no trace — same invariant as the
     # primary-sink path.
     assert registry.subscribers_for("before_db_write", "pre") == ()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# err-002 — exactly-once audit row across the timeout race
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _LatentlyCompletingAuditSink:
+    """Structural :class:`alfred.hooks.audit_sink.AuditSink` whose
+    :meth:`emit` sleeps just long enough to land AFTER the
+    :data:`_EMIT_SYNC_THREAD_JOIN_SECONDS` bound.
+
+    Pins err-002: when the daemon thread's emit completes AFTER the
+    calling thread has fired the structlog fallback, the sink and the
+    fallback must NOT both record a row for the same correlation_id.
+    The :class:`threading.Lock` emit-claim ensures whichever side
+    acquires it first emits its row; the other side observes the
+    claim is taken and skips.
+
+    Sleep is 0.75 s — outside the 0.5 s bound, but small enough that
+    the daemon actually completes within the test's wall-clock window
+    (the daemon is *not* hung; it just lost the race).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def emit(
+        self,
+        *,
+        event: str,
+        correlation_id: str,
+        fields: Mapping[str, object],
+    ) -> None:
+        """Sleep 0.75 s then record the call.
+
+        The 0.75 s sleep lands outside the 0.5 s bound but inside the
+        test's 2.0 s wall-clock window, so the daemon completes mid-test.
+        """
+        await asyncio.sleep(0.75)
+        self.calls.append(
+            {
+                "event": event,
+                "correlation_id": correlation_id,
+                "fields": dict(fields),
+            }
+        )
+
+
+def test_emit_sync_running_loop_arm_no_double_row_when_daemon_completes_after_timeout() -> None:
+    """err-002: the daemon-thread arm of :meth:`HookRegistry._emit_sync`
+    MUST NOT double-emit the row when the sink completes AFTER the
+    calling thread has fired the structlog fallback.
+
+    The race: the daemon's :func:`asyncio.run` invocation can outlive
+    the bounded ``thread.join(timeout=_EMIT_SYNC_THREAD_JOIN_SECONDS)``.
+    A sink that takes 0.75 s to complete (versus the 0.5 s bound) will
+    have the calling thread proceed to the timeout fallback BEFORE the
+    sink's emit returns. Without the emit-claim Lock, this produces
+    two rows for the same correlation_id — the daemon's sink row plus
+    the calling thread's structlog fallback row.
+
+    With the emit-claim Lock:
+
+    * The calling thread acquires the claim (``acquire(blocking=False)``)
+      before firing the fallback. If the daemon already holds the
+      claim (it acquired it before calling ``asyncio.run``), the
+      calling thread's ``acquire`` returns ``False`` and the fallback
+      is skipped — the sink will record the row.
+    * The daemon's ``_drive`` acquires the claim before calling
+      ``sink.emit``. If the calling thread already won (post-timeout
+      fallback fired), the daemon's ``acquire`` returns ``False`` and
+      the sink call is skipped — the row is on the structlog
+      fallback.
+
+    Whichever side acquires the claim first emits. The other side
+    observes the claim is taken and emits nothing.
+
+    Test assertion: the sum of (rows recorded on the spy sink) + (rows
+    captured on the ``audit_fallback`` channel) is EXACTLY ONE.
+    """
+    sink = _LatentlyCompletingAuditSink()
+    registry = HookRegistry(
+        gate=make_deny_all_gate(),
+        sink=sink,
+        strict_declarations=True,
+    )
+    registry.register_hookpoint(
+        name="before_db_write",
+        subscribable_tiers=frozenset({"system", "operator"}),
+        refusable_tiers=frozenset({"system"}),
+        fail_closed=True,
+    )
+
+    async def _provoke() -> None:
+        """Trigger the running-loop arm via the tier-rejection raise."""
+        with pytest.raises(HookError, match="not allowed on hookpoint"):
+            registry.register(
+                hook_fn=_noop,
+                hookpoint="before_db_write",
+                kind="pre",
+                tier="user-plugin",
+            )
+
+    with structlog.testing.capture_logs() as captured:
+        asyncio.run(_provoke())
+        # Wait long enough for the daemon thread's sink.emit to either
+        # complete OR be suppressed by the emit-claim. The daemon's
+        # asyncio.sleep is 0.75 s; we wait 1.5 s to be safe across CI
+        # jitter — if the daemon survives the calling thread, it WILL
+        # have completed by this point.
+        time.sleep(1.5)
+
+    fallback_rows = [
+        c
+        for c in captured
+        if c.get("event") == HOOKS_TIER_REJECTED and c.get("reason") == "sink_emit_timeout"
+    ]
+    sink_rows = [c for c in sink.calls if c["event"] == HOOKS_TIER_REJECTED]
+    total_rows = len(fallback_rows) + len(sink_rows)
+    assert total_rows == 1, (
+        f"Expected EXACTLY one audit row across (sink + fallback); "
+        f"got sink={len(sink_rows)}, fallback={len(fallback_rows)}. "
+        f"This is err-002: the emit-claim Lock failed to suppress one "
+        f"side of the race."
+    )
