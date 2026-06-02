@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 03:01+0100\n"
+"POT-Creation-Date: 2026-06-02 03:03+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -390,37 +390,37 @@ msgstr "Plugin id whose grants will be revoked."
 msgid "cli.plugin.list.help.short"
 msgstr "List every plugin registered in the Postgres manifest projection."
 
-#: src/alfred/cli/plugin.py:417
+#: src/alfred/cli/plugin.py:425
 msgid "cli.plugin.list.not_implemented_yet"
 msgstr ""
 "alfred plugin list is not yet implemented. Pulls the manifest projection "
 "from Postgres once RealGate is seeded (PR-S3-7). Until then, inspect "
 "plugins via the plugin manifest files under plugins/."
 
-#: src/alfred/cli/plugin.py:421
+#: src/alfred/cli/plugin.py:429
 msgid "cli.plugin.show.help.short"
 msgstr "Show manifest details for a registered plugin."
 
-#: src/alfred/cli/plugin.py:426
+#: src/alfred/cli/plugin.py:434
 msgid "cli.plugin.show.arg.plugin_id"
 msgstr "Plugin id to inspect."
 
-#: src/alfred/cli/plugin.py:437
+#: src/alfred/cli/plugin.py:450
 msgid "cli.plugin.show.plugin_id_label"
 msgstr "plugin_id: {plugin_id}"
 
-#: src/alfred/cli/plugin.py:438
+#: src/alfred/cli/plugin.py:451
 msgid "cli.plugin.show.no_manifest_yet"
 msgstr ""
 "No manifest data available yet. The Postgres manifest projection lands in"
 " PR-S3-7; until then, inspect the plugin's manifest.toml under plugins/ "
 "directly."
 
-#: src/alfred/cli/plugin.py:455
+#: src/alfred/cli/plugin.py:468
 msgid "cli.plugin.grant.denied"
 msgstr "alfred plugin grant denied: {reason}"
 
-#: src/alfred/cli/plugin.py:456
+#: src/alfred/cli/plugin.py:469
 msgid "cli.plugin.grant.pending_review"
 msgstr ""
 "Grant proposal queued for reviewer approval.\n"
@@ -430,11 +430,11 @@ msgstr ""
 "approves the proposal and the supervisor rebuilds the capability "
 "projection."
 
-#: src/alfred/cli/plugin.py:457
+#: src/alfred/cli/plugin.py:470
 msgid "cli.plugin.revoke.denied"
 msgstr "alfred plugin revoke denied: {reason}"
 
-#: src/alfred/cli/plugin.py:458
+#: src/alfred/cli/plugin.py:471
 msgid "cli.plugin.revoke.pending_review"
 msgstr ""
 "Revocation proposal queued for reviewer approval.\n"

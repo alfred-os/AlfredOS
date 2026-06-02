@@ -404,9 +404,17 @@ def revoke(
 # ---------------------------------------------------------------------------
 
 
-@plugin_app.command("list", help=t("cli.plugin.list.help.short"))
+@plugin_app.command("list", help=t("cli.plugin.list.help.short"), hidden=True)
 def plugin_list() -> None:
-    """List registered plugins (PR-S3-7 follow-up).
+    """List registered plugins (deferred to a follow-up PR).
+
+    Hidden from ``alfred plugin --help`` per arch-006: the stub
+    behaviour (exit 2 + localised "not implemented yet" message) is
+    correct for an operator who has guessed the verb exists, but
+    advertising it as a first-class command via ``--help`` overstates
+    the surface this PR ships. The hidden flag keeps the command
+    reachable for operators who type it deliberately while keeping
+    the help table honest about what works today.
 
     devex-011 in plan §548: until the Postgres manifest projection is
     seeded, we MUST NOT emit silent-blank output — an operator could
@@ -418,7 +426,7 @@ def plugin_list() -> None:
     raise typer.Exit(code=2)
 
 
-@plugin_app.command("show", help=t("cli.plugin.show.help.short"))
+@plugin_app.command("show", help=t("cli.plugin.show.help.short"), hidden=True)
 def plugin_show(
     plugin_id: Annotated[
         str,
@@ -428,7 +436,12 @@ def plugin_show(
         ),
     ],
 ) -> None:
-    """Show manifest details for a registered plugin (PR-S3-7 follow-up).
+    """Show manifest details for a registered plugin (deferred to a follow-up PR).
+
+    Hidden from ``alfred plugin --help`` per arch-006 — same reasoning
+    as :func:`plugin_list` above: deliberate invokers still hit a
+    correct stub, but the help table no longer advertises a surface
+    this PR does not implement.
 
     Until the Postgres manifest projection is wired, we echo the plugin
     id back + a localised "no manifest available yet" hint so the
