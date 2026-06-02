@@ -33,7 +33,7 @@ from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookRegistry
 from alfred.memory.episodic import EpisodicRecordInput
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_deny_all_gate
 
 _PAYLOAD_ID: Final[str] = "tl-2026-006"
 _PAYLOAD_PATH: Final[Path] = (
@@ -62,13 +62,16 @@ def test_payload_yaml_present_and_well_formed() -> None:
 def test_user_plugin_subscriber_refused_on_system_only_hookpoint() -> None:
     """``HookRegistry.register`` refuses a user-plugin tier on a system-only hookpoint.
 
-    Wires a production-shaped :class:`make_default_test_gate` (the gate is consulted
-    only after the registration-time tier-allowlist; here the
-    allowlist fires first). Defines a no-op async subscriber, attempts
-    to register on the ``memory.episodic.record.before_db_write``
-    hookpoint at the ``user-plugin`` tier. The registry's
-    ``subscribable_tiers`` enforcement (#119) MUST refuse: HookError
-    raised + ``subscribers_for`` returns empty.
+    Wires the production-shaped :class:`RealGate` deny path
+    (:func:`make_deny_all_gate` — Slice-3 spec §15.1 mandates the
+    adversarial corpus assert against RealGate). The gate is
+    consulted only after the registration-time tier-allowlist; here
+    the allowlist fires first, with the gate as defense-in-depth.
+    Defines a no-op async subscriber, attempts to register on the
+    ``memory.episodic.record.before_db_write`` hookpoint at the
+    ``user-plugin`` tier. The registry's ``subscribable_tiers``
+    enforcement (#119) MUST refuse: HookError raised +
+    ``subscribers_for`` returns empty.
 
     This is the bypass-impossible posture for the two-axis design — an
     attacker who tries to slip into a T3-carrying hookpoint by
@@ -82,7 +85,7 @@ def test_user_plugin_subscriber_refused_on_system_only_hookpoint() -> None:
     # module-init time (a side-effect of importing
     # ``alfred.memory.episodic``). Force re-declaration via the local
     # registry below so the test doesn't depend on global import order.
-    registry = HookRegistry(gate=make_default_test_gate(), strict_declarations=True)
+    registry = HookRegistry(gate=make_deny_all_gate(), strict_declarations=True)
     registry.register_hookpoint(
         name="memory.episodic.record.before_db_write",
         subscribable_tiers=frozenset({"system"}),

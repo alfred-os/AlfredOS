@@ -44,7 +44,7 @@ from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookRegistry
 from alfred.memory.episodic import EpisodicRecordInput
 from tests.adversarial.payload_schema import AdversarialPayload
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_deny_all_gate
 from tests.unit.hooks.conftest import SpyAuditSink
 
 _PAYLOAD_ID: Final[str] = "hk-2026-002"
@@ -94,14 +94,18 @@ def test_user_plugin_rejected_on_security_hookpoint(
        on hookpoint" message + the :data:`HOOKS_TIER_REJECTED` audit
        row lands + the registry's bucket stays empty.
 
-    The :class:`make_default_test_gate` is constructed with ``allow_system=False`` —
-    the production posture per sec-001. Were the registration to slip
-    past the new tier-allowlist gate, the existing capability-gate
-    deny path (covered by :mod:`tests.adversarial.hooks.test_hk_2026_001_tier_escalation`)
-    would still catch the system-tier subset; this test ONLY exercises
-    the new register-time tier-allowlist gate from #119, with a
-    user-plugin tier the existing :class:`make_default_test_gate` would have
-    accepted.
+    The :class:`RealGate` is built with an empty grant store
+    (:func:`make_deny_all_gate`) — Slice-3 spec §15.1 mandates the
+    adversarial corpus assert against RealGate's deny path. The
+    registration-time tier-allowlist check fires BEFORE the gate
+    consult in :meth:`HookRegistry.register`, so the gate's deny
+    posture is defense-in-depth here: the test asserts the tier-
+    allowlist refuses first, and the gate would also refuse if the
+    allowlist were somehow bypassed. The capability-gate refusal
+    arm is covered by
+    :mod:`tests.adversarial.hooks.test_hk_2026_001_tier_escalation`;
+    this test ONLY exercises the register-time tier-allowlist gate
+    from #119.
     """
     # Payload shape sanity — dict form is what the new payload uses.
     payload_fields = registration_tier_rejection_payload.payload
@@ -129,12 +133,14 @@ def test_user_plugin_rejected_on_security_hookpoint(
     )
 
     spy_sink = SpyAuditSink()
-    # ``make_default_test_gate()`` is the production posture
-    # (sec-001). For a user-plugin tier, ``the fixture-parity gate.check`` would return
-    # True (user-plugin is unconditionally granted by the dev gate); the
-    # rejection here comes from the new register-time tier-allowlist
-    # gate, NOT the capability gate.
-    registry = HookRegistry(gate=make_default_test_gate(), sink=spy_sink, strict_declarations=True)
+    # :func:`make_deny_all_gate` is :class:`RealGate` over an empty
+    # :class:`GatePolicy` — the production hot path with no grants
+    # seeded. The capability-gate consult would deny if reached, but
+    # the rejection here comes from the new register-time tier-
+    # allowlist gate (#119), which fires BEFORE the capability gate
+    # in :meth:`HookRegistry.register`. This is defense-in-depth:
+    # tier-allowlist refuses first; gate would also refuse if it ran.
+    registry = HookRegistry(gate=make_deny_all_gate(), sink=spy_sink, strict_declarations=True)
 
     # Declare the hookpoint with the SAME metadata the production
     # publisher (:mod:`alfred.memory.episodic`) declares. The
