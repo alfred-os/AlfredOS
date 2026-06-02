@@ -61,7 +61,9 @@ AlfredOS/
     │   ├── comms.md                # CommsAdapter / DiscordAdapter / OutboundDlp / RateLimiter
     │   ├── hooks.md                # hookpoints, hook kinds, hook tiers, dispatcher
     │   ├── security.md             # trust tiers (T0-T3), nonce gate, capability gate (Slice 3)
-    │   └── plugins.md              # MCP transport, StdioTransport, session lifecycle (Slice 3)
+    │   ├── plugins.md              # MCP transport, StdioTransport, session lifecycle (Slice 3)
+    │   ├── supervisor.md           # plugin supervisor, circuit breaker, action-deadline (Slice 3)
+    │   └── quarantine.md           # dual-LLM split, T3 structured extraction, ContentHandle (Slice 3)
     └── superpowers/specs/          # design docs (this is the path the brainstorming skill expects)
 ```
 
@@ -102,7 +104,7 @@ AlfredOS/
 | Manage users | `alfred user add|list|show|set|remove|bind|unbind` (see ADR-0010) |
 | Plugin management | `alfred plugin grant <id> <tier> <hookpoint>` · `alfred plugin grant status <id>` · `alfred plugin grant list --pending` · `alfred plugin revoke <id>` (Slice 3; `alfred plugin list` / `show` hidden from `--help` per arch-006 follow-up) |
 | Web fetch allowlist | `alfred web allowlist add <domain>` · `alfred web allowlist remove <domain>` · `alfred web allowlist list` (Slice 3) |
-| Config (reviewer-gated) | `alfred config set quarantined-provider <value>` · `alfred config set web-fetch-budget <user> <n>` · `alfred config get <key>` · `alfred config list` (Slice 3) |
+| Config (reviewer-gated + direct) | `alfred config set <key> <value>` (high-blast keys queue a state.git proposal; low-blast keys write `policies.yaml` directly) · `alfred config get <key>` · `alfred config list` (Slice 3) — see `alfred config set --help` for the closed key set (`quarantined-provider`, `web-fetch-budget`, `operator-fetch-budget`, `extraction-max-retries`, `action-deadline`, `user-agent`) |
 | Supervisor | `alfred supervisor status` · `alfred supervisor reset <component> --confirm` (Slice 3) |
 | Audit (extended) | `alfred audit graph --tier T0|T1|T2|T3 --since 24h` (Slice 3) |
 
