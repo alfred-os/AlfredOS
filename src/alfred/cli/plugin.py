@@ -47,6 +47,11 @@ from alfred.cli._state_git import (
     StateGitError,
     StateGitProposalClient,
 )
+from alfred.cli._validators import (
+    validate_hookpoint,
+    validate_plugin_id,
+    validate_subscriber_tier,
+)
 from alfred.i18n import t
 
 # The CLI surface re-exports :data:`PLUGIN_GRANT_FIELDS` so the
@@ -231,11 +236,23 @@ def grant(
     if len(extra) != 2:
         typer.echo(t("cli.plugin.grant.usage_error"), err=True)
         raise typer.Exit(code=2)
-    subscriber_tier, hookpoint = extra
+    subscriber_tier_raw, hookpoint_raw = extra
+    # sec-pr-s3-6-01: closed-set parser-time validation BEFORE the
+    # proposal-write path. ``grant`` swallows positionals via
+    # ``ctx.args`` to multiplex the shorthand against the reserved
+    # subcommands, so the per-Argument ``callback=`` plumbing the other
+    # Typer commands use is not available here. The validator helpers
+    # raise :class:`typer.BadParameter` with a localised body; Typer
+    # converts that into a clean stderr line + exit code 2 — no raw
+    # traceback, no proposal payload that the reviewer has to either
+    # notice or merge.
+    validated_plugin_id = validate_plugin_id(first)
+    validated_tier = validate_subscriber_tier(subscriber_tier_raw)
+    validated_hookpoint = validate_hookpoint(hookpoint_raw)
     _queue_grant_proposal(
-        plugin_id=first,
-        subscriber_tier=subscriber_tier,
-        hookpoint=hookpoint,
+        plugin_id=validated_plugin_id,
+        subscriber_tier=validated_tier.value,
+        hookpoint=validated_hookpoint,
     )
 
 
@@ -301,10 +318,17 @@ def _do_grant_list(*, pending: bool) -> None:
 def revoke(
     plugin_id: Annotated[
         str,
-        typer.Argument(help=t("cli.plugin.revoke.arg.plugin_id")),
+        typer.Argument(
+            help=t("cli.plugin.revoke.arg.plugin_id"),
+            callback=validate_plugin_id,
+        ),
     ],
 ) -> None:
-    """Queue a reviewer-gated revocation proposal for a plugin's grants."""
+    """Queue a reviewer-gated revocation proposal for a plugin's grants.
+
+    sec-pr-s3-6-01: ``plugin_id`` is parser-time-validated via
+    :func:`alfred.cli._validators.validate_plugin_id`.
+    """
     try:
         result = _state_git_client.create_proposal(
             proposal_type=_PROPOSAL_TYPE_REVOKE,
@@ -354,7 +378,10 @@ def plugin_list() -> None:
 def plugin_show(
     plugin_id: Annotated[
         str,
-        typer.Argument(help=t("cli.plugin.show.arg.plugin_id")),
+        typer.Argument(
+            help=t("cli.plugin.show.arg.plugin_id"),
+            callback=validate_plugin_id,
+        ),
     ],
 ) -> None:
     """Show manifest details for a registered plugin (PR-S3-7 follow-up).

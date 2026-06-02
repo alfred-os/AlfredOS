@@ -42,6 +42,7 @@ from alfred.cli._state_git import (
     StateGitError,
     StateGitProposalClient,
 )
+from alfred.cli._validators import validate_domain
 from alfred.i18n import t
 
 # Module-level seams. Tests patch these symbols.
@@ -107,7 +108,10 @@ web_app.add_typer(allowlist_app, name="allowlist")
 def allowlist_add(
     domain: Annotated[
         str,
-        typer.Argument(help=t("cli.web.allowlist.add.arg.domain")),
+        typer.Argument(
+            help=t("cli.web.allowlist.add.arg.domain"),
+            callback=validate_domain,
+        ),
     ],
     path_prefix: Annotated[
         str,
@@ -118,6 +122,12 @@ def allowlist_add(
     ] = _DEFAULT_PATH_PREFIX,
 ) -> None:
     """Queue a reviewer-gated proposal to add ``domain`` to the allowlist.
+
+    sec-pr-s3-6-01: ``domain`` is parser-time-validated via
+    :func:`alfred.cli._validators.validate_domain` — a URL paste,
+    path-traversal attempt, or off-shape string raises
+    :class:`typer.BadParameter` at parse time so it cannot reach the
+    state.git proposal payload.
 
     Does NOT activate the entry. Spec §11.1: allowlist additions widen
     the trust surface and require reviewer approval + human merge.
@@ -154,10 +164,18 @@ def allowlist_add(
 def allowlist_remove(
     domain: Annotated[
         str,
-        typer.Argument(help=t("cli.web.allowlist.remove.arg.domain")),
+        typer.Argument(
+            help=t("cli.web.allowlist.remove.arg.domain"),
+            callback=validate_domain,
+        ),
     ],
 ) -> None:
-    """Queue a reviewer-gated proposal to remove ``domain`` from the allowlist."""
+    """Queue a reviewer-gated proposal to remove ``domain`` from the allowlist.
+
+    sec-pr-s3-6-01: same parser-time domain validation as ``add`` so an
+    operator cannot queue a remove proposal against a malformed string
+    that the projection would silently ignore.
+    """
     try:
         result = _state_git_client.create_proposal(
             proposal_type=_PROPOSAL_TYPE_REMOVE,

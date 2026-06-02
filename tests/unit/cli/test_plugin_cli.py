@@ -55,6 +55,35 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _stub_validator_hookpoint_registry() -> object:
+    """Pin the closed-set hookpoint registry for every test in this module.
+
+    sec-pr-s3-6-01 wires :func:`alfred.cli._validators.validate_hookpoint`
+    into the ``grant`` dispatcher. The validator reads the live
+    HookRegistry singleton; under pytest the singleton's ``_hookpoints``
+    map is empty (no publisher's ``declare_hookpoints`` ran in this
+    fresh process), so a plain ``alfred plugin grant ... plugin.grant.requested``
+    would surface the empty-registry refusal.
+
+    The fixture pins the closed iterable for every test so the validator
+    behaves as it does in production (publisher modules imported,
+    registry populated) without coupling these CLI tests to whichever
+    publisher modules the pytest collector happens to import first.
+    Tests that need the empty-registry branch patch the seam locally.
+    """
+    with patch(
+        "alfred.cli._validators._known_hookpoints_provider",
+        lambda: (
+            "plugin.grant.requested",
+            "plugin.grant.approved",
+            "plugin.grant.denied",
+            "plugin.grant.revoked",
+        ),
+    ) as p:
+        yield p
+
+
 @pytest.fixture()
 def mock_proposal() -> ProposalResult:
     """A canned proposal-result the StateGitProposalClient would return.
@@ -79,7 +108,7 @@ def test_grant_prints_proposal_branch(runner: CliRunner, mock_proposal: Proposal
         mock_client.create_proposal.return_value = mock_proposal
         result = runner.invoke(
             plugin_app,
-            ["grant", "alfred.web-fetch", "system", "tool.web.fetch"],
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
         )
     assert result.exit_code == 0, result.stderr
     assert mock_proposal.branch in result.stdout
@@ -94,7 +123,7 @@ def test_grant_prints_follow_up_status_command(
         mock_client.create_proposal.return_value = mock_proposal
         result = runner.invoke(
             plugin_app,
-            ["grant", "alfred.web-fetch", "system", "tool.web.fetch"],
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
         )
     assert "alfred plugin grant status" in result.stdout
     assert mock_proposal.proposal_id in result.stdout
@@ -113,7 +142,7 @@ def test_grant_uses_pending_review_not_success(
         mock_client.create_proposal.return_value = mock_proposal
         result = runner.invoke(
             plugin_app,
-            ["grant", "alfred.web-fetch", "system", "tool.web.fetch"],
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
         )
     assert "now active" not in result.stdout.lower()
     assert "is now granted" not in result.stdout.lower()
@@ -135,7 +164,7 @@ def test_grant_passes_structured_payload_to_client(
         mock_client.create_proposal.return_value = mock_proposal
         runner.invoke(
             plugin_app,
-            ["grant", "alfred.web-fetch", "system", "tool.web.fetch"],
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
         )
     mock_client.create_proposal.assert_called_once()
     call_kwargs = mock_client.create_proposal.call_args.kwargs
@@ -143,7 +172,7 @@ def test_grant_passes_structured_payload_to_client(
     payload = call_kwargs["payload"]
     assert payload["plugin_id"] == "alfred.web-fetch"
     assert payload["subscriber_tier"] == "system"
-    assert payload["hookpoint"] == "tool.web.fetch"
+    assert payload["hookpoint"] == "plugin.grant.requested"
 
 
 def test_grant_surfaces_state_git_error_on_stderr(runner: CliRunner) -> None:
@@ -154,7 +183,7 @@ def test_grant_surfaces_state_git_error_on_stderr(runner: CliRunner) -> None:
         )
         result = runner.invoke(
             plugin_app,
-            ["grant", "alfred.web-fetch", "system", "tool.web.fetch"],
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requested"],
         )
     assert result.exit_code != 0
     assert "state.git" in result.stderr or "denied" in result.stderr.lower()
@@ -309,3 +338,77 @@ def test_grant_with_wrong_arity_raises_usage_error(runner: CliRunner) -> None:
     result = runner.invoke(plugin_app, ["grant", "alfred.web-fetch"])
     assert result.exit_code == 2
     assert result.stderr.strip() != ""
+
+
+# ---------------------------------------------------------------------------
+# sec-pr-s3-6-01 — closed-set validator wiring: BadParameter trio
+# ---------------------------------------------------------------------------
+
+
+def test_grant_refuses_path_traversal_in_plugin_id(runner: CliRunner) -> None:
+    """``alfred plugin grant ../../etc/passwd ...`` raises BadParameter.
+
+    sec-pr-s3-6-01: an operator-typed path-traversal string must NOT
+    reach the state.git proposal payload. The :func:`validate_plugin_id`
+    callback wired into the ``grant`` dispatcher refuses the input at
+    parse time so the proposal-write call site never runs.
+    """
+    with patch("alfred.cli.plugin._state_git_client") as mock_client:
+        result = runner.invoke(
+            plugin_app,
+            ["grant", "../../../etc/passwd", "system", "plugin.grant.requested"],
+        )
+    assert result.exit_code == 2
+    assert "plugin_id" in result.stderr.lower() or "invalid" in result.stderr.lower()
+    # The proposal write MUST NOT have been called — the parse-time
+    # refusal short-circuited before the dispatch body.
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_grant_refuses_invalid_subscriber_tier(runner: CliRunner) -> None:
+    """``alfred plugin grant <id> T4 <hookpoint>`` raises BadParameter.
+
+    sec-pr-s3-6-01: subscriber-tier is the capability axis
+    (system/operator/user-plugin); a content-trust-tier string (T0..T3)
+    or any out-of-set value is refused. ``T4`` is the brief's canonical
+    typo example.
+    """
+    with patch("alfred.cli.plugin._state_git_client") as mock_client:
+        result = runner.invoke(
+            plugin_app,
+            ["grant", "alfred.web-fetch", "T4", "plugin.grant.requested"],
+        )
+    assert result.exit_code == 2
+    assert "subscriber_tier" in result.stderr.lower() or "invalid" in result.stderr.lower()
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_grant_refuses_unknown_hookpoint(runner: CliRunner) -> None:
+    """``alfred plugin grant <id> <tier> <bogus>`` raises BadParameter.
+
+    sec-pr-s3-6-01: a hookpoint no publisher has declared cannot fire,
+    so a grant against it would land a never-firing entry in state.git.
+    The validator refuses with the closest matches surfaced from the
+    closed set.
+    """
+    with patch("alfred.cli.plugin._state_git_client") as mock_client:
+        result = runner.invoke(
+            plugin_app,
+            ["grant", "alfred.web-fetch", "system", "plugin.grant.requestd"],
+        )
+    assert result.exit_code == 2
+    assert "hookpoint" in result.stderr.lower() or "invalid" in result.stderr.lower()
+    mock_client.create_proposal.assert_not_called()
+
+
+def test_revoke_refuses_invalid_plugin_id(runner: CliRunner) -> None:
+    """``alfred plugin revoke ../etc`` raises BadParameter.
+
+    Same path-traversal refusal as ``grant`` — the revoke surface also
+    flows into a state.git proposal payload, so the closed-set check
+    applies on the revoke command's plugin_id too.
+    """
+    with patch("alfred.cli.plugin._state_git_client") as mock_client:
+        result = runner.invoke(plugin_app, ["revoke", "../../../etc/passwd"])
+    assert result.exit_code == 2
+    mock_client.create_proposal.assert_not_called()

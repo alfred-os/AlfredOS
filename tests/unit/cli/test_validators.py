@@ -175,16 +175,18 @@ def test_validate_hookpoint_accepts_registered_name() -> None:
 
 def test_validate_hookpoint_refuses_unknown_with_close_match_hint() -> None:
     """An unknown name surfaces the difflib-nearest match list."""
-    with _stub_known_hookpoints(
-        {
-            "plugin.grant.requested",
-            "plugin.grant.approved",
-            "plugin.grant.denied",
-            "plugin.grant.revoked",
-        }
+    with (
+        _stub_known_hookpoints(
+            {
+                "plugin.grant.requested",
+                "plugin.grant.approved",
+                "plugin.grant.denied",
+                "plugin.grant.revoked",
+            }
+        ),
+        pytest.raises(typer.BadParameter) as excinfo,
     ):
-        with pytest.raises(typer.BadParameter) as excinfo:
-            validate_hookpoint("plugin.grant.requestd")  # missing 'e'
+        validate_hookpoint("plugin.grant.requestd")  # missing 'e'
     body = excinfo.value.message
     # The closest match is surfaced so the operator sees the typo fix.
     assert "plugin.grant.requested" in body
@@ -197,9 +199,11 @@ def test_validate_hookpoint_refuses_unknown_with_no_close_match_hint() -> None:
     ``difflib.get_close_matches`` returns ``[]`` so the operator does not
     see a confusing empty suggestion list.
     """
-    with _stub_known_hookpoints({"plugin.grant.requested"}):
-        with pytest.raises(typer.BadParameter) as excinfo:
-            validate_hookpoint("xxxxxxxxxxxxxxxx")
+    with (
+        _stub_known_hookpoints({"plugin.grant.requested"}),
+        pytest.raises(typer.BadParameter) as excinfo,
+    ):
+        validate_hookpoint("xxxxxxxxxxxxxxxx")
     assert "no close matches" in excinfo.value.message
 
 
@@ -210,17 +214,15 @@ def test_validate_hookpoint_refuses_when_registry_empty() -> None:
     operator-facing error tells them the registry is empty rather than
     blaming their input.
     """
-    with _stub_known_hookpoints(()):
-        with pytest.raises(typer.BadParameter) as excinfo:
-            validate_hookpoint("plugin.grant.requested")
+    with _stub_known_hookpoints(()), pytest.raises(typer.BadParameter) as excinfo:
+        validate_hookpoint("plugin.grant.requested")
     assert "empty" in excinfo.value.message.lower()
 
 
 def test_validate_hookpoint_bad_parameter_carries_param_hint() -> None:
     """``param_hint`` anchors the Typer error to the hookpoint argument."""
-    with _stub_known_hookpoints({"x.y.z"}):
-        with pytest.raises(typer.BadParameter) as excinfo:
-            validate_hookpoint("not-registered")
+    with _stub_known_hookpoints({"x.y.z"}), pytest.raises(typer.BadParameter) as excinfo:
+        validate_hookpoint("not-registered")
     assert excinfo.value.param_hint == "'hookpoint'"
 
 
@@ -231,17 +233,16 @@ def test_validate_hookpoint_default_provider_queries_live_registry() -> None:
     registry singleton — a future refactor that swaps the seam to a
     stub would silently break production validation without this guard.
     """
-    from alfred.cli._validators import _default_known_hookpoints_provider
-    from alfred.hooks.registry import get_registry
-
     # Re-importing the publisher module is idempotent on equal metadata
     # (HookRegistry.register_hookpoint contract) so the registry is
     # guaranteed to carry the four plugin.grant.* names by the time this
     # test runs.
     import alfred.security.capability_gate.proposals  # noqa: F401
+    from alfred.cli._validators import _default_known_hookpoints_provider
+    from alfred.hooks.registry import get_registry
 
     provider = _default_known_hookpoints_provider()
-    expected = set(get_registry()._hookpoints)  # noqa: SLF001 — seam under test
+    expected = set(get_registry()._hookpoints)
     assert set(provider) == expected
 
 
