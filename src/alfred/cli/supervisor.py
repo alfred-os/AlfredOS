@@ -16,6 +16,7 @@ i18n rule #1. The audit row for ``reset`` carries ``operator_user_id`` per
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from typing import Annotated
 
@@ -26,6 +27,65 @@ from alfred.i18n import t
 
 supervisor_app = typer.Typer(help=t("cli.supervisor.help"), no_args_is_help=True)
 _log = structlog.get_logger(__name__)
+
+
+def _resolve_operator_user_id() -> str | None:
+    """Best-effort Slice-3 operator attribution for audit rows.
+
+    CR-149 round-4 / round-10 (review comment 3338654106 / 3339361789)
+    flagged the unconditional ``operator_user_id=None`` on the breaker-reset
+    path as a PRD §10.8 forensic gap. The Heavy-lift framing assumed a real
+    authenticated CLI session — but a meaningful Slice-3 increment exists
+    today: the OS account that invoked the CLI.
+
+    Resolution order (first match wins):
+
+    1. ``ALFRED_OPERATOR_USER_ID`` env var — the explicit override an
+       operator (or an orchestration script) can set. Takes precedence so
+       a shared CI account can identify which human triggered the action.
+    2. ``getlogin()`` — the controlling-terminal user. Survives ``sudo`` /
+       ``su`` to identify the *originating* operator rather than the
+       elevated account; matches the audit semantic "who is the human".
+    3. ``getpwuid(getuid())`` — the effective UID's account name. Used
+       when the process has no controlling terminal (cron, systemd,
+       container entrypoint). Identifies the runtime account if no
+       human session is available.
+    4. ``None`` — every probe failed; the row still emits with NULL so
+       CLAUDE.md hard rule #7 (no silent skip) holds.
+
+    Limitations (documented; tracked in #153 for the authenticated form):
+
+    * The resolved id is **not authenticated**. Any process running under
+      that OS account can claim it. Operators sharing an OS account
+      cannot be disambiguated.
+    * Replacing this with an authenticated-session value (mTLS / OIDC /
+      signed token) is Slice-4 work and lives in #153. This function's
+      return value becomes that session's resolved id once the wiring
+      lands; the call sites do not change.
+    """
+    explicit = os.environ.get("ALFRED_OPERATOR_USER_ID")
+    if explicit:
+        return explicit
+    try:
+        # ``getlogin`` reads the controlling terminal — returns the
+        # original operator across ``sudo`` / ``su``. Raises OSError
+        # in environments without a TTY (cron, systemd, container
+        # bootstrap without ``-t``).
+        return os.getlogin()
+    except OSError:
+        pass
+    try:
+        # Fallback: effective UID's pwd entry. ``pwd`` is POSIX-only;
+        # the import lives inside the try so the module imports cleanly
+        # on Windows even though the CLI surface targets POSIX hosts.
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError, OSError):
+        # CLAUDE.md hard rule #7: every probe failed, but the row still
+        # emits with NULL so the audit log records the attempt — the
+        # presence of the row IS the forensic signal.
+        return None
 
 
 def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
@@ -43,10 +103,15 @@ def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
     PR-S3-7 wiring (an ``AuditWriter`` instance reachable from the sync
     CLI bootstrap) can simply replace the structlog call with
     ``await audit_writer.append_schema(...)`` without restructuring the
-    emit site. ``operator_user_id`` is intentionally ``None`` for now --
-    devex-007 / spec §10.8 defer the attribution wiring to PR-S3-7; a
-    follow-up issue tracks the gap, but this row going out unsigned is
-    strictly better than no row at all (CLAUDE.md hard rule #7).
+    emit site.
+
+    CR-149 round-10: ``operator_user_id`` is now sourced via
+    :func:`_resolve_operator_user_id` (OS-account attribution — env var,
+    then ``getlogin``, then ``getpwuid``). The id is unauthenticated, so
+    operators sharing an OS account cannot be disambiguated; the
+    authenticated-session refinement is tracked in #153. The OS-account
+    form is still materially better than ``None`` for incident response —
+    a security team grepping the audit log now has a starting point.
 
     The structlog redactor in :mod:`alfred.cli._bootstrap` runs in front
     of every output processor so any accidental secret-shaped string in
@@ -86,7 +151,7 @@ def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
         old_state=None,
         new_state=None,
         trip_count=None,
-        operator_user_id=None,
+        operator_user_id=_resolve_operator_user_id(),
         correlation_id=correlation_id,
         # ``schema_fields`` round-trips the declared field set so a
         # log-grepping audit collector can validate the row at parse
@@ -342,14 +407,12 @@ def supervisor_reset(
     # the row would violate CLAUDE.md hard rule #7).
     _emit_breaker_reset_attempt_audit(component_id=component_id)
 
-    # devex-007: operator_user_id=None is a known placeholder. Full T1
-    # attribution requires wiring IdentityResolver.resolve() from the CLI
-    # session in PR-S3-7. Human judgment required: surface an unmistakable
-    # error if attribution cannot be resolved, or emit None and let the
-    # audit row carry NULL (weaker audit story). Decision deferred to
-    # PR-S3-7; see devex-007 + spec §10.8. A follow-up issue tracks the
-    # operator_user_id wiring; the attempt-row above going out unsigned
-    # is strictly better than no row at all.
+    # CR-149 round-10: ``operator_user_id`` now sources from
+    # :func:`_resolve_operator_user_id` (OS-account attribution — env
+    # var, then getlogin, then getpwuid). Unauthenticated; the
+    # authenticated-session refinement is tracked in #153. Operators
+    # sharing an OS account cannot be disambiguated, but the OS form is
+    # materially better than ``None`` for incident response.
     #
     # err-001 / cross-cutting R4: narrow the except shape to
     # ``SupervisorError`` (every supervisor-domain failure mode the
@@ -385,7 +448,7 @@ def supervisor_reset(
         asyncio.run(
             supervisor.reset_breaker(  # type: ignore[attr-defined]  # PR-S3-3b ships the singleton
                 component_id=component_id,
-                operator_user_id=None,
+                operator_user_id=_resolve_operator_user_id(),
             )
         )
     except NoSuchComponentError as exc:
