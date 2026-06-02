@@ -52,11 +52,17 @@ async def quarantined_to_structured(
 ) -> ExtractionResult: ...
 ```
 
-Gate-first ordering: `gate.check_content_clearance(hookpoint="quarantine.dereference",
-content_tier="T3")` is consulted BEFORE the extractor runs. A denial raises
-`AlfredError` without invoking the extractor — the gate's refusal
-accounting handles denied calls; this function's audit emission (via the
-extractor) is reserved for granted calls.
+Gate-first ordering:
+`gate.check_content_clearance(plugin_id="alfred.quarantined-llm", hookpoint="quarantine.dereference", content_tier="T3")`
+is consulted BEFORE the extractor runs. A denial raises `AlfredError`
+without invoking the extractor — the gate's refusal accounting handles
+denied calls; this function's audit emission (via the extractor) is
+reserved for granted calls. `plugin_id` is REQUIRED on every
+`check_content_clearance` call (the parameter is keyword-only on the
+Protocol — see [Capability gate](../glossary.md#capability-gate)); the
+quarantined-LLM plugin id is pinned as `ClassVar` on
+[`QuarantinedExtractor`](#quarantinedextractor-srcalfredsecurityquarantinepy)
+so the join key never drifts across audit rows.
 
 `gate` is REQUIRED — no default, no `| None` (CR-138 R3): a
 trust-boundary function whose gate can be elided through a default arg
