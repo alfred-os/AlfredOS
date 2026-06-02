@@ -175,6 +175,12 @@ msgstr ""
 "alfred config refused: {yaml_path} is malformed and cannot be parsed. "
 "YAML error: {error}. Fix the file and rerun the command."
 
+#: src/alfred/cli/config.py:86
+msgid "cli.config.error.read_failed"
+msgstr ""
+"alfred config refused: {yaml_path} could not be read. OS error: {error}. "
+"Check file permissions and rerun the command."
+
 # PR-S3-6 Component D — alfred config sub-app (two-track set/get/list).
 # Low-blast keys write to policies.yaml; high-blast keys (e.g.
 # quarantined-provider) queue a state.git reviewer-gated proposal.

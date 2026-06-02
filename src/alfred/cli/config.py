@@ -71,8 +71,28 @@ def _safe_load_yaml(yaml_path: Path) -> dict[str, object]:
     """
     if not yaml_path.exists():
         return {}
+    # CR-149 round-6: ``read_text`` can raise :class:`OSError` /
+    # :class:`PermissionError` (file unreadable, EACCES on the parent
+    # dir, transient I/O error). The previous shape only routed
+    # :class:`yaml.YAMLError` through the localised path, so an
+    # unreadable file dumped a raw Python traceback to stderr instead
+    # of the operator-recovery hint. CLAUDE.md hard rule #7 forbids
+    # silent / raw failures on a T1 surface; route the read failure
+    # through its own localised key so the operator sees the path +
+    # the OS-level diagnostic without picking it out of a traceback.
     try:
         raw = yaml_path.read_text()
+    except OSError as exc:
+        typer.echo(
+            t(
+                "cli.config.error.read_failed",
+                yaml_path=str(yaml_path),
+                error=str(exc),
+            ),
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         typer.echo(

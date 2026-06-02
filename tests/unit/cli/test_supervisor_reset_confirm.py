@@ -75,6 +75,40 @@ def test_reset_unknown_component_exits_nonzero(runner: CliRunner) -> None:
     assert "no-such-plugin" in combined or "not found" in combined.lower()
 
 
+def test_reset_canonical_no_supervised_component_routes_to_component_not_found(
+    runner: CliRunner,
+) -> None:
+    """CR-149 round-6: canonical ``supervisor.no_such_component`` wording
+    routes to the operator-targeted ``component_not_found`` branch.
+
+    The repo's :func:`t("supervisor.no_such_component")` catalog entry
+    renders "No supervised component with id ..." (see
+    ``locale/en/LC_MESSAGES/alfred.po``). The previous CLI handler
+    only matched "not found"; the canonical wording fell through to
+    ``unexpected_error`` and the operator lost the targeted guidance
+    the T1 surface owes them (Spec §10.8 / §11.3).
+    """
+    from alfred.supervisor.errors import SupervisorError
+
+    mock_supervisor = AsyncMock()
+    mock_supervisor.reset_breaker = AsyncMock(
+        side_effect=SupervisorError(
+            "No supervised component with id 'no-such-plugin'. "
+            "Run `alfred supervisor status` to list registered components."
+        )
+    )
+    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
+        result = runner.invoke(supervisor_app, ["reset", "no-such-plugin", "--confirm"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr or "")
+    # The component-not-found catalog entry names the component id and
+    # offers the recovery hint; the unexpected_error catalog entry
+    # surfaces ``type(exc).__name__`` (``SupervisorError``) instead —
+    # the absence of the type name is the regression target.
+    assert "no-such-plugin" in combined
+    assert "SupervisorError" not in combined
+
+
 def test_status_renders_table_header(runner: CliRunner) -> None:
     """``status`` must render the breaker-state table with the component id."""
     with patch("alfred.cli.supervisor._list_breaker_states") as mock_list:
