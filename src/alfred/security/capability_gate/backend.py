@@ -318,6 +318,17 @@ class PostgresBackend:
         population strategy, and the ``state='approved'`` semantics.
         """
         now = dt.datetime.now(dt.UTC)
+        # sec-pr-s3-6-cr-149: the ON CONFLICT branch MUST restore
+        # ``state='approved'`` so a row that was previously in
+        # ``requested``/``denied``/``revoked`` does not stay in that
+        # state after a rebuild merges a fresh approval. Without the
+        # state restore, :meth:`load_grants` would silently filter the
+        # row out (it reads ``state = 'approved'`` only) and the
+        # operator-visible grant would not project into the live
+        # in-memory snapshot — a trust-boundary regression where an
+        # approved capability becomes invisible. ``correlation_id`` is
+        # refreshed alongside so the audit-graph correlator can join
+        # the rebuild row against the latest projection event.
         await session.execute(
             sa.text(
                 "INSERT INTO plugin_grants "
@@ -328,7 +339,9 @@ class PostgresBackend:
                 ":correlation_id, :state) "
                 "ON CONFLICT (plugin_id, hookpoint, subscriber_tier) "
                 "DO UPDATE SET content_tier = EXCLUDED.content_tier, "
-                "proposal_branch = EXCLUDED.proposal_branch"
+                "proposal_branch = EXCLUDED.proposal_branch, "
+                "state = EXCLUDED.state, "
+                "correlation_id = EXCLUDED.correlation_id"
             ),
             {
                 "id": uuid.uuid4(),

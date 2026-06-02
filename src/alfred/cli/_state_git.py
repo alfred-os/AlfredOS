@@ -441,6 +441,20 @@ class StateGitProposalClient:
           (devex-004: leaking ``git push origin proposal/...`` taught
           the operator nothing).
         """
+        # CR-149 sec-pr-s3-6-cr-149: the bound repo path check runs
+        # BEFORE ``subprocess.run`` so the common "operator hasn't
+        # bootstrapped state.git yet" case maps to
+        # :attr:`StateGitErrorKind.PATH_MISSING` regardless of how the
+        # argv shape encodes the path. ``git clone <missing>`` and
+        # ``git --git-dir=<missing>`` both return a non-zero exit code
+        # without raising ``FileNotFoundError``; relying on the
+        # exception alone would fall through to :attr:`PUSH_REJECTED`
+        # and render the wrong recovery hint (CLAUDE.md hard rule #7,
+        # PRD §4.1 onboarding). The pre-check makes the error mapping
+        # independent of the git CLI's argv-dispatch quirks.
+        if not self._repo.exists():
+            msg = "state.git repo missing"
+            raise StateGitError(msg, kind=StateGitErrorKind.PATH_MISSING)
         try:
             # S603/S607: ``cmd[0]`` is always the literal ``"git"`` constructed
             # from this module's hard-coded argv lists; the only operator-
@@ -454,13 +468,9 @@ class StateGitProposalClient:
                 check=False,
             )
         except FileNotFoundError as exc:
-            # ``FileNotFoundError`` fires when ``git`` itself is missing
-            # OR when ``-C <missing-path>`` is passed. Distinguish via
-            # the bound repo path so the CLI can render the matching
-            # recovery hint.
-            if not self._repo.exists():
-                msg = "state.git repo missing"
-                raise StateGitError(msg, kind=StateGitErrorKind.PATH_MISSING) from exc
+            # ``FileNotFoundError`` after the repo-exists pre-check above
+            # narrows to "``git`` binary missing on PATH" — the operator's
+            # next action is install/restore git, not bootstrap state.git.
             msg = "git binary missing"
             raise StateGitError(msg, kind=StateGitErrorKind.GIT_MISSING) from exc
         except OSError as exc:
