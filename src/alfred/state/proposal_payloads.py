@@ -41,9 +41,9 @@ Hard rules honoured here:
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StateGitProposalPayload(BaseModel):
@@ -175,6 +175,32 @@ class WebAllowlistProposal(StateGitProposalPayload):
     action: Literal["add", "remove"]
     domain: str
     path_prefix: str | None = "/"
+
+    @model_validator(mode="after")
+    def _check_action_path_prefix_invariant(self) -> Self:
+        """Enforce the ``action``/``path_prefix`` invariant per spec §11.1.
+
+        CR-149 round-3: the docstring already documents the contract
+        (``add`` carries a real path-prefix; ``remove`` encodes
+        whole-entry deletion via ``None``) but the model previously
+        accepted ``action="add", path_prefix=None``. The CLI surface
+        defaults ``path_prefix`` to ``"/"`` on the add path so the
+        same shape never reached the model, but any non-CLI producer
+        (a future async writer, a state.git replay tool, a malformed
+        test fixture) could still emit an ambiguous add proposal and
+        drift from spec §11.1's add-vs-remove semantics. Failing the
+        construction at the model layer closes the boundary so the
+        reviewer-side parser never sees the ambiguous shape.
+
+        ``remove`` permits ``path_prefix=None`` (the CLI canonical
+        shape for whole-entry deletion) AND a string (legacy
+        per-prefix removal). The closed set keeps both shapes valid
+        for the remove side while pinning the add side.
+        """
+        if self.action == "add" and self.path_prefix is None:
+            msg = "WebAllowlistProposal: action='add' requires a non-None path_prefix"
+            raise ValueError(msg)
+        return self
 
 
 class ConfigSetProposal(StateGitProposalPayload):

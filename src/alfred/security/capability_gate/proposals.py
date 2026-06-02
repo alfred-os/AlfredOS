@@ -99,18 +99,19 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
     subscriber of ``plugin.grant.approved`` would see every operator
     grant approval -- that's an exfiltration path on its own).
 
-    sec-pr-s3-6-05: ``fail_closed=True``. The SYSTEM_ONLY_TIERS lock
-    keeps user-plugin subscribers out of the chain entirely, so
-    flipping fail_closed cannot regress availability for ordinary
-    user-plugin code -- only system-tier observers can subscribe at
-    all. Inside that system-tier chain, a crashing observer SHOULD
-    short-circuit the grant flow: a reviewer-gated capability grant
-    that the observer cannot record reliably is exactly the silent
-    audit-skip CLAUDE.md hard rule #7 forbids. The previous
-    ``fail_closed=False`` rationale ("a crashing observer must not
-    stall a reviewer-approved grant") would let the audit-row emission
-    fail silently while the grant goes live -- the operator cannot
-    later reconstruct who approved it, when, or against which payload.
+    CR-149 round-3: ``fail_closed=False`` — matches the spec §14
+    hookpoint table, which classifies every ``plugin.grant.*`` row as
+    ``fail_closed=False``. The trust-boundary audit row that pins the
+    grant flow is emitted by the supervisor via
+    :meth:`AuditWriter.append_schema` BEFORE any observer chain runs,
+    so a crashing observer never hides the reviewer's decision from
+    the audit log — the row is already durable. ``fail_closed=False``
+    keeps an observer crash from stalling the privileged grant flow
+    while the row stays recorded; the ``SYSTEM_ONLY_TIERS`` lock keeps
+    untrusted code out of the chain regardless of the fail-closed
+    setting. The earlier ``fail_closed=True`` choice
+    (``sec-pr-s3-6-05``) was an override that drifted from the spec
+    table — the round-3 reviewer pushed back and we follow the spec.
 
     Idempotent on equal metadata (:meth:`HookRegistry.register_hookpoint`
     semantics) -- re-importing under pytest test isolation is safe.
@@ -126,7 +127,7 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
             name=hookpoint,
             subscribable_tiers=SYSTEM_ONLY_TIERS,
             refusable_tiers=frozenset(),
-            fail_closed=True,
+            fail_closed=False,
         )
 
 

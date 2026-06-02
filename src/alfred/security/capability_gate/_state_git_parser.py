@@ -85,56 +85,76 @@ def parse_state_git_head(state_git_path: Path, commit_hash: str) -> frozenset[Gr
         contexts MUST wrap this in :func:`asyncio.to_thread` so the
         event loop is not blocked on a cold-cache rebuild.
     """
-    repo = git.Repo(str(state_git_path), odbt=git.GitCmdObjectDB)
-    commit = repo.commit(commit_hash)
-    try:
-        grants_tree = commit.tree[_GRANTS_TREE_PATH]
-    except KeyError:
-        # Bootstrap state — the very first state.git push after init
-        # has no grants. Not an error; the gate stays at the
-        # empty-policy fail-closed default until the first proposal
-        # merges.
-        _log.info(
-            "capability_gate.rebuild.no_grants_tree",
-            commit_hash=commit_hash,
-        )
-        return frozenset()
-
-    rows: list[GrantRow] = []
-    # ADR-0018 Decision 4: traverse subtrees recursively so the
-    # ``policies/grants/<plugin_id>/<grant_id>.json`` layout the new
-    # writers produce round-trips. ``tree.traverse()`` walks every
-    # nested blob in deterministic order — the same blob set the
-    # historical single-level ``grants_tree.blobs`` scan returned for
-    # legacy flat-layout grants stays included.
-    for blob in grants_tree.traverse():
-        # ``traverse`` yields both Blob and Tree nodes; filter to blobs
-        # via the ``type`` discriminator gitpython exposes. JSON-only —
-        # a future ADR that flips the format flips this guard too.
-        if blob.type != "blob":  # type: ignore[union-attr]
-            continue
-        if not blob.path.endswith(".json"):  # type: ignore[union-attr]
-            # Skip README / .gitkeep / future YAML peer files so the
-            # parser stays JSON-only by structural guard, not by
-            # ``except yaml.YAMLError`` after the fact.
-            continue
+    # CR-149 round-3: GitPython's ``Repo`` holds persistent
+    # ``git cat-file`` helper processes + file descriptors that the
+    # garbage-collector cannot reliably release (non-deterministic
+    # destruction). On a long-lived host the rebuild path runs on every
+    # state.git HEAD change, so a slow leak here would eventually wedge
+    # the gate on FD-exhaustion. Manage the ``Repo`` via a context
+    # manager so :meth:`Repo.close` fires deterministically on every
+    # return / exception path.
+    with git.Repo(str(state_git_path), odbt=git.GitCmdObjectDB) as repo:
+        commit = repo.commit(commit_hash)
         try:
-            raw = json.loads(blob.data_stream.read())  # type: ignore[union-attr]
-            rows.append(GrantRow(**raw))
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            # CLAUDE.md hard rule #7: skip-and-log, never silently accept.
-            # Only the exception type name (never str(exc) or exc.args) per
-            # spec §5.6 — although GrantRow's ValueError carries only
-            # closed-domain tier strings, the parser stays disciplined so a
-            # future custom exception with richer payload data does not
-            # leak into the structured log without re-review.
-            _log.warning(
-                "capability_gate.rebuild.skip_invalid_grant",
-                path=blob.path,  # type: ignore[union-attr]
-                error_type=type(exc).__name__,
+            grants_tree = commit.tree[_GRANTS_TREE_PATH]
+        except KeyError:
+            # Bootstrap state — the very first state.git push after init
+            # has no grants. Not an error; the gate stays at the
+            # empty-policy fail-closed default until the first proposal
+            # merges.
+            _log.info(
+                "capability_gate.rebuild.no_grants_tree",
                 commit_hash=commit_hash,
             )
-    return frozenset(rows)
+            return frozenset()
+
+        rows: list[GrantRow] = []
+        # ADR-0018 Decision 4: traverse subtrees recursively so the
+        # ``policies/grants/<plugin_id>/<grant_id>.json`` layout the new
+        # writers produce round-trips. ``tree.traverse()`` walks every
+        # nested blob in deterministic order — the same blob set the
+        # historical single-level ``grants_tree.blobs`` scan returned for
+        # legacy flat-layout grants stays included.
+        for blob in grants_tree.traverse():
+            # ``traverse`` yields both Blob and Tree nodes; filter to blobs
+            # via the ``type`` discriminator gitpython exposes. JSON-only —
+            # a future ADR that flips the format flips this guard too.
+            if blob.type != "blob":  # type: ignore[union-attr]
+                continue
+            if not blob.path.endswith(".json"):  # type: ignore[union-attr]
+                # Skip README / .gitkeep / future YAML peer files so the
+                # parser stays JSON-only by structural guard, not by
+                # ``except yaml.YAMLError`` after the fact.
+                continue
+            try:
+                raw = json.loads(blob.data_stream.read())  # type: ignore[union-attr]
+                rows.append(GrantRow(**raw))
+            except (
+                # CR-149 round-3: ``json.loads`` on bytes decodes UTF-8
+                # BEFORE the JSON parse runs; an invalid UTF-8 sequence
+                # raises :class:`UnicodeDecodeError` (NOT
+                # :class:`json.JSONDecodeError`), which previously
+                # propagated and aborted the rebuild. CLAUDE.md hard
+                # rule #7 + PRD §7.1 require the skip-and-log path so a
+                # single corrupted blob cannot wedge the gate.
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                # CLAUDE.md hard rule #7: skip-and-log, never silently accept.
+                # Only the exception type name (never str(exc) or exc.args) per
+                # spec §5.6 — although GrantRow's ValueError carries only
+                # closed-domain tier strings, the parser stays disciplined so a
+                # future custom exception with richer payload data does not
+                # leak into the structured log without re-review.
+                _log.warning(
+                    "capability_gate.rebuild.skip_invalid_grant",
+                    path=blob.path,  # type: ignore[union-attr]
+                    error_type=type(exc).__name__,
+                    commit_hash=commit_hash,
+                )
+        return frozenset(rows)
 
 
 __all__ = ["parse_state_git_head"]

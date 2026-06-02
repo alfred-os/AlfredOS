@@ -258,13 +258,39 @@ class RealGate:
             )
             return
 
+        # CR-149 round-3: mirror the rollback audit path for
+        # parser-side / repo-read failures. Without this, a bad
+        # state.git head (corrupted commit object, missing tree, raised
+        # gitpython error) propagated out of ``asyncio.to_thread``
+        # before any ``plugin.grant.rebuilt`` row landed — the
+        # capability projection stayed on the previous snapshot AND
+        # the trust-boundary audit trail had no forensic record that
+        # the privileged rebuild attempt failed. CLAUDE.md hard rule
+        # #7 (no silent failures in security paths) requires that
+        # pre-DB failure surfaces in the audit log too. ``Exception``
+        # is intentionally broad: GitPython raises a heterogeneous
+        # mix (``git.exc.*``, ``OSError``, ``ValueError``, ...) and
+        # the audit row must fire for any of them before re-raising
+        # so the supervisor's outer exception path stays intact.
         # gitpython reads are synchronous; offload so we do not block
         # the event loop on a cold object DB read.
-        grants = await asyncio.to_thread(
-            parse_state_git_head,
-            self._state_git_path,
-            state_git_head,
-        )
+        try:
+            grants = await asyncio.to_thread(
+                parse_state_git_head,
+                self._state_git_path,
+                state_git_head,
+            )
+        except Exception as exc:
+            await self._emit_rebuild_rolled_back_audit(
+                commit_hash=state_git_head,
+                grant_count=0,
+            )
+            _log.warning(
+                "capability_gate.rebuild.parser_failed",
+                commit_hash=state_git_head,
+                error_type=type(exc).__name__,
+            )
+            raise
         await self._apply_grants(grants, commit_hash=state_git_head)
 
         # Audit emit LAST — a parse / apply failure must not surface a
@@ -372,22 +398,9 @@ class RealGate:
             # ``str(exc)`` / ``exc.args`` because they may carry T3
             # content fragments). The full success row continues to emit
             # from :meth:`rebuild_from_state_git` after this method returns.
-            correlation_id = str(uuid.uuid4())
-            await self._audit_sink.append_schema(
-                fields=CAPABILITY_GATE_REBUILD_FIELDS,
-                schema_name="CAPABILITY_GATE_REBUILD_FIELDS",
-                event="plugin.grant.rebuilt",
-                actor_user_id=None,
-                subject={
-                    "commit_hash": commit_hash,
-                    "grant_count": len(grants),
-                    "trust_tier_of_trigger": "T0",
-                    "correlation_id": correlation_id,
-                },
-                trust_tier_of_trigger="T0",
-                result="rolled_back",
-                cost_estimate_usd=0.0,
-                trace_id=correlation_id,
+            await self._emit_rebuild_rolled_back_audit(
+                commit_hash=commit_hash,
+                grant_count=len(grants),
             )
             _log.warning(
                 "capability_gate.rebuild.rolled_back",
@@ -521,6 +534,47 @@ class RealGate:
             state_transition=state_transition,
             denied_dispatch_count=denied_dispatch_count,
             backing_store_error_type=backing_store_error_type,
+        )
+
+    async def _emit_rebuild_rolled_back_audit(
+        self,
+        *,
+        commit_hash: str,
+        grant_count: int,
+    ) -> None:
+        """Emit one ``plugin.grant.rebuilt`` row with ``result="rolled_back"``.
+
+        Shared between the :meth:`_apply_grants` SQL-error rollback arm
+        and the :meth:`rebuild_from_state_git` parser-failure arm
+        (CR-149 round-3). Both surfaces represent the same forensic
+        contract: a privileged rebuild attempt failed before the
+        in-memory snapshot was swapped, and the audit graph MUST carry
+        a row pinning that failure (CLAUDE.md hard rule #7 — no silent
+        failures in security paths).
+
+        Spec §5.6: the failing exception's class name is captured by
+        each caller's adjacent structured log line — never copied into
+        the audit row, because the ``CAPABILITY_GATE_REBUILD_FIELDS``
+        schema is symmetric-strict and would reject extra subject keys.
+        Operators correlate via ``correlation_id`` / ``trace_id``: the
+        audit row and the structured log share the same UUID.
+        """
+        correlation_id = str(uuid.uuid4())
+        await self._audit_sink.append_schema(
+            fields=CAPABILITY_GATE_REBUILD_FIELDS,
+            schema_name="CAPABILITY_GATE_REBUILD_FIELDS",
+            event="plugin.grant.rebuilt",
+            actor_user_id=None,
+            subject={
+                "commit_hash": commit_hash,
+                "grant_count": grant_count,
+                "trust_tier_of_trigger": "T0",
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="rolled_back",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
         )
 
     def stop_heartbeat(self) -> None:
