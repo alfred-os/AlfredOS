@@ -91,7 +91,7 @@ from alfred.hooks.registry import (
     set_registry,
 )
 from alfred.i18n import set_language, t
-from tests.helpers.gates import make_default_test_gate, make_deny_all_gate
+from tests.helpers.gates import make_deny_all_gate, make_permissive_fixture_gate
 from tests.unit.hooks.conftest import SpyAuditSink
 
 # ──────────────────────────────────────────────────────────────────────
@@ -259,7 +259,7 @@ def test_subscribers_sorted_by_tier_then_registration_seq(
     parameter list.
     """
     registry = HookRegistry(
-        gate=make_default_test_gate(allow_system=True), strict_declarations=False
+        gate=make_permissive_fixture_gate(allow_system=True), strict_declarations=False
     )
 
     # Register one subscriber per element of the insertion order.
@@ -400,7 +400,7 @@ def test_set_registry_swaps_the_active_singleton() -> None:
     so the harness-wide singleton is untouched after this test.
     """
     prior = get_registry()
-    other = HookRegistry(gate=make_default_test_gate())
+    other = HookRegistry(gate=make_permissive_fixture_gate())
     try:
         set_registry(other)
         assert get_registry() is other
@@ -487,7 +487,7 @@ def test_registry_exposes_injected_sink_via_public_attribute(
     copy or proxy. The PR-B DB-backed sink replaces this attribute at
     construction time; no source change to dispatch.
     """
-    registry = HookRegistry(gate=make_default_test_gate(), sink=spy_sink)
+    registry = HookRegistry(gate=make_permissive_fixture_gate(), sink=spy_sink)
     assert registry.sink is spy_sink
 
 
@@ -499,7 +499,7 @@ def test_registry_default_sink_is_structlog_audit_sink() -> None:
     has an obvious "before" to point at. The default's logger is the
     project's structlog handle ``alfred.hooks``.
     """
-    registry = HookRegistry(gate=make_default_test_gate())
+    registry = HookRegistry(gate=make_permissive_fixture_gate())
     assert isinstance(registry.sink, StructlogAuditSink)
 
 

@@ -36,8 +36,9 @@ provenance: >-
   hk-2026-001 (tier_escalation) exercises for system-tier escalation;
   this payload formalises the user-plugin → T3-carrying-hookpoint
   variant. The runtime assertion uses the same HookRegistry +
-  make_default_test_gate() wiring as the hooks adversarial corpus
-  baseline (post-PR-S3-7 fixture-parity gate).
+  make_deny_all_gate() wiring as the hooks adversarial corpus
+  baseline (Slice-3 spec §15.1: deny-path security tests assert
+  against RealGate).
 references:
   - "spec §4.3"
   - "spec §8.2"

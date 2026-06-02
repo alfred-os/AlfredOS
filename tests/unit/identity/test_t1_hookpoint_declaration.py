@@ -40,14 +40,14 @@ from alfred.identity._ingest import (
     HOOKPOINT_T1_INGRESS,
     declare_hookpoints,
 )
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_permissive_fixture_gate
 
 
 @pytest.fixture
 def fresh_registry() -> Iterator[HookRegistry]:
     """Install a fresh :class:`HookRegistry` for the test body's duration.
 
-    The default fixture-parity gate (:func:`make_default_test_gate`,
+    The default fixture-parity gate (:func:`make_permissive_fixture_gate`,
     ``allow_system=False``) denies the ``system`` tier — fine here
     because :meth:`HookRegistry.register_hookpoint` does not consult
     the gate (the gate only fires on subscriber registration). Swap-
@@ -55,7 +55,7 @@ def fresh_registry() -> Iterator[HookRegistry]:
     unaffected.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_default_test_gate())
+    registry = HookRegistry(gate=make_permissive_fixture_gate())
     set_registry(registry)
     try:
         yield registry
@@ -112,7 +112,7 @@ def test_declare_hookpoints_default_target_uses_active_registry() -> None:
     one the module-init call uses, so this guards against a regression
     that breaks production declaration."""
     prior = get_registry()
-    registry = HookRegistry(gate=make_default_test_gate())
+    registry = HookRegistry(gate=make_permissive_fixture_gate())
     set_registry(registry)
     try:
         declare_hookpoints()

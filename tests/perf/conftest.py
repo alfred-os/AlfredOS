@@ -67,7 +67,7 @@ from typing import Any
 import pytest
 
 from alfred.hooks.registry import OPEN_TIERS, HookRegistry, get_registry, set_registry
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_permissive_fixture_gate
 
 # Pinned bench knobs — mirrored from
 # ``tests/perf/test_hook_dispatch_perf.py``. Centralising them lets the
@@ -284,7 +284,7 @@ def fresh_registry() -> Iterator[HookRegistry]:
     rule #4 — never stub the capability gate with an always-allow shim).
 
     The gate is the post-PR-S3-7 fixture-parity gate
-    (:func:`make_default_test_gate`, ``allow_system=False``); the
+    (:func:`make_permissive_fixture_gate`, ``allow_system=False``); the
     sink is the registry's own default :class:`StructlogAuditSink`.
     The pre-test singleton is captured at fixture entry and restored
     on teardown so the perf bench cannot leak subscribers into a
@@ -299,7 +299,7 @@ def fresh_registry() -> Iterator[HookRegistry]:
     measurement — see Group C in the #119 review report.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_default_test_gate())
+    registry = HookRegistry(gate=make_permissive_fixture_gate())
     _declare_bench_hookpoints(registry)
     set_registry(registry)
     try:
@@ -318,7 +318,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     a future regression need it).
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_default_test_gate(allow_system=True))
+    registry = HookRegistry(gate=make_permissive_fixture_gate(allow_system=True))
     _declare_bench_hookpoints(registry)
     set_registry(registry)
     try:

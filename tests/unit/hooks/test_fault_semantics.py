@@ -56,7 +56,7 @@ from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
 from alfred.hooks.invoke import invoke
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_permissive_fixture_gate
 
 from .conftest import SpyAuditSink
 
@@ -114,7 +114,7 @@ def short_deadline_registry(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_default_test_gate(),
+        gate=make_permissive_fixture_gate(),
         sink=spy_sink,
         chain_deadline_seconds=_SHORT_DEADLINE,
         strict_declarations=False,
@@ -143,7 +143,7 @@ def generous_deadline_registry(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_default_test_gate(),
+        gate=make_permissive_fixture_gate(),
         sink=spy_sink,
         chain_deadline_seconds=0.5,
         strict_declarations=False,
@@ -443,7 +443,7 @@ async def test_chain_deadline_seconds_on_registry_is_the_gate(
 
     # Tight registry — timeout fires.
     tight = HookRegistry(
-        gate=make_default_test_gate(),
+        gate=make_permissive_fixture_gate(),
         sink=spy_sink,
         chain_deadline_seconds=_SHORT_DEADLINE,
         strict_declarations=False,

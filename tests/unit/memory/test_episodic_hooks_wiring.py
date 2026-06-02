@@ -73,7 +73,7 @@ from alfred.hooks.invoke import ERROR_EXC_METADATA_KEY
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.memory.episodic import EpisodicMemory, EpisodicRecordInput, declare_hookpoints
 from alfred.memory.models import Episode
-from tests.helpers.gates import make_default_test_gate
+from tests.helpers.gates import make_permissive_fixture_gate
 
 # Representative kwargs covering every parameter — including non-default
 # values for the six fields with defaults — so the "fields match input"
@@ -178,7 +178,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     refusal contract holds and that a ``fail_closed=True`` chain raises
     :class:`HookSubscriberError` when a system-tier subscriber crashes
     requires a registry whose fixture-parity gate
-    (:func:`make_default_test_gate(allow_system=True)`) permits
+    (:func:`make_permissive_fixture_gate(allow_system=True)`) permits
     system-tier registration. The pre-test singleton is captured and
     restored on teardown so the test never leaks a permissive
     registry into a sibling test (CLAUDE.md hard rule #4 — the gate
@@ -191,7 +191,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     directory.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_default_test_gate(allow_system=True))
+    registry = HookRegistry(gate=make_permissive_fixture_gate(allow_system=True))
     set_registry(registry)
     # #119 — declare the episodic publisher's hookpoints on the fresh
     # registry BEFORE any subscriber registers. Production code reaches

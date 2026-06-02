@@ -349,11 +349,11 @@ async def test_undeclared_hookpoint_in_strict_mode_raises(
     internal inconsistency.
     """
     from alfred.hooks.registry import HookRegistry, get_registry, set_registry
-    from tests.helpers.gates import make_default_test_gate
+    from tests.helpers.gates import make_permissive_fixture_gate
 
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_default_test_gate(allow_system=True),
+        gate=make_permissive_fixture_gate(allow_system=True),
         sink=spy_sink,
         strict_declarations=True,
     )
@@ -392,11 +392,11 @@ async def test_undeclared_hookpoint_in_strict_mode_emits_audit_row(
     the field-disagreement shapes.
     """
     from alfred.hooks.registry import HookRegistry, get_registry, set_registry
-    from tests.helpers.gates import make_default_test_gate
+    from tests.helpers.gates import make_permissive_fixture_gate
 
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_default_test_gate(allow_system=True),
+        gate=make_permissive_fixture_gate(allow_system=True),
         sink=spy_sink,
         strict_declarations=True,
     )
