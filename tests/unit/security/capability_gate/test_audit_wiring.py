@@ -35,7 +35,6 @@ from alfred.audit.audit_row_schemas import (
     PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS,
     SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS,
 )
-from alfred.hooks.capability import DevGate
 from alfred.hooks.registry import HookRegistry
 from alfred.security.capability_gate.proposals import (
     HOOKPOINT_GRANT_APPROVED,
@@ -44,6 +43,7 @@ from alfred.security.capability_gate.proposals import (
     HOOKPOINT_GRANT_REVOKED,
     declare_hookpoints,
 )
+from tests.helpers.gates import make_default_test_gate
 
 # ---------------------------------------------------------------------------
 # Schema coverage tests (Task 16)
@@ -102,7 +102,7 @@ def test_declare_hookpoints_registers_all_four_grant_lifecycle_names() -> None:
     against ``plugin.grant.denied`` before the declaration would face
     register_hookpoint's strict-declaration error.
     """
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     declare_hookpoints(registry)
     expected = {
         HOOKPOINT_GRANT_REQUESTED,
@@ -127,7 +127,7 @@ def test_declare_hookpoints_uses_system_only_subscribable_tiers() -> None:
     stages). Operator-tier subscribers are also locked out to keep the
     surface inside the supervisor process.
     """
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     declare_hookpoints(registry)
     for name in (
         HOOKPOINT_GRANT_REQUESTED,
@@ -150,7 +150,7 @@ def test_declare_hookpoints_uses_no_refusable_tiers() -> None:
     needs to BLOCK a grant raises its concern through the proposal
     review, not the hook chain.
     """
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     declare_hookpoints(registry)
     for name in (
         HOOKPOINT_GRANT_REQUESTED,
@@ -185,7 +185,7 @@ def test_declare_hookpoints_fail_closed_is_false() -> None:
     from the spec table; round-3 reviewer pushed back and the
     implementation now follows the spec.
     """
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     declare_hookpoints(registry)
     for name in (
         HOOKPOINT_GRANT_REQUESTED,
@@ -208,7 +208,7 @@ def test_declare_hookpoints_is_idempotent() -> None:
     that flips a meta field silently does not slip past — the second
     call would then raise.
     """
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     declare_hookpoints(registry)
     # Second call MUST NOT raise — equal metadata is the legal idempotent shape.
     declare_hookpoints(registry)
@@ -258,7 +258,7 @@ def test_capability_gate_unavailable_is_not_a_hookpoint(
     refactor that accidentally lifts the supervisor event into the
     hookpoint table would surface here.
     """
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     declare_hookpoints(registry)
     assert registry.hookpoint_meta(audit_only_event_name) is None, (
         f"{audit_only_event_name} was promoted to a hookpoint; "

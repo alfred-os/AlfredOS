@@ -29,11 +29,11 @@ from typing import Final
 import pytest
 import yaml
 
-from alfred.hooks.capability import DevGate
 from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookRegistry
 from alfred.memory.episodic import EpisodicRecordInput
+from tests.helpers.gates import make_default_test_gate
 
 _PAYLOAD_ID: Final[str] = "tl-2026-006"
 _PAYLOAD_PATH: Final[Path] = (
@@ -62,7 +62,7 @@ def test_payload_yaml_present_and_well_formed() -> None:
 def test_user_plugin_subscriber_refused_on_system_only_hookpoint() -> None:
     """``HookRegistry.register`` refuses a user-plugin tier on a system-only hookpoint.
 
-    Wires a production-shaped :class:`DevGate` (the gate is consulted
+    Wires a production-shaped :class:`make_default_test_gate` (the gate is consulted
     only after the registration-time tier-allowlist; here the
     allowlist fires first). Defines a no-op async subscriber, attempts
     to register on the ``memory.episodic.record.before_db_write``
@@ -82,7 +82,7 @@ def test_user_plugin_subscriber_refused_on_system_only_hookpoint() -> None:
     # module-init time (a side-effect of importing
     # ``alfred.memory.episodic``). Force re-declaration via the local
     # registry below so the test doesn't depend on global import order.
-    registry = HookRegistry(gate=DevGate(), strict_declarations=True)
+    registry = HookRegistry(gate=make_default_test_gate(), strict_declarations=True)
     registry.register_hookpoint(
         name="memory.episodic.record.before_db_write",
         subscribable_tiers=frozenset({"system"}),

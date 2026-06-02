@@ -39,12 +39,12 @@ from typing import Final
 import pytest
 
 from alfred.hooks.audit_sink import HOOKS_TIER_REJECTED
-from alfred.hooks.capability import DevGate
 from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookRegistry
 from alfred.memory.episodic import EpisodicRecordInput
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.gates import make_default_test_gate
 from tests.unit.hooks.conftest import SpyAuditSink
 
 _PAYLOAD_ID: Final[str] = "hk-2026-002"
@@ -94,13 +94,13 @@ def test_user_plugin_rejected_on_security_hookpoint(
        on hookpoint" message + the :data:`HOOKS_TIER_REJECTED` audit
        row lands + the registry's bucket stays empty.
 
-    The :class:`DevGate` is constructed with ``allow_system=False`` —
+    The :class:`make_default_test_gate` is constructed with ``allow_system=False`` —
     the production posture per sec-001. Were the registration to slip
     past the new tier-allowlist gate, the existing capability-gate
     deny path (covered by :mod:`tests.adversarial.hooks.test_hk_2026_001_tier_escalation`)
     would still catch the system-tier subset; this test ONLY exercises
     the new register-time tier-allowlist gate from #119, with a
-    user-plugin tier the existing :class:`DevGate` would have
+    user-plugin tier the existing :class:`make_default_test_gate` would have
     accepted.
     """
     # Payload shape sanity — dict form is what the new payload uses.
@@ -129,12 +129,12 @@ def test_user_plugin_rejected_on_security_hookpoint(
     )
 
     spy_sink = SpyAuditSink()
-    # ``DevGate(allow_system=False)`` is the production posture
-    # (sec-001). For a user-plugin tier, ``DevGate.check`` would return
+    # ``make_default_test_gate()`` is the production posture
+    # (sec-001). For a user-plugin tier, ``the fixture-parity gate.check`` would return
     # True (user-plugin is unconditionally granted by the dev gate); the
     # rejection here comes from the new register-time tier-allowlist
     # gate, NOT the capability gate.
-    registry = HookRegistry(gate=DevGate(), sink=spy_sink, strict_declarations=True)
+    registry = HookRegistry(gate=make_default_test_gate(), sink=spy_sink, strict_declarations=True)
 
     # Declare the hookpoint with the SAME metadata the production
     # publisher (:mod:`alfred.memory.episodic`) declares. The

@@ -29,7 +29,6 @@ from collections.abc import Iterator
 
 import pytest
 
-from alfred.hooks.capability import DevGate
 from alfred.hooks.registry import (
     SYSTEM_OPERATOR_TIERS,
     HookRegistry,
@@ -41,20 +40,22 @@ from alfred.identity._ingest import (
     HOOKPOINT_T1_INGRESS,
     declare_hookpoints,
 )
+from tests.helpers.gates import make_default_test_gate
 
 
 @pytest.fixture
 def fresh_registry() -> Iterator[HookRegistry]:
     """Install a fresh :class:`HookRegistry` for the test body's duration.
 
-    The default :class:`DevGate` denies the ``system`` tier — fine here
-    because :meth:`HookRegistry.register_hookpoint` does not consult the
-    gate (the gate only fires on subscriber registration). Swap-and-
-    restore so a sibling test's view of the global singleton is
+    The default fixture-parity gate (:func:`make_default_test_gate`,
+    ``allow_system=False``) denies the ``system`` tier — fine here
+    because :meth:`HookRegistry.register_hookpoint` does not consult
+    the gate (the gate only fires on subscriber registration). Swap-
+    and-restore so a sibling test's view of the global singleton is
     unaffected.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     set_registry(registry)
     try:
         yield registry
@@ -111,7 +112,7 @@ def test_declare_hookpoints_default_target_uses_active_registry() -> None:
     one the module-init call uses, so this guards against a regression
     that breaks production declaration."""
     prior = get_registry()
-    registry = HookRegistry(gate=DevGate())
+    registry = HookRegistry(gate=make_default_test_gate())
     set_registry(registry)
     try:
         declare_hookpoints()

@@ -11,25 +11,28 @@ isolation is enforced by :func:`alfred.hooks.registry.set_registry` /
 Four fixtures ship:
 
 * :func:`fresh_registry` — the canonical default. Installs a brand-new
-  :class:`HookRegistry` with a :class:`RealGate` constructed via
-  :func:`tests.helpers.gates.make_deny_all_gate` (no grants, every
-  check denies) and the registry's own default
+  :class:`HookRegistry` with the fixture-parity gate constructed via
+  :func:`tests.helpers.gates.make_default_test_gate` (operator and
+  user-plugin granted, system denied — matching the Slice-2.5
+  ``DevGate()`` semantics) and the registry's own default
   :class:`StructlogAuditSink`. The pre-test registry is captured at
   fixture entry and restored on teardown so cross-test contamination
   via the module-level singleton is impossible.
 * :func:`fresh_registry_allow_system` — same shape, but the gate
-  carries a wildcard ``system``-tier grant via
-  :func:`tests.helpers.gates.make_allow_system_gate`. Used by tests
-  that need to register a system-tier subscriber (Task 7's @hook
-  decorator unit tests, Task 9's chain-deadline tests).
+  grants the ``system`` tier as well via
+  :func:`tests.helpers.gates.make_default_test_gate` with
+  ``allow_system=True``. Used by tests that need to register a
+  system-tier subscriber (Task 7's @hook decorator unit tests, Task 9's
+  chain-deadline tests).
 * :func:`spy_registry_allow_system` — the spy-sink composition of
   ``fresh_registry_allow_system``. Installs a :class:`HookRegistry`
-  with a granted-system gate AND a :class:`SpyAuditSink` injected via
-  constructor, so fault-path audit rows land on the test-visible
-  recorder rather than the global structlog sink. Used by Task 11's
-  §6.5 refusal-authorization tests and Task 12's reentry-bypass tests
-  against system-tier subscribers — the only fixture combination that
-  needs both axes (system permitted + sink observable).
+  with a granted-system fixture-parity gate AND a
+  :class:`SpyAuditSink` injected via constructor, so fault-path audit
+  rows land on the test-visible recorder rather than the global
+  structlog sink. Used by Task 11's §6.5 refusal-authorization tests
+  and Task 12's reentry-bypass tests against system-tier subscribers
+  — the only fixture combination that needs both axes (system
+  permitted + sink observable).
 * :func:`spy_sink` — a structural :class:`AuditSink` test double that
   records every ``emit(event, correlation_id, fields)`` into a flat
   list. Tasks 9-12 inject this into a :class:`HookRegistry` to assert the
@@ -39,9 +42,15 @@ Four fixtures ship:
 
 PR-S3-7 (spec §15.1 flag-day): the gate-construction calls migrated
 from the Slice-2.5 ``DevGate(...)`` constructions to
-:mod:`tests.helpers.gates` factories wrapping the production
-:class:`RealGate` with an in-memory stub backend. The deny-path
-semantics are preserved; only the backing-store shape changed.
+:mod:`tests.helpers.gates` factories. Tests that need the strict
+production :class:`RealGate` semantics (empty grants ⇒ deny everything
+including operator, exact ``plugin_id`` match) construct
+:func:`tests.helpers.gates.make_deny_all_gate` /
+:func:`tests.helpers.gates.make_allow_system_gate` directly; the
+fixtures here use :func:`tests.helpers.gates.make_default_test_gate`
+to preserve the Slice-2.5 ergonomic shape for the test bodies that
+register an ``operator``-tier subscriber under an arbitrary
+module-named ``plugin_id``.
 
 The spy is a ``frozen=True, slots=True`` dataclass — same hot-path
 discipline as the real :class:`StructlogAuditSink`. The ``calls`` list
@@ -58,7 +67,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
-from tests.helpers.gates import make_allow_system_gate, make_deny_all_gate
+from tests.helpers.gates import make_default_test_gate
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +127,7 @@ def fresh_registry() -> Iterator[HookRegistry]:
     the strict contract use the :func:`strict_registry` fixture.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_deny_all_gate(), strict_declarations=False)
+    registry = HookRegistry(gate=make_default_test_gate(), strict_declarations=False)
     set_registry(registry)
     try:
         yield registry
@@ -141,7 +150,9 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     :func:`fresh_registry`.
     """
     prior = get_registry()
-    registry = HookRegistry(gate=make_allow_system_gate(), strict_declarations=False)
+    registry = HookRegistry(
+        gate=make_default_test_gate(allow_system=True), strict_declarations=False
+    )
     set_registry(registry)
     try:
         yield registry
@@ -162,7 +173,7 @@ def strict_registry() -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_allow_system_gate(),
+        gate=make_default_test_gate(allow_system=True),
         strict_declarations=True,
     )
     set_registry(registry)
@@ -203,7 +214,7 @@ def spy_registry_allow_system(spy_sink: SpyAuditSink) -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=make_allow_system_gate(),
+        gate=make_default_test_gate(allow_system=True),
         sink=spy_sink,
         strict_declarations=False,
     )

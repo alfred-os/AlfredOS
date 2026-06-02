@@ -4,14 +4,14 @@ Asserts the **defense fired** (not an escalation path): given a user-plugin-
 tier subscriber that tries to register on the canonical hookpoint
 `memory.episodic.record.before_db_write` requesting
 `system` tier, :meth:`HookRegistry.register` MUST raise :class:`HookError`
-via the :class:`DevGate` deny path (capability-gate refusal — see Slice-2.5
+via the :class:`make_default_test_gate` deny path (capability-gate refusal — see Slice-2.5
 spec §6.1 + §6.2 + `src/alfred/hooks/registry.py` ll. 412-421). The PoC
 contract is:
 
 1. Load the payload through the session-scoped `corpus_payloads` fixture
    (drift-guard — a rename / delete / schema regression on `hk-2026-001`
    surfaces here before the assertion can run).
-2. Build a :class:`HookRegistry` with a production-shaped :class:`DevGate`
+2. Build a :class:`HookRegistry` with a production-shaped :class:`make_default_test_gate`
    (``allow_system=False`` — the deny path the payload's
    ``expected_outcome: refused`` is asserting).
 3. Attempt to register a no-op coroutine subscriber on the hookpoint the
@@ -39,12 +39,12 @@ from typing import Final
 
 import pytest
 
-from alfred.hooks.capability import DevGate
 from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookRegistry
 from alfred.memory.episodic import EpisodicRecordInput
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.gates import make_default_test_gate
 
 # Id of the payload this test exercises. Centralised so the failure message
 # carries the right pointer if the corpus filter returns nothing.
@@ -76,7 +76,7 @@ def test_hook_registry_refuses_user_plugin_registering_at_system_tier(
 ) -> None:
     """`HookRegistry.register` MUST raise on a user-plugin requesting system tier.
 
-    Wires a production-shaped :class:`DevGate` (``allow_system=False`` —
+    Wires a production-shaped :class:`make_default_test_gate` (``allow_system=False`` —
     the deny posture per sec-001 in the Slice-2.5 spec) into a fresh
     :class:`HookRegistry`. Defines a no-op async subscriber, attempts to
     register it on the payload's ``hookpoint`` at the payload's
@@ -116,16 +116,16 @@ def test_hook_registry_refuses_user_plugin_registering_at_system_tier(
         f"this test asserts the deny path for a `system` escalation"
     )
 
-    # Production-shaped DevGate: `allow_system=False` is the default and
+    # Production-shaped the fixture-parity gate: `allow_system=False` is the default and
     # the posture sec-001 specifies. Test-only callers that need to
-    # exercise the allow-path build `DevGate(allow_system=True)` (see
+    # exercise the allow-path build `make_default_test_gate(allow_system=True)` (see
     # `EpisodicAuditSink`'s class docstring Example) — that posture is
     # NOT under test here.
     # ``strict_declarations=False`` keeps the test focused on the tier
     # gate (the load-bearing defense for this payload); the
     # registration-time tier-allowlist enforcement is its own dedicated
     # adversarial in ``tests/adversarial/test_hooks_tier_enforcement.py``.
-    registry = HookRegistry(gate=DevGate(), strict_declarations=False)
+    registry = HookRegistry(gate=make_default_test_gate(), strict_declarations=False)
 
     # No-op subscriber — the body is immaterial. The registration gate
     # rejects BEFORE the subscriber is added to any bucket, so the body

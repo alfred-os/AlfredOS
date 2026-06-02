@@ -76,12 +76,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alfred.audit.log import AuditWriter
-from alfred.hooks.capability import DevGate
 from alfred.hooks.context import HookContext
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.memory.episodic import EpisodicMemory, EpisodicRecordInput, declare_hookpoints
 from alfred.memory.hooks_audit_sink import EpisodicAuditSink
 from alfred.memory.models import AuditEntry, Episode
+from tests.helpers.gates import make_default_test_gate
 
 # Representative payload — every field non-default where a default exists,
 # so the byte-identity assertion exercises the real value-flow rather than
@@ -181,7 +181,7 @@ async def test_zero_subscriber_row_byte_identical(
     # ``EpisodicMemory.__init__`` calls :func:`declare_hookpoints`
     # against the active registry, so the hookpoints land before any
     # ``record`` call drives an ``invoke``.
-    fresh_reg = HookRegistry(gate=DevGate())
+    fresh_reg = HookRegistry(gate=make_default_test_gate())
     set_registry(fresh_reg)
     try:
         memory = EpisodicMemory(session=session)
@@ -308,7 +308,7 @@ async def test_audit_sink_no_recursion(
     # subscriber without rewriting the fixture; the subscriber registered
     # below is operator-tier (allow_system is irrelevant to its grant).
     registry = HookRegistry(
-        gate=DevGate(allow_system=True),
+        gate=make_default_test_gate(allow_system=True),
         sink=EpisodicAuditSink(audit=AuditWriter(session_factory=session_factory)),
     )
     set_registry(registry)
@@ -456,7 +456,7 @@ async def test_fault_row_persists_on_flush_failure(
     # ``subscribable_tiers={"system","operator"}`` admits operator-tier
     # subscribers per the spec §6.5 contract.
     registry = HookRegistry(
-        gate=DevGate(allow_system=True),
+        gate=make_default_test_gate(allow_system=True),
         sink=EpisodicAuditSink(audit=AuditWriter(session_factory=session_factory)),
     )
     set_registry(registry)
@@ -645,7 +645,7 @@ async def test_system_tier_redactor_scrubs_content(
 
     This is the spec §6.5 / §8 PoC made operator-observable end-to-end:
 
-    * **System tier.** ``DevGate(allow_system=True)`` is constructed
+    * **System tier.** ``make_default_test_gate(allow_system=True)`` is constructed
       EXPLICITLY — the real refusal mechanism is the gate (CLAUDE.md
       hard rule #4 / sec-007). Removing ``allow_system=True`` would
       cause the registration below to raise :class:`HookError` at
@@ -672,7 +672,7 @@ async def test_system_tier_redactor_scrubs_content(
     no catalog key is added in this commit, which matches the
     decision's prediction.
     """
-    # Install a registry with an EXPLICIT ``DevGate(allow_system=True)`` —
+    # Install a registry with an EXPLICIT ``make_default_test_gate(allow_system=True)`` —
     # the ONLY way a system-tier subscriber can register (sec-007,
     # CLAUDE.md hard rule #4). The sink is the same real
     # :class:`EpisodicAuditSink` Task 8 uses, so the happy-path
@@ -680,7 +680,7 @@ async def test_system_tier_redactor_scrubs_content(
     # the production sink wiring.
     prior = get_registry()
     fresh_reg = HookRegistry(
-        gate=DevGate(allow_system=True),
+        gate=make_default_test_gate(allow_system=True),
         sink=EpisodicAuditSink(audit=AuditWriter(session_factory=session_factory)),
     )
     set_registry(fresh_reg)
@@ -713,7 +713,7 @@ async def test_system_tier_redactor_scrubs_content(
             scrubbed = _strip_sk_tokens(ctx.input.content)
             return ctx.with_input(replace(ctx.input, content=scrubbed))
 
-        # Register at system tier. ``DevGate(allow_system=True)`` is the
+        # Register at system tier. ``make_default_test_gate(allow_system=True)`` is the
         # gate that admits this; flipping the gate flag would cause
         # ``register`` to raise. The hookpoint is ``before_db_write``,
         # kind ``pre`` — the security stage per spec §7.

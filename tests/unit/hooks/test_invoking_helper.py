@@ -35,8 +35,10 @@ Out of scope (PR-B owns these):
 * Integration with the real :class:`alfred.audit.log.AuditWriter`
   sink — PR-B's :class:`EpisodicAuditSink` is the durable path.
 * The ``gate=`` kwarg's effect on subscriber tier checks — Slice-3's
-  grant gate consumes that surface; PR-A's :class:`DevGate` is
-  exercised through the standard registry-injection fixtures.
+  grant gate (:class:`alfred.security.capability_gate._gate.RealGate`)
+  consumes that surface; the fixture-parity gate (post-PR-S3-7) is
+  exercised through the standard registry-injection fixtures in
+  :mod:`tests.unit.hooks.conftest`.
 """
 
 from __future__ import annotations

@@ -348,12 +348,12 @@ async def test_undeclared_hookpoint_in_strict_mode_raises(
     means the register-time enforcement failed to intercept — an
     internal inconsistency.
     """
-    from alfred.hooks.capability import DevGate
     from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+    from tests.helpers.gates import make_default_test_gate
 
     prior = get_registry()
     registry = HookRegistry(
-        gate=DevGate(allow_system=True),
+        gate=make_default_test_gate(allow_system=True),
         sink=spy_sink,
         strict_declarations=True,
     )
@@ -391,12 +391,12 @@ async def test_undeclared_hookpoint_in_strict_mode_emits_audit_row(
     so operators distinguish this internal-inconsistency shape from
     the field-disagreement shapes.
     """
-    from alfred.hooks.capability import DevGate
     from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+    from tests.helpers.gates import make_default_test_gate
 
     prior = get_registry()
     registry = HookRegistry(
-        gate=DevGate(allow_system=True),
+        gate=make_default_test_gate(allow_system=True),
         sink=spy_sink,
         strict_declarations=True,
     )

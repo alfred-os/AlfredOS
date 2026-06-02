@@ -424,8 +424,10 @@ class HookRegistry:
 
     * ``gate`` — the capability gate consulted at register time. A
       refusal raises :class:`HookError` and leaves no trace in the
-      registry. The dev-time default is :class:`DevGate`; Slice-3's
-      operator-grant gate slots in here without source change.
+      registry. The production gate is
+      :class:`alfred.security.capability_gate._gate.RealGate`, wired
+      by :mod:`alfred.bootstrap.gate_factory`. Tests construct
+      fixture-parity gates via :mod:`tests.helpers.gates`.
     * ``sink`` — the public attribute the dispatcher reads for fault-row
       emissions. PR-A's default is a :class:`StructlogAuditSink` bound
       to ``structlog.get_logger("alfred.hooks")``; PR-B's DB-backed
@@ -750,9 +752,10 @@ class HookRegistry:
         # explicit tier-validation message). Raising :class:`HookError`
         # up-front keeps the registry's invariant intact: a failed
         # register MUST leave no trace. The known-tier gate (operator
-        # /user-plugin/system) is the same set ``DevGate`` knows about
-        # — anything else is a developer-bug shape (typo, copy-paste
-        # error) and surfaces here with attribution to ``hook_fn`` and
+        # /user-plugin/system) is the same set the production
+        # :class:`RealGate` knows about — anything else is a
+        # developer-bug shape (typo, copy-paste error) and surfaces
+        # here with attribution to ``hook_fn`` and
         # ``hookpoint``.
         if tier not in _TIER_RANK:
             raise HookError(
@@ -816,8 +819,9 @@ class HookRegistry:
                 )
             )
 
-        # Capability gate consult. The DevGate ignores plugin_id and
-        # hookpoint this slice; Slice-3's grant gate consults all three.
+        # Capability gate consult. The post-PR-S3-7 production gate
+        # (:class:`RealGate`) consults all three of plugin_id,
+        # hookpoint, and requested_tier against its grant table.
         # Passing ``hook_fn.__module__`` as ``plugin_id`` is the
         # default attribution shape (a Slice-3 grant gate keyed by
         # plugin id will read it; the dev gate ignores it).

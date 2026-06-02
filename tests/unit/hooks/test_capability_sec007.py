@@ -1,28 +1,36 @@
 """sec-007 AST-scan regression guard for ``alfred.hooks.capability``.
 
-Task-4 of Slice-2.5 PR-A. The behavioural pin
-(``test_capability.py::test_devgate_does_not_read_environment``) proves that
-*today's* :class:`DevGate` ignores a monkeypatched env var. This module is
-the *structural* pin: it parses ``src/alfred/hooks/capability.py`` on every
-CI run and fails loudly if a future commit reintroduces an
-``os.environ`` / ``os.getenv`` access — the ambient-escalation hazard
-catalogued as sec-007 in the Slice-2.5 spec.
+Task-4 of Slice-2.5 PR-A — the sec-007 structural pin. This module
+parses ``src/alfred/hooks/capability.py`` on every CI run and fails
+loudly if a future commit reintroduces an ``os.environ`` / ``os.getenv``
+access — the ambient-escalation hazard catalogued as sec-007 in the
+Slice-2.5 spec.
 
-Why a separate file: ``test_capability.py`` covers behavioural invariants
-(grant table, fail-closed, Protocol structural subtyping, keyword-only
-contract). The AST scanner is a different shape of test — it inspects
-source bytes, not runtime behaviour — and lives next door so the two pins
-stay legible side-by-side without cross-pollination.
+PR-S3-7 (spec §15.1 flag-day): the Slice-2.5 :class:`DevGate` was
+removed from ``src/alfred/hooks/capability.py`` in this slice — the
+module is now Protocol-only. The sec-007 AST scan still applies to
+the file: a future PR re-introducing any env read (for the
+``CapabilityGate`` Protocol or any new gate implementation that lands
+here) is the regression this pin catches.
+
+Why a separate file: ``test_capability.py`` covers behavioural
+invariants (deny-path semantics, fail-closed, Protocol structural
+subtyping, keyword-only contract) using :class:`RealGate` fixtures from
+:mod:`tests.helpers.gates`. The AST scanner is a different shape of
+test — it inspects source bytes, not runtime behaviour — and lives
+next door so the two pins stay legible side-by-side without
+cross-pollination.
 
 Why a bespoke scanner rather than reusing
-``tests/unit/security/test_no_direct_env_reads.py``: the PR-C scan checks a
-*subset* of env keys (``ALFRED_<SUPPORTED_SECRET>``) with a
+``tests/unit/security/test_no_direct_env_reads.py``: the PR-C scan
+checks a *subset* of env keys (``ALFRED_<SUPPORTED_SECRET>``) with a
 broker-pointing remediation (ADR-0012). The sec-007 contract on
-``capability.py`` is stricter — **no** env read for **any** key, with a
-spec-pointing remediation (Slice-2.5 spec §6.3 / sec-007). The two scans
-share the same AST shape (``ast.NodeVisitor`` + alias tracking + literal
-line-numbered failures) so a reader who has seen one recognises the other,
-but the rule-set and remediation pointer are scoped to this module.
+``capability.py`` is stricter — **no** env read for **any** key, with
+a spec-pointing remediation (Slice-2.5 spec §6.3 / sec-007). The two
+scans share the same AST shape (``ast.NodeVisitor`` + alias tracking +
+literal line-numbered failures) so a reader who has seen one
+recognises the other, but the rule-set and remediation pointer are
+scoped to this module.
 """
 
 from __future__ import annotations
@@ -198,16 +206,17 @@ def _format_hits(path: Path, hits: list[_Hit]) -> str:
     return f"{header}\n{body}\n{_REMEDIATION}"
 
 
-def test_devgate_reads_no_environment() -> None:
+def test_capability_module_reads_no_environment() -> None:
     """sec-007 regression guard: ``capability.py`` must not read the env.
 
     AST-parses ``src/alfred/hooks/capability.py`` on every CI run and
     asserts the source contains no ``os.environ`` subscript, no
     ``os.environ.get(...)`` / ``environ.get(...)`` call, and no
-    ``os.getenv(...)`` / aliased-``getenv`` call. The behavioural pin in
-    ``test_capability.py`` proves *today's* :class:`DevGate` ignores a
-    monkeypatched env var; this structural pin prevents a future commit
-    from reintroducing the ambient-escalation hazard at the source level.
+    ``os.getenv(...)`` / aliased-``getenv`` call. PR-S3-7 removed the
+    Slice-2.5 :class:`DevGate` class from this file; the structural
+    pin still applies — the Protocol-only module remains under the
+    same no-env-read contract so a future gate implementation that
+    lands here cannot smuggle in an ambient-escalation env read.
 
     Failure renders the file, line number, column offset, and source
     fragment of every offending node so the breakage is debuggable from

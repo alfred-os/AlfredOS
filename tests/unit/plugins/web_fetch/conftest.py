@@ -26,8 +26,8 @@ from typing import Any
 
 import pytest
 
-from alfred.hooks.capability import DevGate
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+from tests.helpers.gates import make_default_test_gate
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +85,7 @@ def fresh_registry_allow_system() -> Iterator[HookRegistry]:
     """
     prior = get_registry()
     registry = HookRegistry(
-        gate=DevGate(allow_system=True),
+        gate=make_default_test_gate(allow_system=True),
         strict_declarations=False,
     )
     set_registry(registry)

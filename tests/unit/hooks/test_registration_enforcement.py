@@ -39,10 +39,10 @@ import pytest
 import structlog.testing
 
 from alfred.hooks.audit_sink import HOOKS_TIER_REJECTED
-from alfred.hooks.capability import DevGate
 from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookpointMeta, HookRegistry
+from tests.helpers.gates import make_default_test_gate
 from tests.unit.hooks.conftest import SpyAuditSink
 
 # ──────────────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ def test_default_strict_declarations_is_true_in_production_singleton() -> None:
     async def _noop_local(_ctx: HookContext[Any]) -> None:
         """Async no-op."""
 
-    reg = HookRegistry(gate=DevGate())
+    reg = HookRegistry(gate=make_default_test_gate())
     with pytest.raises(HookError, match="not declared"):
         reg.register(
             hook_fn=_noop_local,
@@ -428,8 +428,9 @@ def test_subscriber_tier_in_allowlist_succeeds(
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
     )
-    # ``operator`` IS in the allow-list. The default :class:`DevGate`
-    # also grants ``operator``; both gates pass.
+    # ``operator`` IS in the allow-list. The fixture-parity gate (via
+    # :func:`make_default_test_gate`) also grants ``operator``; both
+    # gates pass.
     strict_registry.register(
         hook_fn=_noop,
         hookpoint="before_db_write",
@@ -461,7 +462,7 @@ def test_subscriber_tier_not_in_allowlist_refuses(
     ``subscribable_tiers={"system","operator"}``.
     """
     registry = HookRegistry(
-        gate=DevGate(),
+        gate=make_default_test_gate(),
         sink=spy_sink,
         strict_declarations=True,
     )
@@ -545,7 +546,7 @@ def test_tier_rejection_audit_row_is_emitted_synchronously(
     task would surface as this test failing.
     """
     registry = HookRegistry(
-        gate=DevGate(),
+        gate=make_default_test_gate(),
         sink=spy_sink,
         strict_declarations=True,
     )
@@ -591,7 +592,7 @@ def test_tier_rejection_inside_running_loop_emits_synchronously(
 
     async def _provoke() -> None:
         registry = HookRegistry(
-            gate=DevGate(),
+            gate=make_default_test_gate(),
             sink=spy_sink,
             strict_declarations=True,
         )
@@ -807,7 +808,7 @@ def test_emit_sync_no_running_loop_arm_bounds_stalling_sink() -> None:
     """
     sink = _StallingAuditSink()
     registry = HookRegistry(
-        gate=DevGate(),
+        gate=make_default_test_gate(),
         sink=sink,
         strict_declarations=True,
     )

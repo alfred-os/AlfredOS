@@ -22,8 +22,9 @@ Invariants pinned here (mirroring the Task 7 brief):
   :mod:`alfred.hooks.errors`. The registry is NOT mutated by a failed
   decoration — fail-loud BEFORE state change (CLAUDE.md hard rule #7).
 * **Gate refusal propagates** — when the underlying ``register`` raises
-  (e.g. a system-tier subscriber against a default :class:`DevGate`),
-  the decorator does not catch. The raise surfaces at decoration time.
+  (e.g. a system-tier subscriber against the default fixture-parity
+  gate, where ``allow_system=False``), the decorator does not catch.
+  The raise surfaces at decoration time.
 * **``origin_module`` recorded** — ``Subscriber.origin_module`` equals
   the decorated function's ``__module__``. The decorator does not need
   to do anything special here — :meth:`HookRegistry.register` reads
@@ -225,7 +226,7 @@ def test_hook_without_arguments_is_a_type_error() -> None:
 
 @pytest.mark.usefixtures("fresh_registry")
 def test_hook_propagates_gate_refusal_at_decoration_time() -> None:
-    """The default :class:`DevGate` denies the ``system`` tier; a
+    """The default fixture-parity gate denies the ``system`` tier; a
     ``@hook(..., tier="system")`` against the default fixture raises
     :class:`HookError` at decoration time.
 
