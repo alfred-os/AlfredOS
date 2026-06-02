@@ -472,3 +472,163 @@ async def test_set_sync_hash_upserts() -> None:
     assert "INSERT INTO capability_gate_sync" in sql_text
     assert "ON CONFLICT" in sql_text
     assert params == {"commit_hash": "new-head-hash"}
+
+
+# ---------------------------------------------------------------------------
+# apply_atomic — single-transaction batch (sec-pr-s3-6-02 / perf-002 / err-003)
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_atomic_runs_all_sql_inside_one_session() -> None:
+    """``apply_atomic`` runs every DELETE / INSERT / UPSERT on ONE session.
+
+    The atomicity contract: a single ``async with session.begin()``
+    block wraps every SQL statement. The fake factory's ``begin`` mock
+    is invoked exactly once across N revokes + M upserts + the
+    trailing ``set_sync_hash`` — the sentinel that pins the batch
+    against a regression where ``apply_atomic`` opens a per-op
+    transaction inside.
+    """
+    from alfred.security.capability_gate.backend import PostgresBackend
+    from alfred.security.capability_gate.policy import GrantRow
+
+    factory, session = _fake_session_factory()
+    backend = PostgresBackend(session_factory=factory)
+
+    revokes = [
+        GrantRow(
+            plugin_id="legacy.a",
+            subscriber_tier="operator",
+            hookpoint="tool.a",
+            content_tier=None,
+            proposal_branch="proposal/policy-grant-legacy-a",
+        ),
+        GrantRow(
+            plugin_id="legacy.b",
+            subscriber_tier="operator",
+            hookpoint="tool.b",
+            content_tier=None,
+            proposal_branch="proposal/policy-grant-legacy-b",
+        ),
+    ]
+    upserts = [
+        GrantRow(
+            plugin_id="new.x",
+            subscriber_tier="operator",
+            hookpoint="tool.x",
+            content_tier=None,
+            proposal_branch="proposal/policy-grant-new-x",
+        ),
+    ]
+
+    await backend.apply_atomic(
+        revokes=revokes,
+        upserts=upserts,
+        commit_hash="atomic-head-hash",
+    )
+
+    # Exactly ONE ``session.begin()`` for the whole batch — proves the
+    # single-transaction contract holds.
+    session.begin.assert_called_once()
+
+    # The execute mock saw every SQL: 2 deletes + 1 insert + 1 sync-hash
+    # upsert = 4 calls in revoke-then-upsert-then-sync-hash order.
+    assert session.execute.await_count == 4
+    sql_strings = [str(call.args[0]) for call in session.execute.await_args_list]
+    assert "DELETE FROM plugin_grants" in sql_strings[0]
+    assert "DELETE FROM plugin_grants" in sql_strings[1]
+    assert "INSERT INTO plugin_grants" in sql_strings[2]
+    assert "INSERT INTO capability_gate_sync" in sql_strings[3]
+
+
+async def test_apply_atomic_empty_batches_still_set_sync_hash() -> None:
+    """Empty revokes + empty upserts → only the ``set_sync_hash`` SQL fires.
+
+    The bootstrap shape: a freshly-initialised state.git push has no
+    grants but still advances the sync hash. The transaction stays
+    well-formed (one begin, one execute).
+    """
+    from alfred.security.capability_gate.backend import PostgresBackend
+
+    factory, session = _fake_session_factory()
+    backend = PostgresBackend(session_factory=factory)
+
+    await backend.apply_atomic(
+        revokes=[],
+        upserts=[],
+        commit_hash="bootstrap-hash",
+    )
+
+    session.begin.assert_called_once()
+    session.execute.assert_awaited_once()
+    sql_arg, params = session.execute.await_args.args
+    assert "INSERT INTO capability_gate_sync" in str(sql_arg)
+    assert params == {"commit_hash": "bootstrap-hash"}
+
+
+async def test_apply_atomic_propagates_sqlalchemy_error() -> None:
+    """A driver-level error raised mid-batch propagates unchanged.
+
+    The transaction-begin context manager handles rollback at the
+    SQLAlchemy layer (its ``__aexit__`` rolls back on exception). The
+    backend method does NOT catch the error — that's the gate's job in
+    :meth:`RealGate._apply_grants`. This test pins the propagation
+    contract so a misguided ``except SQLAlchemyError`` slip in the
+    backend would surface here.
+    """
+    from sqlalchemy.exc import OperationalError, SQLAlchemyError
+
+    from alfred.security.capability_gate.backend import PostgresBackend
+    from alfred.security.capability_gate.policy import GrantRow
+
+    factory, session = _fake_session_factory()
+    # Make execute raise on the first call so the apply_atomic loop
+    # surfaces the error to the caller.
+    session.execute = AsyncMock(
+        side_effect=OperationalError("simulated", params=None, orig=Exception("simulated"))
+    )
+
+    backend = PostgresBackend(session_factory=factory)
+    revokes = [
+        GrantRow(
+            plugin_id="legacy.a",
+            subscriber_tier="operator",
+            hookpoint="tool.a",
+            content_tier=None,
+            proposal_branch="proposal/policy-grant-legacy-a",
+        ),
+    ]
+
+    with pytest.raises(SQLAlchemyError):
+        await backend.apply_atomic(
+            revokes=revokes,
+            upserts=[],
+            commit_hash="failed-hash",
+        )
+
+    # Only one execute attempted — the loop short-circuited on the
+    # first failure, which is what the single-transaction rollback
+    # contract requires.
+    assert session.execute.await_count == 1
+
+
+def test_storage_backend_protocol_includes_apply_atomic() -> None:
+    """``apply_atomic`` is declared on the :class:`StorageBackend` Protocol.
+
+    sec-pr-s3-6-02: pinning the Protocol surface against a regression
+    where someone implements ``apply_atomic`` only on
+    :class:`PostgresBackend` and forgets the Protocol declaration —
+    the gate would then bind structurally to the concrete backend and
+    drift from the typed seam.
+    """
+    from alfred.security.capability_gate.backend import (
+        PostgresBackend,
+        StorageBackend,
+    )
+
+    assert hasattr(StorageBackend, "apply_atomic")
+
+    # PostgresBackend still satisfies the Protocol with the new method.
+    factory, _ = _fake_session_factory()
+    backend = PostgresBackend(session_factory=factory)
+    assert isinstance(backend, StorageBackend)
