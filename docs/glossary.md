@@ -309,16 +309,35 @@ See [PluginManifest](#pluginmanifest) and
 
 ## RealGate
 
-The production `CapabilityGate` implementation
+The sole production `CapabilityGate` implementation
 (`src/alfred/security/capability_gate/_gate.py`). Backed by Postgres +
 state.git (spec §8.1). Three check methods: `check()` (subscriber-tier
 dispatch gate), `check_plugin_load()` (handshake gate), and
 `check_content_clearance()` (content-tier axis). A 10-second heartbeat
 loop pings the backing store; after 6 missed heartbeats (60 seconds) the
 gate trips to fail-closed and emits a
-`supervisor.capability_gate_unavailable` audit row. Production code does
-not import `RealGate` directly; `alfred.bootstrap.gate_factory` selects
-between `RealGate` and `DevGate` based on `ALFRED_ENV`.
+`supervisor.capability_gate_unavailable` audit row.
+
+`alfred.bootstrap.gate_factory` exposes two callables — `build_dev_gate()`
+and `build_real_gate()` — that both return a `RealGate`. The two-factory
+shape predates the PR-S3-7 flag-day; post-flag-day both branches
+construct the same `RealGate` class with different dependency wiring:
+
+- `build_dev_gate()` returns a fail-closed `RealGate` with an empty
+  grant snapshot, an in-process backend stub (no Postgres connection),
+  and the heartbeat disabled. Every `check*` call denies; developers
+  who need granted-system semantics for local iteration use the
+  helpers in `tests/helpers/gates/`.
+- `build_real_gate()` returns the production-wired `RealGate` with the
+  real Postgres `StorageBackend`, the production `AuditWriter`, and
+  the heartbeat enabled.
+
+The lazy-default at the `HookRegistry` boundary is `_DenyAllGate`
+(`src/alfred/hooks/registry.py`) — a separate fail-closed sentinel that
+serves any `@hook` decorator registering before the bootstrap installs
+the real gate via `set_registry()`. Both fail-closed paths preserve
+CLAUDE.md hard rule #7: no silent authorisation at boundary
+mis-sequencing.
 
 See [GatePolicy](#gatepolicy), [GrantRow](#grantrow),
 [capability gate](#capability-gate), and
@@ -959,9 +978,18 @@ PR-S3-2):
 
 When Postgres is unavailable, all three methods return `False`
 (fail-closed). The 60-second heartbeat window bounds staleness before
-in-process subscribers also see fail-closed. `DevGate` (removed at end
-of Slice 3 in PR-S3-7) implemented both new methods as fail-open
-(`True`) for backward compatibility during the slice.
+in-process subscribers also see fail-closed.
+
+The PR-S3-7 flag-day removed `DevGate` from `src/` entirely.
+`RealGate` is now the sole concrete gate; the dev-vs-prod selection
+in `alfred.bootstrap.gate_factory` chooses between a fail-closed
+no-Postgres `RealGate` (development) and the production-wired
+`RealGate` (production) — never between two different classes. The
+`_DenyAllGate` fail-closed sentinel at the `HookRegistry` lazy default
+serves the bootstrap-ordering edge case where an `@hook` decorator
+runs before the bootstrap installs the real gate. Pre-flag-day
+`DevGate` returned `True` (fail-open) for new methods; that behaviour
+no longer exists in any code path.
 
 See [RealGate](#realgate), spec §8.2,
 [ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
