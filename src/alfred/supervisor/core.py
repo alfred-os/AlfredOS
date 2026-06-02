@@ -492,9 +492,7 @@ class Supervisor:
             # forensic structlog stream + reviewer-side audit row, but
             # the CLI ``except`` arm now narrows on the class, not the
             # English substring.
-            raise NoSuchComponentError(
-                t("supervisor.no_such_component", component_id=component_id)
-            )
+            raise NoSuchComponentError(t("supervisor.no_such_component", component_id=component_id))
 
         old_state = breaker.state.value
         breaker.reset()
