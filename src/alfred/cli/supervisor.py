@@ -270,7 +270,16 @@ def supervisor_reset(
         bool,
         typer.Option(
             "--confirm",
-            help=t("cli.supervisor.reset.confirm_prompt"),
+            # CR-149 round-10 (3339423484): ``confirm_prompt`` is the
+            # runtime refusal body and still carries ``{component}``,
+            # ``{trip_count}``, and ``{last_trip_at}`` placeholders.
+            # ``--help`` renders the help string verbatim, so wiring
+            # the runtime key here surfaced unresolved template fields
+            # to operators running ``alfred supervisor reset --help``.
+            # The dedicated ``confirm_help`` key carries a static
+            # placeholder-free body for the ``--help`` surface; the
+            # runtime path below keeps the templated body.
+            help=t("cli.supervisor.reset.confirm_help"),
         ),
     ] = False,
 ) -> None:
