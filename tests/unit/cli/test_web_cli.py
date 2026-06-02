@@ -240,6 +240,13 @@ def test_allowlist_remove_payload_carries_domain(
     assert isinstance(payload, WebAllowlistProposal)
     assert payload.action == "remove"
     assert payload.domain == "example.com"
+    # CR-149 round-6: spec §11.1 whole-entry delete contract — the
+    # remove path materialises with ``path_prefix=None``. The previous
+    # assertion only pinned ``action`` + ``domain``; an ``allowlist_remove()``
+    # regression that slipped back to the historical ``"/"`` default
+    # (which means "remove root-prefix only") would still pass without
+    # this check.
+    assert payload.path_prefix is None
 
 
 def test_allowlist_add_audit_row_carries_t1_trust_tier(
