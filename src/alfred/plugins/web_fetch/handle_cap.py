@@ -318,6 +318,31 @@ class HandleCap:
             msg = f"HandleCap Lua script returned unexpected value {result!r}"
             raise RuntimeError(msg)
 
+    async def release(
+        self,
+        *,
+        user_id: str,
+        handle_id: str,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Idempotent ZREM. Safe to call after passive TTL has already evicted.
+
+        No Lua needed — single-command ZREM is atomic by itself.
+
+        Args:
+            user_id: same canonical id used at ``try_reserve`` time.
+            handle_id: the UUID4 the dispatcher pre-minted.
+            correlation_id: optional structlog correlation. Task 9 wires the
+                loud ``release_failed`` event to include it so operators can
+                grep back to the originating turn.
+        """
+        client = await self._get_client()
+        key = f"{_KEY_PREFIX_USER}{user_id}"
+        await client.zrem(key, handle_id)
+        # `correlation_id` is unused on the happy path; Task 9 introduces the
+        # try/except RedisError arm that includes it in the structlog event.
+        _ = correlation_id
+
     async def aclose(self) -> None:
         """Idempotent close — supervisor SIGKILL paths.
 
