@@ -5,6 +5,8 @@ testcontainers (mocking would test our mental model, not the interpreter).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -392,3 +394,101 @@ async def test_user_key_outer_expire_set(cap: HandleCap) -> None:
     ttl = await client.ttl(f"alfred:handles:user:{u}")
     # Outer TTL = max(80*2, 600) = 600.
     assert 590 <= ttl <= 600
+
+
+# --- Atomicity / race conditions (spec §2.3) ---
+
+
+@pytest.mark.asyncio
+async def test_race_two_at_boundary(redis_url: str) -> None:
+    """Two coroutines racing the 5th-and-6th slot with cap=5 and 4 already
+    reserved. Exactly one succeeds, one raises WebFetchRateLimited."""
+    hc = HandleCap(redis_url=redis_url, config=HandleCapConfig(per_user=5))
+    try:
+        u = _u()
+        for _ in range(4):
+            await hc.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+        results: list[bool | WebFetchRateLimited] = []
+
+        async def attempt() -> None:
+            try:
+                await hc.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+                results.append(True)
+            except WebFetchRateLimited as e:
+                results.append(e)
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(attempt())
+            tg.create_task(attempt())
+        successes = [r for r in results if r is True]
+        failures = [r for r in results if isinstance(r, WebFetchRateLimited)]
+        assert len(successes) == 1, f"expected exactly 1 success, got {results}"
+        assert len(failures) == 1, f"expected exactly 1 failure, got {results}"
+        assert failures[0].bucket == "handle_cap"
+    finally:
+        await hc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_race_six_against_empty(redis_url: str) -> None:
+    """Six concurrent reserves against an empty key with cap=5. Exactly
+    5 succeed, 1 fails."""
+    hc = HandleCap(redis_url=redis_url, config=HandleCapConfig(per_user=5))
+    try:
+        u = _u()
+        results: list[bool | WebFetchRateLimited] = []
+
+        async def attempt() -> None:
+            try:
+                await hc.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+                results.append(True)
+            except WebFetchRateLimited as e:
+                results.append(e)
+
+        async with asyncio.TaskGroup() as tg:
+            for _ in range(6):
+                tg.create_task(attempt())
+        successes = [r for r in results if r is True]
+        failures = [r for r in results if isinstance(r, WebFetchRateLimited)]
+        assert len(successes) == 5, f"expected 5 successes, got {results}"
+        assert len(failures) == 1, f"expected 1 failure, got {results}"
+    finally:
+        await hc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_release_and_reserve_race_keeps_invariant(redis_url: str) -> None:
+    """Interleaved release+reserve must never let ZCARD breach cap.
+
+    Cap=3; alternate reserve/release across 50 coroutine pairs; observe
+    ZCARD after each batch."""
+    hc = HandleCap(redis_url=redis_url, config=HandleCapConfig(per_user=3))
+    try:
+        u = _u()
+        handles = [_h() for _ in range(50)]
+        for i, h in enumerate(handles):
+            with contextlib.suppress(WebFetchRateLimited):
+                await hc.try_reserve(user_id=u, handle_id=h, handle_ttl_seconds=80)
+            # Periodically release the oldest active member.
+            if i % 2 == 1 and i >= 2:
+                await hc.release(user_id=u, handle_id=handles[i - 2])
+            client = await hc._get_client()
+            card = await client.zcard(f"alfred:handles:user:{u}")
+            assert card <= 3, f"cap breached at i={i}; ZCARD={card}"
+    finally:
+        await hc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reserve_same_handle_id_twice_is_score_update(cap: HandleCap) -> None:
+    """ZADD without NX updates the score (extends expiry); count unchanged.
+    Documents intentional behaviour — pinned so a future refactor doesn't
+    silently break it."""
+    u = _u()
+    h = _h()
+    await cap.try_reserve(user_id=u, handle_id=h, handle_ttl_seconds=80)
+    client = await cap._get_client()
+    count_before = await client.zcard(f"alfred:handles:user:{u}")
+    await cap.try_reserve(user_id=u, handle_id=h, handle_ttl_seconds=80)
+    count_after = await client.zcard(f"alfred:handles:user:{u}")
+    assert count_before == count_after == 1
