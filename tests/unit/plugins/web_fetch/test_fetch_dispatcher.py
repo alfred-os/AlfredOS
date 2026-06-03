@@ -172,6 +172,7 @@ async def test_success_returns_handle_and_emits_ok_audit_row() -> None:
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=_build_transport_returning_handle(),
+        handle_cap=_build_handle_cap(),
     )
 
     assert isinstance(handle, ContentHandle)
@@ -216,6 +217,7 @@ async def test_broadening_cap_emits_capped_row_then_succeeds() -> None:
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=_build_transport_returning_handle(),
+        handle_cap=_build_handle_cap(),
     )
 
     # Two rows: broadening_capped + ok.
@@ -267,6 +269,7 @@ async def test_capped_domains_preserve_path_prefix_in_audit_row() -> None:
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=_build_transport_returning_handle(),
+        handle_cap=_build_handle_cap(),
     )
 
     first_call = audit.append_schema.await_args_list[0]
@@ -296,6 +299,7 @@ async def test_domain_not_allowed_audits_then_raises() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
         )
     assert audit.append_schema.await_count == 1
     call = audit.append_schema.await_args
@@ -318,6 +322,7 @@ async def test_rate_limited_audits_with_bucket_then_raises() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.bucket == "per_domain"
     assert audit.append_schema.await_count == 1
@@ -349,6 +354,7 @@ async def test_control_result_tls_error_maps_to_tls_exception() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.detail == "cert expired"
     assert audit.append_schema.await_count == 1
@@ -377,6 +383,7 @@ async def test_control_result_tls_config_error_also_maps_to_tls_exception() -> N
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
 
 
@@ -403,6 +410,7 @@ async def test_control_result_mime_error_maps_to_mime_exception() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.mime_type == "image/png"
 
@@ -431,6 +439,7 @@ async def test_control_result_size_error_maps_to_size_exception() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.size_bytes == 2048
     assert excinfo.value.limit_bytes == 1024
@@ -468,6 +477,7 @@ async def test_control_result_redirect_refused_maps_to_redirect_exception() -> N
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.status_code == 302
     assert excinfo.value.redirect_target == "http://10.0.0.1/internal"
@@ -499,6 +509,7 @@ async def test_control_result_redirect_refused_with_non_int_status_defaults() ->
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.status_code == 0
     assert excinfo.value.redirect_target == "http://attacker.example/"
@@ -529,6 +540,7 @@ async def test_control_result_redirect_refused_with_non_str_target_defaults() ->
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.status_code == 301
     assert excinfo.value.redirect_target == ""
@@ -556,6 +568,7 @@ async def test_control_result_unknown_type_falls_back_to_generic_error() -> None
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     # The generic fallback carries the plugin-side message string.
     assert "DNS resolution failed" in str(excinfo.value)
@@ -583,6 +596,7 @@ async def test_control_result_with_non_string_type_falls_back_to_default() -> No
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
 
 
@@ -609,6 +623,7 @@ async def test_control_result_with_non_string_dlp_result_uses_default() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert audit.append_schema.await_args.kwargs["result"] == "fetch_error"
 
@@ -636,6 +651,7 @@ async def test_control_result_with_int_status_code_is_recorded() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert audit.append_schema.await_args.kwargs["subject"]["status_code"] == 500
 
@@ -663,6 +679,7 @@ async def test_control_result_with_non_int_status_code_records_none() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert audit.append_schema.await_args.kwargs["subject"]["status_code"] is None
 
@@ -689,6 +706,7 @@ async def test_control_result_size_error_with_missing_byte_counts_uses_defaults(
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.size_bytes == 0
     assert excinfo.value.limit_bytes == 5 * 1024 * 1024
@@ -717,6 +735,7 @@ async def test_control_result_size_error_with_non_int_bytes_uses_defaults() -> N
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.size_bytes == 0
     assert excinfo.value.limit_bytes == 5 * 1024 * 1024
@@ -743,6 +762,7 @@ async def test_control_result_mime_error_with_non_string_mime_uses_default() -> 
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.mime_type == "unknown"
 
@@ -769,6 +789,7 @@ async def test_control_result_with_non_string_message_falls_back_to_repr() -> No
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     # str(error_data) carries the full dict repr.
     assert "weird" in str(excinfo.value)
@@ -809,6 +830,7 @@ async def test_unexpected_dispatch_shape_raises_generic_error() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert "_UnknownResult" in str(excinfo.value)
     # H7: audit row emitted with dispatch_shape_error result.
@@ -853,6 +875,7 @@ async def test_redis_url_threaded_through_to_dispatch(
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=transport,
+        handle_cap=_build_handle_cap(),
     )
 
     # The transport's dispatch was called with the JSON-RPC params dict
@@ -892,6 +915,7 @@ async def test_skip_tls_verify_threaded_through_to_dispatch(
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=transport,
+        handle_cap=_build_handle_cap(),
     )
 
     args, _kwargs = transport.dispatch.await_args
@@ -927,6 +951,7 @@ async def test_parent_tls_policy_refuses_skip_in_non_dev(
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     # Parent-side check fires BEFORE the transport is touched.
     assert transport.dispatch.await_count == 0
@@ -969,6 +994,7 @@ async def test_t3_tagging_contract_documented_on_success_handle(
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=transport,
+        handle_cap=_build_handle_cap(),
     )
     # The structural pin: success returns ContentHandle (opaque), not
     # bytes / TaggedContent / dict / etc. ContentHandle carries no
@@ -1011,6 +1037,7 @@ async def test_dlp_scan_exception_emits_audit_row_then_raises() -> None:
             outbound_dlp=dlp,
             audit=audit,
             transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
         )
     assert audit.append_schema.await_count == 1
     call = audit.append_schema.await_args
@@ -1057,6 +1084,7 @@ async def test_dlp_scan_exception_redacts_userinfo_and_query_in_audit() -> None:
             outbound_dlp=dlp,
             audit=audit,
             transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
         )
 
     assert audit.append_schema.await_count == 1
@@ -1105,6 +1133,7 @@ async def test_transport_exception_emits_audit_row_then_raises() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert audit.append_schema.await_count == 1
     call = audit.append_schema.await_args
@@ -1137,6 +1166,7 @@ async def test_success_audit_write_failure_logs_loud_then_raises() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
         )
     # The append_schema was attempted once for the ok row.
     assert audit.append_schema.await_count == 1
@@ -1172,6 +1202,7 @@ async def test_headers_scanned_per_value_for_secret_leakage() -> None:
         outbound_dlp=dlp,
         audit=audit,
         transport=transport,
+        handle_cap=_build_handle_cap(),
     )
 
     args, _kwargs = transport.dispatch.await_args
@@ -1206,6 +1237,7 @@ async def test_plugin_returned_message_routes_through_i18n() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     msg = str(excinfo.value)
     # The catalogued carrier text appears; the plugin detail is embedded.
@@ -1246,6 +1278,7 @@ async def test_per_session_allowlist_is_built_once_and_reused() -> None:
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=transport_1,
+        handle_cap=_build_handle_cap(),
     )
     await dispatch_web_fetch(
         url="https://example.com/page-2",
@@ -1257,6 +1290,7 @@ async def test_per_session_allowlist_is_built_once_and_reused() -> None:
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=transport_2,
+        handle_cap=_build_handle_cap(),
     )
     # The allowlist object the config exposes is bit-for-bit identical
     # across dispatches — proving the per-fetch reconstruction is gone.
@@ -1291,6 +1325,7 @@ async def test_broadening_cap_event_emitted_at_most_once_per_session() -> None:
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=_build_transport_returning_handle(),
+        handle_cap=_build_handle_cap(),
     )
     await dispatch_web_fetch(
         url="https://example.com/page-2",
@@ -1302,6 +1337,7 @@ async def test_broadening_cap_event_emitted_at_most_once_per_session() -> None:
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=_build_transport_returning_handle(),
+        handle_cap=_build_handle_cap(),
     )
 
     # 1 broadening-cap row + 2 success rows = 3 total. Without the latch
@@ -1341,6 +1377,7 @@ async def test_broadening_cap_latches_even_when_manifest_had_no_capped_entries()
         outbound_dlp=_build_dlp(),
         audit=audit,
         transport=_build_transport_returning_handle(),
+        handle_cap=_build_handle_cap(),
     )
     # Latched after the first dispatch even though the loop emitted
     # zero broadening-cap rows.
@@ -1372,6 +1409,7 @@ async def test_unexpected_dispatch_shape_message_routes_through_i18n() -> None:
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     msg = str(excinfo.value)
     assert "_BogusResult" in msg
@@ -1423,6 +1461,7 @@ async def test_internal_ip_refused_emits_audit_row_then_raises(
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.resolved_ip == "10.0.0.1"
     assert excinfo.value.reason == "rfc1918"
@@ -1459,6 +1498,7 @@ async def test_internal_ip_refused_for_aws_metadata(
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.reason == "link_local"
 
@@ -1497,6 +1537,7 @@ async def test_control_result_internal_ip_refused_maps_to_typed_exception() -> N
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.resolved_ip == "10.0.0.1"
     assert excinfo.value.reason == "rfc1918"
@@ -1528,6 +1569,7 @@ async def test_control_result_internal_ip_refused_with_missing_fields_defaults()
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.resolved_ip == ""
     assert excinfo.value.reason == "reserved"
@@ -1558,6 +1600,95 @@ async def test_control_result_internal_ip_refused_with_non_string_fields_default
             outbound_dlp=_build_dlp(),
             audit=audit,
             transport=transport,
+            handle_cap=_build_handle_cap(),
         )
     assert excinfo.value.resolved_ip == ""
     assert excinfo.value.reason == "reserved"
+
+
+# ---------------------------------------------------------------------------
+# Task 16 — HandleCap kwarg + pre-mint handle_id + cap-refusal audit row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_reserves_cap_before_transport() -> None:
+    """``handle_cap.try_reserve`` fires BEFORE ``transport.dispatch``.
+
+    Pins the ordering invariant from spec §3: the cap reserves the slot
+    pre-network so a burst of concurrent fetches cannot bypass the cap
+    by issuing all their network calls before any reservation lands.
+    The ordering check uses ``MagicMock.mock_calls`` on a parent mock
+    that aggregates both fakes.
+    """
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = _build_transport_returning_handle()
+
+    # Compose both fakes under one parent so mock_calls preserves call
+    # ordering across the two collaborators.
+    parent = MagicMock()
+    parent.attach_mock(handle_cap.try_reserve, "try_reserve")
+    parent.attach_mock(transport.dispatch, "dispatch")
+
+    await dispatch_web_fetch(
+        url="https://example.com/page",
+        headers={},
+        user_id="user-a",
+        correlation_id="corr-cap-order",
+        config=_build_config(),
+        rate_limiter=_build_rate_limiter(),
+        outbound_dlp=_build_dlp(),
+        audit=audit,
+        transport=transport,
+        handle_cap=handle_cap,
+    )
+
+    # try_reserve was invoked at least once, with the active user_id.
+    assert handle_cap.try_reserve.await_count == 1
+    reserve_kwargs = handle_cap.try_reserve.await_args.kwargs
+    assert reserve_kwargs["user_id"] == "user-a"
+    # try_reserve precedes transport.dispatch in the mock_calls log.
+    call_names = [c[0] for c in parent.mock_calls]
+    assert call_names.index("try_reserve") < call_names.index("dispatch")
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_cap_refusal_emits_audit_row() -> None:
+    """Cap exceeded → audit row carries ``rate_limit_bucket='handle_cap'``,
+    ``dlp_scan_result='handle_cap_exceeded'``, ``content_handle_id=None``.
+
+    Disputed-#2: the pre-minted UUID is NOT recorded in the refusal
+    row — no body was written to Redis, so emitting the ghost handle id
+    would pollute the audit graph with forensically-misleading
+    correlation ids. Matches the rate-limit refusal precedent
+    (fetch_dispatcher.py:483).
+    """
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    handle_cap.try_reserve = AsyncMock(side_effect=WebFetchRateLimited("handle_cap"))
+
+    with pytest.raises(WebFetchRateLimited) as exc_info:
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-cap-refused",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=handle_cap,
+        )
+
+    assert exc_info.value.bucket == "handle_cap"
+    # The cap-refusal row is the only emit on this path.
+    assert audit.append_schema.await_count == 1
+    call = audit.append_schema.await_args
+    subj = call.kwargs["subject"]
+    assert subj["rate_limit_bucket"] == "handle_cap"
+    assert subj["dlp_scan_result"] == "handle_cap_exceeded"
+    # Disputed-#2 decision: no ghost handle id in the refusal row.
+    assert subj["content_handle_id"] is None
+    assert call.kwargs["result"] == "rate_limited"
