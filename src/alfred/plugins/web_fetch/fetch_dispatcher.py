@@ -599,6 +599,13 @@ async def dispatch_web_fetch(
             },
         )
     except Exception:
+        # Transport-layer crash: no body was written under handle_id.
+        # Release the cap slot eagerly so the user is not penalised for
+        # ~80s passive TTL on a host-side failure they did not cause.
+        # The Task 18 try/finally + asyncio.shield wrapper is the
+        # CancelledError-safe catch-all; this early-release keeps the
+        # active-path latency tight (release before re-raise).
+        await handle_cap.release(user_id=user_id, handle_id=handle_id)
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
             schema_name="WEB_FETCH_FIELDS",
@@ -628,6 +635,13 @@ async def dispatch_web_fetch(
     if isinstance(result, ContentHandle):
         handle = result
     elif isinstance(result, ControlResult):
+        # Typed plugin error: the plugin refused the body before writing
+        # it (size cap, MIME refusal, redirect refused, internal-IP
+        # refused, TLS error). No body lives under handle_id in Redis,
+        # so the cap slot should not stay held against a fetch that
+        # produced no memory pressure. Release before the typed
+        # exception bubbles.
+        await handle_cap.release(user_id=user_id, handle_id=handle_id)
         # err-012 fix: the plugin returned a structured JSON-RPC error
         # envelope; the transport's control-plane shape surfaces it as
         # ControlResult.payload. Map the ``data.type`` tag (or top-level
