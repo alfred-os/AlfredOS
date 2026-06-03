@@ -1271,19 +1271,19 @@ msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
 #: src/alfred/plugins/stdio_transport.py:631
-#: src/alfred/plugins/web_fetch/errors.py:204
+#: src/alfred/plugins/web_fetch/errors.py:236
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
 "subprocess has been quarantined."
 
-#: src/alfred/plugins/web_fetch/content_store.py:110
+#: src/alfred/plugins/web_fetch/content_store.py:109
 msgid "web.fetch.error.content_handle_expired"
 msgstr ""
 "web.fetch content handle {handle_id!r} has expired or was already "
 "extracted."
 
-#: src/alfred/plugins/web_fetch/errors.py:51
+#: src/alfred/plugins/web_fetch/errors.py:57
 msgid "web.fetch.error.domain_not_allowed"
 msgstr ""
 "web.fetch refused: domain {domain!r} is not in the effective allowlist "
@@ -1293,7 +1293,7 @@ msgstr ""
 # Location header) and must NOT appear in the caller-visible message —
 # leaking it back hands SSRF forensics to the requester. Full target
 # stays on WebFetchRedirectRefused.redirect_target for the audit row.
-#: src/alfred/plugins/web_fetch/errors.py:83
+#: src/alfred/plugins/web_fetch/errors.py:89
 msgid "web.fetch.error.redirect_refused"
 msgstr ""
 "web.fetch refused: upstream returned HTTP {status_code} redirect. SSRF "
@@ -1302,28 +1302,46 @@ msgstr ""
 "allowlist. Operators can inspect the refused Location target in the audit"
 " row (``WEB_FETCH_FIELDS.dlp_scan_result='redirect_refused'``)."
 
-#: src/alfred/plugins/web_fetch/errors.py:102
+#: src/alfred/plugins/web_fetch/errors.py:108
 msgid "web.fetch.error.tls_failure"
 msgstr ""
 "web.fetch refused: TLS verification failed for {url!r} ({detail}). "
 "Production has no operator override; ALFRED_ENV=development is the only "
 "escape hatch."
 
-#: src/alfred/plugins/web_fetch/errors.py:117
+#: src/alfred/plugins/web_fetch/errors.py:125
+msgid "web.fetch.error.rate_limited.handle_cap"
+msgstr ""
+"Too many concurrent web.fetch requests are in flight for this user. Wait "
+"for an existing request to complete; this usually clears within ~80 "
+"seconds. Operator: see docs/runbooks/handle-cap-exceeded.md to raise the "
+"cap."
+
+#: src/alfred/plugins/web_fetch/errors.py:127
 msgid "web.fetch.error.rate_limited"
 msgstr ""
 "web.fetch refused: rate limit exceeded for bucket {bucket!r}. Operator "
-"can adjust the per-domain / per-user / daily-budget caps in "
-"config/policies.yaml under `web_fetch.rate_limits`."
+"can tune the corresponding knob in config/policies.yaml: per-domain "
+"limits live under `web_fetch.rate_limits`; per-user / daily-budget "
+"limits live under `web_fetch.user_daily_budget` / "
+"`web_fetch.operator_daily_budget`."
 
-#: src/alfred/plugins/web_fetch/errors.py:130
+#: src/alfred/plugins/web_fetch/errors.py:148
+msgid "web.fetch.error.handle_id_mismatch"
+msgstr ""
+"The web.fetch plugin returned a content handle whose id does not match "
+"the host-side reservation. This indicates a plugin defect. Inspect the "
+"audit log: alfred audit log --event tool.web.fetch --since 1h (look for "
+"dlp_scan_result=handle_id_mismatch)."
+
+#: src/alfred/plugins/web_fetch/errors.py:162
 msgid "web.fetch.error.mime_type_not_allowed"
 msgstr ""
 "web.fetch refused: response MIME type {mime_type!r} is not allowed. "
 "Allowed MIME types are declared in the plugin manifest; operator can "
 "narrow via config/policies.yaml `web_fetch.allowed_mime_types`."
 
-#: src/alfred/plugins/web_fetch/errors.py:145
+#: src/alfred/plugins/web_fetch/errors.py:177
 msgid "web.fetch.error.size_limit_exceeded"
 msgstr ""
 "web.fetch refused: response body {size} bytes exceeds the {limit}-byte "
@@ -1342,7 +1360,7 @@ msgstr ""
 # exception's ``reason`` attribute carries the closed-vocabulary refusal
 # class (rfc1918 / link_local / loopback / multicast / reserved /
 # dns_failure / no_hostname) for audit pivoting.
-#: src/alfred/plugins/web_fetch/errors.py:179
+#: src/alfred/plugins/web_fetch/errors.py:211
 msgid "web.fetch.error.internal_ip_refused"
 msgstr ""
 "web.fetch refused: target resolved to an internal address. Refused to "
