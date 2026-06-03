@@ -23,9 +23,11 @@ inspect-time signature check ``AsyncMock`` provides is sufficient.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -152,6 +154,33 @@ def _build_handle_cap() -> AsyncMock:
     return hc
 
 
+@contextmanager
+def _pin_pre_minted_handle_id(handle_id: str = "handle-uuid") -> Iterator[None]:
+    """Patch the dispatcher's ``uuid.uuid4`` so the pre-minted handle id
+    matches the value the test transport returns from
+    :func:`_build_transport_returning_handle`.
+
+    Task 19 added a host-side ``result.id == handle_id`` equality check
+    after dispatch — without this patch the random pre-minted UUID
+    would never match the factory's hardcoded ``"handle-uuid"`` and
+    every success-path test would surface as
+    :class:`WebFetchHandleIdMismatch`. The patch keeps the existing
+    success-path tests focused on what they assert (success audit row,
+    DLP forwarding, allowlist gating, etc.) rather than dragging the
+    Task 19 equality plumbing into every fixture.
+    """
+
+    class _PinnedUUID:
+        def __str__(self) -> str:
+            return handle_id
+
+    with patch(
+        "alfred.plugins.web_fetch.fetch_dispatcher.uuid.uuid4",
+        return_value=_PinnedUUID(),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_success_returns_handle_and_emits_ok_audit_row() -> None:
     """The success path returns the ContentHandle from transport.dispatch
@@ -162,18 +191,19 @@ async def test_success_returns_handle_and_emits_ok_audit_row() -> None:
     the netloc that succeeded. ``domain`` carries the netloc instead.
     """
     audit = _build_audit()
-    handle = await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={"User-Agent": "alfred"},
-        user_id="user-1",
-        correlation_id="corr-1",
-        config=_build_config(),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=_build_transport_returning_handle(),
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        handle = await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={"User-Agent": "alfred"},
+            user_id="user-1",
+            correlation_id="corr-1",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
+        )
 
     assert isinstance(handle, ContentHandle)
     assert handle.id == "handle-uuid"
@@ -207,18 +237,19 @@ async def test_broadening_cap_emits_capped_row_then_succeeds() -> None:
     operator = (AllowlistEntry(domain="example.com"),)
     session = (AllowlistEntry(domain="example.com"),)
 
-    await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-2",
-        config=_build_config(manifest=manifest, operator=operator, session=session),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=_build_transport_returning_handle(),
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-2",
+            config=_build_config(manifest=manifest, operator=operator, session=session),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
+        )
 
     # Two rows: broadening_capped + ok.
     assert audit.append_schema.await_count == 2
@@ -259,18 +290,19 @@ async def test_capped_domains_preserve_path_prefix_in_audit_row() -> None:
     operator = (AllowlistEntry(domain="example.com"),)
     session = (AllowlistEntry(domain="example.com"),)
 
-    await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-cr146-cap-prefix",
-        config=_build_config(manifest=manifest, operator=operator, session=session),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=_build_transport_returning_handle(),
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-cr146-cap-prefix",
+            config=_build_config(manifest=manifest, operator=operator, session=session),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
+        )
 
     first_call = audit.append_schema.await_args_list[0]
     capped = first_call.kwargs["subject"]["capped_domains"]
@@ -865,18 +897,19 @@ async def test_redis_url_threaded_through_to_dispatch(
     transport = _build_transport_returning_handle()
     redis_url = "redis://operator-redis:6379/3"
 
-    await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={"User-Agent": "alfred"},
-        user_id="user-1",
-        correlation_id="corr-c2",
-        config=_build_config(redis_url=redis_url),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=transport,
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={"User-Agent": "alfred"},
+            user_id="user-1",
+            correlation_id="corr-c2",
+            config=_build_config(redis_url=redis_url),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=_build_handle_cap(),
+        )
 
     # The transport's dispatch was called with the JSON-RPC params dict
     # as the second positional argument.
@@ -905,18 +938,19 @@ async def test_skip_tls_verify_threaded_through_to_dispatch(
     audit = _build_audit()
     transport = _build_transport_returning_handle()
 
-    await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-h1-thread",
-        config=_build_config(skip_tls_verify=True),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=transport,
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-h1-thread",
+            config=_build_config(skip_tls_verify=True),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=_build_handle_cap(),
+        )
 
     args, _kwargs = transport.dispatch.await_args
     params = args[1]
@@ -984,18 +1018,19 @@ async def test_t3_tagging_contract_documented_on_success_handle(
     audit = _build_audit()
     transport = _build_transport_returning_handle()
 
-    result = await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-c1",
-        config=_build_config(),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=transport,
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        result = await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-c1",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=_build_handle_cap(),
+        )
     # The structural pin: success returns ContentHandle (opaque), not
     # bytes / TaggedContent / dict / etc. ContentHandle carries no
     # ``.content`` field — see :mod:`alfred.security.quarantine`.
@@ -1192,18 +1227,19 @@ async def test_headers_scanned_per_value_for_secret_leakage() -> None:
     dlp = MagicMock()
     dlp.scan = MagicMock(side_effect=_redact)
 
-    await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={"Authorization": "Bearer sk-abc123", "User-Agent": "alfred"},
-        user_id="user-1",
-        correlation_id="corr-m3",
-        config=_build_config(),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=dlp,
-        audit=audit,
-        transport=transport,
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={"Authorization": "Bearer sk-abc123", "User-Agent": "alfred"},
+            user_id="user-1",
+            correlation_id="corr-m3",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=dlp,
+            audit=audit,
+            transport=transport,
+            handle_cap=_build_handle_cap(),
+        )
 
     args, _kwargs = transport.dispatch.await_args
     sent_headers = args[1]["headers"]
@@ -1268,30 +1304,31 @@ async def test_per_session_allowlist_is_built_once_and_reused() -> None:
     transport_1 = _build_transport_returning_handle()
     transport_2 = _build_transport_returning_handle()
 
-    await dispatch_web_fetch(
-        url="https://example.com/page-1",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-h11-1",
-        config=config,
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=transport_1,
-        handle_cap=_build_handle_cap(),
-    )
-    await dispatch_web_fetch(
-        url="https://example.com/page-2",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-h11-2",
-        config=config,
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=transport_2,
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page-1",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-h11-1",
+            config=config,
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport_1,
+            handle_cap=_build_handle_cap(),
+        )
+        await dispatch_web_fetch(
+            url="https://example.com/page-2",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-h11-2",
+            config=config,
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport_2,
+            handle_cap=_build_handle_cap(),
+        )
     # The allowlist object the config exposes is bit-for-bit identical
     # across dispatches — proving the per-fetch reconstruction is gone.
     assert config.allowlist is cached_allowlist
@@ -1315,30 +1352,31 @@ async def test_broadening_cap_event_emitted_at_most_once_per_session() -> None:
     session = (AllowlistEntry(domain="example.com"),)
     config = _build_config(manifest=manifest, operator=operator, session=session)
 
-    await dispatch_web_fetch(
-        url="https://example.com/page-1",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-h12-1",
-        config=config,
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=_build_transport_returning_handle(),
-        handle_cap=_build_handle_cap(),
-    )
-    await dispatch_web_fetch(
-        url="https://example.com/page-2",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-h12-2",
-        config=config,
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=_build_transport_returning_handle(),
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page-1",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-h12-1",
+            config=config,
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
+        )
+        await dispatch_web_fetch(
+            url="https://example.com/page-2",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-h12-2",
+            config=config,
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
+        )
 
     # 1 broadening-cap row + 2 success rows = 3 total. Without the latch
     # we'd see 2 broadening-cap rows + 2 success rows = 4.
@@ -1367,18 +1405,19 @@ async def test_broadening_cap_latches_even_when_manifest_had_no_capped_entries()
     config = _build_config()  # default: no capped entries (manifest ⊆ operator)
     assert config._broadening_cap_emitted == []  # initial state
 
-    await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={},
-        user_id="user-1",
-        correlation_id="corr-h12-latch",
-        config=config,
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=_build_transport_returning_handle(),
-        handle_cap=_build_handle_cap(),
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-h12-latch",
+            config=config,
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
+        )
     # Latched after the first dispatch even though the loop emitted
     # zero broadening-cap rows.
     assert config._broadening_cap_emitted == [True]
@@ -1631,18 +1670,19 @@ async def test_dispatcher_reserves_cap_before_transport() -> None:
     parent.attach_mock(handle_cap.try_reserve, "try_reserve")
     parent.attach_mock(transport.dispatch, "dispatch")
 
-    await dispatch_web_fetch(
-        url="https://example.com/page",
-        headers={},
-        user_id="user-a",
-        correlation_id="corr-cap-order",
-        config=_build_config(),
-        rate_limiter=_build_rate_limiter(),
-        outbound_dlp=_build_dlp(),
-        audit=audit,
-        transport=transport,
-        handle_cap=handle_cap,
-    )
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-cap-order",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
 
     # try_reserve was invoked at least once, with the active user_id.
     assert handle_cap.try_reserve.await_count == 1
@@ -1812,3 +1852,109 @@ async def test_dispatcher_releases_on_cancellederror() -> None:
     handle_cap.release.assert_awaited()
     release_kwargs = handle_cap.release.await_args.kwargs
     assert release_kwargs["user_id"] == "user-a"
+
+
+# ---------------------------------------------------------------------------
+# Task 19 — Dispatcher host-side handle_id equality check
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_handle_id_mismatch_releases_and_audits() -> None:
+    """The plugin returns ``ContentHandle(id='wrong')`` ≠ the pre-minted
+    id → ``WebFetchHandleIdMismatch`` is raised, the cap slot is
+    released, and the audit row carries
+    ``dlp_scan_result='handle_id_mismatch'``.
+
+    Defence-in-depth (spec §3): a buggy or compromised plugin that
+    writes the body under a different Redis key than the host
+    pre-minted would silently decorrelate the cap counter from real
+    Redis memory pressure. The host equality check closes that gap.
+    """
+    from alfred.plugins.web_fetch.errors import WebFetchHandleIdMismatch
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(
+        return_value=ContentHandle(
+            id="wrong-uuid-from-plugin",
+            source_url="https://example.com/page",
+            fetch_timestamp=datetime.now(tz=UTC),
+        )
+    )
+
+    with pytest.raises(WebFetchHandleIdMismatch):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-mismatch",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    handle_cap.release.assert_awaited()
+    # Find the handle_id_mismatch audit row.
+    rows = [c.kwargs for c in audit.append_schema.await_args_list]
+    mismatch_rows = [r for r in rows if r["result"] == "handle_id_mismatch"]
+    assert len(mismatch_rows) == 1
+    subj = mismatch_rows[0]["subject"]
+    assert subj["dlp_scan_result"] == "handle_id_mismatch"
+    # T0 because no T3 content crossed the boundary on this path.
+    assert subj["trust_tier_of_result"] == "T0"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_non_contenthandle_still_dispatch_shape_error() -> None:
+    """A non-ContentHandle / non-ControlResult return (e.g. a stray
+    object) MUST still surface as the existing ``dispatch_shape_error``
+    arm, NOT as ``handle_id_mismatch``.
+
+    The narrow predicate ``isinstance(result, ContentHandle) and
+    result.id != handle_id`` does NOT shadow the existing else-arm at
+    the end of the result-handling block. That else-arm's
+    ``dlp_scan_result='dispatch_shape_error'`` tag is closed vocabulary
+    pinned by audit-graph filters; absorbing shape errors into the
+    mismatch arm would lose that forensic vocabulary.
+
+    Also pins that the dispatch_shape_error path releases the cap via
+    the try/finally + shield (the explicit ``release`` call is the
+    finally arm — no inline release in the else-arm itself).
+    """
+
+    class _NotAHandle:
+        pass
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(return_value=_NotAHandle())
+
+    with pytest.raises(WebFetchError):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-shape",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    # The existing dispatch_shape_error arm fired (NOT handle_id_mismatch).
+    rows = [c.kwargs for c in audit.append_schema.await_args_list]
+    shape_rows = [r for r in rows if r["result"] == "dispatch_shape_error"]
+    mismatch_rows = [r for r in rows if r["result"] == "handle_id_mismatch"]
+    assert len(shape_rows) == 1
+    assert len(mismatch_rows) == 0
+    assert shape_rows[0]["subject"]["dlp_scan_result"] == "dispatch_shape_error"
+    # The cap slot was released — via the finally arm's shield.
+    handle_cap.release.assert_awaited()
