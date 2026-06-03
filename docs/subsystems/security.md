@@ -120,6 +120,31 @@ and no plugin can acquire capabilities that were not explicitly granted.
   model for quarantined-LLM refusals; carries `reason: TypedRefusalReason`
   and `kind: Literal["typed_refusal"]`. Shipped in PR-S3-4 (#TBD).
 
+### Per-user concurrent ContentHandle cap (`src/alfred/plugins/web_fetch/handle_cap.py`)
+
+**Per-user concurrent ContentHandle cap (slice-3 spec §7.10).** A
+per-user Redis-backed counter (`HandleCap`) bounds how many `ContentHandle`
+instances a single user can have alive in Redis at one moment. Default 5;
+override is planned via `web_fetch.max_concurrent_handles_per_user` in
+`policies.yaml` (reserved/inert until policies-loader issue #159 lands).
+Cap-refused fetches emit `tool.web.fetch` audit rows
+with `dlp_scan_result="handle_cap_exceeded"`. See
+[docs/runbooks/handle-cap-exceeded.md](../runbooks/handle-cap-exceeded.md)
+for the operator-facing runbook.
+
+**Audit vocabulary widening (handle-cap PR).** Two closed vocabularies
+on `WEB_FETCH_FIELDS` are widened — operators with SIEM filters MUST
+extend their allow-lists:
+
+- `rate_limit_bucket`: added `handle_cap` (alongside existing
+  `per_domain`, `per_user`, `daily_budget`).
+- `dlp_scan_result`: added `handle_cap_exceeded` and `handle_id_mismatch`.
+
+Both promoted to `typing.Literal[...]` in
+`src/alfred/audit/audit_row_schemas.py` (canonical source). A project-
+level `CHANGELOG.md` is a deferred follow-up; until then this section
+IS the canonical changelog entry for the widening.
+
 ### DLP (`src/alfred/security/dlp.py`)
 
 See [glossary: OutboundDlp](../glossary.md#outbounddlp). The inbound
