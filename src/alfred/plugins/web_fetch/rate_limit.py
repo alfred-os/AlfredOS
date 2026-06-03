@@ -43,6 +43,7 @@ import redis.asyncio as aioredis
 import structlog
 from redis.commands.core import AsyncScript
 
+from alfred.audit.audit_row_schemas import RateLimitBucket
 from alfred.plugins.web_fetch.errors import WebFetchRateLimited
 
 _log = structlog.get_logger(__name__)
@@ -226,15 +227,21 @@ class RateLimiter:
                 str(now_ms),
             ],
         )
-        bucket = cast("bytes", raw).decode("ascii")
-        if bucket != "ok":
-            _log.warning(
-                "web_fetch.rate_limit.exceeded",
-                domain=domain,
-                user_id=user_id,
-                bucket=bucket,
-            )
-            raise WebFetchRateLimited(bucket)
+        bucket_str = cast("bytes", raw).decode("ascii")
+        if bucket_str == "ok":
+            return
+        if bucket_str not in ("per_domain", "per_user", "daily_budget"):
+            # Defensive: Lua should never return anything else; loud-fail if it does.
+            msg = f"RateLimiter Lua script returned unexpected bucket {bucket_str!r}"
+            raise RuntimeError(msg)
+        bucket = cast("RateLimitBucket", bucket_str)
+        _log.warning(
+            "web_fetch.rate_limit.exceeded",
+            domain=domain,
+            user_id=user_id,
+            bucket=bucket,
+        )
+        raise WebFetchRateLimited(bucket)
 
     async def close(self) -> None:
         """Idempotent close — drop the underlying Redis client.
