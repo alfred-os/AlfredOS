@@ -26,6 +26,12 @@ catalog still ships diagnosable text.
 
 from __future__ import annotations
 
+from alfred.audit.audit_row_schemas import RateLimitBucket
+
+# Disputed-#1 (review pass): the canonical RateLimitBucket Literal lives
+# in audit_row_schemas.py (Task 2). errors.py imports it so the bucket
+# discriminator stays a single source of truth; SIEM/audit consumers
+# never need to import errors.py for the closed vocabulary.
 from alfred.errors import AlfredError
 from alfred.i18n import t
 
@@ -105,17 +111,43 @@ class WebFetchTlsError(WebFetchError):
 
 
 class WebFetchRateLimited(WebFetchError):  # noqa: N818 -- name pinned by spec §7.10
-    """A rate-limit bucket refused the request (spec §7.7).
+    """A rate-limit bucket refused the request (spec §7.7, §7.10).
 
-    ``bucket`` is one of ``"per_domain"`` / ``"per_user"`` /
-    ``"daily_budget"`` — pinned by the Lua atomic check in
-    :mod:`alfred.plugins.web_fetch.rate_limit`. Audit rows record it under
-    ``WEB_FETCH_FIELDS["rate_limit_bucket"]``.
+    ``bucket`` is one of :data:`RateLimitBucket`. Audit rows record it under
+    ``WEB_FETCH_FIELDS["rate_limit_bucket"]``. The ``handle_cap`` bucket
+    uses a dedicated i18n catalog entry (``web.fetch.error.rate_limited.handle_cap``)
+    that points operators at ``web_fetch.max_concurrent_handles_per_user``;
+    the other three use the generic ``web.fetch.error.rate_limited`` template.
     """
 
-    def __init__(self, bucket: str) -> None:
-        super().__init__(t("web.fetch.error.rate_limited", bucket=bucket))
-        self.bucket = bucket
+    def __init__(self, bucket: RateLimitBucket) -> None:
+        if bucket == "handle_cap":
+            super().__init__(t("web.fetch.error.rate_limited.handle_cap"))
+        else:
+            super().__init__(t("web.fetch.error.rate_limited", bucket=bucket))
+        self.bucket: RateLimitBucket = bucket
+
+
+class WebFetchHandleIdMismatch(WebFetchError):  # noqa: N818 -- spec §3 host equality check
+    """The plugin returned a ContentHandle whose id differs from the
+    host-side pre-minted reservation (spec §3).
+
+    Defence-in-depth: a buggy or compromised plugin could write the body
+    under a different Redis key, decorrelating the cap counter from real
+    Redis memory pressure. The dispatcher raises this typed exception,
+    releases the cap slot, and emits a ``dlp_scan_result="handle_id_mismatch"``
+    audit row before re-raising.
+
+    The caller-visible message intentionally does NOT interpolate
+    ``expected`` / ``got`` — leaking pre-mint metadata back to the caller
+    tells an attacker the host-pre-mint shape. Forensic detail stays on
+    ``self.expected`` / ``self.got`` for the audit row (operator audience).
+    """
+
+    def __init__(self, expected: str, got: str) -> None:
+        super().__init__(t("web.fetch.error.handle_id_mismatch"))
+        self.expected = expected
+        self.got = got
 
 
 class WebFetchMimeTypeNotAllowed(WebFetchError):  # noqa: N818 -- name pinned by spec §7.10
@@ -210,6 +242,7 @@ __all__ = [
     "WebFetchCanaryTripped",
     "WebFetchDomainNotAllowed",
     "WebFetchError",
+    "WebFetchHandleIdMismatch",
     "WebFetchInternalIPRefused",
     "WebFetchMimeTypeNotAllowed",
     "WebFetchRateLimited",
