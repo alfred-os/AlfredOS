@@ -1770,3 +1770,45 @@ async def test_dispatcher_releases_on_typed_plugin_error() -> None:
     handle_cap.release.assert_awaited()
     release_kwargs = handle_cap.release.await_args.kwargs
     assert release_kwargs["user_id"] == "user-a"
+
+
+# ---------------------------------------------------------------------------
+# Task 18 — Dispatcher CancelledError safety (try/finally + asyncio.shield)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_releases_on_cancellederror() -> None:
+    """``asyncio.CancelledError`` mid-transport → release still fires via
+    the finally arm.
+
+    Python 3.12: ``CancelledError`` inherits from ``BaseException``, NOT
+    ``Exception``. A bare ``except Exception:`` arm misses it; this
+    test pins the try/finally + ``asyncio.shield`` wrapper that catches
+    all cases. Without the wrapper the slot would leak until the
+    passive TTL fires (~80s).
+    """
+    import asyncio
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-cancel",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    handle_cap.release.assert_awaited()
+    release_kwargs = handle_cap.release.await_args.kwargs
+    assert release_kwargs["user_id"] == "user-a"
