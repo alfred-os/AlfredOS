@@ -35,6 +35,7 @@ graph — drift between the two is a release-blocker.
 | Cross-field secret leak via headers + cookies in a web request | PR-S3-5 Task 13 (`de-2026-002` `cross_field_secret_leak.yaml`) |
 | Subprocess env-leak via misconfigured launcher (missing explicit `env=` dict) | **TBD — Slice-3 follow-on (no current task)** — PR-S3-3a covers the env-scrub spawn in `tests/unit/plugins/test_env_scrub_subprocess.py` but no `dlp_egress` adversarial payload formalises the exfiltration vector. Unit-test coverage protects against regression; the adversarial payload would close the threat-model loop |
 | Manifest allowlist broadening (malicious manifest update widens `allowed_domains`) | **TBD — Slice-3 follow-on (no current task)** — PR-S3-5 implements the three-way allowlist intersection and the `web.allowlist.manifest_broadening_capped` audit row in `tests/unit/`, but no `dlp_egress` adversarial payload exercises the manifest-update attack end-to-end |
+| Redis memory exhaustion via concurrent ContentHandle accumulation (spec §7.10) | PR #160 / issue #157 handle-cap (`de-2026-004` `handle_cap_exhaustion.yaml` + `test_handle_cap_exhaustion.py`) |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
