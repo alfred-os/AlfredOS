@@ -26,6 +26,7 @@ audit trail.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Final, cast
@@ -33,6 +34,7 @@ from typing import Final, cast
 import redis.asyncio as aioredis
 import structlog
 from redis.commands.core import AsyncScript
+from redis.exceptions import RedisError
 
 from alfred.plugins.web_fetch.errors import WebFetchRateLimited
 
@@ -183,6 +185,29 @@ class HandleCap:
     module docstring's *Lifecycle* section. Per-request construction
     would re-upload the script on the hot path and lose the EVALSHA
     optimisation.
+
+    Failure model (CLAUDE.md hard rule #7)
+    --------------------------------------
+    * :meth:`try_reserve` fails CLOSED on any
+      :class:`~redis.exceptions.RedisError` subtype (Timeout, Connection,
+      Response, BusyLoading, …). The exception propagates so the
+      dispatcher's ``transport_error`` audit arm fires and the
+      conversation turn aborts.
+    * :meth:`release` fails LOUD-BUT-QUIET on the same subtypes. The
+      caller is already past the conversation turn; re-raising would
+      only confuse the caller while the slot is lost either way. Instead
+      a LOUD :func:`structlog.get_logger.error` event
+      ``web_fetch.handle_cap.release_failed`` fires; passive TTL
+      eviction frees the slot within ~80s.
+
+    The structlog event IS the security signal — there is no dedicated
+    typed exception class for this case. This is the *structlog-only
+    signal* pattern matching the
+    :mod:`~alfred.plugins.web_fetch.canary_scanner` ``err-002``
+    precedent (see ``canary_scanner.py`` line 425 — quarantine-failed
+    branch). Follow-up issue tracks promoting this to a dedicated typed
+    event class once the audit vocabulary stabilises across releasers
+    (handle-cap, rate-limit, canary-scanner, content-store).
     """
 
     def __init__(
@@ -195,6 +220,15 @@ class HandleCap:
         self._config = config or HandleCapConfig()
         self._client: aioredis.Redis | None = None
         self._script: AsyncScript | None = None
+        # Serialises lazy first-use init of ``_client`` / ``_script``.
+        # ``HandleCap`` is one-per-host and shared across concurrent fetches,
+        # so a cold-start burst would race the unguarded `if X is None:`
+        # checks below and mint duplicate redis-py clients (each owning its
+        # own connection pool) or duplicate ``register_script`` calls (which
+        # the AsyncScript registry tolerates but wastes a SCRIPT LOAD). The
+        # lock is acquired once per cold start; the steady-state hot path
+        # short-circuits before entering it.
+        self._init_lock = asyncio.Lock()
 
     @property
     def redis_url(self) -> str:
@@ -204,20 +238,32 @@ class HandleCap:
         return self._redis_url
 
     async def _get_client(self) -> aioredis.Redis:
-        if self._client is None:
-            # decode_responses=False so the Lua return value comes back
-            # as ``bytes`` consistently across redis-py versions (matches
-            # RateLimiter._get_script's contract).
-            self._client = aioredis.from_url(
-                self._redis_url,
-                decode_responses=False,
-            )
+        # Fast-path: assume initialised; only take the lock on cold start.
+        if self._client is not None:
+            return self._client
+        async with self._init_lock:
+            # Re-check under the lock — a peer task may have minted the
+            # client between the fast-path check and lock acquisition.
+            if self._client is None:
+                # decode_responses=False so the Lua return value comes back
+                # as ``bytes`` consistently across redis-py versions (matches
+                # RateLimiter._get_script's contract).
+                self._client = aioredis.from_url(
+                    self._redis_url,
+                    decode_responses=False,
+                )
         return self._client
 
     async def _get_script(self) -> AsyncScript:
         client = await self._get_client()
-        if self._script is None:
-            self._script = client.register_script(_RESERVE_SCRIPT)
+        # Fast-path: assume registered; only take the lock on cold start.
+        if self._script is not None:
+            return self._script
+        async with self._init_lock:
+            # Re-check under the lock — a peer task may have registered
+            # the script between the fast-path check and lock acquisition.
+            if self._script is None:
+                self._script = client.register_script(_RESERVE_SCRIPT)
         return self._script
 
     async def try_reserve(
@@ -329,19 +375,48 @@ class HandleCap:
 
         No Lua needed — single-command ZREM is atomic by itself.
 
+        A Redis transient error on release does NOT propagate (the caller is
+        already past the conversation turn; raising would only confuse the
+        caller while losing the slot anyway). Instead a LOUD
+        ``web_fetch.handle_cap.release_failed`` structlog event fires so
+        operators see the stuck reservation; passive TTL eviction will free
+        the slot within ~80s. The user's effective cap is reduced by 1
+        between the failed ZREM and the eviction.
+
+        ``correlation_id`` is optional but the dispatcher always supplies
+        it so operators can grep the structlog event back to the
+        originating ``web.fetch`` turn. This matches the structlog-only
+        signal pattern documented in the class docstring (``err-002``
+        precedent in :mod:`~alfred.plugins.web_fetch.canary_scanner` —
+        no separate exception class; the structlog event IS the security
+        signal until the audit vocabulary stabilises).
+
         Args:
             user_id: same canonical id used at ``try_reserve`` time.
             handle_id: the UUID4 the dispatcher pre-minted.
-            correlation_id: optional structlog correlation. Task 9 wires the
-                loud ``release_failed`` event to include it so operators can
-                grep back to the originating turn.
+            correlation_id: optional structlog correlation tag.
         """
         client = await self._get_client()
         key = f"{_KEY_PREFIX_USER}{user_id}"
-        await client.zrem(key, handle_id)
-        # `correlation_id` is unused on the happy path; Task 9 introduces the
-        # try/except RedisError arm that includes it in the structlog event.
-        _ = correlation_id
+        try:
+            await client.zrem(key, handle_id)
+        except RedisError as exc:
+            # Deliberately swallowed — see method docstring + class
+            # docstring's *Failure model* section. Type name only — never
+            # ``str(exc)`` / ``exc.args``: Redis error messages can echo
+            # protocol fragments that include T3 content (spec §5.6,
+            # mirrors canary_scanner.py:err-002).
+            _log.error(
+                "web_fetch.handle_cap.release_failed",
+                user_id=user_id,
+                handle_id=handle_id,
+                correlation_id=correlation_id,
+                exception_type=type(exc).__name__,
+                note=(
+                    "ZREM failed; cap slot held until passive TTL (~80s). "
+                    "User's effective cap is reduced by 1 until eviction."
+                ),
+            )
 
     async def aclose(self) -> None:
         """Idempotent close — supervisor SIGKILL paths.

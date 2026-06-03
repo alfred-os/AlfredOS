@@ -10,9 +10,20 @@ import contextlib
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
+from redis.exceptions import (
+    BusyLoadingError,
+    ResponseError,
+)
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+)
+from redis.exceptions import (
+    TimeoutError as RedisTimeoutError,
+)
 from testcontainers.redis import RedisContainer
 
 from alfred.plugins.web_fetch.errors import WebFetchRateLimited
@@ -537,3 +548,134 @@ async def test_user_a_cap_does_not_affect_user_b(cap: HandleCap) -> None:
         await cap.try_reserve(user_id=a, handle_id=_h(), handle_ttl_seconds=80)
     # User B is unaffected.
     await cap.try_reserve(user_id=b, handle_id=_h(), handle_ttl_seconds=80)
+
+
+# --- Redis transient failures by subtype (CLAUDE.md hard rule #7, spec §8.2) ---
+#
+# Reserve fails CLOSED (propagates) so the dispatcher's transport_error audit
+# arm fires and the user-visible turn aborts. Release fails LOUD-BUT-QUIET
+# (swallows but emits structlog) because the caller is already past the
+# conversation turn — raising would only confuse the caller while the slot
+# is lost either way (passive TTL eviction will free it within ~80s).
+#
+# Tests use ``structlog.testing.capture_logs`` rather than pytest's
+# ``caplog``: AlfredOS routes structlog through ``ConsoleRenderer`` and does
+# not universally configure the stdlib bridge in the test runner, so
+# ``caplog`` would silently miss the events.
+
+
+@pytest.mark.asyncio
+async def test_reserve_timeout_propagates(cap: HandleCap) -> None:
+    """Reserve fails closed on TimeoutError — propagates so the dispatcher
+    can emit its transport_error audit row."""
+    with (
+        patch.object(
+            cap,
+            "_get_script",
+            AsyncMock(return_value=AsyncMock(side_effect=RedisTimeoutError("simulated timeout"))),
+        ),
+        pytest.raises(RedisTimeoutError),
+    ):
+        await cap.try_reserve(user_id=_u(), handle_id=_h(), handle_ttl_seconds=80)
+
+
+@pytest.mark.asyncio
+async def test_reserve_connection_error_propagates(cap: HandleCap) -> None:
+    """Reserve fails closed on ConnectionError — propagates so the dispatcher
+    can emit its transport_error audit row."""
+    with (
+        patch.object(
+            cap,
+            "_get_script",
+            AsyncMock(return_value=AsyncMock(side_effect=RedisConnectionError("simulated reset"))),
+        ),
+        pytest.raises(RedisConnectionError),
+    ):
+        await cap.try_reserve(user_id=_u(), handle_id=_h(), handle_ttl_seconds=80)
+
+
+@pytest.mark.asyncio
+async def test_reserve_response_error_propagates(cap: HandleCap) -> None:
+    """ResponseError = runtime Redis bug (e.g., WRONGTYPE). Fail closed."""
+    with (
+        patch.object(
+            cap,
+            "_get_script",
+            AsyncMock(return_value=AsyncMock(side_effect=ResponseError("WRONGTYPE"))),
+        ),
+        pytest.raises(ResponseError),
+    ):
+        await cap.try_reserve(user_id=_u(), handle_id=_h(), handle_ttl_seconds=80)
+
+
+@pytest.mark.asyncio
+async def test_reserve_busyloading_propagates(cap: HandleCap) -> None:
+    """BusyLoadingError = Redis still loading the RDB. Fail closed; operator
+    sees the error class in the audit row's exception_type field."""
+    with (
+        patch.object(
+            cap,
+            "_get_script",
+            AsyncMock(return_value=AsyncMock(side_effect=BusyLoadingError("loading"))),
+        ),
+        pytest.raises(BusyLoadingError),
+    ):
+        await cap.try_reserve(user_id=_u(), handle_id=_h(), handle_ttl_seconds=80)
+
+
+@pytest.mark.asyncio
+async def test_release_timeout_logs_loud_no_propagate(cap: HandleCap) -> None:
+    """Release path's ZREM raises TimeoutError. Does NOT propagate (caller
+    is past the conversation turn); LOUD web_fetch.handle_cap.release_failed
+    structlog event fires.
+
+    Uses ``structlog.testing.capture_logs`` rather than ``caplog`` because
+    AlfredOS logs via structlog directly — the stdlib-bridge path is not
+    universally configured in the test runner, and ``caplog`` would
+    silently miss the event under the wrong logging config.
+    """
+    from structlog.testing import capture_logs
+
+    fake_client = AsyncMock()
+    fake_client.zrem.side_effect = RedisTimeoutError("simulated")
+    u = _u()
+    h = _h()
+    with (
+        patch.object(cap, "_get_client", AsyncMock(return_value=fake_client)),
+        capture_logs() as logs,
+    ):
+        # Should NOT raise.
+        await cap.release(user_id=u, handle_id=h, correlation_id="cid-1")
+    assert any(
+        log.get("event") == "web_fetch.handle_cap.release_failed"
+        and log.get("correlation_id") == "cid-1"
+        and log.get("exception_type") == "TimeoutError"
+        and log.get("user_id") == u
+        and log.get("handle_id") == h
+        for log in logs
+    ), f"expected loud release_failed event with cid-1; got {logs!r}"
+
+
+@pytest.mark.asyncio
+async def test_release_connection_error_logs_loud_no_propagate(cap: HandleCap) -> None:
+    """Release path's ZREM raises ConnectionError. Does NOT propagate; LOUD
+    structlog event fires."""
+    from structlog.testing import capture_logs
+
+    fake_client = AsyncMock()
+    fake_client.zrem.side_effect = RedisConnectionError("simulated reset")
+    u = _u()
+    h = _h()
+    with (
+        patch.object(cap, "_get_client", AsyncMock(return_value=fake_client)),
+        capture_logs() as logs,
+    ):
+        await cap.release(user_id=u, handle_id=h, correlation_id="cid-2")
+    assert any(
+        log.get("event") == "web_fetch.handle_cap.release_failed"
+        and log.get("correlation_id") == "cid-2"
+        and log.get("exception_type") == "ConnectionError"
+        and log.get("user_id") == u
+        and log.get("handle_id") == h
+        for log in logs
+    ), f"expected loud release_failed event with cid-2; got {logs!r}"
