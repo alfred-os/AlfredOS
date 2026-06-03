@@ -316,3 +316,49 @@ def test_quarantine_extract_result_values_subset_of_migration_domain() -> None:
         f"quarantine.extract result values {orphans!r} are not in the migration-allowed "
         f"domain {migration_allowed_results!r}. Update migration 0007 or fix the constant."
     )
+
+
+def test_rate_limit_bucket_literal_closed_set() -> None:
+    """rate_limit_bucket's Literal pins the four-value closed vocabulary
+    after the handle-cap widening (spec §6.2)."""
+    from typing import get_args
+
+    from alfred.audit.audit_row_schemas import RateLimitBucket
+
+    assert set(get_args(RateLimitBucket)) == {
+        "per_domain",
+        "per_user",
+        "daily_budget",
+        "handle_cap",
+    }
+
+
+def test_dlp_scan_result_literal_includes_new_values() -> None:
+    """dlp_scan_result's Literal pins the full closed vocabulary after
+    the handle-cap widening (spec §6.2).
+
+    Mirrors the ``RateLimitBucket`` pattern (exact-set equality) so a
+    stray extra literal, a dropped existing one, or a typo all surface
+    here — not at a downstream audit-graph consumer. The widened pair
+    (``handle_cap_exceeded`` / ``handle_id_mismatch``) is recorded by
+    PR #160 (issue #157); update this set in lockstep with the schema.
+    """
+    from typing import get_args
+
+    from alfred.audit.audit_row_schemas import DlpScanResult
+
+    assert set(get_args(DlpScanResult)) == {
+        "clean",
+        "scanned_dirty",
+        "dlp_scan_error",
+        "domain_not_allowed",
+        "rate_limited",
+        "transport_error",
+        "dispatch_shape_error",
+        "internal_ip_refused",
+        "redirect_refused",
+        "tls_verification_failed",
+        "fetch_error",
+        "handle_cap_exceeded",
+        "handle_id_mismatch",
+    }

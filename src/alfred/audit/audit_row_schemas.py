@@ -31,7 +31,42 @@ from Slice 2.5.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Literal
+
+# ---------------------------------------------------------------------------
+# Closed-vocabulary type aliases
+# ---------------------------------------------------------------------------
+
+RateLimitBucket = Literal[
+    "per_domain",
+    "per_user",
+    "daily_budget",
+    "handle_cap",  # spec §6.2 widening — per-user concurrent ContentHandle cap
+]
+"""Closed vocabulary of rate-limit refusal buckets recorded in
+``WEB_FETCH_FIELDS['rate_limit_bucket']``. Future emitter typos surface
+at type-check time, not runtime."""
+
+DlpScanResult = Literal[
+    "clean",
+    "scanned_dirty",
+    "dlp_scan_error",
+    "domain_not_allowed",
+    "rate_limited",
+    "transport_error",
+    "dispatch_shape_error",
+    "internal_ip_refused",
+    "redirect_refused",
+    "tls_verification_failed",
+    "fetch_error",
+    "handle_cap_exceeded",  # spec §6.2 — per-user concurrent ContentHandle cap refusal
+    "handle_id_mismatch",  # spec §3 — host-side equality check failed
+]
+"""Closed vocabulary recorded in ``WEB_FETCH_FIELDS['dlp_scan_result']``.
+Two values widened by the handle-cap design (slice-3 design spec §7.10);
+see ``docs/subsystems/security.md`` for the audit-vocabulary section
+and ``docs/runbooks/handle-cap-exceeded.md`` for the operator-facing
+widening notice."""
 
 # ---------------------------------------------------------------------------
 # plugin.lifecycle.* family
