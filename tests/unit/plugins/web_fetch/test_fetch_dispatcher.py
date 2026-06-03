@@ -45,6 +45,7 @@ from alfred.plugins.web_fetch.fetch_dispatcher import (
     FetchDispatchConfig,
     dispatch_web_fetch,
 )
+from alfred.plugins.web_fetch.handle_cap import HandleCap
 from alfred.plugins.web_fetch.tls_policy import TlsConfigError
 from alfred.security.quarantine import ContentHandle
 
@@ -135,6 +136,20 @@ def _build_transport_returning_control(payload: dict[str, object]) -> AsyncMock:
     transport = AsyncMock()
     transport.dispatch = AsyncMock(return_value=ControlResult(method="web.fetch", payload=payload))
     return transport
+
+
+def _build_handle_cap() -> AsyncMock:
+    """AsyncMock with HandleCap-compatible methods for dispatcher tests.
+
+    Tasks 16-20 use this to inject a controllable HandleCap into
+    dispatch_web_fetch without spinning up Redis. Real Redis-backed
+    HandleCap contracts are pinned in tests/unit/plugins/web_fetch/
+    test_handle_cap.py.
+    """
+    hc = AsyncMock(spec=HandleCap)
+    hc.try_reserve = AsyncMock(return_value=None)
+    hc.release = AsyncMock(return_value=None)
+    return hc
 
 
 @pytest.mark.asyncio
