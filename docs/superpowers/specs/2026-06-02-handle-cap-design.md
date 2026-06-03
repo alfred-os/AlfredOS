@@ -248,6 +248,11 @@ try:
     # Success path: try to emit success audit row.
     try:
         await audit.append_schema(..., result="ok", ...)
+        # Success — leave the reservation in place. The body lives under
+        # handle_id in Redis; extract / canary / passive TTL will release.
+        # Set released=True so the finally arm does NOT release the slot
+        # we WANT to hold.
+        released = True
     except Exception:
         # Disputed-#1 decision: HOLD the cap until passive TTL.
         # The body IS in Redis under handle_id consuming memory; releasing
@@ -260,7 +265,7 @@ try:
             correlation_id=correlation_id,
             note="cap slot held until passive TTL (~80s); body in Redis",
         )
-        # released stays False — passive TTL will free the slot
+        released = True  # block the finally-arm release; passive TTL frees
         raise
 
     return result

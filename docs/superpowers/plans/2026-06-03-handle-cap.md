@@ -125,8 +125,7 @@ ZCARD = current alive count. ZREMRANGEBYSCORE at the head of every reserve passi
 | `src/alfred/audit/audit_row_schemas.py` | Modify | Add `RateLimitBucket = Literal[...]` and `DlpScanResult = Literal[...]` typed closed sets including new values (spec §6.2) |
 | `config/policies.yaml` | (no change) | Knob already present (`web_fetch.max_concurrent_handles_per_user: 5`); spec §7 |
 | `locale/en/LC_MESSAGES/alfred.po` | Modify | Add `web.fetch.error.rate_limited.handle_cap` + `web.fetch.error.handle_id_mismatch` msgstrs (spec §6.3) |
-| `CHANGELOG.md` | Modify | Audit vocabulary entry documenting `rate_limit_bucket` + `dlp_scan_result` closed-set widening (spec §6.2) |
-| `docs/subsystems/security.md` | Modify | Cross-reference HandleCap as a slice-3 spec §7.10 defence |
+| `docs/subsystems/security.md` | Modify | Cross-reference HandleCap as a slice-3 spec §7.10 defence; capture the closed-vocab widening (CHANGELOG.md introduction deferred to follow-up) |
 | `docs/runbooks/handle-cap-exceeded.md` | Create | Operator runbook: what `handle_cap_exceeded` means in the audit log; how to inspect; how to override (spec §10) |
 | `tests/unit/plugins/web_fetch/test_handle_cap.py` | Create | testcontainers Redis sad-path catalogue (spec §8.2) |
 | `tests/unit/plugins/web_fetch/test_handle_cap_errors.py` | Create | `WebFetchRateLimited` bucket widening + `WebFetchHandleIdMismatch` tests |
@@ -139,6 +138,7 @@ ZCARD = current alive count. ZREMRANGEBYSCORE at the head of every reserve passi
 | `tests/property/plugins/web_fetch/test_handle_cap_invariants.py` | Create | Hypothesis `RuleBasedStateMachine` proving `ZCARD ≤ cap` under all reserve/release/expire interleavings (spec §8.2) |
 | `tests/unit/audit/test_audit_row_schemas.py` | Modify | Pin the new `Literal` closed sets |
 | `tests/adversarial/dlp_egress/handle_cap_exhaustion.yaml` | Create | AdversarialPayload-conformant YAML: single-user cap exhaustion across 100 endpoints; cap=5; expected_outcome=audit_row_emitted (spec §8.2 Adversarial) |
+| `tests/integration/test_redis_compose_service.py` | Modify | Update `store.write` callsite for required `handle_id` kwarg (Task 12 contract change) |
 
 ---
 
@@ -166,7 +166,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary work).
 - [ ] All tasks in §6 marked complete.
 - [ ] `uv run pytest tests/unit/plugins/web_fetch/ tests/unit/audit/ tests/property/plugins/web_fetch/ -q` → green.
 - [ ] `uv run pytest tests/adversarial/dlp_egress/test_handle_cap_exhaustion* -q` → green (adversarial corpus runner picks up the new YAML).
-- [ ] `uv run pytest tests/unit/plugins/web_fetch/test_handle_cap.py --cov=src/alfred/plugins/web_fetch/handle_cap --cov-branch --cov-fail-under=100` → 100% line + branch.
+- [ ] `uv run pytest tests/unit/plugins/web_fetch/test_handle_cap.py tests/unit/plugins/web_fetch/test_fetch_dispatcher.py --cov=src/alfred/plugins/web_fetch/handle_cap --cov=src/alfred/plugins/web_fetch/fetch_dispatcher --cov-branch --cov-fail-under=100` → 100% line + branch on `handle_cap.py` AND the new dispatcher branches introduced by Tasks 16-20 (reserve, release arms, try/finally, equality check, success-audit HOLD).
 - [ ] `uv run ruff check . && uv run ruff format --check .` → green.
 - [ ] `uv run mypy src/ && uv run pyright src/` → green.
 - [ ] `make check` → green (lint + format + type + test).
@@ -264,15 +264,11 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary work).
   Edit `src/alfred/plugins/web_fetch/errors.py`. Find the `WebFetchRateLimited` class (currently ~line 107), update its docstring + add a typed `Literal` for buckets. Add `WebFetchHandleIdMismatch` after it. The diff in shape:
 
   ```python
-  from typing import Literal
-
-  RateLimitBucket = Literal["per_domain", "per_user", "daily_budget", "handle_cap"]
-  """Closed vocabulary of rate-limit refusal buckets (spec §6.1).
-
-  Widened from the original three-bucket vocabulary by the handle-cap design
-  (slice-3 design spec §7.10 line 591) — ``"handle_cap"`` denotes the per-user
-  concurrent ContentHandle bound.
-  """
+  from alfred.audit.audit_row_schemas import RateLimitBucket
+  # Disputed-#1 (review pass): the canonical RateLimitBucket Literal lives
+  # in audit_row_schemas.py (Task 2). errors.py imports it so the bucket
+  # discriminator stays a single source of truth; SIEM/audit consumers
+  # never need to import errors.py for the closed vocabulary.
 
 
   class WebFetchRateLimited(WebFetchError):  # noqa: N818 -- name pinned by spec §7.10
@@ -315,7 +311,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary work).
           self.got = got
   ```
 
-  Also update `__all__` at the bottom of the module to include `WebFetchHandleIdMismatch` and `RateLimitBucket`.
+  Also update `__all__` at the bottom of the module to include `WebFetchHandleIdMismatch`. Do NOT re-export `RateLimitBucket` from `errors.py` — its canonical home is `audit_row_schemas.py` (Task 2). Consumers needing the typed bucket vocabulary import from there.
 
 - [ ] **Step 4: Run new + existing tests.**
 
@@ -323,7 +319,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary work).
   uv run pytest tests/unit/plugins/web_fetch/test_handle_cap_errors.py tests/unit/plugins/web_fetch/test_errors.py -v
   ```
 
-  Expected: both files green. (`test_handle_cap_bucket_message_dispatches_to_dedicated_key` may still fail because the catalog entry doesn't exist yet — that's Task 14. Mark XFAIL or `skip("catalog entry added in Task 14")` for now, OR add a temporary stub msgstr inline. Recommend XFAIL + remove the marker in Task 14.)
+  Expected: both files green. (`test_handle_cap_bucket_message_dispatches_to_dedicated_key` may still fail because the catalog entry doesn't exist yet — that's Task 14. Mark it with `@pytest.mark.xfail(strict=True, reason="catalog entry added in Task 14")` so that an unexpectedly-early pass surfaces as a CI failure rather than silently masking. Remove the marker in Task 14.)
 
 - [ ] **Step 5: Commit.**
 
@@ -609,6 +605,8 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary work).
 
 This task adds the load-bearing atomic check-and-reserve script and its host-side ARGV validator. Tests use a real Redis container via testcontainers (matches `test_lua_atomic_rate_limit.py` precedent).
 
+**Lifecycle.** `HandleCap` is constructed ONCE per plugin host process at startup, alongside `RateLimiter` and `ContentStore`. The dispatcher receives it as a kwarg through every dispatch; no per-request construction. This matches the perf-006 precedent (`RateLimiter` mints + owns its `redis.asyncio.Redis` client across the process lifetime — see `rate_limit.py:144-173`). `aclose()` is idempotent and only runs on process shutdown / supervisor SIGKILL paths.
+
 - [ ] **Step 1: Write the failing tests (ARGV validation + atomic reserve).**
 
   Append to `tests/unit/plugins/web_fetch/test_handle_cap.py`:
@@ -719,6 +717,23 @@ This task adds the load-bearing atomic check-and-reserve script and its host-sid
               )
 
 
+  @pytest.mark.asyncio
+  async def test_reserve_rejects_nan_inf_floats(cap: HandleCap) -> None:
+      """float NaN/Inf are not int — _validate_argv rejects them at the
+      Python boundary before they reach Lua's tonumber() (which returns
+      nil and would otherwise propagate as silent Redis state corruption
+      per spec §2.3). Spec §8.2 mandates these cases explicitly."""
+      now = int(time.time() * 1000)
+      for bad in (float("nan"), float("inf"), float("-inf")):
+          with pytest.raises(ValueError):
+              await cap._try_reserve_with_args(
+                  user_id=_u(), handle_id=_h(),
+                  cap=5,
+                  expiry_ms=bad,  # type: ignore[arg-type]
+                  now_ms=now, outer_ttl=600,
+              )
+
+
   # --- Lua atomic try_reserve (spec §2.3) ---
 
 
@@ -763,12 +778,13 @@ This task adds the load-bearing atomic check-and-reserve script and its host-sid
   Append to `src/alfred/plugins/web_fetch/handle_cap.py`:
 
   ```python
-  import math
+  import time
   from typing import Final, cast
 
   import redis.asyncio as aioredis
   import structlog
   from redis.commands.core import AsyncScript
+  from redis.exceptions import RedisError  # used by release() (Task 9)
 
   from alfred.plugins.web_fetch.errors import WebFetchRateLimited
 
@@ -897,7 +913,6 @@ This task adds the load-bearing atomic check-and-reserve script and its host-sid
               WebFetchRateLimited: cap exceeded; ``.bucket == "handle_cap"``.
               ValueError: invalid ARGV (non-int, non-positive, expiry <= now).
           """
-          import time
           now_ms = int(time.time() * 1000)
           expiry_ms = now_ms + handle_ttl_seconds * 1000
           outer_ttl = max(handle_ttl_seconds * 2, _OUTER_KEY_TTL_FLOOR_SECONDS)
@@ -1042,7 +1057,13 @@ This task adds the load-bearing atomic check-and-reserve script and its host-sid
   Add to `HandleCap` class in `src/alfred/plugins/web_fetch/handle_cap.py`:
 
   ```python
-  async def release(self, *, user_id: str, handle_id: str) -> None:
+  async def release(
+      self,
+      *,
+      user_id: str,
+      handle_id: str,
+      correlation_id: str | None = None,
+  ) -> None:
       """Idempotent ZREM. Safe to call after passive TTL has already evicted.
 
       No Lua needed — single-command ZREM is atomic by itself.
@@ -1050,10 +1071,16 @@ This task adds the load-bearing atomic check-and-reserve script and its host-sid
       Args:
           user_id: same canonical id used at ``try_reserve`` time.
           handle_id: the UUID4 the dispatcher pre-minted.
+          correlation_id: optional structlog correlation. Task 9 wires the
+              loud ``release_failed`` event to include it so operators can
+              grep back to the originating turn.
       """
       client = await self._get_client()
       key = f"{_KEY_PREFIX_USER}{user_id}"
       await client.zrem(key, handle_id)
+      # `correlation_id` is unused on the happy path; Task 9 introduces the
+      # try/except RedisError arm that includes it in the structlog event.
+      _ = correlation_id
   ```
 
 - [ ] **Step 4: Run.**
@@ -1434,30 +1461,43 @@ No new production code — these tests exercise the ZREMRANGEBYSCORE pruning pat
 
 
   @pytest.mark.asyncio
-  async def test_release_timeout_logs_loud_no_propagate(
-      cap: HandleCap, caplog: pytest.LogCaptureFixture,
-  ) -> None:
+  async def test_release_timeout_logs_loud_no_propagate(cap: HandleCap) -> None:
       """Release path's ZREM raises TimeoutError. Does NOT propagate (caller
       is past the conversation turn); LOUD web_fetch.handle_cap.release_failed
-      structlog event fires."""
+      structlog event fires.
+
+      Uses ``structlog.testing.capture_logs`` rather than ``caplog`` because
+      AlfredOS logs via structlog directly — the stdlib-bridge path is not
+      universally configured in the test runner, and ``caplog`` would
+      silently miss the event under the wrong logging config.
+      """
+      from structlog.testing import capture_logs
       fake_client = AsyncMock()
       fake_client.zrem.side_effect = RedisTimeoutError("simulated")
       with patch.object(cap, "_get_client", AsyncMock(return_value=fake_client)):
-          # Should NOT raise.
-          await cap.release(user_id=_u(), handle_id=_h())
-      # structlog event captured by caplog (via structlog's stdlib bridge).
-      assert any("handle_cap.release_failed" in r.getMessage() for r in caplog.records)
+          with capture_logs() as logs:
+              # Should NOT raise.
+              await cap.release(user_id=_u(), handle_id=_h(), correlation_id="cid-1")
+      assert any(
+          log.get("event") == "web_fetch.handle_cap.release_failed"
+          and log.get("correlation_id") == "cid-1"
+          for log in logs
+      )
 
 
   @pytest.mark.asyncio
-  async def test_release_connection_error_logs_loud_no_propagate(
-      cap: HandleCap, caplog: pytest.LogCaptureFixture,
-  ) -> None:
+  async def test_release_connection_error_logs_loud_no_propagate(cap: HandleCap) -> None:
+      from structlog.testing import capture_logs
       fake_client = AsyncMock()
       fake_client.zrem.side_effect = RedisConnectionError("simulated reset")
       with patch.object(cap, "_get_client", AsyncMock(return_value=fake_client)):
-          await cap.release(user_id=_u(), handle_id=_h())
-      assert any("handle_cap.release_failed" in r.getMessage() for r in caplog.records)
+          with capture_logs() as logs:
+              await cap.release(user_id=_u(), handle_id=_h(), correlation_id="cid-2")
+      assert any(
+          log.get("event") == "web_fetch.handle_cap.release_failed"
+          and log.get("correlation_id") == "cid-2"
+          for log in logs
+      )
   ```
 
 - [ ] **Step 2: Run to confirm release tests fail.**
@@ -1472,8 +1512,16 @@ No new production code — these tests exercise the ZREMRANGEBYSCORE pruning pat
 
   Update `release` in `src/alfred/plugins/web_fetch/handle_cap.py`:
 
+  Also add `from redis.exceptions import RedisError` to the module-level imports in `handle_cap.py` (move out of the function body — see review-pass perf/style finding on hot-path imports).
+
   ```python
-  async def release(self, *, user_id: str, handle_id: str) -> None:
+  async def release(
+      self,
+      *,
+      user_id: str,
+      handle_id: str,
+      correlation_id: str | None = None,
+  ) -> None:
       """Idempotent ZREM. Safe to call after passive TTL has already evicted.
 
       A Redis transient error on release does NOT propagate (the caller is
@@ -1481,8 +1529,15 @@ No new production code — these tests exercise the ZREMRANGEBYSCORE pruning pat
       caller while losing the slot anyway). Instead a LOUD structlog event
       fires so operators see the stuck reservation; passive TTL eviction
       will free it within ~80s.
+
+      ``correlation_id`` is optional but the dispatcher always supplies it so
+      operators can grep the structlog event back to the originating
+      web.fetch turn. This is the structlog-only signal pattern matching the
+      ``canary_scanner.py:err-002`` precedent (no separate exception class;
+      the structlog event IS the security signal). Follow-up issue tracks
+      promoting this to a dedicated typed event class once the audit
+      vocabulary stabilises across releasers.
       """
-      from redis.exceptions import RedisError
       client = await self._get_client()
       key = f"{_KEY_PREFIX_USER}{user_id}"
       try:
@@ -1490,7 +1545,9 @@ No new production code — these tests exercise the ZREMRANGEBYSCORE pruning pat
       except RedisError as exc:
           _log.error(
               "web_fetch.handle_cap.release_failed",
-              user_id=user_id, handle_id=handle_id,
+              user_id=user_id,
+              handle_id=handle_id,
+              correlation_id=correlation_id,
               exception_type=type(exc).__name__,
               note=(
                   "ZREM failed; cap slot held until passive TTL (~80s). "
@@ -1549,6 +1606,17 @@ No new production code — these tests exercise the ZREMRANGEBYSCORE pruning pat
       await client.execute_command("SCRIPT", "FLUSH")
       # AsyncScript's __call__ catches NOSCRIPT and retries via EVAL.
       await cap.try_reserve(user_id=_u(), handle_id=_h(), handle_ttl_seconds=80)
+
+
+  @pytest.mark.asyncio
+  async def test_script_registration_cached_across_calls(cap: HandleCap) -> None:
+      """EVALSHA caching: _get_script returns the same AsyncScript object on
+      repeat calls — pinning the perf-006 cache-reuse contract. A regression
+      that re-registered the script per call would silently double the
+      round-trip count on hot reserves."""
+      s1 = await cap._get_script()
+      s2 = await cap._get_script()
+      assert s1 is s2
   ```
 
 - [ ] **Step 2: Run.**
@@ -1601,19 +1669,28 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
   Complements the example-based race tests in test_handle_cap.py (which fix
   n=2 / n=6). The state machine explores random interleavings and shrinks
   to a minimal counterexample on any invariant violation.
+
+  Event-loop discipline: we maintain ONE asyncio loop per state-machine
+  instance and drive every async method through it via ``_run`` (i.e.
+  ``loop.run_until_complete``). Calling ``asyncio.run`` per rule would build
+  + tear down a fresh loop on every step, which breaks the
+  ``redis.asyncio`` connection-pool's loop affinity (the pool binds to the
+  loop on first use; subsequent loops see "got Future attached to a
+  different loop" errors) and makes shrinking flaky. This shape matches the
+  perf-006 precedent of a process-long-lived client.
   """
 
   from __future__ import annotations
 
-  import time
+  import asyncio
   import uuid
-  from collections.abc import Iterator
+  from collections.abc import Awaitable, Iterator
+  from typing import TypeVar
 
   import pytest
   from hypothesis import strategies as st
   from hypothesis.stateful import (
       RuleBasedStateMachine,
-      initialize,
       invariant,
       rule,
       run_state_machine_as_test,
@@ -1622,6 +1699,8 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
 
   from alfred.plugins.web_fetch.errors import WebFetchRateLimited
   from alfred.plugins.web_fetch.handle_cap import HandleCap, HandleCapConfig
+
+  T = TypeVar("T")
 
 
   @pytest.fixture(scope="module")
@@ -1632,28 +1711,33 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
 
   class HandleCapStateMachine(RuleBasedStateMachine):
       """State machine modelling reserve / release / direct-expire operations
-      against a per-user ZSET with cap=3. Invariant: ZCARD(any user) <= 3."""
+      against a per-user ZSET with cap=3. Invariant: ZCARD(any user) <= 3.
+
+      One loop per state-machine instance; never ``asyncio.run`` in rules.
+      """
 
       CAP = 3
 
-      def __init__(self) -> None:
+      def __init__(self, redis_url: str) -> None:
           super().__init__()
-          # redis_url is injected via the module-level fixture below.
-          self.hc = HandleCap(redis_url=_REDIS_URL, config=HandleCapConfig(per_user=self.CAP))
+          self.loop = asyncio.new_event_loop()
+          self.hc = HandleCap(
+              redis_url=redis_url,
+              config=HandleCapConfig(per_user=self.CAP),
+          )
           self.user_id = f"user-{uuid.uuid4()}"
           self.live: set[str] = set()
 
-      @initialize()
-      def _setup(self) -> None:
-          # Anchor state at construction; no async setup possible here.
-          pass
+      def _run(self, coro: Awaitable[T]) -> T:
+          return self.loop.run_until_complete(coro)
 
       @rule(handle_id=st.uuids().map(str))
       def reserve(self, handle_id: str) -> None:
-          import asyncio
           try:
-              asyncio.run(self.hc.try_reserve(
-                  user_id=self.user_id, handle_id=handle_id, handle_ttl_seconds=60,
+              self._run(self.hc.try_reserve(
+                  user_id=self.user_id,
+                  handle_id=handle_id,
+                  handle_ttl_seconds=60,
               ))
               self.live.add(handle_id)
           except WebFetchRateLimited:
@@ -1661,18 +1745,16 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
 
       @rule(data=st.data())
       def release(self, data: st.DataObject) -> None:
-          import asyncio
           if not self.live:
               return
           h = data.draw(st.sampled_from(sorted(self.live)))
-          asyncio.run(self.hc.release(user_id=self.user_id, handle_id=h))
+          self._run(self.hc.release(user_id=self.user_id, handle_id=h))
           self.live.discard(h)
 
       @rule()
       def force_expire(self) -> None:
           """Direct Redis manipulation to simulate TTL eviction.
           Sets all member scores to 0 (deeply in the past)."""
-          import asyncio
 
           async def _expire() -> None:
               client = await self.hc._get_client()
@@ -1680,33 +1762,42 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
               members = await client.zrange(key, 0, -1)
               if members:
                   await client.zadd(key, {m.decode(): 0 for m in members})
-          asyncio.run(_expire())
+
+          self._run(_expire())
           # Next reserve will ZREMRANGEBYSCORE -inf <now_ms>, which clears them.
           self.live.clear()
 
       @invariant()
       def zcard_never_exceeds_cap(self) -> None:
-          import asyncio
-
           async def _check() -> None:
               client = await self.hc._get_client()
-              card = await client.zcard(f"alfred:handles:user:{self.user_id}")
-              assert card <= self.CAP, f"ZCARD={card} exceeded cap={self.CAP}"
-          asyncio.run(_check())
+              card = await client.zcard(
+                  f"alfred:handles:user:{self.user_id}",
+              )
+              assert card <= self.CAP, (
+                  f"ZCARD={card} exceeded cap={self.CAP}"
+              )
+
+          self._run(_check())
 
       def teardown(self) -> None:
-          import asyncio
-          asyncio.run(self.hc.aclose())
+          try:
+              self._run(self.hc.aclose())
+          finally:
+              self.loop.close()
 
 
-  # Hypothesis state-machine runs via a function so we can inject redis_url.
-  _REDIS_URL: str = ""
+  def test_handle_cap_invariant_under_random_interleavings(
+      redis_url: str,
+  ) -> None:
+      # Bind the per-run redis_url via a thin factory subclass so the state
+      # machine constructor signature stays parameter-free (Hypothesis
+      # instantiates the class with no kwargs).
+      class _BoundSM(HandleCapStateMachine):
+          def __init__(self) -> None:
+              super().__init__(redis_url=redis_url)
 
-
-  def test_handle_cap_invariant_under_random_interleavings(redis_url: str) -> None:
-      global _REDIS_URL
-      _REDIS_URL = redis_url
-      run_state_machine_as_test(HandleCapStateMachine)
+      run_state_machine_as_test(_BoundSM)
   ```
 
 - [ ] **Step 3: Run.**
@@ -1864,6 +1955,23 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
 - Modify: `plugins/alfred_web_fetch/web_fetch_plugin.py`
 - Add/Modify: a smoke test under `tests/unit/plugins/`
 
+- [ ] **Step 0: Verify the plugin's importable path.**
+
+  The `plugins/` directory is NOT necessarily on `sys.path` as a package root in this repo — the plugin entry-point is launched as a subprocess via the supervisor. Before assuming `from plugins.alfred_web_fetch.web_fetch_plugin import _handle_fetch` works in a unit test, run:
+
+  ```bash
+  cd ~/projects/AlfredOS-worktrees/issue-157-handle-cap
+  uv run python -c "import plugins.alfred_web_fetch.web_fetch_plugin"
+  ```
+
+  If that fails with `ModuleNotFoundError`, find the correct module path:
+
+  ```bash
+  find plugins/ -name '*.py' | xargs grep -l '_handle_fetch'
+  ```
+
+  …and either (a) adjust the import in the test below to match the actual reachable name (e.g., a relative path from a conftest that pre-extends `sys.path`), or (b) factor `_handle_fetch` into a `src/alfred/`-side helper that the plugin shim re-exports. The plan's pragmatic preference is (a) — the subprocess shim already pre-extends `sys.path`; the test's conftest mirrors that.
+
 - [ ] **Step 1: Write the failing test.**
 
   Edit (or create) a smoke test that exercises `_handle_fetch` with a known `content_handle_id` and asserts the returned handle uses that id. The existing test file is `tests/unit/plugins/test_comms_test_plugin_smoke.py` — check if there's a web_fetch equivalent. If not, add one inline as a new test file `tests/unit/plugins/test_web_fetch_plugin_handle_id_passthrough.py`:
@@ -1995,15 +2103,18 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
   msgid "web.fetch.error.rate_limited.handle_cap"
   msgstr ""
   "Too many concurrent web.fetch requests in flight for this user "
-  "(cap reached). Wait for an existing request to complete, or raise "
-  "web_fetch.max_concurrent_handles_per_user in policies.yaml."
+  "(per-user concurrent ContentHandle cap reached). Wait for an "
+  "existing request to complete; or raise the cap in "
+  "config/policies.yaml under web_fetch.max_concurrent_handles_per_user. "
+  "See docs/runbooks/handle-cap-exceeded.md."
 
   #: src/alfred/plugins/web_fetch/errors.py
   msgid "web.fetch.error.handle_id_mismatch"
   msgstr ""
-  "The fetch plugin returned a content handle whose id does not match "
-  "the host-side reservation. This indicates a plugin defect; the audit "
-  "row carries forensic detail."
+  "The web.fetch plugin returned a content handle whose id does not "
+  "match the host-side reservation. This indicates a plugin defect. "
+  "Inspect the audit log: alfred audit log --event tool.web.fetch "
+  "--result handle_id_mismatch --since 1h"
   ```
 
 - [ ] **Step 2: Regenerate the compiled catalog.**
@@ -2018,7 +2129,11 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
 
   ```bash
   uv run pybabel extract -F babel.cfg -o locale/alfred.pot src/alfred/
-  uv run pybabel update -i locale/alfred.pot -d locale/ --previous --no-fuzzy-matching
+  # --ignore-pot-creation-date is load-bearing: pybabel update otherwise
+  # rewrites the POT-Creation-Date header on every run, surfacing a noisy
+  # one-line diff that fails the catalog-drift gate even when no msgid
+  # changed. The flag pins the header so only real msgid drift produces a diff.
+  uv run pybabel update -i locale/alfred.pot -d locale/ --previous --no-fuzzy-matching --ignore-pot-creation-date
   # Confirm no unexpected drift:
   git diff locale/en/LC_MESSAGES/alfred.po
   uv run pytest tests/unit/plugins/web_fetch/test_handle_cap_errors.py -v
@@ -2166,11 +2281,43 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
                   raise WebFetchCanaryTripped(source_url=source_url, handle_id=handle_id)
   ```
 
-- [ ] **Step 4: Update the hookpoint subscriber registration.**
+- [ ] **Step 3.5: Host design decision (`user_id` propagation to the scanner).**
 
-  Find where `InboundCanaryScanner` is registered as a `tool.web.fetch` post subscriber (likely `register_hookpoints` in `__init__.py` or a similar helper). Update the registration adapter to extract `triggering_user_id` from the hookpoint event context and pass it as `user_id` to `scan()`. The hook event MUST carry `triggering_user_id` — confirm this by reading `src/alfred/hooks/registry.py` and the existing `tool.web.fetch` event-shape definition.
+  The current `HookContext` (in `src/alfred/hooks/context.py`) carries no `user_id`. Two implementation routes were considered during plan review; the decision is captured here so the executing subagent has no ambiguity.
 
-  If the hookpoint event doesn't currently carry `triggering_user_id`, **stop and consult with the user** — this is a hook-payload schema change that may need its own ADR or wider design alignment.
+  **Route A (extend HookContext)**: amend `HookContext[T]` with an optional `triggering_user_id: str | None = None` field. Update the `tool.web.fetch` post-hookpoint emission site in `src/alfred/plugins/web_fetch/__init__.py` to populate it. Update `InboundCanaryScanner.scan` to pull from `context.triggering_user_id`. Touches the hook contract (one small ADR amending ADR-0014).
+
+  **Route B (direct threading)**: thread `user_id` as an explicit kwarg of `scan()` directly from the dispatcher's post-hookpoint invocation site. Skip the `HookContext` schema change. Smaller blast radius; bypasses the canonical hookpoint-event abstraction.
+
+  **Plan decision: Route B (direct threading).** Rationale: Route A's `HookContext` widening affects every hookpoint subscriber across AlfredOS; introducing an optional `triggering_user_id` field makes it "sometimes set" rather than "always set" and weakens type-checking for every existing subscriber. Route B is local to the canary-scanner subsystem and matches the spec §5.4 "direct parameter threading — there is no correlation context object" note. The dispatcher already receives `user_id`; it passes it to the post-hookpoint invocation when the adapter calls `scanner.scan(...)`.
+
+- [ ] **Step 4: Update the hookpoint subscriber registration (Route B).**
+
+  Concretely:
+
+  1. In `src/alfred/plugins/web_fetch/__init__.py`'s `register_hookpoints` (or wherever the `InboundCanaryScanner` is registered as a `tool.web.fetch` post-subscriber), modify the adapter closure so it receives `user_id` from the dispatcher's emission context. Pattern:
+
+     ```python
+     def _make_canary_post_adapter(scanner: InboundCanaryScanner):
+         async def _adapter(
+             *,
+             handle_id: str,
+             source_url: str,
+             user_id: str,            # NEW — threaded from dispatcher
+         ) -> None:
+             await scanner.scan(
+                 handle_id=handle_id,
+                 source_url=source_url,
+                 user_id=user_id,
+             )
+         return _adapter
+     ```
+
+  2. Update the dispatcher's post-hookpoint invocation site to pass `user_id` alongside the existing `handle_id` / `source_url` kwargs. If the current emission interface does NOT accept arbitrary kwargs — i.e. the existing signature is `await post_hookpoint.emit(event_name, ...fixed kwargs...)` — extend it minimally to forward `user_id` as a positional addition, NOT as a new `HookContext` field. This stays inside the canary-scanner subsystem.
+
+  3. Update the registration call site to wire the new adapter shape.
+
+  4. If, while doing the above, you discover that the existing post-hookpoint dispatcher in `src/alfred/hooks/` already forces a fixed kwargs contract that doesn't allow Route B without HookContext changes — at that point stop and consult the user; you have crossed into a true hook-contract change and Route A becomes the correct path. Otherwise proceed.
 
 - [ ] **Step 5: Run.**
 
@@ -2200,6 +2347,57 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
 ---
 
 ### Component E — Dispatcher integration
+
+#### Task 15.5 — `_build_handle_cap` factory + `mock_handle_cap` inline pattern
+
+**Owner:** alfred-security-engineer / alfred-test-engineer
+**Files:**
+- Modify: `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py`
+
+This task is a tiny but load-bearing test-style alignment with the existing codebase pattern. Tasks 16-20 below show the AsyncMock as a parameter named `mock_handle_cap: AsyncMock` for brevity. The actual codebase pattern at `test_fetch_dispatcher.py:52-180` is `_build_<dep>()` factory functions that return constructed mocks inline — see `_build_rate_limiter`. We mirror that shape so Tasks 16-20 stay greppable with the existing fixture vocabulary.
+
+- [ ] **Step 1: Add `_build_handle_cap()` to `test_fetch_dispatcher.py`.**
+
+  Add alongside the existing `_build_*` factories (search for `_build_rate_limiter` to locate them):
+
+  ```python
+  def _build_handle_cap() -> AsyncMock:
+      """Mirrors _build_rate_limiter's shape — returns an AsyncMock spec'd
+      against HandleCap so attribute typos surface in tests."""
+      from alfred.plugins.web_fetch.handle_cap import HandleCap
+      cap = AsyncMock(spec=HandleCap)
+      cap.try_reserve = AsyncMock(return_value=None)
+      cap.release = AsyncMock()
+      return cap
+  ```
+
+- [ ] **Step 2: Tasks 16-20 — read this carefully before applying.**
+
+  The directive for Tasks 16-20: **REPLACE every `mock_handle_cap: AsyncMock` test parameter with a constructed AsyncMock inline via `hc_mock = _build_handle_cap()` at the top of the test body.** Example transformation:
+
+  ```python
+  # Before (as illustrated in Tasks 16-20):
+  @pytest.mark.asyncio
+  async def test_dispatcher_reserves_cap_before_transport(
+      mock_dispatcher_deps: ..., mock_handle_cap: AsyncMock,
+  ) -> None:
+      await dispatch_web_fetch(..., handle_cap=mock_handle_cap)
+
+  # After (matching existing codebase pattern):
+  @pytest.mark.asyncio
+  async def test_dispatcher_reserves_cap_before_transport(
+      mock_dispatcher_deps: ...,
+  ) -> None:
+      hc_mock = _build_handle_cap()
+      await dispatch_web_fetch(..., handle_cap=hc_mock)
+      assert hc_mock.try_reserve.call_args_list[0].kwargs["user_id"] == "user-a"
+  ```
+
+  Apply this transform to every test introduced in Tasks 16, 17, 18, 19, 20.
+
+- [ ] **Step 3: No commit yet** — this is a tooling-prep step folded into Task 16's commit.
+
+---
 
 #### Task 16 — Dispatcher accepts `handle_cap` kwarg + reserve + cap-refusal audit row
 
@@ -2357,6 +2555,11 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
     precedent at line 483 — the pre-minted UUID was never written to Redis).
   - Forwards content_handle_id to the plugin via transport params.
 
+  INTERMEDIATE STATE: this commit ships the dispatcher reserve + cap-refusal
+  audit row ONLY. Transport-error and typed-plugin-error arms do NOT
+  release the cap yet — bisecting to this commit will leak reservations on
+  those error paths for ~80s passive TTL. Tasks 17-18 close the leak.
+
   Refs: #157
 
   MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
@@ -2431,6 +2634,10 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
   Adds release calls in the two existing error arms (raise-exception and
   ControlResult typed plugin error). The CancelledError-safe try/finally
   wrapper lands in Task 18.
+
+  INTERMEDIATE STATE: this commit adds release on the transport-error and
+  typed-plugin-error arms. The asyncio.CancelledError path still leaks
+  reservations until Task 18 wraps the dispatch with try/finally + shield.
 
   Refs: #157
 
@@ -2549,6 +2756,28 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
       mock_handle_cap.release.assert_called()
       audit_call = mock_dispatcher_deps.audit.append_schema.call_args_list[-1]
       assert audit_call.kwargs["subject"]["dlp_scan_result"] == "handle_id_mismatch"
+
+
+  @pytest.mark.asyncio
+  async def test_dispatcher_non_contenthandle_still_dispatch_shape_error(
+      mock_dispatcher_deps,
+  ) -> None:
+      """Narrow predicate preserves the existing dispatch_shape_error else-arm
+      for non-ContentHandle / non-ControlResult shapes. The plugin returning
+      e.g. an ExtractionResult MUST still surface as dispatch_shape_error,
+      not as handle_id_mismatch — preserves the precedent at
+      fetch_dispatcher.py:671."""
+      hc_mock = _build_handle_cap()
+      # transport returns some unexpected non-handle, non-control type.
+      class _Weird:
+          pass
+      mock_dispatcher_deps.transport.dispatch.return_value = _Weird()
+      with pytest.raises(WebFetchError):
+          await dispatch_web_fetch(..., handle_cap=hc_mock)
+      audit_call = mock_dispatcher_deps.audit.append_schema.call_args_list[-1]
+      # NOT handle_id_mismatch — the existing dispatch_shape_error arm.
+      assert audit_call.kwargs["subject"]["dlp_scan_result"] == "dispatch_shape_error"
+      hc_mock.release.assert_called()
   ```
 
 - [ ] **Step 2: Run to confirm failure.**
@@ -2559,7 +2788,15 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
 
   ```python
   # Host-side equality check (spec §3 defence-in-depth).
-  if not isinstance(result, ContentHandle) or result.id != handle_id:
+  #
+  # Predicate is narrow: ONLY catch (ContentHandle with mismatching id). This
+  # preserves the existing dispatcher's downstream `else:` arm which catches
+  # non-ContentHandle / non-ControlResult shapes and emits a separate
+  # `dlp_scan_result="dispatch_shape_error"` audit row (see
+  # fetch_dispatcher.py:671 precedent). A wider predicate
+  # (`not isinstance(...) or .id != handle_id`) would absorb shape errors
+  # into the mismatch arm and lose that precedent's diagnostic vocabulary.
+  if isinstance(result, ContentHandle) and result.id != handle_id:
       await handle_cap.release(user_id=user_id, handle_id=handle_id)
       released = True
       await audit.append_schema(
@@ -2574,6 +2811,10 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
               "fetch_depth": _FETCH_DEPTH,
               "rate_limit_bucket": None,
               "manifest_commit_hash": config.manifest_commit_hash,
+              # T0 because the plugin returned a ContentHandle but with a
+              # mismatching id — no T3 content crossed the boundary on this
+              # path (matches the existing dispatch_shape_error precedent at
+              # fetch_dispatcher.py:671).
               "trust_tier_of_result": "T0",
               "dlp_scan_result": "handle_id_mismatch",
               "canary_tripped": False,
@@ -2585,11 +2826,20 @@ The cap's central invariant — `ZCARD ≤ cap` under all interleavings of `rese
           cost_estimate_usd=0.0,
           trace_id=correlation_id,
       )
-      got_id = result.id if isinstance(result, ContentHandle) else "<not-a-ContentHandle>"
-      raise WebFetchHandleIdMismatch(expected=handle_id, got=got_id)
+      raise WebFetchHandleIdMismatch(expected=handle_id, got=result.id)
   ```
 
   Also `from alfred.plugins.web_fetch.errors import WebFetchHandleIdMismatch` at the top.
+
+  **Also: locate the existing `dispatch_shape_error` arm** (the `else:` branch at `fetch_dispatcher.py:671` per the spec cross-ref) and ensure it also releases the cap slot before raising — the narrow predicate above means non-ContentHandle / non-ControlResult shapes now reach that arm with a live reservation. Add:
+
+  ```python
+  else:
+      # ...existing dispatch_shape_error audit row...
+      await handle_cap.release(user_id=user_id, handle_id=handle_id)
+      released = True
+      # ...raise...
+  ```
 
 - [ ] **Step 4: Run.**
 
@@ -2664,6 +2914,34 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
           "handle_cap.success_audit_failed_holding_cap" in r.getMessage()
           for r in caplog.records
       )
+
+
+  @pytest.mark.asyncio
+  async def test_dispatcher_full_success_does_not_release(
+      mock_dispatcher_deps,
+  ) -> None:
+      """Full-success path returns the handle and leaves the reservation
+      ALIVE — extract / canary / passive TTL handle release later. The
+      success arm sets `released=True` so the finally arm's
+      `if not released: release(...)` is skipped; release MUST NOT fire.
+
+      Without the success-path `released=True` assignment, the finally arm
+      would release the slot we WANT to hold for the body's lifetime,
+      defeating the cap entirely. This test pins that fix."""
+      from alfred.security.quarantine import ContentHandle
+      from datetime import datetime, UTC
+      hc_mock = _build_handle_cap()
+      handle_id = "matching-id"
+      mock_dispatcher_deps.transport.dispatch.return_value = ContentHandle(
+          id=handle_id, source_url="https://example.com/",
+          fetch_timestamp=datetime.now(tz=UTC),
+      )
+      with patch("uuid.uuid4",
+                 return_value=type("U", (), {"__str__": lambda self: handle_id})()):
+          result = await dispatch_web_fetch(..., handle_cap=hc_mock)
+      assert result.id == handle_id
+      # Cap stays held for the body's lifetime.
+      hc_mock.release.assert_not_called()
   ```
 
 - [ ] **Step 2: Run to confirm failure.**
@@ -2699,6 +2977,15 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
           cost_estimate_usd=0.0,
           trace_id=correlation_id,
       )
+      # Success — leave the reservation in place. The body lives in Redis
+      # under handle_id; extract / canary / passive TTL will release. Set
+      # released=True so the finally arm does NOT release the slot we WANT
+      # to hold for the duration of the body's lifetime. Without this
+      # assignment the finally arm would treat `released=False` as "we
+      # exited via exception" and release immediately on a successful
+      # return — defeating the cap's purpose entirely. (Bug found in
+      # plan review; cross-checked against the spec §4 fix.)
+      released = True
   except Exception:
       # Disputed-#1 decision: HOLD the cap until passive TTL.
       # The body IS in Redis under handle_id consuming memory; releasing
@@ -2712,15 +2999,13 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
           subject=success_subject,
           note="cap slot held until passive TTL (~80s); body in Redis",
       )
-      # released stays False — finally arm will NOT release (we explicitly
-      # set released=True here to BLOCK the finally arm's release call).
+      # Explicit released=True to BLOCK the finally arm's release call;
+      # passive TTL within ~80s frees the slot.
       released = True
       raise
 
   return handle
   ```
-
-  Wait — actually if `released = True` blocks the finally arm, the cap IS held. But the test asserts `mock_handle_cap.release.assert_not_called()`. So setting `released = True` here means the finally arm's `if not released: release(...)` is skipped — good. The cap stays held; passive TTL frees it.
 
 - [ ] **Step 4: Run.**
 
@@ -2754,30 +3039,44 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
 **Files:**
 - Create: `tests/adversarial/dlp_egress/handle_cap_exhaustion.yaml`
 
-- [ ] **Step 1: Inspect the schema + a sibling YAML.**
+- [ ] **Step 0: Read the schema + a sibling YAML — EVERY field name must match `AdversarialPayload`.**
+
+  The YAML below is illustrative. Before authoring, read `tests/adversarial/payload_schema.py:AdversarialPayload` and `tests/adversarial/dlp_egress/canary_token_html.yaml` — your final YAML must use the EXACT field names the Pydantic schema declares (including the canonical `id` pattern `^de-YYYY-NNN$`) and the exact `expected_outcome` enum values the schema permits. The schema cross-check from the review pass confirms the id pattern; pick the next available number in the `dlp_egress` category for the year.
 
   ```bash
-  cat tests/adversarial/payload_schema.py | head -80
+  cat tests/adversarial/payload_schema.py
+  ls tests/adversarial/dlp_egress/
   cat tests/adversarial/dlp_egress/canary_token_html.yaml
   ```
 
-- [ ] **Step 2: Author the payload.**
+- [ ] **Step 1: Burst-size decision.**
 
-  Create `tests/adversarial/dlp_egress/handle_cap_exhaustion.yaml`:
+  A 100-fetch burst hits the per-user 30/min rate-limit FIRST (refuses 70 with `bucket="per_user"`), so the YAML would not actually exercise the cap. Two options:
+
+  - **Option A** — override `RateLimitConfig(per_user_per_minute=10000)` in the corpus harness so the cap is the binding limit; keep the 100-fetch burst.
+  - **Option B (RECOMMENDED)** — reduce the burst to **6 concurrent fetches against 6 unique allowlisted endpoints**. With cap=5, the 6th refuses with `bucket="handle_cap"` and the YAML's intent (prove the cap fires) is exercised cleanly without a rate-limit-vs-cap interaction.
+
+  Use Option B. The YAML's purpose is to prove the cap fires; rate-limit-vs-cap interaction is its own test surface.
+
+- [ ] **Step 2: Author the payload (conforming to `AdversarialPayload`).**
+
+  Create `tests/adversarial/dlp_egress/handle_cap_exhaustion.yaml`. The shape below uses `AdversarialPayload`-aligned field names; cross-reference the schema for the canonical surface. Note in particular: `id` MUST match `^de-YYYY-NNN$` (`de-` for `dlp_egress`); use the next available number for 2026.
 
   ```yaml
-  id: handle_cap_exhaustion_2026_001
+  # id MUST match the schema's ^de-YYYY-NNN$ pattern. Replace 016 with the
+  # next available number in the dlp_egress 2026 sequence.
+  id: de-2026-016
   name: per-user concurrent ContentHandle cap exhaustion
   category: dlp_egress
   attack_class: redis_memory_exhaustion
   spec_anchor: docs/superpowers/specs/2026-06-02-handle-cap-design.md#7-10
   description: |
-    A single user attempts to exhaust Redis memory by issuing many
-    concurrent web.fetch calls (each potentially returning up to the
-    body-size limit). The per-user concurrent ContentHandle cap (5 by
-    default) must refuse the 6th request and every subsequent request
-    until existing handles drain via extract, canary trip, or passive
-    TTL eviction.
+    A single user attempts to exhaust Redis memory by issuing concurrent
+    web.fetch calls. The per-user concurrent ContentHandle cap (5 by default)
+    must refuse the 6th request until existing handles drain via extract,
+    canary trip, or passive TTL eviction. Burst is sized to 6 against 6
+    distinct allowlisted endpoints so the cap (not the per-user rate limit
+    of 30/min) is the binding constraint.
   expected_outcome: audit_row_emitted
   expected_audit_row:
     event: tool.web.fetch
@@ -2788,13 +3087,17 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
     cap_per_user: 5
     user_id: attacker-user-1
     allowed_domains:
-      # 100 unique allowlisted endpoints so per-domain rate limit doesn't bind.
-      - "endpoint-{i}.example.test"
+      - endpoint-1.example.test
+      - endpoint-2.example.test
+      - endpoint-3.example.test
+      - endpoint-4.example.test
+      - endpoint-5.example.test
+      - endpoint-6.example.test
   attack_steps:
-    - issue 100 web.fetch calls in flight against unique endpoints
-    - "expect: 5 fetches succeed; 95 refused with WebFetchRateLimited(bucket='handle_cap')"
+    - issue 6 web.fetch calls in flight against the 6 distinct endpoints
+    - "expect: 5 fetches succeed; 1 refused with WebFetchRateLimited(bucket='handle_cap')"
     - "verify: Redis content keyspace bounded to 5 keys × max body size"
-    - "verify: 95 audit rows with dlp_scan_result='handle_cap_exceeded'"
+    - "verify: 1 audit row with dlp_scan_result='handle_cap_exceeded'"
   ```
 
   Adapt field names + types to whatever `payload_schema.py:AdversarialPayload` actually requires — read the schema first and conform exactly.
@@ -2813,12 +3116,12 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
   git add tests/adversarial/dlp_egress/handle_cap_exhaustion.yaml
   git commit -m "test(adversarial): handle_cap_exhaustion payload (#157)
 
-  AdversarialPayload-conformant YAML: single user issues 100 concurrent
-  web.fetch calls across 100 unique allowlisted endpoints (bypassing per-
-  domain rate limit). HandleCap default (per_user=5) must refuse 95 with
-  WebFetchRateLimited(bucket='handle_cap') and emit 95 audit rows with
-  dlp_scan_result='handle_cap_exceeded'. Redis content keyspace bounded
-  to 5 × max-body-size.
+  AdversarialPayload-conformant YAML: single user issues 6 concurrent
+  web.fetch calls across 6 unique allowlisted endpoints. With cap=5 the
+  6th refuses with WebFetchRateLimited(bucket='handle_cap'); 1 audit row
+  with dlp_scan_result='handle_cap_exceeded' is emitted. Burst size is
+  intentionally narrow so the per-user rate limit (30/min) is NOT the
+  binding constraint — the cap is.
 
   Refs: #157
 
@@ -2827,13 +3130,14 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
 
 ---
 
-#### Task 22 — Operator runbook + CHANGELOG + `docs/subsystems/security.md`
+#### Task 22 — Operator runbook + `docs/subsystems/security.md` (CHANGELOG deferred)
 
 **Owner:** alfred-devex-reviewer + alfred-docs-author
 **Files:**
 - Create: `docs/runbooks/handle-cap-exceeded.md`
-- Modify: `CHANGELOG.md`
 - Modify: `docs/subsystems/security.md`
+
+**Disputed-#2 decision (review pass):** AlfredOS does not yet ship a `CHANGELOG.md` and introducing one is out of scope for this PR. Instead the closed-vocabulary widening is captured in (a) `docs/subsystems/security.md` and (b) the runbook's "Audit vocabulary widening" section. A follow-up issue tracks introducing a `CHANGELOG.md` once the project convention is decided; the Task 22 commit message names it.
 
 - [ ] **Step 1: Create the runbook.**
 
@@ -2858,6 +3162,33 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
   - **Not a security event.** A canary trip surfaces as `dlp_scan_result="canary_tripped"` — different.
   - **Not a per-minute rate limit.** That's `rate_limit_bucket="per_user"`.
   - **Not a malicious request indicator by itself.** A legitimate user with slow extracts can trip it.
+
+  ## Why the default is 5
+
+  Default cap × max body size = 5 × 5 MiB = 25 MiB of T3 content parked in
+  Redis per user. Worst-case fleet sizing: 100 active users × 25 MiB ≈ 2.5 GiB
+  held in Redis — well within commodity Redis sizing. Operators with
+  single-user / high-throughput deployments may raise the cap; multi-tenant
+  operators may lower it. Heuristic:
+
+  ```
+  cap_per_user ≤ (redis_memory_budget_mb × 0.5) / (active_users × max_body_mb)
+  ```
+
+  ## Audit vocabulary widening
+
+  This release widens two closed audit-row vocabularies. Operators with
+  downstream filters or SIEM rules MUST extend their allow-lists:
+
+  - `WEB_FETCH_FIELDS["rate_limit_bucket"]`: added `handle_cap` (alongside
+    existing `per_domain`, `per_user`, `daily_budget`).
+  - `WEB_FETCH_FIELDS["dlp_scan_result"]`: added `handle_cap_exceeded` and
+    `handle_id_mismatch`.
+
+  Both are typed via `typing.Literal[...]` in
+  `src/alfred/audit/audit_row_schemas.py` (canonical source). Type-check time
+  catches drift; downstream consumers should snapshot the literal at release
+  time.
 
   ## How to inspect
 
@@ -2920,37 +3251,21 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
 
   ## Related runbooks
 
-  - (TODO when filed) `docs/runbooks/canary-tripped.md`
   - `docs/runbooks/slice-3-operator-migration.md`
   ```
 
-- [ ] **Step 2: Append to `CHANGELOG.md`.**
+- [ ] **Step 2: Closed-vocabulary widening capture (CHANGELOG deferred).**
 
-  Add under an `## Unreleased` section (or whatever the project convention is):
+  AlfredOS doesn't yet have a `CHANGELOG.md`, so the widening is captured in the two doc files that DO exist:
 
-  ```markdown
-  ## Unreleased
+  1. The runbook (Step 1 above) already includes an "Audit vocabulary widening" section listing the new values and pointing at the typed `Literal[...]` in `audit_row_schemas.py` as the canonical source.
+  2. The `docs/subsystems/security.md` cross-reference (Step 3 below) names the widening alongside the HandleCap defence description.
 
-  ### Added
-
-  - Per-user concurrent ContentHandle cap (slice-3 spec §7.10): refuses the
-    6th in-flight `web.fetch` from a single user. Operator override via
-    `web_fetch.max_concurrent_handles_per_user` in `policies.yaml` (default 5).
-    Runbook: `docs/runbooks/handle-cap-exceeded.md`.
-
-  ### Audit vocabulary
-
-  - `WEB_FETCH_FIELDS["rate_limit_bucket"]` closed set widened from
-    `{per_domain, per_user, daily_budget}` to also include `handle_cap`.
-  - `WEB_FETCH_FIELDS["dlp_scan_result"]` closed set widened to include
-    `handle_cap_exceeded` and `handle_id_mismatch`.
-  - Both are now typed via `typing.Literal[...]` in `audit_row_schemas.py`
-    so future emitter typos surface at type-check time.
-  ```
+  File a follow-up issue to introduce a `CHANGELOG.md` at the project level (Keep-a-Changelog format); reference it in the Task 22 commit message: "follow-up: introduce CHANGELOG.md once project convention is decided".
 
 - [ ] **Step 3: Cross-reference in `docs/subsystems/security.md`.**
 
-  Find the section on slice-3 web.fetch defences and add a paragraph:
+  Find the section on slice-3 web.fetch defences and add a paragraph; also capture the closed-vocab widening here (since CHANGELOG.md is deferred — see Step 2 above):
 
   ```markdown
   **Per-user concurrent ContentHandle cap (slice-3 spec §7.10).** A
@@ -2961,20 +3276,42 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
   with `dlp_scan_result="handle_cap_exceeded"`. See
   [docs/runbooks/handle-cap-exceeded.md](../runbooks/handle-cap-exceeded.md)
   for the operator-facing runbook.
+
+  **Audit vocabulary widening (handle-cap PR).** Two closed vocabularies
+  on `WEB_FETCH_FIELDS` are widened — operators with SIEM filters MUST
+  extend their allow-lists:
+
+  - `rate_limit_bucket`: added `handle_cap` (alongside existing
+    `per_domain`, `per_user`, `daily_budget`).
+  - `dlp_scan_result`: added `handle_cap_exceeded` and `handle_id_mismatch`.
+
+  Both promoted to `typing.Literal[...]` in
+  `src/alfred/audit/audit_row_schemas.py` (canonical source). A project-
+  level `CHANGELOG.md` is a deferred follow-up; until then this section
+  IS the canonical changelog entry for the widening.
   ```
 
-- [ ] **Step 4: Commit.**
+- [ ] **Step 4: Policies-yaml inline-comment fix.**
+
+  `config/policies.yaml`'s existing inline comment for `max_concurrent_handles_per_user` cites `spec §7.7` — that's the rate-limit Lua-atomic section. Update the cite to `spec §7.10` (the per-user concurrent ContentHandle cap section). Commit alongside the docs.
+
+- [ ] **Step 5: Commit.**
 
   ```bash
-  git add docs/runbooks/handle-cap-exceeded.md CHANGELOG.md docs/subsystems/security.md
-  git commit -m "docs(handle-cap): operator runbook + CHANGELOG + security subsystem xref (#157)
+  git add docs/runbooks/handle-cap-exceeded.md docs/subsystems/security.md config/policies.yaml
+  git commit -m "docs(handle-cap): operator runbook + security subsystem xref (#157)
 
   - docs/runbooks/handle-cap-exceeded.md: what the audit signal means,
-    how to inspect, common causes + remediations, override knob.
-  - CHANGELOG.md: 'Added' + 'Audit vocabulary' entries documenting the
-    rate_limit_bucket + dlp_scan_result closed-set widening.
+    how to inspect, common causes + remediations, override knob, default-5
+    rationale, audit-vocabulary widening notice.
   - docs/subsystems/security.md: cross-reference HandleCap as a §7.10
-    slice-3 defence.
+    slice-3 defence; captures the closed-vocab widening (rate_limit_bucket
+    + dlp_scan_result) since this PR does not introduce CHANGELOG.md.
+  - config/policies.yaml: inline-comment cite for max_concurrent_handles_per_user
+    corrected from §7.7 (rate-limit) to §7.10 (handle-cap).
+
+  follow-up: introduce CHANGELOG.md once project convention is decided
+  (the closed-vocab widening currently lives in security.md + the runbook).
 
   Refs: #157
 
@@ -3004,9 +3341,12 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
                 tests/unit/plugins/test_web_fetch_plugin_handle_id_passthrough.py \
                 tests/property/plugins/web_fetch/ -v
 
-  # Coverage gate on HandleCap (trust-boundary 100% line+branch)
+  # Coverage gate on HandleCap + dispatcher new branches
+  # (trust-boundary 100% line+branch)
   uv run pytest tests/unit/plugins/web_fetch/test_handle_cap.py \
+                tests/unit/plugins/web_fetch/test_fetch_dispatcher.py \
                 --cov=src/alfred/plugins/web_fetch/handle_cap \
+                --cov=src/alfred/plugins/web_fetch/fetch_dispatcher \
                 --cov-branch --cov-fail-under=100
 
   # Adversarial corpus density
@@ -3014,7 +3354,9 @@ This implements the disputed-#1 decision: HOLD the cap when the success-path aud
 
   # i18n catalog drift (must be no diff)
   uv run pybabel extract -F babel.cfg -o locale/alfred.pot src/alfred/
-  uv run pybabel update -i locale/alfred.pot -d locale/ --previous --no-fuzzy-matching
+  # --ignore-pot-creation-date: pin the POT-Creation-Date header so the
+  # drift gate doesn't flag the header rewrite on every run.
+  uv run pybabel update -i locale/alfred.pot -d locale/ --previous --no-fuzzy-matching --ignore-pot-creation-date
   uv run pybabel compile -d locale/ --check
   git diff --exit-code locale/   # must be clean
 
