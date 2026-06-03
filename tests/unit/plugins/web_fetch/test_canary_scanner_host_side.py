@@ -26,6 +26,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -46,9 +47,18 @@ from alfred.plugins.web_fetch.content_store import (
     ContentStore,
 )
 from alfred.plugins.web_fetch.errors import WebFetchCanaryTripped
+from alfred.plugins.web_fetch.handle_cap import HandleCap
 
 if TYPE_CHECKING:
     import redis.asyncio as aioredis
+
+# Canonical test user id — pinned across the existing test corpus so any
+# regression that drops the ``user_id`` threading at the scanner surface
+# is greppable to a single literal. The closed-character-set discipline
+# (slug-form ids) matches the production guard on ``IdentityResolver``
+# canonicalisation; using a UUID-shaped string would mask a real bug
+# where the scanner accidentally forwarded raw user input downstream.
+_USER_ID: str = "user-canary-test-fixture"
 
 # perf-102: scanners hold long-lived peek clients. ``ScannerFactory``
 # wraps the construction + aclose() lifecycle so every test gets a
@@ -93,6 +103,7 @@ async def scanner_factory(store: ContentStore) -> AsyncIterator[ScannerFactory]:
         content_store: ContentStore | None = None,
         redis_url: str | None = None,
         redis_client: aioredis.Redis | None = None,
+        handle_cap: HandleCap | None = None,
     ) -> InboundCanaryScanner:
         # If neither override was passed, default the peek URL to the
         # store's URL. The factory's caller can opt out by passing
@@ -105,6 +116,7 @@ async def scanner_factory(store: ContentStore) -> AsyncIterator[ScannerFactory]:
             known_canary_tokens=known_canary_tokens,
             redis_url=redis_url,
             redis_client=redis_client,
+            handle_cap=handle_cap,
         )
         created.append(scanner)
         return scanner
@@ -127,7 +139,7 @@ async def test_clean_content_does_not_trip(
         source_url="https://example.com/",
     )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-TOKEN-12345")])
-    await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+    await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
 
 @pytest.mark.asyncio
@@ -146,7 +158,7 @@ async def test_canary_token_in_body_trips(
     )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-TOKEN-12345")])
     with pytest.raises(WebFetchCanaryTripped) as exc_info:
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
     assert exc_info.value.handle_id == handle.id
     assert exc_info.value.source_url == "https://evil.test/page"
 
@@ -166,7 +178,7 @@ async def test_scanner_does_not_consume_clean_handle(
         handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/safe"
     )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("SENTINEL-9999")])
-    await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+    await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
     # Handle must still be extractable.
     result = await store.extract(handle.id)
     assert result == body
@@ -188,7 +200,7 @@ async def test_canary_trip_quarantines_handle(
     )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-QUARANTINE-TEST")])
     with pytest.raises(WebFetchCanaryTripped):
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
     with pytest.raises(ContentHandleExpired):
         await store.extract(handle.id)
 
@@ -225,7 +237,7 @@ async def test_canary_trip_raises_even_when_redis_delete_fails(
     monkeypatch.setattr(store, "delete", _raise_redis_error)
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-DELETE-FAIL")])
     with pytest.raises(WebFetchCanaryTripped) as exc_info:
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
     # source_url + handle_id still attributed despite the delete failure
     # — the orchestrator's catch-arm needs both to emit the
     # canary_tripped audit row.
@@ -270,7 +282,7 @@ async def test_canary_trip_emits_quarantine_failed_structlog(
         structlog.testing.capture_logs() as captured,
         pytest.raises(WebFetchCanaryTripped),
     ):
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
     quarantine_failed_events = [
         e for e in captured if e.get("event") == "web_fetch.canary.quarantine_failed"
@@ -283,6 +295,125 @@ async def test_canary_trip_emits_quarantine_failed_structlog(
     assert event["handle_id"] == handle.id
     assert event["source_url"] == handle.source_url
     assert event["exception_type"] == "RedisError"
+
+
+@pytest.mark.asyncio
+async def test_scan_releases_cap_on_successful_canary_delete(
+    store: ContentStore, scanner_factory: ScannerFactory
+) -> None:
+    """Spec §5.2: on canary trip, ``store.delete`` succeeded → release fires.
+
+    The cap exists to bound the per-user Redis memory pressure produced
+    by live :class:`~alfred.security.quarantine.ContentHandle` instances.
+    A confirmed Redis state change (the body delete succeeded) is the
+    ONLY moment at which the cap slot may be released — the body is
+    gone, the user is not holding the resource, the slot is genuinely
+    free. The release MUST fire in this path or the user's effective
+    cap shrinks by 1 until passive TTL eviction (~80s) — operator-
+    visible as ``handle_cap.exceeded`` warnings the user did not earn.
+
+    Trust-boundary discipline: the typed
+    :class:`~alfred.plugins.web_fetch.errors.WebFetchCanaryTripped`
+    exception STILL propagates regardless of the release decision —
+    release affects cap state, not the security signal.
+    """
+    body = b"content with CANARY-RELEASE-SUCCESS token"
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/release"
+    )
+    # AsyncMock standing in for a real HandleCap. The dispatcher wiring
+    # in Component E (Tasks 16-20) is the integration site that exercises
+    # the LIVE cap; here we pin the scanner's release-on-success
+    # contract so a future refactor that drops the call surfaces here.
+    mock_cap = AsyncMock(spec=HandleCap)
+    scanner = scanner_factory(
+        known_canary_tokens=[CanaryToken("CANARY-RELEASE-SUCCESS")],
+        handle_cap=mock_cap,
+    )
+    with pytest.raises(WebFetchCanaryTripped):
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
+    # ``release`` is called exactly once, AFTER the successful
+    # ``store.delete``, with the same ``user_id`` + ``handle_id`` the
+    # dispatcher reserved against. The mock cannot observe call order
+    # relative to ``store.delete`` directly, but the canary-tripped
+    # exception's propagation past the quarantine-failed branch
+    # (which would have logged + skipped release) is the structural
+    # proof that we hit the ``else`` arm.
+    mock_cap.release.assert_awaited_once_with(user_id=_USER_ID, handle_id=handle.id)
+
+
+@pytest.mark.asyncio
+async def test_scan_does_not_release_when_delete_raises(
+    store: ContentStore,
+    scanner_factory: ScannerFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec §5.2: ``store.delete`` raises ``RedisError`` → release is NOT called.
+
+    HOLD discipline. The body may still be alive in Redis (the
+    quarantine I/O failed); the cap's purpose is to bound the live
+    handle population a user can keep in Redis. Releasing the slot
+    while the body still consumes memory would let a user reset their
+    cap by serving canary-tripped content — a perverse incentive that
+    actively rewards the adversarial path. Holding the slot lets
+    passive TTL eviction (within ~80s) free both the body and the
+    cap slot together.
+
+    Trust-boundary discipline: the typed
+    :class:`~alfred.plugins.web_fetch.errors.WebFetchCanaryTripped`
+    exception STILL propagates so the orchestrator's canary arm fires
+    and the ``tool.web.fetch.canary_tripped`` audit row lands — the
+    security signal is independent of the cap-state decision.
+    """
+    body = b"content with CANARY-RELEASE-HOLD token"
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/hold"
+    )
+
+    async def _raise_redis_error(handle_id: str) -> None:
+        msg = "simulated Redis connection reset during quarantine"
+        raise RedisError(msg)
+
+    monkeypatch.setattr(store, "delete", _raise_redis_error)
+    mock_cap = AsyncMock(spec=HandleCap)
+    scanner = scanner_factory(
+        known_canary_tokens=[CanaryToken("CANARY-RELEASE-HOLD")],
+        handle_cap=mock_cap,
+    )
+    with pytest.raises(WebFetchCanaryTripped):
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
+    # Release MUST NOT fire — the body's Redis state is unknown after
+    # the failed delete; releasing now would let the user reset their
+    # cap with a malicious body still consuming memory. Passive TTL
+    # eviction (~80s) frees both atomically.
+    mock_cap.release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scan_with_no_handle_cap_does_not_raise(
+    store: ContentStore, scanner_factory: ScannerFactory
+) -> None:
+    """The ``handle_cap`` kwarg is optional — a scanner constructed
+    without one still trips on canary content without raising
+    :class:`AttributeError` when the release branch would normally fire.
+
+    This pins the back-compat invariant: the canary-scan responsibility
+    is independent of the cap-state responsibility. A host that hasn't
+    yet wired :class:`HandleCap` (e.g. a Slice-2.5 host wiring the
+    scanner without the Slice-3 cap) MUST still get the security
+    signal — the typed canary exception — without crashing on a
+    ``None`` cap reference.
+    """
+    body = b"content with CANARY-NO-CAP token"
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/nocap"
+    )
+    scanner = scanner_factory(
+        known_canary_tokens=[CanaryToken("CANARY-NO-CAP")],
+        # handle_cap omitted — default is None.
+    )
+    with pytest.raises(WebFetchCanaryTripped):
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
 
 @pytest.mark.asyncio
@@ -308,7 +439,7 @@ async def test_missing_body_raises_canary_scan_error(
     await store.extract(handle.id)
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("SENTINEL-XXXX")])
     with pytest.raises(CanaryScanError) as exc_info:
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
     assert exc_info.value.handle_id == handle.id
     assert exc_info.value.drift_kind == "missing_body"
 
@@ -323,7 +454,7 @@ async def test_case_insensitive_match(store: ContentStore, scanner_factory: Scan
     )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-TOKEN-12345")])
     with pytest.raises(WebFetchCanaryTripped):
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
 
 @pytest.mark.asyncio
@@ -343,7 +474,7 @@ async def test_multiple_canary_tokens_first_match_trips(
         ],
     )
     with pytest.raises(WebFetchCanaryTripped):
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
 
 @pytest.mark.asyncio
@@ -360,7 +491,7 @@ async def test_empty_canary_set_never_trips(
         handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/"
     )
     scanner = scanner_factory(known_canary_tokens=[])
-    await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+    await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
 
 @pytest.mark.asyncio
@@ -379,7 +510,7 @@ async def test_non_utf8_body_does_not_crash_scanner(
     )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-BLOCKED")])
     with pytest.raises(WebFetchCanaryTripped):
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
 
 @pytest.mark.asyncio
@@ -440,7 +571,7 @@ async def test_scanner_reuses_client_across_scans(
             body=f"<html>clean content {i}</html>".encode(),
             source_url=f"https://example.com/scan-{i}",
         )
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
     assert call_count == 1, (
         "perf-102: InboundCanaryScanner must mint its peek client exactly once "
         f"across N scans; observed {call_count} calls to aioredis.from_url."
@@ -662,7 +793,7 @@ async def test_canary_trip_log_sanitizes_query_string(
         structlog.testing.capture_logs() as captured,
         pytest.raises(WebFetchCanaryTripped) as exc_info,
     ):
-        await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
+        await scanner.scan(handle_id=handle.id, source_url=handle.source_url, user_id=_USER_ID)
 
     tripped_events = [e for e in captured if e.get("event") == "web_fetch.canary.tripped"]
     assert len(tripped_events) == 1
@@ -692,7 +823,9 @@ async def test_missing_body_log_sanitizes_userinfo(
         # Deliberately use a handle id that does not exist in Redis;
         # the scanner's GETEX returns None and the missing_body log
         # fires before the canary regex even runs.
-        await scanner.scan(handle_id="nonexistent-handle-id-12345", source_url=raw_url)
+        await scanner.scan(
+            handle_id="nonexistent-handle-id-12345", source_url=raw_url, user_id=_USER_ID
+        )
 
     missing_events = [e for e in captured if e.get("event") == "web_fetch.canary.missing_body"]
     assert len(missing_events) == 1
