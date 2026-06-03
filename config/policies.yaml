@@ -1,10 +1,11 @@
 # config/policies.yaml — AlfredOS low-blast operator policy knobs.
 #
-# Changes here take effect on the next hot-reload (file-mtime polling,
-# 1s interval). No restart required. These knobs narrow or tune within
-# the existing trust surface — they cannot widen it. Widening actions
-# (domain allowlist additions, plugin grants, quarantined-provider changes)
-# require state.git reviewer-gate approval (spec §11.1).
+# Changes here require an `alfred` process restart to take effect.
+# (mtime-polled hot-reload is planned — issue #159; until then
+# operators must restart the process after editing this file.) These knobs
+# narrow or tune within the existing trust surface — they cannot widen it.
+# Widening actions (domain allowlist additions, plugin grants, quarantined-
+# provider changes) require state.git reviewer-gate approval (spec §11.1).
 
 web_fetch:
   # User-Agent header sent with every web.fetch request (spec §16 Fork 4).
@@ -23,9 +24,18 @@ web_fetch:
   user_daily_budget: 100
   operator_daily_budget: null  # unlimited
 
-  # Per-user concurrent ContentHandle cap (spec §7.7).
+  # Per-user concurrent ContentHandle cap (slice-3 spec §7.10 —
+  # docs/superpowers/specs/2026-06-02-handle-cap-design.md).
   # A sixth web.fetch call from the same user while 5 handles are live
   # receives WebFetchRateLimited.
+  #
+  # Note: this knob is reserved for the planned policies-loader
+  # (issue #159). The default (5) applies until the loader lands;
+  # edits to this value have no current effect — the host instantiates
+  # HandleCapConfig() with its built-in default regardless of what
+  # appears here. See docs/runbooks/handle-cap-exceeded.md for the
+  # operator-facing notice and the SQL / redis-cli inspection
+  # examples that work against the in-effect cap (5 today).
   max_concurrent_handles_per_user: 5
 
   # Maximum response body size in bytes (spec §16 Fork 4). Default: 5MB.
