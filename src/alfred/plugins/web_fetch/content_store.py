@@ -38,7 +38,6 @@ drift on future refactors.
 
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime
 from typing import Final, cast
 from urllib.parse import urlparse
@@ -163,6 +162,7 @@ class ContentStore:
     async def write(
         self,
         *,
+        handle_id: str,
         body: bytes,
         source_url: str,
         action_deadline_seconds: int = _DEFAULT_ACTION_DEADLINE_SECONDS,
@@ -170,10 +170,16 @@ class ContentStore:
         per_retry_budget_seconds: int = _DEFAULT_PER_RETRY_BUDGET_SECONDS,
         slack_seconds: int = _DEFAULT_SLACK_SECONDS,
     ) -> ContentHandle:
-        """Write ``body`` to Redis under a freshly minted handle and return
-        the opaque :class:`ContentHandle`.
+        """Write ``body`` to Redis under the host-pre-minted ``handle_id``.
+
+        Spec §3 contract change: the host (dispatcher) pre-mints the id so
+        the cap (:class:`HandleCap`) can reserve the slot BEFORE the network
+        fetch happens. Plugin no longer mints internally.
 
         Args:
+            handle_id: Caller-supplied handle id. Must be unique within the
+                Redis namespace for the TTL duration. The host (dispatcher)
+                mints this via ``str(uuid.uuid4())`` before the network fetch.
             body: The raw response bytes. T3 by construction; the
                 dispatcher must call ``tag_t3_with_nonce`` before handing
                 the body to any downstream consumer that reads it.
@@ -189,7 +195,7 @@ class ContentStore:
                 slow handoff does not lose the handle mid-flight;
                 defaults to 30.
         """
-        handle_id = str(uuid.uuid4())
+        # Internal uuid4() mint REMOVED — handle_id is now caller-supplied.
         ttl = (
             action_deadline_seconds
             + (max_extraction_retries * per_retry_budget_seconds)

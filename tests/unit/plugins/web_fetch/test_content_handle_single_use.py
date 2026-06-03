@@ -85,7 +85,9 @@ def test_content_handle_is_frozen() -> None:
 @pytest.mark.asyncio
 async def test_store_and_extract_once(store: ContentStore) -> None:
     body = b"<html>hello</html>"
-    handle = await store.write(body=body, source_url="https://example.com/")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/"
+    )
     result = await store.extract(handle.id)
     assert result == body
 
@@ -94,7 +96,9 @@ async def test_store_and_extract_once(store: ContentStore) -> None:
 async def test_second_extract_raises_expired(store: ContentStore) -> None:
     """Single-use invariant (spec §7.2): the second extract MUST fail."""
     body = b"<html>single use</html>"
-    handle = await store.write(body=body, source_url="https://example.com/page")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/page"
+    )
     await store.extract(handle.id)
     with pytest.raises(ContentHandleExpired):
         await store.extract(handle.id)
@@ -119,7 +123,9 @@ async def test_concurrent_extract_race_closed(store: ContentStore) -> None:
     pipeline-based GET+DEL would NOT prevent this race.
     """
     body = b"<html>race</html>"
-    handle = await store.write(body=body, source_url="https://example.com/race")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/race"
+    )
 
     results: list[bytes | ContentHandleExpired] = []
 
@@ -149,6 +155,7 @@ async def test_handle_ttl_formula(store: ContentStore, redis_url: str) -> None:
     """
     body = b"data"
     handle = await store.write(
+        handle_id=str(uuid.uuid4()),
         body=body,
         source_url="https://example.com/ttl",
         action_deadline_seconds=30,
@@ -169,7 +176,9 @@ async def test_handle_ttl_formula(store: ContentStore, redis_url: str) -> None:
 async def test_extract_removes_key(store: ContentStore, redis_url: str) -> None:
     """After successful extract, the Redis key MUST be gone (spec §7.2)."""
     body = b"ephemeral"
-    handle = await store.write(body=body, source_url="https://example.com/del")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/del"
+    )
     await store.extract(handle.id)
     probe = aioredis.from_url(redis_url)
     try:
@@ -182,7 +191,9 @@ async def test_extract_removes_key(store: ContentStore, redis_url: str) -> None:
 @pytest.mark.asyncio
 async def test_explicit_delete_idempotent(store: ContentStore) -> None:
     """``delete`` is a no-op on an unknown id (idempotent quarantine path)."""
-    handle = await store.write(body=b"x", source_url="https://example.com/idemp")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=b"x", source_url="https://example.com/idemp"
+    )
     await store.delete(handle.id)
     # Second delete must not raise.
     await store.delete(handle.id)
@@ -195,9 +206,13 @@ async def test_write_returns_handle_with_source_url(store: ContentStore) -> None
     """``write`` is the only path that mints a handle; source_url is
     recorded for audit attribution, not for orchestrator-side reads."""
     body = b"data"
-    handle = await store.write(body=body, source_url="https://example.com/path?q=1")
+    pre_minted = str(uuid.uuid4())
+    handle = await store.write(
+        handle_id=pre_minted, body=body, source_url="https://example.com/path?q=1"
+    )
     assert handle.source_url == "https://example.com/path?q=1"
-    # ``id`` should be a UUID4 string (verified by parsing).
+    # ``id`` must equal the caller-supplied handle_id (no internal re-mint).
+    assert handle.id == pre_minted
     uuid.UUID(handle.id)  # raises if not a valid UUID
     # ``fetch_timestamp`` MUST be tz-aware per CR-138 finding #4.
     assert handle.fetch_timestamp.tzinfo is not None
@@ -251,6 +266,7 @@ async def test_write_rejects_non_positive_ttl(
     """
     with pytest.raises(ValueError, match="TTL must be positive"):
         await store.write(
+            handle_id=str(uuid.uuid4()),
             body=b"x",
             source_url="https://example.com/",
             action_deadline_seconds=action_deadline,
@@ -273,7 +289,7 @@ async def test_write_log_strips_sensitive_url_components(
 
     raw_url = "https://alice:hunter2@example.com/path?token=BEARER_SECRET#frag"
     with structlog.testing.capture_logs() as captured:
-        handle = await store.write(body=b"x", source_url=raw_url)
+        handle = await store.write(handle_id=str(uuid.uuid4()), body=b"x", source_url=raw_url)
 
     written_events = [e for e in captured if e.get("event") == "web_fetch.content_store.written"]
     assert len(written_events) == 1
@@ -311,3 +327,14 @@ def test_content_store_sanitize_url_for_log_fallbacks() -> None:
     # lazy access. Sanitizer catches and falls back rather than
     # leaking the raw URL via an uncaught exception.
     assert _sanitize_url_for_log("https://example.com:notanumber/p") == "<sanitize_failed>"
+
+
+@pytest.mark.asyncio
+async def test_write_uses_passed_handle_id_not_internal_mint(
+    store: ContentStore,
+) -> None:
+    """Host pre-mints handle_id; ContentStore.write uses it verbatim, no
+    internal uuid4() mint. Cap-binding (spec §3) depends on this contract."""
+    h = "pre-minted-deterministic-id"
+    handle = await store.write(handle_id=h, body=b"x", source_url="https://example.com/")
+    assert handle.id == h
