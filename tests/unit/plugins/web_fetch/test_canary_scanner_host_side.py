@@ -23,6 +23,7 @@ import one in place of the other.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import TYPE_CHECKING
 
@@ -121,7 +122,9 @@ async def test_clean_content_does_not_trip(
 ) -> None:
     """A body with no canary tokens completes without raise."""
     handle = await store.write(
-        body=b"<html>clean content</html>", source_url="https://example.com/"
+        handle_id=str(uuid.uuid4()),
+        body=b"<html>clean content</html>",
+        source_url="https://example.com/",
     )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-TOKEN-12345")])
     await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
@@ -138,7 +141,9 @@ async def test_canary_token_in_body_trips(
     without string-parsing the message.
     """
     body = b"<html>CANARY-TOKEN-12345 injected here</html>"
-    handle = await store.write(body=body, source_url="https://evil.test/page")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://evil.test/page"
+    )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-TOKEN-12345")])
     with pytest.raises(WebFetchCanaryTripped) as exc_info:
         await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
@@ -157,7 +162,9 @@ async def test_scanner_does_not_consume_clean_handle(
     and the original TTL.
     """
     body = b"<html>safe</html>"
-    handle = await store.write(body=body, source_url="https://example.com/safe")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/safe"
+    )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("SENTINEL-9999")])
     await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
     # Handle must still be extractable.
@@ -176,7 +183,9 @@ async def test_canary_trip_quarantines_handle(
     WebFetchCanaryTripped propagates.
     """
     body = b"content with CANARY-QUARANTINE-TEST token"
-    handle = await store.write(body=body, source_url="https://attacker.test/")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/"
+    )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-QUARANTINE-TEST")])
     with pytest.raises(WebFetchCanaryTripped):
         await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
@@ -203,7 +212,9 @@ async def test_canary_trip_raises_even_when_redis_delete_fails(
     test catches it.
     """
     body = b"content with CANARY-DELETE-FAIL token"
-    handle = await store.write(body=body, source_url="https://attacker.test/del-fail")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/del-fail"
+    )
 
     async def _raise_redis_error(handle_id: str) -> None:
         # ConnectionError is a RedisError subclass — most common
@@ -244,6 +255,7 @@ async def test_canary_trip_emits_quarantine_failed_structlog(
     """
     body = b"content with CANARY-DELETE-STRUCTLOG token"
     handle = await store.write(
+        handle_id=str(uuid.uuid4()),
         body=body,
         source_url="https://attacker.test/structlog",
     )
@@ -287,7 +299,11 @@ async def test_missing_body_raises_canary_scan_error(
     the orchestrator can quarantine/abort rather than proceeding with
     unscanned content.
     """
-    handle = await store.write(body=b"<html>data</html>", source_url="https://example.com/missing")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()),
+        body=b"<html>data</html>",
+        source_url="https://example.com/missing",
+    )
     # Consume the handle out from under the scanner.
     await store.extract(handle.id)
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("SENTINEL-XXXX")])
@@ -302,7 +318,9 @@ async def test_case_insensitive_match(store: ContentStore, scanner_factory: Scan
     """Canary detection is case-insensitive — an attacker lowercasing a
     well-known canary string must still trip."""
     body = b"<html>canary-token-12345 lowercased</html>"
-    handle = await store.write(body=body, source_url="https://attacker.test/")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/"
+    )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-TOKEN-12345")])
     with pytest.raises(WebFetchCanaryTripped):
         await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
@@ -314,7 +332,9 @@ async def test_multiple_canary_tokens_first_match_trips(
 ) -> None:
     """Multiple registered tokens: a match on any one trips the scan."""
     body = b"<html>nothing here except SECRET-B</html>"
-    handle = await store.write(body=body, source_url="https://attacker.test/")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/"
+    )
     scanner = scanner_factory(
         known_canary_tokens=[
             CanaryToken("SECRET-A"),
@@ -336,7 +356,9 @@ async def test_empty_canary_set_never_trips(
     empty set is allowed for unit-test fixtures.
     """
     body = b"<html>any content</html>"
-    handle = await store.write(body=body, source_url="https://example.com/")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://example.com/"
+    )
     scanner = scanner_factory(known_canary_tokens=[])
     await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
 
@@ -352,7 +374,9 @@ async def test_non_utf8_body_does_not_crash_scanner(
     """
     # Invalid UTF-8 lead byte: \xff is never valid in UTF-8.
     body = b"\xff\xfe\xff CANARY-BLOCKED " + b"\xff" * 10
-    handle = await store.write(body=body, source_url="https://attacker.test/binary")
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()), body=body, source_url="https://attacker.test/binary"
+    )
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-BLOCKED")])
     with pytest.raises(WebFetchCanaryTripped):
         await scanner.scan(handle_id=handle.id, source_url=handle.source_url)
@@ -385,7 +409,9 @@ async def test_scanner_reuses_client_across_scans(
     # first write inside the loop would count as a "from_url call" the
     # scanner did not make, contaminating the perf signal.
     primer_handle = await store.write(
-        body=b"<html>primer</html>", source_url="https://example.com/primer"
+        handle_id=str(uuid.uuid4()),
+        body=b"<html>primer</html>",
+        source_url="https://example.com/primer",
     )
     # Discard the primer handle so it does not pollute later scans.
     await store.delete(primer_handle.id)
@@ -410,6 +436,7 @@ async def test_scanner_reuses_client_across_scans(
     # If the client is per-scan, count == 5; if it's long-lived, count == 1.
     for i in range(5):
         handle = await store.write(
+            handle_id=str(uuid.uuid4()),
             body=f"<html>clean content {i}</html>".encode(),
             source_url=f"https://example.com/scan-{i}",
         )
@@ -628,7 +655,7 @@ async def test_canary_trip_log_sanitizes_query_string(
     """
     body = b"content with CANARY-LOG-SANITIZE token"
     raw_url = "https://attacker.test/exfil?token=BEARER_SECRET"
-    handle = await store.write(body=body, source_url=raw_url)
+    handle = await store.write(handle_id=str(uuid.uuid4()), body=body, source_url=raw_url)
     scanner = scanner_factory(known_canary_tokens=[CanaryToken("CANARY-LOG-SANITIZE")])
 
     with (
