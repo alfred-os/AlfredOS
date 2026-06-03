@@ -679,3 +679,17 @@ async def test_release_connection_error_logs_loud_no_propagate(cap: HandleCap) -
         and log.get("handle_id") == h
         for log in logs
     ), f"expected loud release_failed event with cid-2; got {logs!r}"
+
+
+# --- EVALSHA NOSCRIPT fallback ---
+
+
+@pytest.mark.asyncio
+async def test_evalsha_noscript_reregisters_and_succeeds(cap: HandleCap) -> None:
+    """SCRIPT FLUSH between calls; the next try_reserve hits NOSCRIPT, redis-py
+    AsyncScript auto-falls-back to EVAL + re-caches; reserve succeeds."""
+    await cap.try_reserve(user_id=_u(), handle_id=_h(), handle_ttl_seconds=80)
+    client = await cap._get_client()
+    await client.execute_command("SCRIPT", "FLUSH")
+    # AsyncScript's __call__ catches NOSCRIPT and retries via EVAL.
+    await cap.try_reserve(user_id=_u(), handle_id=_h(), handle_ttl_seconds=80)
