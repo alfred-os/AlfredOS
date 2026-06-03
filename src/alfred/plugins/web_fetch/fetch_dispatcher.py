@@ -44,6 +44,8 @@ which lost MIME / size / generic failure modes — the
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
@@ -561,294 +563,314 @@ async def dispatch_web_fetch(
         )
         raise
 
-    # Step 4: Dispatch to the plugin subprocess via the transport.
-    #
-    # ``redis_url`` (C2 / arch-002): the plugin's ``_handle_fetch`` reads
-    # ``params["redis_url"]`` to open its content-store connection. Without
-    # this key the subprocess would ``KeyError`` on first real dispatch.
-    # The parent owns the connection-string source so the subprocess
-    # cannot synthesise its own — pin the URL at the wire-format boundary.
-    #
-    # ``skip_tls_verify`` (H1 / H10 / arch-003): forwarded so the
-    # subprocess-side :class:`TlsPolicy` check fires too (defence-in-depth
-    # — the parent-side check above is the authoritative gate, but the
-    # subprocess MUST also refuse to silently honour a flipped bit).
-    #
-    # ``content_handle_id``: host-pre-minted UUID. The plugin uses this
-    # exact key when writing the body to Redis; the dispatcher verifies
-    # equality on the success path (Task 19 host-side equality check).
-    #
-    # M7 / err-004: a transport-layer crash (subprocess death, broken
-    # pipe, framing error) is a forensic-attribution failure if we
-    # silently re-raise — emit an audit row BEFORE propagating so the
-    # operator log carries the failure (CLAUDE.md hard rule #7). The
-    # ``transport_error`` result tag is closed-vocabulary, distinct from
-    # ``dispatch_shape_error`` (in-band protocol violation) and the
-    # ``dlp_scan_result`` family (which Slice-3 documents as locked
-    # schema — see devex-002 note below).
+    released = False
     try:
-        result = await transport.dispatch(
-            "web.fetch",
-            {
-                "url": clean_url,
-                "headers": clean_headers,
-                "correlation_id": correlation_id,
-                "redis_url": config.redis_url,
-                "skip_tls_verify": config.skip_tls_verify,
-                "content_handle_id": handle_id,
-            },
-        )
-    except Exception:
-        # Transport-layer crash: no body was written under handle_id.
-        # Release the cap slot eagerly so the user is not penalised for
-        # ~80s passive TTL on a host-side failure they did not cause.
-        # The Task 18 try/finally + asyncio.shield wrapper is the
-        # CancelledError-safe catch-all; this early-release keeps the
-        # active-path latency tight (release before re-raise).
-        await handle_cap.release(user_id=user_id, handle_id=handle_id)
-        await audit.append_schema(
-            fields=WEB_FETCH_FIELDS,
-            schema_name="WEB_FETCH_FIELDS",
-            event="tool.web.fetch",
-            actor_user_id=user_id,
-            subject={
-                "url": clean_url,
-                "domain": domain,
-                "status_code": None,
-                "content_handle_id": None,
-                "fetch_depth": _FETCH_DEPTH,
-                "rate_limit_bucket": None,
-                "manifest_commit_hash": config.manifest_commit_hash,
-                "trust_tier_of_result": "T3",
-                "dlp_scan_result": "transport_error",
-                "canary_tripped": False,
-                "triggering_user_id": user_id,
-                "correlation_id": correlation_id,
-            },
-            trust_tier_of_trigger="T0",
-            result="transport_error",
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
-        )
-        raise
-
-    if isinstance(result, ContentHandle):
-        handle = result
-    elif isinstance(result, ControlResult):
-        # Typed plugin error: the plugin refused the body before writing
-        # it (size cap, MIME refusal, redirect refused, internal-IP
-        # refused, TLS error). No body lives under handle_id in Redis,
-        # so the cap slot should not stay held against a fetch that
-        # produced no memory pressure. Release before the typed
-        # exception bubbles.
-        await handle_cap.release(user_id=user_id, handle_id=handle_id)
-        # err-012 fix: the plugin returned a structured JSON-RPC error
-        # envelope; the transport's control-plane shape surfaces it as
-        # ControlResult.payload. Map the ``data.type`` tag (or top-level
-        # ``type``) to the right typed exception via _ERROR_TYPE_MAP.
-        # Raising WebFetchTlsError for every non-handle path was wrong
-        # — MIME refusals and size-limit refusals are distinct user-
-        # facing failures and the audit row's dlp_scan_result tag MUST
-        # reflect the actual refusal reason.
-        error_data: dict[str, object] = dict(result.payload)
-        error_type_obj = error_data.get("type", "WebFetchError")
-        error_type = error_type_obj if isinstance(error_type_obj, str) else "WebFetchError"
-        dlp_scan_obj = error_data.get("dlp_scan_result", "fetch_error")
-        dlp_result = dlp_scan_obj if isinstance(dlp_scan_obj, str) else "fetch_error"
-        status_code_obj = error_data.get("status_code")
-        status_code: int | None = status_code_obj if isinstance(status_code_obj, int) else None
-
-        await audit.append_schema(
-            fields=WEB_FETCH_FIELDS,
-            schema_name="WEB_FETCH_FIELDS",
-            event="tool.web.fetch",
-            actor_user_id=user_id,
-            subject={
-                "url": clean_url,
-                "domain": domain,
-                "status_code": status_code,
-                "content_handle_id": None,
-                "fetch_depth": _FETCH_DEPTH,
-                "rate_limit_bucket": None,
-                "manifest_commit_hash": config.manifest_commit_hash,
-                "trust_tier_of_result": "T3",
-                "dlp_scan_result": dlp_result,
-                "canary_tripped": False,
-                "triggering_user_id": user_id,
-                "correlation_id": correlation_id,
-            },
-            trust_tier_of_trigger="T0",
-            result=dlp_result,
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
-        )
-
-        # Resolve to the specific exception subclass. Each branch maps
-        # the structured ``error.data`` carrier shape to the typed
-        # exception's positional contract — keeping the typing tight at
-        # the boundary avoids ``Any``-leakage downstream.
-        exc_class = _ERROR_TYPE_MAP.get(error_type, WebFetchError)
-        message_obj = error_data.get("message", str(error_data))
-        message_str = message_obj if isinstance(message_obj, str) else str(error_data)
-        if exc_class is WebFetchTlsError:
-            raise WebFetchTlsError(url=clean_url, detail=message_str)
-        if exc_class is WebFetchMimeTypeNotAllowed:
-            mime_obj = error_data.get("mime_type", "unknown")
-            mime_str = mime_obj if isinstance(mime_obj, str) else "unknown"
-            raise WebFetchMimeTypeNotAllowed(mime_str)
-        if exc_class is WebFetchSizeLimitExceeded:
-            size_obj = error_data.get("size_bytes", 0)
-            limit_obj = error_data.get("limit_bytes", _DEFAULT_SIZE_LIMIT_BYTES)
-            size_bytes = size_obj if isinstance(size_obj, int) else 0
-            limit_bytes = limit_obj if isinstance(limit_obj, int) else _DEFAULT_SIZE_LIMIT_BYTES
-            raise WebFetchSizeLimitExceeded(size_bytes=size_bytes, limit_bytes=limit_bytes)
-        if exc_class is WebFetchRedirectRefused:
-            status_obj = error_data.get("status_code", 0)
-            target_obj = error_data.get("redirect_target", "")
-            status_int = status_obj if isinstance(status_obj, int) else 0
-            target_str = target_obj if isinstance(target_obj, str) else ""
-            raise WebFetchRedirectRefused(status_code=status_int, redirect_target=target_str)
-        if exc_class is WebFetchInternalIPRefused:
-            # sec-pr-s3-5-003: the subprocess-side IP guard caught a
-            # DNS-rebinding race (the parent-side guard resolved to a
-            # safe IP; the subprocess's own resolution returned an
-            # internal one). The typed exception preserves the closed
-            # reason vocabulary so the audit row + structlog stream see
-            # the same attack class string the parent-side guard would
-            # have emitted.
-            resolved_obj = error_data.get("resolved_ip", "")
-            reason_obj = error_data.get("reason", "reserved")
-            resolved_str = resolved_obj if isinstance(resolved_obj, str) else ""
-            reason_str = reason_obj if isinstance(reason_obj, str) else "reserved"
-            raise WebFetchInternalIPRefused(
-                url=clean_url,
-                resolved_ip=resolved_str,
-                reason=reason_str,
+        # Step 4: Dispatch to the plugin subprocess via the transport.
+        #
+        # ``redis_url`` (C2 / arch-002): the plugin's ``_handle_fetch`` reads
+        # ``params["redis_url"]`` to open its content-store connection. Without
+        # this key the subprocess would ``KeyError`` on first real dispatch.
+        # The parent owns the connection-string source so the subprocess
+        # cannot synthesise its own — pin the URL at the wire-format boundary.
+        #
+        # ``skip_tls_verify`` (H1 / H10 / arch-003): forwarded so the
+        # subprocess-side :class:`TlsPolicy` check fires too (defence-in-depth
+        # — the parent-side check above is the authoritative gate, but the
+        # subprocess MUST also refuse to silently honour a flipped bit).
+        #
+        # ``content_handle_id``: host-pre-minted UUID. The plugin uses this
+        # exact key when writing the body to Redis; the dispatcher verifies
+        # equality on the success path (Task 19 host-side equality check).
+        #
+        # M7 / err-004: a transport-layer crash (subprocess death, broken
+        # pipe, framing error) is a forensic-attribution failure if we
+        # silently re-raise — emit an audit row BEFORE propagating so the
+        # operator log carries the failure (CLAUDE.md hard rule #7). The
+        # ``transport_error`` result tag is closed-vocabulary, distinct from
+        # ``dispatch_shape_error`` (in-band protocol violation) and the
+        # ``dlp_scan_result`` family (which Slice-3 documents as locked
+        # schema — see devex-002 note below).
+        try:
+            result = await transport.dispatch(
+                "web.fetch",
+                {
+                    "url": clean_url,
+                    "headers": clean_headers,
+                    "correlation_id": correlation_id,
+                    "redis_url": config.redis_url,
+                    "skip_tls_verify": config.skip_tls_verify,
+                    "content_handle_id": handle_id,
+                },
             )
-        # C4 / i18n-002: the plugin-side ``message`` string is data, NOT
-        # a localisable surface — wrap the WebFetchError carrier in t()
-        # so the operator-visible error text is catalogued. The
-        # plugin-supplied detail flows through as a placeholder so
-        # forensic attribution is preserved without bypassing the i18n
-        # contract (CLAUDE.md i18n hard rule #1).
-        raise WebFetchError(t("web.fetch.error.plugin_returned_message", message=message_str))
-    else:
-        # An ExtractionResult coming back from a ``web.fetch`` dispatch
-        # is a protocol violation — extraction is only legitimate for
-        # quarantine.extract. We surface as WebFetchError so callers
-        # see a typed failure (audit row + exception) rather than a
-        # silent type confusion downstream.
-        shape_name = type(result).__name__
-        # H7 / err-001: emit a ``dispatch_shape_error`` audit row BEFORE
-        # the raise. A trust-boundary anomaly (transport contract
-        # violation) must surface in the audit graph; structlog alone
-        # leaves no row in the audit DB for forensic correlation.
-        await audit.append_schema(
-            fields=WEB_FETCH_FIELDS,
-            schema_name="WEB_FETCH_FIELDS",
-            event="tool.web.fetch",
-            actor_user_id=user_id,
-            subject={
-                "url": clean_url,
-                "domain": domain,
-                "status_code": None,
-                "content_handle_id": None,
-                "fetch_depth": _FETCH_DEPTH,
-                "rate_limit_bucket": None,
-                "manifest_commit_hash": config.manifest_commit_hash,
-                "trust_tier_of_result": "T0",
-                "dlp_scan_result": "dispatch_shape_error",
-                "canary_tripped": False,
-                "triggering_user_id": user_id,
-                "correlation_id": correlation_id,
-            },
-            trust_tier_of_trigger="T0",
-            result="dispatch_shape_error",
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
-        )
-        # devex-005: normalise structlog event names under
-        # ``web_fetch.*`` so log consumers can filter by the subsystem
-        # prefix without per-module exceptions.
-        log.error(
-            "web_fetch.dispatch_shape_error",
-            shape=shape_name,
-            correlation_id=correlation_id,
-        )
-        # C3 / i18n-001: wrap the operator-facing exception string via
-        # t() so the error text is catalogued. The shape name (a Python
-        # type name) is data, surfaced through the ``shape`` placeholder.
-        raise WebFetchError(t("web.fetch.error.unexpected_dispatch_shape", shape=shape_name))
+        except Exception:
+            # Transport-layer crash: no body was written under handle_id.
+            # Release the cap slot eagerly so the user is not penalised for
+            # ~80s passive TTL on a host-side failure they did not cause.
+            # The Task 18 try/finally + asyncio.shield wrapper is the
+            # CancelledError-safe catch-all; this early-release keeps the
+            # active-path latency tight (release before re-raise).
+            await handle_cap.release(user_id=user_id, handle_id=handle_id)
+            released = True
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject={
+                    "url": clean_url,
+                    "domain": domain,
+                    "status_code": None,
+                    "content_handle_id": None,
+                    "fetch_depth": _FETCH_DEPTH,
+                    "rate_limit_bucket": None,
+                    "manifest_commit_hash": config.manifest_commit_hash,
+                    "trust_tier_of_result": "T3",
+                    "dlp_scan_result": "transport_error",
+                    "canary_tripped": False,
+                    "triggering_user_id": user_id,
+                    "correlation_id": correlation_id,
+                },
+                trust_tier_of_trigger="T0",
+                result="transport_error",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+            raise
 
-    # Step 5: success audit row.
-    #
-    # H6 / ar-001 / devex-001: ``rate_limit_bucket`` is None on success.
-    # The schema declares this field as the bucket tag that REFUSED the
-    # fetch ("per_domain" / "per_user" / "daily_budget" / None). The
-    # success path did not get refused; previously this row mis-recorded
-    # the domain string under ``rate_limit_bucket``, which broke
-    # audit-graph filters that pivot on the bucket vocabulary. The
-    # ``domain`` field on this row already carries the netloc — see the
-    # ``"domain": domain`` line below.
-    #
-    # M7 / err-005: a success-path audit-write failure must not silently
-    # drop the row — emit a LOUD structlog warning carrying the
-    # would-be subject so an operator can correlate after the fact, then
-    # re-raise. The caller of dispatch_web_fetch loses the handle (the
-    # returned ContentHandle is the success token), but the forensic
-    # signal survives in the structlog stream.
-    #
-    # devex-002 (DEFERRED): the ``dlp_scan_result`` field is overloaded —
-    # it carries genuine DLP outcomes ("clean", "scanned_dirty",
-    # "dlp_scan_error") AND fetch-outcome tags ("domain_not_allowed",
-    # "rate_limited", "transport_error", "dispatch_shape_error"). The
-    # clean fix is a separate ``fetch_outcome`` field. WEB_FETCH_FIELDS
-    # is locked (schema migration would land in a follow-up PR); we
-    # document the gap here. Audit-row tests pin the current values so
-    # the migration is a clean delta. See task devex-002.
-    success_subject: dict[str, object | None] = {
-        "url": clean_url,
-        "domain": domain,
-        # HTTP status is not surfaced through ContentHandle (T3
-        # provenance is the field on the handle). The success row
-        # carries 200 by convention; if the plugin starts returning
-        # non-2xx success responses the schema needs a transport-
-        # surfaced status field.
-        "status_code": 200,
-        "content_handle_id": handle.id,
-        "fetch_depth": _FETCH_DEPTH,
-        "rate_limit_bucket": None,
-        "manifest_commit_hash": config.manifest_commit_hash,
-        "trust_tier_of_result": "T3",
-        "dlp_scan_result": "clean",
-        "canary_tripped": False,
-        "triggering_user_id": user_id,
-        "correlation_id": correlation_id,
-    }
-    try:
-        await audit.append_schema(
-            fields=WEB_FETCH_FIELDS,
-            schema_name="WEB_FETCH_FIELDS",
-            event="tool.web.fetch",
-            actor_user_id=user_id,
-            subject=success_subject,
-            trust_tier_of_trigger="T0",
-            result="ok",
-            cost_estimate_usd=0.0,
-            trace_id=correlation_id,
-        )
-    except Exception:
-        # LOUD structlog signal so an operator scanning the log finds
-        # the would-be row. ``subject`` is serialised in full because the
-        # row never reached the audit DB; this is the only forensic trail
-        # of the successful fetch.
-        log.warning(
-            "web_fetch.success_audit_write_failed",
-            correlation_id=correlation_id,
-            subject=success_subject,
-        )
-        raise
+        if isinstance(result, ContentHandle):
+            handle = result
+        elif isinstance(result, ControlResult):
+            # Typed plugin error: the plugin refused the body before writing
+            # it (size cap, MIME refusal, redirect refused, internal-IP
+            # refused, TLS error). No body lives under handle_id in Redis,
+            # so the cap slot should not stay held against a fetch that
+            # produced no memory pressure. Release before the typed
+            # exception bubbles.
+            await handle_cap.release(user_id=user_id, handle_id=handle_id)
+            released = True
+            # err-012 fix: the plugin returned a structured JSON-RPC error
+            # envelope; the transport's control-plane shape surfaces it as
+            # ControlResult.payload. Map the ``data.type`` tag (or top-level
+            # ``type``) to the right typed exception via _ERROR_TYPE_MAP.
+            # Raising WebFetchTlsError for every non-handle path was wrong
+            # — MIME refusals and size-limit refusals are distinct user-
+            # facing failures and the audit row's dlp_scan_result tag MUST
+            # reflect the actual refusal reason.
+            error_data: dict[str, object] = dict(result.payload)
+            error_type_obj = error_data.get("type", "WebFetchError")
+            error_type = error_type_obj if isinstance(error_type_obj, str) else "WebFetchError"
+            dlp_scan_obj = error_data.get("dlp_scan_result", "fetch_error")
+            dlp_result = dlp_scan_obj if isinstance(dlp_scan_obj, str) else "fetch_error"
+            status_code_obj = error_data.get("status_code")
+            status_code: int | None = status_code_obj if isinstance(status_code_obj, int) else None
 
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject={
+                    "url": clean_url,
+                    "domain": domain,
+                    "status_code": status_code,
+                    "content_handle_id": None,
+                    "fetch_depth": _FETCH_DEPTH,
+                    "rate_limit_bucket": None,
+                    "manifest_commit_hash": config.manifest_commit_hash,
+                    "trust_tier_of_result": "T3",
+                    "dlp_scan_result": dlp_result,
+                    "canary_tripped": False,
+                    "triggering_user_id": user_id,
+                    "correlation_id": correlation_id,
+                },
+                trust_tier_of_trigger="T0",
+                result=dlp_result,
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+
+            # Resolve to the specific exception subclass. Each branch maps
+            # the structured ``error.data`` carrier shape to the typed
+            # exception's positional contract — keeping the typing tight at
+            # the boundary avoids ``Any``-leakage downstream.
+            exc_class = _ERROR_TYPE_MAP.get(error_type, WebFetchError)
+            message_obj = error_data.get("message", str(error_data))
+            message_str = message_obj if isinstance(message_obj, str) else str(error_data)
+            if exc_class is WebFetchTlsError:
+                raise WebFetchTlsError(url=clean_url, detail=message_str)
+            if exc_class is WebFetchMimeTypeNotAllowed:
+                mime_obj = error_data.get("mime_type", "unknown")
+                mime_str = mime_obj if isinstance(mime_obj, str) else "unknown"
+                raise WebFetchMimeTypeNotAllowed(mime_str)
+            if exc_class is WebFetchSizeLimitExceeded:
+                size_obj = error_data.get("size_bytes", 0)
+                limit_obj = error_data.get("limit_bytes", _DEFAULT_SIZE_LIMIT_BYTES)
+                size_bytes = size_obj if isinstance(size_obj, int) else 0
+                limit_bytes = limit_obj if isinstance(limit_obj, int) else _DEFAULT_SIZE_LIMIT_BYTES
+                raise WebFetchSizeLimitExceeded(size_bytes=size_bytes, limit_bytes=limit_bytes)
+            if exc_class is WebFetchRedirectRefused:
+                status_obj = error_data.get("status_code", 0)
+                target_obj = error_data.get("redirect_target", "")
+                status_int = status_obj if isinstance(status_obj, int) else 0
+                target_str = target_obj if isinstance(target_obj, str) else ""
+                raise WebFetchRedirectRefused(status_code=status_int, redirect_target=target_str)
+            if exc_class is WebFetchInternalIPRefused:
+                # sec-pr-s3-5-003: the subprocess-side IP guard caught a
+                # DNS-rebinding race (the parent-side guard resolved to a
+                # safe IP; the subprocess's own resolution returned an
+                # internal one). The typed exception preserves the closed
+                # reason vocabulary so the audit row + structlog stream see
+                # the same attack class string the parent-side guard would
+                # have emitted.
+                resolved_obj = error_data.get("resolved_ip", "")
+                reason_obj = error_data.get("reason", "reserved")
+                resolved_str = resolved_obj if isinstance(resolved_obj, str) else ""
+                reason_str = reason_obj if isinstance(reason_obj, str) else "reserved"
+                raise WebFetchInternalIPRefused(
+                    url=clean_url,
+                    resolved_ip=resolved_str,
+                    reason=reason_str,
+                )
+            # C4 / i18n-002: the plugin-side ``message`` string is data, NOT
+            # a localisable surface — wrap the WebFetchError carrier in t()
+            # so the operator-visible error text is catalogued. The
+            # plugin-supplied detail flows through as a placeholder so
+            # forensic attribution is preserved without bypassing the i18n
+            # contract (CLAUDE.md i18n hard rule #1).
+            raise WebFetchError(t("web.fetch.error.plugin_returned_message", message=message_str))
+        else:
+            # An ExtractionResult coming back from a ``web.fetch`` dispatch
+            # is a protocol violation — extraction is only legitimate for
+            # quarantine.extract. We surface as WebFetchError so callers
+            # see a typed failure (audit row + exception) rather than a
+            # silent type confusion downstream.
+            shape_name = type(result).__name__
+            # H7 / err-001: emit a ``dispatch_shape_error`` audit row BEFORE
+            # the raise. A trust-boundary anomaly (transport contract
+            # violation) must surface in the audit graph; structlog alone
+            # leaves no row in the audit DB for forensic correlation.
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject={
+                    "url": clean_url,
+                    "domain": domain,
+                    "status_code": None,
+                    "content_handle_id": None,
+                    "fetch_depth": _FETCH_DEPTH,
+                    "rate_limit_bucket": None,
+                    "manifest_commit_hash": config.manifest_commit_hash,
+                    "trust_tier_of_result": "T0",
+                    "dlp_scan_result": "dispatch_shape_error",
+                    "canary_tripped": False,
+                    "triggering_user_id": user_id,
+                    "correlation_id": correlation_id,
+                },
+                trust_tier_of_trigger="T0",
+                result="dispatch_shape_error",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+            # devex-005: normalise structlog event names under
+            # ``web_fetch.*`` so log consumers can filter by the subsystem
+            # prefix without per-module exceptions.
+            log.error(
+                "web_fetch.dispatch_shape_error",
+                shape=shape_name,
+                correlation_id=correlation_id,
+            )
+            # C3 / i18n-001: wrap the operator-facing exception string via
+            # t() so the error text is catalogued. The shape name (a Python
+            # type name) is data, surfaced through the ``shape`` placeholder.
+            raise WebFetchError(t("web.fetch.error.unexpected_dispatch_shape", shape=shape_name))
+
+        # Step 5: success audit row.
+        #
+        # H6 / ar-001 / devex-001: ``rate_limit_bucket`` is None on success.
+        # The schema declares this field as the bucket tag that REFUSED the
+        # fetch ("per_domain" / "per_user" / "daily_budget" / None). The
+        # success path did not get refused; previously this row mis-recorded
+        # the domain string under ``rate_limit_bucket``, which broke
+        # audit-graph filters that pivot on the bucket vocabulary. The
+        # ``domain`` field on this row already carries the netloc — see the
+        # ``"domain": domain`` line below.
+        #
+        # M7 / err-005: a success-path audit-write failure must not silently
+        # drop the row — emit a LOUD structlog warning carrying the
+        # would-be subject so an operator can correlate after the fact, then
+        # re-raise. The caller of dispatch_web_fetch loses the handle (the
+        # returned ContentHandle is the success token), but the forensic
+        # signal survives in the structlog stream.
+        #
+        # devex-002 (DEFERRED): the ``dlp_scan_result`` field is overloaded —
+        # it carries genuine DLP outcomes ("clean", "scanned_dirty",
+        # "dlp_scan_error") AND fetch-outcome tags ("domain_not_allowed",
+        # "rate_limited", "transport_error", "dispatch_shape_error"). The
+        # clean fix is a separate ``fetch_outcome`` field. WEB_FETCH_FIELDS
+        # is locked (schema migration would land in a follow-up PR); we
+        # document the gap here. Audit-row tests pin the current values so
+        # the migration is a clean delta. See task devex-002.
+        success_subject: dict[str, object | None] = {
+            "url": clean_url,
+            "domain": domain,
+            # HTTP status is not surfaced through ContentHandle (T3
+            # provenance is the field on the handle). The success row
+            # carries 200 by convention; if the plugin starts returning
+            # non-2xx success responses the schema needs a transport-
+            # surfaced status field.
+            "status_code": 200,
+            "content_handle_id": handle.id,
+            "fetch_depth": _FETCH_DEPTH,
+            "rate_limit_bucket": None,
+            "manifest_commit_hash": config.manifest_commit_hash,
+            "trust_tier_of_result": "T3",
+            "dlp_scan_result": "clean",
+            "canary_tripped": False,
+            "triggering_user_id": user_id,
+            "correlation_id": correlation_id,
+        }
+        try:
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject=success_subject,
+                trust_tier_of_trigger="T0",
+                result="ok",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+        except Exception:
+            # LOUD structlog signal so an operator scanning the log finds
+            # the would-be row. ``subject`` is serialised in full because the
+            # row never reached the audit DB; this is the only forensic trail
+            # of the successful fetch.
+            log.warning(
+                "web_fetch.success_audit_write_failed",
+                correlation_id=correlation_id,
+                subject=success_subject,
+            )
+            raise
+
+    finally:
+        if not released:
+            # CancelledError catch-all (Python 3.12: CancelledError
+            # inherits from BaseException, NOT Exception — the inner
+            # `except Exception:` arm above misses it). asyncio.shield
+            # protects the release coroutine from nested cancellation;
+            # contextlib.suppress(Exception) prevents a release failure
+            # from masking the original exit reason. Worst case under
+            # double-failure (cancel + release fails): the cap slot
+            # leaks for ~80s passive TTL — a forensically-loud
+            # web_fetch.handle_cap.release_failed structlog event from
+            # the HandleCap layer is the operator's signal.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(
+                    handle_cap.release(user_id=user_id, handle_id=handle_id),
+                )
     return handle
 
 
