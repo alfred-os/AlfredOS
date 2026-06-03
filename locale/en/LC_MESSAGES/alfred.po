@@ -1375,7 +1375,7 @@ msgstr ""
 # attribution), but the operator-facing WebFetchError surface MUST be
 # catalogued — wrapping the message in t() lets the carrier string be
 # localised while preserving the plugin detail as a placeholder.
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:792
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:866
 msgid "web.fetch.error.plugin_returned_message"
 msgstr "web.fetch plugin returned an error: {message}"
 
@@ -1386,7 +1386,7 @@ msgstr "web.fetch plugin returned an error: {message}"
 # operational-error arm catches it. The {shape} placeholder carries the
 # Python type name of the offending result (audit-forensic only — not
 # the value itself, which could be T3-derived).
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:839
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:913
 msgid "web.fetch.error.unexpected_dispatch_shape"
 msgstr ""
 "web.fetch returned an unexpected dispatch shape ({shape}). Expected "
