@@ -492,3 +492,48 @@ async def test_reserve_same_handle_id_twice_is_score_update(cap: HandleCap) -> N
     await cap.try_reserve(user_id=u, handle_id=h, handle_ttl_seconds=80)
     count_after = await client.zcard(f"alfred:handles:user:{u}")
     assert count_before == count_after == 1
+
+
+# --- Config edges + isolation ---
+
+
+@pytest.mark.asyncio
+async def test_cap_one_serializes(redis_url: str) -> None:
+    hc = HandleCap(redis_url=redis_url, config=HandleCapConfig(per_user=1))
+    try:
+        u = _u()
+        h1 = _h()
+        h2 = _h()
+        await hc.try_reserve(user_id=u, handle_id=h1, handle_ttl_seconds=80)
+        with pytest.raises(WebFetchRateLimited):
+            await hc.try_reserve(user_id=u, handle_id=h2, handle_ttl_seconds=80)
+        await hc.release(user_id=u, handle_id=h1)
+        await hc.try_reserve(user_id=u, handle_id=h2, handle_ttl_seconds=80)
+    finally:
+        await hc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cap_large_value_honoured(redis_url: str) -> None:
+    """No off-by-one: cap=1000 lets exactly 1000 succeed, 1001 refused."""
+    hc = HandleCap(redis_url=redis_url, config=HandleCapConfig(per_user=1000))
+    try:
+        u = _u()
+        for _ in range(1000):
+            await hc.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+        with pytest.raises(WebFetchRateLimited):
+            await hc.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+    finally:
+        await hc.aclose()
+
+
+@pytest.mark.asyncio
+async def test_user_a_cap_does_not_affect_user_b(cap: HandleCap) -> None:
+    """Independent ZSET keys — exhausting one user doesn't refuse another."""
+    a, b = _u(), _u()
+    for _ in range(5):
+        await cap.try_reserve(user_id=a, handle_id=_h(), handle_ttl_seconds=80)
+    with pytest.raises(WebFetchRateLimited):
+        await cap.try_reserve(user_id=a, handle_id=_h(), handle_ttl_seconds=80)
+    # User B is unaffected.
+    await cap.try_reserve(user_id=b, handle_id=_h(), handle_ttl_seconds=80)
