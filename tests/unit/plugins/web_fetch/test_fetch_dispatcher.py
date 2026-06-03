@@ -1692,3 +1692,81 @@ async def test_dispatcher_cap_refusal_emits_audit_row() -> None:
     # Disputed-#2 decision: no ghost handle id in the refusal row.
     assert subj["content_handle_id"] is None
     assert call.kwargs["result"] == "rate_limited"
+
+
+# ---------------------------------------------------------------------------
+# Task 17 — Dispatcher release arms (transport error + typed plugin error)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_releases_on_transport_error() -> None:
+    """``transport.dispatch`` raises → ``handle_cap.release`` fires before
+    the re-raise so the slot returns to the pool immediately rather than
+    waiting on the ~80s passive TTL.
+
+    A transport-layer crash (subprocess death, broken pipe, framing
+    error) means no body was written under ``handle_id``; holding the
+    cap slot would penalise the user for a host-side failure they did
+    not cause.
+    """
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-transport-err",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    handle_cap.release.assert_awaited()
+    release_kwargs = handle_cap.release.await_args.kwargs
+    assert release_kwargs["user_id"] == "user-a"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_releases_on_typed_plugin_error() -> None:
+    """ControlResult with a typed plugin error (e.g.
+    ``WebFetchSizeLimitExceeded``) → ``handle_cap.release`` fires before
+    the typed exception bubbles. The plugin refused the body before
+    writing it; the cap slot must not stay held against a request that
+    produced no Redis memory pressure.
+    """
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchSizeLimitExceeded",
+            "message": "Response body exceeded limit 5000000 bytes",
+            "size_bytes": 10_000_000,
+            "limit_bytes": 5_000_000,
+        }
+    )
+
+    with pytest.raises(WebFetchSizeLimitExceeded):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-plugin-err",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    handle_cap.release.assert_awaited()
+    release_kwargs = handle_cap.release.await_args.kwargs
+    assert release_kwargs["user_id"] == "user-a"
