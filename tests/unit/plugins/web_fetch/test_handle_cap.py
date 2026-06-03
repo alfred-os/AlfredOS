@@ -309,3 +309,37 @@ async def test_script_registration_cached_across_calls(cap: HandleCap) -> None:
     assert first_script is not None
     await cap.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
     assert cap._script is first_script
+
+
+# --- release (spec §2.4) ---
+
+
+@pytest.mark.asyncio
+async def test_release_decrements_count(cap: HandleCap) -> None:
+    u = _u()
+    h = _h()
+    await cap.try_reserve(user_id=u, handle_id=h, handle_ttl_seconds=80)
+    await cap.release(user_id=u, handle_id=h)
+    # After release, the user can reserve again immediately.
+    await cap.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+
+
+@pytest.mark.asyncio
+async def test_release_unknown_handle_id_no_op(cap: HandleCap) -> None:
+    """Idempotent — release of a never-reserved id is a no-op ZREM."""
+    await cap.release(user_id=_u(), handle_id="never-reserved")
+
+
+@pytest.mark.asyncio
+async def test_release_twice_no_op(cap: HandleCap) -> None:
+    u = _u()
+    h = _h()
+    await cap.try_reserve(user_id=u, handle_id=h, handle_ttl_seconds=80)
+    await cap.release(user_id=u, handle_id=h)
+    await cap.release(user_id=u, handle_id=h)  # second is a no-op
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_idempotent(cap: HandleCap) -> None:
+    await cap.aclose()
+    await cap.aclose()
