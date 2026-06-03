@@ -47,6 +47,7 @@ import one in place of the other.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import Final, cast
@@ -59,6 +60,7 @@ from redis.exceptions import RedisError
 from alfred.errors import AlfredError
 from alfred.plugins.web_fetch.content_store import ContentStore
 from alfred.plugins.web_fetch.errors import WebFetchCanaryTripped
+from alfred.plugins.web_fetch.handle_cap import HandleCap
 
 _log = structlog.get_logger(__name__)
 
@@ -217,6 +219,7 @@ class InboundCanaryScanner:
         known_canary_tokens: list[CanaryToken],
         redis_url: str | None = None,
         redis_client: aioredis.Redis | None = None,
+        handle_cap: HandleCap | None = None,
     ) -> None:
         """Construct a scanner with an explicit peek-client lifecycle.
 
@@ -255,6 +258,17 @@ class InboundCanaryScanner:
             redis_client: Externally-supplied
                 :class:`redis.asyncio.Redis` client. Lifecycle owned
                 by the host. ``aclose()`` will NOT close this client.
+            handle_cap: Optional per-user concurrent-handle cap. On a
+                canary trip with a successful ``store.delete`` the
+                scanner calls
+                :meth:`HandleCap.release` to free the user's reserved
+                slot — the body is confirmed gone from Redis, so the
+                user is no longer holding the resource. ``None``
+                (default) skips the release; the slot is freed by
+                passive TTL eviction within ~80s. The optional shape
+                preserves back-compat for hosts that wire the scanner
+                without :class:`HandleCap` (e.g. a Slice-2.5 host
+                bootstrapping without Slice-3's cap).
 
         Raises:
             ValueError: Neither ``redis_url`` nor ``redis_client`` was
@@ -275,6 +289,13 @@ class InboundCanaryScanner:
             )
             raise ValueError(msg)
         self._store = content_store
+        # Per-user concurrent-handle cap (spec §5.2). Optional — the
+        # scanner remains operational without one (the slot is freed
+        # by passive TTL eviction). Stored as ``HandleCap | None`` so
+        # the scan path can short-circuit the release call with a
+        # single ``is not None`` check rather than a try/except on a
+        # missing attribute.
+        self._handle_cap = handle_cap
         self._redis_url = redis_url
         # _peek_client is the long-lived client. Lazily minted from
         # _redis_url on first scan when no explicit client was passed.
@@ -342,22 +363,60 @@ class InboundCanaryScanner:
             self._peek_client = None
             await client.aclose()
 
-    async def scan(self, *, handle_id: str, source_url: str) -> None:
+    async def scan(self, *, handle_id: str, source_url: str, user_id: str) -> None:
         """Scan the content store entry for canary tokens.
 
         Read-only on a clean scan (no consume); quarantine + raise on a
         trip; raise :class:`CanaryScanError` on a missing handle.
+
+        On a canary trip the order of operations is load-bearing:
+
+        1. Log the structured ``web_fetch.canary.tripped`` warning.
+        2. Quarantine — ``self._store.delete(handle_id)`` — so a
+           compromised downstream consumer cannot race to dereference
+           the trip'd content. The handle MUST be gone from Redis at
+           the moment :class:`WebFetchCanaryTripped` propagates.
+        3. ONLY on a successful delete (the ``else`` branch of the
+           try/except RedisError) call :meth:`HandleCap.release` if a
+           cap was injected at construction. The release predicate is
+           "confirmed Redis state change" — never "we tried" — because
+           releasing while the body still consumes Redis memory (the
+           ``RedisError`` arm) would let a user reset their cap by
+           serving canary-tripped content, which is a perverse
+           incentive against the cap's purpose (bounding Redis memory
+           pressure). Passive TTL eviction (~80s) frees both the body
+           and the cap slot together in the HOLD path.
+        4. Raise :class:`WebFetchCanaryTripped` regardless of the
+           quarantine / release decisions. The release affects cap
+           state; the typed exception IS the security signal and
+           propagates unconditionally (err-002 discipline).
+
+        Trust-boundary discipline (spec §5.4): ``user_id`` flows DIRECTLY
+        from the dispatcher to this method as an explicit kwarg — there
+        is no correlation-context object, and the plugin subprocess
+        NEVER sees ``user_id``. The minimisation principle keeps the
+        trust-boundary surface narrow: the dispatcher knows the
+        canonical user id; the scanner (host-side) knows it for the
+        cap-release decision only; the plugin subprocess does not.
 
         Args:
             handle_id: The opaque handle minted by
                 :meth:`ContentStore.write`.
             source_url: The URL the content was fetched from. Recorded
                 in :class:`WebFetchCanaryTripped` for the audit row.
+            user_id: Canonical user id (slug-form, closed character
+                set). REQUIRED — the cap release on a canary trip
+                attributes the slot to a user; threading this through
+                explicitly (rather than via a context object) keeps the
+                trust boundary narrow per spec §5.4. The plugin
+                subprocess never sees this value — it is host-side
+                only.
 
         Raises:
             WebFetchCanaryTripped: a registered canary token appears in
                 the body. The handle is quarantined (deleted) BEFORE
-                the raise.
+                the raise; the cap slot is released ONLY on confirmed
+                quarantine success.
             CanaryScanError: the handle was missing at scan time
                 (consumed or expired). Surfaces as a hook dispatcher
                 fault so the orchestrator does NOT proceed with
@@ -466,9 +525,76 @@ class InboundCanaryScanner:
                             "canary quarantine I/O failed; handle may "
                             "remain in store until TTL — typed canary "
                             "exception STILL raised so orchestrator's "
-                            "canary arm fires and audit row is emitted"
+                            "canary arm fires and audit row is emitted; "
+                            "cap slot HELD (passive TTL eviction within "
+                            "~80s frees both body and slot atomically)"
                         ),
                     )
+                else:
+                    # Spec §5.2: release ONLY on confirmed Redis state
+                    # change. The body is GONE from Redis at this point
+                    # — the user is no longer holding the resource the
+                    # cap exists to bound, so the slot is genuinely
+                    # free. Releasing in the ``except`` arm above would
+                    # let a user reset their cap by serving canary-
+                    # tripped content while the body still consumes
+                    # Redis memory (perverse incentive).
+                    #
+                    # The release is idempotent (the cap's ``release``
+                    # is a single ZREM); if a future refactor adds a
+                    # second release site between here and end-of-turn,
+                    # the second call is a no-op.
+                    #
+                    # CR-2: best-effort release. A Redis hiccup mid-
+                    # release would otherwise REPLACE the typed
+                    # WebFetchCanaryTripped (the security signal) with
+                    # a generic RedisError — the orchestrator's canary
+                    # arm would never fire, and the typed audit row
+                    # would not be emitted. The security event MUST
+                    # propagate; the cap slot is freed by passive TTL
+                    # within ~80s on a release failure.
+                    if self._handle_cap is not None:
+                        try:
+                            # CR-156-r1 (T13) shield: if the hosting task is
+                            # cancelled mid-release, the ZREM must still run.
+                            # Without shield, the CancelledError propagates
+                            # INTO ``release()`` and the cap slot is held until
+                            # ~80s passive TTL despite the canary trip having
+                            # confirmed a ``store.delete`` succeeded. The
+                            # dispatcher's finally-arm uses the same pattern;
+                            # see fetch_dispatcher.py line 736 region.
+                            await asyncio.shield(
+                                self._handle_cap.release(
+                                    user_id=user_id,
+                                    handle_id=handle_id,
+                                )
+                            )
+                        except (RedisError, ConnectionError, TimeoutError) as release_exc:
+                            # CR-156-r1 narrowing: catch ONLY the Redis-transient
+                            # class. The intent (preserve typed
+                            # WebFetchCanaryTripped propagation across a
+                            # Redis-hiccup mid-release) is unchanged, but a
+                            # programmer-bug inside ``HandleCap.release`` —
+                            # AttributeError on a wrong client field, TypeError
+                            # on a bad kwarg, a future regression — would
+                            # previously have been silently logged-and-eaten,
+                            # masking the real defect. Those raise loudly now;
+                            # passive TTL still bounds the cap-slot leakage if
+                            # the broader cleanup arm tears the request down.
+                            _log.error(
+                                "web_fetch.handle_cap.eager_release_failed",
+                                user_id=user_id,
+                                handle_id=handle_id,
+                                source_url=_sanitize_url_for_log(source_url),
+                                exception_type=type(release_exc).__name__,
+                                note=(
+                                    "best-effort release failed during "
+                                    "canary-trip cleanup; typed "
+                                    "WebFetchCanaryTripped still "
+                                    "propagates; passive TTL will free "
+                                    "slot within ~80s"
+                                ),
+                            )
                 raise WebFetchCanaryTripped(source_url=source_url, handle_id=handle_id)
 
 
