@@ -343,3 +343,52 @@ async def test_release_twice_no_op(cap: HandleCap) -> None:
 async def test_aclose_is_idempotent(cap: HandleCap) -> None:
     await cap.aclose()
     await cap.aclose()
+
+
+# --- TTL / passive eviction (spec §2.3) ---
+
+
+@pytest.mark.asyncio
+async def test_expired_entries_evicted_on_next_reserve(cap: HandleCap) -> None:
+    """A handle whose score is in the past is evicted by the next reserve's
+    ZREMRANGEBYSCORE — restores capacity."""
+    u = _u()
+    now = int(time.time() * 1000)
+    # Inject 5 expired members directly (score in the past).
+    client = await cap._get_client()
+    key = f"alfred:handles:user:{u}"
+    pipe = client.pipeline()
+    for i in range(5):
+        pipe.zadd(key, {f"expired-{i}": now - 1000})
+    pipe.expire(key, 600)
+    await pipe.execute()
+    # Reserve should succeed — expired entries evicted, count drops to 0.
+    await cap.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+
+
+@pytest.mark.asyncio
+async def test_staggered_expiry_decrements_count(cap: HandleCap) -> None:
+    """Five handles with staggered expiry; later reserves succeed as earlier
+    members fall out of the window."""
+    u = _u()
+    now = int(time.time() * 1000)
+    client = await cap._get_client()
+    key = f"alfred:handles:user:{u}"
+    # Inject 5 members already expired at staggered times — all evictable now.
+    pipe = client.pipeline()
+    for i in range(5):
+        pipe.zadd(key, {f"old-{i}": now - 5000 + i * 100})
+    await pipe.execute()
+    # First reserve evicts all 5 — succeeds.
+    await cap.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+
+
+@pytest.mark.asyncio
+async def test_user_key_outer_expire_set(cap: HandleCap) -> None:
+    """The user's ZSET key gets an outer EXPIRE so idle keys don't accumulate."""
+    u = _u()
+    await cap.try_reserve(user_id=u, handle_id=_h(), handle_ttl_seconds=80)
+    client = await cap._get_client()
+    ttl = await client.ttl(f"alfred:handles:user:{u}")
+    # Outer TTL = max(80*2, 600) = 600.
+    assert 590 <= ttl <= 600
