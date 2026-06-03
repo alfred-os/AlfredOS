@@ -610,7 +610,32 @@ async def dispatch_web_fetch(
             # The Task 18 try/finally + asyncio.shield wrapper is the
             # CancelledError-safe catch-all; this early-release keeps the
             # active-path latency tight (release before re-raise).
-            await handle_cap.release(user_id=user_id, handle_id=handle_id)
+            #
+            # CR-2: a Redis hiccup mid-release would otherwise REPLACE the
+            # original transport error with a RedisError, hiding the real
+            # failure class from audit + caller. Wrap the release in a
+            # best-effort try/except: log loud, then continue to the
+            # original audit + re-raise. Set released=True regardless so
+            # the finally arm does not double-release.
+            try:
+                await handle_cap.release(
+                    user_id=user_id,
+                    handle_id=handle_id,
+                    correlation_id=correlation_id,
+                )
+            except Exception as release_exc:
+                log.error(
+                    "web_fetch.handle_cap.eager_release_failed",
+                    user_id=user_id,
+                    handle_id=handle_id,
+                    correlation_id=correlation_id,
+                    exception_type=type(release_exc).__name__,
+                    note=(
+                        "best-effort release failed during error-arm "
+                        "cleanup; original typed error still propagates; "
+                        "passive TTL will free slot within ~80s"
+                    ),
+                )
             released = True
             await audit.append_schema(
                 fields=WEB_FETCH_FIELDS,
@@ -656,7 +681,31 @@ async def dispatch_web_fetch(
                 # host pre-minted (the plugin's wrong-keyed body is
                 # tracked elsewhere by its own passive TTL), emit a
                 # typed audit row, and raise the typed exception.
-                await handle_cap.release(user_id=user_id, handle_id=handle_id)
+                #
+                # CR-2: best-effort release. A Redis hiccup mid-release
+                # must not REPLACE the typed WebFetchHandleIdMismatch
+                # exception with a generic RedisError — the typed
+                # security signal is the load-bearing diagnostic.
+                try:
+                    await handle_cap.release(
+                        user_id=user_id,
+                        handle_id=handle_id,
+                        correlation_id=correlation_id,
+                    )
+                except Exception as release_exc:
+                    log.error(
+                        "web_fetch.handle_cap.eager_release_failed",
+                        user_id=user_id,
+                        handle_id=handle_id,
+                        correlation_id=correlation_id,
+                        exception_type=type(release_exc).__name__,
+                        note=(
+                            "best-effort release failed during "
+                            "handle_id_mismatch cleanup; typed "
+                            "WebFetchHandleIdMismatch still propagates; "
+                            "passive TTL will free slot within ~80s"
+                        ),
+                    )
                 released = True
                 await audit.append_schema(
                     fields=WEB_FETCH_FIELDS,
@@ -698,7 +747,32 @@ async def dispatch_web_fetch(
             # so the cap slot should not stay held against a fetch that
             # produced no memory pressure. Release before the typed
             # exception bubbles.
-            await handle_cap.release(user_id=user_id, handle_id=handle_id)
+            #
+            # CR-2: best-effort release. A Redis hiccup mid-release must
+            # not REPLACE the typed plugin error (WebFetchSizeLimitExceeded
+            # / WebFetchTlsError / WebFetchMimeTypeNotAllowed / …) with a
+            # generic RedisError — operators rely on the typed audit row
+            # AND the typed exception class for forensic attribution.
+            try:
+                await handle_cap.release(
+                    user_id=user_id,
+                    handle_id=handle_id,
+                    correlation_id=correlation_id,
+                )
+            except Exception as release_exc:
+                log.error(
+                    "web_fetch.handle_cap.eager_release_failed",
+                    user_id=user_id,
+                    handle_id=handle_id,
+                    correlation_id=correlation_id,
+                    exception_type=type(release_exc).__name__,
+                    note=(
+                        "best-effort release failed during typed-plugin-"
+                        "error cleanup; typed WebFetchError subclass "
+                        "still propagates; passive TTL will free slot "
+                        "within ~80s"
+                    ),
+                )
             released = True
             # err-012 fix: the plugin returned a structured JSON-RPC error
             # envelope; the transport's control-plane shape surfaces it as
@@ -867,12 +941,19 @@ async def dispatch_web_fetch(
         success_subject: dict[str, object | None] = {
             "url": clean_url,
             "domain": domain,
-            # HTTP status is not surfaced through ContentHandle (T3
-            # provenance is the field on the handle). The success row
-            # carries 200 by convention; if the plugin starts returning
-            # non-2xx success responses the schema needs a transport-
-            # surfaced status field.
-            "status_code": 200,
+            # H-4: status_code is None on the success row.
+            # The plugin's JSON-RPC return envelope DOES carry the real
+            # HTTP status (web_fetch_plugin.py:312), but the host-side
+            # transport collapses that envelope into a ``ContentHandle``
+            # (stdio_transport.py:670) which has no ``status_code``
+            # field. The end-to-end status is therefore not available
+            # to the dispatcher today; recording a hardcoded ``200``
+            # would corrupt the audit graph for non-2xx successes
+            # (3xx final responses, plugin success on 5xx body that
+            # got past size cap, etc.). Use ``None`` until a follow-up
+            # threads the field through ContentHandle (tracked in the
+            # PR description's follow-ups list).
+            "status_code": None,
             "content_handle_id": handle.id,
             "fetch_depth": _FETCH_DEPTH,
             "rate_limit_bucket": None,
@@ -883,6 +964,22 @@ async def dispatch_web_fetch(
             "triggering_user_id": user_id,
             "correlation_id": correlation_id,
         }
+        # CR-1: set ``released = True`` BEFORE the audit-write await.
+        # The body is in Redis under handle_id as soon as the plugin's
+        # ContentHandle materialised — HOLD posture is correct from this
+        # point on, regardless of audit outcome. Setting the latch
+        # AFTER the await leaves a window where:
+        #   * Python 3.12 ``CancelledError`` (BaseException, NOT
+        #     Exception) fires mid-await → the ``except Exception:``
+        #     misses it → the post-await ``released = True`` line never
+        #     executes → the finally arm releases the cap even though
+        #     the body sits in Redis. The cap counter desyncs from real
+        #     Redis memory pressure for ~80s (the body's passive TTL).
+        # Setting BEFORE the await closes that window: HOLD is the
+        # invariant from the moment the body lands in Redis; the audit-
+        # write outcome only affects the LOUD structlog signal, never
+        # the cap-slot accounting.
+        released = True
         try:
             await audit.append_schema(
                 fields=WEB_FETCH_FIELDS,
@@ -896,14 +993,21 @@ async def dispatch_web_fetch(
                 trace_id=correlation_id,
             )
         except Exception:
-            # LOUD structlog signal so an operator scanning the log finds
-            # the would-be row. ``subject`` is serialised in full because the
-            # row never reached the audit DB; this is the only forensic trail
-            # of the successful fetch.
-            log.warning(
-                "web_fetch.success_audit_write_failed",
+            # Disputed-#1 decision (spec §12): HOLD the cap until passive
+            # TTL. The body IS in Redis under handle_id consuming memory;
+            # releasing would let the user reset their cap while the
+            # resource the cap is meant to bound is still occupied. LOUD
+            # structlog event so operators see the stuck reservation.
+            # ``released = True`` is set above the try/except so this
+            # arm does NOT need to re-assign — the finally arm already
+            # sees the HOLD latch.
+            log.error(
+                "web_fetch.handle_cap.success_audit_failed_holding_cap",
+                user_id=user_id,
+                handle_id=handle_id,
                 correlation_id=correlation_id,
                 subject=success_subject,
+                note="cap slot held until passive TTL (~80s); body in Redis",
             )
             raise
 
@@ -921,7 +1025,11 @@ async def dispatch_web_fetch(
             # the HandleCap layer is the operator's signal.
             with contextlib.suppress(Exception):
                 await asyncio.shield(
-                    handle_cap.release(user_id=user_id, handle_id=handle_id),
+                    handle_cap.release(
+                        user_id=user_id,
+                        handle_id=handle_id,
+                        correlation_id=correlation_id,
+                    ),
                 )
     return handle
 

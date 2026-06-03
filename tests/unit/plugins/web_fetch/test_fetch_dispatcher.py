@@ -217,7 +217,12 @@ async def test_success_returns_handle_and_emits_ok_audit_row() -> None:
     subject = call.kwargs["subject"]
     assert subject["content_handle_id"] == "handle-uuid"
     assert subject["dlp_scan_result"] == "clean"
-    assert subject["status_code"] == 200
+    # H-4: status_code is None on the success row — the host-side
+    # transport collapses the plugin's JSON-RPC envelope into a
+    # ContentHandle that has no status_code field. See the dedicated
+    # ``test_success_row_status_code_is_none`` test for the full
+    # rationale.
+    assert subject["status_code"] is None
     # H6: success path leaves rate_limit_bucket=None — the bucket is the
     # refusal tag, not the success domain.
     assert subject["rate_limit_bucket"] is None
@@ -1190,7 +1195,7 @@ async def test_success_audit_write_failure_logs_loud_then_raises() -> None:
     # The success path issues ONE append_schema call; make it raise.
     audit.append_schema = AsyncMock(side_effect=RuntimeError("audit DB down"))
 
-    with pytest.raises(RuntimeError, match="audit DB down"):
+    with _pin_pre_minted_handle_id(), pytest.raises(RuntimeError, match="audit DB down"):
         await dispatch_web_fetch(
             url="https://example.com/page",
             headers={},
@@ -1958,3 +1963,335 @@ async def test_dispatcher_non_contenthandle_still_dispatch_shape_error() -> None
     assert shape_rows[0]["subject"]["dlp_scan_result"] == "dispatch_shape_error"
     # The cap slot was released — via the finally arm's shield.
     handle_cap.release.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Task 20 — Dispatcher success-audit-failure HOLD behaviour (disputed-#1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_holds_cap_on_success_audit_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Success path with a failing success-audit-write → HOLD the cap.
+
+    Disputed-#1 (spec §12): when the body IS in Redis under the
+    pre-minted handle_id but the success audit row fails to write,
+    releasing the cap would let the user reset their cap while the
+    underlying resource (the body) still consumes Redis memory.
+    Passive TTL (~80s) frees the slot instead; a LOUD structlog event
+    surfaces the stuck reservation so an operator sees it.
+
+    The finally arm MUST NOT release because ``released = True`` is set
+    in the except branch — without that the catch-all release would
+    fire and defeat the HOLD discipline entirely.
+    """
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = _build_transport_returning_handle()
+
+    # Make ONLY the success-path audit row raise (cap-event / earlier
+    # rows on this path: none, manifest ⊆ operator). Match by result="ok".
+    original = audit.append_schema
+
+    async def flaky_append(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("result") == "ok":
+            raise RuntimeError("audit DB unavailable")
+        return await original(*args, **kwargs)
+
+    audit.append_schema = flaky_append
+
+    with (
+        _pin_pre_minted_handle_id(),
+        pytest.raises(RuntimeError, match="audit DB unavailable"),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-hold",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    # CRITICAL: release was NOT called — the body is in Redis under
+    # handle_id and the cap holds the slot until passive TTL.
+    handle_cap.release.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_full_success_does_not_release() -> None:
+    """A full-success dispatch returns the handle and leaves the
+    reservation ALIVE.
+
+    Without the success-path ``released = True`` assignment the finally
+    arm would treat ``released = False`` as "we exited via exception"
+    and release the slot we WANT held — defeating the cap entirely. The
+    body lives in Redis for the extract/canary lifetime; release is the
+    job of those downstream consumers (or passive TTL).
+    """
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+
+    with _pin_pre_minted_handle_id():
+        result = await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-full-success",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=handle_cap,
+        )
+
+    assert isinstance(result, ContentHandle)
+    assert result.id == "handle-uuid"
+    # The cap stays held for the body's lifetime — extract / canary /
+    # passive TTL release later.
+    handle_cap.release.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# CR-1: HOLD invariant survives CancelledError mid-success-audit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_holds_cap_on_cancellederror_during_success_audit() -> None:
+    """CR-1: ``CancelledError`` fired during the success-audit ``await``
+    MUST leave the cap HELD.
+
+    Python 3.12: ``CancelledError`` inherits from ``BaseException``, NOT
+    ``Exception``. If ``released = True`` is set AFTER the audit await,
+    a ``CancelledError`` mid-await leaves ``released = False``; the
+    finally arm then releases the cap even though the body is in Redis
+    under ``handle_id`` consuming memory. The fix sets ``released =
+    True`` BEFORE the audit-write attempt — HOLD posture from the
+    moment the body lands in Redis, regardless of audit outcome.
+
+    Pinning ``handle_cap.release.assert_not_called()`` proves the cap
+    counter stays synced with real Redis memory pressure when the
+    cancellation lands in the audit-await window.
+    """
+    import asyncio
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    transport = _build_transport_returning_handle()
+
+    # Only the SUCCESS row's append (result="ok") raises CancelledError —
+    # earlier rows on this path (none on the manifest ⊆ operator config)
+    # would not be touched, and we want the cancellation to happen
+    # specifically inside the success-audit await.
+    async def cancelled_on_ok(*args: Any, **kwargs: Any) -> None:
+        if kwargs.get("result") == "ok":
+            raise asyncio.CancelledError
+
+    audit.append_schema = AsyncMock(side_effect=cancelled_on_ok)
+
+    with (
+        _pin_pre_minted_handle_id(),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-cancel-on-ok",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    # CR-1: release MUST NOT fire — HOLD invariant must survive
+    # CancelledError mid-success-audit. The body is in Redis under
+    # handle_id; passive TTL (~80s) frees the slot.
+    handle_cap.release.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# CR-2: best-effort release wraps in error arms (typed error propagates)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_transport_error_release_failure_preserves_original(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CR-2 (transport-error arm): if ``handle_cap.release`` itself
+    raises during eager cleanup, the ORIGINAL transport exception MUST
+    still propagate — not a generic ``RuntimeError`` from the release
+    failure that would mask the real failure class.
+    """
+    from structlog.testing import capture_logs
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    handle_cap.release = AsyncMock(side_effect=RuntimeError("release boom"))
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(side_effect=RuntimeError("transport boom"))
+
+    with (
+        capture_logs() as logs,
+        pytest.raises(RuntimeError, match="transport boom"),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-cr2-transport",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    # The eager-release failure surfaced as a LOUD structlog event.
+    assert any(
+        log.get("event") == "web_fetch.handle_cap.eager_release_failed"
+        and log.get("exception_type") == "RuntimeError"
+        and log.get("correlation_id") == "corr-cr2-transport"
+        for log in logs
+    ), f"expected eager_release_failed structlog event; got {logs!r}"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_handle_id_mismatch_release_failure_preserves_typed_error() -> None:
+    """CR-2 (handle_id_mismatch arm): if ``handle_cap.release`` itself
+    raises during eager cleanup, ``WebFetchHandleIdMismatch`` (the
+    typed security signal) MUST still propagate.
+    """
+    from structlog.testing import capture_logs
+
+    from alfred.plugins.web_fetch.errors import WebFetchHandleIdMismatch
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    handle_cap.release = AsyncMock(side_effect=RuntimeError("release boom"))
+    transport = AsyncMock()
+    transport.dispatch = AsyncMock(
+        return_value=ContentHandle(
+            id="wrong-uuid-from-plugin",
+            source_url="https://example.com/page",
+            fetch_timestamp=datetime.now(tz=UTC),
+        )
+    )
+
+    with (
+        capture_logs() as logs,
+        pytest.raises(WebFetchHandleIdMismatch),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-cr2-mismatch",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    assert any(
+        log.get("event") == "web_fetch.handle_cap.eager_release_failed"
+        and log.get("exception_type") == "RuntimeError"
+        and log.get("correlation_id") == "corr-cr2-mismatch"
+        for log in logs
+    ), f"expected eager_release_failed structlog event; got {logs!r}"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_typed_plugin_error_release_failure_preserves_typed_error() -> None:
+    """CR-2 (typed-plugin-error arm): if ``handle_cap.release`` itself
+    raises during eager cleanup, the typed plugin error
+    (``WebFetchSizeLimitExceeded`` here) MUST still propagate.
+    """
+    from structlog.testing import capture_logs
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    handle_cap.release = AsyncMock(side_effect=RuntimeError("release boom"))
+    transport = _build_transport_returning_control(
+        {
+            "type": "WebFetchSizeLimitExceeded",
+            "message": "Response body exceeded limit",
+            "size_bytes": 10_000_000,
+            "limit_bytes": 5_000_000,
+        }
+    )
+
+    with (
+        capture_logs() as logs,
+        pytest.raises(WebFetchSizeLimitExceeded),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-a",
+            correlation_id="corr-cr2-typed",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    assert any(
+        log.get("event") == "web_fetch.handle_cap.eager_release_failed"
+        and log.get("exception_type") == "RuntimeError"
+        and log.get("correlation_id") == "corr-cr2-typed"
+        for log in logs
+    ), f"expected eager_release_failed structlog event; got {logs!r}"
+
+
+# ---------------------------------------------------------------------------
+# H-4: status_code is None on success row (real HTTP status not threaded)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_success_row_status_code_is_none() -> None:
+    """H-4: ``status_code`` is None on the success row.
+
+    The plugin's JSON-RPC envelope carries the real HTTP status code,
+    but the host-side transport collapses the envelope into a
+    ContentHandle (stdio_transport.py:670) that has no status_code
+    field — the value is not available to the dispatcher today.
+    Recording a hardcoded ``200`` corrupted the audit graph for non-2xx
+    successful responses; ``None`` is the honest signal until a
+    follow-up threads the field through ContentHandle.
+    """
+    audit = _build_audit()
+    with _pin_pre_minted_handle_id():
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-1",
+            correlation_id="corr-status-code-none",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=_build_transport_returning_handle(),
+            handle_cap=_build_handle_cap(),
+        )
+
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "ok"
+    assert call.kwargs["subject"]["status_code"] is None
