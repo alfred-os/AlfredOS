@@ -44,6 +44,7 @@ which lost MIME / size / generic failure modes — the
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlparse
@@ -57,6 +58,12 @@ from alfred.audit.audit_row_schemas import (
 from alfred.i18n import t
 from alfred.plugins.transport import ControlResult
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry, AllowlistIntersection
+from alfred.plugins.web_fetch.content_store import (
+    _DEFAULT_ACTION_DEADLINE_SECONDS,
+    _DEFAULT_MAX_EXTRACTION_RETRIES,
+    _DEFAULT_PER_RETRY_BUDGET_SECONDS,
+    _DEFAULT_SLACK_SECONDS,
+)
 from alfred.plugins.web_fetch.errors import (
     WebFetchDomainNotAllowed,
     WebFetchError,
@@ -75,6 +82,7 @@ from alfred.security.quarantine import ContentHandle
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.plugins.transport import PluginTransport
+    from alfred.plugins.web_fetch.handle_cap import HandleCap
     from alfred.security.dlp import OutboundDlp
 
 log = structlog.get_logger(__name__)
@@ -89,6 +97,17 @@ _FETCH_DEPTH: Final[int] = 1
 # subprocess agree on the cap when the plugin's structured error envelope
 # omits the limit (defensive default; the plugin always sets it).
 _DEFAULT_SIZE_LIMIT_BYTES: Final[int] = 5 * 1024 * 1024
+
+# Handle reservation TTL — mirrors ``ContentStore.write``'s body TTL so
+# the cap slot expires at the same time the underlying Redis body does
+# (passive cleanup safety net for paths where active release misses).
+# The formula is action_deadline + max_retries * per_retry + slack so
+# the cap holds for the full extraction budget plus a small grace.
+_DEFAULT_HANDLE_TTL_SECONDS: Final[int] = (
+    _DEFAULT_ACTION_DEADLINE_SECONDS
+    + _DEFAULT_MAX_EXTRACTION_RETRIES * _DEFAULT_PER_RETRY_BUDGET_SECONDS
+    + _DEFAULT_SLACK_SECONDS
+)
 
 # err-012 fix: explicit map from the plugin-side error.data["type"]
 # string to the host-side typed exception. The old draft used
@@ -212,6 +231,7 @@ async def dispatch_web_fetch(
     outbound_dlp: OutboundDlp,
     audit: AuditWriter,
     transport: PluginTransport,
+    handle_cap: HandleCap,
 ) -> ContentHandle:
     """Full orchestrator-side ``web.fetch`` dispatch (spec §7.1-§7.12).
 
@@ -492,6 +512,55 @@ async def dispatch_web_fetch(
         )
         raise
 
+    # Step 3b: Reserve a HandleCap slot BEFORE the network fetch (spec §3).
+    #
+    # The cap reserves the slot pre-network so a burst of concurrent
+    # fetches cannot bypass the cap by issuing all their network calls
+    # before any reservation lands. The host pre-mints ``handle_id`` here
+    # and forwards it to the plugin (the plugin no longer mints its own
+    # — see ``ContentStore.write``'s host-supplied-id contract). This
+    # also gives the host a fixed key it can verify equality against
+    # after the dispatch returns (spec §3 defence-in-depth, Task 19).
+    #
+    # Disputed-#2 decision: on cap refusal we emit
+    # ``content_handle_id=None`` rather than the pre-minted UUID — no
+    # body was ever written to Redis, so the ghost id would only
+    # mislead audit-graph correlators. Matches the rate-limit refusal
+    # precedent above (line ~483).
+    handle_id = str(uuid.uuid4())
+    try:
+        await handle_cap.try_reserve(
+            user_id=user_id,
+            handle_id=handle_id,
+            handle_ttl_seconds=_DEFAULT_HANDLE_TTL_SECONDS,
+        )
+    except WebFetchRateLimited as e:
+        await audit.append_schema(
+            fields=WEB_FETCH_FIELDS,
+            schema_name="WEB_FETCH_FIELDS",
+            event="tool.web.fetch",
+            actor_user_id=user_id,
+            subject={
+                "url": clean_url,
+                "domain": domain,
+                "status_code": None,
+                "content_handle_id": None,
+                "fetch_depth": _FETCH_DEPTH,
+                "rate_limit_bucket": e.bucket,
+                "manifest_commit_hash": config.manifest_commit_hash,
+                "trust_tier_of_result": "T3",
+                "dlp_scan_result": "handle_cap_exceeded",
+                "canary_tripped": False,
+                "triggering_user_id": user_id,
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="rate_limited",
+            cost_estimate_usd=0.0,
+            trace_id=correlation_id,
+        )
+        raise
+
     # Step 4: Dispatch to the plugin subprocess via the transport.
     #
     # ``redis_url`` (C2 / arch-002): the plugin's ``_handle_fetch`` reads
@@ -504,6 +573,10 @@ async def dispatch_web_fetch(
     # subprocess-side :class:`TlsPolicy` check fires too (defence-in-depth
     # — the parent-side check above is the authoritative gate, but the
     # subprocess MUST also refuse to silently honour a flipped bit).
+    #
+    # ``content_handle_id``: host-pre-minted UUID. The plugin uses this
+    # exact key when writing the body to Redis; the dispatcher verifies
+    # equality on the success path (Task 19 host-side equality check).
     #
     # M7 / err-004: a transport-layer crash (subprocess death, broken
     # pipe, framing error) is a forensic-attribution failure if we
@@ -522,6 +595,7 @@ async def dispatch_web_fetch(
                 "correlation_id": correlation_id,
                 "redis_url": config.redis_url,
                 "skip_tls_verify": config.skip_tls_verify,
+                "content_handle_id": handle_id,
             },
         )
     except Exception:
