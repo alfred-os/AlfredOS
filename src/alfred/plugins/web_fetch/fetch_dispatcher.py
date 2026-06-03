@@ -69,6 +69,7 @@ from alfred.plugins.web_fetch.content_store import (
 from alfred.plugins.web_fetch.errors import (
     WebFetchDomainNotAllowed,
     WebFetchError,
+    WebFetchHandleIdMismatch,
     WebFetchInternalIPRefused,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
@@ -638,6 +639,57 @@ async def dispatch_web_fetch(
             raise
 
         if isinstance(result, ContentHandle):
+            # Host-side equality check (spec §3 defence-in-depth). The
+            # predicate is NARROW: it only fires for the
+            # (ContentHandle, mismatching id) shape. Non-ContentHandle /
+            # non-ControlResult returns continue to fall through the
+            # outer else-arm below as ``dispatch_shape_error`` so its
+            # closed-vocabulary diagnostic survives. A wider predicate
+            # (``not isinstance(...) or .id != handle_id``) would absorb
+            # shape errors into the mismatch arm and lose that precedent.
+            if result.id != handle_id:
+                # The plugin returned a ContentHandle but for a key the
+                # host did not pre-mint — either a buggy plugin minting
+                # its own id (contract violation) or a compromised
+                # plugin trying to desynchronise the cap counter from
+                # the body's Redis residency. Release the cap slot the
+                # host pre-minted (the plugin's wrong-keyed body is
+                # tracked elsewhere by its own passive TTL), emit a
+                # typed audit row, and raise the typed exception.
+                await handle_cap.release(user_id=user_id, handle_id=handle_id)
+                released = True
+                await audit.append_schema(
+                    fields=WEB_FETCH_FIELDS,
+                    schema_name="WEB_FETCH_FIELDS",
+                    event="tool.web.fetch",
+                    actor_user_id=user_id,
+                    subject={
+                        "url": clean_url,
+                        "domain": domain,
+                        "status_code": None,
+                        # Pre-minted id (for forensic correlation with
+                        # the cap reservation); the wrong id surfaces on
+                        # the typed exception's attributes.
+                        "content_handle_id": handle_id,
+                        "fetch_depth": _FETCH_DEPTH,
+                        "rate_limit_bucket": None,
+                        "manifest_commit_hash": config.manifest_commit_hash,
+                        # T0 because the plugin returned an unexpected
+                        # shape — no T3 content crossed the boundary on
+                        # this path (matches the dispatch_shape_error
+                        # precedent in the else-arm below).
+                        "trust_tier_of_result": "T0",
+                        "dlp_scan_result": "handle_id_mismatch",
+                        "canary_tripped": False,
+                        "triggering_user_id": user_id,
+                        "correlation_id": correlation_id,
+                    },
+                    trust_tier_of_trigger="T0",
+                    result="handle_id_mismatch",
+                    cost_estimate_usd=0.0,
+                    trace_id=correlation_id,
+                )
+                raise WebFetchHandleIdMismatch(expected=handle_id, got=result.id)
             handle = result
         elif isinstance(result, ControlResult):
             # Typed plugin error: the plugin refused the body before writing
