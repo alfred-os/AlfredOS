@@ -147,6 +147,8 @@ async def _handle_fetch(params: dict[str, Any]) -> dict[str, Any]:
     headers: dict[str, str] = params.get("headers", {})
     redis_url: str = params["redis_url"]
     skip_tls: bool = params.get("skip_tls_verify", False)
+    # NEW: host pre-mints the handle id; plugin uses it verbatim (spec §3).
+    content_handle_id: str = params["content_handle_id"]
 
     # CR-146 major: plugin-side hard cap. See ``_clamp_size_limit``
     # docstring for the coercion shape and rationale.
@@ -296,7 +298,11 @@ async def _handle_fetch(params: dict[str, Any]) -> dict[str, Any]:
 
     # perf-006: use the shared pool (not per-call construct+close).
     store = await _get_or_init_store(redis_url)
-    handle = await store.write(body=body, source_url=url)
+    handle = await store.write(
+        handle_id=content_handle_id,  # spec §3: host-pre-minted id forwarded verbatim
+        body=body,
+        source_url=url,
+    )
 
     return {
         "result": {
