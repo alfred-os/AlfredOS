@@ -37,11 +37,13 @@ Design constraints honoured here:
 
 Module-level seams the tests patch:
 
-* :data:`_known_hookpoints_provider` — returns the iterable of currently-
-  registered hookpoint names. Defaults to the live HookRegistry singleton
-  so production callers always validate against the system's actual
-  registry. Tests inject a fixed set so they do not depend on whichever
-  publisher modules happened to be imported by the test runner.
+* :data:`_known_hookpoints_provider` — returns the iterable of canonically-
+  declared hookpoint names. Defaults to the static manifest at
+  :mod:`alfred.hooks._known_hookpoints` (issue #151) so production callers
+  validate against an import-order-independent source rather than the live
+  HookRegistry singleton (which only sees publishers whose declaring
+  module has already been imported into this process). Tests inject a
+  fixed set so they do not depend on the manifest's current contents.
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ from typing import Final
 
 import typer
 
-from alfred.hooks.registry import get_registry
+from alfred.hooks._known_hookpoints import all_known_hookpoints
 from alfred.i18n import t
 
 # ---------------------------------------------------------------------------
@@ -179,26 +181,42 @@ def validate_subscriber_tier(value: str) -> SubscriberTier:
 # ---------------------------------------------------------------------------
 
 
-def _default_known_hookpoints_provider() -> Iterable[str]:
-    """Return the names of every currently-registered hookpoint.
+def _default_known_hookpoints_provider() -> tuple[str, ...]:
+    """Return the names of every canonically-declared hookpoint.
 
-    The registry's ``_hookpoints`` dict carries the names declared by
-    every publisher imported into the process so far. ``alfred plugin``
-    runs after the full CLI bootstrap, by which point every first-party
-    publisher (``alfred.memory.episodic``, ``alfred.identity._ingest``,
-    ``alfred.security.capability_gate.proposals``, …) has executed its
-    module-init :func:`declare_hookpoints` call.
+    Sources from the static manifest at
+    :mod:`alfred.hooks._known_hookpoints` (issue #151) — independent of
+    which subsystems happen to be imported by the running process. The
+    runtime registry's ``_hookpoints`` dict is populated by each
+    subsystem's ``declare_hookpoints()`` at module-import time; the
+    validator MUST work even when those imports have not fired (CLI
+    lazy-import discipline per PR-S3-6 perf-001 + #151).
 
-    Read-only iteration only — the validator never mutates the
-    registry. Test seams replace this function wholesale rather than
-    patching the registry singleton.
+    Pre-#151 this read from ``get_registry()._hookpoints`` and rejected
+    valid hookpoint names whose declaring subsystem had not yet been
+    imported (the #149 CR-1 use case: cold-start
+    ``alfred plugin grant`` against ``plugin.grant.*`` names declared
+    by :mod:`alfred.security.capability_gate.proposals`). The new
+    manifest source is import-order-independent.
+
+    Read-only iteration only. Return type is ``tuple[str, ...]`` rather
+    than the wider ``Iterable[str]`` so the type checker sees what
+    ``validate_hookpoint`` actually consumes — its first call materialises
+    the iterable via ``tuple(...)`` anyway, so the narrower return type
+    is a no-op at runtime and a clarity win at static-analysis time.
+    Test seams replace this function wholesale; replacements may return
+    any tuple shape — the validator's defensive ``tuple(...)`` call still
+    holds for callable seams that hand back generators.
     """
-    return tuple(get_registry()._hookpoints)
+    return all_known_hookpoints()
 
 
 # Module-level seam. Tests patch this symbol with a closed iterable so
 # the test suite does not depend on which publishers happened to be
-# imported by the test runner.
+# imported by the test runner. The seam's type stays ``Iterable[str]``
+# so test fixtures may return generators / lists / sets in addition to
+# tuples; the validator materialises the seam's return via ``tuple(...)``
+# on every call.
 _known_hookpoints_provider: Callable[[], Iterable[str]] = _default_known_hookpoints_provider
 
 # Number of difflib candidate suggestions to surface alongside an
