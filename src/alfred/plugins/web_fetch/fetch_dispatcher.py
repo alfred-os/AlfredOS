@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import urlparse
 
 import structlog
+from pydantic import ValidationError
 
 from alfred.audit.audit_row_schemas import (
     WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS,
@@ -67,6 +68,7 @@ from alfred.plugins.web_fetch.content_store import (
     _DEFAULT_PER_RETRY_BUDGET_SECONDS,
     _DEFAULT_SLACK_SECONDS,
 )
+from alfred.plugins.web_fetch.dispatch_params import WebFetchDispatchParams
 from alfred.plugins.web_fetch.errors import (
     WebFetchDomainNotAllowed,
     WebFetchError,
@@ -593,18 +595,115 @@ async def dispatch_web_fetch(
         # ``dispatch_shape_error`` (in-band protocol violation) and the
         # ``dlp_scan_result`` family (which Slice-3 documents as locked
         # schema — see devex-002 note below).
+        # Construct + validate dispatch params host-side (#147 / spec §2).
+        # Defence-in-depth before the plugin subprocess's err-004 crash-
+        # on-bad-params contract. A ValidationError here means a dispatcher
+        # bug (e.g. the C2/arch-002 missing-``redis_url`` shape from
+        # PR-S3-5 — issue #147's root cause); failing clean host-side
+        # avoids a plugin-subprocess crash for a host-defect.
         try:
-            result = await transport.dispatch(
-                "web.fetch",
-                {
-                    "url": clean_url,
-                    "headers": clean_headers,
-                    "correlation_id": correlation_id,
-                    "redis_url": config.redis_url,
-                    "skip_tls_verify": config.skip_tls_verify,
-                    "content_handle_id": handle_id,
-                },
+            dispatch_params = WebFetchDispatchParams(
+                url=clean_url,
+                headers=clean_headers,
+                redis_url=config.redis_url,
+                correlation_id=correlation_id,
+                content_handle_id=handle_id,
+                skip_tls_verify=config.skip_tls_verify,
             )
+        except ValidationError as exc:
+            # LOUD structlog: type-name only. Pydantic error messages
+            # embed field names + values that may carry secrets (URL
+            # query strings, header values) — surfacing ``str(exc)`` or
+            # ``exc.errors()`` would invert the fail-closed intent.
+            # Forensic detail rides on ``correlation_id`` in the audit
+            # row (spec §5.6 / CLAUDE.md hard rule #7).
+            log.error(
+                "web_fetch.dispatch.param_validation_failed",
+                user_id=user_id,
+                handle_id=handle_id,
+                correlation_id=correlation_id,
+                exception_type=type(exc).__name__,
+                note=(
+                    "host-side dispatch-params validation failed; this "
+                    "is a host defect, not user input. Cap slot released; "
+                    "transport.dispatch NOT invoked."
+                ),
+            )
+            # Best-effort release: matches the handle_id_mismatch /
+            # transport_error arms — a release failure must NOT replace
+            # the typed WebFetchError with a generic exception.
+            try:
+                await handle_cap.release(
+                    user_id=user_id,
+                    handle_id=handle_id,
+                    correlation_id=correlation_id,
+                )
+            except Exception as release_exc:
+                log.error(
+                    "web_fetch.handle_cap.eager_release_failed",
+                    user_id=user_id,
+                    handle_id=handle_id,
+                    correlation_id=correlation_id,
+                    exception_type=type(release_exc).__name__,
+                    note=(
+                        "best-effort release failed during "
+                        "dispatch_param_invalid cleanup; typed "
+                        "WebFetchError still propagates; passive TTL "
+                        "will free slot within ~80s"
+                    ),
+                )
+            # L-8 / SEC-147-3: released = True BEFORE the audit-write —
+            # different rationale from the success-audit HOLD arm
+            # (#160 CR-1): there, the body lives in Redis so the slot
+            # stays held. Here, no body was ever written (transport.dispatch
+            # never invoked); the eager release above frees the cap
+            # immediately, so the finally arm must skip its catch-all
+            # release.
+            released = True
+            await audit.append_schema(
+                fields=WEB_FETCH_FIELDS,
+                schema_name="WEB_FETCH_FIELDS",
+                event="tool.web.fetch",
+                actor_user_id=user_id,
+                subject={
+                    "url": clean_url,
+                    "domain": domain,
+                    "status_code": None,
+                    # Pre-minted id — forensic correlation with the cap
+                    # reservation. Distinct from cap-refusal which uses
+                    # None (no body was ever written under that id).
+                    "content_handle_id": handle_id,
+                    "fetch_depth": _FETCH_DEPTH,
+                    "rate_limit_bucket": None,
+                    "manifest_commit_hash": config.manifest_commit_hash,
+                    # T0 because no T3 content crossed the boundary on
+                    # this path (matches the handle_id_mismatch /
+                    # dispatch_shape_error precedent).
+                    "trust_tier_of_result": "T0",
+                    "dlp_scan_result": "dispatch_param_invalid",
+                    "canary_tripped": False,
+                    "triggering_user_id": user_id,
+                    "correlation_id": correlation_id,
+                },
+                trust_tier_of_trigger="T0",
+                result="dispatch_param_invalid",
+                cost_estimate_usd=0.0,
+                trace_id=correlation_id,
+            )
+            # SEC-147-1: from None — Pydantic ValidationError messages
+            # embed input_value=... for failed fields (header values,
+            # URL fragments). Re-attaching via __cause__ would leak T3
+            # fragments through any upstream logger.exception() call.
+            # The structlog signal (exception_type=type(exc).__name__) is
+            # the forensic correlation channel; correlation_id ties it
+            # back to the audit row. Python re-attaches __context__
+            # automatically — that's the runtime trace; only __cause__
+            # is suppressed by `from None`, which is what defeats the
+            # exception-message leak path.
+            raise WebFetchError(t("web.fetch.error.dispatch_param_invalid")) from None
+
+        try:
+            result = await transport.dispatch("web.fetch", dispatch_params.model_dump())
         except Exception:
             # Transport-layer crash: no body was written under handle_id.
             # Release the cap slot eagerly so the user is not penalised for
