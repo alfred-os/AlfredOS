@@ -64,6 +64,7 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "plugin.grant.denied",
         "plugin.grant.revoked",
     ),
+    "alfred.security.quarantine": ("security.quarantined.extract",),
     "alfred.plugins.web_fetch": ("tool.web.fetch",),
     "alfred.supervisor.core": (
         "supervisor.breaker.tripped",

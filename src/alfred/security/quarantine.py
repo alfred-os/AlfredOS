@@ -36,6 +36,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NewType, cast, get_arg
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from alfred.hooks import (
+    SYSTEM_ONLY_TIERS,
+    SYSTEM_OPERATOR_TIERS,
+    HookRegistry,
+    get_registry,
+)
+
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.hooks.capability import CapabilityGate
@@ -924,3 +931,54 @@ async def downgrade_to_orchestrator(
     # a plain dict snapshot — the provenance tag is intentionally retired
     # at this boundary. The audit row above is the receipt.
     return dict(data)
+
+
+# ---------------------------------------------------------------------------
+# Hookpoint declaration — security.quarantined.extract (spec §6.5, #158)
+# ---------------------------------------------------------------------------
+
+
+def declare_hookpoints(registry: HookRegistry | None = None) -> None:
+    """Register the ``security.quarantined.extract`` hookpoint (spec §6.5).
+
+    Called at module-init time so a CLI invocation or test fixture that
+    imports :mod:`alfred.security.quarantine` finds the hookpoint
+    pre-declared. Matches the precedent at
+    :mod:`alfred.memory.episodic` / :mod:`alfred.identity._ingest` /
+    :mod:`alfred.security.capability_gate.proposals`.
+
+    Idempotent against the active registry: the registry's
+    :meth:`HookRegistry.register_hookpoint` is a no-op on an identical
+    re-declaration. Important because :mod:`pytest`'s test-isolation
+    fixtures may swap the registry, after which the module-bottom call
+    here re-runs against the new singleton at module reimport time.
+
+    The three meta values are spec §6.5 verbatim and are the dispatch-
+    time defense-in-depth recheck (see
+    :func:`alfred.hooks.invoke._enforce_subscribable_tiers`) — weakening
+    any of them silently disarms the trust boundary on the
+    quarantined-extract post chain. The values MUST equal the publisher's
+    invoke-time args at every dispatch site in :meth:`QuarantinedExtractor.extract`;
+    spec §6.2 raises :class:`HookError` on drift.
+
+    Args:
+        registry: Optional override — passed by tests that want to
+            exercise the declaration against a non-singleton registry.
+            Defaults to :func:`get_registry` so the module-bottom call
+            lands against the active process singleton.
+    """
+    target = registry if registry is not None else get_registry()
+    target.register_hookpoint(
+        name="security.quarantined.extract",
+        subscribable_tiers=SYSTEM_OPERATOR_TIERS,
+        refusable_tiers=SYSTEM_ONLY_TIERS,
+        fail_closed=True,
+    )
+
+
+# Module-bottom call — runs at import time so the hookpoint is declared
+# before any subscriber registration or dispatch lands. The precedent
+# (see :mod:`alfred.memory.episodic`) puts the call at the bottom of
+# the module so every helper symbol the declaration references is
+# already bound by the time the call evaluates.
+declare_hookpoints()
