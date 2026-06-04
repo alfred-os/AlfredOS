@@ -132,13 +132,17 @@ with `dlp_scan_result="handle_cap_exceeded"`. See
 [docs/runbooks/handle-cap-exceeded.md](../runbooks/handle-cap-exceeded.md)
 for the operator-facing runbook.
 
-**Audit vocabulary widening (handle-cap PR).** Two closed vocabularies
-on `WEB_FETCH_FIELDS` are widened — operators with SIEM filters MUST
-extend their allow-lists:
+**Audit vocabulary widening (handle-cap + dispatch-params PRs).** Closed
+vocabularies on `WEB_FETCH_FIELDS` widened across two trust-boundary PRs —
+operators with SIEM filters MUST extend their allow-lists:
 
 - `rate_limit_bucket`: added `handle_cap` (alongside existing
-  `per_domain`, `per_user`, `daily_budget`).
-- `dlp_scan_result`: added `handle_cap_exceeded` and `handle_id_mismatch`.
+  `per_domain`, `per_user`, `daily_budget`) — handle-cap PR.
+- `dlp_scan_result`: added `handle_cap_exceeded` and `handle_id_mismatch`
+  (handle-cap PR) and `dispatch_param_invalid` (#147 — host-side
+  Pydantic validation of `web.fetch` JSON-RPC params; emitted when a
+  dispatcher bug surfaces as a `pydantic.ValidationError` host-side,
+  releasing the cap before crossing the transport boundary).
 
 Both promoted to `typing.Literal[...]` in
 `src/alfred/audit/audit_row_schemas.py` (canonical source). A project-
