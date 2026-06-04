@@ -40,8 +40,9 @@ downstream filters or SIEM rules MUST extend their allow-lists:
 
 - `WEB_FETCH_FIELDS["rate_limit_bucket"]`: added `handle_cap` (alongside
   existing `per_domain`, `per_user`, `daily_budget`).
-- `WEB_FETCH_FIELDS["dlp_scan_result"]`: added `handle_cap_exceeded` and
-  `handle_id_mismatch`.
+- `WEB_FETCH_FIELDS["dlp_scan_result"]`: PR #160 added `handle_cap_exceeded`
+  and `handle_id_mismatch`; PR #147 adds `dispatch_param_invalid` (host-side
+  Pydantic validation failure — distinct fault class, not user input).
 
 Both are typed via `typing.Literal[...]` in
 `src/alfred/audit/audit_row_schemas.py` (canonical source). Type-check time
