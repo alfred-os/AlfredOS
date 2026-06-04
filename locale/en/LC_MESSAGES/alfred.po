@@ -67,7 +67,7 @@ msgstr ""
 "corresponding `*.requested` audit breadcrumb for the operator action that"
 " triggered it."
 
-#: src/alfred/cli/_validators.py:112
+#: src/alfred/cli/_validators.py:114
 msgid "cli.validators.plugin_id_invalid"
 msgstr ""
 "Invalid plugin id {value!r}. Plugin ids are dot-separated segments; each "
@@ -75,30 +75,31 @@ msgstr ""
 "or digit, and contain only lowercase letters, digits, underscore, or "
 "hyphen. No empty, leading, or trailing segments."
 
-#: src/alfred/cli/_validators.py:169
+#: src/alfred/cli/_validators.py:171
 msgid "cli.validators.subscriber_tier_invalid"
 msgstr ""
 "Invalid subscriber tier {value!r}. Subscriber tiers (the capability axis)"
 " must be one of: {valid_tiers}. Note: this is orthogonal to the content "
 "trust tier (T0..T3) used by `alfred audit graph --tier`."
 
-#: src/alfred/cli/_validators.py:230
+#: src/alfred/cli/_validators.py:248
 msgid "cli.validators.hookpoint_registry_empty"
 msgstr ""
-"Cannot validate hookpoint {value!r}: the hook registry is empty, no "
-"publisher has declared any hookpoints in this process. This usually means"
-" the CLI bootstrap did not import the publisher modules; rerun the "
-"command after a full `alfred` startup."
+"Cannot validate hookpoint {value!r}: the canonical hookpoint manifest is "
+"empty. This is a build-time bug — the static manifest at "
+"`src/alfred/hooks/_known_hookpoints.py` should always declare every "
+"hookpoint AlfredOS ships. Please report this with the version of the "
+"`alfred` CLI you are running."
 
-#: src/alfred/cli/_validators.py:236
+#: src/alfred/cli/_validators.py:254
 msgid "cli.validators.hookpoint_invalid"
 msgstr ""
 "Unknown hookpoint {value!r}. No publisher has declared a hookpoint by "
 "that name. Closest matches: {suggestions}. Run `alfred audit log --event "
 "hook.registry.declared` for the full registered set."
 
-#: src/alfred/cli/_validators.py:304 src/alfred/cli/_validators.py:326
-#: src/alfred/cli/_validators.py:339
+#: src/alfred/cli/_validators.py:322 src/alfred/cli/_validators.py:344
+#: src/alfred/cli/_validators.py:357
 msgid "cli.validators.domain_invalid"
 msgstr ""
 "Invalid domain {value!r}. Pass a bare lowercase domain (e.g. example.com "
@@ -106,21 +107,21 @@ msgstr ""
 "letters, digits, dot, hyphen; must end with a TLD of at least two "
 "letters."
 
-#: src/alfred/cli/_validators.py:312
+#: src/alfred/cli/_validators.py:330
 msgid "cli.validators.domain_with_scheme"
 msgstr ""
 "Refusing domain {value!r}: drop the scheme (http://, https://). The "
 "allowlist takes a bare domain; the path component is the separate "
 "`--path-prefix` flag."
 
-#: src/alfred/cli/_validators.py:321
+#: src/alfred/cli/_validators.py:339
 msgid "cli.validators.domain_with_path"
 msgstr ""
 "Refusing domain {value!r}: domain arguments cannot contain `..` or path "
 "separators (`/`, `\\`). Pass the bare host; scope the path with the "
 "separate `--path-prefix` flag."
 
-#: src/alfred/cli/_validators.py:379
+#: src/alfred/cli/_validators.py:397
 msgid "cli.validators.quarantined_provider_invalid"
 msgstr ""
 "Invalid quarantined-provider {value!r}. The quarantined provider must be "
@@ -1322,8 +1323,8 @@ msgid "web.fetch.error.rate_limited"
 msgstr ""
 "web.fetch refused: rate limit exceeded for bucket {bucket!r}. Operator "
 "can tune the corresponding knob in config/policies.yaml: per-domain "
-"limits live under `web_fetch.rate_limits`; per-user / daily-budget "
-"limits live under `web_fetch.user_daily_budget` / "
+"limits live under `web_fetch.rate_limits`; per-user / daily-budget limits"
+" live under `web_fetch.user_daily_budget` / "
 "`web_fetch.operator_daily_budget`."
 
 #: src/alfred/plugins/web_fetch/errors.py:148

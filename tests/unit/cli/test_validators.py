@@ -233,24 +233,25 @@ def test_validate_hookpoint_bad_parameter_carries_param_hint() -> None:
     assert excinfo.value.param_hint == "'hookpoint'"
 
 
-def test_validate_hookpoint_default_provider_queries_live_registry() -> None:
-    """The default seam reads from ``alfred.hooks.registry.get_registry``.
+def test_validate_hookpoint_default_provider_returns_canonical_manifest() -> None:
+    """The default seam reads from the canonical manifest (issue #151).
 
-    This pins the contract that the unpatched validator hits the running
-    registry singleton — a future refactor that swaps the seam to a
-    stub would silently break production validation without this guard.
+    Pre-#151 the default provider read ``get_registry()._hookpoints`` —
+    a set that depends on which publisher modules happened to be
+    imported by the running process. The CLI lazy-import discipline
+    (PR-S3-6 perf-001) meant cold-start ``alfred plugin grant`` calls
+    would reject valid hookpoint names because their declaring
+    subsystem had not yet been imported. The new contract: the default
+    provider returns the canonical static manifest, which is
+    import-order-independent. Any refactor that swaps the seam back to
+    the runtime registry would silently re-introduce the cold-start
+    rejection bug — this test guards against that regression.
     """
-    # Re-importing the publisher module is idempotent on equal metadata
-    # (HookRegistry.register_hookpoint contract) so the registry is
-    # guaranteed to carry the four plugin.grant.* names by the time this
-    # test runs.
-    import alfred.security.capability_gate.proposals  # noqa: F401
     from alfred.cli._validators import _default_known_hookpoints_provider
-    from alfred.hooks.registry import get_registry
+    from alfred.hooks._known_hookpoints import all_known_hookpoints
 
     provider = _default_known_hookpoints_provider()
-    expected = set(get_registry()._hookpoints)
-    assert set(provider) == expected
+    assert tuple(provider) == all_known_hookpoints()
 
 
 # ---------------------------------------------------------------------------
