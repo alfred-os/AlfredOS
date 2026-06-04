@@ -61,10 +61,16 @@ DlpScanResult = Literal[
     "fetch_error",
     "handle_cap_exceeded",  # spec §6.2 — per-user concurrent ContentHandle cap refusal
     "handle_id_mismatch",  # spec §3 — host-side equality check failed
+    "dispatch_param_invalid",  # #147 — host-side Pydantic validation of web.fetch params
 ]
 """Closed vocabulary recorded in ``WEB_FETCH_FIELDS['dlp_scan_result']``.
-Two values widened by the handle-cap design (slice-3 design spec §7.10);
-see ``docs/subsystems/security.md`` for the audit-vocabulary section
+Widened across two trust-boundary PRs:
+- ``handle_cap_exceeded`` / ``handle_id_mismatch`` by the handle-cap design
+  (slice-3 design spec §7.10).
+- ``dispatch_param_invalid`` by host-side Pydantic validation of the
+  ``web.fetch`` JSON-RPC params dict (#147 spec §4).
+
+See ``docs/subsystems/security.md`` for the audit-vocabulary section
 and ``docs/runbooks/handle-cap-exceeded.md`` for the operator-facing
 widening notice."""
 
