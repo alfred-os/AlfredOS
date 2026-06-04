@@ -473,6 +473,8 @@ registry.register_hookpoint(
 
 The `kind` is passed as a separate argument to `invoke()` per the Slice-2.5 contract at `src/alfred/hooks/registry.py`. User-plugin subscribers attempting to register on this hookpoint are refused at registration time with `HOOKS_TIER_REJECTED` audit row. `fail_closed=True` means a timed-out DLP scan refuses the extraction.
 
+All kinds (pre/post/error) share the hookpoint's `fail_closed=True`. The current registry stores one `fail_closed` scalar per hookpoint and applies it to every kind; the §14 column reflects what the registry represents. A per-kind `fail_closed` override (the "error stage rewinds on subscriber crash; pre/post fail-close" semantic the spec previously implied at §14 row 1159) would require a registry refactor and is **not implemented**. Tracked at [#167](https://github.com/alfred-os/AlfredOS/issues/167).
+
 A subscriber on the `security.quarantined.extract` hookpoint with `kind="post"` runs `OutboundDlp.scan` on the validated instance's `.model_dump()`, refusing on canary trip. Without this, a typed-extraction schema with a free-text `str` field is an exfiltration channel.
 
 ### 6.6 `schema_version: Literal[1]` mandatory
@@ -1155,8 +1157,8 @@ Every new Slice-3 hookpoint declared via `register_hookpoint`. All hookpoints us
 
 | Action (hookpoint name) | Applicable kinds | `subscribable_tiers` | `refusable_tiers` | `fail_closed` |
 |---|---|---|---|---|
-| `tool.web.fetch` | pre, post, error, cancel | `SYSTEM_ONLY_TIERS` | `SYSTEM_ONLY_TIERS` (pre/post only) | `True` (pre/post) / `False` (error/cancel) |
-| `security.quarantined.extract` | pre, post, error | `SYSTEM_OPERATOR_TIERS` | `SYSTEM_ONLY_TIERS` (pre/post only) | `True` (pre/post) / `False` (error) |
+| `tool.web.fetch` | pre, post, error, cancel | `SYSTEM_ONLY_TIERS` | `SYSTEM_ONLY_TIERS` (pre/post only) | `True` |
+| `security.quarantined.extract` | pre, post, error | `SYSTEM_OPERATOR_TIERS` | `SYSTEM_ONLY_TIERS` (pre/post only) | `True` |
 | `plugin.lifecycle.loaded` | post | `SYSTEM_ONLY_TIERS` | — | `False` |
 | `plugin.lifecycle.crashed` | error | `SYSTEM_ONLY_TIERS` | — | `False` |
 | `plugin.lifecycle.quarantined` | post | `SYSTEM_ONLY_TIERS` | — | `False` |
@@ -1171,7 +1173,7 @@ Every new Slice-3 hookpoint declared via `register_hookpoint`. All hookpoints us
 | `identity.t1_ingress` | post | `SYSTEM_OPERATOR_TIERS` | — | `False` |
 | `identity.t1_downgrade` | post | `SYSTEM_OPERATOR_TIERS` | — | `False` |
 
-`SYSTEM_ONLY_TIERS` and `SYSTEM_OPERATOR_TIERS` are the named constants from `src/alfred/hooks/registry.py:320,309`. Every hookpoint is declared in the module that owns the action; no cross-module hookpoint declarations. The `fail_closed` column applies to the hookpoint as registered; `invoke()` honours it per kind at dispatch time.
+`SYSTEM_ONLY_TIERS` and `SYSTEM_OPERATOR_TIERS` are the named constants from `src/alfred/hooks/registry.py:320,309`. Every hookpoint is declared in the module that owns the action; no cross-module hookpoint declarations. The `fail_closed` column reflects the **single scalar** the registry stores per hookpoint (§6.5): `invoke()` applies that scalar uniformly to every kind. A per-kind `fail_closed` override — distinguishing e.g. pre/post fail-closed from error/cancel fail-open on the same hookpoint — would require a registry refactor and is **not implemented**. Tracked at [#167](https://github.com/alfred-os/AlfredOS/issues/167).
 
 ---
 

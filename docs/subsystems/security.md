@@ -79,11 +79,15 @@ and no plugin can acquire capabilities that were not explicitly granted.
   which provider code path the quarantined-LLM plugin uses and appears
   verbatim in `quarantine.extract` audit rows. Shipped in PR-S3-4 (#TBD).
 - `TypedRefusalReason` — `src/alfred/security/quarantine.py:212` — closed
-  `Literal` vocabulary for `TypedRefusal.reason`. Seven values:
+  `Literal` vocabulary for `TypedRefusal.reason`. Eight values:
   `cannot_extract`, `refused_by_safety`, `ambiguous_input`,
-  `provider_refused`, `provider_unavailable`, `dlp_outbound_refused`,
-  `nonce_check_failed`. Free-form refusal text cannot appear in audit rows;
-  this is the structural enforcement. Shipped in PR-S3-4 (#TBD).
+  `provider_refused`, `provider_unavailable`, `dlp_outbound_refused`
+  (tombstone — no live emit site), `post_stage_refused` (any post-stage
+  subscriber refusal, with refusing-subscriber identity on the audit
+  row's `refusing_hook_id` field), `nonce_check_failed`. Free-form
+  refusal text cannot appear in audit rows; this is the structural
+  enforcement. Shipped in PR-S3-4 (#TBD); `post_stage_refused` added
+  in #168.
 - `ProviderCapability` — `src/alfred/providers/base.py:22` — `StrEnum`
   whose values steer the quarantined-LLM extraction mode selection:
   `NATIVE_CONSTRAINED_GENERATION` → Anthropic tool-use shape;

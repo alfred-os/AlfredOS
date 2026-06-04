@@ -522,15 +522,19 @@ and [docs/subsystems/security.md](subsystems/security.md).
 ## TypedRefusalReason
 
 Closed `Literal` vocabulary for `TypedRefusal.reason`
-(`src/alfred/security/quarantine.py:212`). Seven values: `cannot_extract`
+(`src/alfred/security/quarantine.py:212`). Eight values: `cannot_extract`
 (retries exhausted), `refused_by_safety` (provider safety filter),
 `ambiguous_input` (schema-incompatible input), `provider_refused` (structured
 provider refusal), `provider_unavailable` (circuit breaker / supervisor down),
-`dlp_outbound_refused` (outbound DLP blocked the result), `nonce_check_failed`
-(handle-id nonce mismatch, enforced in PR-S3-5). Adding a new reason is a
-deliberate audit-schema migration — free-form text cannot appear here because
-provider-supplied error messages are T3-derived and would bypass DLP if
-echoed into audit rows. Shipped in PR-S3-4 (#TBD).
+`dlp_outbound_refused` (TOMBSTONE — retained for forensic-history continuity;
+no live emit site uses this token), `post_stage_refused` (any post-stage
+`security.quarantined.extract` subscriber refused the validated payload; the
+refusing subscriber's identity is on the audit row's `refusing_hook_id` field —
+added in #168), `nonce_check_failed` (handle-id nonce mismatch, enforced in
+PR-S3-5). Adding a new reason is a deliberate audit-schema migration —
+free-form text cannot appear here because provider-supplied error messages
+are T3-derived and would bypass DLP if echoed into audit rows. Shipped in
+PR-S3-4 (#TBD); `post_stage_refused` added in #168.
 
 See [TypedRefusal](#typedrefusal), [QuarantinedExtractor](#quarantinedextractor),
 [docs/subsystems/security.md](subsystems/security.md), and spec §6.7.

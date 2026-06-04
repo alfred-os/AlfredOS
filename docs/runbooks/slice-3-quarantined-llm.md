@@ -178,7 +178,8 @@ When the extraction result is a `TypedRefusal`, the `reason` field is one of:
 | `ambiguous_input` | Input is schema-incompatible — content cannot be parsed into the declared schema | Review the `ExtractionSchema` definition; the schema may be too narrow for the input type |
 | `provider_refused` | Structured provider-level refusal (not a safety filter) | Check provider status dashboard; may be a quota or policy change |
 | `provider_unavailable` | Circuit breaker tripped or supervisor down | Check `supervisor.capability_gate_unavailable` audit rows; verify the quarantined-LLM subprocess is running |
-| `dlp_outbound_refused` | Outbound DLP blocked the extraction result | The extraction result contained a pattern matching an active DLP rule; check `dlp.outbound_redacted` rows with matching `correlation_id` |
+| `dlp_outbound_refused` | TOMBSTONE — no live emit site uses this token; retained for forensic-history continuity. Post-stage DLP refusals now surface as `post_stage_refused`. | None — historical records only |
+| `post_stage_refused` | A post-stage subscriber on `security.quarantined.extract` refused the validated payload (the DLP subscriber's canary trip is the canonical case). The `quarantine.extract` audit row's `refusing_hook_id` field carries the refusing subscriber's identity. | Inspect `subject.refusing_hook_id` on the `quarantine.extract` row to identify the refusing subscriber. For the DLP subscriber (`security.quarantined.extract.post.dlp`), check `dlp.outbound_redacted` rows with matching `correlation_id` |
 | `nonce_check_failed` | Handle-id nonce mismatch — the `ContentHandle` was already consumed or forged | Check for double-extract or replay attempts; the content store's single-use invariant fired (spec §7.2) |
 
 ## Failure modes
