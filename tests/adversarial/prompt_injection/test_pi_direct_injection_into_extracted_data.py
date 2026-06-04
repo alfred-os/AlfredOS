@@ -131,6 +131,7 @@ def test_extracted_data_field_is_t3_derived_data_type() -> None:
     assert T3DerivedData.__supertype__ is not None  # type: ignore[attr-defined]
 
 
+@pytest.mark.asyncio
 async def test_quarantined_to_structured_refuses_on_denied_gate() -> None:
     """:func:`quarantined_to_structured` is gate-first.
 
@@ -151,6 +152,7 @@ async def test_quarantined_to_structured_refuses_on_denied_gate() -> None:
     """
     from alfred.errors import AlfredError
     from alfred.security.quarantine import ExtractionSchema
+    from tests.helpers.gates import make_deny_all_gate
 
     handle = ContentHandle(
         id="00000000-0000-0000-0000-000000000000",
@@ -166,22 +168,156 @@ async def test_quarantined_to_structured_refuses_on_denied_gate() -> None:
     class _DummyExtractor:
         pass
 
-    class _DenyGate:
-        def check(self, *, plugin_id: str, hookpoint: str, requested_tier: str) -> bool:
-            return False
-
-        def check_plugin_load(self, *, plugin_id: str, manifest_tier: str) -> bool:
-            return False
-
-        def check_content_clearance(
-            self, *, plugin_id: str, hookpoint: str, content_tier: str
-        ) -> bool:
-            return False
-
+    # CLAUDE.md hard rule #2 + CR-158 round-3: drive the production
+    # ``RealGate`` via the canonical deny-all factory rather than a
+    # hand-rolled stub. The stub satisfied the protocol shape but did
+    # NOT exercise the actual ``check_content_clearance`` matcher for
+    # ``plugin_id="alfred.quarantined-llm" / hookpoint="quarantine.dereference"``,
+    # so a regression in PRD §7.1's boundary gate could have passed
+    # here unnoticed.
     with pytest.raises(AlfredError):
         await quarantined_to_structured(
             handle,
             _StubSchema,
             extractor=_DummyExtractor(),  # type: ignore[arg-type]
-            gate=_DenyGate(),
+            gate=make_deny_all_gate(),
         )
+
+
+@pytest.mark.asyncio
+async def test_dlp_subscriber_refuses_canary_in_extracted_payload() -> None:
+    """Pin MEDIUM #9 (CR-158): the post-stage
+    :class:`OutboundDlpExtractSubscriber` on
+    ``security.quarantined.extract`` MUST refuse an
+    :class:`Extracted` whose ``data`` carries a canary token.
+
+    The adversarial posture under test: a T3 web payload coerces the
+    quarantined LLM into emitting a canary-marked secret inside the
+    structured-extraction response (a free-text ``summary: str``
+    field is the spec §6.5 primary exfil channel). Defence:
+    :class:`OutboundDlp.scan` runs against
+    :meth:`pydantic.BaseModel.model_dump`; a redaction delta means a
+    canary tripped; the subscriber raises :class:`HookRefusal` and
+    the validated payload NEVER returns to the privileged
+    orchestrator.
+
+    Pre-#158 the hookpoint was unregistered and the DLP scan never
+    ran; this adversarial pin would have passed against a
+    structurally-correct extract that silently leaked the canary
+    into ``Extracted.data``. The fix wires the hookpoint chain;
+    this test is the corpus-side proof.
+    """
+    import re
+    from typing import ClassVar, Literal
+    from unittest.mock import AsyncMock, MagicMock
+
+    from alfred.hooks import HookRefusal
+    from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+    from alfred.plugins.transport import ControlResult
+    from alfred.security._extract_dlp_subscriber import (
+        OutboundDlpExtractSubscriber,
+        register_extract_dlp_subscriber,
+    )
+    from alfred.security.quarantine import (
+        ExtractionSchema,
+        QuarantinedExtractor,
+        declare_hookpoints,
+    )
+    from tests.helpers.gates import make_quarantined_extract_chain_gate
+
+    class _SummarySchema(ExtractionSchema):
+        """Schema mirroring the spec §6.5 free-text exfil shape."""
+
+        schema_version: ClassVar[Literal[1]] = 1
+        summary: str = ""
+
+    # CR-156 round-7 / CR-158 T4 (CLAUDE.md hard rule #2): scoped
+    # :class:`RealGate` — production gate code, NOT
+    # ``make_permissive_fixture_gate(allow_system=True)``. The
+    # adversarial pin asserts a PRD §7.1 trust-boundary outcome
+    # (the DLP subscriber refuses an extracted-payload canary); a
+    # permissive shim would let a regression in the registry's
+    # grant-policy check pass silently. The scoped gate seeds the
+    # system-tier grant for the DLP subscriber's plugin_id on
+    # security.quarantined.extract. Restore the singleton on
+    # teardown — adversarial tests run inside the same process;
+    # a leaked singleton would cross-contaminate the unit suite.
+    prior = get_registry()
+    registry = HookRegistry(
+        gate=make_quarantined_extract_chain_gate(),
+        strict_declarations=False,
+    )
+    set_registry(registry)
+    try:
+        declare_hookpoints(registry)
+
+        # Canary token mirrors the
+        # ``pi_direct_injection_into_extracted_data.yaml``
+        # exfiltration shape — a string the orchestrator's DLP
+        # broker recognises (or, as here, the test's mock DLP
+        # redacts) as a leakage signal.
+        canary = "CANARY-PI-2026-001"
+        dlp = MagicMock()
+        dlp.scan = MagicMock(side_effect=lambda x: re.sub(canary, "[REDACTED]", x))
+        register_extract_dlp_subscriber(registry=registry, outbound_dlp=dlp)
+
+        # Transport returns a schema-valid Extracted whose ``summary``
+        # carries the canary — the LLM was coerced into emitting it.
+        transport = MagicMock()
+        transport.dispatch = AsyncMock(
+            return_value=ControlResult(
+                method="quarantine.extract",
+                payload={
+                    "kind": "extracted",
+                    "data": {"summary": f"benign prose with {canary} embedded"},
+                    "extraction_mode": "native_constrained",
+                },
+            ),
+        )
+
+        audit_writer = MagicMock()
+        audit_writer.append_schema = AsyncMock()
+        extractor = QuarantinedExtractor(
+            transport=transport,
+            audit_writer=audit_writer,
+            outbound_dlp=dlp,
+        )
+
+        handle = ContentHandle(
+            id="00000000-0000-0000-0000-000000000158",
+            source_url="https://attacker.example/article",
+            fetch_timestamp=datetime.now(UTC),
+        )
+
+        # Adversarial outcome: the DLP subscriber's post-stage scan
+        # detects the canary and refuses. The privileged orchestrator
+        # NEVER sees the validated payload.
+        with pytest.raises(HookRefusal) as excinfo:
+            await extractor.extract(handle, _SummarySchema)
+        assert excinfo.value.hook_id == "security.quarantined.extract.post.dlp"
+        assert excinfo.value.reason == "canary_or_secret_in_extracted_payload"
+
+        # CR-158 round 4 deferred: pin the audit row's
+        # ``post_stage_refused`` outcome AND ``refusing_hook_id``
+        # explicitly. The HookRefusal raise alone is not enough — this
+        # test would otherwise still pass if a regression stopped
+        # emitting the refusal-attributed ``quarantine.extract`` row
+        # (the round-3 BLOCKER #2 fix). The audit row IS the post-stage
+        # forensic surface for refusing-subscriber identity because
+        # ``alfred.hooks.invoke._run_post`` does not emit
+        # ``HOOKS_REFUSAL`` (§6.5 is pre-only).
+        audit_writer.append_schema.assert_awaited()
+        refusal_calls = [
+            call.kwargs
+            for call in audit_writer.append_schema.await_args_list
+            if call.kwargs.get("event") == "quarantine.extract"
+        ]
+        assert len(refusal_calls) == 1, (
+            f"Expected exactly one quarantine.extract audit row on the "
+            f"post-stage-refusal path; got {len(refusal_calls)}"
+        )
+        refusal_subject = refusal_calls[0]["subject"]
+        assert refusal_subject["result"] == "post_stage_refused"
+        assert refusal_subject["refusing_hook_id"] == OutboundDlpExtractSubscriber._SCAN_ID
+    finally:
+        set_registry(prior)

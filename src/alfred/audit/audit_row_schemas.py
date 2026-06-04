@@ -174,6 +174,23 @@ PLUGIN_GRANT_REQUESTED_FIELDS: Final[frozenset[str]] = PLUGIN_GRANT_FIELDS | fro
 #   | "prompt_embedded_fallback"
 # trust_tier_of_trigger: always "T3" for quarantine.extract rows
 # result values: "extracted" | "refused" | "malformed_exhausted" | "content_expired"
+#   | "post_stage_refused" | "protocol_violation" | "transport_failed"
+#
+# Audit-trace-key model (CR-158 round 4). The TOP-LEVEL ``trace_id``
+# field (an :meth:`AuditWriter.append_schema` kwarg, NOT a member of
+# this frozenset) on every ``quarantine.*`` audit row in this family
+# carries the SHARED chain id (``chain_correlation_id`` minted at
+# :meth:`alfred.security.quarantine.QuarantinedExtractor.extract`'s
+# chain-entry point). The body-local per-invocation correlation id
+# lives BELOW, as ``subject["correlation_id"]``, so forensic queries
+# can either walk a single coherent trace (join on ``trace_id``,
+# pulling in the pre/post/error hook-dispatch rows
+# :func:`alfred.hooks.invoke.invoke` writes against the same chain
+# id) or narrow to a specific body invocation (filter on
+# ``subject["correlation_id"]``). The two ids are deliberately
+# separate concepts at the audit-graph layer; the ``subject``
+# field is the finer-grained correlation token, ``trace_id`` is
+# the chain join key.
 QUARANTINE_EXTRACT_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "extraction_mode",
@@ -183,7 +200,27 @@ QUARANTINE_EXTRACT_FIELDS: Final[frozenset[str]] = frozenset(
         "retry_count",
         "trust_tier_of_trigger",
         "result",
+        # Body-local per-invocation correlation id (UUID minted inside
+        # :meth:`_extract_body`). NOT the trace key — see the trace-key
+        # model comment above. Finer-grained than ``trace_id``: a single
+        # trace bucket (one ``chain_correlation_id``) contains exactly
+        # one body invocation, so ``subject["correlation_id"]`` is a
+        # 1-to-1 narrowing for the ``quarantine.extract`` /
+        # ``quarantine.transport_failed`` / ``quarantine.protocol_violation``
+        # rows. Cross-process audit consumers that have not adopted the
+        # ``trace_id`` join key can still group on this field within a
+        # single forensic export window.
         "correlation_id",
+        # Set on ``post_stage_refused`` outcomes to the ``hook_id`` of the
+        # refusing subscriber (e.g. ``OutboundDlpExtractSubscriber._SCAN_ID``).
+        # ``None`` on all other outcomes. Required because post-stage
+        # ``HookRefusal`` does NOT emit an upstream ``HOOKS_REFUSAL`` row
+        # (``alfred.hooks.invoke._run_post`` is silent on this path —
+        # §6.5 is pre-only by design), so this is the only forensic
+        # surface for post-stage refusing-subscriber identity. Symmetric
+        # validation in ``append_schema`` forces every emit site for
+        # this family to populate the key explicitly.
+        "refusing_hook_id",
     }
 )
 

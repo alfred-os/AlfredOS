@@ -34,19 +34,40 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NewType, cast, get_args
 
+import structlog
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from alfred.hooks import (
     SYSTEM_ONLY_TIERS,
     SYSTEM_OPERATOR_TIERS,
+    HookContext,
+    HookError,
+    HookRefusal,
     HookRegistry,
     get_registry,
+    invoke,
 )
+
+# CR-156 round-7 / CR-158 T5: ``invoke`` is bound at module scope so
+# ``mock.patch("alfred.security.quarantine.invoke", ...)`` swaps the
+# actually-used reference at the call site. Pre-fix the symbol was
+# imported locally inside :meth:`QuarantinedExtractor.extract` and
+# :meth:`QuarantinedExtractor._dispatch_error_chain`; the test that
+# exercised the defensive ``raise`` branch patched
+# ``alfred.hooks.invoke`` but the bound-at-call-time semantics of a
+# local ``from alfred.hooks import invoke`` left the replacement
+# brittle — the patch only worked because the local re-binding hit
+# the already-patched module attribute, NOT because the test had a
+# stable handle on the quarantine-side symbol. Hoisting the import
+# pins the patch target as a real module attribute.
 
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.hooks.capability import CapabilityGate
     from alfred.plugins.transport import PluginTransport
+    from alfred.security.dlp import OutboundDlp
+
+_log = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +235,17 @@ class ContentHandle:
 #   * ambiguous_input (plan §6.7)      — schema-incompatible input
 #   * provider_refused                  — structured provider refusal
 #   * provider_unavailable              — circuit breaker / supervisor down
-#   * dlp_outbound_refused              — DLP post-scan blocked the result
+#   * dlp_outbound_refused              — TOMBSTONE. Retained for
+#     forensic-history continuity; no live emit site uses this token.
+#     Post-stage refusals (including DLP) now record
+#     ``post_stage_refused``; the refusing subscriber's identity is on
+#     the row's ``refusing_hook_id`` field (see
+#     :data:`alfred.audit.audit_row_schemas.QUARANTINE_EXTRACT_FIELDS`).
+#   * post_stage_refused                — Any post-stage hook subscriber
+#     refused the validated payload. Generic by design so future
+#     post-stage subscribers (not just the DLP one) attribute through
+#     the same closed-vocab token and surface their identity on
+#     ``refusing_hook_id``.
 #   * nonce_check_failed                — handle-id nonce mismatch (PR-S3-5)
 TypedRefusalReason = Literal[
     "cannot_extract",
@@ -223,6 +254,7 @@ TypedRefusalReason = Literal[
     "provider_refused",
     "provider_unavailable",
     "dlp_outbound_refused",
+    "post_stage_refused",
     "nonce_check_failed",
 ]
 
@@ -406,9 +438,65 @@ class QuarantinedExtractor:
         *,
         transport: PluginTransport,
         audit_writer: AuditWriter,
+        outbound_dlp: OutboundDlp,
     ) -> None:
+        """Construct the orchestrator-side extractor.
+
+        Args:
+            transport: The plugin transport that dispatches the
+                ``quarantine.extract`` JSON-RPC call. Keyword-only.
+            audit_writer: The audit-row sink for the
+                ``quarantine.extract`` /
+                ``quarantine.protocol_violation`` /
+                ``quarantine.transport_failed`` event family.
+                Keyword-only.
+            outbound_dlp: The DLP scanner the post-stage subscriber
+                will run on :meth:`pydantic.BaseModel.model_dump`
+                output. Keyword-only; REQUIRED. Spec §6.5 line 476
+                names this as the canonical exfil defence on the
+                quarantined-extract chain; a default would codify a
+                bypass path in the signature (CR-138 R3 lesson).
+
+                Registration of the
+                :class:`OutboundDlpExtractSubscriber` happens here
+                via :func:`register_extract_dlp_subscriber` (idempotent
+                — multiple extractor instances in one process do not
+                double-register). Subscriber lifecycle is anchored to
+                extractor lifecycle: the first
+                :class:`QuarantinedExtractor` constructed wires the
+                scan; subsequent instances are no-ops; an extractor-
+                less process (a tooling subprocess that never builds
+                one) has no DLP scan registered, which is correct
+                because no extract dispatches either.
+        """
         self._transport = transport
         self._audit_writer = audit_writer
+        self._outbound_dlp = outbound_dlp
+        # Anchor the subscriber's lifecycle to extractor lifecycle.
+        # Helper is idempotent against the active registry, so multiple
+        # extractors per process land ONE post-subscriber on the
+        # security.quarantined.extract chain. Imported locally to
+        # avoid pulling the subscriber module into the quarantine
+        # module's import-time dependency closure (the subscriber
+        # itself imports from alfred.hooks which is fine at module-init
+        # time but keeps the import graph one-directional).
+        #
+        # CR-156 round-7 / CR-158 T1: helper now raises
+        # :class:`HookError` on the gate-deny / unavailable path —
+        # we deliberately do NOT catch. A half-wired extractor (no
+        # post-stage DLP scan) is an active trust-boundary violation
+        # (PRD §7.1, CLAUDE.md hard rule #7). The raise propagates
+        # out of ``__init__`` so a denied registration prevents the
+        # extractor from existing at all. The same-instance
+        # idempotency arm returns
+        # :attr:`RegistrationOutcome.ALREADY_REGISTERED` — a benign
+        # success outcome that ties into a sibling extractor's
+        # already-active scan. The return value is intentionally
+        # ignored here: both success outcomes satisfy the contract
+        # "DLP scan is active after construction".
+        from alfred.security._extract_dlp_subscriber import register_extract_dlp_subscriber
+
+        register_extract_dlp_subscriber(outbound_dlp=outbound_dlp)
 
     # ------------------------------------------------------------------
     # Schema-class validation
@@ -470,12 +558,48 @@ class QuarantinedExtractor:
     # extract — the single public surface
     # ------------------------------------------------------------------
 
+    @dataclass(frozen=True, slots=True)
+    class _BodyAuditMetadata:
+        """Carries the audit-row attribution :meth:`_extract_body`
+        would have emitted itself, returned to :meth:`extract` so the
+        ``quarantine.extract`` row emits AFTER the post-stage DLP
+        chain — never BEFORE (CR-158 BLOCKER #2).
+
+        Pre-fix the row emitted at the bottom of :meth:`_extract_body`
+        with ``result="extracted"`` even when the post-stage DLP
+        subscriber subsequently refused the payload. That left a
+        misleading "successful extraction" forensic record for an
+        outcome the orchestrator never observed — the audit log was
+        actively lying about the trust boundary's behaviour. Deferring
+        the emission to :meth:`extract` lets the post-chain outcome
+        decide which ``result`` value the row carries:
+
+        * Post chain succeeds → ``result=audit_result`` (``"extracted"``
+          or ``"refused"`` per the body's classification).
+        * Post chain raises :class:`alfred.hooks.HookRefusal` →
+          ``result="post_stage_refused"``,
+          ``extraction_mode="refused"``, ``refusing_hook_id`` set to
+          the subscriber's ``hook_id``. The validated payload NEVER
+          returns to the caller; the audit row reflects that. (See the
+          handler in :meth:`extract` for the §6.5 pre-only rationale.)
+
+        Frozen + slots: same hot-path discipline as :class:`Extracted`.
+        Carrier-only, no behaviour.
+        """
+
+        audit_result: str
+        audit_extraction_mode: str
+        correlation_id: str
+        schema_name: str
+        schema_version: int
+
     async def extract(
         self,
         handle: ContentHandle,
         schema: type[ExtractionSchema],
     ) -> ExtractionResult:
-        """Dispatch a ``quarantine.extract`` JSON-RPC call.
+        """Dispatch a ``quarantine.extract`` JSON-RPC call through the
+        ``security.quarantined.extract`` hookpoint chain (spec §6.5).
 
         The call carries only the opaque handle id and the schema JSON;
         ``source_url`` never crosses the wire (it is forensic-attribution
@@ -492,20 +616,356 @@ class QuarantinedExtractor:
         :class:`PluginProtocolViolation`. The audit row lands BEFORE
         the raise so an operator reading the log sees the failure even
         if the caller swallows the exception.
+
+        **Hookpoint dispatch (#158).** The body is wrapped in the
+        ``security.quarantined.extract`` chain:
+
+        * ``pre`` stage — system + operator tier subscribers observe
+          the dispatch-side context (schema name + handle id; never
+          the wire payload, which is T3-derived). System-tier
+          subscribers may refuse via :class:`HookRefusal`.
+        * ``post`` stage — the :class:`OutboundDlpExtractSubscriber`
+          (registered by :meth:`__init__`) runs
+          :meth:`OutboundDlp.scan` on the validated
+          :meth:`pydantic.BaseModel.model_dump` of the result. A
+          DLP trigger raises :class:`HookRefusal`; the validated
+          payload NEVER returns to the caller.
+        * ``error`` stage — runs if any exception escapes the body or
+          either chain. Subscribers may suppress (first non-None
+          carrier wins). If every subscriber returns ``None`` the
+          original exception re-raises so the upstream failure is
+          NOT silently swallowed (CLAUDE.md hard rule #7).
+
+        Dispatch is ADDITIVE to the existing audit-row family —
+        ``quarantine.extract`` / ``quarantine.protocol_violation`` /
+        ``quarantine.transport_failed`` continue to emit verbatim.
+        """
+        # Schema-class validation is hoisted out of :meth:`_extract_body`
+        # to fail BEFORE the pre-chain dispatches — a programmer-bug
+        # schema class is a build-time issue, not a runtime
+        # failure-mode the error chain should observe. Pre/post/error
+        # subscribers see only runtime extraction failures; a TypeError
+        # raised against a bad ``schema`` type IS the right exception
+        # for the call site to surface (it surfaces a missing
+        # :class:`ExtractionSchema` subclass annotation), not a hook
+        # outcome (LOW #11 — CR-158).
+        self._validate_schema_class(schema)
+
+        # Mint the chain's correlation id ONCE here so every audit
+        # row (existing ``quarantine.*`` family emitted by the body
+        # helpers + the new pre/post/error hookpoint chain rows
+        # emitted by :func:`alfred.hooks.invoke.invoke`) ties to the
+        # same key. CR-158 round 4: ``trace_id`` on the
+        # ``quarantine.*`` rows IS this value; the body's per-
+        # invocation ``correlation_id`` lives inside the row's subject
+        # payload for finer-grained correlation within the extract
+        # body. Forensic queries joining on ``trace_id`` see a single
+        # coherent trace across the chain; ``subject.correlation_id``
+        # further narrows to a specific body call.
+        chain_correlation_id = uuid.uuid4().hex
+        schema_name = schema.__name__
+
+        # Build the pre-stage carrier. Carries closed-vocabulary
+        # attribution ONLY — ``schema_name`` + the opaque ``handle.id``.
+        # We DO NOT thread the wire payload or the model_dump through
+        # the pre stage; those are T3-derived and must not surface on
+        # a pre subscriber's audit attribution. The post stage carries
+        # the model_dump (DLP needs to scan it); pre carries the
+        # dispatch metadata only.
+        pre_input: dict[str, object] = {
+            "schema_name": schema_name,
+            "handle_id": handle.id,
+        }
+        pre_ctx: HookContext[dict[str, object]] = HookContext(
+            action_id="security.quarantined.extract",
+            hookpoint="security.quarantined.extract",
+            input=pre_input,
+            correlation_id=chain_correlation_id,
+            kind="pre",
+        )
+
+        # Pre chain — fail_closed=True per spec §6.5 declaration.
+        # A system-tier subscriber may refuse via HookRefusal; the
+        # invoke() dispatcher emits HOOKS_REFUSAL and re-raises so
+        # the body never runs.
+        try:
+            await invoke(
+                "security.quarantined.extract",
+                pre_ctx,
+                kind="pre",
+                subscribable_tiers=SYSTEM_OPERATOR_TIERS,
+                refusable_tiers=SYSTEM_ONLY_TIERS,
+                fail_closed=True,
+            )
+        except Exception as pre_exc:
+            # Error stage — let subscribers observe a pre-stage
+            # failure. Re-raise on no-suppression so the original
+            # cause propagates with the original traceback.
+            await self._dispatch_error_chain(
+                exc=pre_exc,
+                pre_input=pre_input,
+                chain_correlation_id=chain_correlation_id,
+            )
+            raise
+
+        # Body — the existing extract flow. Returns the validated
+        # result AND the audit-row metadata; the ``quarantine.extract``
+        # row is DEFERRED to the post-chain outcome (BLOCKER #2 fix).
+        # The upstream transport_failed / protocol_violation rows
+        # still emit inline from inside :meth:`_extract_body` before
+        # the corresponding exception raises — those are distinct
+        # closed-vocabulary events and continue to land at the same
+        # forensic point they always have.
+        try:
+            result, body_audit = await self._extract_body(
+                handle,
+                schema,
+                chain_correlation_id=chain_correlation_id,
+            )
+        except Exception as body_exc:
+            await self._dispatch_error_chain(
+                exc=body_exc,
+                pre_input=pre_input,
+                chain_correlation_id=chain_correlation_id,
+            )
+            raise
+
+        # Post chain — the DLP subscriber's load-bearing scan.
+        # ``input`` is the result.model_dump (a dict) for an
+        # Extracted; for a TypedRefusal it's still a model_dump so
+        # the closed-vocabulary ``reason`` field surfaces. The
+        # subscriber's json.dumps(default=str) handles both shapes.
+        post_input = result.model_dump()
+        post_ctx: HookContext[dict[str, object]] = HookContext(
+            action_id="security.quarantined.extract",
+            hookpoint="security.quarantined.extract",
+            input=post_input,
+            correlation_id=chain_correlation_id,
+            kind="post",
+        )
+        try:
+            await invoke(
+                "security.quarantined.extract",
+                post_ctx,
+                kind="post",
+                subscribable_tiers=SYSTEM_OPERATOR_TIERS,
+                refusable_tiers=SYSTEM_ONLY_TIERS,
+                fail_closed=True,
+            )
+        except HookRefusal as refusal:
+            # The DLP subscriber (or another post-stage refuser) blocked
+            # the validated payload. BLOCKER #2 fix: the audit row
+            # MUST reflect the refusal, NOT the pre-refusal
+            # ``result="extracted"`` classification the body chose.
+            #
+            # Use the generic ``post_stage_refused`` token + carry
+            # refusing-subscriber identity in ``refusing_hook_id``. The
+            # hooks subsystem's ``_run_post`` does NOT emit
+            # ``HOOKS_REFUSAL`` for post-stage refusals (§6.5 is
+            # pre-only — see ``alfred.hooks.invoke`` docstrings at
+            # lines 519-521 + 282-286), so this row is the only
+            # forensic surface for the refusing subscriber's identity.
+            # Any future post-stage subscriber's refusal will land here
+            # with its own ``hook_id`` without code change.
+            #
+            # ``extraction_mode="refused"`` matches the
+            # :class:`TypedRefusal` audit shape so the audit graph
+            # treats the canary-blocked outcome the same as a
+            # typed-refusal outcome (both are refusals; the
+            # ``correlation_id`` ties this row back to the post-chain
+            # subscriber-error / chain-timeout audit rows
+            # :func:`invoke` emits on the non-refusal post-stage arm).
+            await self._emit_extract_audit(
+                audit_result="post_stage_refused",
+                audit_extraction_mode="refused",
+                correlation_id=body_audit.correlation_id,
+                schema_name=body_audit.schema_name,
+                schema_version=body_audit.schema_version,
+                chain_correlation_id=chain_correlation_id,
+                refusing_hook_id=refusal.hook_id,
+            )
+            await self._dispatch_error_chain(
+                exc=refusal,
+                pre_input=pre_input,
+                chain_correlation_id=chain_correlation_id,
+            )
+            raise
+        except Exception as post_exc:
+            # Non-refusal post-chain failure (a subscriber crashed,
+            # the dispatcher tripped a fail_closed). The audit row
+            # for the extract outcome is INTENTIONALLY NOT emitted
+            # here — the upstream :data:`HOOKS_SUBSCRIBER_ERROR` /
+            # :data:`HOOKS_CHAIN_TIMEOUT` row :func:`invoke` already
+            # emitted is the forensic anchor; a second
+            # ``quarantine.extract`` row would imply the extract
+            # completed cleanly, which it didn't. The error chain
+            # still dispatches and the exception re-raises.
+            await self._dispatch_error_chain(
+                exc=post_exc,
+                pre_input=pre_input,
+                chain_correlation_id=chain_correlation_id,
+            )
+            raise
+
+        # Post chain succeeded — emit the audit row with the body's
+        # classification (``"extracted"`` or ``"refused"``). The row
+        # lands HERE so a DLP refusal that aborts the post chain
+        # never produces a misleading ``result="extracted"`` audit
+        # row (BLOCKER #2 — the audit log is the source of truth and
+        # lying in it is worse than redundancy).
+        await self._emit_extract_audit(
+            audit_result=body_audit.audit_result,
+            audit_extraction_mode=body_audit.audit_extraction_mode,
+            correlation_id=body_audit.correlation_id,
+            schema_name=body_audit.schema_name,
+            schema_version=body_audit.schema_version,
+            chain_correlation_id=chain_correlation_id,
+        )
+
+        return result
+
+    async def _dispatch_error_chain(
+        self,
+        *,
+        exc: BaseException,
+        pre_input: dict[str, object],
+        chain_correlation_id: str,
+    ) -> None:
+        """Run the ``security.quarantined.extract`` error chain.
+
+        Called from :meth:`extract` on any exception escaping the
+        pre / body / post stages. The error stage dispatch lets
+        subscribers observe the failure (e.g. flush a span, emit
+        a metric, write a forensic note); subscriber suppression IS
+        allowed but the caller's ``raise`` short-circuits the
+        suppression for now — Slice-4+ would honour
+        :func:`invoke`'s "first non-None wins" carrier-substitution
+        semantic. This slice ships the audit-and-raise discipline.
+        See #170 for the Slice-4+ recoverable-carrier work.
+
+        The dispatch itself never raises against the caller's
+        traceback path — the error chain runs to completion and any
+        :class:`alfred.hooks.HookError` raised by a subscriber is
+        suppressed so the ORIGINAL ``exc`` is the value that
+        propagates. CLAUDE.md hard rule #7 still applies: the
+        subscriber's failure is audited by :func:`invoke` itself
+        (the :data:`HOOKS_SUBSCRIBER_ERROR` row); we just don't let
+        it displace the upstream failure on the caller's traceback.
+        """
+        error_ctx: HookContext[dict[str, object]] = HookContext(
+            action_id="security.quarantined.extract",
+            hookpoint="security.quarantined.extract",
+            input=pre_input,
+            correlation_id=chain_correlation_id,
+            kind="error",
+        )
+        try:
+            await invoke(
+                "security.quarantined.extract",
+                error_ctx,
+                kind="error",
+                subscribable_tiers=SYSTEM_OPERATOR_TIERS,
+                # Spec §6.5 + §14 (post-alignment) both pin True;
+                # per-kind fail_closed would require a registry
+                # refactor — out of scope (MEDIUM #7 — CR-158; see
+                # #167 for the per-kind feature request). The
+                # value MUST equal the publisher's declared
+                # ``fail_closed`` (see
+                # :func:`alfred.hooks.invoke._enforce_subscribable_tiers`'s
+                # dispatch-time drift check); weakening here would
+                # trip the drift detector with HOOKS_TIER_REJECTED
+                # audit and a HookError raise. The helper catches
+                # the HookError below so the original ``exc`` is
+                # preserved on the caller's traceback.
+                fail_closed=True,
+                exc=exc,
+            )
+        except HookError:
+            # A subscriber crashed inside the error chain (the
+            # dispatcher wrapped a non-:class:`HookError` raise as a
+            # :class:`HookSubscriberError` via
+            # :func:`alfred.hooks.invoke._wrap_subscriber_error`). The
+            # dispatcher already emitted the
+            # :data:`HOOKS_SUBSCRIBER_ERROR` row; swallow so the
+            # ORIGINAL ``exc`` is what surfaces on the caller's
+            # traceback. Re-raising here would displace the upstream
+            # failure with a meta-failure.
+            return
+        except Exception as raised:
+            # HIGH #3 (CR-158): narrow the catch from ``BaseException``
+            # to ``Exception`` so :class:`asyncio.CancelledError`,
+            # :class:`SystemExit`, and :class:`KeyboardInterrupt`
+            # propagate. Cancellation MUST be honoured at every
+            # async boundary; swallowing it here would let a chain
+            # in the error stage outlive its caller and silently
+            # leak a never-completing task.
+            #
+            # The remaining ``Exception`` arm covers
+            # :func:`alfred.hooks.invoke.invoke`'s "no-suppression-
+            # completed" path that re-raises ``exc`` itself. We
+            # check identity: if the re-raise is the same object
+            # we passed in via ``exc=``, swallow so the caller's
+            # outer ``raise exc`` is the visible propagation site.
+            # If it's a NEW exception we have no business absorbing
+            # it — re-raise so the new failure is the value the
+            # caller sees (the caller's ``raise`` of the original
+            # ``exc`` will then chain via ``__context__``).
+            if raised is not exc:
+                raise
+            return
+
+    async def _extract_body(
+        self,
+        handle: ContentHandle,
+        schema: type[ExtractionSchema],
+        *,
+        chain_correlation_id: str,
+    ) -> tuple[ExtractionResult, QuarantinedExtractor._BodyAuditMetadata]:
+        """The existing extract logic — wire dispatch + schema lift.
+
+        Returns the validated :class:`ExtractionResult` AND the audit-
+        row metadata :meth:`extract` will emit AFTER the post-stage
+        DLP chain (BLOCKER #2 fix). The body does NOT emit the
+        ``quarantine.extract`` row itself anymore — that emission is
+        deferred so a post-chain refusal can override the
+        classification before the row lands.
+
+        The other audit rows the body owns —
+        ``quarantine.protocol_violation`` and
+        ``quarantine.transport_failed`` — DO emit inline before the
+        corresponding exception raises; those are distinct
+        closed-vocabulary events at distinct forensic anchors and
+        their semantics are unaffected by the post-chain outcome.
+
+        Factored out of :meth:`extract` so the hookpoint chain wraps a
+        clean boundary. Body-side ``correlation_id`` is a per-invocation
+        UUID minted inline; the chain's ``chain_correlation_id`` is the
+        shared trace key (CR-158 round 4) that ties the
+        ``quarantine.*`` rows the body emits to the pre/post/error
+        hook-dispatch rows :meth:`extract` drives. Both are populated
+        on every audit row this body writes — body-local
+        ``correlation_id`` inside ``subject``, chain id on ``trace_id``
+        — so forensic queries can either walk a single coherent trace
+        (join on ``trace_id``) or narrow to a specific body call (filter
+        on ``subject.correlation_id``).
         """
         import json as _json
 
         # Local imports — keep the boundary module dependency-light at
         # import time. Both names are only needed inside this coroutine.
-        from alfred.audit import audit_row_schemas
         from alfred.plugins.errors import PluginProtocolViolation
         from alfred.plugins.transport import ControlResult
 
-        self._validate_schema_class(schema)
-
         # Per-invocation correlation id — never shared across calls
-        # (prov-012). Audit rows on the same conversation are tied
-        # through the parent trace_id, not through this field.
+        # (prov-012). CR-158 round 4: this value lives inside the
+        # ``subject`` payload of every audit row emitted from this
+        # body; the row's TOP-LEVEL ``trace_id`` is
+        # ``chain_correlation_id`` (the shared key minted by
+        # :meth:`extract` at chain entry) so a forensic join across
+        # the pre/post/error hook-dispatch rows + the
+        # ``quarantine.*`` family rows lands a single coherent
+        # trace. Filtering on ``subject.correlation_id`` narrows
+        # further to a single body invocation.
         correlation_id = str(uuid.uuid4())
         schema_name = schema.__name__
         # schema_version is guaranteed = 1 by ExtractionSchema.__init_subclass__
@@ -542,6 +1002,7 @@ class QuarantinedExtractor:
                 correlation_id=correlation_id,
                 schema_name=schema_name,
                 schema_version=schema_version,
+                chain_correlation_id=chain_correlation_id,
             )
             raise
 
@@ -551,6 +1012,7 @@ class QuarantinedExtractor:
                 correlation_id=correlation_id,
                 schema_name=schema_name,
                 schema_version=schema_version,
+                chain_correlation_id=chain_correlation_id,
             )
             raise PluginProtocolViolation(
                 method="quarantine.extract",
@@ -564,6 +1026,7 @@ class QuarantinedExtractor:
                 correlation_id=correlation_id,
                 schema_name=schema_name,
                 schema_version=schema_version,
+                chain_correlation_id=chain_correlation_id,
             )
             raise PluginProtocolViolation(
                 method="quarantine.extract",
@@ -587,6 +1050,7 @@ class QuarantinedExtractor:
                     correlation_id=correlation_id,
                     schema_name=schema_name,
                     schema_version=schema_version,
+                    chain_correlation_id=chain_correlation_id,
                 )
                 raise PluginProtocolViolation(
                     method="quarantine.extract",
@@ -605,6 +1069,7 @@ class QuarantinedExtractor:
                     correlation_id=correlation_id,
                     schema_name=schema_name,
                     schema_version=schema_version,
+                    chain_correlation_id=chain_correlation_id,
                 )
                 raise PluginProtocolViolation(
                     method="quarantine.extract",
@@ -638,6 +1103,7 @@ class QuarantinedExtractor:
                     correlation_id=correlation_id,
                     schema_name=schema_name,
                     schema_version=schema_version,
+                    chain_correlation_id=chain_correlation_id,
                 )
                 raise PluginProtocolViolation(
                     method="quarantine.extract",
@@ -656,6 +1122,7 @@ class QuarantinedExtractor:
                     correlation_id=correlation_id,
                     schema_name=schema_name,
                     schema_version=schema_version,
+                    chain_correlation_id=chain_correlation_id,
                 )
                 raise PluginProtocolViolation(
                     method="quarantine.extract",
@@ -669,6 +1136,82 @@ class QuarantinedExtractor:
             # filter on either independently. ``refused`` is the
             # extraction_mode value for typed refusals.
             audit_extraction_mode = "refused"
+
+        # Return the audit metadata for :meth:`extract` to emit AFTER
+        # the post-stage DLP chain. The body intentionally does NOT
+        # emit the ``quarantine.extract`` row here — see method
+        # docstring for the BLOCKER #2 rationale.
+        return result, QuarantinedExtractor._BodyAuditMetadata(
+            audit_result=audit_result,
+            audit_extraction_mode=audit_extraction_mode,
+            correlation_id=correlation_id,
+            schema_name=schema_name,
+            schema_version=schema_version,
+        )
+
+    async def _emit_extract_audit(
+        self,
+        *,
+        audit_result: str,
+        audit_extraction_mode: str,
+        correlation_id: str,
+        schema_name: str,
+        schema_version: int,
+        chain_correlation_id: str | None,
+        refusing_hook_id: str | None = None,
+    ) -> None:
+        """Emit the ``quarantine.extract`` audit row.
+
+        Factored out of :meth:`_extract_body` so :meth:`extract` can
+        choose the ``audit_result`` value AFTER the post-stage DLP
+        chain returns (BLOCKER #2 fix). Two call sites:
+
+        * Post chain succeeded — :meth:`extract` calls with the
+          body's classification (``"extracted"`` or ``"refused"``);
+          ``refusing_hook_id=None``.
+        * Post chain raised :class:`alfred.hooks.HookRefusal` —
+          :meth:`extract` calls with
+          ``audit_result="post_stage_refused"``,
+          ``audit_extraction_mode="refused"``, and
+          ``refusing_hook_id=refusal.hook_id``. The refusing
+          subscriber's identity surfaces ON this row because
+          ``alfred.hooks.invoke._run_post`` does NOT emit
+          ``HOOKS_REFUSAL`` for post-stage refusals — §6.5 is
+          pre-only — so this row is the only forensic surface for
+          attribution.
+
+        The schema-validated fields the body computed
+        (``schema_name``, ``schema_version``, ``correlation_id``)
+        thread through verbatim so the audit-graph join key is the
+        same regardless of which arm fires. Symmetric validation in
+        :meth:`alfred.audit.AuditWriter.append_schema` forces every
+        emit site to populate ``refusing_hook_id`` (None on the
+        success arm) — the default exists for ergonomic call sites,
+        not for forensic ambiguity.
+
+        ``trace_id`` is the chain's shared key (``chain_correlation_id``
+        minted at :meth:`extract`'s :func:`invoking`-equivalent entry)
+        so the pre/post/error hook-dispatch rows and this row land in
+        the same trace bucket — forensic queries joining on ``trace_id``
+        see a single coherent trace (CR-158 round 4). The body-local
+        ``correlation_id`` lives inside the ``subject`` payload for
+        finer-grained correlation within the extract body. If
+        ``chain_correlation_id`` is ``None`` (emit site outside the
+        chain's scope — defence-in-depth fallback; the live code path
+        always threads the chain id in), the helper falls back to the
+        body-local ``correlation_id`` so a pre-chain row still carries
+        SOME deterministic trace key rather than an empty field.
+        """
+        from alfred.audit import audit_row_schemas
+
+        # Defence-in-depth fallback: every call site in this module
+        # threads ``chain_correlation_id`` from :meth:`extract`, but
+        # the ``| None`` keeps a future emit site that fires before
+        # the chain mints its id (e.g. a constructor-time validation
+        # path) auditable without a code change.
+        effective_trace_id = (
+            chain_correlation_id if chain_correlation_id is not None else correlation_id
+        )
 
         await self._audit_writer.append_schema(
             fields=audit_row_schemas.QUARANTINE_EXTRACT_FIELDS,
@@ -684,14 +1227,13 @@ class QuarantinedExtractor:
                 "trust_tier_of_trigger": "T3",
                 "result": audit_result,
                 "correlation_id": correlation_id,
+                "refusing_hook_id": refusing_hook_id,
             },
             trust_tier_of_trigger="T3",
             result=audit_result,
             cost_estimate_usd=0.0,
-            trace_id=correlation_id,
+            trace_id=effective_trace_id,
         )
-
-        return result
 
     async def _emit_transport_failed_audit(
         self,
@@ -699,6 +1241,7 @@ class QuarantinedExtractor:
         correlation_id: str,
         schema_name: str,
         schema_version: int,
+        chain_correlation_id: str | None,
     ) -> None:
         """Audit a ``quarantine.transport_failed`` event (err-001 fix).
 
@@ -709,6 +1252,11 @@ class QuarantinedExtractor:
         error / premature subprocess death is a transport-layer crash,
         not an in-band protocol violation.
 
+        ``trace_id`` is the chain's shared key (CR-158 round 4); see
+        :meth:`_emit_extract_audit` docstring for the model. Body-local
+        ``correlation_id`` lives in the subject payload; falls back to
+        body-local when ``chain_correlation_id`` is ``None``.
+
         We deliberately do NOT serialise the exception type or message
         into the audit row: the exception may carry handle-id or
         provider-key references through ``__cause__`` chains, and the
@@ -716,6 +1264,10 @@ class QuarantinedExtractor:
         against that leakage.
         """
         from alfred.audit import audit_row_schemas
+
+        effective_trace_id = (
+            chain_correlation_id if chain_correlation_id is not None else correlation_id
+        )
 
         await self._audit_writer.append_schema(
             fields=audit_row_schemas.QUARANTINE_EXTRACT_FIELDS,
@@ -731,11 +1283,18 @@ class QuarantinedExtractor:
                 "trust_tier_of_trigger": "T3",
                 "result": "transport_failed",
                 "correlation_id": correlation_id,
+                # Transport failures are not hookpoint refusals; the
+                # attribution field stays explicitly ``None`` so the
+                # symmetric-validation contract on
+                # :data:`QUARANTINE_EXTRACT_FIELDS` is satisfied
+                # without conflating transport crashes with post-stage
+                # subscriber refusals.
+                "refusing_hook_id": None,
             },
             trust_tier_of_trigger="T3",
             result="transport_failed",
             cost_estimate_usd=0.0,
-            trace_id=correlation_id,
+            trace_id=effective_trace_id,
         )
 
     async def _emit_protocol_violation_audit(
@@ -744,14 +1303,24 @@ class QuarantinedExtractor:
         correlation_id: str,
         schema_name: str,
         schema_version: int,
+        chain_correlation_id: str | None,
     ) -> None:
         """Audit a ``quarantine.protocol_violation`` event.
 
         Emitted BEFORE the :class:`PluginProtocolViolation` raise so
         the operator log carries the failure even if the caller
         swallows the exception (CLAUDE.md hard rule #7).
+
+        ``trace_id`` is the chain's shared key (CR-158 round 4); see
+        :meth:`_emit_extract_audit` docstring for the model. Body-local
+        ``correlation_id`` lives in the subject payload; falls back to
+        body-local when ``chain_correlation_id`` is ``None``.
         """
         from alfred.audit import audit_row_schemas
+
+        effective_trace_id = (
+            chain_correlation_id if chain_correlation_id is not None else correlation_id
+        )
 
         await self._audit_writer.append_schema(
             fields=audit_row_schemas.QUARANTINE_EXTRACT_FIELDS,
@@ -767,11 +1336,16 @@ class QuarantinedExtractor:
                 "trust_tier_of_trigger": "T3",
                 "result": "protocol_violation",
                 "correlation_id": correlation_id,
+                # Protocol violations are not hookpoint refusals; the
+                # attribution field stays explicitly ``None`` so the
+                # symmetric-validation contract on
+                # :data:`QUARANTINE_EXTRACT_FIELDS` is satisfied.
+                "refusing_hook_id": None,
             },
             trust_tier_of_trigger="T3",
             result="protocol_violation",
             cost_estimate_usd=0.0,
-            trace_id=correlation_id,
+            trace_id=effective_trace_id,
         )
 
 
