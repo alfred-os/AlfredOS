@@ -335,13 +335,16 @@ def test_rate_limit_bucket_literal_closed_set() -> None:
 
 def test_dlp_scan_result_literal_includes_new_values() -> None:
     """dlp_scan_result's Literal pins the full closed vocabulary after
-    the handle-cap widening (spec §6.2).
+    the handle-cap widening (spec §6.2) and the host-side dispatch-
+    params validation widening (#147).
 
     Mirrors the ``RateLimitBucket`` pattern (exact-set equality) so a
     stray extra literal, a dropped existing one, or a typo all surface
-    here — not at a downstream audit-graph consumer. The widened pair
-    (``handle_cap_exceeded`` / ``handle_id_mismatch``) is recorded by
-    PR #160 (issue #157); update this set in lockstep with the schema.
+    here — not at a downstream audit-graph consumer. The handle-cap
+    pair (``handle_cap_exceeded`` / ``handle_id_mismatch``) is recorded
+    by PR #160 (issue #157); the dispatch-params value
+    (``dispatch_param_invalid``) is added by PR for issue #147 (#147 spec
+    §4). Update this set in lockstep with the schema.
     """
     from typing import get_args
 
@@ -361,4 +364,5 @@ def test_dlp_scan_result_literal_includes_new_values() -> None:
         "fetch_error",
         "handle_cap_exceeded",
         "handle_id_mismatch",
+        "dispatch_param_invalid",  # NEW per #147
     }
