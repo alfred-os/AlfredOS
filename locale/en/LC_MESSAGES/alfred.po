@@ -1370,12 +1370,21 @@ msgstr ""
 "IP and full URL are recorded on the audit row "
 "(``WEB_FETCH_FIELDS.dlp_scan_result='internal_ip_refused'``)."
 
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:703
+msgid "web.fetch.error.dispatch_param_invalid"
+msgstr ""
+"web.fetch dispatch params failed host-side validation. This is a host "
+"defect, not a user-input issue. Inspect the audit log: alfred audit log "
+"--event tool.web.fetch --since 1h (look for "
+"dlp_scan_result=dispatch_param_invalid). If this recurs, file an issue "
+"with the correlation_id from the audit row."
+
 # C4 / i18n-002 — generic WebFetchError fallback carrying the plugin's
 # message string. The plugin-supplied {message} is data (forensic
 # attribution), but the operator-facing WebFetchError surface MUST be
 # catalogued — wrapping the message in t() lets the carrier string be
 # localised while preserving the plugin detail as a placeholder.
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:866
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:967
 msgid "web.fetch.error.plugin_returned_message"
 msgstr "web.fetch plugin returned an error: {message}"
 
@@ -1386,7 +1395,7 @@ msgstr "web.fetch plugin returned an error: {message}"
 # operational-error arm catches it. The {shape} placeholder carries the
 # Python type name of the offending result (audit-forensic only — not
 # the value itself, which could be T3-derived).
-#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:913
+#: src/alfred/plugins/web_fetch/fetch_dispatcher.py:1014
 msgid "web.fetch.error.unexpected_dispatch_shape"
 msgstr ""
 "web.fetch returned an unexpected dispatch shape ({shape}). Expected "
