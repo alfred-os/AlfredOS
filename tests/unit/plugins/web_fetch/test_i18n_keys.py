@@ -140,6 +140,14 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"env": "staging"},
         ("development", "production"),
     ),
+    "web.fetch.error.dispatch_param_invalid": (
+        # #147 — host-side Pydantic validation arm.
+        # Operator-actionable: distinguishes a host defect from a
+        # user-input issue AND points at the audit log invocation that
+        # surfaces the closed-vocabulary tag for forensic correlation.
+        {},
+        ("host", "audit log"),
+    ),
 }
 
 
