@@ -92,6 +92,27 @@ HOOKS_REENTRY_BYPASS: Final[str] = "hooks.reentry_bypass"
 """Audit-row event id for a re-entrant dispatch where the inner chain
 was bypassed (the dispatcher detected the loop and refused to recurse)."""
 
+HOOKS_DLP_SUBSCRIBER_NOT_REGISTERED: Final[str] = "hooks.dlp_subscriber_not_registered"
+"""Audit-row event id for a system-tier DLP subscriber registration that
+the capability gate refused (issue #158 BLOCKER #1).
+
+Emitted by :func:`alfred.security._extract_dlp_subscriber.register_extract_dlp_subscriber`
+when the registry's :class:`alfred.hooks.capability.CapabilityGate` denies
+the system-tier grant for the
+:class:`alfred.security._extract_dlp_subscriber.OutboundDlpExtractSubscriber`.
+The helper emits this row and then raises :class:`alfred.hooks.errors.HookError`,
+aborting construction of the subscriber and — because the extractor's
+``__init__`` calls the helper — aborting construction of
+:class:`alfred.security.quarantine.QuarantinedExtractor` itself. The loud-
+failure path is fail-closed: the operator sees the refused/aborted
+construction in the audit log rather than a half-wired extractor with no
+DLP scan attached. CLAUDE.md hard rule #7 — no silent failures in
+security paths.
+
+The row carries ``plugin_id``, ``hookpoint``, and ``requested_tier`` for
+audit-graph attribution.
+"""
+
 HOOKS_TIER_REJECTED: Final[str] = "hooks.tier_rejected"
 """Audit-row event id for any #119 / spec §6.2 tier-allow-list refusal
 OR any dispatch-time publisher-side meta drift.
