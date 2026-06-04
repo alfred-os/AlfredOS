@@ -60,6 +60,7 @@ from alfred.audit.audit_row_schemas import (
 from alfred.i18n import t
 from alfred.plugins.transport import ControlResult
 from alfred.plugins.web_fetch.allowlist import AllowlistEntry, AllowlistIntersection
+from alfred.plugins.web_fetch.constants import _DEFAULT_SIZE_LIMIT_BYTES
 from alfred.plugins.web_fetch.content_store import (
     _DEFAULT_ACTION_DEADLINE_SECONDS,
     _DEFAULT_MAX_EXTRACTION_RETRIES,
@@ -96,10 +97,11 @@ log = structlog.get_logger(__name__)
 # defence pinned by ``test_recursion_depth_one.py``.
 _FETCH_DEPTH: Final[int] = 1
 
-# Matches the plugin-side _DEFAULT_SIZE_LIMIT_BYTES so the host and
-# subprocess agree on the cap when the plugin's structured error envelope
-# omits the limit (defensive default; the plugin always sets it).
-_DEFAULT_SIZE_LIMIT_BYTES: Final[int] = 5 * 1024 * 1024
+# CR-CLI / L-9: _DEFAULT_SIZE_LIMIT_BYTES now lives in
+# alfred.plugins.web_fetch.constants so the dispatch_params model and the
+# dispatcher share the literal without drift. The plugin subprocess at
+# plugins/alfred_web_fetch/web_fetch_plugin.py keeps its own copy as the
+# secondary defence (plugin-process-isolation contract).
 
 # Handle reservation TTL — mirrors ``ContentStore.write``'s body TTL so
 # the cap slot expires at the same time the underlying Redis body does
