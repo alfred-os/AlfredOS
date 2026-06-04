@@ -101,7 +101,17 @@ def test_plugin_grant_fields_exact() -> None:
 
 
 def test_quarantine_extract_fields_exact() -> None:
-    """QUARANTINE_EXTRACT_FIELDS exact field list per spec §13."""
+    """QUARANTINE_EXTRACT_FIELDS exact field list per spec §13.
+
+    ``refusing_hook_id`` was added in #168 — it carries the refusing
+    subscriber's identity on ``post_stage_refused`` outcomes; on every
+    other arm (success / typed-refusal / transport-failed /
+    protocol-violation) it is ``None``. The field exists on the schema
+    because ``alfred.hooks.invoke._run_post`` does NOT emit
+    ``HOOKS_REFUSAL`` audit rows for post-stage refusals (§6.5 is
+    pre-only), so the ``quarantine.extract`` row is the only forensic
+    surface for that attribution.
+    """
     assert audit_row_schemas.QUARANTINE_EXTRACT_FIELDS == frozenset(  # noqa: SIM300
         {
             "extraction_mode",
@@ -112,6 +122,7 @@ def test_quarantine_extract_fields_exact() -> None:
             "trust_tier_of_trigger",
             "result",
             "correlation_id",
+            "refusing_hook_id",
         }
     )
 

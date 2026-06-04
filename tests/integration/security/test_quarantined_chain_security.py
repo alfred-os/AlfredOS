@@ -252,6 +252,14 @@ async def test_audit_row_carries_t3_trust_tier_through_full_extract() -> None:
     assert call["event"] == "quarantine.extract"
     assert call["result"] == "extracted"
     assert call["fields"] is audit_row_schemas.QUARANTINE_EXTRACT_FIELDS
+    # CR-158 round 4 deferred: prove the post-stage DLP subscriber
+    # actually ran. The audit assertions above are necessary but not
+    # sufficient — they could pass on a registry regression where the
+    # post bucket lost the DLP subscriber (the identity scanner here
+    # would no-op silently and the audit row would still surface as
+    # ``extracted``). Asserting on ``scan`` invocation pins the
+    # subscriber-was-dispatched contract.
+    fake_dlp.scan.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

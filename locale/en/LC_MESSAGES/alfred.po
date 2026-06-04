@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-04 17:41+0100\n"
+"POT-Creation-Date: 2026-06-04 23:18+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1426,11 +1426,11 @@ msgstr ""
 "HOOKS_DLP_SUBSCRIBER_NOT_REGISTERED carries plugin_id={plugin_id!r}, "
 "hookpoint={hookpoint!r}, requested_tier={requested_tier!r}."
 
-#: src/alfred/security/quarantine.py:1275
+#: src/alfred/security/quarantine.py:1398
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:1347
+#: src/alfred/security/quarantine.py:1470
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 

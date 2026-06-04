@@ -34,6 +34,7 @@ Coverage targets:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock
@@ -41,7 +42,54 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import BaseModel
 
+from alfred.hooks import HookRegistry, get_registry, set_registry
 from alfred.plugins.transport import ControlResult
+from alfred.security.quarantine import declare_hookpoints
+from tests.helpers.gates import make_quarantined_extract_chain_gate
+
+
+@pytest.fixture(autouse=True)
+def _extract_chain_gate() -> Iterator[None]:
+    """Install a scoped :class:`RealGate` as the registry singleton
+    for every test in this module.
+
+    Post-CR-156 round 7 / CR-158 T1, :class:`QuarantinedExtractor`'s
+    constructor calls
+    :func:`alfred.security._extract_dlp_subscriber.register_extract_dlp_subscriber`
+    which raises :class:`HookError` on gate-deny. Without a granted
+    gate the default-installed :class:`_DenyAllGate` would refuse the
+    system-tier subscriber registration and the extractor could not
+    construct.
+
+    The fixture installs a scoped :class:`RealGate` (production gate
+    code, NOT a permissive shim — CLAUDE.md hard rule #2) seeded
+    with exactly the system-tier grant the DLP subscriber needs on
+    the ``security.quarantined.extract`` chain. The hookpoint is
+    re-declared against the fresh registry so the helper's
+    register-time check sees a declared post bucket.
+
+    Restore the prior singleton on teardown — adversarial / chain
+    tests in sibling modules use their own fresh registries; a leak
+    here would cross-contaminate them.
+    """
+    prior = get_registry()
+    registry = HookRegistry(
+        gate=make_quarantined_extract_chain_gate(),
+        strict_declarations=False,
+    )
+    try:
+        # Install + declare INSIDE the try so any failure in
+        # :func:`declare_hookpoints` cannot leak the half-installed
+        # singleton to sibling modules. CR-158 round 2 caught this:
+        # the previous ordering called :func:`set_registry` first,
+        # so a :func:`declare_hookpoints` raise would never reach
+        # the ``finally`` restore.
+        set_registry(registry)
+        declare_hookpoints(registry)
+        yield
+    finally:
+        set_registry(prior)
+
 
 # ---------------------------------------------------------------------------
 # Local fixtures — kept inline so the test file is read in one pass.
@@ -144,6 +192,76 @@ def _make_schema() -> type:
     return _ArticleSchema
 
 
+def _stub_outbound_dlp() -> MagicMock:
+    """Identity :class:`OutboundDlp` stub — scan returns input verbatim.
+
+    Used by tests that exercise the existing
+    :meth:`QuarantinedExtractor.extract` audit / wire-format / schema
+    contracts; the hookpoint chain ships in #158 but these tests
+    predate it, so passing a no-op DLP keeps the original-contract
+    assertions intact (the post chain runs with an unregistered
+    subscriber list — no scan, no refusal). The new chain-behaviour
+    tests live in ``test_quarantined_extract_dlp_chain.py``.
+    """
+    dlp = MagicMock()
+    dlp.scan = MagicMock(side_effect=lambda x: x)
+    return dlp
+
+
+# ---------------------------------------------------------------------------
+# Wire-format guard — data field must be a dict (pre-existing branch
+# uncovered before #158; covered here to keep the trust-boundary
+# coverage gate honest).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extract_payload_with_non_dict_data_is_protocol_violation() -> None:
+    """A ``kind="extracted"`` payload whose ``data`` field is NOT a
+    dict (e.g. a list, a string, ``None``) is a protocol violation,
+    not a permissively-defaulted empty-dict result.
+
+    The wire-format contract from PRD §7.1 is that ``data`` must be a
+    dict matching the requested schema. Permissively coercing a
+    non-dict ``data`` to ``{}`` would let a misbehaving plugin
+    synthesise a valid Extracted outcome for any schema whose
+    required fields all carry defaults, weakening the dual-LLM
+    split's typed-boundary guarantee.
+    """
+    from alfred.plugins.errors import PluginProtocolViolation
+    from alfred.security.quarantine import QuarantinedExtractor
+
+    transport = MagicMock()
+    transport.dispatch = AsyncMock(
+        return_value=ControlResult(
+            method="quarantine.extract",
+            payload={
+                "kind": "extracted",
+                "data": ["this", "is", "a", "list"],  # NOT a dict
+                "extraction_mode": "native_constrained",
+            },
+        ),
+    )
+    audit_writer = MagicMock()
+    audit_writer.append_schema = AsyncMock()
+
+    extractor = QuarantinedExtractor(
+        transport=transport,
+        audit_writer=audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
+    )
+
+    with pytest.raises(PluginProtocolViolation):
+        await extractor.extract(_make_handle(), _make_schema())
+
+    # Protocol-violation audit row emitted BEFORE the raise — CLAUDE.md
+    # hard rule #7. Operator sees the failure even if the caller
+    # swallows the exception.
+    audit_writer.append_schema.assert_awaited()
+    events = [call.kwargs.get("event") for call in audit_writer.append_schema.await_args_list]
+    assert "quarantine.protocol_violation" in events
+
+
 # ---------------------------------------------------------------------------
 # Construction + schema-version validation.
 # ---------------------------------------------------------------------------
@@ -179,6 +297,7 @@ def test_extractor_rejects_non_extraction_schema_at_runtime(
     extractor = QuarantinedExtractor(
         transport=fake_transport_extracted,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
 
     with pytest.raises(TypeError, match="ExtractionSchema"):
@@ -205,6 +324,7 @@ async def test_extract_returns_extracted_for_extracted_payload(
     extractor = QuarantinedExtractor(
         transport=fake_transport_extracted,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     result = await extractor.extract(_make_handle(), _make_schema())
 
@@ -226,6 +346,7 @@ async def test_extract_returns_typed_refusal_for_typed_refusal_payload(
     extractor = QuarantinedExtractor(
         transport=fake_transport_typed_refusal,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     result = await extractor.extract(_make_handle(), _make_schema())
 
@@ -246,6 +367,7 @@ async def test_extract_dispatches_quarantine_extract_method_with_handle_id(
     extractor = QuarantinedExtractor(
         transport=fake_transport_extracted,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     handle = _make_handle()
     await extractor.extract(handle, _make_schema())
@@ -281,6 +403,7 @@ async def test_extract_emits_audit_row_with_quarantine_extract_fields(
     extractor = QuarantinedExtractor(
         transport=fake_transport_extracted,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     await extractor.extract(_make_handle(), _make_schema())
 
@@ -316,6 +439,7 @@ async def test_extract_audit_row_for_refusal_carries_refused_result(
     extractor = QuarantinedExtractor(
         transport=fake_transport_typed_refusal,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     await extractor.extract(_make_handle(), _make_schema())
 
@@ -339,6 +463,7 @@ async def test_extract_audit_row_correlation_id_is_per_call(
     extractor = QuarantinedExtractor(
         transport=fake_transport_extracted,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     await extractor.extract(_make_handle(), _make_schema())
     await extractor.extract(_make_handle(), _make_schema())
@@ -366,6 +491,7 @@ async def test_extract_raises_protocol_violation_on_non_control_result(
     extractor = QuarantinedExtractor(
         transport=fake_transport_non_control,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     with pytest.raises(PluginProtocolViolation):
         await extractor.extract(_make_handle(), _make_schema())
@@ -385,6 +511,7 @@ async def test_extract_emits_protocol_violation_audit_before_raising(
     extractor = QuarantinedExtractor(
         transport=fake_transport_non_control,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     with pytest.raises(PluginProtocolViolation):
         await extractor.extract(_make_handle(), _make_schema())
@@ -418,6 +545,7 @@ async def test_extract_unexpected_payload_kind_is_protocol_violation(
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     with pytest.raises(PluginProtocolViolation):
         await extractor.extract(_make_handle(), _make_schema())
@@ -452,6 +580,7 @@ async def test_extract_out_of_vocabulary_extraction_mode_is_protocol_violation(
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     with pytest.raises(PluginProtocolViolation):
         await extractor.extract(_make_handle(), _make_schema())
@@ -487,6 +616,7 @@ async def test_extract_out_of_vocabulary_refusal_reason_is_protocol_violation(
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
     with pytest.raises(PluginProtocolViolation):
         await extractor.extract(_make_handle(), _make_schema())
@@ -510,6 +640,7 @@ def test_build_retry_prompt_includes_schema_json() -> None:
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=MagicMock(),
+        outbound_dlp=_stub_outbound_dlp(),
     )
     prompt = extractor._build_retry_prompt(
         validator_error_category="schema_mismatch",
@@ -555,6 +686,7 @@ def test_build_retry_prompt_validator_error_category_is_closed_vocabulary() -> N
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=MagicMock(),
+        outbound_dlp=_stub_outbound_dlp(),
     )
 
     # The closed set is small — these labels must work.
@@ -583,6 +715,7 @@ def test_build_retry_prompt_rejects_unknown_category() -> None:
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=MagicMock(),
+        outbound_dlp=_stub_outbound_dlp(),
     )
 
     with pytest.raises(ValueError, match="validator_error_category"):
@@ -644,6 +777,7 @@ async def test_extract_rejects_payload_missing_required_schema_field(
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
 
     with pytest.raises(PluginProtocolViolation):
@@ -688,6 +822,7 @@ async def test_extract_rejects_payload_with_extra_field_when_schema_forbids(
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
 
     with pytest.raises(PluginProtocolViolation):
@@ -719,6 +854,7 @@ async def test_extract_emits_transport_failed_audit_on_dispatch_crash(
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
 
     with pytest.raises(BrokenPipeError):
@@ -768,6 +904,7 @@ async def test_extract_rejects_payload_with_wrong_field_types(
     extractor = QuarantinedExtractor(
         transport=transport,
         audit_writer=fake_audit_writer,
+        outbound_dlp=_stub_outbound_dlp(),
     )
 
     with pytest.raises(PluginProtocolViolation):
