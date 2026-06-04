@@ -2295,3 +2295,216 @@ async def test_success_row_status_code_is_none() -> None:
     call = audit.append_schema.await_args
     assert call.kwargs["result"] == "ok"
     assert call.kwargs["subject"]["status_code"] is None
+
+
+# ---------------------------------------------------------------------------
+# #147: host-side Pydantic validation of web.fetch dispatch params
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_releases_cap_on_param_validation_error() -> None:
+    """#147: a Pydantic ``ValidationError`` host-side releases the cap +
+    raises ``WebFetchError``. ``transport.dispatch`` MUST NOT be called.
+
+    Defence-in-depth: a dispatcher bug (e.g. the C2/arch-002 missing-
+    ``redis_url`` shape from PR-S3-5) fails clean host-side, not via a
+    plugin-subprocess crash.
+    """
+    from pydantic import ValidationError
+
+    from alfred.plugins.web_fetch.dispatch_params import WebFetchDispatchParams
+
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+    handle_cap = _build_handle_cap()
+
+    err = ValidationError.from_exception_data(
+        "WebFetchDispatchParams",
+        [
+            {
+                "type": "missing",
+                "loc": ("url",),
+                "input": {},
+            }
+        ],
+    )
+
+    with (
+        patch.object(WebFetchDispatchParams, "__init__", side_effect=err),
+        pytest.raises(WebFetchError),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-147-a",
+            correlation_id="corr-147-release",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    handle_cap.release.assert_awaited()
+    transport.dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_param_validation_audit_row_shape() -> None:
+    """#147: the validation-failure audit row carries
+    ``dlp_scan_result='dispatch_param_invalid'`` + the pre-minted
+    ``content_handle_id`` + ``trust_tier_of_result='T0'`` (no T3
+    content crossed the boundary on this path).
+    """
+    from pydantic import ValidationError
+
+    from alfred.plugins.web_fetch.dispatch_params import WebFetchDispatchParams
+
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+    handle_cap = _build_handle_cap()
+
+    err = ValidationError.from_exception_data(
+        "WebFetchDispatchParams",
+        [{"type": "missing", "loc": ("redis_url",), "input": {}}],
+    )
+
+    with (
+        _pin_pre_minted_handle_id("handle-uuid-147-shape"),
+        patch.object(WebFetchDispatchParams, "__init__", side_effect=err),
+        pytest.raises(WebFetchError),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-147-b",
+            correlation_id="corr-147-shape",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    rows = [c.kwargs for c in audit.append_schema.await_args_list]
+    inv = [r for r in rows if r["result"] == "dispatch_param_invalid"]
+    assert len(inv) == 1, f"expected exactly one dispatch_param_invalid row; got {rows!r}"
+    subj = inv[0]["subject"]
+    assert subj["dlp_scan_result"] == "dispatch_param_invalid"
+    assert subj["content_handle_id"] == "handle-uuid-147-shape"
+    assert subj["trust_tier_of_result"] == "T0"
+    assert subj["triggering_user_id"] == "user-147-b"
+    assert subj["correlation_id"] == "corr-147-shape"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_param_validation_structlog_emits_typename() -> None:
+    """#147: the loud structlog event
+    ``web_fetch.dispatch.param_validation_failed`` carries the Pydantic
+    error TYPE NAME — never the raw error message (Pydantic embeds
+    field names + values that may carry secrets; spec §5.6 redaction).
+    """
+    from pydantic import ValidationError
+    from structlog.testing import capture_logs
+
+    from alfred.plugins.web_fetch.dispatch_params import WebFetchDispatchParams
+
+    audit = _build_audit()
+    transport = _build_transport_returning_handle()
+    handle_cap = _build_handle_cap()
+
+    err = ValidationError.from_exception_data(
+        "WebFetchDispatchParams",
+        [{"type": "missing", "loc": ("correlation_id",), "input": {}}],
+    )
+
+    with (
+        patch.object(WebFetchDispatchParams, "__init__", side_effect=err),
+        capture_logs() as logs,
+        pytest.raises(WebFetchError),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-147-c",
+            correlation_id="corr-147-typename",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    events = [
+        log for log in logs if log.get("event") == "web_fetch.dispatch.param_validation_failed"
+    ]
+    assert events, f"loud structlog event missing; got {logs!r}"
+    assert events[0].get("exception_type") == "ValidationError"
+    assert events[0].get("correlation_id") == "corr-147-typename"
+    # The raw Pydantic message MUST NOT appear in any captured field —
+    # Pydantic embeds the field name (here "correlation_id") in its
+    # message body. We confirm only the closed-vocabulary tag/typename
+    # surfaces; field-content from the error is forbidden.
+    for log in events:
+        # exception_type is allowed; correlation_id is allowed (it is
+        # the caller's id, not the Pydantic-error excerpt). No other
+        # field may contain the substring "Field required" or similar
+        # Pydantic message tokens.
+        for key, value in log.items():
+            if key in {"exception_type", "event", "correlation_id"}:
+                continue
+            if isinstance(value, str):
+                assert "Field required" not in value
+                assert "validation error" not in value.lower() or key == "note"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_param_validation_release_failure_preserves_validation_error() -> None:
+    """#147: parity with the transport_error / handle_id_mismatch arms —
+    if ``handle_cap.release`` itself raises during eager cleanup on the
+    validation arm, the original ``WebFetchError`` MUST still propagate;
+    the release failure surfaces as a LOUD structlog event.
+    """
+    from pydantic import ValidationError
+    from structlog.testing import capture_logs
+
+    from alfred.plugins.web_fetch.dispatch_params import WebFetchDispatchParams
+
+    audit = _build_audit()
+    handle_cap = _build_handle_cap()
+    handle_cap.release = AsyncMock(side_effect=ConnectionError("redis hiccup"))
+    transport = _build_transport_returning_handle()
+
+    err = ValidationError.from_exception_data(
+        "WebFetchDispatchParams",
+        [{"type": "missing", "loc": ("content_handle_id",), "input": {}}],
+    )
+
+    with (
+        capture_logs() as logs,
+        patch.object(WebFetchDispatchParams, "__init__", side_effect=err),
+        pytest.raises(WebFetchError),
+    ):
+        await dispatch_web_fetch(
+            url="https://example.com/page",
+            headers={},
+            user_id="user-147-d",
+            correlation_id="corr-147-release-fail",
+            config=_build_config(),
+            rate_limiter=_build_rate_limiter(),
+            outbound_dlp=_build_dlp(),
+            audit=audit,
+            transport=transport,
+            handle_cap=handle_cap,
+        )
+
+    assert any(
+        log.get("event") == "web_fetch.handle_cap.eager_release_failed"
+        and log.get("exception_type") == "ConnectionError"
+        for log in logs
+    ), f"expected eager_release_failed structlog event; got {logs!r}"
+    transport.dispatch.assert_not_called()
