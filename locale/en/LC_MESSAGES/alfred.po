@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-02 13:19+0100\n"
+"POT-Creation-Date: 2026-06-04 17:41+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1417,11 +1417,20 @@ msgstr ""
 "prompt-injection payloads is the canonical T3 ingestion attack; disabled "
 "TLS verification is the bypass (spec §7.11)."
 
-#: src/alfred/security/quarantine.py:817
+#: src/alfred/security/_extract_dlp_subscriber.py:368
+msgid "security.quarantine.dlp_subscriber_registration_denied"
+msgstr ""
+"Capability gate denied the system-tier DLP subscriber registration on "
+"security.quarantined.extract; extractor construction was refused and no "
+"post-chain DLP scan was wired. Audit row "
+"HOOKS_DLP_SUBSCRIBER_NOT_REGISTERED carries plugin_id={plugin_id!r}, "
+"hookpoint={hookpoint!r}, requested_tier={requested_tier!r}."
+
+#: src/alfred/security/quarantine.py:1275
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:889
+#: src/alfred/security/quarantine.py:1347
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 

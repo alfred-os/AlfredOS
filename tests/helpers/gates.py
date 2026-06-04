@@ -407,8 +407,216 @@ def make_permissive_fixture_gate(*, allow_system: bool = False) -> CapabilityGat
     return _DevGateLikeFixture(allow_system=allow_system)
 
 
+def make_quarantined_extract_chain_gate(
+    *,
+    plugin_id: str = "alfred.security._extract_dlp_subscriber",
+    allow_sibling_operator: bool = False,
+    sibling_operator_plugin_id: str | None = None,
+    extra_system_plugin_ids: Iterable[str] = (),
+    extra_operator_plugin_ids: Iterable[str] = (),
+    grant_dereference_t3: bool = False,
+    dereference_plugin_id: str = "alfred.quarantined-llm",
+    grant_downgrade_t3: bool = False,
+) -> CapabilityGate:
+    """Return a :class:`RealGate` scoped to the
+    ``security.quarantined.extract`` chain — the canonical scoped-grant
+    posture for #158-era trust-boundary tests.
+
+    Slice-3 spec §15.1 + CLAUDE.md hard rule #2: tests on the
+    trust-boundary MUST use scoped fixture grants, NOT
+    :func:`make_permissive_fixture_gate(allow_system=True)`. The
+    permissive shim ignores ``plugin_id`` / ``hookpoint`` so a
+    regression in the grant-policy check is invisible at test time —
+    exactly what CLAUDE.md hard rule #2 forbids.
+
+    The returned gate seeds:
+
+    * **system-tier grant** for ``(plugin_id, "security.quarantined.extract")``
+      — covers :class:`OutboundDlpExtractSubscriber` registration via
+      :func:`register_extract_dlp_subscriber`, which uses
+      ``OutboundDlpExtractSubscriber.__call__.__module__`` (=
+      ``"alfred.security._extract_dlp_subscriber"``) as its plugin_id.
+    * **operator-tier grant** (only when ``allow_sibling_operator=True``)
+      for ``(sibling_operator_plugin_id or plugin_id,
+      "security.quarantined.extract")`` — covers tests that register a
+      sibling operator-tier subscriber (e.g. a future telemetry observer)
+      next to the system DLP scan to assert that the helper's
+      idempotency check skips past unrelated subscribers. Tests that
+      don't register siblings leave ``allow_sibling_operator=False``;
+      the gate denies any operator request on the chain.
+    * **content-tier T3 grant** for ``(dereference_plugin_id,
+      "quarantine.dereference")`` (only when
+      ``grant_dereference_t3=True``) — covers the
+      :func:`quarantined_to_structured` content-clearance check on the
+      T3 boundary (PRD §7.1). CR-158 round 2 caught the gap: the
+      helper previously seeded only subscriber-tier grants, so
+      ``check_content_clearance()`` on the T3 boundary was never
+      exercised against :class:`RealGate` and a grant-matching
+      regression there would have stayed green in CI. Tests that
+      construct an extractor and exercise dereference on the same
+      fixture pass ``grant_dereference_t3=True``; tests that only
+      register the DLP subscriber leave it :data:`False` so the deny
+      path remains explicit.
+      Downgrade authorization is a SEPARATE
+      ``(plugin_id, hookpoint)`` grant covered by the distinct
+      ``grant_downgrade_t3`` flag (see argument docs below); the
+      ``quarantine.dereference`` grant alone does NOT authorize the
+      ``t3.downgrade_to_orchestrator`` clearance check.
+
+    The grants are EXACT (``hookpoint="security.quarantined.extract"``,
+    not ``"*"``) so a future test that registers a system-tier
+    subscriber on a DIFFERENT hookpoint is denied — the gate's grant
+    posture is the load-bearing security signal, not a permissive
+    backstop.
+
+    Args:
+        plugin_id: The plugin id the system-tier grant covers. Defaults
+            to ``"alfred.security._extract_dlp_subscriber"`` — the
+            attribution the production helper passes when registering
+            the canonical DLP scan.
+        allow_sibling_operator: Seed the operator-tier grant when
+            :data:`True`. Default :data:`False`.
+        sibling_operator_plugin_id: Override the plugin_id covered by
+            the operator-tier grant. When :data:`None` (default) the
+            grant covers ``plugin_id`` itself; tests registering a
+            sibling whose ``__module__`` differs from the DLP
+            subscriber's pass the sibling's module name here.
+        extra_system_plugin_ids: Additional plugin_ids that should
+            receive a system-tier grant for the chain. Tests that
+            register ad-hoc system-tier observers (e.g. pre/error-stage
+            test subscribers whose ``__module__`` resolves to the test
+            module) pass their module names here so the scoped gate
+            grants them without resorting to a permissive shim.
+        extra_operator_plugin_ids: Same shape as
+            ``extra_system_plugin_ids`` but for operator-tier
+            registrations.
+        grant_dereference_t3: Seed the content-tier T3 grant for the
+            ``quarantine.dereference`` hookpoint when :data:`True`.
+            Default :data:`False`. Tests that exercise
+            :func:`quarantined_to_structured` /
+            :func:`downgrade_to_orchestrator` against the returned
+            :class:`RealGate` pass :data:`True`; tests that pin the
+            deny path leave it :data:`False` (an unscoped gate denies
+            content clearance fail-closed).
+        dereference_plugin_id: Override the plugin_id covered by the
+            ``quarantine.dereference`` content-tier T3 grant.
+            Default ``"alfred.quarantined-llm"`` — the attribution
+            :func:`quarantined_to_structured` passes at the
+            content-clearance call site
+            (:data:`alfred.security.quarantine.QuarantinedExtractor._PLUGIN_ID`).
+        grant_downgrade_t3: Seed the content-tier T3 grant for the
+            ``t3.downgrade_to_orchestrator`` hookpoint when
+            :data:`True`. Default :data:`False`. The downgrade path
+            uses a DIFFERENT
+            (plugin_id, hookpoint) tuple from the dereference path
+            (``("t3.downgrade_to_orchestrator",
+            "t3.downgrade_to_orchestrator")``); tests that exercise
+            :func:`downgrade_to_orchestrator` against the returned
+            :class:`RealGate` pass :data:`True`.
+
+    Returns:
+        A :class:`RealGate` instance — production gate code, not a
+        test shim. ``check`` consults the seeded grant set; any
+        request outside the seeded scope denies fail-closed.
+
+    Use this in place of :func:`make_permissive_fixture_gate` for
+    every test that:
+
+    * Constructs a :class:`alfred.security.quarantine.QuarantinedExtractor`
+      (the constructor calls :func:`register_extract_dlp_subscriber`
+      which fails closed without a granted gate post-CR-156 round 7),
+      OR
+    * Calls :func:`register_extract_dlp_subscriber` directly,
+      OR
+    * Dispatches through the ``security.quarantined.extract`` chain.
+    """
+    grants: set[GrantRow] = {
+        GrantRow(
+            plugin_id=plugin_id,
+            subscriber_tier="system",
+            hookpoint="security.quarantined.extract",
+            content_tier=None,
+            proposal_branch="test-fixture",
+        )
+    }
+    if allow_sibling_operator:
+        grants.add(
+            GrantRow(
+                plugin_id=sibling_operator_plugin_id or plugin_id,
+                subscriber_tier="operator",
+                hookpoint="security.quarantined.extract",
+                content_tier=None,
+                proposal_branch="test-fixture",
+            )
+        )
+    for extra_plugin_id in extra_system_plugin_ids:
+        grants.add(
+            GrantRow(
+                plugin_id=extra_plugin_id,
+                subscriber_tier="system",
+                hookpoint="security.quarantined.extract",
+                content_tier=None,
+                proposal_branch="test-fixture",
+            )
+        )
+    for extra_plugin_id in extra_operator_plugin_ids:
+        grants.add(
+            GrantRow(
+                plugin_id=extra_plugin_id,
+                subscriber_tier="operator",
+                hookpoint="security.quarantined.extract",
+                content_tier=None,
+                proposal_branch="test-fixture",
+            )
+        )
+    if grant_dereference_t3:
+        # The content-clearance check at the T3 boundary is the
+        # gate-first short-circuit in :func:`quarantined_to_structured`.
+        # ``subscriber_tier`` is set to ``"system"`` because
+        # :class:`GrantRow` requires a value from the closed domain
+        # ``{"system", "operator", "user-plugin"}`` (CR-139 finding
+        # #4); the production content-clearance check
+        # (:meth:`GatePolicy.check_content_clearance`) consults
+        # ``content_tier`` only (spec §4.3 — orthogonal axes), so
+        # the subscriber-tier value on this row is structurally
+        # required but functionally inert at the
+        # ``quarantine.dereference`` call site.
+        grants.add(
+            GrantRow(
+                plugin_id=dereference_plugin_id,
+                subscriber_tier="system",
+                hookpoint="quarantine.dereference",
+                content_tier="T3",
+                proposal_branch="test-fixture",
+            )
+        )
+    if grant_downgrade_t3:
+        # :func:`downgrade_to_orchestrator` uses a distinct
+        # (plugin_id, hookpoint) tuple from
+        # :func:`quarantined_to_structured` — the downgrade has its
+        # own forensic anchor (``T3_DERIVED_DOWNGRADE_FIELDS``) so
+        # the gate row is also distinct. Same subscriber_tier rationale
+        # as the dereference row above.
+        grants.add(
+            GrantRow(
+                plugin_id="t3.downgrade_to_orchestrator",
+                subscriber_tier="system",
+                hookpoint="t3.downgrade_to_orchestrator",
+                content_tier="T3",
+                proposal_branch="test-fixture",
+            )
+        )
+    frozen_grants = frozenset(grants)
+    return RealGate(
+        policy=GatePolicy(grants=frozen_grants),
+        backend=_make_in_memory_backend(grants=frozen_grants),
+        audit_sink=_make_no_op_audit_sink(),
+    )
+
+
 __all__ = [
     "make_allow_system_gate",
     "make_deny_all_gate",
     "make_permissive_fixture_gate",
+    "make_quarantined_extract_chain_gate",
 ]
