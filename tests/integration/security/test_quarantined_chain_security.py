@@ -33,20 +33,61 @@ rule: integration tests use recorded fixtures).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from alfred.hooks import HookRegistry, get_registry, set_registry
 from alfred.security.quarantine import (
     ContentHandle,
     Extracted,
     ExtractionSchema,
     T3DerivedData,
+    declare_hookpoints,
     downgrade_to_orchestrator,
     quarantined_to_structured,
 )
+from tests.helpers.gates import make_deny_all_gate, make_quarantined_extract_chain_gate
+
+
+@pytest.fixture(autouse=True)
+def _extract_chain_gate() -> Iterator[None]:
+    """Install a scoped :class:`RealGate` as the registry singleton
+    for every test in this module.
+
+    Post-CR-156 round 7 / CR-158 T1, :class:`QuarantinedExtractor`'s
+    constructor raises on gate-deny. Tests in this module that
+    construct an extractor (the audit-row pin) need a granted gate;
+    tests that pass a stub extractor through
+    :func:`quarantined_to_structured` don't strictly need one, but
+    the autouse fixture keeps the gate posture uniform across the
+    module so a future refactor that adds a real extractor doesn't
+    silently fail.
+
+    The scoped :class:`RealGate` (CLAUDE.md hard rule #2 — NOT a
+    permissive shim) seeds the system-tier grant for the DLP
+    subscriber on the ``security.quarantined.extract`` chain. The
+    hookpoint is re-declared against the fresh registry so the
+    helper's register-time check sees a declared post bucket.
+    """
+    prior = get_registry()
+    registry = HookRegistry(
+        gate=make_quarantined_extract_chain_gate(),
+        strict_declarations=False,
+    )
+    try:
+        # Install + declare INSIDE the try so any failure in
+        # :func:`declare_hookpoints` cannot leak the half-installed
+        # singleton to sibling modules (CR-158 round 2).
+        set_registry(registry)
+        declare_hookpoints(registry)
+        yield
+    finally:
+        set_registry(prior)
+
 
 # ---------------------------------------------------------------------------
 # Local helpers — keep test bodies declarative.
@@ -71,19 +112,6 @@ def _make_handle(source: str = "https://example.test/article") -> ContentHandle:
         source_url=source,
         fetch_timestamp=datetime.now(UTC),
     )
-
-
-class _AllowAllGate:
-    """Permissive gate — every check returns True. Use to exercise success path."""
-
-    def check(self, *, plugin_id: str, hookpoint: str, requested_tier: str) -> bool:
-        return True
-
-    def check_plugin_load(self, *, plugin_id: str, manifest_tier: str) -> bool:
-        return True
-
-    def check_content_clearance(self, *, plugin_id: str, hookpoint: str, content_tier: str) -> bool:
-        return True
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +156,12 @@ async def test_quarantined_to_structured_returns_extracted_with_t3_derived_data(
             extraction_mode="native_constrained",
         ),
     )
-    gate = _AllowAllGate()
+    # CR-158 round 2: success path uses :class:`RealGate` with a
+    # content-tier T3 grant for ``quarantine.dereference`` (PRD §7.1
+    # / CLAUDE.md hard rule #2) — NOT a hand-rolled allow-all shim
+    # that ignores ``plugin_id`` / ``hookpoint`` / ``content_tier``
+    # and would mask a grant-matching regression on the boundary.
+    gate = make_quarantined_extract_chain_gate(grant_dereference_t3=True)
     result = await quarantined_to_structured(
         _make_handle(),
         _ArticleSchema,
@@ -159,18 +192,19 @@ async def test_quarantined_to_structured_denied_gate_skips_extractor() -> None:
     fake_extractor = MagicMock()
     fake_extractor.extract = AsyncMock()
 
-    class _DenyGate(_AllowAllGate):
-        def check_content_clearance(
-            self, *, plugin_id: str, hookpoint: str, content_tier: str
-        ) -> bool:
-            return False
-
+    # CR-158 round 2: deny path uses :class:`RealGate` with an
+    # empty grant store (PRD §7.1 / CLAUDE.md hard rule #2).
+    # :func:`make_deny_all_gate` returns a RealGate whose
+    # ``check_content_clearance`` denies fail-closed for every
+    # (plugin_id, hookpoint, content_tier) tuple — exercising the
+    # production grant-policy check rather than a hand-rolled shim
+    # that hard-codes ``return False``.
     with pytest.raises(AlfredError):
         await quarantined_to_structured(
             _make_handle(),
             _ArticleSchema,
             extractor=fake_extractor,
-            gate=_DenyGate(),
+            gate=make_deny_all_gate(),
         )
     fake_extractor.extract.assert_not_awaited()
 
@@ -239,7 +273,16 @@ async def test_audit_row_carries_t3_trust_tier_through_full_extract() -> None:
         ),
     )
 
-    extractor = QuarantinedExtractor(transport=fake_transport, audit_writer=fake_audit_writer)
+    # Identity DLP stub — the test asserts the legacy audit-row family;
+    # the #158 DLP scan runs but the identity scanner produces no
+    # redaction delta, so no HookRefusal interferes with the assertion.
+    fake_dlp = MagicMock()
+    fake_dlp.scan = MagicMock(side_effect=lambda x: x)
+    extractor = QuarantinedExtractor(
+        transport=fake_transport,
+        audit_writer=fake_audit_writer,
+        outbound_dlp=fake_dlp,
+    )
     result = await extractor.extract(_make_handle(), _ArticleSchema)
 
     assert isinstance(result, Extracted)
@@ -287,9 +330,13 @@ async def test_downgrade_to_orchestrator_audit_row_chain_traceable() -> None:
     fake_audit_writer.append_schema = AsyncMock(side_effect=_capture)
 
     data: T3DerivedData = T3DerivedData({"title": "Safe Title"})
+    # CR-158 round 2: success path uses :class:`RealGate` with a
+    # content-tier T3 grant for ``t3.downgrade_to_orchestrator`` —
+    # see :func:`make_quarantined_extract_chain_gate` for the
+    # rationale.
     plain = await downgrade_to_orchestrator(
         data,
-        gate=_AllowAllGate(),
+        gate=make_quarantined_extract_chain_gate(grant_downgrade_t3=True),
         audit_writer=fake_audit_writer,
     )
 
@@ -326,16 +373,15 @@ async def test_downgrade_denied_gate_writes_no_t3_downgrade_audit_row() -> None:
 
     fake_audit_writer.append_schema = AsyncMock(side_effect=_capture)
 
-    class _DenyGate(_AllowAllGate):
-        def check_content_clearance(
-            self, *, plugin_id: str, hookpoint: str, content_tier: str
-        ) -> bool:
-            return False
-
+    # CR-158 round 2: deny path uses :class:`RealGate` with an
+    # empty grant store. ``check_content_clearance`` denies
+    # fail-closed for the ``t3.downgrade_to_orchestrator`` tuple,
+    # exercising the production grant-policy check rather than a
+    # subclassed shim hard-coding ``return False``.
     with pytest.raises(AlfredError):
         await downgrade_to_orchestrator(
             T3DerivedData({"title": "Safe Title"}),
-            gate=_DenyGate(),
+            gate=make_deny_all_gate(),
             audit_writer=fake_audit_writer,
         )
 
@@ -370,11 +416,14 @@ async def test_orchestrator_never_observes_raw_t3_bytes_in_chain_result(
         ),
     )
 
+    # CR-158 round 2: success path uses scoped :class:`RealGate`
+    # (CLAUDE.md hard rule #2). See the first test in this module
+    # for the rationale.
     result = await quarantined_to_structured(
         _make_handle(),
         _ArticleSchema,
         extractor=fake_extractor,
-        gate=_AllowAllGate(),
+        gate=make_quarantined_extract_chain_gate(grant_dereference_t3=True),
     )
 
     assert isinstance(result, Extracted)
