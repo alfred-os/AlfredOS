@@ -137,7 +137,8 @@ TypedRefusalReason = Literal[
     "ambiguous_input",
     "provider_refused",
     "provider_unavailable",
-    "dlp_outbound_refused",
+    "dlp_outbound_refused",  # tombstone — see below
+    "post_stage_refused",
     "nonce_check_failed",
 ]
 ```
@@ -146,6 +147,15 @@ A new refusal cause requires a deliberate addition to the Literal and a
 matching reviewer-gated audit-schema migration. Free-form reasons would
 leak provider-supplied (potentially T3-derived) text into
 orchestrator-readable fields.
+
+`dlp_outbound_refused` is retained as a tombstone for forensic-history
+continuity; no live emit site uses it. Post-stage refusals (including the
+DLP subscriber's canary trip) now record `post_stage_refused` and carry
+the refusing subscriber's identity on `QUARANTINE_EXTRACT_FIELDS.refusing_hook_id`.
+That row is the only forensic surface for the attribution because
+`alfred.hooks.invoke._run_post` does NOT emit `HOOKS_REFUSAL` for
+post-stage refusals — §6.5's refusal-authorisation contract is
+pre-stage-only by design.
 
 ### `T3DerivedData` (`src/alfred/security/quarantine.py`)
 
@@ -401,13 +411,28 @@ the survival check graduates to a structural runtime type assertion
 
 ### `quarantined_to_structured` correlation
 
-`QuarantinedExtractor.extract` allocates a per-invocation `correlation_id`
-(a fresh UUID) for each call — never shared across calls (prov-012).
-Audit rows on the same conversation are tied through the parent
-`trace_id`, not through `correlation_id`. The transport-failed and
-protocol-violation audit emitters reuse the same correlation id so
-operators can join the failure row to whatever wire-level structlog
-emit happens alongside it.
+`QuarantinedExtractor.extract` mints TWO correlation ids per call:
+
+1. **`chain_correlation_id`** (a UUID minted at chain entry, before
+   the pre-stage dispatch). This is the **shared trace key** for the
+   call. Every `quarantine.*` audit row this extractor emits — both
+   the deferred `quarantine.extract` row at the post-stage boundary
+   AND the inline `quarantine.transport_failed` /
+   `quarantine.protocol_violation` rows the body emits before raising
+   — carries this value as its top-level `trace_id`. The pre/post/error
+   hook-chain dispatch rows that `alfred.hooks.invoke.invoke` writes
+   for `security.quarantined.extract` carry the same value as their
+   correlation id. Forensic queries joining on `trace_id` see a single
+   coherent trace covering every dispatch and audit emission for one
+   extraction call (CR-158 round 4).
+2. **`correlation_id`** (a per-invocation UUID minted inside
+   `_extract_body`). Finer-grained than `chain_correlation_id` —
+   lives as a field inside the row's `subject` payload, not as the
+   top-level `trace_id`. Filtering on `subject.correlation_id` narrows
+   a trace bucket to a specific body invocation. Never shared across
+   calls (prov-012); cross-process audit consumers that have not
+   adopted the `trace_id` join key can still group on this field
+   within a single forensic export window.
 
 ## Audit row families
 
