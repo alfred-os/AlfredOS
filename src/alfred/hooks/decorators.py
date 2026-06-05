@@ -79,8 +79,8 @@ def hook(
     works transparently.
 
     Args:
-        name: The dotted hookpoint identifier
-            (e.g. ``"action.memory.episodic.record"``). Positional so a
+        name: The hookpoint identifier (stem form)
+            (e.g. ``"before_validate"``). Positional so a
             typo at the call site is caught by mypy as a type mismatch
             on the first argument, not a missing kwarg.
         kind: The lifecycle stage. Keyword-only; one of the four
@@ -109,7 +109,7 @@ def hook(
     Example:
         .. code-block:: python
 
-            @hook("action.memory.episodic.record", kind="pre", tier="operator")
+            @hook("before_validate", kind="pre", tier="operator")
             async def redact_pii(
                 ctx: HookContext[EpisodicRecordInput],
             ) -> HookContext[EpisodicRecordInput] | None:

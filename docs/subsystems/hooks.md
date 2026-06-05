@@ -21,14 +21,25 @@ Sibling subsystem docs: [identity](identity.md), [comms](comms.md).
 The simplest case — a `user-plugin`-tier `post` observer that watches
 every recorded turn and changes nothing:
 
-> **Hookpoint naming.** PR-A's in-process dispatch keys on the LOCAL stem
-> name the publisher passes to `invoke()` (`"after_flush"`,
-> `"before_validate"`, etc.). The dotted form
-> (`memory.episodic.record.after_flush`) is the canonical threat-model
-> identifier the Slice-3 MCP transport will normalize to — but a Slice-2.5
-> subscriber MUST use the stem to fire against PR-B's publisher. See the
-> `tests/unit/memory/test_episodic_hooks_wiring.py` fixtures for the
-> as-shipped registration form.
+> **Hookpoint naming.** The runtime canonical form is the **stem name** the
+> publisher passes to `invoke()` and the registry's
+> `register_hookpoint(name=...)` (`"after_flush"`, `"before_validate"`, etc.).
+> The dotted form (`memory.episodic.record.after_flush`) was an aspirational
+> threat-model identifier — originally planned to land via a Slice-3 MCP
+> transport normalization layer. **That layer was not built;** the MCP
+> transport at `src/alfred/plugins/session.py` (shipped in PR-S3-3a) uses
+> stem-form identifiers directly. The eventual canonical→stem normalization
+> is deferred to Slice 4 as part of ADR-0016 (comms-MCP rewrite); see
+> [#118](https://github.com/alfred-os/AlfredOS/issues/118).
+>
+> Until then: every subscriber, publisher, and decorator **runtime**
+> example in this doc and in the source docstrings uses stem form. The
+> [Manifest surface](#manifest-surface) section below still shows the
+> aspirational dotted form because that's what the deferred MCP
+> transport layer will accept once ADR-0016 lands. See
+> `tests/unit/memory/test_episodic_hooks_wiring.py` for the as-shipped
+> registration form, and `src/alfred/hooks/_known_hookpoints.py` for the
+> canonical list of every stem the runtime knows about.
 
 ```python
 from alfred.hooks import hook, HookContext
