@@ -42,9 +42,16 @@ Hard rules honoured here:
 from __future__ import annotations
 
 import re
-from typing import ClassVar, Final, Literal, Self
+from typing import Annotated, ClassVar, Final, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 # CR-149 round-10 (3339361798): canonical field-shape patterns for the
 # proposal payloads. Mirrored from ``alfred.cli._validators`` so a
@@ -181,6 +188,13 @@ class StateGitProposalPayload(BaseModel):
     (PII-discipline cross-reference: ``_write_proposal_to_state_git``'s
     ``operator_user_id_len`` log line in the legacy stub); the canonical
     audit-row family is the sole readout site.
+
+    The field is bounded to 64 characters (matches the
+    ``PluginGrant.operator_user_id`` / ``AuditEntry.actor_user_id``
+    schema width) so an oversized payload cannot land in state.git
+    and DoS the dispatcher by hitting the ledger's String(64) limit at
+    write time — CR rework round-1 CRITICAL #4 hardens this at the
+    Pydantic boundary so the proposal-write surface refuses early.
     """
 
     # Configured once on the base so every subclass inherits the same
@@ -196,12 +210,14 @@ class StateGitProposalPayload(BaseModel):
     # mismatched value.
     proposal_type: ClassVar[str]
 
-    operator_user_id: str | None = Field(
+    operator_user_id: Annotated[str, StringConstraints(max_length=64)] | None = Field(
         default=None,
         description=(
             "Canonical user id of the operator who queued the proposal. "
             "PR-S3-7 wires the IdentityResolver; until then the field "
-            "is None on every emit site."
+            "is None on every emit site. Bounded to 64 chars at parse "
+            "time so an oversized payload cannot land in state.git "
+            "(matches PluginGrant.operator_user_id width)."
         ),
     )
 
@@ -424,7 +440,73 @@ class ConfigSetProposal(StateGitProposalPayload):
         return _check_quarantined_provider(value)
 
 
+class BreakerResetProposal(StateGitProposalPayload):
+    """Operator request to reset a circuit breaker (OPEN → CLOSED).
+
+    ADR-0021 — the first user of the side-effecting dispatch
+    infrastructure. Reviewer-gated per ADR-0018; the supervisor's
+    ``_proposal_dispatch_loop`` picks up the merged branch on its next
+    cycle and calls
+    :meth:`alfred.state.dispatch_registry.ProposalEffectsProtocol.reset_breaker`.
+
+    The actual state mutation lives in Postgres (``circuit_breakers``);
+    this proposal is the operator-intent + reviewer-gate record. It
+    does NOT carry the breaker target's prior state — that is the
+    runtime's concern at dispatch time, not the proposal payload's.
+
+    On-disk path convention: ``policies/breaker-resets/<proposal_id>.json``.
+    The dispatch loop's HEAD-diff walker keys the discriminator off the
+    path prefix; drift between this convention and the writer's
+    :func:`_on_disk_files_for` branch would silently misroute the
+    proposal.
+
+    ``component_id`` semantics: the runtime registry key the supervisor
+    uses to look up the breaker (e.g. ``"alfred.web-fetch"``). The
+    payload does not validate the shape — the dispatcher's
+    ``_handle_breaker_reset`` returns
+    :meth:`DispatchOutcome.failed` on
+    :class:`alfred.supervisor.errors.NoSuchComponentError` so an
+    operator-supplied typo surfaces as a ledger row with
+    ``failure_kind="handler_returned_failed"`` rather than a parse
+    refusal at proposal-write time. Catching it earlier would force
+    the writer to maintain a copy of every registered component id,
+    which drifts as plugins load and unload.
+    """
+
+    proposal_type: ClassVar[str] = "breaker-reset"
+
+    # CR rework round-1 CRITICAL #4: bound ``component_id`` at the model
+    # boundary. ``CircuitBreakerState.component_id`` is String(255), so
+    # mirroring that width refuses oversized payloads at parse time
+    # rather than at the supervisor's reset_breaker call.
+    component_id: Annotated[str, StringConstraints(max_length=255)]
+
+    reason: Literal["operator_initiated"] = "operator_initiated"
+
+    # CR rework round-1 HIGH #16: ``operator_user_id`` is required on
+    # the breaker-reset path (the supervisor's
+    # :meth:`Supervisor.reset_breaker` signature requires it as a
+    # keyword-only ``str`` arg). The base class declares it as
+    # ``str | None`` to allow other proposal types to defer the
+    # IdentityResolver wiring; the breaker-reset surface tightens that
+    # with a model-validator refusal so the on-disk shape always
+    # carries a non-empty id. Pyright/mypy keep the field annotation
+    # compatible with the base class — the model_validator is the
+    # narrowing primitive.
+    @model_validator(mode="after")
+    def _require_operator_user_id(self) -> Self:
+        if not self.operator_user_id:
+            msg = (
+                "BreakerResetProposal: operator_user_id is required "
+                "(empty / None is refused — Supervisor.reset_breaker "
+                "needs an attribution string)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 __all__ = [
+    "BreakerResetProposal",
     "ConfigSetProposal",
     "PluginGrantProposal",
     "PluginRevokeProposal",

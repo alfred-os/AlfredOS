@@ -51,6 +51,7 @@ import structlog
 
 from alfred.errors import AlfredError
 from alfred.state.proposal_payloads import (
+    BreakerResetProposal,
     ConfigSetProposal,
     PluginGrantProposal,
     PluginRevokeProposal,
@@ -102,6 +103,13 @@ _PROPOSAL_FILENAME: Final[str] = "proposal.json"
 # and the parser share a single literal — a drift would silently break
 # the round-trip.
 _GRANTS_TREE_PATH: Final[str] = "policies/grants"
+
+# ADR-0021: side-effecting BreakerResetProposal blobs land here so the
+# dispatch loop's HEAD-diff walker keys the discriminator off the path
+# prefix. Centralised so the writer and the dispatcher's path-derivation
+# helpers share a single literal — drift would silently misroute or
+# skip side-effecting proposals.
+_BREAKER_RESETS_TREE_PATH: Final[str] = "policies/breaker-resets"
 
 # ``token_hex(8)`` yields 16 hex characters — collision in a single
 # state.git lifetime is statistically zero. Matches the proposal-flow
@@ -272,6 +280,16 @@ def _legacy_payload_from_dict(
         return PluginGrantProposal(**payload)  # type: ignore[arg-type]
     if proposal_type == PluginRevokeProposal.proposal_type:
         return PluginRevokeProposal(**payload)  # type: ignore[arg-type]
+    if proposal_type == BreakerResetProposal.proposal_type:
+        # ADR-0021: the side-effecting breaker-reset payload is part of
+        # the canonical typed surface. Without this arm the legacy
+        # dict-form ``create_proposal("breaker-reset", {...})`` shape
+        # falls through to the unknown-type fallback that writes the
+        # blob to ``/proposal.json`` instead of the
+        # ``policies/breaker-resets/<id>.json`` path the dispatch loop's
+        # HEAD-diff walker watches. The blob would land in state.git
+        # but the dispatcher would never pick it up — a silent drop.
+        return BreakerResetProposal(**payload)  # type: ignore[arg-type]
     if proposal_type.startswith(f"{WebAllowlistProposal.proposal_type}-"):
         # ``web-allowlist-{action}`` — parse the action off the tag so
         # the typed payload carries the closed-set Literal value.
@@ -998,6 +1016,18 @@ def _on_disk_files_for(
         }
         rel_path = f"{_GRANTS_TREE_PATH}/{payload.plugin_id}/{proposal_id}.json"
         return {rel_path: json.dumps(grant_blob, indent=2, sort_keys=True)}
+
+    # ADR-0021: side-effecting BreakerResetProposal blobs land at the
+    # ``policies/breaker-resets/<proposal_id>.json`` convention so the
+    # dispatch loop's HEAD-diff walker discriminates them from
+    # declarative-projection blobs by path prefix. Pydantic's
+    # mode='json' dump produces a stable shape (sorted keys, no
+    # environment-dependent timestamps) — the dispatcher round-trips
+    # the same blob via :meth:`BreakerResetProposal.model_validate`.
+    if isinstance(payload, BreakerResetProposal):
+        rel_path = f"{_BREAKER_RESETS_TREE_PATH}/{proposal_id}.json"
+        payload_dict = payload.model_dump(mode="json")
+        return {rel_path: json.dumps(payload_dict, indent=2, sort_keys=True)}
 
     # Every other payload type carries its full state in the
     # proposal.json blob at the repo root. Pydantic's mode='json' dump
