@@ -15,7 +15,6 @@ i18n rule #1. The audit row for ``reset`` carries ``operator_user_id`` per
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import os
 import uuid
@@ -163,31 +162,6 @@ def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
         # gains a key without this emitter being updated.
         schema_fields=sorted(SUPERVISOR_BREAKER_RESET_FIELDS),
     )
-
-
-def _get_supervisor() -> object:
-    """Return the live :class:`Supervisor` instance.
-
-    Imported lazily so the CLI bootstrap does not construct a supervisor
-    for read-only commands like ``alfred status``. Tests patch this
-    function with an :class:`unittest.mock.AsyncMock`.
-
-    Depends on PR-S3-3b: ``alfred.supervisor.core.Supervisor.get_instance``.
-    Until that singleton accessor ships, this raises :class:`RuntimeError`
-    so :func:`supervisor_status` can surface the friendly "supervisor not
-    running" hint instead of a raw traceback.
-    """
-    # Deferred import — Supervisor depends on Postgres + async bootstrap.
-    # The CLI is synchronous (Typer); we run the async call via asyncio.run.
-    from alfred.supervisor.core import Supervisor
-
-    get_instance = getattr(Supervisor, "get_instance", None)
-    if get_instance is None:
-        # PR-S3-3b ships the singleton accessor; until then surface the
-        # not-running path rather than constructing a half-wired supervisor.
-        msg = "Supervisor.get_instance not yet available; wired in PR-S3-3b."
-        raise RuntimeError(msg)
-    return get_instance()
 
 
 class BreakerStateRow(TypedDict):
@@ -449,177 +423,73 @@ def supervisor_status() -> None:
     typer.echo(t("cli.supervisor.status.freshness_footer"))
 
 
-@supervisor_app.command("reset")
+@supervisor_app.command("reset", help=t("cli.supervisor.reset.help.short"))
 def supervisor_reset(
     component_id: Annotated[str, typer.Argument(help=t("cli.supervisor.reset.usage"))],
     confirm: Annotated[
         bool,
         typer.Option(
             "--confirm",
-            # CR-149 round-10 (3339423484): ``confirm_prompt`` is the
-            # runtime refusal body and still carries ``{component}``,
-            # ``{trip_count}``, and ``{last_trip_at}`` placeholders.
-            # ``--help`` renders the help string verbatim, so wiring
-            # the runtime key here surfaced unresolved template fields
-            # to operators running ``alfred supervisor reset --help``.
-            # The dedicated ``confirm_help`` key carries a static
-            # placeholder-free body for the ``--help`` surface; the
-            # runtime path below keeps the templated body.
+            # CR-156 round-7 HIGH #6: ``--confirm`` no longer gates a
+            # different operator surface — the deferred-to-#171 path
+            # fails fast irrespective of the flag. ``--confirm`` is kept
+            # in the parser so scripts that pass it today do not break
+            # on an "unknown flag" error when #171 lands and the flag
+            # becomes load-bearing again. The help body documents the
+            # current no-op semantic so operators reading ``--help`` see
+            # the truth.
             help=t("cli.supervisor.reset.confirm_help"),
         ),
     ] = False,
 ) -> None:
     """Reset a circuit breaker from OPEN to CLOSED.
 
-    Spec §10.8: operator-tier T1 command; requires ``--confirm``; emits a
-    ``supervisor.breaker.reset`` audit row with ``operator_user_id``
-    attribution. The ``--confirm`` gate prevents accidental resets in
-    scripts — a supervisor reset clears a tripped circuit breaker,
-    potentially re-enabling a quarantined-LLM plugin that failed 3+ times
-    in 5 minutes.
+    Spec §10.8: operator-tier T1 command; deferred-to-#171 path emits a
+    forensic-attempt audit row, prints the deferred hint, and exits 1
+    regardless of ``--confirm``. The eventual reset call clears a tripped
+    circuit breaker, potentially re-enabling a quarantined-LLM plugin
+    that failed 3+ times in 5 minutes — #171 reinstates the ``--confirm``
+    gate alongside the real dispatch.
     """
-    if not confirm:
-        # devex-004 + i18n-004: the catalog entry for confirm_prompt requires
-        # {component}, {trip_count}, {last_trip_at}. We pass safe placeholders
-        # for trip_count / last_trip_at until PR-S3-7 wires
-        # Supervisor.get_breaker_state.
-        typer.echo(
-            t(
-                "cli.supervisor.reset.confirm_prompt",
-                component=component_id,
-                trip_count="-",
-                last_trip_at="-",
-            ),
-            err=True,
-        )
-        # i18n-004 fix: previously a hardcoded English f-string. Now routed
-        # through t() so the rerun hint translates with the operator language.
-        typer.echo(
-            t("cli.supervisor.reset.rerun_hint", component=component_id),
-            err=True,
-        )
-        raise typer.Exit(code=1)
+    # CR-156 round-7 HIGH #6: fail-fast irrespective of ``--confirm``.
+    # The previous shape gated the deferred-hint behind ``--confirm``
+    # and emitted a separate refusal body when the flag was absent. The
+    # two-step UX added cognitive load without adding safety — there's
+    # no destructive action behind the flag today. Operators see the
+    # same actionable error on both invocations, which is the correct
+    # signal: the request cannot be fulfilled until #171 ships. The
+    # ``confirm`` argument is intentionally ignored on this path.
+    del confirm
 
-    # CR-149: probe the supervisor BEFORE emitting the attempt-row.
-    # The previous shape called ``_get_supervisor()`` outside any
-    # exception handler, so a missing / unreachable supervisor raised
-    # a raw traceback instead of the localised "supervisor not
-    # running" hint the ``status`` command already uses. Spec §11.3
-    # makes ``reset`` an operator surface, not a debug surface — the
-    # error path here mirrors :func:`supervisor_status` exactly. The
-    # attempt-row is emitted only AFTER the probe succeeds so a
-    # supervisor that was never reachable does not generate a misleading
-    # forensic breadcrumb (the operator never actually crossed the
-    # boundary; rolling a fake row would invent state per CR-149
-    # finding #14's pattern).
-    try:
-        supervisor = _get_supervisor()
-    except (RuntimeError, ConnectionError, TimeoutError) as exc:
-        typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
-        raise typer.Exit(code=1) from exc
-
-    # sec-pr-s3-6-04: emit the forensic-attempt audit row BEFORE crossing
-    # into the supervisor. A crash inside ``reset_breaker`` (Postgres
-    # connection lost mid-transaction, breaker-state lock contention,
-    # ...) previously left no trail at all. The order here is
-    # load-bearing: attempt-row first, reset call second; if the audit
-    # emission itself fails, the reset is aborted (the structlog stream
-    # is the operator's last forensic backstop and silently skipping
-    # the row would violate CLAUDE.md hard rule #7).
+    # sec-pr-s3-6-04 + CR-149 round-2: the forensic-attempt audit row
+    # is emitted BEFORE the deferred-hint print. Operator intent always
+    # lands in the audit graph — even though the reset itself is
+    # deferred to #171, the structlog breadcrumb still records that an
+    # operator (resolved via :func:`_resolve_operator_user_id`)
+    # attempted the reset. Without this ordering, an incident response
+    # would lose the "who tried to reset what, when" trail. CLAUDE.md
+    # hard rule #7 forbids the silent-skip shape on T1 surfaces.
     _emit_breaker_reset_attempt_audit(component_id=component_id)
 
-    # CR-149 round-10: ``operator_user_id`` now sources from
-    # :func:`_resolve_operator_user_id` (OS-account attribution — env
-    # var, then getlogin, then getpwuid). Unauthenticated; the
-    # authenticated-session refinement is tracked in #153. Operators
-    # sharing an OS account cannot be disambiguated, but the OS form is
-    # materially better than ``None`` for incident response.
+    # ADR-0020 (revised): the actual reset call is deferred to #171,
+    # which scopes the missing merged-proposal-branch dispatch
+    # infrastructure. The half-shipped ``WebAllowlistProposal`` /
+    # ``ConfigSetProposal`` consumer gap is the same architectural
+    # missing piece; #171 fixes the registry once. Until #171 lands,
+    # the operator surface is:
     #
-    # err-001 / cross-cutting R4: narrow the except shape to
-    # ``SupervisorError`` (every supervisor-domain failure mode the
-    # spec models) plus ``ConnectionError`` / ``asyncio.TimeoutError``
-    # (the two connection-shape failures that surface inside
-    # ``asyncio.run`` when the supervisor IPC drops mid-call). A bare
-    # ``except Exception`` would mask programmer bugs
-    # (typed-method-signature drift, ``KeyError`` from a refactored
-    # payload) -- those MUST propagate so the bug is loud.
+    # 1. Emit the forensic-attempt audit row (above).
+    # 2. Print the long-form deferred hint naming the workarounds
+    #    (supervisor restart OR direct Postgres update) and exit 1.
     #
-    # The lazy import lives at the top of the try-block so the
-    # except-clause narrowing has the type bound; an ImportError here
-    # surfaces as a non-zero exit through the same localised path.
-    try:
-        from alfred.supervisor.errors import (
-            NoSuchComponentError,
-            SupervisorError,
-        )
-    except ImportError as exc:
-        # Defensive: a broken supervisor namespace must not deny the
-        # operator the localised error -- fall back to the generic key.
-        typer.echo(
-            t(
-                "cli.supervisor.reset.unexpected_error",
-                component=component_id,
-                error_type="ImportError",
-            ),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-
-    try:
-        asyncio.run(
-            supervisor.reset_breaker(  # type: ignore[attr-defined]  # PR-S3-3b ships the singleton
-                component_id=component_id,
-                operator_user_id=_resolve_operator_user_id(),
-            )
-        )
-    except NoSuchComponentError as exc:
-        # CR-149 round-7: typed-exception dispatch. The previous shape
-        # branched on English substrings in ``str(exc).lower()`` to
-        # decide whether to render the operator-targeted
-        # ``component_not_found`` hint, which silently broke under
-        # non-English operator languages and catalog copy-edits — the
-        # exact CLAUDE.md hard rule #7 silent-skip shape on a T1
-        # surface. :class:`NoSuchComponentError` is a typed
-        # :class:`SupervisorError` subclass raised by
-        # :meth:`Supervisor.reset_breaker` when the operator-supplied
-        # ``component_id`` is not registered, so the dispatch now
-        # routes off the class — locale-immune by construction.
-        typer.echo(
-            t(
-                "cli.supervisor.reset.component_not_found",
-                component=component_id,
-            ),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-    except SupervisorError as exc:
-        # Every other supervisor-domain failure surfaces through the
-        # generic ``unexpected_error`` key. The ``NoSuchComponentError``
-        # arm above runs first because MRO lookup tries the most
-        # specific class match before falling through to the parent
-        # ``SupervisorError`` branch.
-        typer.echo(
-            t(
-                "cli.supervisor.reset.unexpected_error",
-                component=component_id,
-                error_type=type(exc).__name__,
-            ),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-    except (ConnectionError, TimeoutError) as exc:
-        # Connection-shape failures route through the generic
-        # unexpected_error key -- the operator's next step is to check
-        # whether the supervisor process is alive, not to retry with a
-        # different component id.
-        typer.echo(
-            t(
-                "cli.supervisor.reset.unexpected_error",
-                component=component_id,
-                error_type=type(exc).__name__,
-            ),
-            err=True,
-        )
-        raise typer.Exit(code=1) from exc
-
-    typer.echo(t("cli.supervisor.reset.success", component=component_id))
+    # The catalog body for ``deferred_to_issue_171`` is the operator's
+    # single-source documentation of WHY the command exited 1 + the
+    # next action they can take. Spec §2.2: operator reads it once and
+    # learns the workaround. The runbook
+    # (``docs/runbooks/slice-3-supervisor.md``) deepens the workaround
+    # discussion; the hint provides the discovery anchor.
+    typer.echo(
+        t("cli.supervisor.reset.deferred_to_issue_171", component=component_id),
+        err=True,
+    )
+    raise typer.Exit(code=1)

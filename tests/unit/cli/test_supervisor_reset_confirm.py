@@ -1,21 +1,31 @@
-"""Spec §10.8, §11.3 — alfred supervisor {status, reset --confirm}.
+"""Unit tests for the surviving ``alfred supervisor reset`` surfaces.
 
-Asserts:
+Issue #154 / ADR-0020: the reset command's active dispatch path is
+deferred to [#171](https://github.com/alfred-os/AlfredOS/issues/171) and
+the rewritten body is tested in
+``tests/unit/cli/test_supervisor_reset.py``. The contracts that survive
+the rewrite live here:
 
-* ``reset`` without ``--confirm`` exits non-zero (gate required per spec §11.3).
-* ``reset`` with ``--confirm`` calls :meth:`Supervisor.reset_breaker`.
-* Audit row carries ``operator_user_id`` attribution.
-* T1-tier: command requires operator role.
-* ``status`` renders the breaker-state table.
+* ``--confirm`` is accepted but currently a no-op — the deferred-to-#171
+  body fails fast irrespective of the flag (BLOCKER #6); the flag stays
+  in the parser so scripts that pass it today don't break the day #171
+  wires the real reset. The non-zero-exit pin lives in
+  ``test_reset_without_confirm_exits_nonzero``.
+* ``--help`` does not leak runtime placeholders (CR-149 round-10).
+* The forensic-attempt audit helper's payload covers
+  ``SUPERVISOR_BREAKER_RESET_FIELDS``.
+* ``_resolve_operator_user_id`` precedence (env / getlogin / getpwuid /
+  None) and its end-to-end wiring through the attempt-row structlog
+  event.
 
-Depends on PR-S3-3b (``Supervisor.reset_breaker``, :class:`CircuitBreaker`,
-``circuit_breakers`` table from migration 0010) and PR-S3-0a
-(``SUPERVISOR_BREAKER_RESET_FIELDS`` constants).
+Tests that mocked ``_get_supervisor`` or ``Supervisor.reset_breaker``
+have been removed — those call sites no longer exist in the rewritten
+body.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -30,296 +40,27 @@ def runner() -> CliRunner:
 
 
 def test_reset_without_confirm_exits_nonzero(runner: CliRunner) -> None:
-    """Refusing the ``--confirm`` gate must abort with a non-zero exit."""
+    """CR-156 round-7 HIGH #6: deferred-to-#171 path exits 1 with or without
+    ``--confirm``.
+
+    The reset command no longer routes through a separate refusal body when
+    the flag is absent — the deferred-hint fires on every invocation. Pin
+    the non-zero exit so a regression that accidentally returns 0 from the
+    deferred branch surfaces here.
+    """
     result = runner.invoke(supervisor_app, ["reset", "quarantined-llm"])
-    assert result.exit_code != 0
+    assert result.exit_code == 1, (result.output, result.stderr)
     combined = (result.output or "") + (result.stderr or "")
-    assert "--confirm" in combined or "confirm" in combined.lower()
-
-
-def test_reset_with_confirm_calls_reset_breaker(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The confirmed path must dispatch to ``Supervisor.reset_breaker``.
-
-    CR-149 round-10: ``operator_user_id`` now sources from
-    ``_resolve_operator_user_id`` (env / OS account). Pin the env-var
-    override so the assertion stays deterministic across dev machines.
-    """
-    monkeypatch.setenv("ALFRED_OPERATOR_USER_ID", "test-operator")
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(return_value=None)
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code == 0, (result.output, result.stderr)
-    mock_supervisor.reset_breaker.assert_called_once_with(
-        component_id="quarantined-llm",
-        operator_user_id="test-operator",
-    )
-
-
-def test_reset_success_message_rendered(runner: CliRunner) -> None:
-    """A successful reset must surface the component id in the output."""
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(return_value=None)
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code == 0, (result.output, result.stderr)
-    assert "quarantined-llm" in result.output or "reset" in result.output.lower()
-
-
-def test_reset_unknown_component_exits_nonzero(runner: CliRunner) -> None:
-    """``NoSuchComponentError`` (component-not-found) must surface as a CLI failure.
-
-    CR-149 round-7: the unknown-component dispatch now narrows on the
-    typed :class:`NoSuchComponentError` subclass instead of an English
-    substring scan of ``str(exc)``. The body text is irrelevant — any
-    raise of the class routes to the ``component_not_found`` branch.
-    """
-    from alfred.supervisor.errors import NoSuchComponentError
-
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(
-        side_effect=NoSuchComponentError("Component not found: no-such-plugin")
-    )
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "no-such-plugin", "--confirm"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    assert "no-such-plugin" in combined or "not found" in combined.lower()
-
-
-def test_reset_canonical_no_supervised_component_routes_to_component_not_found(
-    runner: CliRunner,
-) -> None:
-    """CR-149 round-7: typed ``NoSuchComponentError`` routes to the
-    operator-targeted ``component_not_found`` branch.
-
-    Round-6 closed the gap where the canonical
-    :func:`t("supervisor.no_such_component")` wording fell through to
-    the generic ``unexpected_error`` key (the previous dispatch only
-    matched the English substring "not found"). Round-6's fix added a
-    second substring branch matching "no supervised component" — but
-    that still breaks the moment the operator's locale is anything
-    other than English, or even a catalog copy-edit shortens the
-    wording. Round-7 replaces the substring dispatch with a typed
-    :class:`NoSuchComponentError` ``except`` arm. The body wording is
-    no longer load-bearing for routing; only the class is.
-    """
-    from alfred.supervisor.errors import NoSuchComponentError
-
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(
-        side_effect=NoSuchComponentError(
-            "No supervised component with id 'no-such-plugin'. "
-            "Run `alfred supervisor status` to list registered components."
-        )
-    )
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "no-such-plugin", "--confirm"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    # The component-not-found catalog entry names the component id and
-    # offers the recovery hint; the unexpected_error catalog entry
-    # surfaces ``type(exc).__name__`` (``NoSuchComponentError``)
-    # instead — the absence of the type name is the regression target.
-    assert "no-such-plugin" in combined
-    assert "NoSuchComponentError" not in combined
-    assert "SupervisorError" not in combined
-
-
-def test_reset_no_such_component_is_locale_immune(runner: CliRunner) -> None:
-    """CR-149 round-7: a non-English body still routes correctly.
-
-    Pins the load-bearing property of the round-7 typed dispatch:
-    the routing depends on the exception class, NOT on
-    :func:`str(exc).lower()`. A non-English catalog msgstr (Spanish
-    placeholder text below — never seen the English substrings
-    "not found" or "no supervised component") MUST still land on the
-    operator-targeted ``component_not_found`` hint. The pre-round-7
-    substring branch would have fallen through to
-    ``cli.supervisor.reset.unexpected_error`` and lost the PRD §10.8
-    / §11.3 operator guidance the T1 surface owes a non-English
-    operator.
-    """
-    from alfred.supervisor.errors import NoSuchComponentError
-
-    # Spanish stand-in for the catalog body — no overlap with the
-    # legacy English substrings the round-6 dispatch matched.
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(
-        side_effect=NoSuchComponentError("Ningún componente supervisado con id 'no-such-plugin'.")
-    )
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "no-such-plugin", "--confirm"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    # Routed to the operator-targeted branch — the catalog renders the
-    # component id, not the exception type name.
-    assert "no-such-plugin" in combined
-    assert "NoSuchComponentError" not in combined
-
-
-# Status-render tests + the ``no_supervisor_running`` status probe test
-# moved to ``tests/unit/cli/test_supervisor_status.py`` in #154. The status
-# command no longer probes ``_get_supervisor``, so the probe-side error
-# arm collapses into the ``postgres_unavailable`` disposition the new
-# status tests pin.
-
-
-def test_reset_no_supervisor_running_routes_through_localised_hint(
-    runner: CliRunner,
-) -> None:
-    """CR-149: ``reset`` surfaces the localised hint when the supervisor is down.
-
-    The prior shape called ``_get_supervisor()`` outside any
-    exception handler, so a missing / unreachable supervisor raised
-    a raw Python traceback through Typer. Spec §11.3 makes ``reset``
-    an operator surface, not a debug surface — the error path now
-    mirrors :func:`supervisor_status`'s narrow handler and emits
-    the ``cli.supervisor.status.no_supervisor_running`` localised
-    body before exiting code 1. The attempt-row is NOT emitted on
-    this path because the operator never actually crossed the
-    supervisor boundary.
-    """
-    audit_emit = MagicMock()
-    with (
-        patch(
-            "alfred.cli.supervisor._get_supervisor",
-            side_effect=RuntimeError("supervisor not wired"),
-        ),
-        patch(
-            "alfred.cli.supervisor._emit_breaker_reset_attempt_audit",
-            side_effect=audit_emit,
-        ),
-    ):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    assert "supervisor" in combined.lower() or "running" in combined.lower()
-    # CR-149 round-2: the attempt-audit MUST NOT fire when the probe
-    # itself crashed BEFORE the operator action crossed the boundary.
-    # A regression that moves ``_emit_breaker_reset_attempt_audit`` back
-    # above ``_get_supervisor`` would still pass the message-text
-    # assertion above; pinning the call count keeps the PRD §10.8
-    # forensic contract structural.
-    assert audit_emit.call_count == 0
-
-
-# test_status_empty_rows_renders_hint moved to
-# tests/unit/cli/test_supervisor_status.py
-# (now test_status_no_components_yet_on_empty_rows).
-
-
-def test_reset_unexpected_error_routes_through_generic_message(runner: CliRunner) -> None:
-    """A non-"not found" connection-shape error uses the unexpected_error key.
-
-    err-001 / cross-cutting R4: the except clause now narrows to
-    ``SupervisorError``, ``ConnectionError``, ``asyncio.TimeoutError``.
-    A ``ConnectionError`` is the realistic non-domain failure (Postgres
-    drop mid-transaction); it must still route through the localised
-    error key.
-    """
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(
-        side_effect=ConnectionError("postgres connection lost")
-    )
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    # The generic-error catalog entry includes both {component} and {error_type}.
+    # The deferred-hint body still names #171 + the component id even
+    # though the ``--confirm`` flag itself is now a no-op.
+    assert "#171" in combined
     assert "quarantined-llm" in combined
-    assert "ConnectionError" in combined
-
-
-def test_reset_programmer_bug_propagates_loud(runner: CliRunner) -> None:
-    """err-001 / R4: a non-domain bug (e.g. ``KeyError``) MUST propagate.
-
-    The previous bare ``except Exception`` swallowed every shape and
-    mapped to the generic error key, silently turning a typed-method-
-    signature drift into a benign-looking operator-facing failure. The
-    narrowed except clause now only catches the four typed shapes; an
-    AttributeError / TypeError / KeyError bubbles up so the bug is
-    loud in the operator's structlog stream + the CLI tracebacks at
-    once.
-    """
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(side_effect=KeyError("breaker_id"))
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    # ``CliRunner`` captures the exception rather than re-raising; we
-    # assert the exit code is non-zero AND the exception is the typed
-    # KeyError (not Typer.Exit) so the bug surface is preserved.
-    assert result.exit_code != 0
-    assert isinstance(result.exception, KeyError)
-
-
-def test_reset_emits_attempt_audit_row_before_reset_breaker(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """sec-pr-s3-6-04: the attempt audit row fires BEFORE ``reset_breaker``.
-
-    A crash inside ``reset_breaker`` (Postgres dropped, breaker-lock
-    contention, ...) must still leave a forensic trail. Pin the
-    ordering by recording call sequence into a shared list -- the
-    attempt-audit call MUST appear before the reset_breaker call.
-    """
-    calls: list[str] = []
-
-    def _record_attempt(*, component_id: str) -> None:
-        # Signature mirrors the production helper; the test only cares
-        # about the call order, not the structlog kwargs.
-        del component_id
-        calls.append("attempt_audit")
-
-    async def _reset_breaker(*, component_id: str, operator_user_id: str | None) -> None:
-        del component_id, operator_user_id
-        calls.append("reset_breaker")
-
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(side_effect=_reset_breaker)
-    monkeypatch.setattr(
-        "alfred.cli.supervisor._emit_breaker_reset_attempt_audit",
-        _record_attempt,
-    )
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code == 0, (result.output, result.stderr)
-    assert calls == ["attempt_audit", "reset_breaker"]
-
-
-def test_reset_attempt_audit_row_survives_supervisor_crash(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A crash inside ``reset_breaker`` must NOT suppress the attempt row.
-
-    Validates the forensic-trail guarantee from sec-pr-s3-6-04: the
-    attempt-audit emission lands even if the reset call itself fails.
-    """
-    audit_emissions: list[str] = []
-
-    def _record_attempt(*, component_id: str) -> None:
-        audit_emissions.append(component_id)
-
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(side_effect=ConnectionError("postgres lost"))
-    monkeypatch.setattr(
-        "alfred.cli.supervisor._emit_breaker_reset_attempt_audit",
-        _record_attempt,
-    )
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    # Reset failed, but the attempt row was emitted FIRST -- the audit
-    # graph still has the operator-intent breadcrumb.
-    assert result.exit_code != 0
-    assert audit_emissions == ["quarantined-llm"]
 
 
 def test_emit_breaker_reset_attempt_audit_uses_schema_fields() -> None:
     """The attempt-audit helper carries the SUPERVISOR_BREAKER_RESET_FIELDS shape.
 
-    sec-pr-s3-6-04: when PR-S3-7 swaps the structlog emit for the real
+    sec-pr-s3-6-04: when #171 swaps the structlog emit for the real
     ``AuditWriter.append_schema`` call, the kwargs ALREADY match the
     declared field set. This test pins the contract: the helper's
     payload covers every required SUPERVISOR_BREAKER_RESET_FIELDS entry.
@@ -346,89 +87,17 @@ def test_emit_breaker_reset_attempt_audit_uses_schema_fields() -> None:
     # Every declared field is present in the kwargs the helper sent.
     for field in SUPERVISOR_BREAKER_RESET_FIELDS:
         assert field in captured, f"helper omitted {field!r} from the audit payload"
-
-
-def test_reset_supervisor_error_without_not_found_routes_generic(runner: CliRunner) -> None:
-    """A ``SupervisorError`` whose message lacks "not found" uses the generic branch."""
-    from alfred.supervisor.errors import SupervisorError
-
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(side_effect=SupervisorError("breaker probe failed"))
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    assert "quarantined-llm" in combined
-    # The component-not-found branch must NOT be taken for a generic SupervisorError.
-    assert "SupervisorError" in combined
-
-
-def test_get_supervisor_raises_when_singleton_missing() -> None:
-    """``_get_supervisor`` raises RuntimeError until PR-S3-3b ships ``get_instance``.
-
-    Pins the not-yet-wired guard rail so future-PR-S3-3b can flip the
-    behaviour and this test then flips with it.
-    """
-    from alfred.cli import supervisor as supervisor_module
-
-    # ``Supervisor.get_instance`` is intentionally absent in PR-S3-3a; the
-    # CLI surfaces RuntimeError so callers can map to a friendly hint.
-    with pytest.raises(RuntimeError, match="get_instance"):
-        supervisor_module._get_supervisor()
-
-
-# Removed in #154 / ADR-0020:
-#   * test_list_breaker_states_raises_not_implemented
-#   * test_status_handles_read_path_unavailable
-#   * test_status_read_path_connection_error_routes_through_no_supervisor_hint
-#   * test_status_probe_not_implemented_propagates_loud
-#
-# These tests pinned the pre-ADR-0020 placeholder behaviour
-# (``NotImplementedError`` from a stub ``_list_breaker_states`` + a
-# probe-side ``_get_supervisor`` call). The sync Postgres read path
-# replaces both — the typed surface now covers ``OperationalError`` and
-# the ``DATABASE_URL``-unset RuntimeError, with the operator landing on
-# ``cli.supervisor.status.postgres_unavailable``. The new contracts live
-# in ``tests/unit/cli/test_supervisor_status.py``.
-
-
-def test_get_supervisor_invokes_singleton_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When PR-S3-3b lands ``get_instance``, ``_get_supervisor`` returns its result."""
-    from alfred.cli import supervisor as supervisor_module
-    from alfred.supervisor import core as supervisor_core
-
-    sentinel = object()
-    monkeypatch.setattr(
-        supervisor_core.Supervisor, "get_instance", staticmethod(lambda: sentinel), raising=False
-    )
-    assert supervisor_module._get_supervisor() is sentinel
-
-
-def test_reset_import_error_fallback_uses_generic_message(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """If importing ``alfred.supervisor.errors`` fails, the generic branch still fires.
-
-    err-001 / cross-cutting R4: the import now lives ABOVE the
-    ``asyncio.run`` call so the except-clause type binding is
-    statically resolvable. A broken supervisor namespace still routes
-    through the localised key + non-zero exit -- but the rendered
-    error_type is ``ImportError`` rather than the original failure
-    type, because the ImportError fires first.
-    """
-    import sys
-
-    mock_supervisor = AsyncMock()
-
-    # Force ``from alfred.supervisor.errors import SupervisorError`` to raise.
-    monkeypatch.setitem(sys.modules, "alfred.supervisor.errors", None)
-
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    assert "quarantined-llm" in combined
-    assert "ImportError" in combined
+    # CR-156 round-7 MEDIUM #12: the attempt row is emitted BEFORE the
+    # reset itself runs, so the helper cannot yet know the breaker's
+    # actual state. The CR-149 round-2 invariant pinned ``old_state`` /
+    # ``new_state`` / ``trip_count`` to ``None`` as the explicit "not
+    # yet known" sentinel — anything else (e.g. unconditional
+    # ``OPEN`` → ``CLOSED``) would write false transition data into
+    # the forensic trail. This block locks the null-state invariant
+    # against regression.
+    assert captured["old_state"] is None
+    assert captured["new_state"] is None
+    assert captured["trip_count"] is None
 
 
 def test_reset_help_does_not_leak_runtime_placeholders(runner: CliRunner) -> None:
@@ -544,6 +213,9 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
     supervisor reset --confirm`` with ``ALFRED_OPERATOR_USER_ID`` set,
     the attempt audit row carries that id (not ``None``). A regression
     that drops the wiring on the structlog event surfaces here.
+
+    The reset command now exits 1 (deferred to #171); the audit row is
+    still emitted on the way out.
     """
     import structlog
 
@@ -559,11 +231,10 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
 
     structlog.configure(processors=[_intercept, structlog.processors.JSONRenderer()])
     try:
-        mock_supervisor = AsyncMock()
-        mock_supervisor.reset_breaker = AsyncMock(return_value=None)
-        with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-            result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-        assert result.exit_code == 0, (result.output, result.stderr)
+        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
+        # Reset is now deferred-to-#171; exits 1, but the attempt row
+        # still emits first.
+        assert result.exit_code == 1, (result.output, result.stderr)
     finally:
         structlog.reset_defaults()
 
@@ -574,24 +245,37 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
     assert attempt_rows[-1].get("operator_user_id") == "carol@example.com"
 
 
-def test_reset_breaker_call_carries_resolved_operator_user_id(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``Supervisor.reset_breaker`` is invoked with the resolved id.
-
-    Mirrors the attempt-row test on the post-attempt path: the
-    supervisor receives the resolved operator id, not ``None``. A
-    regression on the typed-kwarg call surfaces here.
-    """
-    monkeypatch.setenv("ALFRED_OPERATOR_USER_ID", "dave@example.com")
-
-    mock_supervisor = AsyncMock()
-    mock_supervisor.reset_breaker = AsyncMock(return_value=None)
-    with patch("alfred.cli.supervisor._get_supervisor", return_value=mock_supervisor):
-        result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-    assert result.exit_code == 0, (result.output, result.stderr)
-
-    mock_supervisor.reset_breaker.assert_called_once_with(
-        component_id="quarantined-llm",
-        operator_user_id="dave@example.com",
-    )
+# Removed in #154 / ADR-0020 (revised):
+#   * test_reset_with_confirm_calls_reset_breaker
+#   * test_reset_success_message_rendered
+#   * test_reset_unknown_component_exits_nonzero
+#   * test_reset_canonical_no_supervised_component_routes_to_component_not_found
+#   * test_reset_no_such_component_is_locale_immune
+#   * test_reset_no_supervisor_running_routes_through_localised_hint
+#   * test_reset_unexpected_error_routes_through_generic_message
+#   * test_reset_programmer_bug_propagates_loud
+#   * test_reset_emits_attempt_audit_row_before_reset_breaker
+#   * test_reset_attempt_audit_row_survives_supervisor_crash
+#   * test_reset_supervisor_error_without_not_found_routes_generic
+#   * test_get_supervisor_raises_when_singleton_missing
+#   * test_get_supervisor_invokes_singleton_when_available
+#   * test_reset_import_error_fallback_uses_generic_message
+#   * test_reset_breaker_call_carries_resolved_operator_user_id
+#
+# These tests mocked ``_get_supervisor`` or ``Supervisor.reset_breaker``
+# call sites that no longer exist in the rewritten reset body. The
+# deferred-to-#171 path is tested in
+# ``tests/unit/cli/test_supervisor_reset.py``.
+#
+# Removed in #154 / Task 2 (status path):
+#   * test_list_breaker_states_raises_not_implemented
+#   * test_status_handles_read_path_unavailable
+#   * test_status_read_path_connection_error_routes_through_no_supervisor_hint
+#   * test_status_probe_not_implemented_propagates_loud
+#   * test_status_no_supervisor_running_exits_nonzero
+#   * test_status_renders_table_header
+#   * test_status_renders_all_three_breaker_states
+#   * test_status_empty_rows_renders_hint
+#
+# The new sync-Postgres-read contracts for status live in
+# ``tests/unit/cli/test_supervisor_status.py``.
