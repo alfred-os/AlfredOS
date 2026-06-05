@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import uuid
-from typing import Annotated, TypedDict
+from collections.abc import Mapping
+from typing import Annotated, Final, TypedDict
 
 import structlog
 import typer
@@ -344,6 +346,11 @@ def supervisor_status() -> None:
         raise typer.Exit(code=1) from exc
     if not rows:
         typer.echo(t("cli.supervisor.status.no_components_yet"))
+        # ADR-0021 #171 Operator visibility: dispatch footer renders even
+        # on the empty-components path so the operator can tell whether
+        # the dispatch loop has done anything in the last hour while
+        # waiting for the first plugin to load.
+        _render_dispatch_footer()
         return
     # CR-156 round-7 MEDIUM #9 + CR round-1 i18n follow-up: measure
     # column widths at render time so a long component id does not push
@@ -423,6 +430,43 @@ def supervisor_status() -> None:
     # contract visible inline. Operators reading the table know how
     # current the data is without consulting the runbook.
     typer.echo(t("cli.supervisor.status.freshness_footer"))
+    _render_dispatch_footer()
+
+
+def _render_dispatch_footer() -> None:
+    """Emit the 'Recent proposal dispatch (last hour)' status footer.
+
+    ADR-0021 #171 §Operator visibility. Render even when every count is
+    zero so the operator knows the dispatch loop is wired (the absence
+    of activity is the answer, not a missing surface).
+
+    CR rework round-1 HIGH #12: the ``except`` narrows to
+    ``OperationalError`` (Postgres unreachable) and
+    ``ProgrammingError`` (schema not initialised) — the two
+    well-known transient surfaces. Any other exception is a
+    programmer bug and propagates so the operator sees a full
+    traceback (CLAUDE.md hard rule #7). The localised
+    ``dispatch_footer_unavailable`` body lands on stderr so the
+    operator can still distinguish "footer broke" from "no recent
+    activity"; the breaker table on stdout is preserved.
+    """
+    try:
+        counts = _recent_dispatch_counts()
+    except (OperationalError, ProgrammingError):
+        typer.echo(t("cli.supervisor.status.dispatch_footer_unavailable"), err=True)
+        _log.warning("supervisor.status_dispatch_footer_unavailable")
+        return
+    # CR rework round-1 HIGH #11: the ``pending`` slot was
+    # hardcoded 0 and lied to the operator. Drop it from the
+    # renderer; restore once a meaningful "merged but not yet
+    # dispatched" count surface lands.
+    typer.echo(
+        t(
+            "cli.supervisor.status.dispatch_footer",
+            applied=counts.get("applied", 0),
+            failed=counts.get("failed", 0),
+        )
+    )
 
 
 @supervisor_app.command("reset", help=t("cli.supervisor.reset.help.short"))
@@ -520,3 +564,284 @@ def supervisor_reset(
     # to keep the lint clean; the helper has already echoed the
     # pending_review body with the proposal_id + branch.
     del proposal
+
+
+def _register_proposal_keys_for_pybabel() -> tuple[str, ...]:
+    """Anchor the supervisor-reset proposal-flow i18n keys for pybabel.
+
+    Same pattern as :func:`alfred.cli.web._register_proposal_keys_for_pybabel`.
+    :func:`queue_proposal_or_exit` consumes the ``denied_key`` +
+    ``pending_review_key`` strings via parameter, so the pybabel AST
+    walker would otherwise drop them into the obsoleted block on every
+    ``pybabel update``. Surface the live renders here so the keys stay
+    in the active catalog.
+
+    Representative kwargs render every placeholder the msgstr carries:
+    ``{reason}`` for ``.denied``; ``{component}`` + ``{branch}`` +
+    ``{proposal_id}`` + ``{interval}`` for ``.proposal_submitted``.
+    """
+    return (
+        t("cli.supervisor.reset.denied", reason="example"),
+        t(
+            "cli.supervisor.reset.proposal_submitted",
+            component="example",
+            branch="proposal/breaker-reset-example",
+            proposal_id="0123456789abcdef",
+            interval=30,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# alfred supervisor proposals — Task 9 of #171 / ADR-0021 §Operator visibility
+# ---------------------------------------------------------------------------
+
+
+class _ProposalRow(TypedDict):
+    """Renderer-facing row shape for ``alfred supervisor proposals``.
+
+    ADR-0021 §Operator visibility — columns are the load-bearing
+    forensic surface: ``proposal_type`` + ``proposal_id`` jointly
+    identify the proposal; ``result`` + ``failure_kind`` distinguish
+    the dispositions; ``operator_user_id`` carries the self-claimed
+    forensic attribution; ``processed_at`` anchors the row in time so
+    the operator can correlate with the supervisor's structlog stream.
+    """
+
+    proposal_type: str
+    proposal_id: str
+    result: str
+    failure_kind: str | None
+    operator_user_id: str | None
+    processed_at: dt.datetime
+
+
+def _list_proposals(
+    *,
+    since: dt.timedelta | None = None,
+    limit: int | None = 20,
+) -> list[_ProposalRow]:
+    """Read ``processed_proposals`` rows for the proposals subcommand.
+
+    CR rework round-1 HIGH #13:
+
+    * ``since`` is a :class:`datetime.timedelta` (typed at the helper
+      boundary); the subcommand parses the operator-facing
+      ``--since 1h`` / ``24h`` / ``7d`` shape and threads the
+      resolved delta through. ``None`` returns every row
+      (``--all`` escape hatch).
+    * ``limit`` defaults to 20 so the CLI does not blast every row
+      at the operator's terminal on a large ledger; ``None``
+      disables.
+
+    The query is sync SQLAlchemy through the same engine path used by
+    :func:`_list_breaker_states` — mirror that pattern so a future
+    consolidation lands in one place.
+    """
+    # Lazy imports — perf-001 + ``alfred --help`` stays light.
+    from sqlalchemy import func
+
+    from alfred.memory.models import ProcessedProposal
+
+    engine = create_engine(_resolve_database_url(), pool_pre_ping=True)
+    try:
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            query = select(ProcessedProposal).order_by(ProcessedProposal.processed_at.desc())
+            if since is not None:
+                query = query.where(ProcessedProposal.processed_at > func.now() - since)
+            if limit is not None:
+                query = query.limit(limit)
+            orm_rows = session.execute(query).scalars().all()
+            return [
+                _ProposalRow(
+                    proposal_type=row.proposal_type,
+                    proposal_id=row.proposal_id,
+                    result=row.result,
+                    failure_kind=row.failure_kind,
+                    operator_user_id=row.operator_user_id,
+                    processed_at=row.processed_at,
+                )
+                for row in orm_rows
+            ]
+    finally:
+        engine.dispose()
+
+
+def _recent_dispatch_counts() -> dict[str, int]:
+    """Return last-hour dispatch outcome counts for the status footer.
+
+    Keys: ``applied``, ``failed``. CR rework round-1 HIGH #11: the
+    ``pending`` slot was always 0 (the loop is monotonically forward
+    — a merged blob either appears in the ledger or has not yet been
+    walked), so it lied to the operator. Dropped from the surface
+    until a meaningful "merged but not yet dispatched" count lands.
+    """
+    from sqlalchemy import func
+
+    from alfred.memory.models import ProcessedProposal
+
+    engine = create_engine(_resolve_database_url(), pool_pre_ping=True)
+    try:
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            recent_q = select(ProcessedProposal).where(
+                ProcessedProposal.processed_at > func.now() - dt.timedelta(hours=1)
+            )
+            rows = session.execute(recent_q).scalars().all()
+            applied = sum(1 for r in rows if r.result == "applied")
+            failed = sum(
+                1
+                for r in rows
+                if r.result in {"failed_handler", "failed_parse", "failed_unknown_type"}
+            )
+            return {"applied": applied, "failed": failed}
+    finally:
+        engine.dispose()
+
+
+_DURATION_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(\d+)([hdwm])$")
+_DURATION_SUFFIXES: Final[Mapping[str, dt.timedelta]] = {
+    "h": dt.timedelta(hours=1),
+    "d": dt.timedelta(days=1),
+    "w": dt.timedelta(weeks=1),
+    "m": dt.timedelta(minutes=1),
+}
+
+
+def _parse_duration(raw: str) -> dt.timedelta:
+    """Parse a human-readable duration string (``1h`` / ``24h`` / ``7d``).
+
+    CR rework round-1 HIGH #13: keeps the operator-facing surface
+    consistent across ``--since`` flag inputs. ``m`` minute / ``h``
+    hour / ``d`` day / ``w`` week — the four cadences that match
+    typical operator windows for proposal-dispatch debugging.
+
+    Refuses any other shape via :class:`typer.BadParameter` so the
+    error surface lands at the CLI parser, not at the helper.
+    """
+    match = _DURATION_PATTERN.fullmatch(raw)
+    if match is None:
+        # CR-rework round-2 follow-up: the two parser-error messages
+        # are operator-facing — localise via the catalog rather than
+        # emitting raw English (CLAUDE.md i18n hard rule #1).
+        raise typer.BadParameter(
+            t(
+                "cli.supervisor.proposals.since_invalid",
+                value=raw,
+                example="1h, 24h, 7d, 30m",
+            )
+        )
+    value = int(match.group(1))
+    if value <= 0:
+        raise typer.BadParameter(t("cli.supervisor.proposals.since_must_be_positive", value=raw))
+    return value * _DURATION_SUFFIXES[match.group(2)]
+
+
+@supervisor_app.command("proposals", help=t("cli.supervisor.proposals.help.short"))
+def supervisor_proposals(
+    since: Annotated[
+        str,
+        typer.Option(
+            "--since",
+            help=t("cli.supervisor.proposals.since_help"),
+        ),
+    ] = "1h",
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            help=t("cli.supervisor.proposals.limit_help"),
+            min=1,
+        ),
+    ] = 20,
+    all_: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help=t("cli.supervisor.proposals.all_help"),
+        ),
+    ] = False,
+) -> None:
+    """List recent state.git side-effecting dispatch results.
+
+    ADR-0021 §Operator visibility — the operator-facing surface for
+    "what did the dispatcher do?". The column set is fixed:
+    ``proposal_type``, ``proposal_id``, ``result``, ``failure_kind``,
+    ``operator_user_id``, ``processed_at``. A future widening lands by
+    adding columns here AND in the catalog header keys.
+
+    CR rework round-1 HIGH #13:
+
+    * ``--since DURATION`` (default ``1h``; accepts ``1h``, ``24h``,
+      ``7d``, ``30m``, ``2w``) scopes by processed_at window.
+    * ``--limit N`` (default 20) bounds the row count.
+    * ``--all`` escape hatch returns every row in the ledger
+      (ignores ``--since`` and ``--limit``); useful for forensic
+      export.
+
+    Failure-mode dispatch mirrors :func:`supervisor_status`:
+
+    * ``OperationalError`` (Postgres unreachable) → localised
+      ``postgres_unavailable`` hint + exit 1.
+    * ``ProgrammingError`` (schema not initialised) → schema hint +
+      exit 1.
+    * Empty result set → localised "no proposals yet" body + exit 0.
+    """
+    since_delta: dt.timedelta | None = None if all_ else _parse_duration(since)
+    list_limit: int | None = None if all_ else limit
+    try:
+        rows = _list_proposals(since=since_delta, limit=list_limit)
+    except ProgrammingError as exc:
+        typer.echo(t("cli.supervisor.status.schema_not_initialised"), err=True)
+        raise typer.Exit(code=1) from exc
+    except OperationalError as exc:
+        typer.echo(t("cli.supervisor.status.postgres_unavailable"), err=True)
+        raise typer.Exit(code=1) from exc
+
+    if not rows:
+        # Empty body names the cycle interval so the operator knows
+        # how long to wait before re-checking (devex finding #9).
+        # CR-rework round-2 follow-up: ``--all`` disables the time
+        # filter, so interpolating ``since`` in the empty-state body
+        # would lie to the operator about what was queried. Pick the
+        # right body for the flag combination.
+        from alfred.cli._bootstrap import load_settings_or_die
+
+        interval = load_settings_or_die().proposal_dispatch_interval_s
+        if all_:
+            typer.echo(t("cli.supervisor.proposals.empty_all", interval=interval))
+        else:
+            typer.echo(
+                t(
+                    "cli.supervisor.proposals.empty",
+                    since=since,
+                    interval=interval,
+                )
+            )
+        return
+
+    headers = {
+        "proposal_type": t("cli.supervisor.proposals.column.proposal_type"),
+        "proposal_id": t("cli.supervisor.proposals.column.proposal_id"),
+        "result": t("cli.supervisor.proposals.column.result"),
+        "failure_kind": t("cli.supervisor.proposals.column.failure_kind"),
+        "operator_user_id": t("cli.supervisor.proposals.column.operator_user_id"),
+        "processed_at": t("cli.supervisor.proposals.column.processed_at"),
+    }
+    widths = {
+        col: max(
+            len(headers[col]),
+            max((len(str(r.get(col) or "-")) for r in rows), default=0),
+        )
+        for col in headers
+    }
+    typer.echo(
+        "  ".join(headers[col].ljust(widths[col]) for col in headers),
+    )
+    for row in rows:
+        typer.echo("  ".join(str(row.get(col) or "-").ljust(widths[col]) for col in headers))
+    # CR rework round-1 HIGH #13: closed-vocab legend so the operator
+    # can decode the ``result`` column without consulting the runbook.
+    typer.echo("")
+    typer.echo(t("cli.supervisor.proposals.legend"))
