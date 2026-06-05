@@ -280,6 +280,32 @@ SUPERVISOR_BREAKER_TRIPPED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Emitted by ``alfred supervisor reset --confirm`` at the moment the
+# operator queues a reviewer-gated BreakerResetProposal (ADR-0021 #171).
+# Mirrors the ``WEB_ALLOWLIST_REQUESTED_FIELDS`` / ``CONFIG_SET_REQUESTED_FIELDS``
+# shape — operator-CLI ingress row carrying the proposal_branch +
+# correlation_id so the audit-graph correlator can join the CLI emit
+# with the eventual dispatcher-side ``state.proposal.processed`` row
+# (which carries the same proposal_id under a different audit family).
+#
+# Distinct from SUPERVISOR_BREAKER_RESET_FIELDS (the eventual terminal
+# row that fires when the supervisor actually mutates the breaker):
+# this family is the operator-typed REQUEST stand-in. The supervisor's
+# RESET row covers the post-dispatch effect.
+SUPERVISOR_BREAKER_RESET_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "component_id",
+        "operator_user_id",
+        "proposal_branch",
+        # CR-149 round-6: operator-CLI ingress carries the T1 tag so the
+        # audit-graph swimlane (``alfred audit graph --tier T1``) shows
+        # the operator-typed origin. Same rationale as the plugin-grant
+        # / web-allowlist / config-set requested families.
+        "trust_tier_of_trigger",
+        "correlation_id",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # security.t3_boundary.refused family
 # ---------------------------------------------------------------------------
