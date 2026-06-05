@@ -1067,6 +1067,27 @@ explicitly down the call stack. Each persona turn sets the
 asyncio.TaskGroup copies the context per child, so concurrent turns
 do not leak language state across users.
 
+## Merged-proposal-branch dispatch infrastructure
+
+The missing piece that lets the supervisor (or any other long-running
+daemon) act on a merged state.git proposal branch as a one-shot
+side-effect command. The closest existing precedent
+([RealGate.rebuild_from_state_git](#realgate)) is a declarative
+projection rebuild — it reads policy blobs and upserts them into a
+Postgres projection table; it does NOT run side-effect handlers per
+proposal id. AlfredOS has no registry or replay ledger for
+"on merged proposal branch with payload type X, run handler Y, exactly
+once". `WebAllowlistProposal` and `ConfigSetProposal` are half-shipped
+without a runtime consumer for the same reason. Tracked at
+[#171](https://github.com/alfred-os/AlfredOS/issues/171); when it lands,
+`BreakerResetProposal` becomes the first new user of the registry and
+the existing half-shipped proposal types gain their runtime consumers
+in the same PR family.
+
+See [ADR-0020](adr/0020-supervisor-cli-access-via-postgres-and-state-git.md)
+for the rationale that scopes #171 separately from `alfred supervisor
+reset`.
+
 ## Supervisor
 
 The top-level coordinator that owns plugin process lifecycle, the
@@ -1078,12 +1099,17 @@ internal `_run()` coroutine; every supervised plugin stdio-reader
 task lives inside this group, so a `stop()` call cascade-cancels all
 reader tasks cleanly. The supervisor exposes `reset_breaker()` as the
 operator API for manual CLOSED-state recovery; the CLI surface
-(`alfred supervisor reset <component>`) wires to this method in
-PR-S3-6. Breaker state survives restarts via Postgres persistence
+(`alfred supervisor status` reads `circuit_breakers` directly from
+Postgres today; `alfred supervisor reset --confirm` emits the
+forensic-attempt audit row and prints a deferred-hint pointing at
+[#171](https://github.com/alfred-os/AlfredOS/issues/171) until the
+[merged-proposal-branch dispatch infrastructure](#merged-proposal-branch-dispatch-infrastructure)
+ships). Breaker state survives restarts via Postgres persistence
 (`load_all_breakers()` at bootstrap). The supervisor's own audit rows
 carry `trust_tier_of_trigger="T0"` and `actor_persona="supervisor"`.
 
 See [ADR-0017](adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md),
+[ADR-0020](adr/0020-supervisor-cli-access-via-postgres-and-state-git.md),
 spec §4.8 and §10, and [docs/subsystems/supervisor.md](subsystems/supervisor.md).
 
 ## DeadlineWrapper
