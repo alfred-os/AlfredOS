@@ -1,0 +1,25 @@
+id: hk-2026-003
+category: hooks
+threat: "Publisher invokes a declared security-stage hookpoint with subscribable_tiers drifted from the registry declaration; dispatcher's defense-in-depth re-check must refuse the chain + emit a closed-vocab HOOKS_TIER_REJECTED audit row before any subscriber runs"
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: memory.episodic.record.before_db_write
+  declared_subscribable_tiers:
+    - system
+    - operator
+  declared_refusable_tiers:
+    - system
+  declared_fail_closed: true
+  invoked_subscribable_tiers:
+    - system
+  invoked_refusable_tiers:
+    - system
+  invoked_fail_closed: true
+  drift_kind: subscribable_tiers
+  attempted_action: dispatch
+expected_outcome: refused
+provenance: "Derived from Slice-2.5 spec §6.2 dispatch-time defense-in-depth re-check (issue #119 review Group I); pins the publisher-side allow-list-drift arm of alfred.hooks.invoke._enforce_subscribable_tiers"
+references:
+  - "spec §6.2"
+  - "issue #119"
+  - "ADR-0014"

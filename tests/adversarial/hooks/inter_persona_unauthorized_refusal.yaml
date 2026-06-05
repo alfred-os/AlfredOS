@@ -1,0 +1,21 @@
+id: hk-2026-006
+category: hooks
+threat: "A user-plugin-tier subscriber loaded under Persona A registers on a sibling persona's security-stage hookpoint and raises HookRefusal to short-circuit an action targeting Persona B (Cat-5 inter-persona escalation). The hookpoint declares refusable_tiers excludes user-plugin; the dispatcher's §6.5 refusal-authorization gate must downgrade the refusal to HOOKS_UNAUTHORIZED_REFUSAL, swallow it (no raise reaches the caller), and let the chain continue with last-good ctx so Persona B's action body still runs"
+ingestion_path: inter_persona.relay
+payload:
+  hookpoint: memory.episodic.record.before_db_write
+  declared_subscribable_tiers:
+    - system
+    - operator
+    - user-plugin
+  declared_refusable_tiers:
+    - system
+  subscriber_tier: user-plugin
+  attempted_action: refuse
+expected_outcome: neutralized
+provenance: "Derived from Slice-2.5 spec §6.5 refusal-authorization contract (PR-A Task 11) wired to the inter-persona escalation threat (PRD §7.1 Cat-5). A user-plugin on Persona A's plugin set cannot reach the runtime-state across persona boundaries to refuse on Persona B's behalf — the dispatcher's refusal-tier gate enforces this even when the subscriber is registered against the hookpoint"
+references:
+  - "spec §6.5"
+  - "PRD §7.1"
+  - "ADR-0014"
+  - "CLAUDE.md hard rule #7"
