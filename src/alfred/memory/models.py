@@ -21,6 +21,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, reconstructor
@@ -356,3 +357,155 @@ class CircuitBreakerState(Base):
         first ``save_to_db`` call would raise ``AttributeError``.
         """
         self._save_lock = asyncio.Lock()
+
+
+class ProcessedProposal(Base):
+    """Replay-safety ledger for side-effecting state.git proposals (ADR-0021).
+
+    One row per dispatched proposal. The composite primary key
+    ``(proposal_type, proposal_id)`` is the at-most-once guarantee: a
+    crash between the handler/ledger transaction and the sentinel-bump
+    transaction leaves the ledger row behind, so the next cycle's
+    HEAD-diff walk re-sees the same blob, SELECTs this PK, finds the
+    row, and skips the handler call (``skipped_already_processed``).
+
+    Column semantics
+    ----------------
+
+    * ``proposal_type`` / ``proposal_id`` — composite PK (ADR-0021
+      §Decision / §Replay safety). String(64) on both — matches the
+      writer's 16-hex id width with headroom for future composed
+      discriminators.
+    * ``blob_sha`` — content hash of the JSON blob on the merge commit
+      (``git ls-tree`` blob sha).
+    * ``commit_sha`` — the dispatch-cycle HEAD at the time of the
+      HEAD-diff walk (the head that brought the blob into ``main``).
+      Distinct from ``blob_sha`` — a blob can appear at multiple commits;
+      the commit binds the action to the git object. The non-repudiable
+      forensic join key per ADR-0021 §Threat model; ``operator_user_id``
+      (below) is self-claimed forensic context only.
+    * ``processed_at`` — timestamptz so the supervisor status footer's
+      ``processed_at > NOW() - INTERVAL '1 hour'`` query works.
+    * ``result`` — closed vocab pinned by ``ck_processed_proposals_result``
+      (``applied``, ``failed_handler``, ``failed_parse``,
+      ``failed_unknown_type``).
+    * ``handler_version`` — integer; lets a future handler-shape
+      migration replay the ledger without ambiguity.
+    * ``failure_kind`` — String(48) closed vocab per spec §2.5 (six
+      values: ``handler_returned_failed``, ``handler_uncaught_exception``,
+      ``payload_validation``, ``unknown_proposal_type``, ``blob_not_found``,
+      ``handler_timeout``), pinned by ``ck_processed_proposals_failure_kind``
+      in addition to the dispatcher's ``Literal``-narrowed call sites.
+      NULL on the applied path.
+    * ``failure_detail`` — String(512). Currently truncated only; DLP
+      redaction (``OutboundDlp.scan``) is tracked at
+      `#173 <https://github.com/alfred-os/AlfredOS/issues/173>`_. Today's
+      emit sites pass closed-vocab strings (``type(exc).__name__``,
+      handler-returned reasons) so the realised leak surface is small;
+      a future emit site that drops a Pydantic-validation-error message
+      into this field would carry verbatim T3 fragments without the #173
+      scanner.
+    * ``operator_user_id`` — String(64) matching ``PluginGrant.operator_user_id``
+      and ``AuditEntry.actor_user_id``. Self-claimed per ADR-0021 §Threat
+      model; ``commit_sha`` is the non-repudiable key.
+
+    Cross-column invariant
+    ----------------------
+
+    The ``result`` and ``failure_kind`` columns are coupled by
+    ``ck_processed_proposals_result_failure_kind_consistency``: an
+    ``applied`` row leaves ``failure_kind`` NULL (success carries no
+    failure discriminator), and every ``failed_*`` row carries a
+    non-NULL ``failure_kind``. The dispatcher's call-site Literals
+    encode this invariant in Python today (CR-rework round-2 MAJOR T4);
+    the CHECK is the defense-in-depth boundary so a future refactor
+    that drops the typing narrowing still cannot land an "applied with
+    failure_kind set" or "failed without failure_kind" row in the ledger.
+    """
+
+    __tablename__ = "processed_proposals"
+
+    proposal_type: Mapped[str] = mapped_column(String(64), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    blob_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    commit_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    processed_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    handler_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    failure_kind: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    operator_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            # CR rework round-1 (MEDIUM/LOW): ``skipped_already_processed``
+            # dropped — the dispatcher's replay path short-circuits
+            # via the composite-PK lookup BEFORE inserting any row,
+            # so the value was never written to the ledger.
+            "result IN ('applied', 'failed_handler', 'failed_parse', 'failed_unknown_type')",
+            name="ck_processed_proposals_result",
+        ),
+        CheckConstraint(
+            # HIGH #8: defense-in-depth alongside the dispatcher's
+            # ``Literal``-narrowed :func:`_record_failure` call sites.
+            # ``NULL`` is the applied-path shape; every failure path
+            # writes one of the six closed-vocab values.
+            "failure_kind IS NULL OR failure_kind IN ("
+            "'handler_returned_failed', 'handler_uncaught_exception', "
+            "'payload_validation', 'unknown_proposal_type', "
+            "'blob_not_found', 'handler_timeout')",
+            name="ck_processed_proposals_failure_kind",
+        ),
+        CheckConstraint(
+            # CR-rework round-2 MAJOR T4: result x failure_kind invariant.
+            # ``applied`` rows MUST leave ``failure_kind`` NULL; every
+            # ``failed_*`` row MUST carry a non-NULL ``failure_kind``.
+            # The dispatcher's call-site Literals encode this today but
+            # the CHECK survives a refactor that drops the narrowing.
+            "(result = 'applied' AND failure_kind IS NULL) "
+            "OR (result IN ('failed_handler', 'failed_parse', "
+            "'failed_unknown_type') AND failure_kind IS NOT NULL)",
+            name="ck_processed_proposals_result_failure_kind_consistency",
+        ),
+    )
+
+
+class ProcessedProposalsHead(Base):
+    """Sentinel: tracks last-processed state.git HEAD (ADR-0021).
+
+    Single-row table — enforced by ``ck_processed_proposals_head_singleton``
+    pinning ``id = 1``. The dispatch loop reads this on every cycle to
+    derive the ``git diff <last>..origin/main --diff-filter=A`` walk.
+
+    ``head_sha`` starts NULL after the migration. The dispatch loop's
+    first cycle detects NULL, writes ``git rev-parse origin/main`` as the
+    bootstrap value (forward-from-now semantics — existing blobs are not
+    reprocessed). This avoids the rejected alternative A6 in ADR-0021
+    (subprocess at migration time); ``/var/lib/alfred/state.git`` does
+    not exist at fresh-install migration time on every deployment shape.
+
+    A separate-transaction sentinel bump is the second leg of the
+    atomicity model: handler effect + ledger insert commit together;
+    sentinel bump commits afterward. Crash-between-the-two is provably
+    safe because the next cycle re-walks from the old sentinel, sees
+    the same blob, hits the ledger PK, and skips.
+    """
+
+    __tablename__ = "processed_proposals_head"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    head_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (CheckConstraint("id = 1", name="ck_processed_proposals_head_singleton"),)
