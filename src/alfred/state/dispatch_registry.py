@@ -227,8 +227,10 @@ async def _handle_breaker_reset(
         # The dispatcher verifies path/body type match before calling
         # the handler, so this is unreachable in production. Kept as a
         # defensive narrow so a future direct caller (test fixture, REPL
-        # session) hits a clear ``TypeError`` rather than an AttributeError
-        # deep inside the call.
+        # session) hits a clear ``TypeError`` rather than an
+        # AttributeError deep inside the call. Exercised by
+        # ``test_handle_breaker_reset_refuses_wrong_payload_type`` under
+        # ``tests/unit/state/test_dispatch_registry.py``.
         msg = (
             f"_handle_breaker_reset received {type(payload).__name__}; "
             "expected BreakerResetProposal"

@@ -259,6 +259,33 @@ async def test_handle_breaker_reset_propagates_unexpected_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_breaker_reset_refuses_wrong_payload_type() -> None:
+    """Defensive narrow — direct caller with mismatched payload hits TypeError.
+
+    The dispatcher verifies the path/body type match BEFORE invoking
+    the handler, so in production this branch is unreachable. Pin the
+    refusal so a future direct caller (test fixture, REPL session)
+    sees a clear TypeError rather than an AttributeError deep in the
+    body.
+    """
+    from alfred.state.proposal_payloads import PluginGrantProposal
+
+    payload = PluginGrantProposal(
+        plugin_id="alfred.web-fetch",
+        subscriber_tier="operator",
+        hookpoint="tool.web.fetch",
+        content_tier=None,
+    )
+    ctx = ProposalContext(
+        audit_writer=AsyncMock(spec=AuditWriter),
+        effects=AsyncMock(spec=ProposalEffectsProtocol),
+        logger=structlog.get_logger("test"),
+    )
+    with pytest.raises(TypeError):
+        await _handle_breaker_reset(payload, ctx)
+
+
+@pytest.mark.asyncio
 async def test_handle_breaker_reset_is_async_returns_dispatch_outcome() -> None:
     """The handler MUST be async and return a DispatchOutcome.
 

@@ -56,6 +56,8 @@ class TestSettings:
 
     def test_proposal_dispatch_interval_s_rejects_zero(self) -> None:
         """A zero / negative interval would tight-loop — pin gt=0 at the schema."""
+        from pydantic import ValidationError
+
         with (
             patch.dict(
                 os.environ,
@@ -65,7 +67,7 @@ class TestSettings:
                 },
                 clear=True,
             ),
-            pytest.raises(Exception),
+            pytest.raises((SettingsError, ValidationError)),
         ):
             Settings()
 
