@@ -60,12 +60,16 @@ import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
 from contextlib import AbstractAsyncContextManager, suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
 
-from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_FIELDS
+from alfred.audit.audit_row_schemas import (
+    STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS,
+    SUPERVISOR_BREAKER_RESET_FIELDS,
+)
 from alfred.i18n import t
 from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.capability_monitor import CapabilityGateMonitor
@@ -176,6 +180,8 @@ class Supervisor:
         session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
         gate: _GateLike,
         audit: _AuditLike,
+        state_git_path: Path | None = None,
+        proposal_dispatch_interval_s: int = 30,
     ) -> None:
         self._session_scope = session_scope
         self._gate = gate
@@ -196,6 +202,15 @@ class Supervisor:
             gate=gate,  # type: ignore[arg-type]
             audit=audit,
         )
+
+        # ADR-0021 #171 — wiring for the side-effecting dispatch loop.
+        # When ``state_git_path`` is None the loop is NOT scheduled (the
+        # boot-time wiring opts in explicitly); legacy supervisor unit
+        # tests that don't care about state.git continue to work
+        # unchanged. Production wiring at ``alfred.cli.main`` always
+        # supplies the path + reads the interval from Settings.
+        self._state_git_path: Path | None = state_git_path
+        self._proposal_dispatch_interval_s = proposal_dispatch_interval_s
 
         # start/stop state — see class docstring for the lifecycle.
         self._task_group: asyncio.TaskGroup | None = None
@@ -254,6 +269,13 @@ class Supervisor:
         async with asyncio.TaskGroup() as tg:
             self._task_group = tg
             tg.create_task(self._capability_heartbeat_loop())
+            # ADR-0021 #171 — schedule the side-effecting dispatch loop
+            # only when state.git is wired. Legacy supervisor unit tests
+            # construct without a state.git path and skip the loop;
+            # production wiring always supplies the path so the loop
+            # always runs in real deployments.
+            if self._state_git_path is not None:
+                tg.create_task(self._proposal_dispatch_loop())
             self._started_event.set()
             await self._shutdown_event.wait()
 
@@ -288,6 +310,114 @@ class Supervisor:
                 # without shutdown; we treat that as "next tick due" and
                 # loop back. Any other exception (e.g. external cancel)
                 # propagates.
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
+            except TimeoutError:
+                continue
+
+    async def _proposal_dispatch_loop(self) -> None:
+        """Run the side-effecting state.git dispatch cycle until shutdown.
+
+        ADR-0021 #171. Mirrors the shape of
+        :meth:`_capability_heartbeat_loop` (sibling TaskGroup task; same
+        shutdown discipline) but uses log+skip semantics on cycle
+        failures rather than propagating-into-TaskGroup. The divergence
+        is intentional and documented in ADR-0021 §Consequences (Negative):
+
+        * The heartbeat is critical-path — a missed cycle could mean
+          undetected gate config drift, so its exceptions surface
+          loudly via the TaskGroup-aggregated raise.
+        * The dispatch loop's work is non-critical-path — one skipped
+          cycle delays a single operator action by ≤ ``interval``
+          seconds. Crashing the supervisor on a transient Postgres
+          outage would be worse than logging + retrying on the next
+          tick. Every aborted cycle still emits an audit row
+          (``state.proposal.dispatch_cycle_skipped``) — no silent skips.
+
+        The cycle itself lives in :func:`alfred.state.dispatch_loop._proposal_dispatch_cycle`
+        and handles every per-blob failure path internally; this loop
+        wires the cycle to the supervisor's runtime context + scheduling
+        cadence.
+        """
+        # Import lazily so the legacy unit-tier ``Supervisor`` construct
+        # path (which does not wire ``state_git_path``) does not pull in
+        # the dispatch_loop module just to skip the schedule.
+        from alfred.state.dispatch_loop import _proposal_dispatch_cycle
+        from alfred.state.dispatch_registry import ProposalContext
+
+        if self._state_git_path is None:  # pragma: no cover — schedule gates this
+            return
+
+        repo_path = self._state_git_path
+        interval = self._proposal_dispatch_interval_s
+        # Capture the Supervisor as the ``effects`` adapter — it satisfies
+        # ProposalEffectsProtocol structurally (its ``reset_breaker``
+        # signature matches). Cast through ``Any`` to keep the existing
+        # ``_AuditLike`` Protocol on the audit field — at runtime the
+        # production AuditWriter already satisfies the dispatcher's
+        # ``append_schema`` shape.
+        ctx = ProposalContext(
+            audit_writer=self._audit,  # type: ignore[arg-type]
+            effects=self,
+            logger=_log,
+        )
+
+        while not self._shutdown_event.is_set():
+            try:
+                await _proposal_dispatch_cycle(
+                    ctx=ctx,
+                    repo_path=repo_path,
+                    session_scope=self._session_scope,
+                )
+            except Exception as exc:
+                # Cycle-level errors that escaped the dispatcher's
+                # internal try/except chain — every known failure mode
+                # is recorded as an audit row inside the cycle itself;
+                # this arm is the belt-and-braces "the dispatcher's own
+                # error discipline regressed" log. CR rework round-1
+                # HIGH #6: ``exc_info=True`` preserves the traceback so
+                # the operator can diagnose the dispatcher's regression
+                # from the dev-log stream.
+                #
+                # CR-rework round-2 MAJOR T6: ALSO emit a
+                # ``state.proposal.dispatch_cycle_skipped`` audit row
+                # before the structlog warning so the audit graph
+                # carries every aborted cycle. Without this emit, an
+                # uncaught exception inside the cycle (a regression in
+                # the dispatcher's exception arms) would silently drop
+                # the audit signal — the ADR-0021 contract is "no
+                # silent skips, every aborted cycle emits an audit row".
+                # The emit is itself wrapped in a try/except so an
+                # audit-writer-also-down case downgrades to the
+                # structlog WARNING below (mirrors the discipline
+                # inside :func:`_emit_cycle_skipped`).
+                cycle_correlation_id = str(uuid.uuid4())
+                # Audit-writer-also-down case downgrades to the structlog
+                # WARNING below with ``exc_info=True`` — mirrors the
+                # swallow-with-log discipline in
+                # :func:`alfred.state.dispatch_loop._emit_cycle_skipped`.
+                with suppress(Exception):
+                    await self._audit.append_schema(
+                        fields=STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS,
+                        schema_name="STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS",
+                        event="state.proposal.dispatch_cycle_skipped",
+                        actor_user_id=None,
+                        actor_persona="supervisor",
+                        subject={
+                            "skip_reason": "cycle_uncaught_exception",
+                            "correlation_id": cycle_correlation_id,
+                        },
+                        trust_tier_of_trigger="T0",
+                        result="refused",
+                        cost_estimate_usd=0.0,
+                        cost_actual_usd=0.0,
+                        trace_id=cycle_correlation_id,
+                    )
+                _log.warning(
+                    "supervisor.proposal_dispatch_cycle_uncaught",
+                    error_type=type(exc).__name__,
+                    exc_info=True,
+                )
+            try:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
             except TimeoutError:
                 continue
@@ -474,6 +604,19 @@ class Supervisor:
         Trust tier on the audit row is ``T1`` — this is an
         operator-tier command (spec §3.6); distinct from the supervisor's
         own T0 rows that describe internal state.
+
+        **Idempotent** per ADR-0021 §Atomicity (CR rework round-1
+        CRITICAL #1). The dispatcher's at-least-once guarantee depends
+        on this contract: a re-invocation against a CLOSED breaker is
+        a no-op for the state machine (``CircuitBreaker.reset`` resets
+        the failure window + backoff counter; both are already in the
+        cleared shape) and a no-op for the persisted row (the row is
+        already CLOSED with the current ``trip_count``). The audit row
+        still emits on the re-invocation, which is the desired
+        forensic shape: the audit graph records every operator
+        instruction. Side-effect emit semantics: handler runs N times
+        across N dispatch-cycle replays produce N audit rows + 1
+        ``circuit_breakers`` row in CLOSED.
 
         Raises:
             NoSuchComponentError: ``component_id`` is not registered. A

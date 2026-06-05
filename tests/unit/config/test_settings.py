@@ -35,6 +35,40 @@ class TestSettings:
             s = Settings()
             assert s.anthropic_api_key is None
 
+    def test_proposal_dispatch_interval_s_defaults_to_30(self) -> None:
+        """ADR-0021 #171 — supervisor's dispatch cycle cadence defaults to 30s."""
+        with patch.dict(os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x"}, clear=True):
+            s = Settings()
+            assert s.proposal_dispatch_interval_s == 30
+
+    def test_proposal_dispatch_interval_s_reads_env_override(self) -> None:
+        """Operators can lower the cadence via ALFRED_PROPOSAL_DISPATCH_INTERVAL_S."""
+        with patch.dict(
+            os.environ,
+            {
+                "ALFRED_DEEPSEEK_API_KEY": "x",
+                "ALFRED_PROPOSAL_DISPATCH_INTERVAL_S": "5",
+            },
+            clear=True,
+        ):
+            s = Settings()
+            assert s.proposal_dispatch_interval_s == 5
+
+    def test_proposal_dispatch_interval_s_rejects_zero(self) -> None:
+        """A zero / negative interval would tight-loop — pin gt=0 at the schema."""
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ALFRED_DEEPSEEK_API_KEY": "x",
+                    "ALFRED_PROPOSAL_DISPATCH_INTERVAL_S": "0",
+                },
+                clear=True,
+            ),
+            pytest.raises(Exception),
+        ):
+            Settings()
+
 
 class TestPlaceholderApiKeyValidator:
     """DEVEX-001 (PR #89) — Settings rejects the literal `.env.example` placeholder.
