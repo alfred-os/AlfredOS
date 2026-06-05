@@ -38,6 +38,10 @@ CONSTANT_NAMES: Final[tuple[str, ...]] = (
     "CONFIG_SET_REQUESTED_FIELDS",
     "DLP_OUTBOUND_REFUSED_FIELDS",
     "SUPERVISOR_BREAKER_TRIPPED_FIELDS",
+    # ADR-0021 — state.git side-effecting dispatch audit family.
+    "STATE_PROPOSAL_PROCESSED_FIELDS",
+    "STATE_PROPOSAL_DISPATCH_FAILED_FIELDS",
+    "STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS",
 )
 
 
@@ -377,3 +381,92 @@ def test_dlp_scan_result_literal_includes_new_values() -> None:
         "handle_id_mismatch",
         "dispatch_param_invalid",  # NEW per #147
     }
+
+
+# ---------------------------------------------------------------------------
+# state.proposal.* family (ADR-0021 — side-effecting dispatch)
+# ---------------------------------------------------------------------------
+
+
+def test_state_proposal_processed_fields_exact() -> None:
+    """STATE_PROPOSAL_PROCESSED_FIELDS exact field list per ADR-0021 §Audit.
+
+    Emitted on every dispatched proposal (success or handler-returned-failure).
+    Carries the full forensic surface so the audit-graph correlator can
+    join the dispatch row with both the operator-CLI ingress row and the
+    git merge event (via commit_sha).
+
+    ``commit_sha`` is the non-repudiable join key (ADR-0021 §Threat model);
+    ``operator_user_id`` is self-claimed forensic context.
+    """
+    assert audit_row_schemas.STATE_PROPOSAL_PROCESSED_FIELDS == frozenset(  # noqa: SIM300
+        {
+            "proposal_type",
+            "proposal_id",
+            "result",
+            "failure_kind",
+            "handler_version",
+            "processed_at",
+            "operator_user_id",
+            "commit_sha",
+            "correlation_id",
+        }
+    )
+
+
+def test_state_proposal_dispatch_failed_fields_exact() -> None:
+    """STATE_PROPOSAL_DISPATCH_FAILED_FIELDS exact field list per ADR-0021.
+
+    Emitted on framework-level dispatch failures (unknown_proposal_type,
+    payload_validation, blob_not_found, handler_uncaught_exception).
+    Superset of PROCESSED + ``framework_error_kind`` so a forensic
+    consumer can distinguish operator-caused failures (handler-returned)
+    from framework-level failures (parse / unknown-type / uncaught).
+    """
+    assert audit_row_schemas.STATE_PROPOSAL_DISPATCH_FAILED_FIELDS == frozenset(  # noqa: SIM300
+        {
+            "proposal_type",
+            "proposal_id",
+            "result",
+            "failure_kind",
+            "framework_error_kind",
+            "handler_version",
+            "processed_at",
+            "operator_user_id",
+            "commit_sha",
+            "correlation_id",
+        }
+    )
+
+
+def test_state_proposal_dispatch_cycle_skipped_fields_exact() -> None:
+    """STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS exact field list.
+
+    ADR-0021 §Consequences (Negative): the dispatch loop uses log+skip
+    semantics on cycle-level infrastructure failure (Postgres unreachable,
+    git command failure). Every aborted cycle MUST emit this row — no
+    silent skips. The ``skip_reason`` field carries the cause; no
+    per-proposal fields because the cycle never resolved which proposals
+    it would have processed.
+    """
+    assert audit_row_schemas.STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS == frozenset(  # noqa: SIM300
+        {
+            "skip_reason",
+            "correlation_id",
+        }
+    )
+
+
+def test_state_proposal_dispatch_failed_supersets_processed() -> None:
+    """STATE_PROPOSAL_DISPATCH_FAILED_FIELDS is a superset of PROCESSED + framework key.
+
+    Pins the relationship: framework-level rows carry every processed
+    row's field plus framework_error_kind, so an audit-graph consumer
+    can use the same join-key set and add a discriminator on the
+    framework key only when needed.
+    """
+    processed = audit_row_schemas.STATE_PROPOSAL_PROCESSED_FIELDS
+    failed = audit_row_schemas.STATE_PROPOSAL_DISPATCH_FAILED_FIELDS
+    assert processed.issubset(failed)
+    assert "framework_error_kind" in failed
+    assert "framework_error_kind" not in processed

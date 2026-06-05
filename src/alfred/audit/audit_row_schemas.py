@@ -566,3 +566,65 @@ DLP_OUTBOUND_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
         "correlation_id",
     }
 )
+
+# ---------------------------------------------------------------------------
+# state.proposal.* family (ADR-0021 — side-effecting dispatch)
+# ---------------------------------------------------------------------------
+
+# ``state.proposal.processed`` — emitted on every dispatched proposal
+# (success or handler-returned-failure). The closed-vocab ``result``
+# value carries the dispatch outcome (``applied`` /
+# ``failed_handler``); ``failure_kind`` is None on the applied path
+# and carries the closed-vocab failure discriminator otherwise.
+#
+# ``commit_sha`` is the dispatch-cycle HEAD captured at the HEAD-diff
+# walk (the head that brought the blob into ``main``) and is the
+# non-repudiable forensic join key per ADR-0021 §Threat model — distinct
+# from the ``operator_user_id`` field which is self-claimed forensic
+# context only. DLP redaction of ``failure_detail`` is tracked at #173;
+# today the field is truncated only and the realised emit-site vocab is
+# closed-set strings (``type(exc).__name__``, handler-returned reasons).
+#
+# ``processed_at`` carries the ledger row's wall-clock timestamp so the
+# audit-graph correlator can join against the
+# :class:`alfred.memory.models.ProcessedProposal` row by primary key +
+# timestamp without re-querying Postgres.
+STATE_PROPOSAL_PROCESSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "proposal_type",
+        "proposal_id",
+        "result",
+        "failure_kind",
+        "handler_version",
+        "processed_at",
+        "operator_user_id",
+        "commit_sha",
+        "correlation_id",
+    }
+)
+
+# ``state.proposal.dispatch_failed`` — emitted on framework-level dispatch
+# failures (unknown_proposal_type, payload_validation, blob_not_found,
+# handler_uncaught_exception). Superset of PROCESSED + the
+# ``framework_error_kind`` discriminator so an audit-graph consumer can
+# distinguish operator-caused failures (handler-returned ``failed``,
+# which still emits the processed family) from framework-level failures
+# (parse / unknown-type / uncaught) without re-classifying via
+# ``failure_kind``.
+STATE_PROPOSAL_DISPATCH_FAILED_FIELDS: Final[frozenset[str]] = (
+    STATE_PROPOSAL_PROCESSED_FIELDS | frozenset({"framework_error_kind"})
+)
+
+# ``state.proposal.dispatch_cycle_skipped`` — emitted when an entire
+# cycle is aborted due to infrastructure failure (Postgres unreachable,
+# git command failure). ADR-0021 §Consequences (Negative): no silent
+# skips. The cycle never resolved which proposals it would have
+# processed, so this row carries only the ``skip_reason`` closed-vocab
+# discriminator — no per-proposal fields are knowable at the abort
+# point.
+STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "skip_reason",
+        "correlation_id",
+    }
+)
