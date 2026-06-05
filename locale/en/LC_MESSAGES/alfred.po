@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-05 20:57+0100\n"
+"POT-Creation-Date: 2026-06-05 21:03+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -487,7 +487,7 @@ msgstr ""
 # the schema is not initialised (``circuit_breakers`` does not exist).
 # Routes to a dedicated key naming the remediation rather than dumping
 # a raw SQLAlchemy traceback at an operator.
-#: src/alfred/cli/supervisor.py:329 src/alfred/cli/supervisor.py:792
+#: src/alfred/cli/supervisor.py:329 src/alfred/cli/supervisor.py:796
 msgid "cli.supervisor.status.schema_not_initialised"
 msgstr ""
 "Database schema not initialised. Run: alfred-stack migrate (or `alembic "
@@ -499,7 +499,7 @@ msgstr ""
 # names a concrete action for each common cause rather than collapsing
 # everything to "check the stack".
 #: src/alfred/cli/supervisor.py:336 src/alfred/cli/supervisor.py:345
-#: src/alfred/cli/supervisor.py:795
+#: src/alfred/cli/supervisor.py:799
 msgid "cli.supervisor.status.postgres_unavailable"
 msgstr ""
 "Cannot reach the Alfred Postgres database.\n"
@@ -613,10 +613,23 @@ msgstr ""
 "be wired).\n"
 "Check dispatch status with: alfred supervisor proposals --since 1h"
 
+# CR-rework round-2 follow-up: localise the two parser-error messages
+# emitted from :func:`_parse_duration` so the operator-facing surface
+# stays consistent across locales (CLAUDE.md i18n hard rule #1).
+#: src/alfred/cli/supervisor.py:730
+msgid "cli.supervisor.proposals.since_invalid"
+msgstr ""
+"Invalid --since value: {value}. Expected a unit-suffixed duration like "
+"{example}."
+
+#: src/alfred/cli/supervisor.py:737
+msgid "cli.supervisor.proposals.since_must_be_positive"
+msgstr "Invalid --since value: {value}. Duration must be positive."
+
 # ADR-0021 #171: ``alfred supervisor proposals`` subcommand. Lists
 # recently-processed state.git side-effecting dispatch outcomes; the
 # canonical operator surface for "what did the dispatcher do?".
-#: src/alfred/cli/supervisor.py:737
+#: src/alfred/cli/supervisor.py:741
 msgid "cli.supervisor.proposals.help.short"
 msgstr "List recent state.git side-effecting dispatch results."
 
@@ -624,7 +637,7 @@ msgstr "List recent state.git side-effecting dispatch results."
 # binary ``--recent`` flag so operators can scope to arbitrary
 # windows (1h / 24h / 7d). Default 1h preserves the previous
 # ``--recent`` semantic.
-#: src/alfred/cli/supervisor.py:743
+#: src/alfred/cli/supervisor.py:747
 msgid "cli.supervisor.proposals.since_help"
 msgstr ""
 "Scope to dispatches processed within DURATION (e.g. 1h, 24h, 7d). Default"
@@ -633,52 +646,61 @@ msgstr ""
 # CR rework round-1 HIGH #13: paginate the listing. ``--all`` is
 # the escape hatch when an operator wants every row in the ledger
 # (e.g. forensic export).
-#: src/alfred/cli/supervisor.py:750
+#: src/alfred/cli/supervisor.py:754
 msgid "cli.supervisor.proposals.limit_help"
 msgstr "Maximum rows to render. Default 20. Ignored when --all is passed."
 
-#: src/alfred/cli/supervisor.py:758
+#: src/alfred/cli/supervisor.py:762
 msgid "cli.supervisor.proposals.all_help"
 msgstr "Render every row in the ledger; ignores --limit and --since."
+
+# CR-rework round-2 follow-up: ``--all`` disables the time filter, so
+# the ``--since`` window text from ``empty`` would mislead the
+# operator. Distinct empty-state body omits the window.
+#: src/alfred/cli/supervisor.py:813
+msgid "cli.supervisor.proposals.empty_all"
+msgstr ""
+"No proposals to display. The supervisor's dispatch loop polls every "
+"{interval}s; re-run after the next cycle if a proposal has just merged."
 
 # CR rework round-1 HIGH #13: empty-state body includes the
 # dispatch-cycle interval so the operator knows how long to wait
 # before re-checking after a proposal merges.
-#: src/alfred/cli/supervisor.py:805
+#: src/alfred/cli/supervisor.py:817
 msgid "cli.supervisor.proposals.empty"
 msgstr ""
 "No proposals to display in the {since} window. The supervisor's dispatch "
 "loop polls every {interval}s; re-run after the next cycle if a proposal "
 "has just merged."
 
-#: src/alfred/cli/supervisor.py:813
+#: src/alfred/cli/supervisor.py:825
 msgid "cli.supervisor.proposals.column.proposal_type"
 msgstr "TYPE"
 
-#: src/alfred/cli/supervisor.py:814
+#: src/alfred/cli/supervisor.py:826
 msgid "cli.supervisor.proposals.column.proposal_id"
 msgstr "ID"
 
-#: src/alfred/cli/supervisor.py:815
+#: src/alfred/cli/supervisor.py:827
 msgid "cli.supervisor.proposals.column.result"
 msgstr "RESULT"
 
-#: src/alfred/cli/supervisor.py:816
+#: src/alfred/cli/supervisor.py:828
 msgid "cli.supervisor.proposals.column.failure_kind"
 msgstr "FAILURE"
 
-#: src/alfred/cli/supervisor.py:817
+#: src/alfred/cli/supervisor.py:829
 msgid "cli.supervisor.proposals.column.operator_user_id"
 msgstr "OPERATOR"
 
-#: src/alfred/cli/supervisor.py:818
+#: src/alfred/cli/supervisor.py:830
 msgid "cli.supervisor.proposals.column.processed_at"
 msgstr "PROCESSED AT"
 
 # CR rework round-1 HIGH #13: closed-vocab legend for the ``result``
 # column. Helps operators decode the four values without consulting
 # the runbook on the on-call channel.
-#: src/alfred/cli/supervisor.py:835
+#: src/alfred/cli/supervisor.py:847
 msgid "cli.supervisor.proposals.legend"
 msgstr ""
 "Result values: applied (handler ran cleanly), failed_handler (handler "

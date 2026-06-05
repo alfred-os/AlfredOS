@@ -279,6 +279,63 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
     # ADR-0021 #171: cli.supervisor.reset.deferred_to_issue_171 was
     # tombstoned when the dispatcher landed; the proposal_submitted +
     # confirm_required keys above replace it.
+    # ADR-0021 #171: alfred supervisor proposals subcommand + status footer.
+    "cli.supervisor.status.dispatch_footer": (
+        {"applied": 3, "failed": 1},
+        ("dispatch", "applied"),
+    ),
+    # CR rework round-1 HIGH #12: localised footer-unavailable hint.
+    "cli.supervisor.status.dispatch_footer_unavailable": (
+        {},
+        ("unavailable", "supervisor logs"),
+    ),
+    "cli.supervisor.proposals.help.short": (
+        {},
+        ("dispatch", "list"),
+    ),
+    "cli.supervisor.proposals.since_help": (
+        {},
+        ("duration", "default"),
+    ),
+    "cli.supervisor.proposals.limit_help": (
+        {},
+        ("rows", "limit"),
+    ),
+    "cli.supervisor.proposals.all_help": (
+        {},
+        ("every", "ledger"),
+    ),
+    "cli.supervisor.proposals.legend": (
+        {},
+        ("applied", "result values"),
+    ),
+    "cli.supervisor.proposals.empty": (
+        {"since": "1h", "interval": 30},
+        ("no proposals", "dispatch"),
+    ),
+    # CR-rework round-2 follow-up: ``--all`` empty-state body — distinct
+    # from ``empty`` because the time-window text would mislead the
+    # operator when ``--all`` disables the filter.
+    "cli.supervisor.proposals.empty_all": (
+        {"interval": 30},
+        ("no proposals", "dispatch"),
+    ),
+    # CR-rework round-2 follow-up: ``--since`` parser-error messages
+    # localised — closes the catalog-bypass gap.
+    "cli.supervisor.proposals.since_invalid": (
+        {"value": "abc", "example": "1h, 24h, 7d, 30m"},
+        ("invalid", "duration"),
+    ),
+    "cli.supervisor.proposals.since_must_be_positive": (
+        {"value": "0h"},
+        ("invalid", "positive"),
+    ),
+    "cli.supervisor.proposals.column.proposal_type": ({}, ("TYPE",)),
+    "cli.supervisor.proposals.column.proposal_id": ({}, ("ID",)),
+    "cli.supervisor.proposals.column.result": ({}, ("RESULT",)),
+    "cli.supervisor.proposals.column.failure_kind": ({}, ("FAILURE",)),
+    "cli.supervisor.proposals.column.operator_user_id": ({}, ("OPERATOR",)),
+    "cli.supervisor.proposals.column.processed_at": ({}, ("PROCESSED",)),
     "cli.supervisor.status.breaker_state.open": ({}, ("open",)),
     "cli.supervisor.status.breaker_state.closed": ({}, ("closed",)),
     "cli.supervisor.status.breaker_state.half_open": ({}, ("half",)),
