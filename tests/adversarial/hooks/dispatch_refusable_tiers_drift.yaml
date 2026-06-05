@@ -1,0 +1,28 @@
+id: hk-2026-004
+category: hooks
+threat: "Publisher invokes a declared security-stage hookpoint with refusable_tiers widened past the registry declaration; dispatcher silently honouring the drifted set would let an unauthorised tier short-circuit the action body — the defense-in-depth re-check must refuse the chain + emit a closed-vocab HOOKS_TIER_REJECTED audit row"
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: memory.episodic.record.before_db_write
+  declared_subscribable_tiers:
+    - system
+    - operator
+  declared_refusable_tiers:
+    - system
+  declared_fail_closed: true
+  invoked_subscribable_tiers:
+    - system
+    - operator
+  invoked_refusable_tiers:
+    - system
+    - operator
+  invoked_fail_closed: true
+  drift_kind: refusable_tiers
+  attempted_action: dispatch
+expected_outcome: refused
+provenance: "Derived from Slice-2.5 spec §6.2 dispatch-time defense-in-depth re-check (issue #119 review Group I); pins the refusable-allow-list-drift arm — a typo widening the set silently authorises an operator-tier refusal on a hookpoint declared system-only"
+references:
+  - "spec §6.2"
+  - "spec §6.5"
+  - "issue #119"
+  - "ADR-0014"

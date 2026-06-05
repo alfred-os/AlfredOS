@@ -1,0 +1,27 @@
+id: hk-2026-005
+category: hooks
+threat: "Publisher invokes a security-stage hookpoint declared fail_closed=True with fail_closed=False at the call site; silently honouring the drift would disarm the timeout/subscriber-error fail-closed policy on every chain run (highest-blast — CLAUDE.md hard rule #7 violation). The dispatcher's defense-in-depth re-check must refuse with drift_kind=fail_closed + audit row"
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: memory.episodic.record.before_db_write
+  declared_subscribable_tiers:
+    - system
+    - operator
+  declared_refusable_tiers:
+    - system
+  declared_fail_closed: true
+  invoked_subscribable_tiers:
+    - system
+    - operator
+  invoked_refusable_tiers:
+    - system
+  invoked_fail_closed: false
+  drift_kind: fail_closed
+  attempted_action: dispatch
+expected_outcome: refused
+provenance: "Derived from Slice-2.5 spec §6.2 dispatch-time defense-in-depth re-check (issue #119 review Group I) — the high-blast drift_kind because it silently disarms the fail-closed timeout/error policy on a security stage (CLAUDE.md hard rule #7)"
+references:
+  - "spec §6.2"
+  - "issue #119"
+  - "ADR-0014"
+  - "CLAUDE.md hard rule #7"
