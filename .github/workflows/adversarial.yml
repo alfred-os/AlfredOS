@@ -47,11 +47,13 @@ env:
 jobs:
   adversarial:
     name: Adversarial corpus
-    # Job-level guard: no-op cleanly (without spending checkout / runner steps)
-    # when the corpus has no test_*.py files. Mirrors the in-job
-    # `corpuscheck.outputs.has_corpus` probe but short-circuits earlier so the
-    # job appears as "skipped" rather than "succeeded with all steps skipped".
-    if: ${{ hashFiles('tests/adversarial/**/test_*.py') != '' }}
+    # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()`
+    # in job-level `if:` at workflow-parse time (HTTP 422 "Unrecognized
+    # function: 'hashFiles'") — the function is only valid inside step
+    # contexts (`steps.*.if`, `env:`, `with:`). The in-job `corpuscheck`
+    # step below is the canonical gate; every downstream step short-circuits
+    # on `steps.corpuscheck.outputs.has_corpus`. The cost of running
+    # checkout + the corpuscheck probe on a no-corpus branch is ~5 seconds.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
