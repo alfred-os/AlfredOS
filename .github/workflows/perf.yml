@@ -60,11 +60,15 @@ env:
 jobs:
   perf:
     name: Hook dispatch perf gate
-    # Job-level guard: no-op cleanly (without spending checkout / runner steps)
-    # when the perf corpus has no test_*.py files. Mirrors the in-job
-    # `perfcheck.outputs.has_perf` probe but short-circuits earlier so the
-    # job appears as "skipped" rather than "succeeded with all steps skipped".
-    if: ${{ hashFiles('tests/perf/**/test_*.py') != '' }}
+    # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()`
+    # in job-level `if:` at workflow-parse time (HTTP 422 "Unrecognized
+    # function: 'hashFiles'") — the function is only valid inside step
+    # contexts (`steps.*.if`, `env:`, `with:`). The in-job `perfcheck` step
+    # below is the canonical gate; every downstream step short-circuits on
+    # `steps.perfcheck.outputs.has_perf`. The cost of running checkout +
+    # the perfcheck probe on a no-corpus branch is ~5 seconds — strictly
+    # cheaper than the workflow-parse failure mode (0 successful runs out
+    # of 196 attempts before this fix landed).
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

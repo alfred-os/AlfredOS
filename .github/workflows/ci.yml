@@ -35,30 +35,49 @@ jobs:
     name: Python (lint, types, unit)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: hashFiles('pyproject.toml') != ''
+    # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()`
+    # in job-level `if:` at workflow-parse time (HTTP 422 "Unrecognized
+    # function: 'hashFiles'") — the function is only valid inside step
+    # contexts. The first-step `check` below probes for pyproject.toml and
+    # every downstream step short-circuits on `steps.check.outputs.has_py`.
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Check for Python project
+        id: check
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            echo "has_py=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_py=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::pyproject.toml missing — skipping Python job."
+          fi
       - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
-      - run: uv python install 3.14
-      - run: uv sync --frozen --dev
+        if: steps.check.outputs.has_py == 'true'
+      - if: steps.check.outputs.has_py == 'true'
+        run: uv python install 3.14
+      - if: steps.check.outputs.has_py == 'true'
+        run: uv sync --frozen --dev
       - name: Ruff lint
+        if: steps.check.outputs.has_py == 'true'
         run: uv run ruff check .
       - name: Ruff format check
         # Replaces the old `black --check .` step. ruff format is the
         # AlfredOS-canonical formatter (see docs/python-conventions.md);
         # black is being removed from dev-deps in the Slice 1 Task 1
         # pyproject.toml fixup.
+        if: steps.check.outputs.has_py == 'true'
         run: uv run ruff format --check .
       - name: Mypy (strict)
-        if: hashFiles('src/**/*.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
         run: uv run mypy --strict src/
       - name: Pyright
-        if: hashFiles('src/**/*.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
         run: uv run pyright src/
       - name: Unit tests + coverage gates
-        if: hashFiles('tests/unit/**/*.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('tests/unit/**/*.py') != ''
         # Two gates here:
         #   1. Overall coverage >= 75% (matches pyproject.toml [tool.coverage.report]
         #      fail_under). Drift-detection contract — keeps wide modules honest.
@@ -90,8 +109,11 @@ jobs:
         # the hooks subsystem hasn't landed yet (mirrors the unit-test step
         # at line 61's guard discipline). Re-uses the .coverage data file
         # written by the unit-test step above; depends on that step running
-        # first via implicit step ordering.
-        if: hashFiles('src/alfred/hooks/*.py') != ''
+        # first via implicit step ordering. The chained ``has_py`` clause
+        # mirrors the Mypy / Pyright / unit-test gates so a pyproject-less
+        # branch no-ops cleanly instead of failing on a missing
+        # ``uv run`` toolchain (CR-177).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/hooks/*.py') != ''
         run: |
           uv run coverage report \
             --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py' \
@@ -155,7 +177,7 @@ jobs:
         # < 100% coverage. Chained ``&&`` hashFiles guard per PR-S3-1 R1
         # F1: ANY-match must NOT no-op the gate; ALL files must be
         # present before the coverage report runs.
-        if: hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != ''
         run: |
           uv run coverage report \
             --include='src/alfred/plugins/errors.py,src/alfred/plugins/transport.py,src/alfred/plugins/manifest.py,src/alfred/plugins/inbound_scanner.py,src/alfred/plugins/content_store_base.py,src/alfred/plugins/stdio_transport.py,src/alfred/plugins/session.py,src/alfred/plugins/_observability.py' \
@@ -212,7 +234,7 @@ jobs:
         # at < 100% coverage. Chained ``&&`` hashFiles guard per
         # PR-S3-1 R1 F1: ANY-match must NOT no-op the gate; ALL files
         # must be present before the coverage report runs.
-        if: hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/tls_policy.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/tls_policy.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
         run: |
           uv run coverage report \
             --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
@@ -225,7 +247,7 @@ jobs:
         # exact files under contract and the precise pytest invocation
         # that reproduces the failure on a laptop. Mirrors the Slice-2.5
         # hooks-subsystem precedent for actionable CI failure messages.
-        if: failure() && steps.web_fetch_cov_python.outcome == 'failure'
+        if: failure() && steps.check.outputs.has_py == 'true' && steps.web_fetch_cov_python.outcome == 'failure'
         run: |
           echo "::error::Trust-boundary coverage gate failed for web_fetch."
           echo "Files required at 100% line+branch:"
