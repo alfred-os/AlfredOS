@@ -73,6 +73,17 @@ class Settings(BaseSettings):
     # the docstring contract at the field level).
     working_memory_pool_max: int | None = Field(default=None, ge=50)
 
+    # ADR-0021 #171: cadence of the supervisor's _proposal_dispatch_loop.
+    # 30 s default — operator-action latency target per ADR-0021
+    # §Consequences (Negative). ``gt=0`` because a zero or negative
+    # interval would tight-loop or skip-forever; the dispatcher relies
+    # on a positive sleep budget to avoid starving the rest of the
+    # TaskGroup. Operators can lower for snappier dispatch on a
+    # high-volume install via ``ALFRED_PROPOSAL_DISPATCH_INTERVAL_S``;
+    # the field threads through Settings rather than an os.environ read
+    # so the entire config surface stays auditable from one place.
+    proposal_dispatch_interval_s: int = Field(default=30, gt=0)
+
     @field_validator("deepseek_api_key")
     @classmethod
     def _reject_placeholder_key(cls, v: SecretStr) -> SecretStr:

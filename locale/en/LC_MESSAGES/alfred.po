@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-05 03:04+0100\n"
+"POT-Creation-Date: 2026-06-05 20:57+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -49,17 +49,17 @@ msgstr "configuration is invalid: {detail}"
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
-#: src/alfred/cli/_state_git.py:846
+#: src/alfred/cli/_state_git.py:864
 msgid "cli.state_git.error.path_missing"
 msgstr ""
 "{state_git_path} does not exist. Run `alfred-setup` to initialise the "
 "reviewer-gate state repo."
 
-#: src/alfred/cli/_state_git.py:847
+#: src/alfred/cli/_state_git.py:865
 msgid "cli.state_git.error.git_missing"
 msgstr "`git` is not installed on PATH. Install git and re-run the command."
 
-#: src/alfred/cli/_state_git.py:848
+#: src/alfred/cli/_state_git.py:866
 msgid "cli.state_git.error.push_rejected"
 msgstr ""
 "Reviewer-gate push rejected. Check the alfred structured logs for the "
@@ -477,15 +477,17 @@ msgstr ""
 
 # PR-S3-6 Component E — alfred supervisor sub-app (status read-only,
 # reset --confirm gate). T1-tier per spec §10.8.
-#: src/alfred/cli/supervisor.py:31
+#: src/alfred/cli/supervisor.py:35
 msgid "cli.supervisor.help"
-msgstr "Inspect supervised components. Reset is deferred to #171."
+msgstr ""
+"Inspect supervised components, queue circuit-breaker resets for reviewer "
+"approval, and audit recent dispatch results."
 
 # CR-156 round-7 BLOCKER #4: ProgrammingError from the read path means
 # the schema is not initialised (``circuit_breakers`` does not exist).
 # Routes to a dedicated key naming the remediation rather than dumping
 # a raw SQLAlchemy traceback at an operator.
-#: src/alfred/cli/supervisor.py:325
+#: src/alfred/cli/supervisor.py:329 src/alfred/cli/supervisor.py:792
 msgid "cli.supervisor.status.schema_not_initialised"
 msgstr ""
 "Database schema not initialised. Run: alfred-stack migrate (or `alembic "
@@ -496,7 +498,8 @@ msgstr ""
 # (stack-down vs URL-wrong vs auth-failed vs restarting) so the hint
 # names a concrete action for each common cause rather than collapsing
 # everything to "check the stack".
-#: src/alfred/cli/supervisor.py:332 src/alfred/cli/supervisor.py:341
+#: src/alfred/cli/supervisor.py:336 src/alfred/cli/supervisor.py:345
+#: src/alfred/cli/supervisor.py:795
 msgid "cli.supervisor.status.postgres_unavailable"
 msgstr ""
 "Cannot reach the Alfred Postgres database.\n"
@@ -510,94 +513,177 @@ msgstr ""
 "If none of the above, check the supervisor logs for the underlying\n"
 "SQLSTATE class."
 
-#: src/alfred/cli/supervisor.py:344
+#: src/alfred/cli/supervisor.py:348
 msgid "cli.supervisor.status.no_components_yet"
 msgstr ""
 "No supervised components registered yet. The supervisor writes the first "
 "row to the `circuit_breakers` table when a plugin loads — wait for the "
 "orchestrator to boot a component, then re-run `alfred supervisor status`."
 
-#: src/alfred/cli/supervisor.py:369
+#: src/alfred/cli/supervisor.py:378
 msgid "cli.supervisor.status.column.state"
 msgstr "STATE"
 
-#: src/alfred/cli/supervisor.py:370
+#: src/alfred/cli/supervisor.py:379
 msgid "cli.supervisor.status.column.trip_count"
 msgstr "TRIP COUNT"
 
-#: src/alfred/cli/supervisor.py:373 src/alfred/cli/supervisor.py:388
+#: src/alfred/cli/supervisor.py:382 src/alfred/cli/supervisor.py:397
 msgid "cli.supervisor.status.column.component"
 msgstr "COMPONENT"
 
-#: src/alfred/cli/supervisor.py:382 src/alfred/cli/supervisor.py:391
+#: src/alfred/cli/supervisor.py:391 src/alfred/cli/supervisor.py:400
 msgid "cli.supervisor.status.column.last_trip_at"
 msgstr "LAST TRIP"
 
 # CR-156 round-7 MEDIUM #14: freshness footer printed after the status
 # table. Surfaces the staleness model inline so operators don't need
 # to consult the runbook to know how current the data is.
-#: src/alfred/cli/supervisor.py:423
+#: src/alfred/cli/supervisor.py:432
 msgid "cli.supervisor.status.freshness_footer"
 msgstr ""
 "Snapshot reflects the supervisor's last save_to_db write (typically <=1 "
 "cycle stale). See docs/runbooks/slice-3-supervisor.md."
 
-# CR-156 round-7 BLOCKER #3: the reset command's docstring documents
-# operator intent for code readers but the help shown to operators
-# must reflect reality — the active dispatch path is deferred to #171
-# (the docstring lands on the in-process Python surface; this key
-# lands on the `--help` operator surface).
-#: src/alfred/cli/supervisor.py:426
-msgid "cli.supervisor.reset.help.short"
+# CR rework round-1 HIGH #12: emitted when ``_render_dispatch_footer``
+# narrows on ``OperationalError`` / ``ProgrammingError`` — Postgres
+# unreachable OR schema not initialised. The primary status surface
+# (the breaker table) already rendered, so we surface the footer's
+# unavailability instead of crashing the whole status command.
+#: src/alfred/cli/supervisor.py:456
+msgid "cli.supervisor.status.dispatch_footer_unavailable"
 msgstr ""
-"[deferred to #171] Reset a circuit breaker. Currently logs the attempt "
-"and exits."
+"Recent proposal dispatch (last hour): unavailable. Check supervisor logs "
+"for the underlying error."
 
-#: src/alfred/cli/supervisor.py:428
+# ADR-0021 #171 Operator visibility: footer reporting last-hour
+# dispatch outcomes. Renders even when every count is zero so the
+# absence of activity is the answer, not a missing surface. CR
+# rework round-1 HIGH #11: the hardcoded ``{pending}`` placeholder
+# was always 0 (the loop is monotonically forward — a merged blob
+# either appears in the ledger or has not yet been walked); dropped
+# until a meaningful pending-count surface lands.
+#: src/alfred/cli/supervisor.py:465
+msgid "cli.supervisor.status.dispatch_footer"
+msgstr "Recent proposal dispatch (last hour): {applied} applied, {failed} failed."
+
+# ADR-0021 #171: the reset command's docstring documents operator
+# intent for code readers; this key surfaces on the `--help` operator
+# surface. The deferred-to-#171 stopgap is tombstoned now that the
+# dispatcher ships in the same PR.
+#: src/alfred/cli/supervisor.py:472
+msgid "cli.supervisor.reset.help.short"
+msgstr "Reset a circuit breaker. Writes a reviewer-gated state.git proposal."
+
+#: src/alfred/cli/supervisor.py:474
 msgid "cli.supervisor.reset.usage"
 msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 
-# CR-156 round-7 HIGH #6: ``--confirm`` is preserved in the parser for
-# forward compatibility (so scripts that pass it today do not break on
-# the day #171 lands), but the deferred path fails fast irrespective
-# of the flag. The help body documents the current no-op semantic so
-# operators reading ``--help`` see reality.
-#: src/alfred/cli/supervisor.py:441
+# ADR-0021 #171: ``--confirm`` regains its gating semantic. Reset now
+# writes a real state.git proposal (the no-op stopgap from #154 was
+# only justified while the underlying reset was deferred), so explicit
+# confirmation is meaningful again.
+#: src/alfred/cli/supervisor.py:484
 msgid "cli.supervisor.reset.confirm_help"
 msgstr ""
-"Acknowledges the reset request. Currently has no effect — reset is "
-"deferred to #171."
+"Required: confirm the reset request. Writes a reviewer-gated state.git "
+"proposal; the supervisor applies the reset on the next dispatch cycle."
 
-# #154 / ADR-0020: long-form deferred-reset hint. Operator sees it once
-# and learns the workaround. CR-156 round-7 MEDIUM #8 + BLOCKER #2:
-# restructured into a scannable bullet list (devex reviewer); the
-# Workaround 2 SQL is trimmed to columns that actually exist on the
-# migration-0010 ``circuit_breakers`` schema (the prior body named
-# ``last_reset_at`` / ``last_reset_by`` columns that do not exist).
-# The re-arm-window caveat on Workaround 1 is named explicitly so
-# operators don't expect a restart to clear a freshly-tripped breaker.
-#: src/alfred/cli/supervisor.py:492
-msgid "cli.supervisor.reset.deferred_to_issue_171"
+# ADR-0021 #171: emitted when --confirm is absent. The flag is now a
+# real gate (partial revert of #154 BLOCKER #6 no-op semantic) because
+# the underlying reset performs actual state mutation.
+#: src/alfred/cli/supervisor.py:518
+msgid "cli.supervisor.reset.confirm_required"
 msgstr ""
-"Circuit-breaker reset for {component} is not yet wired (deferred to "
-"#171).\n"
-"The forensic-attempt audit row for this invocation has been emitted.\n"
-"\n"
-"Workarounds:\n"
-"  1. Restart the supervisor:\n"
-"       docker compose restart alfred-supervisor\n"
-"     (Only effective if the breaker is past the re-arm window —\n"
-"      default 1h. CircuitBreaker.load_from_db honours the window;\n"
-"      a freshly-tripped breaker stays OPEN after restart.)\n"
-"\n"
-"  2. Update Postgres directly:\n"
-"       UPDATE circuit_breakers\n"
-"          SET state='CLOSED'\n"
-"        WHERE component_id='{component}';\n"
-"     Bypasses the supervisor.breaker.reset audit row — log the\n"
-"     action in the on-call channel for forensic continuity.\n"
-"\n"
-"Full runbook: docs/runbooks/slice-3-supervisor.md"
+"alfred supervisor reset requires --confirm to write the state.git "
+"proposal. Re-run with --confirm to queue the reset for reviewer approval."
+
+#: src/alfred/cli/supervisor.py:584
+msgid "cli.supervisor.reset.denied"
+msgstr "alfred supervisor reset denied: {reason}"
+
+#: src/alfred/cli/supervisor.py:586
+msgid "cli.supervisor.reset.proposal_submitted"
+msgstr ""
+"Circuit-breaker reset for {component} queued for reviewer approval.\n"
+"  branch:       {branch}\n"
+"  proposal_id:  {proposal_id}\n"
+"The supervisor applies the reset on the next dispatch cycle (up to "
+"{interval}s after reviewer merge — requires the daemon boot path #174 to "
+"be wired).\n"
+"Check dispatch status with: alfred supervisor proposals --since 1h"
+
+# ADR-0021 #171: ``alfred supervisor proposals`` subcommand. Lists
+# recently-processed state.git side-effecting dispatch outcomes; the
+# canonical operator surface for "what did the dispatcher do?".
+#: src/alfred/cli/supervisor.py:737
+msgid "cli.supervisor.proposals.help.short"
+msgstr "List recent state.git side-effecting dispatch results."
+
+# CR rework round-1 HIGH #13: ``--since DURATION`` replaces the
+# binary ``--recent`` flag so operators can scope to arbitrary
+# windows (1h / 24h / 7d). Default 1h preserves the previous
+# ``--recent`` semantic.
+#: src/alfred/cli/supervisor.py:743
+msgid "cli.supervisor.proposals.since_help"
+msgstr ""
+"Scope to dispatches processed within DURATION (e.g. 1h, 24h, 7d). Default"
+" 1h."
+
+# CR rework round-1 HIGH #13: paginate the listing. ``--all`` is
+# the escape hatch when an operator wants every row in the ledger
+# (e.g. forensic export).
+#: src/alfred/cli/supervisor.py:750
+msgid "cli.supervisor.proposals.limit_help"
+msgstr "Maximum rows to render. Default 20. Ignored when --all is passed."
+
+#: src/alfred/cli/supervisor.py:758
+msgid "cli.supervisor.proposals.all_help"
+msgstr "Render every row in the ledger; ignores --limit and --since."
+
+# CR rework round-1 HIGH #13: empty-state body includes the
+# dispatch-cycle interval so the operator knows how long to wait
+# before re-checking after a proposal merges.
+#: src/alfred/cli/supervisor.py:805
+msgid "cli.supervisor.proposals.empty"
+msgstr ""
+"No proposals to display in the {since} window. The supervisor's dispatch "
+"loop polls every {interval}s; re-run after the next cycle if a proposal "
+"has just merged."
+
+#: src/alfred/cli/supervisor.py:813
+msgid "cli.supervisor.proposals.column.proposal_type"
+msgstr "TYPE"
+
+#: src/alfred/cli/supervisor.py:814
+msgid "cli.supervisor.proposals.column.proposal_id"
+msgstr "ID"
+
+#: src/alfred/cli/supervisor.py:815
+msgid "cli.supervisor.proposals.column.result"
+msgstr "RESULT"
+
+#: src/alfred/cli/supervisor.py:816
+msgid "cli.supervisor.proposals.column.failure_kind"
+msgstr "FAILURE"
+
+#: src/alfred/cli/supervisor.py:817
+msgid "cli.supervisor.proposals.column.operator_user_id"
+msgstr "OPERATOR"
+
+#: src/alfred/cli/supervisor.py:818
+msgid "cli.supervisor.proposals.column.processed_at"
+msgstr "PROCESSED AT"
+
+# CR rework round-1 HIGH #13: closed-vocab legend for the ``result``
+# column. Helps operators decode the four values without consulting
+# the runbook on the on-call channel.
+#: src/alfred/cli/supervisor.py:835
+msgid "cli.supervisor.proposals.legend"
+msgstr ""
+"Result values: applied (handler ran cleanly), failed_handler (handler "
+"reported error — see failure_kind), failed_parse (proposal blob "
+"unreadable), failed_unknown_type (path prefix not registered)."
 
 # PR-S3-6 Component C — alfred web allowlist sub-app (reviewer-gated
 # add/remove, read-only list). Async-UX strings carry {branch} +
@@ -1526,20 +1612,20 @@ msgstr ""
 "not present the authorised CapabilityGateNonce. The T3 ingestion boundary"
 " is gated to StdioTransport and quarantine_host only (spec §3.2)."
 
-#: src/alfred/supervisor/core.py:227
+#: src/alfred/supervisor/core.py:242
 msgid "supervisor.start.already_started"
 msgstr ""
 "Supervisor.start() called twice without an intervening stop(). The "
 "supervisor is single-instance per process; re-entrancy would orphan the "
 "first TaskGroup."
 
-#: src/alfred/supervisor/core.py:439
+#: src/alfred/supervisor/core.py:569
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:495
+#: src/alfred/supervisor/core.py:638
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
@@ -1813,4 +1899,27 @@ msgstr ""
 
 #~ msgid "cli.supervisor.reset.rerun_hint"
 #~ msgstr "Re-run with: alfred supervisor reset {component} --confirm"
+
+# ADR-0021 #171: error body rendered when queue_proposal_or_exit
+# catches a StateGitError. The helper supplies {reason} (localised
+# hint) + {detail} (typed error message) via the same shape as the
+# cli.web.allowlist.add.denied / cli.config.set.denied surfaces.
+#~ msgid "cli.supervisor.reset.denied"
+#~ msgstr "alfred supervisor reset denied: {reason}"
+
+# ADR-0021 #171: success body rendered after the proposal lands.
+# Catalog shape follows the cli.web.allowlist.add.pending_review
+# precedent (branch + proposal_id) extended with {interval} so the
+# operator knows the dispatch cadence + {component} for the request
+# context. The follow-up line points at ``alfred supervisor proposals
+# --recent`` (the dispatch-status surface added in Task 9).
+#~ msgid "cli.supervisor.reset.proposal_submitted"
+#~ msgstr ""
+#~ "Circuit-breaker reset for {component} queued for reviewer approval.\n"
+#~ "  branch:       {branch}\n"
+#~ "  proposal_id:  {proposal_id}\n"
+#~ "The supervisor applies the reset on "
+#~ "the next dispatch cycle (~{interval}s "
+#~ "after reviewer merge).\n"
+#~ "Check dispatch status with: alfred supervisor proposals --recent"
 
