@@ -59,7 +59,9 @@ rather than three independent shutdown sequences.
   (after all component breakers are registered, before any plugin spawn).
 
 CLI surface (`alfred supervisor status`, `alfred supervisor reset <component>
---confirm`) wires to `reset_breaker()` and ships in PR-S3-6.
+--confirm`) lives in `src/alfred/cli/supervisor.py`. The two commands reach
+the running supervisor via materially different mechanisms — see [CLI access
+model](#cli-access-model) below and the [Slice-3 runbook](../runbooks/slice-3-supervisor.md).
 
 ### CircuitBreaker (`src/alfred/supervisor/breaker.py`)
 
@@ -327,7 +329,66 @@ the scheduling loop that drives them does not.
 
 | Subsystem | Slice 3 / PR-S3-3b | Deferred to | Anchor |
 |---|---|---|---|
-| Supervisor | `Supervisor`, `CircuitBreaker`, `BreakerState`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints registered; Postgres persistence (migration 0010); `load_all_breakers` + `save_to_db` round-trip | Slice 3 (remaining PRs): CLI surface `alfred supervisor reset` (PR-S3-6). Slice 4: self-healing restart scheduling loop (`maybe_rearm` cadence + exponential backoff probe timing); multi-process `SELECT … FOR UPDATE` escalation for `save_to_db`. | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) spec §10 |
+| Supervisor | `Supervisor`, `CircuitBreaker`, `BreakerState`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints registered; Postgres persistence (migration 0010); `load_all_breakers` + `save_to_db` round-trip; `alfred supervisor status` (Postgres read) + `alfred supervisor reset --confirm` (forensic-attempt audit + deferred-hint) | [#171](https://github.com/alfred-os/AlfredOS/issues/171): merged-proposal-branch dispatch infrastructure + `BreakerResetProposal` (active reset path). Slice 4: self-healing restart scheduling loop (`maybe_rearm` cadence + exponential backoff probe timing); multi-process `SELECT … FOR UPDATE` escalation for `save_to_db`. | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md), [ADR-0020](../adr/0020-supervisor-cli-access-via-postgres-and-state-git.md), spec §10 |
+
+## CLI access model
+
+The supervisor lives in the long-running daemon process; the `alfred` CLI is
+a short-lived synchronous Typer invocation in a different OS process. The CLI
+cannot acquire a live `Supervisor` handle — the `Supervisor.get_instance`
+singleton accessor was the original wiring story (PR-S3-3b) and never
+shipped, because the singleton would live in the daemon process anyway.
+
+ADR-0020 (revised) accepts the asymmetry: the two CLI commands reach the
+supervisor's state via materially different mechanisms.
+
+### `alfred supervisor status` — synchronous Postgres read
+
+The CLI opens a sync SQLAlchemy session against the same `DATABASE_URL` the
+supervisor uses, reads `circuit_breakers`, renders the table, and exits. No
+supervisor handle. No async runtime in the CLI. No new infrastructure. The
+freshness contract is "rows reflect the supervisor's last `save_to_db`
+write; typically lags by ≤1 supervisor cycle" — the same staleness model
+`alfred audit log` uses against the audit Postgres projection.
+
+Failure modes funnel through narrow `except` arms:
+
+| Condition | Disposition |
+|---|---|
+| `DATABASE_URL` unset OR Postgres unreachable | `cli.supervisor.status.postgres_unavailable` + exit 1 |
+| `circuit_breakers` table empty | `cli.supervisor.status.no_components_yet` + exit 0 |
+| Row decode fails (schema drift) | Raw traceback (programmer bug) |
+
+### `alfred supervisor reset` — deferred to #171
+
+The original ADR-0020 named state.git as the substrate (the CLI would write
+a `BreakerResetProposal`; the supervisor would pick it up after reviewer
+merge). Implementation discovery surfaced that AlfredOS has no
+merged-proposal-branch dispatch infrastructure — the closest precedent
+(`RealGate.rebuild_from_state_git`) is a declarative projection rebuild, not
+a side-effect handler. `WebAllowlistProposal` and `ConfigSetProposal` are
+half-shipped (CLI writes proposals, no runtime consumer reads them back).
+Shipping a third half-baked proposal type would perpetuate the gap.
+
+**The reset path is deferred to [#171](https://github.com/alfred-os/AlfredOS/issues/171)**,
+which scopes the dispatch + replay ledger + supervisor poll loop as a single
+piece of architecture. `BreakerResetProposal` lands there as the first user
+of that registry, alongside the half-shipped `WebAllowlistProposal` /
+`ConfigSetProposal` consumers.
+
+Until #171 ships, `alfred supervisor reset <component> --confirm`:
+
+1. Honours the `--confirm` gate.
+2. Emits the forensic-attempt audit row (`supervisor.breaker.reset.attempted`)
+   via the `_emit_breaker_reset_attempt_audit` helper. Operator intent is
+   preserved in the audit graph regardless of whether the reset proceeds.
+3. Prints the localised `cli.supervisor.reset.deferred_to_issue_171` hint,
+   naming the two operator workarounds (supervisor restart or direct
+   Postgres update — see [Slice-3 runbook](../runbooks/slice-3-supervisor.md)).
+4. Exits 1.
+
+The `_get_supervisor()` placeholder is removed. The CLI no longer imports
+`Supervisor`. The PR-S3-3b dependency drops.
 
 ## Operator interfaces
 
@@ -335,7 +396,11 @@ the scheduling loop that drives them does not.
 operator API surface in this slice. It transitions any state → CLOSED, emits
 the `supervisor.breaker.reset` audit row with T1 attribution, and persists the
 new state. The CLI wrapping (`alfred supervisor reset <component> --confirm`)
-ships in PR-S3-6 — this PR ships the programmatic API.
+ships the `--confirm` gate + forensic-attempt audit row today; the active
+reset call lands in [#171](https://github.com/alfred-os/AlfredOS/issues/171)
+alongside the merged-proposal-branch dispatch infrastructure. The
+programmatic API is unchanged: tests call `Supervisor.reset_breaker`
+directly, and #171's dispatcher will route the same way.
 
 **Audit-graph query for breaker diagnostics:**
 
