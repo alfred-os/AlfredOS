@@ -160,75 +160,11 @@ def test_reset_no_such_component_is_locale_immune(runner: CliRunner) -> None:
     assert "NoSuchComponentError" not in combined
 
 
-def test_status_renders_table_header(runner: CliRunner) -> None:
-    """``status`` must render the breaker-state table with the component id."""
-    with patch("alfred.cli.supervisor._list_breaker_states") as mock_list:
-        mock_list.return_value = [
-            {
-                "component": "quarantined-llm",
-                "state": "CLOSED",
-                "trip_count": 0,
-                "last_trip_at": None,
-            }
-        ]
-        # _get_supervisor is called for the running-supervisor probe; stub it.
-        with patch("alfred.cli.supervisor._get_supervisor", return_value=object()):
-            result = runner.invoke(supervisor_app, ["status"])
-    assert result.exit_code == 0, (result.output, result.stderr)
-    assert "quarantined-llm" in result.output
-
-
-def test_status_renders_all_three_breaker_states(runner: CliRunner) -> None:
-    """OPEN / CLOSED / HALF_OPEN states each route through their localised label."""
-    rows = [
-        {
-            "component": "comp-open",
-            "state": "OPEN",
-            "trip_count": 3,
-            "last_trip_at": "2026-05-31T10:00:00Z",
-        },
-        {"component": "comp-closed", "state": "CLOSED", "trip_count": 0, "last_trip_at": None},
-        {
-            "component": "comp-half",
-            "state": "HALF_OPEN",
-            "trip_count": 1,
-            "last_trip_at": "2026-05-31T11:00:00Z",
-        },
-        # CR-149: an unknown enum value renders the explicit
-        # "unknown" label rather than silently masquerading as the
-        # CLOSED label. The previous shape lied about breaker health
-        # by defaulting unknown values to ``closed``; failing loud
-        # is the operator surface contract on T1 status (spec §11.3).
-        {"component": "comp-unknown", "state": "BOGUS", "trip_count": 0, "last_trip_at": None},
-    ]
-    with (
-        patch("alfred.cli.supervisor._list_breaker_states", return_value=rows),
-        patch("alfred.cli.supervisor._get_supervisor", return_value=object()),
-    ):
-        result = runner.invoke(supervisor_app, ["status"])
-    assert result.exit_code == 0, (result.output, result.stderr)
-    assert "comp-open" in result.output
-    assert "comp-closed" in result.output
-    assert "comp-half" in result.output
-    assert "comp-unknown" in result.output
-    # Unknown enum must not leak through the table.
-    assert "BOGUS" not in result.output
-    # CR-149: the explicit "UNKNOWN" localised label is rendered for
-    # the unrecognised breaker state, so the operator sees a tripped /
-    # unsupported state instead of a fabricated CLOSED reading.
-    assert "UNKNOWN" in result.output
-
-
-def test_status_no_supervisor_running_exits_nonzero(runner: CliRunner) -> None:
-    """When ``_get_supervisor`` raises, status surfaces the friendly hint."""
-    with patch(
-        "alfred.cli.supervisor._get_supervisor",
-        side_effect=RuntimeError("supervisor not wired"),
-    ):
-        result = runner.invoke(supervisor_app, ["status"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    assert "supervisor" in combined.lower() or "running" in combined.lower()
+# Status-render tests + the ``no_supervisor_running`` status probe test
+# moved to ``tests/unit/cli/test_supervisor_status.py`` in #154. The status
+# command no longer probes ``_get_supervisor``, so the probe-side error
+# arm collapses into the ``postgres_unavailable`` disposition the new
+# status tests pin.
 
 
 def test_reset_no_supervisor_running_routes_through_localised_hint(
@@ -270,20 +206,9 @@ def test_reset_no_supervisor_running_routes_through_localised_hint(
     assert audit_emit.call_count == 0
 
 
-def test_status_empty_rows_renders_hint(runner: CliRunner) -> None:
-    """An empty ``circuit_breakers`` table renders the "no components yet" hint."""
-    with (
-        patch("alfred.cli.supervisor._list_breaker_states", return_value=[]),
-        patch("alfred.cli.supervisor._get_supervisor", return_value=object()),
-    ):
-        result = runner.invoke(supervisor_app, ["status"])
-    assert result.exit_code == 0, (result.output, result.stderr)
-    # Header row not printed when there's no data — the empty hint should be.
-    assert (
-        "COMPONENT" not in result.output
-        or "registered" in result.output.lower()
-        or "no " in result.output.lower()
-    )
+# test_status_empty_rows_renders_hint moved to
+# tests/unit/cli/test_supervisor_status.py
+# (now test_status_no_components_yet_on_empty_rows).
 
 
 def test_reset_unexpected_error_routes_through_generic_message(runner: CliRunner) -> None:
@@ -452,101 +377,19 @@ def test_get_supervisor_raises_when_singleton_missing() -> None:
         supervisor_module._get_supervisor()
 
 
-def test_list_breaker_states_raises_not_implemented() -> None:
-    """``_list_breaker_states`` raises ``NotImplementedError`` until the read path lands.
-
-    CR-149 round-4: the prior stub returned ``[]`` which collapsed two
-    operationally-distinct conditions (no components vs. read-path
-    not implemented) into a single empty-state message. Fail closed
-    with the explicit typed error; the supervisor_status handler
-    converts it into the localised "status unavailable" message.
-    """
-    from alfred.cli import supervisor as supervisor_module
-
-    with pytest.raises(NotImplementedError, match="read path not implemented"):
-        supervisor_module._list_breaker_states()
-
-
-def test_status_handles_read_path_unavailable(runner: CliRunner) -> None:
-    """``alfred supervisor status`` surfaces a localised "status unavailable" hint
-    when ``_list_breaker_states`` raises ``NotImplementedError``.
-
-    CR-149 round-4 regression: pre-fix, the same NotImplementedError
-    would have leaked as a raw traceback (uncaught). Pin the typed
-    error path + the catalog-routed message so a future refactor
-    cannot silently regress to the empty-state hint.
-    """
-    with (
-        patch("alfred.cli.supervisor._get_supervisor", return_value=object()),
-        patch(
-            "alfred.cli.supervisor._list_breaker_states",
-            side_effect=NotImplementedError("read path not implemented"),
-        ),
-    ):
-        result = runner.invoke(supervisor_app, ["status"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    # The hint must mention "unavailable" or "implemented" so the operator
-    # sees this is a wiring gap, not "no components yet".
-    assert "unavailable" in combined.lower() or "implemented" in combined.lower()
-
-
-def test_status_read_path_connection_error_routes_through_no_supervisor_hint(
-    runner: CliRunner,
-) -> None:
-    """CR-149 round-5: a read-path ``ConnectionError`` routes through the no-supervisor hint.
-
-    The round-5 split added a separate ``except (ConnectionError, TimeoutError)``
-    arm scoped to :func:`_list_breaker_states` so the operator sees one
-    shape of fail-loud message regardless of which side of the bootstrap
-    actually broke once the Postgres projection lands. Pin the arm so a
-    future refactor cannot regress to either silently swallowing the
-    error or raising the wrong localised hint.
-    """
-    with (
-        patch("alfred.cli.supervisor._get_supervisor", return_value=object()),
-        patch(
-            "alfred.cli.supervisor._list_breaker_states",
-            side_effect=ConnectionError("postgres connection lost"),
-        ),
-    ):
-        result = runner.invoke(supervisor_app, ["status"])
-    assert result.exit_code != 0
-    combined = (result.output or "") + (result.stderr or "")
-    # The "no supervisor running" hint MUST appear; the "read path
-    # unavailable" hint MUST NOT.
-    assert "unavailable" not in combined.lower()
-    assert "read path" not in combined.lower()
-    assert "supervisor" in combined.lower() or "running" in combined.lower()
-
-
-def test_status_probe_not_implemented_propagates_loud(runner: CliRunner) -> None:
-    """CR-149 round-5: a ``NotImplementedError`` from ``_get_supervisor`` MUST propagate.
-
-    The prior shape wrapped both the probe and the read-path call in a
-    single ``except NotImplementedError`` block, so a NotImplementedError
-    leaking out of the supervisor bootstrap (e.g. an abstract method
-    left unwired during a Supervisor refactor) would silently surface
-    as the friendly "read path unavailable" hint instead of the loud
-    traceback the bug deserves. Pin the split: a probe-side
-    NotImplementedError now bubbles up as the typed exception so the
-    operator sees a real traceback (CLAUDE.md hard rule #7).
-    """
-    with patch(
-        "alfred.cli.supervisor._get_supervisor",
-        side_effect=NotImplementedError("supervisor.get_instance abstract"),
-    ):
-        result = runner.invoke(supervisor_app, ["status"])
-    # CliRunner captures the un-handled exception rather than re-raising.
-    # Pin the exit-non-zero + the typed exception identity so the
-    # bug-shape stays observable to the operator.
-    assert result.exit_code != 0
-    assert isinstance(result.exception, NotImplementedError)
-    # The "read path unavailable" hint MUST NOT appear -- the probe-side
-    # NotImplementedError is a programmer bug, not a wiring gap.
-    combined = (result.output or "") + (result.stderr or "")
-    assert "unavailable" not in combined.lower()
-    assert "read path" not in combined.lower()
+# Removed in #154 / ADR-0020:
+#   * test_list_breaker_states_raises_not_implemented
+#   * test_status_handles_read_path_unavailable
+#   * test_status_read_path_connection_error_routes_through_no_supervisor_hint
+#   * test_status_probe_not_implemented_propagates_loud
+#
+# These tests pinned the pre-ADR-0020 placeholder behaviour
+# (``NotImplementedError`` from a stub ``_list_breaker_states`` + a
+# probe-side ``_get_supervisor`` call). The sync Postgres read path
+# replaces both — the typed surface now covers ``OperationalError`` and
+# the ``DATABASE_URL``-unset RuntimeError, with the operator landing on
+# ``cli.supervisor.status.postgres_unavailable``. The new contracts live
+# in ``tests/unit/cli/test_supervisor_status.py``.
 
 
 def test_get_supervisor_invokes_singleton_when_available(monkeypatch: pytest.MonkeyPatch) -> None:

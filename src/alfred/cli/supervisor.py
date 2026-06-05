@@ -16,12 +16,16 @@ i18n rule #1. The audit row for ``reset`` carries ``operator_user_id`` per
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import os
 import uuid
-from typing import Annotated
+from typing import Annotated, TypedDict
 
 import structlog
 import typer
+from sqlalchemy import create_engine, select
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.orm import sessionmaker
 
 from alfred.i18n import t
 
@@ -186,115 +190,231 @@ def _get_supervisor() -> object:
     return get_instance()
 
 
-def _list_breaker_states() -> list[dict[str, object]]:
-    """Query the ``circuit_breakers`` Postgres table for all component states.
+class BreakerStateRow(TypedDict):
+    """Renderer-facing row shape for ``alfred supervisor status``.
 
-    Depends on PR-S3-3b migration 0010 + the SQLAlchemy model wiring (the
-    Postgres projection lands in a follow-up PR). Until then this MUST
-    fail closed: returning ``[]`` collapsed "the read-path is not yet
-    implemented" with "the supervisor has zero registered components",
-    so an operator running ``alfred supervisor status`` saw the empty
-    hint and could not tell which condition held. CR-149 round-4 +
-    CLAUDE.md hard rule #7 forbid the silent-failure shape on T1
-    operator surfaces.
-
-    Tests patch this with fixture rows OR with a return value to exercise
-    the populated table path; production callers see the typed
-    ``NotImplementedError`` and the supervisor_status handler converts it
-    into a localised "status unavailable" message.
+    ADR-0020 + spec §3.1: the field set matches what
+    :func:`supervisor_status` already consumes from each row, so the
+    Postgres swap is a pure data-source change. ``component`` is the
+    legacy renderer key; the Postgres column is ``component_id``. The
+    helper translates one to the other on the read path so the rendering
+    code does not have to know whether the source is a placeholder, a
+    mock, or live Postgres rows.
     """
-    msg = "breaker status unavailable: read path not implemented"
-    raise NotImplementedError(msg)
+
+    component: str
+    state: str  # CLOSED | OPEN | HALF_OPEN (renderer maps to localised label)
+    trip_count: int
+    last_trip_at: dt.datetime | None
+
+
+def _resolve_database_url() -> str:
+    """Return the sync-driver Postgres URL the supervisor CLI reads from.
+
+    CR-156 (#154 round-7 BLOCKER #1): the previous shape read
+    ``DATABASE_URL`` directly and handed the verbatim string to
+    SQLAlchemy. The default operator deployment exports the
+    async-driver form (``postgresql+asyncpg://...`` — Slice-1's
+    ``Settings.database_url`` shape), and ``alfred supervisor status``
+    crashed with ``ModuleNotFoundError: No module named 'asyncpg'``
+    inside SQLAlchemy because the CLI bundle ships ``psycopg`` only.
+    Routing through :func:`alfred.cli._bootstrap.sync_db_url` reuses
+    the exact driver-rewrite contract every other sync CLI surface
+    already honours (identity resolver, audit writer): rewrite
+    ``+asyncpg`` → ``+psycopg`` in place, insert ``+psycopg`` when no
+    driver token is present, pass any other explicit driver through.
+
+    Settings has a default ``database_url``, so this function does NOT
+    raise on a missing env var — the operator hits the default
+    (``postgresql+asyncpg://alfred:alfred@localhost:5432/alfred``)
+    which then gets rewritten to ``postgresql+psycopg://...`` here.
+    Postgres-unreachable surfaces at the engine-construction or query
+    layer as :class:`OperationalError`, which the handler arm in
+    :func:`supervisor_status` maps to ``postgres_unavailable``.
+
+    Settings load failure (``placeholder_api_key`` and similar
+    fail-loud config errors) is handled by
+    :func:`load_settings_or_die`, which calls ``typer.Exit(2)``
+    directly — the typed exception flow is consistent with every
+    other CLI bootstrap path.
+    """
+    from alfred.cli._bootstrap import load_settings_or_die, sync_db_url
+
+    return sync_db_url(load_settings_or_die())
+
+
+def _list_breaker_states() -> list[BreakerStateRow]:
+    """Read every row from the ``circuit_breakers`` Postgres table.
+
+    ADR-0020 + spec §3.2: the CLI is synchronous (Typer), so we use a
+    sync SQLAlchemy session bound to a sync engine constructed from
+    ``DATABASE_URL``. No supervisor handle — the CLI never reaches the
+    daemon process; the freshness contract is "rows reflect the
+    supervisor's last ``CircuitBreaker.save_to_db`` write" per the
+    runbook.
+
+    Failure modes:
+
+    * ``DATABASE_URL`` unset → resolver returns the Settings default URL
+      (``+asyncpg`` rewritten to ``+psycopg``) per CR-156 round-7
+      BLOCKER #1; no exception is raised here. If the default points
+      at an unreachable Postgres, that surfaces below as
+      :class:`OperationalError`.
+    * Postgres unreachable / connection refused → :class:`OperationalError`
+      (SQLAlchemy). Handler arm in :func:`supervisor_status` maps to
+      ``postgres_unavailable`` + exit 1.
+    * Settings fail-loud (placeholder API key, schema mismatch)
+      → ``typer.Exit(2)`` raised by :func:`load_settings_or_die`
+      inside the resolver; propagates as a fail-loud bootstrap error.
+    * Row decode fails (schema drift) → propagates as a programmer bug.
+
+    The engine is disposed in a ``finally`` so the connection pool is
+    released even when ``__enter__`` on the session raises (the typical
+    ``OperationalError`` shape). The expire-on-commit flag is False
+    because the helper returns plain dicts immediately after read; ORM
+    instances are not retained across the session boundary.
+    """
+    # Lazy import: ``CircuitBreakerState`` pulls SQLAlchemy ORM + the rest
+    # of ``alfred.memory.models`` (~140 ms cold start) per perf-001. Defer
+    # the cost so ``alfred --help`` stays light.
+    from alfred.memory.models import CircuitBreakerState
+
+    engine = create_engine(_resolve_database_url(), pool_pre_ping=True)
+    try:
+        # ``sessionmaker`` is conventionally bound to a PascalCase name in
+        # SQLAlchemy docs, but ruff's ``N806`` (uppercase-local) is correct
+        # for our house style: this is a local sessionmaker factory, not a
+        # class. The lowercase name reflects that.
+        session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with session_factory() as session:
+            orm_rows = session.execute(select(CircuitBreakerState)).scalars().all()
+            return [
+                BreakerStateRow(
+                    component=row.component_id,
+                    state=row.state,
+                    trip_count=row.trip_count,
+                    last_trip_at=row.last_trip_at,
+                )
+                for row in orm_rows
+            ]
+    finally:
+        # Release the connection pool even on the OperationalError path
+        # — leaving the engine pinned across CLI invocations would leak
+        # sockets in unit tests that exercise the failure arm repeatedly.
+        engine.dispose()
 
 
 @supervisor_app.command("status")
 def supervisor_status() -> None:
     """List all supervised components and their circuit-breaker states.
 
-    Spec §11.3: ``alfred supervisor status`` is a read-only Postgres read.
+    Spec §11.3 + ADR-0020: ``alfred supervisor status`` is a read-only
+    sync SQLAlchemy read against the ``circuit_breakers`` Postgres
+    table. Freshness contract: rows reflect the supervisor's last
+    ``CircuitBreaker.save_to_db`` write — see the Slice-3 runbook for
+    the lag model.
+
     Discovery path: ``quarantine_unavailable`` error →
     ``alfred supervisor status`` →
     ``alfred supervisor reset <component> --confirm``.
+
+    Failure-mode dispatch (in order of frequency):
+
+    * :class:`OperationalError` (Postgres unreachable) → localised
+      ``postgres_unavailable`` hint + exit 1.
+    * :class:`RuntimeError` (``DATABASE_URL`` unset, raised by
+      :func:`_resolve_database_url`) → same hint, same exit code. The
+      two distinct failures share one operator action: check the
+      stack.
+    * Empty result set → localised ``no_components_yet`` hint + exit 0.
+      Materially distinct from ``postgres_unavailable``: the supervisor
+      is alive and the read path works, there is just nothing to show
+      yet.
+
+    Anything else (``KeyError``, ``AttributeError``, ...) is a programmer
+    bug and propagates so the operator sees a full traceback. CLAUDE.md
+    hard rule #7 forbids silent failure on T1 surfaces.
     """
-    # devex-013: disambiguate empty state -- supervisor not running vs
-    # genuinely empty. The probe is the supervisor lookup itself; failing
-    # there means the bootstrap could not reach a live supervisor.
-    #
-    # err-001 / cross-cutting R4: narrow the except clause to the three
-    # shapes a "supervisor not reachable" failure actually produces:
-    #
-    # * ``RuntimeError`` -- :func:`_get_supervisor` raises this until
-    #   PR-S3-3b ships ``Supervisor.get_instance``; the test
-    #   ``test_status_no_supervisor_running_exits_nonzero`` pins it.
-    # * ``ConnectionError`` -- Postgres / supervisor IPC unreachable.
-    # * ``asyncio.TimeoutError`` -- supervisor lookup hung past its
-    #   deadline.
-    #
-    # Anything else (``AttributeError``, ``TypeError``, ``KeyError``,
-    # ...) is a programmer bug and MUST propagate so the operator sees a
-    # full traceback in the structlog stream and the bug surfaces loud.
-    # CR-149 round-5 (sec-pr-s3-6-cr-149-r5): split the supervisor probe
-    # and the read-path call into separate try blocks so the
-    # ``NotImplementedError`` handler scopes ONLY to
-    # :func:`_list_breaker_states`. A ``NotImplementedError`` escaping
-    # from :func:`_get_supervisor` -- or from any module it lazily
-    # imports (e.g. an abstract method left unwired during a refactor of
-    # :class:`alfred.supervisor.core.Supervisor`) -- is a genuine
-    # bootstrap bug and MUST surface a full traceback, not the friendly
-    # "read path unavailable" hint. Mapping a probe-side
-    # ``NotImplementedError`` to the localised read-path message
-    # silently lied about the failure shape and regressed CLAUDE.md
-    # hard rule #7 on a T1 operator surface.
-    #
-    # ``NotImplementedError`` is a subclass of ``RuntimeError`` in
-    # CPython, so the probe-side ``except (RuntimeError, ...)`` arm
-    # would otherwise swallow it and route to the localised
-    # "supervisor not running" hint -- equally a silent lie about the
-    # actual failure shape. The explicit ``except NotImplementedError:
-    # raise`` before the RuntimeError arm pins the propagation contract
-    # in code rather than relying on a future reader spotting the MRO
-    # quirk.
-    try:
-        _get_supervisor()
-    except NotImplementedError:
-        # Probe-side NotImplementedError is a bootstrap bug; let it
-        # propagate so the operator sees the typed traceback rather
-        # than the friendly "supervisor not running" hint that the
-        # RuntimeError handler below would otherwise emit (per
-        # Python's NotImplementedError-is-a-RuntimeError MRO).
-        raise
-    except (RuntimeError, ConnectionError, TimeoutError) as exc:
-        typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
-        raise typer.Exit(code=1) from exc
     try:
         rows = _list_breaker_states()
-    except NotImplementedError as exc:
-        # CR-149 round-4: the read-path is not yet wired (Postgres
-        # projection for circuit_breakers lands in a follow-up PR).
-        # Surface that explicitly to the operator rather than mapping
-        # to the "no components yet" hint — silently returning the
-        # empty-state message would lie about the system's actual
-        # state and break the discovery path (CLAUDE.md hard rule #7,
-        # PRD §10.8 forensic contract).
-        typer.echo(t("cli.supervisor.status.read_path_unavailable"), err=True)
+    except ProgrammingError as exc:
+        # CR-156 round-7 BLOCKER #4: the only realistic operator scenario
+        # for ``ProgrammingError`` on this read path is an un-migrated
+        # database — ``circuit_breakers`` does not exist yet. The arm
+        # routes the typed failure through a localised hint naming the
+        # remediation (run the migrations) instead of dumping a raw
+        # SQLAlchemy traceback. We map every ``ProgrammingError`` shape
+        # to this hint rather than parsing ``exc.orig`` for "UndefinedTable":
+        # the diagnostic for any other ProgrammingError shape (rare) is
+        # still "the schema doesn't match the model" which the same
+        # remediation addresses.
+        typer.echo(t("cli.supervisor.status.schema_not_initialised"), err=True)
         raise typer.Exit(code=1) from exc
-    except (ConnectionError, TimeoutError) as exc:
-        # Once the Postgres projection lands the read-path can also fail
-        # for bootstrap / IPC reasons; treat those as "supervisor not
-        # running" the same way the probe does, so the operator sees
-        # one shape of fail-loud message regardless of which side of
-        # the bootstrap actually broke.
-        typer.echo(t("cli.supervisor.status.no_supervisor_running"), err=True)
+    except OperationalError as exc:
+        # Postgres unreachable (connection refused, DNS, etc.) — surface
+        # the same operator-targeted message we use for the
+        # ``DATABASE_URL`` unset disposition below. The operator action
+        # in both cases is identical: check the stack.
+        typer.echo(t("cli.supervisor.status.postgres_unavailable"), err=True)
+        raise typer.Exit(code=1) from exc
+    except RuntimeError as exc:
+        # Defensive net: any RuntimeError below the typed envelope routes
+        # through the same operator key as the OperationalError arm. The
+        # resolver itself no longer raises (it returns the Settings
+        # default when the env var is unset; see CR-156 round-7
+        # BLOCKER #1), so this arm is residual coverage rather than the
+        # primary missing-env-var path.
+        typer.echo(t("cli.supervisor.status.postgres_unavailable"), err=True)
         raise typer.Exit(code=1) from exc
     if not rows:
-        typer.echo(t("cli.supervisor.status.empty_hint"))
+        typer.echo(t("cli.supervisor.status.no_components_yet"))
         return
+    # CR-156 round-7 MEDIUM #9 + CR round-1 i18n follow-up: measure
+    # column widths at render time so a long component id does not push
+    # the state column out of alignment AND so non-English locales do
+    # not overflow the state/trip_count columns. The prior shape pinned
+    # state=9 ("HALF_OPEN", English) and trip_count=10 ("TRIP COUNT",
+    # English) unconditionally — both broke alignment for any locale
+    # whose state label or column header is longer than the English
+    # form (e.g. Japanese "ハーフオープン" exceeds 9 chars; the German
+    # "AUSGELÖST" exceeds 9). Each numeric width below is now max(
+    # localised-header, localised-data, observed-row-data) so every
+    # locale gets a correctly-aligned table.
+    #
+    # rvw-010 CJK-width caveat still applies — Python's len() counts
+    # code points, not display cells, so wide-cell CJK glyphs still
+    # under-pad in monospaced terminals. The Slice 4 swap to
+    # ``rich.table.Table`` handles display-width / code-point-width
+    # divergence properly.
+    state_label_keys = (
+        "cli.supervisor.status.breaker_state.open",
+        "cli.supervisor.status.breaker_state.closed",
+        "cli.supervisor.status.breaker_state.half_open",
+        "cli.supervisor.status.breaker_state.unknown",
+    )
+    state_header = t("cli.supervisor.status.column.state")
+    trip_header = t("cli.supervisor.status.column.trip_count")
+    widths = {
+        "component": max(
+            len(t("cli.supervisor.status.column.component")),
+            max((len(str(r.get("component", ""))) for r in rows), default=0),
+        ),
+        "state": max(len(state_header), *(len(t(k)) for k in state_label_keys)),
+        "trip_count": max(
+            len(trip_header),
+            max((len(str(r.get("trip_count", 0))) for r in rows), default=0),
+        ),
+        "last_trip_at": max(
+            len(t("cli.supervisor.status.column.last_trip_at")),
+            max((len(str(r.get("last_trip_at") or "-")) for r in rows), default=0),
+        ),
+    }
     header = "  ".join(
         [
-            t("cli.supervisor.status.column.component").ljust(25),
-            t("cli.supervisor.status.column.state").ljust(10),
-            t("cli.supervisor.status.column.trip_count").ljust(12),
-            t("cli.supervisor.status.column.last_trip_at").ljust(25),
+            t("cli.supervisor.status.column.component").ljust(widths["component"]),
+            state_header.ljust(widths["state"]),
+            trip_header.ljust(widths["trip_count"]),
+            t("cli.supervisor.status.column.last_trip_at").ljust(widths["last_trip_at"]),
         ]
     )
     typer.echo(header)
@@ -317,15 +437,16 @@ def supervisor_status() -> None:
         }
         state_label = t(state_key_map.get(state_raw, "cli.supervisor.status.breaker_state.unknown"))
         last_trip = str(row.get("last_trip_at") or "-")
-        # rvw-010: hardcoded column widths mis-render in CJK locales (code-point
-        # width vs display width). Deferred to a follow-up that swaps in
-        # rich.table.Table in Slice 4.
         typer.echo(
-            f"{row.get('component', '')!s:<25}  "
-            f"{state_label:<10}  "
-            f"{row.get('trip_count', 0)!s:<12}  "
-            f"{last_trip:<25}"
+            f"{row.get('component', '')!s:<{widths['component']}}  "
+            f"{state_label:<{widths['state']}}  "
+            f"{row.get('trip_count', 0)!s:<{widths['trip_count']}}  "
+            f"{last_trip:<{widths['last_trip_at']}}"
         )
+    # CR-156 round-7 MEDIUM #14: freshness footer makes the staleness
+    # contract visible inline. Operators reading the table know how
+    # current the data is without consulting the runbook.
+    typer.echo(t("cli.supervisor.status.freshness_footer"))
 
 
 @supervisor_app.command("reset")
