@@ -415,6 +415,57 @@ def test_create_proposal_compat_shim_strips_composite_discriminator_keys(
     assert config_result.branch.startswith("proposal/config-quarantined-provider-")
 
 
+def test_create_proposal_compat_shim_breaker_reset_lands_at_typed_path(
+    bare_repo: Path,
+) -> None:
+    """CR-rework round-2: legacy ``create_proposal("breaker-reset", {...})`` round-trips.
+
+    ADR-0021 introduced :class:`BreakerResetProposal` as a side-effecting
+    payload that the dispatch loop's HEAD-diff walker discriminates by
+    path prefix (``policies/breaker-resets/<proposal_id>.json``). The
+    legacy dict-form ``create_proposal`` shim previously had no
+    ``breaker-reset`` arm, so the call silently fell through to the
+    unknown-type fallback that writes the blob to ``/proposal.json`` —
+    the dispatcher never picks it up, and the operator's intent is lost
+    without a forensic signal.
+
+    This pin asserts the typed arm is wired: the legacy dict form lands
+    at the canonical typed path, the same as
+    :meth:`create_proposal_from_payload`. A future refactor that drops
+    the ``breaker-reset`` branch from :func:`_legacy_payload_from_dict`
+    re-introduces the silent-drop regression.
+    """
+    client = StateGitProposalClient(state_git_path=bare_repo)
+    result = client.create_proposal(
+        proposal_type="breaker-reset",
+        payload={
+            "component_id": "alfred.web-fetch",
+            "operator_user_id": "ops-cli",
+            "reason": "operator_initiated",
+        },
+    )
+    assert result.branch.startswith("proposal/breaker-reset-")
+    out = subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "--git-dir",
+            str(bare_repo),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            result.branch,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    files = out.stdout.splitlines()
+    assert f"policies/breaker-resets/{result.proposal_id}.json" in files
+    # Confirm the legacy fall-through path did NOT fire — a ``proposal.json``
+    # leaf at root would mean the dispatch loop never sees the blob.
+    assert "proposal.json" not in files
+
+
 def test_create_proposal_compat_shim_lands_at_typed_on_disk_path(bare_repo: Path) -> None:
     """CR-149 round-7: ``policy-grant`` legacy calls now land at the typed path.
 
