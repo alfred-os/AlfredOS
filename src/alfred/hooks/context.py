@@ -64,9 +64,12 @@ class HookContext[T]:
             (e.g. ``"memory.episodic.record"``). Stable across the
             registry; load-bearing for capability checks.
         hookpoint: Where in the action's lifecycle this stage fires
-            (e.g. ``"memory.episodic.record.pre"``). Conventionally
-            ``f"{action_id}.{kind}"`` but the dispatcher does not enforce
-            that — sub-stage hookpoints are allowed.
+            (e.g. ``"before_validate"``). The canonical runtime form is
+            the local stem shown in the example; the dispatcher also
+            accepts sub-stage hookpoints. The dotted
+            ``f"{action_id}.{kind}"`` form is the deferred Slice-4 / MCP
+            transport identifier (see issue #118 and ADR-0016) and is not
+            used at this layer.
         input: The typed input payload. Generic so callers retain
             narrowing through the dispatcher.
         correlation_id: Cross-system trace correlation id. Propagated

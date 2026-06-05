@@ -235,7 +235,7 @@ def unknown_tier_message(
         tier: The unknown tier string the caller passed.
         subscriber_name: ``hook_fn.__qualname__`` of the offending
             subscriber.
-        hookpoint: The dotted hookpoint identifier the subscriber was
+        hookpoint: The hookpoint identifier (stem form) the subscriber was
             registering against.
         valid_tiers: The known-tier iterable surfaced verbatim in the
             message so the operator sees the legal alternatives.
@@ -309,7 +309,7 @@ def tier_not_subscribable_message(
 
     Args:
         tier: The rejected tier the subscriber declared.
-        hookpoint: The dotted hookpoint identifier.
+        hookpoint: The hookpoint identifier (stem form).
         subscribable_tiers: The publisher-declared allow-list,
             rendered as a sorted list for stable comparison.
     """
@@ -345,7 +345,7 @@ def dispatch_undeclared_hookpoint_message(
     :class:`HookError`'s ``str()`` representation.
 
     Args:
-        name: The dotted hookpoint identifier that was dispatched but
+        name: The hookpoint identifier (stem form) that was dispatched but
             never declared.
         kind: The lifecycle stage (``"pre"`` / ``"post"`` / ``"error"``
             / ``"cancel"``) — surfaces on both the audit row and the
@@ -388,7 +388,7 @@ def publisher_drift_message(
     fields so the operator can see whether more than one field drifted.
 
     Args:
-        name: The dotted hookpoint identifier.
+        name: The hookpoint identifier (stem form).
         drift_kind: The first-detected disagreeing field
             (``"subscribable_tiers"`` / ``"refusable_tiers"`` /
             ``"fail_closed"``) — surfaces on both the audit row and
@@ -446,7 +446,7 @@ def unknown_tier_in_declaration_message(
     init.
 
     Args:
-        hookpoint: The dotted hookpoint identifier the publisher is
+        hookpoint: The hookpoint identifier (stem form) the publisher is
             declaring against.
         unknown_tiers: The tier strings the publisher passed that are
             not in the known-tier vocabulary.

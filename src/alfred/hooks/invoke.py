@@ -244,7 +244,7 @@ so a drift surfaces as a failing test the author MUST acknowledge.
 
 Schema:
 
-* ``hookpoint`` — dotted hookpoint identifier (str)
+* ``hookpoint`` — hookpoint identifier (stem form) (str)
 * ``kind`` — lifecycle stage (one of ``"pre"`` / ``"post"`` / ``"error"``
   / ``"cancel"``)
 * ``subscriber_name`` — ``hook_fn.__qualname__`` of the offending
@@ -278,7 +278,7 @@ and differ only by the ``event`` constant (authorized vs unauthorized).
 
 Schema:
 
-* ``hookpoint`` — dotted hookpoint identifier (str)
+* ``hookpoint`` — hookpoint identifier (stem form) (str)
 * ``kind`` — lifecycle stage. Always ``"pre"`` this slice — the §6.5
   refusal-authorization contract applies ONLY to the pre chain. The
   post / error / cancel handlers' defensive :class:`HookRefusal`
@@ -333,7 +333,7 @@ so a drift surfaces as a failing test the author MUST acknowledge.
 
 Schema:
 
-* ``hookpoint`` — dotted hookpoint identifier (str)
+* ``hookpoint`` — hookpoint identifier (stem form) (str)
 * ``kind`` — lifecycle stage (one of ``"pre"`` / ``"post"`` / ``"error"``
   / ``"cancel"``)
 * ``deadline_seconds`` — the primary chain deadline that fired (float)
@@ -357,7 +357,7 @@ so a drift surfaces as a failing test the author MUST acknowledge.
 
 Schema:
 
-* ``hookpoint`` — dotted hookpoint identifier (str). The re-entered
+* ``hookpoint`` — hookpoint identifier (stem form) (str). The re-entered
   hookpoint, NOT the outermost call.
 * ``kind`` — lifecycle stage of the re-entrant call (one of ``"pre"`` /
   ``"post"`` / ``"error"`` / ``"cancel"``). Lets the operator distinguish
@@ -449,8 +449,8 @@ async def invoke[T](
       :class:`HookError` raised on ``fail_closed``).
 
     Args:
-        name: The dotted hookpoint identifier (e.g.
-            ``"action.memory.episodic.record"``). Positional so a
+        name: The hookpoint identifier (stem form, e.g.
+            ``"before_validate"``). Positional so a
             typo is caught as a type mismatch by mypy.
         ctx: The :class:`HookContext` the action callsite built.
             :meth:`HookContext.for_stage` rewrites its ``hookpoint``
@@ -809,7 +809,7 @@ async def _handle_chain_timeout[T](
         chain_ctx: The last-good ctx — the chain's snapshot at the
             most recent fold point before the timeout fired. Returned
             to the caller in the ``fail_closed=False`` arm.
-        hookpoint: The dotted hookpoint identifier — surfaces on the
+        hookpoint: The hookpoint identifier (stem form) — surfaces on the
             audit row as the ``hookpoint`` field so PR-B's
             :class:`EpisodicAuditSink` can attribute the timeout to
             the right action.
@@ -954,7 +954,7 @@ async def _emit_subscriber_error_audit(
         exc: The original unexpected exception. Only its class NAME is
             read; the instance is otherwise untouched here (the wrap
             site sets ``__cause__`` separately).
-        hookpoint: The dotted hookpoint identifier — surfaces as the
+        hookpoint: The hookpoint identifier (stem form) — surfaces as the
             ``hookpoint`` field so PR-B's projector can attribute the
             fault to the right action.
         kind: The lifecycle stage — surfaces as the ``kind`` field so
@@ -1090,7 +1090,7 @@ async def _enforce_subscribable_tiers[T](
     current arms make the failure mode observable in both postures.
 
     Args:
-        name: The dotted hookpoint identifier — the registry lookup key.
+        name: The hookpoint identifier (stem form) — the registry lookup key.
         ctx: The retargeted carrier — carries the correlation id used
             for the audit row.
         kind: The lifecycle stage — surfaces on the audit row so
@@ -1864,7 +1864,7 @@ class Flow[T]:
         ``flow.input`` against the same holder.
 
         Args:
-            stage: The dotted hookpoint identifier for this ``pre``
+            stage: The hookpoint identifier (stem form) for this ``pre``
                 stage (e.g. ``"before_db_write"``). Forwarded to
                 :func:`invoke` as the ``name`` arg.
             **invoke_kwargs: Forwarded verbatim to :func:`invoke`. Lets

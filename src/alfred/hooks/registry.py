@@ -209,8 +209,8 @@ class HookpointMeta:
     intuition.
 
     Attributes:
-        name: The dotted hookpoint identifier (e.g.
-            ``"memory.episodic.record.before_db_write"``). Carried so
+        name: The hookpoint identifier (stem form, e.g.
+            ``"before_db_write"``). Carried so
             error messages and audit rows attribute the declaration
             back to a grep-able name.
         subscribable_tiers: The tier allow-list. A subscriber whose
@@ -252,8 +252,8 @@ class Subscriber:
             ``async`` shape is enforced at register time via
             :func:`inspect.iscoroutinefunction`; the runtime contract
             here is "always awaitable".
-        hookpoint: The dotted hookpoint identifier the subscriber is
-            wired to (e.g. ``"action.memory.episodic.record"``).
+        hookpoint: The hookpoint identifier (stem form) the subscriber is
+            wired to (e.g. ``"before_db_write"``).
         kind: The lifecycle stage — one of ``"pre"`` / ``"post"`` /
             ``"error"`` / ``"cancel"`` (see
             :data:`alfred.hooks.context.HookKind`).
@@ -597,8 +597,8 @@ class HookRegistry:
           before any subscriber runs.
 
         Args:
-            name: The dotted hookpoint identifier (e.g.
-                ``"memory.episodic.record.before_db_write"``).
+            name: The hookpoint identifier (stem form, e.g.
+                ``"before_db_write"``).
                 Keyword-only — matches the rest of the registry's
                 surface (``register``, the ``HookRegistry``
                 constructor) so a silent argument-order regression at
@@ -679,7 +679,7 @@ class HookRegistry:
         bug surfaced loudly via the audit row.
 
         Args:
-            name: The dotted hookpoint identifier to look up.
+            name: The hookpoint identifier (stem form) to look up.
 
         Returns:
             The stored :class:`HookpointMeta` instance, or ``None`` if
@@ -724,8 +724,8 @@ class HookRegistry:
             hook_fn: The async callable to register. MUST be a
                 coroutine function (``async def``); a sync callable
                 raises at the call site here, not at dispatch.
-            hookpoint: The dotted hookpoint identifier
-                (e.g. ``"action.memory.episodic.record"``). The
+            hookpoint: The hookpoint identifier (stem form)
+                (e.g. ``"before_db_write"``). The
                 dispatcher keys lookup on the (hookpoint, kind) pair.
             kind: The lifecycle stage — one of the four
                 :data:`alfred.hooks.context.HookKind` literals.
@@ -1129,7 +1129,7 @@ class HookRegistry:
           first ``await`` so this is safe.
 
         Args:
-            hookpoint: The dotted hookpoint identifier to look up.
+            hookpoint: The hookpoint identifier (stem form) to look up.
             kind: The lifecycle stage to look up.
 
         Returns:
