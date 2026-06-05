@@ -64,9 +64,9 @@ def _build_supervisor(
 # ---------------------------------------------------------------------------
 
 
-def test_supervisor_init_records_state_git_path() -> None:
+def test_supervisor_init_records_state_git_path(tmp_path: Path) -> None:
     """``state_git_path`` is stashed so the loop knows the repo."""
-    path = Path("/tmp/state.git")
+    path = tmp_path / "state.git"
     sup, _ = _build_supervisor(state_git_path=path)
     assert sup._state_git_path == path
 

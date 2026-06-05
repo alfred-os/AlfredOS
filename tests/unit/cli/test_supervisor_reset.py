@@ -170,6 +170,24 @@ def test_reset_with_confirm_passes_submitted_kwargs_to_queue_helper(
     assert extra.get("interval") == 30
 
 
+def test_register_proposal_keys_for_pybabel_renders_live_bodies() -> None:
+    """The pybabel-anchor shim returns rendered (not template) strings.
+
+    Mirrors the contract pinned for the cli/web.py and cli/plugin.py
+    sibling shims — the shim is the only static-extraction surface that
+    keeps the proposal-flow keys (denied + proposal_submitted) live
+    in the catalog across pybabel update runs.
+    """
+    from alfred.cli.supervisor import _register_proposal_keys_for_pybabel
+
+    rendered = _register_proposal_keys_for_pybabel()
+    assert len(rendered) == 2
+    # Neither rendered string survives unresolved Python-format markers.
+    for body in rendered:
+        assert "{" not in body and "}" not in body
+        assert body  # non-empty
+
+
 def test_reset_proposal_submitted_catalog_body_renders_with_placeholders() -> None:
     """The catalog body resolves with every placeholder the call site provides.
 
