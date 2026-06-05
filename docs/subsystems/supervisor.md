@@ -245,6 +245,7 @@ Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
 | Event | Schema constant | Key subject fields |
 |---|---|---|
 | `supervisor.breaker.tripped` | `SUPERVISOR_BREAKER_TRIPPED_FIELDS` | `component_id`, `trip_count`, `last_failure_type`, `breaker_state="OPEN"`, `correlation_id` |
+| `supervisor.breaker.reset.requested` | `SUPERVISOR_BREAKER_RESET_REQUESTED_FIELDS` | `component_id`, `operator_user_id`, `proposal_branch`, `trust_tier_of_trigger="T1"`, `correlation_id` |
 | `supervisor.breaker.reset` | `SUPERVISOR_BREAKER_RESET_FIELDS` | `component_id`, `old_state`, `new_state="CLOSED"`, `trip_count`, `operator_user_id`, `correlation_id` |
 
 ### Lifecycle rows
@@ -329,7 +330,7 @@ the scheduling loop that drives them does not.
 
 | Subsystem | Slice 3 / PR-S3-3b | Deferred to | Anchor |
 |---|---|---|---|
-| Supervisor | `Supervisor`, `CircuitBreaker`, `BreakerState`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints registered; Postgres persistence (migration 0010); `load_all_breakers` + `save_to_db` round-trip; `alfred supervisor status` (Postgres read) + `alfred supervisor reset --confirm` (forensic-attempt audit + deferred-hint) | [#171](https://github.com/alfred-os/AlfredOS/issues/171): merged-proposal-branch dispatch infrastructure + `BreakerResetProposal` (active reset path). Slice 4: self-healing restart scheduling loop (`maybe_rearm` cadence + exponential backoff probe timing); multi-process `SELECT … FOR UPDATE` escalation for `save_to_db`. | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md), [ADR-0020](../adr/0020-supervisor-cli-access-via-postgres-and-state-git.md), spec §10 |
+| Supervisor | `Supervisor`, `CircuitBreaker`, `BreakerState`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints registered; Postgres persistence (migration 0010); `load_all_breakers` + `save_to_db` round-trip; `alfred supervisor status` (Postgres read) + `alfred supervisor reset --confirm` (reviewer-gated `BreakerResetProposal` via the merged-proposal-branch dispatcher) + `alfred supervisor proposals --since 1h` (ledger readout). ADR-0021 dispatch loop wired (test-construction + dev-local). | [#174](https://github.com/alfred-os/AlfredOS/issues/174): daemon boot path that supplies `state_git_path` so the loop runs in production deployments. Slice 4: self-healing restart scheduling loop (`maybe_rearm` cadence + exponential backoff probe timing); multi-process `SELECT … FOR UPDATE` escalation for `save_to_db`. [#173](https://github.com/alfred-os/AlfredOS/issues/173): DLP wiring on the dispatcher's `failure_detail` boundary. | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md), [ADR-0020](../adr/0020-supervisor-cli-access-via-postgres-and-state-git.md), [ADR-0021](../adr/0021-merged-proposal-branch-dispatch-for-side-effecting-proposals.md), spec §10 |
 
 ## CLI access model
 
@@ -359,48 +360,61 @@ Failure modes funnel through narrow `except` arms:
 | `circuit_breakers` table empty | `cli.supervisor.status.no_components_yet` + exit 0 |
 | Row decode fails (schema drift) | Raw traceback (programmer bug) |
 
-### `alfred supervisor reset` — deferred to #171
+### `alfred supervisor reset` — reviewer-gated state.git proposal
 
-The original ADR-0020 named state.git as the substrate (the CLI would write
-a `BreakerResetProposal`; the supervisor would pick it up after reviewer
-merge). Implementation discovery surfaced that AlfredOS has no
-merged-proposal-branch dispatch infrastructure — the closest precedent
-(`RealGate.rebuild_from_state_git`) is a declarative projection rebuild, not
-a side-effect handler. `WebAllowlistProposal` and `ConfigSetProposal` are
-half-shipped (CLI writes proposals, no runtime consumer reads them back).
-Shipping a third half-baked proposal type would perpetuate the gap.
+`alfred supervisor reset <component> --confirm` queues a `BreakerResetProposal`
+through the canonical state.git writer per
+[ADR-0021](../adr/0021-merged-proposal-branch-dispatch-for-side-effecting-proposals.md).
+The supervisor's `_proposal_dispatch_loop` (sibling to
+`_capability_heartbeat_loop`, same `TaskGroup` membership) walks the
+HEAD-diff on each cycle (≤`proposal_dispatch_interval_s` seconds; default
+30s), finds new blobs in `policies/<type>/<id>.json`, parses them into
+typed Pydantic payloads, dispatches through `PROPOSAL_HANDLERS`, and records
+the outcome in the `processed_proposals` ledger.
 
-**The reset path is deferred to [#171](https://github.com/alfred-os/AlfredOS/issues/171)**,
-which scopes the dispatch + replay ledger + supervisor poll loop as a single
-piece of architecture. `BreakerResetProposal` lands there as the first user
-of that registry, alongside the half-shipped `WebAllowlistProposal` /
-`ConfigSetProposal` consumers.
+The CLI flow:
 
-Until #171 ships, `alfred supervisor reset <component> --confirm`:
-
-1. Honours the `--confirm` gate.
+1. Honours the `--confirm` gate (BLOCKER #6 from #154 preserved).
 2. Emits the forensic-attempt audit row (`supervisor.breaker.reset.attempted`)
-   via the `_emit_breaker_reset_attempt_audit` helper. Operator intent is
-   preserved in the audit graph regardless of whether the reset proceeds.
-3. Prints the localised `cli.supervisor.reset.deferred_to_issue_171` hint,
-   naming the two operator workarounds (supervisor restart or direct
-   Postgres update — see [Slice-3 runbook](../runbooks/slice-3-supervisor.md)).
-4. Exits 1.
+   BEFORE the proposal write so operator intent always lands in the audit
+   graph.
+3. Calls `queue_proposal_or_exit` with a typed `BreakerResetProposal`,
+   which writes the proposal branch and emits the
+   `supervisor.breaker.reset.requested` audit row stand-in.
+4. Prints the localised `cli.supervisor.reset.proposal_submitted` body with
+   the proposal id, branch, dispatch-cycle interval, and the
+   `alfred supervisor proposals --since 1h` follow-up command.
+5. Exits 0 — the request landed.
 
-The `_get_supervisor()` placeholder is removed. The CLI no longer imports
-`Supervisor`. The PR-S3-3b dependency drops.
+**Slice-3 limitation — daemon boot wiring (#174).** The dispatch loop only
+runs when a `Supervisor` is constructed with a `state_git_path`. The daemon
+boot path that wires the production state.git location is tracked at
+[#174](https://github.com/alfred-os/AlfredOS/issues/174). Until #174 ships,
+the dispatch flow runs in tests and dev-local supervisor constructions but
+not in production.
+
+### `alfred supervisor proposals` — ledger readout
+
+Renders the `processed_proposals` table. Flags: `--since DURATION`
+(default `1h`), `--limit N` (default 20), `--all` (forensic export
+escape hatch). Closed-vocab `result` values (`applied`,
+`failed_handler`, `failed_parse`, `failed_unknown_type`) decoded inline
+via the printed legend.
 
 ## Operator interfaces
 
 `Supervisor.reset_breaker(component_id, *, operator_user_id)` is the single
-operator API surface in this slice. It transitions any state → CLOSED, emits
+operator programmatic API surface. It transitions any state → CLOSED, emits
 the `supervisor.breaker.reset` audit row with T1 attribution, and persists the
 new state. The CLI wrapping (`alfred supervisor reset <component> --confirm`)
-ships the `--confirm` gate + forensic-attempt audit row today; the active
-reset call lands in [#171](https://github.com/alfred-os/AlfredOS/issues/171)
-alongside the merged-proposal-branch dispatch infrastructure. The
-programmatic API is unchanged: tests call `Supervisor.reset_breaker`
-directly, and #171's dispatcher will route the same way.
+ships the `--confirm` gate + forensic-attempt audit row, and — since
+[#171](https://github.com/alfred-os/AlfredOS/issues/171) — writes a typed
+`BreakerResetProposal` through the merged-proposal-branch dispatch
+infrastructure documented above (ADR-0021). On reviewer-gate approval the
+supervisor's `_proposal_dispatch_loop` picks up the merged blob and routes
+through `Supervisor.reset_breaker` via the
+`ProposalEffectsProtocol.reset_breaker` adapter — the same underlying
+mutation tests call directly.
 
 **Audit-graph query for breaker diagnostics:**
 

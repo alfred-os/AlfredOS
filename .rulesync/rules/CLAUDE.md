@@ -111,7 +111,7 @@ or `--help` will simply not list them; do not assume them present.
 | Plugin management | Slice 3 | `alfred plugin grant <id> <tier> <hookpoint>` · `alfred plugin grant status <id>` · `alfred plugin grant list --pending` · `alfred plugin revoke <id>` (`alfred plugin list` / `show` hidden from `--help` per arch-006 follow-up) |
 | Web fetch allowlist | Slice 3 | `alfred web allowlist add <domain>` · `alfred web allowlist remove <domain>` · `alfred web allowlist list` |
 | Config (reviewer-gated + direct) | Slice 3 | `alfred config set <key> <value>` (high-blast keys queue a state.git proposal; low-blast keys write `policies.yaml` directly) · `alfred config get <key>` · `alfred config list` — see `alfred config set --help` for the closed key set (`quarantined-provider`, `web-fetch-budget`, `operator-fetch-budget`, `extraction-max-retries`, `action-deadline`, `user-agent`) |
-| Supervisor | Slice 3 | `alfred supervisor status` · `alfred supervisor reset <component> --confirm` |
+| Supervisor | Slice 3 | `alfred supervisor status` · `alfred supervisor reset <component> --confirm` · `alfred supervisor proposals [--since DURATION] [--limit N] [--all]` |
 | Audit (extended) | Slice 3 | `alfred audit graph --tier T0|T1|T2|T3 --since 24h` |
 
 If a command lacks a slice marker, flag it. Commands
