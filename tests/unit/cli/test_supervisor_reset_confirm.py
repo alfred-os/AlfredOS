@@ -40,21 +40,19 @@ def runner() -> CliRunner:
 
 
 def test_reset_without_confirm_exits_nonzero(runner: CliRunner) -> None:
-    """CR-156 round-7 HIGH #6: deferred-to-#171 path exits 1 with or without
-    ``--confirm``.
+    """ADR-0021 #171: ``--confirm`` regains its gating semantic.
 
-    The reset command no longer routes through a separate refusal body when
-    the flag is absent — the deferred-hint fires on every invocation. Pin
-    the non-zero exit so a regression that accidentally returns 0 from the
-    deferred branch surfaces here.
+    Without ``--confirm`` the reset request exits non-zero without
+    writing a proposal. The body points operators at the required
+    flag so the recovery action is obvious. BLOCKER #6 semantic from
+    #154 is preserved — operators must explicitly confirm destructive
+    actions.
     """
     result = runner.invoke(supervisor_app, ["reset", "quarantined-llm"])
-    assert result.exit_code == 1, (result.output, result.stderr)
+    assert result.exit_code != 0, (result.output, result.stderr)
     combined = (result.output or "") + (result.stderr or "")
-    # The deferred-hint body still names #171 + the component id even
-    # though the ``--confirm`` flag itself is now a no-op.
-    assert "#171" in combined
-    assert "quarantined-llm" in combined
+    # The confirm_required body names the flag operators need to add.
+    assert "--confirm" in combined
 
 
 def test_emit_breaker_reset_attempt_audit_uses_schema_fields() -> None:
@@ -211,15 +209,23 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
 
     Pins the wiring end-to-end: when an operator runs ``alfred
     supervisor reset --confirm`` with ``ALFRED_OPERATOR_USER_ID`` set,
-    the attempt audit row carries that id (not ``None``). A regression
-    that drops the wiring on the structlog event surfaces here.
+    the attempt audit row carries that id (not ``None``).
 
-    The reset command now exits 1 (deferred to #171); the audit row is
-    still emitted on the way out.
+    ADR-0021 #171: reset now writes a state.git proposal and exits 0
+    when the queue succeeds; the attempt row still fires before the
+    proposal write (CR-149 forensic-trail invariant) so this assertion
+    holds regardless of the eventual proposal-write outcome.
     """
     import structlog
 
+    from alfred.cli._state_git import ProposalResult
+
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
     monkeypatch.setenv("ALFRED_OPERATOR_USER_ID", "carol@example.com")
+    monkeypatch.setattr(
+        "alfred.cli.supervisor.queue_proposal_or_exit",
+        lambda **_kw: ProposalResult(proposal_id="abc", branch="proposal/breaker-reset-abc"),
+    )
 
     captured: list[dict[str, object]] = []
 
@@ -232,9 +238,8 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
     structlog.configure(processors=[_intercept, structlog.processors.JSONRenderer()])
     try:
         result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-        # Reset is now deferred-to-#171; exits 1, but the attempt row
-        # still emits first.
-        assert result.exit_code == 1, (result.output, result.stderr)
+        # Reset now exits 0 when the proposal queues cleanly.
+        assert result.exit_code == 0, (result.output, result.stderr)
     finally:
         structlog.reset_defaults()
 

@@ -212,17 +212,36 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"yaml_path": "/etc/alfred/policies.yaml", "error": "Permission denied"},
         ("read", "permissions"),
     ),
-    # cli.supervisor.reset.* -- help + deferred-to-#171 surfaces.
-    # ``cli.supervisor.reset.{confirm_prompt,rerun_hint}`` were tombstoned in
-    # CR-156 round-7 HIGH #6: the reset path now fails fast on every
-    # invocation, so the two-step refusal+rerun-hint pair is unreachable.
+    # cli.supervisor.reset.* — ADR-0021 #171 rewires the path so reset
+    # writes a state.git proposal. The old deferred-to-#171 +
+    # confirm_help no-op bodies are tombstoned; fingerprints follow
+    # the new copy.
     "cli.supervisor.reset.help.short": (
         {},
-        ("#171", "deferred"),
+        ("reset", "proposal"),
     ),
     "cli.supervisor.reset.confirm_help": (
         {},
-        ("acknowledges", "no effect"),
+        ("confirm", "proposal"),
+    ),
+    # ADR-0021 #171: confirm gate restored. Body names the flag operators
+    # need to add for the recovery action.
+    "cli.supervisor.reset.confirm_required": (
+        {},
+        ("--confirm", "queue"),
+    ),
+    "cli.supervisor.reset.denied": (
+        {"reason": "state.git push rejected"},
+        ("denied",),
+    ),
+    "cli.supervisor.reset.proposal_submitted": (
+        {
+            "component": "quarantined-llm",
+            "branch": "proposal/breaker-reset-abc",
+            "proposal_id": "abc",
+            "interval": 30,
+        },
+        ("proposal", "branch", "alfred supervisor proposals"),
     ),
     # ``cli.supervisor.reset.{success,component_not_found,unexpected_error}``
     # tombstoned in #154 / ADR-0020 (Task 3). The reset command is now
@@ -257,14 +276,9 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {},
         ("migrate", "alembic"),
     ),
-    # #154 / ADR-0020 (Task 3): the reset command is deferred to #171
-    # until the merged-proposal-branch dispatch infrastructure ships.
-    # The hint body names the missing infrastructure + both operator
-    # workarounds; the fingerprint covers each load-bearing noun.
-    "cli.supervisor.reset.deferred_to_issue_171": (
-        {"component": "quarantined-llm"},
-        ("#171", "restart", "circuit_breakers"),
-    ),
+    # ADR-0021 #171: cli.supervisor.reset.deferred_to_issue_171 was
+    # tombstoned when the dispatcher landed; the proposal_submitted +
+    # confirm_required keys above replace it.
     "cli.supervisor.status.breaker_state.open": ({}, ("open",)),
     "cli.supervisor.status.breaker_state.closed": ({}, ("closed",)),
     "cli.supervisor.status.breaker_state.half_open": ({}, ("half",)),

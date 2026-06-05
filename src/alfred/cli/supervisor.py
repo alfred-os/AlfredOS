@@ -26,7 +26,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import sessionmaker
 
+from alfred.cli._state_git import queue_proposal_or_exit
 from alfred.i18n import t
+from alfred.state.proposal_payloads import BreakerResetProposal
 
 supervisor_app = typer.Typer(help=t("cli.supervisor.help"), no_args_is_help=True)
 _log = structlog.get_logger(__name__)
@@ -430,66 +432,91 @@ def supervisor_reset(
         bool,
         typer.Option(
             "--confirm",
-            # CR-156 round-7 HIGH #6: ``--confirm`` no longer gates a
-            # different operator surface — the deferred-to-#171 path
-            # fails fast irrespective of the flag. ``--confirm`` is kept
-            # in the parser so scripts that pass it today do not break
-            # on an "unknown flag" error when #171 lands and the flag
-            # becomes load-bearing again. The help body documents the
-            # current no-op semantic so operators reading ``--help`` see
-            # the truth.
+            # ADR-0021 #171: ``--confirm`` regains its gating semantic.
+            # The no-op behaviour introduced by #154 was a stopgap while
+            # the reset path was deferred; reset now performs actual
+            # state mutation (writes a reviewer-gated state.git
+            # proposal), so the confirmation gate is meaningful again.
             help=t("cli.supervisor.reset.confirm_help"),
         ),
     ] = False,
 ) -> None:
-    """Reset a circuit breaker from OPEN to CLOSED.
+    """Queue a reviewer-gated reset of a circuit breaker (OPEN → CLOSED).
 
-    Spec §10.8: operator-tier T1 command; deferred-to-#171 path emits a
-    forensic-attempt audit row, prints the deferred hint, and exits 1
-    regardless of ``--confirm``. The eventual reset call clears a tripped
-    circuit breaker, potentially re-enabling a quarantined-LLM plugin
-    that failed 3+ times in 5 minutes — #171 reinstates the ``--confirm``
-    gate alongside the real dispatch.
+    Spec §10.8 + ADR-0021 #171. The command writes a
+    :class:`BreakerResetProposal` to state.git; the supervisor's
+    :meth:`_proposal_dispatch_loop` picks up the merged branch on its
+    next cycle and calls :meth:`Supervisor.reset_breaker`.
+
+    Flow:
+
+    1. ``--confirm`` MUST be supplied. Without it the command exits
+       non-zero without writing a proposal — preserves the BLOCKER #6
+       semantic from #154's review (operator must explicitly confirm a
+       destructive action).
+    2. Forensic-attempt audit row fires BEFORE the proposal write so
+       operator intent always lands in the audit graph even if the
+       state.git write fails mid-flight (CR-149 forensic-trail
+       invariant).
+    3. Typed payload constructed; ``queue_proposal_or_exit`` writes the
+       branch + emits the ``supervisor.breaker.reset.requested`` audit
+       row stand-in via the canonical writer.
+    4. Submitted body prints the proposal id, the branch name, the
+       dispatch-cycle interval (from ``Settings.proposal_dispatch_interval_s``),
+       and the follow-up command (``alfred supervisor proposals --recent``).
+    5. Exit 0 — the request landed.
     """
-    # CR-156 round-7 HIGH #6: fail-fast irrespective of ``--confirm``.
-    # The previous shape gated the deferred-hint behind ``--confirm``
-    # and emitted a separate refusal body when the flag was absent. The
-    # two-step UX added cognitive load without adding safety — there's
-    # no destructive action behind the flag today. Operators see the
-    # same actionable error on both invocations, which is the correct
-    # signal: the request cannot be fulfilled until #171 ships. The
-    # ``confirm`` argument is intentionally ignored on this path.
-    del confirm
+    if not confirm:
+        # --confirm gate (partial revert of #154 BLOCKER #6 no-op).
+        # Reset now writes a real state.git proposal, so explicit
+        # confirmation is meaningful again. The body names the
+        # required flag so operators know the recovery action.
+        typer.echo(t("cli.supervisor.reset.confirm_required"), err=True)
+        raise typer.Exit(code=1)
 
-    # sec-pr-s3-6-04 + CR-149 round-2: the forensic-attempt audit row
-    # is emitted BEFORE the deferred-hint print. Operator intent always
-    # lands in the audit graph — even though the reset itself is
-    # deferred to #171, the structlog breadcrumb still records that an
-    # operator (resolved via :func:`_resolve_operator_user_id`)
-    # attempted the reset. Without this ordering, an incident response
-    # would lose the "who tried to reset what, when" trail. CLAUDE.md
-    # hard rule #7 forbids the silent-skip shape on T1 surfaces.
+    # CR-149 forensic-trail invariant — operator intent always lands
+    # in the audit graph BEFORE the state.git write so a crash mid-
+    # write still leaves a breadcrumb pointing at the attempt.
     _emit_breaker_reset_attempt_audit(component_id=component_id)
 
-    # ADR-0020 (revised): the actual reset call is deferred to #171,
-    # which scopes the missing merged-proposal-branch dispatch
-    # infrastructure. The half-shipped ``WebAllowlistProposal`` /
-    # ``ConfigSetProposal`` consumer gap is the same architectural
-    # missing piece; #171 fixes the registry once. Until #171 lands,
-    # the operator surface is:
-    #
-    # 1. Emit the forensic-attempt audit row (above).
-    # 2. Print the long-form deferred hint naming the workarounds
-    #    (supervisor restart OR direct Postgres update) and exit 1.
-    #
-    # The catalog body for ``deferred_to_issue_171`` is the operator's
-    # single-source documentation of WHY the command exited 1 + the
-    # next action they can take. Spec §2.2: operator reads it once and
-    # learns the workaround. The runbook
-    # (``docs/runbooks/slice-3-supervisor.md``) deepens the workaround
-    # discussion; the hint provides the discovery anchor.
-    typer.echo(
-        t("cli.supervisor.reset.deferred_to_issue_171", component=component_id),
-        err=True,
+    # Lazy import — perf-001 + symmetry with the existing CLI emit
+    # sites that defer the schema lookup until the actual emit path.
+    from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_REQUESTED_FIELDS
+    from alfred.cli._bootstrap import load_settings_or_die
+
+    # CR rework round-1 HIGH #16: the BreakerResetProposal payload now
+    # requires a non-None ``operator_user_id`` so the dispatcher's
+    # handler can pass it straight through without an ``or ""``
+    # fallback. The OS-account resolver returns ``None`` only when
+    # every probe (env var / getlogin / getpwuid) failed — that is the
+    # rare "no controlling tty AND no pwd entry" shape (a malformed
+    # container entrypoint). Fall back to a closed-set ``unknown``
+    # token so the row still lands; the forensic-attempt audit row
+    # above already records the actual attempt with the resolver's
+    # best effort + the ALFRED_OPERATOR_USER_ID env var if any.
+    operator_user_id = _resolve_operator_user_id() or "unknown"
+
+    proposal = queue_proposal_or_exit(
+        payload=BreakerResetProposal(
+            component_id=component_id,
+            operator_user_id=operator_user_id,
+        ),
+        denied_key="cli.supervisor.reset.denied",
+        pending_review_key="cli.supervisor.reset.proposal_submitted",
+        pending_review_extra_kwargs={
+            "component": component_id,
+            "interval": load_settings_or_die().proposal_dispatch_interval_s,
+        },
+        audit_event="supervisor.breaker.reset.requested",
+        audit_schema_name="SUPERVISOR_BREAKER_RESET_REQUESTED_FIELDS",
+        audit_fields=SUPERVISOR_BREAKER_RESET_REQUESTED_FIELDS,
+        audit_subject_partial={
+            "component_id": component_id,
+            "operator_user_id": operator_user_id,
+            "trust_tier_of_trigger": "T1",
+        },
     )
-    raise typer.Exit(code=1)
+    # ``queue_proposal_or_exit`` returns the ProposalResult — surface
+    # to keep the lint clean; the helper has already echoed the
+    # pending_review body with the proposal_id + branch.
+    del proposal
