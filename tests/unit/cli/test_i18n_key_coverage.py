@@ -212,44 +212,66 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"yaml_path": "/etc/alfred/policies.yaml", "error": "Permission denied"},
         ("read", "permissions"),
     ),
-    # cli.supervisor.reset.* -- confirm + result surfaces
-    "cli.supervisor.reset.confirm_prompt": (
-        {
-            "component": "quarantined-llm",
-            "trip_count": "-",
-            "last_trip_at": "-",
-        },
-        ("refusing", "--confirm"),
+    # cli.supervisor.reset.* -- help + deferred-to-#171 surfaces.
+    # ``cli.supervisor.reset.{confirm_prompt,rerun_hint}`` were tombstoned in
+    # CR-156 round-7 HIGH #6: the reset path now fails fast on every
+    # invocation, so the two-step refusal+rerun-hint pair is unreachable.
+    "cli.supervisor.reset.help.short": (
+        {},
+        ("#171", "deferred"),
     ),
-    "cli.supervisor.reset.rerun_hint": (
-        {"component": "quarantined-llm"},
-        ("re-run", "alfred supervisor reset"),
+    "cli.supervisor.reset.confirm_help": (
+        {},
+        ("acknowledges", "no effect"),
     ),
-    "cli.supervisor.reset.success": (
-        {"component": "quarantined-llm"},
-        ("reset", "audit row"),
-    ),
-    "cli.supervisor.reset.component_not_found": (
-        {"component": "no-such"},
-        ("not found", "alfred supervisor status"),
-    ),
-    "cli.supervisor.reset.unexpected_error": (
-        {"component": "quarantined-llm", "error_type": "ConnectionError"},
-        ("failed", "audit log"),
-    ),
+    # ``cli.supervisor.reset.{success,component_not_found,unexpected_error}``
+    # tombstoned in #154 / ADR-0020 (Task 3). The reset command is now
+    # deferred to #171; the success / not-found / unexpected-error
+    # dispositions are unreachable until #171 ships. The
+    # ``deferred_to_issue_171`` entry above covers the new operator
+    # surface.
     # cli.supervisor.status.* -- table + empty hints
     "cli.supervisor.status.column.component": ({}, ("component",)),
     "cli.supervisor.status.column.state": ({}, ("state",)),
     "cli.supervisor.status.column.trip_count": ({}, ("trip",)),
     "cli.supervisor.status.column.last_trip_at": ({}, ("trip",)),
-    "cli.supervisor.status.empty_hint": ({}, ("component",)),
-    "cli.supervisor.status.no_supervisor_running": (
+    # #154 / ADR-0020: the two distinct "supervisor unreachable" /
+    # "read path missing" dispositions collapse into
+    # ``postgres_unavailable`` because the operator action (check the
+    # stack) is identical. The empty-table case uses the more
+    # operator-targeted ``no_components_yet`` key.
+    "cli.supervisor.status.postgres_unavailable": (
         {},
-        ("supervisor", "docker compose"),
+        ("postgres", "database_url"),
+    ),
+    "cli.supervisor.status.no_components_yet": ({}, ("components",)),
+    # CR-156 round-7 MEDIUM #14: freshness footer rendered after the table.
+    "cli.supervisor.status.freshness_footer": (
+        {},
+        ("snapshot", "save_to_db"),
+    ),
+    # CR-156 round-7 BLOCKER #4: schema-not-initialised hint fingerprints
+    # on the remediation vocabulary ("migrate" / "alembic upgrade") so a
+    # future fuzzy swap with a generic "config broken" body surfaces.
+    "cli.supervisor.status.schema_not_initialised": (
+        {},
+        ("migrate", "alembic"),
+    ),
+    # #154 / ADR-0020 (Task 3): the reset command is deferred to #171
+    # until the merged-proposal-branch dispatch infrastructure ships.
+    # The hint body names the missing infrastructure + both operator
+    # workarounds; the fingerprint covers each load-bearing noun.
+    "cli.supervisor.reset.deferred_to_issue_171": (
+        {"component": "quarantined-llm"},
+        ("#171", "restart", "circuit_breakers"),
     ),
     "cli.supervisor.status.breaker_state.open": ({}, ("open",)),
     "cli.supervisor.status.breaker_state.closed": ({}, ("closed",)),
     "cli.supervisor.status.breaker_state.half_open": ({}, ("half",)),
+    # CR-156 round-7 HIGH #5: the default branch when ``state_raw`` falls
+    # outside the closed-set enum. Fingerprinted alongside the three live
+    # breaker states so a future fuzzy swap is loud here too.
+    "cli.supervisor.status.breaker_state.unknown": ({}, ("unknown",)),
     # cli.audit.graph + log surfaces
     "cli.audit.graph.tier_help": (
         {},

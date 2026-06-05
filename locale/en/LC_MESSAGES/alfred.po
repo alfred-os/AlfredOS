@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-04 23:18+0100\n"
+"POT-Creation-Date: 2026-06-05 03:04+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -477,86 +477,127 @@ msgstr ""
 
 # PR-S3-6 Component E — alfred supervisor sub-app (status read-only,
 # reset --confirm gate). T1-tier per spec §10.8.
-#: src/alfred/cli/supervisor.py:28
+#: src/alfred/cli/supervisor.py:31
 msgid "cli.supervisor.help"
-msgstr "Inspect supervised components and reset tripped circuit breakers."
+msgstr "Inspect supervised components. Reset is deferred to #171."
 
-#: src/alfred/cli/supervisor.py:267 src/alfred/cli/supervisor.py:287
-#: src/alfred/cli/supervisor.py:397
-msgid "cli.supervisor.status.no_supervisor_running"
+# CR-156 round-7 BLOCKER #4: ProgrammingError from the read path means
+# the schema is not initialised (``circuit_breakers`` does not exist).
+# Routes to a dedicated key naming the remediation rather than dumping
+# a raw SQLAlchemy traceback at an operator.
+#: src/alfred/cli/supervisor.py:325
+msgid "cli.supervisor.status.schema_not_initialised"
 msgstr ""
-"Supervisor is not running. Start the Alfred stack with `docker compose up"
-" -d` and re-run `alfred supervisor status`."
+"Database schema not initialised. Run: alfred-stack migrate (or `alembic "
+"upgrade head` inside the alfred container). If migrations have run, the "
+"circuit_breakers table is missing — flag in #134."
 
-#: src/alfred/cli/supervisor.py:279
-msgid "cli.supervisor.status.read_path_unavailable"
+# CR-156 round-7 MEDIUM #10: enumerate the operator recovery levers
+# (stack-down vs URL-wrong vs auth-failed vs restarting) so the hint
+# names a concrete action for each common cause rather than collapsing
+# everything to "check the stack".
+#: src/alfred/cli/supervisor.py:332 src/alfred/cli/supervisor.py:341
+msgid "cli.supervisor.status.postgres_unavailable"
 msgstr ""
-"Breaker status unavailable: the read-path is not yet implemented. The "
-"Postgres projection for circuit_breakers lands in a follow-up PR; until "
-"then, supervisor reset is the diagnostic surface (`alfred supervisor "
-"reset <component> --confirm`)."
+"Cannot reach the Alfred Postgres database.\n"
+"\n"
+"Common causes (operator action):\n"
+"  - Stack down: docker compose ps; docker compose up -d alfred-postgres\n"
+"  - DATABASE_URL points at the wrong host/database\n"
+"  - Credentials wrong (auth failed): check the value of DATABASE_URL\n"
+"  - Postgres restarting / shutting down (retry in a few seconds)\n"
+"\n"
+"If none of the above, check the supervisor logs for the underlying\n"
+"SQLSTATE class."
 
-#: src/alfred/cli/supervisor.py:290
-msgid "cli.supervisor.status.empty_hint"
+#: src/alfred/cli/supervisor.py:344
+msgid "cli.supervisor.status.no_components_yet"
 msgstr ""
-"No supervised components registered. Plugins appear here once the "
-"orchestrator boots them (PR-S3-3b)."
+"No supervised components registered yet. The supervisor writes the first "
+"row to the `circuit_breakers` table when a plugin loads — wait for the "
+"orchestrator to boot a component, then re-run `alfred supervisor status`."
 
-#: src/alfred/cli/supervisor.py:294
-msgid "cli.supervisor.status.column.component"
-msgstr "COMPONENT"
-
-#: src/alfred/cli/supervisor.py:295
+#: src/alfred/cli/supervisor.py:369
 msgid "cli.supervisor.status.column.state"
 msgstr "STATE"
 
-#: src/alfred/cli/supervisor.py:296
+#: src/alfred/cli/supervisor.py:370
 msgid "cli.supervisor.status.column.trip_count"
-msgstr "TRIPS"
+msgstr "TRIP COUNT"
 
-#: src/alfred/cli/supervisor.py:297
+#: src/alfred/cli/supervisor.py:373 src/alfred/cli/supervisor.py:388
+msgid "cli.supervisor.status.column.component"
+msgstr "COMPONENT"
+
+#: src/alfred/cli/supervisor.py:382 src/alfred/cli/supervisor.py:391
 msgid "cli.supervisor.status.column.last_trip_at"
 msgstr "LAST TRIP"
 
-#: src/alfred/cli/supervisor.py:333
+# CR-156 round-7 MEDIUM #14: freshness footer printed after the status
+# table. Surfaces the staleness model inline so operators don't need
+# to consult the runbook to know how current the data is.
+#: src/alfred/cli/supervisor.py:423
+msgid "cli.supervisor.status.freshness_footer"
+msgstr ""
+"Snapshot reflects the supervisor's last save_to_db write (typically <=1 "
+"cycle stale). See docs/runbooks/slice-3-supervisor.md."
+
+# CR-156 round-7 BLOCKER #3: the reset command's docstring documents
+# operator intent for code readers but the help shown to operators
+# must reflect reality — the active dispatch path is deferred to #171
+# (the docstring lands on the in-process Python surface; this key
+# lands on the `--help` operator surface).
+#: src/alfred/cli/supervisor.py:426
+msgid "cli.supervisor.reset.help.short"
+msgstr ""
+"[deferred to #171] Reset a circuit breaker. Currently logs the attempt "
+"and exits."
+
+#: src/alfred/cli/supervisor.py:428
 msgid "cli.supervisor.reset.usage"
 msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 
-#: src/alfred/cli/supervisor.py:347
+# CR-156 round-7 HIGH #6: ``--confirm`` is preserved in the parser for
+# forward compatibility (so scripts that pass it today do not break on
+# the day #171 lands), but the deferred path fails fast irrespective
+# of the flag. The help body documents the current no-op semantic so
+# operators reading ``--help`` see reality.
+#: src/alfred/cli/supervisor.py:441
 msgid "cli.supervisor.reset.confirm_help"
 msgstr ""
-"Acknowledge that resetting the circuit breaker may re-enable a plugin "
-"that just failed 3+ times in 5 minutes. Required for any reset."
+"Acknowledges the reset request. Currently has no effect — reset is "
+"deferred to #171."
 
-#: src/alfred/cli/supervisor.py:367
-msgid "cli.supervisor.reset.confirm_prompt"
+# #154 / ADR-0020: long-form deferred-reset hint. Operator sees it once
+# and learns the workaround. CR-156 round-7 MEDIUM #8 + BLOCKER #2:
+# restructured into a scannable bullet list (devex reviewer); the
+# Workaround 2 SQL is trimmed to columns that actually exist on the
+# migration-0010 ``circuit_breakers`` schema (the prior body named
+# ``last_reset_at`` / ``last_reset_by`` columns that do not exist).
+# The re-arm-window caveat on Workaround 1 is named explicitly so
+# operators don't expect a restart to clear a freshly-tripped breaker.
+#: src/alfred/cli/supervisor.py:492
+msgid "cli.supervisor.reset.deferred_to_issue_171"
 msgstr ""
-"Refusing to reset {component} without --confirm.\n"
-"  trip_count:    {trip_count}\n"
-"  last_trip_at:  {last_trip_at}\n"
-"Pass --confirm to acknowledge that resetting may re-enable a plugin that "
-"just failed 3+ times in 5 minutes."
-
-#: src/alfred/cli/supervisor.py:377
-msgid "cli.supervisor.reset.rerun_hint"
-msgstr "Re-run with: alfred supervisor reset {component} --confirm"
-
-#: src/alfred/cli/supervisor.py:439 src/alfred/cli/supervisor.py:482
-#: src/alfred/cli/supervisor.py:496
-msgid "cli.supervisor.reset.unexpected_error"
-msgstr ""
-"Failed to reset {component}: {error_type}. Check `alfred audit log "
-"--event supervisor.breaker.reset --since 5m`."
-
-#: src/alfred/cli/supervisor.py:468
-msgid "cli.supervisor.reset.component_not_found"
-msgstr ""
-"Component not found: {component}. Run `alfred supervisor status` to list "
-"registered components."
-
-#: src/alfred/cli/supervisor.py:504
-msgid "cli.supervisor.reset.success"
-msgstr "Reset circuit breaker for {component}. Audit row recorded."
+"Circuit-breaker reset for {component} is not yet wired (deferred to "
+"#171).\n"
+"The forensic-attempt audit row for this invocation has been emitted.\n"
+"\n"
+"Workarounds:\n"
+"  1. Restart the supervisor:\n"
+"       docker compose restart alfred-supervisor\n"
+"     (Only effective if the breaker is past the re-arm window —\n"
+"      default 1h. CircuitBreaker.load_from_db honours the window;\n"
+"      a freshly-tripped breaker stays OPEN after restart.)\n"
+"\n"
+"  2. Update Postgres directly:\n"
+"       UPDATE circuit_breakers\n"
+"          SET state='CLOSED'\n"
+"        WHERE component_id='{component}';\n"
+"     Bypasses the supervisor.breaker.reset audit row — log the\n"
+"     action in the on-call channel for forensic continuity.\n"
+"\n"
+"Full runbook: docs/runbooks/slice-3-supervisor.md"
 
 # PR-S3-6 Component C — alfred web allowlist sub-app (reviewer-gated
 # add/remove, read-only list). Async-UX strings carry {branch} +
@@ -1677,4 +1718,99 @@ msgstr ""
 #~ "production stacks: production wires RealGate"
 #~ " against Postgres, not the in-process"
 #~ " stub."
+
+# Tombstoned in #154 / ADR-0020: the status command no longer hits the
+# read-path placeholder, so the "read path not implemented" disposition
+# is unreachable.
+#~ msgid "cli.supervisor.status.read_path_unavailable"
+#~ msgstr ""
+#~ "Breaker status unavailable: the read-"
+#~ "path is not yet implemented. The "
+#~ "Postgres projection for circuit_breakers lands"
+#~ " in a follow-up PR; until then,"
+#~ " supervisor reset is the diagnostic "
+#~ "surface (`alfred supervisor reset <component>"
+#~ " --confirm`)."
+
+# Tombstoned in #154: the empty-table disposition now uses the more
+# operator-targeted `cli.supervisor.status.no_components_yet` key
+# (drops the obsolete PR-S3-3b reference; clarifies the operator
+# action — wait, then re-run).
+#~ msgid "cli.supervisor.status.empty_hint"
+#~ msgstr ""
+#~ "No supervised components registered. Plugins"
+#~ " appear here once the orchestrator "
+#~ "boots them (PR-S3-3b)."
+
+# Tombstoned in #154 / ADR-0020 (Task 3): the reset command no longer
+# probes a supervisor handle; the two distinct
+# "supervisor unreachable" / "DATABASE_URL unset" dispositions both
+# route through ``cli.supervisor.status.postgres_unavailable`` for the
+# status path. The reset path's "supervisor not running" hint
+# disappears entirely because the reset call itself is deferred to
+# #171 — operators see the long-form deferred-to-#171 body instead.
+#~ msgid "cli.supervisor.status.no_supervisor_running"
+#~ msgstr ""
+#~ "Supervisor is not running. Start the "
+#~ "Alfred stack with `docker compose up "
+#~ "-d` and re-run `alfred supervisor "
+#~ "status`."
+
+# Tombstoned in #154 / ADR-0020 (Task 3): the reset call site that
+# produced the unknown-component dispatch (``NoSuchComponentError``
+# → operator hint) is deferred to #171. The deferred-hint body
+# already names the workaround (run ``alfred supervisor status`` to
+# list registered components) inline.
+#~ msgid "cli.supervisor.reset.component_not_found"
+#~ msgstr ""
+#~ "Component not found: {component}. Run "
+#~ "`alfred supervisor status` to list "
+#~ "registered components."
+
+# Tombstoned in #154 / ADR-0020 (Task 3): no more generic-error arm —
+# the reset path no longer crosses into the supervisor, so the
+# ``SupervisorError`` / ``ConnectionError`` / ``ImportError`` arms
+# the original handler routed through this key are unreachable.
+#~ msgid "cli.supervisor.reset.unexpected_error"
+#~ msgstr ""
+#~ "Failed to reset {component}: {error_type}. "
+#~ "Check `alfred audit log --event "
+#~ "supervisor.breaker.reset --since 5m`."
+
+# Tombstoned in #154 / ADR-0020 (Task 3): the reset command can no
+# longer succeed in-process until #171 ships the dispatch
+# infrastructure. The success message lands when #171's pickup
+# handler completes — at which point the catalog key can be
+# resurrected by removing the ``#~`` markers.
+#~ msgid "cli.supervisor.reset.success"
+#~ msgstr "Reset circuit breaker for {component}. Audit row recorded."
+
+# Tombstoned in #154 / ADR-0020 (CR-156 round-7 BLOCKER #1): the
+# resolver now routes through ``sync_db_url(load_settings_or_die())``,
+# which returns the Settings default when the env var is unset rather
+# than raising. The two "missing DATABASE_URL" / "Postgres unreachable"
+# dispositions both surface through ``postgres_unavailable`` because
+# the operator action ("check the stack") is identical.
+#~ msgid "cli.supervisor.status.database_url_unset"
+#~ msgstr "DATABASE_URL is not set; cannot reach the circuit_breakers table."
+
+# Tombstoned in #154 / ADR-0020 (CR-156 round-7 HIGH #6): the reset
+# command no longer two-step-gates the deferred-hint behind ``--confirm``.
+# Operators see the deferred-hint immediately on every invocation (with
+# or without the flag), so the separate refusal body + rerun hint are
+# unreachable. ``--confirm`` is preserved in the parser to keep
+# scripts forward-compatible with the day #171 lands and reinstates
+# the gate.
+#~ msgid "cli.supervisor.reset.confirm_prompt"
+#~ msgstr ""
+#~ "Refusing to reset {component} without --confirm.\n"
+#~ "  trip_count:    {trip_count}\n"
+#~ "  last_trip_at:  {last_trip_at}\n"
+#~ "Pass --confirm to acknowledge that "
+#~ "resetting may re-enable a plugin "
+#~ "that just failed 3+ times in 5 "
+#~ "minutes."
+
+#~ msgid "cli.supervisor.reset.rerun_hint"
+#~ msgstr "Re-run with: alfred supervisor reset {component} --confirm"
 
