@@ -302,6 +302,65 @@ async def test_kill_returns_true_on_live_subprocess(
 
 
 @pytest.mark.asyncio
+async def test_kill_returns_true_on_live_subprocess_minimal_repro(
+    fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
+) -> None:
+    """Minimal reproduction of the original failing test (#187 diagnostic).
+
+    Single spawn + ``transport.kill()`` + assert — exactly the body of
+    the test before the diagnostic instrumentation, but with the kill()
+    flow inlined + explicit error capture so the failure message tells
+    us which False path fires (None / ProcessLookupError / TimeoutError).
+
+    Runs alongside the instrumented ``test_kill_returns_true_on_live_subprocess``
+    so we can see whether the single-shot original also fails on the
+    same CI run.
+    """
+    transport = _make_transport(
+        fake_audit_writer,
+        fake_broker,
+        stub_nonce,
+        executable="/bin/sh",
+        args=["-c", "sleep 5"],
+    )
+    await transport._spawn()
+
+    # Same operations as kill() but instrumented to tell us which path
+    # any False return came from.
+    if transport._process is None:
+        raise AssertionError(
+            f"#187 minimal — transport._process is None post-spawn; "
+            f"loop={type(asyncio.get_running_loop()).__name__}"
+        )
+    pid = transport._process.pid
+
+    kill_branch: str
+    try:
+        transport._process.kill()
+        kill_branch = "ok"
+    except ProcessLookupError as exc:
+        kill_branch = f"ProcessLookupError: {exc!r}"
+
+    wait_branch: str
+    rc_at_wait_exit: object
+    try:
+        await asyncio.wait_for(transport._process.wait(), timeout=_CLOSE_TIMEOUT_S)
+        wait_branch = "ok"
+        rc_at_wait_exit = transport._process.returncode
+    except TimeoutError as exc:
+        wait_branch = f"TimeoutError after {_CLOSE_TIMEOUT_S}s: {exc!r}"
+        rc_at_wait_exit = transport._process.returncode
+
+    if kill_branch != "ok" or wait_branch != "ok":
+        raise AssertionError(
+            f"#187 minimal — kill flow returned False on FIRST-and-ONLY spawn: "
+            f"pid={pid} loop={type(asyncio.get_running_loop()).__name__} "
+            f"kill_branch={kill_branch} wait_branch={wait_branch} "
+            f"returncode_at_wait_exit={rc_at_wait_exit}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_kill_returns_false_when_process_already_dead(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:
