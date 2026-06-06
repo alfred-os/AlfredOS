@@ -11,7 +11,7 @@ Six tests:
    ``EpisodicMemory.record(...)`` against a fresh registry with ZERO
    subscribers. The full ``invoking()``-driven body runs; only
    ``_persist`` is stubbed (no DB write). Asserts the p99 delta over
-   the baseline is BELOW 100 microseconds (empirical budget — see
+   the baseline is BELOW 200 microseconds (empirical budget — see
    CALIBRATION NOTE below). This pins the dispatch engine's
    structural overhead — the lookup, the no-allocation miss branch,
    the four-stage wrap — independent of any subscriber.
@@ -60,7 +60,7 @@ Pinned pytest-benchmark knobs:
   Five rounds covers that window with margin; the rest of the
   sample then reflects steady-state cost.
 
-The chosen budgets (100 µs empty, 1 ms five-chain) are empirically
+The chosen budgets (200 µs empty, 1 ms five-chain) are empirically
 grounded — see CALIBRATION NOTE below. They are NOT advisory — a
 regression that pushes either bench above its budget is treated as a
 structural dispatch-path regression and must be investigated before
@@ -80,9 +80,35 @@ authorization, re-entry guard, _handle_chain_timeout helper):
 
 Three invoke() calls per record() (before_validate, before_db_write,
 after_flush), each entering asyncio.timeout(0.25) + for_stage() +
-_run_*. CI runners (ubuntu-latest 2-vCPU) are ~2-3x slower than M-series;
-this budget gives 4x M-series headroom to survive both CI variance AND
-a ~50% regression in the dispatch path.
+_run_*.
+
+ubuntu-latest recalibration (#117, 2026-06-06). The PR-C empty-chain
+budget (100 µs) was derived from "M-series x 4" before the perf workflow
+actually ran on CI — the gate had been silently failing to parse for 196
+attempts (workflow bug fixed in #177). Once the workflow ran, three
+consecutive ubuntu-latest runs showed:
+
+  PR #178 run 1: 138.77 µs (p99 delta)
+  PR #178 run 2: 135.64 µs
+  PR #169 run 1: 131.38 µs
+  → consistent 131-139 µs band, well above the M-series x 4 estimate
+
+The empty-chain budget is recalibrated to 200 µs — ~44% headroom over
+the observed upper bound (200 µs / 139 µs ≈ 1.44x; 1.5x = 208.5 µs
+rounded down to 200 µs).
+That leaves room for both CI variance AND a meaningful future regression
+before the gate trips. The 5-chain budget (1 ms) is left at PR-C's
+value — that bench has landed at ~200-250 µs on the same runs, well
+inside the 1 ms gate; no recalibration warranted there.
+
+The under-estimate was specifically the "2-3x slower than M-series"
+assumption — actual observed ratio for the empty-chain bench is ~5x
+(135 µs / 27 µs). The asymmetry: every invoke() entry pays the
+asyncio.timeout(0.25) wrap setup + clock-resolution overhead, and the
+runner's interpreter tail is large relative to the dispatch path's own
+work. The 5-chain bench amortises those costs across more subscribers,
+which is why its M-series → ubuntu-latest ratio is closer to the
+originally-estimated 2-3x.
 
 The gate's purpose is to catch REGRESSIONS (a future PR doubling
 dispatch overhead), not to enforce arbitrary absolute targets. An
@@ -147,10 +173,14 @@ from tests.perf.conftest import (
 # future adjustment (with PRD review) lands at one named site, not
 # buried in each bench's assert.
 #
-# Both budgets give ~4x M-series headroom over the as-shipped p99,
-# leaving room for CI (ubuntu-latest ~2-3x slower) and a ~50%
-# dispatch-path regression before the gate trips.
-_EMPTY_BUDGET_SECONDS: float = 100e-6  # 100 µs (was spec §5's 10 µs)
+# Empty-chain budget recalibrated to 200 µs from 100 µs after #117's
+# data-collection cycle on ubuntu-latest showed a consistent 131-139 µs
+# band (vs. the original "M-series x 4 = 100 µs" projection). ~50%
+# headroom over the observed upper bound. 5-chain budget (1 ms) is left
+# at PR-C's value — observed ~200-250 µs on ubuntu-latest, no
+# recalibration warranted there. Module-header CALIBRATION NOTE carries
+# the full data + rationale.
+_EMPTY_BUDGET_SECONDS: float = 200e-6  # 200 µs (#117 recalibration; was 100 µs)
 _FIVE_CHAIN_BUDGET_SECONDS: float = 1000e-6  # 1 ms (was spec §5's 100 µs)
 
 
@@ -318,7 +348,7 @@ def test_baseline_noop_delta_floor(benchmark: BenchmarkFixture) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. Empty-hookpoint dispatch-overhead bench (budgeted, < 100 µs)
+# 2. Empty-hookpoint dispatch-overhead bench (budgeted, < 200 µs)
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -328,7 +358,7 @@ def test_empty_hookpoint_dispatch_overhead(
     fresh_registry: HookRegistry,
     baseline_p99: float,
 ) -> None:
-    """Pin the empty-hookpoint dispatch overhead AT MOST 100 µs over baseline.
+    """Pin the empty-hookpoint dispatch overhead AT MOST 200 µs over baseline.
 
     Measures the full :meth:`EpisodicMemory.record` body MINUS the DB
     write (``_persist`` stubbed):
@@ -351,7 +381,7 @@ def test_empty_hookpoint_dispatch_overhead(
     dispatch engine's structural overhead (lookup, tier filtering,
     context retargeting) grew — not a subscriber added cost.
 
-    The 100 µs budget is empirically grounded — see module-header
+    The 200 µs budget is empirically grounded — see module-header
     CALIBRATION NOTE for the full rationale. The bench's informative
     failure message names the budget and the regression hint so the
     operator can triage from the test output alone.
