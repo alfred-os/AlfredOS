@@ -680,5 +680,30 @@ jobs:
             echo "has_setup_script=false" >> "$GITHUB_OUTPUT"
             echo "::notice::bin/alfred-setup.sh missing — skipping setup-script-smoke job."
           fi
+      - name: Stub docker on macOS for --dry-run
+        if: matrix.os == 'macos-latest' && steps.check.outputs.has_setup_script == 'true'
+        # GitHub-hosted macOS runners do not ship with Docker installed
+        # (https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners).
+        # ``bin/alfred-setup.sh --dry-run`` only walks the prereq checks
+        # (docker + docker compose + jq) and exits BEFORE running any
+        # real docker command (line 64 of the setup script). A no-op shim
+        # on PATH lets the macOS leg exercise the script's *bash* logic —
+        # which IS the macOS portability surface (bash 3.2 vs 5+, BSD vs
+        # GNU coreutils, ``[[ ... ]]`` parsing) — without needing a real
+        # Docker daemon (which on macos-latest would require ~3 min of
+        # colima setup per run). The shim's behaviour is bounded by
+        # ``--dry-run``'s early exit; outside CI the script's
+        # ``require_cmd docker`` arm runs the real binary. #184 item 5.
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bin"
+          cat > "${RUNNER_TEMP}/bin/docker" <<'STUB'
+          #!/bin/sh
+          # No-op docker stub. Reached only by alfred-setup.sh --dry-run's
+          # prereq checks; never invoked outside CI.
+          exit 0
+          STUB
+          chmod +x "${RUNNER_TEMP}/bin/docker"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
       - if: steps.check.outputs.has_setup_script == 'true'
         run: bin/alfred-setup.sh --dry-run
