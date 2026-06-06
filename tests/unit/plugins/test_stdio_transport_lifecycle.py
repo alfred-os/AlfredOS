@@ -20,13 +20,15 @@ plugin shim.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import platform
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from alfred.plugins.stdio_transport import StdioTransport
+from alfred.plugins.stdio_transport import _CLOSE_TIMEOUT_S, StdioTransport
 
 
 def _make_transport(
@@ -208,6 +210,13 @@ async def test_kill_returns_true_on_live_subprocess(
     The audit row at the quarantine call site reads this flag to record
     whether the subprocess was successfully killed (vs already dead from
     a prior crash). Both cases still emit the row.
+
+    #187 diagnostic: kill() has three False paths (self._process is None
+    / ProcessLookupError on .kill() / TimeoutError on .wait()). The plain
+    ``assert succeeded is True`` here doesn't reveal which one fires on
+    Linux CI under coverage. The block below replays kill()'s logic step
+    by step with named assertions so the failure message pinpoints the
+    failing branch. Remove the diagnostic block once #187 is closed.
     """
     transport = _make_transport(
         fake_audit_writer,
@@ -216,9 +225,80 @@ async def test_kill_returns_true_on_live_subprocess(
         executable="/bin/sh",
         args=["-c", "sleep 5"],
     )
+
+    # Stage A: env probe — capture characteristics that differ between
+    # macOS local (passes) and Linux CI under coverage (fails). The loop
+    # implementation class names the child-watcher / pidfd path used on
+    # Linux 3.12+, which is the most plausible delta vs macOS's kqueue.
+    env_probe = {
+        "platform": platform.system(),
+        "python": sys.version_info[:3],
+        "pid": os.getpid(),
+        "loop_impl": type(asyncio.get_running_loop()).__name__,
+    }
+
+    # Stage B: spawn — should set self._process to a live asyncio Process.
     await transport._spawn()
-    succeeded = await transport.kill()
-    assert succeeded is True
+    proc = transport._process
+    spawn_probe = {
+        "process_is_None": proc is None,
+        "pid": getattr(proc, "pid", None),
+        "returncode_post_spawn": getattr(proc, "returncode", "no-attr"),
+    }
+    assert proc is not None, f"_spawn left _process unset; env={env_probe}"
+
+    # Stage C: SIGKILL the subprocess. ProcessLookupError here means the
+    # OS no longer has the pid (process exited between spawn-return and
+    # kill-syscall). Capture the outcome rather than catching-and-
+    # returning-False so the assertion message shows it.
+    kill_outcome: str
+    try:
+        proc.kill()
+        kill_outcome = "ok"
+    except ProcessLookupError as exc:
+        kill_outcome = f"ProcessLookupError: {exc!r}"
+
+    # Stage D: wait for reap. TimeoutError here means SIGKILL did not
+    # cause the process to exit within _CLOSE_TIMEOUT_S (5s) — strange
+    # for /bin/sh, but possible if pidfd reaping is broken or the loop
+    # is starved.
+    wait_outcome: str
+    rc_after_wait: object
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_CLOSE_TIMEOUT_S)
+        wait_outcome = "ok"
+        rc_after_wait = proc.returncode
+    except TimeoutError as exc:
+        wait_outcome = f"TimeoutError after {_CLOSE_TIMEOUT_S}s: {exc!r}"
+        rc_after_wait = proc.returncode
+
+    diagnostic = {
+        "env": env_probe,
+        "spawn": spawn_probe,
+        "kill_outcome": kill_outcome,
+        "wait_outcome": wait_outcome,
+        "returncode_after_wait": rc_after_wait,
+    }
+
+    assert kill_outcome == "ok" and wait_outcome == "ok", (
+        f"#187 diagnostic — kill flow did not complete cleanly: {diagnostic}"
+    )
+
+    # Stage E: original contract — call kill() on a fresh transport so the
+    # public surface is still exercised. Re-spawning to avoid double-kill
+    # on the same process.
+    transport2 = _make_transport(
+        fake_audit_writer,
+        fake_broker,
+        stub_nonce,
+        executable="/bin/sh",
+        args=["-c", "sleep 5"],
+    )
+    await transport2._spawn()
+    succeeded = await transport2.kill()
+    assert succeeded is True, (
+        f"#187 kill() returned False; transport2 state: process={transport2._process!r}"
+    )
 
 
 @pytest.mark.asyncio
