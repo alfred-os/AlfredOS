@@ -80,6 +80,7 @@ After this PR:
 ### Task 1 — Docs commit (ADR + spec + plan + runbook + subsystem + glossary)
 
 **Files**:
+
 - Already created: `docs/adr/0021-...md`, `docs/superpowers/specs/2026-06-05-...md`, `docs/superpowers/plans/2026-06-05-...md`.
 - Create: `docs/subsystems/state.md` — high-level overview: state.git as proposal channel; declarative projection (gate's rebuild) vs side-effect dispatch (this PR's infrastructure); operator visibility via `alfred supervisor proposals`.
 - Modify: `docs/runbooks/slice-3-supervisor.md` — replace the "reset deferred to #171" workaround section. New flow: `alfred supervisor reset` writes a proposal; reviewer approves; supervisor picks up on next cycle (≤30s). Document: `alfred supervisor proposals --recent` as the primary status-check surface. Document: `alfred audit log` is unavailable until PR-S3-7; include the canonical psql fallback query. Document: failure investigation path (check `failure_kind` + `failure_detail` in `processed_proposals`). Document the `--confirm` semantic reinstatement and the old `deferred_to_issue_171` catalog key tombstone (scripts grepping for it need updating).
@@ -87,6 +88,7 @@ After this PR:
 
 - [ ] Write the runbook + subsystem + glossary updates.
 - [ ] Commit:
+
   ```
   docs(state): ADR-0021 + spec + plan for merged-proposal dispatch (#171)
   ```
@@ -94,6 +96,7 @@ After this PR:
 ### Task 2 — `BreakerResetProposal` payload + `_on_disk_files_for` writer update
 
 **Files**:
+
 - Modify: `src/alfred/state/proposal_payloads.py`
 - Modify: `src/alfred/cli/_state_git.py` — add explicit `BreakerResetProposal` branch in `_on_disk_files_for` (`src/alfred/cli/_state_git.py:968+`). This is **required**, not optional. The current switch only handles `PluginGrantProposal`; other payloads fall through to the root `/proposal.json` path, which is incorrect for `BreakerResetProposal`. The new branch emits `policies/breaker-resets/<proposal_id>.json`.
 - Create: `tests/unit/state/test_breaker_reset_proposal_payload.py`
@@ -106,6 +109,7 @@ After this PR:
 ### Task 3 — Postgres schema (models + alembic)
 
 **Files**:
+
 - Modify: `src/alfred/memory/models.py`
 - Create: `src/alfred/memory/migrations/versions/0011_processed_proposals.py`
 - Modify: `tests/unit/memory/test_models.py` (or create a new file for the new models)
@@ -119,6 +123,7 @@ After this PR:
 ### Task 4 — Closed-vocab audit events
 
 **Files**:
+
 - Modify: `src/alfred/audit/audit_row_schemas.py` — add `STATE_PROPOSAL_PROCESSED_FIELDS`, `STATE_PROPOSAL_DISPATCH_FAILED_FIELDS`, `STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS` as `frozenset` constants (per the symmetric-key pattern of `QUARANTINE_EXTRACT_FIELDS` etc.).
 - Modify: `tests/unit/audit/test_audit_row_schemas.py` to pin the new field sets.
 
@@ -132,6 +137,7 @@ Note: there is no `src/alfred/audit/event_vocabulary.py`. Audit event names (`st
 ### Task 5 — `DispatchOutcome`, `ProposalContext`, `ProposalEffectsProtocol`, `_handle_breaker_reset`
 
 **Files**:
+
 - Create: `src/alfred/state/dispatch_registry.py`
 - Create: `tests/unit/state/test_dispatch_registry.py`
 
@@ -146,6 +152,7 @@ Note: there is no `src/alfred/audit/event_vocabulary.py`. Audit event names (`st
 ### Task 6 — Dispatch cycle (`_proposal_dispatch_cycle`)
 
 **Files**:
+
 - Create: `src/alfred/state/dispatch_loop.py`
 - Create: `tests/unit/state/test_dispatch_loop.py`
 
@@ -197,6 +204,7 @@ async def _load_proposal_blob(
 ### Task 7 — Wire the loop into the supervisor TaskGroup + Settings field
 
 **Files**:
+
 - Modify: `src/alfred/supervisor/core.py`
 - Modify: `src/alfred/config/settings.py`
 - Modify: `tests/unit/supervisor/test_core.py` (or add a new test file for the new loop)
@@ -218,6 +226,7 @@ async def _load_proposal_blob(
 ### Task 8 — CLI rewire: `alfred supervisor reset` writes the proposal
 
 **Files**:
+
 - Modify: `src/alfred/cli/supervisor.py`
 - Modify: `locale/en/LC_MESSAGES/alfred.po`
 - Modify: `tests/unit/cli/test_supervisor_reset.py`
@@ -237,6 +246,7 @@ async def _load_proposal_blob(
 ### Task 9 — `alfred supervisor proposals` subcommand
 
 **Files**:
+
 - Modify: `src/alfred/cli/supervisor.py`
 - Modify: `locale/en/LC_MESSAGES/alfred.po`
 - Modify: `tests/unit/cli/test_supervisor_proposals.py` (create)
@@ -254,6 +264,7 @@ The `alfred supervisor proposals` subcommand queries `processed_proposals` and d
 ### Task 10 — Integration round-trip + adversarial
 
 **Files**:
+
 - Create: `tests/integration/state/test_breaker_reset_proposal_roundtrip.py`
 - Create: `tests/adversarial/state/test_dispatch_replay_safety.py`
 
@@ -265,6 +276,7 @@ The `alfred supervisor proposals` subcommand queries `processed_proposals` and d
 ### Task 11 — Final QA + push + STOP
 
 - [ ] **Step 1: Full quality bar.**
+
   ```bash
   cd "$(git rev-parse --show-toplevel)"
   uv run ruff check . && uv run ruff format --check .

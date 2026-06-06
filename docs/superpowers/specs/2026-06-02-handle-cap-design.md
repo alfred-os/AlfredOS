@@ -128,6 +128,7 @@ No Lua needed — `ZREM` is atomic by itself. Same long-lived client as `try_res
 Today the plugin subprocess mints the `handle_id` inside `ContentStore.write` and returns it to the host. For the cap to bind the request **before** the network fetch, the host must know the id at reserve time.
 
 **Two content-store surfaces clarification.** The codebase has two content-store types:
+
 - `src/alfred/plugins/content_store_base.py:ContentStoreBase` Protocol (`put/get/delete` against `TaggedContent[T3]`) — the abstract trust-boundary contract.
 - `src/alfred/plugins/web_fetch/content_store.py:ContentStore` (concrete Redis-backed, `write/extract/delete` against raw bytes) — the web-fetch-specific implementation that this spec modifies.
 
@@ -155,6 +156,7 @@ if not isinstance(result, ContentHandle) or result.id != handle_id:
 A buggy / compromised plugin that uses a different id would otherwise silently desynchronise the cap's accounting from real Redis memory.
 
 **Files affected (contract change ripple):**
+
 - `src/alfred/plugins/web_fetch/content_store.py` (handle_id required)
 - `plugins/alfred_web_fetch/web_fetch_plugin.py` (forward content_handle_id param)
 - `tests/unit/plugins/web_fetch/test_content_handle_single_use.py` (and any other test that calls `write` directly)
@@ -318,6 +320,7 @@ async def extract(self, handle_id: str, user_id: str) -> bytes:
 ```
 
 Release-suppression cases (apply when extract is canonically wired):
+
 - **Miss path (`ContentHandleExpired`):** handle is already gone from Redis; passive eviction handles the ZSET entry.
 - **Redis transient error mid-extract:** body is in unknown state. Conservative — do NOT release; passive eviction within ~80s will clean up.
 
@@ -328,6 +331,7 @@ This PR tracks the missing wire-up under a follow-up issue (to be filed against 
 Signature change: `scan(*, handle_id: str, source_url: str, user_id: str) -> None`. **Only** on successful `self._store.delete(handle_id)` (the body is confirmed gone from Redis) call `handle_cap.release(user_id=user_id, handle_id=handle_id)`.
 
 Release-suppression cases:
+
 - **Delete raised `RedisError`:** the body may still be in Redis consuming memory. The cap's purpose is to bound Redis memory pressure; releasing the slot while the body lives would let the user reset their cap by serving canary-tripped content, which is a perverse incentive. Leave the slot held; passive TTL eviction will free it within ~80s.
 - **Fault path (`CanaryScanError` on missing body):** handle is already gone; passive eviction handles it.
 
@@ -364,6 +368,7 @@ The `user_id` propagation is via direct parameter threading — there is **no "c
 ### 6.2 Audit row
 
 Uses existing `WEB_FETCH_FIELDS` — no schema change:
+
 - `rate_limit_bucket = "handle_cap"` (typed discriminator for operators filtering by bucket)
 - `dlp_scan_result = "handle_cap_exceeded"` (slice-3 spec §7.10 line 591 string; closed-set expansion documented in `CHANGELOG.md`)
 - `content_handle_id = None` (cap refusal happens BEFORE the plugin call; the pre-minted UUID was never written to Redis. Matches existing rate-limit refusal precedent at `fetch_dispatcher.py:483`.)
@@ -450,39 +455,47 @@ Lua scripts run against **real Redis** (`testcontainers.redis.RedisContainer("re
 ### 8.2 Sad-path catalogue (named tests)
 
 **Atomicity:**
+
 - `test_race_two_at_boundary` — 2 coroutines via `asyncio.TaskGroup`, cap=5 with 4 reserved. Exactly one succeeds, one raises.
 - `test_race_six_against_empty` — 6 coroutines, cap=5, empty key. Exactly 5 succeed.
 - `test_release_and_reserve_race` — release+reserve interleave. Invariant: `ZCARD <= cap` at every observation.
 
 **ARGV validation (host-side defence against Lua nil/NaN/negative):**
+
 - `test_reserve_rejects_non_int_cap` — `cap=5.5`, `cap="5"`, `cap=True` each raise `ValueError` before EVALSHA.
 - `test_reserve_rejects_nan_inf_expiry` — `expiry_ms=float("nan")`, `float("inf")` each raise `ValueError`.
 - `test_reserve_rejects_negative_or_zero_ttl` — `outer_ttl=0`, `outer_ttl=-1` each raise `ValueError` (would otherwise DELETE the key in some Redis versions).
 - `test_reserve_rejects_expiry_at_or_before_now` — `expiry_ms <= now_ms` raises `ValueError`.
 
 **TTL / passive eviction:**
+
 - `test_expired_entries_evicted_on_next_reserve` — reserve with score in the past via direct Redis manipulation. Next reserve sees count=0, succeeds.
 - `test_staggered_expiry_decrements_count` — 5 handles with staggered expiry, sleep between asserts.
 - `test_user_key_outer_expire_set` — let all members expire, wait past `_OUTER_KEY_TTL_FLOOR_SECONDS`, `EXISTS = 0`.
 
 **Idempotency:**
+
 - `test_release_unknown_handle_id_no_op` — release of never-reserved id.
 - `test_release_twice_no_op` — reserve, release, release.
 - `test_reserve_same_handle_id_twice_is_score_update` — ZADD without NX → score update, count unchanged. Documents intentional behaviour.
 
 **Concurrency under release:**
+
 - `test_concurrent_reserve_release_cap_respected` — 20 mixed coroutines, cap=5. Track all observations; cap never breached.
 
 **Configuration edge cases:**
+
 - `test_cap_one_serializes` — cap=1; reserve, refuse, release, reserve.
 - `test_cap_large_value_honoured` — cap=1000; 1000 succeed, 1001 refused (no off-by-one).
 - `test_cap_zero_validates_at_load` — `HandleCapConfig(per_user=0)` raises at construction.
 - `test_default_config_matches_spec` — `HandleCapConfig()` → `per_user=5`.
 
 **User isolation:**
+
 - `test_user_a_cap_does_not_affect_user_b` — independent ZSET keys.
 
 **Redis transient failures by subtype (CLAUDE.md hard rule #7):**
+
 - `test_reserve_timeout_raises_and_logs` — patched `redis.exceptions.TimeoutError`; reserve raises; structured warning fires.
 - `test_reserve_connection_error_raises_and_logs` — patched `redis.exceptions.ConnectionError`; reserve raises; structured warning fires.
 - `test_reserve_response_error_propagates` — patched `redis.exceptions.ResponseError`; reserve raises; distinguishes runtime Redis bugs from transient I/O.
@@ -492,6 +505,7 @@ Lua scripts run against **real Redis** (`testcontainers.redis.RedisContainer("re
 - `test_evalsha_noscript_reregisters_and_succeeds` — `SCRIPT FLUSH` between calls; auto re-register via redis-py `AsyncScript`.
 
 **Lifecycle integration (in `test_fetch_dispatcher.py`):**
+
 - `test_dispatcher_reserves_before_transport` — mock transport. Verify `try_reserve` fires before `transport.dispatch`.
 - `test_dispatcher_releases_on_transport_error` — mock transport raises. Release fires before re-raise.
 - `test_dispatcher_releases_on_plugin_typed_error` — `ControlResult` with `WebFetchSizeLimitExceeded`. Release fires.
@@ -505,9 +519,11 @@ Lua scripts run against **real Redis** (`testcontainers.redis.RedisContainer("re
 - `test_canary_scan_error_does_not_release` — `CanaryScanError` (missing body); no release.
 
 **Property-based (hypothesis) stateful test:**
+
 - `tests/property/plugins/web_fetch/test_handle_cap_invariants.py::HandleCapStateMachine` — `RuleBasedStateMachine` modelling `reserve(user_id, handle_id)`, `release(user_id, handle_id)`, and `expire(user_id, handle_id)` rules. Invariant decorator: `assume(ZCARD(alfred:handles:user:{any_user}) <= cap)`. Hypothesis explores random interleavings; any violation surfaces a minimal counterexample. Complements (does not replace) the example-based race tests above.
 
 **Adversarial:**
+
 - `tests/adversarial/dlp_egress/handle_cap_exhaustion.yaml` — single user, 100 fetches in flight across 100 allowlisted endpoints, cap=5. Verifies refusal at fetch #6. **YAML shape matches `tests/adversarial/payload_schema.py:AdversarialPayload`** — `expected_outcome: "audit_row_emitted"` (per `dlp_egress/canary_token_html.yaml` precedent); attack-class metadata documents the 5-keys Redis-keyspace bound as a derived property, not as the assertion shape itself.
 
 ### 8.3 Coverage
@@ -544,6 +560,7 @@ Lua scripts run against **real Redis** (`testcontainers.redis.RedisContainer("re
 One PR, one umbrella issue (#157):
 
 **New files:**
+
 - `src/alfred/plugins/web_fetch/handle_cap.py` — `HandleCap` class + `HandleCapConfig` + Lua script + ARGV validation
 - `tests/unit/plugins/web_fetch/test_handle_cap.py` — testcontainers Redis sad-path catalogue
 - `tests/property/plugins/web_fetch/test_handle_cap_invariants.py` — hypothesis stateful test
@@ -551,6 +568,7 @@ One PR, one umbrella issue (#157):
 - `docs/runbooks/handle-cap-exceeded.md` — operator runbook: "what does `handle_cap_exceeded` mean in the audit log; how to inspect; how to override"
 
 **Modified files:**
+
 - `src/alfred/plugins/web_fetch/content_store.py` — `handle_id` required kwarg
 - `src/alfred/plugins/web_fetch/fetch_dispatcher.py` — `handle_cap: HandleCap` kwarg, reserve + release + try/finally + equality check + success-audit-failure HOLD
 - `src/alfred/plugins/web_fetch/errors.py` — bucket vocabulary docstring; new `WebFetchHandleIdMismatch`; typed `Literal[...]` for bucket discriminator

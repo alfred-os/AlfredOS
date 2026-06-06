@@ -10,6 +10,7 @@ ruff/grep CI rule (spec §3.7-3.8), and the capability-gate's
 `check_content_clearance` method (spec §8.2).
 
 Attack vectors covered:
+
 - `cast(TaggedContent[T2], t3_value)` bypass — pytest module (requires Python-level
   code execution; spec §12.2 fixture-vs-pytest allocation).
 - Wire-format tier confusion — JSON payload with `"tier": "T2"` but T3-constructed

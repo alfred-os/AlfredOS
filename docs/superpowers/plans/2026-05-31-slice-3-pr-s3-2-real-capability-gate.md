@@ -61,6 +61,7 @@ RealGate.check(plugin_id, hookpoint, requested_tier) → bool
 ```
 
 Fail-closed path:
+
 ```
 Heartbeat task (every 10 s) → PostgresBackend.ping()
     failure → increment _missed_heartbeats
@@ -142,10 +143,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/hooks/test_capability.py -q 2>&1 | tail -5
   ```
+
   Expected: 5 failures (AttributeError / AssertionError).
 
 - [ ] **Task 2 — Implement Protocol extension in capability.py.**
@@ -229,19 +232,24 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run tests:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/hooks/test_capability.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass.
 
   Run quality gate:
+
   ```bash
   uv run ruff check src/alfred/hooks/capability.py && uv run mypy src/alfred/hooks/capability.py
   ```
+
   Expected: no errors.
 
   Commit:
+
   ```bash
   git add src/alfred/hooks/capability.py tests/unit/hooks/test_capability.py
   git commit -m "feat(capability-gate): extend CapabilityGate Protocol with check_plugin_load + check_content_clearance (#TBD-slice3)"
@@ -386,10 +394,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_gate_policy.py -q 2>&1 | tail -5
   ```
+
   Expected: ImportError / collection errors (module doesn't exist yet).
 
 - [ ] **Task 4 — Implement policy.py.**
@@ -513,10 +523,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run tests:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_gate_policy.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass.
 
   ```bash
@@ -524,6 +536,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Commit:
+
   ```bash
   git add src/alfred/security/capability_gate/ tests/unit/security/capability_gate/
   git commit -m "feat(capability-gate): GatePolicy + GrantRow pure-policy module (#TBD-slice3)"
@@ -632,10 +645,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_storage_backend.py -q 2>&1 | tail -5
   ```
+
   Expected: ImportError (backend.py doesn't exist yet).
 
 - [ ] **Task 6 — Implement backend.py.**
@@ -830,10 +845,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_storage_backend.py -q -k "not pg_session" 2>&1 | tail -5
   ```
+
   Expected: the non-container tests pass; pg_session tests are skipped (no fixture yet).
 
   ```bash
@@ -841,6 +858,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Commit:
+
   ```bash
   git add src/alfred/security/capability_gate/backend.py tests/unit/security/capability_gate/test_storage_backend.py
   git commit -m "feat(capability-gate): StorageBackend Protocol + PostgresBackend (#TBD-slice3)"
@@ -969,10 +987,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_real_gate.py -q 2>&1 | tail -5
   ```
+
   Expected: ImportError (`_gate.py` doesn't exist).
 
 - [ ] **Task 8 — Implement RealGate._gate.py (core check path).**
@@ -1282,13 +1302,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run tests:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_real_gate.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass.
 
   Update `src/alfred/security/capability_gate/__init__.py` to import from `_gate`:
+
   ```python
   # src/alfred/security/capability_gate/__init__.py  — update import
   from alfred.security.capability_gate._gate import RealGate
@@ -1299,6 +1322,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Commit:
+
   ```bash
   git add src/alfred/security/capability_gate/ tests/unit/security/capability_gate/test_real_gate.py
   git commit -m "feat(capability-gate): RealGate core — check/check_plugin_load/check_content_clearance (#TBD-slice3)"
@@ -1624,13 +1648,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   > to keep PR-S3-2's test-dependency surface tight.
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_fail_closed_outage.py -q 2>&1 | tail -10
   ```
+
   Expected: pass (tests exercise _gate.py written in Task 8).
 
   Commit:
+
   ```bash
   git add tests/unit/security/capability_gate/test_fail_closed_outage.py
   git commit -m "test(capability-gate): fail-closed outage scenarios + revoked_inflight audit row + 60s timing invariant (#TBD-slice3)"
@@ -1798,13 +1825,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_hybrid_storage_roundtrip.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass.
 
   Commit:
+
   ```bash
   git add tests/unit/security/capability_gate/test_hybrid_storage_roundtrip.py
   git commit -m "test(capability-gate): hybrid storage roundtrip — commit-hash change triggers rebuild (#TBD-slice3)"
@@ -1938,10 +1968,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_proposal_flow.py -q 2>&1 | tail -5
   ```
+
   Expected: ImportError (proposals.py doesn't exist).
 
 - [ ] **Task 12 — Implement proposals.py.**
@@ -2078,10 +2110,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_proposal_flow.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass.
 
   ```bash
@@ -2089,6 +2123,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Commit:
+
   ```bash
   git add src/alfred/security/capability_gate/proposals.py tests/unit/security/capability_gate/test_proposal_flow.py
   git commit -m "feat(capability-gate): reviewer-gated proposal flow — create_proposal_branch + audit wiring (#TBD-slice3)"
@@ -2178,10 +2213,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/test_default_strict_declarations_invariant.py -q 2>&1 | tail -5
   ```
+
   Expected: ImportError or AttributeError (gate_factory.py doesn't exist).
 
 - [ ] **Task 14 — Implement gate_factory.py.**
@@ -2266,10 +2303,12 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/test_default_strict_declarations_invariant.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass.
 
   ```bash
@@ -2277,6 +2316,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Commit:
+
   ```bash
   git add src/alfred/bootstrap/ tests/unit/security/test_default_strict_declarations_invariant.py
   git commit -m "feat(capability-gate): gate_factory.py — ALFRED_ENV-gated RealGate/DevGate selection (#TBD-slice3)"
@@ -2356,13 +2396,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/test_capability_gate_ast_no_os_import.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass (none of the listed modules import os; backend.py uses sqlalchemy not os).
 
   Commit:
+
   ```bash
   git add tests/unit/security/test_capability_gate_ast_no_os_import.py
   git commit -m "test(security): AST-scan capability-gate modules for no-os-import (sec-007 extension) (#TBD-slice3)"
@@ -2434,13 +2477,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_audit_wiring.py -q 2>&1 | tail -5
   ```
+
   Expected: pass (constants from PR-S3-0a `audit_row_schemas.py`).
 
   Commit:
+
   ```bash
   git add src/alfred/security/capability_gate/proposals.py tests/unit/security/capability_gate/test_audit_wiring.py
   git commit -m "feat(capability-gate): wire plugin.grant.* hookpoints + audit row constants (#TBD-slice3)"
@@ -2492,13 +2538,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_audit_wiring.py -q 2>&1 | tail -5
   ```
+
   Expected: all pass.
 
   Commit:
+
   ```bash
   git add tests/unit/security/capability_gate/test_audit_wiring.py
   git commit -m "test(capability-gate): document supervisor.capability_gate_unavailable as audit event not hookpoint (#TBD-slice3)"
@@ -2648,13 +2697,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run (skipped without Docker):
+
   ```bash
   cd <repo-root>
   uv run pytest tests/integration/security/test_grant_lifecycle_e2e.py -q 2>&1 | tail -5
   ```
+
   Expected: 2 skipped (no `INTEGRATION_TESTS=1`).
 
   Commit:
+
   ```bash
   git add tests/integration/security/ tests/integration/security/__init__.py
   git commit -m "test(capability-gate): e2e grant lifecycle integration test (requires INTEGRATION_TESTS=1) (#TBD-slice3)"
@@ -2717,13 +2769,16 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/security/capability_gate/test_i18n_keys.py -q 2>&1 | tail -5
   ```
+
   Expected: pass if PR-S3-0b catalog is merged; xfail/skip if catalog not yet present (known dependency).
 
   Commit:
+
   ```bash
   git add tests/unit/security/capability_gate/test_i18n_keys.py
   git commit -m "test(capability-gate): assert i18n keys resolve via t() — keys defined in PR-S3-0b (#TBD-slice3)"
@@ -2762,6 +2817,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Run full capability.py coverage:
+
   ```bash
   cd <repo-root>
   uv run pytest tests/unit/hooks/test_capability.py \
@@ -2770,6 +2826,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
     --cov-fail-under=100 \
     -q 2>&1 | tail -10
   ```
+
   Expected: coverage ≥ 100%.
 
   If any branches are uncovered, add additional test cases in `test_capability.py` to cover them. Then:
@@ -2780,6 +2837,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   ```
 
   Commit:
+
   ```bash
   git add pyproject.toml tests/unit/hooks/test_capability.py
   git commit -m "test(capability-gate): enforce 100% line+branch coverage on capability.py (#TBD-slice3)"
@@ -2795,16 +2853,19 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
   cd <repo-root>
   make check 2>&1 | tail -20
   ```
+
   Expected: lint + format + type + test all pass.
 
   ```bash
   make docs-check 2>&1 | tail -5
   ```
+
   Expected: no broken links.
 
   If any failures, fix them with targeted edits. Do not proceed to PR until both gates are green.
 
   Final commit (if any fixups needed):
+
   ```bash
   git add -p  # stage only the targeted fixup changes
   git commit -m "fix(capability-gate): quality-gate fixups (#TBD-slice3)"

@@ -18,6 +18,7 @@
 ## §1 Goal
 
 After this PR merges:
+
 1. `src/alfred/hooks/_known_hookpoints.py` exists with the canonical static manifest listing all 18 current hookpoint names grouped by 5 declaring subsystems.
 2. `validate_hookpoint()` succeeds for every name in the manifest on a cold-Python-process CLI invocation (no chat-graph imports forced).
 3. Sync test asserts the runtime registry, after a full subsystem-import sweep, equals the manifest's flat set.
@@ -55,6 +56,7 @@ After this PR merges:
 ### Task 1 — Create the canonical manifest module
 
 **Files**:
+
 - Create: `src/alfred/hooks/_known_hookpoints.py`
 
 - [ ] **Step 1: Write the failing tests.**
@@ -231,6 +233,7 @@ After this PR merges:
 ### Task 2 — Update CLI validator to consult the manifest
 
 **Files**:
+
 - Modify: `src/alfred/cli/_validators.py`
 - Modify: `tests/unit/cli/test_validators.py` (update existing patching pattern if needed)
 
@@ -303,6 +306,7 @@ After this PR merges:
 ### Task 3 — Sync test (manifest vs runtime registry)
 
 **Files**:
+
 - Create: `tests/unit/hooks/test_known_hookpoints_sync.py`
 
 - [ ] **Step 1: Write the test.**
@@ -371,13 +375,13 @@ After this PR merges:
   the test must invoke them directly because their hookpoints do NOT
   register at import time:
 
-  * `alfred.plugins.web_fetch` ships
+  - `alfred.plugins.web_fetch` ships
     `register_hookpoints(registry)` as a one-shot bootstrap call rather
     than firing at import. The test calls
     `alfred.plugins.web_fetch.register_hookpoints(get_registry())`
     explicitly so `tool.web.fetch` lands in the registry for the drift
     check.
-  * `alfred.supervisor.core.Supervisor._register_hookpoints` is an
+  - `alfred.supervisor.core.Supervisor._register_hookpoints` is an
     instance method that an instance calls from `__init__`
     (plan-review decision core-010 keeps registration off the
     module-import path for test isolation). The method body dispatches
@@ -417,6 +421,7 @@ After this PR merges:
 ### Task 4 — Cold-start subprocess test (validator works without lazy-import bootstrap)
 
 **Files**:
+
 - Create: `tests/unit/cli/test_validate_hookpoint_cold_start.py`
 
 - [ ] **Step 1: Write the test.**

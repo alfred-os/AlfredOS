@@ -8,6 +8,7 @@ ingestion is the attack entry point (spec §12.1 category disambiguation:
 "dlp_egress = T3-origin exfiltration paths; dlp = T0/T1/T2-origin DLP mechanics").
 
 Attack vectors covered:
+
 - Canary token planted in T3 web content propagating through quarantined LLM
   into structured output → DLP scan → audit row.
 - Cross-field secret leak via headers + cookies in a web request.

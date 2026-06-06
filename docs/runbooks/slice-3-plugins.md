@@ -10,17 +10,18 @@ story.
 
 If you have not read [`docs/runbooks/slice-2-discord-smoke.md`](./slice-2-discord-smoke.md)
 yet, do that first. Slice 3 builds on the Slice-2 deployment shape (Postgres
+
 + Redis + the operator identity row), and the prerequisites carry over.
 
 ## Prerequisites
 
-- Slice-2 deployment is healthy: `docker compose ps` shows
++ Slice-2 deployment is healthy: `docker compose ps` shows
   `alfred-postgres`, `alfred-redis`, and the supervisor in a `running` state.
-- The operator row exists (`docker compose run --rm alfred-core user list`
++ The operator row exists (`docker compose run --rm alfred-core user list`
   shows at least one `authorization = operator` user).
-- `~/.config/alfred/secrets.toml` exists at `chmod 600` (the Slice-2 setup
++ `~/.config/alfred/secrets.toml` exists at `chmod 600` (the Slice-2 setup
   script wrote it; the operator owns the backup-exclusion).
-- The host has `runuser` available on PATH — on Debian / Ubuntu it ships in
++ The host has `runuser` available on PATH — on Debian / Ubuntu it ships in
   `util-linux`, which is a base package. macOS dev hosts may skip this; the
   launcher emits the macOS deviation audit row on those.
 
@@ -71,6 +72,7 @@ sudo install -m 644 /dev/null /etc/alfred/sandbox/alfred.example.policy
 
 When the supervisor tries to spawn a plugin whose policy file is missing,
 the launcher emits `plugin.launcher_no_sandbox_policy` on stderr and exits
+
 1. The audit row carries the plugin id; the supervisor renders the localised
 message from the catalog.
 
@@ -198,9 +200,9 @@ production), and that the absence of a sandbox policy file is intentional.
 
 ## Further reading
 
-- PRD §4.8 — supervisor + launcher contract
-- PRD §5.2 — sandbox policy directory + UID drop
-- [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — manifest
++ PRD §4.8 — supervisor + launcher contract
++ PRD §5.2 — sandbox policy directory + UID drop
++ [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — manifest
   shape, error hierarchy, QuarantinedUnavailable location.
-- [`tests/unit/plugins/test_plugin_launcher_stub.py`](../../tests/unit/plugins/test_plugin_launcher_stub.py)
++ [`tests/unit/plugins/test_plugin_launcher_stub.py`](../../tests/unit/plugins/test_plugin_launcher_stub.py)
   — every invariant pinned by a test; read alongside the script.

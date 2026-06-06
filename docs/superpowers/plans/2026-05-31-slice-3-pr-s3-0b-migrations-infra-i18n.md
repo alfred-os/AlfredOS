@@ -2757,7 +2757,7 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
 | CLAUDE.md i18n rule #4 | `pybabel compile --check` passes; extract not run (call-sites in S3-1..S3-7, i18n-009) | Tasks 16, 17 |
 | CLAUDE.md i18n rule #3 | Models carry `language` field (inherited from existing patterns) | Tasks 4, 6 |
 | mem-001 | `plugin_grants.content_tier` column added; test asserts T0/T1/T2/T3/NULL valid; T99 rejected | Tasks 3, 4 |
-| mem-002 | `capability_gate_sync.commit_hash` (not `state_git_commit_hash`); test asserts column name | Tasks 5, 6 | **Deviation from fixup contract**: the fixup directive said "pick `state_git_commit_hash` everywhere"; implementers chose the shorter `commit_hash` for the sync table and applied it consistently across S3-0b + S3-2. The `state_git_commit_hash` column name correctly belongs only on the `plugin_grants` table, where it records the state.git commit that authorised each row. The sync table's column records the current cache HEAD, making `commit_hash` the accurate name. This deviation is intentional and internally consistent. |
+| mem-002 | `capability_gate_sync.commit_hash` (not `state_git_commit_hash`); test asserts column name — see deviation note below | Tasks 5, 6 |
 | mem-003 | `uq_plugin_grants_plugin_hook_tier` UNIQUE constraint; upsert ON CONFLICT test | Tasks 3, 4 |
 | mem-004 | `capability_gate_sync` id=INTEGER CHECK(id=1) singleton; second-row rejected test | Tasks 5, 6 |
 | mem-005 | Migration test ordering pinned with `pytestmark`; no-op `.replace` removed | Tasks 1, 3, 5 |
@@ -2767,6 +2767,15 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
 | devops-008 | `--user-group` flag creates dedicated GID for alfred-quarantine | Task 9 |
 | devops-009 | Seed logic in dedicated `bin/alfred-state-git-seed.sh` | Task 12 |
 | devops-010 | Compose invariant unit test | Task 10a |
+
+**Deviation from fixup contract (mem-002).** The fixup directive said "pick
+`state_git_commit_hash` everywhere"; implementers chose the shorter
+`commit_hash` for the sync table and applied it consistently across S3-0b +
+S3-2. The `state_git_commit_hash` column name correctly belongs only on the
+`plugin_grants` table, where it records the state.git commit that authorised
+each row. The sync table's column records the current cache HEAD, making
+`commit_hash` the accurate name. This deviation is intentional and
+internally consistent.
 
 ---
 

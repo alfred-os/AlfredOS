@@ -32,17 +32,20 @@ becomes a development-only escape hatch that refuses in production.
 ## Consequences
 
 ### Positive
+
 - PRD §5 line 117 invariant fully satisfied from Slice 4 onwards.
 - Outbound network calls from the quarantined LLM are kernel-enforced against
   the declared allowlist, not just policy-checked.
 
 ### Negative
+
 - Per-OS sandbox policy files must be maintained and tested. The Linux policy
   is the AlfredOS primary target; macOS and Windows policies are best-effort.
 - The `bwrap` cold-start overhead adds ~50-100ms to the subprocess spawn
   path (within the < 500ms cold-start budget from spec §7a.1).
 
 ### Neutral
+
 - `StdioTransport` and `AlfredPluginSession` are unchanged; the container
   boundary is below the transport layer.
 

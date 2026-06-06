@@ -20,8 +20,8 @@ in Slice 2:
   §7.1 names this as the load-bearing prompt-injection defence.
 
 Revised Slice 2 scope (multi-user identity + Discord adapter + file-backed
-secret broker + per-user budget guard + working memory pool + rate limiter
-+ outbound DLP scan) is already wide enough for one slice. Adding T1, T3,
+secret broker + per-user budget guard + working memory pool + rate limiter,
+outbound DLP scan) is already wide enough for one slice. Adding T1, T3,
 and the dual-LLM split — three load-bearing security surfaces, each with
 its own test corpus and review burden — would roughly double the
 changeset and miss the merge window.

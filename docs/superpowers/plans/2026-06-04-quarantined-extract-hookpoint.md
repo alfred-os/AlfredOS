@@ -18,6 +18,7 @@
 ## §1 Goal
 
 After this PR merges:
+
 1. `register_hookpoint("security.quarantined.extract", subscribable_tiers=SYSTEM_OPERATOR_TIERS, refusable_tiers=SYSTEM_ONLY_TIERS, fail_closed=True)` runs at `alfred.security.quarantine` module-init time.
 2. `QuarantinedExtractor.extract` dispatches via the hookpoint chain (pre/post/error stages via `invoking()`).
 3. `OutboundDlpExtractSubscriber` (system-tier, post-only) runs `OutboundDlp.scan(json.dumps(result.model_dump()))` and raises `HookRefusal` on canary trip / DLP-detected secret.
@@ -61,6 +62,7 @@ After this PR merges:
 ### Task 1 — Hookpoint registration + manifest entry
 
 **Files**:
+
 - Modify: `src/alfred/security/quarantine.py` (just the `declare_hookpoints()` function + module-bottom call — NOT the `extract` wrap yet).
 - Modify: `src/alfred/hooks/_known_hookpoints.py` (extend manifest).
 - Create: `tests/unit/hooks/test_hookpoint_security_quarantined_extract.py`.
@@ -174,6 +176,7 @@ After this PR merges:
 ### Task 2 — `OutboundDlpExtractSubscriber`
 
 **Files**:
+
 - Create: `src/alfred/security/_extract_dlp_subscriber.py`
 - Create: `tests/unit/security/test_extract_dlp_subscriber.py`
 
@@ -287,6 +290,7 @@ After this PR merges:
 ### Task 3 — `QuarantinedExtractor.extract` dispatch through hookpoint chain
 
 **Files**:
+
 - Modify: `src/alfred/security/quarantine.py`
 - Modify: `tests/unit/security/test_quarantined_to_structured.py` (existing — update fixtures if needed)
 - Create: `tests/unit/security/test_quarantined_extract_dlp_chain.py`
@@ -355,13 +359,16 @@ After this PR merges:
   In `src/alfred/security/quarantine.py`:
   - Add `outbound_dlp: OutboundDlp` parameter to `QuarantinedExtractor.__init__`.
   - In `__init__`, after storing instance state, call:
+
     ```python
     from alfred.security._extract_dlp_subscriber import register_extract_dlp_subscriber
     register_extract_dlp_subscriber(outbound_dlp=outbound_dlp)
     ```
+
     The helper is idempotent — multiple `QuarantinedExtractor` instances → single subscriber registration.
 
   - In `extract`, wrap the existing body:
+
     ```python
     from alfred.hooks import invoking
     

@@ -1,0 +1,54 @@
+// Markdownlint configuration for AlfredOS.
+//
+// Why this file exists: prior to PR #184, ci.yml ran markdownlint with no
+// config — defaults include MD013 (line-length) at 80, which produced ~7924
+// errors across docs/, .rulesync/, .github/. Eighty-column markdown is
+// restrictive for technical docs (URLs, code samples, ADR tables, error
+// messages). This config sets the rules to match the style we actually want.
+//
+// Keep this file's surface small. Any rule we relax should be relaxed for
+// a reason captured here so future contributors don't quietly drift back.
+{
+  "config": {
+    "default": true,
+    // Line length: disabled. The repo convention is no soft-wrap — each
+    // paragraph is one line, wrapping is the editor's job. ADR tables, PRD
+    // section headers, and inline code references all routinely exceed 120
+    // chars. 3,100+ violations at line_length:120 confirmed this style is
+    // not changing. Other structural rules still catch real issues.
+    "MD013": false,
+    // Fenced-code-language: optional. Many small fences in this repo are
+    // plain text (paths, snippets, error messages) where ```text is noise.
+    // Where the language is meaningful (```python, ```bash), authors use it.
+    "MD040": false,
+    // Inline HTML: needed for <details>, <summary>, and <kbd> in docs.
+    "MD033": false,
+    // Bare URLs: ADRs and references frequently cite raw URLs. Wrapping each
+    // in <...> is noise; we accept the bare form.
+    "MD034": false,
+    // First-line H1: a handful of docs start with a TOC fence or yaml front
+    // matter rather than an H1. Not worth the churn.
+    "MD041": false,
+    // Blockquote blank-lines: plan/spec docs use blank lines inside multi-
+    // paragraph blockquotes as a visual separator. Intentional pattern.
+    "MD028": false,
+    // Ordered-list numbering: plans and specs use non-incremental numbering
+    // (e.g. step 1.. step 5.. step 10) to anchor cross-references to absolute
+    // step numbers. The rule's incremental check fights that convention.
+    "MD029": false,
+    // Emphasis-as-heading: ADRs use the **Context** / **Decision** /
+    // **Consequences** bold-label convention rather than ### headings, which
+    // is widespread enough to make this rule too noisy. Real heading drift in
+    // operator-facing docs (READMEs, runbooks) is caught by code review.
+    "MD036": false
+  },
+  "globs": [
+    "**/*.md"
+  ],
+  "ignores": [
+    "LICENSE",
+    "node_modules/**",
+    ".venv/**",
+    "**/.venv/**"
+  ]
+}

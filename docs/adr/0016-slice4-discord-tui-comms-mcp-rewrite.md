@@ -33,11 +33,13 @@ handling) and finalises the ADR-0009 polarity-inversion note.
 ## Consequences
 
 ### Positive
+
 - PRD §5 "Plugins are MCP servers" invariant fully satisfied for comms adapters.
 - T3-promotion for Discord embeds/attachments/polls lands naturally alongside
   the MCP rewrite — the DLP scan is at the transport boundary, not in-adapter.
 
 ### Negative
+
 - The `CommsAdapter` in-process Protocol (`src/alfred/comms/`) is removed.
   Any external code (custom personas, third-party skills) that imported
   concrete adapter classes directly rather than using the Protocol type will
@@ -46,6 +48,7 @@ handling) and finalises the ADR-0009 polarity-inversion note.
   bypasses the test gate.
 
 ### Neutral
+
 - The `IdentityResolver` placement (host-side in Slice 3, per §9.1) is
   revisited when the full host-side callback wire type is designed for Slice 4.
 

@@ -58,6 +58,7 @@ Before this PR: `capability.py` contains both `CapabilityGate` Protocol and `Dev
 ### Test migration shape
 
 Every test that constructs `DevGate` for deny-path semantics gets one of three treatments:
+
 - Tests that exercise the `check()` deny path stay in `tests/unit/hooks/` but construct `RealGate` with an empty Postgres backing store (all checks deny by default when no grants exist).
 - Tests that exercise `allow_system=True` semantics construct `RealGate` with a fixture grant seeded into the Postgres store.
 - Tests for `DevGate`'s own behaviour (`test_capability.py`) are deleted — the thing being tested no longer exists in `src/`.
@@ -76,7 +77,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 | `.rulesync/rules/CLAUDE.md` | Modify | Add new Slice-3 CLI commands to command table (alfred plugin, alfred web allowlist, alfred config, alfred supervisor) |
 | `CLAUDE.md` | Regenerate | Updated from rulesync after .rulesync/rules/CLAUDE.md edit |
 | `src/alfred/hooks/capability.py` | Modify | Remove DevGate class; keep CapabilityGate Protocol only |
-| `src/alfred/hooks/__init__.py` | Modify | Remove DevGate from __all__ and re-exports |
+| `src/alfred/hooks/__init__.py` | Modify | Remove DevGate from **all** and re-exports |
 | `tests/unit/hooks/test_capability.py` | Modify | Remove DevGate-specific tests; add RealGate deny-path tests |
 | `tests/unit/hooks/test_capability_sec007.py` | Modify | Update to reference capability.py without DevGate |
 | `tests/unit/hooks/conftest.py` | Modify | Replace DevGate fixture construction with RealGate fixtures |
@@ -147,6 +148,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   3. Run `make docs-check` — must pass.
   4. Commit:
+
      ```
      git commit -m "docs(glossary): add ContentHandle, QuarantinedExtractor, T3DerivedData (#TBD-slice3)"
      ```
@@ -204,6 +206,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   2. Run `make docs-check` — must pass.
   3. Commit:
+
      ```
      git commit -m "docs(glossary): add PluginTransport, StdioTransport, AlfredPluginSession (#TBD-slice3)"
      ```
@@ -280,12 +283,15 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   to a user-facing `t()` message; none surfaces raw extraction state.
 
   See spec §6.7 and [docs/subsystems/quarantine.md](subsystems/quarantine.md).
+
   ```
 
   2. Run `make docs-check` — must pass.
   3. Commit:
      ```
+
      git commit -m "docs(glossary): add sandbox profile, RealGate, ExtractionResult, TypedRefusal (#TBD-slice3)"
+
      ```
 
 - [ ] **Task 4 — Glossary: add JSON_OBJECT_MODE, ProviderCapability, WebFetchError, WebFetchCanaryTripped, QuarantinedUnavailable**
@@ -362,6 +368,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   2. Run `make docs-check` — must pass.
   3. Commit:
+
      ```
      git commit -m "docs(glossary): add JSON_OBJECT_MODE, ProviderCapability, WebFetchError, WebFetchCanaryTripped, QuarantinedUnavailable (#TBD-slice3)"
      ```
@@ -484,6 +491,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   5. Run `make docs-check` — must pass.
   6. Commit:
+
      ```
      git commit -m "docs(glossary): add CommsAdapterMCP, quarantined_to_structured, AnyTaggedContent; update capability gate, hook tier, trust tier T1/T3 (#TBD-slice3)"
      ```
@@ -531,6 +539,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   2. Run `make docs-check` — must pass.
   3. Commit:
+
      ```
      git commit -m "docs(glossary): add provenance and Supervisor — spec §18 required entries (#TBD-slice3)"
      ```
@@ -712,6 +721,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   2. Run `make docs-check` — must pass.
   3. Commit:
+
      ```
      git commit -m "docs(subsystems): add plugins.md — MCP stdio transport deep-doc (#TBD-slice3)"
      ```
@@ -775,12 +785,14 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   ### Circuit breaker state machine
 
   ```
+
   CLOSED  ──(3 failures in 300s)──►  OPEN
     ▲                                  │
     │                                  │ 1h elapsed OR
     │                                  │ operator reset
     │                                  ▼
   CLOSED  ◄──(probe succeeds)──  HALF_OPEN
+
   ```
 
   State + `last_trip_at` + `trip_count` are persisted to Postgres
@@ -886,6 +898,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   2. Run `make docs-check` — must pass.
   3. Commit:
+
      ```
      git commit -m "docs(subsystems): add supervisor.md — circuit breaker + deadline deep-doc (#TBD-slice3)"
      ```
@@ -1085,6 +1098,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 
   2. Run `make docs-check` — must pass.
   3. Commit:
+
      ```
      git commit -m "docs(subsystems): add quarantine.md — dual-LLM split + T3 extraction deep-doc (#TBD-slice3)"
      ```
@@ -1255,6 +1269,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   Cause: `state.git` was not seeded before `docker compose up`.
 
   Fix:
+
   ```shell
   git init --bare /var/lib/alfred/state.git
   # Bare repos have no working tree, so `git commit --allow-empty` cannot run;
@@ -1279,6 +1294,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   Cause: Postgres or state.git is unreachable.
 
   Fix: verify `docker compose ps` shows `alfred-db` healthy, then:
+
   ```shell
   alfred status
   ```
@@ -1308,10 +1324,12 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
      `provider`, `model`, and `secret_id`.
   2. Inspect recent crash events (Slice-3 `alfred audit graph` is the
      available surface; `alfred audit log --event` ships in Slice 4):
+
      ```shell
      alfred audit graph --since 5m
      # then grep for plugin.lifecycle.crashed rows
      ```
+
   3. After fixing the config: `alfred supervisor reset quarantined-llm
      --confirm`.
 
@@ -1392,12 +1410,15 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
     split and T3 extraction.
   - [docs/glossary.md](../glossary.md) — RealGate, capability gate,
     ContentHandle.
+
   ```
 
   2. Run `make docs-check` — must pass.
   3. Commit:
      ```
+
      git commit -m "docs(runbooks): add slice-3-operator-migration.md (#TBD-slice3)"
+
      ```
 
 ---
@@ -1431,6 +1452,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   6. Run `make docs-check` — must pass.
 
   7. Commit:
+
      ```
      git commit -m "docs(claude-md): update command table with Slice-3 CLI surface (#TBD-slice3)"
      ```
@@ -1510,6 +1532,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   3. Run `uv run ruff check tests/helpers/ && uv run ruff format --check tests/helpers/` — must pass.
 
   4. Commit:
+
      ```
      git commit -m "test(helpers): add gates.py shim for DevGate-to-RealGate migration (#TBD-slice3)"
      ```
@@ -1545,6 +1568,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   ```
 
   2. Run `uv run pytest tests/unit/hooks/test_devgate_removed.py -q` — both tests FAIL (DevGate still importable). Expected output:
+
      ```
      FAILED tests/unit/hooks/test_devgate_removed.py::test_devgate_not_importable_from_alfred_hooks
      FAILED tests/unit/hooks/test_devgate_removed.py::test_devgate_not_importable_from_capability_module
@@ -1558,6 +1582,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   4. Edit `src/alfred/hooks/__init__.py` — remove `DevGate` from the imports and from `__all__`.
 
   5. Run `uv run pytest tests/unit/hooks/test_devgate_removed.py -q` — both tests PASS. Expected output:
+
      ```
      2 passed in 0.XXs
      ```
@@ -1565,6 +1590,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   6. Run `uv run mypy src/alfred/hooks/ && uv run pyright src/alfred/hooks/` — must pass (no `DevGate` references remain in src/).
 
   7. Commit:
+
      ```
      git commit -m "feat(capability): remove DevGate from src/ — flag-day PR-S3-7 (#TBD-slice3)"
      ```
@@ -1576,6 +1602,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   Steps:
 
   1. Replace all `from alfred.hooks.capability import DevGate` imports with:
+
      ```python
      from tests.helpers.gates import make_deny_all_gate, make_allow_system_gate
      ```
@@ -1589,6 +1616,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   4. Update all fixture docstrings to remove references to `DevGate` and reference `RealGate` (via the test helper).
 
   5. Run `uv run pytest tests/unit/hooks/ -q` — must pass. Expected:
+
      ```
      XX passed in X.XXs
      ```
@@ -1596,6 +1624,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   6. Run `uv run mypy tests/unit/hooks/ && uv run pyright tests/unit/hooks/` — must pass.
 
   7. Commit:
+
      ```
      git commit -m "test(hooks): migrate conftest.py DevGate fixtures to RealGate (#TBD-slice3)"
      ```
@@ -1767,6 +1796,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   ```
 
   3. Run `uv run pytest tests/unit/hooks/test_capability.py -q` — all tests PASS. Expected:
+
      ```
      X passed in X.XXs
      ```
@@ -1774,6 +1804,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   4. Run `uv run pytest tests/unit/hooks/ --cov=src/alfred/hooks/capability.py --cov-branch --cov-fail-under=100 -q` — 100% coverage preserved on `capability.py`.
 
   5. Commit:
+
      ```
      git commit -m "test(capability): migrate deny-path tests from DevGate to RealGate fixtures (#TBD-slice3)"
      ```
@@ -1792,6 +1823,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   2. In `test_capability_sec007.py` — update the module docstring to note that it tests the `capability.py` module for env-read absence (sec-007), which still applies to the file now that `DevGate` is removed. The test itself tests the module at the AST level so it still runs cleanly.
 
   3. Run `uv run pytest tests/unit/hooks/ tests/unit/memory/test_episodic_hooks_wiring.py -q` — all tests PASS. Expected:
+
      ```
      XX passed in X.XXs
      ```
@@ -1799,12 +1831,15 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   4. Run `uv run mypy tests/ && uv run pyright tests/` — must pass (no unresolved `DevGate` imports).
 
   5. Run full quality gate:
+
      ```
      make check
      ```
+
      Expected output: `All checks passed.` (or equivalent green signal).
 
   6. Commit:
+
      ```
      git commit -m "test(hooks): complete DevGate→RealGate migration across all test files (#TBD-slice3)"
      ```
@@ -1836,6 +1871,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   3. Run `make docs-check` — must pass.
 
   4. Commit:
+
      ```
      git commit -m "docs: retire Slice-2.5 tracking issues #122-#125 (#TBD-slice3)"
      ```
@@ -1849,24 +1885,31 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   Steps:
 
   1. Run the complete quality bar:
+
      ```
      make check
      ```
+
      Expected: all lint, format, type-check, and test gates green.
 
   2. Run docs-check:
+
      ```
      make docs-check
      ```
+
      Expected: no broken links.
 
   3. Run the adversarial suite (required because this PR touches `src/alfred/hooks/capability.py`):
+
      ```
      uv run pytest tests/adversarial -q
      ```
+
      Expected: all existing adversarial tests pass; no regression from DevGate removal.
 
   4. Run the unit coverage gate on `capability.py`:
+
      ```
      uv run pytest tests/unit/hooks/ \
        --cov=src/alfred/hooks/capability.py \
@@ -1874,17 +1917,21 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
        --cov-fail-under=100 \
        -q
      ```
+
      Expected: `100%` coverage on `capability.py`.
 
   5. Run catalog drift check:
+
      ```
      uv run pybabel compile --check -d locale
      ```
+
      Expected: no catalog drift (no new `t()` keys are added by this PR — all keys were added in PR-S3-0b).
 
   6. If all gates green: no further action. If any gate fails: diagnose root cause before committing.
 
   7. Commit (if not already clean from Task 16):
+
      ```
      git commit -m "chore: final quality gate pass — PR-S3-7 (#TBD-slice3)"
      ```

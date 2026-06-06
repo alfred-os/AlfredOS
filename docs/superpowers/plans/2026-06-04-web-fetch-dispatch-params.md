@@ -18,6 +18,7 @@
 ## §1 Goal
 
 After this PR merges:
+
 1. `WebFetchDispatchParams` Pydantic model exists with required fields per spec §2.1 + 2 defaults.
 2. `dispatch_web_fetch` constructs the model and serialises via `.model_dump()` before `await transport.dispatch(...)`.
 3. A missing or wrong-typed kwarg raises `ValidationError` host-side; the dispatcher catches it, releases the cap, emits a `tool.web.fetch` audit row with `dlp_scan_result="dispatch_param_invalid"`, and raises typed `WebFetchError`.
@@ -80,6 +81,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary).
 
 **Owner**: alfred-security-engineer
 **Files**:
+
 - Modify: `src/alfred/audit/audit_row_schemas.py`
 - Modify: `tests/unit/audit/test_audit_row_schemas.py`
 
@@ -139,6 +141,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary).
 
 **Owner**: alfred-security-engineer
 **Files**:
+
 - Create: `src/alfred/plugins/web_fetch/dispatch_params.py`
 - Create: `tests/unit/plugins/web_fetch/test_dispatch_params.py`
 
@@ -342,6 +345,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary).
 
 **Owner**: alfred-security-engineer
 **Files**:
+
 - Modify: `src/alfred/plugins/web_fetch/fetch_dispatcher.py`
 - Modify: `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py`
 
@@ -515,6 +519,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary).
   ```
 
   Add imports at top:
+
   ```python
   from pydantic import ValidationError
   from alfred.plugins.web_fetch.dispatch_params import WebFetchDispatchParams
@@ -558,6 +563,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary).
 
 **Owner**: alfred-i18n-reviewer
 **Files**:
+
 - Modify: `locale/en/LC_MESSAGES/alfred.po`, `locale/en/LC_MESSAGES/alfred.mo`
 
 - [ ] **Step 1: Add the entry.**
@@ -606,6 +612,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary).
 
 **Owner**: alfred-security-engineer
 **Files**:
+
 - Create: `tests/unit/plugins/web_fetch/test_dispatch_params_e2e.py`
 
 - [ ] **Step 1: Write the e2e test.**
@@ -741,6 +748,7 @@ Plan-level owner: **alfred-security-engineer** (trust-boundary).
 
 **Owner**: alfred-docs-author
 **Files**:
+
 - Modify: `docs/subsystems/security.md`
 
 - [ ] **Step 1: Update the audit-vocabulary widening note added by #157.**

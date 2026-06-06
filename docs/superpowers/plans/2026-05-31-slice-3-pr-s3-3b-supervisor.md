@@ -117,6 +117,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `src/alfred/supervisor/errors.py`.
 
   **Failing test** (`tests/unit/supervisor/test_errors.py`):
+
   ```python
   # tests/unit/supervisor/test_errors.py
   from alfred.errors import AlfredError
@@ -145,6 +146,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_errors.py -q` → expect 4 failures (ImportError).
 
   **Implementation** (`src/alfred/supervisor/errors.py`):
+
   ```python
   """Supervisor error hierarchy.
 
@@ -180,6 +182,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_errors.py -q` → 4 passed.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor): error hierarchy — SupervisorError, BreakStateError, QuarantinedUnavailable (#TBD-slice3)"
   ```
@@ -190,6 +193,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Modify `src/alfred/memory/models.py`.
 
   **Failing test** (`tests/unit/supervisor/test_persisted_state_restore.py` — stub that just imports):
+
   ```python
   from alfred.memory.models import CircuitBreakerState  # ImportError if not present
 
@@ -200,6 +204,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_persisted_state_restore.py::test_circuit_breaker_state_model_exists -q` → ImportError / AttributeError.
 
   **Implementation** (append to `src/alfred/memory/models.py` after `AuditEntry`):
+
   ```python
   class CircuitBreakerState(Base):
       """Persisted state for a named circuit breaker (spec §10.6).
@@ -241,6 +246,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_persisted_state_restore.py::test_circuit_breaker_state_model_exists -q` → 1 passed.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/models): CircuitBreakerState ORM model in models.py (#TBD-slice3)"
   ```
@@ -251,6 +257,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `src/alfred/memory/migrations/versions/0010_circuit_breakers.py`.
 
   **Failing test** (add to `test_persisted_state_restore.py`):
+
   ```python
   import importlib
 
@@ -265,6 +272,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_persisted_state_restore.py::test_migration_0010_module_importable -q` → ImportError.
 
   **Implementation** (`src/alfred/memory/migrations/versions/0010_circuit_breakers.py`):
+
   ```python
   """Create circuit_breakers table for supervisor breaker state (spec §10.6).
 
@@ -343,6 +351,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_persisted_state_restore.py::test_migration_0010_module_importable -q` → 1 passed.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/migration): 0010_circuit_breakers CREATE TABLE (#TBD-slice3)"
   ```
@@ -355,6 +364,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `src/alfred/supervisor/breaker.py`.
 
   **Failing test** (`tests/unit/supervisor/test_breaker_state_machine.py`):
+
   ```python
   from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 
@@ -369,6 +379,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_breaker_state_machine.py -q` → ImportError.
 
   **Implementation** (`src/alfred/supervisor/breaker.py` — skeleton):
+
   ```python
   """CircuitBreaker — three-state fault isolation for supervised plugins.
 
@@ -457,6 +468,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Modify `src/alfred/supervisor/breaker.py`.
 
   **Failing test** (add to `test_breaker_state_machine.py`):
+
   ```python
   import datetime as dt
   from unittest.mock import AsyncMock
@@ -498,6 +510,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_breaker_state_machine.py -q` → failures on new tests.
 
   **Implementation** (add methods to `CircuitBreaker`):
+
   ```python
   def record_failure(
       self,
@@ -545,6 +558,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_breaker_state_machine.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/breaker): record_failure CLOSED→OPEN transition, assert_available (#TBD-slice3)"
   ```
@@ -555,6 +569,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Modify `src/alfred/supervisor/breaker.py`.
 
   **Failing test** (add to `test_breaker_state_machine.py`):
+
   ```python
   def test_open_re_arms_after_1h() -> None:
       cb = _make_cb()
@@ -593,6 +608,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run → failures.
 
   **Implementation** (add to `CircuitBreaker`):
+
   ```python
   def maybe_rearm(self, *, now: dt.datetime | None = None) -> None:
       """Transition OPEN → HALF_OPEN when the re-arm window has elapsed.
@@ -640,6 +656,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_breaker_state_machine.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/breaker): OPEN→HALF_OPEN re-arm, probe success/failure, backoff (#TBD-slice3)"
   ```
@@ -650,6 +667,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Modify `src/alfred/supervisor/breaker.py`.
 
   **Failing test** (add to `test_breaker_state_machine.py`):
+
   ```python
   def test_operator_reset_from_open_to_closed() -> None:
       cb = _make_cb()
@@ -674,6 +692,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run → failures.
 
   **Implementation**:
+
   ```python
   def reset(self) -> None:
       """Operator-triggered reset: transition any state → CLOSED.
@@ -690,6 +709,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_breaker_state_machine.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/breaker): reset(), full state-machine coverage (#TBD-slice3)"
   ```
@@ -702,6 +722,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Modify `src/alfred/supervisor/breaker.py`.
 
   **Failing test** (`tests/unit/supervisor/test_persisted_state_restore.py` — complete):
+
   ```python
   """Tests for CircuitBreaker Postgres persistence (spec §10.6)."""
 
@@ -795,6 +816,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_persisted_state_restore.py -q` → failures (methods missing).
 
   **Implementation** (add to `CircuitBreaker`):
+
   ```python
   async def load_from_db(
       self,
@@ -865,6 +887,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_persisted_state_restore.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/breaker): load_from_db + save_to_db Postgres persistence (#TBD-slice3)"
   ```
@@ -877,6 +900,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   **Motivation (err-001 / core-004):** hookpoint invocation must NOT be fire-and-forget. `asyncio.get_event_loop().create_task(...)` escapes the Supervisor's TaskGroup, loses exceptions silently, and uses a deprecated API on Python 3.12+. The fix: `_trip()` does NOT invoke hookpoints itself. Instead `PluginLifecycle.on_crash()` and `Supervisor.reset_breaker()` — both already `async` — call `await _invoke_hookpoint(...)` after recording the state change. Hookpoint registration belongs in `Supervisor.__init__` (Task 20), not at module-import time (core-010). Additionally: `invoke(...)` positional arg is `name`, not `hookpoint=` keyword (core-004).
 
   **Failing test** (add to `test_breaker_state_machine.py`):
+
   ```python
   import pytest
   from unittest.mock import AsyncMock, patch
@@ -937,6 +961,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_breaker_state_machine.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/breaker): hookpoint helper — no fire-and-forget, TaskGroup-safe (#TBD-slice3)"
   ```
@@ -949,6 +974,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `src/alfred/supervisor/plugin_lifecycle.py`.
 
   **Failing test** (`tests/unit/supervisor/test_action_timeout_taskgroup_cancellation.py` — plugin lifecycle portion):
+
   ```python
   """Plugin lifecycle: load_refused emitted when gate denies, crash increments breaker."""
 
@@ -1011,6 +1037,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run → ImportError.
 
   **Implementation** (`src/alfred/supervisor/plugin_lifecycle.py`):
+
   ```python
   """Plugin lifecycle coordination for the supervisor.
 
@@ -1184,6 +1211,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_action_timeout_taskgroup_cancellation.py -q` → plugin lifecycle tests pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor): PluginLifecycle — start_plugin + on_crash with audit rows (#TBD-slice3)"
   ```
@@ -1204,6 +1232,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   - **Audit write failure is NOT swallowed** (err-006). `_emit_timeout_row` does not have a bare `except Exception: log.error(...)` fallback. Either the write succeeds or the exception propagates to the orchestrator, which already has a structured error-handling arm.
 
   **Failing test** (`tests/unit/supervisor/test_action_timeout_taskgroup_cancellation.py` — deadline portion):
+
   ```python
   """deadline.py: asyncio.timeout wrapper re-raises TimeoutError, never misclassifies cancel."""
 
@@ -1278,6 +1307,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run → ImportError.
 
   **Implementation** (`src/alfred/supervisor/deadline.py`):
+
   ```python
   """Per-orchestrator-action deadline enforcement (spec §10.5).
 
@@ -1342,6 +1372,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_action_timeout_taskgroup_cancellation.py -q` → deadline tests pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/deadline): DeadlineWrapper — TimeoutError-only, no audit side-effect (#TBD-slice3)"
   ```
@@ -1354,6 +1385,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   **Design note (core-002, core-003):** `asyncio.timeout` sits **inside** `session_scope` per spec §10.5 so the existing `CancelledError` rollback arm fires. But the `supervisor.action_timeout` audit row must land **outside** the rolled-back transaction. The fix: a new `except asyncio.TimeoutError` arm catches the `TimeoutError` re-raised by `DeadlineWrapper.run`, writes the audit row with a separate **autocommit** writer (not the session-scoped writer), then re-raises `CancelledError` to trigger the existing rollback arm. The two rows — `supervisor.action_timeout` and `orchestrator.turn result=cancelled` — are independent writes.
 
   **Failing test** (add to `test_action_timeout_taskgroup_cancellation.py`):
+
   ```python
   @pytest.mark.asyncio
   async def test_orchestrator_timeout_emits_both_audit_rows() -> None:
@@ -1492,6 +1524,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/ -q && uv run pytest tests/unit/orchestrator/ -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(orchestrator): wire DeadlineWrapper — timeout row via autocommit writer outside session (#TBD-slice3)"
   ```
@@ -1504,6 +1537,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `src/alfred/supervisor/observability.py`.
 
   **Failing test** (`tests/unit/supervisor/test_histograms.py`):
+
   ```python
   """alfred_orchestrator_action_duration_seconds histogram emitted on every outcome."""
 
@@ -1547,6 +1581,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run → ImportError.
 
   **Implementation** (`src/alfred/supervisor/observability.py`):
+
   ```python
   """Prometheus histogram + OpenTelemetry sub-spans for per-action observability.
 
@@ -1614,6 +1649,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_histograms.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/observability): Prometheus histogram + OTel sub-spans (#TBD-slice3)"
   ```
@@ -1645,6 +1681,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   The histogram is emitted by the orchestrator's `handle_user_message` success path and by `_emit_supervisor_timeout_row` (Task 12). DeadlineWrapper itself does NOT call the histogram — it is a pure timing wrapper (core-002: no audit/observability side-effects inside the wrapper).
 
   **Failing test** (add to `test_histograms.py`):
+
   ```python
   def test_bucket_user_id_bounded_cardinality() -> None:
       """bucket_user_id returns a value in [0, 255] for any user_id (perf-001)."""
@@ -1687,6 +1724,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run → failure (`bucket_user_id` not present yet).
 
   **Implementation** (update `observability.py` `record_action_duration` to call `bucket_user_id`):
+
   ```python
   def record_action_duration(
       *,
@@ -1708,6 +1746,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_histograms.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/observability): bucket_user_id, wire histogram with bounded cardinality (#TBD-slice3)"
   ```
@@ -1720,6 +1759,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `tests/unit/supervisor/test_capability_gate_outage_fail_closed.py`.
 
   **Test** (TDD — this drives spec §10.4, §8.1):
+
   ```python
   """Gate unavailable → fail-closed; supervisor.capability_gate_unavailable rows emitted."""
 
@@ -1837,6 +1877,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `src/alfred/supervisor/capability_monitor.py`.
 
   **Implementation**:
+
   ```python
   """CapabilityGateMonitor — heartbeat loop for RealGate backing-store health.
 
@@ -1934,6 +1975,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_capability_gate_outage_fail_closed.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor): CapabilityGateMonitor — fail-closed state-transition audit rows (#TBD-slice3)"
   ```
@@ -1946,6 +1988,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `src/alfred/supervisor/core.py`; create `src/alfred/supervisor/__init__.py`.
 
   **Failing test** (add to existing test files — just import check):
+
   ```python
   def test_supervisor_importable() -> None:
       from alfred.supervisor import Supervisor, BreakerState, CircuitBreaker
@@ -1953,6 +1996,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   ```
 
   **Implementation** (`src/alfred/supervisor/core.py`):
+
   ```python
   """Supervisor — top-level coordinator for plugin lifecycle and circuit breakers.
 
@@ -2145,6 +2189,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   ```
 
   **`src/alfred/supervisor/__init__.py`**:
+
   ```python
   """Supervisor subsystem — circuit breakers, plugin lifecycle, per-action deadlines.
 
@@ -2178,6 +2223,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/ -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor): Supervisor core class + __init__.py public surface (#TBD-slice3)"
   ```
@@ -2200,6 +2246,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Move `supervisor.action_timeout` from a module-level call to the `_register_hookpoints` block in Task 20. Remove any import-time registration from `deadline.py`.
 
   **Failing test** (add to `test_action_timeout_taskgroup_cancellation.py`):
+
   ```python
   def test_supervisor_action_timeout_hookpoint_registered_by_supervisor_init() -> None:
       """supervisor.action_timeout hookpoint must be registered by Supervisor.__init__,
@@ -2228,6 +2275,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/test_action_timeout_taskgroup_cancellation.py -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor): move supervisor.action_timeout hookpoint registration into Supervisor.__init__ (#TBD-slice3)"
   ```
@@ -2269,6 +2317,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Call `self._register_hookpoints()` at the end of `Supervisor.__init__`.
 
   **Test** (add to test suite):
+
   ```python
   def test_supervisor_registers_lifecycle_hookpoints() -> None:
       from alfred.hooks.registry import get_registry
@@ -2373,6 +2422,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/unit/supervisor/ -q` → all pass.
 
   Commit:
+
   ```
   git commit -m "feat(supervisor/core): register plugin.lifecycle.* and supervisor.breaker.* hookpoints (#TBD-slice3)"
   ```
@@ -2385,6 +2435,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Files: Create `tests/integration/supervisor/__init__.py`; create `tests/integration/supervisor/test_quarantined_llm_3_failures_trip.py`.
 
   **Implementation**:
+
   ```python
   """Integration test: 3 quarantined-LLM crashes within 5 min trip the breaker to OPEN.
 
@@ -2489,6 +2540,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `uv run pytest tests/integration/supervisor/ -q` → all pass with testcontainer.
 
   Commit:
+
   ```
   git commit -m "test(supervisor): integration test — 3 failures trip breaker, persisted state restore (#TBD-slice3)"
   ```
@@ -2505,6 +2557,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   **Design note (core-009):** `[tool.coverage.supervisor]` is not a recognised coverage.py TOML section — coverage.py only reads `[tool.coverage.run]`, `[tool.coverage.report]`, etc. The bogus section is silently ignored, making the `fail_under = 100` claim non-binding. Drive the 100% gate through the Makefile invocation only.
 
   Add to `Makefile` (or `make check` target):
+
   ```
   uv run pytest tests/unit/supervisor/ \
     --cov=src/alfred/supervisor/breaker \
@@ -2517,6 +2570,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Run: `make check` → green.
 
   Commit:
+
   ```
   git commit -m "chore(supervisor): 100% coverage gate for breaker.py and deadline.py — Makefile only (#TBD-slice3)"
   ```
@@ -2531,6 +2585,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   ```
 
   Expected output:
+
   ```
   ruff check . ✓
   ruff format --check . ✓
@@ -2544,6 +2599,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   **Python 3.12+ asyncio note:** Replace `asyncio.get_event_loop().create_task(...)` with `asyncio.get_running_loop().create_task(...)` where needed. Replace `asyncio.get_event_loop().run_until_complete(...)` in CLI with a dedicated runner.
 
   Commit:
+
   ```
   git commit -m "chore(supervisor): make check passes — mypy strict + pyright clean (#TBD-slice3)"
   ```
@@ -2560,6 +2616,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
   Fix any broken cross-links introduced by this PR. The plan file itself does not introduce new deep-docs; those land in PR-S3-7 per spec §17.
 
   Commit:
+
   ```
   git commit -m "chore(supervisor): make docs-check passes (#TBD-slice3)"
   ```

@@ -38,6 +38,7 @@ The trade-off versus a copyleft licence (AGPL) is that we accept the possibility
 **Primary user (MVP):** A self-hoster running Alfred for themselves, their family, or their team. Comfortable with Docker. Wants a persistent AI presence that remembers them, can be talked to from any of their existing chat apps, and can take real actions on their behalf with strong safety rails.
 
 **Day-1 use cases the MVP must support:**
+
 1. **Continuous conversation across sessions** — message Alfred on Discord on Monday, follow up on Telegram on Thursday, expect coherent continuity.
 2. **Multi-user isolation** — multiple users in the same Discord server, each gets a private memory, none can read another's facts.
 3. **Skill creation on request** — "Alfred, please write a skill that pulls my GitHub notifications every morning" → proposal → tests → reviewer gate → live skill.
@@ -113,6 +114,7 @@ Each criterion is binary; all must pass for v0.1.
 ```
 
 **Architectural invariants (non-negotiable, baked into every component):**
+
 - **Plugins are MCP servers.** Comms adapters, skills, memory backends, integrations, and the reviewer agent are all MCP servers — stdio for in-process, HTTP for remote.
 - **Hybrid isolation.** Plugins declare a trust tier; official → in-process subprocess; third-party or agent-authored → containerized with declared capabilities (network allowlist, fs mounts, secret IDs). **Slice 3 relaxation:** the quarantined-LLM plugin runs as a dedicated-UID subprocess with env scrubbing rather than a container — a time-bounded deviation recorded in [ADR-0017](docs/adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md). Full containerisation lands in Slice 4 per [ADR-0015](docs/adr/0015-slice4-containerised-quarantined-llm.md).
 - **Internal git repo at `/var/lib/alfred/state.git`** holds: skills, persona definitions, prompt/persona configs, routing config, security policy. The agent commits proposed changes to `proposal/*` branches; the reviewer agent reviews; merged commits become active. Rollback is `git revert`.
@@ -145,6 +147,7 @@ Hooks coexist with the event bus: the event bus stays the observation-only surfa
 **Post-MVP:** Slack, WhatsApp, voice (STT/TTS), email.
 
 **Adapter contract:** Each adapter is an MCP plugin that:
+
 - Authenticates with its platform (bot token, OAuth, etc.).
 - Maps platform identities to Alfred's canonical `user_id` (first-contact binding flow; cross-platform binding via a verification code).
 - Tags inbound content with trust tiers (user message body → T2; web previews, link unfurls, forwarded content → T3).
@@ -170,6 +173,7 @@ Hooks coexist with the event bus: the event bus stays the observation-only surfa
 **Auto-query:** Before every inbound message reaches the orchestrator, an **auto-retrieve step** queries vector + graph + facts for the active user and persona, and injects top-k into the prompt's cacheable prefix.
 
 **User control:** Every memory write commits to the internal git repo with attribution. Users can:
+
 - `alfred memory show <user>` — view their entire memory
 - `alfred memory forget <fact-id>` — delete a fact
 - `alfred memory rollback <commit>` — undo a consolidation pass
@@ -178,18 +182,21 @@ Hooks coexist with the event bus: the event bus stays the observation-only surfa
 ### 6.3 Agentic Skills & MCP Integration
 
 **MCP is the universal plugin protocol.** Every capability beyond the core orchestrator is an MCP server:
+
 - **Skills** (procedural how-to plugins) — what the agent can *do*
 - **Memory backends** — how memory is stored and queried
 - **Integrations** — Google Workspace, GitHub, Linear, etc.
 - **Reviewer agent** — itself an MCP server, ideally a different provider
 
 **Skill registry** lives in the internal git repo at `skills/<name>/` with:
+
 - `manifest.json` — name, version, capabilities required, trust tier, dependencies
 - `skill.{py,ts,go,...}` — the implementation (polyglot)
 - `tests/` — happy-path, error-path, out-of-scope refusal
 - `README.md` — agent-readable description of when to invoke
 
 **Skill lifecycle:**
+
 1. Agent proposes a skill (or operator/user adds one)
 2. Proposal lands in `proposal/skill-<id>` branch
 3. Tests run in sandbox
@@ -197,6 +204,7 @@ Hooks coexist with the event bus: the event bus stays the observation-only surfa
 5. On approval → merge to `main` → hot reload → metrics watched for first N invocations
 
 **Engineering rules the agent must follow when authoring skills:**
+
 - One clear purpose per skill (single responsibility).
 - All side-effecting tools parameterized with capability requirements declared up front.
 - Mandatory tests: happy-path, error-path, refusal-when-out-of-scope.
@@ -207,6 +215,7 @@ Hooks coexist with the event bus: the event bus stays the observation-only surfa
 ### 6.4 Self-Improvement with Reviewer Gate
 
 **Gated change types (all four are gated):**
+
 1. Skills — create / modify
 2. Prompt / persona / routing rules
 3. Memory schema and consolidation rules
@@ -238,6 +247,7 @@ Audit log gets the full proposal + decision chain
 ```
 
 **Reviewer agent requirements:**
+
 - Runs on a different provider from the primary by default (cross-provider so a single jailbreak does not compromise both sides).
 - Sees only the diff + tests + rationale, never the original conversation that produced the proposal (diff-only review minimizes attack surface).
 - Can reject, request changes (with bounded iteration count), or escalate to operator.
@@ -253,6 +263,7 @@ Audit log gets the full proposal + decision chain
 4. **Embedding cache** — `sha256(text) → embedding` in Postgres. Eliminates re-embedding identical chunks.
 
 **Budget enforcement:**
+
 - Per-user daily token budget (default + per-user override).
 - Per-task max cost ceiling.
 - Per-persona daily coordination budget (caps non-user-facing chatter).
@@ -285,6 +296,7 @@ internal_clis:                      # optional: route via local CLI subagents
 ```
 
 **Provider plugin contract:** Each provider is an MCP plugin that exposes:
+
 - `complete(prompt, params) -> response`
 - `embed(text) -> vector`
 - `capabilities() -> [vision, tool_use, 1M-context, ...]`
@@ -309,6 +321,7 @@ services:
 ```
 
 **Setup script:**
+
 - `bin/alfred-setup.sh` (POSIX; runs natively on macOS/Linux, in WSL on Windows)
 - `bin/alfred-setup.ps1` (native PowerShell; calls into the POSIX script in WSL or sets up Docker Desktop on Windows)
 - **Idempotent.** Safe to re-run.
@@ -320,15 +333,18 @@ services:
 - Initializes the internal git repo.
 
 **Self-healing:**
+
 - Each container has liveness + readiness probes; Compose restart-policy `unless-stopped`.
 - Plugin supervisor in `alfred-core` restarts crashed plugin subprocesses with exponential backoff and a circuit breaker (3 crashes in 5 min → quarantine + notify).
 - State is recoverable from Postgres + git repo; in-memory state is rebuildable.
 
 **Checkpoints:**
+
 - Periodic snapshot of (Postgres dump + Qdrant snapshot + git bundle) to a configured location.
 - `alfred snapshot` + `alfred restore <id>` CLI.
 
 **Scale path (designed for, not MVP-required):**
+
 - `alfred-core` is stateless behind the event bus → replicable.
 - Postgres → read replicas or managed.
 - Redis → cluster mode.
@@ -338,6 +354,7 @@ services:
 ### 6.8 Persona System
 
 **Concepts:**
+
 - A **persona** is a versioned config bundle: name, system prompt, character traits, capability allowlist, routing tier preferences, memory access policy, daily coordination budget.
 - The **persona registry** lives in the internal git repo at `personas/<name>/`. Adding/modifying a persona is reviewer-gated.
 - **Alfred** is the default persona (the head butler). Other personas are specialists.
@@ -351,6 +368,7 @@ services:
 | **Group** | `@alfred @lucius help me plan this trip` or `/group ...` | Multiple personas join one thread, moderated by Alfred (or first-addressed persona) |
 
 **Group session rules:**
+
 - Moderator tracks the floor; prevents stepping-on-each-other; summarizes when needed.
 - Each persona's turn is bounded by a per-message token cap.
 - Personas can decline to participate ("Pepper has nothing to add on this") to keep noise down.
@@ -394,17 +412,20 @@ T3 untrusted       — Web pages, emails, MCP tool outputs, file contents, link 
 ```
 
 **Dual-LLM split:**
+
 - **Privileged orchestrator** holds tools, executes actions, sees only T0–T2.
 - **Quarantined LLM** is the only consumer of T3 content. It emits structured data (JSON with a schema) — never tool calls, never free text fed back as instructions.
 - T3 content is spotlighted (delimited, sometimes encoded) so the orchestrator cannot accidentally process it as instructions.
 
 **Tool-call enforcement (defense in depth):**
+
 - Each tool has a capability manifest (network: allowlist, fs: paths, secrets: which IDs).
 - Each conversation has a capability grant (what tools are in scope for this request).
 - The tool layer refuses calls outside the grant, even if the LLM tries.
 - **Step-up auth** required for high-blast actions (sending money, deleting data, accessing credentials, contacting people outside an allowlist): out-of-band confirmation via Telegram/Discord DM, not an in-conversation "yes".
 
 **Outbound DLP:**
+
 - Every outbound message (to user, to web, to plugin) passes through a redactor:
   - Regex patterns for known token formats (AWS, Stripe, OpenAI, JWT, GitHub, OAuth tokens, etc.)
   - Entropy detector for unknown secret-looking strings
@@ -412,22 +433,27 @@ T3 untrusted       — Web pages, emails, MCP tool outputs, file contents, link 
 - Strictness configurable per channel (public Discord channel = strict; user's own DM = relaxed for their own info).
 
 **Secret broker:**
+
 - Secrets live in an encrypted vault. Default: age-encrypted file. Pluggable: HashiCorp Vault, AWS Secrets Manager, OS keychain.
 - LLM sees opaque references: `{{secret:gmail_oauth}}`.
 - Substitution happens at the tool-call boundary, never round-trips through the LLM.
 
 **Canary tokens:**
+
 - Synthetic credentials seeded into ingested untrusted content. Any attempted use trips quarantine + alert + audit entry.
 
 **Egress allowlists per session:**
+
 - Default-deny for outbound network calls.
 - Each conversation starts with an empty allowlist; tools requiring network specify domains.
 
 **Audit & rollback:**
+
 - Append-only audit log: every tool call, every memory write, every config change, every reviewer decision, every persona coordination message. Includes full prompt + trust-tier of triggering content.
 - Internal git repo at `/var/lib/alfred/state.git`. Reviewer-pending changes on `proposal/*` branches; active on `main`. Rollback = `git revert` + reload.
 
 **Reviewer agent specifics (security-relevant):**
+
 - Different provider from primary by default.
 - Sees only diff + tests + rationale, never the original conversation.
 - Diff-only review minimizes attack surface from poisoned context.
@@ -472,6 +498,7 @@ T3 untrusted       — Web pages, emails, MCP tool outputs, file contents, link 
 ### 7.6 Scalability Path (Post-MVP Design)
 
 MVP is single-host. The design accommodates these without rewrites:
+
 - Stateless `alfred-core` behind a queue (multiple replicas).
 - Postgres read replicas or managed service.
 - Redis cluster mode for event bus and cache.
@@ -534,6 +561,7 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 ## 9. MVP Scope vs. Roadmap
 
 **MVP (v0.1) must include:**
+
 - Comms: Discord + Telegram + TUI
 - Memory: all 6 layers operational; knowledge graph may be sparse but functional
 - Providers: DeepSeek + Anthropic + OpenAI; tiered routing with all 4 caching layers
@@ -548,6 +576,7 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 - CLI: `alfred status | memory | snapshot | rollback | plugin | persona | cost | audit`
 
 **Explicit MVP non-goals:**
+
 - Slack, WhatsApp, voice, email — post-MVP
 - Web dashboard — post-MVP (CLI only for v0.1)
 - Mobile push for step-up auth — post-MVP (Telegram/Discord DM for v0.1)
@@ -556,6 +585,7 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 - Marketplace / plugin registry — post-MVP
 
 **Post-MVP roadmap (sequenced, not committed dates):**
+
 1. **v0.2** — Web dashboard for memory, audit, proposals, persona management
 2. **v0.3** — Slack + WhatsApp adapters
 3. **v0.4** — Voice (STT/TTS plugins) + email adapter
@@ -582,6 +612,7 @@ Decisions captured during design (2026-05-24):
 - **DEC-013:** Specialist reviewer agents (error, performance, docs, i18n, devex) created alongside the subsystem-engineer agents to enable comprehensive adversarial review without overloading any single agent's scope.
 
 **Open questions (TBD before implementation plan):**
+
 - Exact persona-bundle file format (TOML vs YAML vs Python module)
 - Whether to use Pydantic v2 throughout or split between Pydantic and dataclasses
 - Choice of test recorder (VCR.py vs custom)

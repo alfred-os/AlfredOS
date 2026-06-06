@@ -64,6 +64,7 @@ class WebFetchDispatchParams(BaseModel):
 ```
 
 **Discipline notes:**
+
 - `extra="forbid"` — extra fields raise. A future dispatcher adding a key without updating the model is a fail-loud regression.
 - `strict=True` — no silent type coercion (`"5"` for an int field raises; bool is rejected for an int field).
 - `frozen=True` — immutable after construction. The model_dump value is the wire format; nothing mutates it post-validation.
@@ -116,6 +117,7 @@ Operator-actionable: points at the audit log; clarifies it's not a user-input bu
 ## 4. Closed-vocabulary widening
 
 `DlpScanResult` Literal in `audit_row_schemas.py` widens from 14 → 15 values: adds `"dispatch_param_invalid"`. PR #160 already widened the Literal to 14 (adding `"handle_cap_exceeded"` and `"handle_id_mismatch"`); this PR adds the 15th. Discipline matches the handle-cap PR's additions:
+
 - Typed `Literal[...]` catches future emitter typos at type-check time.
 - `CHANGELOG.md` introduction still deferred (#157's note); capture in `docs/subsystems/security.md` + cross-reference here.
 
