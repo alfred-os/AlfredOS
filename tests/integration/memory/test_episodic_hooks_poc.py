@@ -334,7 +334,7 @@ async def test_audit_sink_no_recursion(
 
         registry.register(
             hook_fn=buggy_subscriber,
-            hookpoint="before_validate",
+            hookpoint="memory.episodic.record.before_validate",
             kind="pre",
             tier="operator",
         )
@@ -382,7 +382,7 @@ async def test_audit_sink_no_recursion(
     assert fault_row.trust_tier_of_trigger == "T0"
     assert fault_row.cost_estimate_usd == 0.0
     assert fault_row.trace_id  # uuid4 hex from invoking()'s correlation id
-    assert fault_row.subject["hookpoint"] == "before_validate"
+    assert fault_row.subject["hookpoint"] == "memory.episodic.record.before_validate"
     assert fault_row.subject["kind"] == "pre"
     # NAME and TYPE only — never the exception message (CLAUDE.md hard
     # rule #1 / PR-A's _SUBSCRIBER_ERROR_AUDIT_FIELDS schema).
@@ -477,7 +477,7 @@ async def test_fault_row_persists_on_flush_failure(
 
         registry.register(
             hook_fn=poison_trust_tier,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="operator",
         )
@@ -496,7 +496,7 @@ async def test_fault_row_persists_on_flush_failure(
 
         registry.register(
             hook_fn=faulty_error_handler,
-            hookpoint="write_failed",
+            hookpoint="memory.episodic.record.write_failed",
             kind="error",
             tier="operator",
         )
@@ -550,7 +550,7 @@ async def test_fault_row_persists_on_flush_failure(
     fault_row = rows[0]
     assert fault_row.result == "fault"
     assert fault_row.trust_tier_of_trigger == "T0"
-    assert fault_row.subject["hookpoint"] == "write_failed"
+    assert fault_row.subject["hookpoint"] == "memory.episodic.record.write_failed"
     assert fault_row.subject["kind"] == "error"
     assert fault_row.subject["subscriber_name"].endswith("faulty_error_handler")
     assert fault_row.subject["exception_type"] == "RuntimeError"
@@ -719,7 +719,7 @@ async def test_system_tier_redactor_scrubs_content(
         # kind ``pre`` — the security stage per spec §7.
         fresh_reg.register(
             hook_fn=redactor,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="system",
         )
