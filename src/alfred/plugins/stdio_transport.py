@@ -713,6 +713,17 @@ class StdioTransport:
         every case — kill landed or not. The supervisor's try/finally
         around this call guarantees the emit; this method only reports
         the outcome.
+
+        The post-kill reap is best-effort. SIGKILL is uncatchable — once
+        the syscall returns, the kernel will terminate the process —
+        so a slow asyncio child-watcher notification does not mean the
+        kill failed (#187). If the bounded wait_for times out, we still
+        report ``True``; ``close()`` and the process's own reaping path
+        will handle the late SIGCHLD without leaking state. Under heavy
+        load (CI + coverage instrumentation) the SIGCHLD-to-callback
+        latency can exceed the 5-second budget even though the process
+        has already exited — punishing the caller in that race makes
+        kill_succeeded falsely report a SIGKILL miss.
         """
         if self._process is None:
             return False
@@ -724,13 +735,16 @@ class StdioTransport:
             # operators see "we tried but missed" rather than a silent
             # success.
             return False
-        # Wait for the OS to reap so subsequent ``.returncode`` checks
-        # don't race. Bounded so a stuck child can't wedge the
-        # quarantine path forever.
-        try:
+        # Best-effort reap: SIGKILL is delivered synchronously by the
+        # kernel; the only thing wait_for adds is making sure
+        # ``.returncode`` reads after this call do not race the SIGCHLD
+        # processing. Bound so a stuck child watcher can't wedge the
+        # quarantine path forever, but a timeout here doesn't mean the
+        # kill failed (the kernel does not negotiate with SIGKILL). Late
+        # reap is the caller's problem (or close()'s); kill itself
+        # succeeded. See #187.
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._process.wait(), timeout=_CLOSE_TIMEOUT_S)
-        except TimeoutError:  # pragma: no cover — defensive; kill should reap
-            return False
         return True
 
     async def close(self) -> None:
