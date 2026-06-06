@@ -196,3 +196,47 @@ def test_redis_url_property_exposed(redis_url: str) -> None:
     on the same Redis (perf-006 connection-pool reuse)."""
     lim = RateLimiter(redis_url=redis_url)
     assert lim.redis_url == redis_url
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #197 — defensive arm: Lua-script unexpected-return-value loud failure
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_unexpected_lua_return_raises_runtime_error(limiter: RateLimiter) -> None:
+    """#197: an unexpected return value from the Lua script raises
+    :class:`RuntimeError` rather than silently degrading.
+
+    The Lua script's contract is to return one of
+    ``b"ok"`` / ``b"per_domain"`` / ``b"per_user"`` / ``b"daily_budget"``.
+    A future drift on the Lua side (refactor mistake, library upgrade
+    that swaps the return shape) would otherwise let the limiter
+    silently fall through — depending on which arm of the if-chain
+    fires next, the request could be ALLOWED past a legitimate bucket
+    (a security regression) or REFUSED with a misleading bucket
+    attribution (a forensic regression). Either way, the operator's
+    audit trail would be wrong.
+
+    The defensive ``if bucket_str not in (...)`` arm catches the drift
+    at the boundary and raises a loud :class:`RuntimeError` naming the
+    unexpected value. Pin via patching the script accessor so the test
+    does not depend on real Lua misbehaviour (which would be a Redis
+    bug, not ours).
+    """
+    from unittest.mock import AsyncMock
+
+    # Replace the script accessor with one whose returned callable
+    # produces an unexpected value. The accessor itself is async — it
+    # returns the cached script object — so AsyncMock with a custom
+    # return_value matches the interface.
+    bad_script = AsyncMock(return_value=b"surprise_bucket_value")
+    limiter._get_script = AsyncMock(return_value=bad_script)  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="unexpected bucket"):
+        await limiter.check_and_increment(domain=_unique_domain(), user_id=_unique_user())
+
+    # The unexpected value appears in the error message verbatim so an
+    # operator chasing the drift has the literal Lua return on the
+    # raised exception — no extra grepping required.
+    bad_script.assert_awaited_once()
