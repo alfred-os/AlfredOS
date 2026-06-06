@@ -436,8 +436,20 @@ jobs:
         # directory walk; explicit rename is least surprising).
         run: |
           set -euo pipefail
+          # ``coverage combine`` treats ``.coverage`` (no suffix) as the
+          # OUTPUT file; passing it as an input argument silently drops
+          # the unit data (only the ``.coverage.integration`` input
+          # actually feeds the merge — log says "Combined 1 file" when
+          # we expect 2). Rename the unit data file to ``.coverage.unit``
+          # so combine sees two real inputs and writes the merged result
+          # to ``.coverage``. This was the actual root cause of the
+          # "security/* 100% coverage gap" surfaced on main 2026-06-06
+          # — every security/* file is already at 100% on unit data;
+          # the gate was reading integration-only data because of this
+          # bug.
+          mv .coverage .coverage.unit
           mv .coverage-integration-dir/.coverage .coverage.integration
-          uv run coverage combine --keep .coverage .coverage.integration
+          uv run coverage combine --keep .coverage.unit .coverage.integration
           uv run coverage report --include='src/alfred/security/*' --fail-under=100
       - name: Hooks subsystem 100% line+branch coverage (combined)
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/hooks/*.py') != ''
