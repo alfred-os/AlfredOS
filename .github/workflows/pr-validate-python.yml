@@ -250,77 +250,18 @@ jobs:
         if: steps.srccheck.outputs.has_source == 'true'
         run: uv run pyright src
 
-  # ─────────────────────────────────────────────────────────────
-  # Job 5: pytest
-  # Unit + integration test suite. Integration tests run by directory
-  # (tests/integration) because the @pytest.mark.integration marker is
-  # informational, not selection-driving — `pytest tests/integration` runs
-  # everything in that directory regardless of marker. Tests there require
-  # Docker (testcontainers). Smoke and adversarial suites are excluded
-  # from PR CI — smoke runs on main per the nightly schedule; adversarial
-  # is release-blocking and runs nightly + before tags.
-  # ─────────────────────────────────────────────────────────────
-  pytest:
-    name: Pytest
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    # Docker daemon is available on ubuntu-latest by default; testcontainers
-    # uses the host docker socket. No services: block needed.
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Check for Python tests
-        id: srccheck
-        run: |
-          set -euo pipefail
-          # Probe tests/ defensively (same rationale as the src/ guards above).
-          if [ -d tests ] && find tests -name 'test_*.py' 2>/dev/null | grep -q .; then
-            echo "has_tests=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No test_*.py files — skipping pytest (expected pre-Slice-1)."
-          fi
-      - name: Install uv
-        if: steps.srccheck.outputs.has_tests == 'true'
-        uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
-          # Cache `~/.cache/uv` keyed on the lock file so the 5 jobs share
-          # the resolver result across the matrix instead of each re-resolving
-          # + re-downloading dev deps on every PR push.
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-      - name: Set up Python
-        if: steps.srccheck.outputs.has_tests == 'true'
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Sync dependencies
-        if: steps.srccheck.outputs.has_tests == 'true'
-        run: uv sync --dev
-      - name: Run unit + integration tests
-        if: steps.srccheck.outputs.has_tests == 'true'
-        env:
-          # Deliberately-fake placeholder so Settings() can instantiate during
-          # unit-test bootstrap. NOT a real secret — gitleaks recognises this
-          # exact value and the substring `not-a-real-secret` keeps any future
-          # scanner from mis-flagging.
-          # TODO(slice-1): once Settings() unit tests use explicit env mocking
-          # via monkeypatch (conftest.py fixture), remove this env block.
-          # SecretBroker contract tests MUST run without a default value or
-          # they silently pass when the missing-key path breaks. Tracked with
-          # the Slice 1 Task 1 pyproject.toml toolchain fixup.
-          ALFRED_DEEPSEEK_API_KEY: not-a-real-secret-ci-bootstrap-placeholder
-        run: |
-          test_targets=()
-          [ -d tests/unit ] && test_targets+=(tests/unit)
-          [ -d tests/integration ] && test_targets+=(tests/integration)
-          uv run pytest "${test_targets[@]}" -q
+  # The previous "Pytest" job here ran `pytest tests/unit tests/integration
+  # -q` WITHOUT coverage. It showed engineers a green "Pytest" check on
+  # every PR while the real coverage gates (in ci.yml's `Python (lint,
+  # types, unit)`, `Integration`, and `coverage-gates` jobs) had been
+  # paper-only for months — first because ci.yml failed to parse for 500+
+  # attempts (PR #183 fixed), then because individual paper-only gates
+  # cascaded (#194/#195/#196/#198 + the coverage-combine bug #200). The
+  # misleading parallel green signal let coverage debt accumulate quietly.
+  #
+  # Removed in #201. ci.yml's `Python (lint, types, unit)` is the
+  # canonical Python-test gate; it runs the same suite WITH per-subsystem
+  # 100% coverage gates and is promoted to required alongside this change.
 
   # -----------------------------------------------------------------
   # Job 6: tag(T3, ...) grep gate (Slice-3 spec §3.7-3.8)
