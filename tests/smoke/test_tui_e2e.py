@@ -357,7 +357,12 @@ async def test_tui_mock_provider_round_trip(monkeypatch: pytest.MonkeyPatch) -> 
             assert entry.language == operator.language
             assert entry.actor_persona == "alfred"
             assert entry.persona_id == "alfred"
-            assert entry.trust_tier_of_trigger == "T2"
+            # TUI ingress is tagged T1 (operator) per Slice-3 trust-tier
+            # completion — see orchestrator/core.py:565. The earlier "T2"
+            # pin predated T1's introduction and silently asserted the
+            # wrong value once the code path was widened to T1 for TUI
+            # ingress (other adapters stay T2).
+            assert entry.trust_tier_of_trigger == "T1"
             assert entry.result == "success"
 
         # Per-user budget moved (PR-B Phase 1). Mock cost was 0.00001.
