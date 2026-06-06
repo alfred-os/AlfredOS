@@ -241,24 +241,24 @@ class TestRecordPreHookpointWiring:
         async def before_validate_spy(
             _ctx: HookContext[EpisodicRecordInput],
         ) -> HookContext[EpisodicRecordInput] | None:
-            order.append("before_validate")
+            order.append("memory.episodic.record.before_validate")
             return None
 
         async def before_db_write_spy(
             _ctx: HookContext[EpisodicRecordInput],
         ) -> HookContext[EpisodicRecordInput] | None:
-            order.append("before_db_write")
+            order.append("memory.episodic.record.before_db_write")
             return None
 
         fresh_registry_allow_system.register(
             hook_fn=before_validate_spy,
-            hookpoint="before_validate",
+            hookpoint="memory.episodic.record.before_validate",
             kind="pre",
             tier="operator",
         )
         fresh_registry_allow_system.register(
             hook_fn=before_db_write_spy,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="operator",
         )
@@ -287,9 +287,9 @@ class TestRecordPreHookpointWiring:
         await mem.record(**_RECORD_KWARGS)  # type: ignore[arg-type]
 
         assert order == [
-            "before_validate",
+            "memory.episodic.record.before_validate",
             "_validate",
-            "before_db_write",
+            "memory.episodic.record.before_db_write",
             "_persist",
         ]
 
@@ -318,7 +318,7 @@ class TestRecordPreHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=capture,
-            hookpoint="before_validate",
+            hookpoint="memory.episodic.record.before_validate",
             kind="pre",
             tier="operator",
         )
@@ -367,13 +367,13 @@ class TestRecordPreHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=mutator,
-            hookpoint="before_validate",
+            hookpoint="memory.episodic.record.before_validate",
             kind="pre",
             tier="operator",
         )
         fresh_registry_allow_system.register(
             hook_fn=observer,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="operator",
         )
@@ -411,7 +411,7 @@ class TestRecordPreHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=mutator,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="operator",
         )
@@ -456,7 +456,7 @@ class TestRecordPreHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=refuser,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="system",
         )
@@ -500,7 +500,7 @@ class TestRecordPreHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=crasher,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="system",
         )
@@ -555,13 +555,13 @@ class TestRecordPreHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=before_validate_spy,
-            hookpoint="before_validate",
+            hookpoint="memory.episodic.record.before_validate",
             kind="pre",
             tier="operator",
         )
         fresh_registry_allow_system.register(
             hook_fn=before_db_write_spy,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="operator",
         )
@@ -644,7 +644,7 @@ class TestRecordTerminalHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=post_spy,
-            hookpoint="after_flush",
+            hookpoint="memory.episodic.record.after_flush",
             kind="post",
             tier="operator",
         )
@@ -656,7 +656,7 @@ class TestRecordTerminalHookpointWiring:
 
         assert len(seen) == 1
         assert seen[0].kind == "post"
-        assert seen[0].hookpoint == "after_flush"
+        assert seen[0].hookpoint == "memory.episodic.record.after_flush"
         # Sanity: _persist did run (the post chain fires only after
         # the body completes successfully).
         assert session.add.call_count == 1
@@ -697,7 +697,7 @@ class TestRecordTerminalHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=error_spy,
-            hookpoint="write_failed",
+            hookpoint="memory.episodic.record.write_failed",
             kind="error",
             tier="operator",
         )
@@ -762,13 +762,13 @@ class TestRecordTerminalHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=cancel_spy,
-            hookpoint="cancelled",
+            hookpoint="memory.episodic.record.cancelled",
             kind="cancel",
             tier="operator",
         )
         fresh_registry_allow_system.register(
             hook_fn=error_spy,
-            hookpoint="write_failed",
+            hookpoint="memory.episodic.record.write_failed",
             kind="error",
             tier="operator",
         )
@@ -787,7 +787,7 @@ class TestRecordTerminalHookpointWiring:
         # Cancel chain ran; error chain did NOT.
         assert len(cancel_seen) == 1
         assert cancel_seen[0].kind == "cancel"
-        assert cancel_seen[0].hookpoint == "cancelled"
+        assert cancel_seen[0].hookpoint == "memory.episodic.record.cancelled"
         assert error_seen == []
 
     # ------------------------------------------------------------------
@@ -818,7 +818,7 @@ class TestRecordTerminalHookpointWiring:
 
         fresh_registry_allow_system.register(
             hook_fn=post_spy,
-            hookpoint="after_flush",
+            hookpoint="memory.episodic.record.after_flush",
             kind="post",
             tier="operator",
         )
@@ -977,7 +977,7 @@ class TestValidateGuard:
 
         fresh_registry_allow_system.register(
             hook_fn=before_db_write_spy,
-            hookpoint="before_db_write",
+            hookpoint="memory.episodic.record.before_db_write",
             kind="pre",
             tier="operator",
         )
@@ -1027,7 +1027,7 @@ class TestValidateGuard:
 
         fresh_registry_allow_system.register(
             hook_fn=empty_user_id_mutator,
-            hookpoint="before_validate",
+            hookpoint="memory.episodic.record.before_validate",
             kind="pre",
             tier="operator",
         )

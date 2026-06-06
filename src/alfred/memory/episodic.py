@@ -44,11 +44,20 @@ _VALID_ROLES: frozenset[str] = frozenset({"system", "user", "assistant"})
 # calls share one source of truth (a typo on either side would surface
 # as a register-time strict-declaration failure under #119, but
 # centralising names removes the typo surface entirely).
-_HOOKPOINT_BEFORE_VALIDATE: Final[str] = "before_validate"
-_HOOKPOINT_BEFORE_DB_WRITE: Final[str] = "before_db_write"
-_HOOKPOINT_AFTER_FLUSH: Final[str] = "after_flush"
-_HOOKPOINT_WRITE_FAILED: Final[str] = "write_failed"
-_HOOKPOINT_CANCELLED: Final[str] = "cancelled"
+#
+# Dotted-form canonical identifiers — ``memory.episodic.record.<stem>`` —
+# matching the convention every other subsystem uses (see
+# :mod:`alfred.hooks._known_hookpoints`). Issue #118 migrated these away
+# from the original Slice-2.5 stems (``after_flush`` etc.) so the
+# threat-model identifier (always dotted) and the runtime invoke key
+# are now the same string. Plugin manifests, audit rows, operator-
+# visible logs, and adversarial-corpus payloads all use this single
+# form — no resolver layer, no rename at the transport boundary.
+_HOOKPOINT_BEFORE_VALIDATE: Final[str] = "memory.episodic.record.before_validate"
+_HOOKPOINT_BEFORE_DB_WRITE: Final[str] = "memory.episodic.record.before_db_write"
+_HOOKPOINT_AFTER_FLUSH: Final[str] = "memory.episodic.record.after_flush"
+_HOOKPOINT_WRITE_FAILED: Final[str] = "memory.episodic.record.write_failed"
+_HOOKPOINT_CANCELLED: Final[str] = "memory.episodic.record.cancelled"
 
 
 def declare_hookpoints(registry: HookRegistry | None = None) -> None:

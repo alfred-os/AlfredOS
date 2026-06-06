@@ -48,11 +48,11 @@ from typing import Final
 # is safe.
 KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
     "alfred.memory.episodic": (
-        "before_validate",
-        "before_db_write",
-        "after_flush",
-        "write_failed",
-        "cancelled",
+        "memory.episodic.record.before_validate",
+        "memory.episodic.record.before_db_write",
+        "memory.episodic.record.after_flush",
+        "memory.episodic.record.write_failed",
+        "memory.episodic.record.cancelled",
     ),
     "alfred.identity._ingest": (
         "identity.t1_ingress",

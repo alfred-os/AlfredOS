@@ -21,30 +21,21 @@ Sibling subsystem docs: [identity](identity.md), [comms](comms.md).
 The simplest case — a `user-plugin`-tier `post` observer that watches
 every recorded turn and changes nothing:
 
-> **Hookpoint naming.** The runtime canonical form is the **stem name** the
-> publisher passes to `invoke()` and the registry's
-> `register_hookpoint(name=...)` (`"after_flush"`, `"before_validate"`, etc.).
-> The dotted form (`memory.episodic.record.after_flush`) was an aspirational
-> threat-model identifier — originally planned to land via a Slice-3 MCP
-> transport normalization layer. **That layer was not built;** the MCP
-> transport at `src/alfred/plugins/session.py` (shipped in PR-S3-3a) uses
-> stem-form identifiers directly. The eventual canonical→stem normalization
-> is deferred to Slice 4 as part of ADR-0016 (comms-MCP rewrite); see
-> [#118](https://github.com/alfred-os/AlfredOS/issues/118).
->
-> Until then: every subscriber, publisher, and decorator **runtime**
-> example in this doc and in the source docstrings uses stem form. The
-> [Manifest surface](#manifest-surface) section below still shows the
-> aspirational dotted form because that's what the deferred MCP
-> transport layer will accept once ADR-0016 lands. See
-> `tests/unit/memory/test_episodic_hooks_wiring.py` for the as-shipped
-> registration form, and `src/alfred/hooks/_known_hookpoints.py` for the
-> canonical list of every stem the runtime knows about.
+> **Hookpoint naming.** Hookpoints use **dotted-form canonical
+> identifiers** at every surface — publisher `invoke()`, subscriber
+> `@hook(...)`, `register_hookpoint(name=...)`, audit rows, plugin
+> manifests, and the threat-model corpus. Issue #118 migrated the
+> episodic publisher's five names from the original Slice-2.5 stem
+> form (`after_flush`, `before_validate`, etc.) to the dotted form
+> shown in the examples below (`memory.episodic.record.after_flush`,
+> …) so the in-process publisher and the deferred MCP-plugin manifest
+> path share one source of truth. See
+> `src/alfred/hooks/_known_hookpoints.py` for the canonical list.
 
 ```python
 from alfred.hooks import hook, HookContext
 
-@hook("after_flush", kind="post", tier="user-plugin")
+@hook("memory.episodic.record.after_flush", kind="post", tier="user-plugin")
 async def log_recorded_turn(ctx: HookContext) -> None:
     print(f"recorded turn for {ctx.input.user_id}")  # observe only
     return None  # pass through — the chain's view is unchanged
@@ -68,7 +59,7 @@ Inspect the active registry directly via the
 ```python
 from alfred.hooks import get_registry
 
-regs = get_registry().subscribers_for("after_flush", kind="post")
+regs = get_registry().subscribers_for("memory.episodic.record.after_flush", kind="post")
 assert any(s.origin_module == __name__ for s in regs), \
     "my subscriber didn't register"
 ```
@@ -110,7 +101,7 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
 
     # Open observability hookpoint — every tier can subscribe and refuse.
     target.register_hookpoint(
-        name="after_flush",
+        name="memory.episodic.record.after_flush",
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,
@@ -119,7 +110,7 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
     # Security stage — system + operator only, system-only refusal,
     # fail-closed on subscriber error / timeout.
     target.register_hookpoint(
-        name="before_db_write",
+        name="memory.episodic.record.before_db_write",
         subscribable_tiers=SYSTEM_OPERATOR_TIERS,
         refusable_tiers=SYSTEM_ONLY_TIERS,
         fail_closed=True,
@@ -149,7 +140,7 @@ uses.
 ```python
 # Self-check: is the hookpoint declared?
 from alfred.hooks import get_registry
-assert get_registry().hookpoint_meta("before_db_write") is not None
+assert get_registry().hookpoint_meta("memory.episodic.record.before_db_write") is not None
 ```
 
 ### Drive a synthetic dispatch from a test
@@ -170,14 +161,14 @@ fake_input = {"user_id": "alice", "content": "hello"}
 
 ctx = HookContext(
     action_id="memory.episodic.record",
-    hookpoint="after_flush",       # stem; the dispatcher rewrites it via for_stage()
+    hookpoint="memory.episodic.record.after_flush",       # the dispatcher rewrites the stage via for_stage()
     input=fake_input,
     correlation_id="test-corr-id",
     kind="post",
 )
 
 # invoke() is async — wrap the call in asyncio.run(...) at the test entry.
-result = asyncio.run(invoke("after_flush", ctx, kind="post"))
+result = asyncio.run(invoke("memory.episodic.record.after_flush", ctx, kind="post"))
 ```
 
 `invoke(name, ctx, *, kind=...)` applies `HookContext.for_stage(...)`
@@ -196,7 +187,7 @@ observer is the mirror — fires before the action body runs, returns
 `None`, sees the input the action will process:
 
 ```python
-@hook("before_validate", kind="pre", tier="user-plugin")
+@hook("memory.episodic.record.before_validate", kind="pre", tier="user-plugin")
 async def count_pending_writes(ctx: HookContext) -> None:
     metrics.incr("pending_writes", tags={"user": ctx.input.user_id})
     return None
@@ -227,7 +218,7 @@ A `pre` hook that returns a new `HookContext` rewrites the input the
 action body will see:
 
 ```python
-@hook("before_db_write", kind="pre", tier="operator")
+@hook("memory.episodic.record.before_db_write", kind="pre", tier="operator")
 async def normalise_content(
     ctx: HookContext[EpisodicRecordInput],
 ) -> HookContext[EpisodicRecordInput]:
@@ -256,7 +247,7 @@ dispatcher stops walking the chain immediately, emits a `hooks.refusal`
 to the caller:
 
 ```python
-@hook("before_db_write", kind="pre", tier="system")
+@hook("memory.episodic.record.before_db_write", kind="pre", tier="system")
 async def block_secret_leaks(
     ctx: HookContext[EpisodicRecordInput],
 ) -> HookContext[EpisodicRecordInput]:
@@ -283,12 +274,12 @@ not by raising). This is spec §6.5.
 
 ### System-tier
 
-The PoC redactor on `before_db_write` is the system-tier example. It
+The PoC redactor on `memory.episodic.record.before_db_write` is the system-tier example. It
 needs `tier="system"` to see pre-DLP content (an in-tree security stage)
 and it needs the registry's capability gate to grant `system`:
 
 ```python
-@hook("before_db_write", kind="pre", tier="system")
+@hook("memory.episodic.record.before_db_write", kind="pre", tier="system")
 async def redact_pre_persist(
     ctx: HookContext[EpisodicRecordInput],
 ) -> HookContext[EpisodicRecordInput]:
@@ -300,7 +291,7 @@ async def redact_pre_persist(
 before such a subscriber runs (spec §6.3):
 
 - **Publisher-side allow-list.** The hookpoint's `subscribable_tiers`
-  must include `system`. For `before_db_write` that is the case —
+  must include `system`. For `memory.episodic.record.before_db_write` that is the case —
   `subscribable_tiers={"system", "operator"}`, deliberately excluding
   `user-plugin` so a third-party plugin cannot wedge into the redactor
   seam.
@@ -327,7 +318,7 @@ trace in the registry. There is no env-flag escape hatch — sec-007
 forbids `DevGate` reading the environment for the
 `ambient-escalation` reason given in the spec.
 
-The PoC's `before_db_write` stage is `fail_closed=True`. A subscriber
+The PoC's `memory.episodic.record.before_db_write` stage is `fail_closed=True`. A subscriber
 that crashes (the redactor backend is down), refuses, or exceeds the
 per-chain deadline must NOT let the un-redacted write proceed — that
 is the spec §6.6 + §6.4 contract. The wrap is a `HookSubscriberError`
@@ -376,18 +367,18 @@ and yields a mutable `Flow[T]` driver. The PoC's `record` reads:
 
 ```python
 async with invoking("memory.episodic.record", inp) as flow:
-    flow = await flow.pre("before_validate")
+    flow = await flow.pre("memory.episodic.record.before_validate")
     self._validate(flow.input)
     flow = await flow.pre(
-        "before_db_write",
+        "memory.episodic.record.before_db_write",
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
     )
     async with flow.body(
-        post="after_flush",
-        error="write_failed",
-        cancel="cancelled",
+        post="memory.episodic.record.after_flush",
+        error="memory.episodic.record.write_failed",
+        cancel="memory.episodic.record.cancelled",
     ):
         await self._persist(flow.input)
 ```
@@ -430,7 +421,7 @@ actually runs.
 
 Every hookpoint has **one publisher** — the module that owns the
 action it sits inside (e.g. `alfred.memory.episodic` for
-`before_db_write`). That publisher MUST declare the hookpoint's
+`memory.episodic.record.before_db_write`). That publisher MUST declare the hookpoint's
 metadata at module-init time via
 `HookRegistry.register_hookpoint(...)`. The declaration carries the
 three values that govern dispatch policy for the hookpoint:
@@ -502,19 +493,19 @@ tier but cannot defeat either declared allow-list).
 ```python
 # Publisher (alfred.memory.episodic) — declared at module-init.
 get_registry().register_hookpoint(
-    name="before_db_write",
+    name="memory.episodic.record.before_db_write",
     subscribable_tiers=frozenset({"system", "operator"}),
     refusable_tiers=frozenset({"system"}),
     fail_closed=True,
 )
 
 # Subscriber module — succeeds (operator tier IN the allow-list).
-@hook("before_db_write", kind="pre", tier="operator")
+@hook("memory.episodic.record.before_db_write", kind="pre", tier="operator")
 async def operator_redactor(ctx): ...
 
 # Subscriber module — refused at register time (user-plugin NOT in
 # allow-list). HookError + hooks.tier_rejected audit row.
-@hook("before_db_write", kind="pre", tier="user-plugin")
+@hook("memory.episodic.record.before_db_write", kind="pre", tier="user-plugin")
 async def hostile_user_plugin(ctx): ...
 ```
 
@@ -636,7 +627,7 @@ pin.
 Migration `0006_audit_result_hooks_values.py` extended `ck_audit_log_result`
 with `"fault"` (chain timeout / subscriber error / error suppressed) and
 `"bypass"` (re-entry path); the existing Slice-1/2 dispositions
-(`success`, `refused`, `cancelled`, …) remain. Operators writing SIEM
+(`success`, `refused`, `memory.episodic.record.cancelled`, …) remain. Operators writing SIEM
 queries against the audit log should grep on the event constant
 plus result-disposition pair.
 
@@ -697,12 +688,12 @@ kind = "pre"
 tier = "operator"
 ```
 
-> **Note (Slice 2.5):** PR-A's in-process dispatch keys on the LOCAL stem
-> (`"before_db_write"`). The dotted form shown above is the
-> canonical/threat-model identifier the Slice-3 MCP transport will
-> accept; until then, a plugin manifest emitted into the in-process
-> loader must use the stem. The Slice-3 MCP transport will introduce a
-> canonical→runtime resolution layer.
+> **Note (#118).** The in-process publisher and the manifest both use
+> the dotted form `"memory.episodic.record.before_db_write"` — one
+> source of truth across the invoke surface, the registry, the audit
+> rows, and the deferred MCP-plugin manifest path. The original
+> stem/dotted split was retired when #118 migrated the episodic stems
+> to dotted form.
 
 Slice 2.5 does NOT invent new field names. An earlier draft did and a
 review caught the drift against PRD §5.1 / ADR-0014; the spec text was
