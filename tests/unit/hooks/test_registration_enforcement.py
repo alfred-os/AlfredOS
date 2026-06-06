@@ -1179,3 +1179,214 @@ def test_emit_sync_running_loop_arm_stalled_sink_at_least_once() -> None:
         "call (regression of CR-156 round-6 3342416844) or the test "
         "sink is somehow beating the 0.5 s bound."
     )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #195 — registry.py running-loop arm: sink-raises + race-skips-fallback
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _RaisingAuditSink:
+    """Structural :class:`AuditSink` whose ``emit`` raises immediately.
+
+    Drives the daemon thread's ``except BaseException`` arm + the
+    calling thread's ``raise exc_holder[0]`` re-raise. Together those
+    are the load-bearing contract that a sink failure surfaces on the
+    calling frame rather than being silently swallowed (CLAUDE.md hard
+    rule #7).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.done_event: threading.Event = threading.Event()
+
+    async def emit(
+        self,
+        *,
+        event: str,
+        correlation_id: str,
+        fields: Mapping[str, object],
+    ) -> None:
+        """Record the call (so we can pin it was reached) then raise."""
+        try:
+            self.calls.append(
+                {
+                    "event": event,
+                    "correlation_id": correlation_id,
+                    "fields": dict(fields),
+                }
+            )
+            raise RuntimeError("test sink raised — #195 coverage of registry.py:1066-1068 + 1110")
+        finally:
+            self.done_event.set()
+
+
+def test_emit_sync_running_loop_arm_propagates_sink_exception() -> None:
+    """When the sink raises inside the daemon, the exception is captured
+    on the daemon thread and re-raised on the calling frame.
+
+    Coverage target: registry.py lines 1066-1068 (the daemon's
+    ``except BaseException`` arm) and line 1110 (the calling thread's
+    ``raise exc_holder[0]``).
+
+    Contract: the audit row IS the loud-failure escape (CLAUDE.md hard
+    rule #7). A sink failure must propagate as the louder signal rather
+    than be silently swallowed in favour of the tier-refusal raise —
+    otherwise a broken sink + a clean tier rejection looks like a
+    successful registration with a silent audit drop, which is the
+    exact failure mode this gate exists to prevent.
+
+    The tier-refusal :class:`HookError` raise on the next line of
+    ``register()`` is therefore NOT reached: the sink's
+    :class:`RuntimeError` shadows it. Test asserts the
+    :class:`RuntimeError` propagates, not :class:`HookError`.
+    """
+    sink = _RaisingAuditSink()
+    registry = HookRegistry(
+        gate=make_deny_all_gate(),
+        sink=sink,
+        strict_declarations=True,
+    )
+    registry.register_hookpoint(
+        name="before_db_write",
+        subscribable_tiers=frozenset({"system", "operator"}),
+        refusable_tiers=frozenset({"system"}),
+        fail_closed=True,
+    )
+
+    async def _provoke() -> None:
+        """Trigger the running-loop arm via the tier-rejection raise."""
+        with pytest.raises(RuntimeError, match="test sink raised"):
+            registry.register(
+                hook_fn=_noop,
+                hookpoint="before_db_write",
+                kind="pre",
+                tier="user-plugin",
+            )
+
+    asyncio.run(_provoke())
+
+    # The sink WAS called (its except-arm fired BECAUSE it raised
+    # inside the body, after recording the call).
+    assert sink.done_event.wait(timeout=5.0), (
+        "_RaisingAuditSink.done_event never fired; the daemon thread "
+        "either never started or is stuck before the sink raised."
+    )
+    assert len(sink.calls) == 1
+
+
+def test_emit_sync_running_loop_arm_skips_fallback_when_lock_contested() -> None:
+    """Timeout fires AND the calling thread's ``emit_claim.acquire`` returns
+    ``False`` (simulating the daemon winning the post-emit-acquire race).
+    The fallback is skipped and the function returns cleanly.
+
+    Coverage target: registry.py line 1101 → 1108 (the branch where the
+    timeout block runs but the fallback is skipped).
+
+    The production race is documented in the comment at lines 1093-1100:
+    between ``thread.is_alive()`` returning ``True`` and the calling
+    thread's ``acquire(blocking=False)`` on line 1101, the daemon's
+    sink call can complete and the daemon's own post-emit acquire can
+    win the claim. Reproducing it deterministically requires
+    controlling the lock object — which is created locally inside
+    ``_emit_sync`` — so the test patches ``threading.Lock`` to return a
+    lock that always refuses ``acquire``. With a stalling sink the
+    timeout still fires; the patched lock then forces the
+    ``acquire`` on line 1101 to return ``False``, exercising the
+    skip-fallback path.
+    """
+    sink = _LatentlyCompletingAuditSink()
+    registry = HookRegistry(
+        gate=make_deny_all_gate(),
+        sink=sink,
+        strict_declarations=True,
+    )
+    registry.register_hookpoint(
+        name="before_db_write",
+        subscribable_tiers=frozenset({"system", "operator"}),
+        refusable_tiers=frozenset({"system"}),
+        fail_closed=True,
+    )
+
+    class _AlwaysContestedLock:
+        """A threading.Lock-shaped double whose acquire ALWAYS returns False.
+
+        Drives the daemon's line 1078 acquire to fail (the daemon exits
+        silently — fine for the test's invariant: we only care that the
+        calling thread's line 1101 acquire fails) AND the calling
+        thread's line 1101 acquire to fail (the test's target branch).
+        Release is a no-op since the lock is never actually held.
+
+        Standard-lock surface (``locked``, ``__enter__``, ``__exit__``)
+        kept compatible with the broader threading machinery because
+        ``threading.Condition`` consults ``lock.locked`` at init time
+        and ``threading.Event`` uses ``Condition``. Without those
+        attributes, the patched ``threading.Lock`` breaks unrelated
+        primitives the test sink relies on.
+        """
+
+        def acquire(
+            self,
+            blocking: bool = True,  # noqa: FBT001, FBT002 - matches threading.Lock surface
+            timeout: float = -1,
+        ) -> bool:
+            """Always refuse — both daemon and caller hit this."""
+            return False
+
+        def release(self) -> None:
+            """No-op: nothing was ever acquired."""
+
+        def locked(self) -> bool:
+            """Compat shim for threading.Condition.__init__."""
+            return False
+
+        def __enter__(self) -> type[_AlwaysContestedLock]:
+            """Compat shim — ``with lock:`` should at least not crash."""
+            return type(self)
+
+        def __exit__(self, *exc: object) -> None:
+            """Compat shim — pair with __enter__."""
+
+    async def _provoke() -> None:
+        """Trigger the running-loop arm via the tier-rejection raise."""
+        with pytest.raises(HookError, match="not allowed on hookpoint"):
+            registry.register(
+                hook_fn=_noop,
+                hookpoint="before_db_write",
+                kind="pre",
+                tier="user-plugin",
+            )
+
+    # Patch threading.Lock IN THE REGISTRY MODULE so emit_claim
+    # becomes our contested lock without breaking unrelated threading
+    # primitives used by the sink (Event, Thread, etc).
+    from unittest.mock import patch
+
+    import alfred.hooks.registry as registry_mod
+
+    with (
+        patch.object(registry_mod.threading, "Lock", _AlwaysContestedLock),
+        structlog.testing.capture_logs() as captured,
+    ):
+        asyncio.run(_provoke())
+        # Wait for the daemon's sink call to finish so the test doesn't
+        # race the asyncio.run teardown.
+        sink.done_event.wait(timeout=5.0)
+
+    # Load-bearing assertion: the calling-thread structlog fallback
+    # was SKIPPED because the lock returned False on the line-1101
+    # acquire. Without the patched lock, the existing
+    # ``test_emit_sync_running_loop_arm_stalled_sink_at_least_once``
+    # test would see exactly the opposite — the fallback firing — so
+    # this test pins the complementary branch of the same if-statement.
+    fallback_rows = [
+        c
+        for c in captured
+        if c.get("event") == HOOKS_TIER_REJECTED and c.get("reason") == "sink_emit_timeout"
+    ]
+    assert len(fallback_rows) == 0, (
+        f"Expected zero fallback rows when emit_claim.acquire returns False "
+        f"on the calling thread (line 1101→1108 branch); got {fallback_rows!r}. "
+        f"The contested-lock patch did not take effect, or the timeout branch "
+        f"was not reached."
+    )

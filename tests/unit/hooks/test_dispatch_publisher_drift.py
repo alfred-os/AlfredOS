@@ -423,3 +423,86 @@ async def test_undeclared_hookpoint_in_strict_mode_emits_audit_row(
     assert fields["kind"] == "pre"
     assert fields["drift_at"] == "dispatch"
     assert fields["drift_kind"] == "undeclared_hookpoint"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #195 — coverage of the optional invoke-time-arg fields
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_enforce_drift_audit_row_omits_fail_closed_when_arg_is_none() -> None:
+    """When the publisher's invoke-time ``fail_closed`` is ``None``, the
+    drift audit row omits ``invoked_fail_closed`` rather than emitting
+    a ``None`` placeholder.
+
+    Closes the gap left by the existing drift tests, which all pass a
+    concrete ``fail_closed=True`` / ``=False``. The per-kind dispatcher
+    handlers ``_run_post`` / ``_run_error`` / ``_run_cancel`` call
+    ``_enforce_subscribable_tiers`` without ``refusable_tiers`` (which
+    defaults to ``None``), and a future callsite drift could pass
+    ``fail_closed=None`` too. The audit-row schema treats the field as
+    optional via ``if fail_closed is not None: fields[...] = ...`` —
+    this test pins the omit branch so a regression to "always emit, even
+    if None" surfaces as a coverage failure rather than as a stray
+    ``invoked_fail_closed=None`` row.
+
+    The test invokes the helper directly because the public ``invoke()``
+    signature pins ``fail_closed: bool = False`` (defaults to ``False``,
+    never ``None``); the ``None`` shape is reachable only on the
+    internal helper.
+    """
+    # Local imports: the helper is module-internal and only exercised here.
+    from alfred.hooks.invoke import _enforce_subscribable_tiers
+    from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+    from tests.helpers.gates import make_deny_all_gate
+
+    sink = SpyAuditSink()
+    registry = HookRegistry(
+        gate=make_deny_all_gate(),
+        sink=sink,
+        strict_declarations=True,
+    )
+    registry.register_hookpoint(
+        name="fail-closed-none-drift",
+        subscribable_tiers=frozenset({"system", "operator"}),
+        refusable_tiers=frozenset({"system"}),
+        fail_closed=True,
+    )
+
+    # Drive _enforce_subscribable_tiers via the active registry. Save
+    # the prior singleton so the test does not pollute downstream tests
+    # that rely on the production singleton's state.
+    prior_registry = get_registry()
+    set_registry(registry)
+    try:
+        # Trigger subscribable_tiers drift with fail_closed=None. The
+        # drift detection picks subscribable_tiers first (it's the first
+        # field checked); the audit row builder then enters the
+        # optional-field block where fail_closed is None.
+        with pytest.raises(HookError, match="subscribable_tiers"):
+            await _enforce_subscribable_tiers(
+                "fail-closed-none-drift",
+                _ctx(),
+                kind="pre",
+                subscribable_tiers=frozenset({"user-plugin"}),  # drift
+                refusable_tiers=None,
+                fail_closed=None,  # the None we are pinning
+            )
+    finally:
+        set_registry(prior_registry)
+
+    matching = [c for c in sink.calls if c["event"] == HOOKS_TIER_REJECTED]
+    assert len(matching) == 1, (
+        f"expected exactly one drift row; got {[c['event'] for c in sink.calls]}"
+    )
+    fields = matching[0]["fields"]
+    assert isinstance(fields, dict)
+    assert fields["drift_kind"] == "subscribable_tiers"
+    # The load-bearing assertion for the missing-branch coverage: the
+    # row OMITS invoked_fail_closed when the arg is None.
+    assert "invoked_fail_closed" not in fields, (
+        f"expected invoked_fail_closed to be omitted when arg is None; got fields={fields!r}"
+    )
+    # The optional refusable_tiers field follows the same contract.
+    assert "invoked_refusable_tiers" not in fields
