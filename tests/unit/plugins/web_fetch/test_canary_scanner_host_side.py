@@ -833,3 +833,104 @@ async def test_missing_body_log_sanitizes_userinfo(
     assert "alice" not in sanitized
     assert "hunter2" not in sanitized
     assert sanitized == "https://host.test/path"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# #197 — eager-release-failed leg (best-effort cap release)
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scan_logs_release_failure_but_still_propagates_canary_trip(
+    store: ContentStore,
+    scanner_factory: ScannerFactory,
+) -> None:
+    """#197: on canary trip, when ``store.delete`` succeeds but the
+    cap's ``release`` raises a Redis-transient error, the scanner logs
+    the failure AND still propagates ``WebFetchCanaryTripped``.
+
+    The cap's release is best-effort: a Redis hiccup mid-release would
+    otherwise REPLACE the typed security signal with a generic
+    ``RedisError``, hiding the canary trip from the orchestrator. The
+    scanner narrows the catch to the Redis-transient class
+    (``RedisError`` / ``ConnectionError`` / ``TimeoutError``) so a
+    programmer-bug inside ``HandleCap.release`` (``AttributeError`` /
+    ``TypeError`` / future regression) still raises loudly — those are
+    NOT the "Redis hiccup" shape.
+
+    Three invariants pinned:
+
+    1. The typed ``WebFetchCanaryTripped`` propagates (security signal
+       intact).
+    2. The error log records the failure with attribution
+       (``user_id``, sanitized ``source_url``, ``exception_type``).
+    3. The cap-slot leakage is bounded by the passive TTL (the audit
+       row says so; we can't directly observe TTL in a unit test).
+    """
+    body = b"content with CANARY-RELEASE-FAIL token"
+    # Secret-bearing URL: PRD §5.6 mandates userinfo + query strip on
+    # operator-visible logs. Use a token-shaped query value so a
+    # regression that drops sanitization on THIS specific error leg
+    # surfaces here (CR catch on PR #198).
+    raw_url = "https://alice:pw@attacker.test/release-fail?token=BEARER_SECRET"
+    handle = await store.write(
+        handle_id=str(uuid.uuid4()),
+        body=body,
+        source_url=raw_url,
+    )
+
+    # AsyncMock standing in for a real HandleCap; the release call
+    # raises RedisError — the Redis-transient class the scanner's
+    # catch is narrowed to. (A non-Redis exception would propagate
+    # past the narrowed catch and surface as the released exception
+    # type instead of the canary trip — separate failure mode, not
+    # exercised here.)
+    mock_cap = AsyncMock(spec=HandleCap)
+    mock_cap.release.side_effect = RedisError(
+        "simulated Redis connection reset during eager release"
+    )
+    scanner = scanner_factory(
+        known_canary_tokens=[CanaryToken("CANARY-RELEASE-FAIL")],
+        handle_cap=mock_cap,
+    )
+
+    with (
+        structlog.testing.capture_logs() as captured,
+        pytest.raises(WebFetchCanaryTripped) as exc_info,
+    ):
+        await scanner.scan(
+            handle_id=handle.id,
+            source_url=handle.source_url,
+            user_id=_USER_ID,
+        )
+
+    # Invariant 1: typed security signal propagates with attribution.
+    assert exc_info.value.handle_id == handle.id
+    assert exc_info.value.source_url == handle.source_url
+
+    # Invariant 2: error log records the failure.
+    release_failed_events = [
+        e for e in captured if e.get("event") == "web_fetch.handle_cap.eager_release_failed"
+    ]
+    assert len(release_failed_events) == 1, (
+        f"expected exactly one eager_release_failed event; captured: {captured!r}"
+    )
+    event = release_failed_events[0]
+    assert event["log_level"] == "error", "eager_release_failed must be LOUD (error level)"
+    assert event["user_id"] == _USER_ID
+    assert event["handle_id"] == handle.id
+    # PRD §5.6: the source_url field is sanitized — userinfo + query
+    # stripped — so a token-shaped query value never reaches operator-
+    # visible logs. This is the load-bearing assertion against
+    # sanitization drift on THIS specific error leg (CR on PR #198).
+    assert event["source_url"] == "https://attacker.test/release-fail"
+    assert "BEARER_SECRET" not in event["source_url"]
+    assert "alice" not in event["source_url"]
+    # Spec §5.6: type name only — never str(exc) / exc.args (a future
+    # Redis driver shape could carry T3 fragments).
+    assert event["exception_type"] == "RedisError"
+
+    # The release WAS attempted (the side_effect fired); the cap-slot
+    # is now leaked until passive TTL eviction, consistent with the
+    # documented contract.
+    mock_cap.release.assert_awaited_once_with(user_id=_USER_ID, handle_id=handle.id)
