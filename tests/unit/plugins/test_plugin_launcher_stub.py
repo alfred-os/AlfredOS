@@ -42,12 +42,18 @@ _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 # The launcher's Linux UID-drop branch invokes ``runuser -u <user> -- ...``.
 # The production default ``alfred-quarantine`` is provisioned out-of-band
 # (see launcher --help) and does not exist on a vanilla GitHub Actions
-# runner — runuser exits 1 ("user does not exist"), failing the dev /
-# unsandboxed exec-reachability tests below. Pointing ``ALFRED_PLUGIN_UID``
-# at the current process's user lets runuser succeed on CI without
-# provisioning a system account; the assertion is still about reaching
-# the exec branch, not about UID isolation (that's spec'd elsewhere).
+# runner. Pointing ``ALFRED_PLUGIN_UID`` at the current process's user lets
+# runuser succeed when the test runs as root (production deployments invoke
+# the launcher as root). The skipif on ``_LAUNCHER_REQUIRES_ROOT`` covers
+# the second blocker: ``runuser -u`` requires root regardless of the target
+# user. GitHub Actions Linux runners run as the unprivileged ``runner``
+# account, so the two dev / unsandboxed exec-reachability tests below
+# skip there; the launcher's Linux UID-drop is exercised on local + root
+# CI, the macOS fallback is exercised on the macos matrix legs, and the
+# grep-level static check at ``test_launcher_invokes_runuser_for_uid_drop``
+# locks the contract on every leg.
 _LAUNCHER_TEST_UID = getpass.getuser()
+_LAUNCHER_REQUIRES_ROOT = os.uname().sysname == "Linux" and os.geteuid() != 0
 
 
 def test_launcher_exists_and_is_executable() -> None:
@@ -172,6 +178,10 @@ def test_launcher_refuses_unsandboxed_flag_in_production() -> None:
     assert b"plugin.launcher_no_sandbox_policy" not in result.stderr
 
 
+@pytest.mark.skipif(
+    _LAUNCHER_REQUIRES_ROOT,
+    reason="Linux runuser branch requires root; this runner is non-root",
+)
 def test_launcher_accepts_unsandboxed_in_development() -> None:
     """Development + unsandboxed=1 → exec the plugin (the only escape hatch).
 
@@ -351,6 +361,10 @@ def test_launcher_refuses_plugin_id_outside_safe_charset(bad_id: str) -> None:
     assert bad_id.encode() not in result.stderr
 
 
+@pytest.mark.skipif(
+    _LAUNCHER_REQUIRES_ROOT,
+    reason="Linux runuser branch requires root; this runner is non-root",
+)
 def test_launcher_accepts_well_formed_plugin_id() -> None:
     """The safe charset ``[A-Za-z0-9._-]+`` is accepted as before.
 
