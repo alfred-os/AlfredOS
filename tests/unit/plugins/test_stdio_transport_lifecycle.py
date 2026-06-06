@@ -361,6 +361,51 @@ async def test_kill_returns_true_on_live_subprocess_minimal_repro(
 
 
 @pytest.mark.asyncio
+async def test_kill_returns_true_on_live_subprocess_wrapper_repro(
+    fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
+) -> None:
+    """Direct wrapper call (#187 diagnostic round 3).
+
+    The other diagnostic tests inlined kill()'s logic. This one calls the
+    ``transport.kill()`` wrapper directly — exactly what the original
+    failing test does — but captures process state before and after so
+    the assertion message tells us:
+
+    * Was the subprocess alive before kill()? (returncode is None)
+    * What's the returncode after the wrapper returned False?
+      * ``-9`` → SIGKILL landed; wrapper still returned False (False on
+        wait? but how — proc.wait() returned, so the returncode is set)
+      * ``None`` → process never exited; TimeoutError on wait_for
+      * any positive value or other negative → process exited for some
+        OTHER reason before kill() could fire (ProcessLookupError)
+    """
+    transport = _make_transport(
+        fake_audit_writer,
+        fake_broker,
+        stub_nonce,
+        executable="/bin/sh",
+        args=["-c", "sleep 5"],
+    )
+    await transport._spawn()
+    assert transport._process is not None, "#187 wrapper — spawn left _process None"
+
+    proc_alive_before = transport._process.returncode is None
+    pid = transport._process.pid
+
+    succeeded = await transport.kill()
+
+    rc_after = transport._process.returncode
+
+    if not succeeded:
+        raise AssertionError(
+            f"#187 wrapper-repro — transport.kill() returned False. "
+            f"pid={pid} loop={type(asyncio.get_running_loop()).__name__} "
+            f"proc_alive_before_kill={proc_alive_before} "
+            f"returncode_after_kill={rc_after}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_kill_returns_false_when_process_already_dead(
     fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
 ) -> None:
