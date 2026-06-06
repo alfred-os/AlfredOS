@@ -138,6 +138,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
   - **Mid-turn eviction property test (hypothesis):** drive N concurrent acquire/release pairs against pool_max=1; assert that no `release` call ever raises because its in-use entry was evicted from under it.
 
 - [ ] **Task 6.** Implement `src/alfred/memory/working_pool.py`:
+
   ```python
   class WorkingMemoryPool:
       def __init__(
@@ -153,6 +154,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
       async def release(self, key: tuple[str, str], wm: WorkingMemory) -> None: ...
       def evict(self, key: tuple[str, str]) -> None: ...
   ```
+
   - Per-key `asyncio.Lock` registry (dict[tuple[str, str], asyncio.Lock]); lazy-create on first acquire of each key.
   - Lazy rehydrate inside the lock: open a pool-owned short-lived `pool_session_scope` session (spec §3 line 460 — "not the orchestrator's per-turn session, keeps locality clean per core-006"); call `episodic.recent(persona=key[0], user_id=key[1], limit=20)`; replay into `WorkingMemory.append(role=..., content=...)` in chronological order.
   - `_in_use: set[tuple[str, str]]` — incremented on acquire, decremented on release. LRU eviction iterates idle entries by `_last_released_at` and evicts the oldest until under cap.
@@ -181,6 +183,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
   - Keep `Persona` dataclass + `ALFRED_PERSONA` constant.
   - **Delete** `alfred_system_prompt`. **Add** `render_persona_prompt(*, persona: Persona = ALFRED_PERSONA, operator_name: str, requesting_user_name: str, language: str) -> str` with the cacheable-prefix + `<user_context>` tail shape per spec §3.
   - Implementation sketch:
+
     ```python
     def render_persona_prompt(
         *,
@@ -206,6 +209,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
         )
         return f"{prefix}\n\n{tail}"
     ```
+
   - Operator-facing strings here go to the model, not to the human eye — they are T0 system-prompt text, written in canonical English, and **do not pass through `t()`**. (CLAUDE.md i18n rule #2 covers the language imperative; the model translates its own response per that imperative.)
 
 ### Phase 4 — Orchestrator contract change (TDD, alfred-core-engineer)
@@ -234,6 +238,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
 
 - [ ] **Task 11.** Implement the orchestrator contract change in `src/alfred/orchestrator/core.py`:
   - Constructor signature change:
+
     ```python
     def __init__(
         self,
@@ -249,8 +254,10 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
         self._operator = identity_resolver.get_operator()  # frozen User, cached for the orchestrator lifetime
         ...
     ```
+
     The orchestrator no longer holds a `WorkingMemory` — the pool owns it; the adapter passes it in per turn.
   - `handle_user_message` signature change:
+
     ```python
     async def handle_user_message(
         self,
@@ -260,8 +267,10 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
         working_memory: WorkingMemory,
     ) -> str: ...
     ```
+
     The content is already T2-tagged (the adapter tagged it). The orchestrator no longer re-tags — it reads `content.content` and `content.tier.name == "T2"`. (Slice-1 had the orchestrator tag a raw `str`; PR B moves the tag site outward to the adapter, which is what makes Slice-3's T3 path a type-level discriminant.)
   - Inside `_handle_turn`, every `self._operator_name` becomes `user.slug`; every `self._operator_language` becomes `user.language`; the persona prompt call becomes:
+
     ```python
     system_prompt = render_persona_prompt(
         persona=ALFRED_PERSONA,
@@ -270,13 +279,17 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
         language=user.language,
     )
     ```
+
   - Budget calls thread `user.slug`:
+
     ```python
     estimate = self._budget.estimate_for(user.slug, request)
     if self._budget.would_exceed(user.slug, estimate): ...
     self._budget.check_and_charge(user.slug, response.cost_usd)
     ```
+
   - Episodic calls thread `user.slug` + `user.language` + `persona="alfred"`:
+
     ```python
     await episodic.record(
         user_id=user.slug,
@@ -287,7 +300,9 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
         persona="alfred",
     )
     ```
+
   - Audit calls thread `user.slug` + `user.language` + `actor_persona="alfred"`:
+
     ```python
     await self._audit.append(
         event="orchestrator.turn",
@@ -300,6 +315,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
         language=user.language,
     )
     ```
+
   - **`UnknownBudgetUserError` branch:** wrap each per-user budget call in a `try/except BudgetError` and discriminate on `isinstance(exc, UnknownBudgetUserError)`. On unknown-user, audit `result="unknown_budget_user"` (subject carries `phase="budget_pre_check"` or `"budget_post_charge"` depending on which call raised) and re-raise so the adapter surfaces it. Other `BudgetError`s keep slice-1 behaviour (`budget_blocked` on pre-check, `budget_overrun` on post-charge).
   - **Cancellation backstop** — same shape as slice-1; the audit row's `actor_user_id` becomes `user.slug` (was `self._operator_name`). The top-level `_audit_cancellation` helper takes `user` as an arg (it's only callable from inside `handle_user_message`, which has the user in scope).
   - **`session.rollback()` discipline** — unchanged from slice-1. The outer try/except in `handle_user_message` is identical except that `BaseException`/`asyncio.CancelledError` arms reference the captured `user` instead of `self._operator_*`.
@@ -315,14 +331,17 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
 
 - [ ] **Task 13.** Update `src/alfred/comms/tui.py`:
   - `_OrchestratorLike` Protocol gains the new signature:
+
     ```python
     class _OrchestratorLike(Protocol):
         async def handle_user_message(
             self, *, user: User, content: TaggedContent[T2], working_memory: WorkingMemory,
         ) -> str: ...
     ```
+
   - `AlfredTuiApp.__init__` takes additional constructor injects: `identity_resolver: IdentityResolverLike`, `working_pool: WorkingMemoryPool`. CLI wires these.
   - `_run_turn(text)` becomes:
+
     ```python
     async def _run_turn(self, text: str) -> str:
         user = self._identity_resolver.get_operator()
@@ -335,6 +354,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
         finally:
             await self._working_pool.release(("alfred", user.slug), wm)
     ```
+
   - Per spec §3 line 376-398's adapter wiring pattern: capture WM once at the top of the turn; never re-enter the pool mid-turn.
 
 - [ ] **Task 14.** Update `tests/unit/comms/test_tui.py`:
@@ -352,6 +372,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
   - `WorkingMemoryPool` wired with the testcontainer's `session_scope` and a stubbed `active_user_count`.
   - `Orchestrator(...)` construction uses the real `IdentityResolver` built against the migration-0004 backfilled operator row.
   - `await orch.handle_user_message("hi alfred")` becomes:
+
     ```python
     user = resolver.get_operator()
     content = tag(T2, "hi alfred", source="smoke.test")
@@ -361,6 +382,7 @@ PR B is one commit cluster of ~14 commits. The architect-approved atomic path ke
     finally:
         await pool.release(("alfred", user.slug), wm)
     ```
+
   - Assertions on persisted episodes + audit row gain `language` + `persona` (`Episode.persona == "alfred"`; `AuditEntry.actor_persona == "alfred"`).
 
 ### Phase 7 — Conventions pass + verification (alfred-python-developer)

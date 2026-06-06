@@ -512,6 +512,7 @@ New `User.language` column (BCP-47, default `settings.operator_language`). Set p
 Catalog additions enumerated (full list — no wildcards in spec):
 
 **Discord adapter keys:**
+
 - `discord.unknown_user_first` — first-DM-since-startup variant. **Body (devex-004):** "I don't recognise this Discord ID yet (snowflake: `{snowflake}`). Ask your operator to run: `alfred user add --name <YourName> --discord-id {snowflake}`. The operator's audit log shows this DM." (`{snowflake}` is the only placeholder; `<YourName>` stays literal for the unknown user to fill in.)
 - `discord.unknown_user_repeat` — subsequent variant, polite, no hint (suppressed entirely after the second hit per the dedup window).
 - `discord.embed_unsupported` — embeds/attachments/stickers/poll/components/activity/application refusal (sec-001).
@@ -520,6 +521,7 @@ Catalog additions enumerated (full list — no wildcards in spec):
 - `discord.alfred_error` — fixed phrase, no interpolation.
 
 **`alfred user` CLI keys (enumerated, not wildcarded — pybabel extract needs concrete names):**
+
 - `cli.user.help.group` + per-subcommand `cli.user.help.<add|list|show|remove|bind|unbind|set>.short` + `.long` (14 keys).
 - `cli.user.flag.<name>.<short|long>` for every option (`--name`, `--discord-id`, `--authorization`, `--daily-budget-usd`, `--language`, `--rate-limit-per-min`, `--rate-limit-per-day`, `--platform`, `--id`, `--json`, `--include-deleted`, `--yes`). ~24 keys.
 - Success/confirmation: `cli.user.added`, `cli.user.bound`, `cli.user.unbound`, `cli.user.removed`, `cli.user.set.success`, `cli.user.remove.confirm`, `cli.user.remove.refused_last_operator`, `cli.user.operator_replaced`.

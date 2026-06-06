@@ -142,11 +142,11 @@ audit row. Use `alfred supervisor reset --confirm`.
 
 ## Cross-references
 
-- [ADR-0020](../adr/0020-supervisor-cli-access-via-postgres-and-state-git.md) — the architectural decision that initially scoped the supervisor CLI to status-only.
-- [ADR-0021](../adr/0021-merged-proposal-branch-dispatch-for-side-effecting-proposals.md) — the merged-proposal-branch dispatch infrastructure that ships the active reset path.
-- [#171](https://github.com/alfred-os/AlfredOS/issues/171) — the infrastructure work that landed the dispatch loop + replay ledger + `BreakerResetProposal`.
-- [#174](https://github.com/alfred-os/AlfredOS/issues/174) — the deferred daemon boot wiring that supplies `state_git_path` to the production `Supervisor`.
-- [#173](https://github.com/alfred-os/AlfredOS/issues/173) — the deferred DLP wiring on the dispatcher's `failure_detail` boundary.
-- [`docs/subsystems/supervisor.md`](../subsystems/supervisor.md) — the supervisor's full architecture (breaker state machine, hookpoint registration, persistence model).
-- [`PRD.md` §10.8](../../PRD.md) — operator-tier T1 commands and the forensic audit-row contract.
-- Spec §10.6 — circuit-breaker persistence and the re-arm window flap-protection model.
+* [ADR-0020](../adr/0020-supervisor-cli-access-via-postgres-and-state-git.md) — the architectural decision that initially scoped the supervisor CLI to status-only.
+* [ADR-0021](../adr/0021-merged-proposal-branch-dispatch-for-side-effecting-proposals.md) — the merged-proposal-branch dispatch infrastructure that ships the active reset path.
+* [#171](https://github.com/alfred-os/AlfredOS/issues/171) — the infrastructure work that landed the dispatch loop + replay ledger + `BreakerResetProposal`.
+* [#174](https://github.com/alfred-os/AlfredOS/issues/174) — the deferred daemon boot wiring that supplies `state_git_path` to the production `Supervisor`.
+* [#173](https://github.com/alfred-os/AlfredOS/issues/173) — the deferred DLP wiring on the dispatcher's `failure_detail` boundary.
+* [`docs/subsystems/supervisor.md`](../subsystems/supervisor.md) — the supervisor's full architecture (breaker state machine, hookpoint registration, persistence model).
+* [`PRD.md` §10.8](../../PRD.md) — operator-tier T1 commands and the forensic audit-row contract.
+* Spec §10.6 — circuit-breaker persistence and the re-arm window flap-protection model.

@@ -110,6 +110,7 @@ PROPOSAL_HANDLERS: Final[Mapping[str, ProposalHandler]] = {
 ```
 
 Each handler:
+
 - Receives the parsed typed payload (Pydantic v2 instance) + a `ProposalContext` (audit_writer, effects interface, structured logger).
 - Performs the side effect.
 - Returns `DispatchOutcome.applied()` or `DispatchOutcome.failed(reason)`.

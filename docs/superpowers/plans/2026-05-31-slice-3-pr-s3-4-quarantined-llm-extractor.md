@@ -114,6 +114,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Files: Modify `src/alfred/providers/base.py`.
 
   **Failing test** (`tests/unit/quarantine/test_provider_capabilities.py`):
+
   ```python
   # tests/unit/quarantine/test_provider_capabilities.py
   import pytest
@@ -156,6 +157,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: `uv run pytest tests/unit/quarantine/test_provider_capabilities.py -q` → FAIL.
 
   **Implementation** (`src/alfred/providers/base.py` additions):
+
   ```python
   from enum import Enum
   from typing import Protocol, TypeVar
@@ -206,6 +208,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: `uv run pytest tests/unit/quarantine/test_provider_capabilities.py -q` → all pass.
 
   Commit:
+
   ```
   feat(providers): ProviderCapability enum + register_provider() registry decorator (#TBD-slice3)
   ```
@@ -221,6 +224,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   > **prov-009 (Medium):** `DeepSeekProvider` is per-model; `deepseek-reasoner` does NOT support JSON mode. `capabilities()` must be model-aware.
 
   **Failing test:**
+
   ```python
   def test_anthropic_has_native_constrained() -> None:
       from alfred.providers.anthropic_native import AnthropicProvider
@@ -244,6 +248,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: → FAIL.
 
   **Implementation:**
+
   ```python
   # In src/alfred/providers/anthropic_native.py:
   from alfred.providers.base import ProviderCapability, register_provider
@@ -277,6 +282,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: → all pass.
 
   Commit:
+
   ```
   feat(providers): capabilities() on AnthropicProvider + DeepSeekProvider (model-aware) (#TBD-slice3)
   ```
@@ -290,6 +296,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Files: Modify `src/alfred/security/quarantine.py` (stubs promoted to full impl).
 
   **Failing test** (`tests/unit/quarantine/test_extraction_result_types.py`):
+
   ```python
   # tests/unit/quarantine/test_extraction_result_types.py
   import pytest
@@ -341,6 +348,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: `uv run pytest tests/unit/quarantine/test_extraction_result_types.py -q` → FAIL (stubs incomplete).
 
   **Implementation** (update `src/alfred/security/quarantine.py`):
+
   ```python
   """Quarantine boundary — the single crossing point from T3 to orchestrator-readable form.
 
@@ -405,6 +413,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: `uv run pytest tests/unit/quarantine/test_extraction_result_types.py -q` → all pass.
 
   Commit:
+
   ```
   feat(quarantine): ExtractionResult discriminated union + T3DerivedData NewType full impl (#TBD-slice3)
   ```
@@ -544,6 +553,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   feat(quarantined-llm): plugin manifest + quarantine.ingest/extract skeleton, fd-3 read in main() (#TBD-slice3)
   ```
@@ -563,6 +573,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   > **test-004 / rvw-008 (Medium):** `_call_provider` must not remain a `"{}"` stub in the committed plan. Wire real provider SDK dispatch; each capability path calls its own API shape (Anthropic tool-use, DeepSeek response_format, fallback text). See also prov-006 — recorded fixture files must be created in Task 11b.
 
   **Failing test** (`tests/unit/quarantine/test_quarantined_extractor_dispatch.py`):
+
   ```python
   # tests/unit/quarantine/test_quarantined_extractor_dispatch.py
   """Dispatch paths and retry-guidance hygiene (spec §6.2, §6.3, §12.3)."""
@@ -685,6 +696,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: `uv run pytest tests/unit/quarantine/test_quarantined_extractor_dispatch.py -q` → FAIL.
 
   **Implementation** (`plugins/alfred_quarantined_llm/provider_dispatch.py`):
+
   ```python
   """Provider dispatch for quarantined extraction (spec §6.2, §6.3)."""
   from __future__ import annotations
@@ -832,6 +844,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Also add `_build_retry_prompt` to `QuarantinedExtractor`:
+
   ```python
   # In src/alfred/plugins/quarantine_extractor.py
   def _build_retry_prompt(self, *, validator_error: str, schema_json: str) -> str:
@@ -849,6 +862,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: `uv run pytest tests/unit/quarantine/test_quarantined_extractor_dispatch.py -q` → all pass.
 
   Commit:
+
   ```
   feat(quarantine): provider dispatch — native/JSON-object/fallback capability branches + sanitized retry (#TBD-slice3)
   ```
@@ -872,6 +886,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Files: Create `src/alfred/plugins/quarantine_extractor.py`.
 
   **Failing test** (`tests/unit/quarantine/test_quarantined_extractor_dispatch.py` extended):
+
   ```python
   def test_schema_version_missing_raises_before_subprocess():
       """schema_version: Literal[1] missing → ValueError before dispatch (spec ��6.6)."""
@@ -923,6 +938,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: → FAIL.
 
   **Implementation** (`src/alfred/plugins/quarantine_extractor.py`):
+
   ```python
   """QuarantinedExtractor — orchestrator-side client of the quarantined-LLM plugin (spec §6.4).
 
@@ -1126,6 +1142,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: `uv run pytest tests/unit/quarantine/test_quarantined_extractor_dispatch.py -q` → all pass.
 
   Commit:
+
   ```
   feat(quarantine): QuarantinedExtractor — append_schema, DLP subscriber, protocol-violation guard, per-call correlation_id (#TBD-slice3)
   ```
@@ -1139,6 +1156,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Files: Modify `src/alfred/security/quarantine.py`.
 
   **Failing test** (`tests/unit/quarantine/test_quarantined_to_structured.py`):
+
   ```python
   # tests/unit/quarantine/test_quarantined_to_structured.py
   """quarantined_to_structured is the ONLY T3→orchestrator path (spec §3.4)."""
@@ -1212,6 +1230,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: → FAIL.
 
   **Implementation** (update `src/alfred/security/quarantine.py`):
+
   ```python
   async def quarantined_to_structured(
       handle: ContentHandle,
@@ -1244,6 +1263,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: → all pass.
 
   Commit:
+
   ```
   feat(quarantine): quarantined_to_structured full implementation — single T3→orchestrator crossing point (#TBD-slice3)
   ```
@@ -1259,6 +1279,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   > **rvw-001 / Cluster 4 (Critical):** Use `await audit_writer.append_schema(fields, ...)` not `.append(event=..., fields=..., ...)`.
 
   **Failing test** (`tests/unit/quarantine/test_downgrade_to_orchestrator.py`):
+
   ```python
   # tests/unit/quarantine/test_downgrade_to_orchestrator.py
   import pytest
@@ -1283,6 +1304,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   **Implementation:**
+
   ```python
   async def downgrade_to_orchestrator(
       data: T3DerivedData,
@@ -1324,6 +1346,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Run: → all pass.
 
   Commit:
+
   ```
   feat(quarantine): downgrade_to_orchestrator — T3_DERIVED_DOWNGRADE_FIELDS, append_schema, gate check (#TBD-slice3)
   ```
@@ -1337,6 +1360,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Files: Create `tests/integration/test_quarantined_chain_security.py`.
 
   **Implementation:**
+
   ```python
   # tests/integration/test_quarantined_chain_security.py
   """Cross-fork integration: quarantined extraction chain security gate (spec §12.4).
@@ -1456,6 +1480,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   test(integration): quarantined_chain_security — merge-blocking security gate (#TBD-slice3)
   ```
@@ -1509,6 +1534,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   test(integration): quarantined_chain_latency — advisory 5s budget gate (#TBD-slice3)
   ```
@@ -1587,6 +1613,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   test(adversarial): prompt_injection payloads — HTML meta, JS comments, display:none CSS (#TBD-slice3)
   ```
@@ -1694,6 +1721,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   test(fixtures): per-provider recorded extraction fixtures + conftest (prov-006) (#TBD-slice3)
   ```
@@ -1797,6 +1825,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   test(adversarial): retry-guidance hygiene — strict token-set invariant + poisoned-input positive control (#TBD-slice3)
   ```
@@ -1822,6 +1851,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   Expected: 100% on both files. Add any missing branch tests.
 
   Commit:
+
   ```
   test(quarantine): 100% line+branch coverage on quarantine.py + quarantine_extractor.py (#TBD-slice3)
   ```
@@ -1889,6 +1919,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   test(smoke): provider capabilities — CAPABILITIES constants, Anthropic tool-use shape, OpenAI strict:true, DeepSeek JSON mode (#TBD-slice3)
   ```
@@ -1908,6 +1939,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
   ```
 
   Commit:
+
   ```
   chore(quarantine): quality gate pass — lint, type, coverage, adversarial, integration security gate (#TBD-slice3)
   ```
@@ -1945,10 +1977,12 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
 | §14 `security.quarantined.extract` hookpoint declaration + kind=post DLP subscriber registration | Task 6 |
 
 **Deferred to PR-S3-5:**
+
 - Redis content store for handle resolution (PR-S3-5 ships `alfred.plugins.web_fetch.content_store`)
 - `InboundCanaryScanner` as hook subscriber (PR-S3-5 owns the `tool.web.fetch` hookpoint)
 - `dlp_egress` canary-propagation-through-quarantined-LLM full chain (requires live content store)
 
 **Deferred to PR-S3-7:**
+
 - `docs/subsystems/quarantine.md` deep-doc
 - `docs/glossary.md` additions: `ContentHandle`, `QuarantinedExtractor`, `quarantined_to_structured`, `T3DerivedData`, `provenance`, `RealGate`

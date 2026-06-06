@@ -2052,6 +2052,7 @@ ADR-0009's status flip (spec §9.4, §15.2) lands in **PR-S3-0a**, not here. Tas
   - Create `plugins/alfred-comms-test/main.py`
 
   `plugins/alfred-comms-test/__init__.py`:
+
   ```python
   # plugins/alfred-comms-test/__init__.py
   """Alfred comms-test reference plugin.
@@ -2063,6 +2064,7 @@ ADR-0009's status flip (spec §9.4, §15.2) lands in **PR-S3-0a**, not here. Tas
   ```
 
   `plugins/alfred-comms-test/manifest.toml`:
+
   ```toml
   # plugins/alfred-comms-test/manifest.toml
   # Slice-3 manifest schema (spec §4.3): manifest_version = 1 (integer).
@@ -2082,6 +2084,7 @@ ADR-0009's status flip (spec §9.4, §15.2) lands in **PR-S3-0a**, not here. Tas
   ```
 
   `plugins/alfred-comms-test/main.py`:
+
   ```python
   #!/usr/bin/env python3
   # plugins/alfred-comms-test/main.py

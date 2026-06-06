@@ -195,6 +195,7 @@ def is_t2(content: TaggedContent[Any]) -> TypeGuard[TaggedContent[T2]]:
 - Pytest classes group related tests: `class TestSecretBroker:` — group by class-under-test, not by feature.
 
 **Avoid:**
+
 - `data`, `info`, `obj`, `tmp`, `helper`, `util` as names. They tell the reader nothing.
 - Verbs in noun position: prefer `provider_router`, not `route_provider`.
 - Abbreviations that aren't industry-standard. `db` and `url` are fine; `ctx` and `cfg` are fine; `prv` is not.
@@ -344,6 +345,7 @@ async with asyncio.TaskGroup() as tg:
 - **Dependency inversion**: depend on the protocol, build the implementation at the edge (CLI bootstrap, test fixture). Never reach for module globals from a function under test.
 
 **Anti-patterns we actively avoid:**
+
 - Premature interfaces. One implementation = no interface. Two = consider one. Three = definitely one.
 - "Manager" / "Helper" / "Util" classes — they're usually a pile of unrelated functions wearing a class costume.
 - Inheritance for code reuse. Compose instead.

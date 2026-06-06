@@ -132,6 +132,7 @@ Bite-sized TDD tasks, ordered so each one has its dependencies green before it o
   - `RateLimiterHealth` frozen dataclass: `active_buckets: int`, `total_allowed: int`, `total_refused: int`.
   - `RateLimiter(Protocol)` async: `allow(user: User) -> bool`, `reset(user_id: str) -> None`, `health() -> RateLimiterHealth`.
   - `InProcessTokenBucketRateLimiter`:
+
     ```python
     AUTH_DEFAULT_PER_MIN: Final[Mapping[AuthorizationLevel, int | None]] = MappingProxyType({
         AuthorizationLevel.READ_ONLY: 0,        # short-circuit before lookup; value is documentation
@@ -140,6 +141,7 @@ Bite-sized TDD tasks, ordered so each one has its dependencies green before it o
         AuthorizationLevel.OPERATOR: None,      # unlimited
     })
     ```
+
     `allow(user)`:
     1. **FIRST**: `if user.authorization is AuthorizationLevel.READ_ONLY: return False`. (Security invariant per spec line 223.)
     2. `if user.deleted_at is not None: return False`. (Defense-in-depth.)
@@ -165,6 +167,7 @@ Bite-sized TDD tasks, ordered so each one has its dependencies green before it o
   - **No audit on clean input:** `len(pre) == len(post)` and no stage triggered → zero audit calls.
   - **Both backends feed redactor:** file-source secret + env-source secret both replaced; longer-first ordering preserved across backends.
 - [ ] Implement `src/alfred/security/dlp.py`:
+
   ```python
   _GENERIC_API_KEY_RE: Final = re.compile(r"\b(?:sk|pk|tok|key)[-_][A-Za-z0-9]{20,}\b")
   _REDACTION_SENTINEL: Final = "[REDACTED:api-key-shape]"
@@ -200,6 +203,7 @@ Bite-sized TDD tasks, ordered so each one has its dependencies green before it o
           """Slice-3 canary stage. Slice-2: literal no-op (regression-guarded)."""
           return text
   ```
+
 - [ ] Gate: `uv run pytest tests/unit/security/test_dlp.py --cov=src/alfred/security/dlp.py --cov-branch --cov-fail-under=100 -q`. Must be 100% line AND branch.
 - [ ] Lint/type green.
 
@@ -246,11 +250,13 @@ Bite-sized TDD tasks, ordered so each one has its dependencies green before it o
   - `alfred.comms.discord` (ships in PR D2; tripped retroactively when D2 lands if anyone imports it directly).
   - Any future class whose name ends in `Adapter` and lives under `alfred.comms` — generalised via an importable allowlist constant `_ALLOWED_COMMS_IMPORTS: frozenset[str] = frozenset({"alfred.comms.adapter", "alfred.comms.discord_types", "alfred.comms.markdown_split"})`. Anything ELSE under `alfred.comms` imported from outside the package or the test tree fails the test.
 - [ ] Reuses `tests/unit/_shared/import_violation.py::_remediation_message(file, line, symbol)` (shipped by PR C). The failure message names the violating `file:line`, the imported symbol, and points the contributor at `src/alfred/comms/adapter.py` + ADR-0009. Shape (literal example):
+
   ```
   src/alfred/cli/main.py:42 imports alfred.comms.tui_adapter.TuiAdapter directly.
   Consumers outside src/alfred/comms/ MUST go through the CommsAdapter Protocol
   (src/alfred/comms/adapter.py). See ADR-0009.
   ```
+
 - [ ] Migrate the slice-1 CLI bootstrap (`src/alfred/cli/main.py` chat command) to construct `TuiAdapter` (typed as the Protocol from `adapter.py`) instead of `AlfredTuiApp` directly. After migration, run the new test and assert it passes WITHOUT any exception slots populated. If any external consumer still needs to import the concrete class for a reason unforeseen by D1, escalate to `alfred-architect` rather than adding an exception — adding an exception silently widens the Slice-3 swap surface.
 - [ ] Tests green; lint/type green.
 
@@ -266,6 +272,7 @@ Bite-sized TDD tasks, ordered so each one has its dependencies green before it o
 **Subagent:** `alfred-security-engineer`.
 
 - [ ] Wire the per-file gate into the existing `pyproject.toml` or `pytest.ini` coverage configuration. The literal command this PR's CI must run:
+
   ```
   uv run pytest \
     tests/unit/security/test_dlp.py \
@@ -275,6 +282,7 @@ Bite-sized TDD tasks, ordered so each one has its dependencies green before it o
     --cov-fail-under=100 \
     -q
   ```
+
   Result MUST be 100% line + branch. The full `make check` invocation runs this gate alongside the existing per-file gate on `src/alfred/security/secrets.py` (from PR C); both must be green.
 - [ ] Add a one-line note to `tests/unit/security/__init__.py` (or wherever the security-suite docstring lives) documenting which files are 100%-gated, so future contributors can extend the gate list without grep-and-pray.
 
@@ -295,6 +303,7 @@ make check
 **PR-D1-specific gates layered on top of `make check`:**
 
 1. **DLP per-file 100% line + branch coverage.**
+
    ```bash
    uv run pytest \
      tests/unit/security/test_dlp.py \
@@ -304,36 +313,47 @@ make check
      --cov-fail-under=100 \
      -q
    ```
+
    Expected: every line + every branch in `src/alfred/security/dlp.py` covered. The canary-stub test counts as a separate covered branch (entering and returning from `_canary_stub`).
 
 2. **TUI smoke through the new Protocol seam.**
+
    ```bash
    uv run pytest tests/smoke/test_hello_alfred.py -q
    ```
+
    Expected: green without modification to the smoke test. If it fails, the `TuiAdapter` wrap is incorrect.
 
 3. **Adapter import-isolation test.**
+
    ```bash
    uv run pytest tests/unit/comms/test_no_direct_adapter_imports.py -q
    ```
+
    Expected: green with the `_ALLOWED_COMMS_IMPORTS` constant containing exactly `{"alfred.comms.adapter", "alfred.comms.discord_types", "alfred.comms.markdown_split"}` and zero exception slots. If green only because of a populated exception slot, the implementer has cheated; the test passes for the wrong reason and PR D2's import isolation is broken from day one. **`alfred-architect` reviews any non-empty exception slot before merge.**
 
 4. **`read_only`-FIRST security-invariant test green.**
+
    ```bash
    uv run pytest tests/unit/identity/test_rate_limit.py::test_read_only_user_refused_regardless_of_override -q
    ```
+
    Named precisely so the spec line can grep for it. If the test name changes, the spec-to-code traceability breaks.
 
 5. **Markdown splitter property test green.**
+
    ```bash
    uv run pytest tests/unit/comms/test_markdown_split.py -q
    ```
+
    Includes the hypothesis suite. No `@given` shrinks should be surfaced; if one is, fix the splitter, don't `@example`-paper-over it.
 
 6. **No `broker.redact` callers outside `dlp.py`.**
+
    ```bash
    ! git grep -nE 'broker\.redact\b' src/alfred/ | grep -v 'src/alfred/security/dlp.py'
    ```
+
    Expected: empty match set. The structlog refactor (Task 6) is the only `broker.redact` caller after this PR; every other path goes through `OutboundDlp.scan`.
 
 7. **Conventions discipline.** `alfred-python-developer` reviews:

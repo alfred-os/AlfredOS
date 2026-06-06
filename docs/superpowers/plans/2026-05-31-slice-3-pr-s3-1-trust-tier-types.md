@@ -75,11 +75,11 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
 |---|---|---|
 | `src/alfred/security/tiers.py` | Modify | Add T1, T3, AnyTaggedContent, wire-format serializer, nonce-gated tag(T3) overload |
 | `src/alfred/security/quarantine.py` | Create | **Canonical home for ContentHandle** (arch-003). T3DerivedData NewType, ContentHandle, quarantined_to_structured stub, downgrade_to_orchestrator stub, ExtractionResult / Extracted / TypedRefusal discriminated-union type stubs (consumed by PR-S3-3a before PR-S3-4 lands — sec-002). PR-S3-5 re-exports ContentHandle for namespace continuity; it does not redefine it. |
-| `src/alfred/identity/_ingest.py` | Create | **Owned by this PR** (arch-011). _ingest_tier(user, adapter_name) → type[TrustTier]. PR-S3-3a consumes _ingest_tier() and registers identity.t1_ingress/t1_downgrade hookpoints; it does NOT create this module. |
-| `src/alfred/orchestrator/core.py` | Modify | Widen TaggedContent[T2] to TaggedContent[T1] | TaggedContent[T2] in type signatures |
+| `src/alfred/identity/_ingest.py` | Create | **Owned by this PR** (arch-011). `_ingest_tier(user, adapter_name) → type[TrustTier]`. PR-S3-3a consumes `_ingest_tier()` and registers identity.t1_ingress/t1_downgrade hookpoints; it does NOT create this module. |
+| `src/alfred/orchestrator/core.py` | Modify | Widen TaggedContent[T2] to TaggedContent[T1] in type signatures |
 | `src/alfred/bootstrap/nonce_factory.py` | Create | Per-process CapabilityGateNonce construction and DI seam |
 | `src/alfred/security/__init__.py` | Modify | Re-export T1, T3, AnyTaggedContent, quarantine symbols |
-| `scripts/check_tag_t3.py` | Create | CI ruff/grep rule rejecting unauthorised tag(T3 call sites |
+| `scripts/check_tag_t3.py` | Create | CI ruff/grep rule rejecting unauthorised `tag(T3, ...)` call sites |
 | `tests/unit/security/test_tag_t3_capability_gate.py` | Create | Nonce identity check, import-bypass refusal, frame-introspection bypass, gc out-of-scope ack |
 | `tests/unit/security/test_t3_derived_data.py` | Create | T3DerivedData NewType survival through serialisation, downgrade_to_orchestrator gate |
 | `tests/unit/security/test_wire_format_cross_tier_rejection.py` | Create | Wire serializer/parser round-trips and cross-tier rejection |
@@ -194,6 +194,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** clean.
 
   **Commit:**
+
   ```
   git commit -m "feat(tiers): add T1 + T3 TrustTier subclasses + _APPROVED_TIERS update (#TBD-slice3)"
   ```
@@ -282,6 +283,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** `3 passed`
 
   **Commit:**
+
   ```
   git commit -m "feat(tiers): add AnyTaggedContent read-only Protocol (spec §3.3) (#TBD-slice3)"
   ```
@@ -440,6 +442,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** clean (the `Any` usages in model_serializer are unavoidable Pydantic v2 callback shapes; annotate with `# type: ignore[override]` if mypy flags the Pydantic decorator signature mismatch).
 
   **Commit:**
+
   ```
   git commit -m "feat(tiers): wire-format tier.name serializer + cross-tier rejection (spec §3.5) (#TBD-slice3)"
   ```
@@ -490,6 +493,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** `2 passed`
 
   **Commit:**
+
   ```
   git commit -m "feat(tiers): add tag(T1, ...) overload (spec §3.1) (#TBD-slice3)"
   ```
@@ -736,6 +740,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** clean or only known Pydantic v2 decorator overrides.
 
   **Commit:**
+
   ```
   git commit -m "feat(tiers): CapabilityGateNonce + capability-gated tag(T3, ...) (spec §3.2) (#TBD-slice3)"
   ```
@@ -815,6 +820,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** `1 passed`
 
   **Commit:**
+
   ```
   git commit -m "feat(bootstrap): nonce_factory creates + registers T3 gate nonce (spec §3.2) (#TBD-slice3)"
   ```
@@ -1223,6 +1229,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** clean.
 
   **Commit:**
+
   ```
   git commit -m "feat(quarantine): T3DerivedData NewType + ContentHandle + boundary stubs (spec §3.4, §3.7) (#TBD-slice3)"
   ```
@@ -1390,6 +1397,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** clean.
 
   **Commit:**
+
   ```
   git commit -m "feat(identity): _ingest_tier role×adapter T1/T2 derivation (spec §3.6) (#TBD-slice3)"
   ```
@@ -1486,6 +1494,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** clean.
 
   **Commit:**
+
   ```
   git commit -m "feat(orchestrator): widen content type to TaggedContent[T1] | TaggedContent[T2] (spec §3.1) (#TBD-slice3)"
   ```
@@ -1709,12 +1718,15 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** all 3 tests pass.
 
   **Verify clean on own source tree:**
+
   ```
   python scripts/check_tag_t3.py src/alfred/
   ```
+
   **Expected:** exits 0 (no violations in current src/).
 
   **Commit:**
+
   ```
   git commit -m "feat(scripts): check_tag_t3.py ruff/grep CI rule for tag(T3 + cast bypass (spec §3.2, §3.3) (#TBD-slice3)"
   ```
@@ -2185,6 +2197,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** all pytest modules pass. YAML-only payloads are not auto-executed by pytest; they are loaded by the test modules above.
 
   **Commit:**
+
   ```
   git commit -m "test(adversarial): tier_laundering corpus — cast-bypass, frame-bypass, T3DerivedData provenance (spec §3.8, §12.2) (#TBD-slice3)"
   ```
@@ -2236,6 +2249,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   Per spec §11a, `src/alfred/security/tiers.py` and `src/alfred/security/quarantine.py` require 100% line+branch coverage in this PR.
 
   **Run:**
+
   ```
   uv run pytest tests/unit/security/ tests/unit/identity/ \
     --cov=src/alfred/security/tiers \
@@ -2256,6 +2270,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   Add targeted tests as needed, then re-run.
 
   **Commit:**
+
   ```
   git commit -m "test(coverage): 100% line+branch gate on tiers.py + quarantine.py + _ingest.py (#TBD-slice3)"
   ```
@@ -2276,6 +2291,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
   **Expected:** all quality gates green.
 
   **Commit:**
+
   ```
   git commit -m "chore(coverage): add tiers.py + quarantine.py + _ingest.py to per-package 100% gate (#TBD-slice3)"
   ```

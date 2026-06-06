@@ -9,6 +9,7 @@
 **Architecture (slice 1):** Single-process Python `alfred-core` container, plus `alfred-postgres`. DeepSeek as primary provider (cheapest), Anthropic as fallback so the multi-provider pattern is exercised from day 1. Hardcoded `Alfred` persona. Working memory (in-process buffer) + episodic log (Postgres). Trust-tier markers limited to T0/T2 (no untrusted ingestion in this slice). Minimal secret broker (env-backed). Per-day budget guard. Append-only audit table (no signing or internal git yet). `textual`-based TUI.
 
 **Tech Stack:**
+
 - Python 3.12+
 - uv (package manager)
 - Pydantic v2 + pydantic-settings (data models, config)
@@ -44,6 +45,7 @@
 **i18n is woven through the main task flow** — it is a CLAUDE.md hard rule (rule #1: "all operator-/user-facing strings go through `t()`. Hardcoded English in `src/alfred/` outside the catalog source files is a release blocker."). Each affected task includes the i18n work as required steps, not as an appendix. The dedicated **Task 3.5 — i18n primitives** lands *before* the first consumer (Task 5), so a linear executor can never ship hardcoded English.
 
 **Slice 1 Definition of Done:**
+
 1. `bin/alfred-setup.sh && docker compose up -d` brings up `alfred-core` + `alfred-postgres` cleanly on macOS/Linux.
 2. `alfred chat` opens a TUI where the operator can type and Alfred responds via DeepSeek.
 3. Multi-turn context is preserved within a session.
@@ -157,6 +159,7 @@ tests/
 ## Task 1 — Initialize Python project
 
 **Files:**
+
 - Create: `pyproject.toml`, `.python-version`
 - Create: `src/alfred/__init__.py`, `src/alfred/py.typed`
 - Create: all empty `__init__.py` files listed in File Structure
@@ -299,6 +302,7 @@ git commit -m "build: bootstrap Python project with uv, sqlalchemy, openai/anthr
 ## Task 2 — Config and secret broker
 
 **Files:**
+
 - Create: `src/alfred/config/settings.py`
 - Create: `src/alfred/security/secrets.py`
 - Create: `tests/unit/config/test_settings.py`
@@ -620,6 +624,7 @@ git commit -m "feat(config): add pydantic-settings + env-backed secret broker"
 ## Task 3 — Database: SQLAlchemy 2.0 async, models, alembic
 
 **Files:**
+
 - Create: `src/alfred/memory/db.py`, `src/alfred/memory/models.py`
 - Create: `src/alfred/memory/migrations/env.py`, `src/alfred/memory/migrations/versions/0001_initial.py`
 - Create: `alembic.ini`
@@ -948,6 +953,7 @@ git commit -m "feat(memory): add episodes + audit_log tables with sqlalchemy 2.0
 > Inserted here so the primitives exist *before* their consumers in Tasks 5, 11, 13, 14, 15. A linear executor cannot ship hardcoded English because every consumer below this point already has `t()` available.
 
 **Files:**
+
 - Create: `src/alfred/i18n/__init__.py`, `src/alfred/i18n/translator.py`, `src/alfred/i18n/catalog.py`
 - Create: `babel.cfg`, `locale/en/LC_MESSAGES/alfred.po`
 - Create: `tests/unit/i18n/__init__.py`, `tests/unit/i18n/test_translator.py`
@@ -1151,6 +1157,7 @@ git commit -m "feat(i18n): add Babel/gettext translator with English seed catalo
 ## Task 4 — Trust-tier minimal: T0, T2, and `tag()`
 
 **Files:**
+
 - Create: `src/alfred/security/tiers.py`
 - Create: `tests/unit/security/test_tiers.py`
 
@@ -1309,6 +1316,7 @@ git commit -m "feat(security): add T0/T2 trust-tier markers and tag() for slice 
 ## Task 5 — Audit log writer
 
 **Files:**
+
 - Create: `src/alfred/audit/log.py`
 - Modify: `tests/unit/security/` — add `test_audit.py` (use unit-level mock; integration tested through smoke later)
 
@@ -1454,6 +1462,7 @@ git commit -m "feat(audit): add slice-1 append-only audit writer"
 ## Task 6 — Provider base + DeepSeek adapter
 
 **Files:**
+
 - Create: `src/alfred/providers/base.py`
 - Create: `src/alfred/providers/deepseek.py`
 - Create: `tests/unit/providers/test_deepseek.py`
@@ -1642,6 +1651,7 @@ git commit -m "feat(providers): add provider protocol and DeepSeek adapter"
 ## Task 7 — Anthropic adapter (fallback)
 
 **Files:**
+
 - Create: `src/alfred/providers/anthropic_native.py`
 - Create: `tests/unit/providers/test_anthropic.py`
 
@@ -1772,6 +1782,7 @@ git commit -m "feat(providers): add Anthropic fallback adapter"
 ## Task 8 — Provider router (primary + fallback)
 
 **Files:**
+
 - Create: `src/alfred/providers/router.py`
 - Create: `tests/unit/providers/test_router.py`
 
@@ -1906,6 +1917,7 @@ git commit -m "feat(providers): add primary+fallback router"
 ## Task 9 — Working memory (in-process turn buffer)
 
 **Files:**
+
 - Create: `src/alfred/memory/working.py`
 - Create: `tests/unit/memory/test_working.py`
 
@@ -2006,6 +2018,7 @@ git commit -m "feat(memory): add bounded working-memory turn buffer"
 ## Task 10 — Episodic memory writer and continuity loader
 
 **Files:**
+
 - Create: `src/alfred/memory/episodic.py`
 - Create: `tests/unit/memory/test_episodic.py`
 
@@ -2154,6 +2167,7 @@ git commit -m "feat(memory): add episodic writer and recent-turns loader"
 ## Task 11 — Hardcoded Alfred persona
 
 **Files:**
+
 - Create: `src/alfred/personas/alfred.py`
 - Create: `tests/unit/personas/__init__.py`, `tests/unit/personas/test_alfred.py`
 
@@ -2274,6 +2288,7 @@ git commit -m "feat(personas): add hardcoded Alfred persona and system-prompt fa
 ## Task 12 — Budget guard
 
 **Files:**
+
 - Create: `src/alfred/budget/guard.py`
 - Create: `tests/unit/budget/test_guard.py`
 
@@ -2427,6 +2442,7 @@ git commit -m "feat(budget): add per-call and daily budget guard"
 ## Task 13 — Orchestrator (slim OODA loop)
 
 **Files:**
+
 - Create: `src/alfred/orchestrator/core.py`
 - Create: `tests/unit/orchestrator/test_core.py`
 
@@ -2867,6 +2883,7 @@ git commit -m "feat(orchestrator): add slice-1 slim OODA loop"
 ## Task 14 — Textual-based TUI
 
 **Files:**
+
 - Create: `src/alfred/comms/tui.py`
 - Create: `tests/unit/comms/__init__.py`, `tests/unit/comms/test_tui.py`
 
@@ -3037,6 +3054,7 @@ git commit -m "feat(comms): add textual-based TUI for slice 1"
 ## Task 15 — `alfred` CLI entry
 
 **Files:**
+
 - Create: `src/alfred/cli/main.py`
 - Create: `tests/unit/cli/__init__.py`, `tests/unit/cli/test_main.py`
 
@@ -3259,6 +3277,7 @@ if __name__ == "__main__":
 ```
 
 The CLI bootstrap is the single place where:
+
 - Settings load (fail loud on missing key with a friendly hint — no pydantic stack trace).
 - The SecretBroker is constructed (the only `os.environ`-aware code path from here on).
 - structlog is configured (JSON renderer + redactor pipeline).
@@ -3282,6 +3301,7 @@ git commit -m "feat(cli): add alfred CLI with chat and status commands"
 ## Task 16 — Docker Compose, Dockerfile, and setup script
 
 **Files:**
+
 - Create: `docker-compose.yaml`
 - Create: `docker/alfred-core.Dockerfile`
 - Create: `bin/alfred-setup.sh`
@@ -3479,6 +3499,7 @@ git commit -m "build(deploy): add docker compose, alfred-core Dockerfile, setup 
 ## Task 17 — Smoke test, CI wiring, PR
 
 **Files:**
+
 - Create: `tests/smoke/__init__.py`, `tests/smoke/test_hello_alfred.py`
 - Modify: `.github/workflows/ci.yml` (uncomment Python job behind hashFiles guard)
 

@@ -136,11 +136,13 @@
 ### Cluster 11 — `_send` chokepoint with DLP scan + markdown-aware split + single `channel.send` caller
 
 - [ ] **11.1** Implement `async def _send(self, text: str) -> None`:
+
   ```python
   safe = self._outbound_dlp.scan(text)
   for chunk in _split_for_discord(safe, max_len=2000):
       await self._channel.send(chunk)
   ```
+
   (Spec lines 403-409.)
 - [ ] **11.2** Refactor every refusal/error/success path in `_handle` to go through `_send` — no direct `msg.channel.send` anywhere else in `src/alfred/comms/discord.py`.
 - [ ] **11.3** Unit test `test_send_is_sole_channel_send_caller` — grep the source of `src/alfred/comms/discord.py`; assert `msg.channel.send` (and equivalent `.send(` patterns on channel-typed references) appear ZERO times outside the body of `_send`. Use AST inspection (walk for `Attribute(attr='send')` calls) rather than text grep so the test isn't fooled by a comment. Failure message names the offending line.
@@ -201,6 +203,7 @@
 ### Cluster 16 — `docker-compose.yaml` `alfred-discord` service
 
 - [ ] **16.1** Add the `alfred-discord` service block per spec line 270-273:
+
   ```yaml
   alfred-discord:
     image: alfred-core:${ALFRED_IMAGE_TAG:-latest}
@@ -220,6 +223,7 @@
       - ~/.config/alfred/secrets.toml:/etc/alfred/secrets.toml:ro
     user: "${UID:-1000}:${GID:-1000}"
   ```
+
   (The exact YAML keys mirror PR A's existing `alfred-core` service for consistency.)
 - [ ] **16.2** Run-shape: spec line 272 mandates `docker compose up -d alfred-discord` (NOT `run -d` — `run` is for one-shot CLI invocations). The setup-script's optional inline-bind path uses `docker compose run --rm alfred-core ...` for one-shot user mutations, then leaves `up -d alfred-discord` to the operator (or the script's final step).
 - [ ] **16.3** Inline-comment the 256M memory cap rationale: "Measured RSS for a DM-only workload with the spec'd `discord.Client` flags is ~90-150 MB; bump to 512M if you see OOMKills under sustained load."
@@ -266,7 +270,7 @@
 ### Cluster 20 — i18n catalog entries
 
 - [ ] **20.1** Add to `src/alfred/locale/en/LC_MESSAGES/messages.po`:
-  - `discord.unknown_user_first` — body per devex-004: `"I don't recognise this Discord ID yet (snowflake: \`{snowflake}\`). Ask your operator to run: \`alfred user add --name <YourName> --discord-id {snowflake}\`. The operator's audit log shows this DM."` (`{snowflake}` is the only placeholder; `<YourName>` stays literal).
+  - `discord.unknown_user_first` — body per devex-004: `"I don't recognise this Discord ID yet (snowflake: \`{snowflake}\`). Ask your operator to run: \`alfred user add --name <YourName> --discord-id {snowflake}\`. The operator's audit log shows this DM."`(`{snowflake}` is the only placeholder; `<YourName>` stays literal).
   - `discord.unknown_user_repeat` — polite, no hint (suppressed entirely after the second hit within the dedup TTL per spec line 516; this key exists for completeness but the dedup branch never sends it — present so the catalog is self-documenting).
   - `discord.embed_unsupported` — embeds/attachments/stickers/poll/components/activity/application refusal text.
   - `discord.rate_limited` — non-`read_only` token-bucket refusal only (sec-002 — NO key for `read_only` because the read_only audit row is the only observable signal).

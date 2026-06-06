@@ -74,6 +74,7 @@ After this PR:
 ### Task 1 — Docs commit (ADR + spec + plan + runbook + subsystem)
 
 **Files**:
+
 - Created: `docs/adr/0020-supervisor-cli-access-via-postgres-and-state-git.md` (revised)
 - Created: `docs/superpowers/specs/2026-06-05-supervisor-cli-access-design.md` (revised)
 - Created: `docs/superpowers/plans/2026-06-05-supervisor-cli-access.md` (this file, revised)
@@ -94,6 +95,7 @@ After this PR:
 - [ ] **Step 3**: Update `docs/glossary.md` if other architecture terms are listed. Add an entry for "merged-proposal-branch dispatch infrastructure" pointing at #171.
 
 - [ ] **Step 4**: Commit.
+
   ```bash
   cd "$(git rev-parse --show-toplevel)"
   git add docs/
@@ -115,6 +117,7 @@ After this PR:
 ### Task 2 — `_list_breaker_states` sync Postgres read
 
 **Files**:
+
 - Modify: `src/alfred/cli/supervisor.py`
 - Modify: `tests/unit/cli/test_supervisor_status.py`
 
@@ -135,6 +138,7 @@ After this PR:
 - [ ] **Step 6**: Run; confirm green. Coverage on `_list_breaker_states` should be 100%.
 
 - [ ] **Step 7**: Commit.
+
   ```bash
   git add src/alfred/cli/supervisor.py tests/unit/cli/test_supervisor_status.py locale/
   git commit -m "feat(cli): supervisor status reads circuit_breakers directly from Postgres (#154)
@@ -156,6 +160,7 @@ After this PR:
 ### Task 3 — `supervisor_reset` deferred-hint update + delete `_get_supervisor`
 
 **Files**:
+
 - Modify: `src/alfred/cli/supervisor.py`
 - Modify: `tests/unit/cli/test_supervisor_reset.py`
 - Modify: `locale/en/LC_MESSAGES/alfred.po`
@@ -177,6 +182,7 @@ After this PR:
   - The `asyncio.run(supervisor.reset_breaker(...))` block + all its except arms.
 
   Replace with:
+
   ```python
   _emit_breaker_reset_attempt_audit(component_id=component_id)
   typer.echo(t("cli.supervisor.reset.deferred_to_issue_171", component=component_id), err=True)
@@ -190,6 +196,7 @@ After this PR:
 - [ ] **Step 6**: Run; confirm green.
 
 - [ ] **Step 7**: Commit.
+
   ```bash
   git add src/alfred/cli/supervisor.py tests/unit/cli/test_supervisor_reset.py locale/
   git commit -m "refactor(cli): supervisor reset now hints at #171 deferral; drop _get_supervisor (#154)
@@ -217,11 +224,13 @@ After this PR:
 ### Task 4 — Integration round-trip + final QA + push + STOP
 
 **Files**:
+
 - Create: `tests/integration/cli/test_supervisor_status_postgres_roundtrip.py`
 
 - [ ] **Step 1: Integration round-trip test** per spec §5.3. Real Postgres via testcontainers; insert two `CircuitBreakerState` rows; assert `alfred supervisor status` renders them.
 
 - [ ] **Step 2: Full quality bar.**
+
   ```bash
   cd "$(git rev-parse --show-toplevel)"
   uv run ruff check . && uv run ruff format --check .

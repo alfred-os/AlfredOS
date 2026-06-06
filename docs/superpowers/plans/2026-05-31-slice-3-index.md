@@ -197,6 +197,7 @@ The ADR-0009 status header flip ("Superseded by ADR-0016 for new adapters; in-pr
 Two test files gate the slice merge, both owned by PR-S3-4 (the quarantined-LLM extractor PR that first makes the full chain exercisable end-to-end):
 
 **`tests/integration/test_quarantined_chain_security.py`** — **merge-blocking.** Assertions:
+
 - `hasattr(ContentHandle, 'content') is False` — orchestrator cannot dereference handle to bytes.
 - A T3 fragment from a recorded fixture does NOT appear verbatim in `Extracted.data` values (prompt-injection neutralisation).
 - The audit row for the chain carries `trust_tier_of_trigger="T3"`.
@@ -226,6 +227,7 @@ PR-S3-6 (CLI surface) can merge any time after S3-3a; it does not gate S3-4 or S
 ### Quality gates before any PR merges
 
 Every PR in the slice must clear:
+
 1. `make check` (lint + format + type + unit tests) — mandatory.
 2. The adversarial suite (`uv run pytest tests/adversarial`) — mandatory for every PR touching `src/alfred/security/`.
 3. 100% line + branch coverage on every trust-boundary file the PR introduces or modifies (per spec §11a).
@@ -234,6 +236,7 @@ Every PR in the slice must clear:
 ### Rollback strategy
 
 Each PR is independently revertable because:
+
 - `DevGate` coexists with `RealGate` through S3-6; reverting S3-2 re-enables `DevGate` as the only gate.
 - Alembic migrations 0007–0010 each carry a `downgrade()` path (spec §13: DROP TABLE or constraint revert).
 - `plugin_grants` and `capability_gate_sync` tables are rebuildable from state.git.
@@ -297,6 +300,7 @@ The split has no architectural implication — it is a review-bandwidth decision
 ## §8 Slice-4 backlog seeded from Slice-3
 
 **Slice-4 broker hardening (from Slice-3 plan-review DLP-ordering escalation):**
+
 - Typed `SecretRef` objects in place of `{{secret:*}}` string templating (eliminates string-replace bugs by construction).
 - Broker-side post-substitution invariant check: assert zero remaining `{{secret:*}}` placeholders + no cross-placement of values (caller's IDs match the substituted values).
 - Per-secret-ID canary tokens woven into the post-substitution bytes by the broker itself; egress logger verifies presence on the wire.

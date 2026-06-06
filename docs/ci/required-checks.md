@@ -44,6 +44,7 @@ These checks are emitted by their workflow but not yet in the branch-protection 
 > (see [GitHub docs](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks)).
 >
 > Mitigation options (decide before promotion):
+>
 > 1. Add a companion always-triggered workflow that reports the same check name
 >    and short-circuits to success on off-path PRs.
 > 2. Drop the `paths:` filter from `perf.yml` (lets the workflow run on all PRs;

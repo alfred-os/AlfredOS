@@ -211,22 +211,25 @@ lifecycle is bound to extractor existence:
 ### 2.5 Threat model + residual risk (documented in code)
 
 Inline comment in `OutboundDlpExtractSubscriber.__call__` body documents:
-- **Pattern-matchable sub-channel (closed)**: canary tokens, API key regexes, credit card regexes — all caught by `OutboundDlp.scan`.
-- **Semantic sub-channel (open — known limitation)**: arbitrary paraphrased PII in natural-language fields is not regex-detectable. Out of scope per current threat model. Future AI-DLP work would close this; tracked separately.
+
+* **Pattern-matchable sub-channel (closed)**: canary tokens, API key regexes, credit card regexes — all caught by `OutboundDlp.scan`.
+* **Semantic sub-channel (open — known limitation)**: arbitrary paraphrased PII in natural-language fields is not regex-detectable. Out of scope per current threat model. Future AI-DLP work would close this; tracked separately.
 
 The comment exists so a future reviewer reading the subscriber doesn't conclude "this scan is sufficient defence." It's necessary but not sufficient — and the spec's authors accepted that trade-off when they wrote §6.5 specifying `OutboundDlp.scan` (a regex-based scanner).
 
 ## 3. Audit-row interactions
 
 Currently `extract` emits 3 audit-row families directly:
-- `quarantine.extract` (success) at line 666
-- `quarantine.extract` (typed_refusal) at line 713
-- `quarantine.protocol_violation` at line 749
+
+* `quarantine.extract` (success) at line 666
+* `quarantine.extract` (typed_refusal) at line 713
+* `quarantine.protocol_violation` at line 749
 
 These stay. The hookpoint dispatch ADDS the spec-named `security.quarantined.extract` event flow:
-- `pre` audit: subscribers observe schema + handle id (no T3 content)
-- `post` audit: subscribers observe the validated `model_dump()` — this is the new defence
-- `error` audit: subscribers observe a typed error context (already happens via the existing `protocol_violation` row; the hookpoint adds an additional channel for SIEM-style observers)
+
+* `pre` audit: subscribers observe schema + handle id (no T3 content)
+* `post` audit: subscribers observe the validated `model_dump()` — this is the new defence
+* `error` audit: subscribers observe a typed error context (already happens via the existing `protocol_violation` row; the hookpoint adds an additional channel for SIEM-style observers)
 
 **Post-stage refusal audit attribution.** `quarantine.extract` records
 the outcome class as `audit_result="post_stage_refused"` for any
@@ -283,28 +286,32 @@ trace key rather than an empty field.
 ### 4.1 Unit — hookpoint metadata
 
 `tests/unit/hooks/test_hookpoint_security_quarantined_extract.py`:
-- `test_hookpoint_registered_at_module_import` — importing `alfred.security.quarantine` registers the hookpoint with `subscribable_tiers=SYSTEM_OPERATOR_TIERS`, `refusable_tiers=SYSTEM_ONLY_TIERS`, `fail_closed=True`.
-- `test_user_tier_subscription_refused` — a `user-plugin` tier subscriber attempting registration is refused with `HOOKS_TIER_REJECTED` audit row.
-- `test_hookpoint_in_canonical_manifest` — `security.quarantined.extract` appears in `KNOWN_HOOKPOINTS["alfred.security.quarantine"]`.
+
+* `test_hookpoint_registered_at_module_import` — importing `alfred.security.quarantine` registers the hookpoint with `subscribable_tiers=SYSTEM_OPERATOR_TIERS`, `refusable_tiers=SYSTEM_ONLY_TIERS`, `fail_closed=True`.
+* `test_user_tier_subscription_refused` — a `user-plugin` tier subscriber attempting registration is refused with `HOOKS_TIER_REJECTED` audit row.
+* `test_hookpoint_in_canonical_manifest` — `security.quarantined.extract` appears in `KNOWN_HOOKPOINTS["alfred.security.quarantine"]`.
 
 ### 4.2 Unit — DLP subscriber
 
 `tests/unit/security/test_extract_dlp_subscriber.py`:
-- `test_clean_payload_returns_ctx_unchanged`.
-- `test_canary_in_summary_field_raises_refusal` — a result with `summary: "API key sk-...."` triggers `HookRefusal`.
-- `test_canary_in_nested_dict_field_raises_refusal` — covers `model_dump()` nested-dict shape.
-- `test_dlp_outage_propagates_loud` — `outbound_dlp.scan` raising re-raises so the chain treats it as refusal (fail-closed).
+
+* `test_clean_payload_returns_ctx_unchanged`.
+* `test_canary_in_summary_field_raises_refusal` — a result with `summary: "API key sk-...."` triggers `HookRefusal`.
+* `test_canary_in_nested_dict_field_raises_refusal` — covers `model_dump()` nested-dict shape.
+* `test_dlp_outage_propagates_loud` — `outbound_dlp.scan` raising re-raises so the chain treats it as refusal (fail-closed).
 
 ### 4.3 Integration — end-to-end DLP-in-chain
 
 `tests/unit/security/test_quarantined_extract_dlp_chain.py`:
-- `test_clean_extract_succeeds_with_dlp_subscriber_registered` — happy path.
-- `test_extract_with_canary_in_response_is_refused_by_dlp_subscriber` — the quarantined LLM returns an `ExtractionResult` whose `summary` field contains a canary; the post-subscriber raises `HookRefusal`; `extract` propagates the refusal; an audit row is emitted; the validated payload never returns to the caller.
-- `test_extract_constructor_raises_when_dlp_subscriber_denied` — fail-loud anchor on the constructor-anchored registration model. `QuarantinedExtractor.__init__` calls `register_extract_dlp_subscriber`; if the helper cannot land a post-stage subscriber on the active `security.quarantined.extract` chain (gate denies the system-tier registration, hookpoint unavailable, etc.), the raise propagates out of `__init__` and the extractor never exists. There is no "still succeeds without DLP subscriber" path — operating without an active post-stage DLP scan on this trust boundary is the failure (PRD §7.1, CLAUDE.md hard rule `#7`).
+
+* `test_clean_extract_succeeds_with_dlp_subscriber_registered` — happy path.
+* `test_extract_with_canary_in_response_is_refused_by_dlp_subscriber` — the quarantined LLM returns an `ExtractionResult` whose `summary` field contains a canary; the post-subscriber raises `HookRefusal`; `extract` propagates the refusal; an audit row is emitted; the validated payload never returns to the caller.
+* `test_extract_constructor_raises_when_dlp_subscriber_denied` — fail-loud anchor on the constructor-anchored registration model. `QuarantinedExtractor.__init__` calls `register_extract_dlp_subscriber`; if the helper cannot land a post-stage subscriber on the active `security.quarantined.extract` chain (gate denies the system-tier registration, hookpoint unavailable, etc.), the raise propagates out of `__init__` and the extractor never exists. There is no "still succeeds without DLP subscriber" path — operating without an active post-stage DLP scan on this trust boundary is the failure (PRD §7.1, CLAUDE.md hard rule `#7`).
 
 ### 4.4 Adversarial corpus
 
 The existing `tests/adversarial/prompt_injection/pi_direct_injection_into_extracted_data.yaml` (if it exists) should already exercise this path. Implementer:
+
 1. Verify the YAML exists; if so, tighten the assertion to require DLP-subscriber refusal (currently it may only assert audit row emission).
 2. If it doesn't exist, file a small adjacent issue to add one — out of scope for this PR.
 
@@ -324,16 +331,16 @@ The existing `tests/adversarial/prompt_injection/pi_direct_injection_into_extrac
 
 ## 6. Out of scope
 
-- AI-based semantic DLP layer (would close the semantic sub-channel — separate, larger work).
-- Migrating the existing `quarantine.extract` audit row family into the hookpoint dispatch chain's audit (would conflate two well-separated concerns; ADR territory).
-- Public API change to `QuarantinedExtractor.extract` — signature stays identical.
+* AI-based semantic DLP layer (would close the semantic sub-channel — separate, larger work).
+* Migrating the existing `quarantine.extract` audit row family into the hookpoint dispatch chain's audit (would conflate two well-separated concerns; ADR territory).
+* Public API change to `QuarantinedExtractor.extract` — signature stays identical.
 
 ## 7. References
 
-- Issue #158 — UAT finding E13.
-- Slice-3 design spec §6.5 (lines 461–476) — hookpoint definition.
-- Slice-3 design spec §7.1 line 82 — DLP-placement table naming the post-subscriber.
-- Slice-3 design spec §14 line 1159 — hookpoint surface table.
-- `src/alfred/memory/episodic.py:259` — `invoking()` precedent.
-- `src/alfred/hooks/_known_hookpoints.py` — canonical manifest (#151).
-- CLAUDE.md hard rule #7 — fail-loud on security paths.
+* Issue #158 — UAT finding E13.
+* Slice-3 design spec §6.5 (lines 461–476) — hookpoint definition.
+* Slice-3 design spec §7.1 line 82 — DLP-placement table naming the post-subscriber.
+* Slice-3 design spec §14 line 1159 — hookpoint surface table.
+* `src/alfred/memory/episodic.py:259` — `invoking()` precedent.
+* `src/alfred/hooks/_known_hookpoints.py` — canonical manifest (#151).
+* CLAUDE.md hard rule #7 — fail-loud on security paths.

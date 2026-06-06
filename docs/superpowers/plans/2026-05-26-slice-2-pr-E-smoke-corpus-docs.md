@@ -134,6 +134,7 @@ Each task = one or two commits. The order matters only across two boundaries: (a
 - [ ] **Step 1b.6 — Skip-vs-pass discipline.** Without `ALFRED_SMOKE_PROVIDER_KEY`, the real-provider tests report `SKIPPED` (NOT `PASSED`, NOT `ERROR`) — same pattern as Task 1. The mock-provider tests + the rehydrate-cadence test run unconditionally. Verify locally: `uv run pytest tests/smoke/test_tui_e2e.py -v` shows three passes and two skips on a fresh machine without the env var.
 - [ ] **Step 1b.7 — Wire the GitHub repo secret.** In `.github/workflows/pr-validate-python.yml` (or wherever the smoke job runs), the smoke step gains `env: ALFRED_SMOKE_PROVIDER_KEY: ${{ secrets.ALFRED_SMOKE_PROVIDER_KEY }}`. The secret is operator-provisioned post-merge; the test skips on fork-PRs where secrets aren't available — same intended degradation as Task 1.
 - [ ] **Step 1b.8 — Commit.**
+
   ```bash
   git add tests/smoke/test_tui_e2e.py
   git commit -m "test(smoke): TUI e2e via Textual harness + slice-1 rehydrate cadence (te-003)"
@@ -274,8 +275,8 @@ For each of `prompt_injection`, `dlp`, `capability_bypass`, `canary`, `inter_per
 
   ```make
   docs-check: ## verify markdown link + anchor integrity across docs/
-  	@echo "==> docs-check: link + anchor validation"
-  	uv run python scripts/docs_check.py docs/ CLAUDE.md PRD.md README.md
+   @echo "==> docs-check: link + anchor validation"
+   uv run python scripts/docs_check.py docs/ CLAUDE.md PRD.md README.md
   ```
 
   Per Open Question Q3, the Python script approach is chosen over the Node `markdown-link-check` action because the latter doesn't follow `#anchor` fragments to verify the heading exists; AlfredOS needs anchor-aware checking (the glossary anchors `authorization-role` + `canonical-user-id` ARE the load-bearing surfaces).

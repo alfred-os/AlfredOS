@@ -116,6 +116,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/errors.py`, `tests/unit/plugins/test_errors.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_errors.py
   from alfred.errors import AlfredError
@@ -163,6 +164,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_errors.py -q` → expect `ImportError`.
 
   **Implementation** (`src/alfred/plugins/errors.py`):
+
   ```python
   """Plugin error hierarchy (spec §4).
 
@@ -233,6 +235,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_errors.py -q` → 5 passed.
 
   Commit:
+
   ```
   feat(plugins): plugin error hierarchy — ManifestVersionError, ManifestTierError, PluginProtocolViolation (#TBD-slice3)
   ```
@@ -244,6 +247,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/transport.py`, `tests/unit/plugins/test_transport_protocol.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_transport_protocol.py
   from typing import get_type_hints
@@ -276,6 +280,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_transport_protocol.py -q` → `ImportError`.
 
   **Implementation** (`src/alfred/plugins/transport.py`):
+
   ```python
   """PluginTransport Protocol and DispatchResult type (spec §4.1).
 
@@ -343,6 +348,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_transport_protocol.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): PluginTransport Protocol + DispatchResult discriminated union (#TBD-slice3)
   ```
@@ -356,6 +362,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/manifest.py`, `tests/unit/plugins/test_manifest_validation.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_manifest_validation.py
   import pytest
@@ -402,6 +409,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_manifest_validation.py -q` → `ImportError`.
 
   **Implementation** (`src/alfred/plugins/manifest.py`):
+
   ```python
   """Plugin manifest parser (spec §4.3).
 
@@ -471,6 +479,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_manifest_validation.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): manifest parser — version pin enforcement + subscriber_tier T3 refusal (#TBD-slice3)
   ```
@@ -484,6 +493,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/inbound_scanner.py`, `tests/unit/plugins/test_stdio_transport_inbound_scan.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_stdio_transport_inbound_scan.py
   import pytest
@@ -516,6 +526,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_stdio_transport_inbound_scan.py -q` → `ImportError`.
 
   **Implementation** (`src/alfred/plugins/inbound_scanner.py`):
+
   ```python
   """InboundContentScanner — distinct from OutboundDlp (spec §4.5).
 
@@ -587,6 +598,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_stdio_transport_inbound_scan.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): InboundContentScanner — distinct from OutboundDlp, SECURITY EVENT disposition (#TBD-slice3)
   ```
@@ -600,6 +612,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/content_store_base.py`, `tests/unit/plugins/test_content_store_base.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_content_store_base.py
   import datetime
@@ -647,6 +660,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_content_store_base.py -q` → `ImportError`.
 
   **Implementation** (`src/alfred/plugins/content_store_base.py`):
+
   ```python
   """ContentStoreBase Protocol and InMemoryContentStore stub (spec §7.2, §7.3).
 
@@ -712,6 +726,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_content_store_base.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): ContentStoreBase Protocol + InMemoryContentStore stub for unit tests (#TBD-slice3)
   ```
@@ -735,6 +750,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/stdio_transport.py`, `tests/unit/plugins/test_env_scrub_subprocess.py`, `tests/unit/plugins/test_dispatch_result_shape.py`, `tests/unit/plugins/test_fd3_key_delivery_framing.py`.
 
   **Failing tests (env-scrub + dispatch shape + fd-3 framing):**
+
   ```python
   # tests/unit/plugins/test_env_scrub_subprocess.py
   """Verify subprocess spawn uses explicit minimal env, never inheriting parent env (spec §5.3)."""
@@ -855,6 +871,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_env_scrub_subprocess.py tests/unit/plugins/test_dispatch_result_shape.py tests/unit/plugins/test_fd3_key_delivery_framing.py -q` → FAIL (file does not exist yet).
 
   **Implementation** (`src/alfred/plugins/stdio_transport.py`):
+
   ```python
   """StdioTransport — MCP plugin stdio transport (spec §4.2).
 
@@ -1160,6 +1177,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_env_scrub_subprocess.py tests/unit/plugins/test_dispatch_result_shape.py tests/unit/plugins/test_fd3_key_delivery_framing.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): StdioTransport — Cluster 1 rewrite (DLP order, DispatchResult union, UID-drop, nonce-as-arg, length-prefixed framing) (#TBD-slice3)
   ```
@@ -1171,6 +1189,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `tests/unit/plugins/test_stdio_transport_outbound_dlp.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_stdio_transport_outbound_dlp.py
   """Verify OutboundDlp.scan fires on placeholder frame BEFORE secret substitution (arch-001 / sec-010 fix).
@@ -1299,6 +1318,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_stdio_transport_outbound_dlp.py -q` → tests fail (fake fixtures missing).
 
   Add conftest fixtures to `tests/unit/plugins/conftest.py`:
+
   ```python
   # tests/unit/plugins/conftest.py
   import pytest
@@ -1335,6 +1355,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_stdio_transport_outbound_dlp.py -q` → all pass.
 
   Commit:
+
   ```
   test(plugins): outbound DLP fires on placeholder frame; DlpOutboundRefusedError asserted (#TBD-slice3)
   ```
@@ -1348,6 +1369,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/session.py`, `tests/unit/plugins/test_session_handshake.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_session_handshake.py
   import pytest
@@ -1442,6 +1464,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   > public API.
 
   **Implementation** (`src/alfred/plugins/session.py`):
+
   ```python
   """AlfredPluginSession — manifest handshake + lifecycle audit rows (spec §4.2, §4.7).
 
@@ -1686,6 +1709,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   > pipe was closed mid-kill).
 
   Update `tests/unit/plugins/test_session_handshake.py` to use `async` for the SIGKILL test:
+
   ```python
   @pytest.mark.asyncio
   async def test_post_handshake_hook_registration_triggers_sigkill(fake_audit_writer, fake_gate):
@@ -1705,6 +1729,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   ```
 
   Add `fake_gate` fixture to `tests/unit/plugins/conftest.py`:
+
   ```python
   @pytest.fixture
   def fake_gate():
@@ -1717,6 +1742,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_session_handshake.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): AlfredPluginSession — manifest handshake, lifecycle audit rows, SIGKILL-before-row quarantine (#TBD-slice3)
   ```
@@ -1826,6 +1852,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/adversarial/tier_laundering/test_post_handshake_hook_registration.py -q` → all pass.
 
   Commit:
+
   ```
   test(adversarial): post-handshake hook registration — assert SIGKILL issued + no-hook registered (#TBD-slice3)
   ```
@@ -1843,6 +1870,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `bin/alfred-plugin-launcher`, `tests/unit/plugins/test_plugin_launcher_stub.py`.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_plugin_launcher_stub.py
   """Launcher tests (sec-003 / i18n-005 fixes)."""
@@ -1910,6 +1938,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_plugin_launcher_stub.py -q` → FAIL (file does not exist).
 
   **Implementation** (`bin/alfred-plugin-launcher`):
+
   ```bash
   #!/usr/bin/env bash
   # bin/alfred-plugin-launcher — fail-closed plugin launcher (spec §4.8, §5.2).
@@ -1979,6 +2008,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_plugin_launcher_stub.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): bin/alfred-plugin-launcher — UID-drop via runuser, bare-key stderr (#TBD-slice3)
   ```
@@ -1992,6 +2022,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Modify `src/alfred/identity/_ingest.py` (if created by PR-S3-1) or create it here.
 
   **Failing test:**
+
   ```python
   # tests/unit/identity/test_ingest_tier_hookpoints.py
   """Verify identity hookpoints are registered and fire on T1 ingress."""
@@ -2019,6 +2050,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/identity/test_ingest_tier_hookpoints.py -q` → FAIL.
 
   **Implementation** — add to `src/alfred/identity/_ingest.py`:
+
   ```python
   def register_identity_hookpoints() -> None:
       """Register identity.t1_ingress and identity.t1_downgrade hookpoints (spec §3.6, §14).
@@ -2044,6 +2076,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/identity/test_ingest_tier_hookpoints.py -q` → all pass.
 
   Commit:
+
   ```
   feat(identity): register identity.t1_ingress + identity.t1_downgrade hookpoints (#TBD-slice3)
   ```
@@ -2059,6 +2092,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Files: Create `src/alfred/plugins/observability.py`, add `tests/unit/plugins/test_transport_perf_budgets.py`.
 
   **Implementation** (`src/alfred/plugins/observability.py`):
+
   ```python
   """Transport-layer Prometheus histograms (spec §7a.1 — perf-002 / perf-009 fix).
 
@@ -2104,6 +2138,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Instrument `StdioTransport.dispatch` and `StdioTransport._spawn` with `time.monotonic()` observe calls using these histograms.
 
   **Failing test:**
+
   ```python
   # tests/unit/plugins/test_transport_perf_budgets.py
   """Verify all four spec §7a.1 histogram metrics exist and observe on use (perf-002 / perf-009)."""
@@ -2128,6 +2163,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/test_transport_perf_budgets.py -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): transport-layer Prometheus histograms for spec §7a.1 p99 budgets (#TBD-slice3)
   ```
@@ -2153,6 +2189,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Expected: 100% on both files. Add any missing branch tests.
 
   Commit:
+
   ```
   test(plugins): 100% line+branch coverage on stdio_transport + inbound_scanner (#TBD-slice3)
   ```
@@ -2189,6 +2226,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   Run: `uv run pytest tests/unit/plugins/ -q` → all pass.
 
   Commit:
+
   ```
   feat(plugins): public __init__.py surface for alfred.plugins package (#TBD-slice3)
   ```
@@ -2208,6 +2246,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
   ```
 
   Commit:
+
   ```
   chore(plugins): quality gate pass — lint, type, coverage, adversarial (#TBD-slice3)
   ```
@@ -2275,6 +2314,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
 | sec-009 | Accepted core-engineer's reading: wildcard `*` is intentional production semantics in `GatePolicy.check()`; no change to PR-S3-2 wildcard |
 
 **Deferred to PR-S3-4 and PR-S3-5:**
+
 - §5.1 quarantined-LLM plugin shape and `quarantine.ingest`/`quarantine.extract` methods
 - §5.3 fd-3 handshake *reader* side (subprocess side lives in `plugins/alfred_quarantined_llm/`)
 - §5.4 provider-match check at handshake (`routing.yaml[quarantine][provider]` vs manifest)

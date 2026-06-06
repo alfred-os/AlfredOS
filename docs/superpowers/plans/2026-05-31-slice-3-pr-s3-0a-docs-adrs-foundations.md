@@ -103,6 +103,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] Write the ADR header and status block:
+
     ```markdown
     # ADR-0017 — Slice 3: trust-tier completion, MCP plugin transport, dual-LLM split
 
@@ -114,11 +115,13 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
     ## Context
     ```
+
   - [ ] Write the Context section (no test step for docs; verification is `make docs-check` at end of component A):
 
     The context section explains the forces that drove three interlocked decisions that Slice 3 must resolve as a unit. Cite: ADR-0013 committed Slice 3 to delivering T1+T3+dual-LLM (line: "Slice 3 commits the full stack"); ADR-0008 made the original Slice-1 commitment; PRD §7.1 names the dual-LLM split as the load-bearing prompt-injection defence; PRD §5 names "Plugins are MCP servers" as a non-negotiable architectural invariant. The three forces are: (a) T1+T3+dual-LLM from ADR-0013's commitment; (b) the MCP transport must land before the dual-LLM split (the quarantined LLM runs as an MCP plugin — this dependency forces the transport into the same slice); (c) the PRD §5 hybrid-isolation invariant cannot stay silently relaxed while Slice 3 runs a subprocess plugin without container isolation. These three forces require one coherent ADR, not three separate records.
 
   Commit:
+
   ```
   docs(adr-0017): context section for trust-tier completion + MCP transport + dual-LLM (#TBD-slice3)
   ```
@@ -141,6 +144,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     **Decision 5 — PR-S3-0 pre-committed split into PR-S3-0a and PR-S3-0b; PR-S3-3 pre-committed split into PR-S3-3a and PR-S3-3b.** The original PR-S3-0 scope (five ADRs + three Alembic migrations + i18n + Docker infra) exceeded the ~600-line budget on prose alone. PR-S3-0a carries docs-only deliverables; PR-S3-0b carries schema/infra. PR-S3-3 splits transport (PR-S3-3a) from supervisor (PR-S3-3b). Both splits are pre-committed so implementors do not re-open the split decision at implementation time. Cite spec §1.3.
 
   Commit:
+
   ```
   docs(adr-0017): decision section — five structural Slice-3 decisions (#TBD-slice3)
   ```
@@ -183,12 +187,15 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   - [ ] Write References section linking PRD §5, PRD §7.1, ADR-0008, ADR-0013, ADR-0009, ADR-0015, ADR-0016, spec file, and code anchors.
 
   - [ ] Run `make docs-check` to confirm the file has no broken links:
+
     ```bash
     cd <repo-root> && make docs-check
     ```
+
     Expected: exits 0, last 3 lines show no errors.
 
   Commit:
+
   ```
   docs(adr-0017): consequences, alternatives, references (#TBD-slice3)
   ```
@@ -201,20 +208,27 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] Update the header block. Current Status line:
+
     ```
     - **Status**: Accepted (superseded in part by ADR-0013 — Slice-2 commitment to T1+T3+dual-LLM rescheduled to Slice 3)
     ```
+
     New Status line:
+
     ```
     - **Status**: Superseded by [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Slice 3 delivers the full trust-tier stack this ADR committed to in Slice 1/2
     ```
+
     Also update the `- **Superseded by**: —` line:
+
     ```
     - **Superseded by**: [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) (2026-05-31)
     ```
+
   - [ ] Run `make docs-check`.
 
   Commit:
+
   ```
   docs(adr-0008): status flip — superseded by ADR-0017 (#TBD-slice3)
   ```
@@ -225,19 +239,24 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] Update header block. Current:
+
     ```
     - **Status**: Accepted
     - **Superseded by**: —
     ```
+
     New:
+
     ```
     - **Status**: Superseded by [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Slice 3 delivers the full stack this ADR committed to
     - **Superseded by**: [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) (2026-05-31)
     ```
+
   - [ ] Add a one-paragraph note at the bottom of the Consequences section (before References): "ADR-0013 deferred T1+T3+dual-LLM to Slice 3. Slice 3 delivered all three per this commitment. ADR-0017 supersedes this ADR and records the five structural decisions that govern the implementation. The Slice-3 tracking issues for §6.10 deferred items are retired in PR-S3-7."
   - [ ] Run `make docs-check`.
 
   Commit:
+
   ```
   docs(adr-0013): status flip — superseded by ADR-0017 (#TBD-slice3)
   ```
@@ -248,19 +267,24 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] Update header block. Current:
+
     ```
     - **Status**: Accepted
     - **Superseded by**: —
     ```
+
     New:
+
     ```
     - **Status**: Superseded by [ADR-0016](0016-slice4-discord-tui-comms-mcp-rewrite.md) for new adapters; in-process Discord + TUI adapters unchanged through Slice 3
     - **Superseded by**: [ADR-0016](0016-slice4-discord-tui-comms-mcp-rewrite.md) (2026-05-31, for new adapters only)
     ```
+
   - [ ] Add a note at the bottom of the Consequences section: "Slice 3 ships a `CommsAdapterMCP` Protocol stub (`src/alfred/comms/mcp_protocol.py`) and a reference test plugin (`plugins/alfred-comms-test/`) that validates the MCP comms transport contract. The existing `DiscordAdapter` and `TuiAdapter` remain in-process through Slice 3, untouched. ADR-0016 commits Slice 4 to the full rewrite."
   - [ ] Run `make docs-check`.
 
   Commit:
+
   ```
   docs(adr-0009): status flip — superseded by ADR-0016 for new adapters (#TBD-slice3)
   ```
@@ -302,6 +326,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   - [ ] Run `make docs-check`.
 
   Commit:
+
   ```
   docs(adr-0017): retire Slice-2.5 tracking issues per spec §15.3 (#TBD-slice3)
   ```
@@ -374,6 +399,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   - [ ] Run `make docs-check`.
 
   Commit:
+
   ```
   docs(adr-0015): Slice-4 containerised quarantined-LLM commitment stub (#TBD-slice3)
   ```
@@ -448,6 +474,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   - [ ] Run `make docs-check`.
 
   Commit:
+
   ```
   docs(adr-0016): Slice-4 Discord/TUI comms-MCP rewrite commitment stub (#TBD-slice3)
   ```
@@ -460,16 +487,21 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] Locate line 117 in `PRD.md`. Current text:
+
     ```
     - **Hybrid isolation.** Plugins declare a trust tier; official → in-process subprocess; third-party or agent-authored → containerized with declared capabilities (network allowlist, fs mounts, secret IDs).
     ```
+
     New text:
+
     ```
     - **Hybrid isolation.** Plugins declare a trust tier; official → in-process subprocess; third-party or agent-authored → containerized with declared capabilities (network allowlist, fs mounts, secret IDs). **Slice 3 relaxation:** the quarantined-LLM plugin runs as a dedicated-UID subprocess with env scrubbing rather than a container — a time-bounded deviation recorded in [ADR-0017](docs/adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md). Full containerisation lands in Slice 4 per [ADR-0015](docs/adr/0015-slice4-containerised-quarantined-llm.md).
     ```
+
   - [ ] Run `make docs-check` to confirm the new ADR links resolve.
 
   Commit:
+
   ```
   docs(prd): §5 line 117 hybrid-isolation amendment — Slice-3 relaxation + Slice-4 commitment (#TBD-slice3)
   ```
@@ -635,9 +667,11 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Run the test expecting FAIL (module does not yet exist):
+
     ```bash
     cd <repo-root> && uv run pytest tests/unit/audit/test_audit_row_schemas.py -q 2>&1 | head -20
     ```
+
     Expected: `ModuleNotFoundError` or `ImportError` — test collection fails because `audit_row_schemas` does not exist yet.
 
 - [ ] **Task 11 — Implement `src/alfred/audit/audit_row_schemas.py`.**
@@ -920,18 +954,23 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Run the test expecting PASS:
+
     ```bash
     cd <repo-root> && uv run pytest tests/unit/audit/test_audit_row_schemas.py -v 2>&1 | tail -20
     ```
+
     Expected: all tests pass.
 
   - [ ] Run mypy + pyright:
+
     ```bash
     cd <repo-root> && uv run mypy src/alfred/audit/audit_row_schemas.py && uv run pyright src/alfred/audit/audit_row_schemas.py
     ```
+
     Expected: no errors.
 
   Commit:
+
   ```
   feat(audit): audit_row_schemas.py — 18 Final frozenset constants for Slice-3 audit row families (17 spec §13 + T3_DERIVED_DOWNGRADE_FIELDS) (#TBD-slice3)
   ```
@@ -944,10 +983,12 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] **Verify existing import paths** (mem-006: dependency paths must exist before the re-export is written):
+
     ```bash
     cd <repo-root> && uv run python -c \
       'from alfred.audit.log import AuditWriter; from alfred.memory.models import AuditEntry; print("OK", AuditWriter, AuditEntry)'
     ```
+
     Expected: prints `OK` with both class references. If either fails, update the import path in the `__init__.py` body below to match the actual module location before proceeding.
 
   - [ ] Write failing test for the public surface:
@@ -976,11 +1017,13 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
     Run expecting FAIL (`audit_row_schemas` not yet in `__init__.py`):
+
     ```bash
     cd <repo-root> && uv run pytest tests/unit/audit/test_audit_init.py -q 2>&1 | head -10
     ```
 
   - [ ] Implement: update `src/alfred/audit/__init__.py` to:
+
     ```python
     """Alfred audit package.
 
@@ -1001,16 +1044,19 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Run tests expecting PASS:
+
     ```bash
     cd <repo-root> && uv run pytest tests/unit/audit/ -v 2>&1 | tail -15
     ```
 
   - [ ] Run mypy + pyright on the updated `__init__.py`:
+
     ```bash
     cd <repo-root> && uv run mypy src/alfred/audit/__init__.py && uv run pyright src/alfred/audit/__init__.py
     ```
 
   Commit:
+
   ```
   feat(audit): re-export audit_row_schemas from alfred.audit public surface (#TBD-slice3)
   ```
@@ -1110,9 +1156,11 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Run tests expecting FAIL (`append_schema` does not yet exist):
+
     ```bash
     cd <repo-root> && uv run pytest tests/unit/audit/test_log.py -q -k "append_schema" 2>&1 | head -15
     ```
+
     Expected: `AttributeError: 'AuditWriter' object has no attribute 'append_schema'`.
 
 - [ ] **Task 12b — Implement `AuditWriter.append_schema()` in `src/alfred/audit/log.py`.**
@@ -1184,11 +1232,13 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Run tests expecting PASS:
+
     ```bash
     cd <repo-root> && uv run pytest tests/unit/audit/ -v 2>&1 | tail -20
     ```
 
   - [ ] Run mypy + pyright:
+
     ```bash
     cd <repo-root> && uv run mypy src/alfred/audit/log.py && uv run pyright src/alfred/audit/log.py
     ```
@@ -1198,6 +1248,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     Add a row: `src/alfred/audit/log.py` | Modify | Adds `append_schema()` helper that validates `subject` keys against a `fields` constant and forwards to `append()`.
 
   Commit:
+
   ```
   feat(audit): AuditWriter.append_schema() — typed helper validates subject keys against field-list constant (#TBD-slice3)
   ```
@@ -1314,9 +1365,11 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Run tests expecting FAIL (`ValidationError` imports needed; `tl` prefix unrecognised):
+
     ```bash
     cd <repo-root> && uv run pytest tests/adversarial/test_payload_schema.py -q 2>&1 | head -15
     ```
+
     Expected: failures on `tier_laundering`/`dlp_egress` category tests and `tl`/`de` prefix tests.
 
 - [ ] **Task 14 — Implement `payload_schema.py` extensions.**
@@ -1325,6 +1378,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] Update `_PREFIX_TO_CATEGORY` dict — add two entries:
+
     ```python
     _PREFIX_TO_CATEGORY: dict[str, str] = {
         "pi": "prompt_injection",
@@ -1339,11 +1393,13 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Update `_ID_PATTERN` regex to include `tl` and `de` prefixes:
+
     ```python
     _ID_PATTERN = re.compile(r"^(pi|dlp|cap|cnry|ipp|hk|tl|de)-\d{4}-\d{3}$")
     ```
 
   - [ ] Update `Category` Literal:
+
     ```python
     Category = Literal[
         "prompt_injection",
@@ -1358,6 +1414,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Update `IngestionPath` Literal — add six new values after existing values:
+
     ```python
     IngestionPath = Literal[
         "web.fetch",
@@ -1376,6 +1433,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Update `ExpectedOutcome` Literal — add two new values:
+
     ```python
     ExpectedOutcome = Literal[
         "neutralized",
@@ -1389,21 +1447,25 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
     ```
 
   - [ ] Add `ValidationError` import to `test_payload_schema.py` (it's used in the new tests):
+
     ```python
     from pydantic import ValidationError
     ```
 
   - [ ] Run tests expecting PASS:
+
     ```bash
     cd <repo-root> && uv run pytest tests/adversarial/test_payload_schema.py -v 2>&1 | tail -20
     ```
 
   - [ ] Run full adversarial suite to confirm no regressions:
+
     ```bash
     cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -10
     ```
 
   Commit:
+
   ```
   feat(adversarial): extend payload_schema.py — tier_laundering + dlp_egress categories, 6 IngestionPath + 2 ExpectedOutcome additions (#TBD-slice3)
   ```
@@ -1463,11 +1525,13 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   - [ ] ~~Write `tests/adversarial/tier_laundering/payloads.yaml`.~~ **Struck per plan amendment above.** No `payloads.yaml` ships in this PR; the empty-category-dir convention is README-only, and `conftest.py` would reject a `payloads: []` wrapper. PR-S3-1 onwards add the YAML when populating it.
 
   - [ ] Run adversarial suite to confirm the empty category dir is tolerated:
+
     ```bash
     cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -5
     ```
 
   Commit:
+
   ```
   feat(adversarial): tier_laundering corpus stub — README-only matches existing empty-category convention (#TBD-slice3)
   ```
@@ -1510,11 +1574,13 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
   - [ ] ~~Write `tests/adversarial/dlp_egress/payloads.yaml`.~~ **Struck per plan amendment above.** Same rationale as Task 15 — README-only matches the existing empty-category-dir convention; PR-S3-5 adds the YAML when populating it with `de-` payloads.
 
   - [ ] Run adversarial suite:
+
     ```bash
     cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -5
     ```
 
   Commit:
+
   ```
   feat(adversarial): dlp_egress corpus stub — README-only matches existing empty-category convention (#TBD-slice3)
   ```
@@ -1525,27 +1591,35 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 
   Steps:
   - [ ] Run the full quality gate:
+
     ```bash
     cd <repo-root> && make check 2>&1 | tail -20
     ```
+
     Expected: exits 0. Ruff + format + mypy strict + pyright all pass.
 
   - [ ] Run docs check:
+
     ```bash
     cd <repo-root> && make docs-check 2>&1 | tail -3
     ```
+
     Expected: exits 0.
 
   - [ ] Run adversarial suite:
+
     ```bash
     cd <repo-root> && uv run pytest tests/adversarial -q 2>&1 | tail -5
     ```
+
     Expected: all existing tests pass; new `tier_laundering` + `dlp_egress` stubs collected without errors.
 
   - [ ] Run all unit tests:
+
     ```bash
     cd <repo-root> && uv run pytest tests/unit -q 2>&1 | tail -5
     ```
+
     Expected: all pass, including new `tests/unit/audit/` tests.
 
   No additional commit for this task — it is the verification step before the PR is opened.
@@ -1615,6 +1689,7 @@ All six commands must exit 0 before the PR is opened.
 ## §7 References
 
 **Spec sections:**
+
 - [Spec §0](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#0-summary) — PR-S3-0a scope summary.
 - [Spec §1.3](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#13-scope-budget) — pre-committed PR splits.
 - [Spec §2](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#2-cross-cutting-wire-format-adr-section) — cross-cutting wire format (ADR-0017 records this).
@@ -1625,6 +1700,7 @@ All six commands must exit 0 before the PR is opened.
 - [Spec §17](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#17-pr-breakdown-preview) — PR-S3-0a deliverable list.
 
 **ADRs this PR creates or modifies:**
+
 - `docs/adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md` (created)
 - `docs/adr/0015-slice4-containerised-quarantined-llm.md` (created)
 - `docs/adr/0016-slice4-discord-tui-comms-mcp-rewrite.md` (created)
@@ -1633,16 +1709,20 @@ All six commands must exit 0 before the PR is opened.
 - `docs/adr/0009-comms-adapter-protocol-slice2-only.md` (status flip + note)
 
 **PRD sections:**
+
 - [PRD §5 line 117](../../PRD.md#5-architecture-overview) — hybrid-isolation invariant (amended by Task 9).
 - [PRD §7.1](../../PRD.md#71-security--prompt-injection-defense) — dual-LLM split + T3 trust tier.
 
 **Predecessor plans this PR depends on:**
+
 - None — this is the first Slice-3 PR.
 
 **Plans gated on this PR:**
+
 - `docs/superpowers/plans/2026-05-31-slice-3-pr-s3-0b-schema-infra.md` — gated directly on this PR.
 - All implementation plans (PR-S3-1 through PR-S3-7) — import `audit_row_schemas` and write adversarial corpus payloads against the schema established here.
 
 **Sister spec:**
+
 - [Slice 2.5 spec](../specs/2026-05-27-slice-2.5-hooks-design.md) — shipped Slice-2.5 contract this slice builds on.
 - [Slice 2.5 PR-A plan](./2026-05-27-slice-2.5-pr-A-hook-registry.md) — template for this plan's structure.

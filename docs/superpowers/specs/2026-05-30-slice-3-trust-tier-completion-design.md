@@ -40,6 +40,7 @@ PR-S3-0 establishes foundations: schema constants, Alembic migrations (`0007`-`0
 - **Never shipped:** in-process `MemoryTransport` for plugins (deliberately excluded; would collapse process-boundary isolation).
 
 PRD §5 architectural invariants asserted by this slice (lines 116-121 of `PRD.md`):
+
 - "Plugins are MCP servers" — `StdioTransport` delivers this for the quarantined LLM and `web.fetch` in Slice 3.
 - "Dual-LLM split" — the privileged orchestrator never processes raw T3 content; quarantined LLM emits only structured data.
 - "The LLM never holds secrets" — host-side secret-broker substitution before bytes cross the pipe.
@@ -222,6 +223,7 @@ This is a Slice-3 type-level discriminant. A full `TaggedContent[T2_DerivedFromT
 ### 3.8 Cast-bypass policy + adversarial coverage
 
 The `tier_laundering` adversarial category (§12.2) includes:
+
 - `cast(TaggedContent[T2], t3_value)` bypass — asserts the orchestrator raises rather than accepting the cast result.
 - Wire-format tier confusion — a JSON payload with `"tier": "T2"` but a T3-constructed `content` field; asserts validation rejection.
 - `tag(T3, ...)` from orchestrator module context — asserts `ValueError` before construction.
@@ -327,6 +329,7 @@ The wire protocol rejects any JSON-RPC call with method `alfred/hooks.register` 
 ### 4.7 Lifecycle audit family (`plugin.lifecycle.*`)
 
 Audit row event names (defined in `audit_row_schemas.py` §13):
+
 - `plugin.lifecycle.loaded` — successful handshake + capability grant.
 - `plugin.lifecycle.load_refused` — any handshake failure (parse, version, tier, signature).
 - `plugin.lifecycle.crashed` — subprocess exited unexpectedly.
@@ -360,6 +363,7 @@ Slice 3 does NOT claim to provide runtime isolation beyond UID separation and en
 ### 5.1 Quarantined-LLM plugin shape
 
 The quarantined LLM ships as `plugins/alfred-quarantined-llm/` — an in-tree MCP plugin loaded by the plugin host (`AlfredPluginSession`, §4, the class that owns the subprocess lifecycle) via `StdioTransport`. It exposes exactly two JSON-RPC methods:
+
 - `quarantine.ingest(handle: str, context: str) -> void` — accepts a `ContentHandle` id + brief context; fetches the T3 content from the content store internally by handle ID.
 - `quarantine.extract(handle_id: str, schema_json: str, schema_version: int) -> ExtractionResultJSON` — takes the `handle_id` explicitly and runs structured extraction against that specific content. The subprocess looks up T3 content per call from the content store using the ID; it does NOT operate against "most-recently ingested" state. This prevents a TOCTOU race where a concurrent extract in conversation B operates against conversation A's ingested content.
 
@@ -546,6 +550,7 @@ class ContentHandle:
 ### 7.4 Three-way allowlist intersection (manifest ∩ operator config ∩ per-session)
 
 A URL is reachable if and only if ALL THREE allowlists permit it:
+
 1. Plugin manifest's declared `allowed_domains` list.
 2. Operator's `config/policies.yaml` `web_fetch.allowed_domains`.
 3. Per-session grant (capability-gate check at dispatch time, re-checked on every call — not cached).
@@ -584,6 +589,7 @@ Canary trip disposition: `WebFetchCanaryTripped` (a distinct `AlfredError` subcl
 Per-domain: 10 requests/minute (operator override in `config/policies.yaml`). Per-user: 30 requests/minute (operator override). Per-user daily budget: 100 fetches/day for user-tier, unlimited for operator-tier (default; override in `config/policies.yaml`).
 
 State lives in Redis using sliding-window counters:
+
 - Per-domain rate: `alfred:rate:{domain}` key.
 - Per-user rate: `alfred:rate:user:{user_id}` key.
 - Per-user daily fetch budget counter: `alfred:fetch_budget:{user_id}:{YYYY-MM-DD}` key, TTL=48h.
@@ -706,6 +712,7 @@ Content trust tier (T0-T3) and subscriber hook tier (system/operator/user-plugin
 ### 8.3 Reviewer-gated proposal flow for high-blast grants
 
 Granting `system` tier requires:
+
 1. A state.git proposal branch `proposal/policy-grant-<id>`.
 2. Reviewer agent review (per PRD §6.4 — security policy changes).
 3. Explicit human approval (per PRD §6.4 #4 — plugin install/remove).
@@ -822,6 +829,7 @@ Slice 2.5's chain-deadline (250ms) is per-hookpoint chain, not per-orchestrator-
 ### 11.1 High-blast in state.git (reviewer-gated)
 
 The following changes require state.git proposal + reviewer-gate + human approval (PRD §6.4):
+
 - Web-fetch domain allowlist additions (`alfred web allowlist add <domain>`).
 - Plugin capability grants (`alfred plugin grant <plugin-id> <tier> <hookpoint>`).
 - Quarantined-provider choice (`alfred config quarantined-provider <provider>`).
@@ -831,6 +839,7 @@ These are security-policy changes per PRD §6.4 #3; they widen the trust surface
 ### 11.2 Low-blast in `config/policies.yaml` (hot-reload)
 
 The following changes land in `config/policies.yaml` and hot-reload without a reviewer gate:
+
 - User-Agent string (`web_fetch.user_agent`; default: `AlfredOS/<version>`).
 - Per-domain rate-limit overrides (`web_fetch.rate_limits.<domain>`).
 - Per-user daily fetch budget (`web_fetch.user_daily_budget`; default 100).
@@ -862,6 +871,7 @@ These narrow or tune within the existing trust surface; they cannot widen it.
 All command output strings route through `t()` (CLAUDE.md i18n rule #1).
 
 **Reviewer-gated command async UX:** `alfred plugin grant`, `alfred web allowlist add`, and `alfred config quarantined-provider` are asynchronous — they queue a proposal and do NOT apply immediately. On success, they:
+
 1. Print the proposal branch name: `Proposal queued at proposal/policy-grant-<id>.`
 2. Print the follow-up discovery command: `Run 'alfred plugin grant status <id>' to track approval.`
 3. Use the i18n key `cli.plugin.grant.pending_review` (not `cli.plugin.grant.success` — the grant is not yet active). Reserve `cli.plugin.grant.success` for when a previously-queued grant is approved (i.e., the reviewer-gate merges the proposal).
@@ -879,6 +889,7 @@ User-tier default: 100 fetches/day. Operator-tier default: unlimited. Both confi
 The i18n catalog-additions PR ships as the first Slice-3 PR, adding all new `t()` keys used across all 11 forks. Each key ships with its canonical English body + `Translators:` context comments where placeholder names are ambiguous.
 
 **Action keys:**
+
 - `cli.plugin.grant.{pending_review, denied, confirm_prompt}` — async-UX keys; `success` reserved for reviewer-approved path (not Slice-3)
 - `cli.plugin.grant.status.{pending, approved, denied, expired}`
 - `cli.web.allowlist.{pending_review, added, removed}`
@@ -886,6 +897,7 @@ The i18n catalog-additions PR ships as the first Slice-3 PR, adding all new `t()
 - `cli.supervisor.reset.{confirm_prompt, success, component_not_found}`
 
 **List/table column keys (per `cli.user.list.column.*` precedent):**
+
 - `cli.plugin.list.column.{plugin_id, subscriber_tier, status, manifest_version}` + `cli.plugin.list.empty_hint`
 - `cli.plugin.show.field.{plugin_id, manifest_version, sandbox_profile, hookpoints, grants, last_lifecycle_event}`
 - `cli.web.allowlist.list.column.{domain, path_prefix, granted_by, granted_at}` + `cli.web.allowlist.list_empty`
@@ -893,6 +905,7 @@ The i18n catalog-additions PR ships as the first Slice-3 PR, adding all new `t()
 - `cli.supervisor.status.breaker_state.{open, closed, half_open}`
 
 **WebFetchError message keys (§7.10 — "All error strings route through `t()`"):**
+
 - `web.fetch.error.domain_not_allowed`
 - `web.fetch.error.tls_failure`
 - `web.fetch.error.rate_limited`
@@ -900,6 +913,7 @@ The i18n catalog-additions PR ships as the first Slice-3 PR, adding all new `t()
 - `web.fetch.error.size_limit_exceeded`
 
 **System / bootstrap keys:**
+
 - `bootstrap.quarantined_provider_same_as_privileged`
 - `orchestrator.quarantine_unavailable`
 - `orchestrator.action_timeout`
@@ -960,6 +974,7 @@ The closed-set `Category` literal in `tests/adversarial/payload_schema.py` gains
 `Category` Literal additions: `tier_laundering`, `dlp_egress`.
 
 `IngestionPath` Literal extensions (new values, existing values preserved):
+
 - `stdio_transport.outbound` — frames written to subprocess stdin
 - `stdio_transport.inbound` — frames read from subprocess stdout
 - `cast_bypass` — `cast(TaggedContent[T2], t3_value)` type-level attack
@@ -968,10 +983,12 @@ The closed-set `Category` literal in `tests/adversarial/payload_schema.py` gains
 - `secret_broker` — secret leaked via env or manifest
 
 `ExpectedOutcome` Literal additions:
+
 - `boundary_refused` — the `tag(T3, ...)` from unauthorised caller disposition
 - `audit_row_emitted` — asserts a specific named audit row exists (used for manifest-broadening-capped checks)
 
 **Fixture-vs-pytest allocation:** The following adversarial assertions ship as **pytest modules** under `tests/adversarial/tier_laundering/test_*.py` (not YAML payloads), because they require Python-level code execution that YAML payloads cannot express:
+
 - `cast(TaggedContent[T2], t3_value)` bypass — tests Python type system
 - Frame-introspection bypass (monkey-patch `sys.modules`) — requires import manipulation
 - Post-handshake hook registration attack — requires a live subprocess
@@ -983,11 +1000,13 @@ All other `tier_laundering` and `dlp_egress` cases ship as YAML payloads with `p
 ### 12.3 Per-provider recorded fixtures for `prompt_injection`
 
 `prompt_injection` payloads include:
+
 - Fetched HTML with injected instructions in `<meta>`, JS comments, `display:none` CSS, alt-text, and microformats.
 - Per-provider variants (DeepSeek/Anthropic/OpenAI) as recorded LLM fixtures (not live calls), matching the existing `tests/adversarial/` pattern.
 - Assertion: the structured `ExtractionResult` data field does not contain the injected instruction string.
 
 `tier_laundering` payloads include:
+
 - Schema-valid but semantically poisoned structured output (a valid `Title` field containing instructions).
 - `T3DerivedData` provenance marker survival test (verifying `type(result.data)` is `T3DerivedData`, not plain `dict`, through `quarantined_to_structured` and through a DB write/read roundtrip — the NewType must survive serialisation).
 - Wire-format tier confusion (`TaggedContent` JSON with mismatched `tier` field).
@@ -998,6 +1017,7 @@ All other `tier_laundering` and `dlp_egress` cases ship as YAML payloads with `p
 - Retry-guidance hygiene: replay a malformed-output corpus through the prompt-embedded fallback path; assert the second-turn prompt token set is a subset of `{validator-error tokens} ∪ {schema-JSON tokens} ∪ {fixed-instruction-template tokens}`. References `QuarantinedExtractor._build_retry_prompt()` directly. Pytest module.
 
 `dlp_egress` payloads include:
+
 - Canary token planted in T3 web content propagating through quarantined LLM into structured output → DLP scan → audit row.
 - Cross-field secret leak via headers + cookies in a web request.
 - Subprocess env-leak via misconfigured launcher (missing explicit `env=` dict).
@@ -1008,6 +1028,7 @@ All other `tier_laundering` and `dlp_egress` cases ship as YAML payloads with `p
 The cross-fork chain is exercised by **two separate test files** with distinct gate statuses:
 
 **`tests/integration/test_quarantined_chain_security.py`** — merge-blocking security assertions:
+
 - `hasattr(ContentHandle, 'content') is False` — orchestrator cannot dereference handle to bytes.
 - A T3 fragment from the recorded fixture does NOT appear verbatim in `Extracted.data` values (prompt-injection neutralisation, per §6.3 and §12.3 invariant at the integration layer).
 - The audit row for the chain carries `trust_tier_of_trigger="T3"` per §6.8.
@@ -1015,6 +1036,7 @@ The cross-fork chain is exercised by **two separate test files** with distinct g
 - A recorded canary-token fixture triggers `WebFetchCanaryTripped` BEFORE `quarantine.extract` is invoked (not after, not alongside).
 
 **`tests/integration/test_quarantined_chain_latency.py`** — performance gate (advisory, not merge-blocking in Slice 3):
+
 - End-to-end latency for the quarantined extraction chain ≤ 5s (generous for the subprocess hop; the Slice-2.5 perf gate's 1ms five-chain budget is for the hook dispatcher only).
 - Extraction mode recorded correctly in audit row.
 
@@ -1190,6 +1212,7 @@ ADR-0009 transitions to "Superseded by ADR-0016 for new adapters; in-process ada
 ### 15.3 Slice-2.5 §6.10 §6.11 tracking issues retired
 
 The Slice-2.5 spec §6.10 "Deferred to Slice 3" items:
+
 - Real manifest-driven `CapabilityGate` + install prompt → delivered in §8 (Fork 7) of this spec.
 - MCP-transport hook registration → delivered in §4 (Fork 2) of this spec.
 - Data-classification tags per hookpoint → delivered in §3 (Fork 3/6) via `check_content_clearance`.
@@ -1199,6 +1222,7 @@ The Slice-2.5 spec §6.11 "Out of scope" items (supply-chain signing, ContextVar
 ### 15.4 Operator migration runbook (Slice 2 → Slice 3)
 
 **Upgrade order:**
+
 1. Run `docker compose pull && docker compose build`.
 2. Run `alfred plugin grant init` — seeds `/var/lib/alfred/state.git` (idempotent: `git init --bare` if no HEAD, empty `main` branch with initial commit). Skipping this step causes every plugin load to fail with `t("bootstrap.capability_gate_unseeded")`.
 3. Run `uv run alembic upgrade head` — applies migrations `0007` through `0010`.
@@ -1319,6 +1343,7 @@ The `superpowers:writing-plans` skill owns the formal plan suite. This section i
 ## 18. References
 
 **PRD sections:**
+
 - [PRD §5](../../../PRD.md#5-architecture-overview) — architectural invariants (lines 116-121): plugins are MCP servers; hybrid isolation; dual-LLM split; every action hookable.
 - [PRD §5.1](../../../PRD.md#51-hookable-actions) — hookable actions contract.
 - [PRD §6.3](../../../PRD.md#63-agentic-skills--mcp-integration) — MCP plugin contract + capability manifest.
@@ -1331,6 +1356,7 @@ The `superpowers:writing-plans` skill owns the formal plan suite. This section i
 - [PRD §7.4](../../../PRD.md#74-audit-trail--rollback) — audit log, CLI.
 
 **ADRs:**
+
 - [ADR-0001](../../adr/0001-deepseek-as-primary-provider-slice1.md) — DeepSeek as primary provider.
 - [ADR-0008](../../adr/0008-llm-output-trust-tier.md) — LLM output trust tier; superseded by ADR-0017.
 - [ADR-0009](../../adr/0009-comms-adapter-protocol-slice2-only.md) — CommsAdapter Protocol; superseded for new adapters by ADR-0016.
@@ -1341,6 +1367,7 @@ The `superpowers:writing-plans` skill owns the formal plan suite. This section i
 - ADR-0016 (co-merged) — Slice-4 Discord+TUI comms-MCP migration commitment.
 
 **Code:**
+
 - `src/alfred/security/tiers.py` — `TrustTier`, `TaggedContent`, `_APPROVED_TIERS`, `tag()`.
 - `src/alfred/hooks/registry.py` — `HookRegistry`, `HookpointMeta`, `SYSTEM_ONLY_TIERS`, `SYSTEM_OPERATOR_TIERS`.
 - `src/alfred/hooks/capability.py` — `CapabilityGate` Protocol, `DevGate`.
@@ -1351,6 +1378,7 @@ The `superpowers:writing-plans` skill owns the formal plan suite. This section i
 - `src/alfred/providers/base.py:68` — `capabilities()` pre-flagged for Slice-2 deferral.
 
 **Glossary entries to add in Slice 3 (via `docs/glossary.md`):**
+
 - `ContentHandle` — opaque id for T3 content held in the plugin host's content store; the orchestrator holds this and never dereferences it to bytes.
 - `QuarantinedExtractor` — orchestrator-side client of the quarantined-LLM MCP plugin; raw provider response bytes never cross back to the orchestrator untyped.
 - `PluginTransport` — Protocol for subprocess communication; `StdioTransport` is the Slice-3 sole implementation.
@@ -1364,10 +1392,12 @@ The `superpowers:writing-plans` skill owns the formal plan suite. This section i
 - `AlfredPluginSession` — the orchestrator-side class that owns the subprocess lifecycle, manifest handshake, version check, and capability-gate consult for a single plugin. See §4.2.
 
 **Glossary entries to UPDATE in Slice 3 (update existing entries, do NOT add duplicates):**
+
 - `## Capability gate` (existing entry) — update to include `check_plugin_load` and `check_content_clearance` method descriptions. Fold into the existing entry rather than adding separate top-level entries.
 - `## Hook tier` (existing entry) — update with §3.x orthogonality language: "A system-tier plugin (subscriber tier) can process T3 content (content trust tier); these two axes are orthogonal. Using `subscriber_tier='T3'` in a manifest is a security error refused at handshake." Do NOT create a separate `subscriber tier` entry — the existing `## Hook tier` entry covers the same concept.
 
 **Sibling docs:**
+
 - [docs/subsystems/hooks.md](../../subsystems/hooks.md) — hooks subsystem deep-doc; §3.1 publisher-side contract.
 - [docs/glossary.md](../../glossary.md) — trust-tier and hook-tier orthogonality warning.
 - [docs/superpowers/specs/2026-05-27-slice-2.5-hooks-design.md](2026-05-27-slice-2.5-hooks-design.md) — shipped Slice-2.5 contract this slice builds on.

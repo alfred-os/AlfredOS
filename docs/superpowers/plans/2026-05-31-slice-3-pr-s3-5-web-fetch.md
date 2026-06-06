@@ -1,4 +1,5 @@
 # web.fetch MCP Plugin Implementation Plan
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This is trust-boundary work — TDD is HARD here, not advisory.
 
 **Goal:** Ship the `alfred-web-fetch` in-tree MCP plugin: three-way allowlist intersection, Redis-atomic rate-limiting, single-use `ContentHandle` output, `InboundCanaryScanner` as system-tier hook subscriber, TLS fail-closed, depth=1 enforcement, and the full `WebFetchError` hierarchy — making `web.fetch` the first real T3-ingesting tool in the slice.
@@ -256,6 +257,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: no errors.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): WebFetchError hierarchy + WebFetchCanaryTripped security event (#TBD-slice3)"
   ```
@@ -555,6 +557,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: `6 passed`.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): ContentHandle + Redis content store with single-use atomic DEL (#TBD-slice3)"
   ```
@@ -793,6 +796,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: `11 passed`.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): three-way allowlist intersection with broadening-cap event (#TBD-slice3)"
   ```
@@ -1082,6 +1086,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: `6 passed`.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): Lua-atomic three-bucket rate limiter with race-condition prevention (#TBD-slice3)"
   ```
@@ -1406,6 +1411,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   ```
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): InboundCanaryScanner as system-tier hook subscriber on tool.web.fetch (#TBD-slice3)"
   ```
@@ -1523,6 +1529,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: `2 passed`.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): register tool.web.fetch hookpoint as SYSTEM_ONLY_TIERS fail_closed=True (#TBD-slice3)"
   ```
@@ -1679,6 +1686,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: `5 passed`.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): TLS policy fail-closed with ALFRED_ENV=development escape hatch (#TBD-slice3)"
   ```
@@ -1763,6 +1771,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: `2 passed` (the quarantined-LLM manifest test skips if PR-S3-4 not present).
 
   Commit:
+
   ```
   git commit -m "test(web-fetch): depth=1 enforcement — quarantined LLM cannot call web.fetch (#TBD-slice3)"
   ```
@@ -2009,6 +2018,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: no errors.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): plugin manifest + MCP server entry point (spec §7.1, §4.3) (#TBD-slice3)"
   ```
@@ -2330,6 +2340,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: no errors.
 
   Commit:
+
   ```
   git commit -m "feat(web-fetch): fetch dispatcher with WEB_FETCH_FIELDS audit row wiring (#TBD-slice3)"
   ```
@@ -2386,6 +2397,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   Expected: passes if PR-S3-0b merged, skips otherwise.
 
   Commit:
+
   ```
   git commit -m "test(web-fetch): i18n key presence gate for web.fetch error strings (spec §11.5) (#TBD-slice3)"
   ```
@@ -2435,6 +2447,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   ```
 
   Commit:
+
   ```
   git commit -m "test(adversarial): de-2026-001 canary-token-in-HTML dlp_egress payload (#TBD-slice3)"
   ```
@@ -2474,6 +2487,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   ```
 
   Commit:
+
   ```
   git commit -m "test(adversarial): de-2026-002 cross-field-secret-leak dlp_egress documented gap (#TBD-slice3)"
   ```
@@ -2537,6 +2551,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   ```
 
   Commit:
+
   ```
   git commit -m "test(adversarial): pi-2026-001 HTML multi-surface prompt-injection payload (spec §12.3) (#TBD-slice3)"
   ```
@@ -2561,6 +2576,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   ```
 
   Add to the CI per-package coverage gate command in `Makefile` or `pyproject.toml`:
+
   ```
   uv run pytest tests/unit/plugins/web_fetch/ \
     --cov=src/alfred/plugins/web_fetch/canary_scanner \
@@ -2568,18 +2584,23 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
   ```
 
   Run full test suite:
+
   ```
   uv run pytest tests/unit/plugins/web_fetch/ -q
   ```
+
   Expected: all unit tests pass.
 
   Run type checks:
+
   ```
   uv run mypy src/alfred/plugins/web_fetch/ && uv run pyright src/alfred/plugins/web_fetch/
   ```
+
   Expected: no errors.
 
   Commit:
+
   ```
   git commit -m "chore(web-fetch): 100% coverage gate for InboundCanaryScanner trust-boundary (spec §11a) (#TBD-slice3)"
   ```
@@ -2587,14 +2608,17 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
 - [ ] **Task 16 — `make check` + `make docs-check` green.**
 
   Run:
+
   ```
   make check
   ```
+
   Expected: ruff check, ruff format, mypy, pyright, pytest — all green.
 
   ```
   make docs-check
   ```
+
   Expected: no broken cross-links.
 
   If `make docs-check` reports broken links in newly created docs, fix the link paths. No commit unless a real fix is needed.
@@ -2686,6 +2710,7 @@ uv run pytest tests/adversarial/test_payload_schema.py -v
 ## §7 References
 
 **Spec sections:**
+
 - [spec §7 web.fetch](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#7-webfetch-fork-4) — primary source for this PR
 - [spec §7a performance budgets](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#7a-performance-budgets)
 - [spec §11.5 i18n keys](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#115-i18n-catalog-additions-pr-shipped-first)
@@ -2695,6 +2720,7 @@ uv run pytest tests/adversarial/test_payload_schema.py -v
 - [spec §2.1 DLP placement](../specs/2026-05-30-slice-3-trust-tier-completion-design.md#21-dlp-placement-on-every-slice-3-wire)
 
 **Predecessor PR plans (assumed merged):**
+
 - [PR-S3-0a](2026-05-31-slice-3-pr-s3-0a-docs-adrs-foundations.md) — `audit_row_schemas.py` + `payload_schema.py` Literal additions (`tier_laundering`, `dlp_egress`)
 - [PR-S3-0b](2026-05-31-slice-3-pr-s3-0b-migrations-infra-i18n.md) — i18n catalog additions (all `web.fetch.error.*` keys)
 - [PR-S3-1](2026-05-31-slice-3-pr-s3-1-trust-tier-types.md) — `T3` class, `tag(T3, ...)` capability-gated factory
@@ -2704,15 +2730,18 @@ uv run pytest tests/adversarial/test_payload_schema.py -v
 - [PR-S3-4](2026-05-31-slice-3-pr-s3-4-quarantined-llm-extractor.md) — `plugins/alfred_quarantined_llm/`, `QuarantinedExtractor`
 
 **ADRs:**
+
 - [ADR-0017](../../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — load-bearing Slice-3 ADR; web.fetch is Fork 4
 - [ADR-0014](../../adr/0014-pluggable-hooks-for-every-action.md) — every action is hookable; InboundCanaryScanner as hook subscriber (not plugin-internal) is the correct ADR-0014 application
 
 **PRD sections:**
+
 - [PRD §7.1](../../../PRD.md#71-security--prompt-injection-defense) — trust tiers, canary tokens, T3 ingestion
 - [PRD §5.1](../../../PRD.md#51-hookable-actions) — every action hookable
 - [PRD §7.4](../../../PRD.md#74-audit-trail--rollback) — audit trail, per-user forensic attribution
 
 **Code symbols this plan wires against (all from upstream PRs):**
+
 - `src/alfred/audit/audit_row_schemas.py::WEB_FETCH_FIELDS` (PR-S3-0a)
 - `src/alfred/audit/audit_row_schemas.py::WEB_ALLOWLIST_MANIFEST_BROADENING_CAPPED_FIELDS` (PR-S3-0a)
 - `src/alfred/hooks/registry.py::SYSTEM_ONLY_TIERS` (Slice-2.5 PR-A)
@@ -2817,6 +2846,7 @@ with the issue number; an unlinked `DEFERRED` means "to file before
 merge".
 
 **Security:**
+
 - `sec-pr-s3-5-002` — three-way intersection path narrowing now preserves
   the most-restrictive prefix when manifest, operator, and session
   allowlists disagree (commit `f2f651e`).
@@ -2826,6 +2856,7 @@ merge".
   `00f44aa`).
 
 **Architecture:**
+
 - `arch-001` — T3 tagging wired at the dispatcher boundary so every byte
   exiting the plugin transport is `TaggedContent[T3]` before it reaches
   the orchestrator (commit `fb5f76e`).
@@ -2837,6 +2868,7 @@ merge".
   (commit `dbe5df2`).
 
 **i18n:**
+
 - `i18n-001`, `i18n-002` — dispatcher's hardcoded English error strings
   now route through `t()` (commit `bfa452e`).
 - `i18n-003` — `TlsConfigError` message goes through `t()`
@@ -2846,6 +2878,7 @@ merge".
   (commit `3847795`).
 
 **Performance:**
+
 - `perf-100`, `perf-101` — per-session `AllowlistIntersection` + once-only
   broadening cap so the intersection is computed once per dispatch session
   rather than per-request (commit `2201a4d`).
@@ -2854,6 +2887,7 @@ merge".
   than constructing one per scan (commit `6af171e`).
 
 **Error-handling:**
+
 - `err-001`, `err-002` — audit row emitted on unexpected dispatch shape;
   canary trip survives Redis transient errors (commits `266aff4`,
   `bfa452e`).
@@ -2862,6 +2896,7 @@ merge".
   now writes a structured audit row before re-raising (commit `bfa452e`).
 
 **Developer experience:**
+
 - `devex-001` — `rate_limit_bucket` fidelity: the audit row records the
   bucket identifier the rate limiter actually consulted, not a derived
   approximation. *(DEFERRED — to file)*
@@ -2877,6 +2912,7 @@ merge".
   stream sees one consistent namespace. *(DEFERRED — to file)*
 
 **As-reviewed (originating reviewer findings):**
+
 - `ar-001` — audit schema lie: the plan documented a field
   (`fetch_outcome`) that the row schema didn't carry; row schema now
   matches the dispatcher's actual emit

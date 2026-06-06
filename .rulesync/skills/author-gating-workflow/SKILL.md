@@ -161,6 +161,7 @@ gh pr create --title "test: gate validation (DO NOT MERGE)" --body "Validates ne
 ```
 
 The PR should show:
+
 - The new check ✗ failed
 - "Merge" button blocked with "Required statuses must pass"
 

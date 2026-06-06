@@ -587,6 +587,7 @@ would be an injection vector).
 > **ContextVar boundary caveat.** The `_reentry` ContextVar guard inherits
 > across `asyncio.create_task` (Python copies the context at task spawn).
 > It does NOT inherit across:
+>
 > - `asyncio.to_thread(...)` — runs in a thread executor without contextvar copy
 > - `loop.run_in_executor(...)` / `ThreadPoolExecutor.submit(...)` — same
 > - `asyncio.run_coroutine_threadsafe(...)` — cross-loop
@@ -637,7 +638,7 @@ with `"fault"` (chain timeout / subscriber error / error suppressed) and
 `"bypass"` (re-entry path); the existing Slice-1/2 dispositions
 (`success`, `refused`, `cancelled`, …) remain. Operators writing SIEM
 queries against the audit log should grep on the event constant
-+ result-disposition pair.
+plus result-disposition pair.
 
 ## Performance budget
 
