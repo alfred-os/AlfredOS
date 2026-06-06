@@ -284,9 +284,12 @@ async def test_kill_returns_true_on_live_subprocess(
         f"#187 diagnostic — kill flow did not complete cleanly: {diagnostic}"
     )
 
-    # Stage E: original contract — call kill() on a fresh transport so the
-    # public surface is still exercised. Re-spawning to avoid double-kill
-    # on the same process.
+    # Stage E: SECOND iteration in the same loop, but with the wrapper's
+    # operations INLINED + each False branch captured. Round 3 confirmed
+    # that calling ``transport.kill()`` in a fresh test passes; the
+    # failure only manifests when a previous spawn+kill has happened in
+    # the same loop. Inlining the branches reveals which one fires on
+    # the second iteration.
     transport2 = _make_transport(
         fake_audit_writer,
         fake_broker,
@@ -295,10 +298,37 @@ async def test_kill_returns_true_on_live_subprocess(
         args=["-c", "sleep 5"],
     )
     await transport2._spawn()
-    succeeded = await transport2.kill()
-    assert succeeded is True, (
-        f"#187 kill() returned False; transport2 state: process={transport2._process!r}"
-    )
+    proc2 = transport2._process
+    e_probe = {
+        "proc2_is_None": proc2 is None,
+        "pid2": getattr(proc2, "pid", None),
+        "returncode_post_spawn2": getattr(proc2, "returncode", "no-attr"),
+    }
+    assert proc2 is not None, f"#187 stage E — second spawn left _process None; e_probe={e_probe}"
+
+    e_kill_branch: str
+    try:
+        proc2.kill()
+        e_kill_branch = "ok"
+    except ProcessLookupError as exc:
+        e_kill_branch = f"ProcessLookupError: {exc!r}"
+
+    e_wait_branch: str
+    e_rc_at_wait_exit: object
+    try:
+        await asyncio.wait_for(proc2.wait(), timeout=_CLOSE_TIMEOUT_S)
+        e_wait_branch = "ok"
+        e_rc_at_wait_exit = proc2.returncode
+    except TimeoutError as exc:
+        e_wait_branch = f"TimeoutError after {_CLOSE_TIMEOUT_S}s: {exc!r}"
+        e_rc_at_wait_exit = proc2.returncode
+
+    if e_kill_branch != "ok" or e_wait_branch != "ok":
+        raise AssertionError(
+            f"#187 stage E — SECOND kill flow failed; e_probe={e_probe} "
+            f"e_kill_branch={e_kill_branch} e_wait_branch={e_wait_branch} "
+            f"e_returncode_at_wait_exit={e_rc_at_wait_exit}"
+        )
 
 
 @pytest.mark.asyncio
