@@ -103,6 +103,34 @@ from alfred.providers.base import CompletionResponse
 _PROVIDER_KEY_ENV = "ALFRED_SMOKE_PROVIDER_KEY"
 _DETERMINISTIC_PROMPT = "respond with exactly the word OK and nothing else"
 
+# Minimum plausible API key length. DeepSeek keys are ~35 chars, Anthropic
+# ~80 chars; anything shorter is structurally a placeholder. Keeps the
+# real-provider smoke from running with a stub secret and emitting a
+# misleading 401 (#184 item 4 — the repo secret was set to a literal
+# "placeholder" string and CI surfaced the 401 as a hard fail).
+_MIN_PROVIDER_KEY_LEN = 20
+# Substrings that mark a value as a stub even when it is long enough to
+# pass the length check. Lower-cased before comparison so authors don't
+# have to remember the exact casing they used.
+_PLACEHOLDER_MARKERS = ("placeholder", "todo", "fixme", "not-a-real", "stub", "xxxxx")
+
+
+def _is_placeholder_provider_key(value: str | None) -> bool:
+    """True for unset / blank / placeholder-shaped values.
+
+    Anchored deliberately at the env-read boundary so the skip reason
+    distinguishes "unset" from "set to a stub" — the operator who set
+    the stub deserves a hint that the key is the reason the test isn't
+    actually running.
+    """
+    if value is None:
+        return True
+    stripped = value.strip()
+    if not stripped or len(stripped) < _MIN_PROVIDER_KEY_LEN:
+        return True
+    lowered = stripped.lower()
+    return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
+
 
 # ---------------------------------------------------------------------------
 # Shared fixtures (testcontainer Postgres + dep-graph builder)
@@ -344,11 +372,13 @@ async def test_tui_mock_provider_round_trip(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.smoke
 @pytest.mark.skipif(
-    os.getenv(_PROVIDER_KEY_ENV) is None,
+    _is_placeholder_provider_key(os.getenv(_PROVIDER_KEY_ENV)),
     reason=(
-        f"{_PROVIDER_KEY_ENV} is unset; this smoke targets a real DeepSeek "
-        "(or Anthropic fallback) provider and is skipped on fork PRs / "
-        "unconfigured local boxes."
+        f"{_PROVIDER_KEY_ENV} is unset or placeholder-shaped; this smoke "
+        "targets a real DeepSeek (or Anthropic fallback) provider and is "
+        "skipped on fork PRs, unconfigured local boxes, and CI environments "
+        "where the repo secret is a stub value (set to e.g. 'placeholder' "
+        "while a real throwaway key is provisioned)."
     ),
 )
 async def test_tui_real_provider_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
