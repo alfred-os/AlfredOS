@@ -20,6 +20,7 @@ plugin shim.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock
@@ -219,6 +220,69 @@ async def test_kill_returns_true_on_live_subprocess(
     await transport._spawn()
     succeeded = await transport.kill()
     assert succeeded is True
+
+
+@pytest.mark.asyncio
+async def test_kill_returns_true_even_if_reap_wait_times_out(
+    fake_audit_writer: MagicMock, fake_broker: MagicMock, stub_nonce: object
+) -> None:
+    """#187 regression: a TimeoutError on the post-SIGKILL reap is not a kill failure.
+
+    SIGKILL is delivered synchronously by the kernel; once
+    ``self._process.kill()`` returns without ``ProcessLookupError`` the
+    signal has landed. The bounded ``wait_for`` that follows is a
+    best-effort reap so subsequent ``.returncode`` reads do not race the
+    asyncio child-watcher callback — but under heavy load (CI +
+    coverage instrumentation) the SIGCHLD-to-callback latency can
+    exceed the 5-second budget. A TimeoutError there must NOT translate
+    to ``kill() returned False`` because the caller's audit row reads
+    that bool into ``kill_succeeded`` — false-negatives there mislead
+    operators into chasing a SIGKILL miss that never happened.
+
+    The test plumbs a Process whose ``.kill()`` is a no-op (no PLE) and
+    whose ``.wait()`` blocks forever; ``kill()`` must time the wait_for
+    out internally and still report ``True``.
+    """
+    transport = _make_transport(fake_audit_writer, fake_broker, stub_nonce)
+
+    # Hand-craft a Process double: kill() is a real-ish no-op (does not
+    # raise PLE), wait() never returns. asyncio.wait_for hits the
+    # timeout and raises TimeoutError; the new contract swallows it
+    # and returns True.
+    #
+    # The wait double MUST be an async function (not ``lambda: future``):
+    # AsyncMock with a plain-callable ``side_effect`` returns the side
+    # effect's return value verbatim rather than awaiting it, so
+    # ``await mock_proc.wait()`` would resolve immediately with the
+    # Future as a value and wait_for would never time out. Wrapping the
+    # block inside an async function makes ``mock_proc.wait()`` truly
+    # await the never-completing future. CR catch on PR #194.
+    forever_block: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+    async def _block_forever() -> int:
+        return await forever_block
+
+    mock_proc = MagicMock()
+    mock_proc.kill = MagicMock(return_value=None)
+    mock_proc.wait = AsyncMock(side_effect=_block_forever)
+    transport._process = mock_proc
+
+    # Patch _CLOSE_TIMEOUT_S locally to keep the test fast (0.1s vs 5s).
+    # The contract is invariant in the timeout value.
+    import alfred.plugins.stdio_transport as transport_mod
+
+    original_timeout = transport_mod._CLOSE_TIMEOUT_S
+    transport_mod._CLOSE_TIMEOUT_S = 0.1  # type: ignore[misc]
+    try:
+        succeeded = await transport.kill()
+    finally:
+        transport_mod._CLOSE_TIMEOUT_S = original_timeout  # type: ignore[misc]
+        forever_block.cancel()
+
+    assert succeeded is True, (
+        "#187 regression: kill() must return True when SIGKILL was sent successfully, "
+        "even if the asyncio reap wait_for times out (uncatchable signal — process WILL exit)."
+    )
 
 
 @pytest.mark.asyncio
