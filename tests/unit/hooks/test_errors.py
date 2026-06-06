@@ -24,7 +24,12 @@ from __future__ import annotations
 import pytest
 
 from alfred.errors import AlfredError
-from alfred.hooks.errors import HookError, HookRefusal, HookSubscriberError
+from alfred.hooks.errors import (
+    HookError,
+    HookRefusal,
+    HookSubscriberError,
+    hookpoint_not_declared_message,
+)
 from alfred.i18n import set_language, t
 
 
@@ -247,3 +252,70 @@ def test_hooks_subscriber_must_be_async_catalog_key_resolves_not_bare() -> None:
     rendered = t("hooks.subscriber_must_be_async", name="my_sync_subscriber")
     assert rendered != "hooks.subscriber_must_be_async"
     assert "my_sync_subscriber" in rendered
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 5. hookpoint_not_declared_message close-match suggestion
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_hookpoint_not_declared_message_appends_did_you_mean_for_close_match() -> None:
+    """When ``declared_names`` contains a name within edit-distance of
+    the typo, the rendered message appends a ``Did you mean: '<X>'?`` hint.
+
+    The close-match branch in :func:`hookpoint_not_declared_message`
+    routes through a second catalog key (``hooks.hookpoint_not_declared
+    .did_you_mean``) — the per-language renderer for the suggestion
+    suffix. Without an existing declared name within difflib's 0.6
+    cutoff, the suffix stays empty (covered by the next test below).
+
+    The CLAUDE.md hard rule #7 (no silent failures in security paths)
+    requires this helper's both branches to be reachable from a real
+    code path; the registry's ``register`` call-site exercises the
+    no-match branch when the typo is against an empty registry, but
+    only this test reaches the suggestion-appended branch.
+    """
+    rendered = hookpoint_not_declared_message(
+        name="memory.episodic.record.before_db_writeNNN",
+        declared_names=("memory.episodic.record.before_db_write",),
+    )
+    # The base catalog template carries the typo'd name; the suggestion
+    # suffix carries the close match. Both must surface — the operator
+    # reading the raised :class:`HookError` should see both.
+    assert "memory.episodic.record.before_db_writeNNN" in rendered
+    assert "memory.episodic.record.before_db_write" in rendered
+    assert "Did you mean" in rendered
+
+
+def test_hookpoint_not_declared_message_omits_did_you_mean_below_cutoff() -> None:
+    """When no declared name is within difflib's 0.6 edit-distance
+    cutoff, the rendered message omits the suggestion suffix.
+
+    Defends against a future refactor that always renders the
+    suggestion key (with an empty match) — the operator would see
+    ``Did you mean: ''?``, which is worse than no hint at all.
+    """
+    rendered = hookpoint_not_declared_message(
+        name="totally.unrelated.hookpoint",
+        declared_names=("memory.episodic.record.before_db_write",),
+    )
+    assert "totally.unrelated.hookpoint" in rendered
+    assert "Did you mean" not in rendered
+
+
+def test_hookpoint_not_declared_message_omits_did_you_mean_on_empty_declared() -> None:
+    """An empty ``declared_names`` iterable disables the close-match
+    suggestion entirely.
+
+    Pins the docstring contract: ``Empty iterable disables the
+    closest-match suggestion (the message still carries the
+    publisher/subscriber hint).`` Mirrors the call site in
+    :meth:`HookRegistry.register` when the registry has zero declared
+    hookpoints.
+    """
+    rendered = hookpoint_not_declared_message(
+        name="memory.episodic.record.before_db_write",
+        declared_names=(),
+    )
+    assert "memory.episodic.record.before_db_write" in rendered
+    assert "Did you mean" not in rendered

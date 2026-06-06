@@ -352,8 +352,21 @@ jobs:
         # downstream `coverage-gates` job to pick up — GitHub Actions
         # jobs run on different runners so we can't rely on filesystem
         # state crossing the boundary.
+        #
+        # ``--cov-fail-under=0`` overrides ``[tool.coverage.report]
+        # fail_under = 75`` in pyproject.toml. This job runs the
+        # integration suite alone (no unit data on this runner — the
+        # ``python`` job's .coverage stays on its own runner) and
+        # integration-only coverage is ~46% by construction. The 75%
+        # threshold is the right gate for the COMBINED unit+integration
+        # run that ``coverage-gates`` performs downstream, not for the
+        # integration-only data we collect here. Without this override
+        # the integration job fails on the 75% threshold and the
+        # downstream ``coverage-gates`` job (which carries the real
+        # 100% trust-boundary gates) is skipped — leaving the gates
+        # paper-only on every push. #184 item 3.
         run: |
-          uv run pytest tests/integration -q --cov=src/alfred --cov-append --cov-branch
+          uv run pytest tests/integration -q --cov=src/alfred --cov-append --cov-branch --cov-fail-under=0
       - name: Upload integration coverage artifact
         if: steps.check.outputs.has_integration == 'true'
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
