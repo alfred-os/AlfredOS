@@ -27,6 +27,7 @@ absent) the ``supervisor.config_insecure`` JSON shape.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import shutil
@@ -37,6 +38,16 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
+
+# The launcher's Linux UID-drop branch invokes ``runuser -u <user> -- ...``.
+# The production default ``alfred-quarantine`` is provisioned out-of-band
+# (see launcher --help) and does not exist on a vanilla GitHub Actions
+# runner — runuser exits 1 ("user does not exist"), failing the dev /
+# unsandboxed exec-reachability tests below. Pointing ``ALFRED_PLUGIN_UID``
+# at the current process's user lets runuser succeed on CI without
+# provisioning a system account; the assertion is still about reaching
+# the exec branch, not about UID isolation (that's spec'd elsewhere).
+_LAUNCHER_TEST_UID = getpass.getuser()
 
 
 def test_launcher_exists_and_is_executable() -> None:
@@ -173,6 +184,7 @@ def test_launcher_accepts_unsandboxed_in_development() -> None:
         "ALFRED_ENV": "development",
         "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
         "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
+        "ALFRED_PLUGIN_UID": _LAUNCHER_TEST_UID,
     }
     result = subprocess.run(  # noqa: S603 — literal repo-owned script path
         [
@@ -350,6 +362,7 @@ def test_launcher_accepts_well_formed_plugin_id() -> None:
         "ALFRED_ENV": "development",
         "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
         "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
+        "ALFRED_PLUGIN_UID": _LAUNCHER_TEST_UID,
     }
     result = subprocess.run(  # noqa: S603 — literal repo-owned script path
         [str(_LAUNCHER), "alfred.well-formed_id.v1", "/bin/echo", "marker"],

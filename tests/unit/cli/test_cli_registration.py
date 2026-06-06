@@ -20,12 +20,27 @@ removed or shadowed.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 
 from alfred.cli.main import app
 
 runner = CliRunner()
+
+# Strips ANSI SGR / cursor codes Rich emits when it decides the runner's
+# captured stdout is a colour-capable terminal — which on Linux CI is the
+# case enough of the time to break naive substring assertions like
+# ``"--tier" in stdout`` (the token gets split across ``\x1b[1;36m-\x1b[0m
+# \x1b[1;36m-tier\x1b[0m``). The local-macOS CliRunner already strips colour
+# so the regression is invisible until it hits CI.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def _plain(text: str) -> str:
+    """Return ``text`` with ANSI escape sequences stripped."""
+    return _ANSI_RE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +68,7 @@ def test_subapp_appears_in_root_help(subcommand: str) -> None:
     """
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0, result.stdout
-    assert subcommand in result.stdout, (
+    assert subcommand in _plain(result.stdout), (
         f"Expected ``{subcommand}`` in ``alfred --help`` output; got:\n{result.stdout}"
     )
 
@@ -88,7 +103,7 @@ def test_subapp_help_is_reachable(subcommand: str, expected_help_fragment: str) 
     assert result.exit_code == 0, (
         f"``alfred {subcommand} --help`` exited {result.exit_code}; stdout:\n{result.stdout}"
     )
-    assert expected_help_fragment.lower() in result.stdout.lower(), (
+    assert expected_help_fragment.lower() in _plain(result.stdout).lower(), (
         f"Expected ``{expected_help_fragment}`` in ``alfred {subcommand} "
         f"--help`` output; got:\n{result.stdout}"
     )
@@ -112,6 +127,6 @@ def test_audit_graph_tier_flag_is_reachable_through_registration() -> None:
     """
     result = runner.invoke(app, ["audit", "graph", "--help"])
     assert result.exit_code == 0, result.stdout
-    assert "--tier" in result.stdout, (
+    assert "--tier" in _plain(result.stdout), (
         f"Expected ``--tier`` option in ``alfred audit graph --help``; got:\n{result.stdout}"
     )
