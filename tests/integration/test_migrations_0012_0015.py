@@ -1028,3 +1028,214 @@ def test_0013_check_policies_json_size_refuses_oversized(
                 "j": payload_json,
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# 0014 audit_log result CHECK extension (Slice-4 result values)
+# ---------------------------------------------------------------------------
+
+
+_SLICE_4_RESULT_ADDITIONS = (
+    "dispatched_with_redactions",
+    "dispatched_clean",
+    "recursion_refused",
+    "audit_row_emitted",
+)
+
+
+def _insert_audit_row(engine: sa.Engine, *, result: str, event: str = "test.event") -> None:
+    """Insert a minimal audit_log row with the given ``result`` value.
+
+    Uses the columns the Slice-1 ``audit_log`` table requires; the
+    Slice-4 ``*_FIELDS`` shape data goes into ``subject`` JSON, so this
+    helper only varies ``result`` to exercise the CHECK constraint.
+    """
+    import uuid as _uuid
+
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO audit_log "
+                "(id, created_at, trace_id, event, actor_persona, subject, "
+                "trust_tier_of_trigger, result, cost_estimate_usd, language) "
+                "VALUES (:id, :ts, :tr, :ev, :ap, :sj, :tt, :rs, :ce, :lang)"
+            ),
+            {
+                "id": str(_uuid.uuid4()),
+                "ts": dt.datetime.now(dt.UTC),
+                "tr": "trace-test",
+                "ev": event,
+                "ap": "alfred",
+                "sj": "{}",
+                "tt": "T0",
+                "rs": result,
+                "ce": 0.0,
+                "lang": "en-US",
+            },
+        )
+
+
+@pytest.mark.parametrize("result_value", _SLICE_4_RESULT_ADDITIONS)
+def test_0014_check_accepts_slice_4_result_value(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    result_value: str,
+) -> None:
+    """Each Slice-4 result value is accepted after migration 0014."""
+    alembic_command.upgrade(alembic_cfg, "0014")
+    _insert_audit_row(engine_at_0011, result=result_value)
+
+
+def test_0014_check_refuses_pre_existing_typo(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """CHECK refuses typo values not in the closed vocab.
+
+    Pins the gate: a future writer accidentally emitting "dispached"
+    (typo of dispatched_clean) gets refused at the DB layer.
+    """
+    alembic_command.upgrade(alembic_cfg, "0014")
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO audit_log "
+                "(id, created_at, trace_id, event, actor_persona, subject, "
+                "trust_tier_of_trigger, result, cost_estimate_usd, language) "
+                "VALUES (:id, :ts, :tr, :ev, :ap, :sj, :tt, :rs, :ce, :lang)"
+            ),
+            {
+                "id": "11111111-2222-3333-4444-555555555555",
+                "ts": dt.datetime.now(dt.UTC),
+                "tr": "trace-typo",
+                "ev": "test.event",
+                "ap": "alfred",
+                "sj": "{}",
+                "tt": "T0",
+                "rs": "dispached",  # typo
+                "ce": 0.0,
+                "lang": "en-US",
+            },
+        )
+
+
+def test_0014_preserves_slice_3_values(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Existing Slice-3 closed-vocab values still accepted after 0014.
+
+    Spot-check several representative values from each historical slice
+    to confirm the upgrade is strictly ADDITIVE — no Slice-3 emit-site
+    silently breaks because its result value was dropped from the
+    closed vocab.
+    """
+    alembic_command.upgrade(alembic_cfg, "0014")
+    for v in (
+        "success",  # Slice-1
+        "refused",  # Slice-2
+        "fault",  # Slice-2.5
+        "extracted",  # Slice-3
+        "tripped",
+        "reset",
+    ):
+        _insert_audit_row(engine_at_0011, result=v, event=f"test.preserve.{v}")
+
+
+def test_0014_downgrade_deletes_slice_4_rows(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Downgrade DELETES rows with Slice-4 result values before restoring
+    the pre-Slice-4 CHECK.
+
+    Loud-destruction discipline (matches migrations 0005 / 0006 / 0007):
+    operators who care about Slice-4 audit history snapshot the table
+    BEFORE downgrading. This test pins that contract.
+    """
+    alembic_command.upgrade(alembic_cfg, "0014")
+    _insert_audit_row(engine_at_0011, result="dispatched_clean", event="will.die")
+    _insert_audit_row(engine_at_0011, result="success", event="will.survive")
+    alembic_command.downgrade(alembic_cfg, "0013")
+    with engine_at_0011.begin() as conn:
+        rows = conn.execute(
+            sa.text(
+                "SELECT result FROM audit_log WHERE event IN "
+                "('will.die', 'will.survive') ORDER BY event"
+            )
+        ).all()
+    # 'will.die' (dispatched_clean) is deleted; 'will.survive' (success)
+    # remains. Both events are in the result set on downgrade verification.
+    surviving = [r.result for r in rows]
+    assert "success" in surviving
+    assert "dispatched_clean" not in surviving
+
+
+def test_0014_downgrade_restores_slice_3_check(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """After downgrade, attempting to insert a Slice-4 value is refused."""
+    alembic_command.upgrade(alembic_cfg, "0014")
+    alembic_command.downgrade(alembic_cfg, "0013")
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)):
+        _insert_audit_row(engine_at_0011, result="dispatched_clean")
+
+
+def test_0014_idempotent_upgrade_downgrade_roundtrip(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Upgrade → downgrade → upgrade preserves non-Slice-4 rows.
+
+    Round-2 test-engineer closure: pins the realistic hotfix-rollback-
+    then-re-apply path. Slice-3 baseline rows survive the round-trip;
+    Slice-4 rows are destroyed (per downgrade contract) and would need
+    to be replayed by the writers themselves.
+    """
+    alembic_command.upgrade(alembic_cfg, "0014")
+    # Plant a baseline (Slice-1) row that must survive both transitions.
+    _insert_audit_row(engine_at_0011, result="success", event="roundtrip.survivor")
+    alembic_command.downgrade(alembic_cfg, "0013")
+    # Re-upgrade — CHECK is restored to the Slice-4 vocab.
+    alembic_command.upgrade(alembic_cfg, "0014")
+    with engine_at_0011.begin() as conn:
+        rows = conn.execute(
+            sa.text("SELECT result FROM audit_log WHERE event = :ev"),
+            {"ev": "roundtrip.survivor"},
+        ).all()
+    assert [r.result for r in rows] == ["success"], (
+        f"baseline Slice-1 row didn't survive round-trip; saw {rows}"
+    )
+    # And Slice-4 INSERT is accepted again after the re-upgrade.
+    _insert_audit_row(engine_at_0011, result="dispatched_clean", event="post-reup")
+
+
+def test_0014_baseline_results_matches_slice_3_head() -> None:
+    """``_BASE_RESULTS`` matches the Slice-3 (migration 0007) closed vocab.
+
+    Round-2 cross-cutting closure: a future Slice-3 fixup that extends
+    the vocab without updating this tuple would have downgrade restore
+    a stale baseline that silently rejects emit-sites the operator was
+    happy to use. This assertion pins the count + key Slice-3 members
+    so the drift fails fast.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mig_0014",
+        "src/alfred/memory/migrations/versions/0014_audit_result_slice4_values.py",
+    )
+    assert spec is not None and spec.loader is not None
+    mig = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mig)
+
+    # 5 (Slice-1) + 10 (Slice-2) + 2 (Slice-2.5) + 13 (Slice-3) = 30 baseline.
+    assert len(mig._BASE_RESULTS) == 30, (
+        f"_BASE_RESULTS size drifted from Slice-3 head (expected 30); got {len(mig._BASE_RESULTS)}"
+    )
+    # Spot-check representative values per slice.
+    for required in ("success", "refused", "fault", "extracted", "content_expired"):
+        assert required in mig._BASE_RESULTS, (
+            f"missing {required!r} in _BASE_RESULTS — Slice-3 baseline drift"
+        )
