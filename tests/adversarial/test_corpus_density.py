@@ -22,6 +22,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+
+def _count_yaml_payloads(category_dir: Path) -> int:
+    """Return the number of ``*.yaml`` payload files under ``category_dir``.
+
+    Stricter than :func:`_count_payload_artifacts` — used by the Slice-4
+    xfail-strict density guards so a follow-on PR cannot flip the marker
+    by shipping a stub ``test_*.py`` without a real YAML payload (CR
+    finding #207-csb-001).
+    """
+    if not category_dir.is_dir():
+        return 0
+    return sum(1 for p in category_dir.glob("*.yaml") if p.is_file())
+
 
 def _count_payload_artifacts(category_dir: Path) -> int:
     """Return the number of YAML payloads + pytest modules under `category_dir`.
@@ -72,4 +87,83 @@ def test_dlp_egress_corpus_has_payloads() -> None:
     assert count > 0, (
         f"dlp_egress corpus has 0 payloads — expected ≥1 after the "
         f"owning PR (S3-5) merges. Searched: {category_dir}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slice-4 density guards — each marked xfail(strict=True) until owning PR
+# ships payloads. The strict marker FLIPS to pass when payloads arrive,
+# which then fails the test (strict=True), forcing the implementer to
+# remove the xfail decoration as part of the same PR. This closes the
+# "follow-on PR ships green with empty corpus tree" loophole.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="awaiting PR-S4-7 sandbox policies bundle — sbx-2026-001..N",
+)
+def test_sandbox_escape_corpus_has_payloads() -> None:
+    """`tests/adversarial/sandbox_escape/` must carry ≥1 payload from PR-S4-7."""
+    category_dir = Path(__file__).parent / "sandbox_escape"
+    count = _count_yaml_payloads(category_dir)
+    assert count > 0, (
+        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
+        "requires real YAML, not stub test modules"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="awaiting PR-S4-4 policy hot-reload — csb-2026-001..N",
+)
+def test_config_reload_bypass_corpus_has_payloads() -> None:
+    """`tests/adversarial/config_reload_bypass/` must carry ≥1 payload from PR-S4-4."""
+    category_dir = Path(__file__).parent / "config_reload_bypass"
+    count = _count_yaml_payloads(category_dir)
+    assert count > 0, (
+        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
+        "requires real YAML, not stub test modules"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="awaiting PR-S4-3 carrier substitution — crf-2026-001..N",
+)
+def test_carrier_substitution_tamper_corpus_has_payloads() -> None:
+    """`tests/adversarial/carrier_substitution_tamper/` must carry ≥1 payload from PR-S4-3."""
+    category_dir = Path(__file__).parent / "carrier_substitution_tamper"
+    count = _count_yaml_payloads(category_dir)
+    assert count > 0, (
+        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
+        "requires real YAML, not stub test modules"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="awaiting PR-S4-5 CLI operator session — osf-2026-001..N",
+)
+def test_operator_session_forgery_corpus_has_payloads() -> None:
+    """`tests/adversarial/operator_session_forgery/` must carry ≥1 payload from PR-S4-5."""
+    category_dir = Path(__file__).parent / "operator_session_forgery"
+    count = _count_yaml_payloads(category_dir)
+    assert count > 0, (
+        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
+        "requires real YAML, not stub test modules"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="awaiting PR-S4-8/9 comms-MCP foundations + Discord — cib-2026-001..N",
+)
+def test_comms_identity_boundary_corpus_has_payloads() -> None:
+    """`tests/adversarial/comms_identity_boundary/` must carry ≥1 payload from PR-S4-8/9."""
+    category_dir = Path(__file__).parent / "comms_identity_boundary"
+    count = _count_yaml_payloads(category_dir)
+    assert count > 0, (
+        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
+        "requires real YAML, not stub test modules"
     )

@@ -1385,3 +1385,94 @@ See [T3DerivedData](#t3deriveddata),
 [trust tier](#trust-tier),
 [dual-LLM split](#dual-llm-split), spec §3.7, and
 [docs/subsystems/security.md](subsystems/security.md).
+
+## CarrierSubstitution
+
+The recoverable-carrier semantic for the `error` hook stage shipped in
+Slice 4 ([ADR-0022](adr/0022-recoverable-carrier-semantic-for-error-stage-hookpoint-dispatch.md)).
+An `error`-stage subscriber may return a `SubstituteResult[T]` carrying a
+fallback carrier object; the dispatcher swaps it in for the original
+exception's would-be result, subject to a strict-total-order
+[trust tier](#trust-tier) guard (the subscriber's registered tier must
+not exceed the hookpoint's `carrier_tier`). Substitutions are observed
+via the meta-hookpoints `hooks.carrier_substituted` (success) and
+`hooks.carrier_substitution_refused` (refusal); refusal reasons include
+`tier_upgrade_attempt`, `recursion_refused`, and `payload_type_mismatch`.
+
+See [trust tier](#trust-tier), [ADR-0014](adr/0014-pluggable-hooks-for-every-action.md),
+and [ADR-0022](adr/0022-recoverable-carrier-semantic-for-error-stage-hookpoint-dispatch.md).
+
+## PoliciesSnapshotRef
+
+The synchronous handle to the active `PoliciesV1` snapshot, returned by
+`alfred.policies.PoliciesSnapshotRef.current()`. Long-lived loops deref
+per iteration; the call is a single GIL-atomic attribute load (no
+`await`), explicit in the type signature so mypy refuses misuse. The
+`PolicyWatcher` swaps the underlying snapshot atomically via single-
+attribute assignment after a successful `CONFIG_RELOAD_FIELDS` audit
+write ([ADR-0023](adr/0023-mtime-polled-hot-reload-for-policies-yaml.md)).
+Consumers MUST NOT cache the result across iterations.
+
+See [ADR-0023](adr/0023-mtime-polled-hot-reload-for-policies-yaml.md) and
+[ADR-0024](adr/0024-perf-gate-hardware-budget.md) (perf budget for `current()`).
+
+## OperatorSession
+
+The Slice-4 CLI session model written to `~/.config/alfred/session` by
+`alfred login` (`src/alfred/identity/operator_session.py`). Mode `0600`
+mandatory. Fields: HKDF-derived `token_hash` (peppered SHA-256), canonical
+`user_id`, 12-hour default expiry (clamped to `[1h, 7d]`), per-OS
+`machine_id_hash`, host. Load discipline is TOCTOU-safe:
+`os.openat()` against an fstat-validated parent dirfd, then
+`open(O_RDONLY | O_NOFOLLOW)` + `fstat` validates mode + uid → read.
+Expired / revoked / machine-id-mismatched / host-mismatched /
+token-user-mismatched sessions are refused with
+`OPERATOR_SESSION_REFUSED_FIELDS` and a closed-vocab `reason`.
+
+See [canonical user id](#canonical-user-id),
+[ADR-0020](adr/0020-supervisor-cli-access-via-postgres-and-state-git.md),
+and [docs/subsystems/supervisor.md](subsystems/supervisor.md).
+
+## sandbox kind
+
+The manifest declaration on a plugin entry that selects its kernel
+posture. Three values: `kind: none` (UID-separated baseline; Slice-3
+default), `kind: full` (bwrap-isolated with per-OS [policy_ref](#policy_ref),
+provider-key delivery via fd-3; Slice-4 quarantined-LLM and Discord
+adapter), and `kind: stub` (dev-only escape hatch — refuses in
+production via the `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED` env var with
+truthy parsing). See [ADR-0015](adr/0015-slice4-containerised-quarantined-llm.md)
+and `docs/superpowers/specs/2026-06-06-slice-4-design.md` §5.
+
+## policy_ref
+
+The relative path to a TOML policy file under
+`~/.config/alfred/sandbox/` (operator overlay) or
+`/usr/share/alfred/sandbox/` (image-baked fallback). Declared in a
+plugin manifest's `sandbox.policy_refs` block, one entry per host OS
+(`linux`, `macos`, `windows`). The launcher refuses any `policy_ref`
+that contains `..`, follows a symlink, or resolves outside the
+sandbox-policy root canonical directory — the
+`policy_ref_escapes_root` refusal reason on `SANDBOX_REFUSED_FIELDS`
+covers the path-traversal case. Vendor policies ship with a sibling
+`<policy>.sha256` integrity digest; the loader refuses on mismatch.
+
+See [sandbox kind](#sandbox-kind) and
+[ADR-0015](adr/0015-slice4-containerised-quarantined-llm.md).
+
+## fd-3 inheritance
+
+The provider-key delivery channel for `kind: full` plugins. The
+Supervisor (host) opens a pipe, writes a 4-byte big-endian length prefix
+plus the key bytes via a single `os.writev` syscall (atomic on POSIX), then
+zeroes the local `bytearray` and `gc.collect()`s. The launcher invokes
+`bwrap --keep-fd 3 ...` so the kernel inherits fd 3 into the spawned
+plugin. The plugin reads the framed bytes via Slice-3's
+`read_fd3_secret()`. Honest limitation: the Supervisor holds the key in
+a Python `str` (interned, non-zeroizable) for microseconds between the
+broker fetch and the writev — Slice-5's `SecretBroker.get_bytes` closes
+this.
+
+See [sandbox kind](#sandbox-kind),
+[ADR-0015](adr/0015-slice4-containerised-quarantined-llm.md), and
+`docs/superpowers/specs/2026-06-06-slice-4-design.md` §5.4.

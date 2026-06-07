@@ -654,3 +654,388 @@ STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS: Final[frozenset[str]] = frozenset(
         "correlation_id",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# Slice-4 audit-row constants (PR-S4-0a foundations)
+# ---------------------------------------------------------------------------
+#
+# Twenty-three new ``Final[frozenset[str]]`` constants spanning every Slice-4
+# subsystem: daemon boot lifecycle, carrier substitution (ADR-0022), policies
+# hot-reload (ADR-0023), operator sessions (#153), sandbox launcher (#152 §5),
+# comms-MCP foundations + addressing (#152 §6, ADR-0009 supersession).
+#
+# Field-set authoring rules carry over from Slice-3:
+# * every conditional emit-time field appears in the set;
+# * forensic join keys (``correlation_id``, ``boot_id``, ``user_id``,
+#   ``inbound_message_id``, ``policies_snapshot_hash``) live on the row, not on
+#   the line above the emit;
+# * tier-tagged ID fields (``platform_user_id_hash``, ``machine_id_hash``)
+#   carry pepper-keyed HMAC-SHA256 values (PR-S4-0b ships ``audit.hash_pepper``);
+# * ``language`` is a BCP-47 tag on every comms inbound family (i18n hard rule).
+#
+# Consumers in PR-S4-1..11 ingest these constants via
+# :func:`alfred.audit.log.AuditWriter.append_schema`; the writer treats the
+# frozenset as the closed contract surface.
+
+# ---------------------------------------------------------------------------
+# daemon.boot family — PR-S4-1
+# ---------------------------------------------------------------------------
+
+DAEMON_BOOT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "boot_id",
+        "started_at",
+        "state_git_head_sha",
+        "slice_version",
+        "policies_snapshot_hash",
+        "environment",
+    }
+)
+
+DAEMON_BOOT_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "boot_id",
+        "attempted_at",
+        "failure_reason",
+        "environment_source",
+    }
+)
+
+DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "boot_id",
+        "env_var_value",
+        "etc_file_value",
+        "resolved_value",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# state.proposal.dispatch_failure family (DLP-into-failure_detail; #173)
+# ---------------------------------------------------------------------------
+
+# Emitted on the SUCCESS path of ``_record_failure`` when the DLP scan completed
+# and the ledger row was written. Disjoint from ``DLP_OUTBOUND_REFUSED_FIELDS``
+# (which fires on the refusal path). ``redacted_detail`` is the scan-then-
+# truncate output; ``dlp_redactions_count`` is >=0 (binary signal in PR-S4-2;
+# Slice-5 may sharpen).
+PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "proposal_branch",
+        "dispatch_attempted_at",
+        "failure_class",
+        "redacted_detail",
+        "dlp_redactions_count",
+        "correlation_id",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# hooks.carrier_substitution family (ADR-0022; #170)
+# ---------------------------------------------------------------------------
+
+# Observation row emitted when an ``error``-stage subscriber returns a
+# ``SubstituteResult`` and the dispatcher accepts the substitution per the
+# strict-total-order tier-upgrade guard.
+CARRIER_SUBSTITUTION_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "hookpoint",
+        "subscriber_id",
+        "source_tier",
+        "carrier_tier",
+        "substituted_at",
+    }
+)
+
+# Refusal row emitted when the dispatcher refuses a substitution (tier-upgrade
+# attempt, recursion guard, payload type mismatch, or meta-hookpoint policy
+# violation).
+CARRIER_SUBSTITUTION_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "hookpoint",
+        "subscriber_id",
+        "attempted_source_tier",
+        "carrier_tier",
+        "reason",
+        "refused_at",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# config.reload family (ADR-0023; #159)
+# ---------------------------------------------------------------------------
+
+CONFIG_RELOAD_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "file_path",
+        "prev_sha256",
+        "new_sha256",
+        "changed_keys",
+        "loaded_at",
+        # ``operator_session_id`` joins to ``policies_snapshot_history``
+        # ``applied_by_operator_session_id`` (PR-S4-4 round-2 closure 4).
+        # None for auto-applied watcher reloads (the writer records None too).
+        "operator_session_id",
+    }
+)
+
+# ``reason`` closed-vocab: parse_failure | high_blast_change |
+# validation_failure | file_vanished | stat_failed | audit_write_failed
+# (per spec §4 / PR-S4-4 round-2 closures).
+CONFIG_RELOAD_REJECTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "file_path",
+        "attempted_sha256",
+        # ``reason`` closed-vocab: parse_failure | high_blast_change |
+        # validation_failure | file_vanished | stat_failed |
+        # audit_write_failed (PR-S4-4 round-2 closure 7: on audit-write
+        # failure the watcher MUST emit this row via the fallback sink AND
+        # re-raise; the active snapshot stays consistent with the last
+        # successful audit).
+        "reason",
+        "offending_key",
+        "dlp_scan_result",
+        "operator_session_id",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# operator.session family (#153)
+# ---------------------------------------------------------------------------
+
+OPERATOR_SESSION_CREATED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "user_id",
+        "issued_at",
+        "expires_at",
+        "host",
+        "machine_id_hash",
+        "via",
+    }
+)
+
+OPERATOR_SESSION_REVOKED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "user_id",
+        "revoked_at",
+        "via",
+    }
+)
+
+# ``reason`` closed-vocab: planted_file | expired | revoked | host_mismatch |
+# machine_mismatch | token_user_mismatch | planted_file_invalid_user_id
+# (per PR-S4-5 round-2 closures).
+OPERATOR_SESSION_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        # ``attempted_user_id`` is the self-claimed user_id from the planted/
+        # presented session file (Pydantic-validated for character class +
+        # length per PR-S4-5 round-2 closure 4). ``resolved_user_id`` is the
+        # DB-resolved owner of the token (None when token lookup misses).
+        # When the two differ the row carries reason="token_user_mismatch"
+        # (PR-S4-5 round-2 closure 11).
+        "attempted_user_id",
+        "resolved_user_id",
+        "reason",
+        "host",
+        "machine_id_hash",
+        "refused_at",
+        "via",
+    }
+)
+
+SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "component_id",
+        "reason",
+        "attempted_at",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# supervisor.plugin.sandbox family (#152 §5, ADR-0015)
+# ---------------------------------------------------------------------------
+
+# ``reason`` closed-vocab: policy_ref_missing | policy_ref_os_mismatch |
+# policy_ref_unreadable | policy_ref_escapes_root | bwrap_unavailable |
+# bwrap_mode_userns_unavailable | kind_full_requires_keep_fd_3 |
+# sandbox_info_handshake_mismatch
+# (per PR-S4-6/7 round-2 closures; ``policy_ref_escapes_root`` covers the
+# path-traversal case the sandbox_escape adversarial README documents and
+# is distinct from ``policy_ref_unreadable``).
+SANDBOX_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "plugin_id",
+        "policy_ref",
+        "host_os",
+        "reason",
+        "environment",
+    }
+)
+
+# Emitted when a kind:stub plugin runs unsandboxed in a development environment.
+# ``environment`` ∈ {"development", "test"} only — production refuses
+# (PR-S4-6 sec-2 closure).
+SANDBOX_STUB_USED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "plugin_id",
+        "policy_ref",
+        "host_os",
+        "environment",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# comms family — PR-S4-8/9/10 foundations
+# ---------------------------------------------------------------------------
+
+# Emitted at the wire-T3 → host promotion boundary; ``language`` is BCP-47
+# per i18n hard rule (PR-S4-9 round-2 closure 1).
+COMMS_INBOUND_T3_PROMOTION_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "inbound_message_id",
+        "platform_user_id_hash",
+        "canonical_user_id",
+        "sub_payload_kinds",
+        "language",
+        "addressing_signal",
+    }
+)
+
+COMMS_BINDING_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "platform_user_id_hash",
+        "verification_phrase_hash",
+        "requested_at",
+        # ``language`` is the BCP-47 tag resolved from the inbound DM (the
+        # binding-request prose is rendered back to the user in this language;
+        # i18n hard rule + PR-S4-9 round-2 closure 1).
+        "language",
+    }
+)
+
+COMMS_ADAPTER_CRASHED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        # ``error_class`` is the open-vocab Python exception type;
+        # ``reason`` is the closed-vocab SLO bucket the adapter-supervisor
+        # uses for runbook routing (see ``COMMS_ADAPTER_CRASHED_REASONS``
+        # discriminator vocab in spec §6.8).
+        "error_class",
+        "reason",
+        "detail_redacted",
+        "crashed_at",
+    }
+)
+
+COMMS_RATE_LIMIT_SIGNAL_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "platform_endpoint",
+        "retry_after_seconds",
+        "signalled_at",
+    }
+)
+
+COMMS_UNKNOWN_NOTIFICATION_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "method",
+        "method_redacted_params",
+        "observed_at",
+    }
+)
+
+COMMS_HANDLER_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "notification_method",
+        "handler_class",
+        # ``error_class`` is the open-vocab Python exception type;
+        # ``reason`` is the closed-vocab handler-failure bucket
+        # (validation, ratelimited_self, broker_unavailable, ...).
+        "error_class",
+        "reason",
+        "detail_redacted",
+        "failed_at",
+    }
+)
+
+COMMS_ADDRESSING_DRIFT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "inbound_signal",
+        "outbound_mode",
+        "canonical_user_id",
+        "observed_at",
+    }
+)
+
+# Emitted on BurstLimiter pre-resolution or per-user budget hit (PR-S4-8
+# round-2 closure 3). ``dropped`` is True only after the 30s
+# bucket-empty grace expires.
+COMMS_INBOUND_BUDGET_CAPPED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "canonical_user_id",
+        "persona",
+        "tokens_available",
+        "wait_seconds",
+        "dropped",
+        "observed_at",
+        # ``language`` carries the user's resolved language so the
+        # operator-facing "you were rate-limited" message renders in their
+        # locale (i18n hard rule + PR-S4-9 round-2 closure 1).
+        "language",
+    }
+)
+
+# ---------------------------------------------------------------------------
+# supervisor.plugin lifecycle (PR-S4-9/10 restart wiring)
+# ---------------------------------------------------------------------------
+
+SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "plugin_id",
+        "reason",
+        "requested_at",
+        "requester",
+    }
+)
+
+
+# ---------------------------------------------------------------------------
+# Slice-4 fieldset roster (test surface)
+# ---------------------------------------------------------------------------
+#
+# Names enumerated for ``tests/unit/audit/test_slice_4_audit_row_fields.py``
+# AST-walk verification. Adding a new Slice-4 ``*_FIELDS`` constant requires
+# adding its name to this tuple in the same commit (the AST guard catches
+# omissions).
+SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
+    "DAEMON_BOOT_FIELDS",
+    "DAEMON_BOOT_FAILED_FIELDS",
+    "DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS",
+    "PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS",
+    "CARRIER_SUBSTITUTION_FIELDS",
+    "CARRIER_SUBSTITUTION_REFUSED_FIELDS",
+    "CONFIG_RELOAD_FIELDS",
+    "CONFIG_RELOAD_REJECTED_FIELDS",
+    "OPERATOR_SESSION_CREATED_FIELDS",
+    "OPERATOR_SESSION_REVOKED_FIELDS",
+    "OPERATOR_SESSION_REFUSED_FIELDS",
+    "SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS",
+    "SANDBOX_REFUSED_FIELDS",
+    "SANDBOX_STUB_USED_FIELDS",
+    "COMMS_INBOUND_T3_PROMOTION_FIELDS",
+    "COMMS_BINDING_REQUESTED_FIELDS",
+    "COMMS_ADAPTER_CRASHED_FIELDS",
+    "COMMS_RATE_LIMIT_SIGNAL_FIELDS",
+    "COMMS_UNKNOWN_NOTIFICATION_FIELDS",
+    "COMMS_HANDLER_FAILED_FIELDS",
+    "COMMS_ADDRESSING_DRIFT_FIELDS",
+    "COMMS_INBOUND_BUDGET_CAPPED_FIELDS",
+    "SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS",
+)
