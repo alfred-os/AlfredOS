@@ -1,0 +1,11 @@
+# Gitleaks repo allowlist.
+#
+# Slice-4 plan PR-S4-2 documents a `HookRefusal(reason="canary_or_secret_in_failure_detail", ...)`
+# fixture as the contract surface for the DLP-into-failure_detail behaviour
+# (closes #173). The literal string `secret` inside the reason token, followed
+# by `correlation_id=...` on the same line, trips gitleaks' generic-api-key
+# rule by keyword-proximity. The fixture is documentation prose, not a secret.
+[allowlist]
+paths = [
+  '''docs/superpowers/plans/2026-06-07-slice-4-pr-s4-2-dlp-failure-detail\.md''',
+]
