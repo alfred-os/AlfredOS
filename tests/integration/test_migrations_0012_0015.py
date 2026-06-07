@@ -679,3 +679,352 @@ def test_0012_column_types_match_orm_contract(
         col_type = cols[tz_col]["type"]
         assert isinstance(col_type, sa.DateTime)
         assert col_type.timezone is True, f"{tz_col} must be timestamptz (timezone=True)"
+
+
+# ---------------------------------------------------------------------------
+# 0013 policies_snapshot_history
+# ---------------------------------------------------------------------------
+
+
+def test_0013_upgrade_creates_policies_snapshot_history(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Column-set matches plan §B exactly."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    inspector = sa.inspect(engine_at_0011)
+    assert "policies_snapshot_history" in inspector.get_table_names()
+    cols = {c["name"] for c in inspector.get_columns("policies_snapshot_history")}
+    assert cols == {
+        "snapshot_id",
+        "loaded_at",
+        "file_sha256",
+        "policies_json",
+        "swapped_from_snapshot_id",
+        "applied_by_operator_session_id",
+    }
+
+
+def test_0013_snapshot_id_primary_key_named(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """PK is named ``uq_policies_snapshot_history_snapshot_id``."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    inspector = sa.inspect(engine_at_0011)
+    pk = inspector.get_pk_constraint("policies_snapshot_history")
+    assert pk["name"] == "uq_policies_snapshot_history_snapshot_id"
+    assert pk["constrained_columns"] == ["snapshot_id"]
+
+
+def test_0013_self_reference_swapped_from(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """swapped_from_snapshot_id is a self-FK preserving snapshot lineage."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    inspector = sa.inspect(engine_at_0011)
+    fks = inspector.get_foreign_keys("policies_snapshot_history")
+    assert any(
+        fk["referred_table"] == "policies_snapshot_history"
+        and fk["referred_columns"] == ["snapshot_id"]
+        and fk["constrained_columns"] == ["swapped_from_snapshot_id"]
+        for fk in fks
+    ), f"missing self-FK on swapped_from_snapshot_id; got {fks}"
+
+
+def test_0013_applied_by_operator_session_fk(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """applied_by_operator_session_id FKs operator_sessions.token_hash.
+
+    PR-S4-4 round-2 closure 4: forensic-replay rows carry the
+    session token-hash of the operator who triggered the swap (NULL
+    for watcher-auto swaps).
+    """
+    alembic_command.upgrade(alembic_cfg, "0013")
+    inspector = sa.inspect(engine_at_0011)
+    fks = inspector.get_foreign_keys("policies_snapshot_history")
+    assert any(
+        fk["referred_table"] == "operator_sessions"
+        and fk["referred_columns"] == ["token_hash"]
+        and fk["constrained_columns"] == ["applied_by_operator_session_id"]
+        for fk in fks
+    ), f"missing FK applied_by → operator_sessions.token_hash; got {fks}"
+
+
+def test_0013_lookup_index_loaded_at_exists(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """``ix_policies_snapshot_history_loaded_at`` covers time-range queries."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    inspector = sa.inspect(engine_at_0011)
+    ix = next(
+        (
+            ix
+            for ix in inspector.get_indexes("policies_snapshot_history")
+            if ix["name"] == "ix_policies_snapshot_history_loaded_at"
+        ),
+        None,
+    )
+    assert ix is not None
+    assert ix["column_names"] == ["loaded_at"]
+
+
+@pytest.mark.parametrize(
+    "bad_sha",
+    [
+        "TOO-SHORT",
+        "9" * 63,
+        "9" * 65,
+        "Z" * 64,  # non-hex
+    ],
+)
+def test_0013_check_file_sha256_refuses_bad_format(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    bad_sha: str,
+) -> None:
+    """CHECK ``ck_policies_snapshot_history_file_sha256_hex`` refuses non-hex64."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    snapshot_id = "11111111-2222-3333-4444-555555555555"
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO policies_snapshot_history "
+                "(snapshot_id, loaded_at, file_sha256, policies_json) "
+                "VALUES (:s, :l, :f, :j)"
+            ),
+            {
+                "s": snapshot_id,
+                "l": dt.datetime.now(dt.UTC),
+                "f": bad_sha,
+                "j": "{}",
+            },
+        )
+
+
+def test_0013_check_snapshot_id_refuses_bad_uuid(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """CHECK ``ck_policies_snapshot_history_snapshot_id_uuid_hex`` refuses."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO policies_snapshot_history "
+                "(snapshot_id, loaded_at, file_sha256, policies_json) "
+                "VALUES (:s, :l, :f, :j)"
+            ),
+            {
+                "s": "not-a-uuid",
+                "l": dt.datetime.now(dt.UTC),
+                "f": "a" * 64,
+                "j": "{}",
+            },
+        )
+
+
+def test_0013_happy_path_bootstrap_snapshot_round_trip(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Bootstrap snapshot (swapped_from_snapshot_id IS NULL) round-trips."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    snapshot_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    with engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO policies_snapshot_history "
+                "(snapshot_id, loaded_at, file_sha256, policies_json) "
+                "VALUES (:s, :l, :f, :j)"
+            ),
+            {
+                "s": snapshot_id,
+                "l": now,
+                "f": "0" * 64,
+                "j": '{"rate_limit_window_seconds": 60}',
+            },
+        )
+    with engine_at_0011.begin() as conn:
+        row = conn.execute(
+            sa.text(
+                "SELECT snapshot_id, file_sha256, swapped_from_snapshot_id, "
+                "applied_by_operator_session_id "
+                "FROM policies_snapshot_history WHERE snapshot_id = :s"
+            ),
+            {"s": snapshot_id},
+        ).one()
+    assert row.snapshot_id == snapshot_id
+    assert row.file_sha256 == "0" * 64
+    # Bootstrap shape: both nullable FK fields are NULL.
+    assert row.swapped_from_snapshot_id is None
+    assert row.applied_by_operator_session_id is None
+
+
+def test_0013_downgrade_drops_table_and_index(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Downgrade removes table + named index."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    alembic_command.downgrade(alembic_cfg, "0012")
+    inspector = sa.inspect(engine_at_0011)
+    assert "policies_snapshot_history" not in inspector.get_table_names()
+
+
+def test_0013_downgrade_idempotent(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Symmetric fail-soft via IF EXISTS — re-downgrade no-ops cleanly."""
+    alembic_command.upgrade(alembic_cfg, "0013")
+    alembic_command.downgrade(alembic_cfg, "0012")
+    # Re-stamp + re-downgrade exercises the retry path.
+    alembic_command.stamp(alembic_cfg, "0013")
+    alembic_command.downgrade(alembic_cfg, "0012")
+    inspector = sa.inspect(engine_at_0011)
+    assert "policies_snapshot_history" not in inspector.get_table_names()
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review closures on 0013: FK refusals + applied_by hex + JSONB cap.
+# ---------------------------------------------------------------------------
+
+
+def test_0013_self_fk_refuses_dangling_swapped_from(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Self-FK on swapped_from_snapshot_id enforced at INSERT time.
+
+    Round-2 TE-209-1 closure: previously only inspector-shape was checked.
+    A future migration that dropped the FK clause would have silently passed.
+    This test plants a non-existent parent UUID and asserts refusal.
+    """
+    alembic_command.upgrade(alembic_cfg, "0013")
+    snapshot_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    dangling = "11111111-2222-3333-4444-555555555555"
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO policies_snapshot_history "
+                "(snapshot_id, loaded_at, file_sha256, policies_json, "
+                "swapped_from_snapshot_id) "
+                "VALUES (:s, :l, :f, :j, :p)"
+            ),
+            {
+                "s": snapshot_id,
+                "l": dt.datetime.now(dt.UTC),
+                "f": "1" * 64,
+                "j": "{}",
+                "p": dangling,
+            },
+        )
+
+
+def test_0013_operator_session_fk_refuses_dangling_applied_by(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """operator_sessions FK enforced — dangling token_hash refused.
+
+    Round-2 TE-209-2 closure + PR-S4-4 closure 4 attestation: the live
+    session link cannot be forged at INSERT time; a token_hash that
+    doesn't exist in operator_sessions is refused by the FK.
+    """
+    alembic_command.upgrade(alembic_cfg, "0013")
+    snapshot_id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    dangling_session = "0" * 64
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO policies_snapshot_history "
+                "(snapshot_id, loaded_at, file_sha256, policies_json, "
+                "applied_by_operator_session_id) "
+                "VALUES (:s, :l, :f, :j, :a)"
+            ),
+            {
+                "s": snapshot_id,
+                "l": dt.datetime.now(dt.UTC),
+                "f": "2" * 64,
+                "j": "{}",
+                "a": dangling_session,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_token_hash",
+    [
+        "TOO-SHORT",
+        "x" * 63,
+        "X" * 64,  # upper-case rejected by hex regex
+        "g" * 64,  # 'g' outside hex range
+    ],
+)
+def test_0013_check_applied_by_hex_refuses_bad_format(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    bad_token_hash: str,
+) -> None:
+    """CHECK ck_..._applied_by_hex refuses non-hex64 values when non-NULL.
+
+    Round-2 TE-209-3 closure: symmetric to file_sha256 + snapshot_id CHECK
+    refusal tests, so a future asymmetric regression where applied_by's
+    CHECK gets dropped doesn't slip through.
+    """
+    alembic_command.upgrade(alembic_cfg, "0013")
+    snapshot_id = "cccccccc-dddd-eeee-ffff-000000000000"
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO policies_snapshot_history "
+                "(snapshot_id, loaded_at, file_sha256, policies_json, "
+                "applied_by_operator_session_id) "
+                "VALUES (:s, :l, :f, :j, :a)"
+            ),
+            {
+                "s": snapshot_id,
+                "l": dt.datetime.now(dt.UTC),
+                "f": "3" * 64,
+                "j": "{}",
+                "a": bad_token_hash,
+            },
+        )
+
+
+def test_0013_check_policies_json_size_refuses_oversized(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """CHECK ``ck_..._policies_json_size`` refuses payloads >256 KB.
+
+    Round-2 sec-2 closure: defence-in-depth against direct-INSERT bypass
+    of the PR-S4-4 watcher's 256 KB cap. Construct a JSONB payload that
+    exceeds the 262144-byte ceiling.
+    """
+    alembic_command.upgrade(alembic_cfg, "0013")
+    snapshot_id = "dddddddd-eeee-ffff-0000-111111111111"
+    # 270 KB of JSON content
+    huge_value = "x" * (270 * 1024)
+    payload_json = f'{{"big": "{huge_value}"}}'
+    assert len(payload_json) > 262144  # sanity
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO policies_snapshot_history "
+                "(snapshot_id, loaded_at, file_sha256, policies_json) "
+                "VALUES (:s, :l, :f, :j)"
+            ),
+            {
+                "s": snapshot_id,
+                "l": dt.datetime.now(dt.UTC),
+                "f": "4" * 64,
+                "j": payload_json,
+            },
+        )
