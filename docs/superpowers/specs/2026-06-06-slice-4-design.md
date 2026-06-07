@@ -1141,7 +1141,7 @@ hash = hmac.new(
     key=pepper_bytes,
     msg=raw_value.encode("utf-8"),
     digestmod=hashlib.sha256,
-).hexdigest()[:32]
+).hexdigest()
 ```
 
 The pepper is **broker-resident**: it lives in the encrypted broker vault (default: age-encrypted TOML per ADR-0005 + ADR-0012) under the secret name `audit.hash_pepper`. The `AuditWriter` fetches it at host startup and holds the bytes in-process for the daemon's lifetime. It is **not** a `Settings.audit_hash_pepper` field — that earlier round-1/round-2 phrasing was wrong (Settings fields are env/config-sourced).
