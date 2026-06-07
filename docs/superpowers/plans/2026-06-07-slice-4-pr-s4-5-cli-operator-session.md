@@ -238,7 +238,7 @@ from alfred.identity.models import UserId
 
 
 _TOKEN_BYTES: Final = 32  # 32 random bytes; base64url-encoded → ~43 chars
-_HASH_LEN: Final = 32     # HMAC-SHA256 truncated to 32 hex chars (128 bits)
+_HASH_LEN: Final = 64     # full HMAC-SHA256 hex output (256 bits) — no truncation; matches the algorithm's natural output width and the 256-bit pepper/token entropy
 
 _DEFAULT_EXPIRES_IN: Final = timedelta(hours=12)
 _MIN_EXPIRES_IN: Final = timedelta(hours=1)
@@ -255,7 +255,7 @@ class OperatorSession(BaseModel):
     index.
 
     `machine_id_hash` is HMAC-SHA256(audit.hash_pepper, raw_machine_id),
-    truncated to 32 hex chars. The raw machine-id is NEVER serialised.
+    full HMAC-SHA256 hex output (64 chars / 256 bits). The raw machine-id is NEVER serialised.
     """
 
     schema_version: Literal[1]
@@ -449,7 +449,7 @@ async def compute_machine_id_hash(
     provider: MachineIdProvider,
     audit_hash_pepper: bytes,
 ) -> str:
-    """HMAC-SHA256(pepper, raw_machine_id), truncated to 32 hex chars.
+    """HMAC-SHA256(pepper, raw_machine_id), 64-char hex output (256 bits, no truncation).
 
     The pepper comes from secret_broker.get("audit.hash_pepper").encode("utf-8").
     Rotating the pepper invalidates cross-row correlation (documented trade-off
@@ -460,7 +460,7 @@ async def compute_machine_id_hash(
         key=audit_hash_pepper,
         msg=raw,
         digestmod=hashlib.sha256,
-    ).hexdigest()[:_HASH_LEN]
+    ).hexdigest()
 ```
 
 Tests (sec-006 closure):
@@ -472,11 +472,11 @@ Tests (sec-006 closure):
 
 ### §5.4 Token hash storage
 
-The token is **not** stored in the DB verbatim. The `operator_sessions.token_hash` column holds `hmac.new(pepper, token.encode(), sha256).hexdigest()[:32]`. The resolver computes the hash from the session-file's token and looks up `WHERE token_hash = :h AND revoked_at IS NULL`. Tests:
+The token is **not** stored in the DB verbatim. The `operator_sessions.token_hash` column holds `hmac.new(pepper, token.encode(), sha256).hexdigest()`. The resolver computes the hash from the session-file's token and looks up `WHERE token_hash = :h AND revoked_at IS NULL`. Tests:
 
 - Token + pepper → hash → DB lookup hits one row.
 - Rotated pepper invalidates lookups (deliberately — operators re-login after a pepper rotation, documented per spec §8.10).
-- Two distinct tokens produce two distinct hashes (no collisions in the 128-bit truncated space within any plausible operator deployment).
+- Two distinct tokens produce two distinct hashes (no collisions in the 256-bit hash space within any plausible operator deployment).
 
 ---
 
@@ -541,7 +541,7 @@ The tasks are sequenced so that the AST guard (Task 4) lands BEFORE any producti
   - `OperatorSession` per §5.1.
   - `OperatorSessionError(AlfredError)` root — every refusal raises a subclass.
   - Subclasses one-per-reason: `OperatorSessionMissing`, `OperatorSessionExpired`, `OperatorSessionRevoked`, `OperatorSessionHostMismatch`, `OperatorSessionMachineMismatch`, `OperatorSessionBadFileMode`, `OperatorSessionBadFileOwner`, `OperatorSessionTokenUnknown`, `OperatorSessionUserRevoked`, `OperatorSessionTimeout`, `OperatorSessionMalformed`, `OperatorSessionNoMachineId`.
-  - Constants `_TOKEN_BYTES = 32`, `_HASH_LEN = 32`, `_DEFAULT_EXPIRES_IN = timedelta(hours=12)`, `_MIN_EXPIRES_IN = timedelta(hours=1)`, `_MAX_EXPIRES_IN = timedelta(days=7)`.
+  - Constants `_TOKEN_BYTES = 32`, `_HASH_LEN = 64`, `_DEFAULT_EXPIRES_IN = timedelta(hours=12)`, `_MIN_EXPIRES_IN = timedelta(hours=1)`, `_MAX_EXPIRES_IN = timedelta(days=7)`.
 
   Run: `uv run pytest tests/unit/identity/test_operator_session_model.py -q`
   Expected: `6 passed` (one per bullet above).
@@ -687,7 +687,7 @@ The tasks are sequenced so that the AST guard (Task 4) lands BEFORE any producti
   - `LinuxMachineIdProvider`: primary readable → returns its bytes; primary missing, fallback readable → returns fallback; both missing → `OperatorSessionNoMachineId(host_os="linux")`. Use a temp dir + `monkeypatch` on the class's `_PRIMARY` / `_FALLBACK` paths to avoid touching the real `/etc/machine-id`.
   - `MacosMachineIdProvider`: cache hit → returns cached bytes. Cache miss + mocked `ioreg` returning the canonical `IOPlatformUUID` line → parses + writes cache + returns. `ioreg` exits non-zero → raises. Patch `asyncio.create_subprocess_exec`.
   - `WindowsMachineIdProvider`: registry read mocked via a fake `winreg` module → returns the GUID. Registry missing → raises.
-  - `compute_machine_id_hash`: HMAC-SHA256 with a known pepper + known raw → known 32-char hex digest.
+  - `compute_machine_id_hash`: HMAC-SHA256 with a known pepper + known raw → known 64-char hex digest (full 256-bit output).
   - `machine_id_provider()` returns the right concrete class per `sys.platform` (monkeypatched).
 
   Run: `uv run pytest tests/unit/identity/test_operator_session_machine_id.py -q`
@@ -885,7 +885,7 @@ The tasks are sequenced so that the AST guard (Task 4) lands BEFORE any producti
           raw_token = session.token.get_secret_value()
           token_hash = hmac.new(
               key=pepper, msg=raw_token.encode("utf-8"), digestmod=hashlib.sha256,
-          ).hexdigest()[:_HASH_LEN]
+          ).hexdigest()
           async with self._session_factory() as db:
               row = await db.execute(
                   select(OperatorSessionRow).where(
@@ -1015,7 +1015,7 @@ The tasks are sequenced so that the AST guard (Task 4) lands BEFORE any producti
   4. **Overwrite confirmation**: if a session file exists for a different user, prompt with `t("login.session_overwrite_confirm")` (`typer.confirm`); on refuse, exit non-zero.
   5. **`--expires-in` clamp**: parse the duration (`1h`, `24h`, `7d`); if outside `[1h, 7d]`, refuse with `t("login.expires_in_out_of_range")`.
   6. **Machine-id read**: call `compute_machine_id_hash(provider=machine_id_provider(), pepper=secret_broker.get("audit.hash_pepper").encode())`; on `OperatorSessionNoMachineId`, refuse with `t("login.no_machine_id")`.
-  7. **Token generation**: `token_raw = secrets.token_urlsafe(_TOKEN_BYTES)`. `token_hash = HMAC(pepper, token_raw)[:32]`.
+  7. **Token generation**: `token_raw = secrets.token_urlsafe(_TOKEN_BYTES)`. `token_hash = HMAC(pepper, token_raw)` (full 64-char hex, no truncation).
   8. **DB row insert** into `operator_sessions`.
   9. **Session-file write** via a `0o600`-mode temp file + atomic rename. Use `os.umask(0o077)` around the write to make the temp file mode 0600 from the start (do not rely on `os.chmod` after-the-fact which is TOCTOU).
   10. **Audit emit**: `OPERATOR_SESSION_CREATED_FIELDS` with `via="login"` (or `"refresh"` for the refresh path).
