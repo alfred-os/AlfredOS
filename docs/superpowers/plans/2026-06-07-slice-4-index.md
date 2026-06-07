@@ -176,6 +176,7 @@ All adversarial tests in implementation PRs reference these constants — no PR 
 ### `HookpointMeta.carrier_tier` + `allow_error_substitution` (defined in PR-S4-3)
 
 PR-S4-3 extends `src/alfred/hooks/registry.py:HookpointMeta` with two new fields. PR-S4-0a does NOT touch HookpointMeta (rev-007 closure — runtime-type changes belong with the carrier-substitution PR). **The fields ship with a coordinated migration plan** (sec-idx-001 + core-eng-004 + mem-002 closures from `/review-plan` round 1):
+
 1. `carrier_tier: TrustTier | None = None` ships as **Optional with `None` default** so PR-S4-3 lands without breaking the ~6 existing Supervisor hookpoints + every Slice-2.5/3 publisher.
 2. Every existing `register_hookpoint(...)` call in `src/` is migrated in PR-S4-3 itself to pass an explicit `carrier_tier=` value (the wave migration the index promised; not deferred).
 3. After PR-S4-3 lands, **a second-stage tightening** in the SAME PR flips the field to required (`carrier_tier: TrustTier`) once all in-tree call sites carry the value. Final commit of PR-S4-3.
@@ -189,11 +190,13 @@ PR-S4-3 extends `src/alfred/hooks/registry.py:HookpointMeta` with two new fields
 ### `OperatorSession` model + file-load contract (defined in PR-S4-5)
 
 Spec §6 carries the full model. File at `~/.config/alfred/session`, mode `0600` mandatory. Load discipline (sec-006 round-2 closure):
+
 1. `open(path, O_RDONLY | O_NOFOLLOW)` — refuse symlinks.
 2. `fstat(fd)` on the open fd — validate `st_mode == 0600`, `st_uid == os.getuid()`, `st_gid == os.getgid()`.
 3. Only after `fstat` passes, read contents.
 
 Per-OS machine-id sources (sec-006 round-2 closure):
+
 - Linux: `/etc/machine-id` then `/var/lib/dbus/machine-id`. Both unreadable → refuse with `login.no_machine_id`.
 - macOS: `IOPlatformUUID` cached at `/var/db/alfred/machine-id`.
 - Windows: `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography\MachineGuid`.
@@ -214,6 +217,7 @@ sandbox:
 ```
 
 `bin/alfred-plugin-launcher.sh` (bash — Slice-3 shipped, PR-S4-6 extends; sec-004 round-3 honest) resolves the per-OS policy by calling a pre-launcher Python helper at `src/alfred/plugins/manifest_reader.py`. Production refuse modes (each emits `SANDBOX_REFUSED_FIELDS`):
+
 - `policy_ref_missing` / `policy_ref_os_mismatch` / `policy_ref_unreadable`
 - `sandbox_block_missing`
 - `windows_stub_in_production`
@@ -224,6 +228,7 @@ Quarantined-LLM plugin migrates `kind: none` → `kind: full` in PR-S4-6 (manife
 ### Comms-MCP wire contract (ADR-0024, defined in PR-S4-0a, implemented in PR-S4-8)
 
 Spec §8.1 carries the four host→plugin requests + four plugin→host notifications. PR-S4-8 ships:
+
 - The wire-format owner at `src/alfred/comms_mcp/protocol.py` (NOT `src/alfred/comms/protocol.py` — Critical 1 round-1 closure).
 - Inbound notification dispatch via `AlfredPluginSession._on_post_handshake_method(method: str)` extension. **This method exists at `src/alfred/plugins/session.py:347`** — verified, NOT a fabricated surface (core-011 round-4 closure was the lesson).
 - Per-adapter `asyncio.BoundedSemaphore(value=Settings.comms_max_in_flight_notifications, default=32)` via `async with` block (core-008 + perf-003 closures).
@@ -290,7 +295,7 @@ Spec §11.5 lists 10 merge-blocking integration tests owned across the slice, **
 | `tests/integration/test_discord_addressing_modes.py` + `tests/integration/test_discord_subpayload_promotion.py` | PR-S4-9 | ubuntu-latest |
 | `tests/integration/test_tui_round_trip.py` + `tests/smoke/test_slice4_graduation.py` (compose-up + login + chat — ops-006 closure) | PR-S4-10 | ubuntu-latest |
 
-**Total: 10 merge-blocking gates** = 10 integration tests + the `tests/smoke/test_slice4_graduation.py` smoke test (rev-idx-003 closure: the smoke counts as its own required-status row in the manifest; PR-S4-10 promotes both `test_tui_round_trip.py` AND `test_slice4_graduation.py` via separate `gh api` calls so each appears as a distinct row in `docs/ci/required-checks.md`). The spec §14 §12 list and this table now match exactly.
+**Total: 10 merge-blocking gates** = 9 integration tests + the `tests/smoke/test_slice4_graduation.py` smoke test (rev-idx-003 closure: the smoke counts as its own required-status row in the manifest; PR-S4-10 promotes both `test_tui_round_trip.py` AND `test_slice4_graduation.py` via separate `gh api` calls so each appears as a distinct row in `docs/ci/required-checks.md`). The spec §14 and §12 lists and this table now match exactly.
 
 **macOS-advisory channel scaffolding** (devops closure): the `test_sandbox_escape_kernel_enforced.py` macos-advisory variant ships in PR-S4-7 alongside a new `.github/workflows/sandbox-macos-advisory.yml` workflow file. The workflow is **NOT** added to `required-checks.json`; it runs on `macos-latest`, reports green/red, but doesn't gate merge. PR-S4-7's plan ships the workflow file + a one-paragraph `docs/ci/macos-advisory.md` note explaining "advisory means visible-but-not-blocking; investigate failures but don't auto-revert." Adding a second macOS advisory check (e.g., a future Telegram adapter) follows the same pattern: a new `<feature>-macos-advisory.yml`, not added to required-checks.
 
@@ -309,6 +314,7 @@ Critical path through the dependency graph: `0a → 0b → 3 → 5 → 8 → 9 �
 ### Quality gates before any PR merges
 
 Every Slice-4 PR must clear:
+
 1. `make check` — mandatory.
 2. The adversarial suite (`uv run pytest tests/adversarial`) — mandatory for every PR touching `src/alfred/security/`, `src/alfred/hooks/`, `src/alfred/policies/`, `src/alfred/orchestrator/burst_limiter.py`, or `bin/alfred-plugin-launcher.sh`.
 3. 100% line + branch coverage on every trust-boundary file (spec §14 criterion 11 — 9 files; see per-file owning-PR mapping below).
@@ -333,6 +339,7 @@ Every Slice-4 PR must clear:
 Each PR's `Coverage gates` CI job uses `pytest --cov` with `--cov-fail-under=100 --cov-branch` against the file glob it owns. Promoted via `gh api` in the PR that ships it (same ops-007 promotion-per-PR pattern as integration tests). The required-checks manifest carries a row per file at slice graduation.
 
 **Recorded-LLM-fixture policy for the 10 merge-blocking integration tests** (test-eng-004 closure — several tests touch `quarantined_extract`, which calls a real LLM provider; without a recorded-fixture commitment they become flaky-required gates):
+
 - All 10 merge-blocking integration tests SHALL use **recorded VCR fixtures** for any LLM provider call, NOT live API calls. Live calls happen only in the nightly e2e suite (PRD §8 baseline).
 - Fixtures live at `tests/integration/fixtures/<test_name>/<scenario>.yaml`. Cassettes are checked in. Re-recording is a deliberate, reviewer-approved act (the test author updates the cassette and the PR description names the LLM API change that prompted it).
 - The fixture-format check at `tests/integration/test_fixture_format.py` (PR-S4-3 ships this; runs in `make check`) refuses cassettes lacking `match_on: [method, scheme, host, port, path, query, body]` to prevent silent drift.
@@ -343,7 +350,8 @@ Each PR's `Coverage gates` CI job uses `pytest --cov` with `--cov-fail-under=100
 
 ### Rollback strategy
 
-Each PR is independently revertable through PR-S4-9 because:
+Each PR is independently revertible through PR-S4-9 because:
+
 - Alembic migrations **0012–0015** each carry a `downgrade()` path (renumbered from 0011-0014 per mem-001 closure to avoid collision with the existing `0011_processed_proposals.py`).
 - `operator_sessions` rows are session tokens — reverting `cli-operator-session` revokes all sessions (acceptable; operators re-login).
 - `policies_snapshot_history` is optional rollback log; reverting hot-reload reverts to start-of-process-config-load behaviour (Slice-3 baseline).
@@ -354,6 +362,7 @@ Each PR is independently revertable through PR-S4-9 because:
 **Irreversible step:** PR-S4-10 deletes `src/alfred/comms/`. A post-PR-S4-10 regression that requires the in-process adapter back is a new PR on `main`, not a revert. PR-S4-11 verifies the deletion is clean.
 
 **Operator-recourse window between PR-S4-10 and PR-S4-11** (rev-idx-004 closure): the period after PR-S4-10 merges and before PR-S4-11 ships the graduation runbook + ADR-0015/0016 status flips is a documentation gap. Operators encountering issues in this window have no slice-4-runbook to consult and ADR-0015/0016 still read "Proposed". **Discipline**:
+
 1. PR-S4-10 lands `docs/runbooks/slice-4-graduation-PRELIM.md` as a stub-runbook covering only the failure modes its own PR introduces (TUI launcher spawn failure, residual `comms.` import attempts, ADR-0009 narrowed-caveat read). The stub is a placeholder + a one-line "full runbook lands at PR-S4-11; for now, see `docs/subsystems/comms.md`".
 2. A **48-hour soak window** between PR-S4-10 merge and PR-S4-11 open (operator-driven; not enforced by CI). If a regression surfaces during soak, PR-S4-11 inherits its closure.
 3. Carrier-substitution revert discipline (sec-idx-005 closure): a revert of PR-S4-3 *after* downstream hookpoint-registering PRs have merged silently weakens the trust boundary because `HookpointMeta.carrier_tier` becomes Optional again. **Coordinated revert rule**: any PR-S4-3 revert REQUIRES a coordinated revert of every dependent PR's hookpoint registration (PR-S4-1, S4-4, S4-5, S4-6, S4-7, S4-8, S4-9). PR-S4-3's plan ships the revert script (`scripts/revert-pr-s4-3-cascade.sh`) so the discipline is mechanically enforced.
@@ -438,5 +447,6 @@ To open as tracking issues when Slice 5 kicks off:
 - **`/review-plan` coordinator-to-specialist Phase C dispatch** — the coordinator's Agent-tool unavailability in this session left Phase C cross-checks unrun (manually compensated by filesystem verification of the Critical). Slice 5 should retry the workflow once the coordinator's Agent access is restored, OR the `/review-plan` skill should be updated to delegate cross-check dispatch back to the parent skill in this case.
 - **PR-S4-9 / PR-S4-10 import-window AST guard interim** — the comms-004 closure ships an interim "imports forbidden against `plugins/alfred_discord/`" check; Slice-5 should generalise this pattern into a reusable test helper for any future cross-PR deletion + replacement flow.
 - **Discord adapter `THREAT_MODEL.md`** — per sec-idx-002 closure, PR-S4-9 ships a per-plugin threat-model markdown alongside the implementation. Slice 5 should formalise this into a per-plugin manifest field (`threat_model_ref:`) so every kind:none first-party plugin carries a documented threat model the reviewer-gate can verify exists.
+- **`host` field unhashed in operator-session audit rows** (PR-S4-0a `/review-plan` round-2 sec-2 finding): `OPERATOR_SESSION_*_FIELDS` carry `host` (raw hostname) alongside `machine_id_hash` (HMAC-peppered). The asymmetry leaks persistent host identity into the immutable audit log. Slice 5 changes the field to `host_hash` and adds a matching `host` column to the `operator_sessions` table for binding-check forensics (the raw value stays in the broker-resident DB row; the audit log gets only the hash). Migration `00NN_operator_session_host_hash` handles the rename; the partition-anchor invariant test extension follows.
 
 ---
