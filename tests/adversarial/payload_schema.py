@@ -27,11 +27,17 @@ _PREFIX_TO_CATEGORY: dict[str, str] = {
     "hk": "hooks",
     "tl": "tier_laundering",  # Slice 3 — T3 content posing as T2, cast bypasses
     "de": "dlp_egress",  # Slice 3 — T3-origin credential exfiltration paths
+    # Slice 4 additions (PR-S4-0a):
+    "sbx": "sandbox_escape",  # ADR-0015 — sandbox host-escape attempts
+    "csb": "config_reload_bypass",  # ADR-0023 — hot-reload high-blast bypass
+    "crf": "carrier_substitution_tamper",  # ADR-0022 — tier-upgrade / recursion
+    "osf": "operator_session_forgery",  # #153 — planted-file + replay
+    "cib": "comms_identity_boundary",  # #152 — comms-platform identity spoof
 }
 
 # Anchored regex matching `<prefix>-YYYY-NNN`. NNN is zero-padded to three
 # digits per SKILL.md "Numbering monotonic per year per category."
-_ID_PATTERN = re.compile(r"^(pi|dlp|cap|cnry|ipp|hk|tl|de)-\d{4}-\d{3}$")
+_ID_PATTERN = re.compile(r"^(pi|dlp|cap|cnry|ipp|hk|tl|de|sbx|csb|crf|osf|cib)-\d{4}-\d{3}$")
 
 Category = Literal[
     "prompt_injection",
@@ -42,6 +48,12 @@ Category = Literal[
     "hooks",
     "tier_laundering",  # Slice 3: T3->T2 cast bypasses, wire-format confusion, nonce forgery
     "dlp_egress",  # Slice 3: T3-origin exfiltration (distinct from dlp — see spec §12.1)
+    # Slice 4 additions (PR-S4-0a):
+    "sandbox_escape",  # Slice 4: ADR-0015 host-escape (filesystem, process-fork, network)
+    "config_reload_bypass",  # Slice 4: high-blast hot-reload, TOCTOU on policies.yaml
+    "carrier_substitution_tamper",  # Slice 4: ADR-0022 tier upgrade, recursion via meta-hookpoint
+    "operator_session_forgery",  # Slice 4: planted-file, token replay, machine-id mismatch
+    "comms_identity_boundary",  # Slice 4: platform-id spoofing, addressing drift
 ]
 
 IngestionPath = Literal[
@@ -57,6 +69,14 @@ IngestionPath = Literal[
     "wire_format_deser",  # malformed JSON-RPC tier field on the wire
     "capability_gate",  # capability-gate bypass attempt
     "secret_broker",  # secret leaked via env or manifest
+    # Slice 4 additions (PR-S4-0a):
+    "sandbox_policy_load",  # PolicyTomlReader / vendor-policy parse path
+    "operator_session_file",  # planted ~/.config/alfred/session content
+    "mtime_poll",  # PolicyWatcher tick — TOCTOU on policies.yaml
+    "inbound_notification_handler",  # comms-MCP wire ingest into orchestrator
+    "proposal_dispatch_failure",  # OutboundDlp scan of failure_detail
+    "comms_inbound_message",  # raw platform body before identity resolution
+    "stdio_fd3_key_delivery",  # provider-key fd-3 framing
 ]
 
 ExpectedOutcome = Literal[
@@ -68,6 +88,9 @@ ExpectedOutcome = Literal[
     "boundary_refused",  # tag(T3, ...) from unauthorised caller disposition
     # asserts a specific named audit row exists (e.g. manifest-broadening-capped):
     "audit_row_emitted",
+    # Slice 4 additions (PR-S4-0a):
+    "policy_swap_aborted_on_audit_failure",  # config.reload audit-write fails → swap aborts
+    "recursion_refused",  # error subscriber registered against meta-hookpoint refused
 ]
 
 
