@@ -670,3 +670,19 @@ class SandboxPolicyRegistry(Base):
             name="ck_sandbox_policy_registry_policy_ref_relative",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Cross-module Base.metadata registration
+# ---------------------------------------------------------------------------
+# OperatorSession (this module) declares a FK to ``users.id`` declared by
+# ``alfred.identity.models.User``. Pyright/mypy resolve the FK string at
+# runtime via ``Base.metadata`` — and SQLAlchemy ``Base.metadata.create_all()``
+# refuses with ``NoReferencedTableError`` if ``users`` is not registered.
+#
+# Side-effect import at module bottom: ensures any consumer that imports
+# ``alfred.memory.models`` also registers the identity tables with the same
+# ``Base.metadata``. The import is placed AFTER ``Base`` is defined to break
+# the (otherwise-circular) import — ``alfred.identity.models`` reaches up
+# to read ``Base`` from this module, which by this line is fully populated.
+import alfred.identity.models as _alfred_identity_models  # noqa: E402, F401

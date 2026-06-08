@@ -157,6 +157,124 @@ if [[ ! -f "$secrets_file" ]]; then
 fi
 chmod 600 "$secrets_file"
 
+step "Ensuring ~/.config/alfred/sandbox/ exists"
+# Per-OS sandbox-policy files live here for PR-S4-6's launcher to
+# resolve (spec §7.5–7.7). The directory is operator-controlled; this
+# step only ensures it EXISTS with sensible default perms on first
+# creation. Vendor or local policy files are dropped here by the
+# operator (or shipped by downstream PR-S4-7 as default policies).
+#
+# DevEx closure (PR #215): chmod only on newly-created dirs. If the
+# operator pre-created or symlinked ~/.config/alfred/sandbox to a
+# shared location, leave the perms alone — operator intent wins. We
+# warn (but do not refuse) on world-readable perms so the operator
+# can see the trade-off.
+sandbox_dir="$HOME/.config/alfred/sandbox"
+if [[ ! -d "$sandbox_dir" ]]; then
+  mkdir -p "$sandbox_dir"
+  chmod 700 "$sandbox_dir"
+  echo "Created $sandbox_dir (mode 0700)."
+else
+  current_mode="$(stat -c '%a' "$sandbox_dir" 2>/dev/null || stat -f '%A' "$sandbox_dir" 2>/dev/null || echo unknown)"
+  if [[ "$current_mode" != "700" && "$current_mode" != "unknown" ]]; then
+    echo "WARN: $sandbox_dir already exists with mode $current_mode (kept). "
+    echo "      0700 is recommended; chmod yourself if you intend that."
+  else
+    echo "$sandbox_dir already exists; leaving alone."
+  fi
+fi
+
+step "Bootstrapping audit.hash_pepper secret"
+# AlfredOS uses audit.hash_pepper as the HMAC key for every *_hash
+# audit-row field (PR-S4-5 operator_session.token_hash + machine_id_hash,
+# PR-S4-8/9 platform_user_id_hash + verification_phrase_hash). Each
+# purpose-specific subkey is HKDF-derived from this master pepper at
+# the application layer (PR-S4-5 round-2 closure 3).
+#
+# This step is idempotent: if a non-empty value is already in the
+# broker config file we leave it alone. Rotating the pepper
+# invalidates cross-row correlation (spec §8.10), so the bootstrap
+# MUST NOT clobber an existing value.
+#
+# Concurrency: the entire bootstrap (grep guard + append) runs inside
+# a per-target-file lock acquired via mkdir (POSIX-portable; flock is
+# Linux-only). Two concurrent setup-script invocations therefore see
+# strict at-most-one bootstrap (PR #215 sec-2 closure — TOCTOU between
+# grep and append).
+#
+# Key is written with TOML quoting (``"audit.hash_pepper" = ...``) so
+# tomllib parses it as a top-level dotted string key rather than as a
+# nested table ``{audit: {hash_pepper: ...}}`` (PR #215 cross-cutting
+# closure — unquoted would have left SecretBroker.get(...) raising
+# UnknownSecretError).
+pepper_key="audit.hash_pepper"
+target_file="${ALFRED_SECRETS_FILE:-$secrets_file}"
+lock_dir="${target_file}.lock"
+
+# PR #215 sec-1 closure: chmod 600 the target_file directly (the outer
+# $secrets_file chmod only covered the default path).
+_pepper_ensure_target() {
+  if [[ ! -f "$target_file" ]]; then
+    printf '# AlfredOS secrets file. DO NOT commit.\n' > "$target_file"
+  fi
+  chmod 600 "$target_file"
+}
+
+_pepper_bootstrap() {
+  _pepper_ensure_target
+  if grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
+    echo "audit.hash_pepper already configured in ${target_file}; leaving alone."
+    return 0
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    cat >&2 <<EOF_NO_OPENSSL
+ERROR: openssl is required to bootstrap audit.hash_pepper but is not on PATH.
+       Install it for your distro and re-run this script (the run is
+       idempotent — already-configured pepper is left alone):
+         Debian/Ubuntu:   sudo apt-get install -y openssl
+         Fedora/RHEL:     sudo dnf install -y openssl
+         Arch:            sudo pacman -S openssl
+         Alpine:          sudo apk add openssl
+         macOS (brew):    brew install openssl
+EOF_NO_OPENSSL
+    return 1
+  fi
+  pepper_value="$(openssl rand -hex 32)"
+  # Quote the dotted key so tomllib reads it as a flat string key
+  # (cross-cutting BLOCKER closure).
+  printf '"%s" = "%s"\n' "$pepper_key" "$pepper_value" >> "$target_file"
+  echo "Seeded audit.hash_pepper into ${target_file}."
+}
+
+# mkdir-lock: POSIX atomic. Acquire, run, release.
+if mkdir "$lock_dir" 2>/dev/null; then
+  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+  _pepper_bootstrap || _pepper_status=$?
+  rmdir "$lock_dir"
+  trap - EXIT INT TERM
+  if [[ -n "${_pepper_status:-}" ]] && [[ "$_pepper_status" -ne 0 ]]; then
+    exit "$_pepper_status"
+  fi
+else
+  # Another concurrent setup invocation holds the lock. Wait up to 30
+  # seconds for it to finish; if it never releases, refuse loudly
+  # rather than racing.
+  waited=0
+  while [[ -d "$lock_dir" ]] && [[ "$waited" -lt 30 ]]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [[ -d "$lock_dir" ]]; then
+    echo "ERROR: audit.hash_pepper bootstrap lock ${lock_dir} held >30s — refusing to race." >&2
+    exit 1
+  fi
+  # Lock released; the other invocation already bootstrapped (or
+  # already-configured case). Just verify the key is present.
+  if ! grep -qE "^\"?${pepper_key}\"?[[:space:]]*=" "$target_file" 2>/dev/null; then
+    _pepper_bootstrap
+  fi
+fi
+
 # Export UID and GID so the compose `user: "${UID:-1000}:${GID:-1000}"`
 # substitution picks up the operator's real uid/gid. macOS bash 3.2
 # does NOT export UID by default, and GID is rarely exported on any
