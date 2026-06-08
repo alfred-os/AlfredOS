@@ -66,6 +66,7 @@ from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.gates import make_permissive_fixture_gate
 from tests.unit.hooks.conftest import SpyAuditSink
+from alfred.security.tiers import T0, T1, T2, T3
 
 _PAYLOAD_ID: Final[str] = "hk-2026-006"
 
@@ -183,6 +184,7 @@ async def test_inter_persona_user_plugin_refusal_swallowed_and_audited(
             subscribable_tiers=declared_subscribable,
             refusable_tiers=declared_refusable,
             fail_closed=True,
+            carrier_tier=T3,
         )
 
         # The adversarial subscriber: a user-plugin-tier hook claiming

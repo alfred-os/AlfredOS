@@ -68,6 +68,7 @@ import pytest
 
 from alfred.hooks.registry import OPEN_TIERS, HookRegistry, get_registry, set_registry
 from tests.helpers.gates import make_permissive_fixture_gate
+from alfred.security.tiers import T0, T1, T2, T3
 
 # Pinned bench knobs — mirrored from
 # ``tests/perf/test_hook_dispatch_perf.py``. Centralising them lets the
@@ -269,6 +270,7 @@ def _declare_bench_hookpoints(registry: HookRegistry) -> None:
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,
+        carrier_tier=T3,
     )
 
 

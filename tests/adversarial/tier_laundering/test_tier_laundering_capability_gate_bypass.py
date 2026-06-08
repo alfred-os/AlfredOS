@@ -34,6 +34,7 @@ from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookRegistry
 from alfred.memory.episodic import EpisodicRecordInput
 from tests.helpers.gates import make_deny_all_gate
+from alfred.security.tiers import T0, T1, T2, T3
 
 _PAYLOAD_ID: Final[str] = "tl-2026-006"
 _PAYLOAD_PATH: Final[Path] = (
@@ -91,6 +92,7 @@ def test_user_plugin_subscriber_refused_on_system_only_hookpoint() -> None:
         subscribable_tiers=frozenset({"system"}),
         refusable_tiers=frozenset(),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     async def hostile_user_plugin_subscriber(

@@ -2202,3 +2202,14 @@ msgstr ""
 #~ "after reviewer merge).\n"
 #~ "Check dispatch status with: alfred supervisor proposals --recent"
 
+
+# Slice-4 PR-S4-3 — recoverable-carrier semantic registration gates.
+
+msgid "hooks.carrier_tier_required"
+msgstr "Hookpoint {hookpoint} declared with carrier_tier=None but is not on the meta-hookpoint allow-list. Every non-meta hookpoint MUST declare its upper-bound trust tier (see ADR-0022 PR-S4-3). Set carrier_tier= to the appropriate TrustTier subclass."
+
+msgid "hooks.carrier_tier_must_be_none_for_meta_hookpoint"
+msgstr "Hookpoint {hookpoint} is a meta-hookpoint (hooks.* family) but declared with a non-None carrier_tier. Meta-hookpoints MUST carry carrier_tier=None to break the substitution recursion loop (see ADR-0022 PR-S4-3)."
+
+msgid "hooks.allow_error_substitution_must_be_false_for_meta_hookpoint"
+msgstr "Hookpoint {hookpoint} is a meta-hookpoint (hooks.* family) but declared with allow_error_substitution=True. Meta-hookpoints MUST carry allow_error_substitution=False to belt-and-braces the recursion guard (see ADR-0022 PR-S4-3)."

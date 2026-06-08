@@ -44,6 +44,7 @@ from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.gates import make_permissive_fixture_gate
 from tests.unit.hooks.conftest import SpyAuditSink
+from alfred.security.tiers import T0, T1, T2, T3
 
 _PAYLOAD_ID: Final[str] = "hk-2026-003"
 
@@ -155,6 +156,7 @@ async def test_dispatch_subscribable_tiers_drift_refused_and_audited(
             subscribable_tiers=declared_subscribable,
             refusable_tiers=declared_refusable,
             fail_closed=declared_fail_closed,
+            carrier_tier=T3,
         )
 
         correlation_id = uuid4().hex

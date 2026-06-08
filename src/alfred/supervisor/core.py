@@ -774,22 +774,31 @@ class Supervisor:
           supervisor's observability-shaped hookpoints.
         """
         from alfred.hooks import SYSTEM_ONLY_TIERS, SYSTEM_OPERATOR_TIERS, get_registry
+        from alfred.security.tiers import T0, TrustTier
 
         registry = get_registry()
-        hookpoints: tuple[tuple[str, frozenset[str], frozenset[str], bool], ...] = (
-            ("supervisor.breaker.tripped", SYSTEM_ONLY_TIERS, frozenset(), False),
-            ("supervisor.breaker.reset", SYSTEM_OPERATOR_TIERS, frozenset(), False),
-            ("supervisor.action_timeout", SYSTEM_ONLY_TIERS, frozenset(), False),
-            ("plugin.lifecycle.loaded", SYSTEM_ONLY_TIERS, frozenset(), False),
-            ("plugin.lifecycle.crashed", SYSTEM_ONLY_TIERS, frozenset(), False),
-            ("plugin.lifecycle.quarantined", SYSTEM_ONLY_TIERS, frozenset(), False),
+        # PR-S4-3: every supervisor hookpoint is system-internal
+        # observability (breaker state transitions, action-timeout
+        # signals, plugin-lifecycle events). T0 (system-only) is the
+        # correct carrier tier upper bound — none of these paths
+        # carries operator or untrusted content.
+        hookpoints: tuple[
+            tuple[str, frozenset[str], frozenset[str], bool, type[TrustTier]], ...
+        ] = (
+            ("supervisor.breaker.tripped", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
+            ("supervisor.breaker.reset", SYSTEM_OPERATOR_TIERS, frozenset(), False, T0),
+            ("supervisor.action_timeout", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
+            ("plugin.lifecycle.loaded", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
+            ("plugin.lifecycle.crashed", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
+            ("plugin.lifecycle.quarantined", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
         )
-        for name, subscribable_tiers, refusable_tiers, fail_closed in hookpoints:
+        for name, subscribable_tiers, refusable_tiers, fail_closed, carrier_tier in hookpoints:
             registry.register_hookpoint(
                 name=name,
                 subscribable_tiers=subscribable_tiers,
                 refusable_tiers=refusable_tiers,
                 fail_closed=fail_closed,
+                carrier_tier=carrier_tier,
             )
 
 
