@@ -16,6 +16,7 @@ from sqlalchemy import (
     JSON,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -23,7 +24,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, reconstructor
 
 
@@ -146,7 +147,13 @@ class AuditEntry(Base):
             # (spec §13). Order matches the migration's _SLICE_3_ADDITIONS.
             "'extracted', 'malformed_exhausted', 'load_refused', 'crashed', "
             "'quarantined', 'reloaded', 'requested', 'approved', 'denied', "
-            "'revoked', 'tripped', 'reset', 'content_expired')",
+            "'revoked', 'tripped', 'reset', 'content_expired', "
+            # Slice-4 (migration 0014) — DLP-into-failure_detail (PR-S4-2),
+            # carrier substitution (PR-S4-3), policies hot-reload (PR-S4-4),
+            # plus the generic attestation result used by the
+            # PR-S4-4 closure 7 audit-write-failure path.
+            "'dispatched_with_redactions', 'dispatched_clean', "
+            "'recursion_refused', 'audit_row_emitted')",
             name="ck_audit_log_result",
         ),
     )
@@ -509,3 +516,157 @@ class ProcessedProposalsHead(Base):
     )
 
     __table_args__ = (CheckConstraint("id = 1", name="ck_processed_proposals_head_singleton"),)
+
+
+class OperatorSession(Base):
+    """CLI operator-session token row.
+
+    Mirrors the ``operator_sessions`` table (migration 0012). The
+    session token itself never lands in the DB — only ``token_hash``
+    does (HMAC-SHA256 hex of the random token, keyed by the HKDF-derived
+    ``_TOKEN_HASH_SUBKEY`` per PR-S4-5 round-2 closure 3).
+
+    ``token_hash`` is the natural primary key — globally unique
+    (256-bit HMAC-SHA256 hex output) and the column PR-S4-5's
+    ``_resolve_operator`` reads on every CLI invocation. Postgres
+    auto-creates the unique btree on the PK; ADR-0024 budgets the
+    lookup at <=5 ms p99.
+
+    ``revoked_at`` is nullable — active sessions have NULL.
+    ``alfred logout`` sets the column rather than deleting the row so
+    the audit-log retains the session lifecycle.
+
+    ``__table_args__`` mirrors migration 0012's CHECK constraints,
+    indexes, and named PK so ``Base.metadata.create_all()`` tests
+    that bypass alembic build the same DB-layer refusal surface PR-S4-5
+    + the 5 ms p99 budget rely on.
+    """
+
+    __tablename__ = "operator_sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    issued_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    host: Mapped[str] = mapped_column(String(253), nullable=False)
+    machine_id_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        sa.PrimaryKeyConstraint("token_hash", name="uq_operator_sessions_token_hash"),
+        Index(
+            "ix_operator_sessions_user_id_expires_at",
+            "user_id",
+            "expires_at",
+        ),
+    )
+
+
+class PoliciesSnapshotHistory(Base):
+    """Optional rollback log for PR-S4-4 hot-reload swaps.
+
+    Mirrors the ``policies_snapshot_history`` table (migration 0013;
+    ADR-0023). One row per swapped-in ``PoliciesV1`` snapshot.
+
+    ``swapped_from_snapshot_id`` is the self-reference to the previous
+    snapshot (NULL for the bootstrap snapshot). ``ON DELETE RESTRICT``
+    at the DB layer prevents silent lineage breakage; the model mirrors
+    that contract.
+
+    ``applied_by_operator_session_id`` carries the live-session LINK to
+    the operator who drove a watcher-CLI-initiated swap; NULL when the
+    watcher auto-swapped on an mtime change. **Forensic attribution
+    lives in audit_log, not on this column** — see the migration
+    docstring + PR #209 sec-1 closure.
+
+    ``__table_args__`` mirrors migration 0013's CHECK constraints
+    (snapshot_id UUID format, file_sha256 hex format, applied_by hex
+    format, 256 KB JSONB size cap from PR-S4-4 round-2 closure 2) and
+    the time-range lookup index. Consumers that bypass alembic
+    (``metadata.create_all()``) get the same defence-in-depth surface.
+    """
+
+    __tablename__ = "policies_snapshot_history"
+
+    snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    loaded_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # JSONB on Postgres (production), JSON on SQLite (unit-test fallback) — same
+    # logical type, dialect-portable. Production migration 0013 uses JSONB
+    # exclusively; this with_variant keeps SQLite-backed tests buildable.
+    policies_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
+    swapped_from_snapshot_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("policies_snapshot_history.snapshot_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    applied_by_operator_session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("operator_sessions.token_hash", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # Postgres-specific CHECK constraints (regex ``~``, ``octet_length``)
+    # live in migration 0013 only — SQLite-backed unit tests (which consume
+    # this model via ``Base.metadata.create_all()``) cannot parse those
+    # operators. Production DB (Postgres + alembic) carries the full
+    # defence-in-depth surface (UUID hex format, SHA-256 hex format,
+    # 256 KB JSONB size cap from PR-S4-4 closure 2). The dialect-portable
+    # constraints (named PK + lookup index) stay on the model.
+    __table_args__ = (
+        sa.PrimaryKeyConstraint("snapshot_id", name="uq_policies_snapshot_history_snapshot_id"),
+        Index("ix_policies_snapshot_history_loaded_at", "loaded_at"),
+    )
+
+
+class SandboxPolicyRegistry(Base):
+    """Launcher policy-resolution observability.
+
+    Mirrors the ``sandbox_policy_registry`` table (migration 0015;
+    ADR-0015). Composite PK ``(plugin_id, host_os)`` — one row per
+    plugin per host OS. Read-only observability; the launcher itself
+    does NOT consult this table at spawn time (the live policy is in
+    the plugin's manifest + the on-disk policy file). Operators query
+    it to confirm every plugin's expected policy matches the resolved
+    one across OSes.
+
+    ``__table_args__`` mirrors migration 0015's CHECK constraints
+    (host_os + resolution_result closed vocabs, plugin_id snake_case
+    charset, policy_ref relative-path guard).
+    """
+
+    __tablename__ = "sandbox_policy_registry"
+
+    plugin_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    host_os: Mapped[str] = mapped_column(String(16), nullable=False)
+    policy_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    last_resolved_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolution_result: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    __table_args__ = (
+        sa.PrimaryKeyConstraint(
+            "plugin_id",
+            "host_os",
+            name="uq_sandbox_policy_registry_plugin_host_os",
+        ),
+        CheckConstraint(
+            "host_os IN ('linux', 'macos', 'windows')",
+            name="ck_sandbox_policy_registry_host_os",
+        ),
+        CheckConstraint(
+            "resolution_result IN ('resolved', 'refused_policy_missing', "
+            "'refused_unreadable', 'refused_os_mismatch', 'stub_used')",
+            name="ck_sandbox_policy_registry_resolution_result",
+        ),
+        CheckConstraint(
+            "policy_ref NOT LIKE '/%' AND policy_ref NOT LIKE '%..%'",
+            name="ck_sandbox_policy_registry_policy_ref_relative",
+        ),
+    )
