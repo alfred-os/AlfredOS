@@ -731,6 +731,25 @@ PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Emitted when ``OutboundDlp.scan`` raises a NON-``HookRefusal`` exception
+# while scanning ``failure_detail`` (e.g. a regex-engine fault, an encoding
+# error in a stage). Disjoint from both ``PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS``
+# (clean/redacted success) and ``DLP_OUTBOUND_REFUSED_FIELDS`` (deliberate
+# canary-trip refusal). The scan-failed path ABORTS the ledger insert — a
+# scanner we cannot trust the output of MUST NOT let unscanned bytes land in
+# ``processed_proposals.failure_detail``. ``scan_error_type`` is the
+# ``type(exc).__name__`` closed-vocab discriminator (no T3 surface — the
+# exception MESSAGE is never carried, only the class name). err-003 / sec-004.
+PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "proposal_branch",
+        "dispatch_attempted_at",
+        "failure_class",
+        "scan_error_type",
+        "correlation_id",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # hooks.carrier_substitution family (ADR-0022; #170)
 # ---------------------------------------------------------------------------
@@ -1019,6 +1038,7 @@ SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
     "DAEMON_BOOT_FAILED_FIELDS",
     "DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS",
     "PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS",
+    "PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS",
     "CARRIER_SUBSTITUTION_FIELDS",
     "CARRIER_SUBSTITUTION_REFUSED_FIELDS",
     "CONFIG_RELOAD_FIELDS",
