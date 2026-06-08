@@ -159,6 +159,17 @@ See [glossary: OutboundDlp](../glossary.md#outbounddlp). The inbound
 analog lives in the plugins subsystem — see
 [InboundContentScanner](../glossary.md#inboundcontentscanner).
 
+- **DLP placement — state.git dispatch `failure_detail` (#173, PR-S4-2):**
+  `alfred.state.dispatch_loop._record_failure` runs `OutboundDlp.scan` over
+  the proposal-dispatch `failure_detail` before the 512-char truncation, so
+  a secret/canary cannot reach `processed_proposals.failure_detail`. The
+  wire emits **two disjoint** audit rows (spec §2.1):
+  `state.proposal.failure_detail_redacted` on success (clean/redacted) and
+  the Slice-3 `security.dlp_outbound_refused` on a canary-trip refusal
+  (which aborts the ledger write). A non-`HookRefusal` scan fault emits
+  `state.proposal.dispatch_dlp_scan_failed` and likewise aborts. Full
+  subsystem write-up lands in PR-S4-11.
+
 ### Secret broker (`src/alfred/security/secrets.py`)
 
 See [glossary: SecretBroker](../glossary.md#secretbroker).

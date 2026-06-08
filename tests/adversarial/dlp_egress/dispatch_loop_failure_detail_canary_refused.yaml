@@ -1,0 +1,43 @@
+# dispatch_loop_failure_detail_canary_refused.yaml — dlp_egress payload (#173).
+# Schema: tests/adversarial/payload_schema.py. Executable counterpart:
+# test_dispatch_loop_failure_detail_canary_refused.py.
+#
+# TODO: Slice-5 — re-validate against the real canary mechanism once
+# Slice-3's OutboundDlp.scan() actually raises HookRefusal on a canary
+# trip. Today the canary stage (dlp.py _canary_stub) is a no-op returning
+# text unchanged, so the refusal arm is exercised via an injected DLP stub
+# whose scan() raises HookRefusal. When the real canary stage lands, this
+# same payload exercises it against natural inputs with no code change to
+# _record_failure (sec-004).
+#
+# Threat: a canary token planted in the dispatch `failure_detail` channel
+# trips the DLP canary stage. The scan raises HookRefusal; _record_failure
+# MUST abort the ProcessedProposal insert entirely (the detail is too
+# dangerous to land even truncated) and emit security.dlp_outbound_refused.
+id: de-2026-006
+category: dlp_egress
+threat: >-
+  A canary token planted in the proposal-dispatch `failure_detail` channel
+  trips the DLP canary stage, which raises HookRefusal. PR-S4-2's
+  `_record_failure` aborts the ledger insert (no ProcessedProposal row
+  lands) and emits a `security.dlp_outbound_refused` audit row — the
+  refusal is the deliberate no-write signal, disjoint from the
+  redacted-success path.
+ingestion_path: proposal_dispatch_failure
+payload:
+  failure_detail: "detail carrying canary token CANARY-7f3a9b refused"
+  planted_canary: "CANARY-7f3a9b"
+  note: >-
+    Slice-5 TODO — the canary stage is a no-op stub today; the refusal arm
+    is exercised via an injected refusing-DLP stub. The contract this
+    payload pins: HookRefusal from scan() aborts the write and emits
+    DLP_OUTBOUND_REFUSED_FIELDS.
+expected_outcome: boundary_refused
+provenance: >-
+  Issue #173 + spec §2.1 (DLP_OUTBOUND_REFUSED_FIELDS reserved for the
+  refusal path; aborts the write). PR-S4-2 round-2 closure sec-004
+  (canary fidelity Slice-5 TODO).
+references:
+  - "issue #173 — DLP scan into processed_proposals.failure_detail"
+  - "spec §2.1 — DLP_OUTBOUND_REFUSED_FIELDS reserved for refusal path"
+  - "spec §3.3 — refusal aborts the ProcessedProposal insert"
