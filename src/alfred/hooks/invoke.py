@@ -584,6 +584,7 @@ async def invoke[T](
     refusable_tiers: frozenset[str] = _DEFAULT_TIERS,
     fail_closed: bool = False,
     exc: BaseException | None = None,
+    carrier_type: type[T] | None = None,
 ) -> HookContext[T]:
     """Dispatch a hook chain for ``(name, kind)``.
 
@@ -761,6 +762,7 @@ async def invoke[T](
             refusable_tiers=refusable_tiers,
             fail_closed=fail_closed,
             exc=exc,
+            carrier_type=carrier_type,
         )
     finally:
         # Pop the frame REGARDLESS of how dispatch terminated — a
@@ -781,6 +783,7 @@ async def _dispatch_by_kind[T](
     refusable_tiers: frozenset[str],
     fail_closed: bool,
     exc: BaseException | None,
+    carrier_type: type[T] | None = None,
 ) -> HookContext[T]:
     """Route to one of four kind-handlers.
 
@@ -816,6 +819,7 @@ async def _dispatch_by_kind[T](
             exc=exc,
             subscribable_tiers=subscribable_tiers,
             fail_closed=fail_closed,
+            carrier_type=carrier_type,
         )
         # PR-S4-3 (ADR-0022): pattern-match the discriminated union
         # back to the public HookContext[T] return type so legacy
