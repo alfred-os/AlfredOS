@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from alfred.audit.log import AuditWriter
 from alfred.memory.models import Base, ProcessedProposal, ProcessedProposalsHead
+from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_loop import _proposal_dispatch_cycle
 from alfred.state.dispatch_registry import (
     PROPOSAL_HANDLERS,
@@ -49,6 +50,20 @@ from alfred.state.dispatch_registry import (
     ProposalEffectsProtocol,
 )
 from alfred.supervisor.errors import NoSuchComponentError
+
+
+def _identity_dlp() -> OutboundDlp:
+    """An OutboundDlp whose stages are no-ops — satisfies the required field."""
+
+    class _IdentityBroker:
+        def redact(self, text: str) -> str:
+            return text
+
+    def _sink(*, event: str, subject: object) -> None:
+        return None
+
+    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
+
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -173,6 +188,7 @@ async def test_breaker_reset_proposal_round_trip_happy_path(
         audit_writer=audit,
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     # Bootstrap.
@@ -252,6 +268,7 @@ async def test_breaker_reset_proposal_round_trip_unknown_component(
         audit_writer=audit,
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     # Bootstrap.
@@ -325,6 +342,7 @@ async def test_breaker_reset_proposal_crash_after_ledger_before_sentinel_safe(
         audit_writer=audit,
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     # Bootstrap so the sentinel is populated.
@@ -433,6 +451,7 @@ async def test_breaker_reset_proposal_round_trip_real_supervisor(
         audit_writer=audit,
         effects=supervisor,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     # Bootstrap.

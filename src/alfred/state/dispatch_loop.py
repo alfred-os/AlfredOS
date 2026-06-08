@@ -58,13 +58,20 @@ the handler. Mismatch → ``failure_kind="payload_validation"`` ledger
 row + handler skipped. Closes the type-confusion vector where a blob's
 JSON claims a different type than its path.
 
-DLP redaction of ``failure_detail`` is tracked at #173 (CR rework
-round-1 CRITICAL #2). Today :func:`_truncated_detail` only truncates;
-the call sites that feed it (``type(exc).__name__``,
-handler-returned closed-vocab reasons) keep the realised leak
-surface small, but a future emit site that drops a Pydantic
-ValidationError string into this channel would carry T3 fragments
-without #173 in place.
+DLP redaction of ``failure_detail`` (#173, PR-S4-2). Every failure-row
+write runs the failure detail through ``ctx.outbound_dlp.scan(...)``
+BEFORE the 512-char truncation (:func:`_redacted_detail`), so a secret
+or canary that reached this channel — via ``type(exc).__name__``,
+handler-returned reasons, or any future emit site that drops a richer
+string here — is redacted (or, on a canary-trip ``HookRefusal``,
+refused) before it can land in ``processed_proposals.failure_detail``.
+The boundary is truthful regardless of what the call sites pass: the
+scan is not opt-out (CLAUDE.md hard rule #4). ``_record_failure`` emits
+two **disjoint** audit rows per spec §2.1 — ``state.proposal.failure_detail_redacted``
+on success (count >=0) and the Slice-3 ``security.dlp_outbound_refused``
+on refusal (which aborts the row insert). A non-``HookRefusal`` scan
+exception emits ``state.proposal.dispatch_dlp_scan_failed`` and likewise
+aborts the insert.
 """
 
 from __future__ import annotations
@@ -88,11 +95,15 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alfred.audit.audit_row_schemas import (
+    DLP_OUTBOUND_REFUSED_FIELDS,
+    PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS,
+    PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS,
     STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS,
     STATE_PROPOSAL_DISPATCH_FAILED_FIELDS,
     STATE_PROPOSAL_PROCESSED_FIELDS,
 )
-from alfred.memory.models import ProcessedProposal, ProcessedProposalsHead
+from alfred.hooks.errors import HookRefusal
+from alfred.memory.models import AuditEntry, ProcessedProposal, ProcessedProposalsHead
 from alfred.state.dispatch_registry import (
     PROPOSAL_HANDLERS,
     ProposalContext,
@@ -668,7 +679,7 @@ async def _dispatch_one(
             session_scope,
             result="failed_parse",
             failure_kind="payload_validation",
-            failure_detail=_truncated_detail(type(exc).__name__),
+            failure_detail=type(exc).__name__,
             operator_user_id=None,
             correlation_id=correlation_id,
             framework_error_kind="payload_validation",
@@ -687,8 +698,11 @@ async def _dispatch_one(
             # CR rework round-1 CRITICAL #2: ``ValidationError`` carries
             # the malformed input verbatim — never let that string near
             # the ledger. Use the exception class name (closed vocab,
-            # zero T3 surface).
-            failure_detail=_truncated_detail(type(exc).__name__),
+            # zero T3 surface). #173 / PR-S4-2: ``_record_failure`` now
+            # runs ``ctx.outbound_dlp.scan(...)`` over this value before
+            # the ledger write regardless, so the boundary stays truthful
+            # even if a future emit site widens what it passes here.
+            failure_detail=type(exc).__name__,
             operator_user_id=None,
             correlation_id=correlation_id,
             framework_error_kind="payload_validation",
@@ -722,7 +736,7 @@ async def _dispatch_one(
             session_scope,
             result="failed_handler",
             failure_kind="handler_uncaught_exception",
-            failure_detail=_truncated_detail(type(exc).__name__),
+            failure_detail=type(exc).__name__,
             operator_user_id=operator_user_id,
             correlation_id=correlation_id,
             framework_error_kind="handler_uncaught_exception",
@@ -746,7 +760,7 @@ async def _dispatch_one(
         session_scope,
         result="failed_handler",
         failure_kind="handler_returned_failed",
-        failure_detail=_truncated_detail(outcome.reason or ""),
+        failure_detail=outcome.reason or "",
         operator_user_id=operator_user_id,
         correlation_id=correlation_id,
         framework_error_kind=None,
@@ -816,6 +830,121 @@ async def _record_applied(
         raise _PostHandlerAuditFailure("audit emit failed after applied-row commit") from exc
 
 
+async def _emit_dlp_outbound_refused(
+    ctx: ProposalContext,
+    ref: _ProposalBlobRef,
+    refusal: HookRefusal,
+    *,
+    correlation_id: str,
+) -> None:
+    """Emit the Slice-3 ``DLP_OUTBOUND_REFUSED_FIELDS`` row on a canary-trip refusal.
+
+    sec-004: ``OutboundDlp.scan`` raised :class:`HookRefusal` (the canary
+    stage said no-write). No ``ProcessedProposal`` row is inserted — the
+    failure detail is too dangerous to land even truncated. The refusal
+    row reuses the Slice-3 constant verbatim so the audit-graph reads the
+    proposal-dispatch refusal on the same wire as the stdio-transport
+    refusal (``security.dlp_outbound_refused``).
+
+    An audit-emit failure here raises :class:`_PostHandlerAuditFailure` so
+    the cycle aborts loudly (CLAUDE.md #7) — narrowed to the DB-write
+    family per err-001 so a programmer error in the subject propagates.
+    """
+    try:
+        await ctx.audit_writer.append_schema(
+            fields=DLP_OUTBOUND_REFUSED_FIELDS,
+            schema_name="DLP_OUTBOUND_REFUSED_FIELDS",
+            event="security.dlp_outbound_refused",
+            actor_user_id=None,
+            actor_persona="supervisor",
+            subject={
+                "wire": "proposal_dispatch_failure",
+                "direction": "outbound",
+                "scan_rule_matched": refusal.reason,
+                "field_name": "failure_detail",
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T1",
+            result="refused",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=correlation_id,
+        )
+    except SQLAlchemyError as exc:
+        raise _PostHandlerAuditFailure("audit emit failed during DLP outbound refusal") from exc
+    _log.warning(
+        "state.dispatch.failure_detail_dlp_refused",
+        proposal_type=ref.proposal_type,
+        proposal_id=ref.proposal_id,
+        scan_rule_matched=refusal.reason,
+        correlation_id=correlation_id,
+    )
+
+
+async def _emit_dlp_scan_failed(
+    ctx: ProposalContext,
+    ref: _ProposalBlobRef,
+    exc: Exception,
+    *,
+    correlation_id: str,
+) -> None:
+    """Emit ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` on a non-refusal scan fault.
+
+    err-003: ``OutboundDlp.scan`` raised something other than
+    :class:`HookRefusal` (a regex-engine fault, an encoding error in a
+    stage). A scanner whose output we cannot trust MUST NOT let unscanned
+    bytes reach the ledger, so the row insert is aborted. Only the
+    exception CLASS name is carried (``scan_error_type``) — the message is
+    never persisted, keeping the row free of any T3 surface the scan was
+    meant to catch.
+    """
+    try:
+        await ctx.audit_writer.append_schema(
+            fields=PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS,
+            schema_name="PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS",
+            event="state.proposal.dispatch_dlp_scan_failed",
+            actor_user_id=None,
+            actor_persona="supervisor",
+            subject={
+                "proposal_branch": ref.content_path,
+                "dispatch_attempted_at": dt.datetime.now(dt.UTC).isoformat(),
+                "failure_class": "dlp_scan_error",
+                "scan_error_type": type(exc).__name__,
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T1",
+            result="refused",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=correlation_id,
+        )
+    except SQLAlchemyError as audit_exc:
+        raise _PostHandlerAuditFailure(
+            "audit emit failed during DLP scan-failed abort"
+        ) from audit_exc
+
+
+def _validate_subject_keys(subject: Mapping[str, object], fields: frozenset[str]) -> None:
+    """Symmetric key-validation mirroring ``AuditWriter.append_schema``.
+
+    The same security guard the writer applies (missing OR extra key →
+    raise) re-applied here because the #173 redacted row is written
+    INSIDE the ledger session (err-002 transactional lockstep) rather
+    than through ``append_schema``'s own-session path. A typo'd field or
+    an accidental T3 fragment in the subject fails loudly at the emit
+    site rather than persisting an off-contract JSONB blob.
+    """
+    missing = fields - subject.keys()
+    extra = subject.keys() - fields
+    if missing or extra:
+        msg = (
+            f"failure-detail redacted audit subject mismatch: "
+            f"missing={sorted(missing)!r} extra={sorted(extra)!r}; "
+            f"declared fields are {sorted(fields)!r}"
+        )
+        raise ValueError(msg)
+
+
 async def _record_failure(
     ctx: ProposalContext,
     ref: _ProposalBlobRef,
@@ -832,12 +961,63 @@ async def _record_failure(
 ) -> None:
     """Insert the ledger row + emit processed-or-failed audit row for a failure path.
 
-    Audit-emit failures land in :class:`_PostHandlerAuditFailure` per
-    HIGH #6 — handler-returned-failed cases hold the same ledger-row
-    invariant as the applied path (a row landed; subsequent cycles
-    short-circuit on PK).
+    DLP boundary (#173 / PR-S4-2). Before the ledger insert, ``failure_detail``
+    is run through ``ctx.outbound_dlp.scan(...)`` and then truncated by
+    :func:`_redacted_detail`:
+
+    * **clean / redacted** → the redacted text lands in the ledger and a
+      ``PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS`` row is written IN THE
+      SAME session as the ledger insert (err-002 transactional lockstep:
+      the ledger row and its audit twin commit atomically, so an
+      audit-emit failure rolls back the ledger row and the cycle retries).
+    * **canary-trip ``HookRefusal``** → the row insert is ABORTED, a
+      Slice-3 ``DLP_OUTBOUND_REFUSED_FIELDS`` row is emitted, and the
+      function returns without landing a ledger row (sec-004).
+    * **other scan exception** → ABORTED, a
+      ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` row is emitted carrying
+      only the exception CLASS name (no T3 surface), and the function
+      returns (err-003).
+
+    Audit-emit failures on the trailing PROCESSED / DISPATCH_FAILED row
+    land in :class:`_PostHandlerAuditFailure` per HIGH #6 — handler-returned
+    -failed cases hold the same ledger-row invariant as the applied path.
     """
+    # --- DLP scan the failure detail BEFORE it can reach the ledger. ---
+    dlp_redactions_count = 0
+    scanned_detail: str | None
+    if failure_detail is None:
+        scanned_detail = None
+    else:
+        try:
+            scanned = ctx.outbound_dlp.scan(failure_detail)
+        except HookRefusal as refusal:
+            await _emit_dlp_outbound_refused(ctx, ref, refusal, correlation_id=correlation_id)
+            return
+        except Exception as exc:
+            await _emit_dlp_scan_failed(ctx, ref, exc, correlation_id=correlation_id)
+            return
+        if scanned != failure_detail:
+            dlp_redactions_count = 1
+        scanned_detail = _redacted_detail(scanned)
+
     processed_at = dt.datetime.now(dt.UTC)
+
+    # err-002 transactional lockstep: the ledger row AND its
+    # PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS audit twin land in the SAME
+    # session so they commit atomically. If the audit row write raises, the
+    # session context manager rolls BOTH back and the cycle retries next
+    # tick (sentinel unbumped). This is the one audit row that must NOT use
+    # AuditWriter's own-session path — a ledger row landing without its
+    # redaction-accounting twin is silent divergence (CLAUDE.md #7).
+    redacted_subject: dict[str, object] = {
+        "proposal_branch": ref.content_path,
+        "dispatch_attempted_at": processed_at.isoformat(),
+        "failure_class": failure_kind,
+        "redacted_detail": scanned_detail if scanned_detail is not None else "",
+        "dlp_redactions_count": dlp_redactions_count,
+        "correlation_id": correlation_id,
+    }
+    _validate_subject_keys(redacted_subject, PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS)
     async with session_scope() as session:
         session.add(
             ProcessedProposal(
@@ -849,8 +1029,25 @@ async def _record_failure(
                 result=result,
                 handler_version=1,
                 failure_kind=failure_kind,
-                failure_detail=failure_detail,
+                failure_detail=scanned_detail,
                 operator_user_id=operator_user_id,
+            )
+        )
+        # sec-001: the redacted row's result mirrors the DLP OUTCOME, never
+        # "refused" (that value is reserved for DLP_OUTBOUND_REFUSED_FIELDS).
+        session.add(
+            AuditEntry(
+                trace_id=correlation_id,
+                event="state.proposal.failure_detail_redacted",
+                actor_user_id=operator_user_id,
+                actor_persona="supervisor",
+                subject=redacted_subject,
+                trust_tier_of_trigger="T1",
+                result=(
+                    "dispatched_with_redactions" if dlp_redactions_count > 0 else "dispatched_clean"
+                ),
+                cost_estimate_usd=0.0,
+                cost_actual_usd=0.0,
             )
         )
 
@@ -908,7 +1105,12 @@ async def _record_failure(
             cost_actual_usd=0.0,
             trace_id=correlation_id,
         )
-    except Exception as exc:
+    except SQLAlchemyError as exc:
+        # err-001: narrow to the DB-write failure family. The audit row's
+        # own session flush is the only thing that can fail here for an
+        # infrastructure reason; a ValueError/TypeError from a wrong-shape
+        # subject is a programmer error and MUST propagate loud (a typo in
+        # the emit site is a bug, not a transient audit-writer outage).
         raise _PostHandlerAuditFailure("audit emit failed after failure-row commit") from exc
 
 
@@ -961,27 +1163,27 @@ async def _emit_cycle_skipped(
         )
 
 
-def _truncated_detail(text: str) -> str:
-    """Truncate text bound for the ``failure_detail`` ledger column.
+def _redacted_detail(text: str) -> str:
+    """Truncate DLP-scanned text bound for the ``failure_detail`` column.
 
-    CR rework round-1 CRITICAL #2: this helper used to be named
-    ``_redacted_detail`` and its docstring claimed DLP redaction. It
-    never did — it only truncated. The rename keeps the name honest;
-    DLP wiring is tracked at
-    `#173 <https://github.com/alfred-os/AlfredOS/issues/173>`_.
+    This helper is **only the truncation step**. Callers MUST run
+    ``ctx.outbound_dlp.scan(text)`` BEFORE passing text here — the DLP
+    scan happens at the :func:`_record_failure` call site, not inside this
+    helper, so the single-purpose truncate stays trivially testable and
+    audit-graphable (#173, PR-S4-2).
 
-    Today the dispatcher's call sites pass only closed-vocab strings
-    through this path (``type(exc).__name__``, handler-returned
-    closed-vocab reasons). That keeps the realised leak surface
-    small. A future emit site that drops a Pydantic
-    ``ValidationError`` string into this channel would carry T3
-    fragments verbatim — #173 wires :meth:`OutboundDlp.scan` at this
-    boundary to close that surface.
+    The name is now truthful: the text reaching this helper has already
+    been through :meth:`alfred.security.dlp.OutboundDlp.scan` (broker
+    redaction + generic-API-key regex + canary stage), so what lands in
+    ``processed_proposals.failure_detail`` carries no secret bytes. Before
+    PR-S4-2 this helper was misleadingly named ``_redacted_detail`` while
+    only truncating (CR rework round-1 CRITICAL #2 / #173); the scan is
+    now wired so the name is accurate.
 
     The 512-char truncation matches ``ProcessedProposal.failure_detail``'s
-    String(512) column width; an overlong input gets the same shape
-    Postgres would refuse with at insert time, just at the Python
-    layer so the cycle's audit emit doesn't fail with a DataError.
+    String(512) column width; an overlong (post-redaction) input gets the
+    same shape Postgres would refuse with at insert time, just at the
+    Python layer so the cycle's audit emit doesn't fail with a DataError.
     """
     return text[:512]
 

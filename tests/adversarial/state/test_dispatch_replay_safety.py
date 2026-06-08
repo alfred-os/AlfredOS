@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from alfred.audit.log import AuditWriter
 from alfred.memory.models import Base, ProcessedProposal, ProcessedProposalsHead
+from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_loop import _proposal_dispatch_cycle
 from alfred.state.dispatch_registry import (
     PROPOSAL_HANDLERS,
@@ -45,6 +46,20 @@ from alfred.state.dispatch_registry import (
     ProposalEffectsProtocol,
 )
 from alfred.supervisor.errors import NoSuchComponentError
+
+
+def _identity_dlp() -> OutboundDlp:
+    """An OutboundDlp whose stages are no-ops — satisfies the required field."""
+
+    class _IdentityBroker:
+        def redact(self, text: str) -> str:
+            return text
+
+    def _sink(*, event: str, subject: object) -> None:
+        return None
+
+    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
+
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -138,6 +153,7 @@ async def test_dispatch_does_not_replay_processed_proposal_on_supervisor_restart
         audit_writer=audit_1,
         effects=effects_1,
         logger=structlog.get_logger("ctx1"),
+        outbound_dlp=_identity_dlp(),
     )
 
     # First-supervisor lifetime.
@@ -158,6 +174,7 @@ async def test_dispatch_does_not_replay_processed_proposal_on_supervisor_restart
         audit_writer=audit_2,
         effects=effects_2,
         logger=structlog.get_logger("ctx2"),
+        outbound_dlp=_identity_dlp(),
     )
     await _proposal_dispatch_cycle(
         ctx=ctx_2, repo_path=state_git_repo, session_scope=session_scope_factory
@@ -188,6 +205,7 @@ async def test_dispatch_records_unknown_proposal_type_loud(
         audit_writer=audit,
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     await _proposal_dispatch_cycle(
@@ -246,6 +264,7 @@ async def test_dispatch_rejects_proposal_referencing_unknown_component_id(
         audit_writer=audit,
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     await _proposal_dispatch_cycle(
@@ -296,6 +315,7 @@ async def test_dispatch_does_not_invoke_handler_for_declarative_proposal_types(
         audit_writer=audit,
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     await _proposal_dispatch_cycle(

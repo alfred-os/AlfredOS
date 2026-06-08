@@ -28,6 +28,7 @@ import pytest
 import structlog
 
 from alfred.audit.log import AuditWriter
+from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_registry import (
     PROPOSAL_HANDLERS,
     DispatchOutcome,
@@ -37,6 +38,20 @@ from alfred.state.dispatch_registry import (
 )
 from alfred.state.proposal_payloads import BreakerResetProposal
 from alfred.supervisor.errors import NoSuchComponentError
+
+
+def _identity_dlp() -> OutboundDlp:
+    """An OutboundDlp whose stages are no-ops — satisfies the required field."""
+
+    class _IdentityBroker:
+        def redact(self, text: str) -> str:
+            return text
+
+    def _sink(*, event: str, subject: object) -> None:
+        return None
+
+    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
+
 
 # ---------------------------------------------------------------------------
 # DispatchOutcome — name, factories, immutability
@@ -126,6 +141,7 @@ def test_proposal_context_is_frozen() -> None:
         audit_writer=audit,
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
     with pytest.raises((AttributeError, TypeError)):
         ctx.audit_writer = AsyncMock(spec=AuditWriter)  # type: ignore[misc]
@@ -187,6 +203,7 @@ async def test_handle_breaker_reset_calls_effects_reset_breaker() -> None:
         audit_writer=AsyncMock(spec=AuditWriter),
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     outcome = await _handle_breaker_reset(payload, ctx)
@@ -219,6 +236,7 @@ async def test_handle_breaker_reset_returns_failed_on_unknown_component() -> Non
         audit_writer=AsyncMock(spec=AuditWriter),
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     outcome = await _handle_breaker_reset(payload, ctx)
@@ -247,6 +265,7 @@ async def test_handle_breaker_reset_propagates_unexpected_exception() -> None:
         audit_writer=AsyncMock(spec=AuditWriter),
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
 
     with pytest.raises(RuntimeError):
@@ -280,6 +299,7 @@ async def test_handle_breaker_reset_refuses_wrong_payload_type() -> None:
         audit_writer=AsyncMock(spec=AuditWriter),
         effects=AsyncMock(spec=ProposalEffectsProtocol),
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
     with pytest.raises(TypeError):
         await _handle_breaker_reset(payload, ctx)
@@ -302,6 +322,7 @@ async def test_handle_breaker_reset_is_async_returns_dispatch_outcome() -> None:
         audit_writer=AsyncMock(spec=AuditWriter),
         effects=effects,
         logger=structlog.get_logger("test"),
+        outbound_dlp=_identity_dlp(),
     )
     outcome = await _handle_breaker_reset(payload, ctx)
     assert isinstance(outcome, DispatchOutcome)
