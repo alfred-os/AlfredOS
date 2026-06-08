@@ -79,6 +79,11 @@ from alfred.supervisor.plugin_lifecycle import PluginLifecycle
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from alfred.supervisor.protocols import (
+        OperatorResolverProtocol,
+        PoliciesSnapshotRefProtocol,
+    )
+
 _log = structlog.get_logger(__name__)
 
 # Spec §10.5 — graceful shutdown budget. After ``stop()`` sets the
@@ -182,6 +187,13 @@ class Supervisor:
         audit: _AuditLike,
         state_git_path: Path | None = None,
         proposal_dispatch_interval_s: int = 30,
+        # Slice-4 stub kwargs (#174). Both default to None so the legacy
+        # 5-kwarg construction (unit tests, alfred chat bootstrap) keeps
+        # passing unchanged. Real implementations:
+        #   policies_ref              → PR-S4-4 (PoliciesSnapshotRef)
+        #   operator_session_resolver → PR-S4-5 (_resolve_operator)
+        policies_ref: PoliciesSnapshotRefProtocol | None = None,
+        operator_session_resolver: OperatorResolverProtocol | None = None,
     ) -> None:
         self._session_scope = session_scope
         self._gate = gate
@@ -211,6 +223,14 @@ class Supervisor:
         # supplies the path + reads the interval from Settings.
         self._state_git_path: Path | None = state_git_path
         self._proposal_dispatch_interval_s = proposal_dispatch_interval_s
+
+        # Slice-4 stub deps (#174). Held but not yet dereferenced by the
+        # dispatch loop in this PR — the CLI boot path passes the parse-once
+        # snapshot stub + the no-op operator resolver so PR-S4-4 / PR-S4-5
+        # can swap real implementations through the same kwargs without
+        # re-touching __init__.
+        self._policies_ref: PoliciesSnapshotRefProtocol | None = policies_ref
+        self._operator_session_resolver: OperatorResolverProtocol | None = operator_session_resolver
 
         # start/stop state — see class docstring for the lifecycle.
         self._task_group: asyncio.TaskGroup | None = None

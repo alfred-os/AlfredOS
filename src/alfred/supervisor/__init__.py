@@ -38,11 +38,17 @@ from alfred.supervisor.errors import (
     QuarantinedUnavailable,
     SupervisorError,
 )
+from alfred.supervisor.protocols import (
+    OperatorResolverProtocol,
+    PoliciesSnapshotRefProtocol,
+)
 
 __all__ = [
     "BreakStateError",
     "BreakerState",
     "CircuitBreaker",
+    "OperatorResolverProtocol",
+    "PoliciesSnapshotRefProtocol",
     "QuarantinedUnavailable",
     "Supervisor",
     "SupervisorError",

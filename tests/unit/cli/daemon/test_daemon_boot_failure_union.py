@@ -1,0 +1,67 @@
+"""Verify the DaemonBootFailure union ships the five spec §3.4 modes (#174).
+
+core-eng-001 round-2 closure: the union lives at the CLI layer
+(``alfred.cli.daemon._failures``), NOT ``alfred.supervisor.protocols``.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from alfred.cli.daemon._failures import (
+    CapabilityGateHandshakeFailedFailure,
+    EnvironmentNotSetFailure,
+    LauncherNotPolicyResolvingFailure,
+    SnapshotRefInitFailedFailure,
+    UnsandboxedEnvInProductionFailure,
+)
+
+
+@pytest.mark.parametrize(
+    ("cls", "reason"),
+    [
+        (EnvironmentNotSetFailure, "environment_not_set"),
+        (UnsandboxedEnvInProductionFailure, "unsandboxed_env_in_production"),
+        (LauncherNotPolicyResolvingFailure, "launcher_not_policy_resolving"),
+        (SnapshotRefInitFailedFailure, "snapshot_ref_init_failed"),
+        (CapabilityGateHandshakeFailedFailure, "capability_gate_handshake_failed"),
+    ],
+)
+def test_failure_carries_literal_reason(cls: type, reason: str) -> None:
+    instance = cls()
+    assert instance.failure_reason == reason
+
+
+def test_environment_not_set_carries_no_extra_fields() -> None:
+    """Pure refusal — nothing to attach beyond the literal reason."""
+    f = EnvironmentNotSetFailure()
+    assert f.model_dump() == {"failure_reason": "environment_not_set"}
+
+
+def test_snapshot_ref_failed_carries_parse_error() -> None:
+    """Failures that need detail carry it on the model."""
+    f = SnapshotRefInitFailedFailure(detail_redacted="yaml.scanner.ScannerError")
+    d = f.model_dump()
+    assert d["failure_reason"] == "snapshot_ref_init_failed"
+    assert d["detail_redacted"] == "yaml.scanner.ScannerError"
+
+
+def test_launcher_failure_carries_probe_response() -> None:
+    f = LauncherNotPolicyResolvingFailure(probe_response="slice-3-stub-signature")
+    d = f.model_dump()
+    assert d["failure_reason"] == "launcher_not_policy_resolving"
+    assert d["probe_response"] == "slice-3-stub-signature"
+
+
+def test_capability_gate_failure_carries_backing_store_kind() -> None:
+    f = CapabilityGateHandshakeFailedFailure(backing_store_kind="postgres")
+    d = f.model_dump()
+    assert d["failure_reason"] == "capability_gate_handshake_failed"
+    assert d["backing_store_kind"] == "postgres"
+
+
+def test_models_are_frozen() -> None:
+    """Boot-failure carriers are immutable — no mid-flight mutation."""
+    f = EnvironmentNotSetFailure()
+    with pytest.raises(Exception):  # pydantic ValidationError on frozen set
+        f.failure_reason = "other"  # type: ignore[misc]
