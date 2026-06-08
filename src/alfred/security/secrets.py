@@ -67,6 +67,14 @@ SUPPORTED_SECRETS: frozenset[str] = frozenset(
         "deepseek_api_key",
         "anthropic_api_key",
         "discord_bot_token",
+        # Slice-4 PR-S4-0b Component H: master HMAC pepper used by
+        # PR-S4-5 operator-session token_hash + machine_id_hash,
+        # PR-S4-8/9 comms platform_user_id_hash + verification_phrase_hash,
+        # and PR-S4-0b migration 0012-0015's CHECK regex pins. The
+        # ``bin/alfred-setup.sh`` script seeds this on first boot via
+        # ``openssl rand -hex 32``; rotation invalidates cross-row
+        # correlation (spec §8.10) so the bootstrap is idempotent.
+        "audit.hash_pepper",
     }
 )
 

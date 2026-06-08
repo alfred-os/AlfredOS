@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-05 22:20+0100\n"
+"POT-Creation-Date: 2026-06-08 09:24+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1584,21 +1584,21 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/secrets.py:232 src/alfred/security/secrets.py:243
-#: src/alfred/security/secrets.py:259 src/alfred/security/secrets.py:271
-#: src/alfred/security/secrets.py:368
+#: src/alfred/security/secrets.py:240 src/alfred/security/secrets.py:251
+#: src/alfred/security/secrets.py:267 src/alfred/security/secrets.py:279
+#: src/alfred/security/secrets.py:376
 msgid "secrets.file_perms_too_open"
 msgstr ""
 "Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
 "`chmod 600 {path}` and `chmod 700 {parent}`."
 
-#: src/alfred/security/secrets.py:253
+#: src/alfred/security/secrets.py:261
 msgid "secrets.path_is_directory"
 msgstr ""
 "Secrets path '{path}' is a directory (Docker bind-mount usually causes "
 "this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:344 src/alfred/security/secrets.py:355
+#: src/alfred/security/secrets.py:352 src/alfred/security/secrets.py:363
 msgid "secrets.file_missing_required"
 msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "
