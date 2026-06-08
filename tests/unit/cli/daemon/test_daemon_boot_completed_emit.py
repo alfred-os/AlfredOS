@@ -79,9 +79,17 @@ def test_boot_completed_row_not_emitted_when_supervisor_start_raises(
     """
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
+    stop_calls: list[None] = []
+
     class _FailingStartSupervisor(FakeSupervisor):
         async def start(self) -> None:
             raise RuntimeError("supervisor failed to start")
+
+        async def stop(self) -> None:
+            # CR: the boot's single try/finally must still drain the
+            # supervisor even when start() raised.
+            stop_calls.append(None)
+            await super().stop()
 
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.Supervisor",
@@ -96,7 +104,10 @@ def test_boot_completed_row_not_emitted_when_supervisor_start_raises(
     assert result.exit_code != 0
     # No completion row was written for a boot that never completed.
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
-    # No "started" confirmation was printed.
-    assert "boot_id" not in result.output or result.output.strip() == ""
+    # No "started" confirmation was printed (an empty output trivially
+    # satisfies this — the redundant disjunct was dropped).
+    assert "boot_id" not in result.output
     # The PID file was cleaned up (or never persisted past the failed start).
     assert not (tmp_path / "daemon.pid").exists()
+    # The single try/finally drained the supervisor despite the start crash.
+    assert stop_calls == [None]
