@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,9 +57,16 @@ def write_pidfile(
     """Write the PID file atomically with mode 0600.
 
     Creates parent directories if missing (they too are mode 0700). The
-    write goes to a temp file then renames, and the mode is set on the fd
-    via the ``os.open`` mode argument so the file is never world-readable
-    even momentarily.
+    write goes to a unique temp file then renames, and the mode is set on
+    the fd via the ``os.open`` mode argument so the file is never
+    world-readable even momentarily.
+
+    sec (security LOW, write-validation): the temp file is opened with
+    ``O_EXCL`` and a per-write unique suffix (PID + random token) so the
+    write NEVER reuses a pre-existing inode. Mirrors the read side's
+    open-then-validate discipline: an attacker-planted ``.tmp`` (same uid,
+    e.g. a compromised sibling process) is refused with ``FileExistsError``
+    rather than truncated-and-reused — we only ever write a file we created.
     """
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps(
@@ -69,17 +77,24 @@ def write_pidfile(
             "hostname": socket.gethostname(),
         }
     )
-    tmp = path.with_suffix(".pid.tmp")
+    unique = f"{os.getpid()}.{secrets.token_hex(8)}"
+    tmp = path.with_name(f"{path.name}.{unique}.tmp")
     fd = os.open(
         str(tmp),
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
         0o600,
     )
     try:
         os.write(fd, payload.encode("utf-8"))
-    finally:
         os.close(fd)
-    tmp.rename(path)
+        tmp.rename(path)
+    except BaseException:
+        # Never leave a partial / orphaned temp behind on any failure path.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+        raise
 
 
 def load_pidfile(path: Path) -> PidFileInfo:

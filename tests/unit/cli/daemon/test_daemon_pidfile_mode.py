@@ -29,6 +29,44 @@ def test_write_pidfile_creates_0600(tmp_path: Path) -> None:
     assert st.st_uid == os.getuid()
 
 
+def test_write_pidfile_overwrites_existing_and_leaves_no_temp(tmp_path: Path) -> None:
+    """A second write replaces the target (rename) and leaves no .tmp behind.
+
+    The ``O_EXCL`` guards the UNIQUE temp inode, not the target, so an
+    existing pidfile is replaced cleanly. The unique-suffix temp must not
+    linger in the directory.
+    """
+    pf = tmp_path / "daemon.pid"
+    write_pidfile(path=pf, pid=1, boot_id="first", started_at="t1")
+    write_pidfile(path=pf, pid=2, boot_id="second", started_at="t2")
+    assert load_pidfile(pf).boot_id == "second"
+    leftovers = [p.name for p in tmp_path.iterdir() if ".tmp" in p.name]
+    assert leftovers == [], f"orphaned temp files: {leftovers}"
+
+
+def test_write_pidfile_cleans_up_temp_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure mid-write removes the unique temp — no orphaned inode.
+
+    sec write-validation: an exception after the ``O_EXCL`` open must not
+    leave a partial temp the next write could trip over.
+    """
+    import alfred.cli.daemon._daemon_pidfile as mod
+
+    pf = tmp_path / "daemon.pid"
+
+    def _boom(_fd: int, _data: bytes) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mod.os, "write", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_pidfile(path=pf, pid=1, boot_id="x", started_at="t")
+    assert not pf.exists()
+    leftovers = [p.name for p in tmp_path.iterdir() if ".tmp" in p.name]
+    assert leftovers == [], f"orphaned temp files: {leftovers}"
+
+
 def test_load_pidfile_roundtrips(tmp_path: Path) -> None:
     pf = tmp_path / "daemon.pid"
     write_pidfile(path=pf, pid=4242, boot_id="boot-x", started_at="2026-06-07T00:00:00+00:00")
