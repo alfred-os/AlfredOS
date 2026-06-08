@@ -125,6 +125,23 @@ class Settings(BaseSettings):
         "Override via ALFRED_STATE_GIT_PATH.",
     )
 
+    # CR #6 (#174): the daemon boot snapshot-ref probe must NOT resolve
+    # ``config/policies.yaml`` relative to the caller's CWD — the daemon's
+    # working directory is not guaranteed to be the repo / install root, so
+    # a CWD-relative read is fragile and could silently load the wrong file
+    # (or refuse a real one). Anchor the policies file deterministically at
+    # the documented ``/etc/alfred`` runtime-config root (same root as
+    # ``/etc/alfred/environment`` and ``/etc/alfred/secrets.toml``). The
+    # daemon CLI threads this into ``probe_snapshot_ref_init(config_path=…)``
+    # rather than relying on the probe's CWD-relative default. Override via
+    # ALFRED_POLICIES_PATH (e.g. a repo checkout pointing at
+    # ``config/policies.yaml`` for local development).
+    policies_path: Path = Field(
+        default=Path("/etc/alfred/policies.yaml"),
+        description="Absolute path to the policies.yaml the daemon loads at "
+        "boot. Override via ALFRED_POLICIES_PATH.",
+    )
+
     # arch-002 closure (#174): the dual-source environment lookup result —
     # env-var value, file value, conflict flag — that the daemon CLI needs
     # to emit the ``daemon.boot.environment_source_conflict`` audit row.
@@ -167,8 +184,18 @@ class Settings(BaseSettings):
         # disk read, no TOCTOU window.
         loaded = load_environment()
         _ENVIRONMENT_LOAD_RESULT.set(loaded)
-        if "environment" not in data and loaded.value is not None:
-            data["environment"] = loaded.value
+        if "environment" not in data:
+            if loaded.value is not None:
+                data["environment"] = loaded.value
+        elif isinstance(data["environment"], str):
+            # CR #7: pydantic-settings populates ``environment`` directly from
+            # the RAW ``ALFRED_ENVIRONMENT`` value, bypassing the loader's
+            # stripping. Normalize it here the SAME way the dual-source loader
+            # strips both of its sources, so ``ALFRED_ENVIRONMENT=" production"``
+            # validates exactly as the bare value (and matches the load result
+            # the after-validator compares against). Leaves a non-str explicit
+            # kwarg untouched.
+            data["environment"] = data["environment"].strip()
         return data
 
     @model_validator(mode="after")
