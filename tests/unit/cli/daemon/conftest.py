@@ -67,17 +67,30 @@ def boot_success_env(
         "alfred.config._environment_loader._DEFAULT_ETC_PATH",
         tmp_path / "absent-etc",
     )
+    # CR #6: the snapshot-ref probe reads ``Settings.policies_path`` (anchored
+    # at /etc/alfred), NOT a CWD-relative ``config/policies.yaml``. Point it at
+    # a real file under tmp so the boot-success path passes regardless of the
+    # test runner's CWD — including the production-environment success tests
+    # that would otherwise refuse on an absent /etc/alfred/policies.yaml.
+    policies_file = tmp_path / "policies.yaml"
+    policies_file.write_text("schema_version: 1\n", encoding="utf-8")
+    monkeypatch.setenv("ALFRED_POLICIES_PATH", str(policies_file))
 
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_audit_writer",
         lambda **_kw: fake_audit_writer,
     )
-    # sec-004: the shipped launcher stub refuses in production. Boot-success
-    # tests that run with ALFRED_ENVIRONMENT=production (e.g. the
-    # source-conflict test) must isolate their assertion from that refusal,
-    # so the fixture pins the launcher probe to "passing" (a genuine
-    # policy-resolving launcher). Probe-refusal tests monkeypatch this back
-    # to the failure they exercise.
+    # sec-004 (INTENTIONAL launcher-probe bypass): the shipped PR-S4-1
+    # launcher stub returns ``_STUB_SIGNATURE`` and so REFUSES the boot in
+    # production — that production refusal is the real, security-required
+    # behaviour and is asserted directly by
+    # ``test_probe_launcher_not_policy_resolving.py`` (the prod-refusal
+    # test). It must NOT be weakened. Boot-SUCCESS tests that run with
+    # ALFRED_ENVIRONMENT=production (e.g. the source-conflict test) only need
+    # to isolate their assertion from that refusal, so this fixture pins the
+    # launcher probe to "passing" (standing in for a genuine
+    # policy-resolving launcher PR-S4-6 will ship). Probe-refusal tests
+    # monkeypatch this back to the failure they exercise.
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.probe_launcher_policy_resolving",
         _make_async(lambda **_kw: None),
