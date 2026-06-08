@@ -74,6 +74,7 @@ if TYPE_CHECKING:
 
     from alfred.audit.log import AuditWriter
     from alfred.config.settings import Settings
+    from alfred.security.dlp import OutboundDlpProtocol
 
 # Exit codes (operator-facing contract; documented in the runbook PR-S4-11).
 _EXIT_REFUSED: Final[int] = 2
@@ -120,6 +121,32 @@ def build_boot_session_scope(  # pragma: no cover - real-infra glue; unit tests 
     # build_session_scope is an untyped Slice-1 helper (returns a no-arg
     # callable shaped exactly like our annotation); the cast pins the type.
     return build_session_scope(settings)  # type: ignore[no-any-return]
+
+
+def _build_boot_outbound_dlp(  # pragma: no cover - real-infra glue; unit tests monkeypatch
+    *,
+    settings: Settings,
+    audit: AuditWriter,
+) -> OutboundDlpProtocol:
+    """Construct the outbound DLP scanner threaded into the dispatch loop.
+
+    arch-001 (#173 / PR-S4-2). Broker + audit sink mirror the
+    orchestrator's outbound-DLP wiring (``alfred.cli.main``): the broker
+    redacts AlfredOS-owned secrets, the generic-API-key regex catches
+    leaked third-party keys, and modification events land an audit row.
+    Attributed to the system actor — the dispatch loop is a T0/T1
+    supervisor surface, not an end-user turn.
+    """
+    from alfred.cli._bootstrap import build_adapter_dlp_audit_sink, build_broker
+    from alfred.security.dlp import OutboundDlp
+
+    broker = build_broker(settings)
+    sink = build_adapter_dlp_audit_sink(
+        audit_writer=audit,
+        operator_user_id="supervisor",
+        language=settings.operator_language,
+    )
+    return OutboundDlp(broker=broker, audit=sink)
 
 
 class _BackingStoreAvailabilityGate(Protocol):
@@ -571,6 +598,14 @@ async def _start_async() -> None:
     state_git_head_sha = read_state_git_head_sha(settings.state_git_path)
     policies_snapshot_hash = snapshot_ref.snapshot_hash()
 
+    # arch-001 (#173 / PR-S4-2): construct the outbound DLP singleton at
+    # boot and thread it to the Supervisor, which lands it on every
+    # ProposalContext. The dispatch loop scans ``failure_detail`` through
+    # this scanner before it reaches the ledger (CLAUDE.md #4 — DLP cannot
+    # be disabled per-call). Broker + audit sink mirror the orchestrator's
+    # outbound-DLP wiring in ``alfred.cli.main``.
+    outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
+
     supervisor = Supervisor(
         session_scope=session_scope,
         gate=gate,
@@ -579,6 +614,7 @@ async def _start_async() -> None:
         proposal_dispatch_interval_s=settings.proposal_dispatch_interval_s,
         policies_ref=snapshot_ref,
         operator_session_resolver=_StubOperatorResolver(),
+        outbound_dlp=outbound_dlp,
     )
 
     # The PID file is written BEFORE start() so a concurrent ``alfred daemon

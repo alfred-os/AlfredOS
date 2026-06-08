@@ -79,6 +79,8 @@ from alfred.supervisor.plugin_lifecycle import PluginLifecycle
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from alfred.security.dlp import OutboundDlpProtocol
+    from alfred.state.dispatch_registry import ProposalContext
     from alfred.supervisor.protocols import (
         OperatorResolverProtocol,
         PoliciesSnapshotRefProtocol,
@@ -194,6 +196,15 @@ class Supervisor:
         #   operator_session_resolver → PR-S4-5 (_resolve_operator)
         policies_ref: PoliciesSnapshotRefProtocol | None = None,
         operator_session_resolver: OperatorResolverProtocol | None = None,
+        # arch-001 (#173 / PR-S4-2): the outbound DLP scanner threaded into
+        # every ProposalContext so _record_failure can scan failure_detail
+        # before it lands in the ledger. Optional default for legacy
+        # callers (alfred chat bootstrap, supervisor unit tests) that never
+        # schedule the dispatch loop; the daemon boot path constructs the
+        # singleton and passes it. If the loop IS scheduled (state_git_path
+        # set) but no scanner was supplied, _build_proposal_context raises
+        # loudly rather than silently disarming the boundary.
+        outbound_dlp: OutboundDlpProtocol | None = None,
     ) -> None:
         self._session_scope = session_scope
         self._gate = gate
@@ -231,6 +242,7 @@ class Supervisor:
         # re-touching __init__.
         self._policies_ref: PoliciesSnapshotRefProtocol | None = policies_ref
         self._operator_session_resolver: OperatorResolverProtocol | None = operator_session_resolver
+        self._outbound_dlp: OutboundDlpProtocol | None = outbound_dlp
 
         # start/stop state — see class docstring for the lifecycle.
         self._task_group: asyncio.TaskGroup | None = None
@@ -334,6 +346,37 @@ class Supervisor:
             except TimeoutError:
                 continue
 
+    def _build_proposal_context(self) -> ProposalContext:
+        """Construct the per-cycle :class:`ProposalContext` with the DLP scanner.
+
+        arch-001 (#173 / PR-S4-2): the outbound DLP scanner singleton lands
+        on every ``ProposalContext`` so ``_record_failure`` can scan
+        ``failure_detail`` before it reaches the ledger. The dispatch loop
+        is only scheduled when ``state_git_path`` is set; reaching this
+        method with no scanner wired is a boot-wiring bug, so we raise
+        loudly rather than silently disarm the boundary (CLAUDE.md #4 — DLP
+        cannot be disabled per-call).
+
+        The Supervisor is captured as the ``effects`` adapter — it satisfies
+        ``ProposalEffectsProtocol`` structurally (its ``reset_breaker``
+        signature matches). The ``# type: ignore`` keeps the existing
+        ``_AuditLike`` Protocol on the audit field — at runtime the
+        production ``AuditWriter`` already satisfies the dispatcher's
+        ``append_schema`` shape.
+        """
+        # Lazy import mirrors the dispatch-loop import discipline — the
+        # legacy unit-tier Supervisor construct path never reaches here.
+        from alfred.state.dispatch_registry import ProposalContext
+
+        if self._outbound_dlp is None:
+            raise RuntimeError(t("supervisor.dispatch.outbound_dlp_unwired"))
+        return ProposalContext(
+            audit_writer=self._audit,  # type: ignore[arg-type]
+            effects=self,
+            logger=_log,
+            outbound_dlp=self._outbound_dlp,
+        )
+
     async def _proposal_dispatch_loop(self) -> None:
         """Run the side-effecting state.git dispatch cycle until shutdown.
 
@@ -362,24 +405,13 @@ class Supervisor:
         # path (which does not wire ``state_git_path``) does not pull in
         # the dispatch_loop module just to skip the schedule.
         from alfred.state.dispatch_loop import _proposal_dispatch_cycle
-        from alfred.state.dispatch_registry import ProposalContext
 
         if self._state_git_path is None:  # pragma: no cover — schedule gates this
             return
 
         repo_path = self._state_git_path
         interval = self._proposal_dispatch_interval_s
-        # Capture the Supervisor as the ``effects`` adapter — it satisfies
-        # ProposalEffectsProtocol structurally (its ``reset_breaker``
-        # signature matches). Cast through ``Any`` to keep the existing
-        # ``_AuditLike`` Protocol on the audit field — at runtime the
-        # production AuditWriter already satisfies the dispatcher's
-        # ``append_schema`` shape.
-        ctx = ProposalContext(
-            audit_writer=self._audit,  # type: ignore[arg-type]
-            effects=self,
-            logger=_log,
-        )
+        ctx = self._build_proposal_context()
 
         while not self._shutdown_event.is_set():
             try:
