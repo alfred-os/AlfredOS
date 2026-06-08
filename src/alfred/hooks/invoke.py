@@ -469,6 +469,55 @@ duplicated here to avoid an import cycle
 """
 
 
+def _wrap_legacy_substitute_as_outcome[T](
+    *,
+    result_ctx: HookContext[T],
+    subscriber: Subscriber,
+    hookpoint_name: str,
+) -> "SubstituteResult[T] | None":
+    """Wrap a legacy error-stage substitute as a SubstituteResult outcome.
+
+    Slice-2.5/3 subscribers signalled "swallow + substitute" by returning
+    a non-``None`` :class:`HookContext` from the error chain. PR-S4-3
+    (ADR-0022) formalises substitution as a
+    :class:`SubstituteResult` with explicit source_tier + subscriber_id.
+    Legacy returns map to ``source_tier="T0"`` (system trust — the
+    lowest rank in the strict total order T0 < T1 < T2 < T3) so they
+    never trip the tier-upgrade guard against any declared
+    ``carrier_tier``.
+
+    Per-PR-S4-3 contract: a subscriber that wants to substitute at a
+    specific tier embeds a :class:`SubstituteResult` instance under
+    ``ctx.metadata["substitute_result"]`` and the extractor reads it
+    directly. The legacy path here covers subscribers that pre-date the
+    ADR.
+
+    Returns the SubstituteResult outcome if the tier-upgrade guard
+    accepts it, else ``None`` (caller continues the chain).
+    """
+    registry = get_registry()
+    meta = registry.hookpoint_meta(hookpoint_name)
+    embedded = result_ctx.metadata.get("substitute_result")
+    if isinstance(embedded, SubstituteResult):
+        substitute: SubstituteResult[T] = embedded
+    else:
+        substitute = SubstituteResult[T](
+            payload=result_ctx.input,
+            source_tier="T0",
+            subscriber_id=subscriber.hook_fn.__qualname__,
+        )
+    if meta is None or meta.carrier_tier is None:
+        return substitute
+    if not meta.allow_error_substitution:
+        return None
+    if not _enforce_substitute_tier(
+        carrier_tier=meta.carrier_tier,
+        source_tier=substitute.source_tier,
+    ):
+        return None
+    return substitute
+
+
 def _enforce_substitute_tier(
     *,
     carrier_tier: type[TrustTier],
@@ -761,13 +810,25 @@ async def _dispatch_by_kind[T](
             fail_closed=fail_closed,
         )
     if kind == "error":
-        return await _run_error(
+        outcome, final_ctx = await _run_error(
             name,
             ctx,
             exc=exc,
             subscribable_tiers=subscribable_tiers,
             fail_closed=fail_closed,
         )
+        # PR-S4-3 (ADR-0022): pattern-match the discriminated union
+        # back to the public HookContext[T] return type so legacy
+        # callers see no signature change. ReRaise → propagate the
+        # upstream exception verbatim; SubstituteResult → return the
+        # chain's final ctx (carries any metadata changes from the
+        # chain) with the substitute payload swapped in.
+        match outcome:
+            case ReRaise():
+                assert exc is not None
+                raise exc
+            case SubstituteResult(payload=substituted_payload):
+                return final_ctx.with_input(substituted_payload)
     if kind == "cancel":
         return await _run_cancel(
             name,
@@ -1648,7 +1709,8 @@ async def _run_error[T](
     exc: BaseException | None,
     subscribable_tiers: frozenset[str],
     fail_closed: bool,
-) -> HookContext[T]:
+    carrier_type: type[T] | None = None,
+) -> "tuple[ErrorOutcome[T], HookContext[T]]":
     """Dispatch the ``error`` chain.
 
     The first subscriber that returns a :class:`HookContext` wins
@@ -1754,15 +1816,27 @@ async def _run_error[T](
                     continue
                 pending = None
                 if result is not None:
-                    # First non-None wins — short-circuit the rest of the
-                    # chain. Capture the substitute and break out of the
-                    # timeout-wrapped loop so the post-loop disposition
-                    # logic can return it cleanly.
-                    suppressed = result
+                    # First non-None wins — short-circuit the rest of
+                    # the chain. PR-S4-3 (ADR-0022): the returned ctx
+                    # is the substitute carrier; we wrap its input as
+                    # a SubstituteResult and run the tier-upgrade
+                    # guard before returning.
                     last_good_ctx = result
-                    break
+                    substitute_outcome = _wrap_legacy_substitute_as_outcome(
+                        result_ctx=result,
+                        subscriber=sub,
+                        hookpoint_name=name,
+                    )
+                    if substitute_outcome is not None:
+                        return substitute_outcome, result
+                    # Tier-upgrade guard refused — continue chain.
+                    chain_ctx = last_good_ctx
+                    continue
     except TimeoutError:
-        return await _handle_chain_timeout(
+        # Timeout-arm: preserve the old suppress-re-raise semantic by
+        # wrapping the last-good ctx as a SubstituteResult outcome.
+        # source_tier="T0" so it never trips the tier-upgrade guard.
+        timeout_ctx = await _handle_chain_timeout(
             pending=pending,
             chain_ctx=chain_ctx,
             hookpoint=name,
@@ -1770,23 +1844,25 @@ async def _run_error[T](
             deadline_seconds=deadline_seconds,
             fail_closed=fail_closed,
         )
+        return (
+            SubstituteResult(
+                payload=timeout_ctx.input,
+                source_tier="T0",
+                subscriber_id="_handle_chain_timeout",
+            ),
+            timeout_ctx,
+        )
 
-    if suppressed is not None:
-        return suppressed
-
-    # No subscriber suppressed AND the chain did not time out — re-raise
-    # the upstream exception. This is the load-bearing "no silent
-    # failures" guarantee for the error stage; mypy narrowing for the
-    # ``exc is None`` branch is via the explicit raise path below.
+    # No subscriber suppressed AND the chain did not time out — the
+    # ReRaise() outcome tells the caller to re-raise the upstream
+    # exception. CLAUDE.md hard rule #7: no silent failures on the
+    # error stage.
     if exc is None:
-        # Defensive: a missing ``exc`` on an ``error`` invoke is a
-        # caller bug. Raising RuntimeError instead of failing silently
-        # keeps the loud-failure discipline (hard rule #7).
         raise RuntimeError(
             "invoke(kind='error', ...) called without an exc argument; "
             "the error stage requires the upstream exception."
         )
-    raise exc
+    return ReRaise(), last_good_ctx
 
 
 async def _run_cancel[T](
