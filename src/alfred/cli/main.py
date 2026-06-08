@@ -47,6 +47,7 @@ import typer
 
 from alfred.cli.audit import audit_app
 from alfred.cli.config import config_app
+from alfred.cli.daemon import daemon_app
 from alfred.cli.discord_cmd import discord_app
 from alfred.cli.plugin import plugin_app
 from alfred.cli.supervisor import supervisor_app
@@ -108,6 +109,9 @@ app.add_typer(web_app, name="web")
 app.add_typer(config_app, name="config")
 app.add_typer(supervisor_app, name="supervisor")
 app.add_typer(audit_app, name="audit")
+# PR-S4-1 (#174): the production daemon entrypoint. ``alfred daemon
+# start | stop | status`` wires the Supervisor + proposal-dispatch loop.
+app.add_typer(daemon_app, name="daemon")
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +152,7 @@ def __getattr__(name: str) -> object:
 # ---------------------------------------------------------------------------
 
 
-@app.command()
+@app.command(help=t("status.help"))
 def status() -> None:
     """Print a short config summary: provider, budget, optional fallback.
 
