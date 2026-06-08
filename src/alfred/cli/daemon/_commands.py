@@ -187,7 +187,18 @@ async def build_boot_gate(
     Production wires a real Postgres-backed :class:`RealGate` via the
     bootstrap factory; this PR is the first to construct the Supervisor in
     production, so the gate is wrapped in :class:`_SupervisorBootGate` to
-    add the sync backing-store-availability surface the heartbeat polls.
+    add the sync backing-store-availability surface the monitor polls.
+
+    ``start_heartbeat=True`` is load-bearing: the supervisor's
+    :class:`CapabilityGateMonitor` polls
+    :meth:`_SupervisorBootGate.is_backing_store_available` (which reads
+    :attr:`RealGate._fail_closed`), and that flag is ONLY driven by the
+    heartbeat loop. Constructing the gate with the heartbeat OFF would
+    leave the monitor permanently seeing "available" — a RUNTIME Postgres
+    outage after boot would go undetected and the gate would never
+    fail-closed (review finding: runtime-outage-not-detected). The
+    boot-time liveness check is the separate async ``SELECT 1``
+    handshake (probe c); the heartbeat is the post-boot continuous check.
     """
     from alfred.bootstrap.gate_factory import build_real_gate
     from alfred.security.capability_gate.backend import PostgresBackend
@@ -200,7 +211,7 @@ async def build_boot_gate(
     real_gate = await build_real_gate(
         backend=backend,
         audit_sink=_noop_audit_sink,
-        start_heartbeat=False,
+        start_heartbeat=True,
     )
     return _SupervisorBootGate(real_gate)
 
