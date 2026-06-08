@@ -81,6 +81,16 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "plugin.lifecycle.crashed",
         "plugin.lifecycle.quarantined",
     ),
+    # PR-S4-1 (#174): the daemon-boot + dispatch-failure hookpoints. All
+    # three are system-internal (carrier_tier=T0) + fail_closed=True.
+    # Registered by ``alfred.cli.daemon.declare_hookpoints`` at module
+    # import time (bottom-of-module call), mirroring
+    # ``alfred.identity._ingest``.
+    "alfred.cli.daemon": (
+        "daemon.boot.completed",
+        "daemon.boot.failed",
+        "proposal.dispatch.failed",
+    ),
     # PR-S4-3 (ADR-0022): the two observation-only carrier-substitution
     # meta-hookpoints. They describe the substitution machinery itself
     # and carry carrier_tier=None + allow_error_substitution=False so
