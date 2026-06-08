@@ -30,13 +30,14 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 23 entries (Slice-4 contract surface size).
+    """Roster must contain exactly 24 entries (Slice-4 contract surface size).
 
     Adding a new Slice-4 ``*_FIELDS`` constant requires bumping this assertion
     AND extending ``SLICE_4_FIELDSET_NAMES`` in the same commit. The number
-    is intentionally pinned so a roster omission surfaces here.
+    is intentionally pinned so a roster omission surfaces here. PR-S4-2
+    (#173) added ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` — the 24th.
     """
-    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 23
+    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 24
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
@@ -186,6 +187,9 @@ def test_slice_4_constants_have_frozenset_shape() -> None:
         # PROPOSAL_DISPATCH_FAILURE_REDACTED row joins back to its
         # processed/cycle siblings via this field (Slice-3 precedent).
         ("PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS", "correlation_id"),
+        # The scan-failed sibling (#173 err-003) joins back via the same
+        # dispatch-cycle correlation id.
+        ("PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS", "correlation_id"),
         # Daemon-boot uses boot_id as its join key (multiple boot rows
         # share boot_id across the boot lifecycle).
         ("DAEMON_BOOT_FIELDS", "boot_id"),
