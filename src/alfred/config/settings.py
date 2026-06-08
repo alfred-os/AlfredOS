@@ -7,6 +7,7 @@ they never leak into logs by accident.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Literal
 
@@ -19,6 +20,21 @@ from alfred.config._environment_loader import EnvironmentLoadResult, load_enviro
 # script (bin/alfred-setup.sh) and the Settings validator below so an operator
 # who skipped editing .env hits a friendly error before any provider call.
 _PLACEHOLDER_API_KEY = "sk-..."
+
+# arch-002 / core-eng-pr222-2 / reviewer TOCTOU fix (#174): the dual-source
+# environment loader must run EXACTLY ONCE per ``Settings()`` construction.
+# ``extra="ignore"`` drops any stash key from the raw input dict before the
+# ``mode='after'`` validator runs, so the ``mode='before'`` validator cannot
+# hand the result over through the model. Threading it through a ContextVar
+# lets the single ``load_environment()`` call in ``_resolve_environment`` be
+# read by ``_capture_environment_load_result`` without a second disk read —
+# closing the within-construction TOCTOU window where a mid-construction
+# change to ALFRED_ENVIRONMENT / /etc/alfred/environment could make the
+# audited result disagree with the validated field.
+_ENVIRONMENT_LOAD_RESULT: ContextVar[EnvironmentLoadResult | None] = ContextVar(
+    "_alfred_environment_load_result",
+    default=None,
+)
 
 
 class SettingsError(ValueError):
@@ -130,41 +146,45 @@ class Settings(BaseSettings):
         field" error fire, which ``Settings.__init__``'s ``SettingsError``
         adapter translates to the operator-facing message.
 
-        The resolved :class:`EnvironmentLoadResult` is stashed under a
-        private key and lifted onto the instance by
-        :meth:`_capture_environment_load_result` (``mode='after'``) so the
-        validated model surface never carries it (arch-002 closure).
+        The resolved :class:`EnvironmentLoadResult` is threaded to
+        :meth:`_capture_environment_load_result` (``mode='after'``) via the
+        ``_ENVIRONMENT_LOAD_RESULT`` ContextVar so the loader runs exactly
+        once and the validated model surface never carries it (arch-002).
         """
+        # Reset the per-construction side channel up front so a previous
+        # construction's result never leaks into this one (the after-
+        # validator may not run if validation fails).
+        _ENVIRONMENT_LOAD_RESULT.set(None)
         if not isinstance(data, dict):
             return data
-        if "environment" not in data:
-            loaded = load_environment()
-            if loaded.value is not None:
-                data["environment"] = loaded.value
-                data["__environment_load_result"] = loaded
+        # ``environment`` may already be present because pydantic-settings
+        # populates it directly from ``ALFRED_ENVIRONMENT`` (env_prefix).
+        # Run the dual-source loader EXACTLY ONCE here regardless, so the
+        # conflict audit result is captured even when the field was sourced
+        # by pydantic-settings (core-eng-pr222-2 point b), and inject the
+        # value only when it is otherwise absent. The single result is
+        # threaded to the after-validator via the ContextVar — no second
+        # disk read, no TOCTOU window.
+        loaded = load_environment()
+        _ENVIRONMENT_LOAD_RESULT.set(loaded)
+        if "environment" not in data and loaded.value is not None:
+            data["environment"] = loaded.value
         return data
 
     @model_validator(mode="after")
     def _capture_environment_load_result(self) -> Settings:
-        """Lift the stashed load result onto the private attribute.
+        """Lift the single load result onto the private attribute.
 
         ``mode='before'`` cannot set a :class:`PrivateAttr` (the instance
-        does not exist yet); ``mode='after'`` reads the stash key the
-        ``before`` validator left behind. The stash key lives in the raw
-        input dict, which Pydantic has already consumed by the time this
-        runs, so we re-read it from ``__pydantic_extra__`` when present and
-        otherwise leave the attribute ``None``.
+        does not exist yet); ``mode='after'`` reads the ContextVar the
+        ``before`` validator populated from its single ``load_environment()``
+        call. No second disk read — the audited result provably matches the
+        value chosen above (reviewer / core-eng-pr222-2 TOCTOU fix). The
+        ContextVar is ``None`` when ``environment`` was passed explicitly
+        (the loader was bypassed), leaving the attribute ``None``.
         """
-        # ``__environment_load_result`` is not a declared field; with
-        # ``extra="ignore"`` Pydantic drops it from ``data`` before this
-        # validator runs, so the ``before`` validator cannot hand it over
-        # through the model. Recompute the read-only side channel only when
-        # the loader actually produced a value for ``environment`` (i.e.
-        # the env was NOT passed explicitly). Recomputation is FILE-ONLY
-        # and idempotent, so it cannot disagree with the value chosen above
-        # within a single construction.
-        loaded = load_environment()
-        if loaded.value is not None and loaded.value == self.environment:
+        loaded = _ENVIRONMENT_LOAD_RESULT.get()
+        if loaded is not None and loaded.value == self.environment:
             self._environment_load_result = loaded
         return self
 
