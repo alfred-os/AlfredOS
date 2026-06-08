@@ -61,18 +61,23 @@ class EnvironmentLoadResult:
     unrecognised_value: str | None = None
 
 
-def load_environment(*, etc_path: Path = _DEFAULT_ETC_PATH) -> EnvironmentLoadResult:
+def load_environment(*, etc_path: Path | None = None) -> EnvironmentLoadResult:
     """Resolve ``Settings.environment`` via env-var > /etc file precedence.
 
     Args:
         etc_path: Override for the file source. Tests pass a ``tmp_path``
             so the suite never touches ``/etc/alfred/environment`` on a
-            developer machine. Production callers pass the default.
+            developer machine. ``None`` (the default) reads the module-level
+            ``_DEFAULT_ETC_PATH`` AT CALL TIME so a test that monkeypatches
+            that module attribute takes effect (a bound parameter default
+            would freeze the value at import time).
 
     Returns:
         :class:`EnvironmentLoadResult` describing the resolved value, the
         source that produced it, and any conflict the daemon must audit.
     """
+    if etc_path is None:
+        etc_path = _DEFAULT_ETC_PATH
     env_raw = os.environ.get("ALFRED_ENVIRONMENT")
     file_raw: str | None = None
     try:
