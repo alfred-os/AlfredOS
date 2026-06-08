@@ -1239,3 +1239,361 @@ def test_0014_baseline_results_matches_slice_3_head() -> None:
         assert required in mig._BASE_RESULTS, (
             f"missing {required!r} in _BASE_RESULTS — Slice-3 baseline drift"
         )
+
+
+# ---------------------------------------------------------------------------
+# 0015 sandbox_policy_registry
+# ---------------------------------------------------------------------------
+
+
+_INSERT_REGISTRY_SQL = sa.text(
+    "INSERT INTO sandbox_policy_registry "
+    "(plugin_id, host_os, policy_ref, last_resolved_at, resolution_result) "
+    "VALUES (:p, :o, :r, :t, :res)"
+)
+
+
+def _registry_payload(
+    plugin_id: str = "alfred_quarantined_llm",
+    host_os: str = "linux",
+    policy_ref: str = "quarantined-llm.linux.bwrap",
+    resolution_result: str = "resolved",
+) -> dict[str, object]:
+    """Build a parametric INSERT payload; defaults are valid."""
+    return {
+        "p": plugin_id,
+        "o": host_os,
+        "r": policy_ref,
+        "t": dt.datetime.now(dt.UTC),
+        "res": resolution_result,
+    }
+
+
+def test_0015_upgrade_creates_sandbox_policy_registry(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Column-set matches plan §D exactly."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    inspector = sa.inspect(engine_at_0011)
+    assert "sandbox_policy_registry" in inspector.get_table_names()
+    cols = {c["name"] for c in inspector.get_columns("sandbox_policy_registry")}
+    assert cols == {
+        "plugin_id",
+        "policy_ref",
+        "host_os",
+        "last_resolved_at",
+        "resolution_result",
+    }
+
+
+def test_0015_composite_pk_named(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """PK ``uq_sandbox_policy_registry_plugin_host_os`` is composite."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    inspector = sa.inspect(engine_at_0011)
+    pk = inspector.get_pk_constraint("sandbox_policy_registry")
+    assert pk["name"] == "uq_sandbox_policy_registry_plugin_host_os"
+    # Order matters — the composite PK's column order influences index plan.
+    assert pk["constrained_columns"] == ["plugin_id", "host_os"]
+
+
+@pytest.mark.parametrize("host_os", ["linux", "macos", "windows"])
+def test_0015_host_os_check_accepts_valid(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    host_os: str,
+) -> None:
+    """Each of the three valid host_os values is accepted."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    with engine_at_0011.begin() as conn:
+        conn.execute(
+            _INSERT_REGISTRY_SQL,
+            _registry_payload(host_os=host_os),
+        )
+
+
+@pytest.mark.parametrize("bad_host_os", ["freebsd", "Linux", "android", "", "linux "])
+def test_0015_host_os_check_refuses_invalid(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    bad_host_os: str,
+) -> None:
+    """CHECK refuses host_os values outside the closed vocab."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            _INSERT_REGISTRY_SQL,
+            _registry_payload(
+                plugin_id=f"badhost_{bad_host_os or 'empty'}",
+                host_os=bad_host_os,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_result",
+    ["accepted", "resolved_ok", "stubbed", "", "REFUSED_POLICY_MISSING"],
+)
+def test_0015_resolution_result_check_refuses_invalid(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    bad_result: str,
+) -> None:
+    """CHECK refuses resolution_result values outside the closed vocab."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            _INSERT_REGISTRY_SQL,
+            _registry_payload(
+                plugin_id=f"badres_{bad_result or 'empty'}",
+                resolution_result=bad_result,
+            ),
+        )
+
+
+def test_0015_composite_pk_refuses_duplicate(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Two rows with the same ``(plugin_id, host_os)`` are refused."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    with engine_at_0011.begin() as conn:
+        conn.execute(_INSERT_REGISTRY_SQL, _registry_payload())
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(_INSERT_REGISTRY_SQL, _registry_payload())
+
+
+def test_0015_same_plugin_different_os_accepted(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Same plugin_id across different host_os is the canonical shape."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    for os_value in ("linux", "macos", "windows"):
+        with engine_at_0011.begin() as conn:
+            conn.execute(
+                _INSERT_REGISTRY_SQL,
+                _registry_payload(host_os=os_value),
+            )
+    with engine_at_0011.begin() as conn:
+        count = conn.execute(
+            sa.text("SELECT COUNT(*) FROM sandbox_policy_registry WHERE plugin_id = :p"),
+            {"p": "alfred_quarantined_llm"},
+        ).scalar()
+    assert count == 3
+
+
+def test_0015_happy_path_round_trip(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Insert + select round-trip preserves all 5 columns."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    plugin_id = "round_trip_plugin"
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    with engine_at_0011.begin() as conn:
+        conn.execute(
+            _INSERT_REGISTRY_SQL,
+            {
+                "p": plugin_id,
+                "o": "linux",
+                "r": "policies/round-trip.linux.bwrap",
+                "t": now,
+                "res": "resolved",
+            },
+        )
+    with engine_at_0011.begin() as conn:
+        row = conn.execute(
+            sa.text(
+                "SELECT plugin_id, host_os, policy_ref, "
+                "last_resolved_at, resolution_result "
+                "FROM sandbox_policy_registry WHERE plugin_id = :p"
+            ),
+            {"p": plugin_id},
+        ).one()
+    assert row.plugin_id == plugin_id
+    assert row.host_os == "linux"
+    assert row.policy_ref == "policies/round-trip.linux.bwrap"
+    assert row.resolution_result == "resolved"
+    # PR #211 cross-cutting closure: assert the 5th column too.
+    assert row.last_resolved_at == now
+
+
+def test_0015_downgrade_drops_table(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Downgrade removes the table cleanly."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    alembic_command.downgrade(alembic_cfg, "0014")
+    inspector = sa.inspect(engine_at_0011)
+    assert "sandbox_policy_registry" not in inspector.get_table_names()
+
+
+def test_0015_downgrade_idempotent(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """Symmetric fail-soft via IF EXISTS — re-downgrade no-ops cleanly."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    alembic_command.downgrade(alembic_cfg, "0014")
+    alembic_command.stamp(alembic_cfg, "0015")
+    alembic_command.downgrade(alembic_cfg, "0014")
+    inspector = sa.inspect(engine_at_0011)
+    assert "sandbox_policy_registry" not in inspector.get_table_names()
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review closures on 0015: UPSERT semantic, length boundaries,
+# plugin_id charset CHECK, policy_ref path-traversal CHECK.
+# ---------------------------------------------------------------------------
+
+
+def test_0015_upsert_via_on_conflict_updates_in_place(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+) -> None:
+    """``INSERT ... ON CONFLICT (plugin_id, host_os) DO UPDATE`` is the
+    natural shape for the launcher's "latest state" write.
+
+    PR #211 test-engineer MED closure: pins the UPSERT contract so a
+    future PK rename / column re-order doesn't silently break the
+    launcher's write path.
+    """
+    alembic_command.upgrade(alembic_cfg, "0015")
+    plugin_id = "upsert_plugin"
+    t1 = dt.datetime.now(dt.UTC).replace(microsecond=0) - dt.timedelta(minutes=5)
+    t2 = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    upsert_sql = sa.text(
+        "INSERT INTO sandbox_policy_registry "
+        "(plugin_id, host_os, policy_ref, last_resolved_at, resolution_result) "
+        "VALUES (:p, :o, :r, :t, :res) "
+        "ON CONFLICT (plugin_id, host_os) DO UPDATE SET "
+        "policy_ref = EXCLUDED.policy_ref, "
+        "last_resolved_at = EXCLUDED.last_resolved_at, "
+        "resolution_result = EXCLUDED.resolution_result"
+    )
+    # First write: stub_used (e.g. dev environment).
+    with engine_at_0011.begin() as conn:
+        conn.execute(
+            upsert_sql,
+            {
+                "p": plugin_id,
+                "o": "linux",
+                "r": "policies/upsert.linux.bwrap",
+                "t": t1,
+                "res": "stub_used",
+            },
+        )
+    # Second write: same (plugin, OS) but resolved policy.
+    with engine_at_0011.begin() as conn:
+        conn.execute(
+            upsert_sql,
+            {
+                "p": plugin_id,
+                "o": "linux",
+                "r": "policies/upsert-v2.linux.bwrap",
+                "t": t2,
+                "res": "resolved",
+            },
+        )
+    with engine_at_0011.begin() as conn:
+        rows = conn.execute(
+            sa.text(
+                "SELECT policy_ref, last_resolved_at, resolution_result "
+                "FROM sandbox_policy_registry WHERE plugin_id = :p"
+            ),
+            {"p": plugin_id},
+        ).all()
+    assert len(rows) == 1, "ON CONFLICT must keep exactly one row"
+    assert rows[0].policy_ref == "policies/upsert-v2.linux.bwrap"
+    assert rows[0].last_resolved_at == t2
+    assert rows[0].resolution_result == "resolved"
+
+
+@pytest.mark.parametrize(
+    ("plugin_id_value", "case"),
+    [
+        ("a", "min-1"),
+        ("a" * 128, "max"),
+    ],
+)
+def test_0015_plugin_id_length_boundary_accepts(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    plugin_id_value: str,
+    case: str,
+) -> None:
+    """plugin_id 1 and 128 chars accepted (boundary triple — refusal at
+    129 covered by the format CHECK refusal test below)."""
+    alembic_command.upgrade(alembic_cfg, "0015")
+    with engine_at_0011.begin() as conn:
+        conn.execute(
+            _INSERT_REGISTRY_SQL,
+            _registry_payload(plugin_id=plugin_id_value),
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_plugin_id",
+    [
+        "Plugin-With-Hyphen",  # hyphen rejected by [a-z0-9_]
+        "PLUGIN_UPPER",  # uppercase rejected
+        "plugin.dotted",  # dot rejected
+        "plugin space",  # whitespace rejected
+        "",  # empty (zero-length rejected by {1,128})
+        "a" * 129,  # 129 chars overflows the {1,128} cap
+    ],
+)
+def test_0015_plugin_id_charset_check_refuses_invalid(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    bad_plugin_id: str,
+) -> None:
+    """CHECK ``ck_sandbox_policy_registry_plugin_id_format`` refuses
+    non-snake_case / overflow plugin_id values.
+
+    PR #211 sec/mem closure: prevents silent PK sharding from typo'd
+    or upper-cased writer-side ids.
+    """
+    alembic_command.upgrade(alembic_cfg, "0015")
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            _INSERT_REGISTRY_SQL,
+            _registry_payload(plugin_id=bad_plugin_id),
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_policy_ref",
+    [
+        "/etc/passwd",  # absolute path
+        "/usr/share/policies/x",  # absolute path
+        "../../../etc/shadow",  # parent-directory escape
+        "policies/../../etc/passwd",  # mid-path escape
+        "x/../y",  # any .. anywhere
+    ],
+)
+def test_0015_policy_ref_check_refuses_path_traversal(
+    alembic_cfg: AlembicConfig,
+    engine_at_0011: sa.Engine,
+    bad_policy_ref: str,
+) -> None:
+    """CHECK ``ck_sandbox_policy_registry_policy_ref_relative`` refuses
+    absolute paths and parent-directory escapes.
+
+    PR #211 sec closure: defence-in-depth against a buggy/malicious
+    writer planting paths that resolve outside the sandbox-policy root.
+    """
+    alembic_command.upgrade(alembic_cfg, "0015")
+    with pytest.raises((sa.exc.IntegrityError, sa.exc.DataError)), engine_at_0011.begin() as conn:
+        conn.execute(
+            _INSERT_REGISTRY_SQL,
+            _registry_payload(
+                plugin_id="path_traversal_test",
+                policy_ref=bad_policy_ref,
+            ),
+        )
