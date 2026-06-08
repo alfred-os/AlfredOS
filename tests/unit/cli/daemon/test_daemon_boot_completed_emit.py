@@ -63,3 +63,40 @@ def test_boot_completed_exits_3_when_completion_audit_unwritable(
     runner = CliRunner()
     result = runner.invoke(daemon_app, ["start"])
     assert result.exit_code == 3
+
+
+def test_boot_completed_row_not_emitted_when_supervisor_start_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+) -> None:
+    """CR #2: declare boot complete only AFTER supervisor.start() succeeds.
+
+    If ``supervisor.start()`` raises, the daemon never actually completed
+    its boot, so no ``daemon.boot.completed`` audit row may be emitted and
+    no "started" message may be printed — emitting either would lie to the
+    operator + the audit trail about a boot that did not happen.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+
+    class _FailingStartSupervisor(FakeSupervisor):
+        async def start(self) -> None:
+            raise RuntimeError("supervisor failed to start")
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.Supervisor",
+        _FailingStartSupervisor,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(daemon_app, ["start"])
+
+    # The boot crashed (start raised) — the command exits non-zero and the
+    # exception is not swallowed.
+    assert result.exit_code != 0
+    # No completion row was written for a boot that never completed.
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # No "started" confirmation was printed.
+    assert "boot_id" not in result.output or result.output.strip() == ""
+    # The PID file was cleaned up (or never persisted past the failed start).
+    assert not (tmp_path / "daemon.pid").exists()

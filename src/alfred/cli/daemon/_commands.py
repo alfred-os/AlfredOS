@@ -535,8 +535,13 @@ async def _start_async() -> None:
             environment_source=source,
         )
 
-    # Probe (b): snapshot-ref init (FILE-ONLY; core-eng-002).
-    failure_b, snapshot_ref = await probe_snapshot_ref_init(environment=settings.environment)
+    # Probe (b): snapshot-ref init (FILE-ONLY; core-eng-002). CR #6: the
+    # policies path is resolved from Settings (anchored at /etc/alfred),
+    # NOT from the daemon's CWD.
+    failure_b, snapshot_ref = await probe_snapshot_ref_init(
+        environment=settings.environment,
+        config_path=settings.policies_path,
+    )
     if failure_b is not None or snapshot_ref is None:
         await _refuse_boot(
             audit,
@@ -576,24 +581,8 @@ async def _start_async() -> None:
         operator_session_resolver=_StubOperatorResolver(),
     )
 
-    await _emit_or_quarantine(
-        audit,
-        fields=DAEMON_BOOT_FIELDS,
-        schema_name="DAEMON_BOOT_FIELDS",
-        event="daemon.boot.completed",
-        subject={
-            "boot_id": boot_id,
-            "started_at": started_at.isoformat(),
-            "state_git_head_sha": state_git_head_sha,
-            "slice_version": "4",
-            "policies_snapshot_hash": policies_snapshot_hash,
-            "environment": settings.environment,
-        },
-        result="success",
-    )
-
-    await _invoke_boot_completed(boot_id, state_git_head_sha)
-
+    # The PID file is written BEFORE start() so a concurrent ``alfred daemon
+    # stop`` can find us the instant the supervisor begins coming up.
     pidfile_path = default_pidfile_path()
     write_pidfile(
         pidfile_path,
@@ -601,12 +590,43 @@ async def _start_async() -> None:
         boot_id=boot_id,
         started_at=started_at.isoformat(),
     )
-    typer.echo(t("daemon.boot.started", boot_id=boot_id))
 
-    await supervisor.start()
     try:
+        # CR #2: declare boot COMPLETE only after ``supervisor.start()``
+        # succeeds. Emitting the completion row / echoing "started" BEFORE
+        # start() would record a ``daemon.boot.completed`` row + tell the
+        # operator the daemon is up for a boot that may then fail in start()
+        # — a lie to both the audit trail and the operator. So start() runs
+        # first; only on success do we emit the completed row, invoke the
+        # hookpoint, and echo.
+        await supervisor.start()
+
+        await _emit_or_quarantine(
+            audit,
+            fields=DAEMON_BOOT_FIELDS,
+            schema_name="DAEMON_BOOT_FIELDS",
+            event="daemon.boot.completed",
+            subject={
+                "boot_id": boot_id,
+                "started_at": started_at.isoformat(),
+                "state_git_head_sha": state_git_head_sha,
+                "slice_version": "4",
+                "policies_snapshot_hash": policies_snapshot_hash,
+                "environment": settings.environment,
+            },
+            result="success",
+        )
+
+        await _invoke_boot_completed(boot_id, state_git_head_sha)
+
+        typer.echo(t("daemon.boot.started", boot_id=boot_id))
+
         await wait_for_shutdown(supervisor)
     finally:
+        # Drain the supervisor (no-op if start() never succeeded) and remove
+        # the PID file on EVERY exit path — clean shutdown, a start() crash,
+        # or a quarantine (exit 3) on the completion row — so a failed boot
+        # never leaves a stale pidfile behind.
         await supervisor.stop()
         delete_pidfile(pidfile_path)
 
