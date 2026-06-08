@@ -142,10 +142,11 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
-from typing import Any, Final, Self, cast
+from typing import Any, Final, Literal, Self, cast
 from uuid import uuid4
 
 import structlog
+from pydantic import BaseModel, ConfigDict
 
 from alfred.hooks.audit_sink import (
     HOOKS_CHAIN_TIMEOUT,
@@ -364,6 +365,61 @@ Schema:
   a re-entrant ``pre`` (the common shape — a subscriber that recursively
   invokes its own action) from a re-entrant ``error`` (the suspicious
   shape — an error-handler that re-throws into its own error chain).
+"""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ErrorOutcome[T] discriminated union — PR-S4-3 / ADR-0022
+# ──────────────────────────────────────────────────────────────────────
+
+
+class ReRaise(BaseModel):
+    """The error chain decided not to substitute — the original
+    exception propagates.
+
+    Returned by :func:`_run_error` when every subscriber returned
+    ``None`` OR when the tier-upgrade guard refused every substitute
+    OR when the hookpoint's
+    :attr:`alfred.hooks.registry.HookpointMeta.allow_error_substitution`
+    is ``False``.
+
+    Frozen Pydantic v2 — no payload, no fields. Equality is "all
+    ``ReRaise()`` instances are equal" so a caller pattern-matching
+    on ``case ReRaise():`` matches every Re-raise outcome.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SubstituteResult[T](BaseModel):
+    """An error-stage subscriber produced a recovery payload that
+    replaces the exception.
+
+    Attributes:
+        payload: The typed substitute. Matched against the caller's
+            ``carrier_type`` at construction; a mismatch raises
+            :class:`pydantic.ValidationError`.
+        source_tier: The substitute's trust origin. Wire-format string
+            (NOT ``type[TrustTier]`` — kept JSON-serialisable for the
+            audit row, mirroring
+            :func:`alfred.security.tiers._tier_by_name`).
+        subscriber_id: The substituting subscriber's
+            ``hook_fn.__qualname__``. Surfaces on the
+            :data:`CARRIER_SUBSTITUTION_FIELDS` audit row (PR-S4-0a).
+    """
+
+    payload: T
+    source_tier: Literal["T0", "T1", "T2", "T3"]
+    subscriber_id: str
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+type ErrorOutcome[T] = ReRaise | SubstituteResult[T]
+"""Discriminated union over the two error-stage dispositions.
+
+Callers MUST exhaustively pattern-match on this type. Mypy strict
+enforces exhaustiveness; a future third variant surfaces as a
+non-exhaustive match warning at every consume site.
 """
 
 
