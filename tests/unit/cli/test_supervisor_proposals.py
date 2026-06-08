@@ -234,8 +234,8 @@ def test_proposals_subcommand_empty_renders_localised_message(
         "alfred.cli.supervisor._list_proposals",
         lambda *, since=None, limit=None: [],
     )
-    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
-    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    # ALFRED_DEEPSEEK_API_KEY + ALFRED_ENVIRONMENT are already set by the
+    # autouse ``_settings_env`` fixture; no redundant setup here (CR #13).
     result = runner.invoke(supervisor_app, ["proposals"])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert "proposals" in result.output.lower()
