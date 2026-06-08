@@ -9,7 +9,7 @@ must surface loudly rather than silently disarm the DLP boundary.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
@@ -17,8 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from alfred.security.dlp import OutboundDlp
 from alfred.supervisor.core import Supervisor
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 
 def _make_minimal_session_scope() -> Callable[[], AbstractAsyncContextManager[Any]]:
@@ -26,17 +26,6 @@ def _make_minimal_session_scope() -> Callable[[], AbstractAsyncContextManager[An
     cm.__aenter__ = AsyncMock(return_value=MagicMock())
     cm.__aexit__ = AsyncMock(return_value=None)
     return lambda: cm
-
-
-def _identity_dlp() -> OutboundDlp:
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: Mapping[str, object]) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
 
 
 def test_outbound_dlp_defaults_to_none() -> None:

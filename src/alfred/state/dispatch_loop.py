@@ -913,7 +913,13 @@ async def _emit_dlp_scan_failed(
                 "correlation_id": correlation_id,
             },
             trust_tier_of_trigger="T1",
-            result="refused",
+            # A scanner CRASH is an infrastructure fault, NOT a deliberate
+            # DLP refusal — ``dlp_failed`` (a base-vocab result value) names
+            # it honestly. ``refused`` stays reserved for the canary-trip
+            # HookRefusal path (DLP_OUTBOUND_REFUSED). Review closure
+            # (cross-cutting + architect): keep the two dispositions
+            # distinguishable on the audit trail.
+            result="dlp_failed",
             cost_estimate_usd=0.0,
             cost_actual_usd=0.0,
             trace_id=correlation_id,

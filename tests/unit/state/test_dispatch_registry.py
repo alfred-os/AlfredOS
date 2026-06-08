@@ -28,7 +28,6 @@ import pytest
 import structlog
 
 from alfred.audit.log import AuditWriter
-from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_registry import (
     PROPOSAL_HANDLERS,
     DispatchOutcome,
@@ -38,20 +37,7 @@ from alfred.state.dispatch_registry import (
 )
 from alfred.state.proposal_payloads import BreakerResetProposal
 from alfred.supervisor.errors import NoSuchComponentError
-
-
-def _identity_dlp() -> OutboundDlp:
-    """An OutboundDlp whose stages are no-ops — satisfies the required field."""
-
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: object) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
-
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 # ---------------------------------------------------------------------------
 # DispatchOutcome — name, factories, immutability

@@ -13,7 +13,7 @@ persisted — the atomic-rollback contract.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,21 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from alfred.audit.log import AuditWriter
 from alfred.memory.models import AuditEntry, Base, ProcessedProposal
-from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_loop import _ProposalBlobRef, _record_failure
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
-
-
-def _identity_dlp() -> OutboundDlp:
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: Mapping[str, object]) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
 
 
 def _ref() -> _ProposalBlobRef:
