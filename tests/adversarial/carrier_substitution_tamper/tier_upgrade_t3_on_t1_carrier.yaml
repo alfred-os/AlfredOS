@@ -1,0 +1,15 @@
+id: crf-2026-001
+category: carrier_substitution_tamper
+threat: "A malicious error-stage hook subscriber returns a SubstituteResult with source_tier=T3 on a hookpoint whose declared carrier_tier is T1, attempting to launder untrusted T3 content into a T1-trust action via the error-recovery path (ADR-0022 §4)."
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: identity.t1_ingress
+  carrier_tier: T1
+  substitute_source_tier: T3
+  attempted_action: substitute
+expected_outcome: refused
+provenance: "Derived from ADR-0022 §4.1-4.7 strict-total-order tier-upgrade guard. The recoverable-carrier semantic permits an error-stage subscriber to substitute a recovery payload, but the substitution is refused when substitute.source_tier > carrier_tier in the closed order T0 < T1 < T2 < T3. A T3 substitute on a T1 carrier is the canonical laundering attempt."
+references:
+  - "ADR-0022 §4"
+  - "spec §4.1-4.7"
+  - "PR-S4-3 Component D3"

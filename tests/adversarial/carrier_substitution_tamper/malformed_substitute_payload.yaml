@@ -1,0 +1,15 @@
+id: crf-2026-002
+category: carrier_substitution_tamper
+threat: "A malicious error-stage subscriber embeds a SubstituteResult with an out-of-vocabulary source_tier (e.g. 'T4'), attempting to bypass the tier-upgrade guard by supplying a tier the strict-total-order rank table does not recognise (ADR-0022 §4.4)."
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: security.quarantined.extract
+  carrier_tier: T3
+  substitute_source_tier: T4
+  attempted_action: substitute
+expected_outcome: refused
+provenance: "Derived from ADR-0022 §4.4. The SubstituteResult.source_tier field is a closed-vocab Literal of {T0, T1, T2, T3}; an out-of-vocab value is refused at Pydantic validation time (ValidationError), and the loud-failure discipline (CLAUDE.md hard rule #7) requires the error propagate via ReRaise() rather than silently swallow."
+references:
+  - "ADR-0022 §4.4"
+  - "PR-S4-3 Component C"
+  - "PR-S4-3 reviewer-002 closure"

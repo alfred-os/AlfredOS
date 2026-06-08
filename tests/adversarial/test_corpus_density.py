@@ -127,17 +127,19 @@ def test_config_reload_bypass_corpus_has_payloads() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="awaiting PR-S4-3 carrier substitution — crf-2026-001..N",
-)
 def test_carrier_substitution_tamper_corpus_has_payloads() -> None:
-    """`tests/adversarial/carrier_substitution_tamper/` must carry ≥1 payload from PR-S4-3."""
+    """`tests/adversarial/carrier_substitution_tamper/` carries ≥4 PR-S4-3 payloads.
+
+    PR-S4-3 (ADR-0022) ships crf-2026-001..004: tier-upgrade refusal,
+    malformed substitute, wrong-type substitute, meta-hookpoint
+    recursion. The xfail-strict guard was removed when the payloads
+    landed; the floor of 4 catches a silent deletion regression.
+    """
     category_dir = Path(__file__).parent / "carrier_substitution_tamper"
     count = _count_yaml_payloads(category_dir)
-    assert count > 0, (
-        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
-        "requires real YAML, not stub test modules"
+    assert count >= 4, (
+        f"expected ≥4 *.yaml payloads under {category_dir} (crf-2026-001..004), "
+        f"found {count} — a payload was deleted or renamed"
     )
 
 
