@@ -164,6 +164,33 @@ class RealGate:
         return gate
 
     # ------------------------------------------------------------------
+    # Backing-store availability (public surface for the daemon boot gate)
+    # ------------------------------------------------------------------
+
+    def is_backing_store_available(self) -> bool:
+        """Return the gate's real fail-closed state as an availability signal.
+
+        PR-S4-1 (arch-222-1 / err-001 / core-eng-pr222-1): the daemon's
+        supervisor boot gate (``_SupervisorBootGate``) and the supervisor's
+        :class:`CapabilityGateMonitor` heartbeat need a SYNC view of whether
+        the gate can reach its backing store. This is the public contract
+        they consume — they do NOT reach into the private ``_fail_closed``
+        flag (which would fail-OPEN on a rename via a ``getattr`` default).
+
+        Semantics: ``True`` iff the gate is currently serving (not
+        fail-closed). The flag is driven by :meth:`_heartbeat_loop`, which
+        trips ``_fail_closed`` after the 60 s staleness window
+        (``_MAX_MISSED_HEARTBEATS``). When the heartbeat is NOT running
+        (``start_heartbeat=False``), this returns ``True`` because the flag
+        never trips — so this sync read is a CACHED view, authoritative only
+        when the heartbeat drives it. At boot the AUTHORITATIVE liveness
+        check is the async ``SELECT 1`` handshake (``_BootHandshake`` /
+        probe c), not this cached read; the monitor relies on the heartbeat
+        being started in production to observe a later outage.
+        """
+        return not self._fail_closed
+
+    # ------------------------------------------------------------------
     # Hot-path check methods (spec §8.2)
     # ------------------------------------------------------------------
 
