@@ -28,9 +28,10 @@ import subprocess
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NoReturn, Protocol
 
 import typer
+from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import (
     DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS,
@@ -121,23 +122,40 @@ def build_boot_session_scope(  # pragma: no cover - real-infra glue; unit tests 
     return build_session_scope(settings)  # type: ignore[no-any-return]
 
 
+class _BackingStoreAvailabilityGate(Protocol):
+    """The PUBLIC contract the supervisor boot gate depends on.
+
+    arch-222-1 / err-001 / core-eng-pr222-1: the boot gate consumes
+    :meth:`RealGate.is_backing_store_available` through this Protocol rather
+    than reaching into the private ``_fail_closed`` attribute. A ``getattr``
+    default would fail-OPEN (report "available") if the attribute were ever
+    renamed; depending on a typed contract makes the bridge survive a
+    refactor and keeps the fail-closed direction safe.
+    """
+
+    def is_backing_store_available(self) -> bool: ...
+
+
 class _SupervisorBootGate:
     """Gate adapter the Supervisor consumes.
 
     Wraps a :class:`RealGate` (for the hot-path ``check*`` calls the plugin
-    lifecycle will make) and adds the SYNC ``is_backing_store_available()``
-    the supervisor's ``CapabilityGateMonitor`` heartbeat polls. RealGate's
-    own fail-closed flag is the source of truth — when the heartbeat detects
-    the backing store dropped, ``RealGate`` has already flipped fail-closed,
-    so reporting ``not self._gate._fail_closed`` keeps the monitor's
-    transition logic correct.
+    lifecycle will make) and re-exports the SYNC
+    ``is_backing_store_available()`` the supervisor's
+    ``CapabilityGateMonitor`` heartbeat polls. The wrapped gate's PUBLIC
+    :meth:`is_backing_store_available` is the source of truth — it returns
+    ``not _fail_closed`` (driven by RealGate's own heartbeat), so the
+    monitor's transition logic stays correct. We delegate to that public
+    method (no ``getattr`` default, no private reach) so a missing method is
+    a loud ``AttributeError`` at construction-adjacent call time rather than
+    a silent fail-OPEN.
     """
 
-    def __init__(self, gate: object) -> None:
+    def __init__(self, gate: _BackingStoreAvailabilityGate) -> None:
         self._gate = gate
 
     def is_backing_store_available(self) -> bool:
-        return not getattr(self._gate, "_fail_closed", False)
+        return self._gate.is_backing_store_available()
 
 
 class _BootHandshake:
@@ -285,8 +303,16 @@ async def _emit_or_quarantine(
             cost_actual_usd=0.0,
             trace_id=str(subject.get("boot_id", uuid.uuid4())),
         )
-    except Exception as exc:
-        # CLAUDE.md hard rule 7: a failed audit write is loud + quarantines.
+    except (SQLAlchemyError, OSError) as exc:
+        # err-002: narrow to the persistence family. A DB-write failure
+        # (SQLAlchemyError) or a DSN-unreachable / socket error (OSError —
+        # ConnectionError is an OSError subclass) is a genuine
+        # "audit log unwritable" event → quarantine with exit 3 (sec-003,
+        # CLAUDE.md hard rule 7: a failed audit write is loud).
+        #
+        # Any OTHER exception (TypeError/KeyError/serialization bug in
+        # append_schema) is a real CODE defect — it must propagate and
+        # crash loudly rather than masquerade as "Postgres is down".
         typer.echo(t("daemon.boot.audit_log_unwritable"), err=True)
         raise _BootRefusedError(_EXIT_AUDIT_UNWRITABLE) from exc
 
@@ -298,11 +324,16 @@ async def _refuse_boot(
     *,
     boot_id: str,
     environment_source: str,
-) -> None:
+) -> NoReturn:
     """Refuse the boot: invoke hookpoint, emit failed row, print, exit 2.
 
     arch-001 closure: the ``daemon.boot.failed`` hookpoint is invoked BEFORE
     the audit emit so the hookpoint surface is live, not dead.
+
+    Security LOW (sec): the ``NoReturn`` annotation is load-bearing — it lets
+    the type checker prove every call site halts, so no refusal can ever
+    fall through into ``Supervisor`` construction (a fail-OPEN on a security
+    refusal). Callers therefore need no explicit ``return`` afterwards.
     """
     await _invoke_boot_failed(failure)
     await _emit_or_quarantine(
@@ -413,6 +444,22 @@ class _EnvironmentNotSetError(Exception):
         self.load_result = load_result
 
 
+def _environment_refusal_message(load_result: EnvironmentLoadResult) -> str:
+    """Pick the operator-facing refusal copy for an unresolved environment.
+
+    devex-222-01: an UNRECOGNISED value (a typo like ``staging`` / ``dev``)
+    is distinct from a fully-unset environment. The unrecognised branch
+    echoes what the operator typed so a typo is not indistinguishable from
+    "unset" — and names the accepted values so the next attempt succeeds.
+    """
+    if load_result.source is EnvironmentSource.UNRECOGNISED:
+        return t(
+            "daemon.boot.environment_unrecognised",
+            value=load_result.unrecognised_value or "",
+        )
+    return t("daemon.boot.environment_not_set")
+
+
 async def _start_async() -> None:
     boot_id = str(uuid.uuid4())
     # sec-001: build the AuditWriter BEFORE the environment check so the
@@ -422,14 +469,18 @@ async def _start_async() -> None:
     try:
         settings, load_result = _load_settings_or_die()
     except _EnvironmentNotSetError as exc:
+        # devex-222-01: distinguish a TYPO (env var set to an unrecognised
+        # value) from a fully-unset environment. The unrecognised path
+        # echoes the operator's typo + the accepted values so following the
+        # message literally does not re-trigger the same refusal.
+        message = _environment_refusal_message(exc.load_result)
         await _refuse_boot(
             audit,
             EnvironmentNotSetFailure(),
-            t("daemon.boot.environment_not_set"),
+            message,
             boot_id=boot_id,
             environment_source=exc.load_result.source.value,
         )
-        return  # pragma: no cover - _refuse_boot always raises
 
     # The conflict audit (if any) goes out BEFORE the probes so the row is
     # present even if a later probe refuses.
@@ -474,7 +525,7 @@ async def _start_async() -> None:
         )
 
     # Probe (b): snapshot-ref init (FILE-ONLY; core-eng-002).
-    failure_b, snapshot_ref = await probe_snapshot_ref_init()
+    failure_b, snapshot_ref = await probe_snapshot_ref_init(environment=settings.environment)
     if failure_b is not None or snapshot_ref is None:
         await _refuse_boot(
             audit,
@@ -483,7 +534,6 @@ async def _start_async() -> None:
             boot_id=boot_id,
             environment_source=source,
         )
-        return  # pragma: no cover - _refuse_boot always raises
 
     # Probe (c): capability-gate handshake — Postgres reachability via a
     # real SELECT 1 over the boot session scope (core-eng-002).
@@ -614,11 +664,15 @@ def status_daemon() -> None:
     if not is_pid_alive(info.pid):
         typer.echo(t("daemon.status.stale_pidfile", pid=info.pid))
         return
+    # devex-222-03: the value is the raw boot timestamp, so the label is
+    # "Started:" — not "Uptime:" (which would promise a duration the
+    # operator must compute by hand). A humanised uptime duration lands in
+    # a follow-up; for now the label honestly describes its value.
     typer.echo(
         t(
             "daemon.status.template",
             pid=info.pid,
-            uptime=info.started_at,
+            started_at=info.started_at,
             boot_id=info.boot_id,
             last_boot_at=info.started_at,
         )

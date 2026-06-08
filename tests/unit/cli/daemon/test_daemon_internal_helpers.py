@@ -92,20 +92,42 @@ def test_current_pid_is_our_pid() -> None:
     assert _commands._current_pid() == os.getpid()
 
 
-def test_supervisor_boot_gate_available_when_not_fail_closed() -> None:
+def test_supervisor_boot_gate_available_delegates_to_public_method() -> None:
+    """The adapter re-exports the wrapped gate's PUBLIC availability method."""
+
     class _Gate:
-        _fail_closed = False
+        def is_backing_store_available(self) -> bool:
+            return True
 
     adapter = _commands._SupervisorBootGate(_Gate())
     assert adapter.is_backing_store_available() is True
 
 
-def test_supervisor_boot_gate_unavailable_when_fail_closed() -> None:
+def test_supervisor_boot_gate_unavailable_delegates_to_public_method() -> None:
     class _Gate:
-        _fail_closed = True
+        def is_backing_store_available(self) -> bool:
+            return False
 
     adapter = _commands._SupervisorBootGate(_Gate())
     assert adapter.is_backing_store_available() is False
+
+
+def test_supervisor_boot_gate_fails_loud_when_method_absent() -> None:
+    """A wrapped gate WITHOUT the public method raises — never fails OPEN.
+
+    arch-222-1 / err-001 / test-engineer Critical coverage gap: the previous
+    ``getattr(gate, "_fail_closed", False)`` shape silently reported
+    "available" when the attribute was absent (a fail-OPEN trust-boundary
+    default). Delegating to the public method makes a missing contract a
+    loud ``AttributeError`` instead.
+    """
+
+    class _GateMissingMethod:
+        pass
+
+    adapter = _commands._SupervisorBootGate(_GateMissingMethod())  # type: ignore[arg-type]
+    with pytest.raises(AttributeError):
+        adapter.is_backing_store_available()
 
 
 async def test_boot_handshake_runs_healthcheck(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,9 +11,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
+from alfred.i18n import t
 
 
 def test_environment_not_set_refuses_and_audits(
@@ -59,7 +61,9 @@ def test_environment_not_set_exits_3_when_audit_unwritable(
     )
 
     class _BrokenWriter:
-        append_schema = AsyncMock(side_effect=RuntimeError("pg down"))
+        append_schema = AsyncMock(
+            side_effect=OperationalError("pg down", None, Exception("refused"))
+        )
 
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_audit_writer",
@@ -69,3 +73,43 @@ def test_environment_not_set_exits_3_when_audit_unwritable(
     runner = CliRunner()
     result = runner.invoke(daemon_app, ["start"])
     assert result.exit_code == 3
+
+
+def test_environment_unrecognised_echoes_typo_and_refuses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """devex-222-01: a typo'd value echoes the typo + the accepted list.
+
+    The operator set ALFRED_ENVIRONMENT to a value that is NOT one of
+    development/production/test. The refusal must distinguish this from
+    "unset" by echoing what they typed via the
+    ``daemon.boot.environment_unrecognised`` message.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "staging")  # not a valid value
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        "alfred.config._environment_loader._DEFAULT_ETC_PATH",
+        tmp_path / "absent",
+    )
+
+    appended: list[dict[str, object]] = []
+
+    class _FakeWriter:
+        async def append_schema(self, **kw: object) -> None:
+            appended.append(kw)
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_audit_writer",
+        lambda **_kw: _FakeWriter(),
+    )
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    # The unrecognised message (with the echoed typo) was printed.
+    assert t("daemon.boot.environment_unrecognised", value="staging") in result.output
+    assert "staging" in result.output
+    # The failed audit row still records the canonical failure_reason.
+    subject = appended[0]["subject"]
+    assert isinstance(subject, dict)
+    assert subject["failure_reason"] == "environment_not_set"
+    assert subject["environment_source"] == "unrecognised"

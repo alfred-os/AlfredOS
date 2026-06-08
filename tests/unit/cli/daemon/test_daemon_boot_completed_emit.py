@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from alfred.cli.daemon import daemon_app
@@ -49,11 +50,13 @@ def test_boot_completed_exits_3_when_completion_audit_unwritable(
     tmp_path: Path,
     boot_success_env: FakeAuditWriter,
 ) -> None:
-    """sec-003: a failure writing the completion row quarantines with exit 3."""
+    """sec-003: a persistence failure writing the completion row → exit 3."""
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
     async def _boom(**_kw: object) -> None:
-        raise RuntimeError("pg down on completion write")
+        # err-002: a DB-write failure (SQLAlchemyError) is the genuine
+        # audit-unwritable case → quarantine exit 3.
+        raise OperationalError("pg down on completion write", None, Exception("refused"))
 
     monkeypatch.setattr(boot_success_env, "append_schema", _boom)
 
