@@ -89,6 +89,9 @@ from alfred.hooks.capability import CapabilityGate
 from alfred.hooks.context import HookContext, HookKind
 from alfred.hooks.errors import (
     HookError,
+    allow_error_substitution_must_be_false_for_meta_hookpoint_message,
+    carrier_tier_must_be_none_for_meta_hookpoint_message,
+    carrier_tier_required_message,
     hookpoint_drift_message,
     hookpoint_not_declared_message,
     subscriber_must_be_async_message,
@@ -96,6 +99,7 @@ from alfred.hooks.errors import (
     unknown_tier_in_declaration_message,
     unknown_tier_message,
 )
+from alfred.security.tiers import TrustTier
 
 # ──────────────────────────────────────────────────────────────────────
 # Module constants — spec §0 verbatim
@@ -227,6 +231,24 @@ class HookpointMeta:
     subscribable_tiers: frozenset[str]
     refusable_tiers: frozenset[str]
     fail_closed: bool
+    # Slice-4 PR-S4-3 (ADR-0022 recoverable-carrier semantic). The
+    # carrier_tier is the upper bound of a legal SubstituteResult.tier
+    # on the error chain — substitutions are refused when
+    # ``substitute.tier > carrier_tier`` per the closed total order
+    # ``T0 < T1 < T2 < T3``. Meta-hookpoints (the ``hooks.*`` family
+    # that EMITS substitution events) carry ``carrier_tier=None`` to
+    # break the recursion loop: a meta-hookpoint about substitution
+    # cannot itself substitute its own error. The registration helper
+    # ``register_hookpoint`` refuses ``carrier_tier=None`` outside the
+    # documented meta-hookpoint allow-list at module-init time.
+    #
+    # ``allow_error_substitution`` is the binary opt-in to the
+    # recoverable-carrier semantic. Default-open (True) for non-meta
+    # hookpoints — every Slice-4 sibling-site migration in Task F uses
+    # the default. The meta-hookpoints in Task E set False explicitly
+    # to belt-and-braces the recursion guard.
+    carrier_tier: type[TrustTier] | None = None
+    allow_error_substitution: bool = True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -324,6 +346,32 @@ Use for the most security-sensitive hookpoints (capability-gate
 register-time consult, audit-log write authorization). Both operator
 and user-plugin tiers are locked out. Typically paired with
 ``fail_closed=True`` for the timeout / unexpected-exception policy.
+"""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Slice-4 PR-S4-3 — meta-hookpoint allow-list (ADR-0022)
+# ──────────────────────────────────────────────────────────────────────
+
+_META_HOOKPOINT_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "hooks.carrier_substituted",
+        "hooks.carrier_substitution_refused",
+    }
+)
+"""Hookpoints emitted *about* the substitution machinery itself.
+
+Meta-hookpoints close the recursion: a meta-hookpoint about
+substitution cannot itself substitute its own error. They carry
+``carrier_tier=None`` + ``allow_error_substitution=False`` so the
+tier-upgrade guard treats them as a fixed point. ``register_hookpoint``
+refuses ``carrier_tier=None`` for every name NOT in this set —
+guaranteeing every non-meta hookpoint declares its upper-bound tier.
+
+Membership is closed: a future meta-hookpoint addition must extend
+this frozenset (and the corresponding catalog entries / Task E
+implementation). Operator-facing surface — not a third-party
+extension point.
 """
 
 
@@ -543,6 +591,8 @@ class HookRegistry:
         subscribable_tiers: Iterable[str],
         refusable_tiers: Iterable[str],
         fail_closed: bool,
+        carrier_tier: type[TrustTier] | None,
+        allow_error_substitution: bool = True,
     ) -> None:
         """Declare a hookpoint's per-hookpoint metadata (#119).
 
@@ -652,11 +702,37 @@ class HookRegistry:
                 )
             )
 
+        # Slice-4 PR-S4-3 (ADR-0022 recoverable-carrier semantic).
+        # Three gates close the meta-hookpoint recursion:
+        #   1. non-meta hookpoints MUST set carrier_tier (the
+        #      tier-upgrade guard needs a fixed point).
+        #   2. meta-hookpoints MUST carry carrier_tier=None (a non-None
+        #      tier would let the meta-hookpoint substitute its own
+        #      error and trigger recursion).
+        #   3. meta-hookpoints MUST carry allow_error_substitution=False
+        #      (belt-and-braces — a subscriber against a meta-hookpoint
+        #      cannot substitute the meta-event's payload).
+        is_meta = name in _META_HOOKPOINT_NAMES
+        if carrier_tier is None and not is_meta:
+            raise HookError(carrier_tier_required_message(hookpoint=name))
+        if carrier_tier is not None and is_meta:
+            raise HookError(
+                carrier_tier_must_be_none_for_meta_hookpoint_message(hookpoint=name)
+            )
+        if allow_error_substitution and is_meta:
+            raise HookError(
+                allow_error_substitution_must_be_false_for_meta_hookpoint_message(
+                    hookpoint=name
+                )
+            )
+
         new_meta = HookpointMeta(
             name=name,
             subscribable_tiers=normalized_subscribable_tiers,
             refusable_tiers=normalized_refusable_tiers,
             fail_closed=fail_closed,
+            carrier_tier=carrier_tier,
+            allow_error_substitution=allow_error_substitution,
         )
         stored = self._hookpoints.get(name)
         if stored is not None and stored != new_meta:

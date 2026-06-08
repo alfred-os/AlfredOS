@@ -23,6 +23,7 @@ from alfred.hooks import (
 )
 from alfred.memory.models import Episode
 from alfred.providers.base import Role
+from alfred.security.tiers import T3
 
 # The runtime vocabulary of the ``Role`` ``Literal``. PEP 586's
 # ``typing.get_args(Role)`` would compute this dynamically, but
@@ -101,6 +102,10 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,
+        # PR-S4-3: T3 upper bound — episodic content carries T2 (TUI/Discord) or T3
+        # (untrusted ingestion). Per-call carrier_type is computed from
+        # EpisodicRecordInput.trust_tier at invoke time (mem-002 closure).
+        carrier_tier=T3,
     )
 
     # ``before_db_write`` — security stage. ``user-plugin`` cannot
@@ -121,6 +126,7 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
         subscribable_tiers=SYSTEM_OPERATOR_TIERS,
         refusable_tiers=SYSTEM_ONLY_TIERS,
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     # The three terminal hookpoints inherit the defaults — open
@@ -133,18 +139,21 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,
+        carrier_tier=T3,
     )
     target.register_hookpoint(
         name=_HOOKPOINT_WRITE_FAILED,
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,
+        carrier_tier=T3,
     )
     target.register_hookpoint(
         name=_HOOKPOINT_CANCELLED,
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,
+        carrier_tier=T3,
     )
 
 

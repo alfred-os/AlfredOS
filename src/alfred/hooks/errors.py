@@ -459,3 +459,60 @@ def unknown_tier_in_declaration_message(
         unknown_tiers=repr(sorted(unknown_tiers)),
         valid_tiers=repr(sorted(valid_tiers)),
     )
+
+
+def carrier_tier_required_message(*, hookpoint: str) -> str:
+    """Render the ``hooks.carrier_tier_required`` operator-facing string.
+
+    Called by :meth:`alfred.hooks.registry.HookRegistry.register_hookpoint`
+    when a publisher passes ``carrier_tier=None`` for a hookpoint NOT
+    on the meta-hookpoint allow-list. Only ``hooks.carrier_substituted``
+    and ``hooks.carrier_substitution_refused`` may carry
+    ``carrier_tier=None`` — every other hookpoint declares its
+    upper-bound tier so the Slice-4 tier-upgrade guard has a
+    fixed point to compare against (ADR-0022 PR-S4-3).
+
+    Args:
+        hookpoint: The hookpoint identifier the publisher is declaring.
+    """
+    return t("hooks.carrier_tier_required", hookpoint=hookpoint)
+
+
+def carrier_tier_must_be_none_for_meta_hookpoint_message(*, hookpoint: str) -> str:
+    """Render the ``hooks.carrier_tier_must_be_none_for_meta_hookpoint``
+    operator-facing string.
+
+    Symmetric guard to :func:`carrier_tier_required_message`: a
+    publisher declaring a meta-hookpoint (``hooks.carrier_substituted``
+    / ``hooks.carrier_substitution_refused``) MUST set
+    ``carrier_tier=None`` to keep the recursion guard intact. A
+    non-``None`` value would let the meta-hookpoint substitute its
+    own error (ADR-0022 PR-S4-3).
+
+    Args:
+        hookpoint: The hookpoint identifier the publisher is declaring.
+    """
+    return t(
+        "hooks.carrier_tier_must_be_none_for_meta_hookpoint",
+        hookpoint=hookpoint,
+    )
+
+
+def allow_error_substitution_must_be_false_for_meta_hookpoint_message(
+    *, hookpoint: str
+) -> str:
+    """Render the ``hooks.allow_error_substitution_must_be_false_for_meta_hookpoint``
+    operator-facing string.
+
+    Meta-hookpoints MUST carry ``allow_error_substitution=False`` so
+    a subscriber against the meta-hookpoint cannot substitute the
+    meta-event's payload. Belt-and-braces alongside the
+    ``carrier_tier=None`` guard (ADR-0022 PR-S4-3).
+
+    Args:
+        hookpoint: The hookpoint identifier the publisher is declaring.
+    """
+    return t(
+        "hooks.allow_error_substitution_must_be_false_for_meta_hookpoint",
+        hookpoint=hookpoint,
+    )

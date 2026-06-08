@@ -91,12 +91,15 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
         subscribable_tiers=SYSTEM_OPERATOR_TIERS,
         refusable_tiers=frozenset(),
         fail_closed=False,
+        # PR-S4-3: T1 carrier (operator-tier ingress per spec §14).
+        carrier_tier=T1,
     )
     target.register_hookpoint(
         name=HOOKPOINT_T1_DOWNGRADE,
         subscribable_tiers=SYSTEM_OPERATOR_TIERS,
         refusable_tiers=frozenset(),
         fail_closed=False,
+        carrier_tier=T1,
     )
 
 

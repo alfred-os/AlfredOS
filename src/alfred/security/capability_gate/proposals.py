@@ -54,6 +54,7 @@ import structlog
 
 from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
 from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry, get_registry
+from alfred.security.tiers import T0
 
 # CR reviewer F1: the proposal flow and the gate share a single
 # audit-sink Protocol. See ``_audit_protocols`` for the rationale; the
@@ -136,6 +137,8 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
             subscribable_tiers=SYSTEM_ONLY_TIERS,
             refusable_tiers=frozenset(),
             fail_closed=False,
+            # PR-S4-3: T0 carrier — capability-gate proposals are system-internal.
+            carrier_tier=T0,
         )
 
 

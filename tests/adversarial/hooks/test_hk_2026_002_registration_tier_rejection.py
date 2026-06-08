@@ -46,6 +46,7 @@ from alfred.memory.episodic import EpisodicRecordInput
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.gates import make_deny_all_gate
 from tests.unit.hooks.conftest import SpyAuditSink
+from alfred.security.tiers import T0, T1, T2, T3
 
 _PAYLOAD_ID: Final[str] = "hk-2026-002"
 
@@ -152,6 +153,7 @@ def test_user_plugin_rejected_on_security_hookpoint(
         subscribable_tiers=declared_tiers,
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     async def hostile_user_plugin_subscriber(

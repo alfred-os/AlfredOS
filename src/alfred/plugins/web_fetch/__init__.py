@@ -56,6 +56,7 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchTlsError,
 )
 from alfred.plugins.web_fetch.rate_limit import RateLimitConfig, RateLimiter
+from alfred.security.tiers import T3
 
 
 def register_hookpoints(registry: HookRegistry) -> None:
@@ -94,6 +95,8 @@ def register_hookpoints(registry: HookRegistry) -> None:
         subscribable_tiers=SYSTEM_ONLY_TIERS,
         refusable_tiers=SYSTEM_ONLY_TIERS,
         fail_closed=True,
+        # PR-S4-3: T3 carrier — web fetch returns T3 (untrusted external) content.
+        carrier_tier=T3,
     )
 
 

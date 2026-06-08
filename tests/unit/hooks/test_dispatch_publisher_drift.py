@@ -39,6 +39,7 @@ from alfred.hooks.errors import HookError
 from alfred.hooks.invoke import invoke
 from alfred.hooks.registry import HookRegistry
 from tests.unit.hooks.conftest import SpyAuditSink
+from alfred.security.tiers import T0, T1, T2, T3
 
 
 def _ctx() -> HookContext[Any]:
@@ -81,6 +82,7 @@ async def test_dispatch_detects_publisher_allowlist_drift(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     # Publisher then invokes with ``{"system"}`` — DIFFERENT allow-list.
@@ -124,6 +126,7 @@ async def test_dispatch_matching_allowlist_runs_chain(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     # Same allow-list at invoke time. The dispatcher's re-check
@@ -193,6 +196,7 @@ async def test_dispatch_drift_check_across_all_kinds(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     # ``pre`` arm.
@@ -261,6 +265,7 @@ async def test_dispatch_detects_refusable_tiers_drift(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     with pytest.raises(HookError, match="refusable_tiers"):
@@ -307,6 +312,7 @@ async def test_dispatch_detects_fail_closed_drift(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     with pytest.raises(HookError, match="fail_closed"):
@@ -468,6 +474,7 @@ async def test_enforce_drift_audit_row_omits_fail_closed_when_arg_is_none() -> N
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     # Drive _enforce_subscribable_tiers via the active registry. Save

@@ -47,6 +47,7 @@ from alfred.hooks import (
     get_registry,
     invoke,
 )
+from alfred.security.tiers import T3
 
 # CR-156 round-7 / CR-158 T5: ``invoke`` is bound at module scope so
 # ``mock.patch("alfred.security.quarantine.invoke", ...)`` swaps the
@@ -1547,6 +1548,8 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
         subscribable_tiers=SYSTEM_OPERATOR_TIERS,
         refusable_tiers=SYSTEM_ONLY_TIERS,
         fail_closed=True,
+        # PR-S4-3: T3 carrier — quarantined extract handles untrusted T3 content.
+        carrier_tier=T3,
     )
 
 

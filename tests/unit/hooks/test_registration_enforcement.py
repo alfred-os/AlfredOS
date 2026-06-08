@@ -45,6 +45,7 @@ from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookpointMeta, HookRegistry
 from tests.helpers.gates import make_deny_all_gate
 from tests.unit.hooks.conftest import SpyAuditSink
+from alfred.security.tiers import T0, T1, T2, T3
 
 # ──────────────────────────────────────────────────────────────────────
 # 0. Production-singleton default — the #119 invariant pin
@@ -166,6 +167,7 @@ def test_idempotent_declaration_with_same_args(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     # Second call with the SAME args — must not raise.
     strict_registry.register_hookpoint(
@@ -173,6 +175,7 @@ def test_idempotent_declaration_with_same_args(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     # The declared metadata is what the first call set.
     meta = strict_registry.hookpoint_meta("memory.episodic.record.before_db_write")
@@ -181,6 +184,7 @@ def test_idempotent_declaration_with_same_args(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
 
@@ -217,6 +221,7 @@ def test_conflicting_declaration_raises(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     # Different ``subscribable_tiers`` — must raise.
     with pytest.raises(HookError, match="already declared with different metadata"):
@@ -225,6 +230,7 @@ def test_conflicting_declaration_raises(
             subscribable_tiers=frozenset({"operator"}),
             refusable_tiers=frozenset({"system"}),
             fail_closed=True,
+            carrier_tier=T3,
         )
 
 
@@ -243,6 +249,7 @@ def test_conflicting_declaration_differs_on_fail_closed(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     with pytest.raises(HookError, match="already declared with different metadata"):
         strict_registry.register_hookpoint(
@@ -250,6 +257,7 @@ def test_conflicting_declaration_differs_on_fail_closed(
             subscribable_tiers=frozenset({"system", "operator"}),
             refusable_tiers=frozenset({"system"}),
             fail_closed=False,
+            carrier_tier=T3,
         )
 
 
@@ -266,6 +274,7 @@ def test_conflicting_declaration_differs_on_refusable_tiers(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     with pytest.raises(HookError, match="already declared with different metadata"):
         strict_registry.register_hookpoint(
@@ -273,6 +282,7 @@ def test_conflicting_declaration_differs_on_refusable_tiers(
             subscribable_tiers=frozenset({"system", "operator"}),
             refusable_tiers=frozenset({"system", "operator"}),
             fail_closed=True,
+            carrier_tier=T3,
         )
 
 
@@ -294,6 +304,7 @@ def test_hookpoint_meta_is_frozen() -> None:
         subscribable_tiers=frozenset({"operator"}),
         refusable_tiers=frozenset({"operator"}),
         fail_closed=False,
+        carrier_tier=T3,
     )
     with pytest.raises(FrozenInstanceError):
         meta.fail_closed = True  # type: ignore[misc]
@@ -309,6 +320,7 @@ def test_hookpoint_meta_carries_required_fields() -> None:
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     assert meta.name == "memory.episodic.record.before_db_write"
     assert meta.subscribable_tiers == frozenset({"system", "operator"})
@@ -329,18 +341,21 @@ def test_hookpoint_meta_equality_keys_off_all_fields() -> None:
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     b = HookpointMeta(
         name="x",
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     c = HookpointMeta(
         name="x",
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=False,  # drift
+        carrier_tier=T3,
     )
     assert a == b
     assert a != c
@@ -377,6 +392,7 @@ def test_hookpoint_meta_returns_stored_metadata_after_declare(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     meta = strict_registry.hookpoint_meta("before_db_write")
     assert meta is not None
@@ -411,6 +427,7 @@ def test_register_hookpoint_rejects_positional_args(
             frozenset({"operator"}),  # pyright: ignore[reportCallIssue]
             frozenset({"operator"}),
             False,  # noqa: FBT003 — the whole point of the test is to assert positional rejection
+            carrier_tier=T3,
         )
 
 
@@ -434,6 +451,7 @@ def test_subscriber_tier_in_allowlist_succeeds(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     # ``operator`` IS in the allow-list. The fixture-parity gate (via
     # :func:`make_permissive_fixture_gate`) also grants ``operator``;
@@ -483,6 +501,7 @@ def test_subscriber_tier_not_in_allowlist_refuses(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     with pytest.raises(HookError, match="not allowed on hookpoint"):
@@ -530,6 +549,7 @@ def test_failed_tier_registration_leaves_no_trace(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
     with pytest.raises(HookError):
         strict_registry.register(
@@ -572,6 +592,7 @@ def test_tier_rejection_audit_row_is_emitted_synchronously(
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     with pytest.raises(HookError):
@@ -623,6 +644,7 @@ def test_tier_rejection_inside_running_loop_emits_synchronously(
             subscribable_tiers=frozenset({"system", "operator"}),
             refusable_tiers=frozenset({"system"}),
             fail_closed=True,
+            carrier_tier=T3,
         )
         with pytest.raises(HookError):
             registry.register(
@@ -666,6 +688,7 @@ def test_register_hookpoint_normalizes_mutable_set_to_frozenset(
         subscribable_tiers=original_subscribable,
         refusable_tiers=original_refusable,
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     stored = strict_registry.hookpoint_meta("before_db_write")
@@ -704,6 +727,7 @@ def test_register_hookpoint_rejects_unknown_tier_in_subscribable_tiers(
             subscribable_tiers=frozenset({"operatior"}),  # typo
             refusable_tiers=frozenset({"system"}),
             fail_closed=True,
+            carrier_tier=T3,
         )
 
 
@@ -723,6 +747,7 @@ def test_register_hookpoint_rejects_unknown_tier_in_refusable_tiers(
             subscribable_tiers=frozenset({"system", "operator"}),
             refusable_tiers=frozenset({"unknown"}),  # not in _TIER_RANK
             fail_closed=True,
+            carrier_tier=T3,
         )
 
 
@@ -739,6 +764,7 @@ def test_register_hookpoint_rejects_multiple_unknown_tiers(
             subscribable_tiers=frozenset({"operatior", "system"}),
             refusable_tiers=frozenset({"unknown", "system"}),
             fail_closed=True,
+            carrier_tier=T3,
         )
 
 
@@ -756,6 +782,7 @@ def test_register_hookpoint_accepts_all_three_valid_tiers(
         subscribable_tiers=frozenset({"system", "operator", "user-plugin"}),
         refusable_tiers=frozenset({"system", "operator", "user-plugin"}),
         fail_closed=False,
+        carrier_tier=T3,
     )
     stored = strict_registry.hookpoint_meta("open.hookpoint")
     assert stored is not None
@@ -844,6 +871,7 @@ def test_emit_sync_no_running_loop_arm_bounds_stalling_sink() -> None:
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     # Capture structlog output across the register call so the
@@ -1039,6 +1067,7 @@ def test_emit_sync_running_loop_arm_fast_sink_no_fallback() -> None:
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     async def _provoke() -> None:
@@ -1122,6 +1151,7 @@ def test_emit_sync_running_loop_arm_stalled_sink_at_least_once() -> None:
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     async def _provoke() -> None:
@@ -1252,6 +1282,7 @@ def test_emit_sync_running_loop_arm_propagates_sink_exception() -> None:
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     async def _provoke() -> None:
@@ -1306,6 +1337,7 @@ def test_emit_sync_running_loop_arm_skips_fallback_when_lock_contested() -> None
         subscribable_tiers=frozenset({"system", "operator"}),
         refusable_tiers=frozenset({"system"}),
         fail_closed=True,
+        carrier_tier=T3,
     )
 
     class _AlwaysContestedLock:
