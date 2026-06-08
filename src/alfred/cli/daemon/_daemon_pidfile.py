@@ -19,6 +19,7 @@ import json
 import os
 import secrets
 import socket
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -105,11 +106,24 @@ def load_pidfile(path: Path) -> PidFileInfo:
             malformed JSON.
     """
     try:
-        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        # sec (CR #3): O_NONBLOCK is load-bearing — opening a FIFO O_RDONLY
+        # without it BLOCKS forever waiting for a writer, so a same-uid
+        # attacker who plants a FIFO at the pidfile path could hang the
+        # daemon CLI (a DoS) before fstat ever runs. With O_NONBLOCK the
+        # open returns immediately for a FIFO; fstat then rejects it as
+        # non-regular below. On a regular file O_NONBLOCK is a harmless
+        # no-op. O_NOFOLLOW still refuses a symlink target.
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError as exc:
         raise DaemonPidFileError(f"pidfile_missing:{path}") from exc
     try:
         st = os.fstat(fd)
+        # sec (CR #3): the O_NOFOLLOW open refused a symlink, but the target
+        # could still be a FIFO / device / socket a same-uid attacker planted
+        # — reading one could block forever or feed garbage. Refuse anything
+        # that is not a plain regular file before we touch its contents.
+        if not stat.S_ISREG(st.st_mode):
+            raise DaemonPidFileError(f"not_a_regular_file:{oct(st.st_mode)}")
         if st.st_mode & 0o777 != 0o600:
             raise DaemonPidFileError(f"bad_file_mode:{oct(st.st_mode)}")
         if st.st_uid != os.getuid():
@@ -122,8 +136,15 @@ def load_pidfile(path: Path) -> PidFileInfo:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DaemonPidFileError("malformed_json") from exc
     try:
+        pid = int(data["pid"])
+        # sec (CR #4): a non-positive pid is malformed — ``os.kill(pid, 0)``
+        # with pid 0 signals the whole process group and a negative pid
+        # signals a process group, so neither is a valid single-process
+        # liveness target. Reject before any consumer calls is_pid_alive().
+        if pid <= 0:
+            raise ValueError(f"non_positive_pid:{pid}")
         return PidFileInfo(
-            pid=int(data["pid"]),
+            pid=pid,
             boot_id=str(data["boot_id"]),
             started_at=str(data["started_at"]),
             hostname=str(data["hostname"]),
