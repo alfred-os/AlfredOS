@@ -159,11 +159,12 @@ ignore = ["S101"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "ARG"]
 # The Slice-4 daemon smoke test drives the deployment the way an operator's
-# shell does: docker compose, git, uv, and psql invoked by name (partial
-# path) with fixed-literal args. S603/S607/S608 flag untrusted-subprocess /
-# partial-path / SQL-construction risks that do not apply to a smoke test
-# wiring trusted CLIs with hard-coded literal arguments.
-"tests/smoke/test_slice4_daemon_dispatch.py" = ["S603", "S607", "S608"]
+# shell does: git and uv invoked by name (partial path) with fixed-literal
+# args. S603/S607 flag untrusted-subprocess / partial-path risks that do not
+# apply to a smoke test wiring trusted CLIs with hard-coded literal
+# arguments. (The audit-count probe is a parametrised psycopg2 query, so no
+# S608 SQL-construction ignore is needed.)
+"tests/smoke/test_slice4_daemon_dispatch.py" = ["S603", "S607"]
 # read_state_git_head_sha coverage exercises a real temp git repo via
 # trusted `git` invocations (partial path, fixed-literal args).
 "tests/unit/cli/daemon/test_daemon_internal_helpers.py" = ["S603", "S607"]
