@@ -82,17 +82,28 @@ _PROPOSAL_PATH = f"policies/breaker-resets/{_PROPOSAL_ID}.json"
 def test_daemon_boots_and_dispatches(tmp_path: Path) -> None:
     """End-to-end: alfred daemon start → merge proposal to main → dispatch fires."""
     with PostgresContainer("postgres:16") as pg:
-        # testcontainers returns a psycopg2 URL by default; the daemon +
-        # alfred migrate need the asyncpg async-driver URL (see module
-        # docstring). The direct audit-count probe keeps the psycopg2 URL.
-        sync_url = pg.get_connection_url()
-        async_url = sync_url.replace("psycopg2", "asyncpg")
+        # testcontainers returns a SQLAlchemy-style URL
+        # (``postgresql+psycopg2://...``). The daemon + ``alfred migrate``
+        # need the asyncpg async-driver URL (see module docstring).
+        # The direct audit-count probe calls ``psycopg2.connect`` directly,
+        # which does NOT understand the ``+psycopg2`` SQLAlchemy dialect
+        # suffix — it needs a bare ``postgresql://...`` DSN. Strip the
+        # dialect so the probe connects (otherwise every ``_count_audit_rows``
+        # silently returns 0 and the boot-completed poll times out).
+        sa_url = pg.get_connection_url()
+        async_url = sa_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+        psycopg2_url = sa_url.replace("postgresql+psycopg2://", "postgresql://")
 
         state_git = tmp_path / "state.git"
         _init_state_git_repo(state_git)
 
         env = os.environ.copy()
         env["ALFRED_ENVIRONMENT"] = "test"
+        # ALFRED_DEEPSEEK_API_KEY is a REQUIRED Settings field — without it
+        # Settings() raises and the daemon's _load_settings_or_die reports it
+        # (defensively) as environment-not-set. Mirror test_hello_alfred's
+        # placeholder so the daemon boots.
+        env["ALFRED_DEEPSEEK_API_KEY"] = "not-a-real-secret-smoke-test-placeholder"
         env["ALFRED_STATE_GIT_PATH"] = str(state_git)
         env["ALFRED_DATABASE_URL"] = async_url
         env["ALFRED_PROPOSAL_DISPATCH_INTERVAL_S"] = _PROPOSAL_DISPATCH_INTERVAL_S
@@ -103,7 +114,7 @@ def test_daemon_boots_and_dispatches(tmp_path: Path) -> None:
 
         daemon = subprocess.Popen(["uv", "run", "alfred", "daemon", "start"], env=env)
         try:
-            _wait_for_boot_completed(sync_url, _BOOT_COMPLETED_TIMEOUT_S)
+            _wait_for_boot_completed(psycopg2_url, _BOOT_COMPLETED_TIMEOUT_S)
 
             # Simulate the reviewer-gate APPROVAL + merge: land a dispatchable
             # breaker-reset blob on origin/main. Committed AFTER boot so the
@@ -112,7 +123,7 @@ def test_daemon_boots_and_dispatches(tmp_path: Path) -> None:
 
             # Poll the audit_log for the dispatch-loop's processed row rather
             # than sleeping (core-eng-003). The loop interval is 2s.
-            _wait_for_proposal_processed(sync_url, _DISPATCH_TIMEOUT_S)
+            _wait_for_proposal_processed(psycopg2_url, _DISPATCH_TIMEOUT_S)
         finally:
             subprocess.run(["uv", "run", "alfred", "daemon", "stop"], env=env, check=False)
             daemon.wait(timeout=10.0)
