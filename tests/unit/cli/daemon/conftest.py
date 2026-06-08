@@ -72,6 +72,16 @@ def boot_success_env(
         "alfred.cli.daemon._commands.build_boot_audit_writer",
         lambda **_kw: fake_audit_writer,
     )
+    # sec-004: the shipped launcher stub refuses in production. Boot-success
+    # tests that run with ALFRED_ENVIRONMENT=production (e.g. the
+    # source-conflict test) must isolate their assertion from that refusal,
+    # so the fixture pins the launcher probe to "passing" (a genuine
+    # policy-resolving launcher). Probe-refusal tests monkeypatch this back
+    # to the failure they exercise.
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.probe_launcher_policy_resolving",
+        _make_async(lambda **_kw: None),
+    )
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_session_scope",
         lambda _settings: lambda: None,
