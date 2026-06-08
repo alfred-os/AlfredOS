@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 # Generic API-key shape: prefix + separator + 20-or-more alnum bytes,
 # anchored on word boundaries so an embedded form (e.g.
@@ -147,4 +147,32 @@ class OutboundDlp:
         return text
 
 
-__all__ = ["OutboundDlp"]
+@runtime_checkable
+class OutboundDlpProtocol(Protocol):
+    """Structural type for the outbound DLP scanner.
+
+    Used by frozen dataclasses (:class:`alfred.state.dispatch_registry.ProposalContext`)
+    and other surfaces that need to annotate a DLP-scanner dependency
+    without binding to the concrete :class:`OutboundDlp` class. The concrete
+    class satisfies this protocol by virtue of its ``scan`` signature.
+
+    The protocol is intentionally narrow — the only stable surface is
+    ``scan``. A consumer that needs broker-redaction or audit-sink access
+    constructs :class:`OutboundDlp` directly; everything else uses this
+    protocol. Mirrors the in-module ``_BrokerLike`` / ``_AuditSink``
+    structural-typing precedent.
+
+    ``runtime_checkable`` so the injection boundary can ``isinstance``-check
+    a candidate scanner; the dispatch loop never sees the concrete class
+    (the AST guard ``test_dispatch_loop_no_local_dlp_construct`` enforces
+    that — the singleton arrives via ``ProposalContext.outbound_dlp``).
+    """
+
+    def scan(self, text: str) -> str:
+        # Protocol body. Real coverage comes from injected implementations;
+        # the stub is unreachable so the pragma keeps the 100% coverage gate
+        # honest (same discipline as ``_BrokerLike`` / ``_AuditSink``).
+        raise NotImplementedError  # pragma: no cover
+
+
+__all__ = ["OutboundDlp", "OutboundDlpProtocol"]
