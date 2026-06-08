@@ -110,7 +110,7 @@ class _BootRefusedError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def build_boot_session_scope(
+def build_boot_session_scope(  # pragma: no cover - real-infra glue; unit tests monkeypatch
     settings: Settings,
 ) -> Callable[[], AbstractAsyncContextManager[AsyncSession]]:
     """Build the async session scope the Supervisor + audit writer share."""
@@ -161,7 +161,9 @@ class _BootHandshake:
         return True
 
 
-async def build_boot_gate(settings: Settings) -> object:
+async def build_boot_gate(
+    settings: Settings,
+) -> object:  # pragma: no cover - real-infra glue; unit tests monkeypatch
     """Construct the RealGate-wrapping supervisor gate.
 
     Production wires a real Postgres-backed :class:`RealGate` via the
@@ -214,10 +216,18 @@ def read_state_git_head_sha(state_git_path: Path) -> str:
         return _STATE_GIT_HEAD_UNKNOWN
     if completed.returncode != 0:
         return _STATE_GIT_HEAD_UNKNOWN
-    return completed.stdout.strip() or _STATE_GIT_HEAD_UNKNOWN
+    sha = completed.stdout.strip()
+    # An empty bare repo can echo the literal ``HEAD`` (git-version
+    # dependent) with returncode 0; only accept a real 40-hex object id so
+    # the boot row never records a non-SHA placeholder.
+    if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
+        return sha
+    return _STATE_GIT_HEAD_UNKNOWN
 
 
-def wait_for_shutdown(_supervisor: Supervisor) -> asyncio.Future[None]:
+def wait_for_shutdown(  # pragma: no cover - real-loop signal glue; unit tests monkeypatch
+    _supervisor: Supervisor,
+) -> asyncio.Future[None]:
     """Park until a shutdown signal resolves.
 
     PR-S4-1 wires SIGTERM (sent by ``alfred daemon stop``) to set a future

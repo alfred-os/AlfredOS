@@ -51,7 +51,7 @@ def test_construction_with_new_slice4_kwargs() -> None:
         session_scope=_make_minimal_session_scope(),
         gate=MagicMock(),
         audit=MagicMock(),
-        state_git_path=Path("/tmp/state.git"),
+        state_git_path=Path("state.git"),
         proposal_dispatch_interval_s=30,
         policies_ref=_StubRef(),
         operator_session_resolver=_StubResolver(),
