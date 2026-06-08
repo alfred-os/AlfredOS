@@ -257,16 +257,21 @@ def _declare_bench_hookpoints(registry: HookRegistry) -> None:
     fixture declares the hookpoint on the fresh registry BEFORE any
     subscriber-register call. The values match the
     :func:`alfred.memory.episodic.declare_hookpoints` defaults for
-    ``before_validate`` so the bench measurement reflects the same
-    metadata-lookup cost a production dispatch would pay.
+    ``memory.episodic.record.before_validate`` so the bench measurement
+    reflects the same metadata-lookup cost a production dispatch pays.
 
-    Only ``before_validate`` needs an upfront declaration here — the
-    other four hookpoints are declared by
+    Post-#118 (stem→dotted migration) ``record()`` invokes the DOTTED
+    name ``memory.episodic.record.before_validate``; the bench
+    subscribers must attach to that same name (a stem ``before_validate``
+    declaration is vestigial — nothing drives it, so subscribers on it
+    would never fire and the "five-subscriber" gate would silently
+    measure an empty dispatch). Only this hookpoint needs an upfront
+    declaration here — the other four are declared by
     :func:`alfred.memory.episodic.declare_hookpoints` when
     :class:`EpisodicMemory.__init__` runs (idempotent on equal meta).
     """
     registry.register_hookpoint(
-        name="before_validate",
+        name="memory.episodic.record.before_validate",
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,

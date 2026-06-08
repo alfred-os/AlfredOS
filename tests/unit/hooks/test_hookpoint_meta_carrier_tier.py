@@ -157,12 +157,13 @@ def test_hookpoint_meta_equality_includes_allow_error_substitution() -> None:
 # ---------------------------------------------------------------------------
 
 
+from alfred.hooks.capability import CapabilityGate  # noqa: E402
 from alfred.hooks.errors import HookError  # noqa: E402
 from alfred.hooks.registry import HookRegistry  # noqa: E402
 from tests.helpers.gates import make_permissive_fixture_gate  # noqa: E402
 
 
-def grant_all_gate() -> object:
+def grant_all_gate() -> CapabilityGate:
     """Build a permissive gate fixture for register_hookpoint tests."""
     return make_permissive_fixture_gate(allow_system=True)
 

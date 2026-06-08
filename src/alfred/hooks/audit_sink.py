@@ -154,6 +154,38 @@ signal to the caller, the audit row is the durable attribution
 operators can grep.
 """
 
+HOOKS_CARRIER_SUBSTITUTION: Final[str] = "hooks.carrier_substitution"
+"""Audit-row event id for an ACCEPTED error-stage carrier substitution
+(PR-S4-3 / ADR-0022 §4.3).
+
+Emitted by :func:`alfred.hooks.invoke._wrap_legacy_substitute_as_outcome`
+when an error-stage subscriber's substitute payload passes the
+tier-upgrade guard and replaces the upstream exception. The row carries
+``hookpoint``, ``subscriber_id``, ``source_tier`` (the dispatcher-
+attested trust tier — NOT subscriber-supplied, §3), and ``carrier_tier``
+so the audit graph attributes every recovery to its origin.
+"""
+
+HOOKS_CARRIER_SUBSTITUTION_REFUSED: Final[str] = "hooks.carrier_substitution_refused"
+"""Audit-row event id for a REFUSED error-stage carrier substitution
+(PR-S4-3 / ADR-0022 §4.4).
+
+Emitted by :func:`alfred.hooks.invoke._wrap_legacy_substitute_as_outcome`
+on EVERY refusal arm so a tier-laundering / wrong-type / recursion
+attempt leaves a durable trace (CLAUDE.md hard rule #7). The row's
+``reason`` field distinguishes:
+
+* ``"tier_upgrade_refused"`` — ``source_tier > carrier_tier`` in the
+  strict total order T0 < T1 < T2 < T3.
+* ``"payload_type_mismatch"`` — the substitute payload failed the
+  declared ``carrier_type`` isinstance check.
+* ``"recursion_refused"`` — the hookpoint declares
+  ``allow_error_substitution=False`` (a meta-hookpoint).
+
+The row carries ``hookpoint``, ``subscriber_id``,
+``attempted_source_tier``, ``carrier_tier``, and ``reason``.
+"""
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Protocol seam — spec §0 verbatim

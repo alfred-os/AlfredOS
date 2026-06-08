@@ -27,6 +27,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Final
 
+# PR-S4-3 (ADR-0022): the carrier-substitution meta-hookpoint names.
+# Module-level constants so the manifest tuple and
+# ``declare_meta_hookpoints`` share one source of truth (no string
+# duplication that could drift).
+CARRIER_SUBSTITUTED_HOOKPOINT: Final[str] = "hooks.carrier_substituted"
+CARRIER_SUBSTITUTION_REFUSED_HOOKPOINT: Final[str] = "hooks.carrier_substitution_refused"
+
 # Hand-maintained source of truth. Adding a new hookpoint:
 #
 # 1. Decide the declaring subsystem (the module whose
@@ -79,8 +86,8 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
     # and carry carrier_tier=None + allow_error_substitution=False so
     # they cannot recurse. Registered by ``declare_meta_hookpoints``.
     "alfred.hooks._known_hookpoints": (
-        "hooks.carrier_substituted",
-        "hooks.carrier_substitution_refused",
+        CARRIER_SUBSTITUTED_HOOKPOINT,
+        CARRIER_SUBSTITUTION_REFUSED_HOOKPOINT,
     ),
 }
 
@@ -114,10 +121,20 @@ def declare_meta_hookpoints(registry: object | None = None) -> None:
     from alfred.hooks import get_registry
     from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry
 
-    reg: HookRegistry = (
-        registry if isinstance(registry, HookRegistry) else get_registry()
-    )
-    for name in ("hooks.carrier_substituted", "hooks.carrier_substitution_refused"):
+    # Fail fast on a wrong-typed injection (CR closure): ``None`` means
+    # "use the process singleton", a real ``HookRegistry`` is used as-is,
+    # but any OTHER object is a caller bug — silently falling back to the
+    # global singleton would mask it and mutate global state unexpectedly.
+    if registry is None:
+        reg: HookRegistry = get_registry()
+    elif isinstance(registry, HookRegistry):
+        reg = registry
+    else:
+        raise TypeError(
+            f"declare_meta_hookpoints(registry=) expects a HookRegistry or None, "
+            f"got {type(registry).__name__}"
+        )
+    for name in (CARRIER_SUBSTITUTED_HOOKPOINT, CARRIER_SUBSTITUTION_REFUSED_HOOKPOINT):
         reg.register_hookpoint(
             name=name,
             subscribable_tiers=SYSTEM_ONLY_TIERS,

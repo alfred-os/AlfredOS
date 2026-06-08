@@ -63,3 +63,34 @@ def test_meta_hookpoints_subscribable_system_only() -> None:
     meta = reg.hookpoint_meta("hooks.carrier_substituted")
     assert meta is not None
     assert meta.subscribable_tiers == frozenset({"system"})
+
+
+def test_declare_meta_hookpoints_rejects_wrong_typed_registry() -> None:
+    """A non-HookRegistry, non-None ``registry`` arg fails fast (CR closure).
+
+    Silently falling back to the global singleton on a bad injection
+    would mask the caller bug and mutate global state unexpectedly.
+    """
+    import pytest
+
+    with pytest.raises(TypeError, match="HookRegistry or None"):
+        declare_meta_hookpoints("not-a-registry")  # type: ignore[arg-type]
+
+
+def test_declare_meta_hookpoints_defaults_to_global_singleton() -> None:
+    """With no arg, ``declare_meta_hookpoints`` targets the process singleton.
+
+    Covers the production call shape (the bootstrap orchestrator calls
+    it with no argument). Swaps in a fresh registry as the singleton so
+    the declaration does not leak into sibling tests.
+    """
+    from alfred.hooks import get_registry, set_registry
+
+    prior = get_registry()
+    fresh = _registry()
+    set_registry(fresh)
+    try:
+        declare_meta_hookpoints()  # no arg → get_registry()
+        assert get_registry().hookpoint_meta("hooks.carrier_substituted") is not None
+    finally:
+        set_registry(prior)
