@@ -491,3 +491,23 @@ async def test_real_gate_apply_grants_does_not_revoke_unchanged_grants() -> None
     kwargs = backend.apply_atomic.await_args.kwargs
     assert set(kwargs["revokes"]) == set()
     assert set(kwargs["upserts"]) == {keeper}
+
+
+async def test_real_gate_is_backing_store_available_public_accessor() -> None:
+    """The PUBLIC ``is_backing_store_available`` mirrors the fail-closed flag.
+
+    PR-S4-1 (arch-222-1 / err-001 / core-eng-pr222-1): the daemon's
+    ``_SupervisorBootGate`` and the supervisor's ``CapabilityGateMonitor``
+    consume this public method instead of reaching into the private
+    ``_fail_closed`` attribute. ``True`` when serving; ``False`` once the
+    heartbeat has tripped fail-closed. Both arms are pinned so the
+    trust-boundary signal has 100% branch coverage.
+    """
+    from alfred.security.capability_gate._gate import RealGate
+
+    gate = await RealGate.create(backend=_make_backend(), audit_sink=_make_no_op_sink())
+    # Fresh gate is serving.
+    assert gate.is_backing_store_available() is True
+    # Heartbeat trip → unavailable.
+    gate._fail_closed = True
+    assert gate.is_backing_store_available() is False
