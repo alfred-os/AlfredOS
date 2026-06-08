@@ -298,53 +298,60 @@ msgstr ""
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:286
+#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:290
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:287
+#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:291
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:308
+#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:312
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
 "operator --name <YourName>' first."
 
-#: src/alfred/cli/main.py:57
+#: src/alfred/cli/main.py:58
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:181
+#: src/alfred/cli/main.py:155
+msgid "status.help"
+msgstr ""
+"Print a short instance health summary: provider, budget, optional "
+"fallback. For daemon-specific status (PID, uptime, last boot event), see:"
+" alfred daemon status"
+
+#: src/alfred/cli/main.py:185
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:184
+#: src/alfred/cli/main.py:188
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:185
+#: src/alfred/cli/main.py:189
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:186
+#: src/alfred/cli/main.py:190
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:187
+#: src/alfred/cli/main.py:191
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:188
+#: src/alfred/cli/main.py:192
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:189
+#: src/alfred/cli/main.py:193
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:190
+#: src/alfred/cli/main.py:194
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
@@ -793,6 +800,120 @@ msgstr ""
 "  proposal_id:  {proposal_id}\n"
 "The domain is still fetchable until the reviewer approves the proposal."
 
+#: src/alfred/cli/daemon/__init__.py:81
+msgid "daemon.help.root"
+msgstr ""
+"Boot, stop, and inspect the AlfredOS daemon — the production entrypoint "
+"that runs the supervisor and the merged-proposal dispatch loop."
+
+#: src/alfred/cli/daemon/__init__.py:84
+msgid "daemon.help.start"
+msgstr "Boot the AlfredOS daemon and run it until stopped."
+
+#: src/alfred/cli/daemon/__init__.py:91
+msgid "daemon.help.stop"
+msgstr "Stop a running AlfredOS daemon (SIGTERM to the PID file's owner)."
+
+# devex-002 closure: the daemon-status help cross-references `alfred status`
+# for full instance health, and `status.help` (below) points back here for
+# daemon-specific boot details.
+#: src/alfred/cli/daemon/__init__.py:98
+msgid "daemon.status.help"
+msgstr ""
+"Show the daemon boot subset: PID, uptime, boot id, and last boot event. "
+"For full instance health (providers, budget, gate), see: alfred status"
+
+# Daemon CLI surface keys added by PR-S4-1 (#174) beyond the PR-S4-0b
+# reserve. Operator-facing; all bodies ship real English copy.
+#: src/alfred/cli/daemon/_commands.py:290
+msgid "daemon.boot.audit_log_unwritable"
+msgstr ""
+"The audit log is unwritable, so the daemon refuses to boot — a boot with "
+"no audit trail is a silent security failure. Verify Postgres is reachable"
+" (`docker compose ps` should show alfred-pg healthy) and re-run `alfred "
+"daemon start`."
+
+# Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
+#: src/alfred/cli/daemon/_commands.py:428
+#: src/alfred/i18n/_slice_4_reserve.py:64
+msgid "daemon.boot.environment_not_set"
+msgstr ""
+"Settings.environment is not set. Refusing to boot — production refuses "
+"without an explicit environment. Set ALFRED_ENVIRONMENT=dev (or prod) in "
+"your .env and re-run `alfred daemon start`."
+
+#: src/alfred/cli/daemon/_commands.py:460
+#: src/alfred/i18n/_slice_4_reserve.py:65
+msgid "daemon.boot.unsandboxed_in_production"
+msgstr ""
+"ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in a production environment. "
+"Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
+"daemon start`."
+
+#: src/alfred/cli/daemon/_commands.py:471
+#: src/alfred/i18n/_slice_4_reserve.py:66
+msgid "daemon.boot.launcher_not_policy_resolving"
+msgstr ""
+"bin/alfred-plugin-launcher.sh does not resolve per-plugin policies. "
+"Refusing to boot. Re-run `bin/alfred-setup.sh` to refresh the launcher, "
+"then `alfred daemon start`."
+
+#: src/alfred/cli/daemon/_commands.py:482
+#: src/alfred/i18n/_slice_4_reserve.py:67
+msgid "daemon.boot.snapshot_ref_init_failed"
+msgstr ""
+"PoliciesSnapshotRef initialisation failed: {detail}. Refusing to boot. "
+"Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
+"start`."
+
+#: src/alfred/cli/daemon/_commands.py:497
+#: src/alfred/i18n/_slice_4_reserve.py:68
+msgid "daemon.boot.capability_gate_handshake_failed"
+msgstr ""
+"Capability-gate handshake failed: {detail}. Refusing to boot. Check "
+"`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
+"daemon start`."
+
+#: src/alfred/cli/daemon/_commands.py:543
+#: src/alfred/i18n/_slice_4_reserve.py:70
+msgid "daemon.boot.started"
+msgstr "AlfredOS daemon started ({boot_id})."
+
+#: src/alfred/cli/daemon/_commands.py:587
+msgid "daemon.stop.no_daemon"
+msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
+
+#: src/alfred/cli/daemon/_commands.py:590
+#: src/alfred/cli/daemon/_commands.py:595
+msgid "daemon.stop.stale_pidfile"
+msgstr ""
+"The PID file points at a process that is no longer running (stale). "
+"Nothing to stop."
+
+#: src/alfred/cli/daemon/_commands.py:597
+#: src/alfred/i18n/_slice_4_reserve.py:71
+msgid "daemon.stop.confirmed"
+msgstr "AlfredOS daemon stopped."
+
+#: src/alfred/cli/daemon/_commands.py:612
+msgid "daemon.status.not_running"
+msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
+
+#: src/alfred/cli/daemon/_commands.py:615
+msgid "daemon.status.stale_pidfile"
+msgstr ""
+"A PID file exists for process {pid}, but that process is no longer "
+"running (stale pidfile). The daemon is not running."
+
+#: src/alfred/cli/daemon/_commands.py:619
+#: src/alfred/i18n/_slice_4_reserve.py:72
+msgid "daemon.status.template"
+msgstr ""
+"Daemon PID {pid}\n"
+"Uptime: {uptime}\n"
+"Boot ID: {boot_id}\n"
+"Last boot completed: {last_boot_at}"
+
 #: src/alfred/comms/discord.py:181
 msgid "discord.embed_unsupported"
 msgstr ""
@@ -1180,63 +1301,11 @@ msgstr ""
 "Operator {user} lacks the required permissions to reset the supervisor "
 "breaker."
 
-# Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/i18n/_slice_4_reserve.py:64
-msgid "daemon.boot.environment_not_set"
-msgstr ""
-"Settings.environment is not set. Refusing to boot — production refuses "
-"without an explicit environment. Set ALFRED_ENVIRONMENT=dev (or prod) in "
-"your .env and re-run `alfred daemon start`."
-
-#: src/alfred/i18n/_slice_4_reserve.py:65
-msgid "daemon.boot.unsandboxed_in_production"
-msgstr ""
-"ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in a production environment. "
-"Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
-"daemon start`."
-
-#: src/alfred/i18n/_slice_4_reserve.py:66
-msgid "daemon.boot.launcher_not_policy_resolving"
-msgstr ""
-"bin/alfred-plugin-launcher.sh does not resolve per-plugin policies. "
-"Refusing to boot. Re-run `bin/alfred-setup.sh` to refresh the launcher, "
-"then `alfred daemon start`."
-
-#: src/alfred/i18n/_slice_4_reserve.py:67
-msgid "daemon.boot.snapshot_ref_init_failed"
-msgstr ""
-"PoliciesSnapshotRef initialisation failed: {detail}. Refusing to boot. "
-"Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
-"start`."
-
-#: src/alfred/i18n/_slice_4_reserve.py:68
-msgid "daemon.boot.capability_gate_handshake_failed"
-msgstr ""
-"Capability-gate handshake failed: {detail}. Refusing to boot. Check "
-"`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
-"daemon start`."
-
 #: src/alfred/i18n/_slice_4_reserve.py:69
 msgid "daemon.boot.audit_hash_pepper_missing"
 msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
 "it. Refusing to boot."
-
-#: src/alfred/i18n/_slice_4_reserve.py:70
-msgid "daemon.boot.started"
-msgstr "AlfredOS daemon started ({boot_id})."
-
-#: src/alfred/i18n/_slice_4_reserve.py:71
-msgid "daemon.stop.confirmed"
-msgstr "AlfredOS daemon stopped."
-
-#: src/alfred/i18n/_slice_4_reserve.py:72
-msgid "daemon.status.template"
-msgstr ""
-"Daemon PID {pid}\n"
-"Uptime: {uptime}\n"
-"Boot ID: {boot_id}\n"
-"Last boot completed: {last_boot_at}"
 
 # Sandbox refusal reasons (PR-S4-6 launcher).
 #: src/alfred/i18n/_slice_4_reserve.py:75
@@ -1916,20 +1985,20 @@ msgstr ""
 "not present the authorised CapabilityGateNonce. The T3 ingestion boundary"
 " is gated to StdioTransport and quarantine_host only (spec §3.2)."
 
-#: src/alfred/supervisor/core.py:242
+#: src/alfred/supervisor/core.py:262
 msgid "supervisor.start.already_started"
 msgstr ""
 "Supervisor.start() called twice without an intervening stop(). The "
 "supervisor is single-instance per process; re-entrancy would orphan the "
 "first TaskGroup."
 
-#: src/alfred/supervisor/core.py:569
+#: src/alfred/supervisor/core.py:589
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:638
+#: src/alfred/supervisor/core.py:658
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "

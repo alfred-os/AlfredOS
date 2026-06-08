@@ -61,6 +61,16 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.boot.started",
     "daemon.stop.confirmed",
     "daemon.status.template",
+    # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the reserve.
+    "daemon.boot.audit_log_unwritable",
+    "daemon.stop.no_daemon",
+    "daemon.stop.stale_pidfile",
+    "daemon.status.not_running",
+    "daemon.status.stale_pidfile",
+    "daemon.help.root",
+    "daemon.help.start",
+    "daemon.help.stop",
+    "daemon.status.help",
     # Sandbox refusal reasons (6).
     "supervisor.sandbox.refused.policy_ref_missing",
     "supervisor.sandbox.refused.policy_ref_os_mismatch",

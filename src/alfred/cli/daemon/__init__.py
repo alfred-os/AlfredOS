@@ -81,25 +81,22 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
 daemon_app = typer.Typer(help=t("daemon.help.root"), no_args_is_help=True)
 
 
-@daemon_app.command("start")
+@daemon_app.command("start", help=t("daemon.help.start"))
 def start() -> None:
-    """Start the AlfredOS daemon (filled in by Component E)."""
     from alfred.cli.daemon._commands import start_daemon
 
     start_daemon()
 
 
-@daemon_app.command("stop")
+@daemon_app.command("stop", help=t("daemon.help.stop"))
 def stop() -> None:
-    """Stop the AlfredOS daemon (filled in by Component E)."""
     from alfred.cli.daemon._commands import stop_daemon
 
     stop_daemon()
 
 
-@daemon_app.command("status")
+@daemon_app.command("status", help=t("daemon.status.help"))
 def status() -> None:
-    """Show daemon status (filled in by Component E)."""
     from alfred.cli.daemon._commands import status_daemon
 
     status_daemon()
