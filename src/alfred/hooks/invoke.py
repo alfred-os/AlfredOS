@@ -149,6 +149,8 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from alfred.hooks.audit_sink import (
+    HOOKS_CARRIER_SUBSTITUTION,
+    HOOKS_CARRIER_SUBSTITUTION_REFUSED,
     HOOKS_CHAIN_TIMEOUT,
     HOOKS_REENTRY_BYPASS,
     HOOKS_REFUSAL,
@@ -461,82 +463,148 @@ _SOURCE_TIER_TO_CLASS: Final[Mapping[str, type[TrustTier]]] = MappingProxyType(
         "T3": T3,
     }
 )
-"""Wire-format string → TrustTier class.
+"""Closed wire-format ``Literal["T0".."T3"]`` → TrustTier class.
 
-Mirrors the Slice-3 :func:`alfred.security.tiers._tier_by_name` table;
-duplicated here to avoid an import cycle
-(``alfred.security.tiers`` does not import ``alfred.hooks``).
+Deliberately a LOCAL table rather than reusing
+:func:`alfred.security.tiers._tier_by_name`: that helper accepts an open
+``str`` and is the general tier-parsing entry point, whereas this table
+is keyed exactly by the four-value :class:`SubstituteResult.source_tier`
+``Literal`` — a narrower, closed domain. Pinning it here keeps the
+tier-upgrade guard's input vocabulary explicit and grep-able alongside
+:data:`_TRUST_TIER_RANK` (there is no import cycle — ``invoke.py``
+already imports ``T0..T3`` from ``alfred.security.tiers`` directly).
 """
 
 
-def _wrap_legacy_substitute_as_outcome[T](
+# ADR-0022 §3 — the dispatcher attests ``source_tier`` from the firing
+# subscriber's REGISTERED tier; the subscriber never supplies it. This
+# blocks a subscriber registered at ``user-plugin`` (untrusted) from
+# spoofing ``source_tier="T0"`` (system) to launder a substitute past
+# the tier-upgrade guard. The map is the natural correspondence between
+# the subscriber-tier vocabulary {system, operator, user-plugin} and the
+# closed trust-tier order {T0, T1, T2, T3}:
+#   system      → T0 (AlfredOS internals — fully trusted)
+#   operator    → T1 (operator-attributable)
+#   user-plugin → T3 (untrusted third-party — most conservative)
+_SUBSCRIBER_TIER_TO_SOURCE_TIER: Final[Mapping[str, Literal["T0", "T1", "T2", "T3"]]] = (
+    MappingProxyType(
+        {
+            "system": "T0",
+            "operator": "T1",
+            "user-plugin": "T3",
+        }
+    )
+)
+
+
+async def _wrap_legacy_substitute_as_outcome[T](
     *,
     result_ctx: HookContext[T],
     subscriber: Subscriber,
     hookpoint_name: str,
+    correlation_id: str,
     carrier_type: type[T] | None = None,
 ) -> SubstituteResult[T] | None:
-    """Wrap a legacy error-stage substitute as a SubstituteResult outcome.
+    """Resolve an error-stage substitute into a tier-guarded outcome.
 
-    Slice-2.5/3 subscribers signalled "swallow + substitute" by returning
-    a non-``None`` :class:`HookContext` from the error chain. PR-S4-3
-    (ADR-0022) formalises substitution as a
-    :class:`SubstituteResult` with explicit source_tier + subscriber_id.
-    Legacy returns map to ``source_tier="T0"`` (system trust — the
-    lowest rank in the strict total order T0 < T1 < T2 < T3) so they
-    never trip the tier-upgrade guard against any declared
-    ``carrier_tier``.
+    Two substitution shapes are accepted from a subscriber that returns a
+    non-``None`` :class:`HookContext` on the error chain:
 
-    Per-PR-S4-3 contract: a subscriber that wants to substitute at a
-    specific tier embeds a :class:`SubstituteResult` instance under
-    ``ctx.metadata["substitute_result"]`` and the extractor reads it
-    directly. The legacy path here covers subscribers that pre-date the
-    ADR.
+    * **ADR-0022 contract** — the subscriber embeds just the recovery
+      payload under ``ctx.metadata["substitute_payload"]``.
+    * **Legacy (Slice-2.5/3)** — the subscriber returns a non-``None``
+      ctx whose ``input`` is the substitute.
 
-    When ``carrier_type`` is supplied, an embedded substitute's payload
-    is validated against it (reviewer-002 closure — a wrong-type
-    substitute is refused loudly rather than silently accepted). A
-    payload-type mismatch returns ``None`` so the chain continues and
-    the upstream exception ultimately re-raises.
+    In BOTH shapes the ``source_tier`` is **dispatcher-attested** from
+    the firing subscriber's registered tier (ADR-0022 §3) — the
+    subscriber never supplies it. This prevents a ``user-plugin``-tier
+    subscriber from spoofing ``source_tier="T0"`` to launder a substitute
+    past the tier-upgrade guard.
 
-    Returns the SubstituteResult outcome if the tier-upgrade guard
-    accepts it, else ``None`` (caller continues the chain).
+    Every disposition emits an audit row (CLAUDE.md hard rule #7 +
+    spec §4.3/§4.4):
+
+    * accept → :data:`HOOKS_CARRIER_SUBSTITUTION`
+    * refuse → :data:`HOOKS_CARRIER_SUBSTITUTION_REFUSED` with a
+      ``reason`` of ``recursion_refused`` / ``payload_type_mismatch`` /
+      ``tier_upgrade_refused``.
+
+    Returns the attested :class:`SubstituteResult` if accepted, else
+    ``None`` (caller continues the chain; the upstream exception
+    ultimately re-raises).
     """
     registry = get_registry()
     meta = registry.hookpoint_meta(hookpoint_name)
-    embedded = result_ctx.metadata.get("substitute_result")
-    if isinstance(embedded, SubstituteResult):
-        substitute: SubstituteResult[T] = embedded
-        if carrier_type is not None and not isinstance(substitute.payload, carrier_type):
-            # reviewer-002 / sec-003 closure: a substitute whose payload
-            # does not match the declared carrier_type is refused. No
-            # silent swallow — returning None continues the chain so the
-            # upstream exception re-raises (CLAUDE.md hard rule #7).
-            return None
+    subscriber_id = subscriber.hook_fn.__qualname__
+    # Attest the source tier from the registered subscriber tier. An
+    # unknown tier string (should be impossible — register() validates
+    # against _TIER_RANK) maps to T3, the most conservative.
+    source_tier = _SUBSCRIBER_TIER_TO_SOURCE_TIER.get(subscriber.tier, "T3")
+    carrier_tier_label = meta.carrier_tier.name if meta and meta.carrier_tier else "none"
+
+    # The recovery payload: the ADR-0022 embed wins; otherwise the legacy
+    # ctx-return input.
+    if "substitute_payload" in result_ctx.metadata:
+        payload = cast(T, result_ctx.metadata["substitute_payload"])
     else:
-        substitute = SubstituteResult[T](
-            payload=result_ctx.input,
-            source_tier="T0",
-            subscriber_id=subscriber.hook_fn.__qualname__,
+        payload = result_ctx.input
+
+    async def _refuse(reason: str) -> None:
+        await registry.sink.emit(
+            event=HOOKS_CARRIER_SUBSTITUTION_REFUSED,
+            correlation_id=correlation_id,
+            fields={
+                "hookpoint": hookpoint_name,
+                "subscriber_id": subscriber_id,
+                "attempted_source_tier": source_tier,
+                "carrier_tier": carrier_tier_label,
+                "reason": reason,
+            },
         )
-    # allow_error_substitution=False (meta-hookpoints) short-circuits
-    # substitution FIRST — this closes the recursion loop. Checking
-    # carrier_tier before this would let a meta-hookpoint (carrier_tier=None)
-    # substitute its own error and recurse (crf-2026-004).
+
+    # 1. allow_error_substitution=False (meta-hookpoints) — recursion
+    #    guard FIRST so a meta-hookpoint (carrier_tier=None) cannot
+    #    substitute its own error (crf-2026-004).
     if meta is not None and not meta.allow_error_substitution:
+        await _refuse("recursion_refused")
         return None
-    # No declared carrier tier (permissive-mode undeclared hookpoint, or a
-    # meta-hookpoint that already passed the allow_error_substitution gate
-    # above): accept the legacy substitute. The tier-upgrade guard has no
-    # carrier to compare against.
-    if meta is None or meta.carrier_tier is None:
-        return substitute
-    if not _enforce_substitute_tier(
-        carrier_tier=meta.carrier_tier,
-        source_tier=substitute.source_tier,
+
+    # 2. payload-type mismatch (reviewer-002 / sec-003) — a substitute
+    #    whose payload does not match the declared carrier_type is
+    #    refused loudly (crf-2026-003).
+    if carrier_type is not None and not isinstance(payload, carrier_type):
+        await _refuse("payload_type_mismatch")
+        return None
+
+    # 3. tier-upgrade guard — refuse when source_tier > carrier_tier in
+    #    the strict total order (crf-2026-001).
+    if (
+        meta is not None
+        and meta.carrier_tier is not None
+        and not _enforce_substitute_tier(
+            carrier_tier=meta.carrier_tier,
+            source_tier=source_tier,
+        )
     ):
+        await _refuse("tier_upgrade_refused")
         return None
-    return substitute
+
+    # Accepted — emit the attribution row and return the attested result.
+    await registry.sink.emit(
+        event=HOOKS_CARRIER_SUBSTITUTION,
+        correlation_id=correlation_id,
+        fields={
+            "hookpoint": hookpoint_name,
+            "subscriber_id": subscriber_id,
+            "source_tier": source_tier,
+            "carrier_tier": carrier_tier_label,
+        },
+    )
+    return SubstituteResult[T](
+        payload=payload,
+        source_tier=source_tier,
+        subscriber_id=subscriber_id,
+    )
 
 
 def _enforce_substitute_tier(
@@ -848,12 +916,24 @@ async def _dispatch_by_kind[T](
         # upstream exception verbatim; SubstituteResult → return the
         # chain's final ctx (carries any metadata changes from the
         # chain) with the substitute payload swapped in.
+        # ``ErrorOutcome[T]`` is the closed union ``ReRaise | SubstituteResult``
+        # (mypy strict enforces exhaustiveness), and BOTH arms terminate
+        # (raise / return). The explicit wildcard makes the match closed
+        # for coverage; it is unreachable in practice (a third variant
+        # would be a mypy error first).
         match outcome:
             case ReRaise():
-                assert exc is not None
+                # ``_run_error`` raises RuntimeError on ``exc is None``
+                # before it can return ReRaise(), so ``exc`` is always
+                # set here. Use an explicit raise (not ``assert``) so
+                # the guard survives ``python -O`` (err-220-002).
+                if exc is None:  # pragma: no cover - defensive
+                    raise RuntimeError("invoke(kind='error', ...) reached ReRaise with exc=None")
                 raise exc
             case SubstituteResult(payload=substituted_payload):
                 return final_ctx.with_input(substituted_payload)
+            case _:  # pragma: no cover - closed-union exhaustiveness backstop
+                raise AssertionError(f"unreachable ErrorOutcome variant: {outcome!r}")
     if kind == "cancel":
         return await _run_cancel(
             name,
@@ -1842,19 +1922,30 @@ async def _run_error[T](
                 if result is not None:
                     # First non-None wins — short-circuit the rest of
                     # the chain. PR-S4-3 (ADR-0022): the returned ctx
-                    # is the substitute carrier; we wrap its input as
-                    # a SubstituteResult and run the tier-upgrade
-                    # guard before returning.
-                    last_good_ctx = result
-                    substitute_outcome = _wrap_legacy_substitute_as_outcome(
+                    # is the substitute carrier; we run the tier-upgrade
+                    # + type + recursion guards before accepting it.
+                    #
+                    # CR-critical: do NOT promote ``result`` to
+                    # ``last_good_ctx`` until the substitute is ACCEPTED.
+                    # A rejected substitute (tier-laundering / wrong-type
+                    # / recursion) must not leak its ctx into the
+                    # continuing chain — the chain resumes from the prior
+                    # last-good ctx, exactly as if this subscriber had
+                    # returned ``None``.
+                    substitute_outcome = await _wrap_legacy_substitute_as_outcome(
                         result_ctx=result,
                         subscriber=sub,
                         hookpoint_name=name,
+                        correlation_id=chain_ctx.correlation_id,
                         carrier_type=carrier_type,
                     )
                     if substitute_outcome is not None:
+                        last_good_ctx = result
                         return substitute_outcome, result
-                    # Tier-upgrade guard refused — continue chain.
+                    # Substitution refused — the refusal audit row was
+                    # emitted inside the wrapper. Resume the chain from
+                    # the prior last-good ctx (the rejected substitute is
+                    # discarded, not retained).
                     chain_ctx = last_good_ctx
                     continue
     except TimeoutError:

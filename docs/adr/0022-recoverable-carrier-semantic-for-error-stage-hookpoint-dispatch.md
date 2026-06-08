@@ -1,10 +1,37 @@
 # ADR-0022 — Recoverable-carrier semantic for error-stage hookpoint dispatch
 
 **Date:** 2026-06-07
-**Status:** Proposed
+**Status:** Accepted
 **Closes:** [#170](https://github.com/alfred-os/AlfredOS/issues/170)
-**Implemented in:** PR-S4-3 (planned)
+**Implemented in:** [PR #220](https://github.com/alfred-os/AlfredOS/pull/220) (PR-S4-3)
 **Related:** [ADR-0014](./0014-pluggable-hooks-for-every-action.md) (pluggable-hooks contract this ADR extends)
+
+## Implementation note (PR #220)
+
+Two clarifications recorded at implementation time:
+
+1. **Public `invoke()` return type unchanged.** §2 requires `_run_error()`
+   to return `ErrorOutcome[T]` and "the caller pattern-matches." The
+   implementation satisfies this at the `_run_error` → `_dispatch_by_kind`
+   boundary: `_run_error` returns `tuple[ErrorOutcome[T], HookContext[T]]`
+   and `_dispatch_by_kind` exhaustively matches it (`ReRaise` → re-raise,
+   `SubstituteResult` → `with_input`). The **public** `invoke()` keeps
+   returning `HookContext[T]` so the 100+ existing call sites need no
+   change. The discriminated union is the dispatcher's internal contract,
+   not a call-site-facing one — within §2's latitude.
+
+2. **`source_tier` attestation (§3) is implemented.** The dispatcher reads
+   the firing subscriber's registered tier (`Subscriber.tier`) and maps it
+   to the trust tier via `system→T0 / operator→T1 / user-plugin→T3`. A
+   subscriber embeds only the recovery payload under
+   `ctx.metadata["substitute_payload"]`; the dispatcher stamps the attested
+   `source_tier`. Every accept emits `hooks.carrier_substitution`; every
+   refusal emits `hooks.carrier_substitution_refused` with a typed
+   `reason` (§4.3/§4.4). The `carrier_tier` field stays
+   `type[TrustTier] | None` (the §5 Stage-B "flip to required" is enforced
+   by the runtime `register_hookpoint` gate + the AST guard rather than a
+   Pydantic-required field, since `HookpointMeta` is a frozen dataclass,
+   not a Pydantic model).
 
 ## Context
 

@@ -57,22 +57,18 @@ def _find_register_hookpoint_calls(tree: ast.AST) -> list[ast.Call]:
 
 
 def _is_passing_carrier_tier(call: ast.Call) -> bool:
-    """Return True iff ``call`` passes ``carrier_tier=`` (kw OR **expansion)."""
-    for kw in call.keywords:
-        if kw.arg == "carrier_tier":
-            return True
-        if kw.arg is None:
-            # ``**kwargs`` expansion — assume it carries carrier_tier.
-            # Concrete kwargs-passing sites are rare in this codebase
-            # (a tuple-driven loop in supervisor/core.py uses positional
-            # passing) and the runtime register_hookpoint signature
-            # gate catches a missing carrier_tier value at register
-            # time regardless. The AST guard is a static convenience —
-            # it ELEVATES the runtime gate to PR-author time for the
-            # common direct-kwarg shape; ``**kwargs`` is permitted as
-            # the runtime escape valve.
-            return True
-    return False
+    """Return True iff ``call`` passes an EXPLICIT ``carrier_tier=`` kwarg.
+
+    A ``**kwargs`` expansion is NOT treated as compliant (CR closure):
+    accepting it would let the gate be bypassed by spreading a dict that
+    may or may not carry ``carrier_tier``. The runtime
+    ``register_hookpoint`` signature gate is the backstop for any
+    ``**kwargs`` site (it raises ``TypeError`` when ``carrier_tier`` is
+    absent), but this static guard requires the explicit keyword so a
+    missing ``carrier_tier`` surfaces at PR-author time for the common
+    direct-kwarg shape.
+    """
+    return any(kw.arg == "carrier_tier" for kw in call.keywords)
 
 
 def test_every_register_hookpoint_call_passes_carrier_tier() -> None:

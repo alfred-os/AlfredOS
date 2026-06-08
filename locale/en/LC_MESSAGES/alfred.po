@@ -944,6 +944,31 @@ msgstr ""
 "— valid tiers are {valid_tiers}. Check for typos on the publisher's "
 "subscribable_tiers / refusable_tiers args."
 
+# Slice-4 PR-S4-3 — recoverable-carrier semantic registration gates.
+#: src/alfred/hooks/errors.py:478
+msgid "hooks.carrier_tier_required"
+msgstr ""
+"Hookpoint {hookpoint} declared with carrier_tier=None but is not on the "
+"meta-hookpoint allow-list. Every non-meta hookpoint MUST declare its "
+"upper-bound trust tier (see ADR-0022 PR-S4-3). Set carrier_tier= to the "
+"appropriate TrustTier subclass."
+
+#: src/alfred/hooks/errors.py:496
+msgid "hooks.carrier_tier_must_be_none_for_meta_hookpoint"
+msgstr ""
+"Hookpoint {hookpoint} is a meta-hookpoint (hooks.* family) but declared "
+"with a non-None carrier_tier. Meta-hookpoints MUST carry "
+"carrier_tier=None to break the substitution recursion loop (see ADR-0022 "
+"PR-S4-3)."
+
+#: src/alfred/hooks/errors.py:514
+msgid "hooks.allow_error_substitution_must_be_false_for_meta_hookpoint"
+msgstr ""
+"Hookpoint {hookpoint} is a meta-hookpoint (hooks.* family) but declared "
+"with allow_error_substitution=True. Meta-hookpoints MUST carry "
+"allow_error_substitution=False to belt-and-braces the recursion guard "
+"(see ADR-0022 PR-S4-3)."
+
 #: src/alfred/i18n/_deferred_key_anchors.py:68
 msgid "cli.plugin.grant.status.approved"
 msgstr "approved"
@@ -1832,11 +1857,11 @@ msgstr ""
 "HOOKS_DLP_SUBSCRIBER_NOT_REGISTERED carries plugin_id={plugin_id!r}, "
 "hookpoint={hookpoint!r}, requested_tier={requested_tier!r}."
 
-#: src/alfred/security/quarantine.py:1398
+#: src/alfred/security/quarantine.py:1399
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:1470
+#: src/alfred/security/quarantine.py:1471
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
@@ -2202,14 +2227,3 @@ msgstr ""
 #~ "after reviewer merge).\n"
 #~ "Check dispatch status with: alfred supervisor proposals --recent"
 
-
-# Slice-4 PR-S4-3 — recoverable-carrier semantic registration gates.
-
-msgid "hooks.carrier_tier_required"
-msgstr "Hookpoint {hookpoint} declared with carrier_tier=None but is not on the meta-hookpoint allow-list. Every non-meta hookpoint MUST declare its upper-bound trust tier (see ADR-0022 PR-S4-3). Set carrier_tier= to the appropriate TrustTier subclass."
-
-msgid "hooks.carrier_tier_must_be_none_for_meta_hookpoint"
-msgstr "Hookpoint {hookpoint} is a meta-hookpoint (hooks.* family) but declared with a non-None carrier_tier. Meta-hookpoints MUST carry carrier_tier=None to break the substitution recursion loop (see ADR-0022 PR-S4-3)."
-
-msgid "hooks.allow_error_substitution_must_be_false_for_meta_hookpoint"
-msgstr "Hookpoint {hookpoint} is a meta-hookpoint (hooks.* family) but declared with allow_error_substitution=True. Meta-hookpoints MUST carry allow_error_substitution=False to belt-and-braces the recursion guard (see ADR-0022 PR-S4-3)."

@@ -266,7 +266,7 @@ def _register_n_passthrough_pre_subscribers(
     registry: HookRegistry,
     n: int,
     *,
-    hookpoint: str = "before_validate",
+    hookpoint: str = "memory.episodic.record.before_validate",
     tier: str = "operator",
 ) -> None:
     """Register ``n`` pass-through async ``pre`` subscribers on ``hookpoint``.
@@ -625,10 +625,18 @@ async def test_refusal_short_circuits_subscribers(
         counter["value"] += 1
         return ctx
 
+    # This test drives the refusal through ``mem.record()``, which
+    # invokes the DOTTED hookpoint name ``memory.episodic.record.before_validate``
+    # (post-#118 stem→dotted migration). The subscribers must register
+    # on the same dotted name the action invokes — registering on the
+    # old stem ``before_validate`` would put them on a hookpoint
+    # ``record()`` never fires, so the refuser would never run. The
+    # ``fresh_registry`` fixture already declares this dotted hookpoint
+    # via ``_declare_bench_hookpoints``.
     for fn in (sub_0, sub_1_refuser, sub_2_counter, sub_3_counter, sub_4_counter):
         fresh_registry.register(
             hook_fn=fn,
-            hookpoint="before_validate",
+            hookpoint="memory.episodic.record.before_validate",
             kind="pre",
             tier="operator",
         )

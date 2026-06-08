@@ -102,9 +102,15 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
         subscribable_tiers=OPEN_TIERS,
         refusable_tiers=OPEN_TIERS,
         fail_closed=False,
-        # PR-S4-3: T3 upper bound — episodic content carries T2 (TUI/Discord) or T3
-        # (untrusted ingestion). Per-call carrier_type is computed from
-        # EpisodicRecordInput.trust_tier at invoke time (mem-002 closure).
+        # PR-S4-3: T3 carrier upper bound. Episodic content can carry T2
+        # (TUI/Discord) OR T3 (untrusted ingestion), so T3 — the top of
+        # the strict total order — is the conservative declaration: it
+        # accepts a substitute from any subscriber tier on this
+        # observability-shaped hookpoint. Tightening the carrier to the
+        # PER-EPISODE trust tier (so a T3 substitute on a T2 episode is
+        # refused) is the mem-002 follow-up tracked in #221 — it requires
+        # threading EpisodicRecordInput.trust_tier through Flow.body into
+        # _run_error, which this PR does not do.
         carrier_tier=T3,
     )
 

@@ -80,7 +80,7 @@ from hypothesis import strategies as st
 
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookpointMeta, HookRegistry
-from alfred.security.tiers import T3
+from alfred.security.tiers import T0, T1, T2, T3
 from tests.helpers.gates import make_permissive_fixture_gate
 
 # ──────────────────────────────────────────────────────────────────────
@@ -135,11 +135,11 @@ _meta_strategy = st.builds(
     subscribable_tiers=_tier_set_strategy,
     refusable_tiers=_tier_set_strategy,
     fail_closed=st.booleans(),
-    # PR-S4-3: every non-meta hookpoint declares its carrier_tier; using T3
-    # uniformly here matches the AST-patched test sites in this PR (all
-    # downstream consumers will pass an explicit tier; this property suite
-    # validates equality / drift / idempotency in that posture).
-    carrier_tier=st.just(T3),
+    # PR-S4-3: carrier_tier is sampled across the full {T0, T1, T2, T3}
+    # range so the equality / drift / idempotency properties actually
+    # exercise the new field (CR closure — a fixed T3 left carrier_tier
+    # drift untested).
+    carrier_tier=st.sampled_from([T0, T1, T2, T3]),
 )
 
 
@@ -215,24 +215,30 @@ def test_hookpoint_meta_equality_is_field_wise(
 ) -> None:
     """``a == b`` iff every field matches.
 
-    The four fields are :attr:`HookpointMeta.name`,
+    The six fields are :attr:`HookpointMeta.name`,
     :attr:`HookpointMeta.subscribable_tiers`,
     :attr:`HookpointMeta.refusable_tiers`,
-    :attr:`HookpointMeta.fail_closed`. The example tests in
+    :attr:`HookpointMeta.fail_closed`, and the PR-S4-3 additions
+    :attr:`HookpointMeta.carrier_tier` +
+    :attr:`HookpointMeta.allow_error_substitution`. The example tests in
     ``test_registration_enforcement.py`` pin drift on each field
     individually; this property covers every cross-product (drift on
     multiple fields, equal on others) hypothesis generates.
 
     The forward implication catches an ``__eq__`` that misses a field
-    (e.g. ignores ``fail_closed``); the reverse catches an
-    ``__eq__`` that adds a field the dataclass does not carry (e.g.
-    object identity creeping in).
+    (e.g. ignores ``fail_closed`` or the new ``carrier_tier``); the
+    reverse catches an ``__eq__`` that adds a field the dataclass does
+    not carry (e.g. object identity creeping in). The strategy varies
+    ``carrier_tier`` across {T0, T1, T2, T3} so a regression that drops
+    it from ``__eq__`` is caught here (CR closure).
     """
     fields_equal = (
         a.name == b.name
         and a.subscribable_tiers == b.subscribable_tiers
         and a.refusable_tiers == b.refusable_tiers
         and a.fail_closed == b.fail_closed
+        and a.carrier_tier == b.carrier_tier
+        and a.allow_error_substitution == b.allow_error_substitution
     )
     assert (a == b) == fields_equal
 
@@ -267,7 +273,7 @@ def test_register_hookpoint_is_idempotent_on_equal_meta(meta: HookpointMeta) -> 
         subscribable_tiers=meta.subscribable_tiers,
         refusable_tiers=meta.refusable_tiers,
         fail_closed=meta.fail_closed,
-        carrier_tier=T3,
+        carrier_tier=meta.carrier_tier,
     )
     # Second call with identical args — must not raise.
     registry.register_hookpoint(
@@ -275,7 +281,7 @@ def test_register_hookpoint_is_idempotent_on_equal_meta(meta: HookpointMeta) -> 
         subscribable_tiers=meta.subscribable_tiers,
         refusable_tiers=meta.refusable_tiers,
         fail_closed=meta.fail_closed,
-        carrier_tier=T3,
+        carrier_tier=meta.carrier_tier,
     )
     assert registry.hookpoint_meta(meta.name) == meta
 
@@ -314,7 +320,7 @@ def test_register_hookpoint_raises_on_drift(
         subscribable_tiers=b.subscribable_tiers,
         refusable_tiers=b.refusable_tiers,
         fail_closed=b.fail_closed,
-        carrier_tier=T3,
+        carrier_tier=b.carrier_tier,
     )
     registry = HookRegistry(
         gate=make_permissive_fixture_gate(allow_system=True),
@@ -325,7 +331,7 @@ def test_register_hookpoint_raises_on_drift(
         subscribable_tiers=a.subscribable_tiers,
         refusable_tiers=a.refusable_tiers,
         fail_closed=a.fail_closed,
-        carrier_tier=T3,
+        carrier_tier=a.carrier_tier,
     )
     if a == other:
         # No drift: idempotent path. Already covered by property 4 —
@@ -337,7 +343,7 @@ def test_register_hookpoint_raises_on_drift(
             subscribable_tiers=other.subscribable_tiers,
             refusable_tiers=other.refusable_tiers,
             fail_closed=other.fail_closed,
-            carrier_tier=T3,
+            carrier_tier=other.carrier_tier,
         )
         assert registry.hookpoint_meta(a.name) == a
         return
@@ -349,5 +355,5 @@ def test_register_hookpoint_raises_on_drift(
             subscribable_tiers=other.subscribable_tiers,
             refusable_tiers=other.refusable_tiers,
             fail_closed=other.fail_closed,
-            carrier_tier=T3,
+            carrier_tier=other.carrier_tier,
         )
