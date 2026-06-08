@@ -66,6 +66,14 @@ def test_manifest_matches_runtime_registry_after_full_import_sweep() -> None:
 
     Supervisor._register_hookpoints(_StubSupervisor())  # type: ignore[arg-type]
 
+    # PR-S4-3 (ADR-0022): the carrier-substitution meta-hookpoints are
+    # registered by declare_meta_hookpoints (not a per-subsystem
+    # declare_hookpoints, since they belong to the hooks subsystem
+    # itself). Fire it explicitly so the runtime set includes them.
+    from alfred.hooks._known_hookpoints import declare_meta_hookpoints
+
+    declare_meta_hookpoints(get_registry())
+
     # Read the resulting runtime set.
     runtime_names = set(get_registry()._hookpoints.keys())
     manifest_names = set(all_known_hookpoints())
@@ -81,7 +89,7 @@ def test_manifest_matches_runtime_registry_after_full_import_sweep() -> None:
     # MUST fail loud. Bump this constant when the manifest grows; the
     # fixture-driven sync check below catches the matching shrink-the-
     # manifest direction.
-    expected_min_hookpoints = 18
+    expected_min_hookpoints = 20
     assert len(runtime_names) >= expected_min_hookpoints, (
         f"sync test environment registered only {len(runtime_names)} "
         f"hookpoints; expected at least {expected_min_hookpoints}. Either "

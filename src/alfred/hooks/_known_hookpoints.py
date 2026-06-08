@@ -74,6 +74,14 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "plugin.lifecycle.crashed",
         "plugin.lifecycle.quarantined",
     ),
+    # PR-S4-3 (ADR-0022): the two observation-only carrier-substitution
+    # meta-hookpoints. They describe the substitution machinery itself
+    # and carry carrier_tier=None + allow_error_substitution=False so
+    # they cannot recurse. Registered by ``declare_meta_hookpoints``.
+    "alfred.hooks._known_hookpoints": (
+        "hooks.carrier_substituted",
+        "hooks.carrier_substitution_refused",
+    ),
 }
 
 
@@ -86,4 +94,38 @@ def all_known_hookpoints() -> tuple[str, ...]:
     return tuple(name for names in KNOWN_HOOKPOINTS.values() for name in names)
 
 
-__all__ = ["KNOWN_HOOKPOINTS", "all_known_hookpoints"]
+def declare_meta_hookpoints(registry: object | None = None) -> None:
+    """Register the two observation-only carrier-substitution meta-hookpoints.
+
+    PR-S4-3 (ADR-0022). Both meta-hookpoints carry ``carrier_tier=None``
+    and ``allow_error_substitution=False`` so a subscriber against them
+    cannot substitute the meta-event's payload — closing the recursion
+    loop the recoverable-carrier semantic would otherwise open.
+
+    Called once at bootstrap by the same orchestrator that fires the
+    per-subsystem ``declare_hookpoints()`` calls. Idempotent on equal
+    metadata (the registry's standard re-declaration guard).
+
+    Args:
+        registry: The :class:`alfred.hooks.registry.HookRegistry` to
+            declare against. Defaults to the process singleton via
+            :func:`alfred.hooks.get_registry`.
+    """
+    from alfred.hooks import get_registry
+    from alfred.hooks.registry import SYSTEM_ONLY_TIERS, HookRegistry
+
+    reg: HookRegistry = (
+        registry if isinstance(registry, HookRegistry) else get_registry()
+    )
+    for name in ("hooks.carrier_substituted", "hooks.carrier_substitution_refused"):
+        reg.register_hookpoint(
+            name=name,
+            subscribable_tiers=SYSTEM_ONLY_TIERS,
+            refusable_tiers=frozenset(),
+            fail_closed=False,
+            carrier_tier=None,
+            allow_error_substitution=False,
+        )
+
+
+__all__ = ["KNOWN_HOOKPOINTS", "all_known_hookpoints", "declare_meta_hookpoints"]
