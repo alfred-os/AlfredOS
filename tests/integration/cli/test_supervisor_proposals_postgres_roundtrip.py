@@ -42,6 +42,7 @@ pytestmark = pytest.mark.integration
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Satisfy Settings' API-key requirement (same as the status round-trip)."""
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
 
 @pytest.fixture
