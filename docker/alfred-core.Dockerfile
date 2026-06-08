@@ -11,7 +11,7 @@
 #    so `docker compose run --rm alfred-core <cmd>` maps 1:1 to
 #    `alfred <cmd>` — there is no shell or alternative surface.
 
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim-bookworm AS builder
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -27,7 +27,7 @@ COPY src ./src
 # so they ride along with --no-dev.
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:${PATH}"
 
@@ -39,10 +39,10 @@ ENV PYTHONUNBUFFERED=1 \
 # guarantee collapses.
 # bubblewrap: provides `bwrap` — Slice-4 PR-S4-6's bash launcher invokes
 # bwrap directly with per-plugin policy files (spec §7.5 Linux policy /
-# ADR-0015). Debian Bookworm ships bubblewrap 0.8.x which supports the
-# `--keep-fd` flag the PR-S4-6 round-2 closure 5 requires for fd-3
-# provider-key inheritance (the flag was added in bwrap 0.5.0). Without
-# bwrap Linux production refuses to launch the quarantined-LLM with
+# ADR-0015). Debian Bookworm ships bubblewrap 0.8.x which provides the
+# `--bind-fd` / `--ro-bind-fd` / `--sync-fd` family the PR-S4-6 launcher
+# uses for fd-3 provider-key inheritance into the sandbox. Without bwrap
+# Linux production refuses to launch the quarantined-LLM with
 # `policy_ref_unreadable` because no binary can apply the policy.
 RUN apt-get update -qq \
     && apt-get install -y --no-install-recommends git util-linux bubblewrap \
