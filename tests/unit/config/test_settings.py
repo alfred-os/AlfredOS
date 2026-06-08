@@ -12,7 +12,11 @@ from alfred.config.settings import Settings, SettingsError
 
 class TestSettings:
     def test_loads_with_defaults_when_env_missing(self) -> None:
-        with patch.dict(os.environ, {"ALFRED_DEEPSEEK_API_KEY": "test-key"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"ALFRED_DEEPSEEK_API_KEY": "test-key", "ALFRED_ENVIRONMENT": "test"},
+            clear=True,
+        ):
             s = Settings()
             assert s.deepseek_api_key.get_secret_value() == "test-key"
             assert s.daily_budget_usd == 1.0  # default
@@ -20,7 +24,9 @@ class TestSettings:
             assert s.fallback_provider == "anthropic"  # default
 
     def test_database_url_defaults_to_localhost_postgres(self) -> None:
-        with patch.dict(os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x"}, clear=True):
+        with patch.dict(
+            os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x", "ALFRED_ENVIRONMENT": "test"}, clear=True
+        ):
             s = Settings()
             # Pin the FULL default DSN — a substring `"postgresql"` check would
             # also pass on a stale or pointed-at-prod URL, which defeats the
@@ -31,13 +37,17 @@ class TestSettings:
             )
 
     def test_anthropic_api_key_is_optional(self) -> None:
-        with patch.dict(os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x"}, clear=True):
+        with patch.dict(
+            os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x", "ALFRED_ENVIRONMENT": "test"}, clear=True
+        ):
             s = Settings()
             assert s.anthropic_api_key is None
 
     def test_proposal_dispatch_interval_s_defaults_to_30(self) -> None:
         """ADR-0021 #171 — supervisor's dispatch cycle cadence defaults to 30s."""
-        with patch.dict(os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x"}, clear=True):
+        with patch.dict(
+            os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x", "ALFRED_ENVIRONMENT": "test"}, clear=True
+        ):
             s = Settings()
             assert s.proposal_dispatch_interval_s == 30
 
@@ -47,6 +57,7 @@ class TestSettings:
             os.environ,
             {
                 "ALFRED_DEEPSEEK_API_KEY": "x",
+                "ALFRED_ENVIRONMENT": "test",
                 "ALFRED_PROPOSAL_DISPATCH_INTERVAL_S": "5",
             },
             clear=True,
@@ -63,6 +74,7 @@ class TestSettings:
                 os.environ,
                 {
                     "ALFRED_DEEPSEEK_API_KEY": "x",
+                    "ALFRED_ENVIRONMENT": "test",
                     "ALFRED_PROPOSAL_DISPATCH_INTERVAL_S": "0",
                 },
                 clear=True,
@@ -82,7 +94,11 @@ class TestPlaceholderApiKeyValidator:
 
     def test_rejects_literal_placeholder(self) -> None:
         # Sentinel string is `sk-...` exactly, matching .env.example line 5.
-        with patch.dict(os.environ, {"ALFRED_DEEPSEEK_API_KEY": "sk-..."}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"ALFRED_DEEPSEEK_API_KEY": "sk-...", "ALFRED_ENVIRONMENT": "test"},
+            clear=True,
+        ):
             with pytest.raises(SettingsError) as excinfo:
                 Settings()
             # Validator raises with the `placeholder_api_key` sentinel string
@@ -94,6 +110,10 @@ class TestPlaceholderApiKeyValidator:
         # Any string other than the literal placeholder is accepted at this
         # layer — the provider call validates further (auth failure surfaces
         # later via the friendly provider-error path).
-        with patch.dict(os.environ, {"ALFRED_DEEPSEEK_API_KEY": "sk-real-1234"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"ALFRED_DEEPSEEK_API_KEY": "sk-real-1234", "ALFRED_ENVIRONMENT": "test"},
+            clear=True,
+        ):
             s = Settings()
             assert s.deepseek_api_key.get_secret_value() == "sk-real-1234"

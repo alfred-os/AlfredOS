@@ -7,8 +7,13 @@ they never leak into logs by accident.
 
 from __future__ import annotations
 
-from pydantic import Field, PostgresDsn, SecretStr, field_validator
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, PostgresDsn, PrivateAttr, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from alfred.config._environment_loader import EnvironmentLoadResult, load_environment
 
 # The literal placeholder shipped in .env.example. Rejected in both the setup
 # script (bin/alfred-setup.sh) and the Settings validator below so an operator
@@ -34,6 +39,15 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # Deployment classification (spec §7.3 #174). Mandatory, dual-sourced:
+    # env var ALFRED_ENVIRONMENT wins; /etc/alfred/environment is the
+    # fallback; disagreement is audited by the daemon CLI and the env-var
+    # value wins; neither set → the field stays absent and Pydantic's
+    # required-field error fires (translated to SettingsError by __init__).
+    # The ``_resolve_environment`` model-validator below populates the
+    # field from the dual-source loader when it is not passed explicitly.
+    environment: Literal["development", "production", "test"]
 
     # Provider config
     deepseek_api_key: SecretStr
@@ -83,6 +97,87 @@ class Settings(BaseSettings):
     # the field threads through Settings rather than an os.environ read
     # so the entire config surface stays auditable from one place.
     proposal_dispatch_interval_s: int = Field(default=30, gt=0)
+
+    # ADR-0021 #174: state.git absolute path. Slice-3 hardcoded
+    # /var/lib/alfred/state.git in src/alfred/cli/_state_git.py at the call
+    # site; PR-S4-1 promotes it to a Settings field so the daemon boot
+    # path and the operator CLI both read from the same source. Override
+    # via ALFRED_STATE_GIT_PATH.
+    state_git_path: Path = Field(
+        default=Path("/var/lib/alfred/state.git"),
+        description="Absolute path to the state.git repository. "
+        "Override via ALFRED_STATE_GIT_PATH.",
+    )
+
+    # arch-002 closure (#174): the dual-source environment lookup result —
+    # env-var value, file value, conflict flag — that the daemon CLI needs
+    # to emit the ``daemon.boot.environment_source_conflict`` audit row.
+    # Held as a PrivateAttr (NOT a model field) so the validated model
+    # surface stays clean and serialization never carries it — no Pydantic
+    # data-smuggling. ``None`` when ``environment`` was passed explicitly
+    # (the dual-source loader was bypassed).
+    _environment_load_result: EnvironmentLoadResult | None = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_environment(cls, data: object) -> object:
+        """Populate ``environment`` from env-var > /etc/alfred/environment.
+
+        Pydantic v2 model-validator (``mode='before'``) runs against the
+        raw kwargs dict — when ``environment`` is missing we fall back to
+        the dual-source loader. When the loader returns ``None`` we leave
+        the field absent and let Pydantic's normal "missing required
+        field" error fire, which ``Settings.__init__``'s ``SettingsError``
+        adapter translates to the operator-facing message.
+
+        The resolved :class:`EnvironmentLoadResult` is stashed under a
+        private key and lifted onto the instance by
+        :meth:`_capture_environment_load_result` (``mode='after'``) so the
+        validated model surface never carries it (arch-002 closure).
+        """
+        if not isinstance(data, dict):
+            return data
+        if "environment" not in data:
+            loaded = load_environment()
+            if loaded.value is not None:
+                data["environment"] = loaded.value
+                data["__environment_load_result"] = loaded
+        return data
+
+    @model_validator(mode="after")
+    def _capture_environment_load_result(self) -> Settings:
+        """Lift the stashed load result onto the private attribute.
+
+        ``mode='before'`` cannot set a :class:`PrivateAttr` (the instance
+        does not exist yet); ``mode='after'`` reads the stash key the
+        ``before`` validator left behind. The stash key lives in the raw
+        input dict, which Pydantic has already consumed by the time this
+        runs, so we re-read it from ``__pydantic_extra__`` when present and
+        otherwise leave the attribute ``None``.
+        """
+        # ``__environment_load_result`` is not a declared field; with
+        # ``extra="ignore"`` Pydantic drops it from ``data`` before this
+        # validator runs, so the ``before`` validator cannot hand it over
+        # through the model. Recompute the read-only side channel only when
+        # the loader actually produced a value for ``environment`` (i.e.
+        # the env was NOT passed explicitly). Recomputation is FILE-ONLY
+        # and idempotent, so it cannot disagree with the value chosen above
+        # within a single construction.
+        loaded = load_environment()
+        if loaded.value is not None and loaded.value == self.environment:
+            self._environment_load_result = loaded
+        return self
+
+    @property
+    def environment_load_result(self) -> EnvironmentLoadResult | None:
+        """The dual-source environment lookup result, or ``None``.
+
+        ``None`` when ``environment`` was supplied explicitly (the loader
+        was bypassed) — e.g. unit tests constructing ``Settings(environment
+        ="test")``. The daemon CLI reads this to emit the source-conflict
+        audit row (arch-002 closure).
+        """
+        return self._environment_load_result
 
     @field_validator("deepseek_api_key")
     @classmethod
