@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-08 09:24+0100\n"
+"POT-Creation-Date: 2026-06-09 00:10+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -825,7 +825,7 @@ msgstr ""
 
 # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the PR-S4-0b
 # reserve. Operator-facing; all bodies ship real English copy.
-#: src/alfred/cli/daemon/_commands.py:327
+#: src/alfred/cli/daemon/_commands.py:354
 msgid "daemon.boot.audit_log_unwritable"
 msgstr ""
 "The audit log is unwritable, so the daemon refuses to boot — a boot with "
@@ -833,7 +833,7 @@ msgstr ""
 " (`docker compose ps` should show alfred-pg healthy) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:468
+#: src/alfred/cli/daemon/_commands.py:495
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -841,7 +841,7 @@ msgstr ""
 " `alfred daemon start`."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:471
+#: src/alfred/cli/daemon/_commands.py:498
 #: src/alfred/i18n/_slice_4_reserve.py:64
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -850,7 +850,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:522
+#: src/alfred/cli/daemon/_commands.py:549
 #: src/alfred/i18n/_slice_4_reserve.py:65
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -858,7 +858,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:533
+#: src/alfred/cli/daemon/_commands.py:560
 #: src/alfred/i18n/_slice_4_reserve.py:66
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -867,7 +867,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:549
+#: src/alfred/cli/daemon/_commands.py:576
 #: src/alfred/i18n/_slice_4_reserve.py:67
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -875,7 +875,7 @@ msgstr ""
 "Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:563
+#: src/alfred/cli/daemon/_commands.py:590
 #: src/alfred/i18n/_slice_4_reserve.py:68
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -883,38 +883,38 @@ msgstr ""
 "`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:622
+#: src/alfred/cli/daemon/_commands.py:658
 #: src/alfred/i18n/_slice_4_reserve.py:70
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:668
+#: src/alfred/cli/daemon/_commands.py:704
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:671
-#: src/alfred/cli/daemon/_commands.py:676
+#: src/alfred/cli/daemon/_commands.py:707
+#: src/alfred/cli/daemon/_commands.py:712
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:678
+#: src/alfred/cli/daemon/_commands.py:714
 #: src/alfred/i18n/_slice_4_reserve.py:71
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:693
+#: src/alfred/cli/daemon/_commands.py:729
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:696
+#: src/alfred/cli/daemon/_commands.py:732
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:704
+#: src/alfred/cli/daemon/_commands.py:740
 #: src/alfred/i18n/_slice_4_reserve.py:72
 msgid "daemon.status.template"
 msgstr ""
@@ -1994,20 +1994,27 @@ msgstr ""
 "not present the authorised CapabilityGateNonce. The T3 ingestion boundary"
 " is gated to StdioTransport and quarantine_host only (spec §3.2)."
 
-#: src/alfred/supervisor/core.py:262
+#: src/alfred/supervisor/core.py:274
 msgid "supervisor.start.already_started"
 msgstr ""
 "Supervisor.start() called twice without an intervening stop(). The "
 "supervisor is single-instance per process; re-entrancy would orphan the "
 "first TaskGroup."
 
-#: src/alfred/supervisor/core.py:589
+#: src/alfred/supervisor/core.py:372
+msgid "supervisor.dispatch.outbound_dlp_unwired"
+msgstr ""
+"The proposal dispatch loop is scheduled but no outbound DLP scanner was "
+"wired to the Supervisor. failure_detail cannot reach the ledger without "
+"passing DLP first (#173); pass outbound_dlp= at construction."
+
+#: src/alfred/supervisor/core.py:621
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:658
+#: src/alfred/supervisor/core.py:690
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
