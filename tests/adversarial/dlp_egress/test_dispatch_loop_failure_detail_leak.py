@@ -19,7 +19,7 @@ audit-row contract — both merge-blocking.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 
@@ -31,9 +31,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from alfred.audit.log import AuditWriter
 from alfred.memory.models import AuditEntry, Base, ProcessedProposal
-from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_loop import _ProposalBlobRef, _record_failure
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 _PAYLOAD_PATH = Path(__file__).parent / "dispatch_loop_failure_detail_leak.yaml"
 
@@ -74,17 +74,6 @@ async def session_scope_factory(
         yield _scope
     finally:
         await engine.dispose()
-
-
-def _identity_dlp() -> OutboundDlp:
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: Mapping[str, object]) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
 
 
 @pytest.mark.integration

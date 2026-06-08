@@ -18,7 +18,7 @@ Covered branches (test-003 + sec-002 + sec-003 + err-002 + err-003):
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 
@@ -29,8 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from alfred.audit.log import AuditWriter
 from alfred.hooks.errors import HookRefusal
 from alfred.memory.models import AuditEntry, Base, ProcessedProposal
-from alfred.security.dlp import OutboundDlp, OutboundDlpProtocol
+from alfred.security.dlp import OutboundDlpProtocol
 from alfred.state.dispatch_loop import _ProposalBlobRef, _record_failure
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -61,19 +62,6 @@ async def session_scope_factory(
         yield _scope
     finally:
         await engine.dispose()
-
-
-def _identity_dlp() -> OutboundDlp:
-    """Clean scan — returns text unchanged (count stays 0)."""
-
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: Mapping[str, object]) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
 
 
 class _RefusingDlp:
@@ -287,4 +275,5 @@ async def test_non_refusal_scan_exception_aborts_write(
     scan_failed = [a for a in audit if a.event == "state.proposal.dispatch_dlp_scan_failed"]
     assert len(scan_failed) == 1
     assert scan_failed[0].subject["scan_error_type"] == "RuntimeError"
+    assert scan_failed[0].result == "dlp_failed"
     assert [a for a in audit if a.event == "state.proposal.failure_detail_redacted"] == []

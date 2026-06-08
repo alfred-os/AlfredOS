@@ -28,8 +28,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from alfred.security.dlp import OutboundDlp
 from alfred.supervisor.core import Supervisor
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 
 @asynccontextmanager
@@ -37,26 +37,6 @@ async def _fake_session_scope() -> AsyncIterator[Any]:
     session = AsyncMock()
     session.commit = AsyncMock()
     yield session
-
-
-def _identity_dlp() -> OutboundDlp:
-    """An OutboundDlp whose stages are no-ops — the scanner the loop needs.
-
-    arch-001 (#173): a Supervisor that schedules the dispatch loop MUST
-    carry a DLP scanner; ``_build_proposal_context`` refuses otherwise.
-    The wiring tests run the real loop so they wire an identity scanner
-    (matching the production invariant that the loop is never scheduled
-    without one).
-    """
-
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: Any) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
 
 
 def _build_supervisor(

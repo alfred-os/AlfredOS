@@ -38,7 +38,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from alfred.audit.log import AuditWriter
 from alfred.memory.models import Base, ProcessedProposal, ProcessedProposalsHead
-from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_loop import _proposal_dispatch_cycle
 from alfred.state.dispatch_registry import (
     PROPOSAL_HANDLERS,
@@ -46,20 +45,7 @@ from alfred.state.dispatch_registry import (
     ProposalEffectsProtocol,
 )
 from alfred.supervisor.errors import NoSuchComponentError
-
-
-def _identity_dlp() -> OutboundDlp:
-    """An OutboundDlp whose stages are no-ops — satisfies the required field."""
-
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: object) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
-
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 

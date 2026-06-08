@@ -11,7 +11,7 @@ truncate helper's body is unchanged.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -24,13 +24,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from alfred.audit.log import AuditWriter
 from alfred.hooks.errors import HookRefusal
 from alfred.memory.models import AuditEntry, ProcessedProposal
-from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_loop import (
     _PostHandlerAuditFailure,
     _ProposalBlobRef,
     _record_failure,
 )
 from alfred.state.dispatch_registry import ProposalContext
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 
 def test_truncated_detail_was_renamed_to_redacted_detail() -> None:
@@ -56,17 +56,6 @@ def test_redacted_detail_truncates_to_512() -> None:
 # ---------------------------------------------------------------------------
 
 _PLANTED_KEY = "sk-" + "DEADBEEF" * 5  # > 20 alnum after sk- → api-key-shape match
-
-
-def _identity_dlp() -> OutboundDlp:
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: Mapping[str, object]) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
 
 
 class _RefusingDlp:
@@ -245,6 +234,8 @@ async def test_record_failure_scan_error_aborts_unit() -> None:
     call = audit.append_schema.await_args_list[0]
     assert call.kwargs["event"] == "state.proposal.dispatch_dlp_scan_failed"
     assert call.kwargs["subject"]["scan_error_type"] == "RuntimeError"
+    # A scan crash is an infra fault, not a deliberate refusal.
+    assert call.kwargs["result"] == "dlp_failed"
 
 
 @pytest.mark.asyncio

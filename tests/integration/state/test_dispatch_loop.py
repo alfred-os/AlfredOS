@@ -56,6 +56,7 @@ from alfred.state.dispatch_registry import (
     ProposalEffectsProtocol,
     ProposalHandler,
 )
+from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -177,19 +178,6 @@ def _payload(component_id: str = "alfred.web-fetch") -> str:
         indent=2,
         sort_keys=True,
     )
-
-
-def _identity_dlp() -> OutboundDlp:
-    """An OutboundDlp whose stages are all no-ops (clean scan, count=0)."""
-
-    class _IdentityBroker:
-        def redact(self, text: str) -> str:
-            return text
-
-    def _sink(*, event: str, subject: object) -> None:
-        return None
-
-    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
 
 
 def _make_ctx(
