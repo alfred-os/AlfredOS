@@ -67,8 +67,8 @@ from typing import Any
 import pytest
 
 from alfred.hooks.registry import OPEN_TIERS, HookRegistry, get_registry, set_registry
+from alfred.security.tiers import T3
 from tests.helpers.gates import make_permissive_fixture_gate
-from alfred.security.tiers import T0, T1, T2, T3
 
 # Pinned bench knobs — mirrored from
 # ``tests/perf/test_hook_dispatch_perf.py``. Centralising them lets the

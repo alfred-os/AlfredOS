@@ -498,9 +498,7 @@ def carrier_tier_must_be_none_for_meta_hookpoint_message(*, hookpoint: str) -> s
     )
 
 
-def allow_error_substitution_must_be_false_for_meta_hookpoint_message(
-    *, hookpoint: str
-) -> str:
+def allow_error_substitution_must_be_false_for_meta_hookpoint_message(*, hookpoint: str) -> str:
     """Render the ``hooks.allow_error_substitution_must_be_false_for_meta_hookpoint``
     operator-facing string.
 

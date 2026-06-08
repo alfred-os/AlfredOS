@@ -175,7 +175,7 @@ def test_register_hookpoint_requires_carrier_tier_kwarg() -> None:
     kwarg surfaces at module-init time before any subscriber runs.
     """
     reg = HookRegistry(gate=grant_all_gate(), strict_declarations=True)
-    with pytest.raises(TypeError, match="missing.*carrier_tier"):
+    with pytest.raises(TypeError, match=r"missing.*carrier_tier"):
         reg.register_hookpoint(  # type: ignore[call-arg]
             name="something.action",
             subscribable_tiers=frozenset({"system"}),
@@ -192,7 +192,7 @@ def test_register_hookpoint_refuses_none_for_non_meta_hookpoint() -> None:
     ``carrier_tier=None``. Every other publisher MUST set a tier.
     """
     reg = HookRegistry(gate=grant_all_gate(), strict_declarations=True)
-    with pytest.raises(HookError, match="meta-hookpoint allow-list"):
+    with pytest.raises(HookError, match=r"meta-hookpoint allow-list"):
         reg.register_hookpoint(
             name="memory.episodic.record.before_validate",
             subscribable_tiers=frozenset({"system"}),
@@ -226,7 +226,7 @@ def test_register_hookpoint_accepts_none_for_carrier_substituted_meta_hookpoint(
 def test_register_hookpoint_refuses_tier_on_meta_hookpoint() -> None:
     """Meta-hookpoints MUST carry ``carrier_tier=None`` (symmetric guard)."""
     reg = HookRegistry(gate=grant_all_gate(), strict_declarations=True)
-    with pytest.raises(HookError, match="meta-hookpoint.*non-None"):
+    with pytest.raises(HookError, match=r"meta-hookpoint.*non-None"):
         reg.register_hookpoint(
             name="hooks.carrier_substituted",
             subscribable_tiers=frozenset({"system"}),
@@ -240,7 +240,7 @@ def test_register_hookpoint_refuses_tier_on_meta_hookpoint() -> None:
 def test_register_hookpoint_refuses_allow_substitution_on_meta_hookpoint() -> None:
     """Meta-hookpoints MUST carry ``allow_error_substitution=False`` (recursion guard)."""
     reg = HookRegistry(gate=grant_all_gate(), strict_declarations=True)
-    with pytest.raises(HookError, match="allow_error_substitution=True"):
+    with pytest.raises(HookError, match=r"allow_error_substitution=True"):
         reg.register_hookpoint(
             name="hooks.carrier_substituted",
             subscribable_tiers=frozenset({"system"}),

@@ -716,14 +716,10 @@ class HookRegistry:
         if carrier_tier is None and not is_meta:
             raise HookError(carrier_tier_required_message(hookpoint=name))
         if carrier_tier is not None and is_meta:
-            raise HookError(
-                carrier_tier_must_be_none_for_meta_hookpoint_message(hookpoint=name)
-            )
+            raise HookError(carrier_tier_must_be_none_for_meta_hookpoint_message(hookpoint=name))
         if allow_error_substitution and is_meta:
             raise HookError(
-                allow_error_substitution_must_be_false_for_meta_hookpoint_message(
-                    hookpoint=name
-                )
+                allow_error_substitution_must_be_false_for_meta_hookpoint_message(hookpoint=name)
             )
 
         new_meta = HookpointMeta(

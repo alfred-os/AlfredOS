@@ -43,9 +43,9 @@ from alfred.hooks.audit_sink import HOOKS_TIER_REJECTED
 from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookpointMeta, HookRegistry
+from alfred.security.tiers import T3
 from tests.helpers.gates import make_deny_all_gate
 from tests.unit.hooks.conftest import SpyAuditSink
-from alfred.security.tiers import T0, T1, T2, T3
 
 # ──────────────────────────────────────────────────────────────────────
 # 0. Production-singleton default — the #119 invariant pin

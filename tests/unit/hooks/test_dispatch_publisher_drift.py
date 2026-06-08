@@ -38,8 +38,8 @@ from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.invoke import invoke
 from alfred.hooks.registry import HookRegistry
+from alfred.security.tiers import T3
 from tests.unit.hooks.conftest import SpyAuditSink
-from alfred.security.tiers import T0, T1, T2, T3
 
 
 def _ctx() -> HookContext[Any]:

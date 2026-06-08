@@ -140,7 +140,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from typing import Any, Final, Literal, Self, cast
 from uuid import uuid4
@@ -421,6 +421,75 @@ Callers MUST exhaustively pattern-match on this type. Mypy strict
 enforces exhaustiveness; a future third variant surfaces as a
 non-exhaustive match warning at every consume site.
 """
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Trust-tier strict total order — PR-S4-3 / Critical 5 closure
+# ──────────────────────────────────────────────────────────────────────
+
+from types import MappingProxyType  # noqa: E402
+
+from alfred.security.tiers import T0, T1, T2, T3, TrustTier  # noqa: E402
+
+_TRUST_TIER_RANK: Final[Mapping[type[TrustTier], int]] = MappingProxyType(
+    {
+        T0: 0,
+        T1: 1,
+        T2: 2,
+        T3: 3,
+    }
+)
+"""Strict total order on the four approved tiers: T0 < T1 < T2 < T3.
+
+Used by :func:`_enforce_substitute_tier` to refuse substitutes whose
+declared source tier strictly exceeds the surrounding hookpoint's
+declared carrier tier. Implemented as a dict (NOT as ``__lt__``
+operators on TrustTier subclasses) so the comparison stays grep-able
+and the AST guard at
+``tests/unit/hooks/test_carrier_tier_required.py`` can lint it.
+
+``MappingProxyType`` wraps the dict so callers cannot mutate it at
+runtime — same immutability discipline as
+:data:`alfred.hooks.registry.OPEN_TIERS`.
+"""
+
+_SOURCE_TIER_TO_CLASS: Final[Mapping[str, type[TrustTier]]] = MappingProxyType(
+    {
+        "T0": T0,
+        "T1": T1,
+        "T2": T2,
+        "T3": T3,
+    }
+)
+"""Wire-format string → TrustTier class.
+
+Mirrors the Slice-3 :func:`alfred.security.tiers._tier_by_name` table;
+duplicated here to avoid an import cycle
+(``alfred.security.tiers`` does not import ``alfred.hooks``).
+"""
+
+
+def _enforce_substitute_tier(
+    *,
+    carrier_tier: type[TrustTier],
+    source_tier: Literal["T0", "T1", "T2", "T3"],
+) -> bool:
+    """Return True iff ``source_tier <= carrier_tier`` in strict total order.
+
+    Strict total order T0 < T1 < T2 < T3 (rank 0..3). A substitute is
+    ACCEPTED when ``rank[source] <= rank[carrier]``; REFUSED when
+    ``rank[source] > rank[carrier]``. The refusal disposition (audit
+    row, re-raise) is the caller's responsibility — this helper is
+    the pure predicate.
+
+    The ``carrier_tier=None`` case is the meta-hookpoint shape; that
+    path never reaches this helper because the meta-hookpoint
+    dispatch arm in :func:`_run_error` consults
+    :attr:`alfred.hooks.registry.HookpointMeta.allow_error_substitution`
+    first and shortcuts the chain.
+    """
+    source_class = _SOURCE_TIER_TO_CLASS[source_tier]
+    return _TRUST_TIER_RANK[source_class] <= _TRUST_TIER_RANK[carrier_tier]
 
 
 def _spawn_subscriber[T](

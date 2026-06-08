@@ -80,8 +80,8 @@ from hypothesis import strategies as st
 
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookpointMeta, HookRegistry
+from alfred.security.tiers import T3
 from tests.helpers.gates import make_permissive_fixture_gate
-from alfred.security.tiers import T0, T1, T2, T3
 
 # ──────────────────────────────────────────────────────────────────────
 # Strategies
