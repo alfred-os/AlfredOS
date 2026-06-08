@@ -123,3 +123,33 @@ def test_load_pidfile_refuses_foreign_owner(
     monkeypatch.setattr(os, "fstat", _fake_fstat)
     with pytest.raises(DaemonPidFileError):
         load_pidfile(pf)
+
+
+def test_load_pidfile_refuses_non_regular_file(tmp_path: Path) -> None:
+    """CR #3: a FIFO (or any non-regular file) at the path is refused.
+
+    A planted non-regular file (FIFO / device / socket) could block forever
+    on ``read`` or feed garbage. After the O_NOFOLLOW open + fstat we assert
+    the opened fd is a REGULAR file and refuse otherwise.
+    """
+    fifo = tmp_path / "daemon.pid"
+    os.mkfifo(fifo, mode=0o600)
+    with pytest.raises(DaemonPidFileError):
+        load_pidfile(fifo)
+
+
+def test_load_pidfile_refuses_non_positive_pid(tmp_path: Path) -> None:
+    """CR #4: a pidfile payload with pid <= 0 is malformed and refused.
+
+    A ``0`` / negative pid would make ``os.kill(pid, 0)`` signal a process
+    group or fail confusingly, so the loader rejects it as malformed.
+    """
+    for bad_pid in (0, -1):
+        pf = tmp_path / f"daemon-{bad_pid}.pid"
+        pf.write_text(
+            json.dumps({"pid": bad_pid, "boot_id": "x", "started_at": "now", "hostname": "h"}),
+            encoding="utf-8",
+        )
+        pf.chmod(0o600)
+        with pytest.raises(DaemonPidFileError):
+            load_pidfile(pf)
