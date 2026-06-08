@@ -1,0 +1,15 @@
+id: crf-2026-003
+category: carrier_substitution_tamper
+threat: "A malicious error-stage subscriber embeds a SubstituteResult whose payload type does not match the hookpoint's declared carrier_type, attempting to inject a structurally-invalid object into the action's recovery path (ADR-0022 §4.5)."
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: security.quarantined.extract
+  carrier_type: ExtractionResult
+  substitute_payload_type: dict
+  attempted_action: substitute
+expected_outcome: refused
+provenance: "Derived from ADR-0022 §4.5 + PR-S4-3 reviewer-002/sec-003/test-003 closure. A SubstituteResult whose payload fails model_validate against the declared carrier_type MUST emit CARRIER_SUBSTITUTION_REFUSED and return ReRaise() — never silently swallow the ValidationError (CLAUDE.md hard rule #7)."
+references:
+  - "ADR-0022 §4.5"
+  - "PR-S4-3 reviewer-002 closure"
+  - "PR-S4-3 sec-003 closure"

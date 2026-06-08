@@ -506,10 +506,18 @@ def _wrap_legacy_substitute_as_outcome[T](
             source_tier="T0",
             subscriber_id=subscriber.hook_fn.__qualname__,
         )
+    # allow_error_substitution=False (meta-hookpoints) short-circuits
+    # substitution FIRST — this closes the recursion loop. Checking
+    # carrier_tier before this would let a meta-hookpoint (carrier_tier=None)
+    # substitute its own error and recurse (crf-2026-004).
+    if meta is not None and not meta.allow_error_substitution:
+        return None
+    # No declared carrier tier (permissive-mode undeclared hookpoint, or a
+    # meta-hookpoint that already passed the allow_error_substitution gate
+    # above): accept the legacy substitute. The tier-upgrade guard has no
+    # carrier to compare against.
     if meta is None or meta.carrier_tier is None:
         return substitute
-    if not meta.allow_error_substitution:
-        return None
     if not _enforce_substitute_tier(
         carrier_tier=meta.carrier_tier,
         source_tier=substitute.source_tier,

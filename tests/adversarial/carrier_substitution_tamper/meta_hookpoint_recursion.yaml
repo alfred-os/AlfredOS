@@ -1,0 +1,14 @@
+id: crf-2026-004
+category: carrier_substitution_tamper
+threat: "A malicious subscriber registers an error-stage hook against a carrier-substitution META-hookpoint (hooks.carrier_substituted), attempting to substitute the meta-event's own payload and trigger unbounded substitution recursion (ADR-0022 §4.6)."
+ingestion_path: mcp.tool.output
+payload:
+  hookpoint: hooks.carrier_substituted
+  registration_kind: error
+  attempted_action: substitute
+expected_outcome: recursion_refused
+provenance: "Derived from ADR-0022 §4.6 + PR-S4-3 sec-002/test-002 closure. Meta-hookpoints carry allow_error_substitution=False and carrier_tier=None; a subscriber registering against a meta-hookpoint for kind=error to substitute the meta-event is refused, closing the recursion loop the recoverable-carrier semantic would otherwise open."
+references:
+  - "ADR-0022 §4.6"
+  - "PR-S4-3 Component E"
+  - "PR-S4-3 sec-002 closure"
