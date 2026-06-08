@@ -41,10 +41,17 @@ from alfred.cli.daemon._failures import (
 # stripped membership, never ``== "1"`` strict equality.
 _TRUTHY_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
-# The launcher self-test token a policy-resolving launcher returns. PR-S4-6
-# wires the real subprocess call; the stub below returns this token so the
-# happy path passes today.
+# The launcher self-test token a REAL policy-resolving launcher returns.
+# PR-S4-6 wires the real subprocess call against
+# ``bin/alfred-plugin-launcher.sh --self-test`` and asserts this signature.
 _POLICY_RESOLVING_SIGNATURE: Final[str] = "policy-resolving"
+
+# sec-004: the PR-S4-1 stub launcher returns THIS token, NOT the resolving
+# one. A stub launcher is unverified (potentially unsandboxed), so it must
+# NOT impersonate a real policy-resolving launcher — production refuses on
+# it (see ``probe_launcher_policy_resolving``). Dev/test tolerate it for
+# convenience until PR-S4-6 ships the real subprocess self-test.
+_STUB_SIGNATURE: Final[str] = "slice-4-launcher-stub"
 
 # PR-S4-1 fallback default. PR-S4-4 deletes this once PoliciesV1 ships.
 _DEFAULT_POLICIES_V1_STUB: Final[bytes] = b"_DEFAULT_POLICIES_V1_STUB"
@@ -67,11 +74,13 @@ def _truthy_env(name: str) -> bool:
 async def _launcher_self_test_impl() -> str:
     """PR-S4-1 stub for the launcher self-test.
 
-    PR-S4-6 replaces this with a real subprocess call to
-    ``bin/alfred-plugin-launcher.sh --self-test`` and checks the response
-    for the policy-resolving signature.
+    sec-004: returns the STUB signature — NOT the policy-resolving one — so
+    a production deploy on this unverified launcher refuses to boot. PR-S4-6
+    replaces this with a real subprocess call to
+    ``bin/alfred-plugin-launcher.sh --self-test`` that returns the
+    policy-resolving signature only when the launcher genuinely sandboxes.
     """
-    return _POLICY_RESOLVING_SIGNATURE
+    return _STUB_SIGNATURE
 
 
 async def probe_launcher_policy_resolving(
@@ -80,11 +89,14 @@ async def probe_launcher_policy_resolving(
 ) -> DaemonBootFailure | None:
     """Verify the launcher binary supports policy resolution.
 
-    PR-S4-1: stub that passes unless the launcher returns a non-resolving
-    signature AND we are in production (sec-004 — no production deploy may
-    silently succeed without the real check). Outside production the stub
-    signature is tolerated for dev convenience; PR-S4-6 ships the real
-    probe that runs ``bin/alfred-plugin-launcher.sh --self-test``.
+    sec-004: a real policy-resolving signature passes everywhere. Any other
+    signature (including the PR-S4-1 ``_STUB_SIGNATURE``) refuses the boot in
+    production — no production deploy may boot on an unverified, potentially
+    unsandboxed launcher — but is tolerated outside production for dev
+    convenience. The PR-S4-1 stub returns ``_STUB_SIGNATURE``, so in
+    production today this probe REFUSES; PR-S4-6 ships the real subprocess
+    self-test that returns the policy-resolving signature only when the
+    launcher genuinely sandboxes.
     """
     response = await _launcher_self_test_impl()
     if response == _POLICY_RESOLVING_SIGNATURE:
@@ -119,6 +131,7 @@ class _StubPoliciesSnapshotRef:
 
 async def probe_snapshot_ref_init(
     *,
+    environment: str,
     config_path: Path = Path("config/policies.yaml"),
 ) -> tuple[DaemonBootFailure | None, _StubPoliciesSnapshotRef | None]:
     """Load ``config/policies.yaml`` once at boot (FILE-ONLY; core-eng-002).
@@ -128,12 +141,24 @@ async def probe_snapshot_ref_init(
     ``Supervisor(policies_ref=…)``. On refusal the snapshot_ref is ``None``
     and the failure carries the redacted exception class — never a fragment
     of the file (§5.6).
+
+    err-003: a fully-absent ``config/policies.yaml`` falls back to an
+    empty-policy stub ONLY outside production. In production a missing
+    policies file refuses the boot (``snapshot_ref_init_failed``) — booting
+    the privileged orchestrator with no policy set is a silent security
+    failure (CLAUDE.md hard rule 7). The fallback stays for dev/test
+    convenience until PR-S4-4's watcher requires the file everywhere.
     """
     try:
         raw = config_path.read_bytes()
-    except FileNotFoundError:
-        # Fallback to the default stub. PR-S4-4 may require the file once
-        # the watcher lands.
+    except FileNotFoundError as exc:
+        if environment == "production":
+            return (
+                SnapshotRefInitFailedFailure(detail_redacted=type(exc).__qualname__),
+                None,
+            )
+        # Dev/test fallback to the default stub. PR-S4-4 may require the
+        # file once the watcher lands.
         return None, _StubPoliciesSnapshotRef(_DEFAULT_POLICIES_V1_STUB)
     except OSError as exc:
         return (
