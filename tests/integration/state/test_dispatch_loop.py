@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from alfred.audit.log import AuditWriter
 from alfred.memory.models import Base, ProcessedProposal, ProcessedProposalsHead
+from alfred.security.dlp import OutboundDlp
 from alfred.state.dispatch_loop import _proposal_dispatch_cycle
 from alfred.state.dispatch_registry import (
     DispatchOutcome,
@@ -178,12 +179,36 @@ def _payload(component_id: str = "alfred.web-fetch") -> str:
     )
 
 
-def _make_ctx(effects: ProposalEffectsProtocol | None = None) -> ProposalContext:
-    """Build a ProposalContext with mocked audit + effects."""
+def _identity_dlp() -> OutboundDlp:
+    """An OutboundDlp whose stages are all no-ops (clean scan, count=0)."""
+
+    class _IdentityBroker:
+        def redact(self, text: str) -> str:
+            return text
+
+    def _sink(*, event: str, subject: object) -> None:
+        return None
+
+    return OutboundDlp(broker=_IdentityBroker(), audit=_sink)
+
+
+def _make_ctx(
+    effects: ProposalEffectsProtocol | None = None,
+    *,
+    outbound_dlp: OutboundDlp | None = None,
+) -> ProposalContext:
+    """Build a ProposalContext with mocked audit + effects + a DLP scanner.
+
+    The default scanner is an identity OutboundDlp (clean scan, count=0) so
+    existing tests' failure-detail values pass through unredacted. #173
+    tests inject a broker that knows the planted secret to exercise the
+    redaction path.
+    """
     return ProposalContext(
         audit_writer=AsyncMock(spec=AuditWriter),
         effects=effects if effects is not None else AsyncMock(spec=ProposalEffectsProtocol),
         logger=structlog.get_logger("test"),
+        outbound_dlp=outbound_dlp if outbound_dlp is not None else _identity_dlp(),
     )
 
 
