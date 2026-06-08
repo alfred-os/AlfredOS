@@ -164,6 +164,9 @@ ignore = ["S101"]
 # partial-path / SQL-construction risks that do not apply to a smoke test
 # wiring trusted CLIs with hard-coded literal arguments.
 "tests/smoke/test_slice4_daemon_dispatch.py" = ["S603", "S607", "S608"]
+# read_state_git_head_sha coverage exercises a real temp git repo via
+# trusted `git` invocations (partial path, fixed-literal args).
+"tests/unit/cli/daemon/test_daemon_internal_helpers.py" = ["S603", "S607"]
 "src/alfred/memory/migrations/**/*.py" = ["N999"]
 # FBT001/FBT002/FBT003 (boolean-trap rules) are valid for general API design
 # but conflict with Typer's declarative CLI surface — Typer flags are by
