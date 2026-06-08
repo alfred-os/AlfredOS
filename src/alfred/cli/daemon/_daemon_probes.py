@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 import yaml
 
@@ -152,11 +152,10 @@ async def probe_snapshot_ref_init(
     return None, _StubPoliciesSnapshotRef(raw)
 
 
-class _BackingStoreGate:
+class _BackingStoreGate(Protocol):
     """Structural view of the gate dependency the handshake probe consults."""
 
-    async def is_backing_store_available(self) -> bool:  # pragma: no cover - protocol
-        raise NotImplementedError
+    async def is_backing_store_available(self) -> bool: ...
 
 
 async def probe_capability_gate_handshake(

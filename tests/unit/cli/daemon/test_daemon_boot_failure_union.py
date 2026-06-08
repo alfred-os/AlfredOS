@@ -7,6 +7,7 @@ core-eng-001 round-2 closure: the union lives at the CLI layer
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from alfred.cli.daemon._failures import (
     CapabilityGateHandshakeFailedFailure,
@@ -63,5 +64,5 @@ def test_capability_gate_failure_carries_backing_store_kind() -> None:
 def test_models_are_frozen() -> None:
     """Boot-failure carriers are immutable — no mid-flight mutation."""
     f = EnvironmentNotSetFailure()
-    with pytest.raises(Exception):  # pydantic ValidationError on frozen set
+    with pytest.raises(ValidationError):  # frozen model rejects the set
         f.failure_reason = "other"  # type: ignore[misc]
