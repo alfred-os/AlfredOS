@@ -96,7 +96,17 @@ def test_validate_hookpoint_does_not_force_subsystem_imports() -> None:
     # ``repr`` into the child script. ``repr`` produces a literal Python
     # tuple of string constants — safe to interpolate via ``str.replace``
     # without f-string nesting / brace-escaping landmines.
-    forbidden_repr = repr(tuple(KNOWN_HOOKPOINTS.keys()))
+    #
+    # ``alfred.hooks._known_hookpoints`` is excluded from the forbidden
+    # set: it is the manifest module itself, which the validator imports
+    # by definition (it reads ``all_known_hookpoints`` from it). PR-S4-3
+    # added the carrier-substitution meta-hookpoints under this module's
+    # own key (they are declared by ``declare_meta_hookpoints`` at
+    # bootstrap, not by importing a heavyweight subsystem). The cold-start
+    # guarantee is about not pulling in the SUBSYSTEM declarers (memory,
+    # identity, security, supervisor) — not the always-loaded manifest.
+    manifest_module = "alfred.hooks._known_hookpoints"
+    forbidden_repr = repr(tuple(k for k in KNOWN_HOOKPOINTS if k != manifest_module))
     script_template = """
         import sys
         from alfred.cli._validators import validate_hookpoint
