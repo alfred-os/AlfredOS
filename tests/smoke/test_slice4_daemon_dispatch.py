@@ -3,12 +3,27 @@
 Closes the #174 acceptance criterion: in deployed AlfredOS, the
 merged-proposal dispatch loop must actually run in production. This test
 boots the docker compose Postgres + state.git, runs ``alfred daemon
-start`` as a subprocess, queues a breaker-reset proposal into state.git via
-the operator CLI, and polls the ``audit_log`` for the
-``state.proposal.processed`` row the Slice-3 dispatch loop emits when it
-picks the proposal up — proving the loop fired (NOT a fixed ``sleep``;
-core-eng-003). Teardown uses ``alfred daemon stop`` (the new SIGTERM-via-
-PID-file path), NOT ``docker compose down`` of the daemon (core-eng-003).
+start`` as a subprocess, then commits a dispatchable breaker-reset blob to
+``origin/main`` (simulating the reviewer-gate APPROVAL + merge), and polls
+the ``audit_log`` for the ``state.proposal.processed`` row the Slice-3
+dispatch loop emits when it picks the proposal up — proving the loop fired
+(NOT a fixed ``sleep``; core-eng-003). Teardown uses ``alfred daemon stop``
+(the new SIGTERM-via-PID-file path), NOT ``docker compose down`` of the
+daemon (core-eng-003).
+
+Why a direct commit to ``origin/main`` rather than ``alfred supervisor
+reset`` (test-engineer HIGH, PR #222 review): ``supervisor reset`` pushes
+an UNMERGED ``proposal/*`` branch, but the dispatch loop scans
+``origin/main`` only (``dispatch_loop.py`` ``_resolve_origin_main``) and
+nothing auto-merges it — so the observe step could never fire. The dispatch
+loop's contract is "process blobs that landed on ``origin/main``", i.e.
+proposals the reviewer gate already approved and merged. We simulate that
+merged state directly: commit ``policies/breaker-resets/<id>.json`` and
+point ``origin/main`` at it, mirroring the Slice-3 integration fixture
+(``tests/integration/state/test_dispatch_loop.py``). The blob is committed
+AFTER boot so it is NOT swallowed by the bootstrap cycle's baseline (the
+first cycle seeds the sentinel to the then-current ``origin/main`` and
+processes nothing).
 
 Marked ``@pytest.mark.smoke`` so it only runs when an operator opts in via
 ``uv run pytest tests/smoke -m smoke``. It is NOT run locally during this
@@ -17,6 +32,7 @@ PR's development (no docker); it runs in CI's docker-in-docker runner.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
@@ -30,6 +46,10 @@ _BOOT_COMPLETED_TIMEOUT_S = 20.0
 _DISPATCH_TIMEOUT_S = 20.0
 _PROPOSAL_DISPATCH_INTERVAL_S = "2"
 _COMPONENT = "smoke-noop-component"
+# A 16-lowercase-hex proposal id matching the dispatch loop's
+# ``_PROPOSAL_ID_RE`` (``policies/<type>/<id>.json``).
+_PROPOSAL_ID = "a1b2c3d4e5f60718"
+_PROPOSAL_PATH = f"policies/breaker-resets/{_PROPOSAL_ID}.json"
 
 
 @pytest.fixture
@@ -49,9 +69,9 @@ def _compose_postgres() -> Iterator[None]:
     reason="smoke requires docker-compose.yaml present",
 )
 def test_daemon_boots_and_dispatches(_compose_postgres: None, tmp_path: Path) -> None:
-    """End-to-end: alfred daemon start → mutate state.git → dispatch fires."""
+    """End-to-end: alfred daemon start → merge proposal to main → dispatch fires."""
     state_git = tmp_path / "state.git"
-    subprocess.run(["git", "init", "--bare", str(state_git)], check=True)
+    _init_state_git_repo(state_git)
 
     env = os.environ.copy()
     env["ALFRED_ENVIRONMENT"] = "test"
@@ -65,12 +85,10 @@ def test_daemon_boots_and_dispatches(_compose_postgres: None, tmp_path: Path) ->
     try:
         _wait_for_boot_completed(env, _BOOT_COMPLETED_TIMEOUT_S)
 
-        # Queue a breaker-reset proposal into state.git via the operator CLI.
-        subprocess.run(
-            ["uv", "run", "alfred", "supervisor", "reset", _COMPONENT, "--confirm"],
-            env=env,
-            check=True,
-        )
+        # Simulate the reviewer-gate APPROVAL + merge: land a dispatchable
+        # breaker-reset blob on origin/main. Committed AFTER boot so the
+        # bootstrap cycle's baseline does not already include it.
+        _merge_dispatchable_proposal(state_git)
 
         # Poll the audit_log for the dispatch-loop's processed row rather
         # than sleeping (core-eng-003). The loop interval is 2s.
@@ -78,6 +96,52 @@ def test_daemon_boots_and_dispatches(_compose_postgres: None, tmp_path: Path) ->
     finally:
         subprocess.run(["uv", "run", "alfred", "daemon", "stop"], env=env, check=False)
         daemon.wait(timeout=10.0)
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True)
+
+
+def _init_state_git_repo(repo: Path) -> None:
+    """Create a state.git repo with a seeded ``origin/main`` ref.
+
+    Mirrors ``tests/integration/state/test_dispatch_loop.py``: a real repo
+    with an initial empty commit, and ``refs/remotes/origin/main`` pointed
+    at HEAD so the dispatcher's ``git rev-parse origin/main`` resolves on
+    the bootstrap cycle.
+    """
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    _git(repo, "config", "user.email", "smoke@alfred.test")
+    _git(repo, "config", "user.name", "alfred-smoke")
+    _git(repo, "commit", "--allow-empty", "-m", "init", "-q")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
+def _merge_dispatchable_proposal(repo: Path) -> None:
+    """Commit a breaker-reset blob and advance ``origin/main`` to it.
+
+    The canonical ``BreakerResetProposal`` JSON shape the dispatch loop
+    parses (``component_id`` + ``operator_user_id`` + ``reason``). Updating
+    ``refs/remotes/origin/main`` is the in-test stand-in for the reviewer
+    gate merging the approved proposal to ``main``.
+    """
+    target = repo / _PROPOSAL_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(
+            {
+                "component_id": _COMPONENT,
+                "operator_user_id": "smoke-operator",
+                "reason": "operator_initiated",
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    _git(repo, "add", _PROPOSAL_PATH)
+    _git(repo, "commit", "-m", "merge: approved breaker-reset proposal", "-q")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
 
 
 def _wait_for_postgres_ready(timeout_s: float) -> None:
