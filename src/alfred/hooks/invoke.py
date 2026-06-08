@@ -474,7 +474,8 @@ def _wrap_legacy_substitute_as_outcome[T](
     result_ctx: HookContext[T],
     subscriber: Subscriber,
     hookpoint_name: str,
-) -> "SubstituteResult[T] | None":
+    carrier_type: type[T] | None = None,
+) -> SubstituteResult[T] | None:
     """Wrap a legacy error-stage substitute as a SubstituteResult outcome.
 
     Slice-2.5/3 subscribers signalled "swallow + substitute" by returning
@@ -492,6 +493,12 @@ def _wrap_legacy_substitute_as_outcome[T](
     directly. The legacy path here covers subscribers that pre-date the
     ADR.
 
+    When ``carrier_type`` is supplied, an embedded substitute's payload
+    is validated against it (reviewer-002 closure — a wrong-type
+    substitute is refused loudly rather than silently accepted). A
+    payload-type mismatch returns ``None`` so the chain continues and
+    the upstream exception ultimately re-raises.
+
     Returns the SubstituteResult outcome if the tier-upgrade guard
     accepts it, else ``None`` (caller continues the chain).
     """
@@ -500,6 +507,12 @@ def _wrap_legacy_substitute_as_outcome[T](
     embedded = result_ctx.metadata.get("substitute_result")
     if isinstance(embedded, SubstituteResult):
         substitute: SubstituteResult[T] = embedded
+        if carrier_type is not None and not isinstance(substitute.payload, carrier_type):
+            # reviewer-002 / sec-003 closure: a substitute whose payload
+            # does not match the declared carrier_type is refused. No
+            # silent swallow — returning None continues the chain so the
+            # upstream exception re-raises (CLAUDE.md hard rule #7).
+            return None
     else:
         substitute = SubstituteResult[T](
             payload=result_ctx.input,
@@ -1722,7 +1735,7 @@ async def _run_error[T](
     subscribable_tiers: frozenset[str],
     fail_closed: bool,
     carrier_type: type[T] | None = None,
-) -> "tuple[ErrorOutcome[T], HookContext[T]]":
+) -> tuple[ErrorOutcome[T], HookContext[T]]:
     """Dispatch the ``error`` chain.
 
     The first subscriber that returns a :class:`HookContext` wins
@@ -1788,7 +1801,6 @@ async def _run_error[T](
     chain_ctx = ctx.with_metadata(**{ERROR_EXC_METADATA_KEY: exc})
 
     pending: asyncio.Task[HookContext[T] | None] | None = None
-    suppressed: HookContext[T] | None = None
     last_good_ctx = chain_ctx
     try:
         async with asyncio.timeout(deadline_seconds):
@@ -1838,6 +1850,7 @@ async def _run_error[T](
                         result_ctx=result,
                         subscriber=sub,
                         hookpoint_name=name,
+                        carrier_type=carrier_type,
                     )
                     if substitute_outcome is not None:
                         return substitute_outcome, result
