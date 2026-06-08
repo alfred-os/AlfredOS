@@ -98,3 +98,5 @@ GEMINI.md
 secrets.toml
 secrets.*.toml
 **/secrets.toml
+# Added by code-review-graph
+.code-review-graph/

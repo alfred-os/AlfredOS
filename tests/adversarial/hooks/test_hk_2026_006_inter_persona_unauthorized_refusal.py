@@ -63,10 +63,10 @@ from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookRefusal
 from alfred.hooks.invoke import invoke
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+from alfred.security.tiers import T3
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.helpers.gates import make_permissive_fixture_gate
 from tests.unit.hooks.conftest import SpyAuditSink
-from alfred.security.tiers import T0, T1, T2, T3
 
 _PAYLOAD_ID: Final[str] = "hk-2026-006"
 

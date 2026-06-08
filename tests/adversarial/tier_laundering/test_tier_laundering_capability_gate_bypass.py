@@ -33,8 +33,8 @@ from alfred.hooks.context import HookContext
 from alfred.hooks.errors import HookError
 from alfred.hooks.registry import HookRegistry
 from alfred.memory.episodic import EpisodicRecordInput
+from alfred.security.tiers import T3
 from tests.helpers.gates import make_deny_all_gate
-from alfred.security.tiers import T0, T1, T2, T3
 
 _PAYLOAD_ID: Final[str] = "tl-2026-006"
 _PAYLOAD_PATH: Final[Path] = (

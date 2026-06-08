@@ -49,9 +49,9 @@ def _find_register_hookpoint_calls(tree: ast.AST) -> list[ast.Call]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "register_hookpoint":
-            out.append(node)
-        elif isinstance(func, ast.Name) and func.id == "register_hookpoint":
+        if (isinstance(func, ast.Attribute) and func.attr == "register_hookpoint") or (
+            isinstance(func, ast.Name) and func.id == "register_hookpoint"
+        ):
             out.append(node)
     return out
 
