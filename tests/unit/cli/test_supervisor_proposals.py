@@ -32,6 +32,7 @@ from alfred.cli.supervisor import supervisor_app
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Satisfy Settings construction."""
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
 
 @pytest.fixture()
@@ -234,6 +235,7 @@ def test_proposals_subcommand_empty_renders_localised_message(
         lambda *, since=None, limit=None: [],
     )
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     result = runner.invoke(supervisor_app, ["proposals"])
     assert result.exit_code == 0, (result.output, result.stderr)
     assert "proposals" in result.output.lower()

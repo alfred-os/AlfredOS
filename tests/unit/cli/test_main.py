@@ -23,6 +23,7 @@ def test_alfred_help_lists_commands() -> None:
 
 def test_alfred_status_exits_zero(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert "deepseek" in result.stdout.lower()

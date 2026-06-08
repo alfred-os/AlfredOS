@@ -45,6 +45,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     validator error.
     """
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
 
 @pytest.fixture()

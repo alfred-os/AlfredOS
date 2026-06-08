@@ -221,6 +221,7 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
     from alfred.cli._state_git import ProposalResult
 
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_OPERATOR_USER_ID", "carol@example.com")
     monkeypatch.setattr(
         "alfred.cli.supervisor.queue_proposal_or_exit",
