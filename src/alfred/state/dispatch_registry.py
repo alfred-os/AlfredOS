@@ -41,6 +41,7 @@ from typing import Final, Literal, Protocol, runtime_checkable
 import structlog
 
 from alfred.audit.log import AuditWriter
+from alfred.security.dlp import OutboundDlpProtocol
 from alfred.state.proposal_payloads import (
     BreakerResetProposal,
     StateGitProposalPayload,
@@ -161,11 +162,22 @@ class ProposalContext:
       structurally by ``Supervisor``.
     * ``logger`` — handler-side structlog binding; the dispatcher
       attaches per-cycle correlation ids via :meth:`bind`.
+    * ``outbound_dlp`` — the outbound DLP scanner (#173). REQUIRED, no
+      default: ``_record_failure`` runs ``outbound_dlp.scan(failure_detail)``
+      before the 512-char truncation so a secret/canary in the failure
+      detail is redacted (or refused) before it lands in
+      ``processed_proposals.failure_detail``. Typed
+      :class:`alfred.security.dlp.OutboundDlpProtocol` (structural) so the
+      dispatch loop never binds to the concrete ``OutboundDlp`` — the
+      singleton is threaded from the daemon boot path through
+      ``Supervisor`` (CLAUDE.md hard rule #4: DLP is on by default and
+      cannot be disabled per-call).
     """
 
     audit_writer: AuditWriter
     effects: ProposalEffectsProtocol
     logger: structlog.BoundLogger
+    outbound_dlp: OutboundDlpProtocol
 
 
 # ---------------------------------------------------------------------------
