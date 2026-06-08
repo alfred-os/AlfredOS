@@ -158,6 +158,12 @@ ignore = ["S101"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "ARG"]
+# The Slice-4 daemon smoke test drives the deployment the way an operator's
+# shell does: docker compose, git, uv, and psql invoked by name (partial
+# path) with fixed-literal args. S603/S607/S608 flag untrusted-subprocess /
+# partial-path / SQL-construction risks that do not apply to a smoke test
+# wiring trusted CLIs with hard-coded literal arguments.
+"tests/smoke/test_slice4_daemon_dispatch.py" = ["S603", "S607", "S608"]
 "src/alfred/memory/migrations/**/*.py" = ["N999"]
 # FBT001/FBT002/FBT003 (boolean-trap rules) are valid for general API design
 # but conflict with Typer's declarative CLI surface — Typer flags are by
