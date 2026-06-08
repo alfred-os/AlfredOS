@@ -49,6 +49,7 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     placeholder dummy so the read path can reach Postgres.
     """
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
 
 @pytest.fixture
