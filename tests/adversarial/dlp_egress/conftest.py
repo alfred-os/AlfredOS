@@ -1,0 +1,32 @@
+"""Per-subdir conftest for ``tests/adversarial/dlp_egress/`` — provides Postgres.
+
+The #173 corpus entries (``de-2026-005`` / ``de-2026-006``) drive the real
+``_record_failure`` DLP boundary against a Postgres testcontainer so the
+ledger insert + the in-session redacted audit twin (and the refusal /
+scan-failed abort paths) are exercised against the production engine.
+
+Mirrors ``tests/adversarial/state/conftest.py`` — a thin per-test
+``postgres_url`` fixture (per-test isolation prevents row bleeding between
+adversarial cases). The Redis-backed entries in this directory
+(``de-2026-004``) bring their own container fixtures and are unaffected.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+from testcontainers.postgres import PostgresContainer
+
+
+@pytest.fixture
+def postgres_url() -> Iterator[str]:
+    """Yield a fresh Postgres container's asyncpg-driver URL for one test.
+
+    Same shape as ``tests/integration/conftest.py::postgres_url`` — rewrites
+    the testcontainers default psycopg2 driver token to asyncpg so
+    ``create_async_engine`` accepts the URL verbatim.
+    """
+    with PostgresContainer("postgres:16") as pg:
+        url = pg.get_connection_url().replace("psycopg2", "asyncpg")
+        yield url

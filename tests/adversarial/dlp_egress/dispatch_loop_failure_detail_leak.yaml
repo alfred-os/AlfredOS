@@ -1,0 +1,39 @@
+# dispatch_loop_failure_detail_leak.yaml — dlp_egress adversarial payload (#173).
+# Schema: tests/adversarial/payload_schema.py. Executable counterpart:
+# test_dispatch_loop_failure_detail_leak.py.
+#
+# Threat: a merged proposal whose handling fails surfaces a string in the
+# state.git dispatch loop's `failure_detail` channel that carries a planted
+# provider API key (e.g. via a future emit site that drops a richer error
+# string than the closed-vocab `type(exc).__name__`). Before #173 the
+# `_truncated_detail` helper only truncated — the key would land verbatim in
+# `processed_proposals.failure_detail` (a T1 ledger column readable by the
+# audit graph and any operator). PR-S4-2 wires `OutboundDlp.scan` at this
+# boundary so the key is redacted BEFORE truncation and a
+# `state.proposal.failure_detail_redacted` audit row records the redaction.
+id: de-2026-005
+category: dlp_egress
+threat: >-
+  A planted provider API key reaches the proposal-dispatch `failure_detail`
+  channel. Without DLP at this boundary the key lands verbatim in the
+  `processed_proposals.failure_detail` ledger column. PR-S4-2 runs
+  `OutboundDlp.scan` before the 512-char truncation so the key is redacted
+  to the api-key-shape sentinel and the redaction is audited — the raw key
+  never reaches the ledger.
+ingestion_path: proposal_dispatch_failure
+payload:
+  failure_detail: "boom sk-DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF tail"
+  planted_secret_prefix: "sk-"
+  note: >-
+    The api-key-shape regex (stage 2 of OutboundDlp.scan) matches the
+    sk- prefix + >=20 alnum bytes and replaces it with
+    [REDACTED:api-key-shape] before _redacted_detail truncates.
+expected_outcome: caught_by_dlp
+provenance: >-
+  Issue #173 (Slice-3 carryover: `_truncated_detail` named-as-if-DLP but
+  only truncated). Spec §2.1 DLP-placement table + §3.3 change-shape.
+  PR-S4-2 closes the leak; this payload pins that the defense fires.
+references:
+  - "issue #173 — DLP scan into processed_proposals.failure_detail"
+  - "spec §2.1 — OutboundDlp.scan placement table (two disjoint constants)"
+  - "spec §3.3 — rename + scan-then-truncate + audit-on-both-paths"
