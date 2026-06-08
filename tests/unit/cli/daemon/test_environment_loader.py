@@ -105,3 +105,35 @@ def test_file_trim_whitespace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     result = load_environment(etc_path=etc_file)
     assert result.value == "test"
+
+
+def test_env_var_trim_whitespace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """CR #7: the env-var source is stripped the SAME way as the file source.
+
+    Both sources must normalize whitespace identically, so a value like
+    ``" production"`` from the env var validates exactly as the bare
+    ``"production"`` from the file — otherwise a stray space would
+    spuriously fail validation or trigger a phantom source conflict.
+    """
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "  production  ")
+    result = load_environment(etc_path=tmp_path / "absent")
+    assert result.value == "production"
+    assert result.source is EnvironmentSource.ENV_VAR
+
+
+def test_whitespace_parity_no_phantom_conflict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CR #7: whitespace differences alone must not register as a conflict.
+
+    Env var ``"  production  "`` and file ``"production\\n"`` are the SAME
+    value once normalized — no ``daemon.boot.environment_source_conflict``
+    may be reported for a whitespace-only difference.
+    """
+    etc_file = tmp_path / "environment"
+    etc_file.write_text("production\n", encoding="utf-8")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "  production  ")
+    result = load_environment(etc_path=etc_file)
+    assert result.value == "production"
+    assert result.source is EnvironmentSource.ENV_VAR
+    assert result.conflict is False

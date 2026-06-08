@@ -78,7 +78,14 @@ def load_environment(*, etc_path: Path | None = None) -> EnvironmentLoadResult:
     """
     if etc_path is None:
         etc_path = _DEFAULT_ETC_PATH
-    env_raw = os.environ.get("ALFRED_ENVIRONMENT")
+    # CR #7: normalize BOTH sources identically — strip surrounding
+    # whitespace from the env var exactly as we strip the file's contents.
+    # Without this, ``ALFRED_ENVIRONMENT=" production"`` would fail Literal
+    # validation while ``production`` in the file passes, and a
+    # whitespace-only difference between the two sources would spuriously
+    # register as a source conflict.
+    env_raw_unstripped = os.environ.get("ALFRED_ENVIRONMENT")
+    env_raw = env_raw_unstripped.strip() if env_raw_unstripped is not None else None
     file_raw: str | None = None
     try:
         file_raw = etc_path.read_text(encoding="utf-8").strip()
