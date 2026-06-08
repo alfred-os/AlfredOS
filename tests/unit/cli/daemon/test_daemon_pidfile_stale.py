@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from alfred.cli.daemon._daemon_pidfile import (
     default_pidfile_path,
     delete_pidfile,
@@ -29,21 +31,15 @@ def test_live_pid_detected() -> None:
 
 
 def test_is_pid_alive_permission_error_counts_as_alive(
-    monkeypatch: object,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A PermissionError from kill(pid, 0) means the process exists (alive)."""
-    import pytest
-
-    mp = pytest.MonkeyPatch()
 
     def _raise_permission(_pid: int, _sig: int) -> None:
         raise PermissionError
 
-    mp.setattr(os, "kill", _raise_permission)
-    try:
-        assert is_pid_alive(4242) is True
-    finally:
-        mp.undo()
+    monkeypatch.setattr(os, "kill", _raise_permission)
+    assert is_pid_alive(4242) is True
 
 
 def test_delete_pidfile_missing_is_noop(tmp_path: Path) -> None:
