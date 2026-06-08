@@ -63,6 +63,7 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.status.template",
     # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the reserve.
     "daemon.boot.audit_log_unwritable",
+    "daemon.boot.environment_unrecognised",  # devex-222-01: typo vs unset
     "daemon.stop.no_daemon",
     "daemon.stop.stale_pidfile",
     "daemon.status.not_running",
