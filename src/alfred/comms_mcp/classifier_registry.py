@@ -24,6 +24,7 @@ classifier for a lax one).
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from types import MappingProxyType
 from typing import Final
@@ -62,6 +63,13 @@ class UnknownClassifierError(AlfredError):
 # (write) and ``get_classifier`` (read) only.
 _REGISTRY: dict[tuple[str, str], type] = {}
 
+# Guards the read-check-write in ``register_classifier``. Registration is
+# import-time (single-threaded under the import lock in practice), but the lock
+# makes the check+write atomic regardless of how/when the decorator runs — so a
+# concurrent registration can never race the collision check into a silent
+# overwrite.
+_REGISTRY_LOCK: Final[threading.Lock] = threading.Lock()
+
 
 def register_classifier(*, kind: str, name: str) -> Callable[[type], type]:
     """Register a classifier class under ``(kind, name)``; return it unchanged.
@@ -70,18 +78,22 @@ def register_classifier(*, kind: str, name: str) -> Callable[[type], type]:
     the same key is a no-op. A collision with a *different* class raises
     ``ValueError`` — a silent overwrite could substitute a permissive
     classifier for a strict one, weakening the inbound scan.
+
+    The collision check and the write are held under :data:`_REGISTRY_LOCK` so
+    they are atomic even if registration is ever driven concurrently.
     """
 
     def _decorate(cls: type) -> type:
         key = (kind, name)
-        existing = _REGISTRY.get(key)
-        if existing is not None and existing is not cls:
-            msg = (
-                f"classifier {name!r} for kind {kind!r} already registered to "
-                f"{existing!r}; refusing to overwrite with {cls!r}"
-            )
-            raise ValueError(msg)
-        _REGISTRY[key] = cls
+        with _REGISTRY_LOCK:
+            existing = _REGISTRY.get(key)
+            if existing is not None and existing is not cls:
+                msg = (
+                    f"classifier {name!r} for kind {kind!r} already registered to "
+                    f"{existing!r}; refusing to overwrite with {cls!r}"
+                )
+                raise ValueError(msg)
+            _REGISTRY[key] = cls
         return cls
 
     return _decorate
