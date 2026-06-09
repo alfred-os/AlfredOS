@@ -723,9 +723,17 @@ class AlfredPluginSession:
             case "adapter.rate_limit_signal":
                 assert self._rate_limit_handler is not None
                 await self._rate_limit_handler.process(RateLimitSignal.model_validate(raw))
-            case _:  # "adapter.crashed" — the only remaining member of the set
+            case "adapter.crashed":
                 assert self._crash_handler is not None
                 await self._crash_handler.process(CrashedNotification.model_validate(raw))
+            case _:
+                # Unreachable in normal flow — ``_COMMS_NOTIFICATION_METHODS``
+                # gates this router upstream. Defence-in-depth: fail fast with a
+                # clear error naming the method rather than silently coercing an
+                # unhandled method into ``adapter.crashed`` (CR finding 2).
+                raise PluginError(
+                    f"_route_comms_notification reached an unhandled method: {method!r}"
+                )
 
     async def _emit_handler_failed(self, method: str, exc: Exception) -> None:
         """Write the ``COMMS_HANDLER_FAILED_FIELDS`` row for a handler exception.
