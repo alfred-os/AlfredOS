@@ -327,14 +327,50 @@ async def test_logout_no_session(tmp_path: Path) -> None:
 
 
 async def test_logout_bad_file_cleanup(tmp_path: Path) -> None:
-    """A session file present but unloadable (bad mode) is removed + refused."""
+    """A session file present but unloadable (bad mode) is audited + removed.
+
+    err-finding-4: the tamper-cleanup MUST emit a forensic audit row BEFORE
+    unlinking the (possibly planted) file. The row is file-less
+    (attempted_user_id None) with reason ``cleanup_malformed``.
+    """
     deps = _deps(tmp_path)
     await _seed_session_file(deps)
     deps.session_file_path.chmod(0o644)  # break the mode -> BadFileMode on load
+    audit = _Audit()
+    deps2 = _deps(tmp_path, audit=audit)
     with pytest.raises(typer.Exit) as exc:
-        await logout_impl(deps)
+        await logout_impl(deps2)
     assert exc.value.exit_code == 1
-    assert not deps.session_file_path.exists()
+    assert not deps2.session_file_path.exists()
+    refused = next(c for c in audit.calls if c["schema_name"] == "OPERATOR_SESSION_REFUSED_FIELDS")
+    assert refused["subject"]["reason"] == "cleanup_malformed"
+    assert refused["subject"]["attempted_user_id"] is None
+    assert refused["result"] == "refused"
+
+
+async def test_logout_confirmed_resolves_display_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """devex-finding-5: the logout confirmation shows the display name, not a
+    bare numeric id."""
+    deps = _deps(tmp_path)
+    await _seed_session_file(deps)
+    deps2 = _deps(tmp_path)
+    await logout_impl(deps2)
+    out = capsys.readouterr().out
+    assert "User 7" in out
+
+
+async def test_logout_confirmed_numeric_fallback_when_user_gone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A removed user falls back to the numeric id rather than failing logout."""
+    deps = _deps(tmp_path)
+    await _seed_session_file(deps)
+    deps2 = _deps(tmp_path, db=_DB())  # empty registry -> lookup misses
+    await logout_impl(deps2)
+    out = capsys.readouterr().out
+    assert "7" in out
 
 
 def test_session_file_path_under_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -412,8 +448,7 @@ def test_resolve_operator_user_id_or_refuse_no_recovery_key(
     assert exc.value.exit_code == 1
 
 
-async def test_whoami_expired(tmp_path: Path) -> None:
-    deps = _deps(tmp_path)
+async def _seed_expired_session(deps: OperatorSessionDeps, *, user_id: int = 7) -> None:
     pepper = _PEPPER.encode()
     machine_hash = await compute_machine_id_hash(provider=_MachineId(), pepper=pepper)
     past = deps.now_fn() - timedelta(hours=2)
@@ -421,7 +456,7 @@ async def test_whoami_expired(tmp_path: Path) -> None:
         deps.session_file_path,
         OperatorSessionFile(
             schema_version=1,
-            user_id=7,
+            user_id=user_id,
             token=SecretStr("tok"),
             issued_at=past - timedelta(minutes=1),
             expires_at=past,
@@ -429,6 +464,46 @@ async def test_whoami_expired(tmp_path: Path) -> None:
             machine_id_hash=machine_hash,
         ),
     )
+
+
+async def test_whoami_expired(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    deps = _deps(tmp_path)
+    await _seed_expired_session(deps)
     with pytest.raises(typer.Exit) as exc:
         await whoami_impl(deps)
     assert exc.value.exit_code == 1
+    err = capsys.readouterr().err
+    # devex-finding-5: display name + localised datetime, not bare id / raw iso.
+    assert "User 7" in err
+    # The expired datetime is localised via babel.dates.format_datetime, so the
+    # raw ISO-8601 'T'-separated stamp (e.g. 2026-06-08T10:00:00+00:00) is absent.
+    past = deps.now_fn() - timedelta(hours=2)
+    assert past.isoformat() not in err
+
+
+async def test_whoami_expired_numeric_fallback_when_user_gone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    deps = _deps(tmp_path)
+    await _seed_expired_session(deps)
+    deps2 = _deps(tmp_path, db=_DB())  # empty registry -> lookup misses
+    with pytest.raises(typer.Exit) as exc:
+        await whoami_impl(deps2)
+    assert exc.value.exit_code == 1
+    assert "7" in capsys.readouterr().err
+
+
+async def test_whoami_unloadable_no_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """err-finding-3: a corrupt/insecure file gets an actionable message +
+    recovery, not a raw traceback."""
+    deps = _deps(tmp_path)
+    await _seed_session_file(deps)
+    deps.session_file_path.chmod(0o644)  # break the mode -> BadFileMode on load
+    with pytest.raises(typer.Exit) as exc:
+        await whoami_impl(deps)
+    assert exc.value.exit_code == 1
+    err = capsys.readouterr().err
+    assert "corrupt or insecure" in err
+    assert "alfred logout" in err  # recovery command surfaced

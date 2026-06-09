@@ -34,9 +34,11 @@ from pydantic import SecretStr
 
 from alfred.audit.audit_row_schemas import (
     OPERATOR_SESSION_CREATED_FIELDS,
+    OPERATOR_SESSION_REFUSED_FIELDS,
     OPERATOR_SESSION_REVOKED_FIELDS,
 )
 from alfred.i18n import t
+from alfred.identity._session_protocols import AuditLike, BrokerLike, MachineIdLike
 from alfred.identity.operator_session import (
     OPERATOR_SESSION_CREATED_HOOKPOINT,
     OPERATOR_SESSION_REVOKED_HOOKPOINT,
@@ -90,10 +92,10 @@ class OperatorSessionDeps:
     needs (kept narrow so the CLI does not embed SQLAlchemy directly).
     """
 
-    secret_broker: Any
-    audit_writer: Any
+    secret_broker: BrokerLike
+    audit_writer: AuditLike
     hook_dispatcher: _HookDispatcher
-    machine_id_provider: Any
+    machine_id_provider: MachineIdLike
     host: str
     session_file_path: Path
     list_users: Callable[[], Awaitable[Sequence[_PickerUser]]]
@@ -271,6 +273,51 @@ async def login_impl(
 # --------------------------------------------------------------------------- #
 
 
+async def _resolve_display_name(deps: OperatorSessionDeps, user_id: int) -> str:
+    """Resolve a user's display name, falling back to the numeric id.
+
+    The healthy ``whoami`` template resolves the display name; the degraded
+    paths (logout confirmation, expired whoami) MUST do the same so the
+    operator gets a human-readable name exactly when things are degraded,
+    not a bare numeric id (devex). A removed/unknown user falls back to the
+    stringified id rather than failing the command.
+    """
+    user = await deps.lookup_user_by_id(user_id)
+    return user.display_name if user is not None else str(user_id)
+
+
+async def _emit_cleanup_malformed_audit(deps: OperatorSessionDeps) -> None:
+    """Record a tamper-cleanup audit row BEFORE unlinking an unloadable file.
+
+    hard rule #7 + forensic discipline: a malformed / bad-mode / bad-owner
+    session file may be planted or tampered. Unlinking it silently destroys
+    the evidence. We emit a file-less ``OPERATOR_SESSION_REFUSED`` row
+    (reason ``cleanup_malformed``, every self-claimed field ``None`` so no
+    unparsed attacker bytes reach the log) so the tamper is recorded, THEN
+    the caller unlinks.
+    """
+    refused_at = deps.now_fn()
+    await deps.audit_writer.append_schema(
+        fields=OPERATOR_SESSION_REFUSED_FIELDS,
+        schema_name="OPERATOR_SESSION_REFUSED_FIELDS",
+        event="operator.session.refused",
+        actor_user_id=None,
+        subject={
+            "attempted_user_id": None,
+            "resolved_user_id": None,
+            "reason": "cleanup_malformed",
+            "host": None,
+            "machine_id_hash": None,
+            "refused_at": refused_at.isoformat(),
+            "via": "logout",
+        },
+        trust_tier_of_trigger="T1",
+        result="refused",
+        cost_estimate_usd=0.0,
+        trace_id="operator-session-refused-cleanup_malformed",
+    )
+
+
 async def logout_impl(deps: OperatorSessionDeps) -> None:
     """Revoke + delete the current operator session."""
     try:
@@ -279,8 +326,10 @@ async def logout_impl(deps: OperatorSessionDeps) -> None:
         typer.echo(t("logout.no_session"), err=True)
         raise typer.Exit(code=1) from None
     except OperatorSessionError:
-        # Bad mode / owner / malformed — defensively remove the file so the
-        # next login is unblocked, and audit the cleanup.
+        # Bad mode / owner / malformed — possibly planted/tampered. Audit the
+        # cleanup BEFORE we destroy the evidence, then remove the file so the
+        # next login is unblocked.
+        await _emit_cleanup_malformed_audit(deps)
         deps.session_file_path.unlink(missing_ok=True)
         typer.echo(t("logout.no_session"), err=True)
         raise typer.Exit(code=1) from None
@@ -310,7 +359,8 @@ async def logout_impl(deps: OperatorSessionDeps) -> None:
         OPERATOR_SESSION_REVOKED_HOOKPOINT,
         {"user_id": str(session.user_id), "via": "logout"},
     )
-    typer.echo(t("logout.confirmed", user=str(session.user_id)))
+    display = await _resolve_display_name(deps, session.user_id)
+    typer.echo(t("logout.confirmed", user=display))
 
 
 # --------------------------------------------------------------------------- #
@@ -325,21 +375,27 @@ async def whoami_impl(deps: OperatorSessionDeps) -> None:
     except OperatorSessionMissing:
         typer.echo(t("whoami.no_session"), err=True)
         raise typer.Exit(code=1) from None
+    except OperatorSessionError:
+        # Malformed / bad-mode / bad-owner — the file is corrupt or insecure.
+        # Print an actionable message + the recovery command instead of letting
+        # a raw traceback escape to the operator (err: no unhandled exception).
+        typer.echo(t("whoami.unloadable"), err=True)
+        typer.echo(t("whoami.unloadable.recovery"), err=True)
+        raise typer.Exit(code=1) from None
     now = deps.now_fn()
+    user = await deps.lookup_user_by_id(session.user_id)
+    lang = user.language if user is not None else "en"
+    display = user.display_name if user is not None else str(session.user_id)
     if session.expires_at < now:
         typer.echo(
             t(
                 "whoami.expired",
-                user=str(session.user_id),
-                expires_at=session.expires_at.isoformat(),
+                user=display,
+                expires_at=format_datetime(session.expires_at, locale=lang),
             ),
             err=True,
         )
         raise typer.Exit(code=1)
-
-    user = await deps.lookup_user_by_id(session.user_id)
-    lang = user.language if user is not None else "en"
-    display = user.display_name if user is not None else str(session.user_id)
     issued_rel = format_timedelta(session.issued_at - now, add_direction=True, locale=lang)
     expires_rel = format_timedelta(session.expires_at - now, add_direction=True, locale=lang)
     typer.echo(
