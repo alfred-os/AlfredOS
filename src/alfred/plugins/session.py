@@ -59,10 +59,13 @@ safe-for-audit (spec §5.6).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import uuid
-from typing import TYPE_CHECKING, Final
+from datetime import timedelta
+from types import TracebackType
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import structlog
 
@@ -75,10 +78,17 @@ from alfred.plugins.errors import (
     SandboxInfoHandshakeMismatch,
 )
 from alfred.plugins.manifest import PluginManifest, parse_manifest
+from alfred.utils.sliding_window_counter import SlidingWindowCounter
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from alfred.comms_mcp.handlers import (
+        BindingHandler,
+        CrashHandler,
+        InboundHandler,
+        RateLimitHandler,
+    )
     from alfred.plugins.stdio_transport import StdioTransport
 
 log = structlog.get_logger(__name__)
@@ -128,6 +138,81 @@ def _best_effort_plugin_id(manifest_raw: str) -> str:
 _AUDIT_TRUST_TIER: Final[str] = "T0"
 _AUDIT_COST_USD: Final[float] = 0.0
 
+# ---------------------------------------------------------------------------
+# PR-S4-8 comms-notification dispatch (Component G, Tasks 35-42).
+# ---------------------------------------------------------------------------
+
+# The four plugin -> host notification methods the dispatch arm fans out to
+# (spec §8.4). A post-handshake method NOT in this set (and not a Slice-3
+# disallowed/sandbox method) is an unknown notification: audited + restart-
+# requested, never silently dropped.
+_COMMS_NOTIFICATION_METHODS: Final[frozenset[str]] = frozenset(
+    {
+        "inbound.message",
+        "adapter.binding_request",
+        "adapter.rate_limit_signal",
+        "adapter.crashed",
+    }
+)
+
+# err-007: three handler failures inside this window trips the adapter's
+# circuit breaker. Mirrors the Slice-3 CircuitBreaker failure window so a
+# comms-handler storm and a plugin-crash storm trip on the same cadence.
+_HANDLER_FAILURE_THRESHOLD: Final[int] = 3
+_HANDLER_FAILURE_WINDOW: Final[timedelta] = timedelta(minutes=5)
+
+# Bound on the redacted exception detail carried into COMMS_HANDLER_FAILED_FIELDS
+# (spec §8.4 pseudocode — str(exc) truncated then DLP-scanned).
+_HANDLER_DETAIL_MAX_LEN: Final[int] = 512
+
+# Closed-vocab handler-failure bucket. The open-vocab Python exception type
+# lands on ``error_class``; ``reason`` is the SLO bucket. The dispatcher cannot
+# know the semantic cause of an arbitrary handler exception, so it records the
+# generic bucket — finer buckets are the handlers' own concern.
+_HANDLER_FAILURE_REASON: Final[str] = "handler_exception"
+
+# Mirrors ``Settings.comms_max_in_flight_notifications`` default (config field
+# ``Field(default=32, ge=1, le=1024)``). The factory takes the cap as a plain
+# int so it stays pure + unit-testable; the daemon passes the live setting.
+_DEFAULT_MAX_IN_FLIGHT: Final[int] = 32
+
+
+@runtime_checkable
+class _SupervisorLike(Protocol):
+    """Narrow structural seam for the supervisor the dispatcher escalates to.
+
+    The session depends on this Protocol rather than the concrete
+    :class:`alfred.supervisor.core.Supervisor` to avoid a module-import cycle
+    (``alfred.supervisor`` already imports ``alfred.plugins.errors``). The two
+    methods are the only supervisor surface the dispatch arm touches.
+    """
+
+    async def trip_breaker(self, *, component_id: str, reason: str) -> None: ...
+
+    async def request_plugin_restart(self, *, adapter_id: str, reason: str) -> None: ...
+
+
+class _NoopSemaphore:
+    """An async-context-manager no-op standing in for the dispatch semaphore.
+
+    Slice-3 callers never enter the comms dispatch arm (they only hit the
+    disallowed-method / sandbox_info paths), so they get this no-op instead of
+    a real :class:`asyncio.BoundedSemaphore`. The enforcing
+    :meth:`AlfredPluginSession.for_comms_adapter` factory always allocates a
+    real per-session semaphore.
+    """
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        return None
+
 
 class AlfredPluginSession:
     """Owns the lifecycle of a single plugin subprocess (spec §4.2, §4.6, §4.7).
@@ -153,6 +238,19 @@ class AlfredPluginSession:
         gate: CapabilityGate,
         transport: StdioTransport | None = None,
         correlation_id: str | None = None,
+        # PR-S4-8 comms params (Component G, Task 35). All default to ``None``
+        # so every Slice-3 caller (which never enters the comms dispatch arm)
+        # constructs unchanged. The enforcing ``for_comms_adapter`` factory
+        # makes the four handlers required + allocates a real per-session
+        # semaphore + error counter.
+        adapter_id: str | None = None,
+        inbound_handler: InboundHandler | None = None,
+        binding_handler: BindingHandler | None = None,
+        rate_limit_handler: RateLimitHandler | None = None,
+        crash_handler: CrashHandler | None = None,
+        supervisor: _SupervisorLike | None = None,
+        dispatch_semaphore: asyncio.BoundedSemaphore | _NoopSemaphore | None = None,
+        error_counter: SlidingWindowCounter | None = None,
     ) -> None:
         """Internal: prefer ``await AlfredPluginSession.create(manifest_raw=...)``.
 
@@ -160,6 +258,12 @@ class AlfredPluginSession:
         synchronous state init — no audit emits, no I/O. The
         :meth:`create` factory handles the parse and the awaited
         ``plugin.lifecycle.load_refused`` emit on failure.
+
+        The comms params default to ``None`` (Slice-3 back-compat). When a
+        comms adapter is wired, prefer :meth:`for_comms_adapter` — it makes
+        the four handlers required and allocates the per-session dispatch
+        state. ``dispatch_semaphore`` defaults to a :class:`_NoopSemaphore`
+        so the Slice-3 disallowed-method path constructs without a real one.
         """
         self._audit_writer = audit_writer
         self._gate = gate
@@ -167,6 +271,19 @@ class AlfredPluginSession:
         self._manifest: PluginManifest = manifest
         self._handshake_complete = False
         self._correlation_id = correlation_id or str(uuid.uuid4())
+
+        self._adapter_id = adapter_id
+        self._inbound_handler = inbound_handler
+        self._binding_handler = binding_handler
+        self._rate_limit_handler = rate_limit_handler
+        self._crash_handler = crash_handler
+        self._supervisor = supervisor
+        self._dispatch_semaphore: asyncio.BoundedSemaphore | _NoopSemaphore = (
+            dispatch_semaphore if dispatch_semaphore is not None else _NoopSemaphore()
+        )
+        self._error_counter: SlidingWindowCounter = (
+            error_counter if error_counter is not None else SlidingWindowCounter()
+        )
 
     # ------------------------------------------------------------------
     # Construction
@@ -219,6 +336,64 @@ class AlfredPluginSession:
             gate=gate,
             transport=transport,
             correlation_id=correlation_id,
+        )
+
+    @classmethod
+    async def for_comms_adapter(
+        cls,
+        *,
+        adapter_id: str,
+        manifest_raw: str,
+        audit_writer: AuditWriter,
+        gate: CapabilityGate,
+        supervisor: _SupervisorLike,
+        inbound_handler: InboundHandler,
+        binding_handler: BindingHandler,
+        rate_limit_handler: RateLimitHandler,
+        crash_handler: CrashHandler,
+        transport: StdioTransport | None = None,
+        max_in_flight_notifications: int = _DEFAULT_MAX_IN_FLIGHT,
+    ) -> AlfredPluginSession:
+        """Enforcing factory for a comms-adapter session (comms-004).
+
+        Unlike :meth:`create`, all four notification handlers are **required**
+        keyword arguments — a comms adapter cannot be spawned with a missing
+        handler (no Optional, no ``_NoopSemaphore`` default for the dispatch
+        arm). PR-S4-9 / PR-S4-10 adapter launchers MUST go through this
+        factory; the Slice-3 ``__init__`` keeps the Optional kwargs only for
+        in-process back-compat.
+
+        Allocates a **fresh per-session** :class:`asyncio.BoundedSemaphore`
+        (perf-003: per-adapter, never process-wide, so one adapter's storm
+        cannot starve another) and a fresh :class:`SlidingWindowCounter` for
+        the err-007 breaker trigger. ``max_in_flight_notifications`` caps the
+        semaphore; the daemon boot path passes
+        ``Settings.comms_max_in_flight_notifications`` (the factory takes it as
+        a plain int so it stays pure + unit-testable without an env load).
+
+        Reuses :meth:`create`'s manifest parse + load-refused audit path, then
+        rebinds the parsed manifest with the comms wiring.
+        """
+        base = await cls.create(
+            manifest_raw=manifest_raw,
+            audit_writer=audit_writer,
+            gate=gate,
+            transport=transport,
+        )
+        return cls(
+            manifest=base._manifest,
+            audit_writer=audit_writer,
+            gate=gate,
+            transport=transport,
+            correlation_id=base._correlation_id,
+            adapter_id=adapter_id,
+            inbound_handler=inbound_handler,
+            binding_handler=binding_handler,
+            rate_limit_handler=rate_limit_handler,
+            crash_handler=crash_handler,
+            supervisor=supervisor,
+            dispatch_semaphore=asyncio.BoundedSemaphore(value=max_in_flight_notifications),
+            error_counter=SlidingWindowCounter(),
         )
 
     @staticmethod
