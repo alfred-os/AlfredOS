@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-09 02:33+0100\n"
+"POT-Creation-Date: 2026-06-09 05:27+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -367,102 +367,112 @@ msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
-#: src/alfred/cli/operator_session.py:135
-#: src/alfred/i18n/_slice_4_reserve.py:43
+#: src/alfred/cli/operator_session.py:137
+#: src/alfred/i18n/_slice_4_reserve.py:42
 msgid "login.no_users_exist"
 msgstr "No users are registered. Add a user first: `alfred user add`."
 
-#: src/alfred/cli/operator_session.py:139
-#: src/alfred/i18n/_slice_4_reserve.py:44
+#: src/alfred/cli/operator_session.py:141
+#: src/alfred/i18n/_slice_4_reserve.py:43
 msgid "login.auto_selected_single_user"
 msgstr "Selected the only registered user: {display_name}."
 
-#: src/alfred/cli/operator_session.py:142
-#: src/alfred/i18n/_slice_4_reserve.py:45
+#: src/alfred/cli/operator_session.py:144
+#: src/alfred/i18n/_slice_4_reserve.py:44
 msgid "login.non_tty_requires_explicit_user"
-msgstr "Multiple users registered. Pass `--user <id>` in non-interactive contexts."
+msgstr ""
+"Multiple users registered. Run `alfred login --as <user>` in non-"
+"interactive contexts."
 
-#: src/alfred/cli/operator_session.py:145
-#: src/alfred/i18n/_slice_4_reserve.py:47
+#: src/alfred/cli/operator_session.py:147
+#: src/alfred/i18n/_slice_4_reserve.py:46
 msgid "login.picker_row"
 msgstr "  {index}) {display_name} ({slug})"
 
-#: src/alfred/cli/operator_session.py:146
-#: src/alfred/i18n/_slice_4_reserve.py:48
+#: src/alfred/cli/operator_session.py:148
+#: src/alfred/i18n/_slice_4_reserve.py:47
 msgid "login.picker_prompt"
 msgstr "Select a user by number"
 
-#: src/alfred/cli/operator_session.py:148
-#: src/alfred/i18n/_slice_4_reserve.py:49
+#: src/alfred/cli/operator_session.py:150
+#: src/alfred/i18n/_slice_4_reserve.py:48
 msgid "login.picker_out_of_range"
 msgstr "Selection out of range. Run `alfred login` again."
 
-#: src/alfred/cli/operator_session.py:165
-#: src/alfred/i18n/_slice_4_reserve.py:40
+#: src/alfred/cli/operator_session.py:167
+#: src/alfred/i18n/_slice_4_reserve.py:39
 msgid "login.expires_in_out_of_range"
 msgstr "--expires-in {value} is outside the supported range [1h, 7d]."
 
-#: src/alfred/cli/operator_session.py:174
-#: src/alfred/i18n/_slice_4_reserve.py:46
+#: src/alfred/cli/operator_session.py:176
+#: src/alfred/i18n/_slice_4_reserve.py:45
 msgid "login.refresh_no_session"
-msgstr "No active session to refresh. Run `alfred login --as <user>` first."
+msgstr "No active session to refresh. Run `alfred login` first."
 
-#: src/alfred/cli/operator_session.py:178
-#: src/alfred/cli/operator_session.py:186
-#: src/alfred/i18n/_slice_4_reserve.py:38
+#: src/alfred/cli/operator_session.py:180
+#: src/alfred/cli/operator_session.py:188
+#: src/alfred/i18n/_slice_4_reserve.py:37
 msgid "login.user_not_found"
 msgstr "User {user} is not in the registry."
 
-#: src/alfred/cli/operator_session.py:179
-#: src/alfred/cli/operator_session.py:187
-#: src/alfred/i18n/_slice_4_reserve.py:39
+#: src/alfred/cli/operator_session.py:181
+#: src/alfred/cli/operator_session.py:189
+#: src/alfred/i18n/_slice_4_reserve.py:38
 msgid "login.user_not_found.hint"
 msgstr ""
 "Use `alfred user list` to inspect known users, or `alfred user add` to "
 "create one."
 
-#: src/alfred/cli/operator_session.py:199
-#: src/alfred/i18n/_slice_4_reserve.py:37
+#: src/alfred/cli/operator_session.py:201
+#: src/alfred/i18n/_slice_4_reserve.py:36
 msgid "login.session_overwrite_confirm"
 msgstr ""
 "Overwriting existing session for {user}; the previous token is now "
 "revoked."
 
-#: src/alfred/cli/operator_session.py:209
-#: src/alfred/i18n/_slice_4_reserve.py:41
+#: src/alfred/cli/operator_session.py:211
+#: src/alfred/i18n/_slice_4_reserve.py:40
 msgid "login.no_machine_id"
 msgstr "Cannot read this host's machine-id. Operator session creation refused."
 
-#: src/alfred/cli/operator_session.py:261
-#: src/alfred/i18n/_slice_4_reserve.py:42
+#: src/alfred/cli/operator_session.py:263
+#: src/alfred/i18n/_slice_4_reserve.py:41
 msgid "login.confirmed"
 msgstr "Logged in as {user}. Session expires at {expires_at} ({host})."
 
-#: src/alfred/cli/operator_session.py:279
-#: src/alfred/cli/operator_session.py:285
-#: src/alfred/i18n/_slice_4_reserve.py:50
+#: src/alfred/cli/operator_session.py:326
+#: src/alfred/cli/operator_session.py:334
+#: src/alfred/i18n/_slice_4_reserve.py:49
 msgid "logout.no_session"
 msgstr "No active session to log out of."
 
-#: src/alfred/cli/operator_session.py:313
-#: src/alfred/i18n/_slice_4_reserve.py:51
+#: src/alfred/cli/operator_session.py:363
+#: src/alfred/i18n/_slice_4_reserve.py:50
 msgid "logout.confirmed"
 msgstr "Logged out. Session for {user} revoked."
 
-#: src/alfred/cli/operator_session.py:326
-#: src/alfred/i18n/_slice_4_reserve.py:52
+#: src/alfred/cli/operator_session.py:376
+#: src/alfred/i18n/_slice_4_reserve.py:51
 msgid "whoami.no_session"
-msgstr "No active session. Run `alfred login --as <user>` to start one."
+msgstr "No active session. Run `alfred login` to start one."
 
-#: src/alfred/cli/operator_session.py:332
+#: src/alfred/cli/operator_session.py:382
 #: src/alfred/i18n/_slice_4_reserve.py:53
-msgid "whoami.expired"
-msgstr ""
-"Session for {user} expired at {expires_at}. Run `alfred login --as "
-"<user>` to renew."
+msgid "whoami.unloadable"
+msgstr "Session file is corrupt or insecure and could not be read."
 
-#: src/alfred/cli/operator_session.py:347
+#: src/alfred/cli/operator_session.py:383
 #: src/alfred/i18n/_slice_4_reserve.py:54
+msgid "whoami.unloadable.recovery"
+msgstr "Run `alfred logout` to clear it, then `alfred login`."
+
+#: src/alfred/cli/operator_session.py:392
+#: src/alfred/i18n/_slice_4_reserve.py:52
+msgid "whoami.expired"
+msgstr "Session for {user} expired at {expires_at}. Run `alfred login` to renew."
+
+#: src/alfred/cli/operator_session.py:403
+#: src/alfred/i18n/_slice_4_reserve.py:55
 msgid "whoami.template"
 msgstr ""
 "Signed in as: {user} ({user_short})\n"
@@ -957,7 +967,7 @@ msgstr ""
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
 #: src/alfred/cli/daemon/_commands.py:498
-#: src/alfred/i18n/_slice_4_reserve.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:89
 msgid "daemon.boot.environment_not_set"
 msgstr ""
 "Settings.environment is not set. Refusing to boot — production refuses "
@@ -966,7 +976,7 @@ msgstr ""
 "start`."
 
 #: src/alfred/cli/daemon/_commands.py:549
-#: src/alfred/i18n/_slice_4_reserve.py:92
+#: src/alfred/i18n/_slice_4_reserve.py:90
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in a production environment. "
@@ -974,7 +984,7 @@ msgstr ""
 "daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:560
-#: src/alfred/i18n/_slice_4_reserve.py:93
+#: src/alfred/i18n/_slice_4_reserve.py:91
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
 "bin/alfred-plugin-launcher.sh does not resolve per-plugin policies. "
@@ -983,7 +993,7 @@ msgstr ""
 "`alfred daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:576
-#: src/alfred/i18n/_slice_4_reserve.py:94
+#: src/alfred/i18n/_slice_4_reserve.py:92
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
 "PoliciesSnapshotRef initialisation failed: {detail}. Refusing to boot. "
@@ -991,7 +1001,7 @@ msgstr ""
 "start`."
 
 #: src/alfred/cli/daemon/_commands.py:590
-#: src/alfred/i18n/_slice_4_reserve.py:95
+#: src/alfred/i18n/_slice_4_reserve.py:93
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
 "Capability-gate handshake failed: {detail}. Refusing to boot. Check "
@@ -999,7 +1009,7 @@ msgstr ""
 "daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:658
-#: src/alfred/i18n/_slice_4_reserve.py:97
+#: src/alfred/i18n/_slice_4_reserve.py:95
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
@@ -1015,7 +1025,7 @@ msgstr ""
 "Nothing to stop."
 
 #: src/alfred/cli/daemon/_commands.py:714
-#: src/alfred/i18n/_slice_4_reserve.py:98
+#: src/alfred/i18n/_slice_4_reserve.py:96
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
@@ -1030,7 +1040,7 @@ msgstr ""
 "running (stale pidfile). The daemon is not running."
 
 #: src/alfred/cli/daemon/_commands.py:740
-#: src/alfred/i18n/_slice_4_reserve.py:99
+#: src/alfred/i18n/_slice_4_reserve.py:97
 msgid "daemon.status.template"
 msgstr ""
 "Daemon PID {pid}\n"
@@ -1310,228 +1320,209 @@ msgstr "UNKNOWN"
 # config-reload notifications, and TUI gating. Sourced PRs: S4-1..S4-10
 # consume these keys; this PR ships them so every consumer's `t()`
 # call resolves to a non-bare string at boot time.
-# Login / session lifecycle (PR-S4-5).
-#: src/alfred/i18n/_slice_4_reserve.py:36
-msgid "login.prompt_confirm_overwrite"
-msgstr "An active session for {user} already exists. Overwrite? [y/N]"
-
-#: src/alfred/i18n/_slice_4_reserve.py:55
-msgid "whoami.signed_in_as"
-msgstr "Signed in as"
-
-#: src/alfred/i18n/_slice_4_reserve.py:56
-msgid "whoami.session_since"
-msgstr "Session since"
-
-#: src/alfred/i18n/_slice_4_reserve.py:57
-msgid "whoami.session_expires"
-msgstr "Session expires"
-
-#: src/alfred/i18n/_slice_4_reserve.py:58
-msgid "whoami.machine"
-msgstr "Machine"
-
 # Operator-session refusal reasons (PR-S4-5 _resolve_operator + spec §8.10).
-#: src/alfred/i18n/_slice_4_reserve.py:61
+#: src/alfred/i18n/_slice_4_reserve.py:58
 msgid "operator_session.refused.expired"
-msgstr "Session expired. Run `alfred login --as <user>` to renew."
+msgstr "Session expired. Run `alfred login` to renew."
 
-#: src/alfred/i18n/_slice_4_reserve.py:62
+#: src/alfred/i18n/_slice_4_reserve.py:59
 msgid "operator_session.refused.host_mismatch"
 msgstr ""
 "Session host binding mismatch. The session was issued for a different "
-"host. Run `alfred login --as <user>` on this host."
+"host. Run `alfred login` on this host."
 
-#: src/alfred/i18n/_slice_4_reserve.py:63
+#: src/alfred/i18n/_slice_4_reserve.py:60
 msgid "operator_session.refused.machine_mismatch"
 msgstr ""
 "Machine-id mismatch. The session was issued on a different machine. Run "
-"`alfred login --as <user>` on this machine."
+"`alfred login` on this machine."
 
-#: src/alfred/i18n/_slice_4_reserve.py:64
+#: src/alfred/i18n/_slice_4_reserve.py:61
 msgid "operator_session.refused.token_unknown"
-msgstr ""
-"Session token not recognised. Run `alfred login --as <user>` to start a "
-"new session."
+msgstr "Session token not recognised. Run `alfred login` to start a new session."
 
-#: src/alfred/i18n/_slice_4_reserve.py:65
+#: src/alfred/i18n/_slice_4_reserve.py:62
 msgid "operator_session.refused.user_revoked"
 msgstr ""
 "Session revoked because the user was removed or disabled. Contact the "
 "operator who maintains `alfred user list`."
 
-#: src/alfred/i18n/_slice_4_reserve.py:66
+#: src/alfred/i18n/_slice_4_reserve.py:63
 msgid "operator_session.refused.bad_file_mode"
 msgstr "Session file at {path} has insecure mode; expected 0600."
 
-#: src/alfred/i18n/_slice_4_reserve.py:67
+#: src/alfred/i18n/_slice_4_reserve.py:64
 msgid "operator_session.refused.bad_file_owner"
 msgstr "Session file at {path} is not owned by the current user."
 
-#: src/alfred/i18n/_slice_4_reserve.py:68
+#: src/alfred/i18n/_slice_4_reserve.py:65
 msgid "operator_session.refused.resolver_timeout"
 msgstr ""
 "Operator-session resolver exceeded the 250ms hard timeout. Re-run the "
 "command; if it persists, check `alfred status` for DB latency."
 
-#: src/alfred/i18n/_slice_4_reserve.py:70
+#: src/alfred/i18n/_slice_4_reserve.py:67
 msgid "operator_session.refused.expired.recovery"
 msgstr "Run `alfred login` to start a new session."
 
-#: src/alfred/i18n/_slice_4_reserve.py:71
+#: src/alfred/i18n/_slice_4_reserve.py:68
 msgid "operator_session.refused.host_mismatch.recovery"
 msgstr ""
 "If you docked your laptop, run `alfred login` again on this host (the "
 "hostname changed)."
 
-#: src/alfred/i18n/_slice_4_reserve.py:72
+#: src/alfred/i18n/_slice_4_reserve.py:69
 msgid "operator_session.refused.machine_mismatch.recovery"
 msgstr ""
 "If you reimaged this machine, the previous session is no longer valid. "
 "Run `alfred login` to start fresh."
 
-#: src/alfred/i18n/_slice_4_reserve.py:73
+#: src/alfred/i18n/_slice_4_reserve.py:70
 msgid "operator_session.refused.token_unknown.recovery"
 msgstr "Run `alfred login` to start a new session."
 
-#: src/alfred/i18n/_slice_4_reserve.py:74
+#: src/alfred/i18n/_slice_4_reserve.py:71
 msgid "operator_session.refused.user_revoked.recovery"
 msgstr "Ask an operator to restore your account, then run `alfred login`."
 
-#: src/alfred/i18n/_slice_4_reserve.py:75
+#: src/alfred/i18n/_slice_4_reserve.py:72
 msgid "operator_session.refused.bad_file_mode.recovery"
 msgstr "Run `alfred logout` to clear the bad file, then `alfred login`."
 
-#: src/alfred/i18n/_slice_4_reserve.py:76
+#: src/alfred/i18n/_slice_4_reserve.py:73
 msgid "operator_session.refused.bad_file_owner.recovery"
 msgstr "Run `alfred logout` to clear the bad file, then `alfred login`."
 
-#: src/alfred/i18n/_slice_4_reserve.py:77
+#: src/alfred/i18n/_slice_4_reserve.py:74
 msgid "operator_session.refused.resolver_timeout.recovery"
 msgstr "Re-run the command; if it persists, check `alfred status`."
 
-#: src/alfred/i18n/_slice_4_reserve.py:80
+#: src/alfred/i18n/_slice_4_reserve.py:77
 msgid "supervisor.breaker.reset.refused.not_logged_in"
 msgstr ""
 "Cannot reset supervisor breaker without an active operator session. Run "
-"`alfred login --as <user>` first."
+"`alfred login` first."
 
-#: src/alfred/i18n/_slice_4_reserve.py:81
+#: src/alfred/i18n/_slice_4_reserve.py:78
+msgid "supervisor.breaker.reset.refused.not_logged_in.recovery"
+msgstr "Run `alfred login` first, then re-run the command."
+
+#: src/alfred/i18n/_slice_4_reserve.py:79
 msgid "supervisor.breaker.reset.refused.operator_permissions_insufficient"
 msgstr ""
 "Operator {user} lacks the required permissions to reset the supervisor "
 "breaker."
 
 # Reviewer-gated CLI operator-attribution refusals (PR-S4-5 #153).
-#: src/alfred/i18n/_slice_4_reserve.py:85
+#: src/alfred/i18n/_slice_4_reserve.py:83
 msgid "cli.config.set.refused.not_logged_in"
 msgstr "Cannot queue a config change without an active operator session."
 
-#: src/alfred/i18n/_slice_4_reserve.py:86
+#: src/alfred/i18n/_slice_4_reserve.py:84
 msgid "cli.config.set.refused.not_logged_in.recovery"
 msgstr "Run `alfred login` first, then re-run the command."
 
-#: src/alfred/i18n/_slice_4_reserve.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:85
 msgid "cli.plugin.grant.refused.not_logged_in"
 msgstr "Cannot queue a plugin grant/revoke without an active operator session."
 
-#: src/alfred/i18n/_slice_4_reserve.py:88
+#: src/alfred/i18n/_slice_4_reserve.py:86
 msgid "cli.plugin.grant.refused.not_logged_in.recovery"
 msgstr "Run `alfred login` first, then re-run the command."
 
-#: src/alfred/i18n/_slice_4_reserve.py:96
+#: src/alfred/i18n/_slice_4_reserve.py:94
 msgid "daemon.boot.audit_hash_pepper_missing"
 msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
 "it. Refusing to boot."
 
 # Sandbox refusal reasons (PR-S4-6 launcher).
-#: src/alfred/i18n/_slice_4_reserve.py:102
+#: src/alfred/i18n/_slice_4_reserve.py:100
 msgid "supervisor.sandbox.refused.policy_ref_missing"
 msgstr ""
 "Plugin {plugin_id} declares sandbox kind=full but has no policy_ref for "
 "{host_os}. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:103
+#: src/alfred/i18n/_slice_4_reserve.py:101
 msgid "supervisor.sandbox.refused.policy_ref_os_mismatch"
 msgstr ""
 "Plugin {plugin_id} policy_ref points to a {policy_os} policy on a "
 "{host_os} host. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:104
+#: src/alfred/i18n/_slice_4_reserve.py:102
 msgid "supervisor.sandbox.refused.policy_ref_unreadable"
 msgstr ""
 "Plugin {plugin_id} policy_ref at {policy_ref} is unreadable. Refusing to "
 "launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:105
+#: src/alfred/i18n/_slice_4_reserve.py:103
 msgid "supervisor.sandbox.refused.sandbox_block_missing"
 msgstr ""
 "Plugin {plugin_id} manifest is missing the [sandbox] block. Refusing to "
 "launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:106
+#: src/alfred/i18n/_slice_4_reserve.py:104
 msgid "supervisor.sandbox.refused.windows_stub_in_production"
 msgstr ""
 "Plugin {plugin_id} resolves to the Windows stub policy in production. "
 "Refusing to launch — Windows requires WSL2 per spec §7.7."
 
-#: src/alfred/i18n/_slice_4_reserve.py:107
+#: src/alfred/i18n/_slice_4_reserve.py:105
 msgid "supervisor.sandbox.unsandboxed_refused_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in production. Refusing to "
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:110 src/alfred/policies/watcher.py:377
+#: src/alfred/i18n/_slice_4_reserve.py:108 src/alfred/policies/watcher.py:377
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
-#: src/alfred/i18n/_slice_4_reserve.py:111 src/alfred/policies/watcher.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:109 src/alfred/policies/watcher.py:87
 msgid "supervisor.config_reload.rejected.parse_failure"
 msgstr ""
 "config/policies.yaml reload rejected: parse failure ({detail}). Live "
 "snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:112 src/alfred/policies/watcher.py:89
+#: src/alfred/i18n/_slice_4_reserve.py:110 src/alfred/policies/watcher.py:89
 msgid "supervisor.config_reload.rejected.high_blast_change"
 msgstr ""
 "config/policies.yaml reload rejected: {key} is a high-blast key and "
 "requires reviewer-gate."
 
-#: src/alfred/i18n/_slice_4_reserve.py:113 src/alfred/policies/watcher.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:111 src/alfred/policies/watcher.py:91
 msgid "supervisor.config_reload.rejected.validation_failure"
 msgstr ""
 "config/policies.yaml reload rejected: validation failed for {detail}. "
 "Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:114 src/alfred/policies/watcher.py:93
+#: src/alfred/i18n/_slice_4_reserve.py:112 src/alfred/policies/watcher.py:93
 msgid "supervisor.config_reload.rejected.file_vanished"
 msgstr ""
 "config/policies.yaml vanished between stat and read. Live snapshot "
 "retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:115 src/alfred/policies/watcher.py:95
+#: src/alfred/i18n/_slice_4_reserve.py:113 src/alfred/policies/watcher.py:95
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:116 src/alfred/policies/watcher.py:97
+#: src/alfred/i18n/_slice_4_reserve.py:114 src/alfred/policies/watcher.py:97
 msgid "supervisor.config_reload.rejected.audit_write_failed"
 msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:117 src/alfred/policies/watcher.py:506
+#: src/alfred/i18n/_slice_4_reserve.py:115 src/alfred/policies/watcher.py:506
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:118 src/alfred/policies/watcher.py:523
+#: src/alfred/i18n/_slice_4_reserve.py:116 src/alfred/policies/watcher.py:523
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
-#: src/alfred/i18n/_slice_4_reserve.py:120 src/alfred/policies/watcher.py:489
+#: src/alfred/i18n/_slice_4_reserve.py:118 src/alfred/policies/watcher.py:489
 msgid "policies.watcher.fallback_write_failed"
 msgstr ""
 "PolicyWatcher could not write the rejected-config fallback sink at "
@@ -1539,7 +1530,7 @@ msgstr ""
 " continues; fix the state directory."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/i18n/_slice_4_reserve.py:123
+#: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat requires the AlfredOS daemon to be running. Start it with "
@@ -2146,14 +2137,14 @@ msgstr ""
 "not present the authorised CapabilityGateNonce. The T3 ingestion boundary"
 " is gated to StdioTransport and quarantine_host only (spec §3.2)."
 
-#: src/alfred/supervisor/core.py:280
+#: src/alfred/supervisor/core.py:288
 msgid "supervisor.start.already_started"
 msgstr ""
 "Supervisor.start() called twice without an intervening stop(). The "
 "supervisor is single-instance per process; re-entrancy would orphan the "
 "first TaskGroup."
 
-#: src/alfred/supervisor/core.py:378
+#: src/alfred/supervisor/core.py:386
 msgid "supervisor.dispatch.outbound_dlp_unwired"
 msgstr ""
 "Supervisor cannot schedule the proposal-dispatch loop: no outbound DLP "
@@ -2165,13 +2156,13 @@ msgstr ""
 "ledger without passing DLP first (#173); pass outbound_dlp= at "
 "construction."
 
-#: src/alfred/supervisor/core.py:650
+#: src/alfred/supervisor/core.py:658
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:719
+#: src/alfred/supervisor/core.py:727
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "

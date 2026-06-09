@@ -26,7 +26,6 @@ from alfred.i18n import t
 
 SLICE_4_KEYS: tuple[str, ...] = (
     # Login / session lifecycle (12) — spec §12.2.
-    "login.prompt_confirm_overwrite",
     "login.session_overwrite_confirm",
     "login.user_not_found",
     "login.user_not_found.hint",
@@ -45,12 +44,11 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "logout.confirmed",
     "whoami.no_session",
     "whoami.expired",
+    # whoami broader-error handling (PR-S4-5 err-finding-3): a corrupt/insecure
+    # file gets an actionable message + recovery, not a raw traceback.
+    "whoami.unloadable",
+    "whoami.unloadable.recovery",
     "whoami.template",
-    # whoami labelled lines (PR-S4-5 devex-1).
-    "whoami.signed_in_as",
-    "whoami.session_since",
-    "whoami.session_expires",
-    "whoami.machine",
     # Operator-session refusal reasons (8).
     "operator_session.refused.expired",
     "operator_session.refused.host_mismatch",
@@ -69,8 +67,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "operator_session.refused.bad_file_mode.recovery",
     "operator_session.refused.bad_file_owner.recovery",
     "operator_session.refused.resolver_timeout.recovery",
-    # Supervisor reset refusals (2).
+    # Supervisor reset refusals (2 + the not_logged_in recovery companion
+    # added by the devex-2 invariant fix for the most common refusal path).
     "supervisor.breaker.reset.refused.not_logged_in",
+    "supervisor.breaker.reset.refused.not_logged_in.recovery",
     "supervisor.breaker.reset.refused.operator_permissions_insufficient",
     # Daemon boot (9 — includes audit_hash_pepper_missing per round-2
     # sec-3 + arch-002 closures).
