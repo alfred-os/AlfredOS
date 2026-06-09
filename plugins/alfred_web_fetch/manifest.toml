@@ -43,3 +43,10 @@ cookie = "*"
 # does not SUBSCRIBE to any hookpoints. Subscriber registration for
 # tool.web.fetch is host-side (the InboundCanaryScanner, registered in
 # canary_scanner.py). See spec §7.5 for the publish/subscribe split.
+
+# PR-S4-6 (#152 §5): the [sandbox] block is mandatory for every manifest.
+# This first-party reference adapter processes only test/fixture content
+# and runs under the Slice-3 UID-separated baseline (no bwrap isolation),
+# so kind = "none". A kind = "full" plugin ships per-OS policy_refs.
+[sandbox]
+kind = "none"
