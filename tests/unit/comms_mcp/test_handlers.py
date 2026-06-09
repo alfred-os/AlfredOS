@@ -180,13 +180,14 @@ async def test_crash_handler_rescrubs_secret_shaped_detail() -> None:
     """
     audit = SpyAuditWriter()
     handler = AdapterCrashHandler(audit_writer=audit, hook_invoker=_SpyHookInvoker())
-    secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"  # 24 alnum bytes -> API-key shape
+    # Synthetic API-key-shaped canary (24 alnum bytes); not a real secret.
+    canary_token = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"  # noqa: S105
     notification = CrashedNotification(
         adapter_id="alfred_comms_test",
         error_class="RuntimeError",
-        detail=f"boom leaked {secret} here",
+        detail=f"boom leaked {canary_token} here",
     )
     await handler.process(notification)
     detail = audit.rows_with_schema("COMMS_ADAPTER_CRASHED_FIELDS")[0]["detail_redacted"]
-    assert secret not in detail
+    assert canary_token not in detail
     assert "[REDACTED:api-key-shape]" in detail
