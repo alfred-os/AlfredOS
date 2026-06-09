@@ -44,7 +44,6 @@ _LATENCY_BUCKETS: Final[tuple[float, ...]] = (
     5.0,
     10.0,
     30.0,
-    float("inf"),
 )
 
 INBOUND_DISPATCH_HISTOGRAM: Final[Histogram] = Histogram(
