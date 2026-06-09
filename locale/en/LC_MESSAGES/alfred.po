@@ -1872,6 +1872,19 @@ msgstr ""
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
 
+#: src/alfred/orchestrator/core.py:329
+msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
+msgstr ""
+"comms inbound must be T3: quarantined_extract refuses any source_tier "
+"other than T3 (no silent T3->T2 promotion)."
+
+#: src/alfred/orchestrator/core.py:331
+msgid "orchestrator.quarantined_extract.no_extractor_wired"
+msgstr ""
+"quarantined_extract called on an orchestrator constructed without a "
+"quarantined_extractor; the comms inbound trust-boundary funnel is not "
+"wired."
+
 # Slice-3 retrospective fix DEVEX-001 — bare i18n keys emitted by
 # bin/alfred-plugin-launcher.sh on stderr. The supervisor renders these
 # from the catalog when persisting the matching audit row. The keys
@@ -2336,14 +2349,14 @@ msgstr ""
 "not present the authorised CapabilityGateNonce. The T3 ingestion boundary"
 " is gated to StdioTransport and quarantine_host only (spec §3.2)."
 
-#: src/alfred/supervisor/core.py:288
+#: src/alfred/supervisor/core.py:333
 msgid "supervisor.start.already_started"
 msgstr ""
 "Supervisor.start() called twice without an intervening stop(). The "
 "supervisor is single-instance per process; re-entrancy would orphan the "
 "first TaskGroup."
 
-#: src/alfred/supervisor/core.py:386
+#: src/alfred/supervisor/core.py:431
 msgid "supervisor.dispatch.outbound_dlp_unwired"
 msgstr ""
 "Supervisor cannot schedule the proposal-dispatch loop: no outbound DLP "
@@ -2355,41 +2368,29 @@ msgstr ""
 "ledger without passing DLP first (#173); pass outbound_dlp= at "
 "construction."
 
-#: src/alfred/supervisor/core.py:658
+#: src/alfred/supervisor/core.py:703
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:727
+#: src/alfred/supervisor/core.py:772
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
 "status` to list registered components."
 
-#: src/alfred/supervisor/core.py
+#: src/alfred/supervisor/core.py:895
 msgid "supervisor.trip_breaker.unknown_reason"
 msgstr ""
-"trip_breaker refused: {reason!r} is not a known breaker-trip reason. Pass a "
-"valid TripBreakerReason."
+"trip_breaker refused: {reason!r} is not a known breaker-trip reason. Pass"
+" a valid TripBreakerReason."
 
-#: src/alfred/supervisor/core.py
+#: src/alfred/supervisor/core.py:951
 msgid "supervisor.request_plugin_restart.unknown_reason"
 msgstr ""
-"request_plugin_restart refused: {reason!r} is not a known restart reason. "
-"Pass a valid PluginRestartReason."
-
-#: src/alfred/orchestrator/core.py
-msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
-msgstr ""
-"comms inbound must be T3: quarantined_extract refuses any source_tier other "
-"than T3 (no silent T3->T2 promotion)."
-
-#: src/alfred/orchestrator/core.py
-msgid "orchestrator.quarantined_extract.no_extractor_wired"
-msgstr ""
-"quarantined_extract called on an orchestrator constructed without a "
-"quarantined_extractor; the comms inbound trust-boundary funnel is not wired."
+"request_plugin_restart refused: {reason!r} is not a known restart reason."
+" Pass a valid PluginRestartReason."
 
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""
