@@ -153,7 +153,11 @@ class AuditEntry(Base):
             # plus the generic attestation result used by the
             # PR-S4-4 closure 7 audit-write-failure path.
             "'dispatched_with_redactions', 'dispatched_clean', "
-            "'recursion_refused', 'audit_row_emitted')",
+            "'recursion_refused', 'audit_row_emitted', "
+            # Slice-4 (migration 0016) — PR-S4-8 comms-MCP inbound + session
+            # dispatch dispositions: T3 promotion, first-contact binding,
+            # burst-limiter hard drop, post-handshake allow, handler failure.
+            "'promoted', 'binding_requested', 'dropped', 'allowed', 'failed')",
             name="ck_audit_log_result",
         ),
     )
