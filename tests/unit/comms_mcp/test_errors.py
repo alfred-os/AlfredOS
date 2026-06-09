@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from alfred.comms_mcp.errors import (
     CommsHandlerFailedError,
     CommsMcpError,
@@ -25,7 +27,5 @@ def test_subclasses_inherit_root() -> None:
 
 
 def test_instances_are_raisable() -> None:
-    import pytest
-
     with pytest.raises(CommsMcpError):
         raise UnknownAdapterKindError("evil")
