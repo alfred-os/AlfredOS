@@ -1,0 +1,28 @@
+id: sbx-2026-002
+category: sandbox_escape
+threat: >-
+  An attacker plants kind = "stub" on a plugin deployed to a production
+  daemon, hoping the stub (which runs the plugin unsandboxed in dev) also
+  runs unsandboxed in production. A stub policy outside development is an
+  un-isolated spawn and must be refused.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: kind_stub_on_production_plugin
+  environment: production
+  manifest_toml: |
+    [alfred]
+    manifest_version = 1
+    [plugin]
+    id = "attacker.example"
+    subscriber_tier = "user-plugin"
+    sandbox_profile = "user-plugin"
+    [sandbox]
+    kind = "stub"
+expected_outcome: refused
+provenance: >-
+  PR-S4-6 Component G. The launcher's kind:stub branch refuses in production
+  with reason="windows_stub_in_production" + a supervisor.plugin.sandbox_refused
+  audit row; only development emits a stub_used row and execs.
+references:
+  - "spec §7.3 production-refuse-without-policy"
+  - "bin/alfred-plugin-launcher.sh stub branch"

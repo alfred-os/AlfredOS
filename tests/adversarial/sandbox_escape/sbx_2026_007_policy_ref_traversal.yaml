@@ -1,0 +1,23 @@
+id: sbx-2026-007
+category: sandbox_escape
+threat: >-
+  An attacker plants a manifest whose policy_ref points outside the
+  sandbox-policy root (../../../etc/passwd-bind.toml), hoping the launcher
+  reads attacker-controlled bytes as a bwrap policy — or, worse, mounts a
+  host path the operator never intended. The path-confinement gate must stop
+  the policy file ever being read.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: policy_ref_path_traversal
+  policy_ref: "config/sandbox/../../../etc/passwd-bind.toml"
+expected_outcome: refused
+provenance: >-
+  PR-S4-6 Component G sec-2 BLOCKER. resolve_policy_ref refuses any ref with a
+  '..' component, an absolute path, or one resolving (via symlink) outside the
+  policy root — raising PolicyRefEscapesRoot with reason="policy_ref_escapes_root"
+  BEFORE the file is read. Even a clean-translated --ro-bind is impossible
+  because the gate stops the policy file from ever being opened.
+references:
+  - "spec §7.2 launcher policy resolution"
+  - "src/alfred/plugins/manifest_reader.py::resolve_policy_ref"
+  - "PR #205 round-2 sec-2 closure"

@@ -67,6 +67,9 @@ manifest_version = 1
 id = "alfred.compromised-plugin"
 subscriber_tier = "user-plugin"
 sandbox_profile = "user-plugin"
+
+[sandbox]
+kind = "none"
 """
 
 
