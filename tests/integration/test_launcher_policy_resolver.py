@@ -39,10 +39,11 @@ pytestmark = pytest.mark.skipif(
 
 # A bwrap policy adequate to RUN the Python plugin (read-only /usr, /lib*,
 # tmpfs /tmp, plus PYTHONPATH for the alfred src tree) while STILL refusing
-# the escape attempts: /etc is NOT bound (so /etc/passwd reads fail) and
-# /bin/sh is not separately bound. keep_fds=[3] carries the provider key.
-# The real quarantined-LLM policy bytes ship in PR-S4-7; this fixture is the
-# resolver-integration analogue.
+# the escape attempts: /etc is NOT bound (so /etc/passwd reads fail), /bin/sh
+# is not separately bound, and ``net`` is unshared (so the plugin has no
+# outbound network — only a loopback-only empty net namespace). keep_fds=[3]
+# carries the provider key. The real quarantined-LLM policy bytes ship in
+# PR-S4-7; this fixture is the resolver-integration analogue.
 def _adequate_policy_body() -> str:
     binds = ['["/usr", "/usr"]', '["/lib", "/lib"]']
     for extra in ("/lib64", "/bin"):
@@ -52,7 +53,10 @@ def _adequate_policy_body() -> str:
     return (
         "ro_binds = [\n  " + ",\n  ".join(binds) + "\n]\n"
         'tmpfs = ["/tmp"]\n'
-        'unshare = ["pid", "uts", "cgroup", "ipc"]\n'
+        # test-1 vector 3 (CR PR #229 finding-3): ``net`` is unshared so the
+        # sandboxed plugin runs in an empty network namespace — no host route,
+        # so an outbound connect is kernel-contained, not policy-checked.
+        'unshare = ["pid", "uts", "cgroup", "ipc", "net"]\n'
         "die_with_parent = true\n"
         "keep_fds = [3]\n"
     )
@@ -173,6 +177,40 @@ def test_plugin_cannot_exec_host_bin_sh(tmp_path: Path) -> None:
     manifest, policy_dir = _fixture_manifest(tmp_path)
     result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
     assert "EXEC_OK" not in result.stdout
+
+
+def test_plugin_cannot_open_outbound_network(tmp_path: Path) -> None:
+    """test-1 vector 3 (CR PR #229 finding-3): a sandboxed plugin's outbound
+    network attempt is contained by ``--unshare-net``.
+
+    The fixture policy unshares the network namespace, so the plugin lives in an
+    empty net namespace with no route off-box. A TCP connect to a routable host
+    (1.1.1.1:443) must fail inside the sandbox — proving the network escape is
+    kernel-enforced, not merely policy-advised. We bind a short connect timeout
+    so the test never hangs if (regression) the namespace ISN'T unshared and the
+    connect actually tries to traverse the network.
+    """
+    stub = tmp_path / "net_escape.py"
+    stub.write_text(
+        "import socket, sys\n"
+        "s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+        "s.settimeout(3)\n"
+        "try:\n"
+        "    s.connect(('1.1.1.1', 443))\n"
+        "    print('NET_OK', flush=True)\n"
+        "    sys.exit(1)\n"
+        "except OSError as e:\n"
+        # An empty net namespace yields ENETUNREACH/EHOSTUNREACH immediately.
+        "    print(f'BLOCKED {e.errno}', flush=True)\n"
+        "    sys.exit(0)\n"
+        "finally:\n"
+        "    s.close()\n"
+    )
+    manifest, policy_dir = _fixture_manifest(tmp_path)
+    result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
+    assert "NET_OK" not in result.stdout, "outbound network was NOT contained by --unshare-net"
+    assert result.returncode == 0, result.stderr
+    assert "BLOCKED" in result.stdout
 
 
 def test_missing_sandbox_block_emits_refusal_row(tmp_path: Path) -> None:
