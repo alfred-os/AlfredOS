@@ -53,7 +53,7 @@ _REDACTION_SENTINEL: Final[str] = "[REDACTED:api-key-shape]"
 
 
 def redact_secret_shapes(text: str) -> str:
-    """Stateless secret-shape redaction — the API-key-regex stage standalone.
+    """Stage-2-only secret-shape scrub for INTERNAL audit-string hygiene.
 
     Substitutes every generic API-key-shaped token (``sk-``/``pk_``/… + 20+
     alnum bytes) with :data:`_REDACTION_SENTINEL`. This is the same Stage-2
@@ -62,9 +62,18 @@ def redact_secret_shapes(text: str) -> str:
     the full ``OutboundDlp`` (broker + audit sink) — e.g. the comms session
     dispatcher scrubbing an exception ``str`` before it lands in an audit row.
 
-    NOT a substitute for the full outbound DLP chokepoint (which also runs the
-    broker-backed redactor + canary stage); use ``OutboundDlp.scan_for_outbound``
-    for any text that crosses the outbound wire.
+    .. warning::
+
+        This is **Stage 2 in isolation** — it runs NEITHER the broker-backed
+        Stage-1 redactor (which scrubs values AlfredOS *knows* it owns) NOR the
+        Stage-3 canary detector. It is therefore ONLY safe for host-internal
+        strings that never cross the outbound wire (audit-row detail fields,
+        log lines). For ANY text that leaves AlfredOS for a user/platform, the
+        full chokepoint :meth:`OutboundDlp.scan_for_outbound` is mandatory —
+        using this helper there would silently bypass broker redaction and the
+        canary stage. It is kept public (not ``_``-prefixed) because it is a
+        genuine shared utility across the ``plugins`` and ``comms_mcp`` packages;
+        the contract above — not name-mangling — is what bounds its use.
     """
     return _GENERIC_API_KEY_RE.sub(_REDACTION_SENTINEL, text)
 
