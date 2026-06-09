@@ -72,9 +72,7 @@ async def _real_supervisor(postgres_url: str) -> AsyncIterator[tuple[Supervisor,
 async def _restart_rows(sm: Any) -> list[AuditEntry]:
     async with sm() as session:
         result = await session.execute(
-            select(AuditEntry).where(
-                AuditEntry.event == "supervisor.plugin.restart_requested"
-            )
+            select(AuditEntry).where(AuditEntry.event == "supervisor.plugin.restart_requested")
         )
         return list(result.scalars().all())
 
