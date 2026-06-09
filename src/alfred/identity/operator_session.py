@@ -32,13 +32,33 @@ than introducing a competing ``OperatorSessionResolver`` name).
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import os
+import sys
+from asyncio import create_subprocess_exec
+from asyncio import subprocess as asubprocess
 from datetime import datetime, timedelta
-from typing import Final, Literal
+from pathlib import Path
+from typing import Final, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 from alfred.errors import AlfredError
 from alfred.security._hkdf import hkdf_expand
+
+# ``O_NOFOLLOW`` / ``O_DIRECTORY`` are POSIX-only; on Windows they are
+# absent and the open-time symlink/dir refusal is not enforced (Windows
+# operators are directed at the WSL2 path — PR-S4-10). Falling back to 0
+# keeps the module importable on Windows CI runners.
+_O_NOFOLLOW: Final = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
+
+# Upper bound on the session-file size. A legitimate file is a few hundred
+# bytes; the cap refuses a planted multi-megabyte file before it is parsed
+# (DoS + memory-pressure defence at the trust boundary).
+_MAX_FILE_BYTES: Final = 64 * 1024
 
 # ---------------------------------------------------------------------------
 # Constants (lifetime-pin closure 13)
@@ -184,7 +204,299 @@ class OperatorSessionFile(BaseModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# §5.2 File persistence — explicit SecretStr round-trip (sec-1 closure)
+# ---------------------------------------------------------------------------
+
+
+def _serialize_to_file_bytes(session: OperatorSessionFile) -> bytes:
+    """Serialise to bytes with the RAW token (sec-1).
+
+    ``SecretStr.model_dump_json()`` writes ``"**********"`` for the token,
+    so a naive dump would persist a file whose next load misses the DB
+    row. We dump the model excluding the token, then splice the raw token
+    string in explicitly via ``get_secret_value()``.
+    """
+    payload = session.model_dump(mode="json", exclude={"token"})
+    payload["token"] = session.token.get_secret_value()
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def _deserialize_from_file_bytes(raw: bytes) -> OperatorSessionFile:
+    """Parse file bytes back into an OperatorSessionFile.
+
+    The raw token string is re-wrapped in ``SecretStr`` by Pydantic's
+    field coercion. Raises ``OperatorSessionMalformed`` on any parse or
+    validation failure so the caller maps a single audit reason.
+    """
+    try:
+        return OperatorSessionFile.model_validate_json(raw)
+    except (ValidationError, ValueError) as exc:
+        raise OperatorSessionMalformed(str(exc)) from exc
+
+
+def _validate_parent_dir(parent_fd: int, parent: Path) -> None:
+    """Refuse a group/other-accessible or non-euid-owned parent dir (sec-2)."""
+    parent_stat = os.fstat(parent_fd)
+    if parent_stat.st_mode & 0o077:
+        raise OperatorSessionParentDirInsecure(
+            f"{parent}: mode {parent_stat.st_mode & 0o777:#o} is group/other-accessible",
+        )
+    if hasattr(os, "geteuid") and parent_stat.st_uid != os.geteuid():
+        raise OperatorSessionParentDirNotOwned(
+            f"{parent}: owned by uid {parent_stat.st_uid}, not euid {os.geteuid()}",
+        )
+
+
+def _validate_file_stat(session_fd: int, path: Path) -> None:
+    """Refuse a file whose mode != 0600 or owner != caller uid/gid (sec-2)."""
+    stat = os.fstat(session_fd)
+    if (stat.st_mode & 0o777) != 0o600:
+        raise OperatorSessionBadFileMode(
+            f"{path}: mode {stat.st_mode & 0o777:#o} is not 0o600",
+        )
+    if hasattr(os, "getuid") and (stat.st_uid != os.getuid() or stat.st_gid != os.getgid()):
+        raise OperatorSessionBadFileOwner(
+            f"{path}: owned by uid={stat.st_uid} gid={stat.st_gid}, "
+            f"not uid={os.getuid()} gid={os.getgid()}",
+        )
+
+
+def load_session_file(path: Path) -> OperatorSessionFile:
+    """TOCTOU-safe session-file load (sec-2 closure).
+
+    Discipline:
+
+    1. ``os.open(parent, O_RDONLY | O_DIRECTORY)`` — pin the parent dir by
+       FD, then fstat it: refuse if group/other-accessible
+       (``st_mode & 0o077``) or not owned by ``geteuid()``.
+    2. ``os.openat(parent_fd, "session", O_RDONLY | O_NOFOLLOW)`` — reach
+       the file relative to the pinned dir FD; ``O_NOFOLLOW`` refuses a
+       symlink at open time. Because the dir is pinned, a rename-into-dir
+       swap after step 1 cannot redirect the open.
+    3. ``os.fstat(session_fd)`` — validate mode 0600 + owner on the OPEN
+       FD (not via ``os.stat(path)``), closing the stat-then-open window.
+    4. Only after both fstat validations pass do we read + parse.
+
+    Raises:
+        OperatorSessionMissing: file (or its parent dir) does not exist.
+        OperatorSessionParentDirInsecure / NotOwned: parent dir refused.
+        OperatorSessionBadFileMode: symlink, wrong mode, or open refused.
+        OperatorSessionBadFileOwner: uid/gid mismatch.
+        OperatorSessionMalformed: bytes did not parse as a session file.
+    """
+    parent = path.parent
+    try:
+        parent_fd = os.open(parent, os.O_RDONLY | _O_DIRECTORY)
+    except FileNotFoundError as exc:
+        raise OperatorSessionMissing(str(parent)) from exc
+    try:
+        _validate_parent_dir(parent_fd, parent)
+        try:
+            session_fd = os.open(
+                path.name,
+                os.O_RDONLY | _O_NOFOLLOW,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError as exc:
+            raise OperatorSessionMissing(str(path)) from exc
+        except OSError as exc:
+            # O_NOFOLLOW on a symlink raises ELOOP (errno differs per OS).
+            # Surface as bad-file-mode so the audit reason maps cleanly.
+            raise OperatorSessionBadFileMode(
+                f"{path}: open refused (errno {exc.errno})",
+            ) from exc
+        try:
+            _validate_file_stat(session_fd, path)
+            raw = os.read(session_fd, _MAX_FILE_BYTES + 1)
+        finally:
+            os.close(session_fd)
+    finally:
+        os.close(parent_fd)
+
+    if len(raw) > _MAX_FILE_BYTES:
+        raise OperatorSessionMalformed(f"{path}: session file exceeds {_MAX_FILE_BYTES} bytes")
+    return _deserialize_from_file_bytes(raw)
+
+
+def write_session_file(path: Path, session: OperatorSessionFile) -> None:
+    """Write the session file with a 0700 parent dir + 0600 file (sec-2).
+
+    Creates ``~/.config/alfred/`` with mode 0700 if absent; refuses if an
+    existing dir is broader than 0700. The file is written 0600 from the
+    start via an ``O_CREAT | O_EXCL``-then-atomic-rename dance under a
+    tightened umask so there is no post-write ``chmod`` TOCTOU window.
+    """
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if hasattr(os, "geteuid"):
+        parent_stat = parent.stat()
+        if parent_stat.st_mode & 0o077:
+            raise OperatorSessionParentDirInsecure(
+                f"{parent}: existing mode {parent_stat.st_mode & 0o777:#o} is broader than 0o700",
+            )
+
+    body = _serialize_to_file_bytes(session)
+    tmp = parent / f".{path.name}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, body)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    tmp.replace(path)
+
+
+# ---------------------------------------------------------------------------
+# §5.3 Per-OS machine-id providers (sec-006)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class MachineIdProvider(Protocol):
+    """Read the raw, system-owned machine-id bytes.
+
+    Implementations raise ``OperatorSessionNoMachineId`` on any read
+    failure. The raw bytes are HMAC-hashed before storage — they never
+    leave this module verbatim.
+    """
+
+    async def read_raw(self) -> bytes: ...
+
+
+class LinuxMachineIdProvider:
+    """``/etc/machine-id`` then ``/var/lib/dbus/machine-id`` fallback.
+
+    Reads a ~32-byte file synchronously inside ``async def`` — bounded
+    cost, so a ``to_thread`` wrapper would be overkill. The paths are
+    injectable so tests substitute a temp dir.
+    """
+
+    def __init__(
+        self,
+        *,
+        primary: Path = Path("/etc/machine-id"),
+        fallback: Path = Path("/var/lib/dbus/machine-id"),
+    ) -> None:
+        self._primary = primary
+        self._fallback = fallback
+
+    async def read_raw(self) -> bytes:
+        for path in (self._primary, self._fallback):
+            try:
+                return path.read_bytes().strip()
+            except OSError:
+                continue
+        raise OperatorSessionNoMachineId("linux: no readable machine-id source")
+
+
+class MacosMachineIdProvider:
+    """``ioreg`` IOPlatformUUID, cached at ``/var/db/alfred/machine-id``.
+
+    The cache is read first; a miss spawns ``ioreg`` once and writes the
+    cache. In production the install step (PR-S4-7 macOS runbook)
+    pre-populates the cache so the spawn is a first-boot-only path.
+    """
+
+    def __init__(self, *, cache: Path = Path("/var/db/alfred/machine-id")) -> None:
+        self._cache = cache
+
+    async def read_raw(self) -> bytes:
+        try:
+            cached = self._cache.read_bytes().strip()
+        except OSError:
+            cached = b""
+        if cached:
+            return cached
+
+        proc = await create_subprocess_exec(
+            "ioreg",
+            "-rd1",
+            "-c",
+            "IOPlatformExpertDevice",
+            stdout=asubprocess.PIPE,
+            stderr=asubprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            raise OperatorSessionNoMachineId("macos: ioreg exited non-zero")
+        for line in stdout.splitlines():
+            if b"IOPlatformUUID" in line:
+                _, _, val = line.partition(b"=")
+                uuid = val.strip().strip(b'"').strip()
+                self._cache.parent.mkdir(parents=True, exist_ok=True)
+                self._cache.write_bytes(uuid)
+                return uuid
+        raise OperatorSessionNoMachineId("macos: IOPlatformUUID not found in ioreg output")
+
+
+class WindowsMachineIdProvider:
+    """``HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid``.
+
+    Lazy-imports ``winreg`` so the module stays importable on Linux/macOS
+    CI runners.
+    """
+
+    async def read_raw(self) -> bytes:
+        try:
+            import winreg  # type: ignore[import-not-found, unused-ignore]
+        except ImportError as exc:
+            raise OperatorSessionNoMachineId("windows: winreg unavailable") from exc
+        try:
+            with winreg.OpenKey(  # type: ignore[attr-defined, unused-ignore]
+                winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined, unused-ignore]
+                r"SOFTWARE\Microsoft\Cryptography",
+            ) as key:
+                guid, _ = winreg.QueryValueEx(key, "MachineGuid")  # type: ignore[attr-defined, unused-ignore]
+                return str(guid).encode("utf-8")
+        except OSError as exc:
+            raise OperatorSessionNoMachineId("windows: MachineGuid unreadable") from exc
+
+
+def select_machine_id_provider() -> MachineIdProvider:
+    """Return the concrete provider for the running OS.
+
+    ``sys.platform`` is read into a local so mypy does not statically
+    narrow away the non-host branches (the function must dispatch
+    correctly on every supported OS, not just the build host's).
+    """
+    platform: str = sys.platform
+    if platform == "linux":
+        return LinuxMachineIdProvider()
+    if platform == "darwin":
+        return MacosMachineIdProvider()
+    if platform == "win32":
+        return WindowsMachineIdProvider()
+    raise OperatorSessionNoMachineId(f"unsupported platform: {platform}")
+
+
+async def compute_machine_id_hash(*, provider: MachineIdProvider, pepper: bytes) -> str:
+    """``HMAC-SHA256(machine_id_subkey, raw_machine_id)`` as 64-char hex.
+
+    Uses the HKDF-derived machine-id subkey (sec-3), NOT the master
+    pepper, so the hash cannot be cross-replayed as a token hash.
+    Rotating the master pepper invalidates the hash (documented trade-off
+    per spec §8.10 — operators re-login).
+    """
+    raw = await provider.read_raw()
+    subkey = derive_machine_id_hash_subkey(pepper)
+    return hmac.new(subkey, raw, hashlib.sha256).hexdigest()
+
+
+def compute_token_hash(*, token: str, pepper: bytes) -> str:
+    """``HMAC-SHA256(token_subkey, token)`` as 64-char hex (sec-3).
+
+    The ``operator_sessions.token_hash`` column stores this; the resolver
+    recomputes it from the session-file token to look up the row.
+    """
+    subkey = derive_token_hash_subkey(pepper)
+    return hmac.new(subkey, token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 __all__ = [
+    "LinuxMachineIdProvider",
+    "MachineIdProvider",
+    "MacosMachineIdProvider",
     "OperatorSessionBadFileMode",
     "OperatorSessionBadFileOwner",
     "OperatorSessionError",
@@ -202,6 +514,12 @@ __all__ = [
     "OperatorSessionTokenUnknown",
     "OperatorSessionTokenUserMismatch",
     "OperatorSessionUserRevoked",
+    "WindowsMachineIdProvider",
+    "compute_machine_id_hash",
+    "compute_token_hash",
     "derive_machine_id_hash_subkey",
     "derive_token_hash_subkey",
+    "load_session_file",
+    "select_machine_id_provider",
+    "write_session_file",
 ]
