@@ -60,8 +60,28 @@ def _referenced_names(tree: ast.Module) -> set[str]:
     return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
 
 
+def _import_aliases_of(tree: ast.Module, constants: frozenset[str]) -> set[str]:
+    """Map alias-imported operator-attributed constants back to the originals.
+
+    CR-227 round-2 finding 6: ``from ... import CONST as X`` rebinds the
+    operator-attributed constant to ``X``, so the raw identifier never appears
+    as an ``ast.Name``. Resolve every ``ImportFrom`` alias whose source name is
+    an operator-attributed constant to the canonical constant name so the emit
+    check below sees through the alias. Non-aliased imports (``asname is None``)
+    are already covered by ``_referenced_names`` and need no rewriting.
+    """
+    resolved: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        for alias in node.names:
+            if alias.asname is not None and alias.name in constants:
+                resolved.add(alias.name)
+    return resolved
+
+
 def _module_emits_operator_attributed(tree: ast.Module, constants: frozenset[str]) -> bool:
-    names = _referenced_names(tree)
+    names = _referenced_names(tree) | _import_aliases_of(tree, constants)
     return bool(names & constants)
 
 
@@ -115,3 +135,18 @@ def test_guard_passes_consuming_module() -> None:
     tree = ast.parse(good.read_text())
     assert _module_emits_operator_attributed(tree, constants)
     assert _module_consumes_resolver(tree)
+
+
+def test_guard_catches_aliased_import_non_consuming_module() -> None:
+    """Alias bypass: ``import CONST as X`` must still register as an emit.
+
+    CR-227 round-2 finding 6: without alias resolution the raw constant
+    identifier never appears as an ``ast.Name``, so the guard would miss a
+    module that emits an operator-attributed row through an aliased import
+    while never consuming the resolver.
+    """
+    constants = _operator_attributed_constants()
+    bad = _FIXTURE_DIR / "aliased_bad_module.py"
+    tree = ast.parse(bad.read_text())
+    assert _module_emits_operator_attributed(tree, constants)
+    assert not _module_consumes_resolver(tree)
