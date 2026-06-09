@@ -221,7 +221,15 @@ class PolicyWatcher:
         self._invoke = invoke_fn
         self._history = history_writer
         self._operator_session_id = operator_session_id
-        self._cached_mtime_size: tuple[float, int] | None = None
+        # Nanosecond mtime (perf-005 / CR round-3): ``st_mtime`` is second-
+        # resolution on some filesystems, so a same-second + same-size edit
+        # (e.g. an operator rewriting the file twice within one second to the
+        # same byte length) would be a false-negative on a ``(st_mtime, size)``
+        # gate. ``st_mtime_ns`` closes most of that hole cheaply. The residual
+        # window (a same-NANOSECOND edit that also keeps the byte length
+        # identical) is astronomically unlikely, and the watcher-side SHA
+        # short-circuit (sec-007) catches it on the NEXT genuine change anyway.
+        self._cached_mtime_size: tuple[int, int] | None = None
         self._stat_failures = 0
         self._stat_successes = 0
         self._state: Literal["normal", "degraded"] = "normal"
@@ -269,8 +277,10 @@ class PolicyWatcher:
 
         await self._on_stat_success()
 
-        # Mtime gate (perf-005). Skip re-read on unchanged (mtime, size).
-        new_pair = (st.st_mtime, st.st_size)
+        # Mtime gate (perf-005). Skip re-read on unchanged (mtime_ns, size).
+        # ``st_mtime_ns`` (not ``st_mtime``) so a same-second, same-size edit on
+        # a second-resolution filesystem is not a false-negative (CR round-3).
+        new_pair = (st.st_mtime_ns, st.st_size)
         if self._cached_mtime_size == new_pair:
             return
 
