@@ -27,31 +27,35 @@ _CONCRETE_HANDLERS = (
 )
 
 
+def _except_swallows(handler: ast.ExceptHandler) -> str | None:
+    """Return a swallow description for ``handler``, or ``None`` if it propagates.
+
+    An except body swallows if NO ``raise`` appears anywhere within it (including
+    nested blocks) AND its FINAL statement ends the clause without propagating — a
+    trailing ``pass``, bare ``return``, or ``return None``. Checking the *last*
+    statement (not only a single-statement body) catches the multi-statement
+    swallow ``except: log(...); return`` the earlier single-stmt guard missed.
+    """
+    if any(isinstance(stmt, ast.Raise) for stmt in ast.walk(handler)):
+        return None
+    final_stmt = handler.body[-1] if handler.body else None
+    if isinstance(final_stmt, ast.Pass):
+        return "`except: ...; pass`"
+    if isinstance(final_stmt, ast.Return) and (
+        final_stmt.value is None
+        or (isinstance(final_stmt.value, ast.Constant) and final_stmt.value.value is None)
+    ):
+        return "`except: ...; return None`"
+    return None
+
+
 def _swallows(handler_node: ast.AST) -> list[str]:
     """Return a list of swallowing-except descriptions found in ``handler_node``."""
-    offences: list[str] = []
-    for node in ast.walk(handler_node):
-        if not isinstance(node, ast.ExceptHandler):
-            continue
-        body = node.body
-        # An except body swallows if NO ``raise`` appears anywhere within it
-        # (including nested blocks, via ``ast.walk``) AND its FINAL statement
-        # ends the clause without propagating — a trailing ``pass``, bare
-        # ``return``, or ``return None``. Checking the *last* statement (not
-        # only a single-statement body) catches the multi-statement swallow
-        # ``except: log(...); return`` that the earlier single-stmt guard missed.
-        has_raise = any(isinstance(stmt, ast.Raise) for stmt in ast.walk(node))
-        if has_raise:
-            continue
-        final_stmt = body[-1] if body else None
-        if isinstance(final_stmt, ast.Pass):
-            offences.append("`except: ...; pass`")
-        elif isinstance(final_stmt, ast.Return) and (
-            final_stmt.value is None
-            or (isinstance(final_stmt.value, ast.Constant) and final_stmt.value.value is None)
-        ):
-            offences.append("`except: ...; return None`")
-    return offences
+    return [
+        offence
+        for node in ast.walk(handler_node)
+        if isinstance(node, ast.ExceptHandler) and (offence := _except_swallows(node)) is not None
+    ]
 
 
 def test_handlers_module_has_no_swallowing_except() -> None:
@@ -62,7 +66,8 @@ def test_handlers_module_has_no_swallowing_except() -> None:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "process":
             found = _swallows(node)
             if found:
-                offences[ast.dump(node)[:40]] = found
+                # Human-readable, collision-resistant key: method name + line.
+                offences[f"{node.name}:L{node.lineno}"] = found
     assert offences == {}, f"comms handler process() bodies swallow exceptions: {offences}"
 
 
