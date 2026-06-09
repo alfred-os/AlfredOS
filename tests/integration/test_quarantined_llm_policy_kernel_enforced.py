@@ -92,9 +92,19 @@ def _real_policy_body_with_test_binds(plugin_dir: Path) -> str:
         str(Path(os.path.realpath(sys.executable)).parents[1]),
         str(plugin_dir),
     }
-    for root in sorted(interp_roots):
-        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin")):
-            ro_binds.append((root, root))
+    appended_roots = [
+        root
+        for root in sorted(interp_roots)
+        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin"))
+    ]
+    # finding-3 (PR #231): a venv-layout shift must NEVER let an appended test
+    # bind resolve under /etc or /bin and silently widen the sandbox's read
+    # surface. Fail loud here rather than quietly binding host secrets.
+    assert not any(
+        os.path.realpath(root).startswith(("/etc", "/bin")) for root in appended_roots
+    ), f"test bind resolves under /etc or /bin — would widen the sandbox: {appended_roots}"
+    for root in appended_roots:
+        ro_binds.append((root, root))
 
     binds_toml = ",\n  ".join(f'["{src}", "{dst}"]' for src, dst in ro_binds)
     unshare_toml = ", ".join(f'"{ns}"' for ns in shipped.get("unshare", []))
@@ -246,8 +256,12 @@ def test_quarantined_llm_cannot_read_host_etc_passwd(tmp_path: Path) -> None:
     )
     manifest, policy_dir = _fixture_manifest(tmp_path)
     result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
-    assert "READ_OK" not in result.stdout, "real policy leaked host /etc/passwd"
+    # finding-1: rc==0 proves the sandbox started; the affirmative BLOCKED
+    # sentinel proves the probe ran and the read was refused — not a vacuous
+    # empty-stdout pass from a sandbox that never started.
     assert result.returncode == 0, result.stderr
+    assert "READ_OK" not in result.stdout, "real policy leaked host /etc/passwd"
+    assert "BLOCKED" in result.stdout, "stub did not run / read was not refused"
 
 
 def test_quarantined_llm_cannot_exec_host_bin_sh(tmp_path: Path) -> None:
@@ -264,7 +278,13 @@ def test_quarantined_llm_cannot_exec_host_bin_sh(tmp_path: Path) -> None:
     )
     manifest, policy_dir = _fixture_manifest(tmp_path)
     result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
+    # finding-1: a negative-only assertion passes VACUOUSLY if the sandbox never
+    # starts (empty stdout). rc==0 proves it started; BLOCKED proves the probe
+    # ran and the exec was refused — so a real exec-containment regression is
+    # visible, not silently green.
+    assert result.returncode == 0, result.stderr
     assert "EXEC_OK" not in result.stdout, "real policy did NOT contain /bin/sh exec"
+    assert "BLOCKED" in result.stdout, "stub did not run / exec was not refused"
 
 
 def test_launcher_invokes_bwrap_not_unshared_net(tmp_path: Path) -> None:
