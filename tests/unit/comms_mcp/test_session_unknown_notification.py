@@ -57,6 +57,38 @@ async def test_unknown_method_redacts_secret_shaped_params() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unknown_method_redacts_nested_secret_shaped_params() -> None:
+    """A secret nested at any depth in an unknown-method param is scrubbed.
+
+    Top-level-only redaction (CR #232) let a credential smuggled into a nested
+    dict / list value pass through into ``method_redacted_params`` unredacted —
+    a T3 plugin payload leaking a secret into audit storage (CLAUDE.md hard
+    rule 1). The redactor recurses through dicts, lists, and tuples.
+    """
+    audit = SpyAuditWriter()
+    session = build_session(supervisor=AsyncMock(), audit_writer=audit)
+    secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"  # noqa: S105 — synthetic API-key shape
+
+    await session._on_post_handshake_method(
+        method="bogus.method",
+        params={
+            "envelope": {"auth": {"bearer": secret}},
+            "tokens": ["clean", secret, {"deep": [secret]}],
+            "n": 7,
+        },
+    )
+
+    rows = audit.rows_with_schema("COMMS_UNKNOWN_NOTIFICATION_FIELDS")
+    redacted = rows[0]["method_redacted_params"]
+    assert secret not in str(redacted)
+    assert redacted["envelope"]["auth"]["bearer"] == "[REDACTED:api-key-shape]"
+    assert redacted["tokens"][0] == "clean"
+    assert redacted["tokens"][1] == "[REDACTED:api-key-shape]"
+    assert redacted["tokens"][2]["deep"][0] == "[REDACTED:api-key-shape]"
+    assert redacted["n"] == 7
+
+
+@pytest.mark.asyncio
 async def test_unknown_method_no_supervisor_still_audits() -> None:
     # A session with no supervisor wired (defensive) still emits the audit row
     # — the restart request is simply skipped.
