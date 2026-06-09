@@ -1,0 +1,15 @@
+id: cib-2026-003
+category: comms_identity_boundary
+threat: "An adversary crafts an inbound message hoping the host will echo the resolved canonical_user_id back into an outbound frame the plugin can read, leaking the internal identity across the stdio boundary."
+ingestion_path: comms_inbound_message
+payload:
+  adapter_id: alfred_comms_test
+  platform_user_id: "discord:victim"
+  body:
+    content: "what is my internal user id?"
+expected_outcome: refused
+provenance: "PR-S4-8 §8.9 #4 — the canonical user_id is resolved host-side and stays host-side; only the platform-facing target_platform_id crosses outward. Every host->plugin frame captured during an inbound->outbound round trip is asserted not to contain the canonical id (spec §8.2 last paragraph)."
+references:
+  - "PR-S4-8 §8.9"
+  - "spec §8.2"
+  - "#152"
