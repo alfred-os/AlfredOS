@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -264,12 +265,16 @@ async def _spawn_plugin() -> asyncio.subprocess.Process:
     failure message rather than letting them disappear into the CI log
     noise.
     """
+    # ``ALFRED_ENV=test`` so the production-gated ``inject_inbound`` trigger is
+    # permitted (plan §10 risk row — refused outside the dev/test allowlist).
+    env = {**os.environ, "ALFRED_ENV": "test"}
     return await asyncio.create_subprocess_exec(
         sys.executable,
         str(MAIN_PATH),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
 
 
@@ -289,19 +294,16 @@ async def _close_plugin(proc: asyncio.subprocess.Process) -> None:
 
 
 @pytest.mark.integration
-async def test_comms_test_plugin_lifecycle_start_emits_inbound_message() -> None:
-    """``lifecycle.start`` triggers the plugin → host ``inbound.message`` notification.
+async def test_comms_test_plugin_inject_inbound_emits_inbound_message() -> None:
+    """The ``inject_inbound`` trigger drives the plugin → host ``inbound.message``.
 
-    Spec §9.1 + comms-001: the notification payload MUST carry
-    ``platform``, ``platform_user_id``, ``content``, and ``language``.
-    The plugin emits a fixture frame after the lifecycle response so
-    the host observes the response → notification ordering (matches the
-    plugin docstring §"comms-003: emit ... after the lifecycle handler
-    runs so the host observes the response → notification ordering").
-
-    comms-003: this pins the plugin → host direction. The plugin is the
-    origin of the ``inbound.message`` traffic; the host is the
-    receiver.
+    PR-S4-8: the reference plugin is upgraded to a full-lifecycle adapter.
+    ``lifecycle.start`` no longer auto-emits — inbound traffic is driven by the
+    internal ``alfred_comms_test/inject_inbound`` test trigger, which manufactures
+    an ``inbound.message`` notification matching the host-side
+    ``InboundMessageNotification`` wire schema (``adapter_id``,
+    ``platform_user_id``, ``body``, ``sub_payload_refs``, ``received_at``,
+    ``addressing_signal``). comms-003: this pins the plugin → host direction.
     """
     if not MAIN_PATH.exists():  # pragma: no cover — caught by handshake test
         pytest.skip(f"reference plugin missing at {MAIN_PATH}")
@@ -314,40 +316,40 @@ async def test_comms_test_plugin_lifecycle_start_emits_inbound_message() -> None
             proc.stdin,
             {"jsonrpc": "2.0", "id": 1, "method": "lifecycle.start", "params": {}},
         )
-
-        # The plugin sends two frames in order: the response, then the
-        # inbound.message notification. Both are line-delimited; read
-        # them sequentially.
         response = await _read_line(proc.stdout)
-        assert response.get("id") == 1, f"expected id=1 on lifecycle.start response, got {response}"
-        assert response.get("result", {}).get("status") == "started"
+        assert response.get("id") == 1, f"expected id=1 on lifecycle.start, got {response}"
+        assert response.get("result", {}).get("ok") is True
 
+        # Drive the inbound injection trigger (notification, no response id).
+        await _send_line(
+            proc.stdin,
+            {
+                "jsonrpc": "2.0",
+                "method": "alfred_comms_test/inject_inbound",
+                "params": {"content": "hello from the platform"},
+            },
+        )
         notification = await _read_line(proc.stdout)
         assert notification.get("method") == "inbound.message", (
             f"expected inbound.message notification, got {notification}"
         )
-        # Spec §9.1 + comms-001 wire-shape pins.
         assert "id" not in notification, "inbound.message MUST be a notification (no id)"
         params = notification.get("params", {})
-        assert params.get("platform") == "test"
-        assert params.get("platform_user_id") == "echo-plugin"
-        assert params.get("content") == "echo plugin started"
-        # BCP-47 language tag (CLAUDE.md i18n rule #3).
-        assert params.get("language") == "en-US"
+        assert params.get("adapter_id") == "alfred_comms_test"
+        assert params.get("body") == {"content": "hello from the platform"}
+        assert params.get("addressing_signal") == "dm"
+        assert params.get("sub_payload_refs") == []
     finally:
         await _close_plugin(proc)
 
 
 @pytest.mark.integration
 async def test_comms_test_plugin_adapter_health_ok_after_start() -> None:
-    """``adapter.health`` returns ``status=ok`` once the lifecycle is running.
+    """``adapter.health`` reports ``ok=true`` once ``lifecycle.start`` has run.
 
-    The reference plugin's :class:`AdapterHealthResponse`-shaped payload
-    reports ``"ok"`` while running and ``"degraded"`` while stopped.
-    Driving ``lifecycle.start`` first transitions the state so the
-    health probe returns ``"ok"`` — pinning the spec §9.1 + comms-009
-    expectation that ``adapter.health`` is consultable post-start and
-    reports the Slice-3 narrow ``{"ok", "degraded"}`` Literal.
+    The full-lifecycle adapter's ``HealthReport``-shaped payload reports
+    ``ok=true`` while running. ``lifecycle.start`` no longer auto-emits an
+    inbound notification, so the health probe follows the start response directly.
     """
     if not MAIN_PATH.exists():  # pragma: no cover — caught by handshake test
         pytest.skip(f"reference plugin missing at {MAIN_PATH}")
@@ -356,15 +358,12 @@ async def test_comms_test_plugin_adapter_health_ok_after_start() -> None:
     try:
         assert proc.stdin is not None and proc.stdout is not None
 
-        # Start, then drain the response + inbound.message notification.
         await _send_line(
             proc.stdin,
             {"jsonrpc": "2.0", "id": 1, "method": "lifecycle.start", "params": {}},
         )
-        await _read_line(proc.stdout)  # response
-        await _read_line(proc.stdout)  # inbound.message notification
+        await _read_line(proc.stdout)  # lifecycle.start response
 
-        # Probe health.
         await _send_line(
             proc.stdin,
             {"jsonrpc": "2.0", "id": 2, "method": "adapter.health", "params": {}},
@@ -372,8 +371,10 @@ async def test_comms_test_plugin_adapter_health_ok_after_start() -> None:
         health = await _read_line(proc.stdout)
         assert health.get("id") == 2
         payload = health.get("result", {})
-        assert payload.get("status") == "ok", (
-            f"expected status=ok after lifecycle.start, got payload={payload}"
+        assert payload.get("ok") is True, (
+            f"expected ok=true after lifecycle.start, got payload={payload}"
         )
+        assert payload.get("queue_depth") == 0
+        assert payload.get("error_count") == 0
     finally:
         await _close_plugin(proc)
