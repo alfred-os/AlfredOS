@@ -2065,7 +2065,7 @@ msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
 "matched."
 
-#: src/alfred/plugins/manifest.py:85 src/alfred/plugins/manifest.py:246
+#: src/alfred/plugins/manifest.py:85 src/alfred/plugins/manifest.py:252
 msgid "plugin.manifest_sandbox_policy_refs_required"
 msgstr ""
 "Plugin manifest [sandbox] kind={kind} requires a non-empty policy_refs "
@@ -2117,6 +2117,10 @@ msgid "plugin.manifest_sandbox_policy_refs_unknown_os"
 msgstr ""
 "Plugin manifest [sandbox] policy_refs has unknown OS key {got} (valid: "
 "{valid})."
+
+#: src/alfred/plugins/manifest.py:245
+msgid "plugin.manifest_sandbox_policy_refs_value_type"
+msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
 
 #: src/alfred/plugins/stdio_transport.py:631
 #: src/alfred/plugins/web_fetch/errors.py:236
