@@ -73,12 +73,27 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
 
 ### Positive
 
-- PRD §5 line 117 invariant fully satisfied from Slice 4 onwards.
-- Outbound network calls from the quarantined LLM are kernel-enforced against
-  the declared allowlist, not just policy-checked.
+- PRD §5 line 117 invariant satisfied from Slice 4 onwards **for the
+  filesystem, process, and namespace axes** — kernel-enforced via `bwrap`
+  (read-only binds, no `/etc`/`/bin`, `--unshare-{pid,uts,cgroup,ipc}`,
+  `die_with_parent`). Empirically verified against the real quarantined-LLM
+  policy bytes (PR-S4-7).
 
 ### Negative
 
+- **Network egress is NOT yet kernel-enforced (amended 2026-06-09, PR-S4-7).**
+  The quarantined LLM makes its own provider HTTPS call (provider key delivered
+  over fd 3), and the Slice-4 `SandboxPolicy` schema cannot yet express a
+  provider-only egress allowlist — so the Linux policy does NOT `unshare net`
+  and egress is currently **unrestricted**. This is acceptable as an interim
+  state ONLY because the orchestrator does not yet spawn the quarantined LLM
+  end-to-end (the policy files are inert — verified: `src/alfred/core/` drives
+  no quarantine extraction, `PluginLifecycle` performs no subprocess spawn).
+  The provider-only egress allowlist + HTTPS-downgrade refusal are tracked in
+  **[#230](https://github.com/MrReasonable/AlfredOS/issues/230) and are a
+  release-blocker before the quarantined LLM is wired live.** Until #230 lands,
+  the earlier claim that outbound calls are "kernel-enforced against the
+  declared allowlist" does NOT hold and is superseded by this amendment.
 - Per-OS sandbox policy files must be maintained and tested. The Linux policy
   is the AlfredOS primary target; macOS and Windows policies are best-effort.
 - The `bwrap` cold-start overhead adds ~50-100ms to the subprocess spawn
