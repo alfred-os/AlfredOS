@@ -157,9 +157,10 @@ class AuditEntry(Base):
             # Slice-4 (migration 0016) — PR-S4-8 comms-MCP inbound + session
             # dispatch dispositions: T3 promotion, first-contact binding,
             # burst-limiter backpressure (capped) + hard drop, post-handshake
-            # allow, handler failure.
+            # allow, handler failure, and the supervisor restart-request row
+            # whose only production caller is the comms-wired session.
             "'promoted', 'binding_requested', 'dropped', 'capped', "
-            "'allowed', 'failed')",
+            "'allowed', 'failed', 'restart_requested')",
             name="ck_audit_log_result",
         ),
     )
