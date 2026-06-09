@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from alfred.supervisor.breaker import BreakerState, CircuitBreaker
+from alfred.supervisor.breaker import BreakerState
 from alfred.supervisor.core import Supervisor
 from tests.helpers.policies import _StubPoliciesSnapshotRef
 

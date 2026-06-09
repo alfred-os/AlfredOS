@@ -31,14 +31,9 @@ class SpyAuditWriter:
         missing = fields - subject.keys()
         extra = subject.keys() - fields
         if missing or extra:
-            msg = (
-                f"append_schema {schema_name}: missing={sorted(missing)} "
-                f"extra={sorted(extra)}"
-            )
+            msg = f"append_schema {schema_name}: missing={sorted(missing)} extra={sorted(extra)}"
             raise AssertionError(msg)
-        self.schema_rows.append(
-            {"schema_name": schema_name, "event": event, **subject}
-        )
+        self.schema_rows.append({"schema_name": schema_name, "event": event, **subject})
 
     async def append(
         self,
