@@ -52,7 +52,7 @@ drift is a release-blocker.
 | TOML schema-downgrade against `sandbox_policy_registry` | PR-S4-7 (`sbx-2026-010`) |
 | fd-3 partial-write / pipe-buffer-leak on provider-key channel | PR-S4-6 (`sbx-2026-008`) |
 | Sandbox-info handshake mismatch (`kind:none` posing as `kind:full`) | PR-S4-6 (`sbx-2026-009`) |
-| bwrap version drift (bwrap absent / below the version floor) | PR-S4-6 / PR-S4-0b (`sbx-2026-008` boot probe) |
+| bwrap version drift (bwrap absent / below the version floor) | PR-S4-1 boot probe (#228) — TBD, no dedicated payload yet (`sbx-2026-008` is fd-3 partial-write, above) |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.

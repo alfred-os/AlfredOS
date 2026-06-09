@@ -176,6 +176,12 @@ def _spawn_with_fd3(
         saved_fd3 = None
     os.dup2(read_fd, 3)
     os.set_inheritable(3, True)  # noqa: FBT003 -- stdlib API: bool is positional
+    # Drop the original read end NOW — fd 3 is an independent copy that Popen
+    # inherits. Guard ``read_fd == 3`` (dup2 was then a no-op and read_fd IS
+    # fd 3, owned by the finally below) to avoid a double-close → EBADF that
+    # would fail the test on ambient fd layout rather than behaviour.
+    if read_fd != 3:
+        os.close(read_fd)
     try:
         proc = subprocess.Popen(  # noqa: S603 — repo-owned launcher script path
             [str(_LAUNCHER), "alfred.fixture", sys.executable, str(stub)],
@@ -190,13 +196,14 @@ def _spawn_with_fd3(
             cwd=str(_REPO_ROOT),
         )
     finally:
-        # Restore (or close) this process's fd 3 and drop the original read end.
+        # Restore this process's fd 3 (or close it). This is the only remaining
+        # copy of the read end in the parent; closing it is correct — the child
+        # holds its own fd 3 via pass_fds.
         if saved_fd3 is not None:
             os.dup2(saved_fd3, 3)
             os.close(saved_fd3)
         else:
             os.close(3)
-        os.close(read_fd)
     # CR #229 R2 finding-7: if os.write raises (e.g. EPIPE when the launcher
     # dies early), write_fd would leak. try/finally guarantees the close.
     #
