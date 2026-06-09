@@ -103,6 +103,19 @@ class Settings(BaseSettings):
     # the docstring contract at the field level).
     working_memory_pool_max: int | None = Field(default=None, ge=50)
 
+    # PR-S4-8 (#152, perf-003): per-adapter cap on concurrent inbound
+    # notification handlers. ``AlfredPluginSession`` allocates one
+    # ``asyncio.BoundedSemaphore(value=comms_max_in_flight_notifications)``
+    # per session, so adapter A's rate-limit storm cannot starve adapter B
+    # (the semaphore is per-session, not process-wide). Higher values trade
+    # memory for throughput; back-pressure begins at this cap and flows into
+    # the stdio reader's pending queue, then into kernel-pipe back-pressure
+    # once the read buffer fills. ``ge=1`` because a zero cap would deadlock
+    # every inbound dispatch; ``le=1024`` bounds the worst-case concurrent
+    # handler fan-out per adapter. Override via
+    # ALFRED_COMMS_MAX_IN_FLIGHT_NOTIFICATIONS.
+    comms_max_in_flight_notifications: int = Field(default=32, ge=1, le=1024)
+
     # ADR-0021 #171: cadence of the supervisor's _proposal_dispatch_loop.
     # 30 s default — operator-action latency target per ADR-0021
     # §Consequences (Negative). ``gt=0`` because a zero or negative
