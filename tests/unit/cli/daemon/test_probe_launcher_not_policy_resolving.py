@@ -9,6 +9,7 @@ policy-resolving signature, so a prod deploy on it now boots.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -127,3 +128,78 @@ async def test_self_test_nonzero_exit_returns_stub(
         fake,
     )
     assert await _launcher_self_test_impl() == _STUB_SIGNATURE
+
+
+@pytest.mark.asyncio
+async def test_self_test_hang_times_out_to_stub(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """err (CR PR #229 finding-2): a launcher whose --self-test HANGS must NOT
+    stall boot forever. The probe bounds the subprocess with a short timeout; on
+    expiry it kills the process group and returns the STUB signature so
+    production refuses the boot loudly (fail closed) rather than hanging.
+
+    The fake launcher sleeps far longer than the (overridden, tiny) timeout. The
+    call must return the stub signature within the timeout window, not block.
+    """
+    fake = tmp_path / "hang-launcher.sh"
+    fake.write_text("#!/bin/sh\nsleep 30\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._daemon_probes._LAUNCHER_PATH",
+        fake,
+    )
+    monkeypatch.setattr(
+        "alfred.cli.daemon._daemon_probes._SELF_TEST_TIMEOUT_S",
+        0.5,
+    )
+    # asyncio.timeout would also catch a regression where the impl itself never
+    # returns; 5s is comfortably above the 0.5s self-test timeout.
+    async with asyncio.timeout(5):
+        result = await _launcher_self_test_impl()
+    assert result == _STUB_SIGNATURE
+
+
+@pytest.mark.asyncio
+async def test_self_test_hang_does_not_orphan_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout path kills the spawned process group — no orphaned child of
+    the hung self-test survives the probe."""
+    marker = tmp_path / "still_alive.marker"
+    # The child writes the marker only if it survives past the timeout window.
+    fake = tmp_path / "hang-launcher.sh"
+    fake.write_text(f"#!/bin/sh\nsleep 2\ntouch {marker}\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(
+        "alfred.cli.daemon._daemon_probes._LAUNCHER_PATH",
+        fake,
+    )
+    monkeypatch.setattr(
+        "alfred.cli.daemon._daemon_probes._SELF_TEST_TIMEOUT_S",
+        0.3,
+    )
+    result = await _launcher_self_test_impl()
+    assert result == _STUB_SIGNATURE
+    # Wait past when the child WOULD have touched the marker had it survived.
+    await asyncio.sleep(2.5)
+    assert not marker.exists(), "self-test child survived the timeout — it was not killed"
+
+
+def test_kill_process_group_falls_back_to_pid_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If ``os.killpg`` raises (group lookup races a just-exited leader), the
+    per-pid ``proc.kill()`` fallback fires so the process is still reaped."""
+    from unittest.mock import MagicMock
+
+    from alfred.cli.daemon._daemon_probes import _kill_process_group
+
+    def _boom(*_args: object) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr("alfred.cli.daemon._daemon_probes.os.killpg", _boom)
+    proc = MagicMock()
+    proc.pid = 4242
+    _kill_process_group(proc)
+    proc.kill.assert_called_once()
