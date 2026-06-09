@@ -22,17 +22,13 @@ async def test_from_policy_reads_capacity_and_refill() -> None:
     policy = BurstLimiterPolicy(capacity_tokens=3, refill_seconds=10.0)
     limiter = BurstLimiter.from_policy(policy, audit_writer=SpyAuditWriter())
     # capacity=3 -> three instant acquires, then tokens_remaining hits 0.
-    results = [
-        await limiter.acquire(canonical_user_id="u", persona="alfred") for _ in range(3)
-    ]
+    results = [await limiter.acquire(canonical_user_id="u", persona="alfred") for _ in range(3)]
     assert all(isinstance(r, Acquired) for r in results)
     assert results[-1].tokens_remaining == 0  # type: ignore[union-attr]
 
 
 async def test_from_policy_default_drop_after_seconds() -> None:
-    limiter = BurstLimiter.from_policy(
-        BurstLimiterPolicy(), audit_writer=SpyAuditWriter()
-    )
+    limiter = BurstLimiter.from_policy(BurstLimiterPolicy(), audit_writer=SpyAuditWriter())
     assert limiter.drop_after_seconds == 30.0
 
 

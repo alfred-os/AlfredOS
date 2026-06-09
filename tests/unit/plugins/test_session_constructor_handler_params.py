@@ -130,8 +130,12 @@ async def test_for_comms_adapter_allocates_fresh_per_session_state() -> None:
         "rate_limit_handler": MagicMock(spec=RateLimitHandler),
         "crash_handler": MagicMock(spec=CrashHandler),
     }
-    session_a = await AlfredPluginSession.for_comms_adapter(adapter_id="alfred_comms_test", **common)
-    session_b = await AlfredPluginSession.for_comms_adapter(adapter_id="alfred_comms_test", **common)
+    session_a = await AlfredPluginSession.for_comms_adapter(
+        adapter_id="alfred_comms_test", **common
+    )
+    session_b = await AlfredPluginSession.for_comms_adapter(
+        adapter_id="alfred_comms_test", **common
+    )
     # perf-003: per-adapter semaphore — two sessions hold distinct instances.
     assert session_a._dispatch_semaphore is not session_b._dispatch_semaphore
     assert session_a._error_counter is not session_b._error_counter

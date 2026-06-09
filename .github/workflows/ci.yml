@@ -512,6 +512,22 @@ jobs:
           uv run coverage report \
             --include='src/alfred/plugins/errors.py,src/alfred/plugins/transport.py,src/alfred/plugins/manifest.py,src/alfred/plugins/inbound_scanner.py,src/alfred/plugins/content_store_base.py,src/alfred/plugins/stdio_transport.py,src/alfred/plugins/session.py,src/alfred/plugins/_observability.py' \
             --fail-under=100
+      - name: Comms-MCP trust-boundary 100% line+branch coverage (combined)
+        # PR-S4-8 (#152) host-side comms-MCP foundations (spec §8). Every file
+        # below is a trust-boundary seam: the wire-format owner, the inbound
+        # entrypoint enforcing resolution -> burst-gate -> quarantined_extract,
+        # the host-owned classifier registry + scanner, the notification
+        # handlers, the per-(user, persona) burst limiter, and the seam-bridge
+        # bootstrap that assembles the host (the canonical id never crosses the
+        # stdio boundary outward). ``session.py``'s ``_on_post_handshake_method``
+        # dispatch-arm delta is covered by the Plugins subsystem gate above.
+        # Chained ``&&`` hashFiles guard per the plugins/supervisor precedent so
+        # the gate no-ops cleanly on a branch where these files do not exist yet.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/protocol.py') != '' && hashFiles('src/alfred/comms_mcp/inbound.py') != '' && hashFiles('src/alfred/comms_mcp/inbound_scanner.py') != '' && hashFiles('src/alfred/comms_mcp/classifier_registry.py') != '' && hashFiles('src/alfred/comms_mcp/handlers.py') != '' && hashFiles('src/alfred/comms_mcp/bootstrap.py') != '' && hashFiles('src/alfred/comms_mcp/observability.py') != '' && hashFiles('src/alfred/orchestrator/burst_limiter.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/comms_mcp/protocol.py,src/alfred/comms_mcp/inbound.py,src/alfred/comms_mcp/inbound_scanner.py,src/alfred/comms_mcp/classifier_registry.py,src/alfred/comms_mcp/handlers.py,src/alfred/comms_mcp/bootstrap.py,src/alfred/comms_mcp/observability.py,src/alfred/orchestrator/burst_limiter.py' \
+            --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
         # surface (spec §10). Every file enumerated below is either a

@@ -22,8 +22,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 
 def _count_yaml_payloads(category_dir: Path) -> int:
     """Return the number of ``*.yaml`` payload files under ``category_dir``.
