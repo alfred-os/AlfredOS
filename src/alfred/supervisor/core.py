@@ -256,11 +256,6 @@ class Supervisor:
         self._gate = gate
         self._audit = audit
         self._breakers: dict[str, CircuitBreaker] = {}
-        # Per-tick dedup for ``request_plugin_restart`` (Task 45). Cleared at
-        # each tick boundary via :meth:`_reset_restart_dedup` so a handler-
-        # failure storm within one tick emits exactly one restart-requested
-        # row per ``(adapter_id, reason)``.
-        self._restart_requested_this_tick: set[tuple[str, str]] = set()
         # PluginLifecycle and CapabilityGateMonitor share the gate and
         # audit references; both are bound at construction so the
         # supervisor surface stays narrow (start/stop/register/reset).
@@ -938,24 +933,21 @@ class Supervisor:
         adapter's breaker to ``OPEN`` (marking it unhealthy). The supervisor's
         existing restart scheduler spawns a fresh adapter on its next tick.
 
-        Idempotent per tick (Task 45): repeat requests for the same
-        ``(adapter_id, reason)`` within a single tick emit exactly one row —
-        defence against a handler-failure storm spamming the audit graph. The
-        per-tick dedup set is cleared at the tick boundary
-        (:meth:`_reset_restart_dedup`).
+        Every call emits a row (H2 / #152). An earlier draft deduplicated
+        repeat ``(adapter_id, reason)`` requests within a "tick" — but this
+        slice's Supervisor has no tick boundary that resets the dedup set, and
+        the only production caller (the comms session) invokes this once per
+        offending notification. A permanent dedup would therefore go SILENT on
+        a recurring crash->restart->same-crash loop after the first row. A
+        duplicate audit row is strictly better than a silent gap (CLAUDE.md
+        hard rule 7 — no silent failures on a security path), so the dedup is
+        removed: the audit graph is the operator's restart-storm signal.
 
         Raises:
             ValueError: ``reason`` is not a known :data:`PluginRestartReason`.
         """
         if reason not in _PLUGIN_RESTART_REASONS:
             raise ValueError(t("supervisor.request_plugin_restart.unknown_reason", reason=reason))
-
-        dedup_key = (adapter_id, reason)
-        if dedup_key in self._restart_requested_this_tick:
-            # Already requested this exact restart this tick — no duplicate
-            # row, no duplicate breaker churn.
-            return
-        self._restart_requested_this_tick.add(dedup_key)
 
         # Mark the adapter unhealthy so the breaker reflects the restart
         # request (a previously-CLOSED adapter trips OPEN; an already-OPEN one
@@ -984,16 +976,6 @@ class Supervisor:
             cost_actual_usd=0.0,
             trace_id=correlation_id,
         )
-
-    def _reset_restart_dedup(self) -> None:
-        """Clear the per-tick restart-request dedup set (Task 45).
-
-        Called at each supervisor tick boundary so a restart request that was
-        deduplicated within one tick can re-request (and re-audit) on the next
-        tick — the dedup is a within-tick storm guard, not a permanent
-        suppression.
-        """
-        self._restart_requested_this_tick.clear()
 
     async def load_all_breakers(self) -> None:
         """Restore every registered breaker's state from Postgres.
