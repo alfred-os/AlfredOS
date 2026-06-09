@@ -3,7 +3,7 @@
 Exercises the bash launcher end-to-end against fixture manifests + a fake
 bwrap, covering: --self-test, environment read, dev-escape-hatch production
 refusal (sec-1 truthy parity), and the kind:full/none/stub branches including
-the --sync-fd 3 bwrap invocation and the cross-OS matrix (devops-2 _uname
+the --keep-fd 3 bwrap invocation and the cross-OS matrix (devops-2 _uname
 shim).
 """
 
@@ -153,12 +153,12 @@ def test_unsandboxed_falsy_not_treated_as_set(run_launcher, tmp_path, falsy: str
 
 
 # --------------------------------------------------------------------------
-# kind:full → bwrap --sync-fd 3
+# kind:full → bwrap --keep-fd 3
 # --------------------------------------------------------------------------
 
 
 @_requires_jq
-def test_kind_full_invokes_bwrap_with_sync_fd_3(run_launcher, tmp_path, echo_bwrap) -> None:
+def test_kind_full_invokes_bwrap_with_keep_fd_3(run_launcher, tmp_path, echo_bwrap) -> None:
     # FAKE_UNAME=Linux so the Linux bwrap branch runs on any host (the real
     # bwrap binary is Linux-only; the fake echo-bwrap is portable).
     manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
@@ -175,7 +175,7 @@ def test_kind_full_invokes_bwrap_with_sync_fd_3(run_launcher, tmp_path, echo_bwr
     )
     assert result.returncode == 0, result.stderr
     assert "BWRAP_ARGS:" in result.stdout
-    assert "--sync-fd 3" in result.stdout
+    assert "--keep-fd 3" in result.stdout
 
 
 @_requires_jq

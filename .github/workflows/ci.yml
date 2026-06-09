@@ -345,29 +345,30 @@ jobs:
         # is the launcher's JSON reader. Without these the test silently
         # skips and the gate is paper-only. The alfred-core runtime image
         # (PR-S4-0b) pins bubblewrap 0.8.0; ubuntu-latest's apt bubblewrap is
-        # >= 0.6 which has --sync-fd, sufficient for the resolver test.
+        # >= 0.6 which has --keep-fd, sufficient for the resolver test.
         #
         # devops (CR PR #229 finding-5): the apt install is version-unbounded.
-        # The launcher/translator emit `--sync-fd FD`, which bwrap 0.9.0+
-        # RENAMES to `--keep-fd` (#218 / ADR-0015). A future ubuntu-latest
-        # shipping bwrap >= 0.9 would silently break the resolver test (the
-        # flag would be unrecognised). The version-drift guard below asserts
-        # the installed bwrap still advertises `--sync-fd` so drift fails
-        # LOUDLY here rather than mis-running the test. The #228 boot-probe
-        # owns the runtime version check.
+        # The launcher/translator emit `--keep-fd FD` — bwrap's fd-inheritance
+        # flag, present since 0.5.0 and still current in 0.9.0 (ADR-0015,
+        # corrects the #218 misdiagnosis: --sync-fd is bwrap's INTERNAL
+        # sync-protocol fd, a different flag, and must NOT be used for key
+        # delivery). The version-drift guard below asserts the installed bwrap
+        # still advertises `--keep-fd` so a stripped/forked bwrap fails LOUDLY
+        # here rather than mis-running the test. The #228 boot-probe owns the
+        # runtime version check.
         if: steps.check.outputs.has_integration == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
-          # Loud version-drift guard: the resolver test emits `--sync-fd`.
-          if ! bwrap --help 2>&1 | grep -q -- '--sync-fd'; then
-            echo "::error::Installed bwrap does not advertise --sync-fd. bwrap >= 0.9 renamed it to --keep-fd (#218 / ADR-0015). Pin bubblewrap to a --sync-fd build or update the launcher/translator flag emission. Failing loudly per CR PR #229 finding-5."
+          # Loud version-drift guard: the resolver test emits `--keep-fd`.
+          if ! bwrap --help 2>&1 | grep -q -- '--keep-fd'; then
+            echo "::error::Installed bwrap does not advertise --keep-fd — the fd-inheritance flag the launcher/translator emit (ADR-0015, present in bwrap 0.5.0+). Pin bubblewrap to a build that ships --keep-fd or update the flag emission. Failing loudly per CR PR #229 finding-5."
             bwrap --help 2>&1 | head -n 40 || true
             exit 1
           fi
-          echo "bwrap advertises --sync-fd — resolver test flag is current."
+          echo "bwrap advertises --keep-fd — resolver test flag is current."
           # Ubuntu 23.10+/24.04 (ubuntu-latest) ships
           # kernel.apparmor_restrict_unprivileged_userns=1, which blocks the
           # unprivileged user-namespace setup bwrap needs — surfacing as

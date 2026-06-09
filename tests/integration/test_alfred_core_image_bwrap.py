@@ -15,7 +15,7 @@ This integration test builds the ``alfred-core`` image and asserts:
 3. ``bwrap --help`` mentions at least one ``--*-fd`` flag from the
    fd-handling family — the PR-S4-6 launcher needs SOME mechanism for
    passing the provider key into the sandbox via fd. Bookworm bwrap
-   0.8.0 ships ``--bind-fd`` / ``--ro-bind-fd`` / ``--sync-fd`` (which
+   0.8.0 ships ``--bind-fd`` / ``--ro-bind-fd`` / ``--keep-fd`` (which
    the launcher uses for the fd-3 provider-key pattern). A future
    bwrap that strips ALL fd-handling flags would silently break that
    pattern; this test catches it.
@@ -178,20 +178,18 @@ def test_bwrap_version_is_bubblewrap_not_stub(
     assert "bubblewrap" in stdout, f"bwrap --version output does not name bubblewrap: {stdout!r}"
 
 
-def test_bwrap_provides_sync_fd_for_fd3_inheritance(
+def test_bwrap_provides_keep_fd_for_fd3_inheritance(
     alfred_core_image: str,
 ) -> None:
-    """``bwrap --help`` lists ``--sync-fd`` — the load-bearing flag.
+    """``bwrap --help`` lists ``--keep-fd`` — the load-bearing flag.
 
     PR-S4-6's launcher inherits fd 3 (the provider key) into the
-    sandbox. Bookworm bwrap 0.8.0 provides ``--sync-fd FD`` ("Keep
-    this fd open while sandbox is running") — the same semantic the
-    PR-S4-6 plan documents as ``--keep-fd`` (which IS the upstream
-    bwrap 0.9.0+ name; Bookworm 0.8.0 uses the older ``--sync-fd``).
-
-    PR-S4-6 plan needs a follow-up amendment to align with the
-    deployed Bookworm flag name. Until then, this test pins the
-    actual flag the launcher must call.
+    sandbox. ``--keep-fd FD`` ("Do not close fd FD") keeps the
+    inherited fd open for the sandboxed child to read; it is present
+    since bubblewrap 0.5.0 and still current in 0.9.0. ``--sync-fd`` is
+    a DIFFERENT flag — bwrap's internal sync-protocol fd — which bwrap
+    consumes/closes and must NOT be used for key delivery (corrects the
+    issue #218 misdiagnosis; see ADR-0015).
 
     Asserts BOTH the inheritance flag AND at least one bind-family
     flag so a future bwrap that strips them silently breaks the build,
@@ -203,8 +201,8 @@ def test_bwrap_provides_sync_fd_for_fd3_inheritance(
         f"stderr: {result.stderr.decode(errors='replace')!r}"
     )
     help_text = result.stdout.decode(errors="replace")
-    assert "--sync-fd" in help_text, (
-        "bwrap missing --sync-fd — PR-S4-6 fd-3 provider-key "
+    assert "--keep-fd" in help_text, (
+        "bwrap missing --keep-fd — PR-S4-6 fd-3 provider-key "
         f"inheritance contract cannot hold. help text:\n{help_text}"
     )
     # bind-fd family corroborates the fd-handling vocabulary; one being

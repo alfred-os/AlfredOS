@@ -45,7 +45,7 @@ _requires_jq = pytest.mark.skipif(
 def test_fixture_runs_full_kind_through_bwrap(launcher_chain_fixture) -> None:
     result = launcher_chain_fixture(_FULL_MANIFEST)
     assert result.returncode == 0, result.stderr
-    assert "--sync-fd 3" in result.stdout
+    assert "--keep-fd 3" in result.stdout
 
 
 @_requires_jq

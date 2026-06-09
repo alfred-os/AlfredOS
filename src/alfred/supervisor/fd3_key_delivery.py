@@ -2,7 +2,7 @@
 
 The Supervisor delivers the quarantined provider key to a sandboxed plugin
 out-of-band over fd 3 (the launcher passes fd 3 through to the plugin via
-``bwrap --sync-fd 3``; the launcher itself never reads it). The wire framing
+``bwrap --keep-fd 3``; the launcher itself never reads it). The wire framing
 is a 4-byte big-endian length prefix followed by the key bytes.
 
 sec-3 (round-4) hardening:
