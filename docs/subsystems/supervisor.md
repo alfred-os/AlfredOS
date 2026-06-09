@@ -297,16 +297,85 @@ Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
 
 ## Hookpoints
 
-Six hookpoints registered by `Supervisor.__init__()`. All `fail_closed=False`.
+Nine hookpoints registered by `Supervisor._register_hookpoints()`. All carry
+`carrier_tier=T0` (system-internal observability). All `fail_closed=False`
+except `supervisor.plugin.sandbox_refused` (a subscriber timeout there must
+not let a refused spawn slip through).
 
-| Hookpoint | `subscribable_tiers` | `refusable_tiers` | Fires when |
+| Hookpoint | `subscribable_tiers` | `fail_closed` | Fires when |
 |---|---|---|---|
-| `supervisor.breaker.tripped` | `{"system"}` | `frozenset()` | Breaker trips to OPEN |
-| `supervisor.breaker.reset` | `{"system", "operator"}` | `frozenset()` | Operator reset completes |
-| `supervisor.action_timeout` | `{"system"}` | `frozenset()` | Orchestrator action deadline exceeded |
-| `plugin.lifecycle.loaded` | `{"system"}` | `frozenset()` | Plugin loaded successfully |
-| `plugin.lifecycle.crashed` | `{"system"}` | `frozenset()` | Plugin crashed (breaker still CLOSED) |
-| `plugin.lifecycle.quarantined` | `{"system"}` | `frozenset()` | Plugin crash trips breaker to OPEN |
+| `supervisor.breaker.tripped` | `{"system"}` | `False` | Breaker trips to OPEN |
+| `supervisor.breaker.reset` | `{"system", "operator"}` | `False` | Operator reset completes |
+| `supervisor.action_timeout` | `{"system"}` | `False` | Orchestrator action deadline exceeded |
+| `plugin.lifecycle.loaded` | `{"system"}` | `False` | Plugin loaded successfully |
+| `plugin.lifecycle.crashed` | `{"system"}` | `False` | Plugin crashed (breaker still CLOSED) |
+| `plugin.lifecycle.quarantined` | `{"system"}` | `False` | Plugin crash trips breaker to OPEN |
+| `supervisor.plugin.sandbox_refused` | `{"system"}` | `True` | Every `SANDBOX_REFUSED_FIELDS` emit (PR-S4-6) |
+| `supervisor.boot.mlock_unavailable` | `{"system"}` | `False` | `mlockall` unavailable at boot (PR-S4-6) |
+| `supervisor.boot.core_dumps_disabled` | `{"system"}` | `False` | `RLIMIT_CORE` set to 0 at boot (PR-S4-6) |
+
+## Sandbox launcher policy resolution (PR-S4-6)
+
+The Supervisor spawns each plugin through `bin/alfred-plugin-launcher.sh`
+(bash). PR-S4-6 extends the Slice-3 UID-separated baseline into a manifest-
+driven, policy-resolving flow while preserving every Slice-3 invariant
+(charset-validated `plugin_id`, fail-closed refusals, bare i18n keys on
+stderr, `_do_exec` defined before its call site).
+
+**Pre-launcher Python helper.** The launcher stays bash; a one-shot
+`python3 -m alfred.plugins.manifest_reader` subprocess reads the manifest's
+`[sandbox]` block, resolves `Settings.environment`, and translates a policy
+file into bwrap flags. This keeps the trust-tier-tagging surface in Python
+(unit-testable) rather than in bash. Each invocation is independent.
+
+**Manifest `[sandbox]` block.** Every plugin manifest now declares
+`kind` (`full` | `none` | `stub`) and, for `kind: full`, a per-OS
+`policy_refs` map (`linux` / `macos` / `windows`). A missing block refuses
+the load (`reason="sandbox_block_missing"`). See the
+[glossary](../glossary.md#sandbox-kind).
+
+**`Settings.environment` dual-source resolver.** Mandatory at boot, sourced
+`ALFRED_ENVIRONMENT` env var (primary) > `/etc/alfred/environment` file
+(fallback). Neither set → refuse. Disagreement audits
+`daemon.boot.environment_source_conflict` and the env var wins. (Shipped by
+PR-S4-1; consumed here.)
+
+**Dev escape hatch production-refusal (devex-001).**
+`ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED` truthy (`1`/`true`/`yes`/`on`, case-
+insensitive — the same vocabulary the Python `_truthy_env` accepts) in
+`production` is refused with an operator-visible stderr key
+(`supervisor.sandbox.unsandboxed_refused_in_production`) + a
+`SANDBOX_REFUSED` audit row.
+
+**`policy_ref` path-confinement (sec-2).** `resolve_policy_ref` refuses any
+`policy_ref` with a `..` component, an absolute path, or one resolving (via
+symlink) outside the sandbox-policy root — `reason="policy_ref_escapes_root"`
+— BEFORE the file is ever read.
+
+**fd-3 inheritance.** The Supervisor delivers the quarantined provider key
+out-of-band over fd 3: a single atomic `os.writev` of a 4-byte big-endian
+length prefix + the key bytes (`deliver_provider_key_via_fd3`). The launcher
+passes fd 3 through to the plugin via `bwrap --sync-fd 3` (Bookworm
+bubblewrap 0.8.0 naming; `--keep-fd` is the upstream 0.9.0+ name) and never
+reads it itself. On a partial write / EAGAIN the Supervisor REFUSES to spawn
+(`reason="provider_key_delivery_failed"`).
+
+**Honest residency-window limitation.** The provider key arrives at
+`deliver_provider_key_via_fd3` as a Python `str` (interned, non-zeroizable).
+The mutable copy is zeroed immediately after the writev and `gc.collect()`
+runs, but the brief residency window between `SecretBroker.get` and the write
+is a real (microsecond-scale) limitation. Slice-5
+`SecretBroker.get_bytes(name) -> bytearray` closes it.
+
+**`sandbox_info` handshake (arch-3).** After the handshake a plugin may
+attest its `effective_sandbox_kind`; the Supervisor compares it against the
+manifest's declared `sandbox.kind` and tears the session down
+(`SandboxInfoHandshakeMismatch` + quarantine) on a mismatch — a plugin lying
+about its own containment.
+
+**Process posture.** At boot the Supervisor calls `disable_core_dumps()`
+(`RLIMIT_CORE` → 0, so a core dump cannot leak the in-memory key) and
+`try_mlockall()` (best-effort; failure is loud but non-fatal).
 
 ## Failure modes
 
