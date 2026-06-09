@@ -73,6 +73,28 @@ def _register() -> None:
     t("operator_session.refused.bad_file_owner.recovery")
     t("operator_session.refused.resolver_timeout.recovery")
 
+    # CR-227 round-2 finding 1: the supervisor maps EVERY concrete
+    # OperatorSessionError subclass to its own refusal message (no
+    # default-to-missing). These keys cover the subclasses the resolver vocab
+    # did not yet localise + a distinct unknown-subclass fallback.
+    t("operator_session.refused.token_user_mismatch")
+    t("operator_session.refused.malformed")
+    t("operator_session.refused.parent_dir_insecure")
+    t("operator_session.refused.parent_dir_not_owned")
+    t("operator_session.refused.revoked")
+    t("operator_session.refused.no_machine_id")
+    t("operator_session.refused.unknown")
+    t("operator_session.refused.token_user_mismatch.recovery")
+    t("operator_session.refused.malformed.recovery")
+    t("operator_session.refused.parent_dir_insecure.recovery")
+    t("operator_session.refused.parent_dir_not_owned.recovery")
+    t("operator_session.refused.revoked.recovery")
+    t("operator_session.refused.no_machine_id.recovery")
+    t("operator_session.refused.unknown.recovery")
+    # CR-227 round-2 finding 4: best-effort macOS machine-id cache write
+    # failure is logged (operator-visible) but never breaks login.
+    t("operator_session.machine_id.cache_write_failed", path="/var/db/alfred/machine-id")
+
     # Supervisor reset refusals (PR-S4-5).
     t("supervisor.breaker.reset.refused.not_logged_in")
     t("supervisor.breaker.reset.refused.not_logged_in.recovery")
