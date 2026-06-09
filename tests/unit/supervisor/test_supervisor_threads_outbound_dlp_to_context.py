@@ -61,5 +61,5 @@ def test_build_proposal_context_refuses_when_scanner_unwired() -> None:
         state_git_path=Path("state.git"),
         # outbound_dlp deliberately omitted.
     )
-    with pytest.raises(RuntimeError, match="dispatch loop"):
+    with pytest.raises(RuntimeError, match="no outbound DLP scanner was wired"):
         sup._build_proposal_context()
