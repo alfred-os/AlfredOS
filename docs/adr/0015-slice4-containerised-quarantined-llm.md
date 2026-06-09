@@ -29,36 +29,27 @@ macOS `sandbox-exec`, and a Windows stub policy. The `bin/alfred-plugin-launcher
 receives the per-OS sandbox policy files in Slice 4; `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1`
 becomes a development-only escape hatch that refuses in production.
 
-### bwrap fd-inheritance flag: `--keep-fd`, NOT `--sync-fd` (corrects #218)
+### bwrap fd-inheritance flag: `--sync-fd`, not `--keep-fd` (#218)
 
 The Supervisor delivers the quarantined provider key over an inherited fd
 (fd 3 by convention). The bwrap flag that leaves an inherited fd intact in the
-sandboxed process is **`--keep-fd FD`** ("Do not close fd FD"), present since
-bubblewrap **0.5.0** and still current in **0.9.0**. The launcher and the
-`SandboxPolicy` → bwrap-flag translator
-(`src/alfred/plugins/sandbox_policy.py::policy_to_bwrap_flags`) emit
-**`--keep-fd`**. The logical policy field name `keep_fds` matches the emitted
-flag.
+sandboxed process is **version-dependent**:
 
-`--sync-fd FD` is a **different, unrelated flag**: it is bwrap's *internal
-sync-protocol* fd (used with `--block-fd` / `--userns-block-fd`). bwrap
-consumes/closes it and does **NOT** pass it through as a data channel to the
-child. Using `--sync-fd 3` for key delivery causes the sandboxed child to see
-fd 3 as `OSError: [Errno 9] Bad file descriptor` on `os.read(3, ...)`.
+- Debian Bookworm ships **bubblewrap 0.8.0**, whose flag is **`--sync-fd FD`**.
+- `--keep-fd FD` is the **upstream 0.9.0+ rename** of the same capability.
 
-**This amendment reverses the earlier `--sync-fd` amendment (issue #218).**
-Issue #218 ("Bookworm bubblewrap 0.8.0 renamed `--keep-fd` to `--sync-fd`") is
-a **misdiagnosis**: the two flags both exist and are distinct — there was no
-rename. The original launcher/translator correctly emitted `--keep-fd`; #218
-wrongly flipped it to `--sync-fd`, which broke fd-3 delivery. Empirical proof:
-CI installed bubblewrap **0.9.0**, and `--sync-fd 3` made the sandboxed plugin's
-`os.read(3, 4)` fail with `Bad file descriptor` (PR #229 / #152). Corroborating
-evidence: `tests/unit/test_dockerfile_bubblewrap_present.py` always stated
-"bubblewrap 0.8.x which has `--keep-fd` (introduced in 0.5.0)".
+AlfredOS's `alfred-core` runtime image (PR-S4-0b) pins bubblewrap to the
+Bookworm 0.8.0 line, so the launcher and the `SandboxPolicy` → bwrap-flag
+translator (`src/alfred/plugins/sandbox_policy.py::policy_to_bwrap_flags`) emit
+**`--sync-fd`**. The logical policy field name `keep_fds` is retained as
+documented shorthand; only the emitted CLI surface uses the version-correct
+flag. PR-S4-7 (macOS/Windows policy bytes) and any future bwrap upgrade MUST
+honour this version mapping — emitting `--keep-fd` against 0.8.0 fails the
+sandbox exec at runtime. This invariant is owned by THIS ADR; the daemon-boot
+bwrap-version probe (#228) enforces the version floor at boot.
 
-PR-S4-7 (macOS/Windows policy bytes) and any future bwrap upgrade MUST emit
-`--keep-fd` for fd-3 inheritance. This invariant is owned by THIS ADR; the
-daemon-boot bwrap-version probe (#228) enforces the version floor at boot.
+This corrects the original Slice-4 plan draft, which referred to `--keep-fd 3`
+throughout (the upstream name) before the Bookworm pin was finalised on 0.8.0.
 
 ## Consequences
 
