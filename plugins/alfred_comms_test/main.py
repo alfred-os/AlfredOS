@@ -1,248 +1,296 @@
 #!/usr/bin/env python3
-"""Alfred comms-test MCP stdio plugin — reference echo adapter.
+"""Alfred comms-test MCP stdio plugin — full-lifecycle reference adapter (PR-S4-8).
 
-comms-002 + comms-003 architecture:
+Upgraded from the Slice-3 one-shot echo stub into a full-lifecycle comms adapter
+exercising the ADR-0024 eight-method wire contract host-side (#152, Task 50):
 
-* ``lifecycle.start`` / ``lifecycle.stop`` / ``adapter.health`` are
-  host → plugin, routed as literal JSON-RPC methods per the
-  ``WIRE_METHOD_NAMES`` constant in
-  :mod:`alfred.comms.mcp_protocol`.
-* ``inbound.message`` is plugin → host: the spec §9.1 direction is
-  adapter → orchestrator. The echo plugin demonstrates this by
-  emitting an ``inbound.message`` JSON-RPC NOTIFICATION (no ``id``
-  field) to the host after ``lifecycle.start`` completes. The host
-  registers a notification handler in :class:`AlfredPluginSession`
-  (PR-S3-3a) to receive it.
+Host -> plugin requests (the plugin answers):
 
-The plan's reference implementation (lines 2125-2173 of the Slice 3
-build plan) shows the MCP SDK's ``Server`` + ``@server.request_handler``
-shape. The real reference plugins (``alfred_quarantined_llm``,
-``alfred_web_fetch``) and the host transport
-(:mod:`alfred.plugins.stdio_transport`) use line-delimited JSON-RPC,
-not the MCP SDK's framing. This implementation matches the actual
-in-repo plugin convention: hand-rolled stdio loop, JSON-RPC method
-names appear LITERALLY on the wire (no ``tools/call`` wrap), method
-mapping matches ``WIRE_METHOD_NAMES`` verbatim.
+* ``lifecycle.start``  -> :func:`handle_lifecycle_start`  -> ``{"ok": true}``
+* ``lifecycle.stop``   -> :func:`handle_lifecycle_stop`   -> ``{"ok", "flushed_messages"}``
+* ``adapter.health``   -> :func:`handle_adapter_health`   -> ``HealthReport`` shape
+* ``outbound.message`` -> :func:`handle_outbound_message` -> ``_OutboundDelivered`` shape
 
-The ``mcp`` SDK is NOT a runtime dependency: the ``HAS_MCP`` probe
-exists so this plugin runs anywhere a Python interpreter does, with no
-extra wheel install. When the SDK is added in a future slice the probe
-becomes a hard import.
+Plugin -> host notifications (emitted on internal test triggers):
 
-This plugin is for TEST USE ONLY — it has no production functionality.
-Authorised by ADR-0017 (Slice-3 trust-tier completion + MCP plugin
-transport).
+* ``inbound.message``          (``alfred_comms_test/inject_inbound``)
+* ``adapter.binding_request``  (``alfred_comms_test/inject_binding_request``)
+* ``adapter.rate_limit_signal``(``alfred_comms_test/inject_rate_limit``)
+* ``adapter.crashed``          (``alfred_comms_test/inject_crash``)
+
+The internal ``alfred_comms_test/*`` triggers are NOT part of the ADR-0024 wire
+contract — they are the test harness's lever to make the plugin manufacture a
+host-bound notification on demand. The most dangerous of these,
+``inject_inbound``, fabricates an inbound platform message; it is therefore
+gated on ``ALFRED_ENV=test`` and refuses in production with a
+``comms.test_injection_refused`` refusal frame + a raised
+:class:`TestInjectionRefusedError` (plan §10 risk row / Task 51). The plugin process
+has no DB, so "audit row + raise" is realised as a structured refusal frame the
+host records plus a hard raise that crashes the subprocess loudly.
+
+This plugin is for TEST USE ONLY — no production functionality. The host
+transport speaks line-delimited JSON-RPC (matching ``alfred_web_fetch`` /
+``alfred_quarantined_llm``); JSON-RPC method names appear LITERALLY on the wire.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+from datetime import UTC, datetime
 from typing import Any, Final
 
-# R8 (PR-S3-6 polish): construct the inbound.message params from the
-# canonical :class:`alfred.comms.mcp_protocol.InboundMessage` Pydantic
-# model and dump it, rather than authoring a dict literal that drifts
-# from the wire schema. Pydantic raises ValidationError at construction
-# time if a field is missing — catching the same kinds of regressions
-# the host's ``extra="forbid"`` check catches at receive time, but on
-# the sender side.
-#
-# Plugin-side import discipline: the canonical reference plugin
-# ``alfred_web_fetch.web_fetch_plugin`` already imports from
-# ``alfred.plugins.web_fetch.*``, so a controlled, side-effect-free
-# import from ``alfred.comms.mcp_protocol`` is consistent with the
-# existing convention. The supervisor's trust boundary is enforced by
-# process isolation + the capability gate, not by import-level
-# ignorance.
-from alfred.comms.mcp_protocol import InboundMessage
-
-try:
-    # Optional probe so the file imports on an interpreter that does not
-    # have the ``mcp`` SDK wheel installed. Slice 3 ships without the
-    # SDK; Slice 4 may add it. The plugin does not use the SDK's
-    # primitives because the host transport is line-delimited JSON-RPC
-    # (matching ``alfred_web_fetch`` and ``alfred_quarantined_llm``),
-    # NOT MCP's length-prefixed envelope.
-    import mcp  # type: ignore[import-not-found,unused-ignore]  # noqa: F401
-
-    HAS_MCP = True
-except ImportError:
-    HAS_MCP = False
-
-
-# comms-002: literal JSON-RPC method names on the wire. Mirrors the
-# ``WIRE_METHOD_NAMES`` mapping in ``alfred.comms.mcp_protocol`` so the
-# plugin and the host agree on the wire vocabulary. Duplicating the
-# string constants here keeps the wire vocabulary readable from the
-# plugin source without needing to chase the mapping in the host
-# package — a documentation choice, not a trust-boundary one. The
-# supervisor's trust boundary is enforced by process isolation + the
-# capability gate at the host, not by import-level ignorance.
+# ADR-0024 wire method names — host -> plugin requests.
 _METHOD_LIFECYCLE_START: Final[str] = "lifecycle.start"
 _METHOD_LIFECYCLE_STOP: Final[str] = "lifecycle.stop"
 _METHOD_ADAPTER_HEALTH: Final[str] = "adapter.health"
-_NOTIFICATION_INBOUND_MESSAGE: Final[str] = "inbound.message"
+_METHOD_OUTBOUND_MESSAGE: Final[str] = "outbound.message"
+
+# Plugin -> host notification method names.
+_NOTIFY_INBOUND: Final[str] = "inbound.message"
+_NOTIFY_BINDING: Final[str] = "adapter.binding_request"
+_NOTIFY_RATE_LIMIT: Final[str] = "adapter.rate_limit_signal"
+_NOTIFY_CRASHED: Final[str] = "adapter.crashed"
+
+# Internal test-trigger method names (NOT part of the wire contract).
+_TRIGGER_INJECT_INBOUND: Final[str] = "alfred_comms_test/inject_inbound"
+_TRIGGER_INJECT_BINDING: Final[str] = "alfred_comms_test/inject_binding_request"
+_TRIGGER_INJECT_RATE_LIMIT: Final[str] = "alfred_comms_test/inject_rate_limit"
+_TRIGGER_INJECT_CRASH: Final[str] = "alfred_comms_test/inject_crash"
+
+_ADAPTER_ID: Final[str] = "alfred_comms_test"
+_PLUGIN_VERSION: Final[str] = "0.1.0"
+
+# ``ALFRED_ENV`` values under which fabricated-inbound injection is permitted.
+# Mirrors the in-memory content-store dev/test allowlist.
+_INJECTION_ALLOWED_ENVS: Final[frozenset[str]] = frozenset({"", "development", "test"})
+
+# Event name the host records when an injection is refused in production.
+_REFUSAL_EVENT: Final[str] = "comms.test_injection_refused"
 
 
-# Adapter state — tracked across one subprocess lifetime. ``_running``
-# distinguishes ``status=ok`` from ``status=degraded`` per
-# :class:`AdapterHealthResponse`.
-_running: bool = False
+class TestInjectionRefusedError(RuntimeError):
+    """Raised when ``inject_inbound`` is attempted outside ``ALFRED_ENV=test``.
 
-
-def _build_inbound_message_notification() -> dict[str, Any]:
-    """Return the one-shot ``inbound.message`` notification frame.
-
-    Spec §9.1 + comms-001: ``platform``, ``platform_user_id``,
-    ``content`` and ``language`` are all REQUIRED on the wire.
-    ``language`` is a BCP-47 tag (CLAUDE.md i18n rule #3 — every stored
-    user-content row carries a BCP-47 tag).
-
-    No ``id`` field — this is a JSON-RPC NOTIFICATION (plugin → host).
-    Adding an ``id`` would make it a request and the host would block
-    waiting for a response that the host does not send for upstream
-    inbound traffic.
-
-    R8 (PR-S3-6 polish): the ``params`` payload is now sourced from
-    :class:`alfred.comms.mcp_protocol.InboundMessage` and serialised
-    via ``model_dump()``. The earlier dict literal could silently
-    drift from the wire schema; constructing the model raises
-    :class:`pydantic.ValidationError` at build time if a field is
-    missing or wrongly typed, matching what the host's
-    ``extra="forbid"`` check enforces on receive.
+    Carries :attr:`event` = ``comms.test_injection_refused`` so the refusal frame
+    + the host's audit row name the same closed-vocabulary event.
     """
-    params = InboundMessage(
-        platform="test",
-        platform_user_id="echo-plugin",
-        content="echo plugin started",
-        language="en-US",
-    ).model_dump()
+
+    event: Final[str] = _REFUSAL_EVENT
+
+
+# ---------------------------------------------------------------------------
+# Adapter state (one subprocess lifetime). Pure functions mutate it via the
+# module-level dict so the unit tests can ``reset_state()`` between cases.
+# ---------------------------------------------------------------------------
+
+_state: dict[str, Any] = {"running": False, "outbound": [], "last_inbound_at": None}
+
+
+def reset_state() -> None:
+    """Reset adapter state — test-only helper for hermetic unit cases."""
+    _state["running"] = False
+    _state["outbound"] = []
+    _state["last_inbound_at"] = None
+
+
+def outbound_buffer_depth() -> int:
+    """Number of outbound messages buffered this lifetime."""
+    return len(_state["outbound"])
+
+
+# ---------------------------------------------------------------------------
+# Host -> plugin request handlers (the 8-method wire contract, answer half)
+# ---------------------------------------------------------------------------
+
+
+def handle_lifecycle_start(_params: dict[str, Any]) -> dict[str, Any]:
+    """Mark the adapter running; report the plugin version."""
+    _state["running"] = True
+    return {"ok": True, "plugin_version": _PLUGIN_VERSION}
+
+
+def handle_lifecycle_stop(_params: dict[str, Any]) -> dict[str, Any]:
+    """Stop the adapter, flushing any buffered outbound; report flushed count."""
+    flushed = len(_state["outbound"])
+    _state["outbound"] = []
+    _state["running"] = False
+    return {"ok": True, "flushed_messages": flushed}
+
+
+def handle_adapter_health(_params: dict[str, Any]) -> dict[str, Any]:
+    """Return a ``HealthReport``-shaped snapshot."""
     return {
-        "jsonrpc": "2.0",
-        "method": _NOTIFICATION_INBOUND_MESSAGE,
-        "params": params,
+        "ok": bool(_state["running"]),
+        "last_inbound_at": _state["last_inbound_at"],
+        "queue_depth": 0,
+        "error_count": 0,
     }
 
 
-def _handle_lifecycle_start(_params: dict[str, Any]) -> dict[str, Any]:
-    """Mark the adapter running. Caller emits the inbound notification.
+def handle_outbound_message(params: dict[str, Any]) -> dict[str, Any]:
+    """Buffer the outbound message + report ``_OutboundDelivered``.
 
-    Pulled out as a sync handler so the routing arm in
-    :func:`_serve_stdin_stdout` stays free of state-machine logic and
-    the unit tests in
-    ``tests/unit/comms/test_mcp_identity_boundary.py`` can call the
-    handler directly without spawning a subprocess.
+    The reference adapter never touches a real platform — it records the
+    delivery in an in-memory buffer (drained by ``lifecycle.stop``) and reports a
+    synthetic ``delivered`` outcome with a fabricated platform message id.
     """
-    global _running
-    _running = True
-    return {"status": "started"}
+    _state["outbound"].append(params)
+    return {
+        "outcome": "delivered",
+        "platform_message_id": f"msg-{len(_state['outbound'])}",
+    }
 
 
-def _handle_lifecycle_stop(_params: dict[str, Any]) -> dict[str, Any]:
-    """Mark the adapter stopped."""
-    global _running
-    _running = False
-    return {"status": "stopped"}
+# ---------------------------------------------------------------------------
+# Plugin -> host notification builders + the production-gated injector
+# ---------------------------------------------------------------------------
 
 
-def _handle_adapter_health(_params: dict[str, Any]) -> dict[str, Any]:
-    """Return ``AdapterHealthResponse``-shaped payload.
+def build_inbound_notification(body: dict[str, Any]) -> dict[str, Any]:
+    """Build an ``inbound.message`` notification frame for ``body``.
 
-    Spec §9.1 + comms-009: Slice 3's :class:`AdapterHealthResponse`
-    accepts the narrow ``{"ok", "degraded"}`` Literal. The echo plugin
-    reports ``"ok"`` while running and ``"degraded"`` while stopped
-    (matching the docstring on the Pydantic model — ``degraded`` is a
-    running-but-reduced-capability snapshot, which is closer to the
-    semantics of "lifecycle.start has not been called yet" than
-    ``"unhealthy"`` — and Slice 3 has no ``"unhealthy"`` value to
-    return regardless).
+    Matches the host-side ``InboundMessageNotification`` wire schema:
+    ``adapter_id``, ``platform_user_id``, ``body``, ``sub_payload_refs``,
+    ``received_at`` (tz-aware), ``addressing_signal``. ``platform_metadata`` is
+    threaded through verbatim from the injection payload so the adversarial
+    corpus can plant a forged ``canonical_user_id`` there and assert the host
+    ignores it. No ``id`` member — this is a JSON-RPC notification.
     """
-    status = "ok" if _running else "degraded"
-    detail = "echo plugin running" if _running else "lifecycle.start not yet received"
-    return {"status": status, "detail": detail}
+    _state["last_inbound_at"] = datetime.now(UTC).isoformat()
+    params: dict[str, Any] = {
+        "adapter_id": _ADAPTER_ID,
+        "platform_user_id": body.get("platform_user_id", "discord:reference"),
+        "body": {"content": body.get("content", "")},
+        "sub_payload_refs": [],
+        "received_at": datetime.now(UTC).isoformat(),
+        "addressing_signal": body.get("addressing_signal", "dm"),
+    }
+    if "platform_metadata" in body:
+        params["platform_metadata"] = body["platform_metadata"]
+    return {"jsonrpc": "2.0", "method": _NOTIFY_INBOUND, "params": params}
+
+
+def build_binding_request_notification(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build an ``adapter.binding_request`` notification frame."""
+    return {
+        "jsonrpc": "2.0",
+        "method": _NOTIFY_BINDING,
+        "params": {
+            "adapter_id": _ADAPTER_ID,
+            "platform_user_id": payload.get("platform_user_id", "discord:newcomer"),
+            "verification_phrase": payload.get("verification_phrase", "blue-otter-42"),
+            "platform_metadata": payload.get("platform_metadata", {}),
+        },
+    }
+
+
+def build_rate_limit_notification(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build an ``adapter.rate_limit_signal`` notification frame."""
+    return {
+        "jsonrpc": "2.0",
+        "method": _NOTIFY_RATE_LIMIT,
+        "params": {
+            "adapter_id": _ADAPTER_ID,
+            "retry_after_seconds": int(payload.get("retry_after_seconds", 5)),
+            "platform_endpoint": payload.get("platform_endpoint", "POST /messages"),
+        },
+    }
+
+
+def build_crashed_notification(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build an ``adapter.crashed`` notification frame."""
+    return {
+        "jsonrpc": "2.0",
+        "method": _NOTIFY_CRASHED,
+        "params": {
+            "adapter_id": _ADAPTER_ID,
+            "error_class": payload.get("error_class", "AdapterRuntimeError"),
+            "detail": payload.get("detail", "self-reported crash (test trigger)"),
+        },
+    }
+
+
+def inject_inbound(body: dict[str, Any]) -> dict[str, Any]:
+    """Manufacture an ``inbound.message`` notification — gated on ``ALFRED_ENV``.
+
+    The highest-risk test trigger: it fabricates an inbound platform message.
+    Outside the dev/test allowlist it refuses with :class:`TestInjectionRefusedError`
+    (event ``comms.test_injection_refused``) so a production deployment can never
+    be coerced into injecting synthetic inbound traffic (plan §10 risk row).
+    """
+    env = os.environ.get("ALFRED_ENV", "").strip()
+    if env not in _INJECTION_ALLOWED_ENVS:
+        raise TestInjectionRefusedError(
+            f"inject_inbound refused: ALFRED_ENV={env!r} is not a test environment "
+            f"(event={_REFUSAL_EVENT})"
+        )
+    return build_inbound_notification(body)
+
+
+def build_test_injection_refused_frame(env: str) -> dict[str, Any]:
+    """Build the structured refusal frame the host records for a refused inject."""
+    return {
+        "jsonrpc": "2.0",
+        "method": _REFUSAL_EVENT,
+        "params": {"adapter_id": _ADAPTER_ID, "alfred_env": env},
+    }
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC envelope helpers
+# ---------------------------------------------------------------------------
 
 
 def _build_method_not_found(method: str) -> dict[str, Any]:
-    """Build the JSON-RPC ``-32601`` error envelope for unknown methods.
-
-    CR-149 protocol compliance: every wire frame this plugin emits
-    carries the mandatory ``jsonrpc: "2.0"`` member so a strict host
-    parser (the future ``StdioTransport`` round-trip in Slice 4) does
-    not reject our reply as malformed.
-    """
     return {
         "jsonrpc": "2.0",
-        "error": {
-            "code": -32601,
-            "message": f"Method not found: {method}",
-        },
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
     }
 
 
 def _build_parse_error(detail: str) -> dict[str, Any]:
-    """Build the JSON-RPC ``-32700`` error envelope for malformed frames.
-
-    err-004 boundary discipline: malformed JSON returns a structured
-    response so the orchestrator never hangs waiting for a frame that
-    never arrives.
-
-    CR-149: includes the mandatory ``jsonrpc: "2.0"`` member so the
-    error envelope is wire-compliant on the spec §9 surface.
-    """
     return {
         "jsonrpc": "2.0",
         "id": None,
-        "error": {
-            "code": -32700,
-            "message": "Parse error",
-            "data": {"detail": detail},
-        },
+        "error": {"code": -32700, "message": "Parse error", "data": {"detail": detail}},
     }
 
 
 def _build_invalid_request(req_id: object) -> dict[str, Any]:
-    """Build the JSON-RPC ``-32600`` error envelope for non-object requests.
-
-    CR-149: ``json.loads`` legally returns lists, strings, numbers, or
-    ``null`` for valid JSON that is NOT a JSON-RPC request. The
-    previous code called ``.get(...)`` unconditionally and crashed the
-    subprocess on the first such frame, leaving the host hanging
-    waiting for a response. The Invalid Request envelope is the
-    spec-compliant reply — the host observes the structured error and
-    proceeds.
-
-    ``req_id`` is echoed back when it can be extracted; otherwise we
-    follow the spec and pass ``None``.
-    """
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "error": {
-            "code": -32600,
-            "message": "Invalid Request",
-        },
-    }
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32600, "message": "Invalid Request"}}
 
 
-async def _serve_stdin_stdout() -> None:
-    """MCP stdio loop: read JSON-RPC requests, write responses + notifications.
+# Request methods that produce a synchronous result.
+_REQUEST_HANDLERS: Final[dict[str, Any]] = {
+    _METHOD_LIFECYCLE_START: handle_lifecycle_start,
+    _METHOD_LIFECYCLE_STOP: handle_lifecycle_stop,
+    _METHOD_ADAPTER_HEALTH: handle_adapter_health,
+    _METHOD_OUTBOUND_MESSAGE: handle_outbound_message,
+}
 
-    Mirrors the framing convention used by
-    :mod:`plugins.alfred_web_fetch.web_fetch_plugin`. JSON-decode
-    errors return a structured ``-32700`` parse-error frame so the
-    orchestrator gets a response and does not hang. Any other
-    exception in a handler propagates to crash the subprocess so the
-    host detects the failure via the ``plugin.lifecycle.crashed``
-    audit row (silent swallowing produces a hung host).
+# Trigger methods that emit a host-bound notification (no request result).
+_NOTIFY_TRIGGERS: Final[dict[str, Any]] = {
+    _TRIGGER_INJECT_BINDING: build_binding_request_notification,
+    _TRIGGER_INJECT_RATE_LIMIT: build_rate_limit_notification,
+    _TRIGGER_INJECT_CRASH: build_crashed_notification,
+}
+
+
+async def _serve_stdin_stdout() -> None:  # pragma: no cover - exercised via subprocess
+    """MCP stdio loop: read JSON-RPC, answer requests, emit notifications.
+
+    Covered end-to-end by the integration tests (which spawn this module as a
+    subprocess); the pure handlers above carry the unit coverage.
     """
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     loop = asyncio.get_event_loop()
     await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
     writer_transport, _writer_protocol = await loop.connect_write_pipe(
-        lambda: asyncio.BaseProtocol(), sys.stdout.buffer
+        asyncio.BaseProtocol, sys.stdout.buffer
     )
 
     def _emit(frame: dict[str, Any]) -> None:
@@ -257,86 +305,42 @@ async def _serve_stdin_stdout() -> None:
         except json.JSONDecodeError as exc:
             _emit(_build_parse_error(str(exc)))
             continue
-
-        # CR-149: ``json.loads`` legally returns lists / strings / numbers /
-        # ``None`` for valid JSON that does NOT conform to the JSON-RPC
-        # request shape. Calling ``.get(...)`` unconditionally would
-        # crash the subprocess on the first such frame, leaving the
-        # host hanging on a never-arriving response. We refuse the
-        # frame with a structured Invalid Request envelope (-32600)
-        # and continue the loop so the boundary stays resilient.
         if not isinstance(request, dict):
             _emit(_build_invalid_request(None))
             continue
 
-        # CR-149 round-3 (JSON-RPC §4.1.2): a frame is a notification
-        # iff the ``id`` member is absent — NOT iff it is null. The
-        # prior ``request.get("id")`` collapsed those two cases and the
-        # subprocess replied to notifications, desynchronising the
-        # host's request/notification state machine. Detect membership
-        # explicitly so an explicit ``id: null`` is still a request
-        # (per spec §4.1) while a missing key suppresses the reply.
         has_response_id = "id" in request
         req_id = request.get("id")
         params = request.get("params") or {}
-
-        # CR-149 round-6.5 (JSON-RPC §4.1 / §5.1): the ``method`` member
-        # is required and MUST be a non-empty string. Frames like
-        # ``{}`` or ``{"method": 1}`` previously fell through to
-        # ``_build_method_not_found`` (-32601), which is the wrong code
-        # — the spec mandates ``-32600 Invalid Request`` whenever the
-        # request object itself is malformed (method missing or wrong
-        # type). The notification-suppression contract still applies:
-        # only emit the reply when ``has_response_id`` is True so an
-        # explicit ``id: null`` still gets a structured error while a
-        # missing ``id`` (notification shape) does not.
         method = request.get("method")
         if not isinstance(method, str) or not method:
-            # CR-149 round-10 (3339423468): JSON-RPC 2.0 §5.1 (Error
-            # object) — "If there was an error in detecting the id in
-            # the Request object (e.g. Parse error / Invalid Request),
-            # it MUST be Null." A frame like ``{}`` or
-            # ``{"method": 1}`` is a malformed request object, NOT a
-            # notification — the host cannot disambiguate the two
-            # cases when the request is fundamentally invalid, so the
-            # specification requires emitting an Invalid Request
-            # response with ``id: null`` regardless. The prior
-            # ``has_response_id`` gate dropped the frame entirely and
-            # strict hosts waited for an error reply that never
-            # arrived.
             _emit(_build_invalid_request(req_id if has_response_id else None))
             continue
 
-        if method == _METHOD_LIFECYCLE_START:
-            # CR-149 protocol compliance: every reply envelope carries
-            # ``jsonrpc: "2.0"`` alongside ``result`` / ``id`` so the
-            # spec §9 wire surface accepts the frame without rejecting
-            # it as version-less.
-            response: dict[str, Any] = {
-                "jsonrpc": "2.0",
-                "result": _handle_lifecycle_start(params),
-            }
-            # comms-003: emit the plugin → host inbound.message
-            # notification after the lifecycle handler runs so the host
-            # observes the response → notification ordering.
-            if has_response_id:
-                response["id"] = req_id
-                _emit(response)
-            _emit(_build_inbound_message_notification())
+        # The inbound injector is production-gated. A refusal emits the structured
+        # refusal frame then crashes the subprocess (loud, never silent).
+        if method == _TRIGGER_INJECT_INBOUND:
+            try:
+                _emit(inject_inbound(params))
+            except TestInjectionRefusedError:
+                _emit(build_test_injection_refused_frame(os.environ.get("ALFRED_ENV", "").strip()))
+                raise
             continue
-        if method == _METHOD_LIFECYCLE_STOP:
-            response = {"jsonrpc": "2.0", "result": _handle_lifecycle_stop(params)}
-        elif method == _METHOD_ADAPTER_HEALTH:
-            response = {"jsonrpc": "2.0", "result": _handle_adapter_health(params)}
-        else:
-            response = _build_method_not_found(method)
 
-        # CR-149 round-3: same notification suppression here so the
-        # generic-path branch honours the JSON-RPC §4.1.2 contract.
+        if method in _NOTIFY_TRIGGERS:
+            _emit(_NOTIFY_TRIGGERS[method](params))
+            continue
+
+        handler = _REQUEST_HANDLERS.get(method)
+        if handler is None:
+            response = _build_method_not_found(method)
+        else:
+            response = {"jsonrpc": "2.0", "result": handler(params)}
+
         if has_response_id:
             response["id"] = req_id
             _emit(response)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - process entrypoint
     asyncio.run(_serve_stdin_stdout())

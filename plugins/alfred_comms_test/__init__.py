@@ -1,9 +1,12 @@
 """Alfred comms-test reference plugin.
 
-Implements :class:`alfred.comms.mcp_protocol.CommsAdapterMCP` as an MCP
-stdio server for transport validation. Spec §9.1 validates the MCP
-comms contract against a second consumer beyond the quarantined-LLM
-and ``web.fetch`` plugins.
+Full-lifecycle comms adapter (PR-S4-8, #152) exercising the ADR-0024
+eight-method wire contract host-side: it answers ``lifecycle.start`` /
+``lifecycle.stop`` / ``adapter.health`` / ``outbound.message`` and emits the four
+plugin -> host notifications (``inbound.message``, ``adapter.binding_request``,
+``adapter.rate_limit_signal``, ``adapter.crashed``) on internal test triggers.
+The fabricated-inbound injector is gated on ``ALFRED_ENV=test`` (see
+``main.inject_inbound``). Upgraded from the Slice-3 one-shot echo stub.
 
 The on-disk directory uses an underscore (``alfred_comms_test``) so the
 package is importable by mypy / pyright — a hyphenated dir containing

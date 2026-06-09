@@ -37,3 +37,20 @@ sandbox_profile = "user-plugin"
 # so kind = "none". A kind = "full" plugin ships per-OS policy_refs.
 [sandbox]
 kind = "none"
+
+# PR-S4-8 (#152 §3): comms-MCP adapter declaration. ``adapter_kind`` is the
+# host-side ``alfred.comms_mcp.protocol.adapter_kind`` member this plugin
+# announces; the host's BODY_FIELD_BY_KIND / REQUIRED_CLASSIFIERS_BY_KIND tables
+# are keyed on it. ``classifiers_optional`` lets a plugin opt INTO additional
+# registered classifiers but never OUT of the host-owned required set
+# (sec-002 round-3) — empty here because the reference plugin emits plain text.
+#
+# Trust-tier note: the plugin PROCESS is conceptually T2 (an authenticated,
+# first-party relay), but inbound platform BODIES it forwards become T3 host-side
+# the instant they cross ``process_inbound_message``. The capability declaration
+# the host's manifest parser validates is ``[plugin] subscriber_tier`` above
+# (closed vocabulary {system, operator, user-plugin}); a literal "T2" there is a
+# *content trust tier* and is refused by design — the two axes are orthogonal.
+[comms_mcp]
+adapter_kind = "alfred_comms_test"
+classifiers_optional = []
