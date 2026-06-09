@@ -1,0 +1,27 @@
+id: sbx-2026-011
+category: sandbox_escape
+threat: >-
+  An insider-author (or a runtime attacker who can plant a file under the policy
+  root) replaces the resolved policy_ref with a symlink that points OUTSIDE the
+  confined policy directory — e.g. a symlink at
+  config/sandbox/quarantined-llm.linux.bwrap.policy -> /etc/shadow — hoping the
+  launcher's resolver follows it and either leaks the target or loads an
+  attacker-chosen policy from outside the install root.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: policy_ref_symlink_escapes_root
+  symlink_target: /etc/shadow
+  policy_ref: quarantined-llm.linux.bwrap.policy
+expected_outcome: refused
+provenance: >-
+  PR-S4-7 Component F. resolve_policy_ref realpath-resolves the candidate and
+  confines it to the policy root (the same sec-2 path-confinement that backs
+  sbx-2026-007's traversal refusal); a symlink whose realpath escapes the root
+  raises PolicyRefEscapesRoot with reason="policy_ref_escapes_root". The
+  executable corpus test plants the symlink under a tmp policy root and asserts
+  the refusal — a symlink-follow cannot smuggle a path outside the confined
+  root into the bwrap flag set.
+references:
+  - "spec §7.2 plugin sandbox policy"
+  - "src/alfred/plugins/manifest_reader.py::resolve_policy_ref (realpath confinement)"
+  - "tests/adversarial/sandbox_escape/sbx_2026_007_policy_ref_traversal.yaml"
