@@ -75,6 +75,42 @@ async def test_inbound_handler_delegates_to_process_inbound_message() -> None:
     assert orch.dispatch_calls == 1
 
 
+@pytest.mark.asyncio
+async def test_inbound_handler_pre_resolution_limiter_persists_across_messages() -> None:
+    """sec-003: the pre-resolution DoS gate accumulates across messages.
+
+    The headline bug (CR #232): when ``process_inbound_message`` built a fresh
+    ``_PreResolutionLimiter`` on every call, the coarse per-``(adapter_id,
+    platform_user_id_hash)`` budget never accumulated, so the gate was a no-op
+    in production. Driving a flood for ONE platform user through the SAME
+    ``InboundMessageHandler`` (the real production caller — NO hand-passed
+    limiter) MUST eventually refuse: the resolver stops being consulted and a
+    budget-capped audit row is emitted. The handler owns one persistent limiter.
+    """
+    resolver = SpyIdentityResolver(returns=make_resolved())
+    orch = SpyOrchestrator()
+    audit = SpyAuditWriter()
+    handler = InboundMessageHandler(
+        identity_resolver=resolver,
+        orchestrator=orch,
+        burst_limiter=SpyBurstLimiter(),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+    )
+
+    # The default cap is 50/min; drive well past it for one platform user.
+    flood = 60
+    for _ in range(flood):
+        await handler.process(make_notification(platform_user_id="discord:flooder"))
+
+    # The gate fired: the resolver was NOT consulted for every message, and at
+    # least one message was hard-dropped pre-resolution.
+    assert resolver.resolve_calls < flood
+    capped = audit.rows_with_schema("COMMS_INBOUND_BUDGET_CAPPED_FIELDS")
+    assert capped, "pre-resolution gate never refused despite a flood"
+    assert all(row["dropped"] is True for row in capped)
+
+
 # --- BindingHandler ---------------------------------------------------------
 
 

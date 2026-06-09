@@ -328,6 +328,14 @@ async def process_inbound_message(
     per-step contract. ``None`` resolution short-circuits to the binding flow;
     a ``Dropped`` burst result short-circuits before the extractor; every audit
     row carries peppered hashes (sec-010).
+
+    ``pre_resolution_limiter`` (sec-003) MUST be a long-lived instance for the
+    coarse per-``(adapter_id, platform_user_id_hash)`` DoS budget to accumulate
+    across messages. The production caller — :class:`.handlers.InboundMessageHandler`
+    — owns exactly one and threads it on every call. The ``None`` default mints a
+    single-shot limiter for unit tests that drive ONE message; passing ``None``
+    from a hot loop would reset the budget every message and silently disable the
+    gate, so no long-lived caller should rely on the default.
     """
     # Cheap pre-check BEFORE any expensive work (perf-003). The notification is
     # already a validated Pydantic model here, but the cheap gate is the
@@ -346,8 +354,13 @@ async def process_inbound_message(
     pepper = secret_broker.get("audit.hash_pepper")
     platform_user_id_hash = _peppered_hash(notification.platform_user_id, pepper=pepper)
 
-    # Pre-resolution coarse limiter (sec-003) — runs BEFORE the resolver.
-    limiter = pre_resolution_limiter or _PreResolutionLimiter()
+    # Pre-resolution coarse limiter (sec-003) — runs BEFORE the resolver. The
+    # production caller (InboundMessageHandler) always injects its persistent
+    # instance so the budget accumulates; the ``None`` fallback mints a
+    # single-shot limiter only for unit tests that drive exactly one message.
+    limiter = (
+        pre_resolution_limiter if pre_resolution_limiter is not None else _PreResolutionLimiter()
+    )
     if not limiter.check_and_record(
         adapter_id=notification.adapter_id,
         platform_user_id_hash=platform_user_id_hash,
