@@ -177,6 +177,11 @@ jobs:
         #     orchestrator + lifecycle audit + SIGKILL-before-audit
         #     ordering on the post-handshake hook-register attack
         #     (sec-013 / core-007).
+        #   * ``src/alfred/plugins/manifest_reader.py`` — the pre-launcher
+        #     Python helper (spec §7.2, PR-S4-6): policy_ref confinement
+        #     (sec-2 ``policy_ref_escapes_root`` / ``policy_ref_unreadable``)
+        #     + the closed-vocab bare-key refusals the bash launcher branches
+        #     on. A coverage hole here is an unproven confinement branch.
         #   * ``src/alfred/plugins/_observability.py`` — the spec §7a.1
         #     Prometheus histograms covering the four p99 budgets
         #     (perf-002 / perf-009). A missed observe point is a missed
@@ -188,10 +193,10 @@ jobs:
         # < 100% coverage. Chained ``&&`` hashFiles guard per PR-S3-1 R1
         # F1: ANY-match must NOT no-op the gate; ALL files must be
         # present before the coverage report runs.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/manifest_reader.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/plugins/errors.py,src/alfred/plugins/transport.py,src/alfred/plugins/manifest.py,src/alfred/plugins/inbound_scanner.py,src/alfred/plugins/content_store_base.py,src/alfred/plugins/stdio_transport.py,src/alfred/plugins/session.py,src/alfred/plugins/_observability.py' \
+            --include='src/alfred/plugins/errors.py,src/alfred/plugins/transport.py,src/alfred/plugins/manifest.py,src/alfred/plugins/inbound_scanner.py,src/alfred/plugins/content_store_base.py,src/alfred/plugins/stdio_transport.py,src/alfred/plugins/session.py,src/alfred/plugins/manifest_reader.py,src/alfred/plugins/_observability.py' \
             --fail-under=100
       - name: Web-fetch trust-boundary 100% line+branch coverage
         id: web_fetch_cov_python

@@ -203,6 +203,37 @@ def test_policy_to_bwrap_flags_ref_escapes_root(tmp_path, monkeypatch, capsys) -
     assert "policy_ref_escapes_root" in capsys.readouterr().err
 
 
+def test_policy_to_bwrap_flags_ref_unreadable(tmp_path, monkeypatch, capsys) -> None:
+    # CR #229 R2 finding-1 (in-process branch coverage for the 100% gate):
+    # resolve_policy_ref succeeds (a real regular file under the root) but
+    # read_text() then raises (file chmod 0o000) → the stable bare key, not a
+    # leaked OSError traceback.
+    import os
+
+    root = tmp_path / "config" / "sandbox"
+    root.mkdir(parents=True)
+    policy = root / "locked.linux.bwrap.policy"
+    policy.write_text("keep_fds = [3]\n")
+    policy.chmod(0o000)
+    monkeypatch.delenv("ALFRED_SANDBOX_POLICY_DIR", raising=False)
+    try:
+        if os.access(policy, os.R_OK):  # pragma: no cover - root/unusual fs
+            pytest.skip("cannot make file unreadable (running as root?)")
+        rc = manifest_reader.main(
+            [
+                "--policy-to-bwrap-flags",
+                "--policy-ref",
+                "config/sandbox/locked.linux.bwrap.policy",
+                "--install-root",
+                str(tmp_path),
+            ]
+        )
+    finally:
+        policy.chmod(0o644)
+    assert rc == 1
+    assert "supervisor.sandbox.refused.policy_ref_unreadable" in capsys.readouterr().err
+
+
 def test_policy_to_bwrap_flags_ref_default_install_root(tmp_path, monkeypatch, capsys) -> None:
     # No --install-root → cwd. Run with cwd pointed at tmp_path.
     root = tmp_path / "config" / "sandbox"
