@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
@@ -71,6 +72,7 @@ import structlog
 
 from alfred.audit import audit_row_schemas
 from alfred.audit.log import AuditWriter
+from alfred.comms_mcp import observability as comms_observability
 from alfred.hooks.capability import CapabilityGate
 from alfred.plugins.errors import (
     ManifestError,
@@ -661,9 +663,13 @@ class AlfredPluginSession:
         next frame (err-007 / catch-and-continue invariant).
         """
         async with self._dispatch_semaphore:
+            started = time.monotonic()
             try:
                 await self._route_comms_notification(method, params)
             except Exception as exc:
+                # Task 62: one increment per COMMS_HANDLER_FAILED_FIELDS emit,
+                # observed on the same loud failure path (err-007).
+                comms_observability.record_handler_failure()
                 await self._emit_handler_failed(method, exc)
                 self._error_counter.increment()
                 if (
@@ -677,6 +683,10 @@ class AlfredPluginSession:
                         reason="comms_handler_repeated_failures",
                     )
                 raise
+            finally:
+                # Task 62: dispatch wall time on every outcome (success OR the
+                # err-007 re-raise path) so the p99 reflects the full call.
+                comms_observability.record_inbound_dispatch_seconds(time.monotonic() - started)
 
     async def _route_comms_notification(
         self, method: str, params: Mapping[str, object] | None

@@ -92,6 +92,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alfred.audit.audit_row_schemas import SUPERVISOR_ACTION_TIMEOUT_FIELDS
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetError, BudgetGuard, UnknownBudgetUserError
+from alfred.comms_mcp import observability as comms_observability
 from alfred.i18n import t
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
@@ -328,11 +329,17 @@ class Orchestrator:
             raise ValueError(t("orchestrator.quarantined_extract.source_tier_must_be_t3"))
         if self._quarantined_extractor is None:
             raise RuntimeError(t("orchestrator.quarantined_extract.no_extractor_wired"))
-        return await self._quarantined_extractor.extract(
-            body=body,
-            canonical_user_id=canonical_user_id,
-            source_tier="T3",
-        )
+        # Task 62: observe the T3->orchestrator-readable crossing wall time on
+        # every outcome (the finally fires on success AND on a raising extract).
+        started = time.monotonic()
+        try:
+            return await self._quarantined_extractor.extract(
+                body=body,
+                canonical_user_id=canonical_user_id,
+                source_tier="T3",
+            )
+        finally:
+            comms_observability.record_quarantined_extract_seconds(time.monotonic() - started)
 
     async def handle_user_message(
         self,
