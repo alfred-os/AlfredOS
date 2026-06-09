@@ -196,7 +196,10 @@ class Supervisor:
         # PR-S4-4 (rev-003 closure): ``policies_ref`` is REQUIRED — no default.
         # Production refuses to run the privileged orchestrator with no policy
         # snapshot (CLAUDE.md hard rule 7). Tests pass a ``_StubPoliciesSnapshotRef``
-        # via the ``tests.helpers.policies.stub_policies_ref`` fixture.
+        # (the ``tests.helpers.policies.stub_policies_ref`` fixture, or the class
+        # directly in a test body). NOTE: the daemon still injects the stub ref in
+        # production — the real PoliciesSnapshotRef + watcher scheduling are
+        # pending #225 (PolicyWatcher ships here but is not yet scheduled).
         policies_ref: PoliciesSnapshotRefProtocol,
         operator_session_resolver: OperatorResolverProtocol | None = None,
         # arch-001 (#173 / PR-S4-2): the outbound DLP scanner threaded into

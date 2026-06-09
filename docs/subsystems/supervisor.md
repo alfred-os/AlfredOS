@@ -124,10 +124,13 @@ state machine itself):
 
 ### PolicyWatcher (`src/alfred/policies/watcher.py`)
 
-A long-running child task the daemon schedules in the supervisor's
-`asyncio.TaskGroup` (PR-S4-1 wires it; PR-S4-4 ships the class). It owns
-`config/policies.yaml` and is the **only** runtime reader of that file; every
-other subsystem reads the active policy through `PoliciesSnapshotRef.current()`.
+A long-running child task **intended** to run in the supervisor's
+`asyncio.TaskGroup`. PR-S4-4 ships the class only; **scheduling is not yet wired
+— pending [#225](https://github.com/MrReasonable/AlfredOS/issues/225)** (the
+daemon still injects a stub ref and `PoliciesV1` is unreconciled with the live
+file). Once wired it owns `config/policies.yaml` as the **only** runtime reader
+of that file; every other subsystem reads the active policy through
+`PoliciesSnapshotRef.current()`.
 Full surface — mtime gate, watcher-side SHA short-circuit, high-blast refusal,
 degraded/recovered state machine, the five `supervisor.config_*` /
 `policies.watcher.degraded` hookpoints — is documented in
