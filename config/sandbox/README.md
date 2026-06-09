@@ -70,11 +70,24 @@ The Linux policy is TOML validated by `alfred.plugins.sandbox_policy.SandboxPoli
 The shipped quarantined-LLM Linux policy binds only `/usr`, `/lib`, `/lib64`
 read-only (the interpreter + its loader/libs), a tmpfs scratch dir, synthesises
 `/dev`, unshares `pid/uts/cgroup/ipc`, dies with its parent, and keeps fd 3. It
-binds **no** `/etc` and **no** `/bin` — so host secrets are unreadable and host
-binaries are not exec targets. (Note: on x86-64 Debian `/lib64` exists and holds
-`ld-linux-x86-64.so.2`; on arches without a top-level `/lib64`, the `/usr` +
-`/lib` binds carry the loader via the usrmerge symlink — the production target is
-x86-64 Debian Bookworm, the CI + container image arch.)
+binds **no** `/etc` and **no** `/bin` — so host secrets are unreadable and
+`/bin/sh` / `/bin/*` are not exec targets. (Note: on x86-64 Debian `/lib64`
+exists and holds `ld-linux-x86-64.so.2`; on arches without a top-level `/lib64`,
+the `/usr` + `/lib` binds carry the loader via the usrmerge symlink — the
+production target is x86-64 Debian Bookworm, the CI + container image arch.)
+
+> **Known-permissive (tracked in #230): the broad `/usr` bind leaves
+> `/usr/bin/*` exec-reachable.** Binding all of `/usr` read-only puts
+> `/usr/bin/python`, `/usr/bin/curl`, `/usr/bin/sh`, etc. inside the sandbox's
+> mount namespace, so a compromised quarantined process CAN exec an absolute
+> `/usr/bin/...` path. The `/bin/sh` containment test passes only because `/bin`
+> itself is not bound — `/usr/bin/sh` may still resolve. The PRIMARY exec
+> containment is `--unshare-pid` + `--die-with-parent` + the empty writable
+> surface (a child cannot escape the pid namespace or outlive the Supervisor),
+> NOT the absence of exec targets. **#230 tightens the interpreter bind from the
+> broad `/usr` down to the exact CPython prefix** so `/usr/bin/*` stops being
+> exec-reachable. This is an accepted, documented limitation for the mid-flight
+> slice state, not a silent gap.
 
 Kernel enforcement of these bytes is proven by the merge-blocking integration
 test `tests/integration/test_quarantined_llm_policy_kernel_enforced.py` and the
