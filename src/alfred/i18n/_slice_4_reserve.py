@@ -125,7 +125,8 @@ def _register() -> None:
     # Sandbox refusal reasons (PR-S4-6).
     t("supervisor.sandbox.refused.policy_ref_missing")
     t("supervisor.sandbox.refused.policy_ref_os_mismatch")
-    t("supervisor.sandbox.refused.policy_ref_unreadable")
+    # policy_ref_unreadable lives in plugins/_sandbox_i18n.py alongside its
+    # sibling manifest_reader/launcher bare-key refusals (CR PR #229 R3).
     t("supervisor.sandbox.refused.sandbox_block_missing")
     t("supervisor.sandbox.refused.windows_stub_in_production")
     t("supervisor.sandbox.unsandboxed_refused_in_production")

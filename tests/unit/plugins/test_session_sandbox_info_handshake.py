@@ -139,7 +139,7 @@ async def test_non_sandbox_info_method_unaffected(fake_audit_writer, fake_gate) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad_params", [[], ["effective_sandbox_kind"], "full", 7, 0, ""])
+@pytest.mark.parametrize("bad_params", [None, [], ["effective_sandbox_kind"], "full", 7, 0, ""])
 async def test_sandbox_info_non_object_params_fails_closed(
     fake_audit_writer, fake_gate, bad_params
 ) -> None:

@@ -45,6 +45,9 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     "supervisor.sandbox.refused.policy_ref_escapes_root": t(
         "supervisor.sandbox.refused.policy_ref_escapes_root"
     ),
+    "supervisor.sandbox.refused.policy_ref_unreadable": t(
+        "supervisor.sandbox.refused.policy_ref_unreadable"
+    ),
     "supervisor.sandbox.refused.unknown_host_os": t("supervisor.sandbox.refused.unknown_host_os"),
     "supervisor.sandbox.refused.jq_unavailable": t("supervisor.sandbox.refused.jq_unavailable"),
     "supervisor.sandbox.refused.macos_full_not_yet_shipped": t(
