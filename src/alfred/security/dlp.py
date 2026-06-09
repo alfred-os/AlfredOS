@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, NewType, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field
 
 # Generic API-key shape: prefix + separator + 20-or-more alnum bytes,
 # anchored on word boundaries so an embedded form (e.g.
@@ -48,6 +50,38 @@ _GENERIC_API_KEY_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(?:sk|pk|tok|key)[-_][A-Za-z0-9]{20,}\b"
 )
 _REDACTION_SENTINEL: Final[str] = "[REDACTED:api-key-shape]"
+
+
+class OutboundDlpScanResult(BaseModel):
+    """Forensic metadata of a single :meth:`OutboundDlp.scan_for_outbound` run.
+
+    Carries the post-scan signal an outbound caller needs to make a refusal
+    decision without re-deriving it: how many redaction stages fired
+    (``dlp_redactions_count``) and whether a canary token tripped
+    (``canary_tripped``). The redacted *text* lives alongside this in the
+    :data:`ScannedOutboundBody` tuple — the two are minted together so a
+    comms ``OutboundMessageRequest`` cannot carry text that skipped the scan.
+
+    ``canary_tripped`` is wired to ``False`` here because the Slice-2 canary
+    stage is still a no-op (see :meth:`OutboundDlp._canary_stub`); the field
+    is present now so the Slice-3 canary expansion is a single-site change
+    and the comms wire contract does not move when it lands.
+    """
+
+    dlp_redactions_count: int = Field(ge=0)
+    canary_tripped: bool
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+# The ONLY type the comms ``OutboundMessageRequest.body`` field accepts
+# (PR-S4-8 round-2 closure #1 — sec-001 CRITICAL). A ``NewType`` over the
+# ``(redacted_text, scan_result)`` tuple: the tuple is mintable only by
+# :meth:`OutboundDlp.scan_for_outbound`, so every outbound construction site
+# is statically forced through the DLP chokepoint. The AST guard
+# ``tests/unit/comms/test_outbound_request_constructed_via_scan.py`` refuses
+# any ``OutboundMessageRequest(...)`` whose ``body=`` is not a
+# ``scan_for_outbound(...)`` return value within the same function scope.
+ScannedOutboundBody = NewType("ScannedOutboundBody", tuple[str, OutboundDlpScanResult])
 
 
 class _BrokerLike(Protocol):
@@ -101,6 +135,37 @@ class OutboundDlp:
         concern (oracle attack). The audit row records the byte deltas
         for forensic correlation.
         """
+        redacted, _stages = self._scan_stages(text)
+        return redacted
+
+    def scan_for_outbound(self, raw_body: str) -> ScannedOutboundBody:
+        """Mint a :data:`ScannedOutboundBody` from a raw outbound message body.
+
+        The ONLY constructor of :data:`ScannedOutboundBody` (PR-S4-8 round-2
+        closure #1). A comms ``OutboundMessageRequest`` cannot be built
+        without first routing its body through this method, so the
+        DLP-mandatory invariant is structural, not a convention an emit site
+        can forget. Runs the same three-stage pipeline as :meth:`scan` (so
+        the audit-on-modification row still fires) and additionally surfaces
+        the redaction count + canary signal in a frozen
+        :class:`OutboundDlpScanResult` for the caller's refusal decision.
+        """
+        redacted, stages_triggered = self._scan_stages(raw_body)
+        scan_result = OutboundDlpScanResult(
+            dlp_redactions_count=len(stages_triggered),
+            # Slice-2 canary is a no-op; the field is wired False until the
+            # Slice-3 canary stage replaces ``_canary_stub`` (see model docs).
+            canary_tripped=False,
+        )
+        return ScannedOutboundBody((redacted, scan_result))
+
+    def _scan_stages(self, text: str) -> tuple[str, tuple[str, ...]]:
+        """Run the three-stage pipeline; return ``(redacted, stages_triggered)``.
+
+        Shared core for :meth:`scan` and :meth:`scan_for_outbound`. Emits the
+        ``dlp.outbound_redacted`` audit row on modification; raises propagate
+        per CLAUDE.md hard rule #7.
+        """
         pre = text
         stages_triggered: list[str] = []
 
@@ -134,7 +199,7 @@ class OutboundDlp:
                 },
             )
 
-        return text
+        return text, tuple(stages_triggered)
 
     @staticmethod
     def _canary_stub(text: str) -> str:
@@ -175,4 +240,9 @@ class OutboundDlpProtocol(Protocol):
         raise NotImplementedError  # pragma: no cover
 
 
-__all__ = ["OutboundDlp", "OutboundDlpProtocol"]
+__all__ = [
+    "OutboundDlp",
+    "OutboundDlpProtocol",
+    "OutboundDlpScanResult",
+    "ScannedOutboundBody",
+]
