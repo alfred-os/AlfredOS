@@ -6,26 +6,51 @@ block is frozen + ``extra="forbid"`` so a typo'd operator key surfaces as a
 loud ``validation_failure`` (CLAUDE.md hard rule 7) rather than a silently
 ignored knob.
 
-Low-blast vs high-blast partitioning (spec §5.4 / closure arch-003):
+Low-blast vs high-blast partitioning (ADR-0023 §5 / closure arch-003).
+The partition is a **default-refuse, allowlist-permit** classification, NOT a
+high-blast denylist. The watcher hot-reloads a changed key ONLY when its
+dotted path is enumerated in :data:`LOW_BLAST_ALLOWLIST`; EVERY other changed
+key — top-level or nested — refuses hot-reload with ``high_blast_change``. The
+secure shape is allowlist-permit precisely so a future field added to any
+block defaults to refuse rather than silently slipping through a denylist gap.
 
 * :class:`RateLimitPolicies`, :class:`HandleCapPolicies` — anti-abuse knobs.
-  These are **high-blast** per closure arch-003 (an attacker with config-write
-  could shrink a window to 0 for DoS or widen it to bypass anti-abuse). The
-  watcher hot-reloads them only when the change does NOT cross the high-blast
-  partition (see :func:`alfred.policies.watcher.PolicyWatcher`). In this PR
-  the *enumerated* high-blast keys live in :class:`HighBlastPolicies`; the
-  rate-limit / handle-cap blocks ride the same file and so are observable, but
-  the BurstLimiter sub-policy is consumed by PR-S4-8 read-only.
-* :class:`HighBlastPolicies` — keys that REFUSE hot-reload outright
-  (``quarantined_provider_url``, ``secret_broker_config_ref``). Only the
-  reviewer-gated proposal flow may change them.
+  These are **high-blast** per ADR-0023 §5 / closure arch-003: an attacker
+  with config-write could shrink ``web_fetch_per_user_per_hour`` /
+  ``quarantined_extract_per_user_persona`` / ``web_fetch_per_session_total`` /
+  ``operator_daily_budget_usd`` /
+  ``web_fetch_max_concurrent_handles_per_user`` to 0 (DoS) or widen them to ∞
+  (anti-abuse bypass). They are NOT in the low-blast allowlist, so the watcher
+  refuses hot-reloading them. The BurstLimiter sub-policy is consumed by
+  PR-S4-8 read-only off the boot-time snapshot.
+* :class:`HighBlastPolicies` — keys whose blast radius is total
+  (``quarantined_provider_url`` redirects every T3 extraction;
+  ``secret_broker_config_ref`` repoints the broker). Also outside the
+  allowlist; only the reviewer-gated proposal flow may change them.
+
+:data:`LOW_BLAST_ALLOWLIST` is currently **empty** — the only fields modelled
+so far (``rate_limits``, ``handle_caps``, ``high_blast``) are all high-blast.
+The reserved members of the low-blast partition are UI strings, timezone /
+locale, observability sample rates, and non-security log verbosity — none of
+which exist in :class:`PoliciesV1` yet. When such a field lands it gets an
+explicit allowlist entry plus a corpus + unit test proving it hot-reloads.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+
+# Dotted key paths (``<top_level>`` or ``<top_level>.<sub_field>``) whose
+# change the watcher is permitted to hot-reload. EMPTY by design (ADR-0023 §5):
+# every field currently modelled in ``PoliciesV1`` is high-blast. Membership is
+# checked against the dotted diff produced by
+# ``alfred.policies.snapshot_ref._diff_keys``; any changed key absent here is a
+# ``high_blast_change`` refusal. This is the secure partition shape:
+# default-refuse, allowlist-permit — never a high-blast denylist that could
+# silently miss a future field.
+LOW_BLAST_ALLOWLIST: Final[frozenset[str]] = frozenset()
 
 
 class BurstLimiterPolicy(BaseModel):
@@ -90,6 +115,7 @@ class PoliciesV1(BaseModel):
 
 
 __all__ = [
+    "LOW_BLAST_ALLOWLIST",
     "BurstLimiterPolicy",
     "HandleCapPolicies",
     "HighBlastPolicies",

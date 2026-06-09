@@ -89,6 +89,8 @@ def _register() -> None:
     t("supervisor.config_reload.rejected.audit_write_failed")
     t("supervisor.config_watcher.degraded")
     t("supervisor.config_watcher.recovered")
+    # Fallback-sink write failure (PR-S4-4 round-3 err-S4-4-3).
+    t("policies.watcher.fallback_write_failed")
 
     # TUI gating (PR-S4-1).
     t("comms.tui.daemon_required_to_chat")

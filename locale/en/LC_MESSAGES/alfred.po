@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-09 02:03+0100\n"
+"POT-Creation-Date: 2026-06-09 02:33+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1354,56 +1354,63 @@ msgstr ""
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:83 src/alfred/policies/watcher.py:349
+#: src/alfred/i18n/_slice_4_reserve.py:83 src/alfred/policies/watcher.py:367
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
-#: src/alfred/i18n/_slice_4_reserve.py:84 src/alfred/policies/watcher.py:86
+#: src/alfred/i18n/_slice_4_reserve.py:84 src/alfred/policies/watcher.py:87
 msgid "supervisor.config_reload.rejected.parse_failure"
 msgstr ""
 "config/policies.yaml reload rejected: parse failure ({detail}). Live "
 "snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:85 src/alfred/policies/watcher.py:88
+#: src/alfred/i18n/_slice_4_reserve.py:85 src/alfred/policies/watcher.py:89
 msgid "supervisor.config_reload.rejected.high_blast_change"
 msgstr ""
 "config/policies.yaml reload rejected: {key} is a high-blast key and "
 "requires reviewer-gate."
 
-#: src/alfred/i18n/_slice_4_reserve.py:86 src/alfred/policies/watcher.py:90
+#: src/alfred/i18n/_slice_4_reserve.py:86 src/alfred/policies/watcher.py:91
 msgid "supervisor.config_reload.rejected.validation_failure"
 msgstr ""
 "config/policies.yaml reload rejected: validation failed for {detail}. "
 "Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:87 src/alfred/policies/watcher.py:92
+#: src/alfred/i18n/_slice_4_reserve.py:87 src/alfred/policies/watcher.py:93
 msgid "supervisor.config_reload.rejected.file_vanished"
 msgstr ""
 "config/policies.yaml vanished between stat and read. Live snapshot "
 "retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:88 src/alfred/policies/watcher.py:94
+#: src/alfred/i18n/_slice_4_reserve.py:88 src/alfred/policies/watcher.py:95
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:89 src/alfred/policies/watcher.py:96
+#: src/alfred/i18n/_slice_4_reserve.py:89 src/alfred/policies/watcher.py:97
 msgid "supervisor.config_reload.rejected.audit_write_failed"
 msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:90 src/alfred/policies/watcher.py:452
+#: src/alfred/i18n/_slice_4_reserve.py:90 src/alfred/policies/watcher.py:496
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:91 src/alfred/policies/watcher.py:469
+#: src/alfred/i18n/_slice_4_reserve.py:91 src/alfred/policies/watcher.py:513
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
+#: src/alfred/i18n/_slice_4_reserve.py:93 src/alfred/policies/watcher.py:479
+msgid "policies.watcher.fallback_write_failed"
+msgstr ""
+"PolicyWatcher could not write the rejected-config fallback sink at "
+"{path}: both the audit store and the fallback are unwritable. The watcher"
+" continues; fix the state directory."
+
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/i18n/_slice_4_reserve.py:94
+#: src/alfred/i18n/_slice_4_reserve.py:96
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat requires the AlfredOS daemon to be running. Start it with "

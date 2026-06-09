@@ -13,7 +13,17 @@ from pathlib import Path
 
 import pytest
 
-from ._watcher_harness import build_watcher, isolated_fallback, make_policies, write_policies
+from ._watcher_harness import (
+    allowlisted,
+    build_watcher,
+    isolated_fallback,
+    make_policies,
+    write_policies,
+)
+
+# The dotted key a machinery test allowlists to drive the *applied* swap path
+# without weakening the production (empty) low-blast allowlist (ADR-0023 §5).
+_RATE_KEY = "rate_limits.web_fetch_per_user_per_hour"
 
 pytestmark = pytest.mark.asyncio
 
@@ -26,15 +36,83 @@ def _bump_mtime(path: Path) -> None:
     os.utime(path, (future, future))
 
 
-async def test_low_blast_change_swaps_and_emits_applied(tmp_path: Path) -> None:
+async def test_allowlisted_change_swaps_and_emits_applied(tmp_path: Path) -> None:
+    """An *allowlisted* key change hot-reloads (the applied path still works).
+
+    The production allowlist is empty, so this test injects the key under test
+    to drive the swap machinery; the refusal of the same edit under the
+    default-empty allowlist is pinned by
+    ``test_rate_limit_change_refused_by_default``.
+    """
     watcher, ref, audit, invoker = build_watcher(tmp_path)
     new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
     write_policies(watcher._path, new)
     _bump_mtime(watcher._path)
-    await watcher._tick()
+    with allowlisted(_RATE_KEY):
+        await watcher._tick()
     assert ref.current().policies.rate_limits.web_fetch_per_user_per_hour == 120
     assert audit.subjects_for(_APPLIED)
     assert invoker.count("supervisor.config_reload") == 1
+
+
+async def test_rate_limit_change_refused_by_default(tmp_path: Path) -> None:
+    """KEYSTONE (ADR-0023 §5 / arch-003): a rate-limit edit REFUSES hot-reload.
+
+    With the empty production low-blast allowlist, shrinking/widening
+    ``web_fetch_per_user_per_hour`` (DoS / anti-abuse bypass) is high-blast and
+    must be refused — NOT applied silently with ``config.reload.applied``.
+    """
+    watcher, ref, audit, invoker = build_watcher(tmp_path)
+    active = ref.current()
+    new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 0})
+    write_policies(watcher._path, new)
+    _bump_mtime(watcher._path)
+    await watcher._tick()
+    subjects = audit.subjects_for(_REJECTED)
+    assert subjects and subjects[-1]["reason"] == "high_blast_change"
+    assert subjects[-1]["offending_key"] == _RATE_KEY
+    # Refusal is total: no applied row, active snapshot byte-identical.
+    assert audit.subjects_for(_APPLIED) == []
+    assert ref.current() is active
+    assert invoker.count("supervisor.config_reload_rejected") == 1
+    assert invoker.count("supervisor.config_reload") == 0
+
+
+async def test_handle_cap_change_refused_by_default(tmp_path: Path) -> None:
+    """A ``handle_caps.*`` edit is high-blast and refuses hot-reload (arch-003)."""
+    watcher, ref, audit, _ = build_watcher(tmp_path)
+    active = ref.current()
+    new = make_policies(handle_caps={"web_fetch_max_concurrent_handles_per_user": 9999})
+    write_policies(watcher._path, new)
+    _bump_mtime(watcher._path)
+    await watcher._tick()
+    subjects = audit.subjects_for(_REJECTED)
+    assert subjects and subjects[-1]["reason"] == "high_blast_change"
+    assert subjects[-1]["offending_key"] == "handle_caps.web_fetch_max_concurrent_handles_per_user"
+    assert ref.current() is active
+
+
+async def test_burst_limiter_nested_change_refused_by_default(tmp_path: Path) -> None:
+    """A nested ``quarantined_extract_per_user_persona.*`` edit refuses (arch-003).
+
+    The burst-limiter capacity is the anti-abuse knob PR-S4-8 consumes; an edit
+    to its nested ``capacity_tokens`` must not slip through the low-blast
+    channel.
+    """
+    watcher, ref, audit, _ = build_watcher(tmp_path)
+    active = ref.current()
+    new = make_policies(
+        rate_limits={"quarantined_extract_per_user_persona": {"capacity_tokens": 100}}
+    )
+    write_policies(watcher._path, new)
+    _bump_mtime(watcher._path)
+    await watcher._tick()
+    subjects = audit.subjects_for(_REJECTED)
+    assert subjects and subjects[-1]["reason"] == "high_blast_change"
+    # ``_diff_keys`` reports two-level dotted paths; the nested sub-model field
+    # surfaces as its owning sub-model key.
+    assert subjects[-1]["offending_key"] == "rate_limits.quarantined_extract_per_user_persona"
+    assert ref.current() is active
 
 
 async def test_mtime_gate_skips_reread_when_unchanged(tmp_path: Path, monkeypatch) -> None:
@@ -164,7 +242,8 @@ async def test_swap_audit_failure_emits_rejected_keeps_active(tmp_path: Path) ->
     new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
     write_policies(watcher._path, new)
     _bump_mtime(watcher._path)
-    await watcher._tick()
+    with allowlisted(_RATE_KEY):
+        await watcher._tick()
     subjects = audit.subjects_for(_REJECTED)
     assert subjects and subjects[-1]["reason"] == "audit_write_failed"
     assert ref.current() is active
@@ -184,12 +263,118 @@ async def test_rejected_write_failure_falls_back_to_jsonl_and_degrades(tmp_path:
     new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
     write_policies(watcher._path, new)
     _bump_mtime(watcher._path)
-    with isolated_fallback(tmp_path) as fallback:
+    with isolated_fallback(tmp_path) as fallback, allowlisted(_RATE_KEY):
         await watcher._tick()
         assert fallback.exists()
         assert "audit_write_failed" in fallback.read_text()
     assert ref.current() is active
     assert invoker.count("policies.watcher.degraded") == 1
+
+
+async def test_swap_programmer_error_propagates_not_reclassified(tmp_path: Path) -> None:
+    """err-S4-4-4: a wrong-shape append_schema (ValueError) propagates loudly.
+
+    The swap()-site except is narrowed to ``SQLAlchemyError`` so a programmer
+    error is NOT silently reclassified as transient ``audit_write_failed``. A
+    ValueError / TypeError / ValidationError from ``append_schema`` must escape
+    ``_tick`` as a loud bug.
+    """
+    watcher, ref, audit, _ = build_watcher(tmp_path)
+    active = ref.current()
+    audit.raise_on("CONFIG_RELOAD_FIELDS", ValueError("append_schema wrong shape"))
+    new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
+    write_policies(watcher._path, new)
+    _bump_mtime(watcher._path)
+    with allowlisted(_RATE_KEY), pytest.raises(ValueError, match="wrong shape"):
+        await watcher._tick()
+    # No reclassification to audit_write_failed; active snapshot unchanged.
+    assert audit.subjects_for(_REJECTED) == []
+    assert ref.current() is active
+
+
+async def test_fallback_write_oserror_does_not_kill_watcher(tmp_path: Path, monkeypatch) -> None:
+    """err-S4-4-3: a read-only / full state dir must NOT crash the watcher.
+
+    When BOTH the audit store AND the fallback sink are down, the watcher logs
+    critically and continues — the OSError from ``mkdir``/``open``/``write``
+    must never propagate out of ``_tick`` into ``run()``'s ``while True``.
+    """
+    import alfred.policies.watcher as watcher_mod
+
+    watcher, ref, audit, invoker = build_watcher(tmp_path)
+    active = ref.current()
+    from sqlalchemy.exc import OperationalError
+
+    audit.raise_on("CONFIG_RELOAD_FIELDS", OperationalError("a", {}, Exception("down")))
+    audit.raise_on("CONFIG_RELOAD_REJECTED_FIELDS", OperationalError("b", {}, Exception("down")))
+
+    # Point the fallback at a path whose PARENT is a regular file, so
+    # ``Path.parent.mkdir`` raises NotADirectoryError (an OSError subclass).
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(watcher_mod, "_fallback_jsonl_path", lambda: blocker / "fallback.jsonl")
+
+    crit: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        watcher_mod._LOG, "critical", lambda event, **kw: crit.append({"event": event, **kw})
+    )
+
+    new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
+    write_policies(watcher._path, new)
+    _bump_mtime(watcher._path)
+    # Must NOT raise.
+    with allowlisted(_RATE_KEY):
+        await watcher._tick()
+
+    assert any(c["event"] == "policies.watcher.fallback_write_failed" for c in crit)
+    assert ref.current() is active
+    # The degraded hookpoint still fires despite the sink failure.
+    assert invoker.count("policies.watcher.degraded") == 1
+
+
+async def test_fallback_write_failure_not_cached_so_retries(tmp_path: Path, monkeypatch) -> None:
+    """A FAILED fallback write does not advance the dedup cursor (re-logged each tick)."""
+    import alfred.policies.watcher as watcher_mod
+
+    watcher, _ref, audit, _ = build_watcher(tmp_path)
+    from sqlalchemy.exc import OperationalError
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    monkeypatch.setattr(watcher_mod, "_fallback_jsonl_path", lambda: blocker / "fallback.jsonl")
+    crit: list[str] = []
+    monkeypatch.setattr(watcher_mod._LOG, "critical", lambda event, **kw: crit.append(event))
+
+    for _ in range(2):
+        audit.raise_on("CONFIG_RELOAD_REJECTED_FIELDS", OperationalError("x", {}, Exception("d")))
+        await watcher._reject(
+            reason="audit_write_failed", attempted_sha="sha-1", offending_key="<audit_store>"
+        )
+    # Both attempts re-logged because the failed write never set the dedup cursor.
+    assert crit.count("policies.watcher.fallback_write_failed") == 2
+
+
+async def test_fallback_dedup_one_line_per_distinct_bad_file(tmp_path: Path) -> None:
+    """perf-S4-4-5: a sustained outage on the SAME bad file writes ONE fallback line."""
+    from sqlalchemy.exc import OperationalError
+
+    watcher, _ref, audit, _ = build_watcher(tmp_path)
+    with isolated_fallback(tmp_path) as fallback:
+        # Same (reason, attempted_sha256) twice -> deduped to a single line.
+        for _ in range(2):
+            audit.raise_on(
+                "CONFIG_RELOAD_REJECTED_FIELDS", OperationalError("x", {}, Exception("d"))
+            )
+            await watcher._reject(
+                reason="audit_write_failed", attempted_sha="sha-A", offending_key="<audit_store>"
+            )
+        assert fallback.read_text().count("\n") == 1
+        # A DIFFERENT attempted_sha (a new bad file) appends a second line.
+        audit.raise_on("CONFIG_RELOAD_REJECTED_FIELDS", OperationalError("x", {}, Exception("d")))
+        await watcher._reject(
+            reason="audit_write_failed", attempted_sha="sha-B", offending_key="<audit_store>"
+        )
+        assert fallback.read_text().count("\n") == 2
 
 
 async def test_degraded_after_three_stat_failures(tmp_path: Path, monkeypatch) -> None:
@@ -244,7 +429,8 @@ async def test_mtime_skew_far_future_still_loads(tmp_path: Path) -> None:
     new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
     write_policies(watcher._path, new)
     os.utime(watcher._path, (4_070_908_800, 4_070_908_800))  # year 2099
-    await watcher._tick()
+    with allowlisted(_RATE_KEY):
+        await watcher._tick()
     assert ref.current().policies.rate_limits.web_fetch_per_user_per_hour == 120
     assert audit.subjects_for(_APPLIED)
 
@@ -275,5 +461,6 @@ async def test_swap_writes_history_row_when_writer_present(tmp_path: Path) -> No
     new = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
     write_policies(watcher._path, new)
     _bump_mtime(watcher._path)
-    await watcher._tick()
+    with allowlisted(_RATE_KEY):
+        await watcher._tick()
     assert history.appended == [ref.current().file_sha256]

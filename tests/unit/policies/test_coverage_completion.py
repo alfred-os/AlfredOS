@@ -26,7 +26,7 @@ from alfred.policies.snapshot_ref import (
 from alfred.policies.watcher import PolicyWatcher, _first_error_key
 
 from ._factories import make_policies, make_snapshot
-from ._watcher_harness import build_watcher, write_policies
+from ._watcher_harness import allowlisted, build_watcher, write_policies
 from ._watcher_harness import make_policies as _mk
 
 
@@ -154,7 +154,8 @@ async def test_history_write_failure_is_swallowed_loudly(tmp_path: Path) -> None
     import os
 
     os.utime(watcher._path, (future, future))
-    await watcher._tick()
+    with allowlisted("rate_limits.web_fetch_per_user_per_hour"):
+        await watcher._tick()
     # The swap committed despite the history-write failure.
     assert ref.current().policies.rate_limits.web_fetch_per_user_per_hour == 120
 
@@ -203,3 +204,31 @@ def test_high_blast_offending_key_names_changed_field() -> None:
     a = make_policies()
     b = make_policies(high_blast={"secret_broker_config_ref": "broker://other"})
     assert PolicyWatcher._high_blast_offending_key(a, b) == "high_blast.secret_broker_config_ref"
+
+
+def test_high_blast_offending_key_skips_allowlisted_then_flags_next() -> None:
+    """An allowlisted changed key is skipped; the next non-allowlisted key is flagged.
+
+    Exercises the loop-continue edge: ``_diff_keys`` returns two changed keys,
+    the first allowlisted (skipped) and the second high-blast (returned).
+    """
+    a = make_policies()
+    b = make_policies(
+        rate_limits={"web_fetch_per_user_per_hour": 120},
+        handle_caps={"web_fetch_max_concurrent_handles_per_user": 99},
+    )
+    # ``_diff_keys`` sorts: ``handle_caps.*`` precedes ``rate_limits.*``.
+    # Allowlist the FIRST so the loop must continue past it to flag the second.
+    with allowlisted("handle_caps.web_fetch_max_concurrent_handles_per_user"):
+        assert (
+            PolicyWatcher._high_blast_offending_key(a, b)
+            == "rate_limits.web_fetch_per_user_per_hour"
+        )
+
+
+def test_high_blast_offending_key_all_allowlisted_returns_none() -> None:
+    """When every changed key is allowlisted, no high-blast key is flagged."""
+    a = make_policies()
+    b = make_policies(rate_limits={"web_fetch_per_user_per_hour": 120})
+    with allowlisted("rate_limits.web_fetch_per_user_per_hour"):
+        assert PolicyWatcher._high_blast_offending_key(a, b) is None
