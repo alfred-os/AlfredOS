@@ -253,6 +253,7 @@ async def _emit_binding_request(
     storing the raw phrase.
     """
     phrase = uuid.uuid4().hex
+    platform_user_id_hash = _peppered_hash(notification.platform_user_id, pepper=pepper)
     await audit_writer.append_schema(
         fields=audit_row_schemas.COMMS_BINDING_REQUESTED_FIELDS,
         schema_name="COMMS_BINDING_REQUESTED_FIELDS",
@@ -260,7 +261,7 @@ async def _emit_binding_request(
         actor_user_id=None,
         subject={
             "adapter_id": notification.adapter_id,
-            "platform_user_id_hash": _peppered_hash(notification.platform_user_id, pepper=pepper),
+            "platform_user_id_hash": platform_user_id_hash,
             "verification_phrase_hash": _peppered_hash(phrase, pepper=pepper),
             "requested_at": datetime.now(UTC).isoformat(),
             "language": language,
@@ -268,7 +269,9 @@ async def _emit_binding_request(
         trust_tier_of_trigger="T3",
         result="binding_requested",
         cost_estimate_usd=0.0,
-        trace_id=notification.platform_user_id,
+        # sec-010: trace_id is a persisted, indexed String(64) column — it must
+        # carry the peppered hash, NEVER the raw platform_user_id.
+        trace_id=platform_user_id_hash,
         language=language,
     )
 

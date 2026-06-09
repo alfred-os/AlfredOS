@@ -149,7 +149,16 @@ class SpyAuditWriter:
             raise AssertionError(
                 f"append_schema {schema_name}: missing={sorted(missing)} extra={sorted(extra)}"
             )
-        self.schema_rows.append({"schema_name": schema_name, "event": event, **subject})
+        # ``trace_id`` is a persisted, indexed column — captured here so leak
+        # tests (sec-010) can prove the raw platform_user_id never lands on it.
+        self.schema_rows.append(
+            {
+                "schema_name": schema_name,
+                "event": event,
+                "trace_id": kwargs.get("trace_id"),
+                **subject,
+            }
+        )
 
     async def append(self, *, event: str, subject: dict[str, Any], **kwargs: Any) -> None:
         self.event_rows.append({"event": event, **subject})
