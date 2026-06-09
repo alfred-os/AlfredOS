@@ -2367,6 +2367,18 @@ msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
 "status` to list registered components."
 
+#: src/alfred/supervisor/core.py
+msgid "supervisor.trip_breaker.unknown_reason"
+msgstr ""
+"trip_breaker refused: {reason!r} is not a known breaker-trip reason. Pass a "
+"valid TripBreakerReason."
+
+#: src/alfred/supervisor/core.py
+msgid "supervisor.request_plugin_restart.unknown_reason"
+msgstr ""
+"request_plugin_restart refused: {reason!r} is not a known restart reason. "
+"Pass a valid PluginRestartReason."
+
 #: src/alfred/orchestrator/core.py
 msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
 msgstr ""
