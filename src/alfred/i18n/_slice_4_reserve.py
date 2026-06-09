@@ -33,7 +33,6 @@ def _register() -> None:
     function is the only static reference.
     """
     # Login / session lifecycle (PR-S4-5).
-    t("login.prompt_confirm_overwrite")
     t("login.session_overwrite_confirm")
     t("login.user_not_found")
     t("login.user_not_found.hint")
@@ -51,11 +50,9 @@ def _register() -> None:
     t("logout.confirmed")
     t("whoami.no_session")
     t("whoami.expired")
+    t("whoami.unloadable")
+    t("whoami.unloadable.recovery")
     t("whoami.template")
-    t("whoami.signed_in_as")
-    t("whoami.session_since")
-    t("whoami.session_expires")
-    t("whoami.machine")
 
     # Operator-session refusal reasons (PR-S4-5).
     t("operator_session.refused.expired")
@@ -78,6 +75,7 @@ def _register() -> None:
 
     # Supervisor reset refusals (PR-S4-5).
     t("supervisor.breaker.reset.refused.not_logged_in")
+    t("supervisor.breaker.reset.refused.not_logged_in.recovery")
     t("supervisor.breaker.reset.refused.operator_permissions_insufficient")
     # Reviewer-gated CLI operator-attribution refusals (PR-S4-5 #153) — the
     # ``t()`` call sites pass these via a ``refusal_key`` variable, so pybabel
