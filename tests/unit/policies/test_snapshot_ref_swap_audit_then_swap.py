@@ -44,6 +44,10 @@ async def test_swap_emits_config_reload_audit_before_assignment() -> None:
     assert row["new_sha256"] == new.file_sha256
     assert row["operator_session_id"] is None
     assert "rate_limits.web_fetch_per_user_per_hour" in row["changed_keys"]
+    # Finding 4: the applied row carries old->new for each changed key.
+    values = row["changed_values"]["rate_limits.web_fetch_per_user_per_hour"]
+    assert values["old"] == initial.policies.rate_limits.web_fetch_per_user_per_hour
+    assert values["new"] == 120
 
 
 async def test_swap_uses_new_file_path_not_mtime() -> None:

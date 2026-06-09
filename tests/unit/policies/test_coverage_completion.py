@@ -21,6 +21,7 @@ from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.policies.snapshot_ref import (
     PolicySnapshotHistoryWriter,
     _diff_keys,
+    _diff_values,
     build_initial_snapshot,
 )
 from alfred.policies.watcher import PolicyWatcher, _first_error_key
@@ -69,6 +70,31 @@ def test_build_initial_snapshot(tmp_path: Path) -> None:
     snap = build_initial_snapshot(path=cfg, policies=model)
     assert snap.file_path == cfg.resolve()
     assert snap.policies == model
+    # The mtime comes from the open-fd fstat, matching the on-disk file.
+    assert snap.file_mtime == cfg.stat().st_mtime
+
+
+def test_build_initial_snapshot_uses_fstat_not_path_restat(tmp_path: Path, monkeypatch) -> None:
+    """CR round-3 (TOCTOU): the bootstrap snapshot does NOT re-``stat`` the path.
+
+    The mtime must come from the ``fstat`` of the open fd inside
+    ``load_yaml_bytes_with_stat`` — a ``Path.stat`` call on the path would be a
+    second authoritative stat and reopen a TOCTOU window. Forcing
+    ``Path.stat`` to explode proves the function never path-restats.
+    """
+    cfg = tmp_path / "policies.yaml"
+    model = make_policies()
+    from alfred.policies.load import canonical_bytes
+
+    cfg.write_bytes(canonical_bytes(model))
+
+    def _boom(_self: Path, *_a: object, **_k: object) -> object:
+        raise AssertionError("build_initial_snapshot must not Path.stat() — use the fstat")
+
+    monkeypatch.setattr(Path, "stat", _boom)
+    snap = build_initial_snapshot(path=cfg, policies=model)
+    assert snap.policies == model
+    assert snap.file_mtime > 0
 
 
 def test_diff_keys_top_level_field_change() -> None:
@@ -81,6 +107,27 @@ def test_diff_keys_top_level_field_change() -> None:
     b = make_policies(rate_limits={"web_fetch_per_user_per_hour": 999})
     changed = _diff_keys(a, b)
     assert "rate_limits.web_fetch_per_user_per_hour" in changed
+
+
+def test_diff_values_scalar_field_old_new() -> None:
+    """A scalar sub-field change carries its raw old/new scalar (Finding 4)."""
+    a = make_policies()
+    b = make_policies(rate_limits={"web_fetch_per_user_per_hour": 999})
+    values = _diff_values(a, b)
+    assert values["rate_limits.web_fetch_per_user_per_hour"] == {
+        "old": a.rate_limits.web_fetch_per_user_per_hour,
+        "new": 999,
+    }
+
+
+def test_diff_values_submodel_field_is_jsonable() -> None:
+    """A changed sub-MODEL field dumps to a JSON-storable map (the _jsonable arm)."""
+    a = make_policies()
+    b = make_policies(rate_limits={"quarantined_extract_per_user_persona": {"capacity_tokens": 9}})
+    values = _diff_values(a, b)
+    entry = values["rate_limits.quarantined_extract_per_user_persona"]
+    assert isinstance(entry["old"], dict)
+    assert entry["new"]["capacity_tokens"] == 9
 
 
 def test_first_error_key_returns_dotted_loc() -> None:

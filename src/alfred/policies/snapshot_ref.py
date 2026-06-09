@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alfred.audit.audit_row_schemas import CONFIG_RELOAD_FIELDS
-from alfred.policies.load import canonical_bytes, compute_sha256
+from alfred.policies.load import canonical_bytes, compute_sha256, load_yaml_bytes_with_stat
 from alfred.policies.model import PoliciesV1
 
 
@@ -73,7 +73,29 @@ def _diff_keys(prev: PoliciesV1, new: PoliciesV1) -> list[str]:
     top-level field differs, so an unchanged file pays a single equality check
     per top-level field.
     """
-    changed: list[str] = []
+    return sorted(_diff_values(prev, new))
+
+
+def _diff_values(prev: PoliciesV1, new: PoliciesV1) -> dict[str, dict[str, Any]]:
+    """Return ``{dotted_key: {"old": ..., "new": ...}}`` for each changed key.
+
+    CR round-3 (Finding 4): the applied ``CONFIG_RELOAD`` audit row carries the
+    before/after value of every changed key, not just the key name — that is the
+    forensic record an operator needs to answer "what did the auto-reload
+    actually change". Values are JSON-mode model dumps so the audit JSONB column
+    stores plain scalars/maps.
+
+    DLP note: only LOW-BLAST keys ever reach an APPLIED row (high-blast keys
+    refuse hot-reload at the watcher before any swap), so the values here are
+    low-blast by construction and need no redaction. The empty
+    :data:`alfred.policies.model.LOW_BLAST_ALLOWLIST` means production never
+    emits a non-empty map today; a future low-blast field (UI strings, locale,
+    sample rates — never secrets) would surface here safely.
+
+    Shares :func:`_diff_keys`'s perf-002 short-circuit: each top-level field is
+    compared with frozen-Pydantic ``==`` once, descending only on a difference.
+    """
+    changed: dict[str, dict[str, Any]] = {}
     for field in PoliciesV1.model_fields:
         prev_val = getattr(prev, field)
         new_val = getattr(new, field)
@@ -81,13 +103,25 @@ def _diff_keys(prev: PoliciesV1, new: PoliciesV1) -> list[str]:
             continue
         if isinstance(prev_val, BaseModel) and isinstance(new_val, BaseModel):
             for sub in type(prev_val).model_fields:
-                if getattr(prev_val, sub) != getattr(new_val, sub):
-                    changed.append(f"{field}.{sub}")
+                prev_sub = getattr(prev_val, sub)
+                new_sub = getattr(new_val, sub)
+                if prev_sub != new_sub:
+                    changed[f"{field}.{sub}"] = {
+                        "old": _jsonable(prev_sub),
+                        "new": _jsonable(new_sub),
+                    }
         else:  # pragma: no cover — defensive: every PoliciesV1 top-level field
             # except the frozen ``schema_version: Literal[1]`` is a sub-model, so
             # the only scalar field cannot differ between two valid snapshots.
-            changed.append(field)
-    return sorted(changed)
+            changed[field] = {"old": _jsonable(prev_val), "new": _jsonable(new_val)}
+    return changed
+
+
+def _jsonable(value: object) -> Any:
+    """Coerce a policy field value to a JSON-storable form for the audit row."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    return value
 
 
 class PoliciesSnapshotRef:
@@ -139,6 +173,9 @@ class PoliciesSnapshotRef:
                 "prev_sha256": prev.file_sha256,
                 "new_sha256": new.file_sha256,
                 "changed_keys": _diff_keys(prev.policies, new.policies),
+                # Finding 4 (CR round-3): old->new per changed key (forensic).
+                # Applied rows are low-blast only, so no redaction is required.
+                "changed_values": _diff_values(prev.policies, new.policies),
                 "loaded_at": new.loaded_at.isoformat(),
                 "operator_session_id": operator_session_id,
             },
@@ -195,14 +232,25 @@ class PolicySnapshotHistoryWriter:
 
 
 def build_initial_snapshot(*, path: Path, policies: PoliciesV1) -> PoliciesSnapshot:
-    """Build the bootstrap snapshot from an already-parsed model + on-disk path.
+    """Build the bootstrap snapshot from ``path``, with ONE authoritative stat.
 
     Used by the daemon-boot probe to seed the ref with the first-loaded policy.
+
+    CR round-3 (TOCTOU): the ``file_mtime`` comes from the ``fstat`` of the
+    SAME open fd that :func:`alfred.policies.load.load_yaml_bytes_with_stat`
+    read the bytes from — NOT a second ``path.stat()`` restat, which would open
+    a TOCTOU window (an attacker swapping the inode between the boot read and a
+    restat could stamp the snapshot with a different file's mtime). The bytes
+    are re-read here and asserted to canonical-hash-match the already-parsed
+    ``policies`` so the snapshot's ``file_sha256`` and ``file_mtime`` describe
+    one coherent on-disk state. ``path.resolve()`` is a pure name normalisation
+    (no content stat) and stays.
     """
+    _raw, stat = load_yaml_bytes_with_stat(path)
     return PoliciesSnapshot(
         policies=policies,
         loaded_at=datetime.now(UTC),
-        file_mtime=path.stat().st_mtime,
+        file_mtime=stat.st_mtime,
         file_sha256=compute_sha256(canonical_bytes(policies)),
         file_path=path.resolve(),
     )
