@@ -130,6 +130,64 @@ def test_write_refuses_insecure_existing_parent(tmp_path: Path) -> None:
         write_session_file(parent / "session", _session())
 
 
+def test_write_succeeds_despite_stale_temp(tmp_path: Path) -> None:
+    """A leftover temp from a crashed write must NOT lock out a new login.
+
+    CR-227 round-2 finding 2: the old deterministic temp name
+    (``.session.tmp``) collided with ``O_CREAT | O_EXCL`` whenever a prior
+    write crashed between create and rename, permanently refusing every
+    future login. With a unique temp name the atomic-rename pattern never
+    collides — the stale file is irrelevant to the new write.
+    """
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    path = parent / "session"
+    # Simulate the crashed-write leftover: an old deterministic temp name.
+    stale = parent / ".session.tmp"
+    stale.write_bytes(b"leftover from a crashed write")
+    stale.chmod(0o600)
+
+    write_session_file(path, _session())
+
+    assert load_session_file(path) == _session()
+    # The new write leaves no temp of its own behind.
+    leftovers = [p for p in parent.iterdir() if p.name != "session" and p != stale]
+    assert leftovers == []
+
+
+def test_write_cleans_up_temp_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A write failure removes the unique temp file (no orphan accumulation)."""
+    import alfred.identity.operator_session as _osmod
+
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    path = parent / "session"
+
+    def _boom(_fd: int, _data: bytes) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_osmod.os, "write", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_session_file(path, _session())
+
+    # No temp orphan left behind, and no session file was created.
+    assert list(parent.iterdir()) == []
+
+
+def test_concurrent_writes_do_not_collide(tmp_path: Path) -> None:
+    """Two back-to-back writes (unique temps) both succeed; last one wins."""
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    path = parent / "session"
+    write_session_file(path, _session())
+    write_session_file(path, _session())
+    assert load_session_file(path) == _session()
+    assert [p.name for p in parent.iterdir()] == ["session"]
+
+
 def test_missing_parent_dir_refused(tmp_path: Path) -> None:
     """A path whose parent dir does not exist refuses with Missing."""
     with pytest.raises(OperatorSessionMissing):

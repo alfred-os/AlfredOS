@@ -37,12 +37,14 @@ import hmac
 import json
 import os
 import sys
+import tempfile
 from asyncio import create_subprocess_exec
 from asyncio import subprocess as asubprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Final, Literal, Protocol, runtime_checkable
 
+import structlog
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -54,7 +56,10 @@ from pydantic import (
 )
 
 from alfred.errors import AlfredError
+from alfred.i18n import t
 from alfred.security._hkdf import hkdf_expand
+
+_log = structlog.get_logger(__name__)
 
 # ``O_NOFOLLOW`` / ``O_DIRECTORY`` are POSIX-only; on Windows they are
 # absent and the open-time symlink/dir refusal is not enforced (Windows
@@ -358,14 +363,28 @@ def write_session_file(path: Path, session: OperatorSessionFile) -> None:
             )
 
     body = _serialize_to_file_bytes(session)
-    tmp = parent / f".{path.name}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+    # CR-227 round-2 finding 2: a UNIQUE temp name (``mkstemp`` in the same
+    # dir) so a leftover ``.session.<...>.tmp`` from a crashed or concurrent
+    # write can never make ``O_CREAT | O_EXCL`` fail and lock out all future
+    # logins. ``mkstemp`` creates the file 0600 with ``O_EXCL`` on a random
+    # name (no symlink to follow — it is a fresh create), preserving the
+    # 0600-from-the-start + atomic-rename guarantee. The temp is cleaned up
+    # on any failure so a partial write never accumulates an orphan.
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent)
+    tmp = Path(tmp_name)
     try:
-        os.write(fd, body)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    tmp.replace(path)
+        try:
+            os.write(fd, body)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        tmp.replace(path)
+    except BaseException:
+        # Any failure (write, fsync, or rename) must leave no temp orphan —
+        # an accumulating ``.session.*.tmp`` would defeat the unique-name fix
+        # over time and clutter the 0700 config dir.
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -405,9 +424,19 @@ class LinuxMachineIdProvider:
     async def read_raw(self) -> bytes:
         for path in (self._primary, self._fallback):
             try:
-                return path.read_bytes().strip()
+                raw = path.read_bytes().strip()
             except OSError:
                 continue
+            # CR-227 round-2 finding 3: an empty/whitespace source is treated
+            # as UNREADABLE — never hashed. Hashing ``b""`` would yield a
+            # machine-id-hash that is CONSTANT across every host with an empty
+            # or unreadable source, defeating the replay protection the
+            # machine-id binding exists to provide. Fall through to the next
+            # source; if all are empty/unreadable we RAISE (refuse), so the
+            # resolver records a ``machine_id_unavailable`` refusal rather than
+            # validating a forgeable constant binding.
+            if raw:
+                return raw
         raise OperatorSessionNoMachineId("linux: no readable machine-id source")
 
 
@@ -445,10 +474,27 @@ class MacosMachineIdProvider:
             if b"IOPlatformUUID" in line:
                 _, _, val = line.partition(b"=")
                 uuid = val.strip().strip(b'"').strip()
-                self._cache.parent.mkdir(parents=True, exist_ok=True)
-                self._cache.write_bytes(uuid)
+                self._write_cache_best_effort(uuid)
                 return uuid
         raise OperatorSessionNoMachineId("macos: IOPlatformUUID not found in ioreg output")
+
+    def _write_cache_best_effort(self, uuid: bytes) -> None:
+        """Cache the resolved UUID; never fail login on a cache-write error.
+
+        CR-227 round-2 finding 4: a read-only ``/var/db`` or a permission
+        denial on the cache dir must NOT propagate and break ``alfred login``.
+        The cache is a first-boot optimisation (avoids a repeat ``ioreg``
+        spawn); the in-memory value is authoritative for THIS resolution. On
+        ``OSError`` we log (operator-visible via ``t()``) and continue.
+        """
+        try:
+            self._cache.parent.mkdir(parents=True, exist_ok=True)
+            self._cache.write_bytes(uuid)
+        except OSError as exc:
+            _log.warning(
+                t("operator_session.machine_id.cache_write_failed", path=str(self._cache)),
+                error=str(exc),
+            )
 
 
 class WindowsMachineIdProvider:
