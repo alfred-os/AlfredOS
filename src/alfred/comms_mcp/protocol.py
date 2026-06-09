@@ -130,9 +130,17 @@ class LifecycleStartRequest(_WireModel):
 
 
 class LifecycleStartResult(_WireModel):
-    """Plugin acknowledges lifecycle start."""
+    """Plugin acknowledges lifecycle start.
+
+    ``plugin_version`` (spec §8.1) is the adapter's self-reported version string,
+    threaded into the supervisor's lifecycle audit by PR-S4-9. It is REQUIRED
+    here so the wire contract matches both spec §8.1 and the reference plugin's
+    ``extra="forbid"`` output (``plugins/alfred_comms_test/main.py``) — omitting
+    it would make a conformant plugin's result fail validation.
+    """
 
     ok: bool
+    plugin_version: str = Field(min_length=1)
 
 
 class LifecycleStopRequest(_WireModel):

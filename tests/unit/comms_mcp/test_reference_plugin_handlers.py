@@ -21,6 +21,12 @@ from plugins.alfred_comms_test import main
 def test_lifecycle_start_returns_ok() -> None:
     result = main.handle_lifecycle_start({"adapter_id": "alfred_comms_test"})
     assert result["ok"] is True
+    # M2 forward-contract: the reference plugin emits plugin_version (spec §8.1),
+    # and the host's LifecycleStartResult schema (extra="forbid") must admit it.
+    from alfred.comms_mcp.protocol import LifecycleStartResult
+
+    validated = LifecycleStartResult.model_validate(result)
+    assert validated.plugin_version == result["plugin_version"]
 
 
 def test_lifecycle_stop_reports_flushed_count() -> None:

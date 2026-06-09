@@ -225,7 +225,7 @@ def test_content_ref_kind_literal() -> None:
             credentials_ref="x",
             policies_snapshot_hash="y",
         ),
-        protocol.LifecycleStartResult(ok=True),
+        protocol.LifecycleStartResult(ok=True, plugin_version="0.1.0"),
         protocol.LifecycleStopRequest(adapter_id="alfred_comms_test", reason="operator"),
         protocol.LifecycleStopResult(ok=True, flushed_messages=0),
         protocol.AdapterHealthRequest(adapter_id="alfred_comms_test"),
