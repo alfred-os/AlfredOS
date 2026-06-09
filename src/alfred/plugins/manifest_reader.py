@@ -76,6 +76,7 @@ _PLUGIN_ID_INVALID_KEY = "plugin.launcher_plugin_id_invalid"
 _MANIFEST_UNREADABLE_KEY = "plugin.manifest_unreadable"
 _READ_SANDBOX_NO_SOURCE_KEY = "plugin.manifest_reader_no_source"
 _POLICY_REF_ESCAPES_ROOT_KEY = "supervisor.sandbox.refused.policy_ref_escapes_root"
+_POLICY_REF_UNREADABLE_KEY = "supervisor.sandbox.refused.policy_ref_unreadable"
 
 
 class PolicyRefEscapesRoot(Exception):  # noqa: N818 -- name pinned by sec-2 + audit reason vocab
@@ -243,7 +244,14 @@ def _cmd_policy_to_bwrap_flags(args: argparse.Namespace) -> int:
             )
         except PolicyRefEscapesRoot:
             return _fail(_POLICY_REF_ESCAPES_ROOT_KEY)
-        raw = resolved.read_text(encoding="utf-8")
+        # Confinement succeeded, but the resolved file can still be unreadable
+        # at read time (ENOENT/permission race between resolve() and read).
+        # Refuse with the stable bare key rather than let an OSError traceback
+        # leak into the launcher's stderr ``detail`` (CR #229 R2 finding-1).
+        try:
+            raw = resolved.read_text(encoding="utf-8")
+        except OSError:
+            return _fail(_POLICY_REF_UNREADABLE_KEY)
     else:
         raw = sys.stdin.read()
     try:
