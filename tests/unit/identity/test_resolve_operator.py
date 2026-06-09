@@ -31,6 +31,7 @@ from alfred.identity.operator_session import (
     OperatorSessionMissing,
     OperatorSessionNoMachineId,
     OperatorSessionParentDirInsecure,
+    OperatorSessionPepperMisconfigured,
     OperatorSessionTimeout,
     OperatorSessionTokenUnknown,
     OperatorSessionTokenUserMismatch,
@@ -208,16 +209,31 @@ def _make_resolver(
     audit: _FakeAudit | None = None,
     hooks: _FakeHooks | None = None,
     host: str = _HOST,
+    broker: _FakeBroker | None = None,
 ) -> DefaultOperatorSessionResolver:
     return DefaultOperatorSessionResolver(
         session_scope=_scope_for(session),
-        secret_broker=_FakeBroker(),
+        secret_broker=broker or _FakeBroker(),
         machine_id_provider=_StubMachineId(),
         audit_writer=audit or _FakeAudit(),
         hook_dispatcher=hooks or _FakeHooks(),
         host=host,
         session_file_path=path,
     )
+
+
+def _refused_calls(audit: _FakeAudit) -> list[_AuditCall]:
+    """All ``OPERATOR_SESSION_REFUSED`` rows the resolver emitted.
+
+    hard rule #7: each refusal path lands EXACTLY one row — assertions over
+    this helper count, never just "at least one".
+    """
+    return [c for c in audit.calls if c.schema_name == "OPERATOR_SESSION_REFUSED_FIELDS"]
+
+
+def _refused_hooks(hooks: _FakeHooks) -> list[_HookCall]:
+    """All ``operator.session.refused`` hookpoint emissions."""
+    return [c for c in hooks.calls if c.name == "operator.session.refused"]
 
 
 def _token_hash() -> str:
@@ -239,37 +255,53 @@ async def test_happy_path_returns_canonical_user_id(tmp_path: Path) -> None:
 async def test_expired_refuses_and_audits(tmp_path: Path) -> None:
     path = _write_session(tmp_path, expires_delta=timedelta(hours=-1))
     audit = _FakeAudit()
-    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionExpired):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "expired"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "expired"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_host_mismatch_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path, host="other-host")
     audit = _FakeAudit()
-    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionHostMismatch):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "host_mismatch"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "host_mismatch"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_machine_mismatch_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path, machine_hash="f" * 64)
     audit = _FakeAudit()
-    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionMachineIdMismatch):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "machine_mismatch"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "machine_mismatch"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_token_unknown_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path)
     audit = _FakeAudit()
-    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionTokenUnknown):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "token_unknown"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "token_unknown"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_token_hash_mismatch_is_token_unknown(tmp_path: Path) -> None:
@@ -282,10 +314,14 @@ async def test_token_hash_mismatch_is_token_unknown(tmp_path: Path) -> None:
     path = _write_session(tmp_path, user_id=7)
     session = _FakeSession(rows=[_Row(token_hash="deadbeef" * 8, user_id=7)])
     audit = _FakeAudit()
-    resolver = _make_resolver(path, session, audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, session, audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionTokenUnknown):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "token_unknown"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "token_unknown"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_token_user_mismatch_refuses(tmp_path: Path) -> None:
@@ -294,10 +330,14 @@ async def test_token_user_mismatch_refuses(tmp_path: Path) -> None:
     # DB row owns the token but is bound to a DIFFERENT user (9).
     session = _FakeSession(rows=[_Row(token_hash=_token_hash(), user_id=9)])
     audit = _FakeAudit()
-    resolver = _make_resolver(path, session, audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, session, audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionTokenUserMismatch):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "token_user_mismatch"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "token_user_mismatch"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_user_revoked_refuses(tmp_path: Path) -> None:
@@ -306,10 +346,14 @@ async def test_user_revoked_refuses(tmp_path: Path) -> None:
         rows=[_Row(token_hash=_token_hash(), user_id=7, user_deleted_at=datetime.now(UTC))]
     )
     audit = _FakeAudit()
-    resolver = _make_resolver(path, session, audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, session, audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionUserRevoked):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "user_revoked"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "user_revoked"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_timeout_refuses(tmp_path: Path) -> None:
@@ -337,11 +381,15 @@ async def test_missing_file_emits_fileless_session_missing(tmp_path: Path) -> No
     resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionMissing):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "session_missing"
-    assert audit.calls[-1].subject["attempted_user_id"] is None
-    assert audit.calls[-1].subject["host"] is None
-    assert audit.calls[-1].subject["machine_id_hash"] is None
-    assert [c for c in hooks.calls if c.name == "operator.session.refused"]
+    # hard rule #7: EXACTLY one refused row + one refused hookpoint — no
+    # duplicates, no zero (CR-227 round-3 finding 3 tightens "at least one").
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "session_missing"
+    assert refused[0].subject["attempted_user_id"] is None
+    assert refused[0].subject["host"] is None
+    assert refused[0].subject["machine_id_hash"] is None
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_malformed_file_emits_fileless_planted_file_invalid(tmp_path: Path) -> None:
@@ -352,30 +400,86 @@ async def test_malformed_file_emits_fileless_planted_file_invalid(tmp_path: Path
     path.write_bytes(b'{"not":"a session"}')
     path.chmod(0o600)
     audit = _FakeAudit()
-    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionMalformed):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "planted_file_invalid"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "planted_file_invalid"
+    assert len(_refused_hooks(hooks)) == 1
+
+
+async def test_non_hex_machine_id_hash_refused_as_planted_file_invalid(tmp_path: Path) -> None:
+    """A planted file with a non-hex ``machine_id_hash`` is refused at PARSE.
+
+    CR-227 round-3 finding 2: the field used to accept ANY 64-char string, so
+    a planted file could splice arbitrary bytes (newlines, control chars, a
+    log-injection payload) into the ``machine_mismatch`` forensic row. Pinning
+    the field to the HMAC-SHA256 hex shape turns a non-hex value into a
+    malformed file → ``planted_file_invalid`` file-less row, so NO attacker
+    bytes ever reach the audit log.
+    """
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    path = parent / "session"
+    now = datetime.now(UTC)
+    # 64 chars but NOT lowercase hex — the exact log-injection shape the
+    # length-only constraint used to wave through.
+    poison = "Z" * 63 + "\n"
+    body = {
+        "schema_version": 1,
+        "user_id": 7,
+        "token": _TOKEN,
+        "issued_at": (now - timedelta(minutes=1)).isoformat(),
+        "expires_at": (now + timedelta(hours=12)).isoformat(),
+        "host": _HOST,
+        "machine_id_hash": poison,
+    }
+    import json
+
+    path.write_text(json.dumps(body))
+    path.chmod(0o600)
+    audit = _FakeAudit()
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
+    with pytest.raises(OperatorSessionMalformed):
+        await resolver.resolve()
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "planted_file_invalid"
+    # The poison never reaches the row: every self-claimed field is None.
+    assert refused[0].subject["machine_id_hash"] is None
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_bad_file_mode_emits_fileless_bad_file_mode(tmp_path: Path) -> None:
     path = _write_session(tmp_path)
     path.chmod(0o644)  # broaden beyond 0600 -> BadFileMode on load
     audit = _FakeAudit()
-    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionBadFileMode):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "bad_file_mode"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "bad_file_mode"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_parent_dir_insecure_emits_fileless_row(tmp_path: Path) -> None:
     path = _write_session(tmp_path)
     path.parent.chmod(0o755)  # group/other-accessible parent -> ParentDirInsecure
     audit = _FakeAudit()
-    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
     with pytest.raises(OperatorSessionParentDirInsecure):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "parent_dir_insecure"
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "parent_dir_insecure"
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_no_machine_id_emits_fileless_machine_id_unavailable(tmp_path: Path) -> None:
@@ -386,19 +490,54 @@ async def test_no_machine_id_emits_fileless_machine_id_unavailable(tmp_path: Pat
     """
     path = _write_session(tmp_path, user_id=7)
     audit = _FakeAudit()
+    hooks = _FakeHooks()
     resolver = DefaultOperatorSessionResolver(
         session_scope=_scope_for(_FakeSession(rows=[])),
         secret_broker=_FakeBroker(),
         machine_id_provider=_NoMachineId(),
         audit_writer=audit,
-        hook_dispatcher=_FakeHooks(),
+        hook_dispatcher=hooks,
         host=_HOST,
         session_file_path=path,
     )
     with pytest.raises(OperatorSessionNoMachineId):
         await resolver.resolve()
-    assert audit.calls[-1].subject["reason"] == "machine_id_unavailable"
-    assert audit.calls[-1].subject["machine_id_hash"] is None
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "machine_id_unavailable"
+    assert refused[0].subject["machine_id_hash"] is None
+    assert len(_refused_hooks(hooks)) == 1
+
+
+async def test_short_pepper_refused_as_pepper_misconfigured(tmp_path: Path) -> None:
+    """A short/misconfigured pepper is a TYPED refusal, not a raw ValueError.
+
+    CR-227 round-3 finding 1 (KEYSTONE audit-gap): ``hkdf_expand`` raises a
+    bare ``ValueError`` for a pepper below the 32-byte HKDF PRK floor. Before
+    this fix that error escaped ``resolve()`` UNTYPED — skipping BOTH the
+    ``OPERATOR_SESSION_REFUSED`` audit row AND the CLI refusal UX (raw
+    traceback). The resolver now reads the pepper, refuses below-floor lengths
+    with the closed-vocab reason ``pepper_misconfigured``, emits EXACTLY one
+    file-less refused row + hookpoint, then raises the typed
+    ``OperatorSessionPepperMisconfigured``.
+    """
+    path = _write_session(tmp_path, user_id=7)
+    audit = _FakeAudit()
+    hooks = _FakeHooks()
+    # 31 bytes — one short of the SHA-256 PRK floor.
+    short_broker = _FakeBroker(pepper="0" * 31)
+    resolver = _make_resolver(
+        path, _FakeSession(rows=[]), audit=audit, hooks=hooks, broker=short_broker
+    )
+    with pytest.raises(OperatorSessionPepperMisconfigured):
+        await resolver.resolve()
+    refused = _refused_calls(audit)
+    assert len(refused) == 1
+    assert refused[0].subject["reason"] == "pepper_misconfigured"
+    # File-less row: no self-claimed file bytes reach the log.
+    assert refused[0].subject["attempted_user_id"] is None
+    assert refused[0].subject["machine_id_hash"] is None
+    assert len(_refused_hooks(hooks)) == 1
 
 
 async def test_happy_path_fires_no_refused_hook(tmp_path: Path) -> None:
