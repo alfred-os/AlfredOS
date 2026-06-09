@@ -132,6 +132,17 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "operator.session.revoked",
         "operator.session.refused",
     ),
+    # PR-S4-8 (#152, spec §10): the two comms-MCP hookpoints. Both
+    # fail_closed=True + allow_error_substitution=False.
+    # ``comms.inbound.t3_promoted`` carries carrier_tier=T3 (system+operator
+    # subscribers only); ``comms.adapter.crashed`` carries carrier_tier=T0
+    # (all tiers). Registered by ``alfred.comms_mcp.hookpoints.declare_hookpoints``
+    # at module import (bottom-of-module call). The binding_requested /
+    # rate_limit_signal hookpoints belong to PR-S4-9 (§3) and are NOT listed here.
+    "alfred.comms_mcp.hookpoints": (
+        "comms.inbound.t3_promoted",
+        "comms.adapter.crashed",
+    ),
 }
 
 
