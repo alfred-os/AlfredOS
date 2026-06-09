@@ -9,6 +9,6 @@ Path note: deliberately ``comms_mcp``, not ``comms`` — the legacy
 ``alfred.comms`` package is dormant through this PR (spec §8.8).
 """
 
-from alfred.comms_mcp import protocol
+from alfred.comms_mcp import classifier_registry, protocol
 
-__all__ = ["protocol"]
+__all__ = ["classifier_registry", "protocol"]
