@@ -64,6 +64,7 @@ import hashlib
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
@@ -84,8 +85,6 @@ from alfred.security.dlp import redact_secret_shapes
 from alfred.utils.sliding_window_counter import SlidingWindowCounter
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from alfred.comms_mcp.handlers import (
         BindingHandler,
         CrashHandler,
@@ -186,20 +185,40 @@ _HANDLER_CLASS_BY_METHOD: Final[Mapping[str, str]] = {
 }
 
 
+def _redact_value(value: object) -> object:
+    """Recursively scrub secret-shaped tokens from any string at any depth.
+
+    A plugin-supplied (T3-shaped) param can nest a credential inside a dict,
+    list, or tuple; a top-level-only scrub would leak it. This walks every
+    container and applies :func:`redact_secret_shapes` to every string found,
+    leaving non-string leaves untouched. ``Mapping``/``Sequence`` are matched
+    structurally so arbitrary JSON-shaped payloads are covered; ``str`` and
+    ``bytes`` are deliberately excluded from the sequence branch (a ``str`` is a
+    sequence of ``str`` and would otherwise recurse forever).
+    """
+    if isinstance(value, str):
+        return redact_secret_shapes(value)
+    if isinstance(value, Mapping):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
+
+
 def _redact_params(params: Mapping[str, object] | None) -> Mapping[str, object]:
     """Scrub secret-shaped tokens from every string value of a params dict.
 
     Critical 6: an unknown-method payload is plugin-supplied (T3-shaped); a
-    credential smuggled in a string value is redacted before it reaches the
-    ``method_redacted_params`` audit field. Non-string values pass through
-    unchanged (they cannot carry a secret-shaped token). ``None`` → empty dict.
+    credential smuggled in a string value — at any nesting depth — is redacted
+    before it reaches the ``method_redacted_params`` audit field. Non-string
+    leaves pass through unchanged (they cannot carry a secret-shaped token).
+    ``None`` → empty dict.
     """
     if params is None:
         return {}
-    return {
-        key: (redact_secret_shapes(value) if isinstance(value, str) else value)
-        for key, value in params.items()
-    }
+    return {key: _redact_value(value) for key, value in params.items()}
 
 
 # Mirrors ``Settings.comms_max_in_flight_notifications`` default (config field
