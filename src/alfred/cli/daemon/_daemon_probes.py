@@ -23,8 +23,10 @@ row + prints the ``t()`` message + exits non-zero).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
+import signal
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -57,6 +59,15 @@ _STUB_SIGNATURE: Final[str] = "slice-4-launcher-stub"
 # PR-S4-1 fallback default. PR-S4-4 deletes this once PoliciesV1 ships.
 _DEFAULT_POLICIES_V1_STUB: Final[bytes] = b"_DEFAULT_POLICIES_V1_STUB"
 
+# err (CR PR #229 finding-2): the launcher --self-test subprocess is bounded.
+# A launcher whose --self-test HANGS must never stall the daemon boot forever
+# (the probe runs synchronously before the TaskGroup starts). On timeout the
+# process group is killed and the STUB signature is returned so production
+# refuses the boot loudly — an un-responsive launcher must NOT impersonate a
+# resolving one. The real self-test prints one line and exits in milliseconds;
+# 5s is a generous ceiling that only a genuinely hung launcher trips.
+_SELF_TEST_TIMEOUT_S: Final[float] = 5.0
+
 
 def _truthy_env(name: str) -> bool:
     """Return ``True`` iff env var ``name`` holds a truthy token.
@@ -86,9 +97,14 @@ async def _launcher_self_test_impl() -> str:
     PR-S4-6 (arch-001): the real launcher's ``--self-test`` prints the
     policy-resolving signature, so a genuine policy-resolving launcher passes
     the probe everywhere. Any failure to invoke it — launcher missing, non-zero
-    exit, unexpected output — yields the STUB signature so the sec-004
-    production-refusal still fires on a broken/unverified launcher (fail
-    closed: an un-runnable launcher must NOT impersonate a resolving one).
+    exit, unexpected output, OR a HANG past ``_SELF_TEST_TIMEOUT_S`` (CR #229
+    finding-2) — yields the STUB signature so the sec-004 production-refusal
+    still fires on a broken/unverified launcher (fail closed: an un-runnable or
+    un-responsive launcher must NOT impersonate a resolving one).
+
+    ``start_new_session=True`` puts the launcher in its own process group so a
+    timeout can kill the whole group (the launcher + any child it spawned),
+    never orphaning a subprocess.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -96,13 +112,37 @@ async def _launcher_self_test_impl() -> str:
             "--self-test",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
-        stdout, _ = await proc.communicate()
     except OSError:
+        return _STUB_SIGNATURE
+    try:
+        async with asyncio.timeout(_SELF_TEST_TIMEOUT_S):
+            stdout, _ = await proc.communicate()
+    except TimeoutError:
+        # Hung launcher: kill the whole process group, reap, refuse (stub).
+        _kill_process_group(proc)
+        with contextlib.suppress(Exception):
+            await proc.wait()
         return _STUB_SIGNATURE
     if proc.returncode != 0:
         return _STUB_SIGNATURE
     return stdout.decode("utf-8", errors="replace").strip()
+
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the subprocess's process group; fall back to killing the pid.
+
+    The launcher is spawned with ``start_new_session=True`` so its pid is the
+    process-group leader. Killing the group reaps any child the (hung) launcher
+    spawned. If the group lookup races a just-exited process the per-pid kill is
+    the fallback; all failures are suppressed (the process may already be gone).
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        return
+    with contextlib.suppress(ProcessLookupError, Exception):
+        proc.kill()
 
 
 async def probe_launcher_policy_resolving(
