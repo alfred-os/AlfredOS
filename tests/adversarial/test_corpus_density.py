@@ -114,18 +114,20 @@ def test_sandbox_escape_corpus_has_payloads() -> None:
 
 
 def test_config_reload_bypass_corpus_has_payloads() -> None:
-    """`tests/adversarial/config_reload_bypass/` carries ≥5 PR-S4-4 payloads.
+    """`tests/adversarial/config_reload_bypass/` carries ≥6 PR-S4-4 payloads.
 
     PR-S4-4 (ADR-0023) ships csb-2026-001..005: TOCTOU inode-swap refusal,
     high-blast-change refusal, audit-write-failure abort, cached-mtime
-    rejection re-emit, and the >256 KB oversize-file refusal. The earlier
-    ``xfail(strict=True)`` placeholder self-destructed on the first arriving
-    payload, by design; the floor of 5 catches a silent deletion regression.
+    rejection re-emit, and the >256 KB oversize-file refusal. PR-S4-4 round-3
+    adds csb-2026-007: rate-limit / burst-limiter anti-abuse-knob refusal
+    (ADR-0023 §5 / Finding 1). The earlier ``xfail(strict=True)`` placeholder
+    self-destructed on the first arriving payload, by design; the floor of 6
+    catches a silent deletion regression.
     """
     category_dir = Path(__file__).parent / "config_reload_bypass"
     count = _count_yaml_payloads(category_dir)
-    assert count >= 5, (
-        f"expected ≥5 *.yaml payloads under {category_dir} (csb-2026-001..005), "
+    assert count >= 6, (
+        f"expected ≥6 *.yaml payloads under {category_dir} (csb-2026-001..005, 007), "
         f"found {count} — a payload was deleted or renamed"
     )
 

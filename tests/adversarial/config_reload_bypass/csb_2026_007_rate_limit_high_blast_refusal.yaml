@@ -1,0 +1,32 @@
+id: csb-2026-007
+category: config_reload_bypass
+threat: >-
+  An attacker with config-write capability edits config/policies.yaml to shrink
+  rate_limits.web_fetch_per_user_per_hour (or the burst-limiter
+  quarantined_extract_per_user_persona.capacity_tokens) to 0 for a denial of
+  service, or widen it to a huge value to bypass anti-abuse — relying on the
+  mtime-polled hot-reload channel applying the change the way it would apply a
+  genuinely low-blast UI/locale tweak. These knobs live under RateLimitPolicies
+  / HandleCapPolicies, NOT HighBlastPolicies, so a naive high-blast diff that
+  only inspects the high_blast sub-model would never see the change.
+ingestion_path: mtime_poll
+payload:
+  attack: anti_abuse_knob_swap_via_low_blast_channel
+  offending_key: rate_limits.web_fetch_per_user_per_hour
+  attacker_value: 0
+expected_outcome: audit_row_emitted
+provenance: >-
+  PR-S4-4 round-3 Finding 1 / ADR-0023 §5 / closure arch-003. The low-blast vs
+  high-blast partition is default-refuse, allowlist-permit: LOW_BLAST_ALLOWLIST
+  is EMPTY, so EVERY modelled field — rate_limits.*, handle_caps.*, high_blast.*
+  — is high-blast and REFUSES hot-reload. The watcher computes the dotted diff
+  via _diff_keys, finds the first changed key absent from the allowlist, and
+  aborts the swap with CONFIG_RELOAD_REJECTED_FIELDS(reason="high_blast_change",
+  offending_key="rate_limits.web_fetch_per_user_per_hour"). The active snapshot
+  is unchanged; NO config.reload.applied row is written. Only the
+  reviewer-gated proposal flow may change these knobs.
+references:
+  - "ADR-0023 §5 (blast-radius classification)"
+  - "PR-S4-4 round-3 Finding 1 / closure arch-003"
+  - "src/alfred/policies/model.py::LOW_BLAST_ALLOWLIST"
+  - "src/alfred/policies/watcher.py::PolicyWatcher._high_blast_offending_key"
