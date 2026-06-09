@@ -48,7 +48,6 @@ import structlog
 from pydantic import (
     BaseModel,
     ConfigDict,
-    Field,
     SecretStr,
     StringConstraints,
     ValidationError,
@@ -99,6 +98,20 @@ _SUBKEY_LEN: Final = 32
 _Hostname = Annotated[
     str,
     StringConstraints(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9.\-]+$"),
+]
+
+# ``machine_id_hash`` is echoed verbatim into the ``machine_mismatch`` audit row
+# (``subject["machine_id_hash"]``) on the parsed-file refusal branch. CR-227
+# round-3 finding 2: a length-only constraint let a planted file carry ANY
+# 64-char string (newlines, control bytes, log-injection payloads) into the
+# forensic row. The value is HMAC-SHA256 hex by construction, so pin the exact
+# shape — lowercase hex, exactly 64 chars — at PARSE time. A non-hex value is a
+# malformed file → ``OperatorSessionMalformed`` → ``planted_file_invalid``
+# file-less row (no attacker bytes reach the log), mirroring the ``host`` /
+# ``user_id`` defences (sec-4).
+_MachineIdHash = Annotated[
+    str,
+    StringConstraints(pattern=rf"^[0-9a-f]{{{_HASH_LEN}}}$"),
 ]
 
 
@@ -231,7 +244,7 @@ class OperatorSessionFile(BaseModel):
     issued_at: datetime
     expires_at: datetime
     host: _Hostname
-    machine_id_hash: str = Field(min_length=_HASH_LEN, max_length=_HASH_LEN)
+    machine_id_hash: _MachineIdHash
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
