@@ -40,6 +40,18 @@ def test_sandbox_refused_hookpoint_registered() -> None:
     assert meta.fail_closed is True
 
 
+def test_sandbox_stub_used_hookpoint_registered() -> None:
+    # PR-S4-7: the dev/test-only unsandboxed-exec observability row, the
+    # sandbox_refused sibling. T0 (carries only plugin_id/policy_ref/host_os/
+    # environment — no operator/untrusted content) + fail_closed=True
+    # (mirrors sandbox_refused verbatim; #167 per-kind override deferred).
+    reg = _fresh_registry_with_supervisor_hookpoints()
+    meta = reg.hookpoint_meta("supervisor.plugin.sandbox_stub_used")
+    assert meta is not None
+    assert meta.carrier_tier is T0
+    assert meta.fail_closed is True
+
+
 def test_mlock_unavailable_hookpoint_registered() -> None:
     reg = _fresh_registry_with_supervisor_hookpoints()
     meta = reg.hookpoint_meta("supervisor.boot.mlock_unavailable")

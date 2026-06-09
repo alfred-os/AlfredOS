@@ -89,7 +89,8 @@ def test_manifest_matches_runtime_registry_after_full_import_sweep() -> None:
     # MUST fail loud. Bump this constant when the manifest grows; the
     # fixture-driven sync check below catches the matching shrink-the-
     # manifest direction.
-    expected_min_hookpoints = 29
+    # PR-S4-7: +1 (supervisor.plugin.sandbox_stub_used).
+    expected_min_hookpoints = 30
     assert len(runtime_names) >= expected_min_hookpoints, (
         f"sync test environment registered only {len(runtime_names)} "
         f"hookpoints; expected at least {expected_min_hookpoints}. Either "

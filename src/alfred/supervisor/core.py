@@ -889,6 +889,17 @@ class Supervisor:
             # proceeds even when mlockall is unavailable or a subscriber is
             # slow).
             ("supervisor.plugin.sandbox_refused", SYSTEM_ONLY_TIERS, frozenset(), True, T0),
+            # PR-S4-7: the dev/test-only stub-used row. The launcher emits this
+            # (and execs unsandboxed) ONLY in development/test when no real OS
+            # sandbox is available (Windows kind:full, runuser-missing dev path).
+            # Registered here so a subscriber can observe — and an audit
+            # consumer can never miss — that a plugin ran without OS-level
+            # isolation. carrier_tier=T0 (carries only plugin_id/policy_ref/
+            # host_os/environment — no operator/untrusted content; spec index
+            # §3). fail_closed=True, mirroring its sandbox_refused sibling
+            # verbatim (#167 per-kind override deferred — all Slice-4 supervisor
+            # refusal/posture hookpoints are uniformly fail-closed).
+            ("supervisor.plugin.sandbox_stub_used", SYSTEM_ONLY_TIERS, frozenset(), True, T0),
             ("supervisor.boot.mlock_unavailable", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
             ("supervisor.boot.core_dumps_disabled", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
         )
