@@ -5,7 +5,7 @@ ingestion_path: operator_session_file
 payload:
   attack: "session path is a symlink to attacker-owned file"
   open_flag: "O_NOFOLLOW"
-expected_outcome: boundary_refused
+expected_outcome: refused
 provenance: "PR-S4-5 §5.2 — os.open(..., O_RDONLY | O_NOFOLLOW) raises ELOOP on a symlink; the loader maps it to OperatorSessionBadFileMode (open_refused). The boundary refuses before any content is read."
 references:
   - "PR-S4-5 §5.2"
