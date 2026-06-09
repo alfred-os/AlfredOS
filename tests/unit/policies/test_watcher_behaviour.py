@@ -134,6 +134,46 @@ async def test_mtime_gate_skips_reread_when_unchanged(tmp_path: Path, monkeypatc
     assert calls == []
 
 
+async def test_mtime_gate_uses_nanosecond_resolution(tmp_path: Path, monkeypatch) -> None:
+    """CR round-3: the gate keys on ``st_mtime_ns`` so a same-SECOND edit re-reads.
+
+    Two stats reporting the same integer-second ``st_mtime`` but different
+    ``st_mtime_ns`` (and the same size) must NOT be collapsed by the gate — a
+    second-resolution gate would false-negative. Drives ``_tick`` against a real
+    file but forces ``os.stat`` to return a same-second / distinct-ns pair.
+    """
+    import alfred.policies.watcher as watcher_mod
+
+    watcher, _ref, _audit, _ = build_watcher(tmp_path)
+    size = watcher._path.stat().st_size
+    # Whole-second mtime shared by both stats; nanosecond suffix differs.
+    base_s = 1_000_000
+    seq = iter([base_s * 10**9 + 1, base_s * 10**9 + 999_999])
+
+    class _FakeStat:
+        st_mtime = float(base_s)
+        st_size = size
+
+        def __init__(self, ns: int) -> None:
+            self.st_mtime_ns = ns
+
+    def _fake_stat(_p):
+        return _FakeStat(next(seq))
+
+    calls: list[Path] = []
+    real_load = watcher_mod.load_yaml_bytes
+
+    def _spy_load(path: Path, **kw: object) -> bytes:
+        calls.append(path)
+        return real_load(path, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(watcher_mod.os, "stat", _fake_stat)
+    monkeypatch.setattr(watcher_mod, "load_yaml_bytes", _spy_load)
+    await watcher._tick()  # caches (base_s*1e9+1, size)
+    await watcher._tick()  # distinct ns -> gate opens -> re-read
+    assert len(calls) == 2
+
+
 async def test_sha_short_circuit_no_swap_when_content_unchanged(tmp_path: Path) -> None:
     watcher, ref, audit, invoker = build_watcher(tmp_path)
     active = ref.current()
