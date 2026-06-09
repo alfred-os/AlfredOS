@@ -80,12 +80,16 @@ def test_sbx_2026_001_sandbox_block_missing(tmp_path: Path) -> None:
     with pytest.raises(ManifestSandboxMissingError):
         parse_manifest(payload.payload["manifest_toml"])
     # Launcher-level (the real subprocess): refuses with the audit reason.
-    if _HAS_JQ:
-        rc, stderr = _run_launcher(
-            payload.payload["manifest_toml"], environment="production", tmp_path=tmp_path
-        )
-        assert rc != 0
-        assert "sandbox_block_missing" in stderr
+    # CR #229 R2 finding-5: an explicit skip when jq is absent — degrading to
+    # parser-only while still reporting green would silently weaken the
+    # executable-corpus guarantee (the launcher defence would go unexercised).
+    if not _HAS_JQ:
+        pytest.skip("jq required for sbx-2026-001 launcher refusal assertion")
+    rc, stderr = _run_launcher(
+        payload.payload["manifest_toml"], environment="production", tmp_path=tmp_path
+    )
+    assert rc != 0
+    assert "sandbox_block_missing" in stderr
 
 
 @pytest.mark.skipif(not _HAS_JQ, reason="jq required for the launcher branch")

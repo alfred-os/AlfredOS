@@ -19,6 +19,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 LAUNCHER = REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 
+# CR #229 R2 finding-6 (must-fix): bound every launcher spawn so a hung
+# launcher (e.g. a wedged bwrap or a stuck fd-3 read) fails THIS test fast
+# instead of stalling the whole unit job. ``subprocess.run`` kills the child
+# on timeout and re-raises ``TimeoutExpired``, which surfaces as a test error.
+_LAUNCHER_TIMEOUT_S = 30.0
+
 
 @dataclass(frozen=True)
 class LauncherResult:
@@ -62,6 +68,7 @@ def run_launcher(tmp_path: Path):
             text=True,
             env=_base_env(env),
             check=False,
+            timeout=_LAUNCHER_TIMEOUT_S,
         )
         return LauncherResult(proc.returncode, proc.stdout, proc.stderr)
 
