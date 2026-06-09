@@ -11,7 +11,11 @@ the seven discrete invariants that close issue #152:
    identifiers (``adapter_id`` + ``platform_user_id``) — never a canonical id.
 3. The canonical id used downstream comes from resolver state, NOT from a forged
    ``platform_metadata.canonical_user_id`` planted by the adversary.
-4. The canonical id never appears in any frame the host writes TO the plugin.
+4. The canonical id stays host-side: production threads it into ``ingest`` as a
+   discrete kwarg, and the wire-facing ``notification`` it passes carries only
+   platform identifiers — never the canonical (or forged) id. (Full byte-level
+   outbound-stdio-frame capture lands in PR-S4-9 when the session->stdio
+   outbound seam is wired; see the inline ``TODO(PR-S4-9)``.)
 5. ``COMMS_INBOUND_T3_PROMOTION_FIELDS`` recorded the resolution with a PEPPERED
    ``platform_user_id_hash`` — the raw ``platform_user_id`` never lands in the row.
 6. First-contact (resolver returns ``None``) emits ``COMMS_BINDING_REQUESTED``
@@ -99,7 +103,25 @@ async def test_152_closure_seven_assertions(postgres_url: str, monkeypatch) -> N
         assert t3_row.subject["canonical_user_id"] != _FORGED_CANONICAL
         assert host.resolver_bridge.last_return.canonical_user_id == CANONICAL_SLUG
 
-        # (4) The canonical id never appears in any host -> plugin frame.
+        # (4) The canonical id stays host-side: production threads it into the
+        #     orchestrator's ``ingest`` as a DISCRETE kwarg, and the wire-facing
+        #     ``notification`` it also passes carries ONLY platform identifiers —
+        #     never the canonical (or the forged) id. This asserts what
+        #     production ACTUALLY passes (captured ingest kwargs), not a frame the
+        #     harness hardcodes.
+        ingest_kwargs = host.orchestrator.last_ingest_kwargs
+        assert ingest_kwargs, "production must have called ingest"
+        # The canonical id is the resolver-derived slug, supplied out-of-band.
+        assert ingest_kwargs["canonical_user_id"] == CANONICAL_SLUG
+        # The wire-facing notification model carries no canonical id of any kind.
+        notification_dump = ingest_kwargs["notification"].model_dump()
+        assert CANONICAL_SLUG not in str(notification_dump)
+        assert _FORGED_CANONICAL not in str(notification_dump)
+        # The synthetic outbound frame the harness emits likewise carries no
+        # canonical id. TODO(PR-S4-9): replace this harness-frame check with a
+        # genuine session->stdio outbound-frame capture once that seam is wired —
+        # until then this only proves the harness's own synthetic frame, so the
+        # load-bearing host-side invariant is the ingest-kwargs assertion above.
         for frame in host.outbound.frames:
             assert CANONICAL_SLUG.encode() not in frame
             assert _FORGED_CANONICAL.encode() not in frame
