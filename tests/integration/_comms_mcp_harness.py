@@ -113,9 +113,12 @@ class HarnessOrchestrator:
     """Routes ``quarantined_extract`` to the real bridge; records ingest/dispatch.
 
     ``ingest`` builds an outbound frame and writes it to the recording buffer so
-    the round-trip produces a captured host -> plugin frame (assertion 4). The
-    canonical user id is deliberately NOT placed on the outbound frame — only the
-    platform-facing ``target_platform_id`` crosses outward.
+    the round-trip produces a captured host -> plugin frame. It also records the
+    exact kwargs production threads into it (``last_ingest_kwargs``) so the #152
+    identity invariant can be asserted against what production ACTUALLY passes —
+    the canonical id arrives as a discrete host-side kwarg, never folded into the
+    wire-facing ``notification`` (spec §8.2). The byte-level outbound-frame check
+    on a real session->stdio seam lands in PR-S4-9 (not wired yet).
     """
 
     def __init__(
@@ -125,6 +128,7 @@ class HarnessOrchestrator:
         self._outbound = outbound
         self.dispatch_calls = 0
         self.last_extract_kwargs: dict[str, Any] = {}
+        self.last_ingest_kwargs: dict[str, Any] = {}
 
     async def quarantined_extract(
         self,
@@ -143,6 +147,11 @@ class HarnessOrchestrator:
         )
 
     async def ingest(self, **kwargs: Any) -> object:
+        # Capture EXACTLY what production threads into ingest so the identity
+        # invariant can be asserted against real call args (not a hardcoded
+        # frame): the canonical id is a discrete kwarg; the wire-facing
+        # ``notification`` carries only platform identifiers.
+        self.last_ingest_kwargs = dict(kwargs)
         # Emit a synthetic outbound reply. Only the platform id crosses outward —
         # never the canonical user id (spec §8.2 identity invariant).
         self._outbound.write_frame(
@@ -237,9 +246,15 @@ def make_inbound_notification(
     params = dict(frame["params"])
     if body is not None:
         params["body"] = body
-    # platform_metadata is not part of the host-side InboundMessageNotification
-    # schema (extra="forbid"); the forged value is carried on the wire frame for
-    # the leak/forgery assertions, then dropped before model construction.
+    # H3 honesty note: the REAL forged-canonical-id defence is
+    # ``InboundMessageNotification``'s ``extra="forbid"`` — a forged
+    # ``platform_metadata`` field would raise ``ValidationError`` at
+    # ``model_validate``. That rejection is exercised directly by the unit test
+    # ``test_inbound_notification_rejects_extra_fields`` (test_protocol_schemas.py).
+    # Here we DROP the field so this harness can build the VALID notification the
+    # downstream integration assertions need (resolver-derived canonical id,
+    # peppered hash, T3 inertness) — those assertions are about what production
+    # does AFTER a well-formed notification, not about the schema rejection.
     params.pop("platform_metadata", None)
     return InboundMessageNotification.model_validate(params)
 
