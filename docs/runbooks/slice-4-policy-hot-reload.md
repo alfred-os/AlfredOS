@@ -1,8 +1,14 @@
 # Runbook: policy hot-reload (Slice 4)
 
-**Status:** shipped in Slice 4 — the `PolicyWatcher` mtime-polls
-`config/policies.yaml` and hot-reloads low-blast changes without an `alfred`
-restart; high-blast changes are refused and routed through the reviewer gate.
+**Status:** _machinery_ shipped in Slice 4 (PR-S4-4) — the `PolicyWatcher`,
+`PoliciesSnapshotRef`, and the consumer deref pattern. **Production wiring is
+pending [#225](https://github.com/MrReasonable/AlfredOS/issues/225):** the
+watcher is not yet scheduled under the daemon TaskGroup, the daemon still
+injects a stub ref, and `PoliciesV1` is not yet reconciled with the live
+`config/policies.yaml` schema. Once wired, the watcher mtime-polls
+`config/policies.yaml`, hot-reloads low-blast changes without an `alfred`
+restart, and refuses high-blast changes (routed through the reviewer gate).
+This runbook describes the wired behaviour.
 **ADR:** [ADR-0023](../adr/0023-mtime-polled-hot-reload-for-policies-yaml.md)
 **Subsystem:** [`docs/subsystems/policies.md`](../subsystems/policies.md)
 **Issue:** [#159](https://github.com/MrReasonable/AlfredOS/issues/159)
@@ -66,7 +72,9 @@ consecutive successful stats — look for `supervisor.config_watcher.recovered`.
 If you see `policies.watcher.degraded` (distinct from the above), the audit
 store itself is unwritable: the watcher logged the rejection to
 `~/.local/state/alfred/policies-rejected-fallback.jsonl` and is continuing.
-Restore the audit store (Postgres); the next successful tick clears it.
+Restore the audit store (Postgres); subsequent rejections then write to the
+audit log again. The fallback `.jsonl` is **not** auto-pruned — it is a
+forensic record; rotate or delete it manually once the outage is resolved.
 
 ## TOCTOU + size safety
 
