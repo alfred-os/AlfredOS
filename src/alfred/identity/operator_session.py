@@ -190,6 +190,21 @@ class OperatorSessionNoMachineId(OperatorSessionError):  # noqa: N818 -- name pi
     """The per-OS machine-id source was unreadable."""
 
 
+class OperatorSessionPepperMisconfigured(OperatorSessionError):  # noqa: N818 -- name pinned by PR-S4-5 plan + audit reason vocab
+    """The ``audit.hash_pepper`` broker secret is too short / misconfigured.
+
+    CR-227 round-3 finding 1 (KEYSTONE audit-gap): ``hkdf_expand`` raises a
+    bare ``ValueError`` for a pepper shorter than 32 bytes (the SHA-256
+    PRK floor). Without this typed subclass that error would escape
+    ``resolve()`` UNTYPED — skipping BOTH the ``OPERATOR_SESSION_REFUSED``
+    audit row (hard rule #7: every refusal lands exactly one row) AND the
+    CLI refusal UX (raw traceback to the operator). The resolver wraps the
+    pepper read + every HKDF-backed derivation in this subclass so a
+    misconfigured pepper is recorded with the closed-vocab reason
+    ``pepper_misconfigured`` and rendered as an actionable refusal.
+    """
+
+
 # ---------------------------------------------------------------------------
 # §5.1 OperatorSessionFile Pydantic model
 # ---------------------------------------------------------------------------
@@ -636,6 +651,7 @@ __all__ = [
     "OperatorSessionNoMachineId",
     "OperatorSessionParentDirInsecure",
     "OperatorSessionParentDirNotOwned",
+    "OperatorSessionPepperMisconfigured",
     "OperatorSessionRevoked",
     "OperatorSessionTimeout",
     "OperatorSessionTokenUnknown",

@@ -148,6 +148,7 @@ def _refusal_for(exc: OperatorSessionError) -> tuple[str, str]:
         OperatorSessionNoMachineId,
         OperatorSessionParentDirInsecure,
         OperatorSessionParentDirNotOwned,
+        OperatorSessionPepperMisconfigured,
         OperatorSessionRevoked,
         OperatorSessionTimeout,
         OperatorSessionTokenUnknown,
@@ -214,6 +215,10 @@ def _refusal_for(exc: OperatorSessionError) -> tuple[str, str]:
         OperatorSessionNoMachineId: (
             "operator_session_no_machine_id",
             "operator_session.refused.no_machine_id",
+        ),
+        OperatorSessionPepperMisconfigured: (
+            "operator_session_pepper_misconfigured",
+            "operator_session.refused.pepper_misconfigured",
         ),
     }
     return refusals.get(type(exc), _UNKNOWN_REFUSAL)

@@ -27,6 +27,7 @@ from alfred.identity.operator_session import (
     OperatorSessionNoMachineId,
     OperatorSessionParentDirInsecure,
     OperatorSessionParentDirNotOwned,
+    OperatorSessionPepperMisconfigured,
     OperatorSessionRevoked,
     OperatorSessionTimeout,
     OperatorSessionTokenUnknown,
@@ -81,6 +82,13 @@ def test_reset_with_session_carries_canonical_user_id(monkeypatch: pytest.Monkey
         (OperatorSessionParentDirInsecure("x"), "operator_session_parent_dir_insecure", 1),
         (OperatorSessionParentDirNotOwned("x"), "operator_session_parent_dir_not_owned", 1),
         (OperatorSessionNoMachineId("x"), "operator_session_no_machine_id", 1),
+        # CR-227 round-3 finding 1: the short/misconfigured-pepper KEYSTONE
+        # audit-gap subclass maps to its OWN reason, never silently to missing.
+        (
+            OperatorSessionPepperMisconfigured("x"),
+            "operator_session_pepper_misconfigured",
+            1,
+        ),
     ],
 )
 def test_reset_refuses_when_resolver_raises(
