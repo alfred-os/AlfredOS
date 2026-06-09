@@ -72,6 +72,35 @@ def test_machine_id_hash_length_validator() -> None:
         _make(machine_id_hash="a" * 65)
 
 
+def test_machine_id_hash_accepts_valid_hex() -> None:
+    """A full lowercase-hex HMAC-SHA256 digest is accepted."""
+    digest = "deadbeef" * 8  # 64 lowercase-hex chars
+    assert _make(machine_id_hash=digest).machine_id_hash == digest
+
+
+@pytest.mark.parametrize(
+    "bad_hash",
+    [
+        "Z" * 63 + "\n",  # 64 chars, non-hex + newline log-injection attempt
+        "A" * 64,  # uppercase — not the lowercase-hex shape we emit
+        "g" * 64,  # 'g' is outside [0-9a-f]
+        "deadbeef" * 7 + "deadbe;\n",  # 64 chars with shell-meta + newline
+        "0" * 63 + " ",  # trailing space
+    ],
+)
+def test_machine_id_hash_rejects_non_hex_injection_charset(bad_hash: str) -> None:
+    """CR-227 round-3 finding 2: a planted ``machine_id_hash`` carrying
+    non-hex / log-injection bytes is refused at parse.
+
+    The value is echoed verbatim into the ``machine_mismatch`` audit row, so a
+    length-only constraint let arbitrary 64-char bytes (newlines, control
+    chars) poison the forensic row. Pinning the field to the HMAC-SHA256 hex
+    shape closes the same log-injection class the ``host`` defence already does.
+    """
+    with pytest.raises(ValidationError):
+        _make(machine_id_hash=bad_hash)
+
+
 def test_host_accepts_valid_hostname() -> None:
     assert _make(host="alfred-host.example.com").host == "alfred-host.example.com"
 
