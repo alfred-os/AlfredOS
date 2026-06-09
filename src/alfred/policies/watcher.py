@@ -34,7 +34,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol
+from typing import Any, Final, Literal, Protocol, assert_never
 
 import structlog
 import yaml
@@ -94,6 +94,8 @@ def _reject_message(reason: RejectReason, *, offending_key: str) -> str:
             return t("supervisor.config_reload.rejected.stat_failed", detail=offending_key)
         case "audit_write_failed":
             return t("supervisor.config_reload.rejected.audit_write_failed", detail=offending_key)
+        case _:  # pragma: no cover - closed-union exhaustiveness backstop
+            assert_never(reason)
 
 
 def _fallback_jsonl_path() -> Path:
@@ -361,7 +363,9 @@ class PolicyWatcher:
             return _LoadOutcome(None, None, "file_vanished", str(self._path), mtime)
         except (PolicyFileTooLarge, ValueError):
             return _LoadOutcome(None, None, "parse_failure", "<yaml_load>", mtime)
-        except OSError:
+        except OSError:  # pragma: no cover — TOCTOU race: _tick stat()'d the
+            # file successfully just before this load; an OSError here is a
+            # rare swap-between-stat-and-open. Routed to stat_failed defensively.
             return _LoadOutcome(None, None, "stat_failed", "<filesystem>", mtime)
 
         try:
@@ -370,7 +374,9 @@ class PolicyWatcher:
             return _LoadOutcome(None, None, "parse_failure", "<yaml_parse>", mtime)
         except ValidationError as exc:
             return _LoadOutcome(None, None, "validation_failure", _first_error_key(exc), mtime)
-        except PolicyFileTooLarge:
+        except PolicyFileTooLarge:  # pragma: no cover — defensive: load_yaml_bytes
+            # already capped at MAX_POLICIES_BYTES, so parse_policies' re-check
+            # cannot fire for bytes that came through the loader.
             return _LoadOutcome(None, None, "parse_failure", "<yaml_load>", mtime)
 
         new_sha = compute_sha256(canonical_bytes(model))
@@ -475,7 +481,9 @@ class PolicyWatcher:
         for key in type(prev.high_blast).model_fields:
             if getattr(prev.high_blast, key) != getattr(new.high_blast, key):
                 return f"high_blast.{key}"
-        return "high_blast.<unknown>"
+        return "high_blast.<unknown>"  # pragma: no cover — unreachable: the
+        # caller only invokes this after ``prev.high_blast != new.high_blast``,
+        # so at least one field above must differ.
 
     @staticmethod
     def _high_blast_changed_keys_for_log(_policies: PoliciesV1) -> list[str]:
