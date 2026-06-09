@@ -34,6 +34,7 @@ import pytest
 from alfred.supervisor.breaker import BreakerState, CircuitBreaker
 from alfred.supervisor.core import Supervisor
 from alfred.supervisor.errors import SupervisorError
+from tests.helpers.policies import _StubPoliciesSnapshotRef
 
 
 @asynccontextmanager
@@ -63,6 +64,7 @@ def _build_supervisor() -> tuple[Supervisor, dict[str, Any]]:
         session_scope=_fake_session_scope,
         gate=gate,
         audit=audit,
+        policies_ref=_StubPoliciesSnapshotRef(),
     )
     return sup, {"gate": gate, "audit": audit}
 

@@ -19,6 +19,7 @@ import pytest
 
 from alfred.supervisor.core import Supervisor
 from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
+from tests.helpers.policies import _StubPoliciesSnapshotRef
 
 
 def _make_minimal_session_scope() -> Callable[[], AbstractAsyncContextManager[Any]]:
@@ -34,6 +35,7 @@ def test_outbound_dlp_defaults_to_none() -> None:
         session_scope=_make_minimal_session_scope(),
         gate=MagicMock(),
         audit=MagicMock(),
+        policies_ref=_StubPoliciesSnapshotRef(),
     )
     assert sup._outbound_dlp is None
 
@@ -47,6 +49,7 @@ def test_build_proposal_context_threads_the_singleton() -> None:
         audit=MagicMock(),
         state_git_path=Path("state.git"),
         outbound_dlp=scanner,
+        policies_ref=_StubPoliciesSnapshotRef(),
     )
     ctx = sup._build_proposal_context()
     assert ctx.outbound_dlp is scanner
@@ -59,6 +62,7 @@ def test_build_proposal_context_refuses_when_scanner_unwired() -> None:
         gate=MagicMock(),
         audit=MagicMock(),
         state_git_path=Path("state.git"),
+        policies_ref=_StubPoliciesSnapshotRef(),
         # outbound_dlp deliberately omitted.
     )
     with pytest.raises(RuntimeError, match="no outbound DLP scanner was wired"):

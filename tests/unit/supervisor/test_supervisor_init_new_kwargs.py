@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from alfred.supervisor.core import Supervisor
+from tests.helpers.policies import _StubPoliciesSnapshotRef
 
 
 def _make_minimal_session_scope() -> Callable[[], AbstractAsyncContextManager[Any]]:
@@ -21,27 +22,21 @@ def _make_minimal_session_scope() -> Callable[[], AbstractAsyncContextManager[An
     return lambda: cm
 
 
-def test_legacy_5_kwarg_construction_still_works() -> None:
-    """Slice-3 unit tests that pass 5 kwargs must keep passing."""
+def test_construction_requires_policies_ref() -> None:
+    """PR-S4-4 rev-003: ``policies_ref`` is a REQUIRED kwarg (no default)."""
     sup = Supervisor(
         session_scope=_make_minimal_session_scope(),
         gate=MagicMock(),
         audit=MagicMock(),
         state_git_path=None,
         proposal_dispatch_interval_s=30,
+        policies_ref=_StubPoliciesSnapshotRef(),
     )
     assert sup is not None
 
 
 def test_construction_with_new_slice4_kwargs() -> None:
     """policies_ref + operator_session_resolver accepted as kwargs."""
-
-    class _StubRef:
-        def current(self) -> object:
-            return object()
-
-        def snapshot_hash(self) -> str:
-            return "abc"
 
     class _StubResolver:
         async def resolve(self) -> str:
@@ -53,18 +48,31 @@ def test_construction_with_new_slice4_kwargs() -> None:
         audit=MagicMock(),
         state_git_path=Path("state.git"),
         proposal_dispatch_interval_s=30,
-        policies_ref=_StubRef(),
+        policies_ref=_StubPoliciesSnapshotRef(),
         operator_session_resolver=_StubResolver(),
     )
     assert sup is not None
 
 
-def test_both_new_kwargs_default_to_none() -> None:
-    """Defaults preserve legacy unit-test construction patterns."""
+def test_policies_ref_is_required_kwarg() -> None:
+    """Omitting ``policies_ref`` raises a TypeError (no default — rev-003)."""
+    import pytest
+
+    with pytest.raises(TypeError):
+        Supervisor(  # type: ignore[call-arg]
+            session_scope=_make_minimal_session_scope(),
+            gate=MagicMock(),
+            audit=MagicMock(),
+        )
+
+
+def test_operator_session_resolver_defaults_to_none() -> None:
+    """``operator_session_resolver`` still defaults to None (PR-S4-5 wires it)."""
     sup = Supervisor(
         session_scope=_make_minimal_session_scope(),
         gate=MagicMock(),
         audit=MagicMock(),
+        policies_ref=_StubPoliciesSnapshotRef(),
     )
-    assert sup._policies_ref is None
+    assert sup._policies_ref is not None
     assert sup._operator_session_resolver is None

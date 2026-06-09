@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import redis.asyncio as aioredis
 import structlog
@@ -45,6 +45,9 @@ from redis.commands.core import AsyncScript
 
 from alfred.audit.audit_row_schemas import RateLimitBucket
 from alfred.plugins.web_fetch.errors import WebFetchRateLimited
+
+if TYPE_CHECKING:
+    from alfred.policies.snapshot_ref import PoliciesSnapshotRef
 
 _log = structlog.get_logger(__name__)
 
@@ -140,6 +143,20 @@ class RateLimitConfig:
     per_domain_per_minute: int = _DEFAULT_PER_DOMAIN_PER_MINUTE
     per_user_per_minute: int = _DEFAULT_PER_USER_PER_MINUTE
     per_user_daily: int = _DEFAULT_PER_USER_DAILY
+
+    @classmethod
+    def from_snapshot_ref(cls, ref: PoliciesSnapshotRef) -> RateLimitConfig:
+        """Build a config from the active policy snapshot (PR-S4-4 hot-reload).
+
+        Derefs ``ref.current()`` on EVERY call (per-iteration deref, core-003)
+        so a watcher swap is reflected the next time a caller rebuilds the
+        config — no plugin-host restart required. The per-domain / per-minute
+        knobs are not yet operator-tunable in ``PoliciesV1`` and keep their
+        spec §7.7 defaults; ``per_user_daily`` reads the hot-reloadable
+        ``rate_limits.web_fetch_per_user_per_hour`` budget.
+        """
+        snapshot = ref.current()
+        return cls(per_user_daily=snapshot.policies.rate_limits.web_fetch_per_user_per_hour)
 
 
 class RateLimiter:

@@ -1386,6 +1386,22 @@ msgstr ""
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
+#: src/alfred/i18n/_slice_4_reserve.py:89
+msgid "supervisor.config_reload.rejected.audit_write_failed"
+msgstr ""
+"config/policies.yaml reload rejected: audit store unwritable ({detail}). "
+"Live snapshot retained; the watcher retries on the next change."
+
+#: src/alfred/i18n/_slice_4_reserve.py:90
+msgid "supervisor.config_watcher.degraded"
+msgstr ""
+"PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
+"10x. Fix the filesystem; recovery is automatic."
+
+#: src/alfred/i18n/_slice_4_reserve.py:91
+msgid "supervisor.config_watcher.recovered"
+msgstr "PolicyWatcher recovered: poll cadence restored to normal."
+
 # TUI gating (PR-S4-1 daemon split).
 #: src/alfred/i18n/_slice_4_reserve.py:91
 msgid "comms.tui.daemon_required_to_chat"

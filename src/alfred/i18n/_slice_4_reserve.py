@@ -86,6 +86,9 @@ def _register() -> None:
     t("supervisor.config_reload.rejected.validation_failure")
     t("supervisor.config_reload.rejected.file_vanished")
     t("supervisor.config_reload.rejected.stat_failed")
+    t("supervisor.config_reload.rejected.audit_write_failed")
+    t("supervisor.config_watcher.degraded")
+    t("supervisor.config_watcher.recovered")
 
     # TUI gating (PR-S4-1).
     t("comms.tui.daemon_required_to_chat")
