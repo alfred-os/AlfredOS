@@ -51,6 +51,12 @@ handling) and finalises the ADR-0009 polarity-inversion note.
 
 - The `IdentityResolver` placement (host-side in Slice 3, per §9.1) is
   revisited when the full host-side callback wire type is designed for Slice 4.
+- (PR-S4-8 follow-up, #152) `SupervisorBreakerTripper.trip_comms_breaker`
+  currently collapses every comms breaker-trip reason onto
+  `plugin_lifecycle_crash`. When the rate-limit handler lands in PR-S4-9,
+  `TripBreakerReason` must gain a `comms.rate_limit.exhausted` member so a
+  global-exhaustion trip is distinguishable from a lifecycle crash in the audit
+  graph. Tracked in the PR-S4-9 follow-up issue (#233).
 
 ## References
 
