@@ -131,6 +131,24 @@ plan9 = "y"
         parse_manifest(raw)
 
 
+def test_sandbox_policy_refs_non_string_value_refuses() -> None:
+    # CR #229 R2 finding-9/-2: a non-string policy_refs value (here ``linux =
+    # 7``) must raise the TYPED ManifestError, NOT leak a raw pydantic
+    # ValidationError from SandboxBlock construction. Locks the parse contract.
+    raw = (
+        _BASE
+        + """
+[sandbox]
+kind = "full"
+
+[sandbox.policy_refs]
+linux = 7
+"""
+    )
+    with pytest.raises(ManifestError):
+        parse_manifest(raw)
+
+
 def test_sandbox_policy_refs_non_table_refuses() -> None:
     raw = (
         _BASE

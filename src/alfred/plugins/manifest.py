@@ -228,7 +228,7 @@ def _parse_sandbox_block(data: dict[str, Any], *, plugin_id: str) -> SandboxBloc
     policy_refs_raw = sandbox_section.get("policy_refs", {})
     if not isinstance(policy_refs_raw, dict):
         raise ManifestError(t("plugin.manifest_sandbox_policy_refs_type"))
-    for os_key in policy_refs_raw:
+    for os_key, os_value in policy_refs_raw.items():
         if os_key not in _VALID_OS_KEYS:
             raise ManifestError(
                 t(
@@ -237,6 +237,12 @@ def _parse_sandbox_block(data: dict[str, Any], *, plugin_id: str) -> SandboxBloc
                     valid=", ".join(sorted(_VALID_OS_KEYS)),
                 )
             )
+        # A non-string value (e.g. ``linux = 7``) must surface as the typed
+        # ManifestError here, BEFORE SandboxBlock construction — otherwise
+        # Pydantic raises a raw ValidationError that leaks past the launcher's
+        # bare-key contract (CR #229 R2 finding-2/-9).
+        if not isinstance(os_value, str):
+            raise ManifestError(t("plugin.manifest_sandbox_policy_refs_value_type", os_key=os_key))
 
     # ``kind: full`` requires a non-empty policy_refs map. Checked HERE so a
     # public ``ManifestError`` surfaces to ``parse_manifest`` callers
