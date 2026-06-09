@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 import structlog
 
 from alfred.audit import audit_row_schemas
+from alfred.comms_mcp import observability
 
 if TYPE_CHECKING:
     from alfred.comms_mcp.protocol import InboundMessageNotification
@@ -378,6 +379,9 @@ async def process_inbound_message(
     # without importing the concrete class at runtime (kept TYPE_CHECKING-only).
     if not hasattr(acquired, "tokens_remaining"):
         return
+
+    # Task 62: observe the backpressure wait the message incurred at the limiter.
+    observability.record_burst_limiter_wait_seconds(getattr(acquired, "waited_seconds", 0.0))
 
     # 3) Quarantined extract — T3 hard-coded; no silent promotion.
     extracted = await orchestrator.quarantined_extract(

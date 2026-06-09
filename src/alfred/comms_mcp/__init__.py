@@ -26,6 +26,7 @@ from alfred.comms_mcp import (
     handlers,
     inbound,
     inbound_scanner,
+    observability,
     protocol,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "handlers",
     "inbound",
     "inbound_scanner",
+    "observability",
     "protocol",
 ]
