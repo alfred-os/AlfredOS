@@ -252,6 +252,20 @@ subprocess's crash message can carry T3 fragments. The audit row schema
 constants in `src/alfred/audit/audit_row_schemas.py` mirror this contract so
 the symmetric missing/extra-field guard catches drift.
 
+### Operator attribution resolves at the CLI boundary, not in the Supervisor
+
+`Supervisor.__init__` accepts an `operator_session_resolver` kwarg (a
+PR-S4-1 stub), but the field is **stored and never read**. Operator
+attribution for the reviewer-gated commands is resolved at the CLI boundary —
+`alfred config set` / `alfred plugin grant|revoke` call
+`resolve_operator_user_id_or_refuse`, and `alfred supervisor reset` calls
+`_resolve_operator_session_or_refuse`, each constructing a
+`DefaultOperatorSessionResolver` directly from the CLI bootstrap (#153). The
+stored `Supervisor._operator_session_resolver` is therefore **not live
+wiring**; it is retained so a future in-supervisor consumer can dereference it
+without re-touching `__init__`, and a cleanup PR may remove the kwarg. Do not
+read it as an active resolution path.
+
 ## Audit row families
 
 Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
