@@ -78,12 +78,8 @@ def _violations_in_source(source: str, *, filename: str) -> list[str]:
             if not (isinstance(node, ast.Call) and _is_call_to(node, _TARGET_CALL)):
                 continue
             body = _body_arg(node)
-            ok = (
-                body is not None
-                and (
-                    _is_scan_call(body)
-                    or (isinstance(body, ast.Name) and body.id in scan_names)
-                )
+            ok = body is not None and (
+                _is_scan_call(body) or (isinstance(body, ast.Name) and body.id in scan_names)
             )
             if not ok:
                 violations.append(f"{filename}:{node.lineno}: body= not via {_SCAN_FN}")
@@ -147,8 +143,5 @@ def test_guard_rejects_raw_tuple_body() -> None:
 
 
 def test_guard_rejects_missing_body() -> None:
-    source = (
-        "def f():\n"
-        "    return OutboundMessageRequest(adapter_id='alfred_comms_test')\n"
-    )
+    source = "def f():\n    return OutboundMessageRequest(adapter_id='alfred_comms_test')\n"
     assert _violations_in_source(source, filename="<missing>") != []

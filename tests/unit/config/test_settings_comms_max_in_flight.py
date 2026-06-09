@@ -44,6 +44,5 @@ def test_rejects_over_1024() -> None:
 def test_accepts_boundaries() -> None:
     assert Settings(comms_max_in_flight_notifications=1).comms_max_in_flight_notifications == 1
     assert (
-        Settings(comms_max_in_flight_notifications=1024).comms_max_in_flight_notifications
-        == 1024
+        Settings(comms_max_in_flight_notifications=1024).comms_max_in_flight_notifications == 1024
     )
