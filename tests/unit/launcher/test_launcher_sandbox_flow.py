@@ -498,6 +498,12 @@ def test_unknown_host_os_refused(run_launcher, tmp_path) -> None:
     )
     assert result.returncode != 0
     assert "unknown_host_os" in result.stderr
+    # CR #229 R2 finding-10: the unknown-host-OS refusal also emits a
+    # structured audit JSON row matching the other refusal rows' shape.
+    assert '"event":"supervisor.plugin.sandbox_refused"' in result.stderr
+    assert '"reason":"unknown_host_os"' in result.stderr
+    assert '"host_os":"unknown"' in result.stderr
+    assert '"environment":"test"' in result.stderr
 
 
 # --------------------------------------------------------------------------
