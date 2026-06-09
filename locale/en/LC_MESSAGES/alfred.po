@@ -2367,6 +2367,18 @@ msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
 "status` to list registered components."
 
+#: src/alfred/orchestrator/core.py
+msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
+msgstr ""
+"comms inbound must be T3: quarantined_extract refuses any source_tier other "
+"than T3 (no silent T3->T2 promotion)."
+
+#: src/alfred/orchestrator/core.py
+msgid "orchestrator.quarantined_extract.no_extractor_wired"
+msgstr ""
+"quarantined_extract called on an orchestrator constructed without a "
+"quarantined_extractor; the comms inbound trust-boundary funnel is not wired."
+
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""
 
