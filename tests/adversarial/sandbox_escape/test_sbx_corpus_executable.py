@@ -102,10 +102,21 @@ def _real_policy_flags_with_test_binds(plugin_dir: Path) -> list[str]:
         str(Path(os.path.realpath(sys.executable)).parents[1]),
         str(plugin_dir),
     }
+    appended_roots = [
+        root
+        for root in sorted(interp_roots)
+        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin"))
+    ]
+    # finding-3 (PR #231): the test broadens the read surface with interpreter +
+    # plugin_dir binds. A venv-layout shift must NEVER let one of those resolve
+    # under /etc or /bin and silently widen the sandbox's read surface — fail
+    # loud here instead.
+    assert not any(
+        os.path.realpath(root).startswith(("/etc", "/bin")) for root in appended_roots
+    ), f"test bind resolves under /etc or /bin — would widen the sandbox: {appended_roots}"
     extra: list[str] = []
-    for root in sorted(interp_roots):
-        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin")):
-            extra += ["--ro-bind", root, root]
+    for root in appended_roots:
+        extra += ["--ro-bind", root, root]
     return pruned + extra
 
 
@@ -336,8 +347,11 @@ def test_sbx_2026_003_host_etc_passwd_read_contained(tmp_path: Path) -> None:
         "    sys.exit(0)\n"
     )
     result = _run_under_real_policy(stub, tmp_path)
-    assert "READ_OK" not in result.stdout, "host /etc/passwd was readable — containment failed"
+    # finding-1: rc==0 proves the sandbox started; BLOCKED proves the probe ran
+    # and the read was refused — neither a vacuous empty-stdout pass nor a crash.
     assert result.returncode == 0, result.stderr
+    assert "READ_OK" not in result.stdout, "host /etc/passwd was readable — containment failed"
+    assert "BLOCKED" in result.stdout, "stub did not run / read was not refused"
 
 
 @_bwrap_required
@@ -356,41 +370,99 @@ def test_sbx_2026_004_host_bin_sh_exec_contained(tmp_path: Path) -> None:
         "    sys.exit(0)\n"
     )
     result = _run_under_real_policy(stub, tmp_path)
+    # MEDIUM (PR #231 finding-1): a negative-only assertion (`EXEC_OK not in`)
+    # passes VACUOUSLY if the bwrap sandbox never STARTS (empty stdout). Assert
+    # the probe actually ran (rc==0, surfacing stderr on failure) AND the
+    # affirmative containment sentinel so the test PROVES the exec was refused,
+    # not merely that nothing happened.
+    assert result.returncode == 0, result.stderr
     assert "EXEC_OK" not in result.stdout, "/bin/sh exec was NOT contained"
+    assert "BLOCKED" in result.stdout, "stub did not run / exec was not refused"
+
+
+@_bwrap_required
+def test_usr_bin_exec_reachable_known_permissive_pending_230(tmp_path: Path) -> None:
+    """finding-4 (PR #231): document the KNOWN-PERMISSIVE /usr/bin exec surface.
+
+    The /bin/sh containment passes only because /bin is not bound. The broad
+    ``/usr`` ro_bind, however, leaves ``/usr/bin/*`` exec-reachable inside the
+    sandbox. We assert that reachability as a TRACKED FACT (not a surprise): a
+    compromised quarantined process CAN exec ``/usr/bin/true`` today. The
+    load-bearing exec containment is --unshare-pid + --die-with-parent, NOT the
+    absence of exec targets. #230 tightens the interpreter bind to the exact
+    CPython prefix; when it lands this test flips (the exec should then fail) —
+    forcing the corpus to track the posture change rather than silently widen.
+    """
+    stub = tmp_path / "probe.py"
+    stub.write_text(
+        "import subprocess, sys\n"
+        "r = subprocess.run(['/usr/bin/true'])\n"
+        "print('USRBIN_EXEC_RC', r.returncode, flush=True)\n"
+        "sys.exit(0)\n"
+    )
+    result = _run_under_real_policy(stub, tmp_path)
+    assert result.returncode == 0, result.stderr
+    # Known-permissive: /usr/bin/true is exec-reachable (rc 0) under the broad
+    # /usr bind. If this stops being true, #230 likely landed — update the doc.
+    assert "USRBIN_EXEC_RC 0" in result.stdout, (
+        "/usr/bin/* is no longer exec-reachable — #230 may have tightened the "
+        "/usr bind; update config/sandbox/README.md + this tracked-fact test"
+    )
 
 
 @_bwrap_required
 def test_sbx_2026_006_host_proc_environ_read_contained(tmp_path: Path) -> None:
+    # finding-2 (PR #231): the prior assertion (rc==0 + BLOCKED||READ_LEN) was
+    # self-fulfilling — under --unshare-pid the probe can ONLY ever see its own
+    # pid namespace, so it could never construct a host-env leak and "passed"
+    # regardless of containment. We make it HONEST with the option-(a) marker
+    # probe: seed a recognizable host-env secret in the PARENT env, then assert
+    # that whatever /proc/1/environ the sandboxed process can read NEVER contains
+    # that marker.
+    #
+    # The containment that makes this true under the SHIPPED policy is the MOUNT
+    # namespace: the policy binds no /proc, so /proc/1/environ does not even
+    # exist inside the sandbox and the read raises (verified in Debian Bookworm +
+    # bwrap 0.8.0 — the probe gets ENOENT, MARKER_PRESENT False). The host init's
+    # secret env is therefore unreachable. A regression that exposed host /proc
+    # (or a host-side pid-1 read) would surface the marker and fail this test.
     payload = _load("sbx-2026-006")
     assert payload.expected_outcome == "refused"
+    marker = "ALFRED_HOST_SECRET_MARKER=sbx2026006_leak_canary"
     stub = tmp_path / "probe.py"
-    # The host's pid-1 env block must not leak. Under --unshare-pid the sandbox
-    # has its OWN pid namespace, so /proc/1 (if present) is the sandboxed init,
-    # carrying only the probe's benign environ — never the host's secrets. We
-    # assert no host-secret marker leaks: the launcher passes no secrets into
-    # the probe env, so a successful read is still benign, but the probe also
-    # confirms it cannot see a DISTINCT host process's environ.
+    # Always print PROBE_RAN (proves the stub executed, not a vacuous empty pass)
+    # and a MARKER_PRESENT verdict. The marker is seeded into the host-side
+    # parent env; the assertion is that it never appears in the /proc/1/environ
+    # the sandboxed process can read.
     stub.write_text(
-        "import os, sys\n"
+        "import sys\n"
+        "marker = b'sbx2026006_leak_canary'\n"
+        "print('PROBE_RAN', flush=True)\n"
         "try:\n"
         "    data = open('/proc/1/environ', 'rb').read()\n"
-        # In the sandbox pid namespace /proc/1 is THIS process tree's init; its
-        # environ is the probe's own (benign). The escape would be reading a
-        # DIFFERENT (host) process — proven contained because the host pid 1 is
-        # simply not in this namespace. Report what we got for the assertion.
-        "    print('READ_LEN', len(data), flush=True)\n"
-        "    sys.exit(0)\n"
+        "    print('MARKER_PRESENT', marker in data, flush=True)\n"
         "except OSError:\n"
-        "    print('BLOCKED', flush=True)\n"
-        "    sys.exit(0)\n"
+        "    print('MARKER_PRESENT', False, flush=True)\n"
+        "sys.exit(0)\n"
     )
-    result = _run_under_real_policy(stub, tmp_path)
-    # Either /proc/1 is unreadable (BLOCKED) or it resolves to the sandboxed
-    # init's own benign environ — in NEITHER case does the host's pid-1 secret
-    # block leak. The containment is the pid namespace; we assert the probe ran
-    # and did not crash the sandbox.
+    env = {**os.environ, "ALFRED_HOST_SECRET_MARKER": "sbx2026006_leak_canary"}
+    flags = _real_policy_flags_with_test_binds(tmp_path)
+    bwrap = shutil.which("bwrap")
+    assert bwrap is not None  # gated by _bwrap_required
+    result = subprocess.run(  # noqa: S603 — resolved bwrap path, repo-owned probe
+        [bwrap, *flags, "--", sys.executable, str(stub)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+        check=False,
+    )
     assert result.returncode == 0, result.stderr
-    assert "BLOCKED" in result.stdout or "READ_LEN" in result.stdout
+    assert "PROBE_RAN" in result.stdout, "stub did not run — sandbox never started"
+    assert "MARKER_PRESENT True" not in result.stdout, (
+        f"host pid-1 env marker {marker!r} leaked into the sandbox — pid-namespace isolation failed"
+    )
+    assert "MARKER_PRESENT False" in result.stdout
 
 
 def test_sbx_2026_011_policy_ref_symlink_follow_contained(tmp_path: Path) -> None:
