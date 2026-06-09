@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This is trust-boundary work — TDD is HARD here, not advisory. Every audit-row emit and every sandbox-refusal branch needs a failing test first.
 
-**Goal:** Ship the policy-resolving extension of `bin/alfred-plugin-launcher.sh` (bash — sec-004 round-3 honest), the pre-launcher Python helper at `src/alfred/plugins/manifest_reader.py`, the mandatory `Settings.environment` field with dual-sourced precedence (env var > `/etc/alfred/environment`), the dev-escape-hatch refuse-in-production semantics with operator-visible stderr (devex-001), the `bwrap --keep-fd 3` provider-key fd-3 inheritance pattern (sec-004 round-4), the Supervisor-side `setrlimit(RLIMIT_CORE)` + best-effort `mlockall` posture, the quarantined-LLM plugin's `kind: none` → `kind: full` manifest migration with per-OS `policy_refs`, and the `supervisor.plugin.sandbox_refused` hookpoint. The launcher policy-resolving probe (consumed by PR-S4-1) flips from no-op stub to real behaviour in this PR.
+**Goal:** Ship the policy-resolving extension of `bin/alfred-plugin-launcher.sh` (bash — sec-004 round-3 honest), the pre-launcher Python helper at `src/alfred/plugins/manifest_reader.py`, the mandatory `Settings.environment` field with dual-sourced precedence (env var > `/etc/alfred/environment`), the dev-escape-hatch refuse-in-production semantics with operator-visible stderr (devex-001), the `bwrap --sync-fd 3` provider-key fd-3 inheritance pattern (sec-004 round-4), the Supervisor-side `setrlimit(RLIMIT_CORE)` + best-effort `mlockall` posture, the quarantined-LLM plugin's `kind: none` → `kind: full` manifest migration with per-OS `policy_refs`, and the `supervisor.plugin.sandbox_refused` hookpoint. The launcher policy-resolving probe (consumed by PR-S4-1) flips from no-op stub to real behaviour in this PR.
 
-**Architecture:** Spec §7 in full. The launcher stays bash. A pre-launcher Python one-shot (`python3 -m alfred.plugins.manifest_reader <plugin_id>`) reads the manifest's `sandbox` block and prints a stable JSON line the bash script consumes. The bash launcher then branches: `kind: full` → resolve the per-OS `policy_ref`, `exec bwrap --keep-fd 3 [policy flags] -- ${PLUGIN_BINARY}`; `kind: none` → existing UID-separated baseline (Slice-3); `kind: stub` → refuse in production, dev-only exec unsandboxed with `SANDBOX_STUB_USED_FIELDS`. The Supervisor (Python, host) fetches the quarantined provider key via `SecretBroker.get("quarantined.provider_key")`, opens a pipe whose read end is fd 3 of the launcher subprocess, writes the 4-byte big-endian length prefix + key bytes, closes the write end, then `gc.collect()`s. The bash launcher never reads fd 3 — `--keep-fd 3` makes the kernel inherit fd 3 into the bwrap-spawned plugin, and the plugin's existing Slice-3 `read_fd3_secret()` consumes the framed bytes. Honest limitation acknowledged: Supervisor holds the key in Python `str` (interned, non-zeroizable) for microseconds between broker fetch and fd-3 write; `gc.collect()` is mitigation, not elimination. Slice-5 `SecretBroker.get_bytes` will close this; deferred.
+**Architecture:** Spec §7 in full. The launcher stays bash. A pre-launcher Python one-shot (`python3 -m alfred.plugins.manifest_reader <plugin_id>`) reads the manifest's `sandbox` block and prints a stable JSON line the bash script consumes. The bash launcher then branches: `kind: full` → resolve the per-OS `policy_ref`, `exec bwrap --sync-fd 3 [policy flags] -- ${PLUGIN_BINARY}`; `kind: none` → existing UID-separated baseline (Slice-3); `kind: stub` → refuse in production, dev-only exec unsandboxed with `SANDBOX_STUB_USED_FIELDS`. The Supervisor (Python, host) fetches the quarantined provider key via `SecretBroker.get("quarantined.provider_key")`, opens a pipe whose read end is fd 3 of the launcher subprocess, writes the 4-byte big-endian length prefix + key bytes, closes the write end, then `gc.collect()`s. The bash launcher never reads fd 3 — `--sync-fd 3` makes the kernel inherit fd 3 into the bwrap-spawned plugin, and the plugin's existing Slice-3 `read_fd3_secret()` consumes the framed bytes. Honest limitation acknowledged: Supervisor holds the key in Python `str` (interned, non-zeroizable) for microseconds between broker fetch and fd-3 write; `gc.collect()` is mitigation, not elimination. Slice-5 `SecretBroker.get_bytes` will close this; deferred.
 
 **Tech Stack:** Python 3.12+ · Bash (POSIX-portable with `set -eu`, no `pipefail`) · `tomllib` (stdlib TOML reader) · Pydantic v2 (`Settings` extension) · `alfred.security.secrets.SecretBroker.get` (Slice-3 shipped at `src/alfred/security/secrets.py:396`) · `alfred.plugins.manifest.parse_manifest` (Slice-3 shipped — gains an extension for the `sandbox` block) · `alfred.audit.audit_row_schemas` (Slice-4 `SANDBOX_REFUSED_FIELDS` / `SANDBOX_STUB_USED_FIELDS` ship in PR-S4-0a; this PR consumes them) · `alfred.i18n.t()` for every operator-facing stderr/error string · `resource.setrlimit` + `ctypes.CDLL("libc.so.6").mlockall` (Linux best-effort) · `bin/alfred-plugin-launcher.sh` (Slice-3 shipped; PR-S4-6 extends) · `structlog` · pytest + testcontainers + bash-fixture harness · `coverage --fail-under=100` on every trust-boundary file this PR touches.
 
@@ -51,7 +51,7 @@
 
 4. **sec-4 HIGH (`--read-environment` TOCTOU)**: `--read-environment` (the env-conflict probe) MUST be called EXACTLY ONCE in the boot path; the result is stashed in a module-level frozen Pydantic model `EnvironmentLoadResult` and consulted from there. The Python helper that drives the probe is `src/alfred/cli/daemon/_environment_probe.py:probe_environment() -> EnvironmentLoadResult` — one process, one read, one result. Audit-row emit consumes the cached result. NO repeat invocations.
 
-5. **devops-1 HIGH (bwrap version pin)**: PR-S4-0b's Dockerfile MUST pin `bubblewrap=0.8.0-1` (Debian Bookworm version that ships `--keep-fd`; the round-2 closure-1 in PR-S4-0b said 0.6.0 — corrected here to 0.8.0 to ensure `--keep-fd` support; `--keep-fd` requires bwrap 0.5.0+). PR-S4-1's daemon-boot probe adds `bwrap_version_check`: parse `bwrap --version` output, refuse boot if `< 0.5.0`. New i18n key `daemon.boot.bwrap_version_too_old`. New corpus entry `sbx-2026-008-bwrap_version_drift` simulates an old bwrap and asserts boot refusal.
+5. **devops-1 HIGH (bwrap version pin)**: PR-S4-0b's Dockerfile MUST pin `bubblewrap=0.8.0-1` (Debian Bookworm version that ships the `--sync-fd FD` flag the translator emits). The flag name is version-bound (#218 / ADR-0015): `--sync-fd` is the 0.8.0 name; bwrap **0.9.0+** renames it to `--keep-fd`. The launcher/translator emit `--sync-fd`, so the pinned image and any CI apt-installed bwrap MUST be on the `--sync-fd` line (i.e. `< 0.9.0`, or a build that still accepts `--sync-fd`). PR-S4-1's daemon-boot probe adds `bwrap_version_check` (#228): parse `bwrap --version`, refuse boot if the installed bwrap does not accept `--sync-fd`. New i18n key `daemon.boot.bwrap_version_too_old`. New corpus entry `sbx-2026-008-bwrap_version_drift` simulates a drifted bwrap and asserts boot refusal. **The CI Integration job (PR-S4-6) asserts `bwrap --help` advertises `--sync-fd` so a future `ubuntu-latest` shipping bwrap ≥ 0.9 fails LOUDLY rather than silently mis-running the resolver test.**
 
 6. **devops-2 HIGH (cross-OS CI matrix)**: PR-S4-6 CI workflow expands to run the launcher's macOS branch on `macos-latest` runners and the Windows-stub branch on `windows-latest`. Tests use `FAKE_UNAME=Darwin` / `FAKE_UNAME=Windows_NT` overrides in the bash launcher (a new `_uname()` shim helper). The matrix asserts: (a) Linux+bwrap → success; (b) macOS+sandbox-exec stub → success; (c) Windows → refuse with `kind:none_only_on_windows` audit row. Without the matrix, the per-OS branches drift silently.
 
@@ -84,11 +84,11 @@ This PR closes spec §7.1 through §7.5, §7.8, §7.9, §7.11. After this PR mer
 1. Every plugin manifest gains a `[sandbox]` block (TOML — see §4.1 on the manifest-format reconciliation; the spec wrote YAML, the existing parser is TOML). Missing block → load refused with `reason="sandbox_block_missing"`.
 2. `Settings.environment: Literal["development", "production", "test"]` exists and is mandatory at daemon boot. It is dual-sourced: `ALFRED_ENVIRONMENT` env var (primary) > `/etc/alfred/environment` file (fallback). Neither source set → CLI refuses with `t("daemon.boot.environment_not_set")` and exits non-zero.
 3. `bin/alfred-plugin-launcher.sh` runs the pre-launcher Python helper to read the `sandbox` block and branches:
-   - `kind: full` → resolve OS-specific `policy_refs.{linux,macos,windows}`; refuse if missing/unreadable/OS-mismatch; `exec bwrap --keep-fd 3 ... -- ${PLUGIN_BINARY}` on Linux. macOS+Windows bytes ship in PR-S4-7; PR-S4-6 ensures the *resolver path* compiles for all three OSes.
+   - `kind: full` → resolve OS-specific `policy_refs.{linux,macos,windows}`; refuse if missing/unreadable/OS-mismatch; `exec bwrap --sync-fd 3 ... -- ${PLUGIN_BINARY}` on Linux. macOS+Windows bytes ship in PR-S4-7; PR-S4-6 ensures the *resolver path* compiles for all three OSes.
    - `kind: none` → existing Slice-3 UID-separated subprocess (unchanged behaviour).
    - `kind: stub` → refuse in production; in development emit `SANDBOX_STUB_USED_FIELDS` and exec unsandboxed.
 4. `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` + `Settings.environment == "production"` → refuse with operator-visible **stderr** message (`t("supervisor.sandbox.unsandboxed_refused_in_production")`) and emit `SANDBOX_REFUSED_FIELDS(reason="unsandboxed_env_set_in_production")` (devex-001 closure).
-5. Supervisor (Python) ships fd-3 provider key delivery: `SecretBroker.get("quarantined.provider_key")` → 4-byte big-endian length prefix + key bytes → fd 3 → close write end → `gc.collect()`. The launcher's `--keep-fd 3` invariant means bash never touches the bytes.
+5. Supervisor (Python) ships fd-3 provider key delivery: `SecretBroker.get("quarantined.provider_key")` → 4-byte big-endian length prefix + key bytes → fd 3 → close write end → `gc.collect()`. The launcher's `--sync-fd 3` invariant means bash never touches the bytes.
 6. Supervisor-side process posture: `resource.setrlimit(RLIMIT_CORE, (0, 0))` at boot (no core dumps), `mlockall(MCL_CURRENT | MCL_FUTURE)` best-effort on Linux. Failure of `mlockall` is loud (`supervisor.boot.mlock_unavailable` audit row) but non-fatal — operators without `CAP_IPC_LOCK` boot.
 7. `plugins/alfred_quarantined_llm/manifest.toml` migrates `[plugin].sandbox_profile = "user-plugin"` semantic onto the new `[sandbox] kind = "full"` block with `[sandbox.policy_refs] linux/macos/windows` map.
 8. New host-side hookpoint `supervisor.plugin.sandbox_refused` registered with `carrier_tier="T0"`, `fail_closed=True`.
@@ -166,7 +166,7 @@ Spec anchors: [§7.1 manifest sandbox](../specs/2026-06-06-slice-4-design.md#71-
         │                  jq -r .policy_ref)                        │
         │                test -r "$POLICY_REF" || refuse with        │
         │                reason="policy_ref_unreadable"              │
-        │                On Linux: exec bwrap --keep-fd 3            │
+        │                On Linux: exec bwrap --sync-fd 3            │
         │                  $(cat "$POLICY_REF" |                     │
         │                   python3 -m                               │
         │                   alfred.plugins.manifest_reader           │
@@ -197,7 +197,9 @@ Spec anchors: [§7.1 manifest sandbox](../specs/2026-06-06-slice-4-design.md#71-
 
 **The bash-shape is load-bearing.** A Python launcher would have to start its own Python interpreter to read the manifest before launching the plugin's Python interpreter — chicken-and-egg + double the cold-start tax. The pre-launcher helper is a one-shot subprocess invoked from bash, not an embedded module load. Each invocation of `manifest_reader` is independent; failures don't taint subsequent calls.
 
-**Fd-3 inheritance, not bwrap-bind.** The round-3 spec draft used `--rw-bind /dev/fd/3 /dev/fd/3` — mechanically wrong, because `/dev/fd/3` only exists on Linux as a special procfs symlink that resolves to the inherited fd. Round-4 corrected this to `bwrap --keep-fd 3` — bwrap's documented flag for "leave fd N intact in the spawned process." The kernel handles the inheritance; no mount manipulation needed. PR-S4-6's launcher invocation is the round-4-correct shape.
+**Fd-3 inheritance, not bwrap-bind.** The round-3 spec draft used `--rw-bind /dev/fd/3 /dev/fd/3` — mechanically wrong, because `/dev/fd/3` only exists on Linux as a special procfs symlink that resolves to the inherited fd. Round-4 corrected this to bwrap's documented flag for "leave fd N intact in the spawned process." The kernel handles the inheritance; no mount manipulation needed. PR-S4-6's launcher invocation is the round-4-correct shape.
+
+> **Flag-name reconciliation (#218 / ADR-0015).** The correct flag on the pinned Bookworm bubblewrap 0.8.0 is **`--sync-fd 3`**. `--keep-fd` is the upstream **0.9.0+** rename of the same capability; emitting `--keep-fd` against 0.8.0 fails the sandbox exec at runtime. This plan and the translator (`policy_to_bwrap_flags`) therefore emit `--sync-fd`. The logical policy field name `keep_fds` is retained as documented shorthand. PR-S4-7 (macOS/Windows policy bytes) reads this plan as its contract and MUST emit `--sync-fd`. ADR-0015 owns this invariant; the #228 boot-probe enforces the bwrap version floor.
 
 **Sandbox kind versus subscriber tier.** The Slice-3 manifest already carries `[plugin] subscriber_tier` (closed vocabulary `{system, operator, user-plugin}`) and `[plugin] sandbox_profile` (free-form string, currently set to `"user-plugin"` for the quarantined-LLM). The new `[sandbox] kind` is **orthogonal** — `kind` is the OS-level isolation primitive, `subscriber_tier` is the capability-gate posture, `sandbox_profile` is a legacy free-form label that PR-S4-6 leaves untouched (PR-S4-7 may deprecate it; out-of-scope here). Conflating these is a tier-laundering bug shape; the manifest parser refuses combinations that don't make sense (e.g., `[plugin] subscriber_tier = "system"` with `[sandbox] kind = "stub"` outside dev is refused).
 
@@ -218,7 +220,7 @@ Per Slice-4 index §8 watchlist (round-2 invented `secret_broker.fetch_audit_pep
 | `Settings.environment: Literal[…]` field exists | `grep -n "environment" src/alfred/config/settings.py` returns ONLY the module-level docstring's "environment variables" — no field | **NEW — PR-S4-6 adds the field** |
 | `ALFRED_ENV` reading convention | `bootstrap/gate_factory.py:64 _ENV_KEY: str = "ALFRED_ENV"` and `_gate.py` consult it; sec-007 forbids direct `import os` outside the bootstrap layer | **verified** — Slice-4 introduces `ALFRED_ENVIRONMENT` (note the difference) per spec §7.3; ALFRED_ENV remains for the capability-gate selector |
 | `SANDBOX_REFUSED_FIELDS` / `SANDBOX_STUB_USED_FIELDS` constants | `grep -rn "SANDBOX_REFUSED_FIELDS\|SANDBOX_STUB_USED_FIELDS" src/alfred/audit/` returns nothing on current main | **NEW — lands in PR-S4-0a per index §3; PR-S4-6 consumes** |
-| bwrap `--keep-fd` flag | Per bwrap upstream docs (verified via context7 / bwrap manpage where available); flag exists in bwrap ≥ 0.4 | **verified — DO NOT use `/dev/fd/3` mount as the round-3 spec draft wrote** |
+| bwrap `--sync-fd` flag | Per bwrap upstream docs (verified via context7 / bwrap manpage where available). `--sync-fd FD` is the Bookworm 0.8.0 name; `--keep-fd FD` is the 0.9.0+ rename (#218 / ADR-0015) | **verified — emit `--sync-fd` on the pinned 0.8.0 image; DO NOT use `/dev/fd/3` mount as the round-3 spec draft wrote** |
 | `alfred.plugins.manifest.parse_manifest` | Exists at `src/alfred/plugins/manifest.py` (Slice-3 shipped) — currently does NOT read a `[sandbox]` table | **verified — PR-S4-6 extends** |
 | `alfred.plugins.manifest_reader` (pre-launcher helper) | Does not exist | **NEW — PR-S4-6 creates** |
 | `bwrap` available on alfred-core image | PR-S4-0b adds `bubblewrap` apt-install to Dockerfile (per index §1) | **verified — PR-S4-6 depends on PR-S4-0b** |
@@ -238,7 +240,7 @@ Per Slice-4 index §8 watchlist (round-2 invented `secret_broker.fetch_audit_pep
 | `src/alfred/plugins/sandbox_policy.py` | **Create** | `SandboxPolicy` Pydantic model (TOML schema for `config/sandbox/*.policy` files); `policy_to_bwrap_flags(policy)` translator; reserves the Linux bwrap schema in PR-S4-6 (PR-S4-7 ships the bytes for the quarantined-LLM specifically). PR-S4-6 ships the schema + translator + a fixture-only policy file used by the resolver integration test |
 | `src/alfred/supervisor/process_posture.py` | **Create** | `disable_core_dumps()` — `resource.setrlimit(RLIMIT_CORE, (0, 0))`; `try_mlockall()` — Linux `ctypes` best-effort wrapper, emits `supervisor.boot.mlock_unavailable` audit row on failure |
 | `src/alfred/supervisor/fd3_key_delivery.py` | **Create** | `deliver_provider_key_via_fd3(launcher_process, key: str) -> None` — opens pipe, writes 4-byte big-endian length prefix + key bytes, closes write end, `del key`, `gc.collect()`. Audit-row attribution: `provider_key_delivered` (informational, T0 carrier) |
-| `bin/alfred-plugin-launcher.sh` | Modify | Add: `Settings.environment` read; dev-escape-hatch refuse-in-production with stderr message; manifest sandbox block read via `manifest_reader.py`; `kind` branching (`full` / `none` / `stub`); `bwrap --keep-fd 3` invocation on Linux for `kind: full`. PRESERVES Slice-3 invariants: charset-validate PLUGIN_ID, help flag, runuser UID-drop on Linux for `kind: none`, fail-closed semantics, structured audit JSON on stderr |
+| `bin/alfred-plugin-launcher.sh` | Modify | Add: `Settings.environment` read; dev-escape-hatch refuse-in-production with stderr message; manifest sandbox block read via `manifest_reader.py`; `kind` branching (`full` / `none` / `stub`); `bwrap --sync-fd 3` invocation on Linux for `kind: full`. PRESERVES Slice-3 invariants: charset-validate PLUGIN_ID, help flag, runuser UID-drop on Linux for `kind: none`, fail-closed semantics, structured audit JSON on stderr |
 | `plugins/alfred_quarantined_llm/manifest.toml` | Modify | Add `[sandbox]` table: `kind = "full"`, `[sandbox.policy_refs]` with `linux` / `macos` / `windows` entries. Leaves the Slice-3 `[plugin]` block unchanged |
 | `src/alfred/hooks/registry.py` | Modify | Register `supervisor.plugin.sandbox_refused` hookpoint with `carrier_tier="T0"`, `fail_closed=True`, `allow_error_substitution=True` (default). Also register `supervisor.boot.mlock_unavailable` with `carrier_tier="T0"`, `fail_closed=False` (informational — boot proceeds even if `mlockall` fails) |
 | `src/alfred/audit/__init__.py` or relevant emit-site | Verify | Confirm `SANDBOX_REFUSED_FIELDS` and `SANDBOX_STUB_USED_FIELDS` are imported and re-exported per the Slice-4 audit convention (PR-S4-0a ships the constants; PR-S4-6 references) |
@@ -252,9 +254,9 @@ Per Slice-4 index §8 watchlist (round-2 invented `secret_broker.fetch_audit_pep
 | `tests/unit/supervisor/test_fd3_key_delivery.py` | **Create** | 4-byte big-endian length prefix + bytes; write-end closed after; `gc.collect()` invoked; assertion that the function does NOT retain the key in any local-frame attribute past return. Uses a captured-pipe-reader fixture (no real subprocess) |
 | `tests/unit/launcher/test_environment_read.py` | **Create** | bash-fixture-harness test: `Settings.environment` not set → launcher refuses with bare key + exit 1; env-var-only set → uses env-var value; file-only set → uses file value; both agree → no conflict row; both disagree → conflict audit row JSON on stderr, env-var value wins |
 | `tests/unit/launcher/test_dev_escape_hatch_prod_refusal.py` | **Create** | bash-fixture-harness test: `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` + `ALFRED_ENVIRONMENT=production` → refuse with the operator-facing stderr message + audit row + exit 1. Same with file source. Honoured in development with audit row |
-| `tests/unit/launcher/test_sandbox_kind_branching.py` | **Create** | bash-fixture-harness test: `kind: full` invokes bwrap with `--keep-fd 3`; `kind: none` falls through to Slice-3 runuser path; `kind: stub` refuses in prod, emits stub-used row in dev |
+| `tests/unit/launcher/test_sandbox_kind_branching.py` | **Create** | bash-fixture-harness test: `kind: full` invokes bwrap with `--sync-fd 3`; `kind: none` falls through to Slice-3 runuser path; `kind: stub` refuses in prod, emits stub-used row in dev |
 | `tests/unit/launcher/test_policy_ref_resolution.py` | **Create** | bash-fixture-harness test: missing file → `policy_ref_missing`; unreadable file → `policy_ref_unreadable`; OS mismatch (Linux launcher, only macOS key in manifest) → `policy_ref_os_mismatch` |
-| `tests/integration/test_launcher_policy_resolver.py` | **Create** | Index §4 merge-blocking integration test. End-to-end: real bash launcher process; real manifest_reader subprocess; real fixture policy file; assert bwrap is invoked with `--keep-fd 3` and the fixture's policy flags. Skipped if `bwrap` not on PATH (CI image has it after PR-S4-0b) |
+| `tests/integration/test_launcher_policy_resolver.py` | **Create** | Index §4 merge-blocking integration test. End-to-end: real bash launcher process; real manifest_reader subprocess; real fixture policy file; assert bwrap is invoked with `--sync-fd 3` and the fixture's policy flags. Skipped if `bwrap` not on PATH (CI image has it after PR-S4-0b) |
 | `tests/adversarial/sandbox_escape/test_manifest_sandbox_bypass.py` | **Create** | Adversarial corpus: `manifest_omits_sandbox_block` (sbx-2026-001); attacker plants a kind: stub on a production-deployed plugin (sbx-2026-002); attacker plants a policy_ref pointing outside the install tree (sbx-2026-003). Each refused with `SANDBOX_REFUSED_FIELDS` |
 | `tests/adversarial/sandbox_escape/test_launcher_key_inheritance.py` | **Create** | Adversarial corpus sbx-2026-004 / sbx-2026-005: under strace (Linux) or dtruss (macOS — advisory only), assert the bash launcher process never reads from fd 3; only the spawned plugin does. Skipped if strace not on PATH |
 | `scripts/check_no_direct_env_reads.py` | Modify | Allowlist `src/alfred/supervisor/fd3_key_delivery.py` for `os.pipe`, `os.write`, `os.close`; allowlist `src/alfred/plugins/manifest_reader.py` for the `--read-environment` subcommand's `os.environ.get("ALFRED_ENVIRONMENT")` read (manifest_reader is the explicit boundary — sec-007 carve-out) |
@@ -299,7 +301,7 @@ Inherited from Slice-3 unchanged. PR-S4-6 does NOT add new positional or flag ar
 - The manifest's `[sandbox]` block (read via `manifest_reader.py`).
 - The `/etc/alfred/environment` file fallback for `Settings.environment`.
 
-Fd 3 is the documented out-of-band channel for the quarantined-LLM provider key. PR-S4-6 establishes that fd 3 is **always passed through** by the launcher whether or not the plugin uses it (the cost of `--keep-fd 3` when nothing is written to fd 3 is zero — the inherited fd is just unused). PR-S4-9 (Discord) and PR-S4-10 (TUI) plugins do NOT consume fd 3 but the launcher still inherits it for forward-compat.
+Fd 3 is the documented out-of-band channel for the quarantined-LLM provider key. PR-S4-6 establishes that fd 3 is **always passed through** by the launcher whether or not the plugin uses it (the cost of `--sync-fd 3` when nothing is written to fd 3 is zero — the inherited fd is just unused). PR-S4-9 (Discord) and PR-S4-10 (TUI) plugins do NOT consume fd 3 but the launcher still inherits it for forward-compat.
 
 ### Audit-row constants this PR consumes (defined in PR-S4-0a)
 
@@ -804,7 +806,7 @@ Numbering by component to keep cross-references stable during review.
           "--unshare-pid", "--unshare-uts",
           "--unshare-cgroup", "--unshare-ipc",
           "--die-with-parent",
-          "--keep-fd", "3",
+          "--sync-fd", "3",
       ]
 
   def test_unknown_unshare_kind_refuses() -> None:
@@ -855,7 +857,7 @@ Numbering by component to keep cross-references stable during review.
       if policy.die_with_parent:
           flags += ["--die-with-parent"]
       for fd in policy.keep_fds:
-          flags += ["--keep-fd", str(fd)]
+          flags += ["--sync-fd", str(fd)]
       return flags
   ```
 
@@ -1190,7 +1192,7 @@ This is the largest component. Each task touches `bin/alfred-plugin-launcher.sh`
 
   File: `tests/unit/launcher/test_sandbox_kind_branching.py`. Three sub-tests:
 
-  - `kind: full` → bwrap invocation observed (use a `BWRAP=/path/to/echo-bwrap-args` env var override the launcher honours; ship `tests/fixtures/echo-bwrap.sh` that prints its args + exits 0; assert `--keep-fd 3` appears in the printed args).
+  - `kind: full` → bwrap invocation observed (use a `BWRAP=/path/to/echo-bwrap-args` env var override the launcher honours; ship `tests/fixtures/echo-bwrap.sh` that prints its args + exits 0; assert `--sync-fd 3` appears in the printed args).
   - `kind: none` → falls through to existing Slice-3 `_do_exec` (runuser path on Linux; direct exec on macOS-dev).
   - `kind: stub` in prod → refuses with `windows_stub_in_production`.
   - `kind: stub` in dev → emits SANDBOX_STUB_USED_FIELDS JSON + execs the binary.
@@ -1471,7 +1473,7 @@ This is the largest component. Each task touches `bin/alfred-plugin-launcher.sh`
 
 - [ ] **Task I.4 — Make I.3 pass.**
 
-  Verify the launcher's bash code never references fd 3 in any `read` call. The `--keep-fd 3` flag to bwrap is the only fd-3 touch; bash itself never reads. The test should pass on first try — the launcher was designed for this.
+  Verify the launcher's bash code never references fd 3 in any `read` call. The `--sync-fd 3` flag to bwrap is the only fd-3 touch; bash itself never reads. The test should pass on first try — the launcher was designed for this.
 
 ---
 
@@ -1574,7 +1576,7 @@ This is the largest component. Each task touches `bin/alfred-plugin-launcher.sh`
 
   - **policy_refs (plural)** — the per-OS map in the manifest's `[sandbox]` block. See PR-S4-6.
   - **launcher policy-resolving probe** — the daemon-boot check that the launcher's resolver branch is live. PR-S4-1 calls this probe at boot; PR-S4-6 makes the probe meaningful.
-  - **fd-3 inheritance** — the kernel-managed pattern by which the Supervisor delivers a secret to a sandboxed plugin without bash buffering the bytes. `bwrap --keep-fd 3` is the documented invocation.
+  - **fd-3 inheritance** — the kernel-managed pattern by which the Supervisor delivers a secret to a sandboxed plugin without bash buffering the bytes. `bwrap --sync-fd 3` is the documented invocation.
   - **honest residency window** — the brief microsecond interval when a Python `str` holds the provider key in the Supervisor process. Acknowledged limitation; closed by Slice-5 `SecretBroker.get_bytes`.
 
 - [ ] **Task K.3 — Update `docs/runbooks/`.**
@@ -1641,7 +1643,7 @@ This is the largest component. Each task touches `bin/alfred-plugin-launcher.sh`
 | Spec §7.1 wrote `policy_ref` (singular) while §7.8 wrote `policy_refs` (plural). Resolver shape ambiguous | §5 of this plan resolves: the plural form is load-bearing; the singular form is a draft holdover. Integration tests assert the plural shape. Document in PR description | MEDIUM |
 | `kind: full` on macOS without PR-S4-7 → refusal | This is the correct fail-closed behaviour. macOS dev work uses `kind: none` via the dev-escape-hatch path. Document in K.3 | LOW |
 | Spec §7.5 acknowledged residency window in Python `str` is a real CVE-class risk if the host process leaks memory | Slice-5 SecretBroker.get_bytes closes this. PR-S4-6 documents in §6 task F.2's docstring. PR description calls out as known limitation | MEDIUM |
-| `--keep-fd 3` not present in bwrap < 0.4 | PR-S4-0b's apt install gives bwrap ≥ 0.6 on alfred-core. CI image gates on bwrap version. PR description states the floor | LOW |
+| `--sync-fd 3` not present in bwrap < 0.4 | PR-S4-0b's apt install gives bwrap ≥ 0.6 on alfred-core. CI image gates on bwrap version. PR description states the floor | LOW |
 | Test process `RLIMIT_CORE` mutation leaks across pytest workers | E.1 test fixture saves and restores via try/finally; uses pytest's `monkeypatch` discipline | LOW |
 | `ALFRED_ENVIRONMENT` env-var name conflicts with `ALFRED_ENV` (already in use by capability-gate selector at `bootstrap/gate_factory.py:64`) | Spec §7.3 uses `ALFRED_ENVIRONMENT`; capability-gate uses `ALFRED_ENV`. These are intentionally separate names with distinct semantics. PR description documents the distinction. The Slice-4 graduation runbook clarifies for operators | MEDIUM |
 | `manifest_reader --read-environment` reading `os.environ` directly violates the sec-007 no-direct-env-reads guard | The §4 file table adds `manifest_reader.py` to the AST-scan allowlist. The carve-out is justified because `manifest_reader.py` is the explicit boundary the bash launcher uses; the alternative (bash reads env vars directly) is worse | LOW |

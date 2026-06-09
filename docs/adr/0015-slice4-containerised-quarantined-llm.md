@@ -29,6 +29,28 @@ macOS `sandbox-exec`, and a Windows stub policy. The `bin/alfred-plugin-launcher
 receives the per-OS sandbox policy files in Slice 4; `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1`
 becomes a development-only escape hatch that refuses in production.
 
+### bwrap fd-inheritance flag: `--sync-fd`, not `--keep-fd` (#218)
+
+The Supervisor delivers the quarantined provider key over an inherited fd
+(fd 3 by convention). The bwrap flag that leaves an inherited fd intact in the
+sandboxed process is **version-dependent**:
+
+- Debian Bookworm ships **bubblewrap 0.8.0**, whose flag is **`--sync-fd FD`**.
+- `--keep-fd FD` is the **upstream 0.9.0+ rename** of the same capability.
+
+AlfredOS's `alfred-core` runtime image (PR-S4-0b) pins bubblewrap to the
+Bookworm 0.8.0 line, so the launcher and the `SandboxPolicy` → bwrap-flag
+translator (`src/alfred/plugins/sandbox_policy.py::policy_to_bwrap_flags`) emit
+**`--sync-fd`**. The logical policy field name `keep_fds` is retained as
+documented shorthand; only the emitted CLI surface uses the version-correct
+flag. PR-S4-7 (macOS/Windows policy bytes) and any future bwrap upgrade MUST
+honour this version mapping — emitting `--keep-fd` against 0.8.0 fails the
+sandbox exec at runtime. This invariant is owned by THIS ADR; the daemon-boot
+bwrap-version probe (#228) enforces the version floor at boot.
+
+This corrects the original Slice-4 plan draft, which referred to `--keep-fd 3`
+throughout (the upstream name) before the Bookworm pin was finalised on 0.8.0.
+
 ## Consequences
 
 ### Positive
