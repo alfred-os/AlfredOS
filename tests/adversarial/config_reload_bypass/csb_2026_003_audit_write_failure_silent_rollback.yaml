@@ -1,0 +1,27 @@
+id: csb-2026-003
+category: config_reload_bypass
+threat: >-
+  An attacker degrades the audit store (e.g. exhausts Postgres connections) at
+  the exact moment they push a malicious policy edit, hoping the watcher's
+  audit-then-swap fails silently — applying the policy with no audit trail, or
+  crashing the watcher so subsequent edits go unobserved.
+ingestion_path: mtime_poll
+payload:
+  attack: audit_store_outage_during_swap
+  induced_failure: sqlalchemy.exc.OperationalError
+  edited_field: rate_limits.web_fetch_per_user_per_hour
+expected_outcome: policy_swap_aborted_on_audit_failure
+provenance: >-
+  PR-S4-4 round-2 closures err-004 / sec-4. The audit-then-swap two-phase
+  commit writes CONFIG_RELOAD_FIELDS BEFORE moving the snapshot pointer: an
+  audit-write failure aborts the swap, leaving the active snapshot at the last
+  successfully-audited value. When the REJECTED write also fails (store fully
+  down), the watcher catches SQLAlchemyError, logs critically, appends the
+  rejection to ~/.local/state/alfred/policies-rejected-fallback.jsonl, and
+  emits the policies.watcher.degraded hookpoint — loud, audit-tracked, no
+  silent watcher death (CLAUDE.md hard rule 7).
+references:
+  - "ADR-0023 §audit-then-swap"
+  - "PR-S4-4 round-2 closures err-004, sec-4"
+  - "src/alfred/policies/snapshot_ref.py::PoliciesSnapshotRef.swap"
+  - "src/alfred/policies/watcher.py::PolicyWatcher._reject"

@@ -1,0 +1,24 @@
+id: csb-2026-001
+category: config_reload_bypass
+threat: >-
+  Between the PolicyWatcher's os.stat() and its read of config/policies.yaml,
+  an attacker with directory-write capability renames the file to a symlink
+  pointing at attacker-controlled YAML, hoping the watcher reads the swapped
+  inode and hot-reloads attacker policy (TOCTOU inode swap).
+ingestion_path: mtime_poll
+payload:
+  attack: rename_to_symlink_between_stat_and_read
+  symlink_target: /tmp/attacker-controlled-policies.yaml
+  swapped_field: rate_limits.web_fetch_per_user_per_hour
+expected_outcome: refused
+provenance: >-
+  PR-S4-4 round-2 closure sec-1. load_yaml_bytes opens with
+  os.O_RDONLY | os.O_NOFOLLOW then fstat()s the already-open fd, so a symlink
+  swap raises OSError (ELOOP) at open() and a plain inode swap is read through
+  the fd we already hold — never a path re-resolved a second time. The watcher
+  routes the OSError to its file_vanished / stat_failed rejection branch and
+  the active snapshot is unchanged.
+references:
+  - "ADR-0023 §TOCTOU-safe load"
+  - "PR-S4-4 round-2 closure sec-1"
+  - "src/alfred/policies/load.py::load_yaml_bytes"
