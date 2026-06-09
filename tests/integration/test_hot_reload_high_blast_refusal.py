@@ -1,15 +1,24 @@
 """Merge-blocking integration test: hot-reload high-blast refusal (PR-S4-4 Task 25).
 
-Index §4 + spec §5.7. Drives the REAL :class:`PolicyWatcher` against a real
-temp ``policies.yaml`` and the REAL :class:`AuditWriter` backed by a Postgres
-testcontainer:
+ADR-0023 §5 + index §4 + spec §5.7. Drives the REAL :class:`PolicyWatcher`
+against a real temp ``policies.yaml`` and the REAL :class:`AuditWriter` backed
+by a Postgres testcontainer.
 
-1. A low-blast edit (``web_fetch_per_user_per_hour`` 60 -> 120) hot-reloads:
-   the snapshot ref swaps and a ``config.reload.applied`` audit row lands.
-2. A high-blast edit (``quarantined_provider_url``) is REFUSED: the active
-   snapshot is unchanged (low-blast value AND high-blast URL both preserved —
-   refusal is total) and a ``config.reload.rejected`` row with
-   ``reason="high_blast_change"`` lands.
+The blast-radius partition is **default-refuse, allowlist-permit**: the
+low-blast allowlist (:data:`alfred.policies.model.LOW_BLAST_ALLOWLIST`) is EMPTY
+by design, so EVERY field currently modelled in ``PoliciesV1`` —
+``rate_limits.*``, ``handle_caps.*``, ``high_blast.*`` — is high-blast and must
+REFUSE hot-reload. This test pins that all three partitions refuse:
+
+* a ``rate_limits.web_fetch_per_user_per_hour`` edit (anti-abuse DoS / bypass)
+  is REFUSED — NOT applied silently with ``config.reload.applied`` (the bug
+  the previous version of this test codified as correct);
+* a ``handle_caps.web_fetch_max_concurrent_handles_per_user`` edit is REFUSED;
+* a ``high_blast.quarantined_provider_url`` edit is REFUSED.
+
+In every case the active snapshot is byte-identical afterwards (refusal is
+total) and a ``config.reload.rejected`` row with ``reason="high_blast_change"``
+lands. NO ``config.reload.applied`` row is ever written.
 
 This test is promoted to a required status check at PR-S4-4 merge time
 (index §4 / ops-007). It runs in CI; locally it requires Docker.
@@ -38,7 +47,10 @@ pytestmark = pytest.mark.asyncio
 
 
 def _model(
-    *, rate_per_hour: int = 60, provider_url: str = "https://quarantine.local/v1"
+    *,
+    rate_per_hour: int = 60,
+    handle_cap: int = 8,
+    provider_url: str = "https://quarantine.local/v1",
 ) -> PoliciesV1:
     return PoliciesV1.model_validate(
         {
@@ -48,7 +60,7 @@ def _model(
                 "web_fetch_per_session_total": 200,
                 "operator_daily_budget_usd": 5.0,
             },
-            "handle_caps": {"web_fetch_max_concurrent_handles_per_user": 8},
+            "handle_caps": {"web_fetch_max_concurrent_handles_per_user": handle_cap},
             "high_blast": {
                 "quarantined_provider_url": provider_url,
                 "secret_broker_config_ref": "broker://default",
@@ -71,7 +83,26 @@ def _snapshot(path: Path, model: PoliciesV1) -> PoliciesSnapshot:
     )
 
 
-async def test_low_blast_hot_reloads_high_blast_refused(tmp_path: Path) -> None:
+async def _rejections(sm: async_sessionmaker[AsyncSession], offending_key: str) -> list[AuditEntry]:
+    async with sm() as session:
+        rows = (await session.execute(select(AuditEntry))).scalars().all()
+    return [
+        r
+        for r in rows
+        if r.event == "config.reload.rejected"
+        and r.subject.get("reason") == "high_blast_change"
+        and r.subject.get("offending_key") == offending_key
+    ]
+
+
+async def _applied_rows(sm: async_sessionmaker[AsyncSession]) -> list[AuditEntry]:
+    async with sm() as session:
+        rows = (await session.execute(select(AuditEntry))).scalars().all()
+    return [r for r in rows if r.event == "config.reload.applied"]
+
+
+async def test_every_partition_refuses_hot_reload(tmp_path: Path) -> None:
+    """ADR-0023 §5: rate-limit, handle-cap, AND high-blast edits all refuse."""
     with PostgresContainer("postgres:16") as pg:
         url = pg.get_connection_url().replace("psycopg2", "asyncpg")
         engine = create_async_engine(url, future=True)
@@ -88,7 +119,7 @@ async def test_low_blast_hot_reloads_high_blast_refused(tmp_path: Path) -> None:
             audit = AuditWriter(session_factory=session_scope)
 
             cfg = tmp_path / "policies.yaml"
-            initial = _model(rate_per_hour=60)
+            initial = _model()
             _write(cfg, initial)
             ref = PoliciesSnapshotRef(_snapshot(cfg, initial))
             watcher = PolicyWatcher(
@@ -97,37 +128,33 @@ async def test_low_blast_hot_reloads_high_blast_refused(tmp_path: Path) -> None:
                 audit_writer=audit,
                 poll_interval=0.05,
             )
+            initial_snapshot = ref.current()
 
-            # 1) Low-blast change: 60 -> 120 hot-reloads.
-            _write(cfg, _model(rate_per_hour=120))
+            # 1) Rate-limit edit (anti-abuse DoS / bypass) is REFUSED.
+            _write(cfg, _model(rate_per_hour=0))
             await watcher._tick()
-            assert ref.current().policies.rate_limits.web_fetch_per_user_per_hour == 120
+            assert ref.current() is initial_snapshot, "rate-limit edit must not swap"
+            assert await _rejections(sm, "rate_limits.web_fetch_per_user_per_hour")
 
-            async with sm() as session:
-                applied = (await session.execute(select(AuditEntry))).scalars().all()
-            applied_events = [r.event for r in applied]
-            assert "config.reload.applied" in applied_events
-
-            # 2) High-blast change: provider URL swap is REFUSED.
-            _write(cfg, _model(rate_per_hour=120, provider_url="https://evil.example/v1"))
+            # 2) Handle-cap edit is REFUSED.
+            _write(cfg, _model(handle_cap=9999))
             await watcher._tick()
+            assert ref.current() is initial_snapshot, "handle-cap edit must not swap"
+            assert await _rejections(sm, "handle_caps.web_fetch_max_concurrent_handles_per_user")
 
-            # Refusal is total: low-blast value AND high-blast URL both preserved.
-            assert ref.current().policies.rate_limits.web_fetch_per_user_per_hour == 120
+            # 3) High-blast provider-URL edit is REFUSED.
+            _write(cfg, _model(provider_url="https://evil.example/v1"))
+            await watcher._tick()
+            assert ref.current() is initial_snapshot, "high-blast edit must not swap"
+            assert await _rejections(sm, "high_blast.quarantined_provider_url")
+
+            # The active snapshot is byte-identical to bootstrap throughout, and
+            # NO applied row was ever written — refusal is total for all three.
+            assert ref.current().policies.rate_limits.web_fetch_per_user_per_hour == 60
             assert (
                 str(ref.current().policies.high_blast.quarantined_provider_url).rstrip("/")
                 == "https://quarantine.local/v1"
             )
-
-            async with sm() as session:
-                rows = (await session.execute(select(AuditEntry))).scalars().all()
-            rejections = [
-                r
-                for r in rows
-                if r.event == "config.reload.rejected"
-                and r.subject.get("reason") == "high_blast_change"
-            ]
-            assert rejections, "expected a high_blast_change rejection row"
-            assert rejections[-1].subject["offending_key"] == "high_blast.quarantined_provider_url"
+            assert await _applied_rows(sm) == []
         finally:
             await engine.dispose()
