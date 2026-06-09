@@ -44,11 +44,17 @@ drift is a release-blocker.
 | Attack vector | Owning PR / Task |
 |---|---|
 | TOCTOU inode-swap between `os.stat` and `os.read` | PR-S4-4 (`csb-2026-001` — `O_NOFOLLOW`+fstat refuses) |
-| High-blast key change attempted via hot-reload | PR-S4-4 (`csb-2026-002` — `high_blast_change` refusal) |
+| `high_blast.*` key change attempted via hot-reload | PR-S4-4 (`csb-2026-002` — `high_blast_change` refusal) |
 | Audit-write-failure silent-rollback bypass | PR-S4-4 (`csb-2026-003` — fallback JSONL + `policies.watcher.degraded` hookpoint) |
 | Cached-mtime suppression of rejection re-emit | PR-S4-4 (`csb-2026-004` — re-emit each tick until fixed) |
 | Policy file >256 KB DoS attempt | PR-S4-4 (`csb-2026-005` — size cap enforced after fstat) |
 | Symlink swap targeting non-policy-root path | PR-S4-4 (`csb-2026-006` — symlink refused at `O_NOFOLLOW`) |
+| `rate_limits.*` / `handle_caps.*` anti-abuse-knob swap via low-blast channel | PR-S4-4 round-3 (`csb-2026-007` — `high_blast_change` refusal; ADR-0023 §5, default-refuse allowlist) |
+
+**Executable counterparts.** `test_csb_corpus_executable.py` loads each
+`csb-2026-*` payload and drives the real `PolicyWatcher` to assert the declared
+`expected_outcome` actually fires — so a payload cannot be weakened or renamed
+without the suite noticing (mirrors the `de-2026-*` executable-corpus pattern).
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
