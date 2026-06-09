@@ -36,6 +36,34 @@ def test_module_imports() -> None:
     assert hasattr(protocol, "BODY_FIELD_BY_KIND")
 
 
+def test_inbound_notification_rejects_extra_fields() -> None:
+    """H3 / sec-001: ``extra="forbid"`` IS the forged-canonical-id defence.
+
+    The real defence against an adversary planting a forged
+    ``platform_metadata.canonical_user_id`` on the wire is that
+    ``InboundMessageNotification`` forbids unknown fields — the model never
+    admits ``platform_metadata`` at all. The integration harness used to strip
+    the forged field with ``params.pop`` BEFORE ``model_validate``, so the
+    rejection was never exercised. This test drives the rejection directly: an
+    otherwise-valid payload carrying the forged field raises ``ValidationError``.
+    """
+    valid = {
+        "adapter_id": "alfred_comms_test",
+        "platform_user_id": "discord:victim",
+        "body": {"content": "attack"},
+        "sub_payload_refs": (),
+        "received_at": datetime.now(UTC),
+        "addressing_signal": "dm",
+    }
+    # Sanity: the valid payload alone constructs.
+    protocol.InboundMessageNotification.model_validate(valid)
+    # The forged field is refused — it never reaches the host as a model field.
+    with pytest.raises(ValidationError):
+        protocol.InboundMessageNotification.model_validate(
+            {**valid, "platform_metadata": {"canonical_user_id": "forged"}}
+        )
+
+
 def test_persona_addressing_mode_is_literal() -> None:
     # Members are exactly the four addressing modes.
     from typing import get_args
