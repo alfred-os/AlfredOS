@@ -67,6 +67,25 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "operator_session.refused.bad_file_mode.recovery",
     "operator_session.refused.bad_file_owner.recovery",
     "operator_session.refused.resolver_timeout.recovery",
+    # CR-227 round-2 finding 1: per-subclass supervisor refusal reasons — the
+    # subclasses the resolver vocab did not yet localise + the distinct
+    # unknown-subclass fallback (never coerced to "missing").
+    "operator_session.refused.token_user_mismatch",
+    "operator_session.refused.malformed",
+    "operator_session.refused.parent_dir_insecure",
+    "operator_session.refused.parent_dir_not_owned",
+    "operator_session.refused.revoked",
+    "operator_session.refused.no_machine_id",
+    "operator_session.refused.unknown",
+    "operator_session.refused.token_user_mismatch.recovery",
+    "operator_session.refused.malformed.recovery",
+    "operator_session.refused.parent_dir_insecure.recovery",
+    "operator_session.refused.parent_dir_not_owned.recovery",
+    "operator_session.refused.revoked.recovery",
+    "operator_session.refused.no_machine_id.recovery",
+    "operator_session.refused.unknown.recovery",
+    # CR-227 round-2 finding 4: best-effort macOS machine-id cache-write failure.
+    "operator_session.machine_id.cache_write_failed",
     # Supervisor reset refusals (2 + the not_logged_in recovery companion
     # added by the devex-2 invariant fix for the most common refusal path).
     "supervisor.breaker.reset.refused.not_logged_in",
