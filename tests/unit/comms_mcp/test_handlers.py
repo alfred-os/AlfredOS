@@ -168,3 +168,25 @@ async def test_crash_handler_emits_audit_and_fires_hookpoint() -> None:
     assert len(rows) == 1
     assert rows[0]["error_class"] == "ConnectionResetError"
     assert invoker.fired == ["alfred_comms_test"]
+
+
+@pytest.mark.asyncio
+async def test_crash_handler_rescrubs_secret_shaped_detail() -> None:
+    """M1 canary: the host re-scrubs the UNTRUSTED plugin's crash detail.
+
+    The plugin is T3 — its claim to have redacted ``detail`` is untrustworthy
+    and the CrashedNotification docstring says the host re-scrubs. A planted
+    ``sk-…``-shaped token must NOT survive into the crashed audit row.
+    """
+    audit = SpyAuditWriter()
+    handler = AdapterCrashHandler(audit_writer=audit, hook_invoker=_SpyHookInvoker())
+    secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"  # 24 alnum bytes -> API-key shape
+    notification = CrashedNotification(
+        adapter_id="alfred_comms_test",
+        error_class="RuntimeError",
+        detail=f"boom leaked {secret} here",
+    )
+    await handler.process(notification)
+    detail = audit.rows_with_schema("COMMS_ADAPTER_CRASHED_FIELDS")[0]["detail_redacted"]
+    assert secret not in detail
+    assert "[REDACTED:api-key-shape]" in detail
