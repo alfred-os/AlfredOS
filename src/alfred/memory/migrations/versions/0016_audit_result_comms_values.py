@@ -24,6 +24,12 @@ carry ``result`` discriminators outside the Slice-4 (migration 0014) domain:
   permitted (Wave-3 session extension).
 * ``failed`` — ``COMMS_HANDLER_FAILED_FIELDS``: a comms notification handler
   raised; the loud audit row lands before the err-007 re-raise.
+* ``restart_requested`` — ``SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS``: the
+  comms session dispatcher asked the supervisor to restart a misbehaving
+  adapter (unknown-notification method or repeated handler failures). The row
+  is emitted by :meth:`alfred.supervisor.core.Supervisor.request_plugin_restart`,
+  whose only production caller is the comms-wired session — so this PR (#152)
+  owns the result value even though it lands on a supervisor-shaped row.
 
 Strictly additive at upgrade time — no rows are modified. No new columns are
 added to ``audit_log``; the PR-S4-8 ``COMMS_*_FIELDS`` constants marshal into
@@ -105,6 +111,7 @@ _COMMS_ADDITIONS: tuple[str, ...] = (
     "capped",
     "allowed",
     "failed",
+    "restart_requested",
 )
 
 
