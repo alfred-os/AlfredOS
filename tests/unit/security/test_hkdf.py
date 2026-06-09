@@ -54,6 +54,12 @@ def test_length_above_255_blocks_refused() -> None:
         hkdf_expand(prk=b"\x00" * 32, info=b"x", length=255 * 32 + 1)
 
 
+def test_negative_length_refused() -> None:
+    """A negative length is a caller bug; refuse it loudly."""
+    with pytest.raises(ValueError, match="non-negative"):
+        hkdf_expand(prk=b"\x00" * 32, info=b"x", length=-1)
+
+
 def test_single_block_boundary() -> None:
     """A request of exactly HashLen (32) bytes uses a single T(1) block."""
     okm = hkdf_expand(prk=b"\x01" * 32, info=b"ctx", length=32)
