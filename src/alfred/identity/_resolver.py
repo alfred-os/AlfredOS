@@ -56,6 +56,7 @@ from alfred.identity.operator_session import (
     OperatorSessionNoMachineId,
     OperatorSessionParentDirInsecure,
     OperatorSessionParentDirNotOwned,
+    OperatorSessionPepperMisconfigured,
     OperatorSessionTimeout,
     OperatorSessionTokenUnknown,
     OperatorSessionTokenUserMismatch,
@@ -65,6 +66,7 @@ from alfred.identity.operator_session import (
     load_session_file,
 )
 from alfred.memory.models import OperatorSession as OperatorSessionRow
+from alfred.security._hkdf import HKDF_PRK_FLOOR
 
 _REFUSED_HOOKPOINT = "operator.session.refused"
 
@@ -82,6 +84,7 @@ _FILELESS_REFUSAL_REASONS: dict[type[Exception], str] = {
     OperatorSessionBadFileOwner: "bad_file_owner",
     OperatorSessionMalformed: "planted_file_invalid",
     OperatorSessionNoMachineId: "machine_id_unavailable",
+    OperatorSessionPepperMisconfigured: "pepper_misconfigured",
 }
 
 
@@ -146,7 +149,7 @@ class DefaultOperatorSessionResolver:
 
     async def _resolve_inner(self) -> str:
         session = await self._load_or_emit_fileless()
-        pepper = self._secret_broker.get("audit.hash_pepper").encode("utf-8")
+        pepper = await self._read_pepper_or_emit_fileless()
         now = self._now_fn()
 
         if session.expires_at < now:
@@ -209,6 +212,29 @@ class DefaultOperatorSessionResolver:
             await self._emit_refused_fileless(reason=_FILELESS_REFUSAL_REASONS[type(exc)])
             raise
 
+    async def _read_pepper_or_emit_fileless(self) -> bytes:
+        """Read the ``audit.hash_pepper`` broker secret; refuse if too short.
+
+        CR-227 round-3 finding 1 (KEYSTONE audit-gap): a short / misconfigured
+        pepper makes ``hkdf_expand`` raise a bare ``ValueError`` deep inside
+        the token-hash / machine-id-hash derivations, which would escape
+        ``resolve()`` UNTYPED — skipping BOTH the refused audit row and the CLI
+        refusal UX. We validate the pepper against the HKDF PRK floor HERE, at
+        the read site (the true root cause), emit exactly one file-less
+        ``pepper_misconfigured`` row + hookpoint, then raise the TYPED
+        ``OperatorSessionPepperMisconfigured`` so the pipeline refuses cleanly.
+        """
+        pepper = self._secret_broker.get("audit.hash_pepper").encode("utf-8")
+        if len(pepper) < HKDF_PRK_FLOOR:
+            await self._emit_refused_fileless(
+                reason=_FILELESS_REFUSAL_REASONS[OperatorSessionPepperMisconfigured]
+            )
+            raise OperatorSessionPepperMisconfigured(
+                f"audit.hash_pepper is {len(pepper)} bytes, "
+                f"below the HKDF PRK floor of {HKDF_PRK_FLOOR} bytes",
+            )
+        return pepper
+
     async def _live_machine_hash_or_emit_fileless(self, pepper: bytes) -> str:
         """Compute the live machine-id hash; emit a file-less row if it fails.
 
@@ -218,6 +244,12 @@ class DefaultOperatorSessionResolver:
         is not session-derived — so it emits the file-less row keyed
         ``machine_id_unavailable`` rather than echoing the (untrusted)
         session's self-claimed ``machine_id_hash``.
+
+        The HKDF subkey derivation inside ``compute_machine_id_hash`` cannot
+        raise a short-pepper ``ValueError`` here: ``_read_pepper_or_emit_fileless``
+        already refused any pepper below the HKDF PRK floor BEFORE this site is
+        reached (CR-227 round-3 finding 1). Validating once at the read site
+        keeps a single chokepoint and avoids dead, unreachable guard branches.
         """
         try:
             return await compute_machine_id_hash(provider=self._machine_id_provider, pepper=pepper)

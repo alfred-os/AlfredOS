@@ -76,6 +76,8 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "operator_session.refused.parent_dir_not_owned",
     "operator_session.refused.revoked",
     "operator_session.refused.no_machine_id",
+    # CR-227 round-3 finding 1: the KEYSTONE short/misconfigured-pepper refusal.
+    "operator_session.refused.pepper_misconfigured",
     "operator_session.refused.unknown",
     "operator_session.refused.token_user_mismatch.recovery",
     "operator_session.refused.malformed.recovery",
@@ -83,6 +85,7 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "operator_session.refused.parent_dir_not_owned.recovery",
     "operator_session.refused.revoked.recovery",
     "operator_session.refused.no_machine_id.recovery",
+    "operator_session.refused.pepper_misconfigured.recovery",
     "operator_session.refused.unknown.recovery",
     # CR-227 round-2 finding 4: best-effort macOS machine-id cache-write failure.
     "operator_session.machine_id.cache_write_failed",

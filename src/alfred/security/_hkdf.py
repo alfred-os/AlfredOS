@@ -21,6 +21,14 @@ from typing import Final
 _HASH_LEN: Final = hashlib.sha256().digest_size  # 32 bytes for SHA-256
 _MAX_LENGTH: Final = 255 * _HASH_LEN  # RFC 5869 §2.3 hard ceiling
 
+# The PRK-length floor, exported so callers (the operator-session resolver)
+# can validate a pepper at READ time and raise a TYPED refusal — rather than
+# letting ``hkdf_expand`` raise a bare ``ValueError`` deep in a derivation
+# (CR-227 round-3 finding 1). The floor itself stays enforced inside
+# ``hkdf_expand`` (defense-in-depth); this constant is the single source of
+# truth both the guard and the check share.
+HKDF_PRK_FLOOR: Final = _HASH_LEN
+
 
 def hkdf_expand(*, prk: bytes, info: bytes, length: int) -> bytes:
     """Derive ``length`` bytes of output keying material from a PRK.
@@ -72,4 +80,4 @@ def hkdf_expand(*, prk: bytes, info: bytes, length: int) -> bytes:
     return bytes(okm[:length])
 
 
-__all__ = ["hkdf_expand"]
+__all__ = ["HKDF_PRK_FLOOR", "hkdf_expand"]

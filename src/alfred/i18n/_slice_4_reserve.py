@@ -83,6 +83,9 @@ def _register() -> None:
     t("operator_session.refused.parent_dir_not_owned")
     t("operator_session.refused.revoked")
     t("operator_session.refused.no_machine_id")
+    # CR-227 round-3 finding 1 (KEYSTONE): short/misconfigured ``audit.hash_pepper``
+    # is a TYPED refusal (no untyped ValueError escapes resolve()).
+    t("operator_session.refused.pepper_misconfigured")
     t("operator_session.refused.unknown")
     t("operator_session.refused.token_user_mismatch.recovery")
     t("operator_session.refused.malformed.recovery")
@@ -90,6 +93,7 @@ def _register() -> None:
     t("operator_session.refused.parent_dir_not_owned.recovery")
     t("operator_session.refused.revoked.recovery")
     t("operator_session.refused.no_machine_id.recovery")
+    t("operator_session.refused.pepper_misconfigured.recovery")
     t("operator_session.refused.unknown.recovery")
     # CR-227 round-2 finding 4: best-effort macOS machine-id cache write
     # failure is logged (operator-visible) but never breaks login.
