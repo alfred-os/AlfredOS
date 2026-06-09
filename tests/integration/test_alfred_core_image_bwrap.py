@@ -184,14 +184,11 @@ def test_bwrap_provides_sync_fd_for_fd3_inheritance(
     """``bwrap --help`` lists ``--sync-fd`` — the load-bearing flag.
 
     PR-S4-6's launcher inherits fd 3 (the provider key) into the
-    sandbox. Bookworm bwrap 0.8.0 provides ``--sync-fd FD`` ("Keep
-    this fd open while sandbox is running") — the same semantic the
-    PR-S4-6 plan documents as ``--keep-fd`` (which IS the upstream
-    bwrap 0.9.0+ name; Bookworm 0.8.0 uses the older ``--sync-fd``).
-
-    PR-S4-6 plan needs a follow-up amendment to align with the
-    deployed Bookworm flag name. Until then, this test pins the
-    actual flag the launcher must call.
+    sandbox via ``--sync-fd FD`` ("Keep this fd open while sandbox is
+    running"). Verified against bwrap 0.9.0 ``--help`` in PR #229 CI:
+    ``--sync-fd FD`` is the flag in BOTH 0.8.0 and 0.9.0, and there is
+    no ``--keep-fd`` (the speculated rename never happened — #218).
+    This test pins the actual flag the launcher must call.
 
     Asserts BOTH the inheritance flag AND at least one bind-family
     flag so a future bwrap that strips them silently breaks the build,

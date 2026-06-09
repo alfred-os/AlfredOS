@@ -209,10 +209,9 @@ Operator-facing changes before deploying:
   unsandboxed first-party adapter, or `kind = "full"` with per-OS
   `policy_refs` for an isolated plugin.
 + **`bwrap >= 0.6` must be on `PATH`** (PR-S4-0b's Dockerfile apt-installs
-  bubblewrap 0.8.0, which provides `--keep-fd` — the fd-inheritance flag, present
-  since 0.5.0; `--sync-fd` is bwrap's unrelated internal sync fd, ADR-0015). The
-  daemon-boot launcher probe refuses a production boot on a non-policy-resolving
-  launcher.
+  bubblewrap 0.8.0, which provides `--sync-fd` — the fd-3 inheritance flag,
+  also current in 0.9.0; there is no `--keep-fd`). The daemon-boot launcher
+  probe refuses a production boot on a non-policy-resolving launcher.
 + **`ALFRED_ENVIRONMENT` must be set** — the env var (primary) or
   `/etc/alfred/environment` (fallback). Distinct from the Slice-3
   capability-gate `ALFRED_ENV` selector.

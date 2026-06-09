@@ -33,23 +33,27 @@ becomes a development-only escape hatch that refuses in production.
 
 The Supervisor delivers the quarantined provider key over an inherited fd
 (fd 3 by convention). The bwrap flag that leaves an inherited fd intact in the
-sandboxed process is **version-dependent**:
+sandboxed process is **`--sync-fd FD`** ("Keep this fd open while sandbox is
+running").
 
-- Debian Bookworm ships **bubblewrap 0.8.0**, whose flag is **`--sync-fd FD`**.
-- `--keep-fd FD` is the **upstream 0.9.0+ rename** of the same capability.
+**Empirically verified** against bubblewrap **0.9.0** in PR #229 CI
+(`bwrap --help`): it advertises `--sync-fd FD` and there is **no `--keep-fd`**.
+The earlier belief that `--keep-fd` is "the upstream 0.9.0+ rename" of
+`--sync-fd` (issue #218) is a **misconception** — `--sync-fd` is the flag in
+both the Bookworm 0.8.0 image and 0.9.0; the rename never happened. No bwrap
+version AlfredOS targets uses `--keep-fd`.
 
-AlfredOS's `alfred-core` runtime image (PR-S4-0b) pins bubblewrap to the
-Bookworm 0.8.0 line, so the launcher and the `SandboxPolicy` → bwrap-flag
-translator (`src/alfred/plugins/sandbox_policy.py::policy_to_bwrap_flags`) emit
+The launcher and the `SandboxPolicy` → bwrap-flag translator
+(`src/alfred/plugins/sandbox_policy.py::policy_to_bwrap_flags`) emit
 **`--sync-fd`**. The logical policy field name `keep_fds` is retained as
-documented shorthand; only the emitted CLI surface uses the version-correct
-flag. PR-S4-7 (macOS/Windows policy bytes) and any future bwrap upgrade MUST
-honour this version mapping — emitting `--keep-fd` against 0.8.0 fails the
-sandbox exec at runtime. This invariant is owned by THIS ADR; the daemon-boot
-bwrap-version probe (#228) enforces the version floor at boot.
+documented shorthand; only the emitted CLI surface uses the bwrap flag. A CI
+version-drift guard greps `bwrap --help` for `--sync-fd` so a future rename
+fails loudly rather than mis-running; the daemon-boot bwrap-version probe
+(#228) enforces the version floor at boot.
 
-This corrects the original Slice-4 plan draft, which referred to `--keep-fd 3`
-throughout (the upstream name) before the Bookworm pin was finalised on 0.8.0.
+Separately, fd-3 delivery requires the spawning parent to place the pipe's
+read end **on fd 3** (`--sync-fd 3` keeps fd 3 open but does not create it) —
+see `fd3_key_delivery` and the resolver test's preexec `dup2`.
 
 ## Consequences
 

@@ -6,7 +6,7 @@ bubblewrap in the runtime layer, Linux production refuses to launch
 the quarantined-LLM with ``policy_ref_unreadable`` because no binary
 can apply the policy.
 
-Debian Bookworm ships bubblewrap 0.8.x which has ``--keep-fd``
+Debian Bookworm ships bubblewrap 0.8.x which has ``--sync-fd``
 (introduced in 0.5.0) — the flag PR-S4-6 round-2 closure 5 requires
 for fd-3 provider-key inheritance.
 """
