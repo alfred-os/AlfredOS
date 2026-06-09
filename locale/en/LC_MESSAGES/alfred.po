@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-09 00:10+0100\n"
+"POT-Creation-Date: 2026-06-09 01:55+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1354,56 +1354,56 @@ msgstr ""
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:83
+#: src/alfred/i18n/_slice_4_reserve.py:83 src/alfred/policies/watcher.py:347
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
-#: src/alfred/i18n/_slice_4_reserve.py:84
+#: src/alfred/i18n/_slice_4_reserve.py:84 src/alfred/policies/watcher.py:86
 msgid "supervisor.config_reload.rejected.parse_failure"
 msgstr ""
 "config/policies.yaml reload rejected: parse failure ({detail}). Live "
 "snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:85
+#: src/alfred/i18n/_slice_4_reserve.py:85 src/alfred/policies/watcher.py:88
 msgid "supervisor.config_reload.rejected.high_blast_change"
 msgstr ""
 "config/policies.yaml reload rejected: {key} is a high-blast key and "
 "requires reviewer-gate."
 
-#: src/alfred/i18n/_slice_4_reserve.py:86
+#: src/alfred/i18n/_slice_4_reserve.py:86 src/alfred/policies/watcher.py:90
 msgid "supervisor.config_reload.rejected.validation_failure"
 msgstr ""
 "config/policies.yaml reload rejected: validation failed for {detail}. "
 "Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:87 src/alfred/policies/watcher.py:92
 msgid "supervisor.config_reload.rejected.file_vanished"
 msgstr ""
 "config/policies.yaml vanished between stat and read. Live snapshot "
 "retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:88
+#: src/alfred/i18n/_slice_4_reserve.py:88 src/alfred/policies/watcher.py:94
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:89
+#: src/alfred/i18n/_slice_4_reserve.py:89 src/alfred/policies/watcher.py:96
 msgid "supervisor.config_reload.rejected.audit_write_failed"
 msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:90
+#: src/alfred/i18n/_slice_4_reserve.py:90 src/alfred/policies/watcher.py:446
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:91 src/alfred/policies/watcher.py:463
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/i18n/_slice_4_reserve.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:94
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat requires the AlfredOS daemon to be running. Start it with "
@@ -1803,7 +1803,7 @@ msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
 "subprocess has been quarantined."
 
-#: src/alfred/plugins/web_fetch/content_store.py:109
+#: src/alfred/plugins/web_fetch/content_store.py:112
 msgid "web.fetch.error.content_handle_expired"
 msgstr ""
 "web.fetch content handle {handle_id!r} has expired or was already "
@@ -1951,11 +1951,11 @@ msgstr ""
 "HOOKS_DLP_SUBSCRIBER_NOT_REGISTERED carries plugin_id={plugin_id!r}, "
 "hookpoint={hookpoint!r}, requested_tier={requested_tier!r}."
 
-#: src/alfred/security/quarantine.py:1399
+#: src/alfred/security/quarantine.py:1426
 msgid "security.quarantine.dereference_denied"
 msgstr "Content clearance denied for quarantine.dereference (T3)."
 
-#: src/alfred/security/quarantine.py:1471
+#: src/alfred/security/quarantine.py:1498
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
@@ -2010,14 +2010,14 @@ msgstr ""
 "not present the authorised CapabilityGateNonce. The T3 ingestion boundary"
 " is gated to StdioTransport and quarantine_host only (spec §3.2)."
 
-#: src/alfred/supervisor/core.py:274
+#: src/alfred/supervisor/core.py:277
 msgid "supervisor.start.already_started"
 msgstr ""
 "Supervisor.start() called twice without an intervening stop(). The "
 "supervisor is single-instance per process; re-entrancy would orphan the "
 "first TaskGroup."
 
-#: src/alfred/supervisor/core.py:372
+#: src/alfred/supervisor/core.py:375
 msgid "supervisor.dispatch.outbound_dlp_unwired"
 msgstr ""
 "Supervisor cannot schedule the proposal-dispatch loop: no outbound DLP "
@@ -2029,13 +2029,13 @@ msgstr ""
 "ledger without passing DLP first (#173); pass outbound_dlp= at "
 "construction."
 
-#: src/alfred/supervisor/core.py:621
+#: src/alfred/supervisor/core.py:647
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:690
+#: src/alfred/supervisor/core.py:716
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "

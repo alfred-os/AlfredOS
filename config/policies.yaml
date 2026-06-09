@@ -1,11 +1,22 @@
 # config/policies.yaml — AlfredOS low-blast operator policy knobs.
 #
-# Changes here require an `alfred` process restart to take effect.
-# (mtime-polled hot-reload is planned — issue #159; until then
-# operators must restart the process after editing this file.) These knobs
-# narrow or tune within the existing trust surface — they cannot widen it.
-# Widening actions (domain allowlist additions, plugin grants, quarantined-
-# provider changes) require state.git reviewer-gate approval (spec §11.1).
+# mtime-polled hot-reload landed in PR-S4-4 (ADR-0023, issue #159): the
+# PolicyWatcher (src/alfred/policies/watcher.py) picks up low-blast edits to
+# the PoliciesV1 schema (src/alfred/policies/model.py) on its next poll — no
+# restart needed — and refuses malformed, oversize, or high-blast edits with a
+# loud CONFIG_RELOAD_REJECTED audit row. See the operator runbook at
+# docs/runbooks/slice-4-policy-hot-reload.md.
+#
+# NOTE (schema reconciliation, tracked follow-up): the keys below are the
+# Slice-3 `alfred config` low-blast knobs (read/written by src/alfred/cli/
+# config.py). The PoliciesV1 hot-reload schema is the forward shape;
+# reconciling this deployed file format + the daemon-boot probe into PoliciesV1
+# is owned by the `alfred config` / daemon-boot path, not PR-S4-4.
+#
+# These knobs narrow or tune within the existing trust surface — they cannot
+# widen it. Widening actions (domain allowlist additions, plugin grants,
+# quarantined-provider changes) require state.git reviewer-gate approval
+# (spec §11.1).
 
 web_fetch:
   # User-Agent header sent with every web.fetch request (spec §16 Fork 4).
