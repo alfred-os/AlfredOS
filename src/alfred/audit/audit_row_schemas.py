@@ -892,10 +892,14 @@ SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
 # ``reason`` closed-vocab: policy_ref_missing | policy_ref_os_mismatch |
 # policy_ref_unreadable | policy_ref_escapes_root | bwrap_unavailable |
 # bwrap_mode_userns_unavailable | kind_full_requires_keep_fd_3 |
-# sandbox_info_handshake_mismatch
+# sandbox_info_handshake_mismatch | sandbox_block_missing |
+# unsandboxed_env_set_in_production | windows_stub_in_production |
+# environment_not_set | provider_key_delivery_failed
 # (per PR-S4-6/7 round-2 closures; ``policy_ref_escapes_root`` covers the
 # path-traversal case the sandbox_escape adversarial README documents and
-# is distinct from ``policy_ref_unreadable``).
+# is distinct from ``policy_ref_unreadable``; ``provider_key_delivery_failed``
+# is the fd-3 partial-write / EAGAIN refusal from
+# ``alfred.supervisor.fd3_key_delivery`` — sec-3).
 SANDBOX_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "plugin_id",
