@@ -22,6 +22,7 @@ row + prints the ``t()`` message + exits non-zero).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from pathlib import Path
@@ -71,16 +72,37 @@ def _truthy_env(name: str) -> bool:
     return raw.strip().lower() in _TRUTHY_VALUES
 
 
-async def _launcher_self_test_impl() -> str:
-    """PR-S4-1 stub for the launcher self-test.
+# Repo-relative path to the launcher. Resolved from this file's location so
+# the probe works from any cwd (the daemon may boot from /).
+# _daemon_probes.py → daemon → cli → alfred → src → <repo-root>.
+_LAUNCHER_PATH: Final[Path] = (
+    Path(__file__).resolve().parents[4] / "bin" / "alfred-plugin-launcher.sh"
+)
 
-    sec-004: returns the STUB signature — NOT the policy-resolving one — so
-    a production deploy on this unverified launcher refuses to boot. PR-S4-6
-    replaces this with a real subprocess call to
-    ``bin/alfred-plugin-launcher.sh --self-test`` that returns the
-    policy-resolving signature only when the launcher genuinely sandboxes.
+
+async def _launcher_self_test_impl() -> str:
+    """Run ``bin/alfred-plugin-launcher.sh --self-test`` and return its stdout.
+
+    PR-S4-6 (arch-001): the real launcher's ``--self-test`` prints the
+    policy-resolving signature, so a genuine policy-resolving launcher passes
+    the probe everywhere. Any failure to invoke it — launcher missing, non-zero
+    exit, unexpected output — yields the STUB signature so the sec-004
+    production-refusal still fires on a broken/unverified launcher (fail
+    closed: an un-runnable launcher must NOT impersonate a resolving one).
     """
-    return _STUB_SIGNATURE
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(_LAUNCHER_PATH),
+            "--self-test",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+    except OSError:
+        return _STUB_SIGNATURE
+    if proc.returncode != 0:
+        return _STUB_SIGNATURE
+    return stdout.decode("utf-8", errors="replace").strip()
 
 
 async def probe_launcher_policy_resolving(
