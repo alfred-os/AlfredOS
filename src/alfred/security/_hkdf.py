@@ -36,11 +36,21 @@ def hkdf_expand(*, prk: bytes, info: bytes, length: int) -> bytes:
     ``audit.hash_pepper``. ``info`` is the per-purpose domain-separation
     label (e.g. ``b"operator_session.token_hash.v1"``).
 
+    The ``prk``-length floor is ENFORCED, not merely documented (sec-13):
+    a short/misconfigured/rotated pepper would otherwise silently yield
+    weak subkeys for both the token-hash and machine-id-hash derivations.
+    This is the chokepoint both derivations route through, so the check
+    here is defense-in-depth covering every subkey.
+
     Raises:
-        ValueError: if ``length`` is negative or exceeds ``255 * HashLen``
+        ValueError: if ``prk`` is shorter than ``_HASH_LEN`` bytes, if
+            ``length`` is negative, or if ``length`` exceeds ``255 * HashLen``
             (the RFC ceiling — beyond it the single-byte block counter
             would overflow).
     """
+    if len(prk) < _HASH_LEN:
+        msg = f"hkdf_expand prk must be at least {_HASH_LEN} bytes, got {len(prk)}"
+        raise ValueError(msg)
     if length < 0:
         msg = f"hkdf_expand length must be non-negative, got {length}"
         raise ValueError(msg)

@@ -64,3 +64,21 @@ def test_single_block_boundary() -> None:
     """A request of exactly HashLen (32) bytes uses a single T(1) block."""
     okm = hkdf_expand(prk=b"\x01" * 32, info=b"ctx", length=32)
     assert len(okm) == 32
+
+
+def test_short_prk_refused() -> None:
+    """A PRK shorter than HashLen (32) is a misconfigured/rotated pepper.
+
+    sec-13: a short ``audit.hash_pepper`` silently yields weak subkeys. The
+    RFC mandates the PRK be at least HashLen; we refuse loudly at the entry
+    rather than derive a weak key (Rule 13 — no silent failure on a trust
+    boundary).
+    """
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        hkdf_expand(prk=b"\x00" * 31, info=b"x", length=32)
+
+
+def test_prk_exactly_hashlen_accepted() -> None:
+    """A PRK of exactly HashLen (32) bytes is the boundary — accepted."""
+    okm = hkdf_expand(prk=b"\x00" * 32, info=b"x", length=16)
+    assert len(okm) == 16
