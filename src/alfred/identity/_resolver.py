@@ -64,7 +64,23 @@ class _MachineIdLike(Protocol):
 
 
 class _AuditLike(Protocol):
-    async def append_schema(self, **kwargs: Any) -> None: ...
+    async def append_schema(
+        self,
+        *,
+        fields: frozenset[str],
+        schema_name: str,
+        event: str,
+        actor_user_id: str | None,
+        subject: dict[str, Any],
+        trust_tier_of_trigger: str,
+        result: str,
+        cost_estimate_usd: float,
+        trace_id: str,
+        actor_persona: str = ...,
+        persona_id: str | None = ...,
+        cost_actual_usd: float | None = ...,
+        language: str = ...,
+    ) -> None: ...
 
 
 class _HookDispatcher(Protocol):
