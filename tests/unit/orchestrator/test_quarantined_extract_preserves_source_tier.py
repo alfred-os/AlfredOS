@@ -72,7 +72,9 @@ async def test_calls_underlying_extractor_with_source_tier_t3() -> None:
 @pytest.mark.asyncio
 async def test_raises_when_no_extractor_wired() -> None:
     orch = make_orchestrator(quarantined_extractor=None)
-    with pytest.raises(RuntimeError, match="no_extractor_wired"):
+    # Match both the raw catalog key (uncompiled-catalog dev runs) and the
+    # resolved English (CI compiles the catalog).
+    with pytest.raises(RuntimeError, match="no_extractor_wired|not wired"):
         await orch.quarantined_extract(
             {"content": "hi"},
             canonical_user_id="u_resolved",
