@@ -8,9 +8,18 @@ and proves the defence fires with the expected typed exception + audit reason.
 * osf-002 replayed_session_from_other_host — file host != live host -> host_mismatch.
 * osf-003 replayed_session_from_other_machine — machine-id-hash differs -> machine_mismatch.
 * osf-004 stat_then_open_toctou_race — open-then-fstat sees the original inode.
-* osf-005 symlink_to_attacker_owned_file — O_NOFOLLOW refuses at open.
+* osf-005 symlink_to_attacker_owned_file — O_NOFOLLOW refuses at open ->
+  resolver emits a file-less ``bad_file_mode`` refused row (hard rule #7).
 * osf-006 token_user_mismatch — valid token, mismatched file user_id -> token_user_mismatch.
-* osf-007 planted_user_id_log_injection — non-int user_id refused at parse (Malformed).
+* osf-007 planted_user_id_log_injection — non-int user_id refused at parse ->
+  resolver emits a file-less ``planted_file_invalid`` refused row (hard rule #7).
+
+Every file-load refusal (osf-005/007 + the bad-mode case) is driven through
+the real ``DefaultOperatorSessionResolver`` so the test proves the refusal
+lands EXACTLY ONE ``OPERATOR_SESSION_REFUSED`` audit row with the right
+closed-vocab reason — not merely that the typed exception was raised. The
+file-less rows carry ``attempted_user_id=None`` (no attacker bytes from an
+unparsed/insecure file reach the audit log).
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from alfred.identity.operator_session import (
     OperatorSessionHostMismatch,
     OperatorSessionMachineIdMismatch,
     OperatorSessionMalformed,
+    OperatorSessionMissing,
     OperatorSessionTokenUnknown,
     OperatorSessionTokenUserMismatch,
     _serialize_to_file_bytes,
@@ -69,9 +79,11 @@ class _Machine:
 class _Audit:
     def __init__(self) -> None:
         self.reasons: list[str] = []
+        self.subjects: list[dict[str, Any]] = []
 
     async def append_schema(self, **kwargs: Any) -> None:
         self.reasons.append(kwargs["subject"]["reason"])
+        self.subjects.append(kwargs["subject"])
 
 
 class _Hooks:
@@ -192,6 +204,57 @@ def test_osf_005_symlink_to_attacker_file_refused(tmp_path: Path) -> None:
         load_session_file(link)
 
 
+async def test_osf_005_symlink_refusal_emits_fileless_audit_row(tmp_path: Path) -> None:
+    """O_NOFOLLOW refusal must land a file-less ``bad_file_mode`` row (hard rule #7).
+
+    The previous resolver raised ``OperatorSessionBadFileMode`` from the FIRST
+    statement of ``_resolve_inner``, BEFORE any ``_emit_refused`` — so a
+    symlink-swap attack produced NO audit row. This asserts the file-less emit
+    path now fires exactly one row with the right reason + null self-claimed
+    fields.
+    """
+    target = tmp_path / "attacker-session"
+    target.write_bytes(b"{}")
+    target.chmod(0o600)
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    link = parent / "session"
+    link.symlink_to(target)
+    audit = _Audit()
+    resolver = _resolver(link, rows=[(7, None)], audit=audit)
+    with pytest.raises(OperatorSessionBadFileMode):
+        await resolver.resolve()
+    assert audit.reasons == ["bad_file_mode"]
+    assert audit.subjects[-1]["attempted_user_id"] is None
+    assert audit.subjects[-1]["host"] is None
+    assert audit.subjects[-1]["machine_id_hash"] is None
+
+
+async def test_osf_005b_bad_mode_refusal_emits_fileless_audit_row(tmp_path: Path) -> None:
+    """A real file with a broadened mode (0644) lands a ``bad_file_mode`` row."""
+    path = _write(tmp_path)
+    path.chmod(0o644)
+    audit = _Audit()
+    resolver = _resolver(path, rows=[(7, None)], audit=audit)
+    with pytest.raises(OperatorSessionBadFileMode):
+        await resolver.resolve()
+    assert audit.reasons == ["bad_file_mode"]
+
+
+async def test_osf_missing_file_emits_fileless_session_missing_row(tmp_path: Path) -> None:
+    """No session file at all lands exactly one ``session_missing`` row."""
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    path = parent / "session"  # never created
+    audit = _Audit()
+    resolver = _resolver(path, rows=[(7, None)], audit=audit)
+    with pytest.raises(OperatorSessionMissing):
+        await resolver.resolve()
+    assert audit.reasons == ["session_missing"]
+
+
 async def test_osf_006_token_user_mismatch(tmp_path: Path) -> None:
     """Valid token, file claims user 7, DB row owns user 9 -> token authoritative."""
     path = _write(tmp_path, user_id=7)
@@ -202,14 +265,15 @@ async def test_osf_006_token_user_mismatch(tmp_path: Path) -> None:
     assert audit.reasons[-1] == "token_user_mismatch"
 
 
-def test_osf_007_planted_user_id_log_injection_refused_at_parse(tmp_path: Path) -> None:
-    """A non-int user_id (arbitrary bytes) is refused at parse, before any audit."""
+def _write_planted_malformed(tmp_path: Path) -> Path:
+    """Plant a file whose ``user_id`` carries log-injection bytes.
+
+    The int coercion rejects it at ``model_validate`` time -> Malformed.
+    """
     parent = tmp_path / ".config" / "alfred"
     parent.mkdir(parents=True)
     parent.chmod(0o700)
     path = parent / "session"
-    # Hand-craft a file whose user_id carries injection bytes; the int
-    # coercion rejects it at model_validate time -> Malformed, no audit emit.
     path.write_bytes(
         b'{"schema_version":1,"user_id":"7\\n[CRITICAL] forged","token":"x",'
         b'"issued_at":"2026-06-08T00:00:00+00:00",'
@@ -217,5 +281,27 @@ def test_osf_007_planted_user_id_log_injection_refused_at_parse(tmp_path: Path) 
         b'"host":"h","machine_id_hash":"' + b"a" * 64 + b'"}'
     )
     path.chmod(0o600)
+    return path
+
+
+def test_osf_007_planted_user_id_log_injection_refused_at_parse(tmp_path: Path) -> None:
+    """A non-int user_id (arbitrary bytes) is refused at parse."""
+    path = _write_planted_malformed(tmp_path)
     with pytest.raises(OperatorSessionMalformed):
         load_session_file(path)
+
+
+async def test_osf_007_planted_malformed_emits_fileless_audit_row(tmp_path: Path) -> None:
+    """The planted-malformed refusal lands a ``planted_file_invalid`` row.
+
+    The injection bytes never reach the audit log: the file does not parse,
+    so the file-less row carries ``attempted_user_id=None`` — the closed-vocab
+    ``reason`` is the only forensic signal (hard rule #7 + sec-4).
+    """
+    path = _write_planted_malformed(tmp_path)
+    audit = _Audit()
+    resolver = _resolver(path, rows=[(7, None)], audit=audit)
+    with pytest.raises(OperatorSessionMalformed):
+        await resolver.resolve()
+    assert audit.reasons == ["planted_file_invalid"]
+    assert audit.subjects[-1]["attempted_user_id"] is None
