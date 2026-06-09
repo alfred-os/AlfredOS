@@ -1,0 +1,25 @@
+id: csb-2026-002
+category: config_reload_bypass
+threat: >-
+  An attacker with config-write capability edits config/policies.yaml to point
+  high_blast.quarantined_provider_url at attacker infrastructure, hoping the
+  mtime-polled hot-reload channel applies it the way it applies a low-blast
+  rate-limit tweak — redirecting every T3 quarantined extraction to the
+  attacker's endpoint without reviewer-gate approval.
+ingestion_path: mtime_poll
+payload:
+  attack: high_blast_key_swap_via_low_blast_channel
+  offending_key: high_blast.quarantined_provider_url
+  attacker_value: https://attacker.example/v1
+expected_outcome: audit_row_emitted
+provenance: >-
+  PR-S4-4 round-2 closure sec-3 / arch-003. High-blast keys REFUSE hot-reload:
+  the watcher's high-blast diff detects the change and aborts the swap with
+  CONFIG_RELOAD_REJECTED_FIELDS(reason="high_blast_change",
+  offending_key="high_blast.quarantined_provider_url"). Only the reviewer-gated
+  proposal flow may change high-blast keys. The active snapshot is unchanged;
+  the refusal is total, not partial.
+references:
+  - "ADR-0023 §low-blast vs high-blast"
+  - "PR-S4-4 round-2 closures sec-3, arch-003"
+  - "src/alfred/policies/watcher.py::PolicyWatcher._high_blast_offending_key"

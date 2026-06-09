@@ -1,0 +1,24 @@
+id: csb-2026-004
+category: config_reload_bypass
+threat: >-
+  An attacker plants a malformed (or high-blast) policy edit and relies on the
+  watcher caching the rejected (mtime, size) pair — so the rejection is emitted
+  ONCE and then suppressed on every subsequent tick, letting the bad file sit
+  unnoticed while operators see "no further rejections" and assume it healed.
+ingestion_path: mtime_poll
+payload:
+  attack: rejection_re_emit_suppression_via_mtime_cache
+  edited_field: rate_limits.web_fetch_per_user_per_hour
+  malformed_value: not-an-int
+expected_outcome: audit_row_emitted
+provenance: >-
+  PR-S4-4 round-2 closure sec-2. On a REJECT the watcher does NOT update the
+  cached (mtime, size) pair, so it re-reads and re-emits the same
+  CONFIG_RELOAD_REJECTED_FIELDS row every tick until the operator fixes the
+  file. Operators see a sustained rejection signal, not a one-shot — a
+  malicious file cannot hide behind a suppressed re-emit. The cache moves only
+  AFTER a successful swap.
+references:
+  - "ADR-0023 §rejection durability"
+  - "PR-S4-4 round-2 closure sec-2"
+  - "src/alfred/policies/watcher.py::PolicyWatcher._tick"

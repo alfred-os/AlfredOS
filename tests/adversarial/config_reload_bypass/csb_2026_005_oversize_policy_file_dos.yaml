@@ -1,0 +1,23 @@
+id: csb-2026-005
+category: config_reload_bypass
+threat: >-
+  An attacker replaces config/policies.yaml with a multi-megabyte (e.g. 100 MB)
+  deeply-nested YAML document, hoping the watcher's parse step exhausts memory
+  (parser-OOM DoS) and takes down the daemon, or stalls the event loop.
+ingestion_path: mtime_poll
+payload:
+  attack: parser_oom_via_oversize_file
+  declared_size_bytes: 104857600
+  cap_bytes: 262144
+expected_outcome: refused
+provenance: >-
+  PR-S4-4 round-2 closure sec-1 + csb size cap. load_yaml_bytes enforces a
+  256 KB hard cap AGAINST THE FSTAT RESULT (authoritative for the fd we hold)
+  before any read or parse, raising PolicyFileTooLarge. The watcher routes it to
+  CONFIG_RELOAD_REJECTED_FIELDS(reason="parse_failure") and the active snapshot
+  is unchanged — the YAML parser never sees the oversize bytes. The _tick load
+  also runs in asyncio.to_thread so the event loop is never blocked.
+references:
+  - "ADR-0023 §size cap"
+  - "PR-S4-4 round-2 closure sec-1"
+  - "src/alfred/policies/load.py::MAX_POLICIES_BYTES"
