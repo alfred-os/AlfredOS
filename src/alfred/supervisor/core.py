@@ -60,8 +60,9 @@ import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
 from contextlib import AbstractAsyncContextManager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, get_args
 
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
@@ -69,6 +70,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from alfred.audit.audit_row_schemas import (
     STATE_PROPOSAL_DISPATCH_CYCLE_SKIPPED_FIELDS,
     SUPERVISOR_BREAKER_RESET_FIELDS,
+    SUPERVISOR_BREAKER_TRIPPED_FIELDS,
+    SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS,
 )
 from alfred.i18n import t
 from alfred.supervisor.breaker import BreakerState, CircuitBreaker
@@ -94,6 +97,43 @@ _log = structlog.get_logger(__name__)
 # window, the runner is cancelled outright and the shutdown row is
 # emitted with the partial breaker count.
 _STOP_DRAIN_TIMEOUT_SECONDS: float = 10.0
+
+# ---------------------------------------------------------------------------
+# Closed-vocab reasons for the failure-driven supervisor APIs (PR-S4-8).
+# ---------------------------------------------------------------------------
+#
+# Both ``trip_breaker`` and ``request_plugin_restart`` are reason-checked
+# façades — the Literal pins the accepted vocabulary at the type layer, and a
+# runtime ``get_args`` membership check refuses an out-of-vocab string that
+# slipped past a ``# type: ignore`` (defence-in-depth; a bare ``str`` reaching
+# either method is a caller bug we surface loudly rather than silently audit).
+
+# ``trip_breaker`` reasons: the new comms reason plus the Slice-3 failure-driven
+# transitions. Kept exhaustive (no ``...`` placeholder) so a typo is a refusal.
+TripBreakerReason = Literal[
+    "comms_handler_repeated_failures",
+    "plugin_lifecycle_crash",
+]
+
+# ``request_plugin_restart`` reasons — spec §8.4 / Task 43.
+PluginRestartReason = Literal[
+    "unknown_notification",
+    "handler_repeated_failures",
+    "manifest_handshake_failure",
+]
+
+_TRIP_BREAKER_REASONS: Final[frozenset[str]] = frozenset(get_args(TripBreakerReason))
+_PLUGIN_RESTART_REASONS: Final[frozenset[str]] = frozenset(get_args(PluginRestartReason))
+
+# The requester recorded on every ``SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS``
+# row. The comms dispatcher is the only caller in this PR; pinned as a constant
+# so the audit-graph correlator can filter restart requests by origin.
+_PLUGIN_RESTART_REQUESTER: Final[str] = "AlfredPluginSession"
+
+
+def _utcnow_iso() -> str:
+    """Aware UTC wall-clock as an ISO-8601 string for audit-row timestamps."""
+    return datetime.now(UTC).isoformat()
 
 
 class _GateLike(Protocol):
@@ -216,6 +256,11 @@ class Supervisor:
         self._gate = gate
         self._audit = audit
         self._breakers: dict[str, CircuitBreaker] = {}
+        # Per-tick dedup for ``request_plugin_restart`` (Task 45). Cleared at
+        # each tick boundary via :meth:`_reset_restart_dedup` so a handler-
+        # failure storm within one tick emits exactly one restart-requested
+        # row per ``(adapter_id, reason)``.
+        self._restart_requested_this_tick: set[tuple[str, str]] = set()
         # PluginLifecycle and CapabilityGateMonitor share the gate and
         # audit references; both are bound at construction so the
         # supervisor surface stays narrow (start/stop/register/reset).
@@ -798,6 +843,157 @@ class Supervisor:
             cost_actual_usd=0.0,
             trace_id=correlation_id,
         )
+
+    @staticmethod
+    def _drive_breaker_open(breaker: CircuitBreaker, *, reason: str) -> None:
+        """Force a CLOSED/HALF_OPEN breaker to ``OPEN`` through its real API.
+
+        The :class:`CircuitBreaker` has no public ``trip(reason)`` (arch-004):
+        the only public failure-driven transition is ``record_failure``, which
+        trips on the ``failure_threshold``-th call within the failure window.
+        Calling it ``failure_threshold`` times in one shot satisfies the
+        threshold deterministically — the breaker is ``OPEN`` afterwards.
+
+        ``reason`` rides the breaker's ``exception_type`` slot, which is the
+        T3-safe failure carrier (a closed-vocab Literal here, never
+        ``str(exc)`` — spec §5.6). The caller guarantees the breaker is not
+        already OPEN (``record_failure`` no-ops while OPEN).
+        """
+        for _ in range(breaker._failure_threshold):
+            breaker.record_failure(reason)
+
+    async def trip_breaker(
+        self,
+        *,
+        component_id: str,
+        reason: TripBreakerReason,
+    ) -> None:
+        """Failure-driven breaker trip — the symmetric counterpart to ``reset_breaker``.
+
+        ``trip_breaker`` is the public, reason-checked façade the comms
+        dispatcher (``AlfredPluginSession._on_post_handshake_method``) calls
+        on the third handler failure inside a five-minute window. The
+        :class:`CircuitBreaker` exposes ``record_failure`` (+ internal
+        ``_trip``) but NO public ``trip(reason)`` (arch-004) — so this method
+        drives the breaker to ``OPEN`` through the breaker's *real* API: it
+        calls ``record_failure`` ``failure_threshold`` times in one shot,
+        passing ``reason`` as the T3-safe ``exception_type`` carrier (a
+        closed-vocab Literal, never ``str(exc)``).
+
+        Idempotent against an already-``OPEN`` breaker: ``record_failure``
+        no-ops while OPEN, so no second trip / no duplicate ``tripped`` row.
+        The audit row is emitted only on a genuine CLOSED/HALF_OPEN → OPEN
+        transition.
+
+        Raises:
+            ValueError: ``reason`` is not a known :data:`TripBreakerReason`.
+                Defence-in-depth — a bare ``str`` reaching here past a
+                ``# type: ignore`` is a caller bug surfaced loudly (CLAUDE.md
+                hard rule 7), not silently audited.
+        """
+        if reason not in _TRIP_BREAKER_REASONS:
+            raise ValueError(t("supervisor.trip_breaker.unknown_reason", reason=reason))
+
+        breaker = self.get_or_create_breaker(component_id)
+        if breaker.state == BreakerState.OPEN:
+            # Already tripped — a second request is a no-op transition; no
+            # duplicate audit row (the breaker did not change state).
+            return
+
+        self._drive_breaker_open(breaker, reason=reason)
+
+        correlation_id = str(uuid.uuid4())
+        await self._audit.append_schema(
+            fields=SUPERVISOR_BREAKER_TRIPPED_FIELDS,
+            schema_name="SUPERVISOR_BREAKER_TRIPPED_FIELDS",
+            event="supervisor.breaker.tripped",
+            actor_user_id=None,
+            actor_persona="supervisor",
+            subject={
+                "component_id": component_id,
+                "trip_count": breaker.trip_count,
+                "last_failure_type": reason,
+                "breaker_state": breaker.state.value,
+                "correlation_id": correlation_id,
+            },
+            trust_tier_of_trigger="T0",
+            result="tripped",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=correlation_id,
+        )
+
+    async def request_plugin_restart(
+        self,
+        *,
+        adapter_id: str,
+        reason: PluginRestartReason,
+    ) -> None:
+        """Request a supervised-plugin restart — writes the audit row + marks unhealthy.
+
+        Called by the comms dispatcher when a plugin sends an unknown
+        notification method (``reason="unknown_notification"``) or repeatedly
+        fails its handler. This method only *requests* the restart: it writes
+        the ``SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS`` row and trips the
+        adapter's breaker to ``OPEN`` (marking it unhealthy). The supervisor's
+        existing restart scheduler spawns a fresh adapter on its next tick.
+
+        Idempotent per tick (Task 45): repeat requests for the same
+        ``(adapter_id, reason)`` within a single tick emit exactly one row —
+        defence against a handler-failure storm spamming the audit graph. The
+        per-tick dedup set is cleared at the tick boundary
+        (:meth:`_reset_restart_dedup`).
+
+        Raises:
+            ValueError: ``reason`` is not a known :data:`PluginRestartReason`.
+        """
+        if reason not in _PLUGIN_RESTART_REASONS:
+            raise ValueError(t("supervisor.request_plugin_restart.unknown_reason", reason=reason))
+
+        dedup_key = (adapter_id, reason)
+        if dedup_key in self._restart_requested_this_tick:
+            # Already requested this exact restart this tick — no duplicate
+            # row, no duplicate breaker churn.
+            return
+        self._restart_requested_this_tick.add(dedup_key)
+
+        # Mark the adapter unhealthy so the breaker reflects the restart
+        # request (a previously-CLOSED adapter trips OPEN; an already-OPEN one
+        # stays OPEN). The breaker is the supervisor's "is this component
+        # serving?" source of truth, so the restart scheduler sees it.
+        breaker = self.get_or_create_breaker(adapter_id)
+        if breaker.state != BreakerState.OPEN:
+            self._drive_breaker_open(breaker, reason=reason)
+
+        correlation_id = str(uuid.uuid4())
+        await self._audit.append_schema(
+            fields=SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS,
+            schema_name="SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS",
+            event="supervisor.plugin.restart_requested",
+            actor_user_id=None,
+            actor_persona="supervisor",
+            subject={
+                "plugin_id": adapter_id,
+                "reason": reason,
+                "requested_at": _utcnow_iso(),
+                "requester": _PLUGIN_RESTART_REQUESTER,
+            },
+            trust_tier_of_trigger="T0",
+            result="restart_requested",
+            cost_estimate_usd=0.0,
+            cost_actual_usd=0.0,
+            trace_id=correlation_id,
+        )
+
+    def _reset_restart_dedup(self) -> None:
+        """Clear the per-tick restart-request dedup set (Task 45).
+
+        Called at each supervisor tick boundary so a restart request that was
+        deduplicated within one tick can re-request (and re-audit) on the next
+        tick — the dedup is a within-tick storm guard, not a permanent
+        suppression.
+        """
+        self._restart_requested_this_tick.clear()
 
     async def load_all_breakers(self) -> None:
         """Restore every registered breaker's state from Postgres.
