@@ -203,19 +203,19 @@ production), and that the absence of a sandbox policy file is intentional.
 PR-S4-6 extends the launcher into a manifest-driven, policy-resolving flow.
 Operator-facing changes before deploying:
 
-- **Every plugin manifest MUST declare a `[sandbox]` block.** Existing
++ **Every plugin manifest MUST declare a `[sandbox]` block.** Existing
   third-party plugins that lack one are refused at spawn with
   `reason="sandbox_block_missing"`. Add `[sandbox] kind = "none"` for an
   unsandboxed first-party adapter, or `kind = "full"` with per-OS
   `policy_refs` for an isolated plugin.
-- **`bwrap >= 0.6` must be on `PATH`** (PR-S4-0b's Dockerfile apt-installs
++ **`bwrap >= 0.6` must be on `PATH`** (PR-S4-0b's Dockerfile apt-installs
   bubblewrap 0.8.0, which provides `--sync-fd`; `--keep-fd` is the upstream
   0.9.0+ name). The daemon-boot launcher probe refuses a production boot on a
   non-policy-resolving launcher.
-- **`ALFRED_ENVIRONMENT` must be set** — the env var (primary) or
++ **`ALFRED_ENVIRONMENT` must be set** — the env var (primary) or
   `/etc/alfred/environment` (fallback). Distinct from the Slice-3
   capability-gate `ALFRED_ENV` selector.
-- **Mid-slice caveat:** the quarantined-LLM manifest declares `kind = "full"`
++ **Mid-slice caveat:** the quarantined-LLM manifest declares `kind = "full"`
   but its policy bytes ship in **PR-S4-7**. A daemon running just PR-S4-6 will
   refuse to launch it with `policy_ref_unreadable` — the correct fail-closed
   posture. Land PR-S4-7 before booting the quarantined-LLM in production. The
