@@ -14,9 +14,10 @@ the rewrite live here:
 * ``--help`` does not leak runtime placeholders (CR-149 round-10).
 * The forensic-attempt audit helper's payload covers
   ``SUPERVISOR_BREAKER_RESET_FIELDS``.
-* ``_resolve_operator_user_id`` precedence (env / getlogin / getpwuid /
-  None) and its end-to-end wiring through the attempt-row structlog
-  event.
+* Session-backed operator attribution (#153): the attempt row carries the
+  canonical ``User.id`` resolved from the CLI session token, and a missing
+  session refuses the reset. (Full refusal-branch coverage lives in
+  ``test_supervisor_reset_session_attribution.py``.)
 
 Tests that mocked ``_get_supervisor`` or ``Supervisor.reset_breaker``
 have been removed — those call sites no longer exist in the rewritten
@@ -24,8 +25,6 @@ body.
 """
 
 from __future__ import annotations
-
-from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -79,7 +78,9 @@ def test_emit_breaker_reset_attempt_audit_uses_schema_fields() -> None:
     original = supervisor_module._log
     try:
         supervisor_module._log = _FakeLogger()  # type: ignore[assignment]
-        supervisor_module._emit_breaker_reset_attempt_audit(component_id="quarantined-llm")
+        supervisor_module._emit_breaker_reset_attempt_audit(
+            component_id="quarantined-llm", operator_user_id="42"
+        )
     finally:
         supervisor_module._log = original
     # Every declared field is present in the kwargs the helper sent.
@@ -123,106 +124,34 @@ def test_reset_help_does_not_leak_runtime_placeholders(runner: CliRunner) -> Non
 
 
 # ---------------------------------------------------------------------------
-# CR-149 round-10 / round-4 #3338654106 / #3339361789:
-# OS-account operator attribution via _resolve_operator_user_id.
+# #153: session-backed operator attribution replaces the Slice-3 OS-account
+# fallback (env / getlogin / getpwuid). The full refusal + attribution
+# coverage lives in test_supervisor_reset_session_attribution.py; this file
+# pins the end-to-end attempt-audit wiring through the live structlog chain.
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_operator_user_id_prefers_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``ALFRED_OPERATOR_USER_ID`` env var takes precedence over OS probes.
-
-    Lets a shared CI account / orchestration script identify the human
-    operator who triggered the action — a single shared OS user is
-    common in deployment automation; the env-var override is the
-    explicit operator-attribution surface for that case.
-    """
-    from alfred.cli.supervisor import _resolve_operator_user_id
-
-    monkeypatch.setenv("ALFRED_OPERATOR_USER_ID", "alice@example.com")
-    assert _resolve_operator_user_id() == "alice@example.com"
-
-
-def test_resolve_operator_user_id_falls_back_to_getlogin(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the env var is absent, fall back to ``os.getlogin()``.
-
-    ``getlogin`` reads the controlling terminal, so it returns the
-    originating operator across ``sudo``/``su``. That matches the
-    audit semantic 'who is the human behind this action'.
-    """
-    from alfred.cli import supervisor as supervisor_module
-
-    monkeypatch.delenv("ALFRED_OPERATOR_USER_ID", raising=False)
-    with patch.object(supervisor_module.os, "getlogin", return_value="opbob"):
-        assert supervisor_module._resolve_operator_user_id() == "opbob"
-
-
-def test_resolve_operator_user_id_falls_back_to_getpwuid(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When ``getlogin`` raises (no TTY: cron / systemd / container),
-    fall back to the effective UID's pwd entry.
-
-    This is the typical headless-runtime case. Identifies the runtime
-    account if no human session is available — better than NULL for
-    the forensic trail per CLAUDE.md hard rule #7.
-    """
-    from alfred.cli import supervisor as supervisor_module
-
-    monkeypatch.delenv("ALFRED_OPERATOR_USER_ID", raising=False)
-    fake_pwd_entry = MagicMock()
-    fake_pwd_entry.pw_name = "alfred-runtime"
-    with (
-        patch.object(supervisor_module.os, "getlogin", side_effect=OSError("no TTY")),
-        patch.object(supervisor_module.os, "getuid", return_value=1000),
-        patch("pwd.getpwuid", return_value=fake_pwd_entry),
-    ):
-        assert supervisor_module._resolve_operator_user_id() == "alfred-runtime"
-
-
-def test_resolve_operator_user_id_returns_none_when_every_probe_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Every probe failed → return ``None`` so the row still emits with NULL.
-
-    Per CLAUDE.md hard rule #7, the presence of the audit row IS the
-    forensic signal — silently skipping the row is forbidden, but
-    emitting it with NULL operator_user_id is correct when every
-    attribution probe legitimately failed.
-    """
-    from alfred.cli import supervisor as supervisor_module
-
-    monkeypatch.delenv("ALFRED_OPERATOR_USER_ID", raising=False)
-    with (
-        patch.object(supervisor_module.os, "getlogin", side_effect=OSError("no TTY")),
-        patch.object(supervisor_module.os, "getuid", return_value=99999),
-        patch("pwd.getpwuid", side_effect=KeyError("uid not found")),
-    ):
-        assert supervisor_module._resolve_operator_user_id() is None
-
-
-def test_reset_attempt_audit_carries_resolved_operator_user_id(
+def test_reset_attempt_audit_carries_session_resolved_user_id(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The breaker-reset attempt structlog event carries the resolved id.
+    """The attempt structlog event carries the session-resolved canonical id.
 
-    Pins the wiring end-to-end: when an operator runs ``alfred
-    supervisor reset --confirm`` with ``ALFRED_OPERATOR_USER_ID`` set,
-    the attempt audit row carries that id (not ``None``).
-
-    ADR-0021 #171: reset now writes a state.git proposal and exits 0
-    when the queue succeeds; the attempt row still fires before the
-    proposal write (CR-149 forensic-trail invariant) so this assertion
-    holds regardless of the eventual proposal-write outcome.
+    The session resolver is stubbed to return ``"42"``; the attempt row
+    fires before the proposal write (CR-149 forensic-trail invariant) and
+    carries that canonical ``User.id`` (#153 closure).
     """
     import structlog
 
+    from alfred.cli import supervisor as supervisor_module
     from alfred.cli._state_git import ProposalResult
+
+    class _OkResolver:
+        async def resolve(self) -> str:
+            return "42"
 
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
-    monkeypatch.setenv("ALFRED_OPERATOR_USER_ID", "carol@example.com")
+    monkeypatch.setattr(supervisor_module, "_build_operator_resolver", lambda: _OkResolver())
     monkeypatch.setattr(
         "alfred.cli.supervisor.queue_proposal_or_exit",
         lambda **_kw: ProposalResult(proposal_id="abc", branch="proposal/breaker-reset-abc"),
@@ -239,7 +168,6 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
     structlog.configure(processors=[_intercept, structlog.processors.JSONRenderer()])
     try:
         result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
-        # Reset now exits 0 when the proposal queues cleanly.
         assert result.exit_code == 0, (result.output, result.stderr)
     finally:
         structlog.reset_defaults()
@@ -248,7 +176,27 @@ def test_reset_attempt_audit_carries_resolved_operator_user_id(
         row for row in captured if row.get("event") == "supervisor.breaker.reset.attempted"
     ]
     assert attempt_rows, "attempt audit row never fired"
-    assert attempt_rows[-1].get("operator_user_id") == "carol@example.com"
+    assert attempt_rows[-1].get("operator_user_id") == "42"
+
+
+def test_reset_without_session_refuses(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No session -> refuses with the not_logged_in message + non-zero exit."""
+    from alfred.cli import supervisor as supervisor_module
+    from alfred.identity.operator_session import OperatorSessionMissing
+
+    class _Missing:
+        async def resolve(self) -> str:
+            raise OperatorSessionMissing("no file")
+
+    monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "test-key-not-placeholder")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setattr(supervisor_module, "_build_operator_resolver", lambda: _Missing())
+    result = runner.invoke(supervisor_app, ["reset", "quarantined-llm", "--confirm"])
+    assert result.exit_code == 1
+    assert (
+        "operator session" in result.output.lower()
+        or "operator session" in (result.stderr or "").lower()
+    )
 
 
 # Removed in #154 / ADR-0020 (revised):
