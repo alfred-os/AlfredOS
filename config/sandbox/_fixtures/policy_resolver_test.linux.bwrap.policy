@@ -1,0 +1,18 @@
+# Fixture policy consumed by tests/integration/test_launcher_policy_resolver.py
+# and tests/unit/plugins/test_sandbox_policy_translator.py.
+#
+# NOT the quarantined-LLM policy — that ships in PR-S4-7. This file documents
+# the bwrap policy schema PR-S4-6 ships and exercises the resolver end-to-end
+# without depending on PR-S4-7's bytes.
+#
+# keep_fds MUST contain 3 (the Supervisor's provider-key channel; arch-2).
+# The translator emits --sync-fd 3 (Bookworm bubblewrap 0.8.0 naming; #218).
+
+ro_binds = [
+    ["/usr/lib", "/usr/lib"],
+    ["/etc/ssl/certs", "/etc/ssl/certs"],
+]
+tmpfs = ["/tmp"]
+unshare = ["pid", "uts", "cgroup", "ipc"]
+die_with_parent = true
+keep_fds = [3]
