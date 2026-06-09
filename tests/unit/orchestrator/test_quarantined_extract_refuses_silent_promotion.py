@@ -27,9 +27,10 @@ async def test_refuses_t2_for_comms_inbound() -> None:
     extractor = _NeverCalledExtractor()
     orch = make_orchestrator(quarantined_extractor=extractor)
 
-    # ``t()`` returns the key itself when no compiled catalog is loaded (the
-    # unit-test default); the operator-facing English lands via the catalog.
-    with pytest.raises(ValueError, match="source_tier_must_be_t3"):
+    # Match both the raw catalog key (uncompiled-catalog dev runs) and the
+    # resolved English (CI compiles the catalog), so the assertion is immune
+    # to catalog-compilation state.
+    with pytest.raises(ValueError, match="source_tier_must_be_t3|must be T3"):
         await orch.quarantined_extract(
             {"content": "relayed"},
             canonical_user_id="u_resolved",
