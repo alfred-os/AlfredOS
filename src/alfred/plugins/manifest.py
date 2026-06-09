@@ -32,15 +32,58 @@ still gets refused).
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from typing import Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from alfred.i18n import t
-from alfred.plugins.errors import ManifestError, ManifestTierError, ManifestVersionError
+from alfred.plugins.errors import (
+    ManifestError,
+    ManifestSandboxMissingError,
+    ManifestTierError,
+    ManifestVersionError,
+)
 
 _VALID_SUBSCRIBER_TIERS: Final[frozenset[str]] = frozenset({"system", "operator", "user-plugin"})
 _CONTENT_TRUST_TIERS: Final[frozenset[str]] = frozenset({"T0", "T1", "T2", "T3"})
+
+# Spec §7.1 (PR-S4-6): the OS-level isolation primitive a plugin declares.
+# Orthogonal to ``subscriber_tier`` (capability-gate posture) and the
+# legacy free-form ``sandbox_profile`` label — see manifest.py module
+# docstring + plan §2 "Sandbox kind versus subscriber tier".
+_SANDBOX_KIND: Final[frozenset[str]] = frozenset({"full", "none", "stub"})
+
+# The per-OS keys ``[sandbox.policy_refs]`` may carry. A fourth OS (e.g.
+# ``freebsd``) must extend this set, ``SandboxBlock.policy_refs`` Literal,
+# the manifest_reader validation, AND the launcher ``case`` branch in one
+# atomic PR (cross-PR contract — plan §5).
+_VALID_OS_KEYS: Final[frozenset[str]] = frozenset({"linux", "macos", "windows"})
+
+
+class SandboxBlock(BaseModel):
+    """The manifest's ``[sandbox]`` table (spec §7.1, PR-S4-6).
+
+    Frozen + ``extra="forbid"`` so an unknown key in the table is a
+    construction-time error rather than a silent miss — a typo in a future
+    field name must not degrade to "no sandbox" silently.
+
+    ``kind`` selects the OS-level isolation primitive. ``policy_refs`` is
+    the per-OS map of relative paths the launcher resolves; it is required
+    when ``kind == "full"`` (a full sandbox with no policy to apply is a
+    contradiction) and tolerated-but-validated otherwise.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["full", "none", "stub"]
+    policy_refs: Mapping[Literal["linux", "macos", "windows"], str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_policy_refs_when_full(self) -> SandboxBlock:
+        if self.kind == "full" and not self.policy_refs:
+            raise ValueError(t("plugin.manifest_sandbox_policy_refs_required", kind=self.kind))
+        return self
 
 
 class PluginManifest(BaseModel):
@@ -57,6 +100,7 @@ class PluginManifest(BaseModel):
     plugin_id: str
     subscriber_tier: str
     sandbox_profile: str
+    sandbox: SandboxBlock
     platform: str | None = None  # reserved for Slice-4 comms-MCP
 
     @field_validator("subscriber_tier")
@@ -144,16 +188,68 @@ def parse_manifest(raw: str) -> PluginManifest:
     if platform_raw is not None and not isinstance(platform_raw, str):
         raise ManifestError(t("plugin.manifest_invalid_platform_type"))
 
+    sandbox_block = _parse_sandbox_block(data, plugin_id=plugin_id)
+
     return PluginManifest(
         manifest_version=1,
         plugin_id=plugin_id,
         subscriber_tier=subscriber_tier_raw,
         sandbox_profile=sandbox_profile,
+        sandbox=sandbox_block,
         platform=platform_raw,
     )
 
 
+def _parse_sandbox_block(data: dict[str, Any], *, plugin_id: str) -> SandboxBlock:
+    """Read + validate the manifest's ``[sandbox]`` table (spec §7.1).
+
+    Fails closed: a missing or non-table ``sandbox`` key raises
+    :class:`ManifestSandboxMissingError` so the supervisor can attribute
+    ``reason="sandbox_block_missing"`` from the exception type. The ``kind``
+    and ``policy_refs`` checks run *before* constructing :class:`SandboxBlock`
+    so :class:`ManifestError` surfaces un-wrapped (mirroring the
+    version/tier pattern above); the Pydantic ``model_validator`` is the
+    defence-in-depth backstop for direct construction.
+    """
+    sandbox_section = data.get("sandbox")
+    if not isinstance(sandbox_section, dict):
+        raise ManifestSandboxMissingError(plugin_id=plugin_id)
+
+    raw_kind = sandbox_section.get("kind")
+    if raw_kind not in _SANDBOX_KIND:
+        raise ManifestError(
+            t(
+                "plugin.manifest_sandbox_kind_invalid",
+                got=repr(raw_kind),
+                valid=", ".join(sorted(_SANDBOX_KIND)),
+            )
+        )
+
+    policy_refs_raw = sandbox_section.get("policy_refs", {})
+    if not isinstance(policy_refs_raw, dict):
+        raise ManifestError(t("plugin.manifest_sandbox_policy_refs_type"))
+    for os_key in policy_refs_raw:
+        if os_key not in _VALID_OS_KEYS:
+            raise ManifestError(
+                t(
+                    "plugin.manifest_sandbox_policy_refs_unknown_os",
+                    got=repr(os_key),
+                    valid=", ".join(sorted(_VALID_OS_KEYS)),
+                )
+            )
+
+    # ``kind: full`` requires a non-empty policy_refs map. Checked HERE so a
+    # public ``ManifestError`` surfaces to ``parse_manifest`` callers
+    # un-wrapped; the ``SandboxBlock`` model_validator is the defence-in-depth
+    # backstop for direct construction (which raises Pydantic ValidationError).
+    if raw_kind == "full" and not policy_refs_raw:
+        raise ManifestError(t("plugin.manifest_sandbox_policy_refs_required", kind=raw_kind))
+
+    return SandboxBlock(kind=raw_kind, policy_refs=policy_refs_raw)
+
+
 __all__ = [
     "PluginManifest",
+    "SandboxBlock",
     "parse_manifest",
 ]

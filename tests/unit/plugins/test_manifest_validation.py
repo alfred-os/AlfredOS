@@ -44,6 +44,9 @@ manifest_version = 1
 id = "alfred.test-plugin"
 subscriber_tier = "system"
 sandbox_profile = "user-plugin"
+
+[sandbox]
+kind = "none"
 """
 
 
@@ -149,7 +152,12 @@ def test_platform_field_is_optional_in_v1() -> None:
 
 
 def test_platform_field_accepted_when_provided() -> None:
-    src = VALID_MANIFEST_TOML + '\nplatform = "discord"\n'
+    # platform lives under [plugin]; inject it there rather than appending
+    # (an append would land under the trailing [sandbox] table).
+    src = VALID_MANIFEST_TOML.replace(
+        'sandbox_profile = "user-plugin"',
+        'sandbox_profile = "user-plugin"\nplatform = "discord"',
+    )
     manifest = parse_manifest(src)
     assert manifest.platform == "discord"
 
@@ -194,7 +202,10 @@ def test_sandbox_profile_not_string_raises_manifest_error() -> None:
 
 
 def test_platform_not_string_raises_manifest_error() -> None:
-    src = VALID_MANIFEST_TOML + "platform = 7\n"
+    src = VALID_MANIFEST_TOML.replace(
+        'sandbox_profile = "user-plugin"',
+        'sandbox_profile = "user-plugin"\nplatform = 7',
+    )
     with pytest.raises(ManifestError):
         parse_manifest(src)
 
@@ -211,17 +222,20 @@ def test_direct_construction_t3_subscriber_tier_refused() -> None:
     # same ManifestTierError as parse_manifest.
     from alfred.plugins.manifest import PluginManifest
 
+    from alfred.plugins.manifest import SandboxBlock
+
     with pytest.raises(ManifestTierError):
         PluginManifest(
             manifest_version=1,
             plugin_id="alfred.x",
             subscriber_tier="T3",
             sandbox_profile="user-plugin",
+            sandbox=SandboxBlock(kind="none"),
         )
 
 
 def test_direct_construction_unknown_subscriber_tier_refused() -> None:
-    from alfred.plugins.manifest import PluginManifest
+    from alfred.plugins.manifest import PluginManifest, SandboxBlock
 
     with pytest.raises(ManifestError):
         PluginManifest(
@@ -229,6 +243,7 @@ def test_direct_construction_unknown_subscriber_tier_refused() -> None:
             plugin_id="alfred.x",
             subscriber_tier="root",
             sandbox_profile="user-plugin",
+            sandbox=SandboxBlock(kind="none"),
         )
 
 
@@ -290,7 +305,10 @@ def test_direct_construction_unknown_subscriber_tier_refused() -> None:
         ),
         pytest.param(
             (
-                VALID_MANIFEST_TOML + "platform = 42\n",
+                VALID_MANIFEST_TOML.replace(
+                    'sandbox_profile = "user-plugin"',
+                    'sandbox_profile = "user-plugin"\nplatform = 42',
+                ),
                 "Plugin manifest [plugin] platform",
             ),
             id="non_string_platform",

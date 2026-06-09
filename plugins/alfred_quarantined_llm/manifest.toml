@@ -26,3 +26,19 @@ manifest_version = 1
 id = "alfred.quarantined-llm"
 subscriber_tier = "system"
 sandbox_profile = "user-plugin"
+
+# OS-level isolation primitive (spec §7.1, PR-S4-6). Orthogonal to
+# subscriber_tier (capability-gate posture) and the legacy free-form
+# sandbox_profile label above. kind = "full" means the launcher resolves
+# the per-OS policy_ref and spawns the plugin under bwrap (Linux) /
+# sandbox-exec (macOS) / refuses (Windows stub). The actual policy bytes
+# at the three referenced paths ship in PR-S4-7 — until then, a daemon
+# attempting to launch this plugin refuses with policy_ref_unreadable, the
+# correct fail-closed posture during the slice's mid-flight state.
+[sandbox]
+kind = "full"
+
+[sandbox.policy_refs]
+linux   = "config/sandbox/quarantined-llm.linux.bwrap.policy"
+macos   = "config/sandbox/quarantined-llm.macos.sb"
+windows = "config/sandbox/quarantined-llm.windows.stub.policy"
