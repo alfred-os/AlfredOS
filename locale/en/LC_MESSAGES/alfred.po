@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-09 01:55+0100\n"
+"POT-Creation-Date: 2026-06-09 02:03+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1354,7 +1354,7 @@ msgstr ""
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:83 src/alfred/policies/watcher.py:347
+#: src/alfred/i18n/_slice_4_reserve.py:83 src/alfred/policies/watcher.py:349
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
@@ -1392,13 +1392,13 @@ msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:90 src/alfred/policies/watcher.py:446
+#: src/alfred/i18n/_slice_4_reserve.py:90 src/alfred/policies/watcher.py:452
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:91 src/alfred/policies/watcher.py:463
+#: src/alfred/i18n/_slice_4_reserve.py:91 src/alfred/policies/watcher.py:469
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
