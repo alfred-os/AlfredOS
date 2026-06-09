@@ -355,10 +355,9 @@ symlink) outside the sandbox-policy root — `reason="policy_ref_escapes_root"`
 **fd-3 inheritance.** The Supervisor delivers the quarantined provider key
 out-of-band over fd 3: a single atomic `os.writev` of a 4-byte big-endian
 length prefix + the key bytes (`deliver_provider_key_via_fd3`). The launcher
-passes fd 3 through to the plugin via `bwrap --keep-fd 3` (the fd-inheritance
-flag, present since bubblewrap 0.5.0; `--sync-fd` is bwrap's unrelated internal
-sync fd and must NOT be used for key delivery — ADR-0015) and never reads it
-itself. On a partial write / EAGAIN the Supervisor REFUSES to spawn
+passes fd 3 through to the plugin via `bwrap --sync-fd 3` (the fd-inheritance
+flag in both bubblewrap 0.8.0 and 0.9.0 — there is no `--keep-fd`) and never
+reads it itself. On a partial write / EAGAIN the Supervisor REFUSES to spawn
 (`reason="provider_key_delivery_failed"`).
 
 **Honest residency-window limitation.** The provider key arrives at

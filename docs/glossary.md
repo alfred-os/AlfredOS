@@ -1494,7 +1494,7 @@ The provider-key delivery channel for `kind: full` plugins. The
 Supervisor (host) opens a pipe, writes a 4-byte big-endian length prefix
 plus the key bytes via a single `os.writev` syscall (atomic on POSIX), then
 zeroes the local `bytearray` and `gc.collect()`s. The launcher invokes
-`bwrap --keep-fd 3 ...` so the kernel inherits fd 3 into the spawned
+`bwrap --sync-fd 3 ...` so the kernel inherits fd 3 into the spawned
 plugin. The plugin reads the framed bytes via Slice-3's
 `read_fd3_secret()`. Honest limitation: the Supervisor holds the key in
 a Python `str` (interned, non-zeroizable) for microseconds between the
