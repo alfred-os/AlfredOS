@@ -7,6 +7,7 @@ emissions deterministically by driving ``_tick`` directly.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any
 
 from alfred.policies.load import canonical_bytes
 from alfred.policies.model import PoliciesV1
-from alfred.policies.snapshot_ref import PoliciesSnapshotRef
+from alfred.policies.snapshot_ref import PoliciesSnapshot, PoliciesSnapshotRef
 from alfred.policies.watcher import PolicyWatcher
 
 from ._audit_spy import SpyAudit
@@ -64,6 +65,19 @@ def build_watcher(
     return watcher, ref, audit, invoker
 
 
+def swap_snapshot(ref: PoliciesSnapshotRef, new: PoliciesSnapshot) -> None:
+    """Swap ``ref`` to ``new`` through the PUBLIC ``swap()`` path (CR round-3).
+
+    Sibling deref tests must NOT poke the private ``ref._current`` attribute to
+    fake a watcher swap — that bypasses the audit-then-swap contract the swap
+    path enforces and would keep passing if ``swap`` ever stopped reassigning.
+    This helper drives the real async ``swap()`` (with a :class:`SpyAudit` so
+    the Phase-1 audit write succeeds) from a synchronous test, so the deref
+    assertions exercise the genuine post-swap state.
+    """
+    asyncio.run(ref.swap(new, audit=SpyAudit(), trace_id="harness-swap"))
+
+
 @contextmanager
 def isolated_fallback(tmp_path: Path) -> Iterator[Path]:
     """Redirect the sec-4 fallback JSONL into ``tmp_path`` for the duration."""
@@ -105,5 +119,6 @@ __all__ = [
     "build_watcher",
     "isolated_fallback",
     "make_policies",
+    "swap_snapshot",
     "write_policies",
 ]

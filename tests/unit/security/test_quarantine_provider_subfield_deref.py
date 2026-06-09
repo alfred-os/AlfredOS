@@ -18,6 +18,7 @@ from alfred.policies.snapshot_ref import PoliciesSnapshotRef
 from alfred.security.quarantine import QuarantinedExtractor, declare_hookpoints
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 from tests.unit.policies._factories import make_policies, make_snapshot
+from tests.unit.policies._watcher_harness import swap_snapshot
 
 
 @pytest.fixture
@@ -75,9 +76,14 @@ def test_burst_limiter_policy_reflects_swap_on_next_call(fresh_registry: HookReg
     ref = PoliciesSnapshotRef(make_snapshot(policies=make_policies()))
     extractor = _make_extractor(ref, fresh_registry)
     assert extractor.burst_limiter_policy().capacity_tokens == 5  # type: ignore[union-attr]
-    ref._current = make_snapshot(  # type: ignore[attr-defined]
-        policies=make_policies(
-            rate_limits={"quarantined_extract_per_user_persona": {"capacity_tokens": 10}}
-        )
+    # Swap through the PUBLIC audit-then-swap path, not a private ``_current``
+    # poke (CR round-3 Finding 6).
+    swap_snapshot(
+        ref,
+        make_snapshot(
+            policies=make_policies(
+                rate_limits={"quarantined_extract_per_user_persona": {"capacity_tokens": 10}}
+            )
+        ),
     )
     assert extractor.burst_limiter_policy().capacity_tokens == 10  # type: ignore[union-attr]
