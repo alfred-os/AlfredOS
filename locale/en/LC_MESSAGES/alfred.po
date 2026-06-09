@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-09 09:23+0100\n"
+"POT-Creation-Date: 2026-06-09 09:41+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1953,39 +1953,39 @@ msgstr ""
 "Plugin {plugin_id} policy_ref resolves outside the sandbox-policy root. "
 "Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:40
+#: src/alfred/plugins/_sandbox_i18n.py:39
 msgid "supervisor.sandbox.refused.unknown_host_os"
 msgstr "Plugin {plugin_id} cannot be launched: unrecognised host OS."
 
-#: src/alfred/plugins/_sandbox_i18n.py:43
+#: src/alfred/plugins/_sandbox_i18n.py:40
 msgid "supervisor.sandbox.refused.jq_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: jq is not available on the "
 "launcher host."
 
-#: src/alfred/plugins/_sandbox_i18n.py:46
+#: src/alfred/plugins/_sandbox_i18n.py:42
 msgid "supervisor.sandbox.refused.macos_full_not_yet_shipped"
 msgstr ""
 "Plugin {plugin_id} requests a full macOS sandbox, which is not yet "
 "shipped (PR-S4-7)."
 
-#: src/alfred/plugins/_sandbox_i18n.py:49
+#: src/alfred/plugins/_sandbox_i18n.py:45
 msgid "supervisor.sandbox.refused.policy_translate_failed"
 msgstr "Plugin {plugin_id} sandbox policy could not be translated to bwrap flags."
 
-#: src/alfred/plugins/_sandbox_i18n.py:53
+#: src/alfred/plugins/_sandbox_i18n.py:49
 msgid "supervisor.boot.mlock_unavailable"
 msgstr ""
 "mlockall is unavailable ({errno_string}); Supervisor pages may swap to "
 "disk. Boot proceeds."
 
-#: src/alfred/plugins/_sandbox_i18n.py:54
+#: src/alfred/plugins/_sandbox_i18n.py:50
 msgid "supervisor.boot.core_dumps_disabled"
 msgstr ""
 "Core dumps disabled (RLIMIT_CORE set to 0) to protect the in-memory "
 "provider key."
 
-#: src/alfred/plugins/_sandbox_i18n.py:56
+#: src/alfred/plugins/_sandbox_i18n.py:51
 msgid "daemon.boot.environment_source_conflict"
 msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "

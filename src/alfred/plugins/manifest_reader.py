@@ -78,7 +78,7 @@ _READ_SANDBOX_NO_SOURCE_KEY = "plugin.manifest_reader_no_source"
 _POLICY_REF_ESCAPES_ROOT_KEY = "supervisor.sandbox.refused.policy_ref_escapes_root"
 
 
-class PolicyRefEscapesRoot(Exception):
+class PolicyRefEscapesRoot(Exception):  # noqa: N818 -- name pinned by sec-2 + audit reason vocab
     """A manifest ``policy_ref`` resolves outside the sandbox-policy root.
 
     sec-2 BLOCKER: an attacker who plants a manifest must not be able to point

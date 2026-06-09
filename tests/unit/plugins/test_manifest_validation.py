@@ -220,9 +220,7 @@ def test_direct_construction_t3_subscriber_tier_refused() -> None:
     # Pydantic v2 propagates non-ValidationError exceptions raised in
     # field_validators as-is — so the defence-in-depth path surfaces the
     # same ManifestTierError as parse_manifest.
-    from alfred.plugins.manifest import PluginManifest
-
-    from alfred.plugins.manifest import SandboxBlock
+    from alfred.plugins.manifest import PluginManifest, SandboxBlock
 
     with pytest.raises(ManifestTierError):
         PluginManifest(
