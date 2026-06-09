@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-09 07:08+0100\n"
+"POT-Creation-Date: 2026-06-09 09:23+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1935,6 +1935,62 @@ msgstr ""
 "runuser is Linux-only). Documented dev-only deviation; MUST NOT appear in"
 " production logs."
 
+#: src/alfred/plugins/_sandbox_i18n.py:32
+msgid "plugin.manifest_unreadable"
+msgstr "Plugin manifest could not be read."
+
+#: src/alfred/plugins/_sandbox_i18n.py:33
+msgid "plugin.manifest_reader_no_source"
+msgstr "manifest_reader requires --manifest-path or --plugin-id."
+
+#: src/alfred/plugins/_sandbox_i18n.py:34
+msgid "plugin.manifest_invalid"
+msgstr "Plugin manifest is invalid."
+
+#: src/alfred/plugins/_sandbox_i18n.py:37
+msgid "supervisor.sandbox.refused.policy_ref_escapes_root"
+msgstr ""
+"Plugin {plugin_id} policy_ref resolves outside the sandbox-policy root. "
+"Refusing to launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:40
+msgid "supervisor.sandbox.refused.unknown_host_os"
+msgstr "Plugin {plugin_id} cannot be launched: unrecognised host OS."
+
+#: src/alfred/plugins/_sandbox_i18n.py:43
+msgid "supervisor.sandbox.refused.jq_unavailable"
+msgstr ""
+"Plugin {plugin_id} cannot be launched: jq is not available on the "
+"launcher host."
+
+#: src/alfred/plugins/_sandbox_i18n.py:46
+msgid "supervisor.sandbox.refused.macos_full_not_yet_shipped"
+msgstr ""
+"Plugin {plugin_id} requests a full macOS sandbox, which is not yet "
+"shipped (PR-S4-7)."
+
+#: src/alfred/plugins/_sandbox_i18n.py:49
+msgid "supervisor.sandbox.refused.policy_translate_failed"
+msgstr "Plugin {plugin_id} sandbox policy could not be translated to bwrap flags."
+
+#: src/alfred/plugins/_sandbox_i18n.py:53
+msgid "supervisor.boot.mlock_unavailable"
+msgstr ""
+"mlockall is unavailable ({errno_string}); Supervisor pages may swap to "
+"disk. Boot proceeds."
+
+#: src/alfred/plugins/_sandbox_i18n.py:54
+msgid "supervisor.boot.core_dumps_disabled"
+msgstr ""
+"Core dumps disabled (RLIMIT_CORE set to 0) to protect the in-memory "
+"provider key."
+
+#: src/alfred/plugins/_sandbox_i18n.py:56
+msgid "daemon.boot.environment_source_conflict"
+msgstr ""
+"ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "
+"({file_value}) disagree; the env var wins."
+
 #: src/alfred/plugins/content_store_base.py:153
 msgid "plugin.content_store.inmemory_not_production_safe"
 msgstr ""
@@ -1959,25 +2015,41 @@ msgstr ""
 "expected {expected}."
 
 #: src/alfred/plugins/errors.py:148
+msgid "plugin.manifest_sandbox_block_missing"
+msgstr "Plugin {plugin_id} manifest is missing the required [sandbox] block."
+
+#: src/alfred/plugins/errors.py:166
 msgid "plugin.manifest_subscriber_tier_invalid"
 msgstr ""
 "Plugin manifest subscriber_tier {tier!r} is not a valid subscriber tier "
 "(valid: {valid_tiers}). Content trust tiers (T0-T3) are not subscriber "
 "tiers; see ADR-0017."
 
-#: src/alfred/plugins/errors.py:174
+#: src/alfred/plugins/errors.py:192
 msgid "plugin.protocol_violation"
 msgstr ""
 "Plugin {plugin_id} sent a disallowed JSON-RPC method {method} after the "
 "handshake."
 
-#: src/alfred/plugins/errors.py:193
+#: src/alfred/plugins/errors.py:212
+msgid "supervisor.sandbox.refused.sandbox_info_handshake_mismatch"
+msgstr ""
+"Plugin {plugin_id} reported sandbox kind {reported} but its manifest "
+"declares {declared}. Tearing down."
+
+#: src/alfred/plugins/errors.py:237
 msgid "plugin.transport.dlp_outbound_refused"
 msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
 "matched."
 
-#: src/alfred/plugins/manifest.py:77 src/alfred/plugins/manifest.py:133
+#: src/alfred/plugins/manifest.py:85 src/alfred/plugins/manifest.py:246
+msgid "plugin.manifest_sandbox_policy_refs_required"
+msgstr ""
+"Plugin manifest [sandbox] kind={kind} requires a non-empty policy_refs "
+"table."
+
+#: src/alfred/plugins/manifest.py:121 src/alfred/plugins/manifest.py:177
 msgid "plugin.manifest_unknown_subscriber_tier"
 msgstr ""
 "Plugin manifest subscriber_tier {tier} is unknown; valid values: "
@@ -1986,29 +2058,43 @@ msgstr ""
 # Slice-3 retrospective fix DEVEX-002 — manifest parser raises that
 # previously bypassed t(). Each reason carries a distinct key so callers
 # can branch on the specific manifest defect (CLI rendering, audit row).
-#: src/alfred/plugins/manifest.py:101
+#: src/alfred/plugins/manifest.py:145
 msgid "plugin.manifest_invalid_toml"
 msgstr "Plugin manifest is not valid TOML: {detail}."
 
-#: src/alfred/plugins/manifest.py:115
+#: src/alfred/plugins/manifest.py:159
 msgid "plugin.manifest_missing_plugin_section"
 msgstr "Plugin manifest is missing the required [plugin] table."
 
-#: src/alfred/plugins/manifest.py:119
+#: src/alfred/plugins/manifest.py:163
 msgid "plugin.manifest_invalid_plugin_id"
 msgstr "Plugin manifest [plugin] id is missing or not a non-empty string."
 
-#: src/alfred/plugins/manifest.py:123
+#: src/alfred/plugins/manifest.py:167
 msgid "plugin.manifest_invalid_subscriber_tier_type"
 msgstr "Plugin manifest [plugin] subscriber_tier is missing or not a string."
 
-#: src/alfred/plugins/manifest.py:141
+#: src/alfred/plugins/manifest.py:185
 msgid "plugin.manifest_invalid_sandbox_profile_type"
 msgstr "Plugin manifest [plugin] sandbox_profile is not a string."
 
-#: src/alfred/plugins/manifest.py:145
+#: src/alfred/plugins/manifest.py:189
 msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
+
+#: src/alfred/plugins/manifest.py:222
+msgid "plugin.manifest_sandbox_kind_invalid"
+msgstr "Plugin manifest [sandbox] kind {got} is invalid (valid: {valid})."
+
+#: src/alfred/plugins/manifest.py:230
+msgid "plugin.manifest_sandbox_policy_refs_type"
+msgstr "Plugin manifest [sandbox] policy_refs must be a table."
+
+#: src/alfred/plugins/manifest.py:235
+msgid "plugin.manifest_sandbox_policy_refs_unknown_os"
+msgstr ""
+"Plugin manifest [sandbox] policy_refs has unknown OS key {got} (valid: "
+"{valid})."
 
 #: src/alfred/plugins/stdio_transport.py:631
 #: src/alfred/plugins/web_fetch/errors.py:236

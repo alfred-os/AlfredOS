@@ -116,13 +116,24 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.help.start",
     "daemon.help.stop",
     "daemon.status.help",
-    # Sandbox refusal reasons (6).
+    # Sandbox refusal reasons (6 + PR-S4-6 launcher/handshake additions).
     "supervisor.sandbox.refused.policy_ref_missing",
     "supervisor.sandbox.refused.policy_ref_os_mismatch",
     "supervisor.sandbox.refused.policy_ref_unreadable",
     "supervisor.sandbox.refused.sandbox_block_missing",
     "supervisor.sandbox.refused.windows_stub_in_production",
     "supervisor.sandbox.unsandboxed_refused_in_production",
+    # PR-S4-6 launcher + manifest-reader + handshake refusals.
+    "supervisor.sandbox.refused.policy_ref_escapes_root",
+    "supervisor.sandbox.refused.policy_translate_failed",
+    "supervisor.sandbox.refused.macos_full_not_yet_shipped",
+    "supervisor.sandbox.refused.unknown_host_os",
+    "supervisor.sandbox.refused.jq_unavailable",
+    "supervisor.sandbox.refused.sandbox_info_handshake_mismatch",
+    # PR-S4-6 boot-posture + env-conflict observability.
+    "supervisor.boot.mlock_unavailable",
+    "supervisor.boot.core_dumps_disabled",
+    "daemon.boot.environment_source_conflict",
     # Config-reload notifications (6).
     "supervisor.config_reload.applied",
     "supervisor.config_reload.rejected.parse_failure",
@@ -221,6 +232,7 @@ def test_no_orphan_slice_4_msgids_in_po_outside_enumeration() -> None:
         "operator_session.",
         "supervisor.breaker.reset.",
         "supervisor.sandbox.",
+        "supervisor.boot.",
         "supervisor.config_reload.",
         "supervisor.config_watcher.",
         "policies.watcher.",
