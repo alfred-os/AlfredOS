@@ -162,10 +162,29 @@ async def loop(self):
         use(self._ref.current().x)
 """
 
+# Cross-iteration bad idiom: snap is bound mid-body, the await at the TAIL of
+# iteration N taints it, and it is READ at the HEAD of iteration N+1 before any
+# re-deref. A single forward pass cannot flag the head read (snap is unbound on
+# the first textual visit); the guard's deliberate two-pass loop scan carries
+# the tainted binding into the re-entry and catches it.
+_BAD_CROSS_ITERATION_SRC = """
+async def loop(self):
+    snap = None
+    while True:
+        use(snap.x)
+        snap = self._ref.current()
+        await do_thing()
+"""
+
 
 def test_guard_flags_binding_read_after_await() -> None:
     """The guard itself is trustworthy: it flags the canonical bad idiom."""
     assert _flag_bad_bindings(ast.parse(_BAD_SRC))
+
+
+def test_guard_flags_cross_iteration_binding_read_after_await() -> None:
+    """The two-pass scan catches a tail-bound local read after the next-iteration await."""
+    assert _flag_bad_bindings(ast.parse(_BAD_CROSS_ITERATION_SRC))
 
 
 def test_guard_accepts_deref_after_await() -> None:
