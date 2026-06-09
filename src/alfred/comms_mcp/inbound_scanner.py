@@ -26,8 +26,8 @@ import structlog
 
 from alfred.comms_mcp.classifier_registry import (
     REQUIRED_CLASSIFIERS_BY_KIND,
-    UnknownClassifierError,
     get_classifier,
+    is_registered,
 )
 from alfred.comms_mcp.errors import UnknownAdapterKindError
 from alfred.comms_mcp.protocol import BODY_FIELD_BY_KIND, adapter_kind
@@ -126,12 +126,12 @@ class InboundContentScanner:
         required: frozenset[str],
         optional: frozenset[str],
     ) -> tuple[frozenset[str], tuple[object, ...]]:
-        # Required is authoritative; optional adds only registered extras.
+        # Required is authoritative; optional adds only registered extras. The
+        # registered-check is a non-raising membership predicate (reload-safe;
+        # see ``is_registered``) rather than a catch on UnknownClassifierError.
         to_run = set(required)
         for name in optional:
-            try:
-                get_classifier(kind=adapter_kind, name=name)
-            except UnknownClassifierError:
+            if not is_registered(kind=adapter_kind, name=name):
                 _log.warning(
                     "comms.scanner.optional_classifier_unregistered",
                     adapter_kind=adapter_kind,

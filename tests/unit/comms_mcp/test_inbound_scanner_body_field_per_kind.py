@@ -11,8 +11,18 @@ from __future__ import annotations
 
 import pytest
 
-from alfred.comms_mcp.classifier_registry import register_classifier
+from alfred.comms_mcp.classifier_registry import is_registered, register_classifier
 from alfred.comms_mcp.inbound_scanner import InboundContentScanner
+
+
+def test_is_registered_predicate() -> None:
+    @register_classifier(kind="alfred_comms_test", name="is_registered_probe")
+    class _Probe:
+        def classify(self, body: dict[str, object]) -> tuple[object, ...]:
+            return ()
+
+    assert is_registered(kind="alfred_comms_test", name="is_registered_probe")
+    assert not is_registered(kind="alfred_comms_test", name="never_registered")
 
 
 @pytest.mark.parametrize(
