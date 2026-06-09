@@ -1354,7 +1354,7 @@ msgstr ""
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:83 src/alfred/policies/watcher.py:367
+#: src/alfred/i18n/_slice_4_reserve.py:83 src/alfred/policies/watcher.py:377
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
@@ -1392,17 +1392,17 @@ msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:90 src/alfred/policies/watcher.py:496
+#: src/alfred/i18n/_slice_4_reserve.py:90 src/alfred/policies/watcher.py:506
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:91 src/alfred/policies/watcher.py:513
+#: src/alfred/i18n/_slice_4_reserve.py:91 src/alfred/policies/watcher.py:523
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
-#: src/alfred/i18n/_slice_4_reserve.py:93 src/alfred/policies/watcher.py:479
+#: src/alfred/i18n/_slice_4_reserve.py:93 src/alfred/policies/watcher.py:489
 msgid "policies.watcher.fallback_write_failed"
 msgstr ""
 "PolicyWatcher could not write the rejected-config fallback sink at "
@@ -2017,14 +2017,14 @@ msgstr ""
 "not present the authorised CapabilityGateNonce. The T3 ingestion boundary"
 " is gated to StdioTransport and quarantine_host only (spec §3.2)."
 
-#: src/alfred/supervisor/core.py:277
+#: src/alfred/supervisor/core.py:280
 msgid "supervisor.start.already_started"
 msgstr ""
 "Supervisor.start() called twice without an intervening stop(). The "
 "supervisor is single-instance per process; re-entrancy would orphan the "
 "first TaskGroup."
 
-#: src/alfred/supervisor/core.py:375
+#: src/alfred/supervisor/core.py:378
 msgid "supervisor.dispatch.outbound_dlp_unwired"
 msgstr ""
 "Supervisor cannot schedule the proposal-dispatch loop: no outbound DLP "
@@ -2036,13 +2036,13 @@ msgstr ""
 "ledger without passing DLP first (#173); pass outbound_dlp= at "
 "construction."
 
-#: src/alfred/supervisor/core.py:647
+#: src/alfred/supervisor/core.py:650
 msgid "supervisor.register_plugin_task.no_active_task_group"
 msgstr ""
 "register_plugin_task() called before Supervisor.start() (or after "
 "stop()); no active TaskGroup to attach to. Call start() first."
 
-#: src/alfred/supervisor/core.py:716
+#: src/alfred/supervisor/core.py:719
 msgid "supervisor.no_such_component"
 msgstr ""
 "No supervised component with id {component_id!r}. Run `alfred supervisor "
