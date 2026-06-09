@@ -521,12 +521,20 @@ jobs:
         # bootstrap that assembles the host (the canonical id never crosses the
         # stdio boundary outward). ``session.py``'s ``_on_post_handshake_method``
         # dispatch-arm delta is covered by the Plugins subsystem gate above.
+        # ``errors.py`` (the comms-MCP typed exception hierarchy) is included —
+        # trivially 100% but a security-relevant typed-error surface that belongs
+        # in the gate. ``hookpoints.py`` is deliberately EXCLUDED: its
+        # declarations execute at MODULE IMPORT time (the module-bottom
+        # ``declare_hookpoints()`` call), which runs before pytest-cov starts
+        # tracking — coverage cannot attribute import-time lines to a test, so a
+        # per-file 100% gate would be unsatisfiable. Its behaviour is covered by
+        # ``tests/unit/hooks/test_comms_hookpoints_registered.py`` instead.
         # Chained ``&&`` hashFiles guard per the plugins/supervisor precedent so
         # the gate no-ops cleanly on a branch where these files do not exist yet.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/protocol.py') != '' && hashFiles('src/alfred/comms_mcp/inbound.py') != '' && hashFiles('src/alfred/comms_mcp/inbound_scanner.py') != '' && hashFiles('src/alfred/comms_mcp/classifier_registry.py') != '' && hashFiles('src/alfred/comms_mcp/handlers.py') != '' && hashFiles('src/alfred/comms_mcp/bootstrap.py') != '' && hashFiles('src/alfred/comms_mcp/observability.py') != '' && hashFiles('src/alfred/orchestrator/burst_limiter.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/protocol.py') != '' && hashFiles('src/alfred/comms_mcp/inbound.py') != '' && hashFiles('src/alfred/comms_mcp/inbound_scanner.py') != '' && hashFiles('src/alfred/comms_mcp/classifier_registry.py') != '' && hashFiles('src/alfred/comms_mcp/handlers.py') != '' && hashFiles('src/alfred/comms_mcp/bootstrap.py') != '' && hashFiles('src/alfred/comms_mcp/observability.py') != '' && hashFiles('src/alfred/comms_mcp/errors.py') != '' && hashFiles('src/alfred/orchestrator/burst_limiter.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/comms_mcp/protocol.py,src/alfred/comms_mcp/inbound.py,src/alfred/comms_mcp/inbound_scanner.py,src/alfred/comms_mcp/classifier_registry.py,src/alfred/comms_mcp/handlers.py,src/alfred/comms_mcp/bootstrap.py,src/alfred/comms_mcp/observability.py,src/alfred/orchestrator/burst_limiter.py' \
+            --include='src/alfred/comms_mcp/protocol.py,src/alfred/comms_mcp/inbound.py,src/alfred/comms_mcp/inbound_scanner.py,src/alfred/comms_mcp/classifier_registry.py,src/alfred/comms_mcp/handlers.py,src/alfred/comms_mcp/bootstrap.py,src/alfred/comms_mcp/observability.py,src/alfred/comms_mcp/errors.py,src/alfred/orchestrator/burst_limiter.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
