@@ -176,15 +176,21 @@ def test_operator_session_forgery_corpus_has_payloads() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="awaiting PR-S4-8/9 comms-MCP foundations + Discord — cib-2026-001..N",
-)
 def test_comms_identity_boundary_corpus_has_payloads() -> None:
-    """`tests/adversarial/comms_identity_boundary/` must carry ≥1 payload from PR-S4-8/9."""
+    """`tests/adversarial/comms_identity_boundary/` carries ≥5 PR-S4-8 payloads.
+
+    PR-S4-8 (#152) ships cib-2026-001..005: forged canonical_user_id in
+    platform_metadata (ignored, resolver-state authoritative), inter-persona
+    T2-as-T3 relay (inert claim, always T3), canonical-id outbound leakage
+    (never echoed), empty-classifier-set bypass (AST guard refuses), and
+    handler-exception-silenced (positive/negative control). The xfail-strict
+    placeholder self-destructed when the payloads arrived, by design; the floor
+    of 5 catches a silent deletion regression. PR-S4-9 extends the category with
+    the Discord-specific entries.
+    """
     category_dir = Path(__file__).parent / "comms_identity_boundary"
     count = _count_yaml_payloads(category_dir)
-    assert count > 0, (
-        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
-        "requires real YAML, not stub test modules"
+    assert count >= 5, (
+        f"expected ≥5 *.yaml payloads under {category_dir} (cib-2026-001..005), "
+        f"found {count} — a payload was deleted or renamed"
     )

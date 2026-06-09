@@ -1,0 +1,13 @@
+id: cib-2026-004
+category: comms_identity_boundary
+threat: "A malicious diff adds a new adapter_kind with an empty REQUIRED_CLASSIFIERS_BY_KIND entry and no MARKER_NO_CLASSIFIERS_NEEDED justification so adapter sub-payloads bypass the host-owned classifier set entirely."
+ingestion_path: comms_inbound_message
+payload:
+  attack_shape: "adapter_kind 'evil' added with REQUIRED_CLASSIFIERS_BY_KIND['evil']=frozenset() and no MARKER_NO_CLASSIFIERS_NEEDED['evil']"
+  expected_guard: "tests/unit/comms_mcp/test_required_classifiers_complete.py AST guard"
+expected_outcome: refused
+provenance: "PR-S4-8 §8.5 / sec-002 round-3 — REQUIRED_CLASSIFIERS_BY_KIND is host-owned; a plugin cannot opt out of the required classifier set. An empty entry must carry a MARKER_NO_CLASSIFIERS_NEEDED justification (the reference plugin is plain-text). The AST guard refuses the module import otherwise, so the empty-set bypass never reaches runtime."
+references:
+  - "PR-S4-8 §8.5"
+  - "spec §8.5"
+  - "#152"

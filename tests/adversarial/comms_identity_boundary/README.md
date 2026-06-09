@@ -46,15 +46,24 @@ an explicit out-of-scope decision before Slice-4 closes. The matrix is the
 contract between this category's threat model and the slice's task graph —
 drift is a release-blocker.
 
+PR-S4-8 ships `cib-2026-001..005`; PR-S4-9 extends the category from
+`cib-2026-006` onward with the Discord-specific entries (the original
+forward-looking numbering below was renumbered when PR-S4-8 landed the
+foundations).
+
 | Attack vector | Owning PR / Task |
 |---|---|
-| Inbound platform_user_id resolves to different canonical User | PR-S4-8 (`cib-2026-001`) |
-| Addressing-drift via thread retitle mid-thread | PR-S4-9 (`cib-2026-005` — `COMMS_ADDRESSING_DRIFT_FIELDS`) |
-| Verification-phrase replay from different platform_user_id | PR-S4-9 (`cib-2026-003` — `phrase_platform_user_mismatch` refusal) |
-| Attachment SHA mismatch TOCTOU between DLP scan and broker substitution | PR-S4-8 (`cib-2026-006` — `ContentRefShaSizeMismatch`) |
-| Outbound DLP bypass via queue.pause → policy-tighten → queue.resume | PR-S4-9 (`cib-2026-004` — re-scan defensively at resume) |
-| Pre-resolution DoS via spray of fresh platform_user_ids | PR-S4-8 (`cib-2026-002` — pre-resolution coarse limiter) |
-| Prompt injection through Discord sub-payloads (9 surfaces) | PR-S4-9 (`cib-2026-007..015`) |
+| Forged `canonical_user_id` in `platform_metadata` (ignored; resolver-state authoritative) | PR-S4-8 (`cib-2026-001`) |
+| Inter-persona relay tagging T3 content as T2 (inert claim; always T3) | PR-S4-8 (`cib-2026-002`) |
+| Canonical-id leakage on outbound (never echoed across the stdio boundary) | PR-S4-8 (`cib-2026-003`) |
+| Empty-classifier-set bypass via a new `adapter_kind` (AST guard refuses) | PR-S4-8 (`cib-2026-004`) |
+| Handler-exception-silenced positive/negative control (dispatcher re-raises) | PR-S4-8 (`cib-2026-005`) |
+| Attachment SHA mismatch TOCTOU between DLP scan and broker substitution | PR-S4-9 (`ContentRefShaSizeMismatch`) |
+| Addressing-drift via thread retitle mid-thread | PR-S4-9 (`COMMS_ADDRESSING_DRIFT_FIELDS`) |
+| Verification-phrase replay from different platform_user_id | PR-S4-9 (`phrase_platform_user_mismatch` refusal) |
+| Outbound DLP bypass via queue.pause → policy-tighten → queue.resume | PR-S4-9 (re-scan defensively at resume) |
+| Pre-resolution DoS via spray of fresh platform_user_ids | PR-S4-8 host-side `_PreResolutionLimiter` (covered by unit suite) |
+| Prompt injection through Discord sub-payloads (9 surfaces) | PR-S4-9 |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.

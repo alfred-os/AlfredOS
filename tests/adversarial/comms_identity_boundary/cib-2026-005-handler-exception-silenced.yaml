@@ -1,0 +1,13 @@
+id: cib-2026-005
+category: comms_identity_boundary
+threat: "A comms notification handler silently swallows its own exception and returns None so a downstream failure leaves no COMMS_HANDLER_FAILED_FIELDS audit row and the dispatcher never trips the breaker."
+ingestion_path: inbound_notification_handler
+payload:
+  swallowing_handler_returns: null
+  raising_handler_event: "comms.handler.failed"
+expected_outcome: audit_row_emitted
+provenance: "PR-S4-8 §8.4 / err-007 — the dispatcher contract is 'handlers MUST raise'. A handler that swallows its exception is invisible to the dispatcher (negative control: no COMMS_HANDLER_FAILED_FIELDS, by design — the dispatcher cannot observe a swallowed exception). A handler that DOES raise is the positive control: the dispatcher emits COMMS_HANDLER_FAILED_FIELDS and re-raises the original exception. The structural fix lives at the handler level; tests/unit/comms_mcp/test_handlers_never_swallow.py is the AST guard against bare except:pass in handler process bodies."
+references:
+  - "PR-S4-8 §8.4"
+  - "spec §8.4"
+  - "#152"
