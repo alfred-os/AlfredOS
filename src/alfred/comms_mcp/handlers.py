@@ -49,6 +49,7 @@ from alfred.comms_mcp.inbound import (
     _IdentityResolverLike,
     _OrchestratorLike,
     _peppered_hash,
+    _PreResolutionLimiter,
     _SecretBrokerLike,
     process_inbound_message,
 )
@@ -138,7 +139,16 @@ class _HookInvokerLike(Protocol):
 
 
 class InboundMessageHandler:
-    """Routes ``inbound.message`` through :func:`process_inbound_message`."""
+    """Routes ``inbound.message`` through :func:`process_inbound_message`.
+
+    sec-003: the handler is the long-lived host object that the session
+    dispatcher fans ``inbound.message`` notifications out to, so it OWNS the
+    persistent :class:`_PreResolutionLimiter`. A fresh limiter per message would
+    reset the coarse per-``(adapter_id, platform_user_id_hash)`` budget every
+    time and make the pre-resolution DoS gate a no-op in production; holding it
+    on the handler is what lets the budget actually accumulate across the flood
+    of messages a single platform user can send.
+    """
 
     def __init__(
         self,
@@ -148,12 +158,21 @@ class InboundMessageHandler:
         burst_limiter: _BurstLimiterLike,
         audit_writer: _AuditWriterLike,
         secret_broker: _SecretBrokerLike,
+        pre_resolution_limiter: _PreResolutionLimiter | None = None,
     ) -> None:
         self._identity_resolver = identity_resolver
         self._orchestrator = orchestrator
         self._burst_limiter = burst_limiter
         self._audit_writer = audit_writer
         self._secret_broker = secret_broker
+        # Persistent across every ``process`` call (sec-003). Tests may inject a
+        # pre-loaded limiter to drive the cap deterministically; production
+        # leaves it defaulted so the handler mints exactly one and keeps it.
+        self._pre_resolution_limiter = (
+            pre_resolution_limiter
+            if pre_resolution_limiter is not None
+            else _PreResolutionLimiter()
+        )
 
     async def process(self, notification: InboundMessageNotification) -> None:
         await process_inbound_message(
@@ -163,6 +182,7 @@ class InboundMessageHandler:
             burst_limiter=self._burst_limiter,
             audit_writer=self._audit_writer,
             secret_broker=self._secret_broker,
+            pre_resolution_limiter=self._pre_resolution_limiter,
         )
 
 
