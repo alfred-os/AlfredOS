@@ -32,20 +32,21 @@ from alfred.i18n import t
 from alfred.state.proposal_payloads import BreakerResetProposal
 
 if TYPE_CHECKING:
+    from alfred.identity.operator_session import OperatorSessionError
     from alfred.supervisor.protocols import OperatorResolverProtocol
 
 supervisor_app = typer.Typer(help=t("cli.supervisor.help"), no_args_is_help=True)
 _log = structlog.get_logger(__name__)
 
 
-# Maps an OperatorSessionError subclass to (refusal t-key, audit reason).
-# #153 closure: the Slice-3 OS-account fallback (env/getlogin/getpwuid) is
-# deleted; operator attribution is now the authenticated session token.
-_REFUSAL_KEYS_BY_REASON: Final[Mapping[str, str]] = {
-    "operator_session_missing": "supervisor.breaker.reset.refused.not_logged_in",
-    "operator_session_expired": "operator_session.refused.expired",
-    "operator_session_resolver_timeout": "operator_session.refused.resolver_timeout",
-}
+# Fallback for an unmapped OperatorSessionError subclass. CR-227 round-2
+# finding 1: an unknown subclass must NOT be coerced to "missing" (which reads
+# as "not logged in" and mislabels the forensic trail). It gets its own
+# distinct reason + a generic refusal message instead.
+_UNKNOWN_REFUSAL: Final[tuple[str, str]] = (
+    "operator_session_unknown",
+    "operator_session.refused.unknown",
+)
 
 
 def _build_operator_resolver() -> OperatorResolverProtocol:
@@ -104,33 +105,118 @@ def _resolve_operator_session_or_refuse(*, component_id: str) -> str:
     """
     import asyncio
 
-    from alfred.identity.operator_session import (
-        OperatorSessionError,
-        OperatorSessionExpired,
-        OperatorSessionMissing,
-        OperatorSessionTimeout,
-    )
+    from alfred.identity.operator_session import OperatorSessionError
 
     resolver = _build_operator_resolver()
     try:
         user_id: str = asyncio.run(resolver.resolve())
         return user_id
     except OperatorSessionError as exc:
-        if isinstance(exc, OperatorSessionMissing):
-            reason = "operator_session_missing"
-        elif isinstance(exc, OperatorSessionExpired):
-            reason = "operator_session_expired"
-        elif isinstance(exc, OperatorSessionTimeout):
-            reason = "operator_session_resolver_timeout"
-        else:
-            reason = "operator_session_missing"
+        reason, key = _refusal_for(exc)
         _emit_breaker_reset_refused_audit(component_id=component_id, reason=reason)
-        key = _REFUSAL_KEYS_BY_REASON.get(reason, "supervisor.breaker.reset.refused.not_logged_in")
         typer.echo(t(key), err=True)
         recovery = t(f"{key}.recovery")
         if recovery != f"{key}.recovery":
             typer.echo(recovery, err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _refusal_for(exc: OperatorSessionError) -> tuple[str, str]:
+    """Map a concrete ``OperatorSessionError`` to (audit reason, refusal t-key).
+
+    CR-227 round-2 finding 1: every concrete subclass gets its OWN reason +
+    localised message. Coercing host_mismatch / machine_mismatch /
+    token_unknown / token_user_mismatch / user_revoked / bad_file_mode / etc.
+    to ``operator_session_missing`` mislabelled the forensic trail and weakened
+    hard rule #7 (a replay attempt looked like "not logged in"). The map is
+    keyed on the exception TYPE; the resolver's existing
+    ``operator_session.refused.*`` vocabulary supplies the messages (each with
+    a ``.recovery`` companion). An unmapped subclass falls back to a DISTINCT
+    ``operator_session_unknown`` reason — never to "missing".
+
+    Lazy-imports the exception classes (perf-001: keeps the typer surface
+    light so ``alfred --help`` does not pull the identity/SQLAlchemy chain).
+    """
+    from alfred.identity.operator_session import (
+        OperatorSessionBadFileMode,
+        OperatorSessionBadFileOwner,
+        OperatorSessionExpired,
+        OperatorSessionHostMismatch,
+        OperatorSessionMachineIdMismatch,
+        OperatorSessionMalformed,
+        OperatorSessionMissing,
+        OperatorSessionNoMachineId,
+        OperatorSessionParentDirInsecure,
+        OperatorSessionParentDirNotOwned,
+        OperatorSessionRevoked,
+        OperatorSessionTimeout,
+        OperatorSessionTokenUnknown,
+        OperatorSessionTokenUserMismatch,
+        OperatorSessionUserRevoked,
+    )
+
+    # The missing-session case keeps its bespoke "not logged in" message — it is
+    # the most common refusal and names the ``alfred login`` recovery directly.
+    refusals: Mapping[type[OperatorSessionError], tuple[str, str]] = {
+        OperatorSessionMissing: (
+            "operator_session_missing",
+            "supervisor.breaker.reset.refused.not_logged_in",
+        ),
+        OperatorSessionExpired: ("operator_session_expired", "operator_session.refused.expired"),
+        OperatorSessionTimeout: (
+            "operator_session_resolver_timeout",
+            "operator_session.refused.resolver_timeout",
+        ),
+        OperatorSessionHostMismatch: (
+            "operator_session_host_mismatch",
+            "operator_session.refused.host_mismatch",
+        ),
+        OperatorSessionMachineIdMismatch: (
+            "operator_session_machine_mismatch",
+            "operator_session.refused.machine_mismatch",
+        ),
+        OperatorSessionTokenUnknown: (
+            "operator_session_token_unknown",
+            "operator_session.refused.token_unknown",
+        ),
+        OperatorSessionTokenUserMismatch: (
+            "operator_session_token_user_mismatch",
+            "operator_session.refused.token_user_mismatch",
+        ),
+        OperatorSessionUserRevoked: (
+            "operator_session_user_revoked",
+            "operator_session.refused.user_revoked",
+        ),
+        OperatorSessionRevoked: (
+            "operator_session_revoked",
+            "operator_session.refused.revoked",
+        ),
+        OperatorSessionBadFileMode: (
+            "operator_session_bad_file_mode",
+            "operator_session.refused.bad_file_mode",
+        ),
+        OperatorSessionBadFileOwner: (
+            "operator_session_bad_file_owner",
+            "operator_session.refused.bad_file_owner",
+        ),
+        OperatorSessionMalformed: (
+            "operator_session_malformed",
+            "operator_session.refused.malformed",
+        ),
+        OperatorSessionParentDirInsecure: (
+            "operator_session_parent_dir_insecure",
+            "operator_session.refused.parent_dir_insecure",
+        ),
+        OperatorSessionParentDirNotOwned: (
+            "operator_session_parent_dir_not_owned",
+            "operator_session.refused.parent_dir_not_owned",
+        ),
+        OperatorSessionNoMachineId: (
+            "operator_session_no_machine_id",
+            "operator_session.refused.no_machine_id",
+        ),
+    }
+    return refusals.get(type(exc), _UNKNOWN_REFUSAL)
 
 
 def _emit_breaker_reset_refused_audit(*, component_id: str, reason: str) -> None:
