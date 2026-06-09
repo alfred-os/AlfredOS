@@ -43,6 +43,8 @@ after a fresh ``import alfred.cli.main`` and fails if
 
 from __future__ import annotations
 
+from typing import Annotated
+
 import typer
 
 from alfred.cli.audit import audit_app
@@ -192,6 +194,49 @@ def status() -> None:
     typer.echo(t("status.anthropic_configured", yes_or_no=yes_no))
     typer.echo(t("status.daily_budget", amount=f"{settings.daily_budget_usd:.2f}"))
     typer.echo(t("status.per_call_max", amount=f"{settings.per_call_max_usd:.2f}"))
+
+
+@app.command()
+def login(
+    user: Annotated[
+        str | None, typer.Option("--as", "--user", help=t("cli.login.help.user"))
+    ] = None,
+    expires_in: Annotated[
+        str | None, typer.Option("--expires-in", help=t("cli.login.help.expires_in"))
+    ] = None,
+    refresh: Annotated[bool, typer.Option("--refresh", help=t("cli.login.help.refresh"))] = False,
+) -> None:
+    """Create or refresh the operator session (#153).
+
+    Top-level verb (mirrors ``alfred status`` / ``alfred chat``). The heavy
+    broker + SQLAlchemy chain is imported lazily inside the impl so
+    ``alfred --help`` does not pay it (PR-S3-6 §8.5 perf lesson).
+    """
+    import asyncio
+
+    from alfred.cli.operator_session import _build_deps, login_impl
+
+    asyncio.run(login_impl(_build_deps(), as_user=user, expires_in=expires_in, refresh=refresh))
+
+
+@app.command()
+def logout() -> None:
+    """Revoke and delete the current operator session (#153)."""
+    import asyncio
+
+    from alfred.cli.operator_session import _build_deps, logout_impl
+
+    asyncio.run(logout_impl(_build_deps()))
+
+
+@app.command()
+def whoami() -> None:
+    """Print the currently-bound operator (#153)."""
+    import asyncio
+
+    from alfred.cli.operator_session import _build_deps, whoami_impl
+
+    asyncio.run(whoami_impl(_build_deps()))
 
 
 @app.command()

@@ -40,11 +40,22 @@ def _register() -> None:
     t("login.expires_in_out_of_range")
     t("login.no_machine_id")
     t("login.confirmed")
+    t("login.no_users_exist")
+    t("login.auto_selected_single_user")
+    t("login.non_tty_requires_explicit_user")
+    t("login.refresh_no_session")
+    t("login.picker_row")
+    t("login.picker_prompt")
+    t("login.picker_out_of_range")
     t("logout.no_session")
     t("logout.confirmed")
     t("whoami.no_session")
     t("whoami.expired")
     t("whoami.template")
+    t("whoami.signed_in_as")
+    t("whoami.session_since")
+    t("whoami.session_expires")
+    t("whoami.machine")
 
     # Operator-session refusal reasons (PR-S4-5).
     t("operator_session.refused.expired")
@@ -55,6 +66,15 @@ def _register() -> None:
     t("operator_session.refused.bad_file_mode")
     t("operator_session.refused.bad_file_owner")
     t("operator_session.refused.resolver_timeout")
+    # Refusal recovery companions — each carries a runnable command (devex-2).
+    t("operator_session.refused.expired.recovery")
+    t("operator_session.refused.host_mismatch.recovery")
+    t("operator_session.refused.machine_mismatch.recovery")
+    t("operator_session.refused.token_unknown.recovery")
+    t("operator_session.refused.user_revoked.recovery")
+    t("operator_session.refused.bad_file_mode.recovery")
+    t("operator_session.refused.bad_file_owner.recovery")
+    t("operator_session.refused.resolver_timeout.recovery")
 
     # Supervisor reset refusals (PR-S4-5).
     t("supervisor.breaker.reset.refused.not_logged_in")
