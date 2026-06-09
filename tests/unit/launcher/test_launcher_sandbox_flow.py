@@ -461,18 +461,23 @@ def test_stub_kind_production_uses_host_accurate_reason(run_launcher, tmp_path) 
     non-windows host."""
     manifest = _write_manifest(tmp_path, _STUB_MANIFEST)
     stub = _stub_binary(tmp_path)
-    result = run_launcher(
+    # FAKE_UNAME in production is refused BEFORE the kind branch — assert that
+    # gate fires (CR nitpick: don't leave this first call as dead code).
+    gated = run_launcher(
         "alfred.example",
         str(stub),
         env={
             "ALFRED_ENVIRONMENT": "production",
-            "FAKE_UNAME": "Linux",  # ignored in production, but proves host=linux
+            "FAKE_UNAME": "Linux",
             "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
         },
     )
-    # FAKE_UNAME in production is refused BEFORE the kind branch, so this case
-    # actually exercises the FAKE_UNAME gate. Re-run without FAKE_UNAME to reach
-    # the stub branch on the real host.
+    assert gated.returncode != 0
+    assert "fake_uname_in_production" in gated.stderr
+
+    # Without FAKE_UNAME the stub branch is reached on the real host, and the
+    # generic refusal uses the host-accurate ``stub_kind_in_production`` key
+    # (NOT the windows-specific one) on a non-windows host.
     result = run_launcher(
         "alfred.example",
         str(stub),

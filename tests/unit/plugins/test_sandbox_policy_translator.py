@@ -54,6 +54,19 @@ def test_simple_policy_translates_in_stable_order() -> None:
     ]
 
 
+def test_unshare_net_translates_to_unshare_net_flag() -> None:
+    """``net`` → ``--unshare-net`` (host-independent network-containment proof).
+
+    The integration test that proves outbound-network containment via a real
+    bwrap netns can SKIP on runners whose unprivileged userns can't configure
+    the loopback (RTM_NEWADDR). This deterministic translation assertion holds
+    everywhere, so the network-isolation contract is never left wholly
+    un-asserted.
+    """
+    policy = SandboxPolicy(unshare=["net"], keep_fds=[3])
+    assert "--unshare-net" in policy_to_bwrap_flags(policy)
+
+
 def test_rw_binds_translate() -> None:
     policy = SandboxPolicy(rw_binds=[("/var/run/x", "/var/run/x")], keep_fds=[3])
     flags = policy_to_bwrap_flags(policy)

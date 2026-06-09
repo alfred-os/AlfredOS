@@ -44,34 +44,44 @@ pytestmark = pytest.mark.skipif(
 # outbound network — only a loopback-only empty net namespace). keep_fds=[3]
 # carries the provider key. The real quarantined-LLM policy bytes ship in
 # PR-S4-7; this fixture is the resolver-integration analogue.
-def _adequate_policy_body() -> str:
+def _adequate_policy_body(*, unshare_net: bool = False) -> str:
     binds = ['["/usr", "/usr"]', '["/lib", "/lib"]']
     for extra in ("/lib64", "/bin"):
         if Path(extra).exists():
             binds.append(f'["{extra}", "{extra}"]')
     binds.append(f'["{_REPO_ROOT / "src"}", "{_REPO_ROOT / "src"}"]')
+    # ``net`` is OPT-IN (network-containment test only). bwrap ``--unshare-net``
+    # tries to bring up loopback via netlink (RTM_NEWADDR), which the
+    # GitHub-Actions unprivileged userns FORBIDS — so unsharing net in the
+    # shared fixture would break every filesystem/exec/fd-3 test too. Only the
+    # dedicated network test requests it (and skips loudly when the runner can't
+    # configure the netns — see test_plugin_cannot_open_outbound_network).
+    unshare = ["pid", "uts", "cgroup", "ipc"]
+    if unshare_net:
+        unshare.append("net")
+    unshare_toml = ", ".join(f'"{ns}"' for ns in unshare)
     return (
         "ro_binds = [\n  " + ",\n  ".join(binds) + "\n]\n"
         'tmpfs = ["/tmp"]\n'
-        # test-1 vector 3 (CR PR #229 finding-3): ``net`` is unshared so the
-        # sandboxed plugin runs in an empty network namespace — no host route,
-        # so an outbound connect is kernel-contained, not policy-checked.
-        'unshare = ["pid", "uts", "cgroup", "ipc", "net"]\n'
+        f"unshare = [{unshare_toml}]\n"
         "die_with_parent = true\n"
         "keep_fds = [3]\n"
     )
 
 
-def _fixture_manifest(tmp_path: Path) -> tuple[Path, Path]:
+def _fixture_manifest(tmp_path: Path, *, unshare_net: bool = False) -> tuple[Path, Path]:
     """Write the manifest + an adequate policy under a tmp policy root.
 
     Returns ``(manifest_path, policy_dir)``. The policy_dir is passed to the
     launcher via ``ALFRED_SANDBOX_POLICY_DIR`` so confinement resolves the
-    policy_ref relative to it.
+    policy_ref relative to it. ``unshare_net`` opts into the network-namespace
+    isolation (only the network-containment test; see _adequate_policy_body).
     """
     policy_dir = tmp_path / "policies"
     policy_dir.mkdir()
-    (policy_dir / "fixture.linux.bwrap.policy").write_text(_adequate_policy_body())
+    (policy_dir / "fixture.linux.bwrap.policy").write_text(
+        _adequate_policy_body(unshare_net=unshare_net)
+    )
 
     manifest = tmp_path / "plugins" / "alfred.fixture" / "manifest.toml"
     manifest.parent.mkdir(parents=True)
@@ -210,8 +220,19 @@ def test_plugin_cannot_open_outbound_network(tmp_path: Path) -> None:
         "finally:\n"
         "    s.close()\n"
     )
-    manifest, policy_dir = _fixture_manifest(tmp_path)
+    manifest, policy_dir = _fixture_manifest(tmp_path, unshare_net=True)
     result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
+    # bwrap brings up loopback in the new net namespace via netlink
+    # (RTM_NEWADDR); some unprivileged userns (e.g. GitHub-Actions runners
+    # without CAP_NET_ADMIN) forbid that, so bwrap exits before the plugin
+    # runs. SKIP LOUDLY rather than silent-pass — the containment assertion
+    # below is only meaningful when the netns actually came up.
+    if result.returncode != 0 and "RTM_NEWADDR" in result.stderr:
+        pytest.skip(
+            "runner userns cannot configure the unshared net namespace's "
+            f"loopback (bwrap: {result.stderr.strip()}); network-containment "
+            "assertion not exercisable here"
+        )
     assert "NET_OK" not in result.stdout, "outbound network was NOT contained by --unshare-net"
     assert result.returncode == 0, result.stderr
     assert "BLOCKED" in result.stdout
