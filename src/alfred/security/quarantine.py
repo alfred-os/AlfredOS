@@ -66,6 +66,8 @@ if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.hooks.capability import CapabilityGate
     from alfred.plugins.transport import PluginTransport
+    from alfred.policies.model import BurstLimiterPolicy
+    from alfred.policies.snapshot_ref import PoliciesSnapshotRef
     from alfred.security.dlp import OutboundDlp
 
 _log = structlog.get_logger(__name__)
@@ -440,6 +442,7 @@ class QuarantinedExtractor:
         transport: PluginTransport,
         audit_writer: AuditWriter,
         outbound_dlp: OutboundDlp,
+        policies_ref: PoliciesSnapshotRef | None = None,
     ) -> None:
         """Construct the orchestrator-side extractor.
 
@@ -473,6 +476,13 @@ class QuarantinedExtractor:
         self._transport = transport
         self._audit_writer = audit_writer
         self._outbound_dlp = outbound_dlp
+        # PR-S4-4: the active policy snapshot ref. The LOW-BLAST per-(user,
+        # persona) burst-limiter policy (``rate_limits.
+        # quarantined_extract_per_user_persona``) is hot-reloadable; the
+        # HIGH-BLAST ``quarantined_provider_url`` refuses hot-reload at the
+        # watcher layer (closure arch-003). Additive + optional so Slice-3
+        # construction keeps working until PR-S4-1 wires the real ref.
+        self._policies_ref = policies_ref
         # Anchor the subscriber's lifecycle to extractor lifecycle.
         # Helper is idempotent against the active registry, so multiple
         # extractors per process land ONE post-subscriber on the
@@ -498,6 +508,23 @@ class QuarantinedExtractor:
         from alfred.security._extract_dlp_subscriber import register_extract_dlp_subscriber
 
         register_extract_dlp_subscriber(outbound_dlp=outbound_dlp)
+
+    def burst_limiter_policy(self) -> BurstLimiterPolicy | None:
+        """Return the active per-(user, persona) burst-limiter policy.
+
+        Per-call deref (core-003): reads ``ref.current()`` every invocation so
+        a watcher swap to the LOW-BLAST
+        ``rate_limits.quarantined_extract_per_user_persona`` block takes effect
+        on the next extract without restarting the extractor. The HIGH-BLAST
+        ``quarantined_provider_url`` is NOT read here — it refuses hot-reload at
+        the watcher layer. Returns ``None`` when no snapshot ref is wired
+        (legacy Slice-3 construction).
+        """
+        if self._policies_ref is None:
+            return None
+        return (
+            self._policies_ref.current().policies.rate_limits.quarantined_extract_per_user_persona
+        )
 
     # ------------------------------------------------------------------
     # Schema-class validation

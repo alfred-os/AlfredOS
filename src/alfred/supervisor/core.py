@@ -192,9 +192,12 @@ class Supervisor:
         # Slice-4 stub kwargs (#174). Both default to None so the legacy
         # 5-kwarg construction (unit tests, alfred chat bootstrap) keeps
         # passing unchanged. Real implementations:
-        #   policies_ref              → PR-S4-4 (PoliciesSnapshotRef)
         #   operator_session_resolver → PR-S4-5 (_resolve_operator)
-        policies_ref: PoliciesSnapshotRefProtocol | None = None,
+        # PR-S4-4 (rev-003 closure): ``policies_ref`` is REQUIRED — no default.
+        # Production refuses to run the privileged orchestrator with no policy
+        # snapshot (CLAUDE.md hard rule 7). Tests pass a ``_StubPoliciesSnapshotRef``
+        # via the ``tests.helpers.policies.stub_policies_ref`` fixture.
+        policies_ref: PoliciesSnapshotRefProtocol,
         operator_session_resolver: OperatorResolverProtocol | None = None,
         # arch-001 (#173 / PR-S4-2): the outbound DLP scanner threaded into
         # every ProposalContext so _record_failure can scan failure_detail
@@ -240,7 +243,7 @@ class Supervisor:
         # snapshot stub + the no-op operator resolver so PR-S4-4 / PR-S4-5
         # can swap real implementations through the same kwargs without
         # re-touching __init__.
-        self._policies_ref: PoliciesSnapshotRefProtocol | None = policies_ref
+        self._policies_ref: PoliciesSnapshotRefProtocol = policies_ref
         self._operator_session_resolver: OperatorResolverProtocol | None = operator_session_resolver
         self._outbound_dlp: OutboundDlpProtocol | None = outbound_dlp
 
@@ -410,10 +413,19 @@ class Supervisor:
             return
 
         repo_path = self._state_git_path
-        interval = self._proposal_dispatch_interval_s
         ctx = self._build_proposal_context()
 
         while not self._shutdown_event.is_set():
+            # PR-S4-4 (core-003): deref the active policy snapshot at the TOP of
+            # each iteration. A watcher swap mid-iteration is picked up on the
+            # NEXT iteration (stale-snapshot-for-one-iteration invariant — see
+            # alfred.policies.snapshot_ref). The interval read derives from the
+            # per-iteration snapshot, NOT a cached local, so a future
+            # hot-reloadable cadence knob takes effect without a restart. The
+            # binding is intentionally re-read every loop and never cached
+            # across the awaits below (the Component-D AST guard enforces this).
+            snapshot = self._policies_ref.current()
+            interval = self._dispatch_interval_for(snapshot)
             try:
                 await _proposal_dispatch_cycle(
                     ctx=ctx,
@@ -473,6 +485,20 @@ class Supervisor:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
             except TimeoutError:
                 continue
+
+    def _dispatch_interval_for(self, snapshot: object) -> int:  # noqa: ARG002 — snapshot reserved for a future hot-reloadable cadence knob
+        """Return the dispatch interval, derived from the per-iteration snapshot.
+
+        The proposal-dispatch cadence is not yet an operator-tunable
+        ``PoliciesV1`` field, so this returns the construction-time interval.
+        The signature takes the per-iteration ``snapshot`` (core-003 deref) so
+        a future hot-reloadable cadence knob lands as a one-line change here —
+        the loop already re-derefs every iteration. ``snapshot`` is the active
+        :class:`alfred.policies.snapshot_ref.PoliciesSnapshot`; typed as
+        ``object`` because the supervisor holds the ref via the narrow
+        ``PoliciesSnapshotRefProtocol`` whose ``current()`` returns ``object``.
+        """
+        return self._proposal_dispatch_interval_s
 
     async def stop(self) -> None:
         """Drain the supervised TaskGroup; persist breaker state; audit.

@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import redis.asyncio as aioredis
 import structlog
@@ -37,6 +37,9 @@ from redis.commands.core import AsyncScript
 from redis.exceptions import RedisError
 
 from alfred.plugins.web_fetch.errors import WebFetchRateLimited
+
+if TYPE_CHECKING:
+    from alfred.policies.snapshot_ref import PoliciesSnapshotRef
 
 _log = structlog.get_logger(__name__)
 
@@ -67,6 +70,18 @@ class HandleCapConfig:
                 "A cap of 0 would refuse every fetch."
             )
             raise ValueError(msg)
+
+    @classmethod
+    def from_snapshot_ref(cls, ref: PoliciesSnapshotRef) -> HandleCapConfig:
+        """Build a config from the active policy snapshot (PR-S4-4 hot-reload).
+
+        Derefs ``ref.current()`` on EVERY call (per-iteration deref, core-003)
+        so a watcher swap to
+        ``handle_caps.web_fetch_max_concurrent_handles_per_user`` is reflected
+        the next time a caller rebuilds the config — no plugin-host restart.
+        """
+        snapshot = ref.current()
+        return cls(per_user=snapshot.policies.handle_caps.web_fetch_max_concurrent_handles_per_user)
 
 
 _OUTER_KEY_TTL_FLOOR_SECONDS: Final[int] = 600

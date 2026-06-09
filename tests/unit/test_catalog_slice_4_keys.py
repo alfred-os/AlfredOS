@@ -86,6 +86,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "supervisor.config_reload.rejected.validation_failure",
     "supervisor.config_reload.rejected.file_vanished",
     "supervisor.config_reload.rejected.stat_failed",
+    "supervisor.config_reload.rejected.audit_write_failed",
+    # Config-watcher state-machine notifications (2; PR-S4-4).
+    "supervisor.config_watcher.degraded",
+    "supervisor.config_watcher.recovered",
     # TUI (1).
     "comms.tui.daemon_required_to_chat",
 )
@@ -171,6 +175,7 @@ def test_no_orphan_slice_4_msgids_in_po_outside_enumeration() -> None:
         "supervisor.breaker.reset.",
         "supervisor.sandbox.",
         "supervisor.config_reload.",
+        "supervisor.config_watcher.",
         "daemon.",
         "comms.tui.daemon_required_to_chat",
     )

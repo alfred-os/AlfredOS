@@ -39,7 +39,7 @@ drift on future refactors.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
@@ -52,6 +52,9 @@ from alfred.i18n import t
 # module's path. ``alfred.plugins.web_fetch`` owns the public surface
 # downstream code imports against.
 from alfred.security.quarantine import ContentHandle
+
+if TYPE_CHECKING:
+    from alfred.policies.snapshot_ref import PoliciesSnapshotRef
 
 _log = structlog.get_logger(__name__)
 
@@ -134,9 +137,30 @@ class ContentStore:
     bootstrap path exists).
     """
 
-    def __init__(self, *, redis_url: str) -> None:
+    def __init__(
+        self,
+        *,
+        redis_url: str,
+        policies_ref: PoliciesSnapshotRef | None = None,
+    ) -> None:
         self._redis_url = redis_url
         self._client: aioredis.Redis | None = None
+        # PR-S4-4: the active policy snapshot ref. Additive so the Slice-3
+        # construction (``ContentStore(redis_url=...)``) keeps working; the
+        # plugin host passes the real ref once PR-S4-1's daemon boot wires it.
+        self._policies_ref = policies_ref
+
+    def session_total_quota(self) -> int | None:
+        """Return the per-session web.fetch quota from the active snapshot.
+
+        Per-call deref (core-003): reads ``ref.current()`` every invocation so
+        a watcher swap to ``rate_limits.web_fetch_per_session_total`` takes
+        effect on the next quota check with no plugin-host restart. Returns
+        ``None`` when no snapshot ref is wired (legacy Slice-3 construction).
+        """
+        if self._policies_ref is None:
+            return None
+        return self._policies_ref.current().policies.rate_limits.web_fetch_per_session_total
 
     @property
     def redis_url(self) -> str:

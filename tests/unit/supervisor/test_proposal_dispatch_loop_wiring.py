@@ -30,6 +30,7 @@ import pytest
 
 from alfred.supervisor.core import Supervisor
 from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
+from tests.helpers.policies import _StubPoliciesSnapshotRef
 
 
 @asynccontextmanager
@@ -57,6 +58,7 @@ def _build_supervisor(
         state_git_path=state_git_path,
         proposal_dispatch_interval_s=proposal_dispatch_interval_s,
         outbound_dlp=_identity_dlp(),
+        policies_ref=_StubPoliciesSnapshotRef(),
     )
     return sup, {"gate": gate, "audit": audit}
 

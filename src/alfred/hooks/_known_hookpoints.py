@@ -99,6 +99,20 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         CARRIER_SUBSTITUTED_HOOKPOINT,
         CARRIER_SUBSTITUTION_REFUSED_HOOKPOINT,
     ),
+    # PR-S4-4 (ADR-0023, #159): the PolicyWatcher's operational hookpoints.
+    # All carrier_tier=T0 + fail_closed=True — system-internal config-reload
+    # signals (no operator/untrusted content). Registered by
+    # ``alfred.policies.watcher.declare_hookpoints`` at module import.
+    # ``supervisor.config_watcher.degraded`` fires on the stat-failure
+    # state-machine transition; ``policies.watcher.degraded`` fires when the
+    # audit store is unwritable (closure sec-4 fallback).
+    "alfred.policies.watcher": (
+        "supervisor.config_reload",
+        "supervisor.config_reload_rejected",
+        "supervisor.config_watcher.recovered",
+        "supervisor.config_watcher.degraded",
+        "policies.watcher.degraded",
+    ),
 }
 
 
