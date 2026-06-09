@@ -118,8 +118,8 @@ async def test_152_closure_seven_assertions(postgres_url: str, monkeypatch) -> N
         assert CANONICAL_SLUG not in str(notification_dump)
         assert _FORGED_CANONICAL not in str(notification_dump)
         # The synthetic outbound frame the harness emits likewise carries no
-        # canonical id. TODO(PR-S4-9): replace this harness-frame check with a
-        # genuine session->stdio outbound-frame capture once that seam is wired —
+        # canonical id. TODO(PR-S4-9, #233): replace this harness-frame check with
+        # a genuine session->stdio outbound-frame capture once that seam is wired —
         # until then this only proves the harness's own synthetic frame, so the
         # load-bearing host-side invariant is the ingest-kwargs assertion above.
         for frame in host.outbound.frames:

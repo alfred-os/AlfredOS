@@ -397,6 +397,14 @@ async def process_inbound_message(
     )
 
     inbound_message_id = uuid.uuid4().hex
+    # PROVENANCE CAVEAT + SCANNER-WIRING SEAM (TODO PR-S4-9). These kinds are
+    # taken straight off the UNTRUSTED wire (``notification.sub_payload_refs``) —
+    # they are PLUGIN-ASSERTED, not yet host-classified. ``InboundContentScanner``
+    # is built + tested but has no caller here: for the reference plugin the
+    # required-classifier set is empty, so scanning is inert. PR-S4-9 (which adds
+    # the non-empty Discord classifier set) MUST wire the scanner in BEFORE that
+    # set is non-empty, or unclassified T3 sub-payloads would be admitted on the
+    # plugin's word. Tracked in the PR-S4-9 follow-up issue (#233).
     sub_payload_kinds = frozenset(notification.sub_payload_refs)
 
     # 4) Observability — the T3 promotion row.
