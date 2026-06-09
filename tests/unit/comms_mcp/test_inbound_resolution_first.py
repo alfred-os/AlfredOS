@@ -78,4 +78,10 @@ async def test_binding_row_carries_hashed_platform_user_id_not_raw() -> None:
     row = audit.rows_with_schema("COMMS_BINDING_REQUESTED_FIELDS")[0]
     assert "platform_user_id_hash" in row
     assert "verification_phrase_hash" in row
+    # sec-010: the raw platform_user_id must appear in NEITHER the subject NOR
+    # the persisted/indexed trace_id column. ``trace_id`` previously carried the
+    # raw id (H1) — captured by the spy now so this assertion is real, not a
+    # subject-only tautology.
     assert "discord:victim" not in str(row)
+    assert row["trace_id"] != "discord:victim"
+    assert row["trace_id"] == row["platform_user_id_hash"]
