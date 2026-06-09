@@ -113,6 +113,16 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "supervisor.config_watcher.degraded",
         "policies.watcher.degraded",
     ),
+    # PR-S4-5 (#153): the operator-session lifecycle hookpoints. All three
+    # carry carrier_tier=T1 (operator-attributable content: user_id, host,
+    # machine_id_hash) + fail_closed=True. Registered by
+    # ``alfred.identity.operator_session.declare_hookpoints`` at module
+    # import (bottom-of-module call), mirroring ``alfred.cli.daemon``.
+    "alfred.identity.operator_session": (
+        "operator.session.created",
+        "operator.session.revoked",
+        "operator.session.refused",
+    ),
 }
 
 

@@ -496,7 +496,66 @@ def compute_token_hash(*, token: str, pepper: bytes) -> str:
     return hmac.new(subkey, token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# §10 Hookpoints (operator.session.*) — carrier_tier=T1
+# ---------------------------------------------------------------------------
+
+OPERATOR_SESSION_CREATED_HOOKPOINT: Final = "operator.session.created"
+OPERATOR_SESSION_REVOKED_HOOKPOINT: Final = "operator.session.revoked"
+OPERATOR_SESSION_REFUSED_HOOKPOINT: Final = "operator.session.refused"
+
+_OPERATOR_SESSION_HOOKPOINTS: Final = (
+    OPERATOR_SESSION_CREATED_HOOKPOINT,
+    OPERATOR_SESSION_REVOKED_HOOKPOINT,
+    OPERATOR_SESSION_REFUSED_HOOKPOINT,
+)
+
+
+def declare_hookpoints(registry: object | None = None) -> None:
+    """Register the three operator-session hookpoints (spec §10).
+
+    Each is ``subscribable_tiers=SYSTEM_ONLY_TIERS``, ``fail_closed=True``,
+    ``carrier_tier=T1`` — the session-lifecycle events carry
+    operator-attributable (T1) content (the ``user_id``, ``host``,
+    ``machine_id_hash``). No subscribers exist at this layer in Slice 4;
+    the hookpoints exist for future Slice-5+ consumers (step-up auth,
+    federated-session sync).
+
+    Called at module import (bottom of this file) so the manifest
+    sync-test reaches it by importing the subsystem, mirroring
+    ``alfred.cli.daemon.declare_hookpoints``. Idempotent on equal metadata
+    via the registry's standard re-declaration guard.
+
+    ``register_hookpoint`` REQUIRES ``carrier_tier=`` (PR-S4-3 AST guard);
+    every call below populates it.
+    """
+    from alfred.hooks import SYSTEM_ONLY_TIERS, get_registry
+    from alfred.hooks.registry import HookRegistry
+    from alfred.security.tiers import T1
+
+    if registry is None:
+        reg: HookRegistry = get_registry()
+    elif isinstance(registry, HookRegistry):
+        reg = registry
+    else:
+        raise TypeError(
+            f"declare_hookpoints(registry=) expects a HookRegistry or None, "
+            f"got {type(registry).__name__}",
+        )
+    for name in _OPERATOR_SESSION_HOOKPOINTS:
+        reg.register_hookpoint(
+            name=name,
+            subscribable_tiers=SYSTEM_ONLY_TIERS,
+            refusable_tiers=frozenset(),
+            fail_closed=True,
+            carrier_tier=T1,
+        )
+
+
 __all__ = [
+    "OPERATOR_SESSION_CREATED_HOOKPOINT",
+    "OPERATOR_SESSION_REFUSED_HOOKPOINT",
+    "OPERATOR_SESSION_REVOKED_HOOKPOINT",
     "LinuxMachineIdProvider",
     "MachineIdProvider",
     "MacosMachineIdProvider",
@@ -520,9 +579,15 @@ __all__ = [
     "WindowsMachineIdProvider",
     "compute_machine_id_hash",
     "compute_token_hash",
+    "declare_hookpoints",
     "derive_machine_id_hash_subkey",
     "derive_token_hash_subkey",
     "load_session_file",
     "select_machine_id_provider",
     "write_session_file",
 ]
+
+
+# Module-import registration so the manifest sync-test reaches these by
+# importing the subsystem (mirrors alfred.cli.daemon + alfred.policies.watcher).
+declare_hookpoints()
