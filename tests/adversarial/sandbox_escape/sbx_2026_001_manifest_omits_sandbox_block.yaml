@@ -1,0 +1,26 @@
+id: sbx-2026-001
+category: sandbox_escape
+threat: >-
+  An attacker ships a plugin manifest with no [sandbox] block, hoping the
+  launcher falls open and spawns the plugin with no OS-level isolation
+  declared. A plugin with no declared containment posture must never load.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: manifest_omits_sandbox_block
+  manifest_toml: |
+    [alfred]
+    manifest_version = 1
+    [plugin]
+    id = "attacker.example"
+    subscriber_tier = "user-plugin"
+    sandbox_profile = "user-plugin"
+expected_outcome: refused
+provenance: >-
+  PR-S4-6 Component B + G. parse_manifest raises ManifestSandboxMissingError
+  and the launcher refuses with reason="sandbox_block_missing" + a
+  supervisor.plugin.sandbox_refused audit row before any exec. Fail-closed
+  (CLAUDE.md hard rule #7).
+references:
+  - "spec §7.1 plugin-manifest-sandbox-declaration"
+  - "src/alfred/plugins/manifest.py::_parse_sandbox_block"
+  - "bin/alfred-plugin-launcher.sh sandbox_block_missing branch"

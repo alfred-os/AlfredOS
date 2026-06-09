@@ -1,0 +1,23 @@
+id: sbx-2026-008
+category: sandbox_escape
+threat: >-
+  The provider-key fd-3 channel suffers a partial write (a constrained pipe
+  buffer, an EAGAIN on a would-block fd). An attacker who can induce the
+  truncation hopes the plugin receives a partial key and the Supervisor
+  proceeds anyway, or that a second writer interleaves between the length
+  prefix and the key body.
+ingestion_path: stdio_fd3_key_delivery
+payload:
+  attack: fd3_partial_write_on_provider_key
+  framing: length_prefix_then_key
+expected_outcome: refused
+provenance: >-
+  PR-S4-6 Component F sec-3. deliver_provider_key_via_fd3 writes the 4-byte
+  length prefix + key in ONE atomic os.writev. On a short write or EAGAIN it
+  raises ProviderKeyDeliveryError(reason="provider_key_delivery_failed") and
+  the Supervisor REFUSES to spawn — never delivering a truncated key. The
+  mutable key buffer is zeroed before gc.collect().
+references:
+  - "spec §7.5 fd-3 inheritance + residency"
+  - "src/alfred/supervisor/fd3_key_delivery.py"
+  - "PR #205 round-2 sec-3 closure (single writev)"

@@ -1,0 +1,23 @@
+id: sbx-2026-009
+category: sandbox_escape
+threat: >-
+  A kind:none plugin (no OS-level isolation) reports effective_sandbox_kind =
+  "full" in its post-handshake sandbox_info, hoping the Supervisor trusts the
+  self-report and grants it the posture of a fully-sandboxed plugin. A plugin
+  lying about its own containment must be torn down.
+ingestion_path: stdio_transport.inbound
+payload:
+  attack: sandbox_info_kind_none_claims_full
+  manifest_kind: none
+  reported_effective_sandbox_kind: full
+expected_outcome: quarantined
+provenance: >-
+  PR-S4-6 arch-3. AlfredPluginSession._verify_sandbox_info compares the
+  plugin-reported effective_sandbox_kind against the manifest's declared
+  sandbox.kind; a mismatch (or a missing field) raises
+  SandboxInfoHandshakeMismatch and tears the session down (SIGKILL +
+  plugin.lifecycle.quarantined, reason="sandbox_info_handshake_mismatch").
+references:
+  - "spec §7 (sandbox-info handshake)"
+  - "src/alfred/plugins/session.py::_verify_sandbox_info"
+  - "PR #205 round-2 arch-3 closure"

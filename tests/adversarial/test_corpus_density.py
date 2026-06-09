@@ -99,17 +99,22 @@ def test_dlp_egress_corpus_has_payloads() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="awaiting PR-S4-7 sandbox policies bundle — sbx-2026-001..N",
-)
 def test_sandbox_escape_corpus_has_payloads() -> None:
-    """`tests/adversarial/sandbox_escape/` must carry ≥1 payload from PR-S4-7."""
+    """`tests/adversarial/sandbox_escape/` carries ≥5 PR-S4-6 payloads.
+
+    PR-S4-6 ships sbx-2026-001 (manifest omits [sandbox]), -002 (kind:stub in
+    production), -007 (policy_ref traversal → policy_ref_escapes_root), -008
+    (fd-3 partial-write refusal), and -009 (sandbox_info handshake mismatch).
+    The xfail-strict placeholder self-destructed when the payloads arrived, by
+    design; the floor of 5 catches a silent deletion regression. PR-S4-7 adds
+    the kernel-observable bwrap-escape payloads on top.
+    """
     category_dir = Path(__file__).parent / "sandbox_escape"
     count = _count_yaml_payloads(category_dir)
-    assert count > 0, (
-        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
-        "requires real YAML, not stub test modules"
+    assert count >= 5, (
+        f"expected ≥5 *.yaml payloads under {category_dir} "
+        f"(sbx-2026-001/002/007/008/009), found {count} — a payload was "
+        "deleted or renamed"
     )
 
 
