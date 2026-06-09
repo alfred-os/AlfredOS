@@ -107,9 +107,7 @@ def test_adapter_health_request_minimal() -> None:
 
 
 def test_health_report_accepts_none_last_inbound() -> None:
-    rep = protocol.HealthReport(
-        ok=True, last_inbound_at=None, queue_depth=0, error_count=0
-    )
+    rep = protocol.HealthReport(ok=True, last_inbound_at=None, queue_depth=0, error_count=0)
     assert rep.last_inbound_at is None
 
 
@@ -125,13 +123,9 @@ def test_health_report_rejects_naive_last_inbound() -> None:
 
 def test_health_report_negative_counts_rejected() -> None:
     with pytest.raises(ValidationError):
-        protocol.HealthReport(
-            ok=True, last_inbound_at=None, queue_depth=-1, error_count=0
-        )
+        protocol.HealthReport(ok=True, last_inbound_at=None, queue_depth=-1, error_count=0)
     with pytest.raises(ValidationError):
-        protocol.HealthReport(
-            ok=True, last_inbound_at=None, queue_depth=0, error_count=-1
-        )
+        protocol.HealthReport(ok=True, last_inbound_at=None, queue_depth=0, error_count=-1)
 
 
 # ----- Outbound request ----------------------------------------------------

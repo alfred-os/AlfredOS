@@ -44,7 +44,6 @@ from ._inbound_spies import (
     make_resolved,
 )
 
-
 # --- protocol shape ---------------------------------------------------------
 
 

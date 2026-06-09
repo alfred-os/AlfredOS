@@ -24,11 +24,7 @@ from alfred.comms_mcp.classifier_registry import (
 from alfred.comms_mcp.protocol import adapter_kind
 
 _REGISTRY_SRC = (
-    Path(__file__).resolve().parents[3]
-    / "src"
-    / "alfred"
-    / "comms_mcp"
-    / "classifier_registry.py"
+    Path(__file__).resolve().parents[3] / "src" / "alfred" / "comms_mcp" / "classifier_registry.py"
 )
 
 

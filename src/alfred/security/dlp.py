@@ -52,6 +52,23 @@ _GENERIC_API_KEY_RE: Final[re.Pattern[str]] = re.compile(
 _REDACTION_SENTINEL: Final[str] = "[REDACTED:api-key-shape]"
 
 
+def redact_secret_shapes(text: str) -> str:
+    """Stateless secret-shape redaction — the API-key-regex stage standalone.
+
+    Substitutes every generic API-key-shaped token (``sk-``/``pk_``/… + 20+
+    alnum bytes) with :data:`_REDACTION_SENTINEL`. This is the same Stage-2
+    regex :meth:`OutboundDlp._scan_stages` runs, exposed as a stateless helper
+    for call sites that need a quick secret-shape scrub without constructing
+    the full ``OutboundDlp`` (broker + audit sink) — e.g. the comms session
+    dispatcher scrubbing an exception ``str`` before it lands in an audit row.
+
+    NOT a substitute for the full outbound DLP chokepoint (which also runs the
+    broker-backed redactor + canary stage); use ``OutboundDlp.scan_for_outbound``
+    for any text that crosses the outbound wire.
+    """
+    return _GENERIC_API_KEY_RE.sub(_REDACTION_SENTINEL, text)
+
+
 class OutboundDlpScanResult(BaseModel):
     """Forensic metadata of a single :meth:`OutboundDlp.scan_for_outbound` run.
 
@@ -245,4 +262,5 @@ __all__ = [
     "OutboundDlpProtocol",
     "OutboundDlpScanResult",
     "ScannedOutboundBody",
+    "redact_secret_shapes",
 ]
