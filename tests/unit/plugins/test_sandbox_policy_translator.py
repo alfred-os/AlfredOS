@@ -44,6 +44,8 @@ def test_simple_policy_translates_in_stable_order() -> None:
         "/usr/lib/x",
         "--tmpfs",
         "/tmp",  # noqa: S108 -- expected bwrap flag value, not a host temp path
+        "--dev",
+        "/dev",
         "--unshare-pid",
         "--unshare-uts",
         "--unshare-cgroup",
@@ -52,6 +54,17 @@ def test_simple_policy_translates_in_stable_order() -> None:
         "--sync-fd",
         "3",
     ]
+
+
+def test_dev_mount_default_on_and_opt_out() -> None:
+    """``dev`` defaults on (``--dev /dev``) and can be opted out.
+
+    A minimal /dev is on by default — CPython aborts at startup without
+    ``/dev/urandom``. ``dev = false`` drops it for a process that needs none.
+    """
+    on = policy_to_bwrap_flags(SandboxPolicy(keep_fds=[3]))
+    assert on[on.index("--dev") + 1] == "/dev"
+    assert "--dev" not in policy_to_bwrap_flags(SandboxPolicy(dev=False, keep_fds=[3]))
 
 
 def test_unshare_net_translates_to_unshare_net_flag() -> None:
