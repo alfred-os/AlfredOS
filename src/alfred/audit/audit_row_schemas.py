@@ -791,6 +791,13 @@ CONFIG_RELOAD_FIELDS: Final[frozenset[str]] = frozenset(
         "prev_sha256",
         "new_sha256",
         "changed_keys",
+        # ``changed_values`` (CR round-3 Finding 4): a forensic before/after map
+        # ``{dotted_key: {"old": ..., "new": ...}}`` for every changed key — the
+        # applied row records WHAT the auto-reload changed, not just which keys
+        # moved. Only LOW-BLAST keys reach an applied row (high-blast keys refuse
+        # hot-reload before any swap), so the values are low-blast by
+        # construction and carry no secret/high-blast material to redact.
+        "changed_values",
         "loaded_at",
         # ``operator_session_id`` joins to ``policies_snapshot_history``
         # ``applied_by_operator_session_id`` (PR-S4-4 round-2 closure 4).
