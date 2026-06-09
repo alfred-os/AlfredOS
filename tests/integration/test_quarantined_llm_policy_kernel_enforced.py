@@ -1,0 +1,297 @@
+"""Merge-blocking integration test: the REAL quarantined-LLM Linux policy is
+kernel-enforced (PR-S4-7 Component H).
+
+End-to-end with REAL subprocesses (no mocks): the real bash launcher, the real
+``manifest_reader`` subprocess, the REAL shipped
+``config/sandbox/quarantined-llm.linux.bwrap.policy`` bytes, and a real
+``bwrap`` sandbox. This is the partner of PR-S4-6's
+``test_launcher_policy_resolver.py`` (which exercised a *fixture* policy); this
+module proves the bytes AlfredOS actually ships for the quarantined LLM contain
+a compromised process. Asserts:
+
+* the fd-3 provider key reaches the sandboxed plugin (bwrap inherits fd 3 by
+  default — the test places the pipe read end on fd 3 in the parent +
+  ``pass_fds=(3,)``);
+* host ``/etc/passwd`` is unreadable (the real policy binds neither /etc);
+* ``/bin/sh`` exec is contained (the real policy binds no /bin + unshares pid).
+
+The real policy binds only the SYSTEM interpreter (/usr, /lib, /lib64); the
+test runs under the pytest venv interpreter, so we template the real policy with
+the minimal extra interpreter/plugin binds the test needs — NEVER removing any
+of the policy's own confinement (no /etc, no /bin, unshare pid/uts/cgroup/ipc,
+die_with_parent). This mirrors the S4-6 resolver fixture's bind logic against
+the shipped bytes.
+
+``bwrap`` is Linux-only; the whole module is skipped where it is absent (macOS
+dev). CI's alfred-core image (PR-S4-0b) ships bubblewrap 0.8.0 so this runs in
+docker-in-docker. Promoted to a required status check under PR-S4-7.
+
+NB: the real policy deliberately does NOT ``--unshare-net`` (the quarantined
+LLM makes its own provider HTTPS call); outbound egress is UNRESTRICTED and the
+provider-only allowlist is a release-blocker tracked in #230. This test
+therefore does NOT assert network containment — see
+``tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml``.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
+_REAL_POLICY = _REPO_ROOT / "config" / "sandbox" / "quarantined-llm.linux.bwrap.policy"
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("bwrap") is None,
+    reason="bwrap required for the quarantined-LLM kernel-enforcement test (Linux + CI only)",
+)
+
+
+def _real_policy_body_with_test_binds(plugin_dir: Path) -> str:
+    """The REAL quarantined-LLM Linux policy body + the test-interpreter binds.
+
+    We parse the shipped policy's ``ro_binds`` (so the /usr, /lib, /lib64
+    confinement is the production set verbatim), APPEND the venv-interpreter +
+    plugin_dir binds the pytest interpreter needs, and re-emit a TOML policy
+    body. We KEEP the policy's ``unshare`` / ``die_with_parent`` / ``keep_fds``
+    untouched and DROP only the production tmpfs scratch (``/run/alfred/...``)
+    — irrelevant to the containment assertions and avoids a mountpoint-exists
+    dependency in the test root. We deliberately do NOT add /etc or /bin, so the
+    escape assertions stay meaningful.
+    """
+    shipped = tomllib.loads(_REAL_POLICY.read_text())
+    # Drop any shipped bind whose SOURCE does not exist on this host. The
+    # production policy targets x86-64 Debian Bookworm, where ``/lib64`` is a
+    # real directory holding ld-linux-x86-64.so.2; on aarch64 (and other arches)
+    # ``/lib64`` does not exist and ``--ro-bind /lib64`` would fail with "Can't
+    # find source path". bwrap has no tolerant ``--ro-bind`` in the schema this
+    # PR ships (``--ro-bind-try`` is a #230 schema item), so the TEST filters to
+    # existing sources — the /usr + /lib binds carry the loader via the usrmerge
+    # symlink on every arch, so containment stays meaningful.
+    ro_binds: list[tuple[str, str]] = [
+        (src, dst) for src, dst in shipped.get("ro_binds", []) if Path(src).exists()
+    ]
+
+    # The pytest interpreter is ``sys.executable`` (venv python); its script
+    # lives under ``plugin_dir`` (pytest tmp_path). Neither is under the shipped
+    # /usr,/lib,/lib64 binds, so bind the venv (sys.prefix), the base
+    # interpreter install (sys.base_prefix — where the venv's bin/python symlink
+    # resolves), the realpath'd interpreter root, and plugin_dir.
+    interp_roots = {
+        sys.prefix,
+        sys.base_prefix,
+        str(Path(os.path.realpath(sys.executable)).parents[1]),
+        str(plugin_dir),
+    }
+    for root in sorted(interp_roots):
+        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin")):
+            ro_binds.append((root, root))
+
+    binds_toml = ",\n  ".join(f'["{src}", "{dst}"]' for src, dst in ro_binds)
+    unshare_toml = ", ".join(f'"{ns}"' for ns in shipped.get("unshare", []))
+    lines = [
+        "ro_binds = [\n  " + binds_toml + "\n]",
+        f"unshare = [{unshare_toml}]",
+        f"dev = {str(shipped.get('dev', True)).lower()}",
+        f"die_with_parent = {str(shipped.get('die_with_parent', True)).lower()}",
+        f"keep_fds = {shipped.get('keep_fds', [3])}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _fixture_manifest(tmp_path: Path) -> tuple[Path, Path]:
+    """Write the manifest + the real-policy-derived policy under a tmp root.
+
+    Returns ``(manifest_path, policy_dir)``. The policy_dir is passed to the
+    launcher via ``ALFRED_SANDBOX_POLICY_DIR`` so the policy_ref resolves
+    relative to it.
+    """
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    (policy_dir / "quarantined-llm.linux.bwrap.policy").write_text(
+        _real_policy_body_with_test_binds(tmp_path)
+    )
+
+    manifest = tmp_path / "plugins" / "alfred.quarantined-llm" / "manifest.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        """[alfred]
+manifest_version = 1
+[plugin]
+id = "alfred.quarantined-llm"
+subscriber_tier = "system"
+sandbox_profile = "user-plugin"
+[sandbox]
+kind = "full"
+[sandbox.policy_refs]
+linux = "quarantined-llm.linux.bwrap.policy"
+macos = "config/sandbox/quarantined-llm.macos.sb"
+windows = "config/sandbox/quarantined-llm.windows.stub.policy"
+"""
+    )
+    return manifest, policy_dir
+
+
+def _launcher_env(manifest: Path, policy_dir: Path) -> dict[str, str]:
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "test",
+        "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        "ALFRED_SANDBOX_POLICY_DIR": str(policy_dir),
+    }
+
+
+def _spawn_with_fd3(
+    stub: Path, manifest: Path, policy_dir: Path, key: bytes
+) -> subprocess.CompletedProcess[str]:
+    """Spawn the launcher with the framed provider key delivered over fd 3.
+
+    Mirrors ``test_launcher_policy_resolver.py::_spawn_with_fd3`` exactly: the
+    pipe read end is placed on fd 3 IN THE PARENT (saving/restoring the parent's
+    own fd 3) + ``pass_fds=(3,)`` so ``close_fds`` keeps it and the child — and
+    bwrap's default fd inheritance — carry it through to the plugin. A
+    ``preexec_fn`` dup2 does NOT work (subprocess runs ``close_fds`` after
+    preexec). See the S4-6 test's docstring for the full rationale.
+    """
+    read_fd, write_fd = os.pipe()
+    try:
+        os.fstat(3)
+        saved_fd3: int | None = os.dup(3)
+    except OSError:
+        saved_fd3 = None
+    os.dup2(read_fd, 3)
+    os.set_inheritable(3, True)  # noqa: FBT003 -- stdlib API: bool is positional
+    if read_fd != 3:
+        os.close(read_fd)
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — repo-owned launcher script path
+            [str(_LAUNCHER), "alfred.quarantined-llm", sys.executable, str(stub)],
+            env=_launcher_env(manifest, policy_dir),
+            pass_fds=(3,),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(_REPO_ROOT),
+        )
+    finally:
+        if saved_fd3 is not None:
+            os.dup2(saved_fd3, 3)
+            os.close(saved_fd3)
+        else:
+            os.close(3)
+    try:
+        os.write(write_fd, struct.pack(">I", len(key)))
+        os.write(write_fd, key)
+    except BrokenPipeError:
+        pass
+    finally:
+        os.close(write_fd)
+    stdout, stderr = proc.communicate(timeout=30)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
+def test_real_policy_unshare_set_matches_shipped() -> None:
+    """Guard: the test templates the SHIPPED unshare set, never a weaker one.
+
+    If a future edit drops ``pid`` from the real policy the containment
+    assertions below would silently weaken; this pins the production posture so
+    the kernel-enforcement claims stay anchored to what AlfredOS actually ships.
+    Also pins the documented #230 gap: the real policy MUST NOT unshare ``net``.
+    """
+    shipped = tomllib.loads(_REAL_POLICY.read_text())
+    unshare = set(shipped.get("unshare", []))
+    assert {"pid", "uts", "cgroup", "ipc"} <= unshare
+    assert "net" not in unshare, "egress allowlist landed — update this test + #230"
+    assert 3 in shipped.get("keep_fds", [])
+
+
+def test_quarantined_llm_fd3_key_delivered(tmp_path: Path) -> None:
+    stub = tmp_path / "stub.py"
+    stub.write_text(
+        "import os, struct, sys\n"
+        "prefix = os.read(3, 4)\n"
+        "length, = struct.unpack('>I', prefix)\n"
+        "key = os.read(3, length).decode()\n"
+        "print(f'GOT key=len{len(key)}', flush=True)\n"
+        "sys.exit(0)\n"
+    )
+    manifest, policy_dir = _fixture_manifest(tmp_path)
+    result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-quarantined-123")
+    assert result.returncode == 0, result.stderr
+    assert "GOT key=len18" in result.stdout
+    assert '"event":"supervisor.plugin.sandbox_refused"' not in result.stderr
+
+
+def test_quarantined_llm_cannot_read_host_etc_passwd(tmp_path: Path) -> None:
+    stub = tmp_path / "escape.py"
+    stub.write_text(
+        "import sys\n"
+        "try:\n"
+        "    open('/etc/passwd').read()\n"
+        "    print('READ_OK', flush=True)\n"
+        "    sys.exit(1)\n"
+        "except OSError as e:\n"
+        "    print(f'BLOCKED {e.errno}', flush=True)\n"
+        "    sys.exit(0)\n"
+    )
+    manifest, policy_dir = _fixture_manifest(tmp_path)
+    result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
+    assert "READ_OK" not in result.stdout, "real policy leaked host /etc/passwd"
+    assert result.returncode == 0, result.stderr
+
+
+def test_quarantined_llm_cannot_exec_host_bin_sh(tmp_path: Path) -> None:
+    stub = tmp_path / "exec_escape.py"
+    stub.write_text(
+        "import subprocess, sys\n"
+        "try:\n"
+        "    subprocess.run(['/bin/sh', '-c', 'echo escape'], check=True)\n"
+        "    print('EXEC_OK', flush=True)\n"
+        "    sys.exit(1)\n"
+        "except (FileNotFoundError, OSError):\n"
+        "    print('BLOCKED', flush=True)\n"
+        "    sys.exit(0)\n"
+    )
+    manifest, policy_dir = _fixture_manifest(tmp_path)
+    result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
+    assert "EXEC_OK" not in result.stdout, "real policy did NOT contain /bin/sh exec"
+
+
+def test_launcher_invokes_bwrap_not_unshared_net(tmp_path: Path) -> None:
+    """Documented #230 gap: the real policy must NOT pass --unshare-net.
+
+    A future edit that adds net isolation would change the egress posture; this
+    pins the current (documented, accepted) state at the launcher's emitted flag
+    set so the change is forced through review with #230.
+    """
+    stub = tmp_path / "stub.py"
+    stub.write_text(
+        "import os, struct, sys\n"
+        "os.read(3, 4)\n"  # drain the fd-3 frame so the parent write doesn't EPIPE
+        "print('RAN', flush=True)\n"
+        "sys.exit(0)\n"
+    )
+    manifest, policy_dir = _fixture_manifest(tmp_path)
+    # Translate the policy directly (the launcher's exact path) and assert the
+    # flag set, rather than scraping bwrap's argv. This reads the SAME bytes the
+    # launcher resolves.
+    from alfred.plugins.sandbox_policy import policy_to_bwrap_flags, read_policy_toml
+
+    body = (policy_dir / "quarantined-llm.linux.bwrap.policy").read_text()
+    flags = policy_to_bwrap_flags(read_policy_toml(body))
+    assert "--unshare-net" not in flags, "egress isolation landed — update #230 + this test"
+    assert "--unshare-pid" in flags
+    # And the chain actually runs end-to-end.
+    result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")
+    assert "RAN" in result.stdout, result.stderr
+    assert re.search(r"sandbox_refused", result.stderr) is None
