@@ -1429,9 +1429,37 @@ Expired / revoked / machine-id-mismatched / host-mismatched /
 token-user-mismatched sessions are refused with
 `OPERATOR_SESSION_REFUSED_FIELDS` and a closed-vocab `reason`.
 
+The in-memory file model is named `OperatorSessionFile` (Pydantic v2,
+`src/alfred/identity/operator_session.py`) to disambiguate from the
+SQLAlchemy ORM `OperatorSession` row (`operator_sessions` table,
+`src/alfred/memory/models.py`). The HMAC pepper is HKDF-Expanded
+(RFC 5869, `src/alfred/security/_hkdf.py`) into two domain-separated
+subkeys so a leaked `token_hash` cannot be replayed as a
+`machine_id_hash`.
+
 See [canonical user id](#canonical-user-id),
+[OperatorResolver](#operatorresolver),
 [ADR-0020](adr/0020-supervisor-cli-access-via-postgres-and-state-git.md),
 and [docs/subsystems/supervisor.md](subsystems/supervisor.md).
+
+## OperatorResolver
+
+The host-side DI seam (`OperatorResolverProtocol`,
+`src/alfred/supervisor/protocols.py`, async `resolve() -> str`) that every
+operator-attributed CLI command consumes to turn the
+[OperatorSession](#operatorsession) file into the canonical `User.id`. The
+production implementation is `DefaultOperatorSessionResolver`
+(`src/alfred/identity/_resolver.py`): TOCTOU-safe file load → host /
+machine-id / expiry checks → single-row `token_hash` lookup on the
+`uq_operator_sessions_token_hash` unique index → soft-delete (`deleted_at`)
+check. Distinct from the [IdentityResolver](#identityresolver), which maps
+comms-platform identities to canonical user IDs. Resolution has a 5 ms p99
+budget and a 250 ms hard timeout (`asyncio.wait_for`) that raises
+**OperatorSessionTimeout** rather than hanging a CLI command silently
+(err-008). A pytest AST guard
+(`tests/unit/cli/test_operator_resolver_consumed.py`) refuses any CLI
+command emitting an operator-attributed audit row without consuming the
+resolver.
 
 ## sandbox kind
 

@@ -1,0 +1,18 @@
+id: osf-2026-003
+category: operator_session_forgery
+threat: "An attacker clones a victim VM image (same hostname) and replays the session file. The machine-id-hash baked into the file was computed from the source machine's system-owned machine-id; the resolver recomputes the live machine-id-hash under the new machine and refuses with machine_mismatch even though the hostname matches."
+ingestion_path: operator_session_file
+payload:
+  user_id: 7
+  token: "valid-token"
+  host: "shared-hostname"
+  live_host: "shared-hostname"
+  machine_id_hash: "hash-from-machine-a"
+  live_machine_id_hash: "hash-from-machine-b"
+  db_row_present: true
+expected_outcome: refused
+provenance: "PR-S4-5 §5.3 + §6.4 step 4 — the machine-id is system-owned and stable across boots; the session stores only its HMAC. A cloned image whose hostname matches still refuses because the machine-id differs (OperatorSessionMachineIdMismatch, reason=machine_mismatch)."
+references:
+  - "PR-S4-5 §5.3"
+  - "spec §6.5"
+  - "#153"

@@ -1,0 +1,15 @@
+id: osf-2026-006
+category: operator_session_forgery
+threat: "An attacker plants a session file carrying a VALID token (it matches a real operator_sessions.token_hash row) but a DIFFERENT user_id in the file body, attempting impersonation-by-mismatch. The contract is token-authoritative: the resolver looks up the DB row by token_hash and refuses with token_user_mismatch when db_row.user_id != file.user_id."
+ingestion_path: operator_session_file
+payload:
+  file_user_id: 7
+  db_row_user_id: 9
+  token: "valid-token-owned-by-user-9"
+  db_row_present: true
+expected_outcome: refused
+provenance: "PR-S4-5 round-2 closure 11 (test-1) — the token is authoritative. A file whose user_id disagrees with the token's DB owner is refused with OperatorSessionTokenUserMismatch + OPERATOR_SESSION_REFUSED(reason=token_user_mismatch, resolved_user_id=9). Prevents claiming another operator's identity by editing the file body."
+references:
+  - "PR-S4-5 round-2 closure 11"
+  - "spec §6.4"
+  - "#153"
