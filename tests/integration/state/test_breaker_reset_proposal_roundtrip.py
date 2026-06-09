@@ -50,6 +50,7 @@ from alfred.state.dispatch_registry import (
 )
 from alfred.supervisor.errors import NoSuchComponentError
 from tests.helpers.dlp import identity_outbound_dlp as _identity_dlp
+from tests.helpers.policies import _StubPoliciesSnapshotRef
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -425,6 +426,9 @@ async def test_breaker_reset_proposal_round_trip_real_supervisor(
         session_scope=session_scope_factory,
         gate=MagicMock(),
         audit=audit,
+        # PR-S4-4 rev-003: policies_ref is a REQUIRED kwarg. This roundtrip
+        # doesn't exercise hot-reload, so the stub ref satisfies the contract.
+        policies_ref=_StubPoliciesSnapshotRef(),
     )
     # Register the breaker in the supervisor's in-memory map so
     # reset_breaker finds it.
