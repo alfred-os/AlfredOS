@@ -63,7 +63,7 @@ import asyncio
 import hashlib
 import re
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
@@ -78,6 +78,7 @@ from alfred.plugins.errors import (
     SandboxInfoHandshakeMismatch,
 )
 from alfred.plugins.manifest import PluginManifest, parse_manifest
+from alfred.security.dlp import redact_secret_shapes
 from alfred.utils.sliding_window_counter import SlidingWindowCounter
 
 if TYPE_CHECKING:
@@ -170,6 +171,34 @@ _HANDLER_DETAIL_MAX_LEN: Final[int] = 512
 # know the semantic cause of an arbitrary handler exception, so it records the
 # generic bucket — finer buckets are the handlers' own concern.
 _HANDLER_FAILURE_REASON: Final[str] = "handler_exception"
+
+# Closed-vocab handler-class label per notification method, for the
+# ``handler_class`` field on COMMS_HANDLER_FAILED_FIELDS. A stable label (not
+# ``type(handler).__name__``) so the audit field stays meaningful regardless of
+# which concrete handler / test double is wired.
+_HANDLER_CLASS_BY_METHOD: Final[Mapping[str, str]] = {
+    "inbound.message": "InboundHandler",
+    "adapter.binding_request": "BindingHandler",
+    "adapter.rate_limit_signal": "RateLimitHandler",
+    "adapter.crashed": "CrashHandler",
+}
+
+
+def _redact_params(params: Mapping[str, object] | None) -> Mapping[str, object]:
+    """Scrub secret-shaped tokens from every string value of a params dict.
+
+    Critical 6: an unknown-method payload is plugin-supplied (T3-shaped); a
+    credential smuggled in a string value is redacted before it reaches the
+    ``method_redacted_params`` audit field. Non-string values pass through
+    unchanged (they cannot carry a secret-shaped token). ``None`` → empty dict.
+    """
+    if params is None:
+        return {}
+    return {
+        key: (redact_secret_shapes(value) if isinstance(value, str) else value)
+        for key, value in params.items()
+    }
+
 
 # Mirrors ``Settings.comms_max_in_flight_notifications`` default (config field
 # ``Field(default=32, ge=1, le=1024)``). The factory takes the cap as a plain
@@ -546,22 +575,211 @@ class AlfredPluginSession:
         ``plugin.lifecycle.quarantined`` in a ``try/finally`` so the row
         lands regardless of kill outcome (rvw-pre-flight).
 
-        For any other method the call is a no-op; routing to the real
-        dispatch loop is the supervisor's job.
+        PR-S4-8 dispatch arm (Component G). A method in
+        :data:`_COMMS_NOTIFICATION_METHODS` is validated against its wire
+        schema and fanned out to the matching handler, the whole block wrapped
+        in ``async with self._dispatch_semaphore`` (per-adapter; perf-003). A
+        handler exception emits ``COMMS_HANDLER_FAILED_FIELDS`` + increments
+        the error counter + trips the breaker on 3 failures in 5min, then
+        **re-raises** (err-007 — loud; the original exception propagates to the
+        StdioTransport reader, which logs + continues). An *unknown* method
+        emits ``COMMS_UNKNOWN_NOTIFICATION_FIELDS`` + requests a plugin restart
+        and does NOT raise.
         """
         if method == "sandbox_info":
             await self._verify_sandbox_info(params)
             return
-        if method not in _DISALLOWED_POST_HANDSHAKE_METHODS:
+        if method in _DISALLOWED_POST_HANDSHAKE_METHODS:
+            log.error(
+                "post_handshake_disallowed_method",
+                plugin_id=self._manifest.plugin_id,
+                method=method,
+                correlation_id=self._correlation_id,
+            )
+            await self._quarantine_teardown(reason_base="protocol_violation")
             return
 
+        # Slice-3 in-process sessions (no comms wiring) keep the legacy no-op
+        # tail: a non-disallowed, non-sandbox method (e.g. ``lifecycle.stop``)
+        # is routed elsewhere by the supervisor and is not this session's
+        # concern. Only a comms-wired session (built via ``for_comms_adapter``,
+        # i.e. ``adapter_id`` set) owns the comms dispatch + unknown-method
+        # contract (Critical 6).
+        if not self._is_comms_session:
+            return
+
+        if method in _COMMS_NOTIFICATION_METHODS:
+            await self._dispatch_comms_notification(method, params)
+            return
+
+        # Unknown post-handshake method on a comms session — not silently
+        # dropped (Critical 6): typed audit row first, then restart request.
+        await self._emit_unknown_notification(method, params)
+        if self._supervisor is not None:
+            await self._supervisor.request_plugin_restart(
+                adapter_id=self._effective_adapter_id, reason="unknown_notification"
+            )
+
+    @property
+    def _is_comms_session(self) -> bool:
+        """True when this session was wired as a comms adapter.
+
+        A comms session is constructed with an explicit ``adapter_id`` (always
+        set by :meth:`for_comms_adapter`; never by a Slice-3 in-process
+        caller). Only a comms session owns the comms-notification dispatch +
+        unknown-method contract — a Slice-3 session keeps the legacy no-op
+        tail for any non-disallowed, non-sandbox method.
+        """
+        return self._adapter_id is not None
+
+    @property
+    def _effective_adapter_id(self) -> str:
+        """The adapter id for audit/supervisor calls on a comms session.
+
+        Only reached from the comms dispatch / unknown-method paths, which are
+        gated on :attr:`_is_comms_session` (``adapter_id`` set). The assert
+        pins that invariant for the type checker and fails loudly if a future
+        refactor reaches here on a Slice-3 session.
+        """
+        assert self._adapter_id is not None
+        return self._adapter_id
+
+    async def _dispatch_comms_notification(
+        self, method: str, params: Mapping[str, object] | None
+    ) -> None:
+        """Validate + fan a comms notification to its handler under the semaphore.
+
+        ``async with self._dispatch_semaphore`` (not ``acquire``/``release``)
+        guarantees the slot is released on the exception path (core-008). The
+        semaphore is per-adapter (perf-003): one adapter's notification storm
+        applies backpressure into its own stdio reader, never starving a
+        sibling adapter.
+
+        On a handler exception the audit row + counter increment + (conditional)
+        breaker trip happen BEFORE the ``raise`` — the original exception still
+        propagates to the StdioTransport reader, which logs + continues to the
+        next frame (err-007 / catch-and-continue invariant).
+        """
+        async with self._dispatch_semaphore:
+            try:
+                await self._route_comms_notification(method, params)
+            except Exception as exc:
+                await self._emit_handler_failed(method, exc)
+                self._error_counter.increment()
+                if (
+                    self._error_counter.exceeds(
+                        threshold=_HANDLER_FAILURE_THRESHOLD, window=_HANDLER_FAILURE_WINDOW
+                    )
+                    and self._supervisor is not None
+                ):
+                    await self._supervisor.trip_breaker(
+                        component_id=self._effective_adapter_id,
+                        reason="comms_handler_repeated_failures",
+                    )
+                raise
+
+    async def _route_comms_notification(
+        self, method: str, params: Mapping[str, object] | None
+    ) -> None:
+        """Validate ``params`` against the wire schema + await the one handler.
+
+        Handlers are awaited sequentially per notification — a single
+        notification never fans out to two handlers concurrently (spec §8.4
+        last paragraph; perf-003 clarification). Concurrency across
+        notifications is bounded only by the dispatch semaphore.
+        """
+        from alfred.comms_mcp.protocol import (
+            BindingRequestNotification,
+            CrashedNotification,
+            InboundMessageNotification,
+            RateLimitSignal,
+        )
+
+        raw = dict(params) if params is not None else {}
+        match method:
+            case "inbound.message":
+                assert self._inbound_handler is not None
+                await self._inbound_handler.process(InboundMessageNotification.model_validate(raw))
+            case "adapter.binding_request":
+                assert self._binding_handler is not None
+                await self._binding_handler.process(BindingRequestNotification.model_validate(raw))
+            case "adapter.rate_limit_signal":
+                assert self._rate_limit_handler is not None
+                await self._rate_limit_handler.process(RateLimitSignal.model_validate(raw))
+            case _:  # "adapter.crashed" — the only remaining member of the set
+                assert self._crash_handler is not None
+                await self._crash_handler.process(CrashedNotification.model_validate(raw))
+
+    async def _emit_handler_failed(self, method: str, exc: Exception) -> None:
+        """Write the ``COMMS_HANDLER_FAILED_FIELDS`` row for a handler exception.
+
+        ``detail_redacted`` is ``str(exc)`` scrubbed of secret-shaped tokens
+        (:func:`redact_secret_shapes`) then truncated to
+        :data:`_HANDLER_DETAIL_MAX_LEN` — so a downstream-broke message that
+        echoes a credential never reaches the audit log (CLAUDE.md hard rule 1).
+        ``error_class`` is the open-vocab Python type name; ``reason`` is the
+        closed-vocab SLO bucket.
+        """
+        detail = redact_secret_shapes(str(exc))[:_HANDLER_DETAIL_MAX_LEN]
         log.error(
-            "post_handshake_disallowed_method",
-            plugin_id=self._manifest.plugin_id,
+            "comms.handler_failed",
+            plugin_id=self._effective_adapter_id,
+            notification_method=method,
+            error_class=type(exc).__name__,
+            correlation_id=self._correlation_id,
+        )
+        await self._audit_writer.append_schema(
+            fields=audit_row_schemas.COMMS_HANDLER_FAILED_FIELDS,
+            schema_name="COMMS_HANDLER_FAILED_FIELDS",
+            event="comms.handler.failed",
+            actor_user_id=None,
+            subject={
+                "adapter_id": self._effective_adapter_id,
+                "notification_method": method,
+                "handler_class": _HANDLER_CLASS_BY_METHOD[method],
+                "error_class": type(exc).__name__,
+                "reason": _HANDLER_FAILURE_REASON,
+                "detail_redacted": detail,
+                "failed_at": datetime.now(UTC).isoformat(),
+            },
+            trust_tier_of_trigger=_AUDIT_TRUST_TIER,
+            result="failed",
+            cost_estimate_usd=_AUDIT_COST_USD,
+            trace_id=self._correlation_id,
+        )
+
+    async def _emit_unknown_notification(
+        self, method: str, params: Mapping[str, object] | None
+    ) -> None:
+        """Write the ``COMMS_UNKNOWN_NOTIFICATION_FIELDS`` row (Critical 6).
+
+        The unknown method is NOT silently dropped. ``method_redacted_params``
+        applies :func:`redact_secret_shapes` to every string value in the
+        params dict so a credential smuggled in an unknown-method payload never
+        reaches the audit log.
+        """
+        log.warning(
+            "comms.unknown_notification",
+            plugin_id=self._effective_adapter_id,
             method=method,
             correlation_id=self._correlation_id,
         )
-        await self._quarantine_teardown(reason_base="protocol_violation")
+        await self._audit_writer.append_schema(
+            fields=audit_row_schemas.COMMS_UNKNOWN_NOTIFICATION_FIELDS,
+            schema_name="COMMS_UNKNOWN_NOTIFICATION_FIELDS",
+            event="comms.unknown.notification",
+            actor_user_id=None,
+            subject={
+                "adapter_id": self._effective_adapter_id,
+                "method": method,
+                "method_redacted_params": _redact_params(params),
+                "observed_at": datetime.now(UTC).isoformat(),
+            },
+            trust_tier_of_trigger=_AUDIT_TRUST_TIER,
+            result="refused",
+            cost_estimate_usd=_AUDIT_COST_USD,
+            trace_id=self._correlation_id,
+        )
 
     async def _verify_sandbox_info(self, params: object) -> None:
         """Compare the plugin-reported sandbox kind against the manifest (arch-3).

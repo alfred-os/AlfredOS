@@ -12,6 +12,8 @@ Two coarse gates run BEFORE the resolver:
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from alfred.comms_mcp.inbound import (
@@ -113,8 +115,8 @@ async def test_process_refuses_empty_platform_user_id_before_resolver() -> None:
     class _BadBodyNotification:
         adapter_id = "alfred_comms_test"
         platform_user_id = ""  # empty -> cheap validate refuses
-        body: dict[str, object] = {"content": "x"}
-        sub_payload_refs: tuple[str, ...] = ()
+        body: ClassVar[dict[str, object]] = {"content": "x"}
+        sub_payload_refs: ClassVar[tuple[str, ...]] = ()
         addressing_signal = "dm"
 
     await process_inbound_message(
