@@ -16,7 +16,7 @@
 #      visible stderr key + a SANDBOX_REFUSED audit JSON row.
 #   4. **Manifest [sandbox] block** drives the branch:
 #        kind:full → resolve per-OS policy_ref (path-confined in Python),
-#                    translate to bwrap flags, exec bwrap --sync-fd 3.
+#                    translate to bwrap flags, exec bwrap --keep-fd 3.
 #        kind:none → Slice-3 UID-separated runuser path (unchanged).
 #        kind:stub → refuse in production; dev emits a stub-used audit row.
 #

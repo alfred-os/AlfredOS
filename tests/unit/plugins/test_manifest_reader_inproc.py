@@ -157,7 +157,7 @@ def test_policy_to_bwrap_flags_ok(monkeypatch, capsys) -> None:
     rc = manifest_reader.main(["--policy-to-bwrap-flags"])
     assert rc == 0
     lines = capsys.readouterr().out.splitlines()
-    assert "--sync-fd" in lines
+    assert "--keep-fd" in lines
     assert "3" in lines
 
 
@@ -184,7 +184,7 @@ def test_policy_to_bwrap_flags_confined_ref(tmp_path, monkeypatch, capsys) -> No
         ]
     )
     assert rc == 0
-    assert "--sync-fd" in capsys.readouterr().out.splitlines()
+    assert "--keep-fd" in capsys.readouterr().out.splitlines()
 
 
 def test_policy_to_bwrap_flags_ref_escapes_root(tmp_path, monkeypatch, capsys) -> None:
@@ -245,7 +245,7 @@ def test_policy_to_bwrap_flags_ref_default_install_root(tmp_path, monkeypatch, c
         ["--policy-to-bwrap-flags", "--policy-ref", "config/sandbox/foo.linux.bwrap.policy"]
     )
     assert rc == 0
-    assert "--sync-fd" in capsys.readouterr().out.splitlines()
+    assert "--keep-fd" in capsys.readouterr().out.splitlines()
 
 
 # --------------------------------------------------------------------------

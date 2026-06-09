@@ -4,7 +4,7 @@ End-to-end with REAL subprocesses (no mocks): the real bash launcher, the
 real ``manifest_reader`` subprocess, the real fixture policy file, and a real
 ``bwrap`` sandbox. Asserts:
 
-* ``bwrap`` is invoked with ``--sync-fd 3`` and the fixture's policy flags,
+* ``bwrap`` is invoked with ``--keep-fd 3`` and the fixture's policy flags,
   and the fd-3 provider key reaches the sandboxed plugin (Component J.1).
 * The active escape attempts are contained by bwrap (Component test-1):
   the sandboxed plugin cannot read host ``/etc/passwd`` (``/etc`` not bound)
