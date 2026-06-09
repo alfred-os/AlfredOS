@@ -293,7 +293,10 @@ async def _emit_t3_promotion(
             "inbound_message_id": inbound_message_id,
             "platform_user_id_hash": _peppered_hash(notification.platform_user_id, pepper=pepper),
             "canonical_user_id": resolved.canonical_user_id,
-            "sub_payload_kinds": sub_payload_kinds,
+            # JSONB-serializable: a frozenset is not JSON-encodable, so the
+            # audit row carries a sorted list. Determinism keeps the row stable
+            # across runs for forensic diffing.
+            "sub_payload_kinds": sorted(sub_payload_kinds),
             "language": resolved.language,
             "addressing_signal": notification.addressing_signal,
         },
