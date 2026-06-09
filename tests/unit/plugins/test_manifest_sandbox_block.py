@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from alfred.plugins.errors import ManifestError, ManifestSandboxMissingError
-from alfred.plugins.manifest import parse_manifest
+from alfred.plugins.manifest import SandboxBlock, parse_manifest
 
 _BASE = """
 [alfred]
@@ -161,6 +161,15 @@ linux = "config/sandbox/foo.linux.bwrap.policy"
     m = parse_manifest(raw)
     assert m.sandbox.kind == "none"
     assert m.sandbox.policy_refs["linux"].endswith(".bwrap.policy")
+
+
+def test_sandboxblock_direct_full_without_policy_refs_refuses() -> None:
+    # Defence in depth: constructing SandboxBlock directly (bypassing
+    # parse_manifest's pre-check) still refuses kind:full with no policy_refs
+    # via the model_validator. Pydantic wraps the ValueError in a
+    # ValidationError (a ValueError subclass).
+    with pytest.raises(ValueError):
+        SandboxBlock(kind="full")
 
 
 def test_sandbox_block_non_table_refuses() -> None:

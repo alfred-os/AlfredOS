@@ -36,12 +36,8 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     "supervisor.sandbox.refused.policy_ref_escapes_root": t(
         "supervisor.sandbox.refused.policy_ref_escapes_root"
     ),
-    "supervisor.sandbox.refused.unknown_host_os": t(
-        "supervisor.sandbox.refused.unknown_host_os"
-    ),
-    "supervisor.sandbox.refused.jq_unavailable": t(
-        "supervisor.sandbox.refused.jq_unavailable"
-    ),
+    "supervisor.sandbox.refused.unknown_host_os": t("supervisor.sandbox.refused.unknown_host_os"),
+    "supervisor.sandbox.refused.jq_unavailable": t("supervisor.sandbox.refused.jq_unavailable"),
     "supervisor.sandbox.refused.macos_full_not_yet_shipped": t(
         "supervisor.sandbox.refused.macos_full_not_yet_shipped"
     ),
@@ -52,9 +48,7 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     # from the primitives PR-S4-6 ships).
     "supervisor.boot.mlock_unavailable": t("supervisor.boot.mlock_unavailable"),
     "supervisor.boot.core_dumps_disabled": t("supervisor.boot.core_dumps_disabled"),
-    "daemon.boot.environment_source_conflict": t(
-        "daemon.boot.environment_source_conflict"
-    ),
+    "daemon.boot.environment_source_conflict": t("daemon.boot.environment_source_conflict"),
 }
 
 
