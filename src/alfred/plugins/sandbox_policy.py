@@ -16,15 +16,17 @@ Two load-bearing invariants:
   channel, so the model refuses it at construction with
   :class:`SandboxPolicyInvalid` (``reason="kind_full_requires_keep_fd_3"``).
 
-* **--keep-fd is the fd-inheritance flag (corrects issue #218).** The bwrap
-  flag for "do not close this inherited fd in the sandbox" is ``--keep-fd FD``,
-  present since bubblewrap 0.5.0 and still current in 0.9.0. ``--sync-fd`` is a
-  DIFFERENT flag — bwrap's internal sync-protocol fd (used with --block-fd /
-  --userns-block-fd) — which bwrap consumes/closes and does NOT pass through to
-  the child; using it for key delivery makes the child see fd 3 as "Bad file
-  descriptor". Issue #218 ("Bookworm renamed --keep-fd to --sync-fd") is a
-  misdiagnosis: both flags exist and are distinct. The translator emits
-  ``--keep-fd``. The field name ``keep_fds`` matches the emitted flag.
+* **--sync-fd is the fd-inheritance flag (issue #218).** In bubblewrap the
+  flag whose help text is literally "Keep this fd open while sandbox is
+  running" is ``--sync-fd FD``. Verified empirically against bwrap **0.9.0**
+  (``bwrap --help`` in PR #229 CI): it advertises ``--sync-fd FD`` and there
+  is NO ``--keep-fd`` — i.e. ``--sync-fd`` is current in both the Bookworm
+  0.8.0 image and 0.9.0, and the speculated ``--keep-fd`` rename never
+  happened. The translator emits ``--sync-fd``. The logical field name
+  ``keep_fds`` is retained as documented shorthand; only the CLI surface uses
+  the bwrap flag. (NB: fd-3 delivery ALSO requires the spawning parent to
+  place the pipe's read end ON fd 3 — see ``fd3_key_delivery`` + the resolver
+  test's preexec dup2; ``--sync-fd 3`` keeps fd 3 open but does not create it.)
 """
 
 from __future__ import annotations
@@ -109,7 +111,7 @@ def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
     """Translate a :class:`SandboxPolicy` into the bwrap CLI flag list.
 
     The flag order is stable (binds → tmpfs → dev → unshare → die-with-parent →
-    keep-fd) so the launcher's exec line is reproducible and auditable across
+    sync-fd) so the launcher's exec line is reproducible and auditable across
     Python dict-ordering changes.
     """
     flags: list[str] = []
@@ -128,11 +130,8 @@ def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
     if policy.die_with_parent:
         flags += ["--die-with-parent"]
     for fd in policy.keep_fds:
-        # --keep-fd FD = "do not close this inherited fd in the sandbox"
-        # (bubblewrap 0.5.0+). NOT --sync-fd, which is bwrap's internal
-        # sync-protocol fd and would make the child see fd 3 as a bad fd
-        # (corrects #218 — see module docstring).
-        flags += ["--keep-fd", str(fd)]
+        # --sync-fd, not --keep-fd: Bookworm bubblewrap 0.8.0 naming (#218).
+        flags += ["--sync-fd", str(fd)]
     return flags
 
 

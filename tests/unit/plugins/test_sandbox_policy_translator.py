@@ -9,9 +9,8 @@ Two security invariants pinned here:
 * arch-2: a ``kind: full`` policy whose ``keep_fds`` omits 3 is refused at
   *parse* time (``SandboxPolicyInvalid``) — the fd-3 provider-key channel is
   load-bearing and a policy that forgets it would silently break key delivery.
-* The bwrap flag for fd-3 inheritance is ``--keep-fd`` (bubblewrap 0.5.0+,
-  still current in 0.9.0). NOT ``--sync-fd``, which is bwrap's internal
-  sync-protocol fd — corrects the issue #218 misdiagnosis.
+* The bwrap flag for fd-3 inheritance is ``--sync-fd`` (Debian Bookworm
+  bubblewrap 0.8.0 naming; issue #218), NOT ``--keep-fd`` (upstream 0.9.0+).
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ def test_simple_policy_translates_in_stable_order() -> None:
         "--unshare-cgroup",
         "--unshare-ipc",
         "--die-with-parent",
-        "--keep-fd",
+        "--sync-fd",
         "3",
     ]
 
@@ -105,7 +104,7 @@ def test_default_keep_fds_includes_3() -> None:
     # fd 3 is the Supervisor's provider-key channel — kept by default.
     policy = SandboxPolicy()
     assert 3 in policy.keep_fds
-    assert "--keep-fd" in policy_to_bwrap_flags(policy)
+    assert "--sync-fd" in policy_to_bwrap_flags(policy)
 
 
 def test_keep_fds_without_3_refused_at_parse() -> None:
@@ -119,7 +118,7 @@ def test_keep_fds_without_3_refused_at_parse() -> None:
 def test_multiple_keep_fds_all_emitted() -> None:
     policy = SandboxPolicy(keep_fds=[3, 5])
     flags = policy_to_bwrap_flags(policy)
-    assert flags.count("--keep-fd") == 2
+    assert flags.count("--sync-fd") == 2
     assert "5" in flags
 
 
@@ -164,8 +163,8 @@ def test_fixture_policy_file_translates() -> None:
     )
     policy = read_policy_toml(fixture.read_text(encoding="utf-8"))
     flags = policy_to_bwrap_flags(policy)
-    assert "--keep-fd" in flags
-    assert flags[flags.index("--keep-fd") + 1] == "3"
+    assert "--sync-fd" in flags
+    assert flags[flags.index("--sync-fd") + 1] == "3"
     assert "--ro-bind" in flags
     assert "--unshare-pid" in flags
     assert "--die-with-parent" in flags

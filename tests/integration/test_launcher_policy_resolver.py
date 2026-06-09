@@ -4,7 +4,7 @@ End-to-end with REAL subprocesses (no mocks): the real bash launcher, the
 real ``manifest_reader`` subprocess, the real fixture policy file, and a real
 ``bwrap`` sandbox. Asserts:
 
-* ``bwrap`` is invoked with ``--keep-fd 3`` and the fixture's policy flags,
+* ``bwrap`` is invoked with ``--sync-fd 3`` and the fixture's policy flags,
   and the fd-3 provider key reaches the sandboxed plugin (Component J.1).
 * The active escape attempts are contained by bwrap (Component test-1):
   the sandboxed plugin cannot read host ``/etc/passwd`` (``/etc`` not bound)
@@ -144,7 +144,7 @@ def _launcher_env(manifest: Path, policy_dir: Path) -> dict[str, str]:
 def _remap_read_end_to_fd3(read_fd: int) -> None:
     """preexec_fn: place the pipe read end on fd 3 in the launcher child.
 
-    Runs post-fork / pre-exec in the child. ``bwrap --keep-fd 3`` and the
+    Runs post-fork / pre-exec in the child. ``bwrap --sync-fd 3`` and the
     sandboxed plugin's ``os.read(3, ...)`` operate on fd **3** specifically,
     but ``os.pipe()`` hands us an arbitrary descriptor (under pytest it is NOT
     3). ``pass_fds`` keeps ``read_fd`` open + inheritable at its ORIGINAL
@@ -170,7 +170,7 @@ def _spawn_with_fd3(
         [str(_LAUNCHER), "alfred.fixture", sys.executable, str(stub)],
         env=_launcher_env(manifest, policy_dir),
         # pass_fds keeps read_fd open + inheritable in the child; the
-        # preexec_fn then dup2's it onto fd 3 (the channel bwrap --keep-fd 3
+        # preexec_fn then dup2's it onto fd 3 (the channel bwrap --sync-fd 3
         # and the plugin's os.read(3) use). Without the remap the read end
         # lands at an arbitrary number and fd 3 is closed → the plugin's
         # os.read(3, 4) raises OSError(EBADF).

@@ -175,7 +175,7 @@ def test_policy_to_bwrap_flags_one_per_line() -> None:
     result = _run("--policy-to-bwrap-flags", stdin=policy)
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
-    assert "--keep-fd" in lines
+    assert "--sync-fd" in lines
     assert "3" in lines
     assert "--tmpfs" in lines
 
