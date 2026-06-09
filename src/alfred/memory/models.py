@@ -156,8 +156,10 @@ class AuditEntry(Base):
             "'recursion_refused', 'audit_row_emitted', "
             # Slice-4 (migration 0016) — PR-S4-8 comms-MCP inbound + session
             # dispatch dispositions: T3 promotion, first-contact binding,
-            # burst-limiter hard drop, post-handshake allow, handler failure.
-            "'promoted', 'binding_requested', 'dropped', 'allowed', 'failed')",
+            # burst-limiter backpressure (capped) + hard drop, post-handshake
+            # allow, handler failure.
+            "'promoted', 'binding_requested', 'dropped', 'capped', "
+            "'allowed', 'failed')",
             name="ck_audit_log_result",
         ),
     )

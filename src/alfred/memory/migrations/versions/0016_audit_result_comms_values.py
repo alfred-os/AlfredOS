@@ -16,6 +16,9 @@ carry ``result`` discriminators outside the Slice-4 (migration 0014) domain:
 * ``dropped`` — ``COMMS_INBOUND_BUDGET_CAPPED_FIELDS`` hard-drop row: the
   per-(user, persona) burst limiter stayed empty past ``drop_after_seconds``, or
   the pre-resolution coarse limiter refused before the resolver ran (sec-003).
+* ``capped`` — ``COMMS_INBOUND_BUDGET_CAPPED_FIELDS`` back-pressure row: the
+  burst limiter applied backpressure (a non-zero wait) but the acquire
+  eventually succeeded (``dropped=False``).
 * ``allowed`` — the ``alfred/hooks.register`` post-handshake disposition the
   comms-wired :class:`AlfredPluginSession` emits when a notification method is
   permitted (Wave-3 session extension).
@@ -99,6 +102,7 @@ _COMMS_ADDITIONS: tuple[str, ...] = (
     "promoted",
     "binding_requested",
     "dropped",
+    "capped",
     "allowed",
     "failed",
 )

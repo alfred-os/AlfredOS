@@ -21,7 +21,7 @@ ALEMBIC_INI_PATH = "alembic.ini"
 
 pytestmark = pytest.mark.integration
 
-_COMMS_RESULTS = ("promoted", "binding_requested", "dropped", "allowed", "failed")
+_COMMS_RESULTS = ("promoted", "binding_requested", "dropped", "capped", "allowed", "failed")
 
 
 @pytest.fixture
