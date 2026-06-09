@@ -65,11 +65,92 @@ _SAFE_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 # ``ALFRED_PLUGINS_DIR`` override exists for tests.
 _DEFAULT_PLUGINS_DIR: Path = Path("plugins")
 
+# Default sandbox-policy root, relative to the install root. The
+# ``ALFRED_SANDBOX_POLICY_DIR`` env override (forwarded by the launcher)
+# relocates it; confinement follows the override.
+_DEFAULT_POLICY_SUBDIR = "config/sandbox"
+
 _ENV_NOT_SET_KEY = "daemon.boot.environment_not_set"
 _ENV_UNRECOGNISED_KEY = "daemon.boot.environment_unrecognised"
 _PLUGIN_ID_INVALID_KEY = "plugin.launcher_plugin_id_invalid"
 _MANIFEST_UNREADABLE_KEY = "plugin.manifest_unreadable"
 _READ_SANDBOX_NO_SOURCE_KEY = "plugin.manifest_reader_no_source"
+_POLICY_REF_ESCAPES_ROOT_KEY = "supervisor.sandbox.refused.policy_ref_escapes_root"
+
+
+class PolicyRefEscapesRoot(Exception):
+    """A manifest ``policy_ref`` resolves outside the sandbox-policy root.
+
+    sec-2 BLOCKER: an attacker who plants a manifest must not be able to point
+    ``policy_ref`` at ``../../etc/passwd``, an absolute path outside the root,
+    or a symlink escaping the root. ``reason`` is the shipped audit vocabulary
+    value ``policy_ref_escapes_root``.
+    """
+
+    def __init__(self, ref: str) -> None:
+        super().__init__(f"policy_ref_escapes_root: {ref!r}")
+        self.ref = ref
+        self.reason = "policy_ref_escapes_root"
+
+
+def resolve_policy_ref(
+    ref: str,
+    *,
+    install_root: Path,
+    policy_dir: Path | None = None,
+) -> Path:
+    """Confine + resolve a manifest ``policy_ref`` to a real file path.
+
+    sec-2 path-confinement. Refuses (``PolicyRefEscapesRoot``) any ref that:
+
+    * contains a ``..`` path component (string-level, before resolution),
+    * is an absolute path,
+    * resolves (following symlinks) outside the policy root, or
+    * does not resolve to a regular file under the root.
+
+    Args:
+        ref: The manifest's ``policy_refs.<host_os>`` value.
+        install_root: The AlfredOS install root. When ``policy_dir`` is not
+            given the root is ``install_root / "config/sandbox"`` and ``ref``
+            is interpreted relative to ``install_root``.
+        policy_dir: Explicit policy root (the ``ALFRED_SANDBOX_POLICY_DIR``
+            override). When given, ``ref`` is interpreted relative to it.
+
+    Returns:
+        The canonical (symlink-resolved) absolute path to the policy file.
+    """
+    raw = Path(ref)
+    # String-level: reject any parent-traversal component up front so a ref
+    # that would resolve back inside the root is still refused (launderable
+    # shape — defence in depth) and absolute paths never escape.
+    if ".." in raw.parts:
+        raise PolicyRefEscapesRoot(ref)
+    if raw.is_absolute():
+        raise PolicyRefEscapesRoot(ref)
+
+    if policy_dir is not None:
+        root = policy_dir
+        candidate = policy_dir / raw
+    else:
+        root = install_root / _DEFAULT_POLICY_SUBDIR
+        candidate = install_root / raw
+
+    try:
+        resolved = candidate.resolve(strict=True)
+        root_resolved = root.resolve(strict=True)
+    except OSError as exc:
+        # Missing file / broken symlink / unreadable parent: not a confinement
+        # breach per se, but the ref cannot be honoured — treat as an escape
+        # so the launcher refuses loudly (it never reads an unresolvable ref).
+        raise PolicyRefEscapesRoot(ref) from exc
+
+    # The resolved file must live strictly under the resolved root and be a
+    # regular file (a ref pointing at the root dir itself is not a policy).
+    if root_resolved not in resolved.parents:
+        raise PolicyRefEscapesRoot(ref)
+    if not resolved.is_file():
+        raise PolicyRefEscapesRoot(ref)
+    return resolved
 
 
 def _fail(key: str) -> int:
@@ -143,8 +224,28 @@ def _cmd_read_environment() -> int:
     return _fail(_ENV_NOT_SET_KEY)
 
 
-def _cmd_policy_to_bwrap_flags() -> int:
-    raw = sys.stdin.read()
+def _cmd_policy_to_bwrap_flags(args: argparse.Namespace) -> int:
+    """Translate a policy to bwrap flags, from a confined --policy-ref or stdin.
+
+    When ``--policy-ref`` is given the path is FIRST confined to the
+    sandbox-policy root (sec-2) and only then read — so a manifest pointing
+    ``policy_ref`` outside the install tree is refused before any bytes are
+    read. Without it, the policy TOML is read from stdin (the simple path used
+    by unit tests of the translator itself).
+    """
+    if args.policy_ref is not None:
+        install_root = Path(args.install_root) if args.install_root else Path.cwd()
+        policy_dir_raw = os.environ.get("ALFRED_SANDBOX_POLICY_DIR")
+        policy_dir = Path(policy_dir_raw) if policy_dir_raw else None
+        try:
+            resolved = resolve_policy_ref(
+                args.policy_ref, install_root=install_root, policy_dir=policy_dir
+            )
+        except PolicyRefEscapesRoot:
+            return _fail(_POLICY_REF_ESCAPES_ROOT_KEY)
+        raw = resolved.read_text(encoding="utf-8")
+    else:
+        raw = sys.stdin.read()
     try:
         policy = read_policy_toml(raw)
     except SandboxPolicyInvalid as exc:
@@ -165,6 +266,10 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--policy-to-bwrap-flags", action="store_true")
     parser.add_argument("--manifest-path", default=None)
     parser.add_argument("--plugin-id", default=None)
+    # --policy-to-bwrap-flags options: a confined --policy-ref (sec-2) +
+    # the install root it is relative to. Absent → read policy TOML from stdin.
+    parser.add_argument("--policy-ref", default=None)
+    parser.add_argument("--install-root", default=None)
     return parser
 
 
@@ -177,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_read_environment()
     # The mutually-exclusive required group guarantees exactly one mode; the
     # remaining branch is --policy-to-bwrap-flags.
-    return _cmd_policy_to_bwrap_flags()
+    return _cmd_policy_to_bwrap_flags(args)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entry

@@ -122,18 +122,28 @@ def test_launcher_defines_do_exec_before_calling_it() -> None:
     )
 
 
-def test_launcher_exits_1_without_sandbox_policy_in_production() -> None:
-    """Production + no policy file → exit 1 + bare i18n key on stderr.
+def test_launcher_exits_1_without_sandbox_block_in_production() -> None:
+    """Production + manifest lacking [sandbox] → exit 1 + bare key on stderr.
 
-    The launcher is fail-closed: without a sandbox policy file in
-    ``${ALFRED_SANDBOX_POLICY_DIR}/<plugin_id>.policy``, the spawn
-    refuses. The error is emitted as a bare i18n key, never a
-    hardcoded English sentence (i18n-005 option b).
+    PR-S4-6 contract: the launcher reads the manifest's [sandbox] block. A
+    manifest without one refuses (sandbox_block_missing) — the fail-closed
+    successor to the Slice-3 "no .policy file" refusal. The error is a bare
+    i18n key, never a hardcoded English sentence (i18n-005 option b).
     """
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(
+            "[alfred]\nmanifest_version = 1\n[plugin]\n"
+            'id = "alfred.test-plugin"\nsubscriber_tier = "user-plugin"\n'
+            'sandbox_profile = "user-plugin"\n'
+        )
+        manifest_path = f.name
     env = {
         **os.environ,
-        "ALFRED_ENV": "production",
-        "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "production",
+        "ALFRED_PLUGIN_MANIFEST_PATH": manifest_path,
     }
     env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
     result = subprocess.run(  # noqa: S603 — literal repo-owned script path
@@ -143,27 +153,21 @@ def test_launcher_exits_1_without_sandbox_policy_in_production() -> None:
         check=False,
     )
     assert result.returncode == 1
-    assert b"plugin.launcher_no_sandbox_policy" in result.stderr
+    assert b"sandbox_block_missing" in result.stderr
 
 
 def test_launcher_refuses_unsandboxed_flag_in_production() -> None:
     """Even with the unsandboxed flag, production refuses to launch.
 
-    The flag is a development-only escape hatch. Production must reject
-    it loudly so an operator who accidentally sets it in their docker-
-    compose env cannot bypass the sandbox.
-
-    Distinct i18n key (``plugin.launcher_unsandboxed_rejected``) — CR
-    on PR #140 caught the previous reuse of the no-policy key as a real
-    audit/render ambiguity. Operators must be able to distinguish
-    "unsandboxed flag refused in production" from "sandbox policy file
-    missing".
+    PR-S4-6 (devex-001): the dev escape hatch is refused in production with an
+    operator-visible stderr key + a SANDBOX_REFUSED audit row. The env var is
+    ALFRED_ENVIRONMENT (not the Slice-3 ALFRED_ENV).
     """
     env = {
         **os.environ,
-        "ALFRED_ENV": "production",
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "production",
         "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
-        "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
     }
     result = subprocess.run(  # noqa: S603 — literal repo-owned script path
         [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "hello"],
@@ -172,28 +176,42 @@ def test_launcher_refuses_unsandboxed_flag_in_production() -> None:
         check=False,
     )
     assert result.returncode == 1
-    assert b"plugin.launcher_unsandboxed_rejected" in result.stderr
-    # Negative assertion: the no-policy key must NOT be emitted here —
-    # it would collapse the two refusal cases back into one.
-    assert b"plugin.launcher_no_sandbox_policy" not in result.stderr
+    assert b"supervisor.sandbox.unsandboxed_refused_in_production" in result.stderr
+    assert b"unsandboxed_env_set_in_production" in result.stderr
 
 
 @pytest.mark.skipif(
     _LAUNCHER_REQUIRES_ROOT,
     reason="Linux runuser branch requires root; this runner is non-root",
 )
-def test_launcher_accepts_unsandboxed_in_development() -> None:
-    """Development + unsandboxed=1 → exec the plugin (the only escape hatch).
+def _write_none_manifest() -> str:
+    import tempfile
 
-    The plugin is execed via ``/bin/echo`` so a successful exec
-    produces a recognisable marker on stdout. Returncode 0 + marker
-    present confirms the unsandboxed branch reached the exec.
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(
+            "[alfred]\nmanifest_version = 1\n[plugin]\n"
+            'id = "alfred.test-plugin"\nsubscriber_tier = "user-plugin"\n'
+            'sandbox_profile = "user-plugin"\n[sandbox]\nkind = "none"\n'
+        )
+        return f.name
+
+
+@pytest.mark.skipif(
+    _LAUNCHER_REQUIRES_ROOT,
+    reason="kind:none runuser branch requires root; this runner is non-root",
+)
+def test_launcher_kind_none_execs_plugin_in_development() -> None:
+    """Development + kind:none manifest → exec the plugin (UID-separated path).
+
+    The plugin is execed via ``/bin/echo`` so a successful exec produces a
+    recognisable marker on stdout. Returncode 0 + marker confirms the
+    kind:none branch reached _do_exec.
     """
     env = {
         **os.environ,
-        "ALFRED_ENV": "development",
-        "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
-        "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "development",
+        "ALFRED_PLUGIN_MANIFEST_PATH": _write_none_manifest(),
         "ALFRED_PLUGIN_UID": _LAUNCHER_TEST_UID,
     }
     result = subprocess.run(  # noqa: S603 — literal repo-owned script path
@@ -211,37 +229,6 @@ def test_launcher_accepts_unsandboxed_in_development() -> None:
     assert b"alfred-launcher-test-marker" in result.stdout
 
 
-def test_launcher_emits_config_insecure_audit_row_in_development() -> None:
-    """The unsandboxed dev branch writes a ``supervisor.config_insecure`` JSON line.
-
-    Structured audit row on stderr — the supervisor parses and
-    persists it. Asserts the JSON parses and carries the
-    ``insecure_config_key`` + ``plugin_id`` fields.
-    """
-    env = {
-        **os.environ,
-        "ALFRED_ENV": "development",
-        "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
-        "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
-    }
-    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
-        [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "ok"],
-        capture_output=True,
-        env=env,
-        check=False,
-    )
-    assert b"supervisor.config_insecure" in result.stderr
-    # The audit row is one JSON object per stderr line. Find the line
-    # that contains the event marker and parse it.
-    json_line = next(
-        line for line in result.stderr.splitlines() if b"supervisor.config_insecure" in line
-    )
-    parsed = json.loads(json_line)
-    assert parsed["event"] == "supervisor.config_insecure"
-    assert parsed["plugin_id"] == "alfred.test-plugin"
-    assert "insecure_config_key" in parsed
-
-
 @pytest.mark.skipif(
     shutil.which("runuser") is not None,
     reason="macOS-dev branch only: runuser is unavailable",
@@ -254,49 +241,42 @@ def test_launcher_macos_dev_emits_uid_separation_unavailable_row() -> None:
     deviation; the JSON-on-stderr pattern gives it that without
     pulling structlog into a shell script.
 
-    Requires a sandbox policy file so the unsandboxed-dev escape hatch
-    isn't what's writing the JSON — this test specifically targets the
-    ``_do_exec`` macOS branch.
+    PR-S4-6: the kind:none manifest routes to ``_do_exec``, whose macOS
+    branch emits this row. (kind:none, not the dev escape hatch, is what
+    reaches _do_exec here.)
     """
-    sandbox_dir = Path(__file__).parent / "_tmp_macos_uid_drop"
-    sandbox_dir.mkdir(exist_ok=True)
-    policy = sandbox_dir / "alfred.test-plugin.policy"
-    policy.write_text("# placeholder sandbox policy for unit test")
-    try:
-        env = {
-            **os.environ,
-            "ALFRED_ENV": "production",
-            "ALFRED_SANDBOX_POLICY_DIR": str(sandbox_dir),
-        }
-        env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
-        result = subprocess.run(  # noqa: S603 — literal repo-owned script path
-            [
-                str(_LAUNCHER),
-                "alfred.test-plugin",
-                "/bin/echo",
-                "macos-uid-drop-marker",
-            ],
-            capture_output=True,
-            env=env,
-            check=False,
-        )
-        # Successful exec via /bin/echo (no UID-drop) → 0 + marker present.
-        assert result.returncode == 0
-        assert b"macos-uid-drop-marker" in result.stdout
-        # Audit row records the deviation.
-        assert b"launcher_uid_separation_unavailable_macos" in result.stderr
-        json_line = next(
-            line
-            for line in result.stderr.splitlines()
-            if b"launcher_uid_separation_unavailable_macos" in line
-        )
-        parsed = json.loads(json_line)
-        assert parsed["event"] == "supervisor.config_insecure"
-        assert parsed["plugin_id"] == "alfred.test-plugin"
-        assert parsed["insecure_config_key"] == "launcher_uid_separation_unavailable_macos"
-    finally:
-        policy.unlink(missing_ok=True)
-        sandbox_dir.rmdir()
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "production",
+        "ALFRED_PLUGIN_MANIFEST_PATH": _write_none_manifest(),
+    }
+    env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
+        [
+            str(_LAUNCHER),
+            "alfred.test-plugin",
+            "/bin/echo",
+            "macos-uid-drop-marker",
+        ],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    # Successful exec via /bin/echo (no UID-drop) → 0 + marker present.
+    assert result.returncode == 0
+    assert b"macos-uid-drop-marker" in result.stdout
+    # Audit row records the deviation.
+    assert b"launcher_uid_separation_unavailable_macos" in result.stderr
+    json_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if b"launcher_uid_separation_unavailable_macos" in line
+    )
+    parsed = json.loads(json_line)
+    assert parsed["event"] == "supervisor.config_insecure"
+    assert parsed["plugin_id"] == "alfred.test-plugin"
+    assert parsed["insecure_config_key"] == "launcher_uid_separation_unavailable_macos"
 
 
 # ---------------------------------------------------------------------------
@@ -373,9 +353,9 @@ def test_launcher_accepts_well_formed_plugin_id() -> None:
     """
     env = {
         **os.environ,
-        "ALFRED_ENV": "development",
-        "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED": "1",
-        "ALFRED_SANDBOX_POLICY_DIR": "/nonexistent/sandbox/dir",
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "development",
+        "ALFRED_PLUGIN_MANIFEST_PATH": _write_none_manifest(),
         "ALFRED_PLUGIN_UID": _LAUNCHER_TEST_UID,
     }
     result = subprocess.run(  # noqa: S603 — literal repo-owned script path
@@ -495,15 +475,12 @@ def test_launcher_help_flag_prints_usage_and_exits_zero(flag: str) -> None:
     )
     assert result.returncode == 0, f"--help must exit 0, got {result.returncode}"
     # The help text documents the env-var surface so an operator can find
-    # ALFRED_SANDBOX_POLICY_DIR / ALFRED_PLUGIN_UID etc. without grepping.
+    # ALFRED_ENVIRONMENT / ALFRED_SANDBOX_POLICY_DIR / ALFRED_PLUGIN_UID etc.
+    # without grepping.
     assert b"USAGE" in result.stdout
-    assert b"ALFRED_ENV" in result.stdout
+    assert b"ALFRED_ENVIRONMENT" in result.stdout
     assert b"ALFRED_SANDBOX_POLICY_DIR" in result.stdout
     assert b"EXIT CODES" in result.stdout
-    # The bare i18n key catalogue lives in the help text so operators can
-    # decode an audit row without round-tripping through the supervisor's
-    # renderer.
-    assert b"plugin.launcher_no_sandbox_policy" in result.stdout
     # Negative: the charset refusal key must NOT appear on stderr —
     # otherwise the help branch is downstream of the charset check.
     assert b"plugin.launcher_plugin_id_invalid" not in result.stderr

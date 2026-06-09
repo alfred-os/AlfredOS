@@ -1,80 +1,63 @@
 #!/usr/bin/env bash
-# bin/alfred-plugin-launcher.sh — fail-closed plugin launcher (spec §4.8, §5.2).
+# bin/alfred-plugin-launcher.sh — fail-closed plugin launcher.
 #
-# Usage: alfred-plugin-launcher.sh <plugin_id> <executable> [args...]
+# Slice-3 (spec §4.8, §5.2) shipped the UID-separated baseline: charset-
+# validate PLUGIN_ID, refuse without a sandbox posture, UID-drop via runuser
+# on Linux. PR-S4-6 (spec §7) extends it with a manifest-driven, policy-
+# resolving flow while preserving every Slice-3 invariant:
 #
-# Invariants enforced here (each one matters because the launcher is the
-# sole path the supervisor uses to spawn plugins):
+#   1. **--self-test** returns the policy-resolving signature so the daemon
+#      boot probe (PR-S4-1) knows the launcher genuinely sandboxes.
+#   2. **Settings.environment** is read via the pre-launcher Python helper
+#      (manifest_reader --read-environment): ALFRED_ENVIRONMENT env var >
+#      /etc/alfred/environment file. Neither set → refuse.
+#   3. **Dev escape hatch refuses in production.** ALFRED_PLUGIN_LAUNCHER_-
+#      UNSANDBOXED=1 + environment=production → refuse with an operator-
+#      visible stderr key + a SANDBOX_REFUSED audit JSON row.
+#   4. **Manifest [sandbox] block** drives the branch:
+#        kind:full → resolve per-OS policy_ref (path-confined in Python),
+#                    translate to bwrap flags, exec bwrap --sync-fd 3.
+#        kind:none → Slice-3 UID-separated runuser path (unchanged).
+#        kind:stub → refuse in production; dev emits a stub-used audit row.
 #
-# 1. **Fail-closed.** Without a sandbox policy file
-#    (${ALFRED_SANDBOX_POLICY_DIR}/<plugin_id>.policy), the launcher
-#    refuses to exec the plugin. The ONLY escape hatch is the pair
-#    ALFRED_ENV=development + ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1,
-#    which prints a structured `supervisor.config_insecure` audit
-#    JSON line on stderr before exec'ing. Production refuses the flag
-#    unconditionally — sec-003. The production-refusal path uses a
-#    distinct bare i18n key (`plugin.launcher_unsandboxed_rejected`)
-#    so the audit row + operator-facing render can tell "unsandboxed
-#    flag refused in prod" apart from "no sandbox policy file" — CR
-#    on PR #140 caught the shared key as a real ambiguity.
+# Invariants that DO NOT change from Slice-3:
+#   * Fail-closed everywhere; bare i18n keys on stderr (the supervisor
+#     renders localised text from the catalog — i18n-005 option b).
+#   * PLUGIN_ID is charset-validated ([A-Za-z0-9._-]+) BEFORE any JSON-
+#     emitting branch so a malformed id can never reach a printf JSON
+#     template (audit-stream integrity — CR on PR #140).
+#   * _do_exec is defined BEFORE any call site (CR R2 on PR-S3-0a).
+#   * set -eu, no pipefail (the launcher has no pipes; matches the
+#     seed-script convention).
 #
-# 2. **UID-drop on Linux — fail-closed when runuser is missing.** On
-#    Linux, `runuser -u "${TARGET_UID}" -- ...` runs the plugin under
-#    a different uid so a compromised plugin cannot read the parent
-#    process's secrets at the OS level. On Linux WITHOUT `runuser`,
-#    the launcher refuses (exit 1 + `plugin.launcher_uid_drop_unavailable`
-#    bare key on stderr) rather than execing un-dropped — failing
-#    open here would silently drop the security control this launcher
-#    exists to enforce. CR on PR #140 caught the prior key-on-runuser
-#    branching that mislabelled a no-runuser Linux box as the macOS
-#    dev deviation. macOS / non-Linux dev has no `runuser`; the
-#    launcher emits a `launcher_uid_separation_unavailable_macos`
-#    audit JSON line and execs without UID-drop. This is the
-#    documented macOS-only deviation for Slice 3.
-#
-# 3. **Bare i18n keys on stderr.** No hardcoded English sentences —
-#    the supervisor renders localised text from the audit row (i18n-005
-#    option b). The catalog ships the key->message mapping; the
-#    launcher only emits the key.
-#
-# 4. **JSON audit rows are forensically safe.** PLUGIN_ID is validated
-#    against a safe-charset regex (`[A-Za-z0-9._-]+`) at script entry
-#    BEFORE any JSON-emitting branch runs. A plugin_id that fails the
-#    check is refused with `plugin.launcher_plugin_id_invalid` and a
-#    non-zero exit, so a malformed id (containing `"`, `\`, newlines,
-#    etc.) can never reach a `printf` JSON template — CR on PR #140
-#    flagged the unescaped interpolation as an audit-stream integrity
-#    risk (PRD §5 + CLAUDE.md hard rule #7). The charset is intentionally
-#    a strict subset of the upstream manifest parser's tolerance so the
-#    launcher remains the last fail-closed gate even if upstream
-#    validation drifts.
-#
-# 5. **`_do_exec` declared BEFORE the policy-file check.** CR R2 on
-#    the PR-S3-0a plan caught a prior draft that invoked `_do_exec`
-#    in the dev/unsandboxed branch before its function definition —
-#    bash treats that as "command not found" and exits 127 silently on
-#    that branch. Now the definition leads, the invocations follow.
-#
-# 6. **`set -eu` with no `pipefail`.** Matches the seed-script
-#    convention from bin/alfred-state-git-seed.sh: the launcher has no
-#    pipes, so `pipefail` would be cargo-culted. One convention to
-#    learn for every shell script in this repo.
+# sec-1 (PR #205 round-2): the truthy helper below matches the Python helper
+# in src/alfred/cli/daemon/_daemon_probes.py (accepted: 1/true/yes/on,
+# case-insensitive, whitespace-trimmed). NEVER [ "$VAR" = "1" ].
 
 set -eu
 
-# Help flag — must run BEFORE the charset validation so `--help` does not
-# trip the unsafe-charset refusal. The help text is the operator-facing
-# entry point; it documents the contract that the audit-row renderer
-# elsewhere localises. Doc-string itself is operator-facing English; the
-# launcher emits bare i18n keys only on the failure paths the supervisor
-# captures and translates. DEVEX-005 fix.
+# --self-test — the daemon boot probe (PR-S4-1) shells out to this and only a
+# REAL policy-resolving launcher returns the policy-resolving signature. Must
+# run BEFORE positional-arg parsing so the probe needs no plugin args.
+case "${1:-}" in
+    --self-test)
+        printf 'policy-resolving\n'
+        exit 0
+        ;;
+esac
+
+# Help flag — BEFORE charset validation so --help does not trip the unsafe-
+# charset refusal. Operator-facing English; the launcher emits bare i18n
+# keys only on the failure paths the supervisor captures and translates.
 case "${1:-}" in
     -h | --help)
         cat <<'HELP'
-alfred-plugin-launcher.sh — fail-closed plugin launcher (spec §4.8, §5.2).
+alfred-plugin-launcher.sh — fail-closed plugin launcher (spec §4.8, §5.2, §7).
 
 USAGE
     alfred-plugin-launcher.sh <plugin_id> <executable> [args...]
+    alfred-plugin-launcher.sh --self-test
+    alfred-plugin-launcher.sh --help
 
 ARGS
     plugin_id    Manifest-declared plugin id. Charset [A-Za-z0-9._-]+; any
@@ -84,52 +67,38 @@ ARGS
     args...      Forwarded to the plugin.
 
 ENVIRONMENT
-    ALFRED_ENV
-        "development" enables the unsandboxed escape hatch (see
-        ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED). For launcher enforcement,
-        any other value (including empty) is treated as production: the
-        launcher refuses to spawn without a sandbox policy file. This
-        is launcher-local policy and is independent of the orchestrator
-        gate-selection mechanism described in README §Configuration.
+    ALFRED_ENVIRONMENT
+        development | production | test. Read via the pre-launcher Python
+        helper (env var > /etc/alfred/environment file). Mandatory — the
+        launcher refuses to spawn when neither source resolves.
 
     ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED
-        Dev-only escape hatch. With ALFRED_ENV=development AND this set
-        to "1", the launcher spawns the plugin without a sandbox policy
-        and emits a supervisor.config_insecure audit JSON line on stderr.
-        Refused unconditionally outside development.
+        Dev-only escape hatch. Truthy (1/true/yes/on) in development spawns
+        the plugin without resolving a policy. Refused in production with a
+        SANDBOX_REFUSED audit row.
 
     ALFRED_SANDBOX_POLICY_DIR
-        Directory containing per-plugin sandbox policy files. Default:
-        /etc/alfred/sandbox. The launcher reads <DIR>/<plugin_id>.policy
-        and refuses to spawn if the file is missing (production fail-
-        closed).
+        Override the sandbox-policy root for policy_ref confinement.
+
+    ALFRED_PLUGIN_MANIFEST_PATH
+        Test override: read the manifest from this path instead of resolving
+        it from the plugin-id.
 
     ALFRED_PLUGIN_UID
-        Target UID for the runuser-based UID drop on Linux. Default:
-        alfred-quarantine. Provision this account before deploying — the
-        operator runbook at docs/runbooks/slice-3-plugins.md has the
-        systemd-sysusers fragment.
+        Target UID for the runuser UID drop on Linux (kind:none). Default:
+        alfred-quarantine.
+
+    FAKE_UNAME
+        Test override for the host-OS detection (Darwin / Linux / Windows_NT).
 
 EXIT CODES
     0    Success — exec'd the plugin (this process is replaced).
-    1    Refusal — bare i18n key emitted on stderr. The supervisor
-         captures stderr and renders the localised message from the
-         catalog. Possible keys:
-             plugin.launcher_plugin_id_invalid
-             plugin.launcher_unsandboxed_rejected
-             plugin.launcher_no_sandbox_policy
-             plugin.launcher_uid_drop_unavailable
-
-PLATFORM NOTES
-    Linux        UID-drop via `runuser`. Refuses if runuser is absent.
-    macOS / BSD  No runuser available; the launcher emits a
-                 launcher_uid_separation_unavailable_macos audit JSON
-                 line and exec's WITHOUT UID-drop (documented dev-only
-                 deviation; not for production).
+    1    Refusal — bare i18n key + (where applicable) a SANDBOX_REFUSED audit
+         JSON row on stderr.
 
 SEE ALSO
     docs/runbooks/slice-3-plugins.md   Operator runbook
-    PRD §4.8, §5.2                     Spec for the launcher contract
+    PRD §4.8, §5.2 · spec §7           Launcher contract
 HELP
         exit 0
         ;;
@@ -140,85 +109,184 @@ shift
 EXECUTABLE="${1:?Usage: alfred-plugin-launcher.sh <plugin_id> <executable> [args...]  (try --help)}"
 shift
 
-# Charset-validate PLUGIN_ID at the entry point so every downstream
-# branch (including the JSON-emitting ones) can safely interpolate
-# the value without a shell-escape step. The pattern matches the
-# closed-vocabulary plugin slug shape from spec §5.6 and is a strict
-# subset of what the upstream manifest parser accepts — the launcher
-# is the last fail-closed gate, so it enforces the tighter contract.
+# Charset-validate PLUGIN_ID at entry so every downstream branch (including
+# the JSON-emitting ones) can safely interpolate it. The pattern is a strict
+# subset of the upstream manifest parser's tolerance — the launcher is the
+# last fail-closed gate.
 case "${PLUGIN_ID}" in
     *[!A-Za-z0-9._-]* | "")
-        # Bare i18n key + supervisor renders. The plugin_id is NOT
-        # echoed here (a malformed id is exactly the thing we refuse
-        # to round-trip into the audit stream).
         printf 'plugin.launcher_plugin_id_invalid\n' >&2
         exit 1
         ;;
 esac
 
-ALFRED_ENV="${ALFRED_ENV:-production}"
-UNSANDBOXED="${ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED:-0}"
-TARGET_UID="${ALFRED_PLUGIN_UID:-alfred-quarantine}"
-SANDBOX_POLICY_DIR="${ALFRED_SANDBOX_POLICY_DIR:-/etc/alfred/sandbox}"
-POLICY_FILE="${SANDBOX_POLICY_DIR}/${PLUGIN_ID}.policy"
+# sec-1: shared truthy helper. Matches src/alfred/cli/daemon/_daemon_probes.py
+# (_truthy_env) — accepted values 1/true/yes/on, case-insensitive. POSIX
+# whitespace-trim BEFORE the case-match. NEVER [ "$VAR" = "1" ].
+_truthy() {
+    _t_val="${1:-}"
+    # Trim leading + trailing whitespace (POSIX parameter expansion).
+    _t_val="${_t_val#"${_t_val%%[![:space:]]*}"}"
+    _t_val="${_t_val%"${_t_val##*[![:space:]]}"}"
+    case "$(printf '%s' "${_t_val}" | tr '[:upper:]' '[:lower:]')" in
+        1 | true | yes | on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-# _do_exec runs the plugin process. Linux: UID-drop via runuser. If
-# runuser is missing on Linux, REFUSE (fail-closed) rather than exec
-# without UID separation — silently dropping the security control
-# would violate the spec §4.8 / §5.2 invariant. Non-Linux (macOS dev):
-# emit a supervisor.config_insecure audit JSON line on stderr and
-# exec without UID-drop. The audit row is the operator's record that
-# this deviation happened — the supervisor captures stderr and
-# persists it as a real audit row.
-#
-# Defined here, BEFORE the policy-file check that calls it, so the
-# dev/unsandboxed branch can invoke it without the bash "command not
-# found" failure mode CR R2 flagged.
+# _uname shim — honours FAKE_UNAME for the cross-OS CI matrix (devops-2) so
+# the macOS and Windows branches can be exercised on Linux runners.
+_uname() {
+    if [ -n "${FAKE_UNAME:-}" ]; then
+        printf '%s' "${FAKE_UNAME}"
+    else
+        uname -s
+    fi
+}
+
+# Normalise the host OS to {linux, macos, windows}.
+_host_os() {
+    case "$(_uname | tr '[:upper:]' '[:lower:]')" in
+        linux) printf 'linux' ;;
+        darwin) printf 'macos' ;;
+        mingw* | msys* | cygwin* | windows_nt) printf 'windows' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+UNSANDBOXED="${ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED:-}"
+TARGET_UID="${ALFRED_PLUGIN_UID:-alfred-quarantine}"
+HOST_OS="$(_host_os)"
+
+if [ "${HOST_OS}" = "unknown" ]; then
+    printf 'supervisor.sandbox.refused.unknown_host_os plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    exit 1
+fi
+
+# _do_exec runs the plugin process under the Slice-3 UID-separated baseline
+# (kind:none). Linux: UID-drop via runuser; refuse if runuser missing (fail-
+# closed). Non-Linux dev: emit a config_insecure row + exec without UID-drop.
+# Defined BEFORE any call site (CR R2).
 _do_exec() {
-    if [ "$(uname -s)" = "Linux" ]; then
+    if [ "${HOST_OS}" = "linux" ]; then
         if ! command -v runuser >/dev/null 2>&1; then
-            # Linux without runuser — refuse rather than silently
-            # exec without UID-drop. Bare i18n key on stderr; the
-            # supervisor's renderer attaches the plugin_id from the
-            # spawn context (the audit row schema carries it via the
-            # supervisor's structured wrapper, not here).
             printf 'plugin.launcher_uid_drop_unavailable plugin_id=%s\n' "${PLUGIN_ID}" >&2
             exit 1
         fi
         exec runuser -u "${TARGET_UID}" -- "${EXECUTABLE}" "$@"
     else
-        # macOS / non-Linux dev path. The audit JSON line is bare —
-        # the supervisor parses it and renders localised text from
-        # the catalog. PLUGIN_ID was charset-validated at script
-        # entry so this interpolation cannot produce malformed JSON.
         printf '{"event":"supervisor.config_insecure","insecure_config_key":"launcher_uid_separation_unavailable_macos","plugin_id":"%s"}\n' "${PLUGIN_ID}" >&2
         exec "${EXECUTABLE}" "$@"
     fi
 }
 
-# Production guard: UNSANDBOXED=1 is never accepted outside development.
-# Bare i18n key on stderr (i18n-005 option b) — supervisor renders
-# localised text from the catalog. Uses a distinct key from the
-# "no policy file" refusal so audit/render can distinguish "operator
-# tried to force unsandboxed in prod" from "policy file is missing"
-# (CR on PR #140).
-if [ "${ALFRED_ENV}" != "development" ] && [ "${UNSANDBOXED}" = "1" ]; then
-    printf 'plugin.launcher_unsandboxed_rejected plugin_id=%s\n' "${PLUGIN_ID}" >&2
+# Read Settings.environment via the pre-launcher Python helper (dual-source:
+# ALFRED_ENVIRONMENT env var > /etc/alfred/environment). Neither set → refuse.
+# The helper prints the value on stdout and a bare i18n key on stderr.
+if ! ALFRED_RESOLVED_ENVIRONMENT="$(python3 -m alfred.plugins.manifest_reader --read-environment)"; then
+    printf 'daemon.boot.environment_not_set plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"environment_not_set","environment":"unset","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
     exit 1
 fi
 
-# Policy-file check. Missing policy → refuse, unless dev + unsandboxed.
-if [ ! -f "${POLICY_FILE}" ]; then
-    if [ "${ALFRED_ENV}" = "development" ] && [ "${UNSANDBOXED}" = "1" ]; then
-        # Structured audit row on stderr (supervisor captures it).
-        # PLUGIN_ID was charset-validated at script entry so this
-        # interpolation cannot produce malformed JSON.
-        printf '{"event":"supervisor.config_insecure","insecure_config_key":"ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED","plugin_id":"%s"}\n' "${PLUGIN_ID}" >&2
-        _do_exec "$@"
-        exit 0
+# Dev escape hatch: refuse in production (devex-001 — operator-visible stderr
+# key + SANDBOX_REFUSED audit row). sec-1 truthy parsing.
+if [ "${ALFRED_RESOLVED_ENVIRONMENT}" = "production" ] && _truthy "${UNSANDBOXED}"; then
+    printf 'supervisor.sandbox.unsandboxed_refused_in_production plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"unsandboxed_env_set_in_production","environment":"production","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
+    exit 1
+fi
+
+# Read the manifest's [sandbox] block via the pre-launcher Python helper. The
+# launcher forwards ALFRED_PLUGIN_MANIFEST_PATH as --manifest-path when set,
+# else the helper resolves the manifest from the plugin-id.
+_read_sandbox() {
+    if [ -n "${ALFRED_PLUGIN_MANIFEST_PATH:-}" ]; then
+        python3 -m alfred.plugins.manifest_reader --read-sandbox \
+            --manifest-path "${ALFRED_PLUGIN_MANIFEST_PATH}"
+    else
+        python3 -m alfred.plugins.manifest_reader --read-sandbox \
+            --plugin-id "${PLUGIN_ID}"
     fi
-    printf 'plugin.launcher_no_sandbox_policy plugin_id=%s\n' "${PLUGIN_ID}" >&2
+}
+
+if ! SANDBOX_JSON="$(_read_sandbox 2>/dev/null)"; then
+    printf 'supervisor.sandbox.refused.sandbox_block_missing plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"sandbox_block_missing","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
     exit 1
 fi
 
-_do_exec "$@"
+# jq parses the helper's JSON. Refuse loudly if missing — the resolver is
+# unimplementable without a JSON reader in bash (alfred-core apt-installs jq).
+if ! command -v jq >/dev/null 2>&1; then
+    printf 'supervisor.sandbox.refused.jq_unavailable plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    exit 1
+fi
+
+SANDBOX_KIND="$(printf '%s\n' "${SANDBOX_JSON}" | jq -r '.kind')"
+
+case "${SANDBOX_KIND}" in
+    full)
+        POLICY_REF="$(printf '%s\n' "${SANDBOX_JSON}" | jq -r ".policy_refs.\"${HOST_OS}\" // empty")"
+        if [ -z "${POLICY_REF}" ]; then
+            printf 'supervisor.sandbox.refused.policy_ref_missing plugin_id=%s host_os=%s\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
+            printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"policy_ref_missing","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
+            exit 1
+        fi
+        case "${HOST_OS}" in
+            linux)
+                # Confine + translate the policy_ref into bwrap flags via the
+                # Python helper (sec-2 path-confinement lives in Python). One
+                # flag per line into a bash array.
+                if ! BWRAP_FLAGS_RAW="$(python3 -m alfred.plugins.manifest_reader --policy-to-bwrap-flags --policy-ref "${POLICY_REF}" 2>&1)"; then
+                    printf 'supervisor.sandbox.refused.policy_translate_failed plugin_id=%s detail=%s\n' "${PLUGIN_ID}" "${BWRAP_FLAGS_RAW}" >&2
+                    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","policy_ref":"%s","reason":"policy_ref_unreadable","environment":"%s","host_os":"linux"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+                    exit 1
+                fi
+                BWRAP_FLAGS=()
+                while IFS= read -r _flag; do
+                    [ -n "${_flag}" ] && BWRAP_FLAGS+=("${_flag}")
+                done <<EOF
+${BWRAP_FLAGS_RAW}
+EOF
+                : "${BWRAP:=bwrap}"
+                exec "${BWRAP}" "${BWRAP_FLAGS[@]}" -- "${EXECUTABLE}" "$@"
+                ;;
+            macos)
+                # PR-S4-7 ships the sandbox-exec invocation; PR-S4-6 refuses
+                # so the resolver path is well-defined on macOS.
+                printf 'supervisor.sandbox.refused.macos_full_not_yet_shipped plugin_id=%s\n' "${PLUGIN_ID}" >&2
+                exit 1
+                ;;
+            windows)
+                # kind:full on Windows resolves to a stub policy. Refuse in
+                # production; dev emits a stub-used row + execs unsandboxed.
+                if [ "${ALFRED_RESOLVED_ENVIRONMENT}" = "production" ]; then
+                    printf 'supervisor.sandbox.refused.windows_stub_in_production plugin_id=%s\n' "${PLUGIN_ID}" >&2
+                    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"windows_stub_in_production","environment":"production","host_os":"windows"}\n' "${PLUGIN_ID}" >&2
+                    exit 1
+                fi
+                printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","policy_ref":"%s","host_os":"windows","environment":"%s"}\n' "${PLUGIN_ID}" "${POLICY_REF}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+                exec "${EXECUTABLE}" "$@"
+                ;;
+        esac
+        ;;
+    none)
+        # Slice-3 UID-separated baseline (unchanged). fd 3 still inherited by
+        # the kernel; the plugin's read_fd3_secret consumes it if present.
+        _do_exec "$@"
+        ;;
+    stub)
+        if [ "${ALFRED_RESOLVED_ENVIRONMENT}" = "production" ]; then
+            printf 'supervisor.sandbox.refused.windows_stub_in_production plugin_id=%s\n' "${PLUGIN_ID}" >&2
+            printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"windows_stub_in_production","environment":"production","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
+            exit 1
+        fi
+        printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","host_os":"%s","environment":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+        exec "${EXECUTABLE}" "$@"
+        ;;
+    *)
+        printf 'supervisor.sandbox.refused.sandbox_block_missing plugin_id=%s\n' "${PLUGIN_ID}" >&2
+        exit 1
+        ;;
+esac

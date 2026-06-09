@@ -168,6 +168,55 @@ def test_policy_to_bwrap_flags_invalid(monkeypatch, capsys) -> None:
     assert "kind_full_requires_keep_fd_3" in capsys.readouterr().err
 
 
+def test_policy_to_bwrap_flags_confined_ref(tmp_path, monkeypatch, capsys) -> None:
+    # sec-2: --policy-ref is confined to the policy root, then read.
+    root = tmp_path / "config" / "sandbox"
+    root.mkdir(parents=True)
+    (root / "foo.linux.bwrap.policy").write_text("keep_fds = [3]\n")
+    monkeypatch.delenv("ALFRED_SANDBOX_POLICY_DIR", raising=False)
+    rc = manifest_reader.main(
+        [
+            "--policy-to-bwrap-flags",
+            "--policy-ref",
+            "config/sandbox/foo.linux.bwrap.policy",
+            "--install-root",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 0
+    assert "--sync-fd" in capsys.readouterr().out.splitlines()
+
+
+def test_policy_to_bwrap_flags_ref_escapes_root(tmp_path, monkeypatch, capsys) -> None:
+    (tmp_path / "config" / "sandbox").mkdir(parents=True)
+    monkeypatch.delenv("ALFRED_SANDBOX_POLICY_DIR", raising=False)
+    rc = manifest_reader.main(
+        [
+            "--policy-to-bwrap-flags",
+            "--policy-ref",
+            "config/sandbox/../../etc/passwd",
+            "--install-root",
+            str(tmp_path),
+        ]
+    )
+    assert rc == 1
+    assert "policy_ref_escapes_root" in capsys.readouterr().err
+
+
+def test_policy_to_bwrap_flags_ref_default_install_root(tmp_path, monkeypatch, capsys) -> None:
+    # No --install-root → cwd. Run with cwd pointed at tmp_path.
+    root = tmp_path / "config" / "sandbox"
+    root.mkdir(parents=True)
+    (root / "foo.linux.bwrap.policy").write_text("keep_fds = [3]\n")
+    monkeypatch.delenv("ALFRED_SANDBOX_POLICY_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    rc = manifest_reader.main(
+        ["--policy-to-bwrap-flags", "--policy-ref", "config/sandbox/foo.linux.bwrap.policy"]
+    )
+    assert rc == 0
+    assert "--sync-fd" in capsys.readouterr().out.splitlines()
+
+
 # --------------------------------------------------------------------------
 # argument handling
 # --------------------------------------------------------------------------
