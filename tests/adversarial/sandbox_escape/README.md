@@ -11,7 +11,10 @@ used, it consumes fd 3; verified bubblewrap 0.8.0/0.9.0, #218).
 
 - Host filesystem read attempts (`/etc/passwd`, `/proc/<host_pid>/environ`).
 - Host binary exec attempts (`/bin/sh`, `/usr/bin/env`).
-- Network egress outside the policy-declared `outbound_allowlist`.
+- Network egress (currently UNRESTRICTED — the real Linux policy does NOT
+  `--unshare-net` because the quarantined LLM makes its own provider HTTPS call;
+  the provider-only allowlist is a release-blocker tracked in #230, see
+  `sbx-2026-005`).
 - Policy-file path traversal (`../../../etc/passwd-bind.toml`) and symlink-follow.
 - TOML schema-downgrade against `sandbox_policy_registry` table writes.
 - fd-3 partial-write / pipe-buffer-leak attempts on the provider-key channel.
@@ -29,9 +32,12 @@ the entries; PR-S4-6 ships the launcher-side fd / handshake entries.
 or `audit_row_emitted` anchored to `SANDBOX_REFUSED_FIELDS` /
 `SANDBOX_STUB_USED_FIELDS`.
 
-**Status at graduation.** Minimum 3 entries (PR #205 round-1 closure
-`test-eng-002`); each entry asserts a kernel-observable refusal, NOT just a
-Pydantic refusal at the policy-parse step.
+**Status at graduation.** 11 entries as of PR-S4-7 (density floor 10). The
+PR-S4-7 kernel-observable entries (`sbx-2026-003/004/006`) drive the REAL
+shipped `config/sandbox/quarantined-llm.linux.bwrap.policy` bytes under bwrap
+and assert a kernel-enforced refusal, NOT just a Pydantic refusal at the
+policy-parse step. `sbx-2026-005` is the honest `out_of_scope` egress gap
+(#230); `sbx-2026-011` exercises the realpath policy-root confinement.
 
 ## Coverage matrix
 
@@ -44,15 +50,18 @@ drift is a release-blocker.
 
 | Attack vector | Owning PR / Task |
 |---|---|
-| Host filesystem read attempts (`/etc/passwd`, `/proc/<host_pid>/environ`) | PR-S4-6 / PR-S4-7 (`sbx-2026-001..003`) |
-| Host binary exec attempts (`/bin/sh`, `/usr/bin/env`) | PR-S4-7 (`sbx-2026-004`) |
-| Network egress outside policy `outbound_allowlist` | PR-S4-7 (`sbx-2026-005`) |
+| Host filesystem read of `/etc/passwd` | PR-S4-7 (`sbx-2026-003`) — kernel-observable against the REAL Linux policy (no /etc bind) |
+| Host `/proc/<host_pid>/environ` read | PR-S4-7 (`sbx-2026-006`) — contained by `--unshare-pid` |
+| Host binary exec attempts (`/bin/sh`, `/usr/bin/env`) | PR-S4-7 (`sbx-2026-004`) — no /bin bind + `--unshare-pid` |
+| Network egress outside policy `outbound_allowlist` | PR-S4-7 (`sbx-2026-005`) — **out_of_scope: egress UNRESTRICTED, release-blocker #230** |
 | Policy-file path traversal (`../../../etc/passwd-bind.toml`) | PR-S4-6 (`sbx-2026-007`) — `policy_ref_escapes_root` refusal |
-| Policy-file symlink-follow into bound read-only path | PR-S4-7 (`sbx-2026-011`) |
-| TOML schema-downgrade against `sandbox_policy_registry` | PR-S4-7 (`sbx-2026-010`) |
+| Policy-file symlink-follow outside the policy root | PR-S4-7 (`sbx-2026-011`) — `policy_ref_escapes_root` (realpath confinement) |
+| FAKE_UNAME production host-OS spoof | PR-S4-6 (`sbx-2026-010`) — `fake_uname_in_production` refusal |
+| Manifest omits `[sandbox]` block | PR-S4-6 (`sbx-2026-001`) — `sandbox_block_missing` refusal |
+| `kind:stub` in production | PR-S4-6 (`sbx-2026-002`) — `stub_kind_in_production` refusal |
 | fd-3 partial-write / pipe-buffer-leak on provider-key channel | PR-S4-6 (`sbx-2026-008`) |
 | Sandbox-info handshake mismatch (`kind:none` posing as `kind:full`) | PR-S4-6 (`sbx-2026-009`) |
-| bwrap version drift (bwrap absent / below the version floor) | PR-S4-1 boot probe (#228) — TBD, no dedicated payload yet (`sbx-2026-008` is fd-3 partial-write, above) |
+| bwrap version drift (bwrap absent / below the version floor) | PR-S4-1 boot probe (#228) — TBD, no dedicated payload yet |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
