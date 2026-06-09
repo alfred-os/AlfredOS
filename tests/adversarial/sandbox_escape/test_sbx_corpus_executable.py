@@ -136,7 +136,24 @@ def _run_under_real_policy(stub: Path, plugin_dir: Path) -> subprocess.Completed
         text=True,
         timeout=30,
         check=False,
+        env=_bwrap_child_env(),
     )
+
+
+def _bwrap_child_env() -> dict[str, str]:
+    """Env for the sandboxed interpreter (bwrap inherits it; no --clearenv).
+
+    ``LD_LIBRARY_PATH`` points the loader at the interpreter's lib dirs so a
+    dynamically-linked Debian *venv* python (RUNPATH ``$ORIGIN/../lib``, no
+    ``/etc/ld.so.cache`` since /etc is unbound) can find ``libpython`` inside
+    the sandbox — making the green gate depend on a test guarantee rather than
+    the runner's interpreter layout (test-reviewer MEDIUM). The uv-managed
+    standalone CPython on the current runner doesn't need it.
+    """
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "LD_LIBRARY_PATH": f"{sys.base_prefix}/lib:{sys.prefix}/lib:/usr/lib",
+    }
 
 
 def _run_launcher(manifest_body: str, *, environment: str, tmp_path: Path) -> tuple[int, str]:
@@ -445,7 +462,10 @@ def test_sbx_2026_006_host_proc_environ_read_contained(tmp_path: Path) -> None:
         "    print('MARKER_PRESENT', False, flush=True)\n"
         "sys.exit(0)\n"
     )
-    env = {**os.environ, "ALFRED_HOST_SECRET_MARKER": "sbx2026006_leak_canary"}
+    env = {
+        **_bwrap_child_env(),
+        "ALFRED_HOST_SECRET_MARKER": "sbx2026006_leak_canary",
+    }
     flags = _real_policy_flags_with_test_binds(tmp_path)
     bwrap = shutil.which("bwrap")
     assert bwrap is not None  # gated by _bwrap_required

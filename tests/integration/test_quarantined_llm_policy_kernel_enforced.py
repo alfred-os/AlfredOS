@@ -152,9 +152,20 @@ windows = "config/sandbox/quarantined-llm.windows.stub.policy"
 
 
 def _launcher_env(manifest: Path, policy_dir: Path) -> dict[str, str]:
+    # LD_LIBRARY_PATH makes the green gate depend on a test guarantee rather
+    # than the runner's interpreter layout (test-reviewer MEDIUM). A
+    # dynamically-linked Debian *venv* python (RUNPATH ``$ORIGIN/../lib``) can't
+    # find ``libpython3.x.so`` inside the sandbox — /etc (hence ld.so.cache) is
+    # unbound and ``sys.base_prefix`` is skipped when it lives under /usr. Point
+    # the loader explicitly at the interpreter's lib dirs (both are bound: via
+    # the /usr ro-bind and the appended sys.prefix/base_prefix binds). bwrap
+    # inherits this env by default (no --clearenv). The uv-managed standalone
+    # CPython on the current runner doesn't need it; this keeps the test robust
+    # against the alfred-core Bookworm image the policy targets.
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "LD_LIBRARY_PATH": f"{sys.base_prefix}/lib:{sys.prefix}/lib:/usr/lib",
         "ALFRED_ENVIRONMENT": "test",
         "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
         "ALFRED_SANDBOX_POLICY_DIR": str(policy_dir),
