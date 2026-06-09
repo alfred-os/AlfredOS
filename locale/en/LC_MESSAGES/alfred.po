@@ -1536,80 +1536,74 @@ msgstr ""
 "Plugin {plugin_id} policy_ref points to a {policy_os} policy on a "
 "{host_os} host. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:128
-msgid "supervisor.sandbox.refused.policy_ref_unreadable"
-msgstr ""
-"Plugin {plugin_id} policy_ref at {policy_ref} is unreadable. Refusing to "
-"launch."
-
-#: src/alfred/i18n/_slice_4_reserve.py:129
+#: src/alfred/i18n/_slice_4_reserve.py:130
 msgid "supervisor.sandbox.refused.sandbox_block_missing"
 msgstr ""
 "Plugin {plugin_id} manifest is missing the [sandbox] block. Refusing to "
 "launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:130
+#: src/alfred/i18n/_slice_4_reserve.py:131
 msgid "supervisor.sandbox.refused.windows_stub_in_production"
 msgstr ""
 "Plugin {plugin_id} resolves to the Windows stub policy in production. "
 "Refusing to launch — Windows requires WSL2 per spec §7.7."
 
-#: src/alfred/i18n/_slice_4_reserve.py:131
+#: src/alfred/i18n/_slice_4_reserve.py:132
 msgid "supervisor.sandbox.unsandboxed_refused_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in production. Refusing to "
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:134 src/alfred/policies/watcher.py:377
+#: src/alfred/i18n/_slice_4_reserve.py:135 src/alfred/policies/watcher.py:377
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
-#: src/alfred/i18n/_slice_4_reserve.py:135 src/alfred/policies/watcher.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:136 src/alfred/policies/watcher.py:87
 msgid "supervisor.config_reload.rejected.parse_failure"
 msgstr ""
 "config/policies.yaml reload rejected: parse failure ({detail}). Live "
 "snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:136 src/alfred/policies/watcher.py:89
+#: src/alfred/i18n/_slice_4_reserve.py:137 src/alfred/policies/watcher.py:89
 msgid "supervisor.config_reload.rejected.high_blast_change"
 msgstr ""
 "config/policies.yaml reload rejected: {key} is a high-blast key and "
 "requires reviewer-gate."
 
-#: src/alfred/i18n/_slice_4_reserve.py:137 src/alfred/policies/watcher.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:138 src/alfred/policies/watcher.py:91
 msgid "supervisor.config_reload.rejected.validation_failure"
 msgstr ""
 "config/policies.yaml reload rejected: validation failed for {detail}. "
 "Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:138 src/alfred/policies/watcher.py:93
+#: src/alfred/i18n/_slice_4_reserve.py:139 src/alfred/policies/watcher.py:93
 msgid "supervisor.config_reload.rejected.file_vanished"
 msgstr ""
 "config/policies.yaml vanished between stat and read. Live snapshot "
 "retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:139 src/alfred/policies/watcher.py:95
+#: src/alfred/i18n/_slice_4_reserve.py:140 src/alfred/policies/watcher.py:95
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:140 src/alfred/policies/watcher.py:97
+#: src/alfred/i18n/_slice_4_reserve.py:141 src/alfred/policies/watcher.py:97
 msgid "supervisor.config_reload.rejected.audit_write_failed"
 msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:141 src/alfred/policies/watcher.py:506
+#: src/alfred/i18n/_slice_4_reserve.py:142 src/alfred/policies/watcher.py:506
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:142 src/alfred/policies/watcher.py:523
+#: src/alfred/i18n/_slice_4_reserve.py:143 src/alfred/policies/watcher.py:523
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
-#: src/alfred/i18n/_slice_4_reserve.py:144 src/alfred/policies/watcher.py:489
+#: src/alfred/i18n/_slice_4_reserve.py:145 src/alfred/policies/watcher.py:489
 msgid "policies.watcher.fallback_write_failed"
 msgstr ""
 "PolicyWatcher could not write the rejected-config fallback sink at "
@@ -1617,7 +1611,7 @@ msgstr ""
 " continues; fix the state directory."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/i18n/_slice_4_reserve.py:147
+#: src/alfred/i18n/_slice_4_reserve.py:148
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat requires the AlfredOS daemon to be running. Start it with "
@@ -1953,34 +1947,40 @@ msgstr ""
 "Plugin {plugin_id} policy_ref resolves outside the sandbox-policy root. "
 "Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:48
+#: src/alfred/plugins/_sandbox_i18n.py:49
+msgid "supervisor.sandbox.refused.policy_ref_unreadable"
+msgstr ""
+"Plugin {plugin_id} policy_ref at {policy_ref} is unreadable. Refusing to "
+"launch."
+
+#: src/alfred/plugins/_sandbox_i18n.py:51
 msgid "supervisor.sandbox.refused.unknown_host_os"
 msgstr "Plugin {plugin_id} cannot be launched: unrecognised host OS."
 
-#: src/alfred/plugins/_sandbox_i18n.py:49
+#: src/alfred/plugins/_sandbox_i18n.py:52
 msgid "supervisor.sandbox.refused.jq_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: jq is not available on the "
 "launcher host."
 
-#: src/alfred/plugins/_sandbox_i18n.py:51
+#: src/alfred/plugins/_sandbox_i18n.py:54
 msgid "supervisor.sandbox.refused.macos_full_not_yet_shipped"
 msgstr ""
 "Plugin {plugin_id} requests a full macOS sandbox, which is not yet "
 "shipped (PR-S4-7)."
 
-#: src/alfred/plugins/_sandbox_i18n.py:54
+#: src/alfred/plugins/_sandbox_i18n.py:57
 msgid "supervisor.sandbox.refused.policy_translate_failed"
 msgstr "Plugin {plugin_id} sandbox policy could not be translated to bwrap flags."
 
-#: src/alfred/plugins/_sandbox_i18n.py:62
+#: src/alfred/plugins/_sandbox_i18n.py:65
 msgid "supervisor.sandbox.refused.fake_uname_in_production"
 msgstr ""
 "FAKE_UNAME is set in production for plugin {plugin_id}. FAKE_UNAME is a "
 "test-only host-OS override and is ignored in production; its presence "
 "here can only force a host-OS branch. Refusing to launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:65
+#: src/alfred/plugins/_sandbox_i18n.py:68
 msgid "supervisor.sandbox.refused.uid_separation_unavailable"
 msgstr ""
 "Plugin {plugin_id} cannot be launched on this non-Linux production host "
@@ -1988,26 +1988,26 @@ msgstr ""
 "unsandboxed in production is refused. Run plugins on a Linux host or "
 "under bwrap."
 
-#: src/alfred/plugins/_sandbox_i18n.py:68
+#: src/alfred/plugins/_sandbox_i18n.py:71
 msgid "supervisor.sandbox.refused.stub_kind_in_production"
 msgstr ""
 "Plugin {plugin_id} declares a kind:stub sandbox, which provides no "
 "containment, and is refused in production on host {host_os}. Refusing to "
 "launch."
 
-#: src/alfred/plugins/_sandbox_i18n.py:72
+#: src/alfred/plugins/_sandbox_i18n.py:75
 msgid "supervisor.boot.mlock_unavailable"
 msgstr ""
 "mlockall is unavailable ({errno_string}); Supervisor pages may swap to "
 "disk. Boot proceeds."
 
-#: src/alfred/plugins/_sandbox_i18n.py:73
+#: src/alfred/plugins/_sandbox_i18n.py:76
 msgid "supervisor.boot.core_dumps_disabled"
 msgstr ""
 "Core dumps disabled (RLIMIT_CORE set to 0) to protect the in-memory "
 "provider key."
 
-#: src/alfred/plugins/_sandbox_i18n.py:74
+#: src/alfred/plugins/_sandbox_i18n.py:77
 msgid "daemon.boot.environment_source_conflict"
 msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "

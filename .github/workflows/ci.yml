@@ -368,6 +368,14 @@ jobs:
             exit 1
           fi
           echo "bwrap advertises --sync-fd — resolver test flag is current."
+          # Ubuntu 23.10+/24.04 (ubuntu-latest) ships
+          # kernel.apparmor_restrict_unprivileged_userns=1, which blocks the
+          # unprivileged user-namespace setup bwrap needs — surfacing as
+          # `bwrap: setting up uid map: Permission denied` (and RTM_NEWADDR
+          # on --unshare-net). Relax it for the runner so the launcher's real
+          # bwrap sandbox can spawn. `|| true`: the sysctl is absent on older
+          # kernels, which is fine (no restriction to lift there).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Run integration tests with coverage append
         if: steps.check.outputs.has_integration == 'true'
         # Append integration coverage to the .coverage data file the unit
