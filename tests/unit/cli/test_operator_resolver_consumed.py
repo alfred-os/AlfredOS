@@ -69,13 +69,24 @@ def _import_aliases_of(tree: ast.Module, constants: frozenset[str]) -> set[str]:
     an operator-attributed constant to the canonical constant name so the emit
     check below sees through the alias. Non-aliased imports (``asname is None``)
     are already covered by ``_referenced_names`` and need no rewriting.
+
+    CR-227 round-3 follow-up: only count the alias as an emit when the alias
+    name is actually REFERENCED in the module body. A bare
+    ``from ... import CONST as X`` that never uses ``X`` is not an emit — the
+    constant is dead — so flagging it would be a false positive that drifts
+    from the guard's precision (a non-emitting module would fail the gate).
     """
+    referenced = _referenced_names(tree)
     resolved: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         for alias in node.names:
-            if alias.asname is not None and alias.name in constants:
+            if (
+                alias.asname is not None
+                and alias.name in constants
+                and alias.asname in referenced
+            ):
                 resolved.add(alias.name)
     return resolved
 
@@ -150,3 +161,23 @@ def test_guard_catches_aliased_import_non_consuming_module() -> None:
     tree = ast.parse(bad.read_text())
     assert _module_emits_operator_attributed(tree, constants)
     assert not _module_consumes_resolver(tree)
+
+
+def test_guard_ignores_unreferenced_aliased_import() -> None:
+    """Precision: an aliased import that is never USED is NOT an emit.
+
+    CR-227 round-3 follow-up: ``from ... import CONST as X`` where ``X`` is
+    never referenced rebinds a dead name — the module does not emit an
+    operator-attributed row. Counting it would be a false positive that fails
+    the gate for a non-emitting module.
+    """
+    constants = _operator_attributed_constants()
+    const = next(iter(constants))
+    src = (
+        "from __future__ import annotations\n"
+        f"from alfred.audit.audit_row_schemas import {const} as _UNUSED\n"
+        "def noop() -> None:\n"
+        "    return None\n"
+    )
+    tree = ast.parse(src)
+    assert not _module_emits_operator_attributed(tree, constants)
