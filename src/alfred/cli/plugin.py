@@ -157,6 +157,13 @@ def _queue_grant_proposal(
     keeps ``alfred plugin --help`` light.
     """
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+    from alfred.cli.operator_session import resolve_operator_user_id_or_refuse
+
+    # #153: the proposal payload carries the canonical authenticated
+    # operator id; a missing/expired session refuses the command.
+    operator_user_id = resolve_operator_user_id_or_refuse(
+        refusal_key="cli.plugin.grant.refused.not_logged_in"
+    )
 
     result = queue_proposal_or_exit(
         payload=PluginGrantProposal(
@@ -178,10 +185,8 @@ def _queue_grant_proposal(
             "plugin_id": plugin_id,
             "subscriber_tier": subscriber_tier,
             "hookpoint": hookpoint,
-            # devex-007: PR-S3-7 wires the IdentityResolver bridge.
-            # Until then the audit row carries ``None`` and the eventual
-            # upgrade is a single emit-site edit.
-            "operator_user_id": None,
+            # #153: canonical authenticated operator id (was None pre-S4-5).
+            "operator_user_id": operator_user_id,
             # CR-149 round-6: operator-typed CLI ingress is the canonical
             # T1 swimlane (PRD §7.1). The reviewer-gated capability
             # request originates from a real operator at the CLI; the
@@ -426,6 +431,12 @@ def revoke(
     --help surface light.
     """
     from alfred.audit.audit_row_schemas import PLUGIN_GRANT_REQUESTED_FIELDS
+    from alfred.cli.operator_session import resolve_operator_user_id_or_refuse
+
+    # #153: canonical authenticated operator id on the revoke proposal.
+    operator_user_id = resolve_operator_user_id_or_refuse(
+        refusal_key="cli.plugin.grant.refused.not_logged_in"
+    )
 
     # CR-149: the audit event for the proposal-enqueue path is
     # ``plugin.grant.revoke.requested`` (an inflight / requested
@@ -461,8 +472,8 @@ def revoke(
             # family.
             "subscriber_tier": None,
             "hookpoint": None,
-            # devex-007: PR-S3-7 wires IdentityResolver.
-            "operator_user_id": None,
+            # #153: canonical authenticated operator id (was None pre-S4-5).
+            "operator_user_id": operator_user_id,
             # CR-149 round-7: T1 swimlane tag — same rationale as the
             # grant path. ``alfred plugin revoke`` is operator-typed
             # CLI ingress (PRD §7.1 + CLAUDE.md hard rule #3) and
