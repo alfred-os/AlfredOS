@@ -849,15 +849,22 @@ OPERATOR_SESSION_REVOKED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
-# ``reason`` closed-vocab: planted_file | expired | revoked | host_mismatch |
-# machine_mismatch | token_user_mismatch | planted_file_invalid_user_id
-# (per PR-S4-5 round-2 closures).
+# ``reason`` closed-vocab — session-bound refusals (a valid file parsed):
+#   expired | host_mismatch | machine_mismatch | token_unknown |
+#   token_user_mismatch | user_revoked
+# File-less refusals (no valid file / no machine-id — emitted with every
+#   self-claimed field None so no unparsed attacker bytes reach the log):
+#   session_missing | parent_dir_insecure | parent_dir_not_owned |
+#   bad_file_mode | bad_file_owner | planted_file_invalid |
+#   machine_id_unavailable
+# (per PR-S4-5 round-2 closures + the file-less audit-gap fix, hard rule #7).
 OPERATOR_SESSION_REFUSED_FIELDS: Final[frozenset[str]] = frozenset(
     {
         # ``attempted_user_id`` is the self-claimed user_id from the planted/
         # presented session file (Pydantic-validated for character class +
-        # length per PR-S4-5 round-2 closure 4). ``resolved_user_id`` is the
-        # DB-resolved owner of the token (None when token lookup misses).
+        # length per PR-S4-5 round-2 closure 4), or ``None`` on the file-less
+        # refusal path (file did not parse / no machine-id). ``resolved_user_id``
+        # is the DB-resolved owner of the token (None when token lookup misses).
         # When the two differ the row carries reason="token_user_mismatch"
         # (PR-S4-5 round-2 closure 11).
         "attempted_user_id",

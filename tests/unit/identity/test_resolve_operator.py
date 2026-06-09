@@ -22,10 +22,15 @@ from pydantic import SecretStr
 
 from alfred.identity._resolver import DefaultOperatorSessionResolver
 from alfred.identity.operator_session import (
+    OperatorSessionBadFileMode,
     OperatorSessionExpired,
     OperatorSessionFile,
     OperatorSessionHostMismatch,
     OperatorSessionMachineIdMismatch,
+    OperatorSessionMalformed,
+    OperatorSessionMissing,
+    OperatorSessionNoMachineId,
+    OperatorSessionParentDirInsecure,
     OperatorSessionTimeout,
     OperatorSessionTokenUnknown,
     OperatorSessionTokenUserMismatch,
@@ -60,6 +65,11 @@ class _StubMachineId:
 
     async def read_raw(self) -> bytes:
         return self.raw
+
+
+class _NoMachineId:
+    async def read_raw(self) -> bytes:
+        raise OperatorSessionNoMachineId("no machine id source")
 
 
 @dataclass
@@ -275,6 +285,85 @@ async def test_timeout_refuses(tmp_path: Path) -> None:
     resolver._hard_timeout_s = 0.05  # type: ignore[attr-defined]
     with pytest.raises(OperatorSessionTimeout):
         await resolver.resolve()
+
+
+async def test_missing_file_emits_fileless_session_missing(tmp_path: Path) -> None:
+    """No file -> file-less ``session_missing`` row (attempted_user_id None).
+
+    hard rule #7: the load refusal fires before any session exists, so the
+    resolver MUST still land exactly one refused row + hookpoint.
+    """
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    path = parent / "session"  # never written
+    audit = _FakeAudit()
+    hooks = _FakeHooks()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit, hooks=hooks)
+    with pytest.raises(OperatorSessionMissing):
+        await resolver.resolve()
+    assert audit.calls[-1].subject["reason"] == "session_missing"
+    assert audit.calls[-1].subject["attempted_user_id"] is None
+    assert audit.calls[-1].subject["host"] is None
+    assert audit.calls[-1].subject["machine_id_hash"] is None
+    assert [c for c in hooks.calls if c.name == "operator.session.refused"]
+
+
+async def test_malformed_file_emits_fileless_planted_file_invalid(tmp_path: Path) -> None:
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o700)
+    path = parent / "session"
+    path.write_bytes(b'{"not":"a session"}')
+    path.chmod(0o600)
+    audit = _FakeAudit()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    with pytest.raises(OperatorSessionMalformed):
+        await resolver.resolve()
+    assert audit.calls[-1].subject["reason"] == "planted_file_invalid"
+
+
+async def test_bad_file_mode_emits_fileless_bad_file_mode(tmp_path: Path) -> None:
+    path = _write_session(tmp_path)
+    path.chmod(0o644)  # broaden beyond 0600 -> BadFileMode on load
+    audit = _FakeAudit()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    with pytest.raises(OperatorSessionBadFileMode):
+        await resolver.resolve()
+    assert audit.calls[-1].subject["reason"] == "bad_file_mode"
+
+
+async def test_parent_dir_insecure_emits_fileless_row(tmp_path: Path) -> None:
+    path = _write_session(tmp_path)
+    path.parent.chmod(0o755)  # group/other-accessible parent -> ParentDirInsecure
+    audit = _FakeAudit()
+    resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    with pytest.raises(OperatorSessionParentDirInsecure):
+        await resolver.resolve()
+    assert audit.calls[-1].subject["reason"] == "parent_dir_insecure"
+
+
+async def test_no_machine_id_emits_fileless_machine_id_unavailable(tmp_path: Path) -> None:
+    """A machine-id source read failure lands a ``machine_id_unavailable`` row.
+
+    The machine-id is not session-derived, so the row stays file-less rather
+    than echoing the (untrusted) session's self-claimed machine_id_hash.
+    """
+    path = _write_session(tmp_path, user_id=7)
+    audit = _FakeAudit()
+    resolver = DefaultOperatorSessionResolver(
+        session_scope=_scope_for(_FakeSession(rows=[])),
+        secret_broker=_FakeBroker(),
+        machine_id_provider=_NoMachineId(),
+        audit_writer=audit,
+        hook_dispatcher=_FakeHooks(),
+        host=_HOST,
+        session_file_path=path,
+    )
+    with pytest.raises(OperatorSessionNoMachineId):
+        await resolver.resolve()
+    assert audit.calls[-1].subject["reason"] == "machine_id_unavailable"
+    assert audit.calls[-1].subject["machine_id_hash"] is None
 
 
 async def test_happy_path_fires_no_refused_hook(tmp_path: Path) -> None:
