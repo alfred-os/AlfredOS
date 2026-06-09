@@ -154,7 +154,21 @@ def test_parse_swap_tick_under_budget(tmp_path: Path) -> None:
             samples.append(time.perf_counter() - start)
         return samples
 
-    samples = asyncio.run(_bench())
+    # The rate-limit key is high-blast (ADR-0023 §5), so a production tick on
+    # this edit refuses. To measure the heavier parse-AND-SWAP path the budget
+    # exists for, allowlist the key under test for the benchmark window only —
+    # mirrors the unit-suite ``allowlisted`` helper; the production allowlist is
+    # untouched.
+    import alfred.policies.watcher as watcher_mod
+
+    original_allowlist = watcher_mod.LOW_BLAST_ALLOWLIST
+    watcher_mod.LOW_BLAST_ALLOWLIST = original_allowlist | frozenset(  # type: ignore[assignment]
+        {"rate_limits.web_fetch_per_user_per_hour"}
+    )
+    try:
+        samples = asyncio.run(_bench())
+    finally:
+        watcher_mod.LOW_BLAST_ALLOWLIST = original_allowlist  # type: ignore[assignment]
     p99 = _p99(samples)
     assert p99 < _PARSE_SWAP_BUDGET_S, (
         f"parse-swap _tick p99 {p99 * 1000:.3f}ms exceeds {_PARSE_SWAP_BUDGET_S * 1000:.1f}ms "
