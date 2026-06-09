@@ -210,6 +210,10 @@ HOST_OS="$(_host_os)"
 
 if [ "${HOST_OS}" = "unknown" ]; then
     printf 'supervisor.sandbox.refused.unknown_host_os plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    # CR #229 R2 finding-10: emit the structured audit row too, matching the
+    # other refusal rows' shape so the audit trail is consistent across every
+    # sandbox refusal reason.
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"unknown_host_os","environment":"%s","host_os":"unknown"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
     exit 1
 fi
 
