@@ -1,0 +1,36 @@
+# Quarantined-LLM sandbox STUB policy (Windows) — PR-S4-7, spec §7.2, ADR-0015.
+#
+# AlfredOS ships NO kernel-enforced sandbox on Windows yet. There is no bwrap
+# (Linux namespaces) and no Seatbelt (macOS) equivalent wired up; a real
+# Windows containment primitive (AppContainer / Job Object / restricted token)
+# is out of scope for Slice 4 and tracked alongside #230.
+#
+# This file is a documented STUB that exists so the quarantined-LLM manifest's
+# `[sandbox.policy_refs] windows = ...` reference resolves rather than dangles.
+# It carries NO enforceable bytes — the launcher does NOT parse this body.
+#
+# Launcher behaviour for `kind = "full"` on a Windows host
+# (bin/alfred-plugin-launcher.sh, `windows)` branch):
+#
+#   * PRODUCTION  -> REFUSED. The launcher emits
+#                    `supervisor.plugin.sandbox_refused` with
+#                    reason="windows_stub_in_production" and exits non-zero.
+#                    A quarantined LLM MUST NOT run unsandboxed in production.
+#
+#   * dev / test  -> STUB-USED. The launcher emits
+#                    `supervisor.plugin.sandbox_stub_used` (an honest audit row
+#                    recording that the process ran WITHOUT OS-level isolation)
+#                    and execs the interpreter directly. This is for local
+#                    Windows development only.
+#
+# The `supervisor.plugin.sandbox_stub_used` hookpoint (PR-S4-7 Component E)
+# makes that dev-only unsandboxed exec observable to subscribers, so an
+# operator cannot miss that a plugin ran without containment.
+#
+# DO NOT rely on this file for any production isolation. When real Windows
+# containment lands, this stub is replaced with an enforceable policy and the
+# launcher's `windows)` stub branch is removed.
+
+kind = "stub"
+platform = "windows"
+enforced = false
