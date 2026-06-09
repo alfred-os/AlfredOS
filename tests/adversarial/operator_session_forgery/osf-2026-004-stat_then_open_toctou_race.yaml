@@ -1,0 +1,14 @@
+id: osf-2026-004
+category: operator_session_forgery
+threat: "An attacker with control of the parent directory swaps the session file between the stat and the open syscalls (the classic stat-then-open TOCTOU). The open-then-fstat discipline (open the parent dir FD first, fstat it, then openat O_NOFOLLOW + fstat the file FD) closes the window: the FD points at the original inode regardless of any post-open swap."
+ingestion_path: operator_session_file
+payload:
+  attack: "swap file between stat and open"
+  parent_dir_fd_pinned: true
+  fstat_validates_open_fd: true
+expected_outcome: refused
+provenance: "PR-S4-5 §5.2 sec-2 closure — the loader never calls os.stat(path) then path.open(). It pins the parent dir by FD, fstats it (refuse if group/other-accessible or non-euid-owned), then openat(O_NOFOLLOW) + fstats the file FD. A swap after the dir is pinned cannot redirect the open; a swap to a symlink is refused by O_NOFOLLOW. The race has no exploitable window."
+references:
+  - "PR-S4-5 §5.2"
+  - "spec §6.2"
+  - "#153"

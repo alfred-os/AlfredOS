@@ -1,0 +1,16 @@
+id: osf-2026-002
+category: operator_session_forgery
+threat: "An attacker copies a victim's valid session file from host A to host B. The file's host field still reads host A; the resolver compares it against the live socket.gethostname() and refuses with host_mismatch before the token even reaches the DB lookup."
+ingestion_path: operator_session_file
+payload:
+  user_id: 7
+  token: "valid-token-from-host-a"
+  host: "host-a"
+  live_host: "host-b"
+  db_row_present: true
+expected_outcome: refused
+provenance: "PR-S4-5 §6.4 step 3 — host binding. The session file is bound to the host it was minted on; copying it to a different host is refused with OperatorSessionHostMismatch + OPERATOR_SESSION_REFUSED(reason=host_mismatch)."
+references:
+  - "PR-S4-5 §6.4"
+  - "spec §6.5"
+  - "#153"

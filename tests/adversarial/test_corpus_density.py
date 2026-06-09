@@ -148,17 +148,22 @@ def test_carrier_substitution_tamper_corpus_has_payloads() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="awaiting PR-S4-5 CLI operator session — osf-2026-001..N",
-)
 def test_operator_session_forgery_corpus_has_payloads() -> None:
-    """`tests/adversarial/operator_session_forgery/` must carry ≥1 payload from PR-S4-5."""
+    """`tests/adversarial/operator_session_forgery/` carries ≥7 PR-S4-5 payloads.
+
+    PR-S4-5 (#153) ships osf-2026-001..007: forged session file (token_unknown),
+    replay from another host (host_mismatch), replay from another machine
+    (machine_mismatch), stat-then-open TOCTOU race (closed by open-then-fstat),
+    symlink to attacker file (O_NOFOLLOW boundary refusal), token/user mismatch
+    (token-authoritative, round-2 closure 11), and planted-user-id log injection
+    (round-2 closure 4). The xfail-strict guard was removed when the payloads
+    landed; the floor of 7 catches a silent deletion regression.
+    """
     category_dir = Path(__file__).parent / "operator_session_forgery"
     count = _count_yaml_payloads(category_dir)
-    assert count > 0, (
-        f"no *.yaml payloads under {category_dir} — strict xfail discipline "
-        "requires real YAML, not stub test modules"
+    assert count >= 7, (
+        f"expected ≥7 *.yaml payloads under {category_dir} (osf-2026-001..007), "
+        f"found {count} — a payload was deleted or renamed"
     )
 
 

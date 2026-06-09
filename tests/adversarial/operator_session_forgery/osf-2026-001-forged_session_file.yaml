@@ -1,0 +1,16 @@
+id: osf-2026-001
+category: operator_session_forgery
+threat: "An attacker with write access to ~/.config/alfred/session plants a syntactically-valid session file naming a chosen user_id and a self-minted token. The DB has no matching operator_sessions.token_hash row, so the resolver must refuse with token_unknown rather than trusting the file's self-claimed identity."
+ingestion_path: operator_session_file
+payload:
+  user_id: 1
+  token: "attacker-minted-token-not-in-db"
+  host: "victim-host"
+  machine_id_hash_matches: true
+  db_row_present: false
+expected_outcome: refused
+provenance: "PR-S4-5 §5.4 + spec §6.4 — the token is authoritative. The session file is a host-side artefact; the daemon-side defence is the HMAC(token) lookup on uq_operator_sessions_token_hash. A planted file with no matching DB row resolves to OperatorSessionTokenUnknown and emits OPERATOR_SESSION_REFUSED(reason=token_unknown)."
+references:
+  - "PR-S4-5 §5.4"
+  - "spec §6.4"
+  - "#153"

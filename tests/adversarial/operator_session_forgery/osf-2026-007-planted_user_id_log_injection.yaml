@@ -1,0 +1,13 @@
+id: osf-2026-007
+category: operator_session_forgery
+threat: "An attacker plants a session file whose user_id field carries arbitrary bytes (a newline plus an ANSI clear-screen escape) attempting log-injection into the OPERATOR_SESSION_REFUSED audit row's attempted_user_id field. The file model coerces user_id to int, so non-integer bytes are rejected at parse time (OperatorSessionMalformed) BEFORE any audit emit, so no attacker-controlled bytes reach the audit log."
+ingestion_path: operator_session_file
+payload:
+  user_id_raw: "7\\n[CRITICAL] forged audit line\\x1b[2J"
+  attack: "log-injection via attempted_user_id; the malicious bytes are shown here as backslash-escaped text so the YAML stays printable-ASCII"
+expected_outcome: refused
+provenance: "PR-S4-5 round-2 closure 4 (sec-4). The file model's user_id is an int; arbitrary bytes fail Pydantic coercion at load time (OperatorSessionMalformed) before the resolver reaches the audit-emit path. The audit attempted_user_id therefore only ever carries an int-derived (^[0-9]+$) string. The planted file is refused with no attacker bytes in the log."
+references:
+  - "PR-S4-5 round-2 closure 4"
+  - "spec §6.2"
+  - "#153"

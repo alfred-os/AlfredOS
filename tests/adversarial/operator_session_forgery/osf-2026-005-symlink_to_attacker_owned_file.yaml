@@ -1,0 +1,13 @@
+id: osf-2026-005
+category: operator_session_forgery
+threat: "The operator's session path is replaced by a symlink pointing at an attacker-controlled file (e.g. /tmp/attacker-session). Without O_NOFOLLOW the loader would follow the link and read attacker content; the openat(O_NOFOLLOW) refuses the symlink at open time."
+ingestion_path: operator_session_file
+payload:
+  attack: "session path is a symlink to attacker-owned file"
+  open_flag: "O_NOFOLLOW"
+expected_outcome: boundary_refused
+provenance: "PR-S4-5 §5.2 — os.open(..., O_RDONLY | O_NOFOLLOW) raises ELOOP on a symlink; the loader maps it to OperatorSessionBadFileMode (open_refused). The boundary refuses before any content is read."
+references:
+  - "PR-S4-5 §5.2"
+  - "spec §6.2"
+  - "#153"
