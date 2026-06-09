@@ -150,13 +150,26 @@ class RateLimitConfig:
 
         Derefs ``ref.current()`` on EVERY call (per-iteration deref, core-003)
         so a watcher swap is reflected the next time a caller rebuilds the
-        config — no plugin-host restart required. The per-domain / per-minute
-        knobs are not yet operator-tunable in ``PoliciesV1`` and keep their
-        spec §7.7 defaults; ``per_user_daily`` reads the hot-reloadable
-        ``rate_limits.web_fetch_per_user_per_hour`` budget.
+        config — no plugin-host restart required.
+
+        UNITS HONESTY (CR round-3 Finding 1, #225): this returns the spec §7.7
+        DEFAULTS (10 / 30 / 100) for now. It deliberately does NOT derive
+        ``per_user_daily`` from ``rate_limits.web_fetch_per_user_per_hour`` —
+        that field is HOURLY, and wiring an hourly value into the DAILY
+        ``per_user_daily`` bucket is a units mismatch (an hour-as-day error).
+        ``PoliciesV1`` has no correctly-named/correctly-unit'd daily field yet;
+        adding one is schema territory that #225 owns (it reconciles
+        ``PoliciesV1`` with the live ``config/policies.yaml`` and also wires the
+        first real ``from_snapshot_ref`` consumer — this method is DORMANT in
+        production until then). Until #225 lands, returning defaults is the
+        units-honest behaviour; the per-iteration deref above keeps the
+        hot-reload contract live so #225 only has to map the new field.
         """
-        snapshot = ref.current()
-        return cls(per_user_daily=snapshot.policies.rate_limits.web_fetch_per_user_per_hour)
+        # Deref the active snapshot per call (core-003) even though no field is
+        # mapped yet, so the wiring contract is exercised and #225's change is a
+        # one-line field map rather than a re-architecture.
+        _active = ref.current()
+        return cls()
 
 
 class RateLimiter:
