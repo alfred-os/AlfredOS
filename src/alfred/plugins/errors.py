@@ -194,6 +194,32 @@ class PluginProtocolViolation(PluginTransportError):  # noqa: N818 -- name pinne
         self.plugin_id = plugin_id
 
 
+class SandboxInfoHandshakeMismatch(PluginTransportError):  # noqa: N818 -- name pinned by PR-S4-6 arch-3
+    """A plugin's reported sandbox posture disagrees with its manifest (arch-3).
+
+    After the handshake a plugin may attest its effective isolation via a
+    ``sandbox_info`` method. If the reported ``effective_sandbox_kind`` does
+    not match the manifest's declared ``sandbox.kind`` — a plugin lying about
+    its own containment — the Supervisor tears down the session.
+
+    ``declared`` (manifest kind) and ``reported`` (plugin-attested kind) are
+    closed-vocabulary strings safe to carry in audit rows.
+    """
+
+    def __init__(self, plugin_id: str, declared: str, reported: str) -> None:
+        super().__init__(
+            t(
+                "supervisor.sandbox.refused.sandbox_info_handshake_mismatch",
+                plugin_id=plugin_id,
+                declared=declared,
+                reported=reported,
+            )
+        )
+        self.plugin_id = plugin_id
+        self.declared = declared
+        self.reported = reported
+
+
 class DlpOutboundRefusedError(PluginTransportError):
     """:class:`alfred.security.dlp.OutboundDlp` refused an outbound frame.
 
@@ -225,4 +251,5 @@ __all__ = [
     "PluginProtocolViolation",
     "PluginTransportError",
     "QuarantinedUnavailable",
+    "SandboxInfoHandshakeMismatch",
 ]
