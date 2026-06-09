@@ -88,20 +88,39 @@ class _FakeResult:
         return self.row
 
 
+def _bound_token_hash(statement: Any) -> str | None:
+    """Extract the bound ``token_hash`` from the resolver's compiled SELECT.
+
+    The resolver filters ``OperatorSessionRow.token_hash == token_hash``; the
+    literal lives in the statement's bind params. Pulling it out lets the fake
+    DB honour the unique-index lookup instead of blindly returning row[0].
+    """
+    params = statement.compile().params
+    for key, value in params.items():
+        if "token_hash" in key:
+            return None if value is None else str(value)
+    return None
+
+
 @dataclass
 class _FakeSession:
     rows: Sequence[_Row]
     sleep_s: float = 0.0
 
-    async def execute(self, *_args: Any, **_kwargs: Any) -> _FakeResult:
+    async def execute(self, statement: Any, *_args: Any, **_kwargs: Any) -> _FakeResult:
         if self.sleep_s:
             await asyncio.sleep(self.sleep_s)
-        # The query selects (User.id, User.deleted_at) joined on token_hash;
-        # we resolve it by scanning the fake rows for a non-revoked match.
-        # The bound token_hash lives in the compiled statement, so we instead
-        # match on the single seeded row (tests seed exactly what they need).
+        # CR-227 round-2 finding 7: honour the queried ``token_hash`` so the
+        # fake actually exercises the ``uq_operator_sessions_token_hash``
+        # unique-index lookup. The previous fake returned the first
+        # non-revoked row regardless of which token was queried, so a
+        # resolver regression that looked up the wrong hash would pass
+        # unnoticed. The bound value lives in the compiled statement's
+        # params; we filter the seeded rows by it (returning None on no
+        # match, mirroring ``Result.first()`` over an empty result set).
+        queried = _bound_token_hash(statement)
         for row in self.rows:
-            if row.revoked_at is None:
+            if row.revoked_at is None and row.token_hash == queried:
                 return _FakeResult((row.user_id, row.user_deleted_at))
         return _FakeResult(None)
 
@@ -248,6 +267,22 @@ async def test_token_unknown_refuses(tmp_path: Path) -> None:
     path = _write_session(tmp_path)
     audit = _FakeAudit()
     resolver = _make_resolver(path, _FakeSession(rows=[]), audit=audit)
+    with pytest.raises(OperatorSessionTokenUnknown):
+        await resolver.resolve()
+    assert audit.calls[-1].subject["reason"] == "token_unknown"
+
+
+async def test_token_hash_mismatch_is_token_unknown(tmp_path: Path) -> None:
+    """A seeded row whose token_hash differs from the queried hash is invisible.
+
+    CR-227 round-2 finding 7: proves the resolver looks up by the unique-index
+    ``token_hash`` (not just "first non-revoked row"). The fake honours the
+    bound hash, so a row keyed on a DIFFERENT token resolves to ``token_unknown``.
+    """
+    path = _write_session(tmp_path, user_id=7)
+    session = _FakeSession(rows=[_Row(token_hash="deadbeef" * 8, user_id=7)])
+    audit = _FakeAudit()
+    resolver = _make_resolver(path, session, audit=audit)
     with pytest.raises(OperatorSessionTokenUnknown):
         await resolver.resolve()
     assert audit.calls[-1].subject["reason"] == "token_unknown"
