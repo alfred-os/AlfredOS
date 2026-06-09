@@ -8,6 +8,7 @@ is enforced against the fstat result (authoritative for the fd we read).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from pydantic import ValidationError
 from alfred.policies.load import (
     MAX_POLICIES_BYTES,
     PolicyFileTooLarge,
+    PolicyFileTruncated,
     compute_sha256,
     load_yaml_bytes,
     parse_policies,
@@ -106,3 +108,48 @@ def test_load_yaml_bytes_reads_exactly_fstat_size(tmp_path: Path) -> None:
     raw = load_yaml_bytes(f, max_size=MAX_POLICIES_BYTES)
     assert raw == payload
     assert len(raw) == f.stat().st_size
+
+
+def test_load_yaml_bytes_assembles_short_reads(tmp_path: Path, monkeypatch) -> None:
+    """sec-1: a SHORT ``os.read`` is looped until ``st_size`` bytes accumulate.
+
+    Mocks ``os.read`` to dribble the payload one byte at a time so the
+    accumulate-until-st_size loop is exercised; a one-shot read would have
+    handed only the first byte to the caller.
+    """
+    import alfred.policies.load as load_mod
+
+    f = tmp_path / "policies.yaml"
+    payload = _valid_yaml_text().encode()
+    f.write_bytes(payload)
+
+    real_read = os.read
+
+    def _dribble(fd: int, n: int) -> bytes:
+        return real_read(fd, 1)  # honour EOF but never return more than one byte
+
+    monkeypatch.setattr(load_mod.os, "read", _dribble)
+    assert load_yaml_bytes(f, max_size=MAX_POLICIES_BYTES) == payload
+
+
+def test_load_yaml_bytes_refuses_concurrent_truncation(tmp_path: Path, monkeypatch) -> None:
+    """sec-1: early EOF (read < st_size) is a concurrent truncate -> refuse."""
+    import alfred.policies.load as load_mod
+
+    f = tmp_path / "policies.yaml"
+    payload = _valid_yaml_text().encode()
+    f.write_bytes(payload)
+
+    calls = {"n": 0}
+
+    def _truncating_read(fd: int, n: int) -> bytes:
+        # First read returns a short prefix; the second returns EOF as if the
+        # file was truncated to that prefix between fstat and the final read.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return payload[:4]
+        return b""
+
+    monkeypatch.setattr(load_mod.os, "read", _truncating_read)
+    with pytest.raises(PolicyFileTruncated):
+        load_yaml_bytes(f, max_size=MAX_POLICIES_BYTES)

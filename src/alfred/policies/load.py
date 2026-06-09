@@ -6,6 +6,8 @@ the event loop. They raise typed errors the watcher routes to the right
 ``CONFIG_RELOAD_REJECTED_FIELDS(reason=...)`` branch:
 
 * :exc:`PolicyFileTooLarge` -> ``reason="parse_failure"`` (oversize guard)
+* :exc:`PolicyFileTruncated` -> ``reason="parse_failure"`` (concurrent-truncation
+  guard: the file shrank between ``fstat`` and the final read)
 * :exc:`FileNotFoundError` / :exc:`OSError` -> ``reason="file_vanished"`` /
   ``"stat_failed"`` (the watcher stats first, but the open-then-fstat path can
   also raise these and the watcher treats them the same way)
@@ -45,6 +47,19 @@ class PolicyFileTooLarge(ValueError):  # noqa: N818 — name is part of the publ
     """
 
 
+class PolicyFileTruncated(ValueError):  # noqa: N818 — name is part of the public contract (sec-1)
+    """The read returned fewer bytes than ``fstat`` reported (concurrent truncate).
+
+    ``load_yaml_bytes`` loops until ``st_size`` bytes are read or EOF. If EOF
+    arrives early the file was truncated under us between the ``fstat`` and the
+    final read — refusing to parse a half-written file is safer than feeding the
+    YAML parser an arbitrary prefix. Subclasses :class:`ValueError` so the
+    watcher's existing ``except ValueError`` arm routes it to ``parse_failure``
+    (a truncated file is not parseable; the watcher re-emits the rejection every
+    tick until the writer finishes — sec-2).
+    """
+
+
 def load_yaml_bytes(path: Path, *, max_size: int = MAX_POLICIES_BYTES) -> bytes:
     """Read YAML bytes from ``path`` TOCTOU-safely with a hard size cap.
 
@@ -52,12 +67,41 @@ def load_yaml_bytes(path: Path, *, max_size: int = MAX_POLICIES_BYTES) -> bytes:
     open fd, enforces the size cap against that authoritative stat, then reads
     exactly ``st_size`` bytes from the same fd. See module docstring (sec-1).
 
+    The read loops until ``st_size`` bytes are accumulated or EOF: a single
+    ``os.read`` may return a SHORT read (fewer than the requested bytes) on some
+    filesystems or when interrupted by a signal, so a one-shot
+    ``os.read(fd, st_size)`` could silently hand a truncated prefix to the
+    parser. An early EOF (total read < ``st_size``) means the file was truncated
+    concurrently — we refuse with :exc:`PolicyFileTruncated` rather than parse a
+    half-written file.
+
     Raises:
         FileNotFoundError: ``path`` does not exist.
         OSError: ``path`` is a symlink (``ELOOP`` under ``O_NOFOLLOW``) or any
             other open/stat/read failure. The watcher routes these to its
             ``file_vanished`` / ``stat_failed`` branches.
         PolicyFileTooLarge: the file exceeds ``max_size``.
+        PolicyFileTruncated: the file shrank between ``fstat`` and the final
+            read (concurrent truncation).
+    """
+    return load_yaml_bytes_with_stat(path, max_size=max_size)[0]
+
+
+def load_yaml_bytes_with_stat(
+    path: Path, *, max_size: int = MAX_POLICIES_BYTES
+) -> tuple[bytes, os.stat_result]:
+    """Like :func:`load_yaml_bytes` but also returns the authoritative fstat.
+
+    sec-1 / CR round-3: the returned :class:`os.stat_result` is the ``fstat`` of
+    the SAME open fd the bytes were read from — there is exactly ONE stat per
+    load. Callers that need the file's mtime/size (e.g.
+    :func:`alfred.policies.snapshot_ref.build_initial_snapshot` building the
+    bootstrap snapshot) MUST reuse this result rather than re-``stat``-ing the
+    path, which would reopen a TOCTOU window between the read and the restat.
+
+    Raises:
+        FileNotFoundError, OSError, PolicyFileTooLarge, PolicyFileTruncated:
+            see :func:`load_yaml_bytes`.
     """
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -66,7 +110,16 @@ def load_yaml_bytes(path: Path, *, max_size: int = MAX_POLICIES_BYTES) -> bytes:
             raise PolicyFileTooLarge(
                 f"policies.yaml size {stat.st_size} exceeds max {max_size} bytes"
             )
-        return os.read(fd, stat.st_size)
+        buf = bytearray()
+        while len(buf) < stat.st_size:
+            chunk = os.read(fd, stat.st_size - len(buf))
+            if not chunk:  # EOF before st_size bytes -> concurrent truncation.
+                raise PolicyFileTruncated(
+                    f"policies.yaml shrank during read: got {len(buf)} of "
+                    f"{stat.st_size} bytes (concurrent truncation)"
+                )
+            buf.extend(chunk)
+        return bytes(buf), stat
     finally:
         os.close(fd)
 
@@ -107,8 +160,10 @@ def canonical_bytes(model: PoliciesV1) -> bytes:
 __all__ = [
     "MAX_POLICIES_BYTES",
     "PolicyFileTooLarge",
+    "PolicyFileTruncated",
     "canonical_bytes",
     "compute_sha256",
     "load_yaml_bytes",
+    "load_yaml_bytes_with_stat",
     "parse_policies",
 ]
