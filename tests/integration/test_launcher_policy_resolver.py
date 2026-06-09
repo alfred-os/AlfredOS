@@ -44,12 +44,38 @@ pytestmark = pytest.mark.skipif(
 # outbound network — only a loopback-only empty net namespace). keep_fds=[3]
 # carries the provider key. The real quarantined-LLM policy bytes ship in
 # PR-S4-7; this fixture is the resolver-integration analogue.
-def _adequate_policy_body(*, unshare_net: bool = False) -> str:
+def _adequate_policy_body(plugin_dir: Path, *, unshare_net: bool = False) -> str:
+    # /lib64 carries the ELF dynamic loader the interpreter needs. /bin is
+    # DELIBERATELY NOT bound: on usrmerged Linux it's a symlink to /usr/bin, so
+    # binding it would make ``/bin/sh`` available inside the sandbox and break
+    # test_plugin_cannot_exec_host_bin_sh's containment assertion. The venv
+    # interpreter is bound by absolute path below, so it needs no /bin.
     binds = ['["/usr", "/usr"]', '["/lib", "/lib"]']
-    for extra in ("/lib64", "/bin"):
-        if Path(extra).exists():
-            binds.append(f'["{extra}", "{extra}"]')
+    if Path("/lib64").exists():
+        binds.append('["/lib64", "/lib64"]')
     binds.append(f'["{_REPO_ROOT / "src"}", "{_REPO_ROOT / "src"}"]')
+    # The plugin entrypoint passed by the test is ``sys.executable`` (the venv
+    # python), and its script lives under ``plugin_dir`` (pytest's tmp_path).
+    # Neither is under the system binds above, so BOTH must be bound or bwrap
+    # fails with ``execvp .../python: No such file or directory`` (interpreter)
+    # or the interpreter can't open the script (plugin_dir). Bind the venv
+    # (``sys.prefix``), the base interpreter install (``sys.base_prefix`` —
+    # where the venv's ``bin/python`` symlink resolves, e.g. the uv-managed
+    # CPython on CI) + the realpath'd interpreter root, and ``plugin_dir``.
+    interp_roots = {
+        sys.prefix,
+        sys.base_prefix,
+        str(Path(os.path.realpath(sys.executable)).parents[1]),
+        str(plugin_dir),
+    }
+    for root in sorted(interp_roots):
+        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin")):
+            binds.append(f'["{root}", "{root}"]')
+    # NOTE: deliberately NO ``tmpfs = ["/tmp"]`` — pytest's tmp_path (where the
+    # stub lives) is typically UNDER /tmp, so a fresh tmpfs there would shadow
+    # the just-bound plugin_dir. The stubs need no writable /tmp; the escape
+    # assertions (no /etc, no /bin/sh egress) hold without it.
+    #
     # ``net`` is OPT-IN (network-containment test only). bwrap ``--unshare-net``
     # tries to bring up loopback via netlink (RTM_NEWADDR), which the
     # GitHub-Actions unprivileged userns FORBIDS — so unsharing net in the
@@ -62,7 +88,6 @@ def _adequate_policy_body(*, unshare_net: bool = False) -> str:
     unshare_toml = ", ".join(f'"{ns}"' for ns in unshare)
     return (
         "ro_binds = [\n  " + ",\n  ".join(binds) + "\n]\n"
-        'tmpfs = ["/tmp"]\n'
         f"unshare = [{unshare_toml}]\n"
         "die_with_parent = true\n"
         "keep_fds = [3]\n"
@@ -79,8 +104,10 @@ def _fixture_manifest(tmp_path: Path, *, unshare_net: bool = False) -> tuple[Pat
     """
     policy_dir = tmp_path / "policies"
     policy_dir.mkdir()
+    # The stub is written directly under tmp_path by each test, so bind tmp_path
+    # so the sandboxed interpreter can open it.
     (policy_dir / "fixture.linux.bwrap.policy").write_text(
-        _adequate_policy_body(unshare_net=unshare_net)
+        _adequate_policy_body(tmp_path, unshare_net=unshare_net)
     )
 
     manifest = tmp_path / "plugins" / "alfred.fixture" / "manifest.toml"
