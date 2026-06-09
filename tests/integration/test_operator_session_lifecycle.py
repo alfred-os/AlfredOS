@@ -144,7 +144,11 @@ def _deps(scope: Any, alice_id: int, session_path: Path, hooks: _Hooks) -> Opera
 
 async def _audit_events(scope: Any) -> list[str]:
     async with scope() as db:
-        rows = (await db.execute(select(AuditEntry.event).order_by(AuditEntry.id))).scalars()
+        # AuditEntry.id is a random uuid4 (NOT a serial), so order_by(id) is
+        # effectively random — order by created_at for true chronology.
+        rows = (
+            await db.execute(select(AuditEntry.event).order_by(AuditEntry.created_at))
+        ).scalars()
         return list(rows)
 
 
