@@ -329,7 +329,9 @@ def write_session_file(path: Path, session: OperatorSessionFile) -> None:
     """
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if hasattr(os, "geteuid"):
+    # POSIX hosts always expose geteuid; the guard's false arm is only taken
+    # on Windows, where directory mode bits do not carry the same meaning.
+    if hasattr(os, "geteuid"):  # pragma: no branch
         parent_stat = parent.stat()
         if parent_stat.st_mode & 0o077:
             raise OperatorSessionParentDirInsecure(
@@ -441,15 +443,16 @@ class WindowsMachineIdProvider:
         try:
             import winreg  # type: ignore[import-not-found, unused-ignore]
         except ImportError as exc:
+            # The only arm reachable on non-Windows CI — exercised in tests.
             raise OperatorSessionNoMachineId("windows: winreg unavailable") from exc
-        try:
+        try:  # pragma: no cover - windows-only (winreg absent on CI runners)
             with winreg.OpenKey(  # type: ignore[attr-defined, unused-ignore]
                 winreg.HKEY_LOCAL_MACHINE,  # type: ignore[attr-defined, unused-ignore]
                 r"SOFTWARE\Microsoft\Cryptography",
             ) as key:
                 guid, _ = winreg.QueryValueEx(key, "MachineGuid")  # type: ignore[attr-defined, unused-ignore]
                 return str(guid).encode("utf-8")
-        except OSError as exc:
+        except OSError as exc:  # pragma: no cover - windows-only
             raise OperatorSessionNoMachineId("windows: MachineGuid unreadable") from exc
 
 
@@ -465,7 +468,7 @@ def select_machine_id_provider() -> MachineIdProvider:
         return LinuxMachineIdProvider()
     if platform == "darwin":
         return MacosMachineIdProvider()
-    if platform == "win32":
+    if platform == "win32":  # pragma: no cover - windows-only selector arm
         return WindowsMachineIdProvider()
     raise OperatorSessionNoMachineId(f"unsupported platform: {platform}")
 

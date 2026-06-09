@@ -27,6 +27,7 @@ from alfred.identity.operator_session import (
     OperatorSessionParentDirInsecure,
     _serialize_to_file_bytes,
     load_session_file,
+    write_session_file,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -109,6 +110,50 @@ def test_extra_field_refused(tmp_path: Path) -> None:
     body = _serialize_to_file_bytes(_session()).replace(b"}", b', "x": 1}', 1)
     path = _write_secure(tmp_path, body)
     with pytest.raises(OperatorSessionMalformed):
+        load_session_file(path)
+
+
+def test_write_round_trips_through_load(tmp_path: Path) -> None:
+    """write_session_file produces a file load_session_file accepts."""
+    path = tmp_path / ".config" / "alfred" / "session"
+    write_session_file(path, _session())
+    assert (path.stat().st_mode & 0o777) == 0o600
+    assert load_session_file(path) == _session()
+
+
+def test_write_refuses_insecure_existing_parent(tmp_path: Path) -> None:
+    """An existing parent dir broader than 0700 is refused before write."""
+    parent = tmp_path / ".config" / "alfred"
+    parent.mkdir(parents=True)
+    parent.chmod(0o755)
+    with pytest.raises(OperatorSessionParentDirInsecure):
+        write_session_file(parent / "session", _session())
+
+
+def test_missing_parent_dir_refused(tmp_path: Path) -> None:
+    """A path whose parent dir does not exist refuses with Missing."""
+    with pytest.raises(OperatorSessionMissing):
+        load_session_file(tmp_path / "nope" / "session")
+
+
+def test_oversize_file_refused(tmp_path: Path) -> None:
+    path = _write_secure(tmp_path, b"x" * (64 * 1024 + 1))
+    with pytest.raises(OperatorSessionMalformed, match="exceeds"):
+        load_session_file(path)
+
+
+@pytest.mark.skipif(
+    os.getuid() == 0,
+    reason="root bypasses mode/owner checks; the test asserts a non-root refusal.",
+)
+def test_parent_dir_not_owned_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A parent dir owned by a different euid refuses with ParentDirNotOwned."""
+    from alfred.identity.operator_session import OperatorSessionParentDirNotOwned
+
+    path = _write_secure(tmp_path, _serialize_to_file_bytes(_session()))
+    real_euid = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real_euid + 1)
+    with pytest.raises(OperatorSessionParentDirNotOwned):
         load_session_file(path)
 
 
