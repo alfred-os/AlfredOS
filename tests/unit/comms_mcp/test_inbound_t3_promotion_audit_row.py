@@ -45,6 +45,10 @@ async def test_t3_promotion_audit_row_emitted_after_extract() -> None:
     assert row["addressing_signal"] == "dm"
     assert row["language"] == "ja-JP"
     assert "inbound_message_id" in row
+    # Provenance: sub_payload_kinds is the sorted projection of the notification's
+    # sub_payload_refs (empty here -> empty list). Pin its presence + shape so the
+    # documented provenance field is never silently dropped from the row.
+    assert row["sub_payload_kinds"] == []
     # The raw platform_user_id must NOT appear anywhere in the row.
     assert "discord:victim" not in str(row)
 
