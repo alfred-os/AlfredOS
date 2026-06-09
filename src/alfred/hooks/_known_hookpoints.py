@@ -80,6 +80,12 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "plugin.lifecycle.loaded",
         "plugin.lifecycle.crashed",
         "plugin.lifecycle.quarantined",
+        # PR-S4-6 (ADR-0015): sandbox-launcher posture/refusal hookpoints.
+        # All carrier_tier=T0; sandbox_refused is fail_closed=True, the two
+        # boot rows are informational (fail_closed=False).
+        "supervisor.plugin.sandbox_refused",
+        "supervisor.boot.mlock_unavailable",
+        "supervisor.boot.core_dumps_disabled",
     ),
     # PR-S4-1 (#174): the daemon-boot + dispatch-failure hookpoints. All
     # three are system-internal (carrier_tier=T0) + fail_closed=True.

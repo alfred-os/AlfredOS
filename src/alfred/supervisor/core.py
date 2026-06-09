@@ -880,6 +880,17 @@ class Supervisor:
             ("plugin.lifecycle.loaded", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
             ("plugin.lifecycle.crashed", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
             ("plugin.lifecycle.quarantined", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
+            # PR-S4-6 (ADR-0015) sandbox-launcher hookpoints. All T0 —
+            # system-internal posture/refusal signals carrying only
+            # plugin_id + closed-vocabulary reason (no operator/untrusted
+            # content). sandbox_refused is fail_closed (a subscriber-timeout
+            # there must not let a refused spawn slip through); the two boot
+            # posture rows are informational (fail_closed=False — boot
+            # proceeds even when mlockall is unavailable or a subscriber is
+            # slow).
+            ("supervisor.plugin.sandbox_refused", SYSTEM_ONLY_TIERS, frozenset(), True, T0),
+            ("supervisor.boot.mlock_unavailable", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
+            ("supervisor.boot.core_dumps_disabled", SYSTEM_ONLY_TIERS, frozenset(), False, T0),
         )
         for name, subscribable_tiers, refusable_tiers, fail_closed, carrier_tier in hookpoints:
             registry.register_hookpoint(
