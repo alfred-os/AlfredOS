@@ -52,6 +52,7 @@ from alfred.comms_mcp.inbound import (
     _SecretBrokerLike,
     process_inbound_message,
 )
+from alfred.security.dlp import redact_secret_shapes
 
 if TYPE_CHECKING:
     from alfred.comms_mcp.protocol import (
@@ -257,9 +258,15 @@ class AdapterCrashHandler:
                 "adapter_id": notification.adapter_id,
                 "error_class": notification.error_class,
                 "reason": _CRASH_REASON_SELF_REPORTED,
-                # The plugin already redacted ``detail`` before it crossed the
-                # wire; the host bounds it defensively before audit.
-                "detail_redacted": notification.detail[:_MAX_CRASH_DETAIL_LEN],
+                # The plugin is UNTRUSTED (T3): its claim to have redacted
+                # ``detail`` cannot be trusted, and the CrashedNotification
+                # docstring says the host re-scrubs. Re-run the secret-shape
+                # redactor host-side BEFORE bounding the length, so a leaked
+                # ``sk-…``-shaped token never reaches the audit log
+                # (CLAUDE.md hard rule 1).
+                "detail_redacted": redact_secret_shapes(notification.detail)[
+                    :_MAX_CRASH_DETAIL_LEN
+                ],
                 "crashed_at": datetime.now(UTC).isoformat(),
             },
             trust_tier_of_trigger="T0",
