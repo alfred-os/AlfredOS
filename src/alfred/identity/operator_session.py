@@ -41,9 +41,17 @@ from asyncio import create_subprocess_exec
 from asyncio import subprocess as asubprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Final, Literal, Protocol, runtime_checkable
+from typing import Annotated, Final, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from alfred.errors import AlfredError
 from alfred.security._hkdf import hkdf_expand
@@ -76,6 +84,17 @@ _MAX_EXPIRES_IN: Final = timedelta(days=7)
 _TOKEN_HASH_INFO: Final = b"operator_session.token_hash.v1"
 _MACHINE_ID_HASH_INFO: Final = b"operator_session.machine_id_hash.v1"
 _SUBKEY_LEN: Final = 32
+
+# The file's ``host`` is echoed verbatim into the ``host_mismatch`` audit row
+# (``subject["host"]``). A planted file could otherwise carry an unbounded /
+# arbitrary-charset string into the log. Cap it at the RFC 1035 hostname
+# ceiling (253 chars) and a hostname charset (alnum + ``-`` + ``.``), mirroring
+# the ``user_id`` int-coercion defence (sec-4). Non-conforming hosts are
+# refused at parse → ``OperatorSessionMalformed`` (file-less refused row).
+_Hostname = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9.\-]+$"),
+]
 
 
 def derive_token_hash_subkey(pepper: bytes) -> bytes:
@@ -191,7 +210,7 @@ class OperatorSessionFile(BaseModel):
     token: SecretStr
     issued_at: datetime
     expires_at: datetime
-    host: str
+    host: _Hostname
     machine_id_hash: str = Field(min_length=_HASH_LEN, max_length=_HASH_LEN)
 
     model_config = ConfigDict(frozen=True, extra="forbid")

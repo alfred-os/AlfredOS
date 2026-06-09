@@ -70,3 +70,34 @@ def test_machine_id_hash_length_validator() -> None:
         _make(machine_id_hash="a" * 63)
     with pytest.raises(ValidationError):
         _make(machine_id_hash="a" * 65)
+
+
+def test_host_accepts_valid_hostname() -> None:
+    assert _make(host="alfred-host.example.com").host == "alfred-host.example.com"
+
+
+def test_host_rejects_overlong() -> None:
+    """The host is echoed into the host_mismatch audit row; cap its length."""
+    with pytest.raises(ValidationError):
+        _make(host="h" * 254)
+
+
+def test_host_rejects_empty() -> None:
+    with pytest.raises(ValidationError):
+        _make(host="")
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "host\nINJECTED",  # newline log-injection attempt
+        "host with spaces",
+        "host;rm -rf /",  # shell-meta injection attempt
+        "héllo",  # non-ASCII
+    ],
+)
+def test_host_rejects_injection_charset(bad_host: str) -> None:
+    """A planted file's host carrying log-injection / non-hostname bytes is
+    refused at parse, before it can reach the audit log."""
+    with pytest.raises(ValidationError):
+        _make(host=bad_host)

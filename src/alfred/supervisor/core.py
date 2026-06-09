@@ -247,6 +247,14 @@ class Supervisor:
         # can swap real implementations through the same kwargs without
         # re-touching __init__.
         self._policies_ref: PoliciesSnapshotRefProtocol = policies_ref
+        # arch-LOW (#153): stored but intentionally NEVER read. Operator
+        # attribution is resolved at the CLI boundary (the reviewer-gated
+        # commands call ``resolve_operator_user_id_or_refuse`` /
+        # ``_resolve_operator_session_or_refuse`` directly), so this field is
+        # not live wiring — it is the PR-S4-1 stub kwarg kept so a future
+        # in-supervisor consumer can dereference it without re-touching
+        # ``__init__``. Do not mistake it for an active resolution path; a
+        # cleanup PR may remove the kwarg. See docs/subsystems/supervisor.md.
         self._operator_session_resolver: OperatorResolverProtocol | None = operator_session_resolver
         self._outbound_dlp: OutboundDlpProtocol | None = outbound_dlp
 
