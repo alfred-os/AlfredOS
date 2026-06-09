@@ -1,0 +1,102 @@
+# Quarantined-LLM bwrap sandbox policy (Linux) — PR-S4-7, spec §7.2, ADR-0015.
+#
+# This is the REAL OS-isolation policy the launcher resolves for the
+# `alfred.quarantined-llm` plugin (manifest `[sandbox] kind = "full"`,
+# `[sandbox.policy_refs] linux = ...`). It is parsed by `read_policy_toml`
+# into a `SandboxPolicy` and translated by `policy_to_bwrap_flags` into the
+# bwrap CLI flag list the launcher execs (see
+# `src/alfred/plugins/sandbox_policy.py`).
+#
+# Threat model. The quarantined LLM is the ONLY component that touches raw
+# T3 (untrusted) content — adversary-controlled web pages, emails, RAG
+# snippets, tool outputs. A compromise in the provider-response-parsing path
+# (e.g. a crafted streamed response triggering a parser bug) must NOT escalate
+# beyond the kernel-enforced sandbox. Everything below is the containment the
+# kernel enforces around that subprocess.
+#
+# ----------------------------------------------------------------------------
+# Filesystem confinement
+# ----------------------------------------------------------------------------
+# Read-only binds for the interpreter + its shared libraries ONLY. We bind the
+# usrmerged system trees (/usr, /lib, /lib64) read-only so CPython can exec and
+# dynamically link, and NOTHING else:
+#
+#   * NO /etc bind — /etc/passwd, /etc/shadow, resolv.conf, ssh configs, the
+#     host's secrets-in-config all stay invisible. (DNS still works: glibc
+#     reads /etc/resolv.conf, but with no /etc the resolver falls back; the
+#     provider call uses an IP-pinned or system-resolver path supplied by the
+#     Supervisor — see #230. An adversary that owns the response cannot read a
+#     host /etc/passwd to learn usernames for a follow-on attack.)
+#   * NO /bin bind — on usrmerged Linux /bin is a symlink to /usr/bin, so we
+#     deliberately do NOT bind it separately; /bin/sh / /usr/bin/env are NOT
+#     reachable as exec targets from inside (process-exec containment, below).
+#     NB: /usr/bin IS under the /usr bind, so a determined exec of an absolute
+#     /usr/bin path could still find a binary — the PRIMARY exec containment is
+#     `--unshare-pid` + `--die-with-parent` + the empty writable surface, and
+#     the kernel-observable adversarial corpus asserts the practical
+#     containment (no host /etc read, no new long-lived child escaping the pid
+#     namespace). Tightening the interpreter bind to the exact CPython prefix
+#     (dropping the broad /usr) is tracked in #230.
+ro_binds = [
+  ["/usr", "/usr"],
+  ["/lib", "/lib"],
+  ["/lib64", "/lib64"],
+]
+
+# A single writable scratch directory, backed by an ephemeral tmpfs that dies
+# with the sandbox. The quarantined LLM needs a place to spool a streamed
+# response / scratch file; this gives it one with NO host-filesystem reach. The
+# tmpfs is fresh per launch and discarded on exit — nothing the quarantined
+# process writes survives or leaks onto the host.
+tmpfs = ["/run/alfred/quarantined"]
+
+# A synthesised minimal /dev (null/zero/full/random/urandom/tty) — NOT the
+# host's /dev (no device passthrough). Required: CPython aborts at startup
+# without /dev/urandom (`_Py_HashRandomization_Init`).
+dev = true
+
+# Namespace isolation. We unshare:
+#   * pid    — the sandboxed process cannot see or signal host PIDs, and
+#              `--die-with-parent` reaps the whole subtree when the Supervisor
+#              exits. This is the load-bearing process-fork/exec containment.
+#   * uts    — its own hostname; cannot read the host's.
+#   * cgroup — cannot observe/escape the host cgroup hierarchy.
+#   * ipc    — cannot reach host System V IPC / POSIX shm.
+#
+# We DELIBERATELY DO NOT unshare `net`. SECURITY-CRITICAL — read the egress
+# note below.
+unshare = ["pid", "uts", "cgroup", "ipc"]
+
+# Reap the sandbox subtree when the Supervisor process exits — no orphaned
+# quarantined process can outlive its parent and keep running with T3 content.
+die_with_parent = true
+
+# fd 3 carries the Supervisor's provider-key channel (arch-2). The quarantined
+# LLM makes the provider HTTPS call ITSELF and needs the key; it arrives over
+# fd 3, which bwrap inherits by default (NO CLI flag — see the
+# `policy_to_bwrap_flags` docstring + #218). `keep_fds` is the validated
+# DECLARATION that fd 3 must survive; omitting it is refused at parse time
+# (`kind_full_requires_keep_fd_3`).
+keep_fds = [3]
+
+# ============================================================================
+# !! EGRESS IS CURRENTLY UNRESTRICTED — RELEASE-BLOCKER tracked in #230 !!
+# ============================================================================
+# The quarantined LLM makes the provider HTTPS call itself (it holds the
+# provider key, delivered over fd 3). It therefore NEEDS outbound network. The
+# simple `SandboxPolicy` schema this file uses cannot express "egress to the
+# provider endpoint ONLY" — there is no `network.outbound_allowlist` field yet.
+#
+# Consequently we do NOT `unshare net`: the sandbox has FULL outbound network.
+# Filesystem and process/namespace containment are STILL kernel-enforced, but a
+# compromised quarantined process could in principle open an outbound
+# connection to an arbitrary host (data-exfiltration of whatever it can reach
+# in-process — which is only the T3 content it already holds + the provider
+# key). This is an ACCEPTED, DOCUMENTED gap for the mid-flight slice state.
+#
+# Before the quarantined LLM goes live against real provider traffic, #230 MUST
+# land the provider-only egress allowlist (a `network.outbound_allowlist` field
+# + the bwrap `--unshare-net` + slirp/pasta-style filtered forwarder, OR an
+# egress proxy the sandbox is pinned to). Until then this policy is for
+# resolver/containment testing, not production quarantined-LLM traffic.
+# ============================================================================
