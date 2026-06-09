@@ -19,6 +19,7 @@ PR-S4-6 (ops-007).
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import struct
@@ -140,6 +141,26 @@ def _launcher_env(manifest: Path, policy_dir: Path) -> dict[str, str]:
     }
 
 
+def _remap_read_end_to_fd3(read_fd: int) -> None:
+    """preexec_fn: place the pipe read end on fd 3 in the launcher child.
+
+    Runs post-fork / pre-exec in the child. ``bwrap --keep-fd 3`` and the
+    sandboxed plugin's ``os.read(3, ...)`` operate on fd **3** specifically,
+    but ``os.pipe()`` hands us an arbitrary descriptor (under pytest it is NOT
+    3). ``pass_fds`` keeps ``read_fd`` open + inheritable at its ORIGINAL
+    number; this remap moves it onto 3 so the framing the parent writes reaches
+    the plugin. Mirrors how the production Supervisor spawns the launcher with
+    the pipe read end as fd 3 (see ``alfred.supervisor.fd3_key_delivery``).
+
+    ``os.dup2`` always clears close-on-exec on its TARGET, so fd 3 survives the
+    bwrap exec without an explicit ``set_inheritable``. The original ``read_fd``
+    is closed when it isn't already 3 so the only surviving copy is fd 3.
+    """
+    os.dup2(read_fd, 3)
+    if read_fd != 3:
+        os.close(read_fd)
+
+
 def _spawn_with_fd3(
     stub: Path, manifest: Path, policy_dir: Path, key: bytes
 ) -> subprocess.CompletedProcess[str]:
@@ -148,7 +169,13 @@ def _spawn_with_fd3(
     proc = subprocess.Popen(  # noqa: S603 — repo-owned launcher script path
         [str(_LAUNCHER), "alfred.fixture", sys.executable, str(stub)],
         env=_launcher_env(manifest, policy_dir),
+        # pass_fds keeps read_fd open + inheritable in the child; the
+        # preexec_fn then dup2's it onto fd 3 (the channel bwrap --keep-fd 3
+        # and the plugin's os.read(3) use). Without the remap the read end
+        # lands at an arbitrary number and fd 3 is closed → the plugin's
+        # os.read(3, 4) raises OSError(EBADF).
         pass_fds=(read_fd,),
+        preexec_fn=functools.partial(_remap_read_end_to_fd3, read_fd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
