@@ -82,11 +82,7 @@ def _import_aliases_of(tree: ast.Module, constants: frozenset[str]) -> set[str]:
         if not isinstance(node, ast.ImportFrom):
             continue
         for alias in node.names:
-            if (
-                alias.asname is not None
-                and alias.name in constants
-                and alias.asname in referenced
-            ):
+            if alias.asname is not None and alias.name in constants and alias.asname in referenced:
                 resolved.add(alias.name)
     return resolved
 
