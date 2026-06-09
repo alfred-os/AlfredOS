@@ -8,9 +8,7 @@ from ._burst_spies import SpyAuditWriter
 
 
 async def test_independent_buckets() -> None:
-    limiter = BurstLimiter(
-        capacity_tokens=5, refill_seconds=5.0, audit_writer=SpyAuditWriter()
-    )
+    limiter = BurstLimiter(capacity_tokens=5, refill_seconds=5.0, audit_writer=SpyAuditWriter())
     for _ in range(5):
         assert isinstance(
             await limiter.acquire(canonical_user_id="u_a", persona="alfred"),

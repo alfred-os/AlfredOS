@@ -92,21 +92,15 @@ async def test_invalid_reason_rejected() -> None:
 async def test_idempotent_within_tick() -> None:
     sup, audit = _build_supervisor()
     # Two identical requests within one tick → exactly one audit row.
-    await sup.request_plugin_restart(
-        adapter_id="alfred_comms_test", reason="unknown_notification"
-    )
-    await sup.request_plugin_restart(
-        adapter_id="alfred_comms_test", reason="unknown_notification"
-    )
+    await sup.request_plugin_restart(adapter_id="alfred_comms_test", reason="unknown_notification")
+    await sup.request_plugin_restart(adapter_id="alfred_comms_test", reason="unknown_notification")
     assert len(_restart_rows(audit)) == 1
 
 
 @pytest.mark.asyncio
 async def test_distinct_reason_not_deduplicated() -> None:
     sup, audit = _build_supervisor()
-    await sup.request_plugin_restart(
-        adapter_id="alfred_comms_test", reason="unknown_notification"
-    )
+    await sup.request_plugin_restart(adapter_id="alfred_comms_test", reason="unknown_notification")
     await sup.request_plugin_restart(
         adapter_id="alfred_comms_test", reason="handler_repeated_failures"
     )
@@ -117,13 +111,9 @@ async def test_distinct_reason_not_deduplicated() -> None:
 @pytest.mark.asyncio
 async def test_dedup_cleared_at_tick_boundary() -> None:
     sup, audit = _build_supervisor()
-    await sup.request_plugin_restart(
-        adapter_id="alfred_comms_test", reason="unknown_notification"
-    )
+    await sup.request_plugin_restart(adapter_id="alfred_comms_test", reason="unknown_notification")
     sup._reset_restart_dedup()
     # Next tick: the same request re-emits (the storm guard is within-tick
     # only, not a permanent suppression).
-    await sup.request_plugin_restart(
-        adapter_id="alfred_comms_test", reason="unknown_notification"
-    )
+    await sup.request_plugin_restart(adapter_id="alfred_comms_test", reason="unknown_notification")
     assert len(_restart_rows(audit)) == 2

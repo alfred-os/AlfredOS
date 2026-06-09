@@ -28,6 +28,7 @@ from alfred.comms_mcp.bootstrap import (
     CommsExtractorBridge,
     SupervisorBreakerTripper,
     SyncIdentityResolverBridge,
+    build_supervisor_breaker_tripper,
 )
 from alfred.identity.models import Platform
 
@@ -172,3 +173,9 @@ async def test_breaker_tripper_maps_open_vocab_reason_onto_supervisor_facade() -
     kwargs = supervisor.trip_breaker.await_args.kwargs
     assert kwargs["component_id"] == "comms.alfred_comms_test"
     assert kwargs["reason"] == "plugin_lifecycle_crash"
+
+
+def test_build_supervisor_breaker_tripper_factory() -> None:
+    supervisor = AsyncMock()
+    tripper = build_supervisor_breaker_tripper(supervisor=supervisor)
+    assert isinstance(tripper, SupervisorBreakerTripper)

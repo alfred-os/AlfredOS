@@ -30,7 +30,7 @@ async def test_refuses_t2_for_comms_inbound() -> None:
     # Match both the raw catalog key (uncompiled-catalog dev runs) and the
     # resolved English (CI compiles the catalog), so the assertion is immune
     # to catalog-compilation state.
-    with pytest.raises(ValueError, match="source_tier_must_be_t3|must be T3"):
+    with pytest.raises(ValueError, match=r"source_tier_must_be_t3|must be T3"):
         await orch.quarantined_extract(
             {"content": "relayed"},
             canonical_user_id="u_resolved",

@@ -274,12 +274,13 @@ def test_comms_test_plugin_subprocess_health_round_trip() -> None:
     ``tests/integration/test_comms_mcp_contract.py`` covers the multi-
     frame ordering.
 
-    Without :func:`lifecycle.start` first the plugin reports
-    ``status=degraded`` (the ``_running`` global stays False) — that's
-    the expected pre-start payload per the plugin's docstring. The
-    smoke test asserts on the response *shape*, not on the value of
-    ``status``, so either valid Literal (``ok`` / ``degraded``) satisfies
-    the contract.
+    Without :func:`lifecycle.start` first the plugin reports ``ok=false``
+    (the ``_running`` state stays False) — that's the expected pre-start
+    ``HealthReport`` payload. PR-S4-8 upgraded the reference plugin to the
+    full-lifecycle ADR-0024 contract, so ``adapter.health`` returns the
+    ``HealthReport`` shape (``ok`` / ``queue_depth`` / ``error_count``) rather
+    than the Slice-3 ``{"ok", "degraded"}`` status Literal. The smoke test
+    asserts on the response *shape*.
     """
     request = json.dumps({"jsonrpc": "2.0", "id": 42, "method": "adapter.health", "params": {}})
 
@@ -334,7 +335,9 @@ def test_comms_test_plugin_subprocess_health_round_trip() -> None:
         f"every response frame must carry jsonrpc=2.0 per spec §9, got {response!r}"
     )
     payload = response["result"]
-    # Slice-3 narrow Literal (comms-009): {"ok", "degraded"}.
-    assert payload.get("status") in {"ok", "degraded"}, (
-        f"adapter.health status must be the comms-009 Literal, got {payload!r}"
+    # PR-S4-8 HealthReport shape: ok (bool) + queue_depth + error_count.
+    assert isinstance(payload.get("ok"), bool), (
+        f"adapter.health must report a boolean ok, got {payload!r}"
     )
+    assert payload.get("queue_depth") == 0
+    assert payload.get("error_count") == 0
