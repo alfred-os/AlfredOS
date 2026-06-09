@@ -84,6 +84,9 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         # All carrier_tier=T0; sandbox_refused is fail_closed=True, the two
         # boot rows are informational (fail_closed=False).
         "supervisor.plugin.sandbox_refused",
+        # PR-S4-7: dev/test-only unsandboxed-exec observability row, the
+        # sandbox_refused sibling. carrier_tier=T0 + fail_closed=True.
+        "supervisor.plugin.sandbox_stub_used",
         "supervisor.boot.mlock_unavailable",
         "supervisor.boot.core_dumps_disabled",
     ),
