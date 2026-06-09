@@ -142,6 +142,19 @@ class Settings(BaseSettings):
         "boot. Override via ALFRED_POLICIES_PATH.",
     )
 
+    # PR-S4-4 (ADR-0023, #159): the PolicyWatcher mtime-poll cadence.
+    policy_poll_interval_seconds: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=10.0,
+        description=(
+            "Polling interval (seconds) for PolicyWatcher's mtime check. "
+            "0.5s is the floor (CPU/disk noise); 10s is the ceiling (operator "
+            "patience). The 1s default suffices for operator-edit cadence. "
+            "Spec §5.1 / ADR-0023. Override via ALFRED_POLICY_POLL_INTERVAL_SECONDS."
+        ),
+    )
+
     # arch-002 closure (#174): the dual-source environment lookup result —
     # env-var value, file value, conflict flag — that the daemon CLI needs
     # to emit the ``daemon.boot.environment_source_conflict`` audit row.
