@@ -48,6 +48,23 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
 
+@pytest.fixture(autouse=True)
+def _stub_operator_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the #153 session resolver so reset proceeds without a real session.
+
+    The reset command now resolves an authenticated operator session before
+    writing the proposal; absent the stub it would refuse (exit 1). The
+    refusal branches themselves are covered in
+    ``test_supervisor_reset_session_attribution.py``.
+    """
+
+    class _OkResolver:
+        async def resolve(self) -> str:
+            return "7"
+
+    monkeypatch.setattr("alfred.cli.supervisor._build_operator_resolver", lambda: _OkResolver())
+
+
 @pytest.fixture()
 def runner() -> CliRunner:
     """Typer runner — Click 8.2 separates stdout/stderr by default."""
@@ -106,8 +123,8 @@ def test_reset_with_confirm_emits_attempt_audit_before_proposal_write(
     """
     sequence: list[str] = []
 
-    def _record_attempt(*, component_id: str) -> None:
-        del component_id
+    def _record_attempt(*, component_id: str, operator_user_id: str) -> None:
+        del component_id, operator_user_id
         sequence.append("audit_attempt")
 
     def _fake_queue(**kwargs: object) -> object:

@@ -16,11 +16,10 @@ i18n rule #1. The audit row for ``reset`` carries ``operator_user_id`` per
 from __future__ import annotations
 
 import datetime as dt
-import os
 import re
 import uuid
 from collections.abc import Mapping
-from typing import Annotated, Final, TypedDict
+from typing import TYPE_CHECKING, Annotated, Final, TypedDict
 
 import structlog
 import typer
@@ -32,70 +31,128 @@ from alfred.cli._state_git import queue_proposal_or_exit
 from alfred.i18n import t
 from alfred.state.proposal_payloads import BreakerResetProposal
 
+if TYPE_CHECKING:
+    from alfred.supervisor.protocols import OperatorResolverProtocol
+
 supervisor_app = typer.Typer(help=t("cli.supervisor.help"), no_args_is_help=True)
 _log = structlog.get_logger(__name__)
 
 
-def _resolve_operator_user_id() -> str | None:
-    """Best-effort Slice-3 operator attribution for audit rows.
+# Maps an OperatorSessionError subclass to (refusal t-key, audit reason).
+# #153 closure: the Slice-3 OS-account fallback (env/getlogin/getpwuid) is
+# deleted; operator attribution is now the authenticated session token.
+_REFUSAL_KEYS_BY_REASON: Final[Mapping[str, str]] = {
+    "operator_session_missing": "supervisor.breaker.reset.refused.not_logged_in",
+    "operator_session_expired": "operator_session.refused.expired",
+    "operator_session_resolver_timeout": "operator_session.refused.resolver_timeout",
+}
 
-    CR-149 round-4 / round-10 (review comment 3338654106 / 3339361789)
-    flagged the unconditional ``operator_user_id=None`` on the breaker-reset
-    path as a PRD §10.8 forensic gap. The Heavy-lift framing assumed a real
-    authenticated CLI session — but a meaningful Slice-3 increment exists
-    today: the OS account that invoked the CLI.
 
-    Resolution order (first match wins):
+def _build_operator_resolver() -> OperatorResolverProtocol:
+    """Construct the production ``DefaultOperatorSessionResolver``.
 
-    1. ``ALFRED_OPERATOR_USER_ID`` env var — the explicit override an
-       operator (or an orchestration script) can set. Takes precedence so
-       a shared CI account can identify which human triggered the action.
-    2. ``getlogin()`` — the controlling-terminal user. Survives ``sudo`` /
-       ``su`` to identify the *originating* operator rather than the
-       elevated account; matches the audit semantic "who is the human".
-    3. ``getpwuid(getuid())`` — the effective UID's account name. Used
-       when the process has no controlling terminal (cron, systemd,
-       container entrypoint). Identifies the runtime account if no
-       human session is available.
-    4. ``None`` — every probe failed; the row still emits with NULL so
-       CLAUDE.md hard rule #7 (no silent skip) holds.
-
-    Limitations (documented; tracked in #153 for the authenticated form):
-
-    * The resolved id is **not authenticated**. Any process running under
-      that OS account can claim it. Operators sharing an OS account
-      cannot be disambiguated.
-    * Replacing this with an authenticated-session value (mTLS / OIDC /
-      signed token) is Slice-4 work and lives in #153. This function's
-      return value becomes that session's resolved id once the wiring
-      lands; the call sites do not change.
+    Lazy-imports the broker + SQLAlchemy chain so ``alfred --help`` does not
+    pay it (perf-001). Overridden in unit tests via ``monkeypatch`` so the
+    refusal/attribution branches are exercised without a real Postgres.
     """
-    explicit = os.environ.get("ALFRED_OPERATOR_USER_ID")
-    if explicit:
-        return explicit
+    import socket
+
+    from alfred.audit.log import AuditWriter
+    from alfred.cli._bootstrap import build_broker, load_settings_or_die
+    from alfred.cli.operator_session import _session_file_path
+    from alfred.hooks import SYSTEM_ONLY_TIERS
+    from alfred.hooks.context import HookContext
+    from alfred.hooks.invoke import invoke
+    from alfred.identity._resolver import DefaultOperatorSessionResolver
+    from alfred.identity.operator_session import select_machine_id_provider
+    from alfred.memory.db import build_session_scope
+
+    settings = load_settings_or_die()
+    scope = build_session_scope(settings)
+
+    async def _dispatch(name: str, payload: dict[str, object]) -> None:
+        correlation_id = str(uuid.uuid4())
+        ctx: HookContext[dict[str, object]] = HookContext(
+            action_id=name,
+            hookpoint=name,
+            input={**payload, "correlation_id": correlation_id},
+            correlation_id=correlation_id,
+            kind="post",
+        )
+        await invoke(name, ctx, kind="post", subscribable_tiers=SYSTEM_ONLY_TIERS, fail_closed=True)
+
+    return DefaultOperatorSessionResolver(
+        session_scope=scope,
+        secret_broker=build_broker(settings),
+        machine_id_provider=select_machine_id_provider(),
+        audit_writer=AuditWriter(session_factory=scope),
+        hook_dispatcher=_dispatch,
+        host=socket.gethostname(),
+        session_file_path=_session_file_path(),
+    )
+
+
+def _resolve_operator_session_or_refuse(*, component_id: str) -> str:
+    """Resolve the operator's canonical ``User.id`` from the session token.
+
+    On any ``OperatorSessionError`` the command refuses: emit a
+    ``SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS`` row carrying the mapped
+    ``reason`` + echo the localised refusal (with its recovery companion),
+    then ``raise typer.Exit(1)``. No silent NULL attribution (CLAUDE.md
+    hard rule #7) — a missing/expired session refuses the command outright
+    rather than logging in as ``unknown``.
+    """
+    import asyncio
+
+    from alfred.identity.operator_session import (
+        OperatorSessionError,
+        OperatorSessionExpired,
+        OperatorSessionMissing,
+        OperatorSessionTimeout,
+    )
+
+    resolver = _build_operator_resolver()
     try:
-        # ``getlogin`` reads the controlling terminal — returns the
-        # original operator across ``sudo`` / ``su``. Raises OSError
-        # in environments without a TTY (cron, systemd, container
-        # bootstrap without ``-t``).
-        return os.getlogin()
-    except OSError:
-        pass
-    try:
-        # Fallback: effective UID's pwd entry. ``pwd`` is POSIX-only;
-        # the import lives inside the try so the module imports cleanly
-        # on Windows even though the CLI surface targets POSIX hosts.
-        import pwd
+        user_id: str = asyncio.run(resolver.resolve())
+        return user_id
+    except OperatorSessionError as exc:
+        if isinstance(exc, OperatorSessionMissing):
+            reason = "operator_session_missing"
+        elif isinstance(exc, OperatorSessionExpired):
+            reason = "operator_session_expired"
+        elif isinstance(exc, OperatorSessionTimeout):
+            reason = "operator_session_resolver_timeout"
+        else:
+            reason = "operator_session_missing"
+        _emit_breaker_reset_refused_audit(component_id=component_id, reason=reason)
+        key = _REFUSAL_KEYS_BY_REASON.get(reason, "supervisor.breaker.reset.refused.not_logged_in")
+        typer.echo(t(key), err=True)
+        recovery = t(f"{key}.recovery")
+        if recovery != f"{key}.recovery":
+            typer.echo(recovery, err=True)
+        raise typer.Exit(code=1) from exc
 
-        return pwd.getpwuid(os.getuid()).pw_name
-    except (ImportError, KeyError, OSError):
-        # CLAUDE.md hard rule #7: every probe failed, but the row still
-        # emits with NULL so the audit log records the attempt — the
-        # presence of the row IS the forensic signal.
-        return None
+
+def _emit_breaker_reset_refused_audit(*, component_id: str, reason: str) -> None:
+    """Emit the refused-row stand-in (structlog) for a session-less reset.
+
+    Mirrors :func:`_emit_breaker_reset_attempt_audit`'s structlog-stand-in
+    shape; carries ``SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS`` so a future
+    live-``AuditWriter`` swap is a one-line change.
+    """
+    from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS
+
+    _log.warning(
+        "supervisor.breaker.reset.refused",
+        schema_name="SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS",
+        component_id=component_id,
+        reason=reason,
+        attempted_at=dt.datetime.now(dt.UTC).isoformat(),
+        schema_fields=sorted(SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS),
+    )
 
 
-def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
+def _emit_breaker_reset_attempt_audit(*, component_id: str, operator_user_id: str) -> None:
     """Emit a fail-loud audit-row stand-in BEFORE calling ``reset_breaker``.
 
     sec-pr-s3-6-04: a crash inside :meth:`Supervisor.reset_breaker` (e.g.
@@ -112,13 +169,12 @@ def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
     ``await audit_writer.append_schema(...)`` without restructuring the
     emit site.
 
-    CR-149 round-10: ``operator_user_id`` is now sourced via
-    :func:`_resolve_operator_user_id` (OS-account attribution — env var,
-    then ``getlogin``, then ``getpwuid``). The id is unauthenticated, so
-    operators sharing an OS account cannot be disambiguated; the
-    authenticated-session refinement is tracked in #153. The OS-account
-    form is still materially better than ``None`` for incident response —
-    a security team grepping the audit log now has a starting point.
+    #153: ``operator_user_id`` is the canonical authenticated ``User.id``
+    resolved by :func:`_resolve_operator_session_or_refuse` from the CLI
+    operator-session token. The Slice-3 OS-account fallback (env var /
+    ``getlogin`` / ``getpwuid``) is deleted — a missing or expired session
+    refuses the reset command outright rather than attributing it to an
+    unauthenticated account.
 
     The structlog redactor in :mod:`alfred.cli._bootstrap` runs in front
     of every output processor so any accidental secret-shaped string in
@@ -158,7 +214,7 @@ def _emit_breaker_reset_attempt_audit(*, component_id: str) -> None:
         old_state=None,
         new_state=None,
         trip_count=None,
-        operator_user_id=_resolve_operator_user_id(),
+        operator_user_id=operator_user_id,
         correlation_id=correlation_id,
         # ``schema_fields`` round-trips the declared field set so a
         # log-grepping audit collector can validate the row at parse
@@ -518,28 +574,26 @@ def supervisor_reset(
         typer.echo(t("cli.supervisor.reset.confirm_required"), err=True)
         raise typer.Exit(code=1)
 
+    # #153: resolve the authenticated operator session FIRST. A missing /
+    # expired / timed-out session refuses the command outright (emits a
+    # refused audit row + localised stderr) rather than attributing the
+    # action to an unauthenticated OS account.
+    operator_user_id = _resolve_operator_session_or_refuse(component_id=component_id)
+
     # CR-149 forensic-trail invariant — operator intent always lands
     # in the audit graph BEFORE the state.git write so a crash mid-
     # write still leaves a breadcrumb pointing at the attempt.
-    _emit_breaker_reset_attempt_audit(component_id=component_id)
+    _emit_breaker_reset_attempt_audit(component_id=component_id, operator_user_id=operator_user_id)
 
     # Lazy import — perf-001 + symmetry with the existing CLI emit
     # sites that defer the schema lookup until the actual emit path.
     from alfred.audit.audit_row_schemas import SUPERVISOR_BREAKER_RESET_REQUESTED_FIELDS
     from alfred.cli._bootstrap import load_settings_or_die
 
-    # CR rework round-1 HIGH #16: the BreakerResetProposal payload now
-    # requires a non-None ``operator_user_id`` so the dispatcher's
-    # handler can pass it straight through without an ``or ""``
-    # fallback. The OS-account resolver returns ``None`` only when
-    # every probe (env var / getlogin / getpwuid) failed — that is the
-    # rare "no controlling tty AND no pwd entry" shape (a malformed
-    # container entrypoint). Fall back to a closed-set ``unknown``
-    # token so the row still lands; the forensic-attempt audit row
-    # above already records the actual attempt with the resolver's
-    # best effort + the ALFRED_OPERATOR_USER_ID env var if any.
-    operator_user_id = _resolve_operator_user_id() or "unknown"
-
+    # #153: ``operator_user_id`` is the canonical authenticated ``User.id``
+    # resolved above. The session-backed resolver never returns ``None`` —
+    # a failed resolution already refused the command — so the proposal
+    # payload always carries a real operator id (no ``unknown`` fallback).
     proposal = queue_proposal_or_exit(
         payload=BreakerResetProposal(
             component_id=component_id,
