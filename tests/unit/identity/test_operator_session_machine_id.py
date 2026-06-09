@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,24 @@ async def test_macos_ioreg_nonzero_refuses(tmp_path: Path, monkeypatch: pytest.M
         await provider.read_raw()
 
 
+async def test_macos_no_uuid_line_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ioreg succeeds but the output lacks an IOPlatformUUID line -> refuse."""
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b"some other ioreg line\n", b"")
+
+    async def _fake_exec(*_args: Any, **_kwargs: Any) -> _Proc:
+        return _Proc()
+
+    monkeypatch.setattr("alfred.identity.operator_session.create_subprocess_exec", _fake_exec)
+    provider = MacosMachineIdProvider(cache=tmp_path / "absent")
+    with pytest.raises(OperatorSessionNoMachineId, match="not found"):
+        await provider.read_raw()
+
+
 async def test_compute_machine_id_hash_deterministic() -> None:
     raw = b"machine-raw"
 
@@ -114,3 +133,15 @@ def test_select_provider_unsupported_refuses(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("sys.platform", "sunos")
     with pytest.raises(OperatorSessionNoMachineId):
         select_machine_id_provider()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="On Windows winreg imports; this arm asserts the non-Windows refusal.",
+)
+async def test_windows_provider_winreg_unavailable_refuses() -> None:
+    """On a non-Windows host, ``import winreg`` raises -> NoMachineId."""
+    from alfred.identity.operator_session import WindowsMachineIdProvider
+
+    with pytest.raises(OperatorSessionNoMachineId, match="winreg unavailable"):
+        await WindowsMachineIdProvider().read_raw()
