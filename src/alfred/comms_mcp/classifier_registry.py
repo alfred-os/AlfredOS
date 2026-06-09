@@ -100,10 +100,23 @@ def get_classifier(*, kind: str, name: str) -> type:
         raise UnknownClassifierError(msg) from exc
 
 
+def is_registered(*, kind: str, name: str) -> bool:
+    """Return ``True`` iff a classifier is registered under ``(kind, name)``.
+
+    The non-raising companion to :func:`get_classifier`. Callers that decide
+    whether to dispatch an *optional* classifier use this rather than catching
+    :class:`UnknownClassifierError` — exception-class identity is unstable under
+    ``importlib.reload`` (a reloaded module's ``UnknownClassifierError`` is a
+    distinct class object), so a membership predicate is the reload-safe seam.
+    """
+    return (kind, name) in _REGISTRY
+
+
 __all__ = [
     "MARKER_NO_CLASSIFIERS_NEEDED",
     "REQUIRED_CLASSIFIERS_BY_KIND",
     "UnknownClassifierError",
     "get_classifier",
+    "is_registered",
     "register_classifier",
 ]
