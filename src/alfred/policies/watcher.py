@@ -51,11 +51,12 @@ from alfred.policies.load import (
     load_yaml_bytes,
     parse_policies,
 )
-from alfred.policies.model import PoliciesV1
+from alfred.policies.model import LOW_BLAST_ALLOWLIST, PoliciesV1
 from alfred.policies.snapshot_ref import (
     PoliciesSnapshot,
     PoliciesSnapshotRef,
     PolicySnapshotHistoryWriter,
+    _diff_keys,
 )
 
 _STAT_FAILURE_DEGRADED_THRESHOLD: Final[int] = 3
@@ -224,6 +225,11 @@ class PolicyWatcher:
         self._stat_failures = 0
         self._stat_successes = 0
         self._state: Literal["normal", "degraded"] = "normal"
+        # perf-S4-4-5: the (reason, attempted_sha256) of the last fallback line
+        # written. A sustained audit-store outage re-emits the same rejection
+        # every tick (sec-2); we append a fallback line only when this pair
+        # changes, bounding growth to one line per distinct bad file.
+        self._last_fallback_key: tuple[str, str | None] | None = None
 
     @property
     def state(self) -> Literal["normal", "degraded"]:
@@ -283,27 +289,36 @@ class PolicyWatcher:
 
         assert outcome.model is not None and outcome.new_sha is not None
 
+        # Single deref before any await (perf-S4-4-2): every read below uses
+        # this local. There is no await between this deref and the swap, so the
+        # snapshot cannot move out from under us mid-tick.
+        active = self._ref.current()
+
         # Phase 0 — watcher-side SHA short-circuit (sec-007). No audit, no swap.
-        if outcome.new_sha == self._ref.current().file_sha256:
+        if outcome.new_sha == active.file_sha256:
             self._cached_mtime_size = new_pair
             return
 
-        # High-blast diff — refuse hot-reload (sec-3 / arch-003).
-        offending = self._high_blast_offending_key(self._ref.current().policies, outcome.model)
+        # Allowlist diff — refuse hot-reload of any high-blast key (ADR-0023 §5
+        # / sec-3 / arch-003). The changed-keys diff is computed once and reused
+        # for the applied-message hint below.
+        changed_keys = _diff_keys(active.policies, outcome.model)
+        offending = next((k for k in changed_keys if k not in LOW_BLAST_ALLOWLIST), None)
         if offending is not None:
             await self._reject(
                 reason="high_blast_change", attempted_sha=outcome.new_sha, offending_key=offending
             )
             return  # sec-2: no cache update.
 
+        resolved_path = self._path.resolve()
         new_snapshot = PoliciesSnapshot(
             policies=outcome.model,
             loaded_at=datetime.now(UTC),
             file_mtime=st.st_mtime,
             file_sha256=outcome.new_sha,
-            file_path=self._path.resolve(),
+            file_path=resolved_path,
         )
-        prev_sha = self._ref.current().file_sha256
+        prev_sha = active.file_sha256
         import uuid
 
         trace_id = str(uuid.uuid4())
@@ -314,9 +329,12 @@ class PolicyWatcher:
                 trace_id=trace_id,
                 operator_session_id=self._operator_session_id,
             )
-        except Exception:
-            # err-010 / err-011 — audit-write failure inside swap(). The ref
-            # aborted the assignment; emit the rejected row + fall back.
+        except SQLAlchemyError:
+            # err-010 / err-011 — TRANSIENT audit-write failure inside swap().
+            # The ref aborted the assignment; emit the rejected row + fall back.
+            # A wrong-shape append_schema (ValueError / TypeError /
+            # ValidationError) is a programmer error and propagates loudly (it
+            # is NOT reclassified as transient ``audit_write_failed``).
             await self._reject(
                 reason="audit_write_failed",
                 attempted_sha=outcome.new_sha,
@@ -347,10 +365,7 @@ class PolicyWatcher:
                 "file_path": str(self._path),
                 "message": t(
                     "supervisor.config_reload.applied",
-                    changed_keys=", ".join(
-                        self._high_blast_changed_keys_for_log(new_snapshot.policies)
-                    )
-                    or "rate_limits/handle_caps",
+                    changed_keys=", ".join(changed_keys) or "<none>",
                 ),
             },
         )
@@ -434,11 +449,40 @@ class PolicyWatcher:
         )
 
     def _append_fallback_jsonl(self, subject: dict[str, Any]) -> None:
+        """Append one fallback-sink line, deduped and crash-safe (sec-4).
+
+        perf-S4-4-5: a sustained audit-store outage re-emits the same rejection
+        every tick (sec-2). We append a line only when the
+        ``(reason, attempted_sha256)`` pair differs from the last one written,
+        bounding the file to one line per distinct bad file instead of ~86k
+        lines/day.
+
+        err-S4-4-3: the fallback sink is the LAST line of defence — both the
+        audit store and this sink being down must NOT kill the watcher. A full /
+        read-only / permission-denied state dir raises ``OSError`` from
+        ``mkdir`` / ``open`` / ``write``; we log critically and continue rather
+        than let it propagate out of ``run()``'s loop (CLAUDE.md hard rule 7:
+        loud, never silent — but the watcher survives a sink failure).
+        """
+        dedup_key = (str(subject.get("reason")), subject.get("attempted_sha256"))
+        if dedup_key == self._last_fallback_key:
+            return
         path = _fallback_jsonl_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"emitted_at": datetime.now(UTC).isoformat(), **subject})
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            _LOG.critical(
+                "policies.watcher.fallback_write_failed",
+                message=t("policies.watcher.fallback_write_failed", path=str(path)),
+                exc_info=True,
+            )
+            return
+        # Only advance the dedup cursor on a SUCCESSFUL write so a failed write
+        # is retried (and re-logged) on the next tick rather than suppressed.
+        self._last_fallback_key = dedup_key
 
     def _on_stat_failure_counters(self) -> None:
         self._stat_failures += 1
@@ -472,24 +516,24 @@ class PolicyWatcher:
 
     @staticmethod
     def _high_blast_offending_key(prev: PoliciesV1, new: PoliciesV1) -> str | None:
-        """Return the first changed high-blast key path, or None if unchanged.
+        """Return the first changed HIGH-BLAST dotted key, or None if all changes are low-blast.
 
-        Frozen-Pydantic ``==`` comparison (perf-002).
+        Default-refuse, allowlist-permit (ADR-0023 §5 / closure arch-003): a
+        changed key hot-reloads ONLY when its dotted path is in
+        :data:`LOW_BLAST_ALLOWLIST`. EVERY other changed key — ``rate_limits.*``,
+        ``handle_caps.*``, ``high_blast.*`` — is high-blast and refuses
+        hot-reload. The allowlist is currently empty, so any change to a
+        modelled field refuses. This is intentionally NOT a high-blast denylist:
+        an allowlist defaults a future field to refuse rather than silently
+        permitting it.
+
+        ``_diff_keys`` does a frozen-Pydantic ``==`` short-circuit per top-level
+        field (perf-002), descending into a sub-model only when it differs.
         """
-        if prev.high_blast == new.high_blast:
-            return None
-        for key in type(prev.high_blast).model_fields:
-            if getattr(prev.high_blast, key) != getattr(new.high_blast, key):
-                return f"high_blast.{key}"
-        return "high_blast.<unknown>"  # pragma: no cover — unreachable: the
-        # caller only invokes this after ``prev.high_blast != new.high_blast``,
-        # so at least one field above must differ.
-
-    @staticmethod
-    def _high_blast_changed_keys_for_log(_policies: PoliciesV1) -> list[str]:
-        # Low-blast swaps never touch high-blast; placeholder for the success
-        # message's changed-keys hint (the audit row carries the exact diff).
-        return []
+        for key in _diff_keys(prev, new):
+            if key not in LOW_BLAST_ALLOWLIST:
+                return key
+        return None
 
 
 def _first_error_key(exc: ValidationError) -> str:

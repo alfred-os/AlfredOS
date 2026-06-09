@@ -78,8 +78,30 @@ def isolated_fallback(tmp_path: Path) -> Iterator[Path]:
         watcher_mod._fallback_jsonl_path = original  # type: ignore[assignment]
 
 
+@contextmanager
+def allowlisted(*keys: str) -> Iterator[None]:
+    """Temporarily add ``keys`` to the watcher's low-blast allowlist.
+
+    The production :data:`alfred.policies.model.LOW_BLAST_ALLOWLIST` is EMPTY by
+    design (ADR-0023 §5) — there is no genuinely low-blast field in the current
+    ``PoliciesV1``. To exercise the *applied* swap machinery (history write,
+    audit-fail fallback, applied hookpoint) without weakening the production
+    default, a test allowlists the specific dotted key it edits. This proves the
+    swap path works while the default-refuse partition stays intact.
+    """
+    import alfred.policies.watcher as watcher_mod
+
+    original = watcher_mod.LOW_BLAST_ALLOWLIST
+    watcher_mod.LOW_BLAST_ALLOWLIST = original | frozenset(keys)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        watcher_mod.LOW_BLAST_ALLOWLIST = original  # type: ignore[assignment]
+
+
 __all__ = [
     "CaptureInvoke",
+    "allowlisted",
     "build_watcher",
     "isolated_fallback",
     "make_policies",

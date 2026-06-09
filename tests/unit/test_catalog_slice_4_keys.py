@@ -90,6 +90,8 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # Config-watcher state-machine notifications (2; PR-S4-4).
     "supervisor.config_watcher.degraded",
     "supervisor.config_watcher.recovered",
+    # Fallback-sink write failure (1; PR-S4-4 round-3 err-S4-4-3).
+    "policies.watcher.fallback_write_failed",
     # TUI (1).
     "comms.tui.daemon_required_to_chat",
 )
@@ -164,8 +166,9 @@ def test_no_orphan_slice_4_msgids_in_po_outside_enumeration() -> None:
     # entries which are kept for translator context.
     msgid_pattern = re.compile(r'^msgid\s+"([^"]+)"', re.MULTILINE)
     all_active_msgids = set(msgid_pattern.findall(po_text))
-    # The 7 family prefixes Slice-4 uses (matches the SLICE_4_KEYS tuple
-    # families above). Any msgid carrying one of these prefixes that
+    # The family prefixes Slice-4 uses (matches the SLICE_4_KEYS tuple
+    # families above, including the ``policies.watcher.`` fallback-sink key
+    # added in PR-S4-4 round-3). Any msgid carrying one of these prefixes that
     # isn't in SLICE_4_KEYS is an orphan.
     slice_4_prefixes = (
         "login.",
@@ -176,6 +179,7 @@ def test_no_orphan_slice_4_msgids_in_po_outside_enumeration() -> None:
         "supervisor.sandbox.",
         "supervisor.config_reload.",
         "supervisor.config_watcher.",
+        "policies.watcher.",
         "daemon.",
         "comms.tui.daemon_required_to_chat",
     )
