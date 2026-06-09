@@ -52,17 +52,22 @@ def _run_launcher(manifest_body: str, *, environment: str, tmp_path: Path) -> tu
     stub = tmp_path / "stub.sh"
     stub.write_text("#!/bin/sh\nexit 0\n")
     stub.chmod(0o755)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": environment,
+        "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+    }
+    # sec-keystone (CR PR #229 finding-1): FAKE_UNAME is a test-only shim that
+    # the launcher REFUSES in production. Only set it outside production; in
+    # production the launcher uses the real host OS (Linux on CI).
+    if environment != "production":
+        env["FAKE_UNAME"] = "Linux"
     proc = subprocess.run(  # noqa: S603 — repo-owned launcher script path
         [str(_LAUNCHER), "attacker.example", str(stub)],
         capture_output=True,
         text=True,
-        env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "PYTHONPATH": str(_REPO_ROOT / "src"),
-            "ALFRED_ENVIRONMENT": environment,
-            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
-            "FAKE_UNAME": "Linux",
-        },
+        env=env,
         check=False,
     )
     return proc.returncode, proc.stderr
@@ -91,7 +96,45 @@ def test_sbx_2026_002_kind_stub_in_production(tmp_path: Path) -> None:
         payload.payload["manifest_toml"], environment="production", tmp_path=tmp_path
     )
     assert rc != 0
-    assert "windows_stub_in_production" in stderr
+    # low-1: a kind:stub production refusal uses the host-accurate reason
+    # (``stub_kind_in_production``) — it must never reuse the windows-specific
+    # key on a non-windows host.
+    assert "stub_kind_in_production" in stderr
+    assert "windows_stub_in_production" not in stderr
+
+
+@pytest.mark.skipif(not _HAS_JQ, reason="jq required for the launcher branch")
+def test_sbx_2026_010_fake_uname_production_bypass_refused(tmp_path: Path) -> None:
+    """sec-keystone: ALFRED_ENVIRONMENT=production + FAKE_UNAME=Darwin must NOT
+    force the non-Linux unsandboxed exec. The launcher refuses at the FAKE_UNAME
+    gate before any host-OS branch.
+    """
+    payload = _load("sbx-2026-010")
+    assert payload.expected_outcome == "refused"
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(payload.payload["manifest_toml"])
+    stub = tmp_path / "stub.sh"
+    sentinel = tmp_path / "executed.marker"
+    stub.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 0\n")
+    stub.chmod(0o755)
+    proc = subprocess.run(  # noqa: S603 — repo-owned launcher script path
+        [str(_LAUNCHER), "attacker.example", str(stub)],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PYTHONPATH": str(_REPO_ROOT / "src"),
+            "ALFRED_ENVIRONMENT": "production",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+            "FAKE_UNAME": payload.payload["fake_uname"],
+        },
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert not sentinel.exists(), "plugin executed unsandboxed — bypass NOT closed"
+    assert "fake_uname_in_production" in proc.stderr
+    assert "PLUGIN_EXECUTED_UNSANDBOXED" not in proc.stdout
+    assert "config_insecure" not in proc.stderr
 
 
 def test_sbx_2026_007_policy_ref_traversal_refused(tmp_path: Path) -> None:
@@ -171,6 +214,7 @@ def test_all_pr_s4_6_payloads_load() -> None:
         "sbx-2026-007",
         "sbx-2026-008",
         "sbx-2026-009",
+        "sbx-2026-010",
     ]
     for pid in ids:
         payload = _load(pid)

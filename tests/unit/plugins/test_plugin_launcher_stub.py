@@ -6,23 +6,24 @@ invariants:
 
 * **Fail-closed.** Without a sandbox policy file, the launcher refuses
   to exec the plugin unless ``ALFRED_ENV=development`` AND
-  ``ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1`` — and even then only after
-  emitting a ``supervisor.config_insecure`` audit JSON line on stderr.
-  Production never accepts the unsandboxed flag (sec-003).
+  ``ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1``. Production never accepts the
+  unsandboxed flag (sec-003).
 * **UID-drop.** On Linux, ``runuser -u "${TARGET_UID}" -- ...`` runs
   the plugin under a different uid so a compromised plugin cannot read
-  the parent process's secrets at the OS level. macOS dev does not
-  have ``runuser``; the launcher emits a
-  ``launcher_uid_separation_unavailable_macos`` audit JSON and execs
-  without UID-drop.
+  the parent process's secrets at the OS level. A non-Linux host has no
+  ``runuser``; in PRODUCTION the launcher REFUSES (sec-keystone, CR PR
+  #229: no UID-drop containment → ``uid_separation_unavailable``), and
+  only dev/test exec without UID-drop, emitting an honest
+  ``supervisor.plugin.sandbox_stub_used`` audit JSON row (low-1: the prior
+  advisory ``config_insecure`` row is gone).
 * **Bare i18n keys on stderr.** No hardcoded English sentences — the
   supervisor renders localised text from the audit row. i18n-005
   option (b).
 
 These tests cover the contract at the shell-script level: ``bash -n``
 syntax check, the fail-closed exit code + stderr key, the
-development-mode pass-through, and (on macOS dev where ``runuser`` is
-absent) the ``supervisor.config_insecure`` JSON shape.
+development-mode pass-through, and (on a non-Linux host where ``runuser``
+is absent) the production-refusal / dev-stub_used JSON shapes.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -233,18 +235,25 @@ def test_launcher_kind_none_execs_plugin_in_development() -> None:
     shutil.which("runuser") is not None,
     reason="macOS-dev branch only: runuser is unavailable",
 )
-def test_launcher_macos_dev_emits_uid_separation_unavailable_row() -> None:
-    """On macOS dev (no ``runuser``), the script logs a config_insecure JSON.
+@pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq required for the kind:none sandbox branch"
+)
+def test_launcher_non_linux_production_refuses_uid_separation_unavailable() -> None:
+    """sec-keystone (CR PR #229 finding-1): on a non-Linux PRODUCTION host the
+    kind:none path has no UID-drop containment, so the launcher REFUSES rather
+    than exec'ing unsandboxed.
 
-    The launcher cannot UID-drop on macOS because ``runuser`` is a
-    Linux util. The supervisor needs an audit trail of this
-    deviation; the JSON-on-stderr pattern gives it that without
-    pulling structlog into a shell script.
+    This previously exec'd the plugin and emitted only an advisory
+    ``config_insecure`` row — the second half of the FAKE_UNAME bypass (a
+    genuine non-Linux production host also fell through to the unsandboxed
+    exec). The fix refuses loudly with a host-accurate
+    ``uid_separation_unavailable`` ``sandbox_refused`` row.
 
-    PR-S4-6: the kind:none manifest routes to ``_do_exec``, whose macOS
-    branch emits this row. (kind:none, not the dev escape hatch, is what
-    reaches _do_exec here.)
+    Only observable on a genuine non-Linux host (FAKE_UNAME is refused in
+    production, so it cannot fake the branch); skipped on Linux.
     """
+    if platform.system() == "Linux":
+        pytest.skip("non-Linux _do_exec production refusal only observable off-Linux")
     env = {
         **os.environ,
         "PYTHONPATH": str(_REPO_ROOT / "src"),
@@ -252,31 +261,68 @@ def test_launcher_macos_dev_emits_uid_separation_unavailable_row() -> None:
         "ALFRED_PLUGIN_MANIFEST_PATH": _write_none_manifest(),
     }
     env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
+    env.pop("FAKE_UNAME", None)
     result = subprocess.run(  # noqa: S603 — literal repo-owned script path
-        [
-            str(_LAUNCHER),
-            "alfred.test-plugin",
-            "/bin/echo",
-            "macos-uid-drop-marker",
-        ],
+        [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "macos-uid-drop-marker"],
         capture_output=True,
         env=env,
         check=False,
     )
-    # Successful exec via /bin/echo (no UID-drop) → 0 + marker present.
-    assert result.returncode == 0
-    assert b"macos-uid-drop-marker" in result.stdout
-    # Audit row records the deviation.
-    assert b"launcher_uid_separation_unavailable_macos" in result.stderr
+    # Refused — the plugin was NOT exec'd.
+    assert result.returncode != 0
+    assert b"macos-uid-drop-marker" not in result.stdout
+    # Host-accurate refusal reason (low-1) — NOT the advisory config_insecure row.
+    assert b"config_insecure" not in result.stderr
+    assert b"uid_separation_unavailable" in result.stderr
     json_line = next(
         line
         for line in result.stderr.splitlines()
-        if b"launcher_uid_separation_unavailable_macos" in line
+        if b'"event":"supervisor.plugin.sandbox_refused"' in line
     )
     parsed = json.loads(json_line)
-    assert parsed["event"] == "supervisor.config_insecure"
+    assert parsed["event"] == "supervisor.plugin.sandbox_refused"
     assert parsed["plugin_id"] == "alfred.test-plugin"
-    assert parsed["insecure_config_key"] == "launcher_uid_separation_unavailable_macos"
+    assert parsed["reason"] == "uid_separation_unavailable"
+    assert parsed["environment"] == "production"
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None, reason="jq required for the kind:none sandbox branch"
+)
+def test_launcher_non_linux_dev_execs_with_stub_used_row() -> None:
+    """On a non-Linux DEV host the kind:none path may exec unsandboxed, but with
+    an honest ``sandbox_stub_used`` row (low-1) — NOT the old advisory
+    ``config_insecure`` row.
+
+    Forced via FAKE_UNAME=Darwin (honoured in dev) so it runs on Linux CI too.
+    """
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(_REPO_ROOT / "src"),
+        "ALFRED_ENVIRONMENT": "development",
+        "ALFRED_PLUGIN_MANIFEST_PATH": _write_none_manifest(),
+        "FAKE_UNAME": "Darwin",
+    }
+    env.pop("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", None)
+    result = subprocess.run(  # noqa: S603 — literal repo-owned script path
+        [str(_LAUNCHER), "alfred.test-plugin", "/bin/echo", "macos-uid-drop-marker"],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert b"macos-uid-drop-marker" in result.stdout
+    assert b"config_insecure" not in result.stderr
+    json_line = next(
+        line
+        for line in result.stderr.splitlines()
+        if b'"event":"supervisor.plugin.sandbox_stub_used"' in line
+    )
+    parsed = json.loads(json_line)
+    assert parsed["event"] == "supervisor.plugin.sandbox_stub_used"
+    assert parsed["plugin_id"] == "alfred.test-plugin"
+    assert parsed["reason"] == "uid_separation_unavailable"
+    assert parsed["host_os"] == "macos"
 
 
 # ---------------------------------------------------------------------------
@@ -442,9 +488,13 @@ def test_launcher_json_emission_only_after_charset_validation() -> None:
     """
     source = _LAUNCHER.read_text()
     charset_idx = source.find("plugin.launcher_plugin_id_invalid")
-    first_json_idx = source.find('{"event":"supervisor.config_insecure"')
+    # The first JSON-emitting printf interpolates PLUGIN_ID into an
+    # ``{"event":"supervisor...`` template. CR PR #229 low-1 removed the advisory
+    # ``config_insecure`` row, so this asserts against the first remaining
+    # JSON-emitting event template instead.
+    first_json_idx = source.find('{"event":"supervisor.')
     assert charset_idx != -1, "charset-invalid bare key must be present"
-    assert first_json_idx != -1, "supervisor.config_insecure JSON template must be present"
+    assert first_json_idx != -1, "a supervisor.* JSON template must be present"
     assert charset_idx < first_json_idx, (
         "charset validation must precede the first JSON-emitting branch "
         "(CR PR #140 audit-stream integrity)"

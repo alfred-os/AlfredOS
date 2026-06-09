@@ -130,6 +130,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "supervisor.sandbox.refused.unknown_host_os",
     "supervisor.sandbox.refused.jq_unavailable",
     "supervisor.sandbox.refused.sandbox_info_handshake_mismatch",
+    # PR-S4-6 CR #229 finding-1 (sec-keystone) + low-1 host-accurate refusals.
+    "supervisor.sandbox.refused.fake_uname_in_production",
+    "supervisor.sandbox.refused.uid_separation_unavailable",
+    "supervisor.sandbox.refused.stub_kind_in_production",
     # PR-S4-6 boot-posture + env-conflict observability.
     "supervisor.boot.mlock_unavailable",
     "supervisor.boot.core_dumps_disabled",
