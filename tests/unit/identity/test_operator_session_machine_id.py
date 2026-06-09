@@ -47,6 +47,32 @@ async def test_linux_both_missing_refuses(tmp_path: Path) -> None:
         await provider.read_raw()
 
 
+async def test_linux_empty_primary_falls_through_to_fallback(tmp_path: Path) -> None:
+    """CR-227 round-2 finding 3: an empty/whitespace primary is unreadable.
+
+    An empty ``/etc/machine-id`` must NOT be hashed (the empty value would be
+    a CONSTANT across every host with an empty source, defeating replay
+    protection). The provider falls through to ``/var/lib/dbus/machine-id``.
+    """
+    primary = tmp_path / "machine-id"
+    primary.write_bytes(b"   \n\t  ")  # whitespace-only -> strips to b""
+    fallback = tmp_path / "dbus-machine-id"
+    fallback.write_bytes(b"realfallback\n")
+    provider = LinuxMachineIdProvider(primary=primary, fallback=fallback)
+    assert await provider.read_raw() == b"realfallback"
+
+
+async def test_linux_all_empty_refuses_never_hashes_constant(tmp_path: Path) -> None:
+    """When EVERY source is empty/whitespace the provider RAISES, never hashes b\"\"."""
+    primary = tmp_path / "machine-id"
+    primary.write_bytes(b"")
+    fallback = tmp_path / "dbus-machine-id"
+    fallback.write_bytes(b"\n  \n")
+    provider = LinuxMachineIdProvider(primary=primary, fallback=fallback)
+    with pytest.raises(OperatorSessionNoMachineId):
+        await provider.read_raw()
+
+
 async def test_macos_cache_hit(tmp_path: Path) -> None:
     cache = tmp_path / "machine-id"
     cache.write_bytes(b"CACHED-UUID\n")
@@ -73,6 +99,42 @@ async def test_macos_cache_miss_spawns_ioreg(
     assert await provider.read_raw() == b"DEAD-BEEF-UUID"
     # The cache was populated for the next read.
     assert cache.read_bytes() == b"DEAD-BEEF-UUID"
+
+
+async def test_macos_cache_write_failure_is_best_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CR-227 round-2 finding 4: an unwritable cache dir must NOT break login.
+
+    The cache WRITE is best-effort — on ``OSError`` (read-only fs, permission
+    denied) the provider logs and continues with the in-memory ``ioreg``
+    value. The cache READ stays authoritative when present; only the write
+    degrades gracefully.
+    """
+    import alfred.identity.operator_session as _osmod
+
+    cache = tmp_path / "absent"
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b'    "IOPlatformUUID" = "LIVE-UUID"\n', b"")
+
+    async def _fake_exec(*_args: Any, **_kwargs: Any) -> _Proc:
+        return _Proc()
+
+    monkeypatch.setattr("alfred.identity.operator_session.create_subprocess_exec", _fake_exec)
+
+    # Make the cache write fail (read-only / unwritable).
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(_osmod.Path, "write_bytes", _boom)
+
+    provider = MacosMachineIdProvider(cache=cache)
+    # Login still resolves to the live value despite the failed cache write.
+    assert await provider.read_raw() == b"LIVE-UUID"
 
 
 async def test_macos_ioreg_nonzero_refuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
