@@ -375,7 +375,7 @@ class AlfredPluginSession:
         dispatch loop is the supervisor's job.
         """
         if method == "sandbox_info":
-            await self._verify_sandbox_info(params or {})
+            await self._verify_sandbox_info(params)
             return
         if method not in _DISALLOWED_POST_HANDSHAKE_METHODS:
             return
@@ -388,16 +388,27 @@ class AlfredPluginSession:
         )
         await self._quarantine_teardown(reason_base="protocol_violation")
 
-    async def _verify_sandbox_info(self, params: Mapping[str, object]) -> None:
+    async def _verify_sandbox_info(self, params: object) -> None:
         """Compare the plugin-reported sandbox kind against the manifest (arch-3).
 
         A missing or mismatched ``effective_sandbox_kind`` is a plugin that
         will not (or cannot) honestly attest its isolation — quarantine the
         session and re-raise :class:`SandboxInfoHandshakeMismatch`.
+
+        ``params`` is untrusted plugin-supplied JSON, so it is NOT assumed to
+        be an object (sec / CR #229 R2 finding-3). A non-``dict`` ``params``
+        (a list/string/number, or ``None``) is treated as a lie: a plugin that
+        cannot supply a well-formed attestation object is refused exactly like
+        one whose ``effective_sandbox_kind`` mismatches — fail-closed (hard
+        rule #7), never an ``AttributeError`` before quarantine/audit.
         """
         declared = self._manifest.sandbox.kind
-        reported = params.get("effective_sandbox_kind")
-        reported_str = reported if isinstance(reported, str) else "<missing>"
+        if isinstance(params, dict):
+            reported = params.get("effective_sandbox_kind")
+            reported_str = reported if isinstance(reported, str) else "<missing>"
+        else:
+            # Malformed (non-object) params: no honest attestation is possible.
+            reported_str = "<malformed>"
         if reported_str == declared:
             return
 
@@ -408,12 +419,20 @@ class AlfredPluginSession:
             reported=reported_str,
             correlation_id=self._correlation_id,
         )
-        await self._quarantine_teardown(reason_base="sandbox_info_handshake_mismatch")
-        raise SandboxInfoHandshakeMismatch(
-            plugin_id=self._manifest.plugin_id,
-            declared=declared,
-            reported=reported_str,
-        )
+        # The teardown may itself re-raise a kill failure; the typed mismatch
+        # is the security-load-bearing signal the supervisor branches on, so it
+        # MUST surface regardless (CR #229 R2 finding-4). ``finally`` raises the
+        # mismatch even when ``_quarantine_teardown`` propagates a kill error;
+        # that kill error is captured + chained as ``__context__`` so it is not
+        # lost from the traceback.
+        try:
+            await self._quarantine_teardown(reason_base="sandbox_info_handshake_mismatch")
+        finally:
+            raise SandboxInfoHandshakeMismatch(
+                plugin_id=self._manifest.plugin_id,
+                declared=declared,
+                reported=reported_str,
+            )
 
     async def _quarantine_teardown(self, *, reason_base: str) -> None:
         """SIGKILL + emit the ``plugin.lifecycle.quarantined`` row.

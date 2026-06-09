@@ -136,3 +136,47 @@ async def test_non_sandbox_info_method_unaffected(fake_audit_writer, fake_gate) 
     session = await _make_session(_NONE_MANIFEST, fake_audit_writer, fake_gate, transport)
     await session._on_post_handshake_method("lifecycle.ping")
     transport.kill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_params", [[], ["effective_sandbox_kind"], "full", 7, 0, ""])
+async def test_sandbox_info_non_object_params_fails_closed(
+    fake_audit_writer, fake_gate, bad_params
+) -> None:
+    """A sandbox_info whose params is not a JSON object is a lie (CR #229 R2 f-3).
+
+    Hard rule #7 (fail-closed): a malformed ``params`` (list/string/number,
+    truthy or falsy) must reach quarantine + teardown + the typed mismatch —
+    NOT raise an ``AttributeError`` before the audit row writes. Treating a
+    non-object params as an honest "<missing>" attestation closes the drift.
+    """
+    transport = MagicMock()
+    transport.kill = AsyncMock(return_value=True)
+    session = await _make_session(_NONE_MANIFEST, fake_audit_writer, fake_gate, transport)
+    with pytest.raises(SandboxInfoHandshakeMismatch):
+        await session._on_post_handshake_method("sandbox_info", bad_params)
+    transport.kill.assert_awaited_once()
+    assert fake_audit_writer.last_event == "plugin.lifecycle.quarantined"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_info_mismatch_propagates_even_if_teardown_raises(
+    fake_audit_writer, fake_gate
+) -> None:
+    """A teardown kill error must not swallow the typed mismatch (CR #229 R2 f-4).
+
+    If ``_quarantine_teardown`` re-raises a kill failure, the caller must STILL
+    see :class:`SandboxInfoHandshakeMismatch` — a sandbox-attestation lie always
+    surfaces the typed mismatch so the supervisor's spawn path refuses the
+    session. The kill error is chained, never the surfaced exception.
+    """
+    transport = MagicMock()
+    transport.kill = AsyncMock(side_effect=OSError("kill syscall failed"))
+    session = await _make_session(_NONE_MANIFEST, fake_audit_writer, fake_gate, transport)
+    with pytest.raises(SandboxInfoHandshakeMismatch) as exc_info:
+        await session._on_post_handshake_method("sandbox_info", {"effective_sandbox_kind": "full"})
+    assert exc_info.value.declared == "none"
+    assert exc_info.value.reported == "full"
+    # The audit row still landed (try/finally) and records the kill failure.
+    assert fake_audit_writer.last_event == "plugin.lifecycle.quarantined"
+    assert fake_audit_writer.calls[-1]["subject"]["kill_succeeded"] is False
