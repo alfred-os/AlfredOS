@@ -247,7 +247,7 @@ async def login_impl(
             "via": via,
         },
         trust_tier_of_trigger="T1",
-        result="ok",
+        result="success",
         cost_estimate_usd=0.0,
         trace_id=f"operator-session-created-{user.user_id}",
         language=user.language,
@@ -302,7 +302,7 @@ async def logout_impl(deps: OperatorSessionDeps) -> None:
             "via": "logout",
         },
         trust_tier_of_trigger="T1",
-        result="ok",
+        result="success",
         cost_estimate_usd=0.0,
         trace_id=f"operator-session-revoked-{session.user_id}",
     )
