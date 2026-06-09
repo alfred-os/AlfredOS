@@ -83,7 +83,9 @@ def _diff_keys(prev: PoliciesV1, new: PoliciesV1) -> list[str]:
             for sub in type(prev_val).model_fields:
                 if getattr(prev_val, sub) != getattr(new_val, sub):
                     changed.append(f"{field}.{sub}")
-        else:
+        else:  # pragma: no cover — defensive: every PoliciesV1 top-level field
+            # except the frozen ``schema_version: Literal[1]`` is a sub-model, so
+            # the only scalar field cannot differ between two valid snapshots.
             changed.append(field)
     return sorted(changed)
 
