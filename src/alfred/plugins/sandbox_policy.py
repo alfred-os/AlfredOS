@@ -72,6 +72,13 @@ class SandboxPolicy(BaseModel):
     ro_binds: Sequence[tuple[str, str]] = ()
     rw_binds: Sequence[tuple[str, str]] = ()
     tmpfs: Sequence[str] = ()
+    # A minimal ``/dev`` (``/dev/null``, ``/dev/zero``, ``/dev/urandom``, …)
+    # synthesised by bwrap — NOT the host's /dev (no device passthrough). On
+    # by default because almost any real program needs it: CPython itself
+    # aborts at startup (``_Py_HashRandomization_Init: failed to get random
+    # numbers``) without ``/dev/urandom``. A policy may set ``dev = false`` for
+    # a process that genuinely needs no device nodes.
+    dev: bool = True
     # The ``Literal`` set IS the unshare-kind allow-list (the bwrap
     # ``--unshare-<ns>`` namespaces this schema supports) — an out-of-vocab
     # value (e.g. "zinc") is rejected by Pydantic at field validation with a
@@ -98,7 +105,7 @@ class SandboxPolicy(BaseModel):
 def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
     """Translate a :class:`SandboxPolicy` into the bwrap CLI flag list.
 
-    The flag order is stable (binds → tmpfs → unshare → die-with-parent →
+    The flag order is stable (binds → tmpfs → dev → unshare → die-with-parent →
     sync-fd) so the launcher's exec line is reproducible and auditable across
     Python dict-ordering changes.
     """
@@ -109,6 +116,10 @@ def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
         flags += ["--bind", src, dst]
     for path in policy.tmpfs:
         flags += ["--tmpfs", path]
+    if policy.dev:
+        # bwrap synthesises a minimal devtmpfs at /dev (null/zero/full/random/
+        # urandom/tty) — no host device access. Required for CPython startup.
+        flags += ["--dev", "/dev"]
     for kind in policy.unshare:
         flags += [f"--unshare-{kind}"]
     if policy.die_with_parent:
