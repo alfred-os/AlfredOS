@@ -131,6 +131,24 @@ class ManifestVersionError(ManifestError):
         self.expected = expected
 
 
+class ManifestSandboxMissingError(ManifestError):
+    """The manifest lacks a required ``[sandbox]`` block (spec §7.1, PR-S4-6).
+
+    Distinct leaf from the generic :class:`ManifestError` so the
+    supervisor's ``supervisor.plugin.sandbox_refused`` emit can attribute
+    ``reason="sandbox_block_missing"`` from the exception *type* without
+    parsing the message string. A plugin with no declared isolation posture
+    must never load — the parser fails closed (CLAUDE.md hard rule #7).
+
+    ``plugin_id`` is the manifest-declared id (a closed-vocabulary slug) and
+    is safe to carry in audit rows (spec §5.6).
+    """
+
+    def __init__(self, plugin_id: str) -> None:
+        super().__init__(t("plugin.manifest_sandbox_block_missing", plugin_id=plugin_id))
+        self.plugin_id = plugin_id
+
+
 class ManifestTierError(ManifestError):
     """The manifest declared a content trust tier (T0-T3) as ``subscriber_tier``.
 
@@ -199,6 +217,7 @@ class DlpOutboundRefusedError(PluginTransportError):
 __all__ = [
     "DlpOutboundRefusedError",
     "ManifestError",
+    "ManifestSandboxMissingError",
     "ManifestTierError",
     "ManifestVersionError",
     "PluginError",

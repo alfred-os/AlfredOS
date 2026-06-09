@@ -47,6 +47,9 @@ manifest_version = 1
 id = "alfred.test-plugin"
 subscriber_tier = "system"
 sandbox_profile = "user-plugin"
+
+[sandbox]
+kind = "none"
 """
 
 
