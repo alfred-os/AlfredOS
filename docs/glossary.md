@@ -1494,8 +1494,10 @@ The provider-key delivery channel for `kind: full` plugins. The
 Supervisor (host) opens a pipe, writes a 4-byte big-endian length prefix
 plus the key bytes via a single `os.writev` syscall (atomic on POSIX), then
 zeroes the local `bytearray` and `gc.collect()`s. The launcher invokes
-`bwrap --sync-fd 3 ...` so the kernel inherits fd 3 into the spawned
-plugin. The plugin reads the framed bytes via Slice-3's
+`bwrap` with NO fd flag: bwrap inherits open, non-CLOEXEC fds (fd 3) into the
+spawned plugin by default. (`--sync-fd` is bwrap's internal sync fd and must
+NOT be used for key delivery — pointing it at fd 3 consumes the descriptor;
+verified bubblewrap 0.8.0/0.9.0, #218.) The plugin reads the framed bytes via Slice-3's
 `read_fd3_secret()`. Honest limitation: the Supervisor holds the key in
 a Python `str` (interned, non-zeroizable) for microseconds between the
 broker fetch and the writev — Slice-5's `SecretBroker.get_bytes` closes

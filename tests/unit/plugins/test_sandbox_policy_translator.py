@@ -9,8 +9,13 @@ Two security invariants pinned here:
 * arch-2: a ``kind: full`` policy whose ``keep_fds`` omits 3 is refused at
   *parse* time (``SandboxPolicyInvalid``) — the fd-3 provider-key channel is
   load-bearing and a policy that forgets it would silently break key delivery.
-* The bwrap flag for fd-3 inheritance is ``--sync-fd`` (Debian Bookworm
-  bubblewrap 0.8.0 naming; issue #218), NOT ``--keep-fd`` (upstream 0.9.0+).
+* fd-3 inheritance needs NO bwrap flag: bwrap passes inherited, open,
+  non-CLOEXEC fds into the sandboxed child by default (verified against
+  bubblewrap 0.8.0 + 0.9.0; issue #218). ``--sync-fd`` is bwrap's *internal*
+  sync fd and must NOT be used for key delivery — pointing it at fd 3 consumes
+  fd 3 and the child's ``os.read(3)`` raises EBADF. There is no ``--keep-fd``
+  in these versions. So ``policy_to_bwrap_flags`` emits no fd flag; ``keep_fds``
+  is a validated declaration only (arch-2).
 """
 
 from __future__ import annotations
@@ -51,9 +56,11 @@ def test_simple_policy_translates_in_stable_order() -> None:
         "--unshare-cgroup",
         "--unshare-ipc",
         "--die-with-parent",
-        "--sync-fd",
-        "3",
     ]
+    # No fd flag: bwrap inherits fd 3 by default (issue #218). The list ends
+    # at --die-with-parent; --sync-fd would CONSUME fd 3, breaking delivery.
+    assert "--sync-fd" not in flags
+    assert "--keep-fd" not in flags
 
 
 def test_dev_mount_default_on_and_opt_out() -> None:
@@ -101,10 +108,13 @@ def test_unknown_unshare_kind_refuses() -> None:
 
 
 def test_default_keep_fds_includes_3() -> None:
-    # fd 3 is the Supervisor's provider-key channel — kept by default.
+    # fd 3 is the Supervisor's provider-key channel — kept by default in the
+    # declared field. No CLI flag is emitted for it: bwrap inherits fd 3.
     policy = SandboxPolicy()
     assert 3 in policy.keep_fds
-    assert "--sync-fd" in policy_to_bwrap_flags(policy)
+    flags = policy_to_bwrap_flags(policy)
+    assert "--sync-fd" not in flags
+    assert "--keep-fd" not in flags
 
 
 def test_keep_fds_without_3_refused_at_parse() -> None:
@@ -115,11 +125,16 @@ def test_keep_fds_without_3_refused_at_parse() -> None:
     assert exc_info.value.reason == "kind_full_requires_keep_fd_3"
 
 
-def test_multiple_keep_fds_all_emitted() -> None:
+def test_multiple_keep_fds_declared_no_flag_emitted() -> None:
+    # The field accepts additional fds (e.g. [3, 5]) as a declaration, but the
+    # translator emits NO fd flag for any of them — bwrap inherits open fds by
+    # default. Asserting absence guards against a regression that re-adds a
+    # per-fd flag (which would consume the fd via --sync-fd).
     policy = SandboxPolicy(keep_fds=[3, 5])
     flags = policy_to_bwrap_flags(policy)
-    assert flags.count("--sync-fd") == 2
-    assert "5" in flags
+    assert "--sync-fd" not in flags
+    assert "--keep-fd" not in flags
+    assert "5" not in flags
 
 
 def test_extra_key_in_policy_refused() -> None:
@@ -163,8 +178,9 @@ def test_fixture_policy_file_translates() -> None:
     )
     policy = read_policy_toml(fixture.read_text(encoding="utf-8"))
     flags = policy_to_bwrap_flags(policy)
-    assert "--sync-fd" in flags
-    assert flags[flags.index("--sync-fd") + 1] == "3"
     assert "--ro-bind" in flags
     assert "--unshare-pid" in flags
     assert "--die-with-parent" in flags
+    # fd 3 is inherited by default — no fd flag is emitted.
+    assert "--sync-fd" not in flags
+    assert "--keep-fd" not in flags

@@ -345,29 +345,22 @@ jobs:
         # is the launcher's JSON reader. Without these the test silently
         # skips and the gate is paper-only. The alfred-core runtime image
         # (PR-S4-0b) pins bubblewrap 0.8.0; ubuntu-latest's apt bubblewrap is
-        # >= 0.6 which has --sync-fd, sufficient for the resolver test.
+        # >= 0.6, sufficient for the resolver test.
         #
-        # devops (CR PR #229 finding-5): the apt install is version-unbounded.
-        # The launcher/translator emit `--sync-fd FD` ("Keep this fd open
-        # while sandbox is running"), verified present in bwrap 0.8.0 AND
-        # 0.9.0 (#218 / ADR-0015 — the speculated `--keep-fd` rename never
-        # happened). The version-drift guard below asserts the installed bwrap
-        # still advertises `--sync-fd` so a future rename fails LOUDLY here
-        # rather than mis-running the test. The #228 boot-probe owns the
-        # runtime version check.
+        # fd-3 delivery needs NO bwrap CLI flag: bwrap inherits open,
+        # non-CLOEXEC fds (fd 3 = the provider-key channel) into the sandboxed
+        # child by default (#218 / ADR-0015, verified bwrap 0.8.0 + 0.9.0). The
+        # translator therefore emits no fd flag, so there is no flag to guard
+        # against version drift here — the earlier `--sync-fd` advertise-check
+        # is removed (--sync-fd is bwrap's internal sync fd and would CONSUME
+        # fd 3 if used). The #228 boot-probe owns the runtime bwrap-presence /
+        # version-floor check.
         if: steps.check.outputs.has_integration == 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
-          # Loud version-drift guard: the resolver test emits `--sync-fd`.
-          if ! bwrap --help 2>&1 | grep -q -- '--sync-fd'; then
-            echo "::error::Installed bwrap does not advertise --sync-fd ('Keep this fd open while sandbox is running'), the fd-3 inheritance flag the launcher/translator emit (#218 / ADR-0015). Pin bubblewrap to a --sync-fd build or update the flag emission. Failing loudly per CR PR #229 finding-5."
-            bwrap --help 2>&1 | head -n 40 || true
-            exit 1
-          fi
-          echo "bwrap advertises --sync-fd — resolver test flag is current."
           # Ubuntu 23.10+/24.04 (ubuntu-latest) ships
           # kernel.apparmor_restrict_unprivileged_userns=1, which blocks the
           # unprivileged user-namespace setup bwrap needs — surfacing as

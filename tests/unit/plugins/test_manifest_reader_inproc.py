@@ -157,8 +157,12 @@ def test_policy_to_bwrap_flags_ok(monkeypatch, capsys) -> None:
     rc = manifest_reader.main(["--policy-to-bwrap-flags"])
     assert rc == 0
     lines = capsys.readouterr().out.splitlines()
-    assert "--sync-fd" in lines
-    assert "3" in lines
+    # No fd flag: bwrap inherits fd 3 by default (issue #218). The default
+    # policy still emits its isolation flags (--dev, --die-with-parent).
+    assert "--dev" in lines
+    assert "--die-with-parent" in lines
+    assert "--sync-fd" not in lines
+    assert "--keep-fd" not in lines
 
 
 def test_policy_to_bwrap_flags_invalid(monkeypatch, capsys) -> None:
@@ -184,7 +188,10 @@ def test_policy_to_bwrap_flags_confined_ref(tmp_path, monkeypatch, capsys) -> No
         ]
     )
     assert rc == 0
-    assert "--sync-fd" in capsys.readouterr().out.splitlines()
+    out = capsys.readouterr().out.splitlines()
+    assert "--dev" in out
+    assert "--sync-fd" not in out
+    assert "--keep-fd" not in out
 
 
 def test_policy_to_bwrap_flags_ref_escapes_root(tmp_path, monkeypatch, capsys) -> None:
@@ -245,7 +252,10 @@ def test_policy_to_bwrap_flags_ref_default_install_root(tmp_path, monkeypatch, c
         ["--policy-to-bwrap-flags", "--policy-ref", "config/sandbox/foo.linux.bwrap.policy"]
     )
     assert rc == 0
-    assert "--sync-fd" in capsys.readouterr().out.splitlines()
+    out = capsys.readouterr().out.splitlines()
+    assert "--dev" in out
+    assert "--sync-fd" not in out
+    assert "--keep-fd" not in out
 
 
 # --------------------------------------------------------------------------

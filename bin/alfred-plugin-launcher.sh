@@ -16,7 +16,11 @@
 #      visible stderr key + a SANDBOX_REFUSED audit JSON row.
 #   4. **Manifest [sandbox] block** drives the branch:
 #        kind:full → resolve per-OS policy_ref (path-confined in Python),
-#                    translate to bwrap flags, exec bwrap --sync-fd 3.
+#                    translate to bwrap flags, exec bwrap. fd 3 (the provider-
+#                    key channel) is inherited into the sandbox by bwrap's
+#                    default fd inheritance — NO --sync-fd/--keep-fd flag is
+#                    emitted (--sync-fd would consume fd 3; verified bwrap
+#                    0.8.0/0.9.0, issue #218).
 #        kind:none → Slice-3 UID-separated runuser path (unchanged).
 #        kind:stub → refuse in production; dev emits a stub-used audit row.
 #

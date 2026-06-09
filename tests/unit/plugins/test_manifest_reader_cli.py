@@ -175,8 +175,9 @@ def test_policy_to_bwrap_flags_one_per_line() -> None:
     result = _run("--policy-to-bwrap-flags", stdin=policy)
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
-    assert "--sync-fd" in lines
-    assert "3" in lines
+    # No fd flag is emitted: bwrap inherits fd 3 by default (issue #218).
+    assert "--sync-fd" not in lines
+    assert "--keep-fd" not in lines
     assert "--tmpfs" in lines
 
 
