@@ -72,10 +72,13 @@ from alfred.hooks.capability import CapabilityGate
 from alfred.plugins.errors import (
     ManifestError,
     PluginError,
+    SandboxInfoHandshakeMismatch,
 )
 from alfred.plugins.manifest import PluginManifest, parse_manifest
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from alfred.plugins.stdio_transport import StdioTransport
 
 log = structlog.get_logger(__name__)
@@ -344,25 +347,36 @@ class AlfredPluginSession:
     # Post-handshake message routing
     # ------------------------------------------------------------------
 
-    async def _on_post_handshake_method(self, method: str) -> None:
+    async def _on_post_handshake_method(
+        self, method: str, params: Mapping[str, object] | None = None
+    ) -> None:
         """Route a post-handshake JSON-RPC method through the security gate.
 
-        For methods in :data:`_DISALLOWED_POST_HANDSHAKE_METHODS` (spec
-        §4.6: currently ``alfred/hooks.register``):
+        Two refusal shapes:
 
-        1. ``await self._transport.kill()`` BEFORE the audit row writes.
-           The row's ``signal='SIGKILL'`` claim is only made when the
-           kill actually landed; an operator reading the log cannot be
-           lied to by a misbehaving subprocess (sec-013 / core-007).
-        2. Emit ``plugin.lifecycle.quarantined`` in a ``try/finally`` —
-           the row lands regardless of kill outcome so operators see
-           the quarantine event even if the subprocess was already dead
-           or ``kill()`` raised (rvw-pre-flight). The
-           ``kill_succeeded`` field reflects the actual outcome.
+        * Methods in :data:`_DISALLOWED_POST_HANDSHAKE_METHODS` (spec §4.6:
+          currently ``alfred/hooks.register``) — the host is the sole
+          authority for hook registration; a plugin asking to register one is
+          quarantined.
+        * ``sandbox_info`` (PR-S4-6 arch-3) whose reported
+          ``effective_sandbox_kind`` disagrees with the manifest's declared
+          ``sandbox.kind`` — a plugin lying about its own containment. The
+          mismatch is quarantined AND re-raised as
+          :class:`SandboxInfoHandshakeMismatch` so the supervisor's spawn
+          path refuses the session.
+
+        Either refusal tears the session down: SIGKILL the subprocess BEFORE
+        the audit row writes (so a ``signal='SIGKILL'`` claim is only made
+        when the kill landed — sec-013 / core-007), then emit
+        ``plugin.lifecycle.quarantined`` in a ``try/finally`` so the row
+        lands regardless of kill outcome (rvw-pre-flight).
 
         For any other method the call is a no-op; routing to the real
         dispatch loop is the supervisor's job.
         """
+        if method == "sandbox_info":
+            await self._verify_sandbox_info(params or {})
+            return
         if method not in _DISALLOWED_POST_HANDSHAKE_METHODS:
             return
 
@@ -372,10 +386,43 @@ class AlfredPluginSession:
             method=method,
             correlation_id=self._correlation_id,
         )
+        await self._quarantine_teardown(reason_base="protocol_violation")
 
-        # Step 1 — SIGKILL the subprocess. ``kill()`` returns a bool;
-        # an unexpected exception (broken pipe, etc.) still has to land
-        # the audit row, so wrap the whole sequence in ``try/finally``.
+    async def _verify_sandbox_info(self, params: Mapping[str, object]) -> None:
+        """Compare the plugin-reported sandbox kind against the manifest (arch-3).
+
+        A missing or mismatched ``effective_sandbox_kind`` is a plugin that
+        will not (or cannot) honestly attest its isolation — quarantine the
+        session and re-raise :class:`SandboxInfoHandshakeMismatch`.
+        """
+        declared = self._manifest.sandbox.kind
+        reported = params.get("effective_sandbox_kind")
+        reported_str = reported if isinstance(reported, str) else "<missing>"
+        if reported_str == declared:
+            return
+
+        log.error(
+            "sandbox_info_handshake_mismatch",
+            plugin_id=self._manifest.plugin_id,
+            declared=declared,
+            reported=reported_str,
+            correlation_id=self._correlation_id,
+        )
+        await self._quarantine_teardown(reason_base="sandbox_info_handshake_mismatch")
+        raise SandboxInfoHandshakeMismatch(
+            plugin_id=self._manifest.plugin_id,
+            declared=declared,
+            reported=reported_str,
+        )
+
+    async def _quarantine_teardown(self, *, reason_base: str) -> None:
+        """SIGKILL + emit the ``plugin.lifecycle.quarantined`` row.
+
+        Shared by the disallowed-method and sandbox_info-mismatch paths. The
+        kill runs BEFORE the audit write and the whole sequence is wrapped in
+        ``try/finally`` so the row lands even if ``kill()`` raises; the raised
+        exception is re-propagated after the row is durable.
+        """
         kill_succeeded = False
         kill_exception: BaseException | None = None
         try:
@@ -384,7 +431,6 @@ class AlfredPluginSession:
         except BaseException as exc:  # re-raised after audit emit
             kill_exception = exc
         finally:
-            # Step 2 — quarantine audit row, regardless of kill outcome.
             await self._audit_writer.append_schema(
                 fields=audit_row_schemas.PLUGIN_LIFECYCLE_QUARANTINED_FIELDS,
                 schema_name="PLUGIN_LIFECYCLE_QUARANTINED_FIELDS",
@@ -400,9 +446,7 @@ class AlfredPluginSession:
                     "restart_count": 0,
                     "breaker_state": "OPEN",
                     "quarantine_reason": (
-                        "protocol_violation"
-                        if kill_succeeded
-                        else "protocol_violation (kill failed)"
+                        reason_base if kill_succeeded else f"{reason_base} (kill failed)"
                     ),
                     "kill_succeeded": kill_succeeded,
                     "trip_count": 1,
