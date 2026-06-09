@@ -82,9 +82,9 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -92,6 +92,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from alfred.audit.audit_row_schemas import SUPERVISOR_ACTION_TIMEOUT_FIELDS
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetError, BudgetGuard, UnknownBudgetUserError
+from alfred.i18n import t
 from alfred.memory.episodic import EpisodicMemory
 from alfred.memory.working import WorkingMemory
 from alfred.personas.alfred import ALFRED_PERSONA, render_persona_prompt
@@ -104,8 +105,40 @@ from alfred.supervisor.observability import record_action_duration
 
 if TYPE_CHECKING:
     from alfred.identity.models import User
+    from alfred.security.quarantine import ExtractionResult
 
 _log = structlog.get_logger(__name__)
+
+
+@runtime_checkable
+class QuarantinedExtractorLike(Protocol):
+    """Structural type for the orchestrator-side quarantined-extract funnel.
+
+    The :meth:`Orchestrator.quarantined_extract` wrapper enforces the
+    ``source_tier == "T3"`` invariant (sec-001 round-3 — comms inbound bodies
+    cannot silently promote to T2) and delegates to this dependency. The
+    delegate returns the real Slice-3 :data:`ExtractionResult` union
+    (``Extracted | TypedRefusal``); there is no ``schema_version`` field.
+
+    The Slice-3 :class:`alfred.security.quarantine.QuarantinedExtractor`'s
+    public surface is ``extract(handle, schema)`` — it operates on opaque
+    :class:`ContentHandle` references, not raw bodies. PR-S4-8 (Wave 2) ships
+    this body-shaped seam so the inbound entrypoint can funnel through a single
+    T3-enforcing chokepoint; the body→handle→``extract(handle, schema)`` bridge
+    is wired by the comms host (the session/supervisor wiring PR, Wave 3) which
+    constructs the concrete adapter satisfying this Protocol. Keeping the seam
+    here means the trust-tier enforcement lives at the orchestrator edge
+    regardless of how the bridge is implemented downstream.
+    """
+
+    async def extract(
+        self,
+        *,
+        body: bytes | str | Mapping[str, object],
+        canonical_user_id: str,
+        source_tier: Literal["T3"],
+    ) -> ExtractionResult: ...
+
 
 # Slice-2 per-row persona attribution. Migration 0004 added the column on
 # ``episodes`` + ``audit_log`` as nullable. Slice-1+2 is single-persona —
@@ -227,6 +260,11 @@ class Orchestrator:
         # scope for PR-S3-3b — arch-002 owns reload semantics.
         deadline_seconds: float = 30.0,
         redactor: Callable[[str], str] = lambda s: s,
+        # PR-S4-8 (#152): the orchestrator-side quarantined-extract funnel.
+        # Additive + optional so every Slice-1..3 caller that omits it keeps
+        # constructing; the comms inbound path (Wave 2) requires it wired and
+        # ``quarantined_extract`` raises loudly when it is absent.
+        quarantined_extractor: QuarantinedExtractorLike | None = None,
     ) -> None:
         # Resolve the operator exactly once, here. Caching for the
         # orchestrator's lifetime is load-bearing: re-resolving each turn
@@ -257,6 +295,44 @@ class Orchestrator:
         # the orchestrator owns the audit-row emission so the row can land
         # outside the rolled-back session.
         self._deadline_wrapper = DeadlineWrapper(deadline_seconds=deadline_seconds)
+        self._quarantined_extractor = quarantined_extractor
+
+    async def quarantined_extract(
+        self,
+        body: bytes | str | Mapping[str, object],
+        *,
+        canonical_user_id: str,
+        source_tier: Literal["T3"],
+    ) -> ExtractionResult:
+        """Funnel a T3 comms inbound body into the quarantined extractor.
+
+        This thin wrapper is the ONLY orchestrator-side path by which a comms
+        inbound body becomes orchestrator-readable structured data. It enforces
+        the trust-tier invariant and delegates to the injected
+        :class:`QuarantinedExtractorLike`:
+
+        * ``source_tier`` MUST be the literal ``"T3"``. Passing ``"T2"`` (the
+          inter-persona-relay forgery shape) raises :class:`ValueError` BEFORE
+          the extractor is consulted — there is no path by which a comms inbound
+          body silently promotes to T2 (sec-001 round-3). The ``Literal["T3"]``
+          annotation catches static violations; the runtime check is the
+          defence-in-depth backstop that survives ``# type: ignore``.
+        * A missing extractor (constructed without ``quarantined_extractor=``)
+          raises :class:`RuntimeError` rather than silently no-op'ing the
+          trust-boundary funnel (CLAUDE.md hard rule #7).
+
+        Returns the real Slice-3 :data:`ExtractionResult` union
+        (``Extracted | TypedRefusal``); the caller branches by ``isinstance``.
+        """
+        if source_tier != "T3":
+            raise ValueError(t("orchestrator.quarantined_extract.source_tier_must_be_t3"))
+        if self._quarantined_extractor is None:
+            raise RuntimeError(t("orchestrator.quarantined_extract.no_extractor_wired"))
+        return await self._quarantined_extractor.extract(
+            body=body,
+            canonical_user_id=canonical_user_id,
+            source_tier="T3",
+        )
 
     async def handle_user_message(
         self,
