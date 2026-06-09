@@ -2,8 +2,12 @@
 
 The Supervisor delivers the quarantined provider key to a sandboxed plugin
 out-of-band over fd 3 (the launcher passes fd 3 through to the plugin via
-``bwrap --sync-fd 3``; the launcher itself never reads it). The wire framing
-is a 4-byte big-endian length prefix followed by the key bytes.
+bwrap's DEFAULT fd inheritance — no CLI flag; bwrap inherits open, non-CLOEXEC
+fds into the sandboxed child. ``--sync-fd`` is bwrap's internal sync fd and is
+NOT used here: pointing it at fd 3 would CONSUME the descriptor, severing the
+channel (verified bwrap 0.8.0/0.9.0, #218). The launcher itself never reads
+fd 3). The wire framing is a 4-byte big-endian length prefix followed by the
+key bytes.
 
 sec-3 (round-4) hardening:
 

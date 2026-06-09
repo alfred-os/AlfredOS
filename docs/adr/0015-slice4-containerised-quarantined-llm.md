@@ -29,31 +29,45 @@ macOS `sandbox-exec`, and a Windows stub policy. The `bin/alfred-plugin-launcher
 receives the per-OS sandbox policy files in Slice 4; `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1`
 becomes a development-only escape hatch that refuses in production.
 
-### bwrap fd-inheritance flag: `--sync-fd`, not `--keep-fd` (#218)
+### bwrap fd-3 delivery: NO CLI flag — bwrap inherits fd 3 by default (#218)
+
+> **This section supersedes both prior amendments** (the original `--keep-fd`
+> claim AND the subsequent `--sync-fd` correction). Both were wrong. The
+> truth below is empirically proven against the exact production image.
 
 The Supervisor delivers the quarantined provider key over an inherited fd
-(fd 3 by convention). The bwrap flag that leaves an inherited fd intact in the
-sandboxed process is **`--sync-fd FD`** ("Keep this fd open while sandbox is
-running").
+(fd 3 by convention). **No bwrap CLI flag is used to do this.** bubblewrap
+passes inherited, open, non-CLOEXEC fds — including fd 3 — into the sandboxed
+child **by default**. The launcher therefore emits NO fd flag and relies on
+that default inheritance.
 
-**Empirically verified** against bubblewrap **0.9.0** in PR #229 CI
-(`bwrap --help`): it advertises `--sync-fd FD` and there is **no `--keep-fd`**.
-The earlier belief that `--keep-fd` is "the upstream 0.9.0+ rename" of
-`--sync-fd` (issue #218) is a **misconception** — `--sync-fd` is the flag in
-both the Bookworm 0.8.0 image and 0.9.0; the rename never happened. No bwrap
-version AlfredOS targets uses `--keep-fd`.
+**Empirically proven** in a docker `bwrap` repro against the exact production
+image (Debian Bookworm, bubblewrap **0.8.0**) and **0.9.0**. The repro matrix
+(identical pipe + `dup2` + bwrap setup, only the flag varying):
+
+- `--sync-fd 3` + fd-3 inherited → **EBADF** (the plugin's `os.read(3)` fails).
+- **no fd flag** + fd-3 inherited → **key delivered, exit 0** ✅.
+- production-shaped policy (all unshares + `--dev` + `--die-with-parent` +
+  binds), no fd flag → **key delivered, exit 0** ✅.
+
+`--sync-fd FD` ("Keep this fd open while sandbox is running") keeps the fd open
+in bwrap's **own monitor process** for its internal sync protocol; pointing it
+at fd 3 **consumes** fd 3 so the sandboxed child can no longer read it. It is
+**not** a key-delivery flag and must never be used for one. There is **no
+`--keep-fd`** in bwrap 0.8.0/0.9.0 either.
 
 The launcher and the `SandboxPolicy` → bwrap-flag translator
-(`src/alfred/plugins/sandbox_policy.py::policy_to_bwrap_flags`) emit
-**`--sync-fd`**. The logical policy field name `keep_fds` is retained as
-documented shorthand; only the emitted CLI surface uses the bwrap flag. A CI
-version-drift guard greps `bwrap --help` for `--sync-fd` so a future rename
-fails loudly rather than mis-running; the daemon-boot bwrap-version probe
-(#228) enforces the version floor at boot.
+(`src/alfred/plugins/sandbox_policy.py::policy_to_bwrap_flags`) emit **no fd
+flag**. The logical policy field `keep_fds` is retained as a validated
+*declaration* of intent — arch-2 refuses a `kind: full` policy whose
+`keep_fds` omits 3 at construction (`kind_full_requires_keep_fd_3`) — but the
+inheritance itself is bwrap's default and has no CLI surface. There is no flag
+to guard for version drift; the daemon-boot bwrap probe (#228) enforces the
+bwrap-presence / version floor at boot.
 
-Separately, fd-3 delivery requires the spawning parent to place the pipe's
-read end **on fd 3** (`--sync-fd 3` keeps fd 3 open but does not create it) —
-see `fd3_key_delivery` and the resolver test's preexec `dup2`.
+fd-3 delivery still requires the spawning parent to place the pipe's read end
+**on fd 3** (bwrap inherits whatever is on fd 3; it does not create it) — see
+`fd3_key_delivery` and the resolver test's preexec `dup2`.
 
 ## Consequences
 

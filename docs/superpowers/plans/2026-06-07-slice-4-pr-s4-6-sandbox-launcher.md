@@ -1,5 +1,20 @@
 # PR-S4-6: Sandbox Launcher — Implementation Plan
 
+> **fd-3 delivery — SUPERSEDING NOTE (#152 / #229, supersedes #218 + #210).**
+> This plan repeatedly states the launcher/translator emit a bwrap fd flag
+> (`--keep-fd 3`, then `--sync-fd 3`) to deliver the provider key over fd 3.
+> **Both are wrong and are superseded.** Empirically proven in a docker
+> `bwrap` repro against the production image (Debian Bookworm, bubblewrap
+> 0.8.0) and 0.9.0: bwrap inherits open, non-CLOEXEC fds (fd 3) into the
+> sandboxed child **BY DEFAULT — NO CLI flag**. `--sync-fd` is bwrap's
+> *internal* sync fd and CONSUMES fd 3 if pointed at it (the child's
+> `os.read(3)` raises EBADF). The translator emits NO fd flag; `keep_fds` is a
+> validated declaration only (arch-2). Wherever this plan says `--sync-fd 3`
+> / `--keep-fd 3` for fd-3 delivery, read: **no fd flag — bwrap inherits fd 3
+> by default.** There is no `--sync-fd` advertise-check in CI (removed). The
+> #228 boot-probe owns the bwrap-presence / version floor. ADR-0015's flag
+> section owns the final truth.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This is trust-boundary work — TDD is HARD here, not advisory. Every audit-row emit and every sandbox-refusal branch needs a failing test first.
 
 **Goal:** Ship the policy-resolving extension of `bin/alfred-plugin-launcher.sh` (bash — sec-004 round-3 honest), the pre-launcher Python helper at `src/alfred/plugins/manifest_reader.py`, the mandatory `Settings.environment` field with dual-sourced precedence (env var > `/etc/alfred/environment`), the dev-escape-hatch refuse-in-production semantics with operator-visible stderr (devex-001), the `bwrap --sync-fd 3` provider-key fd-3 inheritance pattern (sec-004 round-4), the Supervisor-side `setrlimit(RLIMIT_CORE)` + best-effort `mlockall` posture, the quarantined-LLM plugin's `kind: none` → `kind: full` manifest migration with per-OS `policy_refs`, and the `supervisor.plugin.sandbox_refused` hookpoint. The launcher policy-resolving probe (consumed by PR-S4-1) flips from no-op stub to real behaviour in this PR.

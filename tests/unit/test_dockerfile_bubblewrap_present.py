@@ -6,9 +6,11 @@ bubblewrap in the runtime layer, Linux production refuses to launch
 the quarantined-LLM with ``policy_ref_unreadable`` because no binary
 can apply the policy.
 
-Debian Bookworm ships bubblewrap 0.8.x which has ``--sync-fd``
-(introduced in 0.5.0) — the flag PR-S4-6 round-2 closure 5 requires
-for fd-3 provider-key inheritance.
+Debian Bookworm ships bubblewrap 0.8.x. fd-3 provider-key delivery needs
+NO bwrap CLI flag: bwrap inherits open, non-CLOEXEC fds (fd 3) into the
+sandboxed child by default (verified 0.8.0/0.9.0, #218). ``--sync-fd`` is
+bwrap's internal sync fd and must NOT be used for delivery — it would consume
+fd 3. This test only asserts the binary is present in the runtime layer.
 """
 
 from __future__ import annotations

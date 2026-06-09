@@ -45,7 +45,13 @@ _requires_jq = pytest.mark.skipif(
 def test_fixture_runs_full_kind_through_bwrap(launcher_chain_fixture) -> None:
     result = launcher_chain_fixture(_FULL_MANIFEST)
     assert result.returncode == 0, result.stderr
-    assert "--sync-fd 3" in result.stdout
+    # bwrap line carries the isolation flags; fd 3 is inherited by default, so
+    # NO --sync-fd/--keep-fd flag is emitted (issue #218).
+    assert "--ro-bind" in result.stdout
+    assert "--unshare-pid" in result.stdout
+    assert "--die-with-parent" in result.stdout
+    assert "--sync-fd" not in result.stdout
+    assert "--keep-fd" not in result.stdout
 
 
 @_requires_jq

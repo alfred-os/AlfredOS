@@ -627,11 +627,13 @@ The actual chain on Slice 4 is:
 
 1. **Supervisor (Python, host)** fetches the secret via the Slice-3 `SecretBroker.get("quarantined.provider_key")` API. Returns `str` (interned Python str — see limitation note below). The Supervisor opens a pipe with the read end at fd 3 of the launcher subprocess.
 2. **Supervisor** writes the 4-byte big-endian length prefix + the key bytes to the pipe, then closes the write end. The launcher subprocess sees a complete fd-3 message available.
-3. **Launcher (bash)** does NOT read the key itself. It passes fd 3 through to the spawned plugin via bwrap's `--keep-fd 3` flag (sec-004-r4 round-4 closure — round-3's `--rw-bind /dev/fd/3 /dev/fd/3` snippet was mechanically wrong; bwrap exposes a `--keep-fd <N>` option specifically for this case, which leaves fd N intact in the spawned process). The launcher does not buffer the bytes through bash variables — bash strings cannot reliably carry NUL bytes or be zeroized. Concrete invocation shape:
+3. **Launcher (bash)** does NOT read the key itself. It passes fd 3 through to the spawned plugin via **bwrap's DEFAULT fd inheritance — NO CLI flag** (see the SUPERSEDING NOTE below; supersedes the `--keep-fd 3` / `--sync-fd 3` text retained here for history). The launcher does not buffer the bytes through bash variables — bash strings cannot reliably carry NUL bytes or be zeroized. Concrete invocation shape:
 
    ```bash
-   exec bwrap --keep-fd 3 [other policy flags] -- ${PLUGIN_BINARY}
+   exec bwrap [other policy flags] -- ${PLUGIN_BINARY}
    ```
+
+   > **SUPERSEDING NOTE (#152 / #229).** The `--keep-fd 3` claim above (and the later `--sync-fd 3` correction) are BOTH wrong. Empirically proven in a docker `bwrap` repro against the production image (Debian Bookworm, bubblewrap 0.8.0) and 0.9.0: bwrap inherits open, non-CLOEXEC fds (fd 3) into the sandboxed child **by default — no flag**. `--sync-fd` is bwrap's *internal* sync fd and CONSUMES fd 3 if pointed at it (the child's `os.read(3)` raises EBADF). The translator emits NO fd flag; `keep_fds` is a validated declaration only (arch-2). ADR-0015's flag section owns the final truth.
 
    No `/dev/fd` mount is needed; the kernel handles the inheritance.
 4. **Plugin (Python)** reads fd 3 inside its own process with the framing the Slice-3 plugin-side `read_fd3_secret()` helper provides; zeroizes its in-process buffer after use.

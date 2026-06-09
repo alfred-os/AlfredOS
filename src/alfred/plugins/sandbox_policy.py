@@ -16,17 +16,22 @@ Two load-bearing invariants:
   channel, so the model refuses it at construction with
   :class:`SandboxPolicyInvalid` (``reason="kind_full_requires_keep_fd_3"``).
 
-* **--sync-fd is the fd-inheritance flag (issue #218).** In bubblewrap the
-  flag whose help text is literally "Keep this fd open while sandbox is
-  running" is ``--sync-fd FD``. Verified empirically against bwrap **0.9.0**
-  (``bwrap --help`` in PR #229 CI): it advertises ``--sync-fd FD`` and there
-  is NO ``--keep-fd`` — i.e. ``--sync-fd`` is current in both the Bookworm
-  0.8.0 image and 0.9.0, and the speculated ``--keep-fd`` rename never
-  happened. The translator emits ``--sync-fd``. The logical field name
-  ``keep_fds`` is retained as documented shorthand; only the CLI surface uses
-  the bwrap flag. (NB: fd-3 delivery ALSO requires the spawning parent to
-  place the pipe's read end ON fd 3 — see ``fd3_key_delivery`` + the resolver
-  test's preexec dup2; ``--sync-fd 3`` keeps fd 3 open but does not create it.)
+* **fd 3 is inherited by default — NO bwrap flag is emitted (issue #218).**
+  bubblewrap passes inherited, open, non-CLOEXEC fds (fd 3 = the provider-key
+  channel) into the sandboxed child BY DEFAULT — no flag is needed. Verified
+  empirically in a docker repro against the exact production image (Debian
+  Bookworm, bubblewrap **0.8.0**) and **0.9.0**: with the pipe's read end
+  ``dup2``'d onto fd 3 in the launcher, the sandboxed plugin reads fd 3 and
+  gets the key with no CLI flag. The flags that LOOK relevant are harmful:
+  ``--sync-fd FD`` ("Keep this fd open while sandbox is running") keeps the fd
+  open in bwrap's OWN monitor process for its internal sync protocol, and
+  pointing it at fd 3 CONSUMES fd 3 so the child's ``os.read(3)`` raises EBADF.
+  There is no ``--keep-fd`` in 0.8.0/0.9.0. So the translator emits NO fd flag.
+  The logical field name ``keep_fds`` is retained as a validated *declaration*
+  (arch-2 refuses a kind:full policy that omits fd 3); the inheritance itself
+  is bwrap's default and needs no CLI surface. (NB: fd-3 delivery ALSO requires
+  the spawning parent to place the pipe's read end ON fd 3 — see
+  ``fd3_key_delivery`` + the resolver test's preexec dup2.)
 """
 
 from __future__ import annotations
@@ -110,9 +115,10 @@ class SandboxPolicy(BaseModel):
 def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
     """Translate a :class:`SandboxPolicy` into the bwrap CLI flag list.
 
-    The flag order is stable (binds → tmpfs → dev → unshare → die-with-parent →
-    sync-fd) so the launcher's exec line is reproducible and auditable across
-    Python dict-ordering changes.
+    The flag order is stable (binds → tmpfs → dev → unshare → die-with-parent)
+    so the launcher's exec line is reproducible and auditable across Python
+    dict-ordering changes. ``keep_fds`` emits NO flag: bwrap inherits fd 3 by
+    default (see the module docstring).
     """
     flags: list[str] = []
     for src, dst in policy.ro_binds:
@@ -129,9 +135,19 @@ def policy_to_bwrap_flags(policy: SandboxPolicy) -> list[str]:
         flags += [f"--unshare-{kind}"]
     if policy.die_with_parent:
         flags += ["--die-with-parent"]
-    for fd in policy.keep_fds:
-        # --sync-fd, not --keep-fd: Bookworm bubblewrap 0.8.0 naming (#218).
-        flags += ["--sync-fd", str(fd)]
+    # NO flag is emitted for ``keep_fds``: bwrap inherits open, non-CLOEXEC fds
+    # (fd 3 = the provider-key channel) into the sandboxed child BY DEFAULT.
+    # Empirically verified against bubblewrap 0.8.0 (the Bookworm image) and
+    # 0.9.0 in a docker repro: with the pipe read end dup2'd onto fd 3 in the
+    # launcher, the sandboxed plugin reads fd 3 and gets the key with no flag.
+    # Crucially, the bwrap flags that LOOK relevant are NOT — ``--sync-fd FD``
+    # ("Keep this fd open while sandbox is running") keeps the fd open in
+    # bwrap's OWN monitor process for its sync protocol; pointing it at fd 3
+    # CONSUMES fd 3 so the child can no longer read it (verified: --sync-fd 3
+    # → the plugin's os.read(3) raises EBADF). There is no ``--keep-fd`` in
+    # these versions. The ``keep_fds`` field is retained as a validated
+    # *declaration* (arch-2 refuses a kind:full policy that omits fd 3); the
+    # inheritance itself is bwrap's default and needs no CLI surface.
     return flags
 
 

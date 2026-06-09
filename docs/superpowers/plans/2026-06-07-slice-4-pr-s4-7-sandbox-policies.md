@@ -1,5 +1,19 @@
 # PR-S4-7: Sandbox Policies — Implementation Plan
 
+> **fd-3 delivery — SUPERSEDING NOTE (#152 / #229, supersedes #218 + #210).**
+> This plan was authored when the launcher was believed to emit a bwrap fd
+> flag (`--keep-fd 3`, later `--sync-fd 3`) to deliver the provider key over
+> fd 3. **Both are wrong.** Empirically proven in a docker `bwrap` repro
+> against the production image (Debian Bookworm, bubblewrap 0.8.0) and 0.9.0:
+> bwrap inherits open, non-CLOEXEC fds (fd 3) into the sandboxed child **BY
+> DEFAULT — NO CLI flag**. `--sync-fd` is bwrap's *internal* sync fd and
+> CONSUMES fd 3 if pointed at it (the child's `os.read(3)` raises EBADF). The
+> translator therefore emits NO fd flag; `keep_fds` is a validated declaration
+> only (arch-2). Wherever this plan says `--sync-fd 3` / `--keep-fd 3` for
+> fd-3 delivery, read: **no fd flag — bwrap inherits fd 3 by default.** The
+> Linux policy file must NOT carry any fd-keep directive. ADR-0015's flag
+> section owns the final truth.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. This is trust-boundary work — TDD is HARD here, not advisory. Every policy byte you ship is a kernel-enforced control, and the adversarial corpus this PR also ships is the only thing standing between a misconfigured-policy regression and a silent escape.
 
 **Goal:** Ship the three per-OS sandbox policy files the launcher (PR-S4-6) resolves, the merge-blocking integration test that proves the Linux policy is kernel-enforced, the macOS advisory variant, and the adversarial sandbox-escape corpus (`sbx-2026-*`) covering insider-author / runtime-compromised / misconfigured-policy attacker models. Migrate the quarantined-LLM `manifest.toml` to `sandbox.kind = "full"` if PR-S4-6 has not already done so (verification gate, not duplicate work) — and register the `supervisor.plugin.sandbox_stub_used` hookpoint that PR-S4-6 reserved.
@@ -82,7 +96,7 @@
 
 This PR delivers the three load-bearing artifacts that close the kernel-enforcement leg of PRD §5 line 117 on supported hosts:
 
-1. `config/sandbox/quarantined-llm.linux.bwrap.policy` — declarative TOML the launcher translates into `bwrap` flags. Fail-closed shape: `--unshare-net` (no `--share-net`), `--die-with-parent`, four namespace unshares, `--sync-fd 3` for the provider-key inheritance pattern PR-S4-6 wires.
+1. `config/sandbox/quarantined-llm.linux.bwrap.policy` — declarative TOML the launcher translates into `bwrap` flags. Fail-closed shape: `--unshare-net` (no `--share-net`), `--die-with-parent`, four namespace unshares, and `keep_fds = [3]` as a validated DECLARATION (arch-2). NO fd flag is emitted: bwrap inherits fd 3 by default for the provider-key channel PR-S4-6 wires (see superseding note).
 2. `config/sandbox/quarantined-llm.macos.sb` — sandbox-exec scheme syntax: `(deny default)` + four explicit allows + the explicit `(deny network-outbound (remote tcp "*"))` catch-all after the proxy allow.
 3. `config/sandbox/quarantined-llm.windows.stub.policy` — TOML stub declaring `prd_compliant = false`. Production refuses; development emits `supervisor.plugin.sandbox_stub_used`.
 
@@ -104,13 +118,13 @@ Before any task in this plan runs, the implementing worker re-verifies the cited
 
 | Surface | Verification command | Status at plan-write time |
 |---|---|---|
-| `bin/alfred-plugin-launcher.sh` exists and PR-S4-6 has added policy-resolution behaviour | `ls bin/alfred-plugin-launcher.sh && grep -n "policy_refs\|--keep-fd" bin/alfred-plugin-launcher.sh` | **Slice-3 launcher exists** (`bin/alfred-plugin-launcher.sh` confirmed). PR-S4-6 must be merged before PR-S4-7 implementation begins; the worker re-runs this grep and expects matches against `policy_refs` and `--sync-fd 3`. |
+| `bin/alfred-plugin-launcher.sh` exists and PR-S4-6 has added policy-resolution behaviour | `ls bin/alfred-plugin-launcher.sh && grep -n "policy_refs" bin/alfred-plugin-launcher.sh` | **Slice-3 launcher exists** (`bin/alfred-plugin-launcher.sh` confirmed). PR-S4-6 must be merged before PR-S4-7 implementation begins; the worker re-runs this grep and expects a match against `policy_refs`. NB: the launcher emits NO fd flag (`--sync-fd`/`--keep-fd`) — bwrap inherits fd 3 by default (superseding note); do NOT grep for an fd flag. |
 | `config/routing.yaml [quarantine]` block (Slice-3 shipped) | `grep -n "^quarantine:" config/routing.yaml` | **Confirmed** — `config/routing.yaml` declares a top-level `quarantine:` block at line 19. The macOS policy's `network*` host/port resolves from `routing.yaml[quarantine].provider_url` at policy-load time (spec §7.6). |
 | `plugins/alfred_quarantined_llm/manifest.toml` (Slice-3 shipped — TOML, NOT YAML) | `ls plugins/alfred_quarantined_llm/manifest.toml` | **Confirmed** — the manifest is TOML at `plugins/alfred_quarantined_llm/manifest.toml`. Spec §7.8 and index §3 use a YAML code-block to illustrate the `sandbox` block shape; the actual file format is TOML. The migration PR-S4-6 lands edits the TOML; this PR does NOT re-edit. |
 | `tests/adversarial/payload_schema.py` has `sandbox_escape` category and `sbx` prefix | `grep -nE "sandbox_escape\|\"sbx\":" tests/adversarial/payload_schema.py` | **Lands in PR-S4-0a** — at plan-write time the Slice-3 `_PREFIX_TO_CATEGORY` is at line 21 and `_ID_PATTERN` at line 34, neither carrying `sbx`. The worker re-runs this grep and expects matches after PR-S4-0a merges. If the grep is empty, the worker stops and escalates (PR-S4-7 cannot ship without the category constant). |
 | `register_hookpoint` shape (Slice-3 `HookpointMeta` + PR-S4-3 `carrier_tier`) | `grep -n "def register_hookpoint\|carrier_tier" src/alfred/hooks/registry.py` | **Confirmed at plan-write time** — `def register_hookpoint(...)` at `src/alfred/hooks/registry.py:539`. PR-S4-3 adds `carrier_tier`; the worker confirms the kwarg appears in the signature before adding the `supervisor.plugin.sandbox_stub_used` registration. |
 | `SANDBOX_REFUSED_FIELDS` + `SANDBOX_STUB_USED_FIELDS` constants | `grep -n "SANDBOX_REFUSED_FIELDS\|SANDBOX_STUB_USED_FIELDS" src/alfred/audit/audit_row_schemas.py` | **Lands in PR-S4-0a.** Plan-write time check is "expect not yet shipped". The worker re-runs after PR-S4-0a merges and expects two `Final[Mapping[...]]` definitions. |
-| `bwrap` and `sandbox-exec` reference | `man bwrap` (Linux runner) / `man sandbox-exec` (macOS runner) | Both man pages are the canonical reference. `bwrap --keep-fd <N>` is the load-bearing flag for fd-3 inheritance (sec-004 round-4 closure replaced an earlier mechanically-wrong `--rw-bind /dev/fd/3 /dev/fd/3` snippet). The worker must NOT improvise alternatives. |
+| `bwrap` and `sandbox-exec` reference | `man bwrap` (Linux runner) / `man sandbox-exec` (macOS runner) | Both man pages are the canonical reference. fd-3 inheritance needs NO bwrap flag — bwrap inherits open, non-CLOEXEC fds (fd 3) by default (superseding note; supersedes the earlier `--keep-fd`/`--sync-fd` claims and the mechanically-wrong `--rw-bind /dev/fd/3 /dev/fd/3` snippet). The worker must NOT improvise alternatives nor emit any fd-keep flag. |
 | `supervisor.plugin.sandbox_refused` hookpoint declaration site | `grep -rn "supervisor.plugin.sandbox_refused" src/alfred/` | **PR-S4-6 territory.** This PR adds the sibling `supervisor.plugin.sandbox_stub_used` declaration only; PR-S4-6 owns `sandbox_refused` per index §3. |
 | GitHub Actions matrix (`ubuntu-latest` + `macos-latest` runners) | `ls .github/workflows/` and inspect existing matrix shapes | The merge-blocking `ubuntu-latest` runner is the standard. The `macos-latest` runner is added by this PR as advisory (`continue-on-error: true`). The worker confirms the existing test workflow uses a strategy matrix before adding a new entry. |
 
@@ -139,9 +153,11 @@ Before any task in this plan runs, the implementing worker re-verifies the cited
               ┌──────────────────────┼──────────────────────┐
               ▼                      ▼                      ▼
        Linux: bwrap            macOS: sandbox-exec    Windows: stub
-       --sync-fd 3 --die-      -f <policy>.sb --     refuse-in-prod,
-       with-parent --unshare-  /path/to/quarantined- emit sandbox_stub_used
-       pid --unshare-uts       llm --                 in dev
+       --die-with-parent       -f <policy>.sb --     refuse-in-prod,
+       --unshare-pid           /path/to/quarantined- emit sandbox_stub_used
+       --unshare-uts           llm --                 in dev
+       (fd 3 inherited,
+        NO fd flag)
        --unshare-cgroup
        --unshare-ipc
        --ro-bind /usr/lib/...
@@ -208,7 +224,7 @@ These surfaces this PR depends on (defined elsewhere) and the surfaces this PR d
 
 ### 5.2 Consumed from PR-S4-6
 
-- `bin/alfred-plugin-launcher.sh` policy-resolving extension: reads `manifest.toml [sandbox] policy_refs.<os>` via the pre-launcher Python helper `src/alfred/plugins/manifest_reader.py`; translates the resolved Linux policy file into `bwrap` flags including `--sync-fd 3`; passes the macOS file verbatim to `sandbox-exec -f`; refuses on the Windows stub in production. This PR's integration tests invoke the launcher; if the launcher's behaviour differs from the contract above, the integration test fails loudly rather than silently masking.
+- `bin/alfred-plugin-launcher.sh` policy-resolving extension: reads `manifest.toml [sandbox] policy_refs.<os>` via the pre-launcher Python helper `src/alfred/plugins/manifest_reader.py`; translates the resolved Linux policy file into `bwrap` flags (binds, tmpfs, `--dev`, unshares, `--die-with-parent`) — NO fd flag; bwrap inherits fd 3 by default (superseding note); passes the macOS file verbatim to `sandbox-exec -f`; refuses on the Windows stub in production. This PR's integration tests invoke the launcher; if the launcher's behaviour differs from the contract above, the integration test fails loudly rather than silently masking.
 - `Settings.environment: Literal["development", "production", "test"]` (spec §7.3 sec-003 closure). The misconfigured-policy adversarial entries set `Settings.environment="production"` when asserting the launcher's refusal.
 - Quarantined-LLM manifest at `plugins/alfred_quarantined_llm/manifest.toml`: post-PR-S4-6 the file declares `[sandbox] kind = "full"` with `policy_refs.linux/macos/windows` pointing at the three policy files this PR ships. The integration test loads this manifest unchanged.
 - `supervisor.plugin.sandbox_refused` hookpoint already registered. This PR adds the sibling `supervisor.plugin.sandbox_stub_used`.
@@ -246,7 +262,7 @@ This component does not ship code. It is a checkbox-driven verification gate tha
   ```bash
   cd <repo-root>
   ls bin/alfred-plugin-launcher.sh
-  grep -nE "policy_refs|--keep-fd" bin/alfred-plugin-launcher.sh
+  grep -nE "policy_refs" bin/alfred-plugin-launcher.sh  # NO fd flag emitted; bwrap inherits fd 3 by default (superseding note)
   ls plugins/alfred_quarantined_llm/manifest.toml
   grep -E '\[sandbox\]|kind\s*=\s*"full"|policy_refs' plugins/alfred_quarantined_llm/manifest.toml
   grep -nE 'sandbox_escape|"sbx":' tests/adversarial/payload_schema.py
@@ -291,7 +307,7 @@ This component ships `config/sandbox/quarantined-llm.linux.bwrap.policy` and the
   - `unshare == ["pid", "uts", "cgroup", "ipc"]` (or contains all four as a frozenset comparison).
   - `binds` contains two entries: `{"src": "/usr/lib/alfred-quarantine", "dst": "/usr/lib/alfred-quarantine", "ro": true}` and `{"src": "/etc/ssl/certs", "dst": "/etc/ssl/certs", "ro": true}`.
   - `tmpfs == ["/tmp"]`.
-  - `keep_fds == [3]` (sec-004 round-4 closure — fd-3 inheritance via `--sync-fd 3`).
+  - `keep_fds == [3]` (a validated DECLARATION of intent, arch-2 — NO fd flag is emitted; bwrap inherits fd 3 by default, see superseding note).
   - `network.outbound_allowlist` is a single entry resolved from `routing.yaml[quarantine].provider_url` (the test asserts the field name exists; it does NOT assert the value because the routing config is operator-set).
 
   ```python
@@ -341,9 +357,10 @@ This component ships `config/sandbox/quarantined-llm.linux.bwrap.policy` and the
 
   def test_keep_fds_is_three() -> None:
       policy = _load()
-      # sec-004 round-4 closure — bwrap --sync-fd 3 is the load-bearing
-      # provider-key inheritance pattern. NOT --rw-bind /dev/fd/3
-      # (mechanically wrong).
+      # keep_fds is a validated DECLARATION (arch-2). NO fd flag is emitted —
+      # bwrap inherits fd 3 by default for the provider-key channel (see
+      # superseding note; supersedes the earlier --sync-fd/--keep-fd and the
+      # mechanically-wrong --rw-bind /dev/fd/3).
       assert policy["keep_fds"] == [3]
 
   def test_outbound_allowlist_field_present() -> None:
@@ -376,7 +393,7 @@ This component ships `config/sandbox/quarantined-llm.linux.bwrap.policy` and the
   #   * unshare list              → launcher passes --unshare-pid --unshare-uts --unshare-cgroup --unshare-ipc.
   #   * binds with ro=true        → launcher passes --ro-bind <src> <dst> per entry.
   #   * tmpfs                     → launcher passes --tmpfs <path>.
-  #   * keep_fds = [3]            → launcher passes --sync-fd 3 (provider-key fd-3 inheritance, sec-004 r4).
+  #   * keep_fds = [3]            → DECLARATION only (arch-2). NO fd flag is emitted; bwrap inherits fd 3 by default for provider-key delivery (superseding note).
   #
   # The outbound network access is brokered: no --share-net, so the kernel
   # blocks all socket egress. The plugin contacts the quarantined-LLM
@@ -760,7 +777,8 @@ This component ships `tests/adversarial/sandbox_escape/` with 12 entries. Each Y
   ingestion_path: stdio_fd3_key_delivery
   description: |
     Spec §7.5 fd-3 discipline: the supervisor writes the provider key
-    to fd 3; the bash launcher passes fd 3 through via bwrap --sync-fd 3
+    to fd 3; the bash launcher passes fd 3 through via bwrap's DEFAULT fd
+    inheritance (NO fd flag; --sync-fd would consume fd 3 — superseding note)
     WITHOUT reading the bytes itself; the spawned plugin reads exactly
     the framed bytes and zeroizes. An insider-author who modifies the
     launcher to capture fd 3 (e.g. `cat <&3 > /tmp/leak`) would compromise
@@ -771,8 +789,9 @@ This component ships `tests/adversarial/sandbox_escape/` with 12 entries. Each Y
       2. The spawned plugin process issues exactly one read(3, ...) of
          the framed length (4 bytes prefix + N bytes key).
       3. The plugin closes fd 3 immediately after the read.
-    Mitigates sec-004 round-4 closure (--sync-fd 3 vs. mechanically-wrong
-    --rw-bind /dev/fd/3 /dev/fd/3).
+    fd 3 is inherited by bwrap's default fd inheritance — NO fd flag (this
+    supersedes the earlier --sync-fd/--keep-fd and the mechanically-wrong
+    --rw-bind /dev/fd/3 /dev/fd/3; superseding note).
   attack_vector:
     method: strace_assertion
     target_process: bash_launcher
@@ -1328,7 +1347,7 @@ The corpus YAMLs above are declarative. The harness needs Python helpers to muta
 
 | Spec section | Implementing task(s) |
 |---|---|
-| §7.5 Linux bwrap policy file shape (`--ro-bind`, `--tmpfs`, `--unshare-*`, `--die-with-parent`, no `--share-net`, `--sync-fd 3`) | Tasks 3, 4 |
+| §7.5 Linux bwrap policy file shape (`--ro-bind`, `--tmpfs`, `--unshare-*`, `--die-with-parent`, no `--share-net`; fd 3 inherited by default — NO fd flag, superseding note) | Tasks 3, 4 |
 | §7.5 fd-3 inheritance discipline (sec-004 round-4) — bash never reads, plugin reads exactly once | Tasks 13 (corpus), 17 (strace helper) |
 | §7.5 Process-level posture inheritance — covered by PR-S4-6 supervisor/launcher; no new code here | Verification only (§2) |
 | §7.6 macOS sandbox-exec policy file shape (`deny default`, four allows, proxy + catch-all deny) | Tasks 5, 6 |

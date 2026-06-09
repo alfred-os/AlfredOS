@@ -12,13 +12,16 @@ This integration test builds the ``alfred-core`` image and asserts:
 1. ``bwrap --version`` exits 0 (the binary is on PATH).
 2. The version string starts with ``bubblewrap`` (not a stub /
    uninstalled).
-3. ``bwrap --help`` mentions at least one ``--*-fd`` flag from the
-   fd-handling family — the PR-S4-6 launcher needs SOME mechanism for
-   passing the provider key into the sandbox via fd. Bookworm bwrap
-   0.8.0 ships ``--bind-fd`` / ``--ro-bind-fd`` / ``--sync-fd`` (which
-   the launcher uses for the fd-3 provider-key pattern). A future
-   bwrap that strips ALL fd-handling flags would silently break that
-   pattern; this test catches it.
+3. fd 3 is INHERITED into the sandbox with NO bwrap CLI flag. The
+   launcher passes the provider key over fd 3 by relying on bwrap's
+   default fd inheritance (open, non-CLOEXEC fds flow into the child).
+   This test proves it empirically: it spawns ``bwrap ... -- python -c
+   'os.read(3, ...)'`` with the read end of a pipe placed on fd 3 and a
+   known marker written to it, then asserts the sandboxed process reads
+   that marker. No ``--sync-fd`` / ``--keep-fd`` flag is used (#218 /
+   ADR-0015 — ``--sync-fd`` is bwrap's internal sync fd and would
+   CONSUME fd 3). A future bwrap that broke default fd inheritance would
+   fail this test at build time, not at production first-spawn.
 
 The build + 3 ``docker run`` invocations cost ~30 s on a warm cache.
 Marker: ``integration`` + ``docker``. Skips gracefully when docker is
@@ -178,37 +181,71 @@ def test_bwrap_version_is_bubblewrap_not_stub(
     assert "bubblewrap" in stdout, f"bwrap --version output does not name bubblewrap: {stdout!r}"
 
 
-def test_bwrap_provides_sync_fd_for_fd3_inheritance(
+# The marker the sandboxed child must read back off fd 3. 16 bytes mirrors a
+# real provider-key length (the docker-bwrap repro that root-caused #229 used
+# ``key=len16``). ASCII-only so it survives the shell here-string round-trip.
+_FD3_MARKER = "fd3-key-marker16"
+
+
+def test_bwrap_inherits_fd3_into_sandbox_without_flag(
     alfred_core_image: str,
 ) -> None:
-    """``bwrap --help`` lists ``--sync-fd`` — the load-bearing flag.
+    """fd 3 is inherited into the bwrap sandbox with NO CLI flag (#218).
 
-    PR-S4-6's launcher inherits fd 3 (the provider key) into the
-    sandbox via ``--sync-fd FD`` ("Keep this fd open while sandbox is
-    running"). Verified against bwrap 0.9.0 ``--help`` in PR #229 CI:
-    ``--sync-fd FD`` is the flag in BOTH 0.8.0 and 0.9.0, and there is
-    no ``--keep-fd`` (the speculated rename never happened — #218).
-    This test pins the actual flag the launcher must call.
+    PR-S4-6's launcher delivers the quarantined provider key over fd 3 by
+    relying on bwrap's DEFAULT fd inheritance: open, non-CLOEXEC fds flow
+    into the sandboxed child. No ``--sync-fd`` / ``--keep-fd`` flag is used
+    (``--sync-fd`` is bwrap's internal sync fd and would CONSUME fd 3, so the
+    child's ``os.read(3)`` would raise EBADF — root-caused in PR #229 against
+    bubblewrap 0.8.0 (the Bookworm image) and 0.9.0).
 
-    Asserts BOTH the inheritance flag AND at least one bind-family
-    flag so a future bwrap that strips them silently breaks the build,
-    not first-spawn production.
+    This is the empirical, image-level proof of that contract: a marker is
+    written onto fd 3, ``bwrap`` is exec'd with the production-shaped
+    isolation flags (binds + unshares + ``--dev`` + ``--die-with-parent``) and
+    NO fd flag, and the sandboxed ``python`` reads the marker back off fd 3.
     """
-    result = _run_in_image(alfred_core_image, "bwrap", "--help")
+    # Inside the container: open fd 3 onto a here-string carrying the marker,
+    # then exec bwrap (no fd flag) running python that reads fd 3 and echoes
+    # it. bwrap's default inheritance must carry fd 3 through to the child.
+    #   exec 3< <(printf %s MARKER)   -- place the read end on fd 3
+    #   bwrap <isolation flags> -- python -c 'os.write(1, os.read(3, 64))'
+    inner = (
+        f"exec 3< <(printf %s {_FD3_MARKER}); "
+        "bwrap "
+        "--ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 "
+        "--ro-bind /bin /bin --proc /proc --dev /dev "
+        "--unshare-pid --unshare-uts --unshare-ipc --unshare-cgroup "
+        "--die-with-parent "
+        "-- python3 -c "
+        "'import os,sys; sys.stdout.write(os.read(3, 64).decode())'"
+    )
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            # bwrap needs an unprivileged userns; ubuntu-latest's default
+            # seccomp/apparmor can block it. --privileged keeps this proof
+            # host-independent (it only exercises bwrap's fd inheritance,
+            # not isolation strength — that is the resolver test's job).
+            "--privileged",
+            "--entrypoint",
+            "/bin/bash",
+            alfred_core_image,
+            "-c",
+            inner,
+        ],
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    stdout = result.stdout.decode(errors="replace")
+    stderr = result.stderr.decode(errors="replace")
     assert result.returncode == 0, (
-        f"bwrap --help exited {result.returncode}; "
-        f"stderr: {result.stderr.decode(errors='replace')!r}"
+        f"bwrap fd-3 inheritance run exited {result.returncode}; stderr: {stderr!r}"
     )
-    help_text = result.stdout.decode(errors="replace")
-    assert "--sync-fd" in help_text, (
-        "bwrap missing --sync-fd — PR-S4-6 fd-3 provider-key "
-        f"inheritance contract cannot hold. help text:\n{help_text}"
-    )
-    # bind-fd family corroborates the fd-handling vocabulary; one being
-    # present without the other suggests a custom bwrap fork.
-    bind_flags = ("--bind", "--ro-bind", "--dev-bind")
-    found_bind = [f for f in bind_flags if f in help_text]
-    assert found_bind, (
-        f"bwrap missing all of {bind_flags}; launcher needs bind-mount "
-        "vocabulary for policy file mounts"
+    assert _FD3_MARKER in stdout, (
+        "sandboxed process did not read the fd-3 marker back — bwrap's default "
+        f"fd inheritance is broken (no flag should be needed). stdout: {stdout!r} "
+        f"stderr: {stderr!r}"
     )

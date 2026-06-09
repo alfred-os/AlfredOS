@@ -153,12 +153,12 @@ def test_unsandboxed_falsy_not_treated_as_set(run_launcher, tmp_path, falsy: str
 
 
 # --------------------------------------------------------------------------
-# kind:full → bwrap --sync-fd 3
+# kind:full → bwrap (fd 3 inherited by default, NO --sync-fd flag; issue #218)
 # --------------------------------------------------------------------------
 
 
 @_requires_jq
-def test_kind_full_invokes_bwrap_with_sync_fd_3(run_launcher, tmp_path, echo_bwrap) -> None:
+def test_kind_full_invokes_bwrap_without_fd_flag(run_launcher, tmp_path, echo_bwrap) -> None:
     # FAKE_UNAME=Linux so the Linux bwrap branch runs on any host (the real
     # bwrap binary is Linux-only; the fake echo-bwrap is portable).
     manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
@@ -175,7 +175,14 @@ def test_kind_full_invokes_bwrap_with_sync_fd_3(run_launcher, tmp_path, echo_bwr
     )
     assert result.returncode == 0, result.stderr
     assert "BWRAP_ARGS:" in result.stdout
-    assert "--sync-fd 3" in result.stdout
+    # The launcher's bwrap line carries the policy's isolation flags (binds,
+    # unshare, die-with-parent) but NO fd flag: fd 3 is inherited by bwrap's
+    # default fd inheritance. --sync-fd 3 would CONSUME fd 3 (issue #218).
+    assert "--ro-bind" in result.stdout
+    assert "--unshare-pid" in result.stdout
+    assert "--die-with-parent" in result.stdout
+    assert "--sync-fd" not in result.stdout
+    assert "--keep-fd" not in result.stdout
 
 
 @_requires_jq
