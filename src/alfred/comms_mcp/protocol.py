@@ -90,6 +90,12 @@ def _check_adapter_kind(value: str) -> str:
 
 AdapterId = Annotated[str, AfterValidator(_check_adapter_kind)]
 
+# L1 defence-in-depth: a pre-resolution platform identifier is bounded so a
+# plugin cannot push an oversized id into the host's hashing / audit path. 512
+# matches ``inbound._MAX_PLATFORM_USER_ID_LEN`` (the cheap-gate bound) — every
+# real platform id (Discord snowflake, etc.) is far shorter.
+PlatformUserId = Annotated[str, Field(min_length=1, max_length=512)]
+
 
 def _assert_aware(value: datetime) -> datetime:
     """Reject a naive datetime (no tzinfo). Aware-timestamp invariant."""
@@ -263,7 +269,7 @@ class InboundMessageNotification(_WireModel):
     """
 
     adapter_id: AdapterId
-    platform_user_id: str = Field(min_length=1)
+    platform_user_id: PlatformUserId
     body: Mapping[str, object]
     sub_payload_refs: tuple[str, ...]
     received_at: AwareDatetime
@@ -274,7 +280,7 @@ class BindingRequestNotification(_WireModel):
     """Plugin reports an unbound platform user attempting first contact."""
 
     adapter_id: AdapterId
-    platform_user_id: str = Field(min_length=1)
+    platform_user_id: PlatformUserId
     verification_phrase: str = Field(min_length=1)
     platform_metadata: Mapping[str, object]
 

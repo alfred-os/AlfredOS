@@ -64,6 +64,22 @@ def test_inbound_notification_rejects_extra_fields() -> None:
         )
 
 
+def test_inbound_notification_rejects_oversized_platform_user_id() -> None:
+    """L1: a pre-resolution platform identifier is bounded (max_length=512)."""
+    valid = {
+        "adapter_id": "alfred_comms_test",
+        "platform_user_id": "x" * 513,
+        "body": {"content": "hi"},
+        "sub_payload_refs": (),
+        "received_at": datetime.now(UTC),
+        "addressing_signal": "dm",
+    }
+    with pytest.raises(ValidationError):
+        protocol.InboundMessageNotification.model_validate(valid)
+    # The boundary value (exactly 512) is accepted.
+    protocol.InboundMessageNotification.model_validate({**valid, "platform_user_id": "x" * 512})
+
+
 def test_persona_addressing_mode_is_literal() -> None:
     # Members are exactly the four addressing modes.
     from typing import get_args
