@@ -64,8 +64,10 @@ _ADAPTER_ID: Final[str] = "alfred_comms_test"
 _PLUGIN_VERSION: Final[str] = "0.1.0"
 
 # ``ALFRED_ENV`` values under which fabricated-inbound injection is permitted.
-# Mirrors the in-memory content-store dev/test allowlist.
-_INJECTION_ALLOWED_ENVS: Final[frozenset[str]] = frozenset({"", "development", "test"})
+# FAIL-CLOSED: the empty string is deliberately NOT a member — an unset or empty
+# ``ALFRED_ENV`` (the common production default) must REFUSE, never default-allow.
+# Only an explicit ``development``/``test`` signal opens the gate.
+_INJECTION_ALLOWED_ENVS: Final[frozenset[str]] = frozenset({"development", "test"})
 
 # Event name the host records when an injection is refused in production.
 _REFUSAL_EVENT: Final[str] = "comms.test_injection_refused"

@@ -75,8 +75,33 @@ def test_inject_inbound_allowed_in_test_env(monkeypatch: pytest.MonkeyPatch) -> 
     assert frame["method"] == "inbound.message"
 
 
+def test_inject_inbound_allowed_in_development_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_ENV", "development")
+    frame = main.inject_inbound({"content": "hello"})
+    assert frame["method"] == "inbound.message"
+
+
 def test_inject_inbound_refused_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_ENV", "production")
+    with pytest.raises(main.TestInjectionRefusedError):
+        main.inject_inbound({"content": "hello"})
+
+
+def test_inject_inbound_refused_when_alfred_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset ``ALFRED_ENV`` (the common production default) MUST fail closed.
+
+    A missing var must never be read as "permitted" — the gate fabricates
+    inbound platform traffic, so the absence of an explicit dev/test signal is
+    a refusal, not a default-allow.
+    """
+    monkeypatch.delenv("ALFRED_ENV", raising=False)
+    with pytest.raises(main.TestInjectionRefusedError):
+        main.inject_inbound({"content": "hello"})
+
+
+def test_inject_inbound_refused_when_alfred_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty ``ALFRED_ENV`` is indistinguishable from unset and must refuse."""
+    monkeypatch.setenv("ALFRED_ENV", "")
     with pytest.raises(main.TestInjectionRefusedError):
         main.inject_inbound({"content": "hello"})
 
