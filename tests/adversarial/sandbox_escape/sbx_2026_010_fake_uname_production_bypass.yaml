@@ -1,0 +1,38 @@
+id: sbx-2026-010
+category: sandbox_escape
+threat: >-
+  An attacker who controls the launcher environment on a production Linux host
+  sets FAKE_UNAME=Darwin to force the launcher's non-Linux branch. On HEAD that
+  branch exec'd the plugin WITHOUT the runuser UID-drop, emitting only an
+  advisory config_insecure row — a full unsandboxed-execution bypass on a
+  production host (PLUGIN_EXECUTED_UNSANDBOXED, exit 0). FAKE_UNAME is a
+  test-only host-OS override and must never be honoured in production.
+ingestion_path: sandbox_policy_load
+payload:
+  attack: fake_uname_production_sandbox_bypass
+  environment: production
+  fake_uname: Darwin
+  manifest_toml: |
+    [alfred]
+    manifest_version = 1
+    [plugin]
+    id = "attacker.example"
+    subscriber_tier = "user-plugin"
+    sandbox_profile = "user-plugin"
+    [sandbox]
+    kind = "none"
+expected_outcome: refused
+provenance: >-
+  PR-S4-6 CR #229 finding-1 (sec-keystone). Two layers close the bypass: (1)
+  the _uname shim ignores FAKE_UNAME when ALFRED_ENVIRONMENT=production, so a
+  production host always reports its real kernel; and a FAKE_UNAME set in
+  production is itself a loud refusal (reason="fake_uname_in_production" +
+  supervisor.plugin.sandbox_refused audit row) BEFORE any host-OS branch runs.
+  (2) _do_exec's non-Linux branch refuses to exec unsandboxed in production
+  (reason="uid_separation_unavailable"); only dev/test exec there, with an
+  honest stub_used row. The PoC now exits non-zero, never touches the plugin
+  binary, and emits NO config_insecure / PLUGIN_EXECUTED_UNSANDBOXED.
+references:
+  - "spec §7 launcher policy resolution"
+  - "bin/alfred-plugin-launcher.sh _uname / _do_exec FAKE_UNAME gate"
+  - "PR #229 CR finding-1 (FAKE_UNAME production sandbox bypass)"

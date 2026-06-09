@@ -90,6 +90,9 @@ ENVIRONMENT
 
     FAKE_UNAME
         Test override for the host-OS detection (Darwin / Linux / Windows_NT).
+        IGNORED in production — the launcher always uses the real `uname -s`
+        there, and a FAKE_UNAME set in production is a loud SANDBOX_REFUSED
+        refusal (it can only be an attempt to force a host-OS branch).
 
 EXIT CODES
     0    Success — exec'd the plugin (this process is replaced).
@@ -134,10 +137,47 @@ _truthy() {
     esac
 }
 
-# _uname shim — honours FAKE_UNAME for the cross-OS CI matrix (devops-2) so
-# the macOS and Windows branches can be exercised on Linux runners.
+# Read Settings.environment via the pre-launcher Python helper (dual-source:
+# ALFRED_ENVIRONMENT env var > /etc/alfred/environment). Neither set → refuse.
+# The helper prints the value on stdout and a bare i18n key on stderr.
+#
+# sec-keystone (CR PR #229 finding-1): the environment is resolved BEFORE host-
+# OS detection so the FAKE_UNAME shim can be gated to non-production. An
+# attacker who controls the launcher env on a production Linux host must NOT be
+# able to force the non-Linux branch (which historically exec'd unsandboxed) by
+# setting FAKE_UNAME=Darwin. The helper's stderr (the specific i18n key) is
+# captured (low-3) so the launcher surfaces the precise refusal reason —
+# environment_not_set vs environment_unrecognised — not a generic one.
+_ENV_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/alfred-launcher-env-err.XXXXXX")"
+if ! ALFRED_RESOLVED_ENVIRONMENT="$(python3 -m alfred.plugins.manifest_reader --read-environment 2>"${_ENV_ERR_FILE}")"; then
+    # The helper emits a closed-vocabulary bare key (daemon.boot.environment_-
+    # not_set | daemon.boot.environment_unrecognised) on its LAST stderr line.
+    # Surface it verbatim (low-3) instead of discarding it with 2>/dev/null and
+    # refusing with a generic reason; fall back to the not_set key if the
+    # capture was empty (fail-closed).
+    _env_err_key="$(tail -n 1 "${_ENV_ERR_FILE}" 2>/dev/null || true)"
+    rm -f "${_ENV_ERR_FILE}"
+    case "${_env_err_key}" in
+        daemon.boot.environment_unrecognised | daemon.boot.environment_not_set) : ;;
+        *) _env_err_key="daemon.boot.environment_not_set" ;;
+    esac
+    printf '%s plugin_id=%s\n' "${_env_err_key}" "${PLUGIN_ID}" >&2
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"%s","environment":"unset","host_os":"unknown"}\n' "${PLUGIN_ID}" "${_env_err_key#daemon.boot.}" >&2
+    exit 1
+fi
+rm -f "${_ENV_ERR_FILE}"
+
+IS_PRODUCTION=false
+[ "${ALFRED_RESOLVED_ENVIRONMENT}" = "production" ] && IS_PRODUCTION=true
+
+# _uname shim — honours FAKE_UNAME for the cross-OS CI matrix (devops-2) so the
+# macOS and Windows branches can be exercised on Linux runners. sec-keystone:
+# FAKE_UNAME is a TEST override only — it is IGNORED in production so a
+# production host always reports its REAL kernel (`uname -s`). A FAKE_UNAME set
+# in production is a loud refusal below (it can only be an attempt to force the
+# non-Linux/unsandboxed branch on a Linux host).
 _uname() {
-    if [ -n "${FAKE_UNAME:-}" ]; then
+    if [ "${IS_PRODUCTION}" = "false" ] && [ -n "${FAKE_UNAME:-}" ]; then
         printf '%s' "${FAKE_UNAME}"
     else
         uname -s
@@ -154,6 +194,16 @@ _host_os() {
     esac
 }
 
+# sec-keystone: a FAKE_UNAME set in production is a hard refusal. It cannot
+# serve any legitimate purpose (the shim is ignored above) and its presence on
+# a production launcher invocation is an attempt to force a host-OS branch.
+# Refuse loudly with a sandbox_refused row BEFORE any host-OS branch runs.
+if [ "${IS_PRODUCTION}" = "true" ] && [ -n "${FAKE_UNAME:-}" ]; then
+    printf 'supervisor.sandbox.refused.fake_uname_in_production plugin_id=%s\n' "${PLUGIN_ID}" >&2
+    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"fake_uname_in_production","environment":"production","host_os":"linux"}\n' "${PLUGIN_ID}" >&2
+    exit 1
+fi
+
 UNSANDBOXED="${ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED:-}"
 TARGET_UID="${ALFRED_PLUGIN_UID:-alfred-quarantine}"
 HOST_OS="$(_host_os)"
@@ -165,8 +215,10 @@ fi
 
 # _do_exec runs the plugin process under the Slice-3 UID-separated baseline
 # (kind:none). Linux: UID-drop via runuser; refuse if runuser missing (fail-
-# closed). Non-Linux dev: emit a config_insecure row + exec without UID-drop.
-# Defined BEFORE any call site (CR R2).
+# closed). Non-Linux: a genuine macOS/Windows host (or a dev FAKE_UNAME shim)
+# has no UID-drop containment, so it REFUSES in production (sec-keystone) and
+# only exec's unsandboxed in dev/test with an honest stub_used row. Defined
+# BEFORE any call site (CR R2).
 _do_exec() {
     if [ "${HOST_OS}" = "linux" ]; then
         if ! command -v runuser >/dev/null 2>&1; then
@@ -174,20 +226,20 @@ _do_exec() {
             exit 1
         fi
         exec runuser -u "${TARGET_UID}" -- "${EXECUTABLE}" "$@"
-    else
-        printf '{"event":"supervisor.config_insecure","insecure_config_key":"launcher_uid_separation_unavailable_macos","plugin_id":"%s"}\n' "${PLUGIN_ID}" >&2
-        exec "${EXECUTABLE}" "$@"
     fi
+    # Non-Linux: no UID-drop is available. Refuse to exec unsandboxed in
+    # production with a host-accurate reason (low-1: not the windows_stub key).
+    if [ "${IS_PRODUCTION}" = "true" ]; then
+        printf 'supervisor.sandbox.refused.uid_separation_unavailable plugin_id=%s host_os=%s\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
+        printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"uid_separation_unavailable","environment":"production","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
+        exit 1
+    fi
+    # Dev/test only: exec without UID-drop, with an honest stub_used audit row
+    # (low-1: replaces the advisory config_insecure row so the unsandboxed exec
+    # is auditable under the same closed vocabulary as the other stub paths).
+    printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","host_os":"%s","environment":"%s","reason":"uid_separation_unavailable"}\n' "${PLUGIN_ID}" "${HOST_OS}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2
+    exec "${EXECUTABLE}" "$@"
 }
-
-# Read Settings.environment via the pre-launcher Python helper (dual-source:
-# ALFRED_ENVIRONMENT env var > /etc/alfred/environment). Neither set → refuse.
-# The helper prints the value on stdout and a bare i18n key on stderr.
-if ! ALFRED_RESOLVED_ENVIRONMENT="$(python3 -m alfred.plugins.manifest_reader --read-environment)"; then
-    printf 'daemon.boot.environment_not_set plugin_id=%s\n' "${PLUGIN_ID}" >&2
-    printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"environment_not_set","environment":"unset","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
-    exit 1
-fi
 
 # Dev escape hatch: refuse in production (devex-001 — operator-visible stderr
 # key + SANDBOX_REFUSED audit row). sec-1 truthy parsing.
@@ -277,9 +329,13 @@ EOF
         _do_exec "$@"
         ;;
     stub)
+        # A kind:stub manifest is host-agnostic — it can resolve on linux/macos/
+        # windows alike. low-1: refuse with a host-accurate reason rather than
+        # reusing the windows-specific key (which mis-labels the audit row on a
+        # linux/macos host).
         if [ "${ALFRED_RESOLVED_ENVIRONMENT}" = "production" ]; then
-            printf 'supervisor.sandbox.refused.windows_stub_in_production plugin_id=%s\n' "${PLUGIN_ID}" >&2
-            printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"windows_stub_in_production","environment":"production","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
+            printf 'supervisor.sandbox.refused.stub_kind_in_production plugin_id=%s host_os=%s\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
+            printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"stub_kind_in_production","environment":"production","host_os":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" >&2
             exit 1
         fi
         printf '{"event":"supervisor.plugin.sandbox_stub_used","plugin_id":"%s","host_os":"%s","environment":"%s"}\n' "${PLUGIN_ID}" "${HOST_OS}" "${ALFRED_RESOLVED_ENVIRONMENT}" >&2

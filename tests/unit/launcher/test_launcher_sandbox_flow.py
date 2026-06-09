@@ -214,7 +214,9 @@ def test_kind_stub_refused_in_production(run_launcher, tmp_path) -> None:
         },
     )
     assert result.returncode != 0
-    assert "windows_stub_in_production" in result.stderr
+    # low-1: host-accurate reason on a non-windows host (this runs on the real
+    # host OS; the kind:stub branch is host-agnostic).
+    assert "stub_kind_in_production" in result.stderr
 
 
 @_requires_jq
@@ -294,7 +296,14 @@ def test_windows_full_dev_stub_used(run_launcher, tmp_path) -> None:
 
 
 @_requires_jq
-def test_windows_full_production_refused(run_launcher, tmp_path) -> None:
+def test_windows_full_production_refused_via_fake_uname_gate(run_launcher, tmp_path) -> None:
+    """sec-keystone: FAKE_UNAME in production is now refused at the gate, BEFORE
+    the windows kind:full branch. The Windows-production refusal is no longer
+    reachable via FAKE_UNAME — that was precisely the bypass vector. A genuine
+    Windows production host (no FAKE_UNAME) still hits ``windows_stub_in_-
+    production`` in the kind:full branch; that path is exercised in CI on the
+    real OS matrix, not via the shim.
+    """
     manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
     stub = _stub_binary(tmp_path)
     result = run_launcher(
@@ -307,7 +316,174 @@ def test_windows_full_production_refused(run_launcher, tmp_path) -> None:
         },
     )
     assert result.returncode != 0
-    assert "windows_stub_in_production" in result.stderr
+    assert "fake_uname_in_production" in result.stderr
+
+
+# --------------------------------------------------------------------------
+# sec-keystone (CR PR #229 finding-1) — FAKE_UNAME production-bypass refusals
+# --------------------------------------------------------------------------
+
+
+@_requires_jq
+def test_fake_uname_in_production_refuses_kind_none_bypass(run_launcher, tmp_path) -> None:
+    """The keystone: ALFRED_ENVIRONMENT=production FAKE_UNAME=Darwin + kind:none
+    must REFUSE rather than force the non-Linux unsandboxed exec.
+
+    Before the fix this combination dropped into the non-Linux ``_do_exec``
+    branch and exec'd the plugin WITHOUT the runuser UID-drop, emitting only an
+    advisory ``config_insecure`` row (PLUGIN_EXECUTED_UNSANDBOXED, exit 0). The
+    fix gates FAKE_UNAME to non-production and refuses loudly.
+    """
+    manifest = _write_manifest(tmp_path, _NONE_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    sentinel = tmp_path / "executed.marker"
+    # If the plugin ever runs, it touches the sentinel — proving the bypass.
+    stub.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 0\n")
+    stub.chmod(0o755)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "production",
+            "FAKE_UNAME": "Darwin",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode != 0
+    assert not sentinel.exists(), "plugin executed unsandboxed — the bypass is NOT closed"
+    assert "fake_uname_in_production" in result.stderr
+    # The advisory config_insecure row must NOT be the audit reason here.
+    assert "config_insecure" not in result.stderr
+    assert "PLUGIN_EXECUTED_UNSANDBOXED" not in result.stdout
+    assert '"event":"supervisor.plugin.sandbox_refused"' in result.stderr
+
+
+@_requires_jq
+def test_fake_uname_in_production_refused_before_manifest_branch(run_launcher, tmp_path) -> None:
+    """FAKE_UNAME in production is refused even with no manifest path — the gate
+    fires before any host-OS or kind branch."""
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "production",
+            "FAKE_UNAME": "Linux",
+        },
+    )
+    assert result.returncode != 0
+    assert "fake_uname_in_production" in result.stderr
+
+
+@_requires_jq
+def test_fake_uname_ignored_in_production_real_uname_wins(run_launcher, tmp_path) -> None:
+    """Even if the gate were bypassed, the _uname shim ignores FAKE_UNAME in
+    production. This asserts the refusal reason is the FAKE_UNAME gate (not a
+    downstream host-OS branch), proving the shim never honoured ``Darwin``."""
+    manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "production",
+            "FAKE_UNAME": "Darwin",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode != 0
+    # macos_full_not_yet_shipped would prove the shim honoured Darwin — it MUST NOT.
+    assert "macos_full_not_yet_shipped" not in result.stderr
+    assert "fake_uname_in_production" in result.stderr
+
+
+@_requires_jq
+def test_kind_none_dev_non_linux_emits_stub_used_not_config_insecure(
+    run_launcher, tmp_path
+) -> None:
+    """Dev/test on a non-Linux host may exec kind:none unsandboxed, but with an
+    honest ``sandbox_stub_used`` row (low-1) — NOT the old advisory
+    ``config_insecure`` row."""
+    manifest = _write_manifest(tmp_path, _NONE_MANIFEST)
+    stub = _stub_binary(tmp_path, exit_code=4)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "development",
+            "FAKE_UNAME": "Darwin",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode == 4  # the stub exec'd (dev path)
+    assert "supervisor.plugin.sandbox_stub_used" in result.stderr
+    assert "uid_separation_unavailable" in result.stderr
+    assert "config_insecure" not in result.stderr
+
+
+@_requires_jq
+def test_kind_none_production_non_linux_refuses(run_launcher, tmp_path) -> None:
+    """A genuine non-Linux production host (no FAKE_UNAME) refuses kind:none —
+    the second defense layer: _do_exec's non-Linux branch refuses in production
+    with the host-accurate ``uid_separation_unavailable`` reason.
+
+    Simulated here by forcing the non-Linux branch in DEVELOPMENT is impossible
+    (dev execs), so this test relies on the host: it is meaningful only on a
+    genuine non-Linux host. On Linux it is skipped.
+    """
+    import platform
+
+    if platform.system() == "Linux":
+        pytest.skip("non-Linux _do_exec production refusal only observable off-Linux")
+    manifest = _write_manifest(tmp_path, _NONE_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    sentinel = tmp_path / "executed.marker"
+    stub.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 0\n")
+    stub.chmod(0o755)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "production",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode != 0
+    assert not sentinel.exists()
+    assert "uid_separation_unavailable" in result.stderr
+    assert "windows_stub_in_production" not in result.stderr  # low-1: host-accurate
+
+
+@_requires_jq
+def test_stub_kind_production_uses_host_accurate_reason(run_launcher, tmp_path) -> None:
+    """low-1: the generic kind:stub production refusal uses a host-accurate
+    reason (``stub_kind_in_production``), not the windows-specific key, on a
+    non-windows host."""
+    manifest = _write_manifest(tmp_path, _STUB_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "production",
+            "FAKE_UNAME": "Linux",  # ignored in production, but proves host=linux
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    # FAKE_UNAME in production is refused BEFORE the kind branch, so this case
+    # actually exercises the FAKE_UNAME gate. Re-run without FAKE_UNAME to reach
+    # the stub branch on the real host.
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "production",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+        },
+    )
+    assert result.returncode != 0
+    assert "stub_kind_in_production" in result.stderr
+    assert "windows_stub_in_production" not in result.stderr
 
 
 def test_unknown_host_os_refused(run_launcher, tmp_path) -> None:

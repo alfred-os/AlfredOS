@@ -21,8 +21,10 @@ payload:
 expected_outcome: refused
 provenance: >-
   PR-S4-6 Component G. The launcher's kind:stub branch refuses in production
-  with reason="windows_stub_in_production" + a supervisor.plugin.sandbox_refused
-  audit row; only development emits a stub_used row and execs.
+  with a host-accurate reason="stub_kind_in_production" + a
+  supervisor.plugin.sandbox_refused audit row (low-1 CR #229: the prior code
+  reused the windows-specific key, mis-labelling the audit row on linux/macos
+  hosts); only development emits a stub_used row and execs.
 references:
   - "spec §7.3 production-refuse-without-policy"
   - "bin/alfred-plugin-launcher.sh stub branch"

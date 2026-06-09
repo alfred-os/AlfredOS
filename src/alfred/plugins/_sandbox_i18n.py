@@ -17,6 +17,15 @@ The boot-posture keys (``supervisor.boot.*``, ``daemon.boot.environment_source_c
 are emitted at the daemon-boot caller (PR-S4-1) from the
 ``MlockResult`` / conflict primitives this PR ships; their callsites live
 here so the catalog carries them from PR-S4-6 onward.
+
+low-2 (CR PR #229): the launcher also surfaces ``daemon.boot.environment_not_set``
+and ``daemon.boot.environment_unrecognised`` on its environment-read refusal
+path (it captures the helper's stderr and re-prints the specific key). Those
+two keys are emitted by ``manifest_reader._cmd_read_environment`` and rendered
+elsewhere (the daemon-boot CLI, PR-S4-1) — their pybabel visibility relies on
+those external callsites, NOT this registry. They are listed in the
+``_ENVIRONMENT_KEYS_RENDERED_ELSEWHERE`` note below so the dependency is named
+rather than silently assumed.
 """
 
 from __future__ import annotations
@@ -44,6 +53,20 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     "supervisor.sandbox.refused.policy_translate_failed": t(
         "supervisor.sandbox.refused.policy_translate_failed"
     ),
+    # sec-keystone (CR PR #229 finding-1): FAKE_UNAME set in production is a
+    # loud refusal (the shim is ignored there); the non-Linux _do_exec branch
+    # refuses in production when no UID-drop containment is available; and the
+    # kind:stub production refusal now uses a host-accurate reason (low-1)
+    # rather than reusing the windows-specific key.
+    "supervisor.sandbox.refused.fake_uname_in_production": t(
+        "supervisor.sandbox.refused.fake_uname_in_production"
+    ),
+    "supervisor.sandbox.refused.uid_separation_unavailable": t(
+        "supervisor.sandbox.refused.uid_separation_unavailable"
+    ),
+    "supervisor.sandbox.refused.stub_kind_in_production": t(
+        "supervisor.sandbox.refused.stub_kind_in_production"
+    ),
     # Boot-posture observability (emitted at the PR-S4-1 daemon-boot caller
     # from the primitives PR-S4-6 ships).
     "supervisor.boot.mlock_unavailable": t("supervisor.boot.mlock_unavailable"),
@@ -52,4 +75,14 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
 }
 
 
-__all__ = ["_SANDBOX_VISIBLE_KEYS"]
+#: low-2: keys the launcher re-prints on its environment-read refusal path but
+#: whose pybabel-visible ``t()`` callsites live elsewhere (the daemon-boot CLI /
+#: ``manifest_reader``). Named here so the docstring's claim is concrete and a
+#: future reader can trace where each key's catalog reference actually lives.
+_ENVIRONMENT_KEYS_RENDERED_ELSEWHERE: tuple[str, ...] = (
+    "daemon.boot.environment_not_set",  # _slice_4_reserve.py + manifest_reader
+    "daemon.boot.environment_unrecognised",  # _slice_4_reserve.py + manifest_reader
+)
+
+
+__all__ = ["_ENVIRONMENT_KEYS_RENDERED_ELSEWHERE", "_SANDBOX_VISIBLE_KEYS"]
