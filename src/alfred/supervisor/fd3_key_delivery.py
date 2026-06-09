@@ -71,11 +71,20 @@ def _zero_buffer(buffer: bytearray) -> None:
 def deliver_provider_key_via_fd3(*, write_fd: int, key: str) -> None:
     """Write ``[len-prefix | key]`` to ``write_fd`` in one atomic writev.
 
+    The caller MUST place the pipe's read end on fd **3** of the launcher
+    child. The robust spawn pattern (verified in a docker bwrap repro): in the
+    PARENT, ``os.dup2(read_fd, 3)`` (saving + restoring any existing parent fd
+    3), then spawn with ``pass_fds=(3,)``. A ``preexec_fn`` that ``dup2``s onto
+    fd 3 does NOT work — ``subprocess`` runs ``close_fds`` AFTER ``preexec_fn``,
+    and the dup'd fd 3 (not in ``pass_fds``) is closed before exec, so the
+    plugin's ``os.read(3)`` raises ``EBADF`` whenever the original ``read_fd``
+    is not already 3 (e.g. under pytest / any process with several fds open).
+
     Args:
         write_fd: The write end of a pipe whose read end is fd 3 of the
-            launcher subprocess. This function closes ``write_fd`` before it
-            returns (and on every refusal path) — the caller owns only the
-            read-end lifecycle.
+            launcher subprocess (see the spawn-pattern note above). This
+            function closes ``write_fd`` before it returns (and on every
+            refusal path) — the caller owns only the read-end lifecycle.
         key: The provider key fetched via ``SecretBroker.get``.
 
     Raises:

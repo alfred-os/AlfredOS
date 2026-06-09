@@ -5,8 +5,9 @@ real ``manifest_reader`` subprocess, the real fixture policy file, and a real
 ``bwrap`` sandbox. Asserts:
 
 * ``bwrap`` is invoked with the fixture's policy flags and NO fd flag: bwrap
-  inherits fd 3 by default (the preexec dup2 places the pipe read end on fd
-  3), and the fd-3 provider key reaches the sandboxed plugin (Component J.1).
+  inherits fd 3 by default (the test places the pipe read end on fd 3 in the
+  parent + ``pass_fds=(3,)``), and the fd-3 provider key reaches the sandboxed
+  plugin (Component J.1).
 * The active escape attempts are contained by bwrap (Component test-1):
   the sandboxed plugin cannot read host ``/etc/passwd`` (``/etc`` not bound)
   and cannot exec ``/bin/sh`` outside the bound read-only tree.
@@ -20,7 +21,6 @@ PR-S4-6 (ops-007).
 
 from __future__ import annotations
 
-import functools
 import os
 import shutil
 import struct
@@ -142,49 +142,61 @@ def _launcher_env(manifest: Path, policy_dir: Path) -> dict[str, str]:
     }
 
 
-def _remap_read_end_to_fd3(read_fd: int) -> None:
-    """preexec_fn: place the pipe read end on fd 3 in the launcher child.
-
-    Runs post-fork / pre-exec in the child. bwrap inherits fd 3 by default (no
-    CLI flag) and the sandboxed plugin's ``os.read(3, ...)`` operates on fd
-    **3** specifically, but ``os.pipe()`` hands us an arbitrary descriptor
-    (under pytest it is NOT 3). ``pass_fds`` keeps ``read_fd`` open +
-    inheritable at its ORIGINAL number; this remap moves it onto 3 so bwrap's
-    default fd inheritance carries it through and the framing the parent writes
-    reaches the plugin. Mirrors how the production Supervisor spawns the
-    launcher with the pipe read end as fd 3 (see
-    ``alfred.supervisor.fd3_key_delivery``).
-
-    ``os.dup2`` always clears close-on-exec on its TARGET, so fd 3 survives the
-    bwrap exec without an explicit ``set_inheritable``. The original ``read_fd``
-    is closed when it isn't already 3 so the only surviving copy is fd 3.
-    """
-    os.dup2(read_fd, 3)
-    if read_fd != 3:
-        os.close(read_fd)
-
-
 def _spawn_with_fd3(
     stub: Path, manifest: Path, policy_dir: Path, key: bytes
 ) -> subprocess.CompletedProcess[str]:
-    """Spawn the launcher with the framed provider key delivered over fd 3."""
+    """Spawn the launcher with the framed provider key delivered over fd 3.
+
+    The sandboxed plugin's ``os.read(3, ...)`` and bwrap's default fd
+    inheritance both operate on fd **3** specifically, but ``os.pipe()`` hands
+    us an arbitrary descriptor (under pytest, with many fds already open, it is
+    a HIGH number — NOT 3). The pipe read end MUST therefore land on fd 3 in the
+    launcher child.
+
+    A ``preexec_fn`` that ``dup2``'s onto fd 3 does NOT work: ``subprocess``
+    runs ``close_fds`` AFTER ``preexec_fn``, and the dup'd fd 3 is not in
+    ``pass_fds`` (only the high ``read_fd`` is), so ``close_fds`` closes fd 3
+    before the exec → the plugin's ``os.read(3)`` raises ``EBADF``. (This is why
+    the test passed only when ``read_fd`` happened to be 3, i.e. with few fds
+    open, and failed under pytest.) Verified in a docker bwrap repro:
+    ``read_fd=3`` → key delivered; ``read_fd=23`` → EBADF.
+
+    The robust fix: place the pipe read end on fd 3 in the PARENT (saving and
+    restoring the parent's own fd 3), then ``pass_fds=(3,)`` so ``close_fds``
+    KEEPS fd 3 (it is now a passed parent fd) and the child inherits it
+    directly — no ``preexec_fn``. This is the contract a real Supervisor caller
+    must honour (see ``alfred.supervisor.fd3_key_delivery``).
+    """
     read_fd, write_fd = os.pipe()
-    proc = subprocess.Popen(  # noqa: S603 — repo-owned launcher script path
-        [str(_LAUNCHER), "alfred.fixture", sys.executable, str(stub)],
-        env=_launcher_env(manifest, policy_dir),
-        # pass_fds keeps read_fd open + inheritable in the child; the
-        # preexec_fn then dup2's it onto fd 3 (the channel bwrap inherits by
-        # default and the plugin's os.read(3) uses). Without the remap the read
-        # end lands at an arbitrary number and fd 3 is closed → the plugin's
-        # os.read(3, 4) raises OSError(EBADF).
-        pass_fds=(read_fd,),
-        preexec_fn=functools.partial(_remap_read_end_to_fd3, read_fd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=str(_REPO_ROOT),
-    )
-    os.close(read_fd)
+    # Place the read end on fd 3 in THIS process, preserving any existing fd 3.
+    try:
+        os.fstat(3)
+        saved_fd3: int | None = os.dup(3)
+    except OSError:
+        saved_fd3 = None
+    os.dup2(read_fd, 3)
+    os.set_inheritable(3, True)  # noqa: FBT003 -- stdlib API: bool is positional
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — repo-owned launcher script path
+            [str(_LAUNCHER), "alfred.fixture", sys.executable, str(stub)],
+            env=_launcher_env(manifest, policy_dir),
+            # fd 3 is the pipe read end (placed above); pass_fds=(3,) makes
+            # close_fds KEEP it so the launcher — and bwrap's default fd
+            # inheritance — carry it through to the plugin.
+            pass_fds=(3,),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(_REPO_ROOT),
+        )
+    finally:
+        # Restore (or close) this process's fd 3 and drop the original read end.
+        if saved_fd3 is not None:
+            os.dup2(saved_fd3, 3)
+            os.close(saved_fd3)
+        else:
+            os.close(3)
+        os.close(read_fd)
     # CR #229 R2 finding-7: if os.write raises (e.g. EPIPE when the launcher
     # dies early), write_fd would leak. try/finally guarantees the close.
     #
