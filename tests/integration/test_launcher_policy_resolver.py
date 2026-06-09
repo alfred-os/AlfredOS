@@ -184,9 +184,17 @@ def _spawn_with_fd3(
     os.close(read_fd)
     # CR #229 R2 finding-7: if os.write raises (e.g. EPIPE when the launcher
     # dies early), write_fd would leak. try/finally guarantees the close.
+    #
+    # On BrokenPipeError the launcher closed fd 3 (the read end) before we
+    # delivered the key — i.e. it exited early. Swallow EPIPE here so we DON'T
+    # mask the launcher's real failure: fall through to communicate() below and
+    # surface its stderr in the assertion (the CompletedProcess carries the
+    # launcher's nonzero rc + stderr).
     try:
         os.write(write_fd, struct.pack(">I", len(key)))
         os.write(write_fd, key)
+    except BrokenPipeError:
+        pass
     finally:
         os.close(write_fd)
     stdout, stderr = proc.communicate(timeout=30)
