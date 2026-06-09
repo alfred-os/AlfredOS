@@ -33,10 +33,14 @@ rather than three independent shutdown sequences.
 
 ### Supervisor (`src/alfred/supervisor/core.py`)
 
-- `Supervisor(session_scope, gate, audit)` — constructor. Immediately creates
-  a `PluginLifecycle` and a `CapabilityGateMonitor` bound to the same gate +
-  audit references. Registers the six supervisor hookpoints via
-  `_register_hookpoints()` (spec §14).
+- `Supervisor(session_scope, gate, audit, *, policies_ref, ...)` — constructor.
+  Immediately creates a `PluginLifecycle` and a `CapabilityGateMonitor` bound to
+  the same gate + audit references. Registers the six supervisor hookpoints via
+  `_register_hookpoints()` (spec §14). `policies_ref` (PR-S4-4, ADR-0023) is a
+  **required** `PoliciesSnapshotRef` — production refuses to run the privileged
+  orchestrator with no policy snapshot (rev-003 closure). `_proposal_dispatch_loop`
+  derefs `policies_ref.current()` once per iteration (the stale-snapshot-for-one-
+  iteration invariant — see [`policies.md`](./policies.md)).
 - `await Supervisor.start()` — opens the supervised `asyncio.TaskGroup` via an
   internal `_run()` coroutine that holds it open until `_shutdown_event` is set.
   Returns only after `_task_group` is populated; callers can immediately call
@@ -117,6 +121,17 @@ state machine itself):
 - `record_denied_dispatch()` — called from dispatch code paths during
   fail-closed to accumulate the per-outage `denied_dispatch_count` rollup.
   No-op outside fail-closed (err-015 guard).
+
+### PolicyWatcher (`src/alfred/policies/watcher.py`)
+
+A long-running child task the daemon schedules in the supervisor's
+`asyncio.TaskGroup` (PR-S4-1 wires it; PR-S4-4 ships the class). It owns
+`config/policies.yaml` and is the **only** runtime reader of that file; every
+other subsystem reads the active policy through `PoliciesSnapshotRef.current()`.
+Full surface — mtime gate, watcher-side SHA short-circuit, high-blast refusal,
+degraded/recovered state machine, the five `supervisor.config_*` /
+`policies.watcher.degraded` hookpoints — is documented in
+[`policies.md`](./policies.md).
 
 ### DeadlineWrapper (`src/alfred/supervisor/deadline.py`)
 
