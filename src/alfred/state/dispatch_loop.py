@@ -898,6 +898,14 @@ async def _emit_dlp_scan_failed(
     never persisted, keeping the row free of any T3 surface the scan was
     meant to catch.
     """
+    # Operator-visible warning: a scanner CRASH (not a deliberate refusal)
+    # is operationally significant — the DLP stage is degraded. Only the
+    # exception CLASS is logged (no T3 surface). CR closure.
+    _log.warning(
+        "dispatch.dlp_scan_failed",
+        proposal_branch=ref.content_path,
+        scan_error_type=type(exc).__name__,
+    )
     try:
         await ctx.audit_writer.append_schema(
             fields=PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS,

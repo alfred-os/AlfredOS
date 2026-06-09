@@ -2004,9 +2004,14 @@ msgstr ""
 #: src/alfred/supervisor/core.py:372
 msgid "supervisor.dispatch.outbound_dlp_unwired"
 msgstr ""
-"The proposal dispatch loop is scheduled but no outbound DLP scanner was "
-"wired to the Supervisor. failure_detail cannot reach the ledger without "
-"passing DLP first (#173); pass outbound_dlp= at construction."
+"Supervisor cannot schedule the proposal-dispatch loop: no outbound DLP "
+"scanner was wired into the supervisor. The daemon boot path must "
+"construct OutboundDlp and pass it as Supervisor(outbound_dlp=...). "
+"Refusing to dispatch — failure_detail would reach the ledger "
+"unscanned.The proposal dispatch loop is scheduled but no outbound DLP "
+"scanner was wired to the Supervisor. failure_detail cannot reach the "
+"ledger without passing DLP first (#173); pass outbound_dlp= at "
+"construction."
 
 #: src/alfred/supervisor/core.py:621
 msgid "supervisor.register_plugin_task.no_active_task_group"
