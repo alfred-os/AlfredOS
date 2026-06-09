@@ -44,7 +44,6 @@ from alfred.identity.operator_session import (
     OperatorSessionMissing,
     OperatorSessionTokenUnknown,
     OperatorSessionTokenUserMismatch,
-    _serialize_to_file_bytes,
     derive_machine_id_hash_subkey,
     load_session_file,
     write_session_file,
@@ -179,16 +178,42 @@ async def test_osf_003_replayed_from_other_machine(tmp_path: Path) -> None:
     assert audit.reasons[-1] == "machine_mismatch"
 
 
-def test_osf_004_stat_then_open_toctou_race(tmp_path: Path) -> None:
-    """open-then-fstat: a post-open swap is invisible at the FD level."""
+def test_osf_004_stat_then_open_toctou_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """open-then-fstat: a mid-load inode swap is invisible at the FD level.
+
+    Models the real race: the attacker swaps the path to a DIFFERENT-content
+    inode AFTER the loader has opened (and fstat-validated) the FD but BEFORE
+    the read. Because the loader reads from the already-open FD — which still
+    points at the original, now-unlinked inode — the attacker's content is
+    never observed. A vulnerable stat-then-RE-OPEN loader would instead read
+    the swapped bytes, so this assertion genuinely distinguishes the two
+    (the prior version re-wrote IDENTICAL bytes and proved nothing).
+    """
     path = _write(tmp_path)
     original = load_session_file(path)
-    # An attacker swaps the file AFTER our loader would have opened the FD;
-    # because load reads from the open FD (original inode), the swapped
-    # content is never observed. We model this by asserting the load returns
-    # the original content even though we now overwrite the path.
-    path.write_bytes(_serialize_to_file_bytes(original))  # benign re-write
-    assert load_session_file(path) == original
+
+    import alfred.identity.operator_session as _osmod
+
+    real_read = _osmod.os.read
+    swapped = {"done": False}
+
+    def _swap_then_read(fd: int, n: int) -> bytes:
+        if not swapped["done"]:
+            swapped["done"] = True
+            # Replace the PATH with a new inode carrying attacker bytes. The
+            # loader's open FD still references the original inode.
+            path.unlink()
+            path.write_bytes(b'{"attacker": "swapped-content-different-bytes"}')
+            path.chmod(0o600)
+        return real_read(fd, n)
+
+    monkeypatch.setattr(_osmod.os, "read", _swap_then_read)
+
+    result = load_session_file(path)
+    assert swapped["done"] is True  # the swap fired mid-load
+    assert result == original  # ...and the original-inode content still won
 
 
 def test_osf_005_symlink_to_attacker_file_refused(tmp_path: Path) -> None:
