@@ -670,7 +670,14 @@ class AlfredPluginSession:
                 # Task 62: one increment per COMMS_HANDLER_FAILED_FIELDS emit,
                 # observed on the same loud failure path (err-007).
                 comms_observability.record_handler_failure()
-                await self._emit_handler_failed(method, exc)
+                # L1 (error reviewer): if the audit write itself fails, the
+                # original handler exception must not be lost. Chain it as the
+                # cause so the forensic trail keeps both the handler failure
+                # (the real fault) and the audit-write failure (the secondary).
+                try:
+                    await self._emit_handler_failed(method, exc)
+                except Exception as audit_exc:
+                    raise exc from audit_exc
                 self._error_counter.increment()
                 if (
                     self._error_counter.exceeds(

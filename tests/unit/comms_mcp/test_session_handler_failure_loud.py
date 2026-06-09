@@ -65,3 +65,26 @@ async def test_handler_exception_redacts_secret_in_detail() -> None:
 
     detail = audit.rows_with_schema("COMMS_HANDLER_FAILED_FIELDS")[0]["detail_redacted"]
     assert "sk-ABCDEFGHIJKLMNOPQRSTUVWX" not in detail
+
+
+@pytest.mark.asyncio
+async def test_audit_write_failure_preserves_original_handler_exception() -> None:
+    """M4 / L1: if the audit write fails, the ORIGINAL handler exc is the cause.
+
+    The handler failure is the real fault; an audit-write failure on the
+    forensic path must not mask it. The dispatcher re-raises the original
+    handler exception with the audit-write failure chained as ``__cause__`` so
+    both faults survive into the StdioTransport reader's log.
+    """
+    handler = AsyncMock()
+    handler.process = AsyncMock(side_effect=RuntimeError("original handler fault"))
+    failing_audit = AsyncMock()
+    failing_audit.append_schema = AsyncMock(side_effect=OSError("audit store down"))
+    session = build_session(inbound_handler=handler, audit_writer=failing_audit)
+
+    with pytest.raises(RuntimeError, match="original handler fault") as excinfo:
+        await session._on_post_handshake_method(method="inbound.message", params=INBOUND_PARAMS)
+
+    # The audit-write failure is the chained cause, not the surfaced exception.
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert "audit store down" in str(excinfo.value.__cause__)
