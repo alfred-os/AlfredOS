@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land [ADR-0023 mtime-polled hot-reload for `config/policies.yaml`](../../adr/0023-slice4-mtime-polled-hot-reload.md) end-to-end. Ship the `PolicyWatcher` + `PoliciesV1` + `PoliciesSnapshot` + `PoliciesSnapshotRef` quartet; migrate four Slice-3 consumers (`RateLimitConfig`, `HandleCapConfig`, `ContentStore`, the quarantined-provider config consumer) plus one long-lived loop (`_proposal_dispatch_loop`) to the snapshot-ref deref pattern; emit `CONFIG_RELOAD_FIELDS` + `CONFIG_RELOAD_REJECTED_FIELDS` audit rows with watcher-side SHA short-circuit (sec-007); add the merge-blocking `tests/integration/test_hot_reload_high_blast_refusal.py` integration test; add five adversarial corpus entries (`csb-*`); back-patch the supervisor + policies subsystem runbooks. Closes #159.
+**Goal:** Land [ADR-0023 mtime-polled hot-reload for `config/policies.yaml`](../../adr/0023-mtime-polled-hot-reload-for-policies-yaml.md) end-to-end. Ship the `PolicyWatcher` + `PoliciesV1` + `PoliciesSnapshot` + `PoliciesSnapshotRef` quartet; migrate four Slice-3 consumers (`RateLimitConfig`, `HandleCapConfig`, `ContentStore`, the quarantined-provider config consumer) plus one long-lived loop (`_proposal_dispatch_loop`) to the snapshot-ref deref pattern; emit `CONFIG_RELOAD_FIELDS` + `CONFIG_RELOAD_REJECTED_FIELDS` audit rows with watcher-side SHA short-circuit (sec-007); add the merge-blocking `tests/integration/test_hot_reload_high_blast_refusal.py` integration test; add five adversarial corpus entries (`csb-*`); back-patch the supervisor + policies subsystem runbooks. Closes #159.
 
 **Architecture:** A new `src/alfred/policies/` package owns the watcher and the snapshot-ref pair. `PolicyWatcher` polls `config/policies.yaml`'s `(mtime, size)` at 1 s default (perf-005 — re-read only when the pair changes). On change it parses to `PoliciesV1`, computes `file_sha256`, **watcher-side-short-circuits if the SHA is unchanged** (sec-007 — load-bearing idempotency that does NOT rely on a non-existent `AuditWriter.dedupe_surface`), then runs Phase-1 audit-write + Phase-2 atomic single-attribute assignment (err-004). `PoliciesSnapshotRef.current()` is **synchronous** (perf-002 — GIL-atomic load; no `await` trampoline overhead). Long-lived loops deref **per-iteration** (core-003). High-blast keys (`quarantined_provider_url`, `secret_broker_config_ref`) refuse hot-reload with `CONFIG_RELOAD_REJECTED_FIELDS(reason="high_blast_change")`; only reviewer-gated proposal flow may change them.
 
@@ -1542,7 +1542,7 @@ Per the prompt + index §1.2:
 
 ### ADRs
 
-- [ADR-0023 — mtime-polled hot-reload for `config/policies.yaml`](../../adr/0023-slice4-mtime-polled-hot-reload.md) (full body lands in PR-S4-0a)
+- [ADR-0023 — mtime-polled hot-reload for `config/policies.yaml`](../../adr/0023-mtime-polled-hot-reload-for-policies-yaml.md) (full body lands in PR-S4-0a)
 - [ADR-0014 — Pluggable hooks for every action](../../adr/0014-pluggable-hooks-for-every-action.md) (load-bearing precedent — the three new hookpoints follow ADR-0014's discipline)
 - [ADR-0017 — Slice-3 trust-tier completion](../../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) (Slice-3 baseline; PR-S4-4 inherits the audit-write discipline)
 
