@@ -85,7 +85,7 @@ def test_manifest_matches_runtime_registry_after_full_import_sweep() -> None:
     # ``missing_in_manifest`` check below because an empty set is a
     # trivial subset of any manifest. The count floor refuses to let
     # that pass silently: if the runtime registers fewer than the
-    # current 18 hookpoints the bootstrap path is broken and the test
+    # current 30-hookpoint floor the bootstrap path is broken and the test
     # MUST fail loud. Bump this constant when the manifest grows; the
     # fixture-driven sync check below catches the matching shrink-the-
     # manifest direction.

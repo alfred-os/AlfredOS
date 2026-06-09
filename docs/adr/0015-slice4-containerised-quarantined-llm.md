@@ -74,10 +74,17 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
 ### Positive
 
 - PRD §5 line 117 invariant satisfied from Slice 4 onwards **for the
-  filesystem, process, and namespace axes** — kernel-enforced via `bwrap`
-  (read-only binds, no `/etc`/`/bin`, `--unshare-{pid,uts,cgroup,ipc}`,
-  `die_with_parent`). Empirically verified against the real quarantined-LLM
-  policy bytes (PR-S4-7).
+  filesystem and namespace axes** — kernel-enforced via `bwrap` (read-only
+  binds, no `/etc`/`/bin`, `--unshare-{pid,uts,cgroup,ipc}`, `die_with_parent`).
+  Empirically verified against the real quarantined-LLM policy bytes (PR-S4-7).
+  The **process-spawn axis is only PARTIALLY met** (amended 2026-06-09, PR-S4-7):
+  pid-namespace isolation hides host processes, but the broad read-only `/usr`
+  bind leaves `/usr/bin/*` (python, curl, …) **exec-reachable** inside the
+  sandbox, so PRD §5's "no capability to spawn further subprocesses" condition
+  does NOT yet fully hold. Tightening the bind to a minimal interpreter set is
+  tracked in [#230](https://github.com/MrReasonable/AlfredOS/issues/230)
+  alongside the egress allowlist; both are release-blockers before the
+  quarantined LLM is wired live.
 
 ### Negative
 
