@@ -30,6 +30,7 @@ from alfred.comms_mcp.bootstrap import (
     SyncIdentityResolverBridge,
     build_supervisor_breaker_tripper,
 )
+from alfred.comms_mcp.errors import UnknownAdapterKindError
 from alfred.identity.models import Platform
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,27 @@ async def test_resolver_bridge_returns_none_on_unbound_user() -> None:
     )
 
     assert resolved is None
+
+
+@pytest.mark.asyncio
+async def test_resolver_bridge_raises_on_unknown_adapter_kind() -> None:
+    """A truly unknown adapter_id must NOT silently map onto DISCORD.
+
+    The ``alfred_comms_test -> DISCORD`` placeholder is intentional, but an
+    unmapped adapter kind is a contract violation — fail loud with the
+    closed-vocab error naming the offending kind, never resolve it against the
+    wrong platform's binding table.
+    """
+    resolver = MagicMock()
+    resolver.resolve = MagicMock()
+    bridge = SyncIdentityResolverBridge(resolver=resolver)
+
+    with pytest.raises(UnknownAdapterKindError) as excinfo:
+        await bridge.resolve(adapter_id="totally_unknown", platform_user_id="x:1")
+
+    assert "totally_unknown" in str(excinfo.value)
+    # The resolver is never consulted for an unmapped kind.
+    resolver.resolve.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

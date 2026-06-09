@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, runtime_checkable
 
+from alfred.comms_mcp.errors import UnknownAdapterKindError
 from alfred.comms_mcp.inbound import ResolvedInbound
 from alfred.identity.models import Platform
 from alfred.security.quarantine import ContentHandle, ExtractionSchema
@@ -174,7 +175,16 @@ class SyncIdentityResolverBridge:
         self._resolver = resolver
 
     async def resolve(self, *, adapter_id: str, platform_user_id: str) -> ResolvedInbound | None:
-        platform = _ADAPTER_KIND_TO_PLATFORM.get(adapter_id, Platform.DISCORD)
+        try:
+            platform = _ADAPTER_KIND_TO_PLATFORM[adapter_id]
+        except KeyError as exc:
+            # An unmapped adapter kind must fail loud — silently defaulting to
+            # DISCORD would resolve the user against the wrong platform's
+            # binding table. The ``alfred_comms_test -> DISCORD`` placeholder is
+            # the ONLY allowed non-native mapping; PR-S4-9/10 add native kinds.
+            raise UnknownAdapterKindError(
+                f"no Platform mapping for adapter_id {adapter_id!r}"
+            ) from exc
         # The real resolver is synchronous + holds a per-instance LRU; the call
         # is in-process and fast (no I/O on a cache hit), so a direct call inside
         # the async seam is correct — there is no blocking-call-in-async concern
