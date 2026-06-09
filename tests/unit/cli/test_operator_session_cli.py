@@ -367,6 +367,51 @@ async def test_whoami_no_session(tmp_path: Path) -> None:
     assert exc.value.exit_code == 1
 
 
+def test_resolve_operator_user_id_or_refuse_happy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from alfred.cli import operator_session as mod
+
+    class _Ok:
+        async def resolve(self) -> str:
+            return "9"
+
+    monkeypatch.setattr(mod, "_build_operator_resolver", lambda: _Ok())
+    assert (
+        mod.resolve_operator_user_id_or_refuse(refusal_key="cli.config.set.refused.not_logged_in")
+        == "9"
+    )
+
+
+def test_resolve_operator_user_id_or_refuse_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    from alfred.cli import operator_session as mod
+    from alfred.identity.operator_session import OperatorSessionMissing
+
+    class _Missing:
+        async def resolve(self) -> str:
+            raise OperatorSessionMissing("no file")
+
+    monkeypatch.setattr(mod, "_build_operator_resolver", lambda: _Missing())
+    with pytest.raises(typer.Exit) as exc:
+        mod.resolve_operator_user_id_or_refuse(refusal_key="cli.config.set.refused.not_logged_in")
+    assert exc.value.exit_code == 1
+
+
+def test_resolve_operator_user_id_or_refuse_no_recovery_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal key without a ``.recovery`` companion still refuses cleanly."""
+    from alfred.cli import operator_session as mod
+    from alfred.identity.operator_session import OperatorSessionMissing
+
+    class _Missing:
+        async def resolve(self) -> str:
+            raise OperatorSessionMissing("no file")
+
+    monkeypatch.setattr(mod, "_build_operator_resolver", lambda: _Missing())
+    with pytest.raises(typer.Exit) as exc:
+        mod.resolve_operator_user_id_or_refuse(refusal_key="some.key.without.recovery.companion")
+    assert exc.value.exit_code == 1
+
+
 async def test_whoami_expired(tmp_path: Path) -> None:
     deps = _deps(tmp_path)
     pepper = _PEPPER.encode()

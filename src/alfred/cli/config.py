@@ -392,6 +392,14 @@ def config_set(
         # import is deferred here rather than at module top, keeping the
         # ``alfred --help`` surface light.
         from alfred.audit.audit_row_schemas import CONFIG_SET_REQUESTED_FIELDS
+        from alfred.cli.operator_session import resolve_operator_user_id_or_refuse
+
+        # #153: resolve the authenticated operator session so the queued
+        # proposal payload carries the canonical ``User.id`` instead of
+        # ``None``. A missing/expired session refuses the command outright.
+        operator_user_id = resolve_operator_user_id_or_refuse(
+            refusal_key="cli.config.set.refused.not_logged_in"
+        )
 
         # Stage 3 (arch-001 / cross-cutting R2): the audit-row stand-in
         # fires via :data:`CONFIG_SET_REQUESTED_FIELDS` BEFORE the
@@ -416,8 +424,8 @@ def config_set(
             audit_fields=CONFIG_SET_REQUESTED_FIELDS,
             audit_subject_partial={
                 "config_key": key,
-                # devex-007: PR-S3-7 wires IdentityResolver.
-                "operator_user_id": None,
+                # #153: canonical authenticated operator id (was None pre-S4-5).
+                "operator_user_id": operator_user_id,
                 # CR-149 round-6: operator-typed CLI ingress for a
                 # high-blast config knob — T1 swimlane (PRD §7.1 +
                 # CLAUDE.md hard rule #3). Same rationale as the other

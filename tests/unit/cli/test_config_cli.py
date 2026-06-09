@@ -34,6 +34,20 @@ from alfred.cli._state_git import ProposalResult, StateGitError
 from alfred.cli.config import config_app
 
 
+@pytest.fixture(autouse=True)
+def _stub_operator_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the #153 session resolver for the high-blast ``config set`` path.
+
+    The reviewer-gated ``config set`` now resolves an authenticated operator
+    session so the proposal payload carries the canonical ``User.id``;
+    absent the stub the high-blast path would refuse (exit 1).
+    """
+    monkeypatch.setattr(
+        "alfred.cli.operator_session.resolve_operator_user_id_or_refuse",
+        lambda *, refusal_key: "7",
+    )
+
+
 @pytest.fixture()
 def runner() -> CliRunner:
     """Typer test runner (Click 8.2 — separate stdout/stderr properties)."""

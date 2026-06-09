@@ -79,6 +79,13 @@ def _register() -> None:
     # Supervisor reset refusals (PR-S4-5).
     t("supervisor.breaker.reset.refused.not_logged_in")
     t("supervisor.breaker.reset.refused.operator_permissions_insufficient")
+    # Reviewer-gated CLI operator-attribution refusals (PR-S4-5 #153) — the
+    # ``t()`` call sites pass these via a ``refusal_key`` variable, so pybabel
+    # cannot extract them at the call site; reserve them here.
+    t("cli.config.set.refused.not_logged_in")
+    t("cli.config.set.refused.not_logged_in.recovery")
+    t("cli.plugin.grant.refused.not_logged_in")
+    t("cli.plugin.grant.refused.not_logged_in.recovery")
 
     # Daemon boot refusals (PR-S4-1).
     t("daemon.boot.environment_not_set")

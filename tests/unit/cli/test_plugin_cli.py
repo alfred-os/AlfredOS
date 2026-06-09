@@ -56,6 +56,21 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture(autouse=True)
+def _stub_operator_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the #153 session resolver so grant/revoke proceed in tests.
+
+    ``alfred plugin grant|revoke`` now resolve an authenticated operator
+    session so the proposal payload carries the canonical ``User.id``;
+    absent the stub the command would refuse (exit 1). The refusal branch
+    is covered separately.
+    """
+    monkeypatch.setattr(
+        "alfred.cli.operator_session.resolve_operator_user_id_or_refuse",
+        lambda *, refusal_key: "7",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stub_validator_hookpoint_registry() -> object:
     """Pin the closed-set hookpoint registry for every test in this module.
 

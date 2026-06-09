@@ -358,6 +358,82 @@ async def whoami_impl(deps: OperatorSessionDeps) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Shared operator-attribution helper for reviewer-gated CLI commands
+# --------------------------------------------------------------------------- #
+
+
+def _build_operator_resolver() -> Any:  # pragma: no cover - integration-covered (Component G)
+    """Construct the production ``DefaultOperatorSessionResolver``.
+
+    Shared by ``config`` / ``plugin`` reviewer-gated commands so their
+    proposal payloads carry the canonical operator ``User.id`` (#153). The
+    ``supervisor reset`` path has its own builder (it emits a
+    breaker-specific refused row); this one emits the generic
+    ``OPERATOR_SESSION_REFUSED_FIELDS`` on failure.
+    """
+    from alfred.audit.log import AuditWriter
+    from alfred.cli._bootstrap import build_broker, load_settings_or_die
+    from alfred.hooks import SYSTEM_ONLY_TIERS
+    from alfred.hooks.context import HookContext
+    from alfred.hooks.invoke import invoke
+    from alfred.identity._resolver import DefaultOperatorSessionResolver
+    from alfred.memory.db import build_session_scope
+
+    settings = load_settings_or_die()
+    scope = build_session_scope(settings)
+
+    async def _dispatch(name: str, payload: dict[str, Any]) -> None:
+        import uuid
+
+        correlation_id = str(uuid.uuid4())
+        ctx: HookContext[dict[str, object]] = HookContext(
+            action_id=name,
+            hookpoint=name,
+            input={**payload, "correlation_id": correlation_id},
+            correlation_id=correlation_id,
+            kind="post",
+        )
+        await invoke(name, ctx, kind="post", subscribable_tiers=SYSTEM_ONLY_TIERS, fail_closed=True)
+
+    return DefaultOperatorSessionResolver(
+        session_scope=scope,
+        secret_broker=build_broker(settings),
+        machine_id_provider=select_machine_id_provider(),
+        audit_writer=AuditWriter(session_factory=scope),
+        hook_dispatcher=_dispatch,
+        host=socket.gethostname(),
+        session_file_path=_session_file_path(),
+    )
+
+
+def resolve_operator_user_id_or_refuse(*, refusal_key: str) -> str:
+    """Resolve the operator's canonical ``User.id`` or refuse the command.
+
+    Used by reviewer-gated CLI commands (``config set``, ``plugin
+    grant/revoke``) so the queued proposal payload carries the canonical
+    ``operator_user_id`` rather than ``None`` (#153). On any
+    ``OperatorSessionError`` the command echoes the localised refusal +
+    its recovery companion and exits non-zero — no unauthenticated
+    attribution. The resolver itself already emits the
+    ``OPERATOR_SESSION_REFUSED`` audit row on the refusal path.
+    """
+    import asyncio
+
+    from alfred.identity.operator_session import OperatorSessionError
+
+    resolver = _build_operator_resolver()
+    try:
+        user_id: str = asyncio.run(resolver.resolve())
+        return user_id
+    except OperatorSessionError as exc:
+        typer.echo(t(refusal_key), err=True)
+        recovery = t(f"{refusal_key}.recovery")
+        if recovery != f"{refusal_key}.recovery":
+            typer.echo(recovery, err=True)
+        raise typer.Exit(code=1) from exc
+
+
+# --------------------------------------------------------------------------- #
 # Production wiring + Typer command surface
 # --------------------------------------------------------------------------- #
 

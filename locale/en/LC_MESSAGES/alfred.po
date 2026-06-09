@@ -208,25 +208,25 @@ msgstr "Configuration key (e.g. web-fetch-budget, quarantined-provider)."
 msgid "cli.config.set.arg.value"
 msgstr "New value (parsed as int/float when possible, else kept as string)."
 
-#: src/alfred/cli/config.py:435
+#: src/alfred/cli/config.py:443
 msgid "cli.config.set.unknown_key"
 msgstr ""
 "alfred config set refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:447
+#: src/alfred/cli/config.py:455
 msgid "cli.config.set.applied"
 msgstr "{key} set to {value} in {yaml_path} (hot-reload picks up the change)."
 
-#: src/alfred/cli/config.py:460
+#: src/alfred/cli/config.py:468
 msgid "cli.config.get.help.short"
 msgstr "Show the current value of an operator configuration key."
 
-#: src/alfred/cli/config.py:464
+#: src/alfred/cli/config.py:472
 msgid "cli.config.get.arg.key"
 msgstr "Configuration key to read."
 
-#: src/alfred/cli/config.py:485
+#: src/alfred/cli/config.py:493
 msgid "cli.config.get.reviewer_gated_set_only"
 msgstr ""
 "'{key}' is a reviewer-gated (high-blast) configuration key. Its value "
@@ -235,37 +235,37 @@ msgstr ""
 " routing.yaml. There is no `alfred config get` surface for reviewer-gated"
 " keys in this release."
 
-#: src/alfred/cli/config.py:493
+#: src/alfred/cli/config.py:501
 msgid "cli.config.get.unknown_key"
 msgstr ""
 "alfred config get refused: '{key}' is not a recognised configuration key."
 " Valid keys: {valid_keys}."
 
-#: src/alfred/cli/config.py:502
+#: src/alfred/cli/config.py:510
 msgid "cli.config.get.not_set"
 msgstr ""
 "{key} is not set in policies.yaml — the system default applies. Set it "
 "with 'alfred config set {key} <value>'."
 
-#: src/alfred/cli/config.py:504
+#: src/alfred/cli/config.py:512
 msgid "cli.config.get.value"
 msgstr "{key} = {value}"
 
-#: src/alfred/cli/config.py:528
+#: src/alfred/cli/config.py:536
 msgid "cli.config.list.help.short"
 msgstr "List every operator configuration value from policies.yaml."
 
-#: src/alfred/cli/config.py:537 src/alfred/cli/config.py:541
+#: src/alfred/cli/config.py:545 src/alfred/cli/config.py:549
 msgid "cli.config.list.empty"
 msgstr ""
 "policies.yaml is empty or missing. Run 'alfred config set <key> <value>' "
 "to seed the file."
 
-#: src/alfred/cli/config.py:565
+#: src/alfred/cli/config.py:573
 msgid "cli.config.set.denied"
 msgstr "alfred config set denied: {reason}"
 
-#: src/alfred/cli/config.py:567
+#: src/alfred/cli/config.py:575
 msgid "cli.config.set.pending_review"
 msgstr ""
 "{key} change queued for reviewer approval (high-blast knob).\n"
@@ -477,105 +477,105 @@ msgstr ""
 msgid "cli.plugin.help.group"
 msgstr "Manage plugin grants and inspect loaded plugins."
 
-#: src/alfred/cli/plugin.py:201
+#: src/alfred/cli/plugin.py:206
 msgid "cli.plugin.grant.follow_up_command"
 msgstr "Check status with: alfred plugin grant status {proposal_id}"
 
-#: src/alfred/cli/plugin.py:210
+#: src/alfred/cli/plugin.py:215
 msgid "cli.plugin.grant.list_pending_hint"
 msgstr "See all queued grants with: alfred plugin grant list --pending"
 
-#: src/alfred/cli/plugin.py:239
+#: src/alfred/cli/plugin.py:244
 msgid "cli.plugin.grant.help.short"
 msgstr "Queue a reviewer-gated capability-grant proposal for a plugin."
 
-#: src/alfred/cli/plugin.py:246
+#: src/alfred/cli/plugin.py:251
 msgid "cli.plugin.grant.arg.plugin_id"
 msgstr "Plugin id from the manifest (e.g. alfred.web-fetch)."
 
-#: src/alfred/cli/plugin.py:302
+#: src/alfred/cli/plugin.py:307
 msgid "cli.plugin.grant.status.usage_error"
 msgstr "Usage: alfred plugin grant status <proposal_id>."
 
-#: src/alfred/cli/plugin.py:304 src/alfred/cli/plugin.py:307
+#: src/alfred/cli/plugin.py:309 src/alfred/cli/plugin.py:312
 msgid "cli.plugin.grant.usage_error"
 msgstr ""
 "Usage: alfred plugin grant <plugin_id> <subscriber_tier> <hookpoint>. "
 "Reserved subcommands: 'status <proposal_id>' and 'list [--pending]'."
 
-#: src/alfred/cli/plugin.py:346
+#: src/alfred/cli/plugin.py:351
 msgid "cli.plugin.grant.status.pending"
 msgstr ""
 "Proposal {proposal_id} is pending reviewer approval. Branch: {branch}. "
 "Full status (pending / approved / denied / not_found) lands once the "
 "Postgres plugin_grants projection is wired (PR-S3-7)."
 
-#: src/alfred/cli/plugin.py:362
+#: src/alfred/cli/plugin.py:367
 msgid "cli.plugin.grant.list.empty"
 msgstr ""
 "No grants to display. Pending-proposal listing reads from the state.git "
 "branch index + Postgres plugin_grants projection; both surfaces fully "
 "land in PR-S3-7."
 
-#: src/alfred/cli/plugin.py:367
+#: src/alfred/cli/plugin.py:372
 msgid "cli.plugin.grant.list.column.plugin_id"
 msgstr "plugin_id"
 
-#: src/alfred/cli/plugin.py:368
+#: src/alfred/cli/plugin.py:373
 msgid "cli.plugin.grant.list.column.subscriber_tier"
 msgstr "tier"
 
-#: src/alfred/cli/plugin.py:369
+#: src/alfred/cli/plugin.py:374
 msgid "cli.plugin.grant.list.column.hookpoint"
 msgstr "hookpoint"
 
-#: src/alfred/cli/plugin.py:370
+#: src/alfred/cli/plugin.py:375
 msgid "cli.plugin.grant.list.column.status"
 msgstr "status"
 
-#: src/alfred/cli/plugin.py:387
+#: src/alfred/cli/plugin.py:392
 msgid "cli.plugin.revoke.help.short"
 msgstr "Queue a reviewer-gated revocation proposal for a plugin's grants."
 
-#: src/alfred/cli/plugin.py:392
+#: src/alfred/cli/plugin.py:397
 msgid "cli.plugin.revoke.arg.plugin_id"
 msgstr "Plugin id whose grants will be revoked."
 
-#: src/alfred/cli/plugin.py:482
+#: src/alfred/cli/plugin.py:493
 msgid "cli.plugin.list.help.short"
 msgstr "List every plugin registered in the Postgres manifest projection."
 
-#: src/alfred/cli/plugin.py:500
+#: src/alfred/cli/plugin.py:511
 msgid "cli.plugin.list.not_implemented_yet"
 msgstr ""
 "alfred plugin list is not yet implemented. Pulls the manifest projection "
 "from Postgres once RealGate is seeded (PR-S3-7). Until then, inspect "
 "plugins via the plugin manifest files under plugins/."
 
-#: src/alfred/cli/plugin.py:504
+#: src/alfred/cli/plugin.py:515
 msgid "cli.plugin.show.help.short"
 msgstr "Show manifest details for a registered plugin."
 
-#: src/alfred/cli/plugin.py:509
+#: src/alfred/cli/plugin.py:520
 msgid "cli.plugin.show.arg.plugin_id"
 msgstr "Plugin id to inspect."
 
-#: src/alfred/cli/plugin.py:525
+#: src/alfred/cli/plugin.py:536
 msgid "cli.plugin.show.plugin_id_label"
 msgstr "plugin_id: {plugin_id}"
 
-#: src/alfred/cli/plugin.py:526
+#: src/alfred/cli/plugin.py:537
 msgid "cli.plugin.show.no_manifest_yet"
 msgstr ""
 "No manifest data available yet. The Postgres manifest projection lands in"
 " PR-S3-7; until then, inspect the plugin's manifest.toml under plugins/ "
 "directly."
 
-#: src/alfred/cli/plugin.py:550
+#: src/alfred/cli/plugin.py:561
 msgid "cli.plugin.grant.denied"
 msgstr "alfred plugin grant denied: {reason}"
 
-#: src/alfred/cli/plugin.py:551
+#: src/alfred/cli/plugin.py:562
 msgid "cli.plugin.grant.pending_review"
 msgstr ""
 "Grant proposal queued for reviewer approval.\n"
@@ -585,11 +585,11 @@ msgstr ""
 "approves the proposal and the supervisor rebuilds the capability "
 "projection."
 
-#: src/alfred/cli/plugin.py:552
+#: src/alfred/cli/plugin.py:563
 msgid "cli.plugin.revoke.denied"
 msgstr "alfred plugin revoke denied: {reason}"
 
-#: src/alfred/cli/plugin.py:553
+#: src/alfred/cli/plugin.py:564
 msgid "cli.plugin.revoke.pending_review"
 msgstr ""
 "Revocation proposal queued for reviewer approval.\n"
@@ -600,7 +600,7 @@ msgstr ""
 
 # PR-S3-6 Component E — alfred supervisor sub-app (status read-only,
 # reset --confirm gate). T1-tier per spec §10.8.
-#: src/alfred/cli/supervisor.py:35
+#: src/alfred/cli/supervisor.py:37
 msgid "cli.supervisor.help"
 msgstr ""
 "Inspect supervised components, queue circuit-breaker resets for reviewer "
@@ -610,7 +610,7 @@ msgstr ""
 # the schema is not initialised (``circuit_breakers`` does not exist).
 # Routes to a dedicated key naming the remediation rather than dumping
 # a raw SQLAlchemy traceback at an operator.
-#: src/alfred/cli/supervisor.py:329 src/alfred/cli/supervisor.py:796
+#: src/alfred/cli/supervisor.py:385 src/alfred/cli/supervisor.py:850
 msgid "cli.supervisor.status.schema_not_initialised"
 msgstr ""
 "Database schema not initialised. Run: alfred-stack migrate (or `alembic "
@@ -621,8 +621,8 @@ msgstr ""
 # (stack-down vs URL-wrong vs auth-failed vs restarting) so the hint
 # names a concrete action for each common cause rather than collapsing
 # everything to "check the stack".
-#: src/alfred/cli/supervisor.py:336 src/alfred/cli/supervisor.py:345
-#: src/alfred/cli/supervisor.py:799
+#: src/alfred/cli/supervisor.py:392 src/alfred/cli/supervisor.py:401
+#: src/alfred/cli/supervisor.py:853
 msgid "cli.supervisor.status.postgres_unavailable"
 msgstr ""
 "Cannot reach the Alfred Postgres database.\n"
@@ -636,33 +636,33 @@ msgstr ""
 "If none of the above, check the supervisor logs for the underlying\n"
 "SQLSTATE class."
 
-#: src/alfred/cli/supervisor.py:348
+#: src/alfred/cli/supervisor.py:404
 msgid "cli.supervisor.status.no_components_yet"
 msgstr ""
 "No supervised components registered yet. The supervisor writes the first "
 "row to the `circuit_breakers` table when a plugin loads — wait for the "
 "orchestrator to boot a component, then re-run `alfred supervisor status`."
 
-#: src/alfred/cli/supervisor.py:378
+#: src/alfred/cli/supervisor.py:434
 msgid "cli.supervisor.status.column.state"
 msgstr "STATE"
 
-#: src/alfred/cli/supervisor.py:379
+#: src/alfred/cli/supervisor.py:435
 msgid "cli.supervisor.status.column.trip_count"
 msgstr "TRIP COUNT"
 
-#: src/alfred/cli/supervisor.py:382 src/alfred/cli/supervisor.py:397
+#: src/alfred/cli/supervisor.py:438 src/alfred/cli/supervisor.py:453
 msgid "cli.supervisor.status.column.component"
 msgstr "COMPONENT"
 
-#: src/alfred/cli/supervisor.py:391 src/alfred/cli/supervisor.py:400
+#: src/alfred/cli/supervisor.py:447 src/alfred/cli/supervisor.py:456
 msgid "cli.supervisor.status.column.last_trip_at"
 msgstr "LAST TRIP"
 
 # CR-156 round-7 MEDIUM #14: freshness footer printed after the status
 # table. Surfaces the staleness model inline so operators don't need
 # to consult the runbook to know how current the data is.
-#: src/alfred/cli/supervisor.py:432
+#: src/alfred/cli/supervisor.py:488
 msgid "cli.supervisor.status.freshness_footer"
 msgstr ""
 "Snapshot reflects the supervisor's last save_to_db write (typically <=1 "
@@ -673,7 +673,7 @@ msgstr ""
 # unreachable OR schema not initialised. The primary status surface
 # (the breaker table) already rendered, so we surface the footer's
 # unavailability instead of crashing the whole status command.
-#: src/alfred/cli/supervisor.py:456
+#: src/alfred/cli/supervisor.py:512
 msgid "cli.supervisor.status.dispatch_footer_unavailable"
 msgstr ""
 "Recent proposal dispatch (last hour): unavailable. Check supervisor logs "
@@ -686,7 +686,7 @@ msgstr ""
 # was always 0 (the loop is monotonically forward — a merged blob
 # either appears in the ledger or has not yet been walked); dropped
 # until a meaningful pending-count surface lands.
-#: src/alfred/cli/supervisor.py:465
+#: src/alfred/cli/supervisor.py:521
 msgid "cli.supervisor.status.dispatch_footer"
 msgstr "Recent proposal dispatch (last hour): {applied} applied, {failed} failed."
 
@@ -694,11 +694,11 @@ msgstr "Recent proposal dispatch (last hour): {applied} applied, {failed} failed
 # intent for code readers; this key surfaces on the `--help` operator
 # surface. The deferred-to-#171 stopgap is tombstoned now that the
 # dispatcher ships in the same PR.
-#: src/alfred/cli/supervisor.py:472
+#: src/alfred/cli/supervisor.py:528
 msgid "cli.supervisor.reset.help.short"
 msgstr "Reset a circuit breaker. Writes a reviewer-gated state.git proposal."
 
-#: src/alfred/cli/supervisor.py:474
+#: src/alfred/cli/supervisor.py:530
 msgid "cli.supervisor.reset.usage"
 msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 
@@ -706,7 +706,7 @@ msgstr "Component id (e.g. quarantined-llm) whose circuit breaker to reset."
 # writes a real state.git proposal (the no-op stopgap from #154 was
 # only justified while the underlying reset was deferred), so explicit
 # confirmation is meaningful again.
-#: src/alfred/cli/supervisor.py:484
+#: src/alfred/cli/supervisor.py:540
 msgid "cli.supervisor.reset.confirm_help"
 msgstr ""
 "Required: confirm the reset request. Writes a reviewer-gated state.git "
@@ -715,17 +715,17 @@ msgstr ""
 # ADR-0021 #171: emitted when --confirm is absent. The flag is now a
 # real gate (partial revert of #154 BLOCKER #6 no-op semantic) because
 # the underlying reset performs actual state mutation.
-#: src/alfred/cli/supervisor.py:518
+#: src/alfred/cli/supervisor.py:574
 msgid "cli.supervisor.reset.confirm_required"
 msgstr ""
 "alfred supervisor reset requires --confirm to write the state.git "
 "proposal. Re-run with --confirm to queue the reset for reviewer approval."
 
-#: src/alfred/cli/supervisor.py:584
+#: src/alfred/cli/supervisor.py:638
 msgid "cli.supervisor.reset.denied"
 msgstr "alfred supervisor reset denied: {reason}"
 
-#: src/alfred/cli/supervisor.py:586
+#: src/alfred/cli/supervisor.py:640
 msgid "cli.supervisor.reset.proposal_submitted"
 msgstr ""
 "Circuit-breaker reset for {component} queued for reviewer approval.\n"
@@ -739,20 +739,20 @@ msgstr ""
 # CR-rework round-2 follow-up: localise the two parser-error messages
 # emitted from :func:`_parse_duration` so the operator-facing surface
 # stays consistent across locales (CLAUDE.md i18n hard rule #1).
-#: src/alfred/cli/supervisor.py:730
+#: src/alfred/cli/supervisor.py:784
 msgid "cli.supervisor.proposals.since_invalid"
 msgstr ""
 "Invalid --since value: {value}. Expected a unit-suffixed duration like "
 "{example}."
 
-#: src/alfred/cli/supervisor.py:737
+#: src/alfred/cli/supervisor.py:791
 msgid "cli.supervisor.proposals.since_must_be_positive"
 msgstr "Invalid --since value: {value}. Duration must be positive."
 
 # ADR-0021 #171: ``alfred supervisor proposals`` subcommand. Lists
 # recently-processed state.git side-effecting dispatch outcomes; the
 # canonical operator surface for "what did the dispatcher do?".
-#: src/alfred/cli/supervisor.py:741
+#: src/alfred/cli/supervisor.py:795
 msgid "cli.supervisor.proposals.help.short"
 msgstr "List recent state.git side-effecting dispatch results."
 
@@ -760,7 +760,7 @@ msgstr "List recent state.git side-effecting dispatch results."
 # binary ``--recent`` flag so operators can scope to arbitrary
 # windows (1h / 24h / 7d). Default 1h preserves the previous
 # ``--recent`` semantic.
-#: src/alfred/cli/supervisor.py:747
+#: src/alfred/cli/supervisor.py:801
 msgid "cli.supervisor.proposals.since_help"
 msgstr ""
 "Scope to dispatches processed within DURATION (e.g. 1h, 24h, 7d). Default"
@@ -769,18 +769,18 @@ msgstr ""
 # CR rework round-1 HIGH #13: paginate the listing. ``--all`` is
 # the escape hatch when an operator wants every row in the ledger
 # (e.g. forensic export).
-#: src/alfred/cli/supervisor.py:754
+#: src/alfred/cli/supervisor.py:808
 msgid "cli.supervisor.proposals.limit_help"
 msgstr "Maximum rows to render. Default 20. Ignored when --all is passed."
 
-#: src/alfred/cli/supervisor.py:762
+#: src/alfred/cli/supervisor.py:816
 msgid "cli.supervisor.proposals.all_help"
 msgstr "Render every row in the ledger; ignores --limit and --since."
 
 # CR-rework round-2 follow-up: ``--all`` disables the time filter, so
 # the ``--since`` window text from ``empty`` would mislead the
 # operator. Distinct empty-state body omits the window.
-#: src/alfred/cli/supervisor.py:813
+#: src/alfred/cli/supervisor.py:867
 msgid "cli.supervisor.proposals.empty_all"
 msgstr ""
 "No proposals to display. The supervisor's dispatch loop polls every "
@@ -789,41 +789,41 @@ msgstr ""
 # CR rework round-1 HIGH #13: empty-state body includes the
 # dispatch-cycle interval so the operator knows how long to wait
 # before re-checking after a proposal merges.
-#: src/alfred/cli/supervisor.py:817
+#: src/alfred/cli/supervisor.py:871
 msgid "cli.supervisor.proposals.empty"
 msgstr ""
 "No proposals to display in the {since} window. The supervisor's dispatch "
 "loop polls every {interval}s; re-run after the next cycle if a proposal "
 "has just merged."
 
-#: src/alfred/cli/supervisor.py:825
+#: src/alfred/cli/supervisor.py:879
 msgid "cli.supervisor.proposals.column.proposal_type"
 msgstr "TYPE"
 
-#: src/alfred/cli/supervisor.py:826
+#: src/alfred/cli/supervisor.py:880
 msgid "cli.supervisor.proposals.column.proposal_id"
 msgstr "ID"
 
-#: src/alfred/cli/supervisor.py:827
+#: src/alfred/cli/supervisor.py:881
 msgid "cli.supervisor.proposals.column.result"
 msgstr "RESULT"
 
-#: src/alfred/cli/supervisor.py:828
+#: src/alfred/cli/supervisor.py:882
 msgid "cli.supervisor.proposals.column.failure_kind"
 msgstr "FAILURE"
 
-#: src/alfred/cli/supervisor.py:829
+#: src/alfred/cli/supervisor.py:883
 msgid "cli.supervisor.proposals.column.operator_user_id"
 msgstr "OPERATOR"
 
-#: src/alfred/cli/supervisor.py:830
+#: src/alfred/cli/supervisor.py:884
 msgid "cli.supervisor.proposals.column.processed_at"
 msgstr "PROCESSED AT"
 
 # CR rework round-1 HIGH #13: closed-vocab legend for the ``result``
 # column. Helps operators decode the four values without consulting
 # the runbook on the on-call channel.
-#: src/alfred/cli/supervisor.py:847
+#: src/alfred/cli/supervisor.py:901
 msgid "cli.supervisor.proposals.legend"
 msgstr ""
 "Result values: applied (handler ran cleanly), failed_handler (handler "
@@ -957,7 +957,7 @@ msgstr ""
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
 #: src/alfred/cli/daemon/_commands.py:498
-#: src/alfred/i18n/_slice_4_reserve.py:84
+#: src/alfred/i18n/_slice_4_reserve.py:91
 msgid "daemon.boot.environment_not_set"
 msgstr ""
 "Settings.environment is not set. Refusing to boot — production refuses "
@@ -966,7 +966,7 @@ msgstr ""
 "start`."
 
 #: src/alfred/cli/daemon/_commands.py:549
-#: src/alfred/i18n/_slice_4_reserve.py:85
+#: src/alfred/i18n/_slice_4_reserve.py:92
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in a production environment. "
@@ -974,7 +974,7 @@ msgstr ""
 "daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:560
-#: src/alfred/i18n/_slice_4_reserve.py:86
+#: src/alfred/i18n/_slice_4_reserve.py:93
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
 "bin/alfred-plugin-launcher.sh does not resolve per-plugin policies. "
@@ -983,7 +983,7 @@ msgstr ""
 "`alfred daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:576
-#: src/alfred/i18n/_slice_4_reserve.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:94
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
 "PoliciesSnapshotRef initialisation failed: {detail}. Refusing to boot. "
@@ -991,7 +991,7 @@ msgstr ""
 "start`."
 
 #: src/alfred/cli/daemon/_commands.py:590
-#: src/alfred/i18n/_slice_4_reserve.py:88
+#: src/alfred/i18n/_slice_4_reserve.py:95
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
 "Capability-gate handshake failed: {detail}. Refusing to boot. Check "
@@ -999,7 +999,7 @@ msgstr ""
 "daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:658
-#: src/alfred/i18n/_slice_4_reserve.py:90
+#: src/alfred/i18n/_slice_4_reserve.py:97
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
@@ -1015,7 +1015,7 @@ msgstr ""
 "Nothing to stop."
 
 #: src/alfred/cli/daemon/_commands.py:714
-#: src/alfred/i18n/_slice_4_reserve.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:98
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
@@ -1030,7 +1030,7 @@ msgstr ""
 "running (stale pidfile). The daemon is not running."
 
 #: src/alfred/cli/daemon/_commands.py:740
-#: src/alfred/i18n/_slice_4_reserve.py:92
+#: src/alfred/i18n/_slice_4_reserve.py:99
 msgid "daemon.status.template"
 msgstr ""
 "Daemon PID {pid}\n"
@@ -1410,7 +1410,6 @@ msgstr "Run `alfred logout` to clear the bad file, then `alfred login`."
 msgid "operator_session.refused.resolver_timeout.recovery"
 msgstr "Re-run the command; if it persists, check `alfred status`."
 
-# Supervisor reset refusals (PR-S4-5 + Slice-3 reset gating).
 #: src/alfred/i18n/_slice_4_reserve.py:80
 msgid "supervisor.breaker.reset.refused.not_logged_in"
 msgstr ""
@@ -1423,99 +1422,116 @@ msgstr ""
 "Operator {user} lacks the required permissions to reset the supervisor "
 "breaker."
 
-#: src/alfred/i18n/_slice_4_reserve.py:89
+# Reviewer-gated CLI operator-attribution refusals (PR-S4-5 #153).
+#: src/alfred/i18n/_slice_4_reserve.py:85
+msgid "cli.config.set.refused.not_logged_in"
+msgstr "Cannot queue a config change without an active operator session."
+
+#: src/alfred/i18n/_slice_4_reserve.py:86
+msgid "cli.config.set.refused.not_logged_in.recovery"
+msgstr "Run `alfred login` first, then re-run the command."
+
+#: src/alfred/i18n/_slice_4_reserve.py:87
+msgid "cli.plugin.grant.refused.not_logged_in"
+msgstr "Cannot queue a plugin grant/revoke without an active operator session."
+
+#: src/alfred/i18n/_slice_4_reserve.py:88
+msgid "cli.plugin.grant.refused.not_logged_in.recovery"
+msgstr "Run `alfred login` first, then re-run the command."
+
+#: src/alfred/i18n/_slice_4_reserve.py:96
 msgid "daemon.boot.audit_hash_pepper_missing"
 msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
 "it. Refusing to boot."
 
 # Sandbox refusal reasons (PR-S4-6 launcher).
-#: src/alfred/i18n/_slice_4_reserve.py:95
+#: src/alfred/i18n/_slice_4_reserve.py:102
 msgid "supervisor.sandbox.refused.policy_ref_missing"
 msgstr ""
 "Plugin {plugin_id} declares sandbox kind=full but has no policy_ref for "
 "{host_os}. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:96
+#: src/alfred/i18n/_slice_4_reserve.py:103
 msgid "supervisor.sandbox.refused.policy_ref_os_mismatch"
 msgstr ""
 "Plugin {plugin_id} policy_ref points to a {policy_os} policy on a "
 "{host_os} host. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:97
+#: src/alfred/i18n/_slice_4_reserve.py:104
 msgid "supervisor.sandbox.refused.policy_ref_unreadable"
 msgstr ""
 "Plugin {plugin_id} policy_ref at {policy_ref} is unreadable. Refusing to "
 "launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:98
+#: src/alfred/i18n/_slice_4_reserve.py:105
 msgid "supervisor.sandbox.refused.sandbox_block_missing"
 msgstr ""
 "Plugin {plugin_id} manifest is missing the [sandbox] block. Refusing to "
 "launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:99
+#: src/alfred/i18n/_slice_4_reserve.py:106
 msgid "supervisor.sandbox.refused.windows_stub_in_production"
 msgstr ""
 "Plugin {plugin_id} resolves to the Windows stub policy in production. "
 "Refusing to launch — Windows requires WSL2 per spec §7.7."
 
-#: src/alfred/i18n/_slice_4_reserve.py:100
+#: src/alfred/i18n/_slice_4_reserve.py:107
 msgid "supervisor.sandbox.unsandboxed_refused_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in production. Refusing to "
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:103 src/alfred/policies/watcher.py:377
+#: src/alfred/i18n/_slice_4_reserve.py:110 src/alfred/policies/watcher.py:377
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
-#: src/alfred/i18n/_slice_4_reserve.py:104 src/alfred/policies/watcher.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:111 src/alfred/policies/watcher.py:87
 msgid "supervisor.config_reload.rejected.parse_failure"
 msgstr ""
 "config/policies.yaml reload rejected: parse failure ({detail}). Live "
 "snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:105 src/alfred/policies/watcher.py:89
+#: src/alfred/i18n/_slice_4_reserve.py:112 src/alfred/policies/watcher.py:89
 msgid "supervisor.config_reload.rejected.high_blast_change"
 msgstr ""
 "config/policies.yaml reload rejected: {key} is a high-blast key and "
 "requires reviewer-gate."
 
-#: src/alfred/i18n/_slice_4_reserve.py:106 src/alfred/policies/watcher.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:113 src/alfred/policies/watcher.py:91
 msgid "supervisor.config_reload.rejected.validation_failure"
 msgstr ""
 "config/policies.yaml reload rejected: validation failed for {detail}. "
 "Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:107 src/alfred/policies/watcher.py:93
+#: src/alfred/i18n/_slice_4_reserve.py:114 src/alfred/policies/watcher.py:93
 msgid "supervisor.config_reload.rejected.file_vanished"
 msgstr ""
 "config/policies.yaml vanished between stat and read. Live snapshot "
 "retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:108 src/alfred/policies/watcher.py:95
+#: src/alfred/i18n/_slice_4_reserve.py:115 src/alfred/policies/watcher.py:95
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:109 src/alfred/policies/watcher.py:97
+#: src/alfred/i18n/_slice_4_reserve.py:116 src/alfred/policies/watcher.py:97
 msgid "supervisor.config_reload.rejected.audit_write_failed"
 msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:110 src/alfred/policies/watcher.py:506
+#: src/alfred/i18n/_slice_4_reserve.py:117 src/alfred/policies/watcher.py:506
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:111 src/alfred/policies/watcher.py:523
+#: src/alfred/i18n/_slice_4_reserve.py:118 src/alfred/policies/watcher.py:523
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
-#: src/alfred/i18n/_slice_4_reserve.py:113 src/alfred/policies/watcher.py:489
+#: src/alfred/i18n/_slice_4_reserve.py:120 src/alfred/policies/watcher.py:489
 msgid "policies.watcher.fallback_write_failed"
 msgstr ""
 "PolicyWatcher could not write the rejected-config fallback sink at "
@@ -1523,7 +1539,7 @@ msgstr ""
 " continues; fix the state directory."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/i18n/_slice_4_reserve.py:116
+#: src/alfred/i18n/_slice_4_reserve.py:123
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat requires the AlfredOS daemon to be running. Start it with "
