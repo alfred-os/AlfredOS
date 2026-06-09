@@ -118,9 +118,13 @@ def _spawn_with_fd3(
         cwd=str(_REPO_ROOT),
     )
     os.close(read_fd)
-    os.write(write_fd, struct.pack(">I", len(key)))
-    os.write(write_fd, key)
-    os.close(write_fd)
+    # CR #229 R2 finding-7: if os.write raises (e.g. EPIPE when the launcher
+    # dies early), write_fd would leak. try/finally guarantees the close.
+    try:
+        os.write(write_fd, struct.pack(">I", len(key)))
+        os.write(write_fd, key)
+    finally:
+        os.close(write_fd)
     stdout, stderr = proc.communicate(timeout=30)
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 

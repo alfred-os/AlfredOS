@@ -25,6 +25,11 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 
+# CR #229 R2 finding-6 (must-fix): a hung launcher must fail THIS test fast
+# rather than stall the whole job. ``subprocess.run`` kills the child on
+# timeout and re-raises ``TimeoutExpired``, surfacing as a test error.
+_LAUNCHER_TIMEOUT_S = 30.0
+
 
 @dataclass(frozen=True)
 class LauncherResult:
@@ -86,6 +91,7 @@ def launcher_chain_fixture(
             text=True,
             env=_launcher_env(_REPO_ROOT, extra),
             check=False,
+            timeout=_LAUNCHER_TIMEOUT_S,
         )
         return LauncherResult(proc.returncode, proc.stdout, proc.stderr)
 
