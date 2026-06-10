@@ -42,9 +42,24 @@ class CommsHandlerFailedError(CommsMcpError):
     """
 
 
+class PromoterRequiredError(CommsMcpError):
+    """An adapter kind with a non-empty required-classifier set got no promoter.
+
+    M2 fail-closed guard. ``REQUIRED_CLASSIFIERS_BY_KIND`` for the inbound's
+    adapter kind is non-empty (e.g. ``"discord"`` requires
+    ``discord_sub_payloads``), so the host MUST promote sub-payloads host-side
+    before the quarantined extract. A ``None`` promoter on that path would
+    silently skip promotion and fall back to trusting the wire-asserted
+    ``sub_payload_refs`` — exactly the untrusted-input-trust the classifier
+    set exists to prevent. ``process_inbound_message`` audits and raises this
+    rather than processing the message, so the misconfiguration fails closed.
+    """
+
+
 __all__ = [
     "CommsHandlerFailedError",
     "CommsMcpError",
     "InboundBurstDroppedError",
+    "PromoterRequiredError",
     "UnknownAdapterKindError",
 ]
