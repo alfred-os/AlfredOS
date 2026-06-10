@@ -55,7 +55,8 @@ async def test_concurrent_emits_do_not_interleave(monkeypatch: pytest.MonkeyPatc
     sink = StdoutNotificationSink()
 
     frames = [
-        notification_frame("inbound.message", {"seq": n, "body": "x" * 40}) for n in range(_EMIT_COUNT)
+        notification_frame("inbound.message", {"seq": n, "body": "x" * 40})
+        for n in range(_EMIT_COUNT)
     ]
 
     async with asyncio.TaskGroup() as tg:
