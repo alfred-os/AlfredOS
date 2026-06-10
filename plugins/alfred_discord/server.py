@@ -34,6 +34,7 @@ from typing import Any, Final
 
 import structlog
 
+from alfred.comms_mcp.plugin_logging import configure_stderr_json_logging
 from alfred.comms_mcp.protocol import OutboundMessageRequest
 from plugins.alfred_discord.crash_emitter import CrashEmitter
 from plugins.alfred_discord.discord_gateway import AlfredDiscordBot
@@ -287,7 +288,13 @@ def _build_server(
 
 
 async def serve() -> None:  # pragma: no cover - process entrypoint
-    """Run the adapter's stdio loop, forwarding an uncaught crash to the emitter."""
+    """Run the adapter's stdio loop, forwarding an uncaught crash to the emitter.
+
+    Structlog is pinned to stderr-JSON before the loop (review F4) so stdout
+    carries ONLY line-delimited JSON-RPC frames — a stray console-rendered log
+    line on stdout would interleave with the wire frames the host reads.
+    """
+    configure_stderr_json_logging()
     sink = StdoutNotificationSink()
     server = _build_server(sink)
     crash = CrashEmitter(adapter_id=_ADAPTER_ID, sink=sink)
