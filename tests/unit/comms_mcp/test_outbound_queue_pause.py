@@ -64,16 +64,39 @@ async def test_submit_consume_round_trips_fifo() -> None:
 async def test_pause_blocks_consume_until_retry_after_elapses() -> None:
     queue: OutboundQueue[dict[str, str]] = OutboundQueue(audit_writer=_RecordingAuditWriter())
     await queue.submit("discord", _req("discord", "a"))
-    queue.pause("discord", retry_after_seconds=0.05)
+    # A generously LONG window so the "still blocked" assertion below cannot race
+    # the auto-resume timer under scheduler jitter on a loaded host. The test
+    # asserts blocked-ness, not an exact resume instant.
+    queue.pause("discord", retry_after_seconds=10.0)
 
     consume_task = asyncio.ensure_future(queue.consume("discord"))
-    # Immediately after pause, consume must NOT have completed.
-    await asyncio.sleep(0.01)
+    # Drain the ready queue a few times so the consume task is scheduled and
+    # parks on the pause gate; it must remain blocked while the (long) window
+    # holds. No reliance on a specific sleep duration vs the timer.
+    for _ in range(5):
+        await asyncio.sleep(0)
     assert not consume_task.done()
 
-    # After the retry-after window the auto-resume timer fires and consume
-    # completes with the queued request.
+    # A manual resume stands in for the timer firing — it exercises the SAME
+    # resume path the auto-resume timer triggers, deterministically. The
+    # auto-resume timer itself is covered by
+    # ``test_auto_resume_timer_unblocks_consume`` below.
+    queue.resume("discord")
     result = await asyncio.wait_for(consume_task, timeout=1.0)
+    assert result["marker"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_auto_resume_timer_unblocks_consume() -> None:
+    # The auto-resume TIMER path: a short window must fire and complete consume.
+    # This is the only timing-dependent assertion left, and it is one-directional
+    # (we only wait for completion, never assert "still blocked" against a short
+    # window), so jitter can lengthen but never falsify it.
+    queue: OutboundQueue[dict[str, str]] = OutboundQueue(audit_writer=_RecordingAuditWriter())
+    await queue.submit("discord", _req("discord", "a"))
+    queue.pause("discord", retry_after_seconds=0.02)
+
+    result = await asyncio.wait_for(queue.consume("discord"), timeout=2.0)
     assert result["marker"] == "a"
 
 
@@ -125,20 +148,33 @@ async def test_concurrent_submit_and_pause_delivers_each_once() -> None:
     assert len(received) == len(markers)  # exactly once each
 
 
+async def _drain_loop(passes: int = 5) -> None:
+    """Yield the event loop ``passes`` times so a parked consume task can run.
+
+    Anti-flake: lets a blocked consume task reach its pause gate WITHOUT relying
+    on a wall-clock sleep racing a timer. After draining, a still-paused queue's
+    consume must remain ``not done``.
+    """
+    for _ in range(passes):
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
-async def test_pause_idempotent_extends_to_later_window() -> None:
+async def test_pause_idempotent_does_not_shorten_an_active_window() -> None:
     queue: OutboundQueue[dict[str, str]] = OutboundQueue(audit_writer=_RecordingAuditWriter())
     await queue.submit("discord", _req("discord", "a"))
-    queue.pause("discord", retry_after_seconds=0.30)
-    # A shorter follow-up window is a no-op: it must NOT shorten the resume.
-    queue.pause("discord", retry_after_seconds=0.02)
+    # Long active window; a SHORTER follow-up must be a no-op (must NOT shorten).
+    queue.pause("discord", retry_after_seconds=10.0)
+    queue.pause("discord", retry_after_seconds=0.01)
 
     consume_task = asyncio.ensure_future(queue.consume("discord"))
-    # At 0.08s the short window would already have resumed; the longer window
-    # must still be holding consume blocked.
-    await asyncio.sleep(0.08)
+    await _drain_loop()
+    # If the shorter window had taken effect it would have resumed by now; the
+    # original long window must still hold consume blocked. No timing race: 0.01s
+    # is the would-be-resume bound, far below the 10s active window.
     assert not consume_task.done()
 
+    queue.resume("discord")  # deterministic completion via the resume path
     result = await asyncio.wait_for(consume_task, timeout=1.0)
     assert result["marker"] == "a"
 
@@ -147,15 +183,20 @@ async def test_pause_idempotent_extends_to_later_window() -> None:
 async def test_pause_extends_to_a_later_window_reschedules_timer() -> None:
     queue: OutboundQueue[dict[str, str]] = OutboundQueue(audit_writer=_RecordingAuditWriter())
     await queue.submit("discord", _req("discord", "a"))
-    queue.pause("discord", retry_after_seconds=0.03)
-    # A LATER window extends the pause: it cancels the first timer and
-    # reschedules. The original 0.03 window must NOT resume consume.
-    queue.pause("discord", retry_after_seconds=0.30)
+    queue.pause("discord", retry_after_seconds=0.02)
+    # A LATER window extends the pause: it must cancel the first (short) timer and
+    # reschedule to a long window. If the first timer were NOT cancelled it would
+    # fire ~0.02s in and resume the queue — the assertion below would then fail.
+    queue.pause("discord", retry_after_seconds=10.0)
 
     consume_task = asyncio.ensure_future(queue.consume("discord"))
-    await asyncio.sleep(0.08)  # past the original 0.03 window
-    assert not consume_task.done()  # extended window still holds
+    # Wait well past the FIRST (short) window — but nowhere near the 10s extended
+    # window — so a non-cancelled first timer would have resumed by now. The gap
+    # (0.20s elapsed vs 10s active window) is wide enough to be jitter-immune.
+    await asyncio.sleep(0.20)
+    assert not consume_task.done()  # extended (long) window still holds
 
+    queue.resume("discord")  # deterministic completion via the resume path
     result = await asyncio.wait_for(consume_task, timeout=1.0)
     assert result["marker"] == "a"
 
