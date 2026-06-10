@@ -81,6 +81,52 @@ async def test_no_rescanner_preserves_legacy_consume() -> None:
 
 
 @pytest.mark.asyncio
+async def test_every_backlog_message_rescanned_after_one_pause() -> None:
+    # H2: a single pause holds back the WHOLE backlog (N messages). On resume,
+    # EVERY message enqueued before the resume must be re-scanned — not just the
+    # first. The one-shot bool regressed here: only message 1 was rescanned and
+    # the planted secret in message 3 slipped out on resume.
+    rescanner = _StubRescanner()
+    queue: OutboundQueue[str] = OutboundQueue(
+        audit_writer=_NoAudit(), dlp_rescanner=rescanner.redactions_for
+    )
+    await queue.submit("discord", "benign one")
+    await queue.submit("discord", "benign two")
+    await queue.submit("discord", "sk-PLANTEDSECRET")  # the one a hot-reload now catches
+    queue.pause("discord", 0.01)
+    rescanner.strict = True  # hot-reload tightens the policy during the pause
+    queue.resume("discord")
+
+    # Messages 1 and 2 are clean and survive their re-scan.
+    assert await queue.consume("discord") == "benign one"
+    assert await queue.consume("discord") == "benign two"
+    # Message 3 carries the newly-prohibited secret: it MUST be rescanned and
+    # refused, proving the backlog beyond the first message is not bypassed.
+    with pytest.raises(OutboundResumeDlpBlockedError):
+        await queue.consume("discord")
+    # All three messages were actually handed to the rescanner.
+    assert rescanner.calls == ["benign one", "benign two", "sk-PLANTEDSECRET"]
+
+
+@pytest.mark.asyncio
+async def test_message_enqueued_after_resume_is_not_rescanned() -> None:
+    # The generation boundary is the resume: a message submitted AFTER resume is
+    # fresh (its construction-time scan still holds) and must not be rescanned.
+    rescanner = _StubRescanner()
+    queue: OutboundQueue[str] = OutboundQueue(
+        audit_writer=_NoAudit(), dlp_rescanner=rescanner.redactions_for
+    )
+    await queue.submit("discord", "before pause")
+    queue.pause("discord", 0.01)
+    queue.resume("discord")
+    await queue.submit("discord", "after resume")
+
+    assert await queue.consume("discord") == "before pause"  # rescanned
+    assert await queue.consume("discord") == "after resume"  # NOT rescanned
+    assert rescanner.calls == ["before pause"]
+
+
+@pytest.mark.asyncio
 async def test_rescan_runs_only_after_a_pause() -> None:
     rescanner = _StubRescanner()
     rescanner.strict = True

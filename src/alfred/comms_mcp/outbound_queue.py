@@ -74,15 +74,20 @@ class _AdapterState[RequestT]:
 
     __slots__ = (
         "cap",
-        "paused_since_last_consume",
+        "generation",
         "queue",
+        "rescan_through_generation",
         "resume_deadline",
         "resume_event",
         "timer",
     )
 
     def __init__(self, *, max_in_flight: int) -> None:
-        self.queue: asyncio.Queue[RequestT] = asyncio.Queue()
+        # comms-2 / H2: each item carries the resume-``generation`` it was
+        # enqueued under so EVERY message held back across a pause is re-scanned
+        # on resume — not just the first. The bare request is unwrapped at
+        # ``consume``; callers never see the stamp.
+        self.queue: asyncio.Queue[tuple[int, RequestT]] = asyncio.Queue()
         # The resume gate starts SET (running). ``pause`` clears it; ``resume``
         # (manual or timer-driven) sets it again.
         self.resume_event = asyncio.Event()
@@ -92,11 +97,16 @@ class _AdapterState[RequestT]:
         # when the adapter is running. Used to make ``pause`` extend-only.
         self.resume_deadline: float | None = None
         self.timer: asyncio.TimerHandle | None = None
-        # comms-2: set by ``pause``, cleared after the next ``consume`` re-scan.
-        # Bounds the defensive DLP re-scan to messages that actually waited
-        # through a pause (a never-paused message is unchanged since its
-        # construction-time scan and does not need re-scanning).
-        self.paused_since_last_consume = False
+        # comms-2 / H2: monotonically increasing generation, bumped on every
+        # resume. ``submit`` stamps the CURRENT generation onto each item;
+        # ``rescan_through_generation`` records the highest generation whose
+        # messages must still be re-scanned (i.e. were enqueued before the most
+        # recent resume). A message is re-scanned iff its stamped generation is
+        # ``<=`` this watermark — so the WHOLE backlog held through one pause is
+        # covered, while a message enqueued AFTER resume (a higher generation) is
+        # not.
+        self.generation = 0
+        self.rescan_through_generation = -1
 
 
 class OutboundQueue[RequestT]:
@@ -151,7 +161,9 @@ class OutboundQueue[RequestT]:
         """
         state = self._state(adapter_id)
         await state.cap.acquire()
-        await state.queue.put(request)
+        # Stamp the current resume-generation so ``consume`` knows whether this
+        # item waited through a pause (H2).
+        await state.queue.put((state.generation, request))
 
     async def consume(self, adapter_id: str) -> RequestT:
         """Return the next request for ``adapter_id`` in FIFO order.
@@ -162,14 +174,14 @@ class OutboundQueue[RequestT]:
         """
         state = self._state(adapter_id)
         await state.resume_event.wait()
-        request = await state.queue.get()
+        generation, request = await state.queue.get()
         state.cap.release()
-        # comms-2: a message that waited through a pause is re-scanned before
-        # re-emission so a policy hot-reload during the pause window cannot leak
-        # a now-prohibited secret. The flag is consumed (one re-scan gate per
-        # pause cycle); a never-paused message skips the scan entirely.
-        if state.paused_since_last_consume:
-            state.paused_since_last_consume = False
+        # comms-2 / H2: a message enqueued at or before the resume watermark
+        # waited through a pause and is re-scanned before re-emission, so a
+        # policy hot-reload during the pause window cannot leak a now-prohibited
+        # secret. EVERY such message is covered (not just the first), while a
+        # message enqueued after the resume (a higher generation) skips the scan.
+        if generation <= state.rescan_through_generation:
             self._rescan_or_refuse(adapter_id, request)
         return request
 
@@ -211,9 +223,6 @@ class OutboundQueue[RequestT]:
         if state.timer is not None:
             state.timer.cancel()
         state.resume_event.clear()
-        # comms-2: mark the adapter so the NEXT consume re-scans the message that
-        # waited through this pause (defensive against a hot-reload mid-pause).
-        state.paused_since_last_consume = True
         state.resume_deadline = new_deadline
         state.timer = loop.call_later(retry_after_seconds, self._auto_resume, adapter_id)
         _log.info(
@@ -241,11 +250,21 @@ class OutboundQueue[RequestT]:
 
     @staticmethod
     def _clear_pause(state: _AdapterState[RequestT]) -> None:
+        was_paused = not state.resume_event.is_set()
         if state.timer is not None:
             state.timer.cancel()
             state.timer = None
         state.resume_deadline = None
         state.resume_event.set()
+        # comms-2 / H2: if this resume actually ended a pause, EVERY message
+        # stamped with the generation that just ended (i.e. enqueued at or before
+        # this point) must be re-scanned on consume. Record the watermark at the
+        # current generation, then bump so messages submitted AFTER resume are a
+        # fresh generation and skip the re-scan. Guarded on ``was_paused`` so a
+        # redundant resume on a running adapter is a no-op (no spurious rescans).
+        if was_paused:
+            state.rescan_through_generation = state.generation
+            state.generation += 1
 
 
 __all__ = ["AuditWriterProtocol", "OutboundQueue", "OutboundResumeDlpBlockedError"]
