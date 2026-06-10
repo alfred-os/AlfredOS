@@ -31,8 +31,12 @@ The forbidden-prefix list is intentionally conservative:
   per-user buffer manager for the orchestrator.
 * ``alfred.orchestrator`` — pulls in supervisor + plugin chain.
 * ``alfred.budget`` — :class:`BudgetGuard` is a chat-graph-only seam.
-* ``alfred.comms.adapter`` — the comms adapter factory chain that
-  ``_chat_main`` needs but ``--help`` does not.
+* ``alfred.comms.adapter`` — the in-process comms adapter chain.
+  **Deleted in PR-S4-10 (#206)** by the comms-MCP flag-day; ``_chat_main``
+  now spawns the TUI plugin via the launcher and imports nothing under
+  ``alfred.comms``. Kept here as a PERMANENT FLOOR — a regression that
+  resurrects the in-process adapter on the ``--help`` path fails loudly
+  rather than silently re-adding the import cost.
 
 ``alfred.memory.models`` is **deliberately not in the list** because
 :class:`alfred.identity.models` (which the ``alfred user`` Typer surface

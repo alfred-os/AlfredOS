@@ -38,13 +38,14 @@ therefore driven through the real plugin inbound emitter in-process against the
 real host dispatcher — the identical strategy ``test_discord_addressing_modes``
 uses — while the launcher subprocess proves the spawn + stdio outbound contract.
 
-Foundation-gap note (launcher leg): the bare ``alfred_tui.server`` subprocess
-does not call :func:`alfred.cli._bootstrap.configure_logging`, so structlog runs
-its default console renderer and human-readable log lines interleave on stdout.
-The real host ``StdioTransport`` reads line-delimited JSON-RPC *frames*; this
-test's ``_read_or_skip`` mirrors that by discarding non-frame lines. Routing the
-plugin's logs to stderr (or wiring the JSON renderer in ``serve()``) is a
-Wave-1-owned production follow-up, out of scope for this Component-D gate.
+Launcher-leg note: ``alfred_tui.server.serve`` now pins structlog to
+stderr-JSON before its loop (review F4), so stdout carries only JSON-RPC
+frames. ``_read_or_skip`` still tolerates a stray non-frame line defensively
+(belt-and-braces against a future renderer change), but the channel is no
+longer expected to interleave logs. This leg is best-effort, NOT a CI gate:
+the TUI's ``sandbox.kind="none"`` launcher path uses ``runuser`` (root-only),
+which the non-root CI runner cannot exec, so it ``pytest.skip``s on CI and runs
+only on a privileged host (see ``docs/ci/required-checks.md``).
 
 Requires docker (testcontainer Postgres); skips cleanly without it.
 """
