@@ -4,6 +4,18 @@ This is the in-tree TUI adapter, rewritten from the Slice-1 in-process Textual
 app as an MCP-stdio plugin. The daemon spawns it via
 `bin/alfred-plugin-launcher.sh` when an operator runs `alfred chat`.
 
+> **Status (PR-S4-10): wire contract only — `alfred chat` is NOT yet functional
+> end-to-end.** This plugin ships the JSON-RPC **wire contract** (the four
+> ADR-0024 methods + the `AlfredTuiApp` Textual render layer). It does **not**
+> yet drive a real interactive session: `server.serve()` runs the JSON-RPC
+> stdio loop but never mounts the Textual app, so a launcher-spawned
+> `alfred chat` reads/writes wire frames and renders **no UI / accepts no
+> keystrokes**. The blocker is structural — Textual needs the PTY while the
+> daemon wire needs a side channel, and the two cannot share one stdin/stdout.
+> Co-hosting the app and moving the wire to a side channel is tracked as the
+> **PR-S4-11 graduation blocker, issue #237**; the Slice-4 graduation smoke must
+> drive a real keystroke→render turn before the slice graduates.
+
 ## Install
 
 Bundled with AlfredOS — operators do not install this manually.
