@@ -1,0 +1,79 @@
+"""Plugin → host JSON-RPC notification sink + frame builders (PR-S4-9 #206).
+
+The Discord adapter emits four plugin→host notifications over stdio
+(``inbound.message``, ``adapter.binding_request``, ``adapter.rate_limit_signal``,
+``adapter.crashed``). Each is a JSON-RPC *notification* — a ``{"jsonrpc": "2.0",
+"method": <name>, "params": {...}}`` frame with NO ``id`` (the host does not
+reply to a notification).
+
+This module owns the single :class:`NotificationSink` contract every emitter
+writes through, plus the frame builders that stamp the wire method names. The
+production sink writes one line-delimited JSON frame to ``sys.stdout`` (matching
+the host's line-delimited transport); the emitters are constructed with the sink
+so they hold no I/O global and are unit-testable with a recording double.
+
+The ``params`` payloads mirror the host-side ADR-0024 notification schemas in
+``alfred.comms_mcp.protocol`` (``RateLimitSignal`` / ``BindingRequestNotification``
+/ ``CrashedNotification`` / ``InboundMessageNotification``). The builders take an
+already-validated source model and emit its ``model_dump`` so a typo'd field
+surfaces host-side as a loud validation failure (the host re-parses the frame).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from collections.abc import Mapping
+from typing import Final, Protocol
+
+# Plugin -> host notification method names (ADR-0024 wire contract).
+NOTIFY_INBOUND: Final[str] = "inbound.message"
+NOTIFY_BINDING: Final[str] = "adapter.binding_request"
+NOTIFY_RATE_LIMIT: Final[str] = "adapter.rate_limit_signal"
+NOTIFY_CRASHED: Final[str] = "adapter.crashed"
+
+
+class NotificationSink(Protocol):
+    """An awaitable sink that writes one plugin→host notification frame.
+
+    Awaitable by contract (closure comms-3): an emitter that must block its
+    caller until the frame is fully accepted — e.g. the rate-limit signal that
+    has to land host-ward BEFORE any further outbound emit — ``await``\\s this.
+    """
+
+    async def emit(self, frame: Mapping[str, object]) -> None: ...
+
+
+def notification_frame(method: str, params: Mapping[str, object]) -> dict[str, object]:
+    """Build a JSON-RPC notification frame (no ``id``) for ``method`` + ``params``."""
+    return {"jsonrpc": "2.0", "method": method, "params": dict(params)}
+
+
+class StdoutNotificationSink:
+    """Production sink: write one line-delimited JSON frame to ``sys.stdout``.
+
+    The write runs in a thread so a blocked stdout pipe does not stall the event
+    loop; the flush is explicit so a frame is not buffered past a subsequent
+    ``sys.exit`` (the crash emitter relies on this to land its frame before the
+    process exits).
+    """
+
+    async def emit(self, frame: Mapping[str, object]) -> None:
+        await asyncio.to_thread(self._write, frame)
+
+    @staticmethod
+    def _write(frame: Mapping[str, object]) -> None:
+        sys.stdout.write(json.dumps(frame) + "\n")
+        sys.stdout.flush()
+
+
+__all__ = [
+    "NOTIFY_BINDING",
+    "NOTIFY_CRASHED",
+    "NOTIFY_INBOUND",
+    "NOTIFY_RATE_LIMIT",
+    "NotificationSink",
+    "StdoutNotificationSink",
+    "notification_frame",
+]
