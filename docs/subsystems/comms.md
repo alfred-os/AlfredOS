@@ -344,11 +344,20 @@ follow-up resumes rather than forks.
 The adapter manifest declares `[sandbox] kind = "full"` (sec-1): it ingests
 adversary-controlled bytes and runs under bwrap fs/namespace containment mirroring
 the quarantined LLM, plus a `/etc/ssl/certs` ro-bind for the Discord TLS chain.
-Egress is NOT yet kernel-enforced — the policy does not `unshare net` because the
-schema cannot yet express a Discord-only egress allowlist; the cap is deferred to
-issue #230 and documented in `config/sandbox/discord-adapter.*` + the manifest
-`[network] allowlist`. See [ADR-0016](../adr/0016-slice4-discord-tui-comms-mcp-rewrite.md)
-and [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md).
+
+Egress is NOT yet kernel-enforced: outbound is currently **UNRESTRICTED**
+(release-blocker `#230`), mirroring `config/sandbox/README.md` and the EGRESS note
+in `config/sandbox/discord-adapter.linux.bwrap.policy`. The policy does not yet
+run `--unshare-net` because the sandbox schema cannot express a Discord-only
+endpoint allowlist. The intended `#230` design — the mechanism this note will be
+updated to describe once landed — is: a `network.outbound_allowlist` field on the
+`kind = "full"` policy, enforced by running bwrap with `--unshare-net` plus a
+slirp/pasta-style filtered forwarder pinned to the Discord endpoints, so the
+kernel (not the manifest's advisory `[network] allowlist`) caps egress to
+Discord-only. The manifest `[network] allowlist` documents the intended endpoints
+today; `#230` makes the policy ENFORCE them at the kernel boundary. See
+[ADR-0016](../adr/0016-slice4-discord-tui-comms-mcp-rewrite.md) and
+[ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md).
 
 ### Rendering guidance for operator-facing audit rows (i18n-3)
 
@@ -359,5 +368,16 @@ datetimes (`received_at`, `recorded_at`) MUST render via
 so an operator in `fr`/`ja` sees locale-correct dates and numbers rather than
 machine ISO strings. The stored row stays machine-readable (ISO-8601 + raw
 numbers); the locale formatting is a presentation-layer concern applied at render
-time, not at write time. PR-S4-10's operator-facing surfaces own the assertions
-on this rendering.
+time, not at write time.
+
+This is a forward-dependency, not a narrative-only one. The same babel-formatting
+contract is already enforced for the CLI surface by PR-S4-5's
+`tests/unit/cli/test_whoami_command.py` (i18n-003 — `alfred whoami` asserts
+`babel.dates.format_datetime(dt, locale=user.language)` parity for `en`/`ja`).
+The comms audit-row rendering binds to the equivalent assertions on **PR-S4-10's
+operator-facing TUI surface**: per the
+[Slice-4 PR-S4-9 plan](../superpowers/plans/2026-06-07-slice-4-pr-s4-9-discord-mcp-adapter.md)
+acceptance criterion #13 (i18n-3) and its §6 "Rendering guidance", PR-S4-10's TUI
+formatting test(s) assert locale-correct rendering of `received_at` / `recorded_at`
+(via `format_datetime`) and `retry_after_seconds` (via `format_decimal`). Those
+TUI tests are the concrete check that closes this dependency.
