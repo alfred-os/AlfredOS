@@ -30,13 +30,28 @@ the queue itself never bypasses it with a silent path.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Protocol
 
 import structlog
 
+from alfred.comms_mcp.errors import CommsMcpError
+
 _log = structlog.get_logger(__name__)
 
 _DEFAULT_MAX_IN_FLIGHT_PER_ADAPTER = 32
+
+
+class OutboundResumeDlpBlockedError(CommsMcpError):
+    """A queued message was refused on resume because a re-scan now redacts it.
+
+    comms-2: ``pause``/``resume`` re-runs the outbound DLP scan defensively so a
+    policy hot-reload that tightened the rules during the pause window cannot let
+    a now-prohibited secret slip out on resume. Raised by :meth:`OutboundQueue.consume`
+    when the post-resume re-scan redacts content the original scan did not; the
+    host emits ``DLP_OUTBOUND_REFUSED_FIELDS(reason="dlp_post_resume_block")`` and
+    drops the message rather than emitting it.
+    """
 
 
 class AuditWriterProtocol(Protocol):
@@ -57,7 +72,14 @@ class _AdapterState[RequestT]:
     of these per adapter and never shares them across event loops.
     """
 
-    __slots__ = ("cap", "queue", "resume_deadline", "resume_event", "timer")
+    __slots__ = (
+        "cap",
+        "paused_since_last_consume",
+        "queue",
+        "resume_deadline",
+        "resume_event",
+        "timer",
+    )
 
     def __init__(self, *, max_in_flight: int) -> None:
         self.queue: asyncio.Queue[RequestT] = asyncio.Queue()
@@ -70,6 +92,11 @@ class _AdapterState[RequestT]:
         # when the adapter is running. Used to make ``pause`` extend-only.
         self.resume_deadline: float | None = None
         self.timer: asyncio.TimerHandle | None = None
+        # comms-2: set by ``pause``, cleared after the next ``consume`` re-scan.
+        # Bounds the defensive DLP re-scan to messages that actually waited
+        # through a pause (a never-paused message is unchanged since its
+        # construction-time scan and does not need re-scanning).
+        self.paused_since_last_consume = False
 
 
 class OutboundQueue[RequestT]:
@@ -86,6 +113,7 @@ class OutboundQueue[RequestT]:
         *,
         max_in_flight_per_adapter: int = _DEFAULT_MAX_IN_FLIGHT_PER_ADAPTER,
         audit_writer: AuditWriterProtocol,
+        dlp_rescanner: Callable[[str], int] | None = None,
     ) -> None:
         """Construct an empty queue.
 
@@ -95,9 +123,16 @@ class OutboundQueue[RequestT]:
                 adapter. Per-adapter, not process-wide. Keyword-only.
             audit_writer: Required emission dependency (see module docstring).
                 Keyword-only — passed explicitly, never reached via a global.
+            dlp_rescanner: Optional ``body -> redaction_count`` callable (comms-2).
+                When wired, :meth:`consume` re-runs it on a message that waited
+                through a pause; a non-zero count means a hot-reloaded stricter
+                policy now redacts the body, so the message is REFUSED
+                (:class:`OutboundResumeDlpBlockedError`) rather than emitted. ``None``
+                preserves the legacy consume path (PR-S4-10 TUI wiring).
         """
         self.max_in_flight_per_adapter = max_in_flight_per_adapter
         self.audit_writer = audit_writer
+        self._dlp_rescanner = dlp_rescanner
         self._adapters: dict[str, _AdapterState[RequestT]] = {}
 
     def _state(self, adapter_id: str) -> _AdapterState[RequestT]:
@@ -129,7 +164,30 @@ class OutboundQueue[RequestT]:
         await state.resume_event.wait()
         request = await state.queue.get()
         state.cap.release()
+        # comms-2: a message that waited through a pause is re-scanned before
+        # re-emission so a policy hot-reload during the pause window cannot leak
+        # a now-prohibited secret. The flag is consumed (one re-scan gate per
+        # pause cycle); a never-paused message skips the scan entirely.
+        if state.paused_since_last_consume:
+            state.paused_since_last_consume = False
+            self._rescan_or_refuse(adapter_id, request)
         return request
+
+    def _rescan_or_refuse(self, adapter_id: str, request: RequestT) -> None:
+        if self._dlp_rescanner is None:
+            return
+        redactions = self._dlp_rescanner(str(request))
+        if redactions > 0:
+            _log.warning(
+                "comms.outbound_queue.dlp_post_resume_block",
+                adapter_id=adapter_id,
+                redactions=redactions,
+            )
+            raise OutboundResumeDlpBlockedError(
+                f"outbound message refused on resume for adapter {adapter_id!r}: "
+                f"post-resume re-scan redacted {redactions} segment(s) "
+                "(reason=dlp_post_resume_block)"
+            )
 
     def pause(self, adapter_id: str, retry_after_seconds: float) -> None:
         """Suspend emission for ``adapter_id`` for ``retry_after_seconds``.
@@ -153,6 +211,9 @@ class OutboundQueue[RequestT]:
         if state.timer is not None:
             state.timer.cancel()
         state.resume_event.clear()
+        # comms-2: mark the adapter so the NEXT consume re-scans the message that
+        # waited through this pause (defensive against a hot-reload mid-pause).
+        state.paused_since_last_consume = True
         state.resume_deadline = new_deadline
         state.timer = loop.call_later(retry_after_seconds, self._auto_resume, adapter_id)
         _log.info(
@@ -187,4 +248,4 @@ class OutboundQueue[RequestT]:
         state.resume_event.set()
 
 
-__all__ = ["AuditWriterProtocol", "OutboundQueue"]
+__all__ = ["AuditWriterProtocol", "OutboundQueue", "OutboundResumeDlpBlockedError"]
