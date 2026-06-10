@@ -172,6 +172,12 @@ ignore = ["S101"]
 # arguments. (The audit-count probe is a parametrised psycopg2 query, so no
 # S608 SQL-construction ignore is needed.)
 "tests/smoke/test_slice4_daemon_dispatch.py" = ["S603", "S607"]
+# The Slice-4 graduation smoke drives docker compose + the deployed alfred CLI
+# by name (partial path) with fixed-literal / repo-owned argv — same trusted-CLI
+# rationale as the daemon-dispatch smoke above. No untrusted input reaches a
+# subprocess; the one ``sh -c`` script interpolates only a JSON blob built from
+# a uuid + fixed literals.
+"tests/smoke/test_slice4_graduation.py" = ["S603", "S607"]
 # read_state_git_head_sha coverage exercises a real temp git repo via
 # trusted `git` invocations (partial path, fixed-literal args).
 "tests/unit/cli/daemon/test_daemon_internal_helpers.py" = ["S603", "S607"]
