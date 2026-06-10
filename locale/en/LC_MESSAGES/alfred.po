@@ -1125,6 +1125,13 @@ msgstr ""
 "Unexpected ingress tier for comms.tui.input: {tier_name!r}; expected T1 "
 "or T2 per spec §3.6."
 
+#: src/alfred/comms_mcp/audit_hash.py:82
+#: src/alfred/i18n/_slice_4_reserve.py:120
+msgid "daemon.boot.audit_hash_pepper_missing"
+msgstr ""
+"audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
+"it. Refusing to boot."
+
 #: src/alfred/hooks/errors.py:108
 msgid "hooks.refusal"
 msgstr "Hook {hook_id} refused action {action_id}: {reason}"
@@ -1516,12 +1523,6 @@ msgstr "Cannot queue a plugin grant/revoke without an active operator session."
 #: src/alfred/i18n/_slice_4_reserve.py:112
 msgid "cli.plugin.grant.refused.not_logged_in.recovery"
 msgstr "Run `alfred login` first, then re-run the command."
-
-#: src/alfred/i18n/_slice_4_reserve.py:120
-msgid "daemon.boot.audit_hash_pepper_missing"
-msgstr ""
-"audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
-"it. Refusing to boot."
 
 # Sandbox refusal reasons (PR-S4-6 launcher).
 #: src/alfred/i18n/_slice_4_reserve.py:126
