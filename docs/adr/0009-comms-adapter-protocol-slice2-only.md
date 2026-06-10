@@ -1,10 +1,10 @@
 # 0009 — `CommsAdapter` is an in-process Python Protocol for Slice 2 only
 
-- **Status**: Superseded by ADR-0016 for new adapters; in-process Discord + TUI adapters unchanged through Slice 3
+- **Status**: Superseded by ADR-0016; in-process Discord + TUI adapters removed in Slice 4 per PR-S4-10
 - **Date**: 2026-05-27
 - **Slice**: 2 — `docs/superpowers/plans/2026-05-26-slice-2-pr-A-identity.md`
 - **Supersedes**: —
-- **Superseded by**: ADR-0016 (2026-05-31, for new adapters only)
+- **Superseded by**: ADR-0016 (2026-05-31)
 
 ## Context
 
@@ -71,6 +71,18 @@ in-process through Slice 3, untouched. ADR-0016 commits Slice 4 to the full rewr
 PR-S3-6 implementation: mypy's package-discovery walker only treats directories
 with valid Python identifiers as importable packages, so the hyphenated form
 was invisible to typing.)
+
+### Slice-4 follow-through
+
+PR-S4-10 (date: 2026-06-07) deleted `src/alfred/comms/` and shipped the
+in-tree replacements at `plugins/alfred_discord/` (PR-S4-9) and
+`plugins/alfred_tui/` (PR-S4-10). The "in-process adapters unchanged
+through Slice 3" caveat above no longer applies as a forward-looking
+statement — it is preserved as the historical record of what Slice 2
+and Slice 3 carried. The wire-format module at
+`src/alfred/comms_mcp/protocol.py` (shipped PR-S4-8 per ADR-0024) is
+the post-Slice-4 home of the comms-adapter contract. ADR-0016
+status-flips Proposed → Accepted at PR-S4-11 graduation.
 
 ## Alternatives considered
 
