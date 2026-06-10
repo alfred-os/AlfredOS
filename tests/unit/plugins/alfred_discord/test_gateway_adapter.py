@@ -114,6 +114,27 @@ async def test_cancelled_connect_task_is_not_a_crash() -> None:
     assert bot.crash_forwarder.handled == []
 
 
+async def test_cancelled_connect_task_done_callback_is_not_a_crash() -> None:
+    # C1: a directly-cancelled connect task (the ``task.cancelled()`` branch of
+    # the done-callback) is normal teardown, not a crash — the emitter is untouched.
+    bot = _FakeBot()
+    adapter = DiscordGatewayAdapter(bot=bot)
+    await adapter.connect("secret-token")
+    assert adapter._task is not None
+    adapter._task.cancel()
+    await asyncio.sleep(0.01)
+    assert bot.crash_forwarder.handled == []
+
+
+async def test_close_without_an_open_task_is_a_noop() -> None:
+    # The ``_task is None`` branch of close (close before connect / double close).
+    bot = _FakeBot()
+    adapter = DiscordGatewayAdapter(bot=bot)
+    flushed = await adapter.close()
+    assert flushed == 0
+    assert bot.closed is True
+
+
 async def test_queue_depth_is_zero_before_inbound() -> None:
     bot = _FakeBot()
     adapter = DiscordGatewayAdapter(bot=bot)

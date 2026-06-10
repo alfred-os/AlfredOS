@@ -116,6 +116,15 @@ async def test_reconnect_counter_resets_after_inbound(
     assert bot.reconnect_attempts == 0
 
 
+async def test_crash_forwarder_property_exposes_the_injected_emitter() -> None:
+    # C1: the gateway adapter reaches the bot's crash emitter via this property to
+    # route a detached-task exception through the same crash path on_error uses.
+    sink = _RecordingSink()
+    crash = _CrashSpy()
+    bot = _bot(sink, crash=crash)
+    assert bot.crash_forwarder is crash
+
+
 async def test_on_disconnect_does_not_sleep_or_schedule_retry() -> None:
     # H3: discord.py owns the reconnect loop + backoff; on_disconnect must only
     # bump the observability counter and return promptly — no sleep, no retry

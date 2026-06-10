@@ -140,13 +140,13 @@ class IdempotencyStore:
                 "DELETE FROM outbound_idempotency WHERE recorded_at < ?",
                 (cutoff,),
             )
-            # L2: read ``rowcount`` INSIDE the lock + transaction block. A
-            # concurrent ``record``/``vacuum_expired`` on the shared connection
-            # could mutate the cursor's reported rowcount once the ``with`` block
-            # has released the lock; capturing it here keeps the pruned count
-            # consistent with the DELETE this call actually performed.
-            pruned = cursor.rowcount
-        return pruned
+            # L2: read + return ``rowcount`` INSIDE the lock + transaction block.
+            # The connection is shared across ``asyncio.to_thread`` workers, so a
+            # concurrent ``record``/``vacuum_expired`` could mutate the cursor's
+            # reported rowcount once the ``with`` block releases the lock. Reading
+            # it here keeps the pruned count consistent with the DELETE this call
+            # actually performed.
+            return cursor.rowcount
 
     def close(self) -> None:
         """Close the underlying connection (flushes WAL to the main db)."""
