@@ -1,0 +1,13 @@
+id: cib-2026-006
+category: comms_identity_boundary
+threat: "An attacker times a secret-bearing outbound message to sit in the OutboundQueue across a rate-limit pause, hoping a policy hot-reload that tightens DLP during the pause is not applied to the already-queued message, leaking the secret on resume."
+ingestion_path: stdio_transport.outbound
+payload:
+  adapter_id: discord
+  body: "sk-PLANTEDSECRETKEYVALUE"
+expected_outcome: refused
+provenance: "PR-S4-9 comms-2 round-2 closure (NEW Task F3). OutboundQueue.pause/resume re-runs the outbound DLP scan on every queued message BEFORE re-emission. The executable runner submits a queued message with a planted secret, pauses, hot-reloads a stricter policy, resumes, and asserts consume REFUSES with OutboundResumeDlpBlockedError (the host emits DLP_OUTBOUND_REFUSED_FIELDS reason=dlp_post_resume_block) instead of emitting the secret. A clean message survives the same cycle."
+references:
+  - "spec §2.1"
+  - "spec §8.6"
+  - "#206"
