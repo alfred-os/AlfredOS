@@ -116,16 +116,21 @@ class IdempotencyStore:
             if cursor.rowcount == 1:
                 return  # fresh insert won the race
             # Row already existed (this insert was a no-op): compare the stored id.
-            existing = self._lookup_locked(key)
+            existing = self._lookup_unlocked(key)
             if existing != platform_message_id:
                 msg = f"idempotency key {key!r} already bound to a different message id"
                 raise IdempotencyConflictError(msg)
 
     def lookup(self, key: str) -> str | None:
         """Return the recorded ``platform_message_id`` for ``key``, or ``None``."""
-        return self._lookup_locked(key)
+        return self._lookup_unlocked(key)
 
-    def _lookup_locked(self, key: str) -> str | None:
+    def _lookup_unlocked(self, key: str) -> str | None:
+        # Named ``_unlocked`` (not ``_locked``): this method does NOT acquire the
+        # write lock. It is called both from a locked context (``record``) and an
+        # unlocked one (``lookup``); under WAL a read is non-blocking, so no lock
+        # is needed. The previous ``_lookup_locked`` name misleadingly implied it
+        # managed the lock itself.
         row = self._conn.execute(
             "SELECT platform_message_id FROM outbound_idempotency WHERE idempotency_key = ?",
             (key,),
