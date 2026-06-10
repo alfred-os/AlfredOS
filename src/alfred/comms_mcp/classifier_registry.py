@@ -38,7 +38,7 @@ from alfred.errors import AlfredError
 REQUIRED_CLASSIFIERS_BY_KIND: Final[MappingProxyType[str, frozenset[str]]] = MappingProxyType(
     {
         "alfred_comms_test": frozenset(),  # plain-text only — see MARKER below
-        # "discord": frozenset({"discord_sub_payloads"}),  # PR-S4-9
+        "discord": frozenset({"discord_sub_payloads"}),  # PR-S4-9
         # "tui":     frozenset(),                          # PR-S4-10
     }
 )

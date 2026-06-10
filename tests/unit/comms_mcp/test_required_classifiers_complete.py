@@ -47,6 +47,33 @@ def test_registry_is_mapping_proxy() -> None:
     assert isinstance(MARKER_NO_CLASSIFIERS_NEEDED, MappingProxyType)
 
 
+def test_discord_requires_sub_payload_classifier() -> None:
+    # PR-S4-9: the Discord adapter kind requires the host-owned
+    # discord_sub_payloads classifier — a plugin cannot opt out of it.
+    assert REQUIRED_CLASSIFIERS_BY_KIND["discord"] == frozenset({"discord_sub_payloads"})
+
+
+def test_every_required_classifier_is_registered_after_import() -> None:
+    # The required table is only meaningful if each named classifier is actually
+    # registered. Re-run the canonical import-time registration against the live
+    # registry (idempotent no-op on the already-registered class) so this guard
+    # is order-independent of a sibling suite test that reloads the registry
+    # module and drops classifiers registered by other modules. A dangling
+    # required entry — a name the scanner would fail to resolve with
+    # UnknownClassifierError at dispatch — is refused here.
+    from alfred.comms_mcp.classifier_registry import is_registered, register_classifier
+    from alfred.comms_mcp.classifiers.discord import DiscordSubPayloadClassifier
+
+    register_classifier(kind="discord", name="discord_sub_payloads")(DiscordSubPayloadClassifier)
+
+    for kind, names in REQUIRED_CLASSIFIERS_BY_KIND.items():
+        for name in names:
+            assert is_registered(kind=kind, name=name), (
+                f"required classifier {name!r} for kind {kind!r} is not registered; "
+                f"import alfred.comms_mcp.classifiers.<module> at boot"
+            )
+
+
 # ----- Task 11: structural AST guard (cib-2026-004 mirror) ------------------
 
 

@@ -22,8 +22,15 @@ def test_adapter_kind_contains_reference_plugin() -> None:
     assert "alfred_comms_test" in adapter_kind
 
 
-def test_adapter_kind_does_not_contain_discord_yet() -> None:
-    assert "discord" not in adapter_kind
+def test_adapter_kind_contains_discord() -> None:
+    # PR-S4-9: the Discord adapter kind lands with its BODY_FIELD_BY_KIND +
+    # REQUIRED_CLASSIFIERS_BY_KIND entries in the same PR (the §8.5 AST-guard
+    # rule). Previously asserted absent; now asserted present.
+    assert "discord" in adapter_kind
+
+
+def test_body_field_for_discord_is_content() -> None:
+    assert BODY_FIELD_BY_KIND["discord"] == "content"
 
 
 def test_body_field_by_kind_is_mapping_proxy() -> None:
