@@ -1119,7 +1119,7 @@ msgstr "alfred"
 # never reach the open ``tag()`` path under the spec §3.6 contract).
 # tier_name carries the offending class name verbatim for forensic
 # attribution. Fail-loud at the boundary, not silently downstream.
-#: src/alfred/comms/tui.py:284
+#: src/alfred/comms/tui.py:286
 msgid "comms.tui.ingress_tier_unexpected"
 msgstr ""
 "Unexpected ingress tier for comms.tui.input: {tier_name!r}; expected T1 "
@@ -1615,8 +1615,8 @@ msgstr ""
 #: src/alfred/i18n/_slice_4_reserve.py:148
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
-"alfred chat requires the AlfredOS daemon to be running. Start it with "
-"`alfred daemon start`."
+"alfred chat needs the daemon. Start it with: alfred daemon start. If you "
+"expected a daemon to be running, check status with: alfred daemon status."
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
