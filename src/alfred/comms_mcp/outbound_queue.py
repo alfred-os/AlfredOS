@@ -25,6 +25,12 @@ This module is observability-only at the queue layer: :meth:`pause` emits the
 the queue. The ``audit_writer`` is a REQUIRED constructor dependency so the
 emission surface is wired and observable from construction (no global state), but
 the queue itself never bypasses it with a silent path.
+
+Wiring status (#235). The queue is TESTED but NOT yet on the live persona-outbound
+path — the daemon does not spawn the discord plugin until the PR-S4-10 flag-day,
+which wires every persona's outbound message through this queue. Until then the
+backpressure + rate-limit pause/resume + comms-2 resume re-scan are exercised only
+by tests. See ``docs/subsystems/comms.md`` (Slice-4 wiring-status note) and #235.
 """
 
 from __future__ import annotations

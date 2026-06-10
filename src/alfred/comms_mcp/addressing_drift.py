@@ -11,6 +11,12 @@ worth a forensic ``COMMS_ADDRESSING_DRIFT_FIELDS`` audit row.
 
 This is the host-side detector: a pure check plus an audit emission. It is loud
 (it never swallows) and side-effect-free beyond the audit write.
+
+Wiring status (#235). This comms-4 primitive is TESTED but NOT yet on the live
+outbound path — the daemon does not spawn the discord plugin until the PR-S4-10
+flag-day. Addressing-drift detection is wired into the live reply path in
+PR-S4-10; until then it is not operationally enforced. See
+``docs/subsystems/comms.md`` (Slice-4 wiring-status note) and issue #235.
 """
 
 from __future__ import annotations

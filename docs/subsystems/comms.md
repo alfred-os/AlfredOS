@@ -297,6 +297,20 @@ stays dormant (an AST guard,
 `tests/unit/comms/test_no_direct_adapter_imports.py`, forbids fresh imports) and
 is deleted in PR-S4-10.
 
+> **Wiring status (PR-S4-9 vs PR-S4-10).** PR-S4-9 ships the adapter and these
+> host primitives as TESTED but NOT-YET-SPAWNED: the daemon does not spawn the
+> discord plugin, and several host primitives are not on the live path until the
+> PR-S4-10 **flag-day**. Specifically the discord `SubPayloadPromoter`
+> construction, the `BindingEmitter` (`plugins/alfred_discord/binding_emitter.py`,
+> emitting `adapter.binding_request` — never constructed by the gateway yet),
+> the [`OutboundQueue`](../glossary.md#outboundqueue) outbound-path wiring, and the
+> comms-4 addressing-drift detector (`src/alfred/comms_mcp/addressing_drift.py`) +
+> [`ThreadConversationLedger`](../glossary.md#threadconversationledger) primitives
+> are wired into the live path in PR-S4-10. Until then, comms-4 + binding are NOT
+> operationally enforced — the primitives exist and are unit/adversarially tested,
+> but the daemon path does not invoke them. Tracking: **#235**. The present-tense
+> prose below describes the post-S4-10 wired behaviour these primitives implement.
+
 ### Inbound: host-side T3 sub-payload promotion
 
 The adapter is a thin marshaller — it ships the user's typed text plus the nine
