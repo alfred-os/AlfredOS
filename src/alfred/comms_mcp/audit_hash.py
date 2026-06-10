@@ -29,15 +29,25 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from typing import TYPE_CHECKING, Final
+from typing import Final, Protocol, runtime_checkable
 
 from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.security._hkdf import hkdf_expand
 from alfred.security.secrets import UnknownSecretError
 
-if TYPE_CHECKING:
-    from alfred.security.secrets import SecretBroker
+
+@runtime_checkable
+class _BrokerLike(Protocol):
+    """Structural view of the secret broker: ``get("audit.hash_pepper")``.
+
+    The comms host wires the real :class:`alfred.security.secrets.SecretBroker`;
+    the inbound unit tests wire a structural stub. The module only ever requests
+    the ``audit.hash_pepper`` secret, so this minimal surface is the whole
+    dependency.
+    """
+
+    def get(self, name: str) -> str: ...
 
 # HKDF-Expand domain separator for the comms subkey (closure comms-1). Distinct
 # from operator_session's ``operator_session.*`` infos so the two subsystems
@@ -87,16 +97,26 @@ class MissingAuditHashPepperError(AlfredError):
 # This is deliberately NOT a global singleton SecretBroker — the broker is
 # passed in explicitly (no hidden construction), and the cache holds only the
 # derived 32-byte subkey, never the raw pepper beyond the single derive call.
-_broker: SecretBroker | None = None
+_broker: _BrokerLike | None = None
 _comms_subkey: bytes | None = None
 
 
-def set_broker(broker: SecretBroker) -> None:
-    """Wire the process :class:`SecretBroker` (called once at daemon boot).
+def set_broker(broker: _BrokerLike) -> None:
+    """Wire the process secret broker (called at the comms host construction seam).
 
-    Resets any cached subkey so a fresh broker re-derives on next use.
+    Idempotent on the SAME broker object: re-wiring the identical broker is a
+    no-op so the inbound hot-path can call this every message (keeping the wiring
+    explicit, no hidden global construction) without thrashing the derived-subkey
+    cache. Wiring a DIFFERENT broker resets the cache so the fresh broker
+    re-derives on next use (the rotation / test path).
+
+    Accepts any object exposing ``get(name) -> str`` (the comms host passes the
+    real :class:`SecretBroker`; the inbound unit tests pass a structural stub) —
+    the module only ever calls ``get("audit.hash_pepper")``.
     """
     global _broker, _comms_subkey
+    if broker is _broker:
+        return
     _broker = broker
     _comms_subkey = None
 
@@ -147,7 +167,7 @@ def hash_verification_phrase(raw: str) -> str:
     return _hash(_VERIFICATION_PHRASE_PREFIX, raw)
 
 
-def set_broker_for_test(broker: SecretBroker) -> None:
+def set_broker_for_test(broker: _BrokerLike) -> None:
     """Test seam: inject a stub broker and clear the cache.
 
     Distinct public name from :func:`set_broker` so a grep for production

@@ -38,7 +38,8 @@ from alfred.comms_mcp.classifier_registry import (
     MARKER_NO_CLASSIFIERS_NEEDED,
     REQUIRED_CLASSIFIERS_BY_KIND,
 )
-from alfred.comms_mcp.inbound import _peppered_hash, process_inbound_message
+from alfred.comms_mcp import audit_hash
+from alfred.comms_mcp.inbound import process_inbound_message
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.unit.comms_mcp._inbound_spies import (
     SpyAuditWriter,
@@ -138,11 +139,11 @@ async def test_cib_003_canonical_id_never_in_audit_or_dispatch() -> None:
         secret_broker=broker,
     )
 
-    # The platform_user_id only ever appears peppered-hashed in the audit row.
+    # The platform_user_id only ever appears keyed-hashed in the audit row. The
+    # production path wired ``audit_hash`` to ``broker`` (H1 unified recipe), so
+    # the expected digest is recomputed through the same authoritative helper.
     t3 = audit.rows_with_schema("COMMS_INBOUND_T3_PROMOTION_FIELDS")[0]
-    assert t3["platform_user_id_hash"] == _peppered_hash(
-        "discord:victim", pepper=broker.get("audit.hash_pepper")
-    )
+    assert t3["platform_user_id_hash"] == audit_hash.hash_platform_user_id("discord:victim")
     assert "discord:victim" not in str(t3)
     # The ingest carrier carries the canonical id host-side only — the dispatch
     # path receives the opaque ingested object, never an outbound id echo.

@@ -43,12 +43,12 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import structlog
 
 from alfred.audit import audit_row_schemas
+from alfred.comms_mcp import audit_hash
 from alfred.comms_mcp.inbound import (
     _AuditWriterLike,
     _BurstLimiterLike,
     _IdentityResolverLike,
     _OrchestratorLike,
-    _peppered_hash,
     _PreResolutionLimiter,
     _SecretBrokerLike,
     _SubPayloadPromoterLike,
@@ -167,6 +167,11 @@ class InboundMessageHandler:
         self._burst_limiter = burst_limiter
         self._audit_writer = audit_writer
         self._secret_broker = secret_broker
+        # H1: wire the authoritative comms hash recipe to the process broker at
+        # the host CONSTRUCTION seam, so it is LIVE before the first inbound
+        # (the per-message ``set_broker`` in process_inbound_message is the cheap
+        # idempotent safety net, not the only wiring point).
+        audit_hash.set_broker(secret_broker)
         # P1: per-adapter sub-payload promoter (None → inert for the reference
         # plugin's empty required-classifier set). Forwarded on every process call.
         self._sub_payload_promoter = sub_payload_promoter
@@ -204,9 +209,17 @@ class BindingRequestHandler:
     def __init__(self, *, audit_writer: _AuditWriterLike, secret_broker: _SecretBrokerLike) -> None:
         self._audit_writer = audit_writer
         self._secret_broker = secret_broker
+        # H1: wire the authoritative comms hash recipe at construction (live
+        # before the first binding row); the per-call set_broker is the cheap
+        # idempotent safety net.
+        audit_hash.set_broker(secret_broker)
 
     async def process(self, notification: BindingRequestNotification) -> None:
-        pepper = self._secret_broker.get("audit.hash_pepper")
+        # Wire the authoritative comms hash recipe (closure comms-1) to this
+        # handler's broker; idempotent on the same broker object. The
+        # verification-phrase and platform-user-id hashes use per-field domain
+        # separation so a phrase digest can never collide with a user-id digest.
+        audit_hash.set_broker(self._secret_broker)
         await self._audit_writer.append_schema(
             fields=audit_row_schemas.COMMS_BINDING_REQUESTED_FIELDS,
             schema_name="COMMS_BINDING_REQUESTED_FIELDS",
@@ -214,11 +227,11 @@ class BindingRequestHandler:
             actor_user_id=None,
             subject={
                 "adapter_id": notification.adapter_id,
-                "platform_user_id_hash": _peppered_hash(
-                    notification.platform_user_id, pepper=pepper
+                "platform_user_id_hash": audit_hash.hash_platform_user_id(
+                    notification.platform_user_id
                 ),
-                "verification_phrase_hash": _peppered_hash(
-                    notification.verification_phrase, pepper=pepper
+                "verification_phrase_hash": audit_hash.hash_verification_phrase(
+                    notification.verification_phrase
                 ),
                 "requested_at": datetime.now(UTC).isoformat(),
                 "language": "en-US",
