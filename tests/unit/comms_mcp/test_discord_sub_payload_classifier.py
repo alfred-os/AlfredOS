@@ -203,3 +203,16 @@ class TestDSL:
 
     def test_walk_index_on_non_list_returns_none(self) -> None:
         assert _walk_path({"embeds": "x"}, "embeds[0]") is None
+
+    def test_walk_malformed_index_returns_none(self) -> None:
+        # A non-numeric index (``embeds[abc]``) must fail closed to ``None`` — the
+        # DSL contract says invalid selectors resolve to nothing, not raise.
+        assert _walk_path({"embeds": [_EMBED]}, "embeds[abc]") is None
+
+    def test_walk_empty_index_returns_none(self) -> None:
+        assert _walk_path({"embeds": [_EMBED]}, "embeds[]") is None
+
+    def test_walk_negative_index_returns_none(self) -> None:
+        # ``embeds[-1]`` must NOT resolve from the end — a negative selector is
+        # invalid in this DSL and must fail closed rather than wrap.
+        assert _walk_path({"embeds": [_EMBED]}, "embeds[-1]") is None
