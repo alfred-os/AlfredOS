@@ -268,7 +268,6 @@ def _build_server() -> DiscordServer:  # pragma: no cover - live-gateway assembl
         sink=sink,
         crash_emitter=crash,
         channel_listen_set=frozenset(),
-        sleeper=asyncio.sleep,
     )
     gateway = DiscordGatewayAdapter(bot=bot)
     lifecycle = DiscordLifecycle(broker=_EnvBroker(), gateway=gateway)
