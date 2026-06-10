@@ -203,6 +203,10 @@ async def test_crash_handler_emits_audit_and_fires_hookpoint() -> None:
     rows = audit.rows_with_schema("COMMS_ADAPTER_CRASHED_FIELDS")
     assert len(rows) == 1
     assert rows[0]["error_class"] == "ConnectionResetError"
+    # Provenance (PRD §7.1): the crash is plugin-triggered, so the trigger tier
+    # is T3 -- not T0. (The hookpoint's carrier_tier stays T0 per spec §10; that
+    # is the surrounding host-daemon action's tier, a distinct concept.)
+    assert rows[0]["trust_tier_of_trigger"] == "T3"
     assert invoker.fired == ["alfred_comms_test"]
 
 
