@@ -32,6 +32,7 @@ See:
 
 from __future__ import annotations
 
+import ast
 import importlib
 import pathlib
 
@@ -41,6 +42,31 @@ import pytest
 #: so the root is four ``parent`` hops up.
 _ROOT = pathlib.Path(__file__).resolve().parents[3]
 _DELETED_DIR = _ROOT / "src" / "alfred" / "comms"
+#: Runtime source tree scanned for latent ``alfred.comms`` import statements.
+_SRC_ROOT = _ROOT / "src" / "alfred"
+
+
+def _imports_legacy_comms(tree: ast.AST) -> bool:
+    """True if ``tree`` contains a real ``import``/``from`` of ``alfred.comms``.
+
+    Matches the deleted package exactly (``alfred.comms`` or a ``alfred.comms.``
+    submodule) WITHOUT matching the surviving ``alfred.comms_mcp`` package — the
+    dotted-prefix guard is the same one ``discord_cmd``'s import test uses.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module is not None:
+            mod = node.module
+        elif isinstance(node, ast.Import):
+            if any(
+                a.name == "alfred.comms" or a.name.startswith("alfred.comms.") for a in node.names
+            ):
+                return True
+            continue
+        else:
+            continue
+        if mod == "alfred.comms" or mod.startswith("alfred.comms."):
+            return True
+    return False
 
 
 def test_src_alfred_comms_directory_is_absent() -> None:
@@ -71,3 +97,29 @@ def test_alfred_comms_mcp_protocol_survives_the_deletion() -> None:
     module = importlib.import_module("alfred.comms_mcp.protocol")
     assert hasattr(module, "InboundMessageNotification")
     assert hasattr(module, "OutboundMessageRequest")
+
+
+def test_no_runtime_source_imports_legacy_comms() -> None:
+    """No runtime ``src/alfred`` module imports the deleted ``alfred.comms`` package.
+
+    The deletion + non-importable checks above only prove the package STAYS
+    gone. A lazily imported or never-exercised module could still add
+    ``from alfred.comms ...`` and those runtime checks would stay green until
+    that path is hit. This static AST scan over the runtime source tree catches
+    such a latent consumer at test time, before any runtime import error. It is
+    careful NOT to flag the surviving ``alfred.comms_mcp`` package. The
+    ``comms_mcp`` subtree is itself skipped so its own internal imports never
+    trip the dotted-prefix guard. (PR-S4-10 review #6.)
+    """
+    offenders: list[str] = []
+    for source in _SRC_ROOT.rglob("*.py"):
+        if "comms_mcp" in source.parts:
+            continue
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        if _imports_legacy_comms(tree):
+            offenders.append(str(source.relative_to(_ROOT)))
+    assert not offenders, (
+        "runtime source still imports the deleted alfred.comms package "
+        f"(PR-S4-10 Component C deletion regression): {offenders}. Import the "
+        "wire-format types from alfred.comms_mcp.protocol instead."
+    )
