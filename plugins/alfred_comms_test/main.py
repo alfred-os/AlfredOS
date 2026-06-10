@@ -22,7 +22,8 @@ The internal ``alfred_comms_test/*`` triggers are NOT part of the ADR-0024 wire
 contract — they are the test harness's lever to make the plugin manufacture a
 host-bound notification on demand. The most dangerous of these,
 ``inject_inbound``, fabricates an inbound platform message; it is therefore
-gated on ``ALFRED_ENV=test`` and refuses in production with a
+gated on the dev/test ``ALFRED_ENV`` allowlist (``development`` / ``test``) and
+refuses in production (and on any unset / empty / unknown ``ALFRED_ENV``) with a
 ``comms.test_injection_refused`` refusal frame + a raised
 :class:`TestInjectionRefusedError` (plan §10 risk row / Task 51). The plugin process
 has no DB, so "audit row + raise" is realised as a structured refusal frame the
@@ -74,10 +75,13 @@ _REFUSAL_EVENT: Final[str] = "comms.test_injection_refused"
 
 
 class TestInjectionRefusedError(RuntimeError):
-    """Raised when ``inject_inbound`` is attempted outside ``ALFRED_ENV=test``.
+    """Raised when ``inject_inbound`` runs outside the dev/test env allowlist.
 
-    Carries :attr:`event` = ``comms.test_injection_refused`` so the refusal frame
-    + the host's audit row name the same closed-vocabulary event.
+    Fail-closed: only an explicit ``ALFRED_ENV`` of ``development`` or ``test``
+    opens the gate (:data:`_INJECTION_ALLOWED_ENVS`); an unset / empty value (the
+    common production default) and any other value REFUSE. Carries
+    :attr:`event` = ``comms.test_injection_refused`` so the refusal frame + the
+    host's audit row name the same closed-vocabulary event.
     """
 
     event: Final[str] = _REFUSAL_EVENT
@@ -123,11 +127,16 @@ def handle_lifecycle_stop(_params: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_adapter_health(_params: dict[str, Any]) -> dict[str, Any]:
-    """Return a ``HealthReport``-shaped snapshot."""
+    """Return a ``HealthReport``-shaped snapshot.
+
+    ``queue_depth`` reports the REAL pending-outbound buffer depth (the same
+    buffer ``lifecycle.stop`` drains and reports as ``flushed_messages``), not a
+    hardcoded ``0`` — so ``adapter.health`` stays truthful after the first send.
+    """
     return {
         "ok": bool(_state["running"]),
         "last_inbound_at": _state["last_inbound_at"],
-        "queue_depth": 0,
+        "queue_depth": outbound_buffer_depth(),
         "error_count": 0,
     }
 
