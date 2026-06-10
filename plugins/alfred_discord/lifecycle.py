@@ -20,6 +20,7 @@ carve-out for log lines); no user-facing ``t()`` string originates here.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Final, Protocol
 
 import structlog
@@ -72,41 +73,60 @@ class DiscordLifecycle:
         self._gateway = gateway
         self._running = False
         self._error_count = 0
+        # Serialises ``start`` / ``stop`` transitions. Without it two overlapping
+        # ``start`` calls can both pass the ``_running`` check and both open the
+        # gateway, and a ``stop`` can interleave mid-start — duplicating sessions
+        # or tearing down a half-opened gateway. The lock makes the check + the
+        # gateway call + the ``_running`` update one atomic transition.
+        self._transition_lock = asyncio.Lock()
 
     async def start(self) -> LifecycleStartResult:
-        """Authenticate + open the gateway; idempotent on a second call.
+        """Authenticate + open the gateway; idempotent and serialized.
 
-        A failure is reported as ``ok=False`` (never a raised exception across the
-        wire) with a loud, secret-free structlog event so the supervisor can act.
+        A failure — broker, transport, or gateway — is reported as ``ok=False``
+        (never a raised exception across the wire) with a loud, secret-free
+        structlog event so the supervisor can act. The transition is serialised
+        under ``_transition_lock`` so concurrent callers cannot open the gateway
+        twice or race a ``stop``.
         """
-        if self._running:
-            # Idempotent: a repeated start does not reopen the gateway.
+        async with self._transition_lock:
+            if self._running:
+                # Idempotent: a repeated start does not reopen the gateway.
+                return LifecycleStartResult(ok=True, plugin_version=_PLUGIN_VERSION)
+
+            try:
+                # Fetch the secret INSIDE the try: a missing broker secret (or any
+                # broker/transport error) must surface as ``ok=False``, never as a
+                # raised exception across the RPC boundary.
+                token = self._broker.get(_BROKER_KEY)
+                await self._gateway.connect(token)
+            except Exception as exc:  # wire contract: never raise across the RPC boundary
+                self._error_count += 1
+                # Log the error CLASS only — never the rendered message (which a
+                # buggy gateway/broker could let leak the token) and never the
+                # token itself.
+                _log.error(
+                    "comms.lifecycle.start_failed",
+                    adapter="discord",
+                    error_class=type(exc).__name__,
+                )
+                return LifecycleStartResult(ok=False, plugin_version=_PLUGIN_VERSION)
+
+            self._running = True
+            _log.info("comms.lifecycle.started", adapter="discord")
             return LifecycleStartResult(ok=True, plugin_version=_PLUGIN_VERSION)
 
-        token = self._broker.get(_BROKER_KEY)
-        try:
-            await self._gateway.connect(token)
-        except GatewayError as exc:
-            self._error_count += 1
-            # Log the error CLASS only — never the rendered message (which a
-            # buggy gateway could let leak the token) and never the token.
-            _log.error(
-                "comms.lifecycle.start_failed",
-                adapter="discord",
-                error_class=type(exc).__name__,
-            )
-            return LifecycleStartResult(ok=False, plugin_version=_PLUGIN_VERSION)
-
-        self._running = True
-        _log.info("comms.lifecycle.started", adapter="discord")
-        return LifecycleStartResult(ok=True, plugin_version=_PLUGIN_VERSION)
-
     async def stop(self) -> LifecycleStopResult:
-        """Close the gateway, flushing in-flight outbound; report the flushed count."""
-        flushed = await self._gateway.close()
-        self._running = False
-        _log.info("comms.lifecycle.stopped", adapter="discord", flushed_messages=flushed)
-        return LifecycleStopResult(ok=True, flushed_messages=flushed)
+        """Close the gateway, flushing in-flight outbound; report the flushed count.
+
+        Serialised under the same ``_transition_lock`` as :meth:`start` so a stop
+        cannot interleave with a concurrent start and leave a half-open gateway.
+        """
+        async with self._transition_lock:
+            flushed = await self._gateway.close()
+            self._running = False
+            _log.info("comms.lifecycle.stopped", adapter="discord", flushed_messages=flushed)
+            return LifecycleStopResult(ok=True, flushed_messages=flushed)
 
     def health(self) -> HealthReport:
         """Report a health snapshot: running state + queue depth + error count.
