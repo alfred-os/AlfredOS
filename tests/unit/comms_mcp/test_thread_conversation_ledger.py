@@ -44,3 +44,22 @@ def test_same_thread_id_on_different_adapters_does_not_collide() -> None:
     b = ledger.bind(adapter_id="telegram", thread_id="t1")
     assert a.conversation_session_id != b.conversation_session_id
     assert b.resumed is False
+
+
+def test_first_bind_is_atomic_no_check_then_create_window() -> None:
+    """The first bind must commit atomically — exactly ONE session per thread.
+
+    A check-then-create shape (``get`` then ``[key] = mint``) leaves a window in
+    which two binds could each see no existing session and each mint a distinct
+    id, the second silently overwriting the first. ``bind`` is atomic-by-
+    construction (``setdefault``): the first writer wins and every subsequent bind
+    resumes that exact id. We assert the invariant directly: repeated binds for
+    one thread all return the FIRST minted id, and exactly one is non-resumed.
+    """
+    ledger = ThreadConversationLedger()
+    bindings = [ledger.bind(adapter_id="discord", thread_id="t1") for _ in range(5)]
+    ids = {b.conversation_session_id for b in bindings}
+    assert len(ids) == 1, "all binds for one thread must share one session id"
+    non_resumed = [b for b in bindings if not b.resumed]
+    assert len(non_resumed) == 1, "exactly one bind creates the session"
+    assert non_resumed[0] is bindings[0]
