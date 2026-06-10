@@ -30,9 +30,17 @@ _PLUGINS_ROOT = Path(__file__).resolve().parents[3] / "plugins"
 
 
 def _live_plugin_t_keys() -> list[str]:
-    """Every string-literal ``t(...)`` key called in any ``plugins/`` module."""
+    """Every string-literal ``t(...)`` key called in runtime ``plugins/`` code.
+
+    Scoped to the plugins' runtime source — paths under a ``tests`` directory
+    (or ``test_*`` modules) are excluded so a ``t()`` in a plugin TEST cannot
+    pollute the assertion with non-runtime keys the running plugin never
+    renders. (PR-S4-10 review #4.)
+    """
     keys: set[str] = set()
     for source in _PLUGINS_ROOT.rglob("*.py"):
+        if "tests" in source.parts or source.name.startswith("test_"):
+            continue
         tree = ast.parse(source.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if (
