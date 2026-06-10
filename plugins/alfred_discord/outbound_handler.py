@@ -109,7 +109,12 @@ class OutboundHandler:
             return self._terminal(exc)
         except discord.HTTPException as exc:
             return self._map_http_exception(exc)
-        except discord.InvalidData as exc:
+        except (discord.InvalidData, ValueError) as exc:
+            # L1: ``TargetResolver.resolve`` casts ``target_platform_id`` to
+            # ``int`` (the live bot fetches a user/channel by snowflake). A
+            # non-numeric id raises ``ValueError`` — a permanently-bad target,
+            # not a transient failure — so map it to a terminal outcome rather
+            # than letting it escape as an uncaught crash.
             return self._terminal(exc)
 
         platform_message_id = str(sent.id)

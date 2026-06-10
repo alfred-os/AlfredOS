@@ -174,6 +174,35 @@ async def test_not_found_returns_terminal(
     assert result.error_class == "discord_not_found"
 
 
+class _RaisingResolver:
+    """A ``TargetResolver`` double that raises the seeded exception on resolve.
+
+    Models the live ``_BotTargetResolver.resolve`` casting a non-numeric
+    ``target_platform_id`` to ``int`` and raising ``ValueError`` (L1).
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def resolve(self, target_platform_id: str, addressing_mode: str) -> DiscordMockSendable:
+        raise self._exc
+
+
+async def test_non_numeric_target_value_error_returns_terminal(tmp_path: Path) -> None:
+    # L1: a non-numeric target id makes the live resolver's ``int(...)`` raise
+    # ``ValueError`` — not in the discord.py exception set — which previously
+    # escaped as an uncaught crash. It must map to a terminal failure instead.
+    store = IdempotencyStore(db_path=tmp_path / "idempotency.db")
+    handler = OutboundHandler(
+        resolver=_RaisingResolver(ValueError("invalid literal for int()")),
+        store=store,
+    )
+    result = await handler.handle_outbound(_request(target_platform_id="not-a-snowflake"))
+    assert isinstance(result, _OutboundTerminal)
+    assert result.outcome == "terminal_failure"
+    assert result.error_class == "discord_terminal_failure"
+
+
 async def test_terminal_detail_is_dlp_scrubbed(
     tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:
