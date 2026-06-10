@@ -97,7 +97,14 @@ testpaths = ["tests"]
 # wheel (it's the supervisor-launched MCP subprocess, not part of the
 # alfred-core package), so pytest needs an explicit pythonpath entry to
 # discover it during collection.
-pythonpath = ["."]
+#
+# PR-S4-10: ``plugins/alfred_tui`` is a src-layout uv package whose modules
+# import each other by the bare top-level name ``alfred_tui`` (NOT the
+# ``plugins.alfred_tui`` namespace path the flat-layout adapters use). It is not
+# pip-installed in-tree, so the launcher-spawn round-trip tests
+# (``tests/integration/test_tui_round_trip.py`` + ``tests/smoke/test_tui_e2e.py``)
+# need its ``src/`` on the import path — mirroring the plugin's own test conftest.
+pythonpath = [".", "plugins/alfred_tui/src"]
 addopts = "-ra --strict-markers --strict-config"
 asyncio_mode = "auto"
 markers = [
