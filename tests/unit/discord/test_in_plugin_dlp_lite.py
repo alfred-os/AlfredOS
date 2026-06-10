@@ -13,6 +13,7 @@ wire contains neither.
 
 from __future__ import annotations
 
+from plugins.alfred_discord.dlp_lite import _REDACTED as _REDACTED_MARKER
 from plugins.alfred_discord.dlp_lite import scrub_in_plugin
 
 # Planted synthetic secret SHAPES (not real credentials) the scrubber must catch.
@@ -48,3 +49,21 @@ def test_multiple_secrets_all_redacted() -> None:
     scrubbed = scrub_in_plugin(text)
     assert _API_KEY_SHAPE not in scrubbed
     assert _BOT_CREDENTIAL_SHAPE not in scrubbed
+
+
+def test_bot_token_with_leading_base64url_punctuation_redacted() -> None:
+    """L4: a base64url token may begin with ``-``/``_``; a ``\\b`` anchor would
+    not fire on a leading ``-`` (``-`` is a non-word char, so ``\\b`` needs a
+    preceding word char). The token must still be redacted regardless of the
+    character immediately before its first segment.
+    """
+    leading_dash_token = ".".join(
+        ("-Tk5ODYyMjQ4MzQ3MTkyNTI0OA", "GaBcDe", "7xY9zAbCdEfGhIjKlMnOpQrStUv")
+    )
+    scrubbed = scrub_in_plugin(leading_dash_token)
+    # The ENTIRE token (including its leading ``-``) must be consumed: with the
+    # token alone on the line, the scrubbed output is exactly the marker. A
+    # ``\b``-anchored pattern leaves the leading ``-`` (``-[REDACTED…]``), so the
+    # output would NOT equal the bare marker — that is the leak this guards.
+    assert scrubbed == _REDACTED_MARKER
+    assert leading_dash_token not in scrubbed
