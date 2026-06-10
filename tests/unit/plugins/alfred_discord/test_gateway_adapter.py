@@ -139,3 +139,39 @@ async def test_queue_depth_is_zero_before_inbound() -> None:
     bot = _FakeBot()
     adapter = DiscordGatewayAdapter(bot=bot)
     assert adapter.queue_depth == 0
+
+
+async def test_second_connect_while_live_is_rejected_single_flight() -> None:
+    # Single-flight: a second connect() while the gateway loop is live must NOT
+    # overwrite (and orphan) the first connect task. It is rejected loudly so the
+    # first loop keeps running uninterrupted.
+    bot = _FakeBot()
+    adapter = DiscordGatewayAdapter(bot=bot)
+    await adapter.connect("secret-token")
+    await asyncio.sleep(0.01)
+    first_task = adapter._task
+
+    with pytest.raises(GatewayError):
+        await adapter.connect("secret-token")
+
+    # The original task is untouched (not orphaned/replaced).
+    assert adapter._task is first_task
+    await adapter.close()
+    assert bot.crash_forwarder.handled == []
+
+
+async def test_reconnect_after_close_is_allowed() -> None:
+    # After a clean close (task cleared), a fresh connect() is permitted — the
+    # single-flight guard only blocks a SECOND concurrent connect, not sequential
+    # reconnects.
+    bot = _FakeBot()
+    adapter = DiscordGatewayAdapter(bot=bot)
+    await adapter.connect("secret-token")
+    await asyncio.sleep(0.01)
+    await adapter.close()
+
+    bot.closed = False  # allow the fake bot's connect loop to block again
+    await adapter.connect("secret-token")
+    await asyncio.sleep(0.01)
+    assert adapter._task is not None
+    await adapter.close()
