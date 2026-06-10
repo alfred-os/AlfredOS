@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -101,7 +102,11 @@ class AlfredTuiApp(App[None]):
         if not text:
             return
         log = self.query_one("#conversation_log", RichLog)
-        log.write(f"[bold cyan]{t('tui.label_you')}[/]: {text}")
+        # ``text`` is operator-typed and echoed into a ``markup=True`` RichLog;
+        # escape it so any ``[red]``/``[link=…]`` is shown literally, not parsed
+        # as Rich console markup. The app-controlled label prefix keeps its
+        # legitimate markup. (PR-S4-10 review #1 — markup-injection guard.)
+        log.write(f"[bold cyan]{t('tui.label_you')}[/]: {escape(text)}")
         event.input.value = ""
         await self._session.consume_user_input(text)
         await self._session.flush_keystroke_batch()
@@ -114,4 +119,9 @@ class AlfredTuiApp(App[None]):
         outbound handler awaits nothing on the render itself.
         """
         log = self.query_one("#conversation_log", RichLog)
-        log.write(f"[bold green]{t('tui.label_alfred')}[/]: {body}")
+        # ``body`` is host-delivered persona output that can carry T3-derived
+        # content; escape it so console markup in the body renders literally
+        # rather than being interpreted by the ``markup=True`` RichLog. The
+        # app-controlled label prefix keeps its legitimate markup.
+        # (PR-S4-10 review #1 — markup-injection guard.)
+        log.write(f"[bold green]{t('tui.label_alfred')}[/]: {escape(body)}")
