@@ -18,9 +18,12 @@ audit-emit time. The runtime check
 ``if t_key not in _LAUNCHER_VISIBLE_KEYS`` is the typo-guard the
 supervisor will wire in when PR-S3-3b lands.
 
-Mirrors the same pattern used by
-:data:`alfred.comms.discord._PYBABEL_VISIBLE_KEYS` for dynamically
-dispatched Discord refusal keys.
+The pattern — a ``src/alfred/``-resident ``t("literal")`` anchor that
+keeps a dynamically dispatched key visible to ``pybabel extract`` (which
+follows only literal ``t()`` calls in the Python AST) — is shared with
+other dynamic-dispatch surfaces in the codebase. ``pybabel extract``
+scans ``src/alfred`` only, so any key dispatched from a non-scanned tree
+(an out-of-tree plugin, a shell launcher) needs an anchor here.
 """
 
 from __future__ import annotations
