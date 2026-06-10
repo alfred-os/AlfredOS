@@ -54,8 +54,10 @@ from alfred.cli.daemon._daemon_probes import (
     probe_snapshot_ref_init,
 )
 from alfred.cli.daemon._failures import (
+    BootInfraInstallFailedFailure,
     DaemonBootFailure,
     EnvironmentNotSetFailure,
+    QuarantineGrantMissingFailure,
     UnsandboxedEnvInProductionFailure,
 )
 from alfred.config._environment_loader import (
@@ -63,6 +65,7 @@ from alfred.config._environment_loader import (
     EnvironmentSource,
     load_environment,
 )
+from alfred.hooks.errors import HookError
 from alfred.i18n import t
 from alfred.supervisor.core import Supervisor
 
@@ -74,6 +77,8 @@ if TYPE_CHECKING:
 
     from alfred.audit.log import AuditWriter
     from alfred.config.settings import Settings
+    from alfred.hooks.capability import CapabilityGate
+    from alfred.security.capability_gate._gate import RealGate
     from alfred.security.dlp import OutboundDlpProtocol
 
 # Exit codes (operator-facing contract; documented in the runbook PR-S4-11).
@@ -206,28 +211,29 @@ class _BootHandshake:
         return True
 
 
-async def build_boot_gate(
+async def build_boot_real_gate_for_daemon(
     settings: Settings,
-) -> object:  # pragma: no cover - real-infra glue; unit tests monkeypatch
-    """Construct the RealGate-wrapping supervisor gate.
+) -> RealGate:  # pragma: no cover - real-infra glue; unit tests monkeypatch
+    """Construct the RAW seeded :class:`RealGate` (ADR-0026 seed-then-load).
 
-    Production wires a real Postgres-backed :class:`RealGate` via the
-    bootstrap factory; this PR is the first to construct the Supervisor in
-    production, so the gate is wrapped in :class:`_SupervisorBootGate` to
-    add the sync backing-store-availability surface the monitor polls.
+    Builds the Postgres backend, then delegates to
+    :func:`alfred.bootstrap.gate_factory.build_boot_real_gate` which seeds
+    the first-party system grants BEFORE loading the in-memory policy. The
+    gate is returned RAW (not wrapped in :class:`_SupervisorBootGate`) so
+    :func:`_start_async` can (a) install it into the boot
+    :class:`HookRegistry` and (b) run the post-install grant assertion
+    against ``check`` before wrapping it for the Supervisor.
 
-    ``start_heartbeat=True`` is load-bearing: the supervisor's
-    :class:`CapabilityGateMonitor` polls
-    :meth:`_SupervisorBootGate.is_backing_store_available` (which reads
-    :attr:`RealGate._fail_closed`), and that flag is ONLY driven by the
-    heartbeat loop. Constructing the gate with the heartbeat OFF would
-    leave the monitor permanently seeing "available" — a RUNTIME Postgres
-    outage after boot would go undetected and the gate would never
-    fail-closed (review finding: runtime-outage-not-detected). The
-    boot-time liveness check is the separate async ``SELECT 1``
-    handshake (probe c); the heartbeat is the post-boot continuous check.
+    ``start_heartbeat=True`` is load-bearing for runtime-outage detection:
+    the supervisor's :class:`CapabilityGateMonitor` polls the wrapped
+    gate's ``is_backing_store_available``, which reads the RealGate
+    ``_fail_closed`` flag driven ONLY by the heartbeat loop. With the
+    heartbeat OFF, a RUNTIME Postgres outage after boot would go
+    undetected and the gate would never fail-closed. The boot-time
+    liveness check is the separate async ``SELECT 1`` handshake (probe c);
+    the heartbeat is the post-boot continuous check.
     """
-    from alfred.bootstrap.gate_factory import build_real_gate
+    from alfred.bootstrap.gate_factory import build_boot_real_gate
     from alfred.security.capability_gate.backend import PostgresBackend
 
     backend = PostgresBackend(dsn=settings.database_url.unicode_string())
@@ -235,12 +241,57 @@ async def build_boot_gate(
     async def _noop_audit_sink(**_kw: object) -> None:
         return None
 
-    real_gate = await build_real_gate(
+    return await build_boot_real_gate(
         backend=backend,
         audit_sink=_noop_audit_sink,
         start_heartbeat=True,
     )
-    return _SupervisorBootGate(real_gate)
+
+
+def _first_party_grant_live(gate: CapabilityGate) -> bool:
+    """Return ``True`` iff every first-party system grant is live on ``gate``.
+
+    ADR-0026: drives the assertion off the SAME
+    :data:`FIRST_PARTY_SYSTEM_GRANTS` constant the seed uses, so the seed
+    and the liveness check can never drift. A ``False`` from any
+    :meth:`RealGate.check` means the seed-then-load did not project the
+    grant into the in-memory policy — a structurally-broken trust boundary
+    (the :class:`QuarantinedExtractor` could not register its DLP scan).
+    """
+    from alfred.security.capability_gate._bootstrap_grants import (
+        FIRST_PARTY_SYSTEM_GRANTS,
+    )
+
+    # Fail closed on an empty grant set: ``all(())`` is vacuously True, which
+    # would let the boot assertion pass with NOTHING asserted. A trust boundary
+    # with no first-party grant to verify is itself broken — refuse.
+    if not FIRST_PARTY_SYSTEM_GRANTS:
+        return False
+    return all(
+        gate.check(
+            plugin_id=grant.plugin_id,
+            hookpoint=grant.hookpoint,
+            requested_tier=grant.subscriber_tier,
+        )
+        for grant in FIRST_PARTY_SYSTEM_GRANTS
+    )
+
+
+def _install_quarantine_boot_registry(gate: CapabilityGate, *, audit: AuditWriter) -> None:
+    """Install the boot :class:`HookRegistry` over ``gate`` + the durable sink.
+
+    The registry sink is the boot :class:`AuditWriter` wrapped in
+    :class:`alfred.memory.hooks_audit_sink.EpisodicAuditSink` so a
+    DLP-subscriber-deny refusal row is DURABLE (CLAUDE.md hard rule #7),
+    NOT the gate's no-op sink. ``gate`` is the RAW :class:`RealGate` whose
+    ``check`` consults the grant policy — passing the
+    :class:`_SupervisorBootGate` wrapper (no ``check``) would be a
+    fail-open smell the typed signature rejects.
+    """
+    from alfred.hooks.boot import install_boot_hook_registry
+    from alfred.memory.hooks_audit_sink import EpisodicAuditSink
+
+    install_boot_hook_registry(gate, sink=EpisodicAuditSink(audit=audit))
 
 
 def build_boot_handshake(
@@ -592,8 +643,57 @@ async def _start_async() -> None:
             environment_source=source,
         )
 
-    # All probes passed. Construct the Supervisor + emit completion.
-    gate = await build_boot_gate(settings)
+    # All probes passed. Build the RAW seeded RealGate (ADR-0026
+    # seed-then-load), install the boot HookRegistry over it so a
+    # production QuarantinedExtractor can register its DLP subscriber, and
+    # ASSERT the seeded first-party grant is live. Placed AFTER probe (c)
+    # so Postgres is known-reachable.
+    #
+    # FIX 1 (CLAUDE.md hard rule #7): the seed-gate build can raise a
+    # SQLAlchemyError (Postgres write failure mid-seed) and the registry
+    # install can raise a HookError (hookpoint metadata drift). Either
+    # would otherwise propagate as an UNCAUGHT crash out of _start_async —
+    # fail-closed + safe, but it SKIPS the audited refusal path (no
+    # daemon.boot.failed row, not exit 2). The grant-assertion arm below
+    # is already audited; wrap the seed + install arms so they match: a
+    # failure runs _refuse_boot (exit 2 + a daemon.boot.failed row) under
+    # the DISTINCT boot_infra_install_failed reason — telling a broken
+    # seed/install apart from a seed that succeeded but failed to project
+    # the grant (quarantine_grant_missing).
+    try:
+        real_gate = await build_boot_real_gate_for_daemon(settings)
+        # The registry sink is the durable boot AuditWriter (wrapped), so a
+        # DLP-subscriber-deny refusal row lands in the audit log — NOT the
+        # gate's no-op sink (CLAUDE.md hard rule #7).
+        _install_quarantine_boot_registry(real_gate, audit=audit)
+    except (SQLAlchemyError, HookError):
+        # _refuse_boot is NoReturn (raises _BootRefusedError → exit 2), so
+        # control never falls through to the grant-assertion below — the
+        # type checker proves the seed/install fault cannot reach Supervisor
+        # construction (a fail-OPEN on a security-boot fault).
+        await _refuse_boot(
+            audit,
+            BootInfraInstallFailedFailure(),
+            t("daemon.boot.boot_infra_install_failed"),
+            boot_id=boot_id,
+            environment_source=source,
+        )
+    # Fail-closed boot grant-assertion: the seeded grant MUST be live
+    # after seed-then-load + install. Driven off the same
+    # FIRST_PARTY_SYSTEM_GRANTS constant as the seed so the two can never
+    # drift. A False result is a structurally-broken trust boundary —
+    # refuse boot (exit 2 + audit row), never silently continue.
+    if not _first_party_grant_live(real_gate):
+        await _refuse_boot(
+            audit,
+            QuarantineGrantMissingFailure(),
+            t("daemon.boot.quarantine_grant_missing"),
+            boot_id=boot_id,
+            environment_source=source,
+        )
+    # Wrap the raw gate for the Supervisor's sync backing-store-availability
+    # surface (the CapabilityGateMonitor heartbeat polls it).
+    gate: object = _SupervisorBootGate(real_gate)
     started_at = datetime.now(UTC)
     state_git_head_sha = read_state_git_head_sha(settings.state_git_path)
     policies_snapshot_hash = snapshot_ref.snapshot_hash()

@@ -10,9 +10,11 @@ import pytest
 from pydantic import ValidationError
 
 from alfred.cli.daemon._failures import (
+    BootInfraInstallFailedFailure,
     CapabilityGateHandshakeFailedFailure,
     EnvironmentNotSetFailure,
     LauncherNotPolicyResolvingFailure,
+    QuarantineGrantMissingFailure,
     SnapshotRefInitFailedFailure,
     UnsandboxedEnvInProductionFailure,
 )
@@ -26,11 +28,23 @@ from alfred.cli.daemon._failures import (
         (LauncherNotPolicyResolvingFailure, "launcher_not_policy_resolving"),
         (SnapshotRefInitFailedFailure, "snapshot_ref_init_failed"),
         (CapabilityGateHandshakeFailedFailure, "capability_gate_handshake_failed"),
+        (QuarantineGrantMissingFailure, "quarantine_grant_missing"),
+        (BootInfraInstallFailedFailure, "boot_infra_install_failed"),
     ],
 )
 def test_failure_carries_literal_reason(cls: type, reason: str) -> None:
     instance = cls()
     assert instance.failure_reason == reason
+
+
+def test_boot_infra_install_failure_is_distinct_from_grant_missing() -> None:
+    """FIX 1: a seed/install fault carries its OWN failure_reason, distinct
+    from the grant-assertion arm — so forensics can tell a broken seed/install
+    apart from a seed that succeeded but failed to project the grant."""
+    assert (
+        BootInfraInstallFailedFailure().failure_reason
+        != QuarantineGrantMissingFailure().failure_reason
+    )
 
 
 def test_environment_not_set_carries_no_extra_fields() -> None:

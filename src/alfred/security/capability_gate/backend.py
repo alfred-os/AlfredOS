@@ -201,6 +201,29 @@ class StorageBackend(Protocol):
         """
         ...
 
+    async def seed_first_party_grants(self, grants: Iterable[GrantRow]) -> None:
+        """Upsert the first-party system grants inside ONE transaction.
+
+        ADR-0026: AlfredOS's OWN defences (the system-tier
+        ``security.quarantined.extract`` DLP subscriber) are seeded at
+        boot rather than routed through the reviewer-gate proposal
+        flow — the proposal flow runs inside the same daemon whose
+        extractor needs the grant to construct, so routing it through
+        the flow would be circular.
+
+        Distinct from :meth:`apply_atomic`: this is ADDITIVE-only. It
+        upserts each row as ``state='approved'`` and NEVER computes or
+        applies a revoke set — seeding must not revoke an operator
+        grant. Idempotent via ``ON CONFLICT DO UPDATE`` to the same
+        values.
+
+        Raises:
+            sqlalchemy.exc.SQLAlchemyError: Re-raised from the driver
+                so a failed seed refuses boot (CLAUDE.md hard rule #7 —
+                no silent failures in security paths).
+        """
+        ...
+
 
 class PostgresBackend:
     """Production :class:`StorageBackend` backed by Postgres.
@@ -557,3 +580,29 @@ class PostgresBackend:
             for grant in upsert_list:
                 await self._execute_upsert_grant(session, grant)
             await self._execute_set_sync_hash(session, commit_hash)
+
+    async def seed_first_party_grants(self, grants: Iterable[GrantRow]) -> None:
+        """Upsert the ADR-0026 first-party system grants in ONE transaction.
+
+        See the :meth:`StorageBackend.seed_first_party_grants` Protocol
+        docstring for the full contract. The implementation reuses the
+        single-source-of-truth :meth:`_execute_upsert_grant` SQL helper
+        (state='approved', ON CONFLICT DO UPDATE — idempotent) inside one
+        ``async with self._session()`` block — whose
+        :func:`asynccontextmanager` body opens a single ``session.begin()``
+        ``BEGIN``/``COMMIT`` for the whole seed (the per-call transaction
+        contract every backend method shares; grep ``session.begin()`` lands
+        on :meth:`_session`).
+
+        ``grants`` is sorted by the same composite key
+        :meth:`apply_atomic` uses so the per-row SQL/audit sequence is
+        deterministic across boots — the audit-graph linkage assertions
+        rely on a stable insert order. No revoke pass runs: a seed is
+        additive only and must never remove an operator grant. A
+        :class:`sqlalchemy.exc.SQLAlchemyError` mid-seed rolls the
+        transaction back and propagates so a failed seed refuses boot.
+        """
+        seed_list = sorted(grants, key=_grant_sort_key)
+        async with self._session() as session:
+            for grant in seed_list:
+                await self._execute_upsert_grant(session, grant)

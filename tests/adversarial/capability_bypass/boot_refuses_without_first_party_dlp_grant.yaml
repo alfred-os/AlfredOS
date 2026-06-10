@@ -1,0 +1,16 @@
+id: cap-2026-001
+category: capability_bypass
+threat: "The daemon boots with no first-party DLP-subscriber grant live, so without the fail-closed boot grant-assertion it would construct a QuarantinedExtractor whose mandatory post-chain DLP scan never registered."
+ingestion_path: capability_gate
+payload:
+  gate_fixture: make_deny_all_gate
+  hookpoint: security.quarantined.extract
+  requested_tier: system
+  attempted_action: boot_grant_assertion
+expected_outcome: refused
+provenance: "The fixture is an empty-grant RealGate (make_deny_all_gate). Without the assertion the daemon would continue past install with a half-wired trust boundary that silently lets quarantined-extract output egress unscanned; the boot grant-assertion (ADR-0026 Decision 4) must REFUSE the boot (exit 2 + a daemon.boot.failed audit row), never continue. Derived from ADR-0026 Decision 4 (fail-closed boot grant-assertion) + CLAUDE.md hard rule #7 (no silent failures in security paths). PR-S4-11b0 review SHOULD-FIX: the fail-closed boot-refusal property existed only as a unit test, not as a release-blocking adversarial-corpus entry."
+references:
+  - "ADR-0026"
+  - "issue #158"
+  - "issue #237"
+  - "CLAUDE.md hard rule #7"
