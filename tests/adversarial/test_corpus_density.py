@@ -181,14 +181,33 @@ def test_comms_identity_boundary_corpus_has_payloads() -> None:
     platform_metadata (ignored, resolver-state authoritative), inter-persona
     T2-as-T3 relay (inert claim, always T3), canonical-id outbound leakage
     (never echoed), empty-classifier-set bypass (AST guard refuses), and
-    handler-exception-silenced (positive/negative control). The xfail-strict
-    placeholder self-destructed when the payloads arrived, by design; the floor
-    of 5 catches a silent deletion regression. PR-S4-9 extends the category with
-    the Discord-specific entries.
+    handler-exception-silenced (positive/negative control). PR-S4-9 (#206)
+    extends the category with cib-2026-006 (outbound-queue resume DLP bypass)
+    and cib-2026-007, lifting the floor to 7. The xfail-strict placeholder
+    self-destructed when the payloads arrived, by design; the floor catches a
+    silent deletion regression.
     """
     category_dir = Path(__file__).parent / "comms_identity_boundary"
     count = _count_yaml_payloads(category_dir)
-    assert count >= 5, (
-        f"expected ≥5 *.yaml payloads under {category_dir} (cib-2026-001..005), "
+    assert count >= 7, (
+        f"expected ≥7 *.yaml payloads under {category_dir} (cib-2026-001..007), "
+        f"found {count} — a payload was deleted or renamed"
+    )
+
+
+def test_prompt_injection_corpus_has_payloads() -> None:
+    """`tests/adversarial/prompt_injection/` carries ≥9 PR-S4-9 payloads.
+
+    PR-S4-9 (#206, test-2) ships pi-2026-005..013: one prompt-injection entry per
+    Discord sub-payload surface (embed title / description / field-name /
+    field-value / footer, attachment filename / description,
+    message-content-with-mention, reply-target content) plus the earlier
+    pi-2026-001..004 indirect-injection entries. The floor of 9 catches a silent
+    deletion regression across the Discord sub-payload-surface corpus.
+    """
+    category_dir = Path(__file__).parent / "prompt_injection"
+    count = _count_yaml_payloads(category_dir)
+    assert count >= 9, (
+        f"expected ≥9 *.yaml payloads under {category_dir} (pi-2026-005..013 et al.), "
         f"found {count} — a payload was deleted or renamed"
     )
