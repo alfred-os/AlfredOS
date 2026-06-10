@@ -29,10 +29,13 @@ _TARGET_CALL = "OutboundMessageRequest"
 _SCAN_FN = "scan_for_outbound"
 
 
-def _scan_bound_names(func: ast.AST) -> set[str]:
-    """Names in ``func`` bound to a ``scan_for_outbound(...)`` return value."""
+_ScopeNode = ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+
+
+def _scan_bound_names(scope: ast.AST) -> set[str]:
+    """Names in ``scope`` bound to a ``scan_for_outbound(...)`` return value."""
     bound: set[str] = set()
-    for node in ast.walk(func):
+    for node in ast.walk(scope):
         if isinstance(node, ast.Assign) and _is_scan_call(node.value):
             for target in node.targets:
                 if isinstance(target, ast.Name):
@@ -64,25 +67,54 @@ def _body_arg(call: ast.Call) -> ast.expr | None:
     return None
 
 
+def _nearest_scope(node: ast.AST) -> _ScopeNode | None:
+    """Return the innermost enclosing scope (module / func / class) for ``node``.
+
+    Climbs the ``parent`` chain set by :func:`_violations_in_source`. A call's
+    own scope is the first scope node strictly ABOVE it, so the climb starts at
+    the parent — this keeps a construction attributed to the scope it lives in.
+    """
+    current: ast.AST | None = getattr(node, "parent", None)
+    while current is not None:
+        if isinstance(current, _ScopeNode):
+            return current
+        current = getattr(current, "parent", None)
+    return None
+
+
 def _violations_in_source(source: str, *, filename: str) -> list[str]:
-    """Return human-readable violation strings for one source file/string."""
+    """Return human-readable violation strings for one source file/string.
+
+    Covers EVERY scope — module body, class body, and (async) function body —
+    not just functions (CR #232): a module- or class-scope construction must not
+    slip past the DLP chokepoint guard. Each ``OutboundMessageRequest(...)`` call
+    is attributed to its nearest enclosing scope so it is checked exactly once
+    against that scope's ``scan_for_outbound`` bindings (no double-counting, no
+    cross-scope name leakage).
+    """
     tree = ast.parse(source, filename=filename)
+
+    # Link every node to its parent so a construction call can climb to its
+    # nearest enclosing scope, and pre-compute each scope's scan-bound names.
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child.parent = parent  # type: ignore[attr-defined]
+    scan_names_by_scope: dict[_ScopeNode, set[str]] = {
+        scope: _scan_bound_names(scope) for scope in ast.walk(tree) if isinstance(scope, _ScopeNode)
+    }
+
     violations: list[str] = []
-    # Walk every function/method; within each, find OutboundMessageRequest
-    # calls and verify the body= argument traces to a scan_for_outbound call.
-    for func in ast.walk(tree):
-        if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _is_call_to(node, _TARGET_CALL)):
             continue
-        scan_names = _scan_bound_names(func)
-        for node in ast.walk(func):
-            if not (isinstance(node, ast.Call) and _is_call_to(node, _TARGET_CALL)):
-                continue
-            body = _body_arg(node)
-            ok = body is not None and (
-                _is_scan_call(body) or (isinstance(body, ast.Name) and body.id in scan_names)
-            )
-            if not ok:
-                violations.append(f"{filename}:{node.lineno}: body= not via {_SCAN_FN}")
+        scope = _nearest_scope(node)
+        scan_names = scan_names_by_scope.get(scope, set()) if scope is not None else set()
+        body = _body_arg(node)
+        ok = body is not None and (
+            _is_scan_call(body) or (isinstance(body, ast.Name) and body.id in scan_names)
+        )
+        if not ok:
+            violations.append(f"{filename}:{node.lineno}: body= not via {_SCAN_FN}")
     return violations
 
 
@@ -145,3 +177,56 @@ def test_guard_rejects_raw_tuple_body() -> None:
 def test_guard_rejects_missing_body() -> None:
     source = "def f():\n    return OutboundMessageRequest(adapter_id='alfred_comms_test')\n"
     assert _violations_in_source(source, filename="<missing>") != []
+
+
+def test_guard_rejects_module_scope_raw_body() -> None:
+    # A module-level construction must NOT bypass the guard (CR #232): the
+    # function-only walk skipped module + class scopes entirely.
+    source = (
+        "REQ = OutboundMessageRequest(\n"
+        "    adapter_id='alfred_comms_test', idempotency_key=k,\n"
+        "    target_platform_id='c', body=(raw, None),\n"
+        "    attachments_refs=(), addressing_mode='dm',\n"
+        ")\n"
+    )
+    assert _violations_in_source(source, filename="<module>") != []
+
+
+def test_guard_rejects_class_body_raw_body() -> None:
+    source = (
+        "class C:\n"
+        "    REQ = OutboundMessageRequest(\n"
+        "        adapter_id='alfred_comms_test', idempotency_key=k,\n"
+        "        target_platform_id='c', body=(raw, None),\n"
+        "        attachments_refs=(), addressing_mode='dm',\n"
+        "    )\n"
+    )
+    assert _violations_in_source(source, filename="<class>") != []
+
+
+def test_guard_accepts_module_scope_scan_call() -> None:
+    # The broadened walk must still accept a legitimate module-scope construction
+    # whose body= traces to a scan_for_outbound call.
+    source = (
+        "scanned = dlp.scan_for_outbound(raw)\n"
+        "REQ = OutboundMessageRequest(\n"
+        "    adapter_id='alfred_comms_test', idempotency_key=k,\n"
+        "    target_platform_id='c', body=scanned,\n"
+        "    attachments_refs=(), addressing_mode='dm',\n"
+        ")\n"
+    )
+    assert _violations_in_source(source, filename="<module-ok>") == []
+
+
+def test_guard_does_not_double_count_function_scope() -> None:
+    # A single bad construction inside a function must be reported exactly once,
+    # not duplicated by the module-scope pass also seeing it.
+    source = (
+        "def f(raw):\n"
+        "    return OutboundMessageRequest(\n"
+        "        adapter_id='alfred_comms_test', idempotency_key=k,\n"
+        "        target_platform_id='c', body=(raw, None),\n"
+        "        attachments_refs=(), addressing_mode='dm',\n"
+        "    )\n"
+    )
+    assert len(_violations_in_source(source, filename="<once>")) == 1
