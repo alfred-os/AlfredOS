@@ -143,6 +143,18 @@ KNOWN_HOOKPOINTS: Final[Mapping[str, tuple[str, ...]]] = {
         "comms.inbound.t3_promoted",
         "comms.adapter.crashed",
     ),
+    # PR-S4-9 (#206, spec §10): the two Discord comms-MCP hookpoints. Both
+    # fail_closed=False + allow_error_substitution=True.
+    # ``comms.adapter.binding_requested`` carries carrier_tier=T3 (system+operator
+    # subscribers — hashed identity metadata only, never the raw T3 body);
+    # ``comms.adapter.rate_limit_signal`` carries carrier_tier=T0 (operational
+    # signal). Registered by ``alfred.comms_mcp.discord_hookpoints.declare_hookpoints``
+    # at module import (bottom-of-module call), mirroring
+    # ``alfred.comms_mcp.hookpoints``.
+    "alfred.comms_mcp.discord_hookpoints": (
+        "comms.adapter.binding_requested",
+        "comms.adapter.rate_limit_signal",
+    ),
 }
 
 
