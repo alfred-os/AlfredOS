@@ -88,6 +88,10 @@ class DiscordMockMessage:
     guild: DiscordMockGuild | None = None
     mentions: Sequence[DiscordMockUser] = field(default_factory=tuple)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # ``None`` for a never-edited message; the edit timestamp once edited. Mirrors
+    # ``discord.Message.edited_at`` so ``normalise`` can stamp ``received_at`` with
+    # the edit instant on the edit path (M4).
+    edited_at: datetime | None = None
     embeds: Sequence[object] = field(default_factory=tuple)
     attachments: Sequence[object] = field(default_factory=tuple)
     poll: object | None = None
@@ -224,6 +228,7 @@ class DiscordMockFactory:
         guild: DiscordMockGuild | None = None,
         mentions: Sequence[DiscordMockUser] = (),
         created_at: datetime | None = None,
+        edited_at: datetime | None = None,
         embeds: Sequence[object] = (),
         attachments: Sequence[object] = (),
         poll: object | None = None,
@@ -240,6 +245,7 @@ class DiscordMockFactory:
             guild=guild,
             mentions=tuple(mentions),
             created_at=created_at if created_at is not None else datetime.now(UTC),
+            edited_at=edited_at,
             embeds=tuple(embeds),
             attachments=tuple(attachments),
             poll=poll,
