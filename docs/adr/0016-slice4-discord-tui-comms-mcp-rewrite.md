@@ -30,6 +30,33 @@ reference test plugin (`lifecycle.start`, `lifecycle.stop`,
 contract with Discord-specific fields (embeds T3-promotion, attachment
 handling) and finalises the ADR-0009 polarity-inversion note.
 
+### Sandbox posture for the Discord adapter (PR-S4-9, sec-1 round-2 closure)
+
+The Discord adapter manifest declares `[sandbox] kind = "full"`, NOT the
+first-party-relay `kind = "none"` carve-out the original plan sketched. Rationale,
+grounded in the ADR-0015 quarantined-LLM precedent: the Discord adapter ingests
+adversary-controlled bytes from arbitrary Discord users (embed titles, attachment
+filenames, message content, reply targets) and opens its WSS connection to the
+Discord gateway in-process, so a compromise in the event-parsing path must be
+contained by the kernel, not by convention. The policy bytes ship at
+`config/sandbox/discord-adapter.{linux.bwrap.policy,macos.sb,windows.stub.policy}`
+and MIRROR the quarantined-LLM policies' fs/namespace containment (ro-binds
+`/usr` `/lib` `/lib64`, tmpfs scratch, synthesised `/dev`, unshare
+`pid`/`uts`/`cgroup`/`ipc`, `die_with_parent`, `keep_fds=[3]`) with ONE
+deliberate addition — a `/etc/ssl/certs` ro-bind the quarantined LLM does not
+need, for verifying the Discord TLS chain.
+
+**Egress is NOT yet kernel-enforced — deferred to #230.** Like the
+quarantined-LLM policy, the Discord policy does NOT `unshare net`: the plugin
+needs outbound network for the Discord WSS connection, and the `SandboxPolicy`
+schema cannot yet express a Discord-only egress allowlist. Filesystem and
+process/namespace containment ARE kernel-enforced; egress is the documented,
+accepted gap for the mid-flight slice state. The manifest's `[network] allowlist`
+records the intended Discord-only cap (`discord.com`, `gateway.discord.gg`); #230
+lands the `network.outbound_allowlist` schema field + the bwrap `--unshare-net` +
+a filtered forwarder/egress-proxy that enforces it at the kernel boundary. This
+mirrors ADR-0015's identical egress-deferral decision for the quarantined LLM.
+
 ## Consequences
 
 ### Positive
@@ -62,5 +89,7 @@ handling) and finalises the ADR-0009 polarity-inversion note.
 
 - [PRD §5](../../PRD.md#5-architecture-overview) — "Plugins are MCP servers."
 - [ADR-0009](0009-comms-adapter-protocol-slice2-only.md) — in-process Protocol; superseded by this ADR for new adapters.
+- [ADR-0015](0015-slice4-containerised-quarantined-llm.md) — the `kind=full` bwrap precedent + the identical egress-deferred-to-#230 posture the Discord adapter mirrors.
 - [ADR-0017](0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) — Slice-3 transport decision.
+- #230 — kernel-enforced egress allowlist (`network.outbound_allowlist` + `--unshare-net`); blocks production Discord/quarantined-LLM traffic until landed.
 - [Spec §9](../superpowers/specs/2026-05-30-slice-3-trust-tier-completion-design.md#9-adr-0009-comms-mcp-rewrite-fork-8) — ADR-0009 comms-MCP rewrite scope.

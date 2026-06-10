@@ -1506,3 +1506,91 @@ this.
 See [sandbox kind](#sandbox-kind),
 [ADR-0015](adr/0015-slice4-containerised-quarantined-llm.md), and
 `docs/superpowers/specs/2026-06-06-slice-4-design.md` §5.4.
+
+## DiscordSubPayloadClassifier
+
+The host-side classifier (`src/alfred/comms_mcp/classifiers/discord.py`,
+registered via `@register_classifier(kind="discord", name="discord_sub_payloads")`)
+that recognises the nine Discord sub-payload kinds inline in an inbound message
+body and emits one opaque `DiscordSubPayload` marker per match. It is synchronous
+and side-effect-free (no content-store write): the marker carries the `kind`, the
+dotted `path` (e.g. `embeds[0]`), the `source_url` (`discord://<path>`), and the
+`raw` sub-payload. The async promotion to a `ContentHandle` is the consuming host
+step (`SubPayloadPromoter`), not the classifier's job. Malformed sub-payloads are
+logged (`comms_mcp.discord_classifier.malformed`) and skipped, never raised, for
+forward-compat with evolving Discord API shapes.
+
+See [SubPayloadPromoter](#subpayloadpromoter),
+[the nine sub-payload kinds](#discord-sub-payload-kinds), and
+[docs/subsystems/comms.md](subsystems/comms.md).
+
+## SubPayloadPromoter
+
+The host-side step (`src/alfred/comms_mcp/sub_payload_promotion.py`) that runs
+BEFORE `quarantined_extract` and turns each `DiscordSubPayload` marker into a
+single-use `ContentHandle`: it host-mints a fresh `uuid4` handle id, writes the
+raw sub-payload bytes to the content store under that id, and rewrites the body
+field at the marker's path to `{"$content_handle_id": <id>}`. After promotion the
+privileged orchestrator only ever holds handle references — the raw (T3)
+sub-payload bytes live in the content store, dereferenced solely by the
+quarantined LLM. This is the load-bearing T3-isolation boundary for Discord rich
+content. The host-classified kind set (not the plugin-asserted
+`notification.sub_payload_refs`) is authoritative for the `COMMS_INBOUND_T3_PROMOTION_FIELDS`
+audit row.
+
+See [DiscordSubPayloadClassifier](#discordsubpayloadclassifier),
+[ContentHandle](#contenthandle), and [docs/subsystems/comms.md](subsystems/comms.md).
+
+## Discord sub-payload kinds
+
+The nine adversary-authorable Discord sub-payload kinds (spec §8.6 / §8.10) the
+`DiscordSubPayloadClassifier` recognises and promotes to `ContentHandle`s:
+`embed`, `attachment`, `poll`, `link_unfurl` (an embed whose `type` is `link`),
+`sticker`, `voice_message` (an attachment whose `content_type` begins `audio/`),
+`component`, `forwarded_ref` (a `message_reference` flagged `forwarded`), and
+`pinned_ref` (a `message_reference` flagged `pinned`). This exact frozenset is
+referenced by the audit-row `sub_payload_kinds` field and is load-bearing.
+
+See [DiscordSubPayloadClassifier](#discordsubpayloadclassifier).
+
+## OutboundQueue
+
+The host-side per-adapter outbound FIFO (`src/alfred/comms_mcp/outbound_queue.py`)
+introduced in PR-S4-9. It owns per-adapter backpressure (an
+`asyncio.Semaphore(max_in_flight_per_adapter)`) and rate-limit pause/resume: on a
+Discord `adapter.rate_limit_signal` (429) the host calls
+`pause(adapter_id, retry_after_seconds)`, which suspends `consume` until the
+retry-after window elapses (auto-resume) or an explicit `resume`. comms-2: a
+message that waited through a pause is re-scanned by the optional `dlp_rescanner`
+before re-emission — a policy hot-reload that tightened DLP during the pause
+catches a planted secret and `consume` refuses it with `OutboundResumeDlpBlockedError`
+rather than emitting it. Consumed by PR-S4-9 Discord outbound and PR-S4-10's TUI.
+
+See [docs/subsystems/comms.md](subsystems/comms.md).
+
+## addressing_signal / addressing_mode
+
+The inbound (`addressing_signal`) and outbound (`addressing_mode`) wire
+`Literal["dm","mention","channel","thread"]` values for Discord. The
+`addressing_signal` is inferred by the adapter from the platform event
+(`plugins/alfred_discord/addressing_inference.py`): a thread channel → `thread`,
+a 1:1 DM → `dm`, a direct @bot mention → `mention`, else a listened channel →
+`channel`. The `addressing_mode` is the persona's chosen reply addressing on the
+outbound `OutboundMessageRequest`. When the two diverge for one conversation, the
+host `detect_addressing_drift` (`src/alfred/comms_mcp/addressing_drift.py`) emits
+a `COMMS_ADDRESSING_DRIFT_FIELDS` forensic row.
+
+See [ThreadConversationLedger](#threadconversationledger) and
+[docs/subsystems/comms.md](subsystems/comms.md).
+
+## ThreadConversationLedger
+
+The host-side binder (`src/alfred/comms_mcp/thread_conversation_ledger.py`,
+comms-4) that maps a `(adapter_id, thread_id)` to a stable
+`conversation_session_id`: the first message in a thread mints a session
+(`resumed=False`), every later message in the same thread resumes the same id
+(`resumed=True`) so a thread never forks a fresh conversation. Keyed including the
+`adapter_id` so two adapters' threads never collide. In-memory for Slice 4;
+durable persistence is a Slice-5 enhancement.
+
+See [addressing_signal / addressing_mode](#addressing_signal--addressing_mode).

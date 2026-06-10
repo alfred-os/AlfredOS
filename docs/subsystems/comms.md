@@ -288,3 +288,62 @@ make the audit log less actionable.
   surface is intentionally minimal so a voice adapter (microphone +
   TTS) and a Telegram adapter can land without altering the
   orchestrator's contract.
+
+## Slice 4: the Discord MCP adapter (PR-S4-9)
+
+Slice 4 ships `plugins/alfred_discord/` as the first real comms-MCP adapter under
+the ADR-0016 / ADR-0024 wire contract. The legacy `src/alfred/comms/discord.py`
+stays dormant (an AST guard,
+`tests/unit/comms/test_no_direct_adapter_imports.py`, forbids fresh imports) and
+is deleted in PR-S4-10.
+
+### Inbound: host-side T3 sub-payload promotion
+
+The adapter is a thin marshaller — it ships the user's typed text plus the nine
+Discord sub-payload kinds INLINE in the wire body and does NO T3 promotion
+in-process. The host does the promotion: `process_inbound_message` runs the
+[`SubPayloadPromoter`](../glossary.md#subpayloadpromoter) BEFORE
+`quarantined_extract`, which scans the body via the
+[`DiscordSubPayloadClassifier`](../glossary.md#discordsubpayloadclassifier),
+writes each recognised sub-payload to the content store under a host-minted handle
+id, and rewrites the body field to a `{"$content_handle_id": <id>}` reference. The
+privileged orchestrator therefore never sees raw sub-payload bytes — only handle
+references; the quarantined LLM dereferences them. The host-classified kind set
+(not the plugin-asserted `sub_payload_refs`) populates the
+`COMMS_INBOUND_T3_PROMOTION_FIELDS` audit row.
+
+### Outbound: idempotency, DLP, and the OutboundQueue
+
+Outbound replies are idempotency-keyed (host-minted `UUID`), DLP-scanned at the
+wire boundary (`ScannedOutboundBody`), and flow through the
+[`OutboundQueue`](../glossary.md#outboundqueue). On a Discord 429
+(`adapter.rate_limit_signal`) the host pauses the queue for the platform's
+`retry_after_seconds`; messages stay queued through the window and auto-resume. A
+message that waited through a pause is re-scanned (comms-2) so a mid-pause DLP
+hot-reload cannot leak a now-prohibited secret. Two threads in one conversation
+bind to one `conversation_session_id` via the
+[`ThreadConversationLedger`](../glossary.md#threadconversationledger) so a
+follow-up resumes rather than forks.
+
+### Sandbox posture and egress
+
+The adapter manifest declares `[sandbox] kind = "full"` (sec-1): it ingests
+adversary-controlled bytes and runs under bwrap fs/namespace containment mirroring
+the quarantined LLM, plus a `/etc/ssl/certs` ro-bind for the Discord TLS chain.
+Egress is NOT yet kernel-enforced — the policy does not `unshare net` because the
+schema cannot yet express a Discord-only egress allowlist; the cap is deferred to
+issue #230 and documented in `config/sandbox/discord-adapter.*` + the manifest
+`[network] allowlist`. See [ADR-0016](../adr/0016-slice4-discord-tui-comms-mcp-rewrite.md)
+and [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md).
+
+### Rendering guidance for operator-facing audit rows (i18n-3)
+
+When a comms audit row renders to an operator surface (CLI / TUI / dashboard),
+datetimes (`received_at`, `recorded_at`) MUST render via
+`babel.dates.format_datetime(dt, locale=operator.language)` and numeric fields
+(`retry_after_seconds`) via `babel.numbers.format_decimal(n, locale=operator.language)`,
+so an operator in `fr`/`ja` sees locale-correct dates and numbers rather than
+machine ISO strings. The stored row stays machine-readable (ISO-8601 + raw
+numbers); the locale formatting is a presentation-layer concern applied at render
+time, not at write time. PR-S4-10's operator-facing surfaces own the assertions
+on this rendering.
