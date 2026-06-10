@@ -377,9 +377,9 @@ jobs:
         #   3. Compile so the CI log shows translation-coverage stats per
         #      locale (and so .mo files would be generated if we publish).
         run: |
-          uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred
+          uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins
           if ! uv run pybabel update --check -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching --ignore-pot-creation-date; then
-            echo "::error::i18n catalog drift detected. Run 'uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred && uv run pybabel update -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching' locally and commit the diff."
+            echo "::error::i18n catalog drift detected. Run 'uv run pybabel extract -F babel.cfg -o /tmp/alfred.pot src/alfred plugins && uv run pybabel update -i /tmp/alfred.pot -d locale -D alfred --no-fuzzy-matching' locally and commit the diff."
             exit 1
           fi
           uv run pybabel compile -d locale -D alfred --statistics
