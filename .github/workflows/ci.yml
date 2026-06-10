@@ -529,6 +529,17 @@ jobs:
         # tracking — coverage cannot attribute import-time lines to a test, so a
         # per-file 100% gate would be unsatisfiable. Its behaviour is covered by
         # ``tests/unit/hooks/test_comms_hookpoints_registered.py`` instead.
+        # ``orchestrator/core.py`` is likewise EXCLUDED from this whole-file gate
+        # even though PR-S4-8 adds ``Orchestrator.quarantined_extract`` there: it
+        # is an 889-line multi-responsibility orchestrator, not a comms-only seam,
+        # and pinning the WHOLE file at 100% from this corpus would be
+        # unsatisfiable (it sits at ~93% on the full suite — unrelated orchestrator
+        # error paths). The ``quarantined_extract`` funnel itself — the only
+        # trust-boundary surface PR-S4-8 touches in that file — IS exercised to
+        # 100% by ``tests/unit/comms_mcp/test_inbound_quarantined_extract_source_tier.py``,
+        # the inbound-path unit suite, and the comms-identity adversarial corpus;
+        # gating it via the whole orchestrator file is the wrong mechanism (a
+        # function-scoped coverage gate is tracked as a follow-up).
         # Chained ``&&`` hashFiles guard per the plugins/supervisor precedent so
         # the gate no-ops cleanly on a branch where these files do not exist yet.
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/protocol.py') != '' && hashFiles('src/alfred/comms_mcp/inbound.py') != '' && hashFiles('src/alfred/comms_mcp/inbound_scanner.py') != '' && hashFiles('src/alfred/comms_mcp/classifier_registry.py') != '' && hashFiles('src/alfred/comms_mcp/handlers.py') != '' && hashFiles('src/alfred/comms_mcp/bootstrap.py') != '' && hashFiles('src/alfred/comms_mcp/observability.py') != '' && hashFiles('src/alfred/comms_mcp/errors.py') != '' && hashFiles('src/alfred/orchestrator/burst_limiter.py') != ''
