@@ -19,7 +19,10 @@ asserts:
 * The ``discord.verify.ok`` structlog event appears on stdout, JSON-parsed.
 * The captured intents tuple on that event includes ``dm_messages`` AND
   ``message_content`` — the two intents the spec requires for the DM-only
-  ingestion path (per ``_compute_intents`` in ``alfred.comms.discord``).
+  ingestion path (computed by the ``alfred discord verify`` command, which
+  PR-S4-9 rerouted onto the out-of-process ``plugins/alfred_discord/``
+  adapter; the in-process ``alfred.comms.discord`` module was deleted in
+  PR-S4-10).
 
 The bot token + DB/provider credentials are written into a ``tmp_path``
 ``secrets.toml`` at 0600 perms under a 0700 parent so the
@@ -157,8 +160,9 @@ def test_discord_verify_reports_ok(smoke_secrets_file: Path) -> None:
     )
     intents_set = set(intents)
     # Spec §3: DM-only path requires message_content + dm_messages.
-    # ``_intents_summary`` in alfred.comms.discord serialises the
-    # enabled intents alphabetically; both flags must appear.
+    # The ``alfred discord verify`` command (now backed by the
+    # plugins/alfred_discord/ adapter) serialises the enabled intents
+    # alphabetically on the verify-ok event; both flags must appear.
     assert "message_content" in intents_set, (
         f"DM-only intents must include message_content; got {intents_set!r}"
     )
