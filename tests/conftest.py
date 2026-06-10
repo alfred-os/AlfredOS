@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.discord_mocks import DiscordMockFactory
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 
@@ -96,3 +98,15 @@ def launcher_chain_fixture(
         return LauncherResult(proc.returncode, proc.stdout, proc.stderr)
 
     return _run
+
+
+@pytest.fixture
+def discord_mock_factory() -> DiscordMockFactory:
+    """Return the typed Discord double factory (closure test-1).
+
+    The single sanctioned construction site for Discord-shaped test inputs.
+    Every ``DiscordMock*`` instance in the suite is built through this factory;
+    the AST guard ``tests/unit/discord/test_no_ad_hoc_mocks.py`` forbids ad-hoc
+    ``Mock(spec=discord.Message)`` patterns elsewhere.
+    """
+    return DiscordMockFactory()
