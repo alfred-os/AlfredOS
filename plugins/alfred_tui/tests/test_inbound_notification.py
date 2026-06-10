@@ -67,6 +67,62 @@ async def test_health_snapshot_reflects_started_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_notify_preserves_buffer_and_counts_error() -> None:
+    """A failed inbound emit must NOT drop the operator's buffered input.
+
+    PR-S4-10 review #2: the batch was cleared (and ``last_inbound_at`` stamped)
+    before awaiting ``_notify``, so a notify failure silently lost the keystroke
+    batch and reported a false-successful inbound. The session must keep the
+    buffer intact, count the error, leave ``last_inbound_at`` unchanged, and
+    re-raise loudly (no silent drop) — so a retry can re-flush the same text.
+    """
+
+    class _BoomError(RuntimeError):
+        pass
+
+    async def _failing(_note: InboundMessageNotification) -> None:
+        raise _BoomError("notify sink down")
+
+    session = TuiSession(notify=_failing)
+    await session.start(adapter_id="tui")
+    await session.consume_user_input("dont lose me")
+
+    with pytest.raises(_BoomError):
+        await session.flush_keystroke_batch()
+
+    snap = session.health_snapshot()
+    assert snap.queue_depth == 1, "buffered input was dropped on a failed notify"
+    assert snap.error_count == 1, "failed notify was not counted as an error"
+    assert snap.last_inbound_at is None, "failed notify stamped a false inbound time"
+
+
+@pytest.mark.asyncio
+async def test_buffer_survives_failed_notify_and_reflushes_on_retry() -> None:
+    """After a failed emit the SAME buffered text re-flushes once the sink recovers."""
+    calls: list[InboundMessageNotification] = []
+    fail_next = {"on": True}
+
+    async def _flaky(note: InboundMessageNotification) -> None:
+        if fail_next["on"]:
+            fail_next["on"] = False
+            raise RuntimeError("transient sink failure")
+        calls.append(note)
+
+    session = TuiSession(notify=_flaky)
+    await session.start(adapter_id="tui")
+    await session.consume_user_input("retry me")
+
+    with pytest.raises(RuntimeError):
+        await session.flush_keystroke_batch()
+    # sink recovered — the preserved buffer re-flushes the identical text.
+    await session.flush_keystroke_batch()
+
+    assert len(calls) == 1
+    assert calls[0].body[BODY_FIELD_BY_KIND["tui"]] == "retry me"
+    assert session.health_snapshot().queue_depth == 0
+
+
+@pytest.mark.asyncio
 async def test_stop_flushes_pending_buffer_count() -> None:
     session = TuiSession()
     await session.start(adapter_id="tui")

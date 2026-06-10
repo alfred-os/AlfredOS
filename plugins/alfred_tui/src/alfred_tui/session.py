@@ -125,7 +125,6 @@ class TuiSession:
         if not self._buffer:
             return
         body = "".join(self._buffer)
-        self._buffer.clear()
         note = InboundMessageNotification(
             adapter_id=_ADAPTER_KIND,
             platform_user_id=os.environ.get("USER") or _UNKNOWN_OPERATOR,
@@ -134,8 +133,19 @@ class TuiSession:
             received_at=datetime.now(UTC),
             addressing_signal=TUI_INBOUND_ADDRESSING_SIGNAL,
         )
+        # Emit FIRST, then clear/stamp. If the sink raises, the operator's
+        # buffered keystrokes must survive (a retry re-flushes the same text)
+        # and health must NOT report a false-successful inbound. The failure is
+        # loud (counted + logged + re-raised), never a silent drop.
+        # (PR-S4-10 review #2 — buffered-input-loss guard.)
+        try:
+            await self._notify(note)
+        except Exception:
+            self._error_count += 1
+            _log.exception("comms.tui.inbound_notify_failed")
+            raise
+        self._buffer.clear()
         self._last_inbound_at = note.received_at
-        await self._notify(note)
 
     def set_render_hook(self, render_outbound: RenderOutbound) -> None:
         """Install the Textual render hook after the app is constructed.
