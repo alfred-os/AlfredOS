@@ -22,8 +22,9 @@ Behaviour pinned here:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from unittest.mock import Mock
 
-from plugins.alfred_discord.rate_limit_emitter import RateLimitEmitter
+from plugins.alfred_discord.rate_limit_emitter import _UNKNOWN_ENDPOINT, RateLimitEmitter
 from tests.support.discord_mocks import DiscordMockFactory
 
 _ADAPTER = "discord"
@@ -112,3 +113,37 @@ async def test_emit_is_awaited_before_returning(
     await emitter.emit_for_rate_limit(exc)
     assert sink.emit_started == 1
     assert sink.emit_finished == 1
+
+
+def _exc_with_url(url: object) -> Mock:
+    """A minimal exception double carrying ``response.url`` for ``_endpoint``."""
+    response = Mock()
+    response.url = url
+    exc = Mock()
+    exc.response = response
+    return exc
+
+
+def test_endpoint_no_response_url_returns_unknown() -> None:
+    exc = _exc_with_url(None)
+    assert RateLimitEmitter._endpoint(exc) == _UNKNOWN_ENDPOINT  # type: ignore[arg-type]
+
+
+def test_endpoint_discord_url_is_coarse_host_plus_segment() -> None:
+    exc = _exc_with_url("https://discord.com/api/v10/channels/1/messages")
+    label = RateLimitEmitter._endpoint(exc)  # type: ignore[arg-type]
+    assert label.startswith("discord.com")
+    assert "discord.com" in label
+
+
+def test_endpoint_non_discord_url_never_leaks_full_url() -> None:
+    # A malicious redirect / MITM / library bug could surface a non-discord URL
+    # carrying a sensitive id. The fallback must NEVER place the full URL (or its
+    # id-bearing path) in the audit label — it collapses to the stable unknown
+    # placeholder instead.
+    leaky = "https://evil.example.com/secret/918273645546372819/token-abc"
+    label = RateLimitEmitter._endpoint(_exc_with_url(leaky))  # type: ignore[arg-type]
+    assert label == _UNKNOWN_ENDPOINT
+    assert "evil.example.com" not in label
+    assert "918273645546372819" not in label
+    assert "token-abc" not in label

@@ -108,16 +108,27 @@ class RateLimitEmitter:
 
     @staticmethod
     def _endpoint(exc: discord.HTTPException) -> str:
-        """Derive a ``host:path``-shaped endpoint label from the 429 response URL."""
+        """Derive a coarse ``host:segment`` endpoint label from the 429 response URL.
+
+        Audit-safety: the label must NEVER carry the full URL. A Discord API
+        response always targets ``discord.com``; for that host we keep a coarse
+        ``discord.com:<trailing-segment>`` shape. For ANY other host — only
+        reachable via a malicious redirect, a MITM, or a library bug — the URL
+        could carry an id/token in its path, so we collapse to the stable
+        ``_UNKNOWN_ENDPOINT`` placeholder rather than echo any of it into the
+        audit row.
+        """
         response = getattr(exc, "response", None)
         url = getattr(response, "url", None)
         if url is None:
             return _UNKNOWN_ENDPOINT
         text = str(url)
-        host = "discord.com" if "discord.com" in text else text
-        # Keep a coarse label (host + a trailing path segment) — never the full
-        # URL, which could carry an id; the host audit row only needs the shape.
-        return f"{host}:{text.rsplit('/', 1)[-1]}" if "/" in text else host
+        if "discord.com" not in text:
+            # Non-Discord host: fail safe — never echo a foreign URL's id-bearing
+            # path into the audit label.
+            return _UNKNOWN_ENDPOINT
+        # Coarse label: the known host + a single trailing path segment shape.
+        return f"discord.com:{text.rsplit('/', 1)[-1]}" if "/" in text else "discord.com"
 
 
 __all__ = ["RateLimitEmitter"]
