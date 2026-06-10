@@ -334,7 +334,11 @@ async def build_comms_host(postgres_url: str) -> AsyncIterator[CommsHost]:
         burst_limiter = BurstLimiter(audit_writer=audit_writer)
 
         secret_broker = MagicMock()
-        secret_broker.get = MagicMock(return_value="integration-test-pepper")
+        # HKDF (audit_hash) requires a >=32-byte PRK; the pepper must clear that
+        # floor — the production audit.hash_pepper is bootstrapped at full length.
+        secret_broker.get = MagicMock(
+            return_value="integration-test-pepper-0123456789abcdef-padding"
+        )
 
         try:
             yield CommsHost(
