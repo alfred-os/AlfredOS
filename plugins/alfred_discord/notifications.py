@@ -69,10 +69,22 @@ class StdoutNotificationSink:
     loop; the flush is explicit so a frame is not buffered past a subsequent
     ``sys.exit`` (the crash emitter relies on this to land its frame before the
     process exits).
+
+    M3: two concurrent :meth:`emit` calls — e.g. a rate-limit signal racing an
+    inbound frame — would otherwise land on DIFFERENT ``to_thread`` workers and
+    interleave their byte writes on the shared ``sys.stdout``, corrupting the
+    line-delimited JSON-RPC stream. An ``asyncio.Lock`` serialises the
+    write+flush so exactly one frame crosses the wire at a time. The lock is
+    held across the ``to_thread`` await, so the second emitter waits for the
+    first frame's flush before its own worker starts writing.
     """
 
+    def __init__(self) -> None:
+        self._emit_lock = asyncio.Lock()
+
     async def emit(self, frame: Mapping[str, object]) -> None:
-        await asyncio.to_thread(self._write, frame)
+        async with self._emit_lock:
+            await asyncio.to_thread(self._write, frame)
 
     def emit_sync(self, frame: Mapping[str, object]) -> None:
         """Write + flush a frame inline (no event loop) — the crash-path sink."""
