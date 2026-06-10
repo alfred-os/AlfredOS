@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-09 09:41+0100\n"
+"POT-Creation-Date: 2026-06-10 13:53+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -290,7 +290,7 @@ msgstr "Seconds to wait for on_ready before timing out (default 30)."
 # PR-S4-10 (#206): alfred discord now spawns plugins/alfred_discord via the
 # launcher; this is the daemon/launcher-unavailable message for both the boot
 # path and the readiness probe.
-#: src/alfred/cli/discord_cmd.py:132 src/alfred/cli/discord_cmd.py:155
+#: src/alfred/cli/discord_cmd.py:132 src/alfred/cli/discord_cmd.py:160
 msgid "cli.discord.daemon_required"
 msgstr ""
 "alfred discord needs the daemon and the plugin launcher. Start the daemon"
@@ -353,7 +353,7 @@ msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/cli/main.py:341 src/alfred/i18n/_slice_4_reserve.py:148
+#: src/alfred/cli/main.py:345 src/alfred/i18n/_slice_4_reserve.py:148
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat needs the daemon. Start it with: alfred daemon start. If you "
@@ -2301,6 +2301,28 @@ msgstr ""
 "request_plugin_restart refused: {reason!r} is not a known restart reason."
 " Pass a valid PluginRestartReason."
 
+# PR-S4-10 review F1 (#206): the TUI render layer moved to
+# plugins/alfred_tui; the CI extract scanned src/alfred ONLY, so these LIVE
+# keys were marked obsolete and dropped at compile time, leaving operators
+# with raw "tui.label_you:" keys. The extract now scans `src/alfred plugins`
+# and these are restored as active msgids with their English msgstr.
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:70
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:71
+msgid "tui.binding.quit"
+msgstr "Quit"
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:81
+msgid "tui.input_placeholder"
+msgstr "Speak to Alfred..."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:104
+msgid "tui.label_you"
+msgstr "you"
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:117
+msgid "tui.label_alfred"
+msgstr "alfred"
+
 #~ msgid "discord.unknown_user_repeat"
 #~ msgstr ""
 
@@ -2634,17 +2656,14 @@ msgstr ""
 #~ msgid "discord.budget_blocked"
 #~ msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
 
-#~ msgid "tui.binding.quit"
-#~ msgstr "Quit"
-
+# PR-S4-10 review F1 (#206): tui.binding.quit / tui.input_placeholder /
+# tui.label_you / tui.label_alfred were restored to ACTIVE msgids above
+# (the render layer still uses them live from plugins/alfred_tui); their
+# obsolete duplicates are removed here. The five entries below stay obsolete
+# — they belonged to the in-process orchestrator turn-lifecycle the move
+# dropped and have NO live caller.
 #~ msgid "tui.binding.cancel_turn"
 #~ msgstr "Cancel turn"
-
-#~ msgid "tui.input_placeholder"
-#~ msgstr "Speak to Alfred..."
-
-#~ msgid "tui.label_you"
-#~ msgstr "you"
 
 #~ msgid "tui.thinking"
 #~ msgstr "thinking..."
@@ -2657,9 +2676,6 @@ msgstr ""
 
 #~ msgid "tui.alfred_error"
 #~ msgstr "alfred error: {error}"
-
-#~ msgid "tui.label_alfred"
-#~ msgstr "alfred"
 
 # Slice-3 retrospective CR-142 round-3 sec-001 — TUI ingress runtime
 # allowlist guard. ``_ingest_tier`` is the source of truth for the
