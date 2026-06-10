@@ -101,8 +101,11 @@ class PluginLaunchSpec:
             delivered on ``ALFRED_PLUGIN_MANIFEST_PATH``.
         module: The ``python -m`` module the launcher executes.
         adapter_id: The per-instance comms-MCP adapter id, delivered on
-            ``ALFRED_PLUGIN_ADAPTER_ID`` so the launch is traceable; the daemon
-            re-asserts it over the ``lifecycle.start`` wire request.
+            ``ALFRED_PLUGIN_ADAPTER_ID``. The plugin binds it as its log self-id
+            for the lines it emits BEFORE ``lifecycle.start`` arrives (the TUI
+            server's :func:`alfred_tui.server.bind_self_id_from_env`); the
+            daemon then re-asserts the AUTHORITATIVE id over the
+            ``lifecycle.start`` wire request.
         import_roots: Directories prepended to the child ``PYTHONPATH`` so the
             plugin's package + the core ``alfred.comms_mcp`` protocol resolve.
         inherit_stdio: When true, the child inherits the CLI's stdio (the TUI
@@ -197,7 +200,10 @@ def _child_env(spec: PluginLaunchSpec) -> dict[str, str]:
 
 
 async def spawn_plugin_via_launcher(
-    spec: PluginLaunchSpec, *, block_on_handoff: bool = True
+    spec: PluginLaunchSpec,
+    *,
+    block_on_handoff: bool = True,
+    probe_timeout_s: float | None = None,
 ) -> LaunchOutcome:
     """Spawn the plugin through the launcher and resolve the probe-window outcome.
 
@@ -218,9 +224,15 @@ async def spawn_plugin_via_launcher(
       itself IS the success signal; awaiting a healthy relay's exit would hang
       forever (review F3). Terminate the child and report
       :data:`LaunchResult.HANDED_OFF`.
+
+    ``probe_timeout_s`` overrides the probe-window length (default
+    :data:`LAUNCHER_PROBE_TIMEOUT_S`). ``alfred discord verify`` threads its
+    operator-supplied ``--timeout`` here (review F7) so the readiness probe can
+    wait longer for a slow-handshaking relay before declaring a hand-off.
     """
     import sys
 
+    timeout = LAUNCHER_PROBE_TIMEOUT_S if probe_timeout_s is None else probe_timeout_s
     cmd = [
         *shlex.split(_launcher_path()),
         spec.plugin_id,
@@ -245,7 +257,7 @@ async def spawn_plugin_via_launcher(
     # code to COMPLETED/FAILED. A launcher still alive after the window handed
     # off a live session.
     try:
-        returncode = await asyncio.wait_for(proc.wait(), timeout=LAUNCHER_PROBE_TIMEOUT_S)
+        returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
     except TimeoutError:
         if not block_on_handoff:
             # Readiness probe: alive past the window IS healthy. Terminate the

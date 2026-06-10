@@ -106,9 +106,14 @@ def verify(
         min=1.0,
     ),
 ) -> None:
-    """Spawn the Discord plugin via the launcher as a readiness probe."""
-    del ctx, timeout  # the shared probe window governs the readiness wait
-    code = asyncio.run(_verify_main())
+    """Spawn the Discord plugin via the launcher as a readiness probe.
+
+    ``--timeout`` is the readiness-probe window: the relay must reach a live
+    hand-off within it to be healthy (review F7 wires the option through to the
+    spawn helper; it was previously parsed then ignored).
+    """
+    del ctx
+    code = asyncio.run(_verify_main(timeout))
     raise typer.Exit(code=int(code))
 
 
@@ -138,7 +143,7 @@ async def _boot_main() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _verify_main() -> _VerifyExitCode:
+async def _verify_main(timeout_s: float) -> _VerifyExitCode:
     """Spawn the plugin via the launcher; return a typed readiness code.
 
     The Discord plugin is a long-running relay, so the HEALTHY outcome is a
@@ -152,7 +157,9 @@ async def _verify_main() -> _VerifyExitCode:
     """
     from alfred.cli._launcher_spawn import LaunchResult, spawn_plugin_via_launcher
 
-    outcome = await spawn_plugin_via_launcher(_build_launch_spec(), block_on_handoff=False)
+    outcome = await spawn_plugin_via_launcher(
+        _build_launch_spec(), block_on_handoff=False, probe_timeout_s=timeout_s
+    )
     if outcome.result in (LaunchResult.HANDED_OFF, LaunchResult.COMPLETED):
         _log.info("discord.verify.ok", outcome=outcome.result.name)
         return _VerifyExitCode.OK

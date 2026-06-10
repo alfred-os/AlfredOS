@@ -38,6 +38,9 @@ def configure_stderr_json_logging(*, level: int = 20) -> None:
     """
     structlog.configure(
         processors=[
+            # Surface contextvars bound via ``structlog.contextvars`` (e.g. the
+            # TUI server's launcher-supplied ``adapter_id`` self-id, review F7).
+            structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.JSONRenderer(),
