@@ -141,15 +141,20 @@ async def _boot_main() -> None:
 async def _verify_main() -> _VerifyExitCode:
     """Spawn the plugin via the launcher; return a typed readiness code.
 
-    A clean launch within the shared probe window (the plugin reached a live
-    handshake, or completed cleanly) is healthy (``OK``); any launcher failure
-    is ``CONFIG_FAILED``. Emits the structlog event matching the outcome.
+    The Discord plugin is a long-running relay, so the HEALTHY outcome is a
+    hand-off (still alive past the probe window), not a clean exit. ``verify``
+    spawns with ``block_on_handoff=False`` so the seam terminates the relay and
+    reports :data:`~alfred.cli._launcher_spawn.LaunchResult.HANDED_OFF` instead
+    of blocking on an exit that never comes (review F3). A clean exit within the
+    window is also healthy (a short-lived plugin that completed). Any launcher
+    failure is ``CONFIG_FAILED``. Emits the structlog event matching the
+    outcome.
     """
     from alfred.cli._launcher_spawn import LaunchResult, spawn_plugin_via_launcher
 
-    outcome = await spawn_plugin_via_launcher(_build_launch_spec())
-    if outcome.result is LaunchResult.COMPLETED:
-        _log.info("discord.verify.ok")
+    outcome = await spawn_plugin_via_launcher(_build_launch_spec(), block_on_handoff=False)
+    if outcome.result in (LaunchResult.HANDED_OFF, LaunchResult.COMPLETED):
+        _log.info("discord.verify.ok", outcome=outcome.result.name)
         return _VerifyExitCode.OK
     _log.error("discord.verify.config_failed", returncode=outcome.returncode)
     typer.echo(t("cli.discord.daemon_required"), err=True)
