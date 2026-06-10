@@ -262,13 +262,15 @@ class AlfredTuiApp(App[None]):
         user = self._identity_resolver.get_operator()
         # arch-001: derive the ingress tier from the role x adapter pair
         # via the single source of truth in ``alfred.identity._ingest``.
-        # The adapter name is the literal ``"tui"`` — same value
+        # The adapter kind is the literal ``"tui"`` — same value
         # :class:`alfred.comms.adapter.TuiAdapter` registers under (the
-        # ``_ingest_tier`` rule keys on that exact string per spec §3.6).
-        # Cast at the call site, not inside ``_ingest_tier``, so a wrong
-        # adapter name surfaces as a type error rather than a silent T2
-        # default.
-        ingress_tier: type[TrustTier] = _ingest_tier(user, adapter_name="tui")
+        # ``_ingest_tier`` rule keys on the ``"tui"`` prefix per spec §3.6).
+        # PR-S4-10 (#206) renamed the kwarg ``adapter_name`` -> ``adapter_id``
+        # to track the comms-MCP wire contract; the bare kind ``"tui"`` is a
+        # valid prefix so the T1 classification is unchanged. Cast at the call
+        # site, not inside ``_ingest_tier``, so a wrong adapter id surfaces as
+        # a type error rather than a silent T2 default.
+        ingress_tier: type[TrustTier] = _ingest_tier(user, adapter_id="tui")
         # CR-142 round-3 hardening: runtime allowlist before ``tag()``.
         # ``_ingest_tier`` is the source of truth for the role x adapter
         # mapping, but a future drift in that helper (or a hostile

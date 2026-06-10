@@ -9,7 +9,7 @@ its boundary - placing this logic in core.py would violate that.
 Each CommsAdapter calls _ingest_tier at its ingress boundary before
 passing tagged content to the orchestrator.
 
-Rule (spec §3.6):
+Rule (spec §3.6) — keyed on the ``adapter_id`` KIND prefix (PR-S4-10):
 
 - TUI + operator role -> T1 (operator tier: highest-trust, TUI only)
 - Discord + operator role -> T2 (Discord is broadcast-shaped, never T1)
@@ -103,25 +103,36 @@ def declare_hookpoints(registry: HookRegistry | None = None) -> None:
     )
 
 
-def _ingest_tier(user: object, adapter_name: str) -> type[TrustTier]:
-    """Derive ingress trust tier from the role x adapter pair.
+def _ingest_tier(user: object, adapter_id: str) -> type[TrustTier]:
+    """Derive ingress trust tier from the role x adapter-kind pair.
 
     Args:
         user: Any object with an ``authorization`` attribute (``Mapped[str]``).
             Typically :class:`alfred.identity.models.User`; typed as ``object``
             here to avoid circular imports at the identity boundary.
-        adapter_name: The ``CommsAdapter.name`` string (e.g. ``"tui"``,
-            ``"discord"``).
+        adapter_id: The per-instance comms-MCP adapter id carried on the wire
+            (e.g. ``"tui-9f3c2b1e"``, ``"discord-bot-prod"``). The
+            adapter-KIND prefix is the contract — ``"tui*"`` is the TUI
+            kind, ``"discord*"`` is the Discord kind.
 
     Returns:
-        ``T1`` for TUI + operator; ``T2`` for all other combinations.
+        ``T1`` for the TUI kind + operator role; ``T2`` for all other
+        combinations.
 
     Spec §3.6 is explicit: Discord is broadcast-shaped and never T1 even
     for operator-role users. This invariant is hard-coded here rather than
     left to per-adapter configuration to prevent misconfiguration drift.
+
+    PR-S4-10 (#206) migrated the parameter from ``adapter_name`` (the
+    in-process ``CommsAdapter.name``, a bare kind like ``"tui"``) to
+    ``adapter_id`` (the comms-MCP wire id, a per-instance value). The gate
+    keys on ``adapter_id.startswith("tui")`` rather than ``== "tui"`` so a
+    per-instance id like ``"tui-9f3c2b1e"`` still classifies correctly. The
+    kwarg rename is a hard break — a stale ``adapter_name=`` caller raises
+    ``TypeError`` rather than silently defaulting to T2.
     """
     authorization: str = getattr(user, "authorization", "")
-    if adapter_name == "tui" and authorization == Authorization.OPERATOR.value:
+    if adapter_id.startswith("tui") and authorization == Authorization.OPERATOR.value:
         return T1
     return T2
 
