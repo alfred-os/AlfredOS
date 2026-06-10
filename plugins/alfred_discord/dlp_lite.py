@@ -37,12 +37,19 @@ from alfred.security.dlp import redact_secret_shapes
 _REDACTED: Final[str] = "[REDACTED:discord-secret-shape]"
 
 # Discord bot-token shape: three dot-joined base64url segments (the JWT-like
-# ``MTk...Gq.Cn...zw.HZ...XU`` layout) of substantial length. Anchored on a word
-# boundary so a longer enclosing token still matches its leading shape. Bundled
-# in-plugin because the host's generic ``sk-``/``pk_`` regex does not cover the
+# ``MTk...Gq.Cn...zw.HZ...XU`` layout) of substantial length. Bundled in-plugin
+# because the host's generic ``sk-``/``pk_`` regex does not cover the
 # platform-specific bot-token layout the Discord SDK could surface.
+#
+# L4: anchored with a NEGATIVE LOOKBEHIND ``(?<![A-Za-z0-9_-])`` rather than a
+# leading ``\b``. base64url's alphabet includes ``-`` and ``_``, which are
+# NON-word chars to ``\b`` — so a token whose first segment begins with ``-``/
+# ``_`` would have its leading char left on the wire (``\b`` only fires after a
+# word char). The lookbehind asserts "no base64url char precedes the token"
+# without consuming it, so the ENTIRE token — leading ``-``/``_`` included — is
+# matched and redacted from any boundary.
 _DISCORD_BOT_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
-    r"\b[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,}\b"
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,}\b"
 )
 
 
