@@ -102,56 +102,39 @@ async def _drive(
 
 
 # --- the eight sub-payload-bearing surfaces --------------------------------
-# Each body plants the injection in a distinct surface; the host classifier
-# recognises the enclosing sub-payload and the promoter swaps it for a handle.
-
-_SUBPAYLOAD_SURFACES: dict[str, tuple[str, dict[str, object]]] = {
-    "pi-2026-005": ("embed", {"content": "hi", "embeds": [{"title": _INJECTION}]}),
-    "pi-2026-006": ("embed", {"content": "hi", "embeds": [{"description": _INJECTION}]}),
-    "pi-2026-007": (
-        "embed",
-        {"content": "hi", "embeds": [{"fields": [{"name": _INJECTION, "value": "x"}]}]},
-    ),
-    "pi-2026-008": (
-        "embed",
-        {"content": "hi", "embeds": [{"fields": [{"name": "x", "value": _INJECTION}]}]},
-    ),
-    "pi-2026-009": ("embed", {"content": "hi", "embeds": [{"footer": {"text": _INJECTION}}]}),
-    "pi-2026-010": (
-        "attachment",
-        {"content": "hi", "attachments": [{"filename": _INJECTION, "content_type": "text/plain"}]},
-    ),
-    "pi-2026-011": (
-        "attachment",
-        {
-            "content": "hi",
-            "attachments": [{"filename": "a.txt", "description": _INJECTION}],
-        },
-    ),
-    "pi-2026-013": (
-        "forwarded_ref",
-        {
-            "content": "hi",
-            "forwarded": True,
-            "message_reference": {"content": _INJECTION},
-        },
-    ),
+# L5: the body for each surface is the SINGLE SOURCE OF TRUTH in the YAML
+# (``payload.payload["body"]``); this module no longer re-declares it. Only the
+# host-classified KIND each surface must promote to — genuine test-side
+# expectation, not duplicated payload data — is mapped per id.
+_EXPECTED_KIND_BY_ID: dict[str, str] = {
+    "pi-2026-005": "embed",  # embed title
+    "pi-2026-006": "embed",  # embed description
+    "pi-2026-007": "embed",  # embed field name
+    "pi-2026-008": "embed",  # embed field value
+    "pi-2026-009": "embed",  # embed footer
+    "pi-2026-010": "attachment",  # attachment filename
+    "pi-2026-011": "attachment",  # attachment description
+    "pi-2026-013": "forwarded_ref",  # reply-target content
 }
 
 
-@pytest.mark.parametrize(
-    ("payload_id", "kind", "body"),
-    [(pid, kind, body) for pid, (kind, body) in _SUBPAYLOAD_SURFACES.items()],
-)
+def _body_of(payload: AdversarialPayload) -> dict[str, object]:
+    """Extract the inbound ``body`` from the YAML payload (the single source)."""
+    assert isinstance(payload.payload, dict)
+    body = payload.payload["body"]
+    assert isinstance(body, dict)
+    return body
+
+
+@pytest.mark.parametrize("payload_id", sorted(_EXPECTED_KIND_BY_ID))
 @pytest.mark.asyncio
-async def test_subpayload_surface_promoted_orchestrator_blind(
-    payload_id: str, kind: str, body: dict[str, object]
-) -> None:
+async def test_subpayload_surface_promoted_orchestrator_blind(payload_id: str) -> None:
     payload = _load(payload_id)
     assert payload.category == "prompt_injection"
     assert payload.expected_outcome == "neutralized"
+    kind = _EXPECTED_KIND_BY_ID[payload_id]
 
-    orch, audit, store = await _drive(body)
+    orch, audit, store = await _drive(_body_of(payload))
 
     # (b) orchestrator never sees raw injected text — the extract body has no
     # injection string, only handle references.
@@ -178,12 +161,8 @@ async def test_message_content_with_mention_flows_through_quarantine() -> None:
     # quarantine boundary), which is the correct neutralization for typed text.
     payload = _load("pi-2026-012")
     assert payload.expected_outcome == "neutralized"
-    body: dict[str, object] = {
-        "content": f"<@12345> {_INJECTION}",
-        "mentions": [{"id": "12345"}],
-    }
 
-    orch, _audit, store = await _drive(body)
+    orch, _audit, store = await _drive(_body_of(payload))
 
     # The content reaches quarantined_extract at the T3 source tier — the
     # privileged prompt never ingests it raw; the quarantined LLM does.
