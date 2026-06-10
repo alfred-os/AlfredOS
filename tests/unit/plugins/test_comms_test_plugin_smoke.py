@@ -339,5 +339,11 @@ def test_comms_test_plugin_subprocess_health_round_trip() -> None:
     assert isinstance(payload.get("ok"), bool), (
         f"adapter.health must report a boolean ok, got {payload!r}"
     )
+    # CR #232: pin the pre-start lifecycle STATE, not just the shape -- this probe
+    # runs WITHOUT lifecycle.start, so ``ok`` must be ``False``. Type-checking
+    # alone would let a regression that flips pre-start ``ok`` to ``True`` slip by.
+    assert payload.get("ok") is False, (
+        f"pre-start adapter.health must report ok=False, got {payload!r}"
+    )
     assert payload.get("queue_depth") == 0
     assert payload.get("error_count") == 0

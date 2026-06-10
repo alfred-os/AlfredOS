@@ -58,6 +58,23 @@ def test_outbound_message_buffers_and_reports_delivered() -> None:
     assert main.outbound_buffer_depth() == 1
 
 
+def test_adapter_health_reports_real_queue_depth_after_sends() -> None:
+    # CR #232: ``queue_depth`` must reflect the REAL pending-outbound buffer, not
+    # a hardcoded 0 -- otherwise health lies after the first send.
+    main.reset_state()
+    main.handle_lifecycle_start({"adapter_id": "alfred_comms_test"})
+    for i in range(3):
+        main.handle_outbound_message(
+            {"adapter_id": "alfred_comms_test", "target_platform_id": "discord:1", "body": f"m{i}"}
+        )
+    health = main.handle_adapter_health({"adapter_id": "alfred_comms_test"})
+    assert health["queue_depth"] == 3
+    # lifecycle.stop drains the same buffer it reports as flushed_messages.
+    stop = main.handle_lifecycle_stop({"adapter_id": "alfred_comms_test"})
+    assert stop["flushed_messages"] == 3
+    assert main.handle_adapter_health({})["queue_depth"] == 0
+
+
 def test_build_inbound_notification_shape() -> None:
     frame = main.build_inbound_notification({"content": "hello"})
     assert frame["jsonrpc"] == "2.0"
