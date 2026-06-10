@@ -280,14 +280,6 @@ def migrate() -> None:
     subprocess.run(["alembic", "upgrade", "head"], check=True)  # noqa: S607
 
 
-# The launcher's handshake-probe window (spec §8.7 / core-005). If the
-# launcher exits non-zero within this window the daemon is absent or
-# mid-restart; if it is still running after the window the TUI is live and
-# owns the operator's terminal. devex-003: the operator retries from the
-# shell rather than the plugin silently waiting in the foreground.
-_LAUNCHER_PROBE_TIMEOUT_S = 2.5
-
-
 async def _chat_main() -> None:
     """Spawn ``plugins/alfred_tui`` via the launcher and hand it the terminal.
 
@@ -300,100 +292,52 @@ async def _chat_main() -> None:
     session scope, DLP, audit writer, in-process comms adapter) are pulled
     in here any longer.
 
-    The launcher is invoked with the real PR-S4-6 contract — positional
-    ``<plugin_id> <executable> [args...]`` with the manifest path on
-    ``ALFRED_PLUGIN_MANIFEST_PATH`` — NOT the ``--manifest``/``--adapter-id``
-    flags an earlier plan draft assumed (the launcher has no such flags).
-    The TUI plugin's manifest declares ``sandbox.kind = "none"`` so the
-    launcher ``exec``s the plugin with the CLI's inherited PTY fds, which
-    the Textual app needs to render.
+    The launch shape lives in :mod:`alfred.cli._launcher_spawn` (shared with
+    ``alfred discord``). The TUI plugin's manifest declares
+    ``sandbox.kind = "none"`` so the launcher ``exec``s the plugin with the
+    CLI's inherited PTY fds, which the Textual app needs to render.
 
-    Daemon-missing / daemon-mid-restart path (spec §8.7): the launcher
-    fails (non-zero exit within the probe window, a missing launcher
-    binary, or an OS spawn error) → the CLI emits the parameterless
-    ``comms.tui.daemon_required_to_chat`` t() string on stderr and exits
-    code 3 (the same startup-failure code the Postgres-unreachable branch
-    used in Slice 2). The plugin never silently waits in its own process.
+    Daemon-missing / daemon-mid-restart path (spec §8.7): the launcher fails
+    (non-zero exit within the probe window, a missing launcher binary, or an
+    OS spawn error) → the CLI emits the parameterless
+    ``comms.tui.daemon_required_to_chat`` t() string on stderr and exits code
+    3 (the same startup-failure code the Postgres-unreachable branch used in
+    Slice 2). The plugin never silently waits in its own process.
 
-    perf-001: ``asyncio``/``os``/``shlex``/``uuid`` import lazily so the
-    ``alfred --help`` path — which never invokes ``chat`` — pays nothing.
+    perf-001: the launcher-spawn helper (and its ``asyncio`` chain) imports
+    lazily so the ``alfred --help`` path — which never invokes ``chat`` —
+    pays nothing.
     """
-    import asyncio
-    import os
-    import shlex
-    import sys
     import uuid
-    from pathlib import Path
+
+    from alfred.cli._launcher_spawn import (
+        LaunchResult,
+        PluginLaunchSpec,
+        repo_root,
+        spawn_plugin_via_launcher,
+    )
 
     set_language(_operator_language())
 
-    # Repo-root-relative defaults. The launcher + manifest + plugin source
-    # ship in-tree; an operator running ``alfred chat`` from the repo root
-    # (or with the package installed alongside ``bin/``/``plugins/``) gets
-    # the right paths. ``ALFRED_PLUGIN_LAUNCHER`` overrides the launcher
-    # for tests + bespoke deployments.
-    repo_root = Path(__file__).resolve().parents[3]
-    launcher = os.environ.get(
-        "ALFRED_PLUGIN_LAUNCHER",
-        str(repo_root / "bin" / "alfred-plugin-launcher.sh"),
-    )
-    manifest_path = repo_root / "plugins" / "alfred_tui" / "manifest.toml"
-    plugin_src = repo_root / "plugins" / "alfred_tui" / "src"
-
-    # Per-instance comms-MCP adapter id. The ``tui`` KIND prefix is the
-    # contract the host's ``_ingest_tier`` keys on (T1 for the operator);
-    # the suffix makes the id unique per launch. The daemon delivers it to
-    # the plugin over the ``lifecycle.start`` wire request — the CLI only
-    # mints it so the launch is traceable.
-    adapter_id = f"tui-{uuid.uuid4()}"
-
-    # ``alfred_tui`` lives under the plugin's own ``src/`` (not the core
-    # package), and the server imports both ``alfred.comms_mcp`` (repo
-    # root) and ``alfred_tui`` (plugin src). Hand the child a PYTHONPATH
-    # spanning both. The kind="none" launcher ``exec``s the executable
-    # directly, inheriting this env (unlike the daemon's scrubbed
-    # subprocess path), so the child resolves both import roots.
-    child_env = dict(os.environ)
-    child_env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(manifest_path)
-    child_env["ALFRED_PLUGIN_ADAPTER_ID"] = adapter_id
-    existing_pythonpath = child_env.get("PYTHONPATH", "")
-    child_env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (str(plugin_src), str(repo_root), existing_pythonpath) if p
+    root = repo_root()
+    plugin_dir = root / "plugins" / "alfred_tui"
+    spec = PluginLaunchSpec(
+        plugin_id="alfred_tui",
+        manifest_path=plugin_dir / "manifest.toml",
+        module="alfred_tui.server",
+        # The ``tui`` KIND prefix is the contract the host's ``_ingest_tier``
+        # keys on (T1 for the operator); the suffix makes the id unique per
+        # launch.
+        adapter_id=f"tui-{uuid.uuid4()}",
+        # ``alfred_tui`` lives under the plugin's own ``src/``; the server
+        # also imports the core ``alfred.comms_mcp`` protocol — span both.
+        import_roots=(plugin_dir / "src", root),
+        # The TUI is a foreground Textual app; it must own the operator's PTY.
+        inherit_stdio=True,
     )
 
-    cmd = [
-        *shlex.split(launcher),
-        "alfred_tui",
-        sys.executable,
-        "-m",
-        "alfred_tui.server",
-    ]
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=None,
-            stdout=None,
-            stderr=None,
-            env=child_env,
-        )
-    except (FileNotFoundError, OSError):
-        # Missing launcher binary / OS-level spawn failure. The daemon
-        # contract is unmet — surface the friendly t() string, not a
-        # traceback.
-        typer.echo(t("comms.tui.daemon_required_to_chat"), err=True)
-        raise typer.Exit(code=3) from None
-
-    # Probe window: a launcher that exits non-zero within the window means
-    # the daemon is absent or mid-restart. A launcher still alive after the
-    # window has handed the live TUI the terminal — re-await it without a
-    # deadline so the operator's session runs to completion.
-    try:
-        returncode = await asyncio.wait_for(proc.wait(), timeout=_LAUNCHER_PROBE_TIMEOUT_S)
-    except TimeoutError:
-        returncode = await proc.wait()
-
-    if returncode != 0:
+    outcome = await spawn_plugin_via_launcher(spec)
+    if outcome.result is LaunchResult.FAILED:
         typer.echo(t("comms.tui.daemon_required_to_chat"), err=True)
         raise typer.Exit(code=3)
 

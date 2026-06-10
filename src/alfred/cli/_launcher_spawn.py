@@ -1,0 +1,180 @@
+"""Shared launcher-spawn seam for the ``alfred`` CLI comms surfaces (PR-S4-10, #206).
+
+The Slice-4 comms-MCP flag-day inverts the CLI model: instead of building the
+in-process orchestrator graph + comms adapter, an operator-facing comms command
+(``alfred chat``, ``alfred discord``) spawns the matching MCP plugin through
+``bin/alfred-plugin-launcher.sh`` (the PR-S4-6 policy-resolving launcher) and
+lets the already-running daemon own the orchestrator graph.
+
+Both call sites share the same launch shape — build the launcher argv, hand the
+child a manifest path + import roots, spawn, and treat a launcher failure within
+a short probe window as "the daemon is not running". This module owns that shape
+once (DRY) so the per-command modules only supply the plugin-specific inputs and
+map the outcome to their own operator-facing ``t()`` string + exit code.
+
+Why a probe window rather than an unconditional wait: a launcher still alive
+after the window has handed a live, foreground plugin (the TUI's Textual app)
+the operator's terminal — the command should then block on the session. A
+launcher that exits *within* the window failed to hand off (absent or
+mid-restart daemon, sandbox refusal, bad token). The caller distinguishes the
+two via :class:`LaunchOutcome`.
+
+The launcher contract is the REAL PR-S4-6 one: positional
+``<plugin_id> <executable> [args...]`` with the manifest path delivered on the
+``ALFRED_PLUGIN_MANIFEST_PATH`` environment variable. There are no
+``--manifest``/``--adapter-id`` flags (an earlier plan draft assumed them; the
+launcher exposes none).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import shlex
+from dataclasses import dataclass
+from enum import Enum, auto
+from pathlib import Path
+
+#: Handshake-probe window (seconds). A launcher that exits non-zero within this
+#: window means the plugin never reached a live handshake (spec §8.7 /
+#: core-005); a launcher still alive after it has handed off a live session.
+LAUNCHER_PROBE_TIMEOUT_S = 2.5
+
+#: Default launcher path, overridable via ``ALFRED_PLUGIN_LAUNCHER`` (tests +
+#: bespoke deployments point this elsewhere).
+_LAUNCHER_ENV_VAR = "ALFRED_PLUGIN_LAUNCHER"
+
+
+def repo_root() -> Path:
+    """Resolve the in-tree repo root that ships ``bin/`` and ``plugins/``.
+
+    The CLI module lives at ``src/alfred/cli/`` so the repo root is three
+    parents up. An operator running from the repo root (or with the package
+    installed alongside ``bin/``/``plugins/``) gets the right launcher,
+    manifest, and plugin-source paths.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def _launcher_path() -> str:
+    return os.environ.get(_LAUNCHER_ENV_VAR, str(repo_root() / "bin" / "alfred-plugin-launcher.sh"))
+
+
+class LaunchResult(Enum):
+    """Coarse outcome of a launcher spawn, mapped by the caller to UX."""
+
+    #: The launcher exited zero after handing off / running to completion.
+    COMPLETED = auto()
+    #: The launcher failed (non-zero exit in the probe window, missing binary,
+    #: or OS spawn error). The daemon contract is unmet.
+    FAILED = auto()
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchOutcome:
+    """Result of :func:`spawn_plugin_via_launcher`.
+
+    ``returncode`` is ``None`` when the spawn itself failed (missing launcher
+    binary / OS error) — there was no process to collect a code from.
+    """
+
+    result: LaunchResult
+    returncode: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class PluginLaunchSpec:
+    """Immutable inputs for one plugin launch.
+
+    Attributes:
+        plugin_id: The launcher's first positional arg + sandbox-policy key
+            (charset ``[A-Za-z0-9._-]+``; the launcher refuses anything else).
+        manifest_path: Absolute path to the plugin's ``manifest.toml``,
+            delivered on ``ALFRED_PLUGIN_MANIFEST_PATH``.
+        module: The ``python -m`` module the launcher executes.
+        adapter_id: The per-instance comms-MCP adapter id, delivered on
+            ``ALFRED_PLUGIN_ADAPTER_ID`` so the launch is traceable; the daemon
+            re-asserts it over the ``lifecycle.start`` wire request.
+        import_roots: Directories prepended to the child ``PYTHONPATH`` so the
+            plugin's package + the core ``alfred.comms_mcp`` protocol resolve.
+        inherit_stdio: When true, the child inherits the CLI's stdio (the TUI
+            needs the PTY); when false, stdio is piped.
+    """
+
+    plugin_id: str
+    manifest_path: Path
+    module: str
+    adapter_id: str
+    import_roots: tuple[Path, ...]
+    inherit_stdio: bool
+
+
+def _child_env(spec: PluginLaunchSpec) -> dict[str, str]:
+    """Build the child environment: manifest path, adapter id, import roots.
+
+    The kind="none" launcher path ``exec``s the executable directly and
+    inherits this env (unlike the daemon's scrubbed subprocess path), so the
+    child resolves both its own package and ``alfred.comms_mcp`` from
+    ``PYTHONPATH``.
+    """
+    env = dict(os.environ)
+    env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(spec.manifest_path)
+    env["ALFRED_PLUGIN_ADAPTER_ID"] = spec.adapter_id
+    existing = env.get("PYTHONPATH", "")
+    roots = [str(p) for p in spec.import_roots]
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (*roots, existing) if p)
+    return env
+
+
+async def spawn_plugin_via_launcher(spec: PluginLaunchSpec) -> LaunchOutcome:
+    """Spawn the plugin through the launcher and resolve the probe-window outcome.
+
+    Returns a :class:`LaunchOutcome` rather than emitting any operator-facing
+    text or raising ``typer.Exit`` — the caller owns the ``t()`` string and the
+    exit code so each command keeps its own UX contract. A missing launcher
+    binary or OS spawn error is reported as :data:`LaunchResult.FAILED` (not
+    re-raised) because, from the operator's perspective, it is the same
+    "daemon/launcher unavailable" condition as a non-zero exit.
+    """
+    import sys
+
+    cmd = [
+        *shlex.split(_launcher_path()),
+        spec.plugin_id,
+        sys.executable,
+        "-m",
+        spec.module,
+    ]
+    stdio = None if spec.inherit_stdio else asyncio.subprocess.PIPE
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=stdio,
+            stdout=stdio,
+            stderr=stdio,
+            env=_child_env(spec),
+        )
+    except (FileNotFoundError, OSError):
+        return LaunchOutcome(result=LaunchResult.FAILED, returncode=None)
+
+    # A launcher that survives the probe window handed off a live session;
+    # re-await it without a deadline so a foreground plugin (the TUI) runs to
+    # completion. A launcher that exits within the window never handed off.
+    try:
+        returncode = await asyncio.wait_for(proc.wait(), timeout=LAUNCHER_PROBE_TIMEOUT_S)
+    except TimeoutError:
+        returncode = await proc.wait()
+
+    result = LaunchResult.COMPLETED if returncode == 0 else LaunchResult.FAILED
+    return LaunchOutcome(result=result, returncode=returncode)
+
+
+__all__ = [
+    "LAUNCHER_PROBE_TIMEOUT_S",
+    "LaunchOutcome",
+    "LaunchResult",
+    "PluginLaunchSpec",
+    "repo_root",
+    "spawn_plugin_via_launcher",
+]

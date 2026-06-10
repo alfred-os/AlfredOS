@@ -275,42 +275,27 @@ msgstr ""
 " the proposal and the supervisor reloads its configuration."
 
 # PR D2 — CLI help and verify-event narration.
-#: src/alfred/cli/discord_cmd.py:64
+#: src/alfred/cli/discord_cmd.py:79
 msgid "cli.discord.help.group"
 msgstr "Discord adapter subcommands."
 
-#: src/alfred/cli/discord_cmd.py:86
+#: src/alfred/cli/discord_cmd.py:99
 msgid "cli.discord.help.verify.short"
 msgstr "Probe the Discord gateway for 30s and exit with a typed code."
 
-#: src/alfred/cli/discord_cmd.py:92
+#: src/alfred/cli/discord_cmd.py:105
 msgid "cli.discord.help.verify.timeout"
 msgstr "Seconds to wait for on_ready before timing out (default 30)."
 
-#: src/alfred/cli/discord_cmd.py:151
-msgid "cli.discord.verify.config_failed.secrets_unreadable"
-msgstr "Discord verify failed: secrets file unreadable. Detail: {detail}"
-
-#: src/alfred/cli/discord_cmd.py:157
-msgid "cli.discord.verify.config_failed.bad_token"
+# PR-S4-10 (#206): alfred discord now spawns plugins/alfred_discord via the
+# launcher; this is the daemon/launcher-unavailable message for both the boot
+# path and the readiness probe.
+#: src/alfred/cli/discord_cmd.py:132 src/alfred/cli/discord_cmd.py:155
+msgid "cli.discord.daemon_required"
 msgstr ""
-"Discord verify failed: bot token rejected. Confirm "
-"~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
-" {detail}"
-
-#: src/alfred/cli/discord_cmd.py:173
-msgid "error.postgres_unreachable"
-msgstr "Postgres is unreachable: {detail}"
-
-#: src/alfred/cli/discord_cmd.py:174
-msgid "hint.is_compose_up"
-msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
-
-#: src/alfred/cli/discord_cmd.py:185
-msgid "cli.user.error.no_operator"
-msgstr ""
-"No operator has been added yet. Run 'alfred user add --authorization "
-"operator --name <YourName>' first."
+"alfred discord needs the daemon and the plugin launcher. Start the daemon"
+" with: alfred daemon start. For ad-hoc verification, run the launcher "
+"directly: bin/alfred-plugin-launcher.sh alfred.discord."
 
 #: src/alfred/cli/main.py:60
 msgid "cli.help.root"
@@ -368,8 +353,7 @@ msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/cli/main.py:384 src/alfred/cli/main.py:397
-#: src/alfred/i18n/_slice_4_reserve.py:148
+#: src/alfred/cli/main.py:341 src/alfred/i18n/_slice_4_reserve.py:148
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat needs the daemon. Start it with: alfred daemon start. If you "
@@ -1897,21 +1881,21 @@ msgstr ""
 # every ``pybabel update`` pass. Without the registry module, pybabel
 # re-marks them ``#~`` on every sync (the launcher emits them from a
 # shell script that pybabel cannot parse).
-#: src/alfred/plugins/_launcher_i18n.py:36
+#: src/alfred/plugins/_launcher_i18n.py:39
 msgid "plugin.launcher_plugin_id_invalid"
 msgstr ""
 "Plugin spawn refused: the supplied plugin_id contained characters outside"
 " the safe charset [A-Za-z0-9._-]. The id is not echoed (it would round-"
 "trip into the audit stream)."
 
-#: src/alfred/plugins/_launcher_i18n.py:37
+#: src/alfred/plugins/_launcher_i18n.py:40
 msgid "plugin.launcher_unsandboxed_rejected"
 msgstr ""
 "Plugin spawn refused: ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 is a "
 "development-only escape hatch and was supplied outside development. Unset"
 " the flag or set ALFRED_ENV=development (never in production)."
 
-#: src/alfred/plugins/_launcher_i18n.py:38
+#: src/alfred/plugins/_launcher_i18n.py:41
 msgid "plugin.launcher_no_sandbox_policy"
 msgstr ""
 "Plugin spawn refused: no sandbox policy file at "
@@ -1919,7 +1903,7 @@ msgstr ""
 "file (see docs/runbooks/slice-3-plugins.md) or, for development only, set"
 " ALFRED_ENV=development + ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1."
 
-#: src/alfred/plugins/_launcher_i18n.py:39
+#: src/alfred/plugins/_launcher_i18n.py:42
 msgid "plugin.launcher_uid_drop_unavailable"
 msgstr ""
 "Plugin spawn refused: runuser is missing on this Linux host so the "
@@ -1930,14 +1914,14 @@ msgstr ""
 # documented-deviation paths. The insecure_config_key is the
 # closed-vocabulary identifier the supervisor matches; the msgstr
 # is the operator-facing renderer.
-#: src/alfred/plugins/_launcher_i18n.py:40
+#: src/alfred/plugins/_launcher_i18n.py:43
 msgid "plugin.launcher_insecure_unsandboxed_dev"
 msgstr ""
 "Plugin {plugin_id} spawned WITHOUT a sandbox policy "
 "(ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1 + ALFRED_ENV=development). This is "
 "a documented dev-only deviation; MUST NOT appear in production logs."
 
-#: src/alfred/plugins/_launcher_i18n.py:42
+#: src/alfred/plugins/_launcher_i18n.py:45
 msgid "plugin.launcher_insecure_uid_separation_macos"
 msgstr ""
 "Plugin {plugin_id} spawned WITHOUT UID separation (macOS dev host; "
@@ -2685,4 +2669,26 @@ msgstr ""
 #~ "the next dispatch cycle (~{interval}s "
 #~ "after reviewer merge).\n"
 #~ "Check dispatch status with: alfred supervisor proposals --recent"
+
+#~ msgid "cli.discord.verify.config_failed.secrets_unreadable"
+#~ msgstr "Discord verify failed: secrets file unreadable. Detail: {detail}"
+
+#~ msgid "cli.discord.verify.config_failed.bad_token"
+#~ msgstr ""
+#~ "Discord verify failed: bot token "
+#~ "rejected. Confirm ~/.config/alfred/secrets.toml "
+#~ "contains a valid discord_bot_token. Detail:"
+#~ " {detail}"
+
+#~ msgid "error.postgres_unreachable"
+#~ msgstr "Postgres is unreachable: {detail}"
+
+#~ msgid "hint.is_compose_up"
+#~ msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
+
+#~ msgid "cli.user.error.no_operator"
+#~ msgstr ""
+#~ "No operator has been added yet. "
+#~ "Run 'alfred user add --authorization "
+#~ "operator --name <YourName>' first."
 
