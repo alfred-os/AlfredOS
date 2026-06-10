@@ -28,6 +28,14 @@ at ``max_tracked_buckets`` (default 10_000) with LRU eviction. An adversary
 cycling distinct keys cannot exhaust host memory; the per-key ``asyncio.Lock``
 is evicted alongside its bucket.
 
+In-flight safety (CR #232). ``acquire`` holds the per-key lock across
+``_backpressure``'s ``await sleep``, so a CONCURRENT acquire for a different key
+must not evict the parked key's bucket + lock out from under it — doing so would
+let the next same-key acquire mint a fresh full bucket and a new lock,
+bypassing the outstanding wait (a same-key rate-limit bypass under churn). Keys
+with an in-flight acquire are refcounted (``_active``) and SKIPPED by eviction;
+only idle keys are dropped, so the memory bound still holds.
+
 ``drop_after_seconds`` home (reviewer note): the shared ``BurstLimiterPolicy``
 (``alfred.policies.model``) is a cross-PR contract anchor pinned by
 ``tests/unit/policies/test_burst_limiter_policy_defaults.py`` and consumed by
@@ -141,6 +149,10 @@ class BurstLimiter:
         # LRU-ordered: most-recently-used at the end (``move_to_end``).
         self._buckets: OrderedDict[tuple[str, str], _BucketState] = OrderedDict()
         self._locks: OrderedDict[tuple[str, str], asyncio.Lock] = OrderedDict()
+        # Refcount of in-flight ``acquire`` calls per key (CR #232). A key with
+        # ``_active[key] > 0`` is mid-acquire (its lock is held, possibly across
+        # a back-pressure sleep) and must NOT be evicted.
+        self._active: dict[tuple[str, str], int] = {}
 
     @classmethod
     def from_policy(
@@ -191,46 +203,57 @@ class BurstLimiter:
         ``Dropped`` when the projected wait exceeds ``drop_after_seconds``.
         """
         key = (canonical_user_id, persona)
-        lock = self._lock_for(key)
-        async with lock:
-            bucket = self._bucket_for(key)
-            now = self._monotonic()
-            self._refill(bucket, now)
+        # Mark the key in-flight BEFORE taking the lock so eviction skips it the
+        # whole time this call is parked on the lock or its back-pressure sleep
+        # (CR #232). Decremented in ``finally`` so an exception cannot pin a key.
+        self._active[key] = self._active.get(key, 0) + 1
+        try:
+            lock = self._lock_for(key)
+            async with lock:
+                bucket = self._bucket_for(key)
+                now = self._monotonic()
+                self._refill(bucket, now)
 
-            if bucket.tokens >= 1.0:
-                bucket.tokens -= 1.0
-                # A consumed-to-empty bucket starts its empty clock.
-                if bucket.tokens < 1.0:
-                    bucket.empty_since_monotonic = now
-                return Acquired(tokens_remaining=int(bucket.tokens), waited_seconds=0.0)
+                if bucket.tokens >= 1.0:
+                    bucket.tokens -= 1.0
+                    # A consumed-to-empty bucket starts its empty clock.
+                    if bucket.tokens < 1.0:
+                        bucket.empty_since_monotonic = now
+                    return Acquired(tokens_remaining=int(bucket.tokens), waited_seconds=0.0)
 
-            # No whole token: compute the wait until the next one. The bucket
-            # is necessarily below one token here, so its empty clock was set
-            # either at the consuming acquire or by ``_refill`` — never None.
-            deficit = 1.0 - bucket.tokens
-            wait_seconds = deficit * self._refill_seconds
-            empty_since = bucket.empty_since_monotonic
-            assert empty_since is not None  # invariant guard (see comment above)
+                # No whole token: compute the wait until the next one. The bucket
+                # is necessarily below one token here, so its empty clock was set
+                # either at the consuming acquire or by ``_refill`` — never None.
+                deficit = 1.0 - bucket.tokens
+                wait_seconds = deficit * self._refill_seconds
+                empty_since = bucket.empty_since_monotonic
+                assert empty_since is not None  # invariant guard (see comment above)
 
-            if wait_seconds > self._drop_after_seconds:
-                return await self._drop(
+                if wait_seconds > self._drop_after_seconds:
+                    return await self._drop(
+                        bucket=bucket,
+                        empty_since_monotonic=empty_since,
+                        now=now,
+                        canonical_user_id=canonical_user_id,
+                        persona=persona,
+                        adapter_id=adapter_id,
+                        language=language,
+                    )
+
+                return await self._backpressure(
                     bucket=bucket,
-                    empty_since_monotonic=empty_since,
-                    now=now,
+                    wait_seconds=wait_seconds,
                     canonical_user_id=canonical_user_id,
                     persona=persona,
                     adapter_id=adapter_id,
                     language=language,
                 )
-
-            return await self._backpressure(
-                bucket=bucket,
-                wait_seconds=wait_seconds,
-                canonical_user_id=canonical_user_id,
-                persona=persona,
-                adapter_id=adapter_id,
-                language=language,
-            )
+        finally:
+            remaining = self._active[key] - 1
+            if remaining:
+                self._active[key] = remaining
+            else:
+                del self._active[key]
 
     # ----- internals -------------------------------------------------------
 
@@ -374,9 +397,23 @@ class BurstLimiter:
 
     def _evict_if_needed(self) -> None:
         while len(self._buckets) > self._max_tracked_buckets:
-            evicted_key, _ = self._buckets.popitem(last=False)
+            evict_key = self._oldest_idle_key()
+            if evict_key is None:
+                # Every tracked key has an in-flight acquire (CR #232): evicting
+                # any of them would drop a bucket/lock out from under a parked
+                # coroutine. Leave the map over-cap until a key goes idle — the
+                # overshoot is bounded by the number of concurrent acquirers.
+                return
+            del self._buckets[evict_key]
             # Evict the matching lock too (locks share the bucket lifetime).
-            self._locks.pop(evicted_key, None)
+            self._locks.pop(evict_key, None)
+
+    def _oldest_idle_key(self) -> tuple[str, str] | None:
+        """Return the LRU-oldest key with NO in-flight acquire, or ``None``."""
+        for candidate in self._buckets:
+            if self._active.get(candidate, 0) == 0:
+                return candidate
+        return None
 
 
 __all__ = ["Acquired", "BurstLimiter", "Dropped"]
