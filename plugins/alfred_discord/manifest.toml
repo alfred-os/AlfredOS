@@ -1,0 +1,86 @@
+# AlfredOS Discord comms-MCP adapter manifest — Slice 4 (PR-S4-9, #206).
+#
+# manifest_version=1 is the integer Slice-3/4 baseline. The host refuses any
+# version > N+1 at handshake (spec §4.9), so bumping this without the matching
+# host-side schema bump is a release-blocker.
+#
+# No ``[[hooks]]`` blocks. ``lifecycle.start``, ``lifecycle.stop``,
+# ``adapter.health`` and ``outbound.message`` are JSON-RPC methods on the
+# plugin's own surface, NOT hookpoints registered with the orchestrator's hook
+# registry. The adapter only EMITS notifications (``inbound.message``,
+# ``adapter.binding_request``, ``adapter.rate_limit_signal``,
+# ``adapter.crashed``); it subscribes to no hookpoints. Declaring any as a
+# hook subscription would make ``RealGate.check_plugin_load`` reject this
+# manifest, since none appear in the spec §14 hookpoint table.
+alfred.manifest_version = 1
+
+[plugin]
+id = "alfred.discord"
+# subscriber_tier=user-plugin: the closed capability-gate vocabulary the
+# manifest parser validates is {system, operator, user-plugin}. The Discord
+# adapter PROCESS is a first-party authenticated relay; the inbound platform
+# BODIES it forwards become content trust tier T3 host-side the instant they
+# cross ``process_inbound_message`` — NOT in-plugin. A literal "T2" here is a
+# *content trust tier* and is refused by design: the capability axis and the
+# content-trust axis are orthogonal (see plugins/alfred_comms_test precedent).
+subscriber_tier = "user-plugin"
+# sandbox_profile: legacy free-form label, orthogonal to the [sandbox] block
+# below. Restricted env, FS writes confined to the per-plugin runtime dir.
+sandbox_profile = "user-plugin"
+# platform field reserved for the comms-MCP manifest extension (spec §4.3);
+# optional in manifest_version=1.
+platform = "discord"
+
+# sec-1 HIGH (PR #205 round-2 closure): kind = "full", NOT "none". Discord
+# ingests adversary-controlled bytes from arbitrary users; the first-party
+# in-tree relay carve-out to kind="none" is dropped. The plugin opens its
+# Discord WSS connection INSIDE the bwrap (Linux) / sandbox-exec (macOS)
+# isolation primitive. The launcher resolves the per-OS policy_ref and spawns
+# the plugin under the sandbox; the policy bytes at the referenced paths ship
+# in a LATER wave (this PR only references them — same mid-flight fail-closed
+# posture as the quarantined-LLM plugin: a daemon launching before the policy
+# lands refuses with policy_ref_unreadable, the correct fail-closed default).
+#
+# The merged ``SandboxBlock`` schema (src/alfred/plugins/manifest.py) cannot
+# yet express a Discord-only egress allowlist (only HTTPS to gateway.discord.gg
+# + discord.com/api). That egress-restricted policy is tracked to #230 — the
+# same deferral posture ADR-0015 takes for the quarantined-LLM interim. Until
+# #230 lands, the [network] allowlist below documents the intended egress cap
+# and the policy files enforce it at the OS-sandbox boundary.
+[sandbox]
+kind = "full"
+
+[sandbox.policy_refs]
+# Per-OS policy paths (the merged schema requires per-OS keys for kind=full;
+# the flat ``policy_ref = "discord-adapter.toml"`` the orchestrator decision
+# names is NOT expressible on this schema — deferred to #230). Bytes ship in a
+# later wave.
+linux   = "config/sandbox/discord-adapter.linux.bwrap.policy"
+macos   = "config/sandbox/discord-adapter.macos.sb"
+windows = "config/sandbox/discord-adapter.windows.stub.policy"
+
+# comms-MCP adapter declaration. ``adapter_kind`` is the host-side
+# ``alfred.comms_mcp.protocol.adapter_kind`` member this plugin announces; the
+# host's BODY_FIELD_BY_KIND / REQUIRED_CLASSIFIERS_BY_KIND tables are keyed on
+# it. ``classifiers_optional`` lets a plugin opt INTO additional registered
+# classifiers but never OUT of the host-owned required set — empty here because
+# the host's ``discord_sub_payloads`` classifier (the required set) does all
+# the sub-payload promotion; the adapter ships the nine sub-payloads inline.
+[comms_mcp]
+adapter_kind = "discord"
+classifiers_optional = []
+
+[secrets]
+# Broker substitutes at the JSON-RPC dispatch boundary; the plugin never sees
+# raw secret bytes in env or argv. ``discord_bot_token`` authenticates the
+# gateway connection at lifecycle.start; ``audit.hash_pepper`` keys the
+# host-coordinated audit-hash helpers (the key is dotted, so it is QUOTED to
+# stay a flat key rather than a nested ``[secrets.audit]`` table).
+discord_bot_token = "*"
+"audit.hash_pepper" = "*"
+
+[network]
+# Intended egress cap: the Discord gateway WSS + REST API only. Enforced at
+# the OS-sandbox boundary by the policy_refs above once #230's egress-restricted
+# SandboxPolicy schema lands; documented here in the interim.
+allowlist = ["discord.com", "gateway.discord.gg"]
