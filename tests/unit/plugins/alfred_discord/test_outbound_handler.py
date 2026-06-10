@@ -152,6 +152,34 @@ async def test_server_5xx_returns_retryable_default_backoff(
     assert result.error_class == "discord_server_error"
 
 
+async def test_client_4xx_returns_terminal_not_retryable(
+    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+) -> None:
+    # A non-429 4xx (e.g. 400 Bad Request) reaching ``_map_http_exception`` is a
+    # CLIENT error — permanently bad, not transient. It must map to a terminal
+    # failure; classifying it retryable would create an endless retry loop.
+    exc = discord_mock_factory.http_exception(status=400)
+    target = discord_mock_factory.sendable(raises=exc)
+    handler, _ = _handler(tmp_path, target)
+    result = await handler.handle_outbound(_request())
+    assert isinstance(result, _OutboundTerminal)
+    assert result.outcome == "terminal_failure"
+    assert result.error_class == "discord_client_error"
+
+
+async def test_unknown_status_http_exception_returns_terminal(
+    tmp_path: Path, discord_mock_factory: DiscordMockFactory
+) -> None:
+    # A 3xx-ish / non-4xx-non-5xx status (defensive: should not occur on a send)
+    # is also NOT retryable — only 429 + 5xx are.
+    exc = discord_mock_factory.http_exception(status=302)
+    target = discord_mock_factory.sendable(raises=exc)
+    handler, _ = _handler(tmp_path, target)
+    result = await handler.handle_outbound(_request())
+    assert isinstance(result, _OutboundTerminal)
+    assert result.error_class == "discord_client_error"
+
+
 async def test_forbidden_returns_terminal(
     tmp_path: Path, discord_mock_factory: DiscordMockFactory
 ) -> None:

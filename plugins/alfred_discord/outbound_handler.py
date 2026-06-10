@@ -13,9 +13,10 @@ trust-boundary-adjacent responsibilities:
    ``<@id>`` mention syntax.
 3. **Failure mapping.** discord.py's send exceptions map onto the union:
    ``HTTPException(429)`` → ``_OutboundRetryable`` (with the platform's
-   ``retry_after``, rounded UP); other 5xx → ``_OutboundRetryable`` with a
-   default backoff; ``Forbidden`` / ``NotFound`` / ``InvalidData`` →
-   ``_OutboundTerminal``.
+   ``retry_after``, rounded UP); 5xx → ``_OutboundRetryable`` with a default
+   backoff; ``Forbidden`` / ``NotFound`` / ``InvalidData`` and any OTHER non-429
+   4xx client error → ``_OutboundTerminal`` (a permanently-bad request is never
+   retried — that would loop forever).
 4. **In-plugin DLP-lite.** ``_OutboundTerminal.detail_redacted`` is scrubbed
    (closure sec-2) so a leaked secret in an exception string never crosses
    stdio raw; the host re-scans on receive.
@@ -130,11 +131,17 @@ class OutboundHandler:
         return body_text
 
     def _map_http_exception(self, exc: discord.HTTPException) -> OutboundMessageResult:
-        """Map an ``HTTPException``: 429 → rate-limited retryable; else 5xx retryable.
+        """Map an ``HTTPException``: ONLY 429 + 5xx are retryable; all else terminal.
 
-        Note ``Forbidden`` / ``NotFound`` subclass ``HTTPException`` but are caught
-        by the more specific ``except`` clause in :meth:`handle_outbound`, so this
-        method only ever sees a non-terminal HTTP error.
+        429 → rate-limited retryable (with the platform's ``retry_after``); 5xx →
+        retryable with a default backoff. Any other status — notably a non-429 4xx
+        CLIENT error (400/401/etc.) — is a permanently-bad request, NOT transient:
+        retrying it would loop forever. Such statuses map to a terminal failure.
+
+        Note ``Forbidden`` (403) / ``NotFound`` (404) subclass ``HTTPException``
+        but are caught by the more specific ``except`` clause in
+        :meth:`handle_outbound`, so this method handles the remaining 4xx
+        (e.g. 400, 401) plus 429 and 5xx.
         """
         status = getattr(exc, "status", None)
         if status == 429:
@@ -144,12 +151,24 @@ class OutboundHandler:
                 retry_after_seconds=retry_after,
                 error_class="discord_rate_limited",
             )
-        # Other HTTP errors (5xx, transient gateway errors) are retryable with a
-        # default backoff.
-        return _OutboundRetryable(
-            outcome="retryable_failure",
-            retry_after_seconds=_DEFAULT_RETRY_AFTER_SECONDS,
-            error_class="discord_server_error",
+        if isinstance(status, int) and 500 <= status < 600:
+            # Server-side / transient gateway error: retryable with a default
+            # backoff the host's OutboundQueue honours.
+            return _OutboundRetryable(
+                outcome="retryable_failure",
+                retry_after_seconds=_DEFAULT_RETRY_AFTER_SECONDS,
+                error_class="discord_server_error",
+            )
+        # Any other status (non-429 4xx client error, or anything unexpected) is
+        # terminal — never retried.
+        detail = scrub_in_plugin(str(exc))[:_DETAIL_MAX_LEN]
+        _log.warning(
+            "comms.outbound.terminal", adapter="discord", error_class="discord_client_error"
+        )
+        return _OutboundTerminal(
+            outcome="terminal_failure",
+            error_class="discord_client_error",
+            detail_redacted=detail,
         )
 
     @staticmethod
