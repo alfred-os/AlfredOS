@@ -45,6 +45,18 @@ class NotificationSink(Protocol):
     async def emit(self, frame: Mapping[str, object]) -> None: ...
 
 
+class SyncNotificationSink(Protocol):
+    """A SYNCHRONOUS sink for the crash path, where the event loop may be gone.
+
+    The crash emitter runs from a top-level except handler that fires as the
+    process tears down — there may be no running event loop to ``await`` an async
+    sink. This sync sink writes + flushes a single frame inline so the crash
+    notification lands before ``sys.exit``.
+    """
+
+    def emit_sync(self, frame: Mapping[str, object]) -> None: ...
+
+
 def notification_frame(method: str, params: Mapping[str, object]) -> dict[str, object]:
     """Build a JSON-RPC notification frame (no ``id``) for ``method`` + ``params``."""
     return {"jsonrpc": "2.0", "method": method, "params": dict(params)}
@@ -62,6 +74,10 @@ class StdoutNotificationSink:
     async def emit(self, frame: Mapping[str, object]) -> None:
         await asyncio.to_thread(self._write, frame)
 
+    def emit_sync(self, frame: Mapping[str, object]) -> None:
+        """Write + flush a frame inline (no event loop) — the crash-path sink."""
+        self._write(frame)
+
     @staticmethod
     def _write(frame: Mapping[str, object]) -> None:
         sys.stdout.write(json.dumps(frame) + "\n")
@@ -75,5 +91,6 @@ __all__ = [
     "NOTIFY_RATE_LIMIT",
     "NotificationSink",
     "StdoutNotificationSink",
+    "SyncNotificationSink",
     "notification_frame",
 ]
