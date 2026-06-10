@@ -41,15 +41,18 @@ _REDACTED: Final[str] = "[REDACTED:discord-secret-shape]"
 # because the host's generic ``sk-``/``pk_`` regex does not cover the
 # platform-specific bot-token layout the Discord SDK could surface.
 #
-# L4: anchored with a NEGATIVE LOOKBEHIND ``(?<![A-Za-z0-9_-])`` rather than a
-# leading ``\b``. base64url's alphabet includes ``-`` and ``_``, which are
-# NON-word chars to ``\b`` — so a token whose first segment begins with ``-``/
-# ``_`` would have its leading char left on the wire (``\b`` only fires after a
-# word char). The lookbehind asserts "no base64url char precedes the token"
-# without consuming it, so the ENTIRE token — leading ``-``/``_`` included — is
-# matched and redacted from any boundary.
+# L4: anchored on BOTH ends with base64url-aware lookarounds rather than ``\b``.
+# base64url's alphabet includes ``-`` and ``_``, which are NON-word chars to
+# ``\b`` — so a token whose first segment begins with ``-``/``_`` would have its
+# leading char left on the wire, and symmetrically a token whose final segment
+# ends with ``-``/``_`` would have its trailing char left on the wire (``\b``
+# only fires across a word/non-word transition). The leading NEGATIVE LOOKBEHIND
+# ``(?<![A-Za-z0-9_-])`` asserts "no base64url char precedes the token" and the
+# trailing NEGATIVE LOOKAHEAD ``(?![A-Za-z0-9_-])`` asserts "no base64url char
+# follows it" — both without consuming, so the ENTIRE token (leading/trailing
+# ``-``/``_`` included) is matched and redacted from any boundary.
 _DISCORD_BOT_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,}\b"
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{27,}(?![A-Za-z0-9_-])"
 )
 
 
