@@ -51,6 +51,7 @@ from alfred.comms_mcp.inbound import (
     _peppered_hash,
     _PreResolutionLimiter,
     _SecretBrokerLike,
+    _SubPayloadPromoterLike,
     process_inbound_message,
 )
 from alfred.security.dlp import redact_secret_shapes
@@ -159,12 +160,16 @@ class InboundMessageHandler:
         audit_writer: _AuditWriterLike,
         secret_broker: _SecretBrokerLike,
         pre_resolution_limiter: _PreResolutionLimiter | None = None,
+        sub_payload_promoter: _SubPayloadPromoterLike | None = None,
     ) -> None:
         self._identity_resolver = identity_resolver
         self._orchestrator = orchestrator
         self._burst_limiter = burst_limiter
         self._audit_writer = audit_writer
         self._secret_broker = secret_broker
+        # P1: per-adapter sub-payload promoter (None → inert for the reference
+        # plugin's empty required-classifier set). Forwarded on every process call.
+        self._sub_payload_promoter = sub_payload_promoter
         # Persistent across every ``process`` call (sec-003). Tests may inject a
         # pre-loaded limiter to drive the cap deterministically; production
         # leaves it defaulted so the handler mints exactly one and keeps it.
@@ -183,6 +188,7 @@ class InboundMessageHandler:
             audit_writer=self._audit_writer,
             secret_broker=self._secret_broker,
             pre_resolution_limiter=self._pre_resolution_limiter,
+            sub_payload_promoter=self._sub_payload_promoter,
         )
 
 

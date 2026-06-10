@@ -55,6 +55,7 @@ from alfred.comms_mcp import observability
 
 if TYPE_CHECKING:
     from alfred.comms_mcp.protocol import InboundMessageNotification
+    from alfred.comms_mcp.sub_payload_promotion import PromotedBody
     from alfred.orchestrator.burst_limiter import Acquired, Dropped
     from alfred.security.quarantine import ExtractionResult
 
@@ -152,6 +153,19 @@ class _SecretBrokerLike(Protocol):
     """Structural type for the secret broker (``audit.hash_pepper`` source)."""
 
     def get(self, name: str) -> str: ...
+
+
+@runtime_checkable
+class _SubPayloadPromoterLike(Protocol):
+    """Structural type for the host-side sub-payload promoter (P1).
+
+    Runs BEFORE ``quarantined_extract`` to replace every recognised sub-payload
+    in the (T3) body with a single-use ``ContentHandle`` reference so the
+    privileged orchestrator never sees raw sub-payload bytes. A ``None`` promoter
+    means promotion is inert (reference plugin / empty required-classifier set).
+    """
+
+    async def promote(self, body: Mapping[str, object]) -> PromotedBody: ...
 
 
 def _peppered_hash(raw: str, *, pepper: str) -> str:
@@ -323,6 +337,7 @@ async def process_inbound_message(
     audit_writer: _AuditWriterLike,
     secret_broker: _SecretBrokerLike,
     pre_resolution_limiter: _PreResolutionLimiter | None = None,
+    sub_payload_promoter: _SubPayloadPromoterLike | None = None,
 ) -> None:
     """Route one inbound comms notification through the trust boundary.
 
@@ -405,23 +420,33 @@ async def process_inbound_message(
     # Task 62: observe the backpressure wait the message incurred at the limiter.
     observability.record_burst_limiter_wait_seconds(getattr(acquired, "waited_seconds", 0.0))
 
-    # 3) Quarantined extract — T3 hard-coded; no silent promotion.
+    # 3a) Sub-payload promotion (P1, #206) — runs BEFORE the extract so the
+    # privileged orchestrator never sees raw sub-payload bytes. The promoter
+    # host-classifies the body, writes each recognised sub-payload to the content
+    # store under a host-minted handle id, and rewrites the body field to a
+    # single-use ``ContentHandle`` reference. The HOST-classified kinds (not the
+    # plugin-asserted ``notification.sub_payload_refs`` off the UNTRUSTED wire)
+    # are authoritative for the audit row. A ``None`` promoter leaves the body
+    # verbatim and falls back to the wire-asserted kinds (reference plugin /
+    # empty required-classifier set) — closes the #233 scanner-wiring seam for
+    # adapters with a non-empty classifier set.
+    if sub_payload_promoter is not None:
+        promoted = await sub_payload_promoter.promote(notification.body)
+        extract_body: Mapping[str, object] = promoted.body
+        sub_payload_kinds = promoted.sub_payload_kinds
+    else:
+        extract_body = notification.body
+        sub_payload_kinds = frozenset(notification.sub_payload_refs)
+
+    # 3b) Quarantined extract — T3 hard-coded; no silent promotion. Receives the
+    # PROMOTED body (raw sub-payloads already swapped for handle references).
     extracted = await orchestrator.quarantined_extract(
-        notification.body,
+        extract_body,
         canonical_user_id=resolved.canonical_user_id,
         source_tier="T3",
     )
 
     inbound_message_id = uuid.uuid4().hex
-    # PROVENANCE CAVEAT + SCANNER-WIRING SEAM (TODO PR-S4-9). These kinds are
-    # taken straight off the UNTRUSTED wire (``notification.sub_payload_refs``) —
-    # they are PLUGIN-ASSERTED, not yet host-classified. ``InboundContentScanner``
-    # is built + tested but has no caller here: for the reference plugin the
-    # required-classifier set is empty, so scanning is inert. PR-S4-9 (which adds
-    # the non-empty Discord classifier set) MUST wire the scanner in BEFORE that
-    # set is non-empty, or unclassified T3 sub-payloads would be admitted on the
-    # plugin's word. Tracked in the PR-S4-9 follow-up issue (#233).
-    sub_payload_kinds = frozenset(notification.sub_payload_refs)
 
     # 4) Observability — the T3 promotion row.
     await _emit_t3_promotion(
