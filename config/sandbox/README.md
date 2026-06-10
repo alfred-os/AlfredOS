@@ -14,14 +14,25 @@ runs under (spec §7.2, ADR-0015).
 
 ## What ships here
 
-The only `kind = "full"` plugin today is the **quarantined LLM** — the single
-component that handles raw T3 (untrusted) content. Its policy files:
+Two `kind = "full"` plugins ship today. The **quarantined LLM** — the single
+component that handles raw T3 (untrusted) content — and the **Discord adapter**
+— a comms relay that ingests adversary-controlled bytes from arbitrary Discord
+users (PR #205 round-2 sec-1 dropped the first-party-relay `kind:none`
+carve-out). Their policy files:
 
 | File | OS | Status |
 |---|---|---|
 | `quarantined-llm.linux.bwrap.policy` | Linux | **Kernel-enforced** via bwrap |
 | `quarantined-llm.macos.sb` | macOS | File only — `sandbox-exec` execution deferred (#230); launcher refuses `kind:full` on macOS today |
 | `quarantined-llm.windows.stub.policy` | Windows | Documented stub — production refuses, dev emits `supervisor.plugin.sandbox_stub_used` |
+| `discord-adapter.linux.bwrap.policy` | Linux | **Kernel-enforced** via bwrap; mirrors the quarantined-LLM fs/namespace containment + ro-binds `/etc/ssl/certs` for the Discord TLS chain |
+| `discord-adapter.macos.sb` | macOS | File only — execution deferred (#230) |
+| `discord-adapter.windows.stub.policy` | Windows | Documented stub — production refuses, dev emits `supervisor.plugin.sandbox_stub_used` |
+
+Both policies leave egress UN-kernel-enforced for now: the schema cannot yet
+express an endpoint allowlist, so neither `unshare net`s. The Discord-only
+egress cap is deferred to **#230** (the manifest's `[network] allowlist`
+documents the intended cap; #230 makes the policy enforce it).
 
 `_fixtures/` holds policy files used only by tests; they are NOT production
 policies.

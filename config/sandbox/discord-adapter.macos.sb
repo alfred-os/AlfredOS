@@ -1,0 +1,82 @@
+;; Discord-adapter sandbox-exec profile (macOS) — PR-S4-9, spec §7.9, ADR-0015/ADR-0016.
+;;
+;; This is the macOS Seatbelt (sandbox-exec / SBPL) analogue of the Linux bwrap
+;; policy. It is the per-OS `policy_ref` the launcher resolves for the
+;; `alfred.discord` plugin's `[sandbox.policy_refs] macos = ...`.
+;;
+;; STATUS — FILE ONLY (execution deferred to #230). The launcher REFUSES a
+;; `kind = "full"` plugin on macOS today (it emits
+;; `supervisor.sandbox.refused.macos_full_not_yet_shipped` and exits before any
+;; `sandbox-exec -f` call). This profile ships now so:
+;;   (1) the Discord manifest's `policy_refs.macos` reference resolves instead
+;;       of dangling, and
+;;   (2) the kernel-enforcement wiring (`sandbox-exec -f <this> -- <interp>`)
+;;       has a reviewed, ready profile the moment #230 lands macOS execution.
+;;
+;; Seatbelt is advisory relative to bwrap (it is a userspace-policy MAC, not a
+;; namespace primitive), so it is a defence-in-depth layer, not the primary
+;; containment. The primary containment on macOS, like Linux, will be the
+;; deny-by-default posture below. This profile MIRRORS
+;; `quarantined-llm.macos.sb` with the network allow scoped to the Discord
+;; endpoints (vs the provider endpoints) once #230 pins the concrete remotes.
+
+(version 1)
+
+;; Deny everything, then re-allow the narrow set the interpreter needs. A
+;; deny-default profile means any capability we forgot to enumerate is DENIED,
+;; which is the fail-closed posture (CLAUDE.md hard rule #7).
+(deny default)
+
+;; ---------------------------------------------------------------------------
+;; Filesystem confinement
+;; ---------------------------------------------------------------------------
+;; Explicit host-secret denials. `(deny default)` already covers these, but
+;; enumerating the high-value targets makes the intent auditable and survives a
+;; future loosening of the default — an adversary owning the T3 Discord content
+;; must not read host account/secret material.
+(deny file-read* (subpath "/etc"))
+(deny file-read* (subpath "/private/etc"))
+(deny file-read* (subpath "/var"))
+(deny file-read* (subpath "/private/var"))
+(deny file-read* (subpath "/Users"))
+
+;; Allow read-only access to the system frameworks + dylibs the interpreter
+;; needs to start and link, plus the system trust store. macOS verifies TLS via
+;; the Security framework / system keychain (not an /etc/ssl/certs file), so the
+;; Discord WSS cert chain validates through /System/Library + the keychain
+;; access the framework mediates — no extra file bind is required here (the
+;; Linux-specific /etc/ssl/certs bind has no macOS analogue).
+(allow file-read*
+  (subpath "/usr/lib")
+  (subpath "/usr/bin")
+  (subpath "/System/Library"))
+
+;; A single writable scratch dir, mirroring the Linux tmpfs (idempotency store +
+;; scratch). The launcher (under #230) templates the concrete per-launch path;
+;; the placeholder keeps the profile self-documenting.
+(allow file-write* (subpath "/private/tmp/alfred-discord"))
+
+;; ---------------------------------------------------------------------------
+;; Process confinement
+;; ---------------------------------------------------------------------------
+;; No fork, no exec of a new program image. The Discord plugin is a single
+;; interpreter process; it must never spawn /bin/sh or any host binary.
+(deny process-fork)
+(deny process-exec*)
+
+;; ---------------------------------------------------------------------------
+;; Network — see the EGRESS note in discord-adapter.linux.bwrap.policy and #230
+;; ---------------------------------------------------------------------------
+;; The Discord plugin opens a WSS connection to gateway.discord.gg + REST to
+;; discord.com/api. Seatbelt CAN express a remote-allowlist, but the concrete
+;; Discord endpoint IPs are supplied at runtime (#230). Until #230 pins the
+;; Discord-only allowlist, outbound HTTPS is allowed broadly here — the SAME
+;; documented, accepted egress gap as Linux. #230 replaces the broad allow below
+;; with `(allow network-outbound (remote ip "<discord-ip>:443"))`.
+(allow network-outbound (remote tcp "*:443"))
+(allow network-bind (local ip "localhost:*"))
+
+;; Mach + sysctl the interpreter touches at startup (hashseed, time). Narrowly
+;; scoped; no host-IPC reach.
+(allow mach-lookup)
+(allow sysctl-read)
