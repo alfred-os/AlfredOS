@@ -123,7 +123,7 @@ async def test_429_pauses_queue_then_auto_resumes(
     assert sink.pauses == [_RETRY_AFTER]
 
     # While paused, consuming #4 must block past a short probe window.
-    consume_task = asyncio.ensure_future(queue.consume(_ADAPTER_ID))
+    consume_task = asyncio.create_task(queue.consume(_ADAPTER_ID))
     await asyncio.sleep(0.1)
     assert not consume_task.done(), "queue surfaced a message while paused"
 
