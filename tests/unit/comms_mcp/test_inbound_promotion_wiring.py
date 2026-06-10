@@ -9,9 +9,12 @@ sub-payloads inline) straight to ``quarantined_extract`` and took
   REWRITTEN body — no raw sub-payload bytes reach the privileged orchestrator;
 * the ``COMMS_INBOUND_T3_PROMOTION_FIELDS`` audit row's ``sub_payload_kinds``
   come from the HOST classifier, not the wire;
-* with no promoter injected (reference plugin / empty classifier set), behaviour
-  is unchanged — the wire body flows through and ``sub_payload_refs`` populates
-  the row (backward-compatible default).
+* with no promoter injected AND an empty-classifier adapter kind (the reference
+  plugin), behaviour is unchanged — the wire body flows through and
+  ``sub_payload_refs`` populates the row (backward-compatible default);
+* with no promoter injected AND a NON-empty-classifier adapter kind (discord),
+  the M2 fail-closed guard refuses rather than trusting the wire-asserted
+  ``sub_payload_refs`` — covered in ``test_inbound_handler_promoter``.
 """
 
 from __future__ import annotations
@@ -117,13 +120,19 @@ async def test_audit_row_kinds_from_host_classifier_not_wire() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_promoter_preserves_legacy_wire_behaviour() -> None:
+async def test_no_promoter_preserves_legacy_wire_behaviour_for_empty_classifier_kind() -> None:
+    # M2: the legacy wire-fallback is ONLY safe for an adapter kind with an EMPTY
+    # required-classifier set (the reference plugin emits plain text, no
+    # sub-payloads). A None promoter there flows the wire body through unchanged
+    # and the row kinds come off the wire. For a non-empty-classifier kind
+    # (discord) the fail-closed guard fires instead — see
+    # test_inbound_handler_promoter.
     orchestrator = SpyOrchestrator()
     audit = SpyAuditWriter()
     body = {"content": "hi"}
     notification = InboundMessageNotification(
-        adapter_id="discord",
-        platform_user_id="discord:user",
+        adapter_id="alfred_comms_test",
+        platform_user_id="test:user",
         body=body,
         sub_payload_refs=("embed",),
         received_at=datetime.now(UTC),

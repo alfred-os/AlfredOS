@@ -52,6 +52,8 @@ import structlog
 
 from alfred.audit import audit_row_schemas
 from alfred.comms_mcp import observability
+from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
+from alfred.comms_mcp.errors import PromoterRequiredError
 
 if TYPE_CHECKING:
     from alfred.comms_mcp.protocol import InboundMessageNotification
@@ -328,6 +330,40 @@ async def _emit_t3_promotion(
     )
 
 
+async def _emit_promoter_required(
+    notification: InboundMessageNotification,
+    *,
+    audit_writer: _AuditWriterLike,
+) -> None:
+    """Emit the M2 fail-closed handler-failure row before raising.
+
+    Uses ``COMMS_HANDLER_FAILED_FIELDS`` with the closed-vocab
+    ``reason="promoter_required"`` so an operator sees a loud, structured refusal
+    (no platform bytes — ``detail_redacted`` carries only the adapter kind).
+    """
+    await audit_writer.append_schema(
+        fields=audit_row_schemas.COMMS_HANDLER_FAILED_FIELDS,
+        schema_name="COMMS_HANDLER_FAILED_FIELDS",
+        event="comms.inbound.promoter_required",
+        actor_user_id=None,
+        subject={
+            "adapter_id": notification.adapter_id,
+            "notification_method": "inbound.message",
+            "handler_class": "process_inbound_message",
+            "error_class": "PromoterRequiredError",
+            "reason": "promoter_required",
+            "detail_redacted": (
+                f"adapter_kind {notification.adapter_id!r} requires a sub_payload_promoter"
+            ),
+            "failed_at": datetime.now(UTC).isoformat(),
+        },
+        trust_tier_of_trigger="T3",
+        result="refused",
+        cost_estimate_usd=0.0,
+        trace_id=notification.adapter_id,
+    )
+
+
 async def process_inbound_message(
     notification: InboundMessageNotification,
     *,
@@ -368,6 +404,28 @@ async def process_inbound_message(
             adapter_id=notification.adapter_id,
         )
         return
+
+    # M2 fail-closed guard: an adapter kind whose required-classifier set is
+    # non-empty (e.g. "discord") MUST receive a non-None promoter. Without one,
+    # promotion silently does not happen and the host falls back to trusting the
+    # wire-asserted ``sub_payload_refs`` — the exact untrusted-input-trust the
+    # required classifier set exists to prevent. Refuse loudly (audit + raise)
+    # rather than processing the message, so a misconfigured wiring fails closed.
+    if (
+        sub_payload_promoter is None
+        and REQUIRED_CLASSIFIERS_BY_KIND.get(notification.adapter_id, frozenset())
+    ):
+        await _emit_promoter_required(notification, audit_writer=audit_writer)
+        _log.error(
+            "comms.inbound.promoter_required",
+            adapter_id=notification.adapter_id,
+        )
+        msg = (
+            f"adapter_kind {notification.adapter_id!r} has a non-empty required-classifier "
+            "set but no sub_payload_promoter was wired; refusing to process inbound "
+            "without host-side sub-payload promotion"
+        )
+        raise PromoterRequiredError(msg)
 
     pepper = secret_broker.get("audit.hash_pepper")
     platform_user_id_hash = _peppered_hash(notification.platform_user_id, pepper=pepper)
