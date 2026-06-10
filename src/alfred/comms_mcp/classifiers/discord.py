@@ -100,7 +100,16 @@ def _walk_path(body: Mapping[str, object], path: str) -> object | None:
         index: int | None = None
         if key.endswith("]") and "[" in key:
             key, _, raw_index = key.partition("[")
-            index = int(raw_index.rstrip("]"))
+            try:
+                index = int(raw_index.rstrip("]"))
+            except ValueError:
+                # Malformed selector (``embeds[abc]`` / ``embeds[]``): the DSL
+                # contract resolves invalid paths to ``None``, never raises.
+                return None
+            if index < 0:
+                # A negative index would resolve from the END (Python list
+                # semantics) — invalid in this DSL; fail closed rather than wrap.
+                return None
         if not isinstance(current, Mapping) or key not in current:
             return None
         current = current[key]
