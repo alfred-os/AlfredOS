@@ -100,25 +100,42 @@ def test_inject_inbound_allowed_in_development_env(monkeypatch: pytest.MonkeyPat
 
 def test_inject_inbound_refused_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_ENV", "production")
+    # The gate also consults ALFRED_ENVIRONMENT (daemon control surface); clear it
+    # so a dev/test value in the ambient env cannot open the gate under test.
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     with pytest.raises(main.TestInjectionRefusedError):
         main.inject_inbound({"content": "hello"})
 
 
-def test_inject_inbound_refused_when_alfred_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unset ``ALFRED_ENV`` (the common production default) MUST fail closed.
+def test_inject_inbound_allowed_via_alfred_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A daemon-spawned adapter is gated on ALFRED_ENVIRONMENT (the scrubbed-env signal).
 
-    A missing var must never be read as "permitted" — the gate fabricates
-    inbound platform traffic, so the absence of an explicit dev/test signal is
-    a refusal, not a default-allow.
+    The daemon's scrubbed comms-child allowlist drops ALFRED_ENV but keeps
+    ALFRED_ENVIRONMENT, so the gate MUST accept a dev/test value from the latter.
     """
     monkeypatch.delenv("ALFRED_ENV", raising=False)
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    frame = main.inject_inbound({"content": "hello"})
+    assert frame["method"] == "inbound.message"
+
+
+def test_inject_inbound_refused_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset env (the common production default) MUST fail closed.
+
+    A missing var must never be read as "permitted" — the gate fabricates
+    inbound platform traffic, so the absence of an explicit dev/test signal on
+    EVERY consulted var is a refusal, not a default-allow.
+    """
+    monkeypatch.delenv("ALFRED_ENV", raising=False)
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     with pytest.raises(main.TestInjectionRefusedError):
         main.inject_inbound({"content": "hello"})
 
 
-def test_inject_inbound_refused_when_alfred_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty ``ALFRED_ENV`` is indistinguishable from unset and must refuse."""
+def test_inject_inbound_refused_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty signal on every var is indistinguishable from unset and must refuse."""
     monkeypatch.setenv("ALFRED_ENV", "")
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "")
     with pytest.raises(main.TestInjectionRefusedError):
         main.inject_inbound({"content": "hello"})
 
@@ -126,6 +143,7 @@ def test_inject_inbound_refused_when_alfred_env_empty(monkeypatch: pytest.Monkey
 def test_test_injection_refused_carries_event_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """The refusal names the ``comms.test_injection_refused`` event for the host."""
     monkeypatch.setenv("ALFRED_ENV", "production")
+    monkeypatch.delenv("ALFRED_ENVIRONMENT", raising=False)
     try:
         main.inject_inbound({"content": "hello"})
     except main.TestInjectionRefusedError as exc:

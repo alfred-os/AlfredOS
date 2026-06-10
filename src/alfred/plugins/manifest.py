@@ -102,6 +102,11 @@ class PluginManifest(BaseModel):
     sandbox_profile: str
     sandbox: SandboxBlock
     platform: str | None = None  # reserved for Slice-4 comms-MCP
+    # PR-S4-11b (#237): the ``python -m`` target the daemon spawns a comms plugin
+    # at. Sourced from ``[comms_mcp] module`` and additive/optional — a manifest
+    # with no ``[comms_mcp]`` block (or no ``module`` key) parses with this
+    # ``None``, so every pre-11b manifest stays back-compat.
+    comms_mcp_module: str | None = None
 
     @field_validator("subscriber_tier")
     @classmethod
@@ -189,6 +194,7 @@ def parse_manifest(raw: str) -> PluginManifest:
         raise ManifestError(t("plugin.manifest_invalid_platform_type"))
 
     sandbox_block = _parse_sandbox_block(data, plugin_id=plugin_id)
+    comms_mcp_module = _parse_comms_mcp_module(data)
 
     return PluginManifest(
         manifest_version=1,
@@ -197,7 +203,38 @@ def parse_manifest(raw: str) -> PluginManifest:
         sandbox_profile=sandbox_profile,
         sandbox=sandbox_block,
         platform=platform_raw,
+        comms_mcp_module=comms_mcp_module,
     )
+
+
+def _parse_comms_mcp_module(data: dict[str, Any]) -> str | None:
+    """Read the optional ``[comms_mcp] module`` key (PR-S4-11b, #237).
+
+    Returns ``None`` when the ``[comms_mcp]`` block is ABSENT or carries no
+    ``module`` key — every pre-11b manifest stays back-compat. The block's other
+    keys (``adapter_kind`` / ``classifiers_optional``) are tolerated and ignored
+    here (they are consumed elsewhere); only ``module``'s type is validated, so a
+    non-string ``module`` surfaces a typed :class:`ManifestError` rather than a
+    raw Pydantic ``ValidationError``.
+
+    FIX 5 (PR-S4-11b review): a PRESENT-but-non-table ``comms_mcp`` (e.g.
+    ``comms_mcp = "oops"``) is a MALFORMED manifest, not "no module". It is
+    rejected with :class:`ManifestError` rather than silently treated as absent
+    — the silent-absence shape masked a broken manifest the operator believes
+    declares a module (CLAUDE.md hard rule #7). A genuinely missing key still
+    returns ``None`` (the ``is None`` arm), preserving back-compat.
+    """
+    if "comms_mcp" not in data:
+        return None
+    comms_section = data["comms_mcp"]
+    if not isinstance(comms_section, dict):
+        raise ManifestError(t("plugin.manifest_comms_mcp_not_table"))
+    module = comms_section.get("module")
+    if module is None:
+        return None
+    if not isinstance(module, str):
+        raise ManifestError(t("plugin.manifest_comms_mcp_module_type"))
+    return module
 
 
 def _parse_sandbox_block(data: dict[str, Any], *, plugin_id: str) -> SandboxBlock:

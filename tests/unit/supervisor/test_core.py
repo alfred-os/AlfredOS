@@ -487,6 +487,107 @@ async def test_stop_force_cancels_runner_on_drain_timeout(
     assert len(stopped_calls) == 1
 
 
+# ---------------------------------------------------------------------------
+# PR-S4-11b DEFECT 1: a supervised comms pump observes the supervisor shutdown
+# signal so a graceful stop drains sub-second instead of force-cancelling.
+# ---------------------------------------------------------------------------
+
+
+class _BlockingTransport:
+    """A transport whose ``read_frame`` blocks forever after the handshake.
+
+    Models the production ``CommsStdioTransport``: ``read_frame`` awaits the
+    next plugin frame, which never arrives during an idle stop — exactly the
+    shape that wedged the supervisor drain for the full budget before DEFECT 1.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[Any] = []
+        self.spawned = False
+        self.closed = False
+        self._block = asyncio.Event()  # never set — read_frame blocks on it
+
+    async def spawn(self) -> None:
+        self.spawned = True
+
+    async def send(self, frame: Any) -> None:
+        self.sent.append(frame)
+
+    async def read_frame(self) -> Any:
+        # First read returns the handshake ack; every subsequent read blocks
+        # forever (no further plugin frames during an idle stop).
+        if not self._block.is_set() and len(self.sent) == 1:
+            self._block.set()
+            return {"jsonrpc": "2.0", "id": 0, "result": {"ok": True}}
+        await asyncio.Event().wait()  # block forever
+        return None  # pragma: no cover — unreachable; the wait above never returns
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_stop_drains_supervised_comms_pump_promptly() -> None:
+    """A comms pump wired with the supervisor shutdown event drains sub-second.
+
+    The production blocker: the pump loops on ``read_frame`` (blocks forever on
+    an idle plugin) and observed NOTHING, so the supervisor's graceful-drain
+    ``wait_for`` always timed out → force-cancel → ``cancelled_with_errors`` and
+    (pre-migration) a CheckViolation on the audit insert. Wiring
+    ``supervisor.shutdown_event`` into the runner lets the pump exit on the
+    graceful drain: the TaskGroup drains WELL within the budget, the
+    ``supervisor.lifecycle.stopped`` row carries ``result='success'``, and the
+    transport is closed (no leaked subprocess).
+    """
+    from alfred.comms_mcp.handlers import BindingHandler, CrashHandler, RateLimitHandler
+    from alfred.plugins.comms_runner import CommsPluginRunner
+    from alfred.plugins.session import AlfredPluginSession
+    from tests.helpers.gates import make_permissive_fixture_gate
+
+    sup, m = _build_supervisor()
+    await sup.start()
+
+    transport = _BlockingTransport()
+    session = await AlfredPluginSession.for_comms_adapter(
+        adapter_id="alfred_comms_test",
+        manifest_raw=(
+            "[alfred]\nmanifest_version = 1\n\n"
+            '[plugin]\nid = "alfred_comms_test"\n'
+            'subscriber_tier = "user-plugin"\nsandbox_profile = "user-plugin"\n\n'
+            '[sandbox]\nkind = "none"\n'
+        ),
+        audit_writer=MagicMock(append_schema=AsyncMock()),
+        gate=make_permissive_fixture_gate(),
+        supervisor=sup,
+        inbound_handler=MagicMock(),
+        binding_handler=MagicMock(spec=BindingHandler),
+        rate_limit_handler=MagicMock(spec=RateLimitHandler),
+        crash_handler=MagicMock(spec=CrashHandler),
+        transport=transport,  # type: ignore[arg-type]
+    )
+    runner = CommsPluginRunner(
+        session=session,
+        transport=transport,  # type: ignore[arg-type]
+        adapter_id="alfred_comms_test",
+        shutdown_event=sup.shutdown_event,
+    )
+    await runner.start_and_handshake()
+    sup.register_plugin_task(runner.pump())
+
+    # The real graceful drain budget is 10s; assert the stop completes WELL
+    # under it (the bug paid the full budget). 2.0s is a generous ceiling that
+    # still fails loudly if the pump ever wedges the drain again.
+    await asyncio.wait_for(sup.stop(), timeout=2.0)
+
+    stopped_calls = [
+        call
+        for call in m["audit"].append.await_args_list
+        if call.kwargs.get("event") == "supervisor.lifecycle.stopped"
+    ]
+    assert len(stopped_calls) == 1
+    assert stopped_calls[0].kwargs["result"] == "success"
+    assert transport.closed is True
+
+
 # Protocol-body coverage so the 100% gate doesn't flag the stubs as dead.
 
 

@@ -251,6 +251,26 @@ def make_allow_system_gate(
     )
 
 
+def make_comms_adapter_load_gate(grants: Iterable[GrantRow]) -> CapabilityGate:
+    """Return a :class:`RealGate` seeded with comms-adapter LOAD grants.
+
+    ADR-0027 boot-path fixture: seeds the EXACT grants the production
+    :func:`alfred.security.capability_gate._comms_adapter_grants.comms_adapter_load_grants`
+    builder produces for the operator-enabled adapters, so a test can assert
+    the daemon boot's ``check_plugin_load`` verdict against the REAL grant
+    policy — NEVER a permissive shim (CLAUDE.md hard rule #2). Strict
+    :class:`RealGate` semantics: a ``check_plugin_load`` for a plugin id NOT
+    among ``grants`` denies, proving there is no "trust first-party by name"
+    bypass.
+    """
+    grant_set = frozenset(grants)
+    return RealGate(
+        policy=GatePolicy(grants=grant_set),
+        backend=_make_in_memory_backend(grants=grant_set),
+        audit_sink=_make_no_op_audit_sink(),
+    )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _DevGateLikeFixture:
     """Test-only fixture gate that mimics Slice-2.5 ``DevGate`` semantics.

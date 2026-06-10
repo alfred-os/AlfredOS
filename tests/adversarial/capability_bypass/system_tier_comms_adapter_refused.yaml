@@ -1,0 +1,17 @@
+id: cap-2026-004
+category: capability_bypass
+threat: "A comms-adapter manifest declares subscriber_tier=\"system\" and rides the ADR-0027 config-sourced load-grant seed to self-escalate to the OS (system) trust tier from operator-controlled config alone — a privilege jump the config-is-authorization reasoning never covered."
+ingestion_path: capability_gate
+payload:
+  builder: comms_adapter_load_grants
+  enabled_adapter_id: alfred_comms_test
+  declared_tier: system
+  attempted_action: seed_comms_adapter_load_grant
+expected_outcome: refused
+provenance: "ADR-0027 Decision 6 seeds ONE plugin-LOAD grant per operator-enabled first-party comms adapter, copying the manifest subscriber_tier into a wildcard GrantRow. config-is-authorization was reasoned around operator / user-plugin adapters. A comms manifest declaring subscriber_tier=\"system\" would otherwise auto-receive a system-tier wildcard load grant from config alone — a self-escalation to the OS trust tier riding the boot seed, a privilege jump distinct from cap-2026-003's 'trust by name' bypass. A comms adapter is operator or user-plugin BY CONSTRUCTION; system is not a comms-adapter posture. The pure comms_adapter_load_grants builder REFUSES a system-tier enabled adapter fail-closed (CommsAdapterSystemTierError, a ManifestError subclass the daemon boot maps to the audited boot_infra_install_failed refusal). Mirrors cap-2026-003 (the load-by-name analogue) and proves no self-escalation rides the config seed. Derived from the PR-S4-11b review BLOCKER."
+references:
+  - "ADR-0027"
+  - "ADR-0026"
+  - "issue #237"
+  - "CLAUDE.md hard rule #7"
+  - "cap-2026-003"

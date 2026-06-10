@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NoReturn, Protocol
@@ -55,6 +56,8 @@ from alfred.cli.daemon._daemon_probes import (
 )
 from alfred.cli.daemon._failures import (
     BootInfraInstallFailedFailure,
+    CommsAdapterSpawnFailedFailure,
+    CommsMultiAdapterUnsupportedFailure,
     DaemonBootFailure,
     EnvironmentNotSetFailure,
     QuarantineGrantMissingFailure,
@@ -67,19 +70,32 @@ from alfred.config._environment_loader import (
 )
 from alfred.hooks.errors import HookError
 from alfred.i18n import t
+
+# PR-S4-11b (#237): module-level so the boot-wiring unit tests monkeypatch these
+# two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
+# ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
+from alfred.plugins.comms_runner import CommsPluginRunner
+from alfred.plugins.comms_stdio_transport import CommsStdioTransport
+from alfred.plugins.errors import ManifestError
+from alfred.plugins.manifest import parse_manifest
 from alfred.supervisor.core import Supervisor
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from contextlib import AbstractAsyncContextManager
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from alfred.audit.log import AuditWriter
+    from alfred.comms_mcp.daemon_runtime import (
+        CommsInboundOrchestratorAdapter,
+        OutboundSenderLike,
+    )
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
     from alfred.security.capability_gate._gate import RealGate
     from alfred.security.dlp import OutboundDlpProtocol
+    from alfred.supervisor.core import Supervisor as _SupervisorType
 
 # Exit codes (operator-facing contract; documented in the runbook PR-S4-11).
 _EXIT_REFUSED: Final[int] = 2
@@ -152,6 +168,329 @@ def _build_boot_outbound_dlp(  # pragma: no cover - real-infra glue; unit tests 
         language=settings.operator_language,
     )
     return OutboundDlp(broker=broker, audit=sink)
+
+
+# ---------------------------------------------------------------------------
+# PR-S4-11b (#237): comms-adapter boot wiring.
+#
+# All of this is built ONLY when ``settings.comms_enabled_adapters`` is non-empty
+# — a default-empty boot constructs none of it and is byte-for-byte unchanged.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _CommsAdapterWireSpec:
+    """The manifest-derived identifiers one comms adapter is spawned with.
+
+    Mind the id triplet (spec §8.3): the launcher ``plugin_id`` (the manifest
+    ``[plugin] id`` + sandbox-policy key, e.g. ``alfred.comms-test``) differs from
+    the wire ``adapter_kind`` (``[comms_mcp] adapter_kind``, e.g.
+    ``alfred_comms_test``) the host's body/classifier tables are keyed on. The
+    runner/transport/session use ``adapter_kind``; the launcher spec's
+    ``plugin_id`` uses the manifest plugin id.
+    """
+
+    plugin_id: str
+    adapter_kind: str
+    module: str
+    sandbox_kind: str
+    manifest_path: Path
+    manifest_raw: str
+
+
+class _RunnerOutboundSender:
+    """The narrow host -> plugin outbound seam the dispatch ack flows through.
+
+    Satisfies :class:`alfred.comms_mcp.daemon_runtime.OutboundSenderLike` by
+    mapping ``send_outbound`` onto a ``outbound.message`` JSON-RPC request on the
+    runner. Kept a tiny adapter here (not in ``daemon_runtime``) so that module
+    never imports the runner — the one-directional import graph (daemon_runtime
+    is imported BY the runner's consumers, never the reverse) stays intact.
+    """
+
+    def __init__(self, *, runner: CommsPluginRunner) -> None:
+        self._runner = runner
+
+    async def send_outbound(
+        self,
+        *,
+        adapter_id: str,
+        target_platform_id: str,
+        body: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return await self._runner.send_request(
+            "outbound.message",
+            {
+                "adapter_id": adapter_id,
+                "target_platform_id": target_platform_id,
+                "body": dict(body),
+            },
+        )
+
+
+def _resolve_comms_adapter_wire_spec(adapter_id: str) -> _CommsAdapterWireSpec:
+    """Resolve + parse one enabled adapter's manifest into its wire identifiers.
+
+    A missing manifest, a parse failure, or a missing ``[comms_mcp]`` block /
+    ``adapter_kind`` for an ENABLED adapter raises (caller maps the raise onto
+    :func:`_refuse_boot` — fail-closed, CLAUDE.md hard rule #7). The
+    ``comms_enabled_adapters`` Settings validator already proved the manifest
+    file exists + the id charset is safe, but this re-parses it for the wire
+    fields and re-raises loudly if the block is malformed.
+    """
+    import tomllib
+
+    from alfred.cli._launcher_spawn import repo_root
+
+    plugin_dir = repo_root() / "plugins" / adapter_id
+    manifest_path = plugin_dir / "manifest.toml"
+    manifest_raw = manifest_path.read_text(encoding="utf-8")
+    manifest = parse_manifest(manifest_raw)
+    if manifest.comms_mcp_module is None:
+        raise _CommsAdapterManifestError(adapter_id, "comms_mcp_module")
+
+    data = tomllib.loads(manifest_raw)
+    comms_section = data.get("comms_mcp")
+    adapter_kind = comms_section.get("adapter_kind") if isinstance(comms_section, dict) else None
+    if not isinstance(adapter_kind, str) or not adapter_kind:
+        raise _CommsAdapterManifestError(adapter_id, "adapter_kind")
+
+    return _CommsAdapterWireSpec(
+        plugin_id=manifest.plugin_id,
+        adapter_kind=adapter_kind,
+        module=manifest.comms_mcp_module,
+        sandbox_kind=manifest.sandbox.kind,
+        manifest_path=manifest_path,
+        manifest_raw=manifest_raw,
+    )
+
+
+class _CommsAdapterManifestError(Exception):
+    """An enabled comms adapter's manifest is missing a required wire field."""
+
+    def __init__(self, adapter_id: str, field: str) -> None:
+        super().__init__(f"comms adapter {adapter_id!r} manifest missing {field!r}")
+        self.adapter_id = adapter_id
+        self.field = field
+
+
+@dataclass(frozen=True, slots=True)
+class _CommsBootGraph:
+    """The pre-Supervisor comms components shared across every enabled adapter.
+
+    Built once (guarded behind ``if settings.comms_enabled_adapters``) and threaded
+    into the per-adapter handler construction + spawn loop. ``inbound_orchestrator``
+    has its outbound sender bound LATER, per adapter, once the runner exists.
+    """
+
+    secret_broker: object
+    resolver_bridge: object
+    extractor_bridge: object
+    burst_limiter: object
+    inbound_orchestrator: CommsInboundOrchestratorAdapter
+
+
+def _build_comms_boot_graph(
+    *, settings: Settings, audit: AuditWriter, outbound_dlp: OutboundDlpProtocol
+) -> _CommsBootGraph:
+    """Construct the pre-Supervisor comms graph (PR-S4-11b construction step 1-5).
+
+    Built ONLY when at least one adapter is enabled. Assembles the secret broker,
+    the sync identity-resolver bridge, the real (recorded-transport) quarantined
+    extractor + its body-shaped bridge, the burst limiter, and the inbound
+    orchestrator adapter whose outbound sender is bound per-adapter after the
+    runner exists.
+    """
+    from typing import cast
+
+    from alfred.cli._bootstrap import build_broker, install_identity_factories_for_settings
+    from alfred.comms_mcp.bootstrap import CommsExtractorBridge, SyncIdentityResolverBridge
+    from alfred.comms_mcp.daemon_runtime import (
+        CommsInboundOrchestratorAdapter,
+        _build_comms_inbound_extractor,
+    )
+    from alfred.orchestrator.burst_limiter import BurstLimiter
+    from alfred.security.dlp import OutboundDlp
+
+    secret_broker = build_broker(settings)
+    resolver = install_identity_factories_for_settings(settings)
+    resolver_bridge = SyncIdentityResolverBridge(resolver=resolver)
+    # ``_build_boot_outbound_dlp`` always constructs a concrete ``OutboundDlp``
+    # (it is annotated to the Protocol for the Supervisor's narrower consumer);
+    # the extractor's post-stage scan needs the concrete class, so the cast pins
+    # what the runtime already guarantees rather than widening the Wave-2 helper.
+    extractor = _build_comms_inbound_extractor(
+        audit_writer=audit, outbound_dlp=cast("OutboundDlp", outbound_dlp)
+    )
+    extractor_bridge = CommsExtractorBridge(extractor=extractor)
+    # AuditWriter satisfies the BurstLimiter's ``_AuditWriterLike`` seam at
+    # runtime (its append/append_schema are the keyword forms the limiter calls);
+    # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
+    # same structural mismatch the per-adapter handlers below carry an ignore for.
+    burst_limiter = BurstLimiter(audit_writer=audit)  # type: ignore[arg-type]
+    inbound_orchestrator = CommsInboundOrchestratorAdapter(extractor_bridge=extractor_bridge)
+    return _CommsBootGraph(
+        secret_broker=secret_broker,
+        resolver_bridge=resolver_bridge,
+        extractor_bridge=extractor_bridge,
+        burst_limiter=burst_limiter,
+        inbound_orchestrator=inbound_orchestrator,
+    )
+
+
+async def _spawn_comms_adapter(
+    *,
+    adapter_id: str,
+    settings: Settings,
+    audit: AuditWriter,
+    gate: object,
+    supervisor: _SupervisorType,
+    graph: _CommsBootGraph,
+    boot_id: str,
+    environment_source: str,
+) -> CommsPluginRunner:
+    """Spawn + readiness-probe one enabled comms adapter, then register its pump.
+
+    The fail-closed boot primitive (architect's required shape): the daemon
+    ``await runner.start_and_handshake()`` BEFORE committing to the long-lived
+    pump, so a broken adapter (missing/parse-broken manifest, spawn failure,
+    not-ok handshake) REFUSES the boot via :func:`_refuse_boot` rather than
+    parking with a dead plugin. On success the pump is scheduled as a supervised
+    TaskGroup task.
+
+    Returns the live :class:`CommsPluginRunner` (post-handshake, pump scheduled)
+    so a caller that needs the host -> plugin request seam can drive it — the
+    daemon boot loop ignores the return (the runner's lifetime is the supervised
+    pump it just registered), while the end-to-end integration proof
+    (``test_daemon_comms_inbound_turn``) grabs it to drive the inbound-injection
+    trigger through the real runner rather than reimplementing the wiring.
+    """
+    from alfred.cli._launcher_spawn import PluginLaunchSpec, repo_root
+    from alfred.comms_mcp.bootstrap import build_supervisor_breaker_tripper
+    from alfred.comms_mcp.daemon_runtime import CommsAdapterCrashedHookInvoker
+    from alfred.comms_mcp.handlers import (
+        AdapterCrashHandler,
+        BindingRequestHandler,
+        InboundMessageHandler,
+        PlatformRateLimitHandler,
+    )
+    from alfred.plugins.errors import ManifestError, PluginError
+    from alfred.plugins.session import AlfredPluginSession
+
+    try:
+        wire = _resolve_comms_adapter_wire_spec(adapter_id)
+    except (OSError, ManifestError, _CommsAdapterManifestError) as exc:
+        await _refuse_boot(
+            audit,
+            _comms_adapter_failure(adapter_id),
+            t("daemon.boot.comms_adapter_spawn_failed", adapter_id=adapter_id),
+            boot_id=boot_id,
+            environment_source=environment_source,
+        )
+        # _refuse_boot is annotated NoReturn (it raises _BootRefusedError); this
+        # line is unreachable defence-in-depth for the type checker's flow.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
+
+    # The ``python -m`` target the launcher execs is the manifest module
+    # ``alfred_comms_test.main`` — a top-level package under ``plugins/``. So the
+    # child PYTHONPATH must carry the ``plugins/`` PARENT (not the per-adapter dir,
+    # which would put the module's siblings on the path but not the package
+    # itself), plus ``src/`` so the core ``alfred.comms_mcp`` protocol resolves in
+    # the scrubbed child env. Mirrors the proven substrate-test spawn roots
+    # (``tests/integration/test_comms_runner_substrate.py``).
+    plugins_root = repo_root() / "plugins"
+    src_root = repo_root() / "src"
+    breaker_tripper = build_supervisor_breaker_tripper(supervisor=supervisor)
+    hook_invoker = CommsAdapterCrashedHookInvoker()
+    inbound_handler = InboundMessageHandler(
+        identity_resolver=graph.resolver_bridge,  # type: ignore[arg-type]
+        orchestrator=graph.inbound_orchestrator,
+        burst_limiter=graph.burst_limiter,  # type: ignore[arg-type]
+        audit_writer=audit,  # type: ignore[arg-type]
+        secret_broker=graph.secret_broker,  # type: ignore[arg-type]
+        sub_payload_promoter=None,
+    )
+    binding_handler = BindingRequestHandler(
+        audit_writer=audit,  # type: ignore[arg-type]
+        secret_broker=graph.secret_broker,  # type: ignore[arg-type]
+    )
+    rate_limit_handler = PlatformRateLimitHandler(
+        breaker_tripper=breaker_tripper,
+        audit_writer=audit,  # type: ignore[arg-type]
+    )
+    crash_handler = AdapterCrashHandler(audit_writer=audit, hook_invoker=hook_invoker)  # type: ignore[arg-type]
+
+    spec = PluginLaunchSpec(
+        plugin_id=wire.plugin_id,
+        manifest_path=wire.manifest_path,
+        module=wire.module,
+        adapter_id=wire.adapter_kind,
+        import_roots=(plugins_root, src_root),
+        inherit_stdio=False,
+        sandbox_kind=wire.sandbox_kind,
+    )
+    transport = CommsStdioTransport(adapter_id=wire.adapter_kind, spec=spec)
+    session = await AlfredPluginSession.for_comms_adapter(
+        adapter_id=wire.adapter_kind,
+        manifest_raw=wire.manifest_raw,
+        audit_writer=audit,
+        gate=gate,  # type: ignore[arg-type]
+        supervisor=supervisor,  # type: ignore[arg-type]
+        inbound_handler=inbound_handler,
+        binding_handler=binding_handler,
+        rate_limit_handler=rate_limit_handler,
+        crash_handler=crash_handler,
+        transport=None,
+        max_in_flight_notifications=settings.comms_max_in_flight_notifications,
+    )
+    # PR-S4-11b DEFECT 1: wire the supervisor's graceful-drain signal into the
+    # runner so its pump exits PROMPTLY on ``alfred daemon stop`` instead of
+    # blocking on the idle plugin stream until the 10s drain budget force-cancels
+    # it (which recorded ``cancelled_with_errors`` + crashed the audit insert).
+    # Read AFTER ``supervisor.start()`` (this spawn runs post-start), so it is
+    # the live per-cycle event the heartbeat/dispatch loops also observe.
+    runner = CommsPluginRunner(
+        session=session,
+        transport=transport,
+        adapter_id=wire.adapter_kind,
+        shutdown_event=supervisor.shutdown_event,
+        # Match the runner's in-flight dispatch-task cap to the session's per-
+        # adapter dispatch semaphore so the reader's task-tracking backpressure and
+        # the handler-execution backpressure share one bound (PR-S4-11b deadlock
+        # fix: notifications dispatch as bounded background tasks so the single
+        # reader stays free to resolve a reentrant handler's outbound ack).
+        max_in_flight_notifications=settings.comms_max_in_flight_notifications,
+    )
+    sender: OutboundSenderLike = _RunnerOutboundSender(runner=runner)
+    graph.inbound_orchestrator.bind_outbound_sender(sender)
+
+    try:
+        await runner.start_and_handshake()
+    except PluginError as exc:
+        await _refuse_boot(
+            audit,
+            _comms_adapter_failure(adapter_id),
+            t("daemon.boot.comms_adapter_handshake_failed", adapter_id=adapter_id),
+            boot_id=boot_id,
+            environment_source=environment_source,
+        )
+        # _refuse_boot is annotated NoReturn (it raises _BootRefusedError); this
+        # line is unreachable defence-in-depth for the type checker's flow.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
+
+    supervisor.register_plugin_task(runner.pump())
+    # O1 (PR-S4-11b): make the headline feature observable in `alfred daemon
+    # start` output — without this the only signal a comms adapter actually
+    # spawned was a `plugin.lifecycle.loaded` audit-log SQL query. Echoed AFTER
+    # the handshake + pump registration so the line means "this adapter is live",
+    # not merely "spawn attempted".
+    typer.echo(t("daemon.comms.adapter_spawned", adapter_id=adapter_id))
+    return runner
+
+
+def _comms_adapter_failure(adapter_id: str) -> CommsAdapterSpawnFailedFailure:
+    """A loud boot-failure carrier for a comms-adapter spawn/handshake refusal."""
+    return CommsAdapterSpawnFailedFailure(adapter_id=adapter_id)
 
 
 class _BackingStoreAvailabilityGate(Protocol):
@@ -232,8 +571,24 @@ async def build_boot_real_gate_for_daemon(
     undetected and the gate would never fail-closed. The boot-time
     liveness check is the separate async ``SELECT 1`` handshake (probe c);
     the heartbeat is the post-boot continuous check.
+
+    ADR-0027: ``extra_grants`` carries the config-sourced comms-adapter
+    plugin-LOAD grants derived from ``settings.comms_enabled_adapters`` by
+    the pure :func:`comms_adapter_load_grants` builder (unit-covered in
+    isolation). Empty for a default-empty config, so the boot seed is then
+    EXACTLY :data:`FIRST_PARTY_SYSTEM_GRANTS`. A broken / ``system``-tier
+    manifest for an enabled adapter raises out of the builder here
+    (:class:`alfred.plugins.errors.ManifestError`) — as does an unreadable
+    manifest file (:class:`OSError`) — fail-closed, rather than seeding
+    nothing. The ``except (SQLAlchemyError, HookError, ManifestError, OSError)``
+    / grant-assertion arms in :func:`_start_async` surface it as an audited
+    ``boot_infra_install_failed`` refusal (exit 2 + a ``daemon.boot.failed``
+    row), never a raw traceback.
     """
     from alfred.bootstrap.gate_factory import build_boot_real_gate
+    from alfred.security.capability_gate._comms_adapter_grants import (
+        comms_adapter_load_grants,
+    )
     from alfred.security.capability_gate.backend import PostgresBackend
 
     backend = PostgresBackend(dsn=settings.database_url.unicode_string())
@@ -245,6 +600,7 @@ async def build_boot_real_gate_for_daemon(
         backend=backend,
         audit_sink=_noop_audit_sink,
         start_heartbeat=True,
+        extra_grants=comms_adapter_load_grants(settings),
     )
 
 
@@ -651,22 +1007,27 @@ async def _start_async() -> None:
     #
     # FIX 1 (CLAUDE.md hard rule #7): the seed-gate build can raise a
     # SQLAlchemyError (Postgres write failure mid-seed) and the registry
-    # install can raise a HookError (hookpoint metadata drift). Either
-    # would otherwise propagate as an UNCAUGHT crash out of _start_async —
-    # fail-closed + safe, but it SKIPS the audited refusal path (no
-    # daemon.boot.failed row, not exit 2). The grant-assertion arm below
-    # is already audited; wrap the seed + install arms so they match: a
-    # failure runs _refuse_boot (exit 2 + a daemon.boot.failed row) under
-    # the DISTINCT boot_infra_install_failed reason — telling a broken
-    # seed/install apart from a seed that succeeded but failed to project
-    # the grant (quarantine_grant_missing).
+    # install can raise a HookError (hookpoint metadata drift). FIX 2
+    # (PR-S4-11b review): the seed-gate build ALSO runs the config-sourced
+    # comms-adapter grants-builder (comms_adapter_load_grants, inside
+    # build_boot_real_gate_for_daemon), which raises ManifestError (corrupt /
+    # system-tier enabled-adapter manifest — see CommsAdapterSystemTierError)
+    # or OSError (manifest file unreadable). Any of these would otherwise
+    # propagate as an UNCAUGHT crash out of _start_async — fail-closed + safe,
+    # but it SKIPS the audited refusal path (no daemon.boot.failed row, not
+    # exit 2; a raw traceback + exit 1). The grant-assertion arm below is
+    # already audited; wrap the seed + install arms so they match: a failure
+    # runs _refuse_boot (exit 2 + a daemon.boot.failed row) under the DISTINCT
+    # boot_infra_install_failed reason — telling a broken seed/install/manifest
+    # apart from a seed that succeeded but failed to project the grant
+    # (quarantine_grant_missing).
     try:
         real_gate = await build_boot_real_gate_for_daemon(settings)
         # The registry sink is the durable boot AuditWriter (wrapped), so a
         # DLP-subscriber-deny refusal row lands in the audit log — NOT the
         # gate's no-op sink (CLAUDE.md hard rule #7).
         _install_quarantine_boot_registry(real_gate, audit=audit)
-    except (SQLAlchemyError, HookError):
+    except (SQLAlchemyError, HookError, ManifestError, OSError):
         # _refuse_boot is NoReturn (raises _BootRefusedError → exit 2), so
         # control never falls through to the grant-assertion below — the
         # type checker proves the seed/install fault cannot reach Supervisor
@@ -706,6 +1067,36 @@ async def _start_async() -> None:
     # outbound-DLP wiring in ``alfred.cli.main``.
     outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
 
+    # FIX 4 (PR-S4-11b review): this cut builds ONE shared inbound orchestrator
+    # whose outbound sender is bound per-adapter (last-writer-wins), so with two
+    # enabled adapters adapter-A's inbound turn would dispatch its ack through
+    # adapter-B's runner — a cross-route. Until per-adapter inbound routing lands
+    # (PR-S4-11c), REFUSE boot fail-closed (audited, exit 2) when more than one
+    # adapter is enabled rather than parking a mis-wired multi-adapter graph
+    # (CLAUDE.md hard rule #7). Placed BEFORE the comms-graph build / supervisor
+    # start so the refusal has no spawn side effects.
+    if len(settings.comms_enabled_adapters) > 1:
+        await _refuse_boot(
+            audit,
+            CommsMultiAdapterUnsupportedFailure(enabled_count=len(settings.comms_enabled_adapters)),
+            t("daemon.boot.comms_multi_adapter_unsupported"),
+            boot_id=boot_id,
+            environment_source=source,
+        )
+
+    # PR-S4-11b (#237): the pre-Supervisor comms graph (secret broker, identity-
+    # resolver bridge, quarantined extractor + bridge, burst limiter, inbound
+    # orchestrator). Built ONLY when an operator has opted comms adapters in — a
+    # default-empty boot constructs NONE of it, so the boot path is byte-for-byte
+    # unchanged (proven by ``test_default_empty_adapters_boot_unchanged``). The
+    # inbound orchestrator's outbound sender is bound per-adapter once the runner
+    # exists (the late-bind seam in ``CommsInboundOrchestratorAdapter``).
+    comms_graph = (
+        _build_comms_boot_graph(settings=settings, audit=audit, outbound_dlp=outbound_dlp)
+        if settings.comms_enabled_adapters
+        else None
+    )
+
     supervisor = Supervisor(
         session_scope=session_scope,
         gate=gate,
@@ -732,11 +1123,46 @@ async def _start_async() -> None:
         # succeeds. Emitting the completion row / echoing "started" BEFORE
         # start() would record a ``daemon.boot.completed`` row + tell the
         # operator the daemon is up for a boot that may then fail in start()
-        # — a lie to both the audit trail and the operator. So start() runs
-        # first; only on success do we emit the completed row, invoke the
-        # hookpoint, and echo.
+        # — a lie to both the audit trail and the operator.
         await supervisor.start()
 
+        # FIX 1 (PR-S4-11b review): spawn + readiness-probe every enabled comms
+        # adapter BEFORE emitting the completion signal. The completion row /
+        # hookpoint / "started" echo are the daemon's "I am fully up" assertion;
+        # an enabled adapter that then fails spawn/handshake (-> ``_refuse_boot``,
+        # exit 2) means the daemon is NOT up, so emitting "completed" first would
+        # record a ``daemon.boot.completed`` row + tell the operator the daemon is
+        # up for a boot that the very next statement refuses — a lie to both the
+        # audit trail and the operator (the same class of lie CR #2 fixed for
+        # ``supervisor.start()``). Each ``_spawn_comms_adapter`` awaits
+        # ``runner.start_and_handshake()`` BEFORE committing the long-lived pump,
+        # so a broken adapter refuses fail-closed (CLAUDE.md hard rule #7) rather
+        # than parking with a dead plugin. The loop is a no-op when
+        # ``comms_graph is None`` (default-empty adapters) — that path emits
+        # ``completed`` below exactly as before.
+        if comms_graph is not None:
+            for adapter_id in settings.comms_enabled_adapters:
+                await _spawn_comms_adapter(
+                    adapter_id=adapter_id,
+                    settings=settings,
+                    audit=audit,
+                    # The session's post-handshake ``check_plugin_load`` needs the
+                    # FULL CapabilityGate surface — pass the RAW ``real_gate``, NOT
+                    # the ``_SupervisorBootGate`` wrapper (which exposes only
+                    # ``is_backing_store_available`` for the heartbeat and would
+                    # ``AttributeError`` on ``check_plugin_load``, crashing the
+                    # handshake). The wrapper is the Supervisor's surface; the comms
+                    # session's surface is the gate itself.
+                    gate=real_gate,
+                    supervisor=supervisor,
+                    graph=comms_graph,
+                    boot_id=boot_id,
+                    environment_source=source,
+                )
+
+        # All enabled adapters spawned + handshaked (or there were none): NOW the
+        # daemon is genuinely up, so emit the completion row, invoke the
+        # hookpoint, and echo "started".
         await _emit_or_quarantine(
             audit,
             fields=DAEMON_BOOT_FIELDS,

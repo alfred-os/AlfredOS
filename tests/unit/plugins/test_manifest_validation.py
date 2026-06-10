@@ -63,6 +63,72 @@ def test_valid_manifest_parses() -> None:
     assert manifest.sandbox_profile == "user-plugin"
 
 
+# ---------------------------------------------------------------------------
+# [comms_mcp] module key (PR-S4-11b Wave 3, #237).
+# ---------------------------------------------------------------------------
+
+
+_COMMS_MANIFEST_TOML = """\
+[alfred]
+manifest_version = 1
+
+[plugin]
+id = "alfred_comms_test"
+subscriber_tier = "user-plugin"
+sandbox_profile = "user-plugin"
+
+[sandbox]
+kind = "none"
+
+[comms_mcp]
+adapter_kind = "alfred_comms_test"
+classifiers_optional = []
+module = "alfred_comms_test.main"
+"""
+
+
+def test_comms_mcp_module_key_parses() -> None:
+    manifest = parse_manifest(_COMMS_MANIFEST_TOML)
+    assert manifest.comms_mcp_module == "alfred_comms_test.main"
+
+
+def test_comms_mcp_module_absent_stays_back_compat() -> None:
+    # An existing manifest without the [comms_mcp] block (or without ``module``)
+    # still parses — the key is additive + optional.
+    manifest = parse_manifest(VALID_MANIFEST_TOML)
+    assert manifest.comms_mcp_module is None
+
+
+def test_comms_mcp_block_without_module_stays_back_compat() -> None:
+    # The reference plugin's existing [comms_mcp] keys (adapter_kind /
+    # classifiers_optional) parse with no ``module`` — back-compat.
+    no_module = _COMMS_MANIFEST_TOML.replace('module = "alfred_comms_test.main"\n', "")
+    manifest = parse_manifest(no_module)
+    assert manifest.comms_mcp_module is None
+
+
+def test_comms_mcp_module_non_string_rejected() -> None:
+    bad = _COMMS_MANIFEST_TOML.replace('module = "alfred_comms_test.main"', "module = 7")
+    with pytest.raises(ManifestError):
+        parse_manifest(bad)
+
+
+def test_comms_mcp_non_table_block_rejected() -> None:
+    # FIX 5 (PR-S4-11b review): a present-but-non-table [comms_mcp] (e.g.
+    # ``comms_mcp = "oops"``) is a malformed manifest, NOT "no module". It must
+    # be REFUSED loudly rather than silently parsing as comms_mcp_module=None
+    # (which would mask a broken manifest the operator believes declares a
+    # module). A missing block stays None (back-compat, asserted above).
+    #
+    # Prepend the bad key at the document top — before [alfred] — so it is a
+    # genuine TOP-LEVEL ``comms_mcp``. Appending after the trailing [sandbox]
+    # table would instead land it as a [sandbox] sub-key (TOML scoping), leaving
+    # no top-level key to exercise the branch.
+    bad = 'comms_mcp = "oops"\n' + VALID_MANIFEST_TOML
+    with pytest.raises(ManifestError):
+        parse_manifest(bad)
+
+
 def test_pluginmanifest_is_frozen() -> None:
     # Frozen so the orchestrator cannot mutate the manifest between
     # capability-gate check and audit-log emission.

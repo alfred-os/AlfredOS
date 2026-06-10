@@ -160,6 +160,56 @@ def test_boot_refuses_audited_when_install_raises_hook_error(
     assert _reason(boot_success_env) == "boot_infra_install_failed"
 
 
+def test_boot_refuses_audited_when_grants_builder_raises_manifest_error(
+    monkeypatch: pytest.MonkeyPatch, boot_success_env: FakeAuditWriter
+) -> None:
+    """FIX 2: a ``ManifestError`` from the comms-adapter grants-builder
+    (corrupt manifest for an enabled adapter, OR a ``system``-tier manifest)
+    must NOT crash uncaught out of ``_start_async`` with a raw traceback /
+    exit 1. The builder runs INSIDE ``build_boot_real_gate_for_daemon``; its
+    ``ManifestError`` must hit the boot ``except`` and map to the audited
+    refusal: exit 2 + a ``daemon.boot.failed`` row with
+    ``boot_infra_install_failed``.
+
+    ``CommsAdapterSystemTierError`` is a ``ManifestError`` subclass, so this
+    arm also covers the FIX 1 self-escalation refusal reaching the audited
+    boot path rather than a traceback."""
+    from alfred.plugins.errors import ManifestError
+
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+
+    async def _raise_manifest_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise ManifestError("corrupt enabled-adapter manifest")
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_real_gate_for_daemon",
+        _raise_manifest_error,
+    )
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert _reason(boot_success_env) == "boot_infra_install_failed"
+
+
+def test_boot_refuses_audited_when_grants_builder_raises_os_error(
+    monkeypatch: pytest.MonkeyPatch, boot_success_env: FakeAuditWriter
+) -> None:
+    """FIX 2: a missing manifest FILE at the grants-builder raises
+    ``FileNotFoundError`` (an ``OSError``). It must reach the audited refusal
+    (exit 2 + ``boot_infra_install_failed``), never a raw traceback/exit 1."""
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+
+    async def _raise_os_error(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError("enabled adapter manifest vanished")
+
+    monkeypatch.setattr(
+        "alfred.cli.daemon._commands.build_boot_real_gate_for_daemon",
+        _raise_os_error,
+    )
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 2
+    assert _reason(boot_success_env) == "boot_infra_install_failed"
+
+
 def _async_return(value: Any):  # type: ignore[no-untyped-def]
     async def _f(*_args: Any, **_kwargs: Any) -> Any:
         return value

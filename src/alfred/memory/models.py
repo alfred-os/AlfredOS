@@ -160,7 +160,12 @@ class AuditEntry(Base):
             # allow, handler failure, and the supervisor restart-request row
             # whose only production caller is the comms-wired session.
             "'promoted', 'binding_requested', 'dropped', 'capped', "
-            "'allowed', 'failed', 'restart_requested')",
+            "'allowed', 'failed', 'restart_requested', "
+            # Slice-4 (migration 0017) — PR-S4-11b supervisor-shutdown
+            # dispositions emitted by Supervisor.stop / reset_breaker: the
+            # force-cancel "clean shutdown failed" row (cancelled_with_errors)
+            # and the breaker-state persistence-failure row (persistence_failed).
+            "'cancelled_with_errors', 'persistence_failed')",
             name="ck_audit_log_result",
         ),
     )

@@ -171,6 +171,31 @@ class ManifestTierError(ManifestError):
         self.tier = tier
 
 
+class CommsAdapterSystemTierError(ManifestError):
+    """An enabled comms adapter's manifest declares ``subscriber_tier="system"``.
+
+    FIX 1 (PR-S4-11b review BLOCKER): the config-sourced comms-adapter LOAD
+    grant (ADR-0027 Decision 6) copies the manifest ``subscriber_tier`` into a
+    seeded wildcard :class:`GrantRow`. ``config-is-authorization`` was reasoned
+    around ``operator`` / ``user-plugin`` adapters; a comms manifest declaring
+    ``system`` would otherwise auto-receive a ``system``-tier wildcard load
+    grant from config alone — a self-escalation to the OS trust tier riding the
+    boot seed. A comms adapter is ``operator`` or ``user-plugin`` BY
+    CONSTRUCTION; ``system`` is not a comms-adapter posture, so the
+    grants-builder fails closed (CLAUDE.md hard rule #7) with this dedicated
+    leaf. Subclasses :class:`ManifestError` so the daemon's boot ``except``
+    maps it to the audited ``boot_infra_install_failed`` refusal rather than a
+    raw traceback.
+
+    ``adapter_id`` is the operator-config adapter id (charset-validated by the
+    ``comms_enabled_adapters`` Settings field) and is safe in audit rows.
+    """
+
+    def __init__(self, adapter_id: str) -> None:
+        super().__init__(t("plugin.comms_adapter_system_tier_refused", adapter_id=adapter_id))
+        self.adapter_id = adapter_id
+
+
 # ---------------------------------------------------------------------------
 # Transport leaves.
 # ---------------------------------------------------------------------------
