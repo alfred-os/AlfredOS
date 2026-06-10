@@ -18,6 +18,11 @@ the payload's declared invariant actually holds at the trust boundary.
 * cib-2026-005 (handler-exception-silenced) -> a raising handler is the positive
   control (dispatcher re-raises); a swallowing handler is the negative control
   (invisible, by design — the AST guard catches it structurally).
+* cib-2026-006 (outbound-queue resume DLP bypass, comms-2) -> a queued secret
+  that waits through a rate-limit pause is re-scanned on resume; a hot-reloaded
+  stricter policy now redacts it, so consume REFUSES it instead of emitting.
+* cib-2026-007 (thread addressing drift, comms-4) -> a thread-retitle re-address
+  (thread inbound, channel outbound) fires COMMS_ADDRESSING_DRIFT_FIELDS.
 
 Mirrors the csb-2026 / de-2026 executable-corpus pattern.
 """
@@ -182,3 +187,58 @@ async def test_cib_005_raising_handler_is_loud_positive_control() -> None:
     with pytest.raises(RuntimeError, match="downstream broke"):
         await session._on_post_handshake_method(method="inbound.message", params=INBOUND_PARAMS)
     assert "comms.handler.failed" in recorded
+
+
+@pytest.mark.asyncio
+async def test_cib_006_outbound_queue_resume_rescans_dlp() -> None:
+    payload = _load("cib-2026-006")
+    assert payload.expected_outcome == "refused"
+    from alfred.comms_mcp.outbound_queue import OutboundQueue, OutboundResumeDlpBlockedError
+
+    # A re-scan that flips to "redact" after the pause models a hot-reloaded
+    # stricter policy catching the planted secret mid-flight.
+    strict = {"on": False}
+
+    def _rescan(body: str) -> int:
+        return 1 if (strict["on"] and "sk-" in body) else 0
+
+    queue: OutboundQueue[str] = OutboundQueue(audit_writer=object(), dlp_rescanner=_rescan)
+    await queue.submit("discord", "sk-PLANTEDSECRETKEYVALUE")
+    queue.pause("discord", 0.01)
+    strict["on"] = True  # policy hot-reload tightens DLP during the pause window
+    queue.resume("discord")
+
+    # The queued secret is REFUSED on resume, not emitted.
+    with pytest.raises(OutboundResumeDlpBlockedError):
+        await queue.consume("discord")
+
+    # A clean message survives the same pause/resume cycle.
+    await queue.submit("discord", "benign reply")
+    queue.pause("discord", 0.01)
+    queue.resume("discord")
+    assert await queue.consume("discord") == "benign reply"
+
+
+@pytest.mark.asyncio
+async def test_cib_007_thread_addressing_drift_audits() -> None:
+    payload = _load("cib-2026-007")
+    assert payload.expected_outcome == "audit_row_emitted"
+    from alfred.comms_mcp.addressing_drift import detect_addressing_drift
+
+    rows: list[dict[str, object]] = []
+
+    class _Audit:
+        async def append_schema(self, *, subject: dict[str, object], **_kw: object) -> None:
+            rows.append(subject)
+
+    # A thread-retitle re-address (thread inbound, channel outbound) fires the row.
+    fired = await detect_addressing_drift(
+        adapter_id="discord",
+        inbound_signal="thread",
+        outbound_mode="channel",
+        canonical_user_id="u_real",
+        audit_writer=_Audit(),
+    )
+    assert fired is True
+    assert rows[0]["inbound_signal"] == "thread"
+    assert rows[0]["outbound_mode"] == "channel"

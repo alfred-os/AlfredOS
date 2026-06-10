@@ -1,0 +1,15 @@
+id: cib-2026-007
+category: comms_identity_boundary
+threat: "An attacker in a Discord thread attempts to retitle/re-address the binding so a persona reply meant for the thread is steered to the parent channel (or a DM), surfacing thread-private context to a wider audience."
+ingestion_path: comms_inbound_message
+payload:
+  adapter_id: discord
+  body:
+    inbound_signal: "thread"
+    outbound_mode: "channel"
+expected_outcome: audit_row_emitted
+provenance: "PR-S4-9 comms-4 round-2 closure. The host detect_addressing_drift compares the inbound addressing_signal (thread) against the outbound addressing_mode (channel); when they diverge it emits COMMS_ADDRESSING_DRIFT_FIELDS carrying both, so a thread-retitle / re-address attempt is forensically visible. A matching signal+mode emits no row."
+references:
+  - "spec §8.6"
+  - "PRD §6.8"
+  - "#206"
