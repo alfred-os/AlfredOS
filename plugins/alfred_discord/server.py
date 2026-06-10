@@ -193,15 +193,37 @@ _ADAPTER_ID: Final[str] = "discord"
 _BROKER_KEY: Final[str] = "discord_bot_token"
 
 
-def idempotency_db_path() -> Path:
-    """Resolve the on-disk idempotency store path under ``$XDG_RUNTIME_DIR``.
+# The bwrap sandbox's ONLY writable mount (M1). The Discord-adapter policy
+# (config/sandbox/discord-adapter.linux.bwrap.policy) mounts an ephemeral tmpfs
+# here; EVERY other path in the sandbox is read-only, so the idempotency store
+# MUST live under this directory or ``sqlite3.connect`` hits a read-only FS and
+# crashes the plugin on first outbound.
+_SANDBOX_TMPFS_ROOT: Final[str] = "/run/alfred/discord"
 
-    Falls back to a temp dir when ``XDG_RUNTIME_DIR`` is unset (the runtime dir
-    is always present under systemd / the launcher; the fallback keeps the path
-    deterministic in a bare shell).
+
+def idempotency_db_path() -> Path:
+    """Resolve the on-disk idempotency store path under the sandbox tmpfs (M1).
+
+    The real bwrap policy mounts a writable tmpfs at :data:`_SANDBOX_TMPFS_ROOT`
+    and makes every other path read-only, so the production store lives directly
+    under that mount. ``ALFRED_DISCORD_RUNTIME_DIR`` overrides the root (the
+    sandbox launcher / a test may point it elsewhere); a bare-shell fallback to a
+    private temp dir keeps the path deterministic and writable when neither the
+    override nor the tmpfs is mounted, with ``0700`` perms so a world-readable
+    ``/tmp`` fallback never exposes the ledger (L3).
     """
-    runtime_root = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-    return Path(runtime_root) / "alfred" / "plugin-alfred.discord" / "idempotency.db"
+    override = os.environ.get("ALFRED_DISCORD_RUNTIME_DIR")
+    if override:
+        return Path(override) / "idempotency.db"
+    tmpfs = Path(_SANDBOX_TMPFS_ROOT)
+    if tmpfs.is_dir() and os.access(tmpfs, os.W_OK):
+        return tmpfs / "idempotency.db"
+    # Bare-shell fallback (no sandbox tmpfs, no override): a private 0700 dir
+    # under the system temp root so the ledger is never world-readable (L3).
+    fallback = Path(tempfile.gettempdir()) / "alfred" / "plugin-alfred.discord"
+    fallback.mkdir(parents=True, exist_ok=True)
+    fallback.chmod(0o700)
+    return fallback / "idempotency.db"
 
 
 class _EnvBroker:

@@ -9,6 +9,7 @@ the ``OutboundMessageResult`` discriminated-union dict.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -65,11 +66,31 @@ def _server(tmp_path: Path, target: DiscordMockSendable) -> DiscordServer:
     return DiscordServer(lifecycle=None, outbound_dispatcher=dispatcher)
 
 
-def test_idempotency_db_path_under_xdg_runtime_dir(
+def test_idempotency_db_path_honours_runtime_dir_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert idempotency_db_path() == tmp_path / "alfred" / "plugin-alfred.discord" / "idempotency.db"
+    # M1: the override env var (set by the sandbox launcher / tests) wins, so
+    # the ledger lands directly under the writable runtime dir.
+    monkeypatch.setenv("ALFRED_DISCORD_RUNTIME_DIR", str(tmp_path))
+    assert idempotency_db_path() == tmp_path / "idempotency.db"
+
+
+def test_idempotency_db_path_falls_back_to_private_0700_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # M1/L3: with no override and no sandbox tmpfs, the fallback dir under the
+    # system temp root is created 0700 so a world-readable /tmp never exposes
+    # the ledger.
+    monkeypatch.delenv("ALFRED_DISCORD_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    # Force the tmpfs branch closed: the sandbox mount does not exist in a bare
+    # shell, so resolution falls through to the private temp dir.
+    path = idempotency_db_path()
+    parent = path.parent
+    assert parent == tmp_path / "alfred" / "plugin-alfred.discord"
+    assert path.name == "idempotency.db"
+    assert parent.is_dir()
+    assert (parent.stat().st_mode & 0o777) == 0o700
 
 
 async def test_outbound_message_delivers_via_real_handler(
