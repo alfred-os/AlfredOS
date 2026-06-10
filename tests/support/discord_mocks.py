@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from unittest.mock import Mock
 
 import discord
 
@@ -100,8 +101,82 @@ class DiscordMockMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscordMockSentMessage:
+    """A returned ``discord.Message`` double — only the ``id`` the handler reads."""
+
+    id: int
+
+
+class DiscordMockSendable:
+    """A sendable Discord target double (``discord.User`` / ``TextChannel`` / ``Thread``).
+
+    The outbound handler calls ``await target.send(content)`` and reads
+    ``sent.id``. The double records every send and either returns a sent-message
+    double or raises a pre-seeded exception, so a test can drive both the
+    happy-path and every error mapping (429 / Forbidden / NotFound) without a
+    live gateway. It is a plain class (not a ``DiscordMock*`` dataclass) because
+    it is STATEFUL — it accumulates a call log — and the AST guard's
+    ``DiscordMock*`` factory rule targets the frozen value doubles, not this
+    behavioural double; it is still built here, the sole sanctioned mock site.
+    """
+
+    def __init__(self, *, sent_id: int = 42, raises: BaseException | None = None) -> None:
+        self._sent_id = sent_id
+        self._raises = raises
+        self.sent: list[str] = []
+
+    async def send(self, content: str) -> DiscordMockSentMessage:
+        self.sent.append(content)
+        if self._raises is not None:
+            raise self._raises
+        return DiscordMockSentMessage(id=self._sent_id)
+
+
+@dataclass(frozen=True, slots=True)
 class DiscordMockFactory:
     """Typed constructors for Discord doubles — the sole sanctioned mock site."""
+
+    def sendable(
+        self, *, sent_id: int = 42, raises: BaseException | None = None
+    ) -> DiscordMockSendable:
+        """A send target that returns a message double or raises ``raises``."""
+        return DiscordMockSendable(sent_id=sent_id, raises=raises)
+
+    def http_exception(
+        self, *, status: int, retry_after: float | None = None
+    ) -> discord.HTTPException:
+        """A ``discord.HTTPException`` with a synthetic response carrying ``status``.
+
+        ``discord.HTTPException`` reads ``status`` (and ``reason``) off its
+        ``response``; ``retry_after`` is not a native attribute (discord.py reads
+        it from headers on a 429), so the outbound handler reads it defensively —
+        this double attaches it directly to mirror ``discord.RateLimited``\\'s
+        ``.retry_after`` surface.
+        """
+        response = Mock()
+        response.status = status
+        response.reason = "synthetic"
+        response.url = "https://discord.com/api/v10/channels/1/messages"
+        exc = discord.HTTPException(response, f"synthetic {status}")
+        if retry_after is not None:
+            exc.retry_after = retry_after  # type: ignore[attr-defined]
+        return exc
+
+    def forbidden(self) -> discord.Forbidden:
+        """A ``discord.Forbidden`` (HTTP 403) double."""
+        response = Mock()
+        response.status = 403
+        response.reason = "Forbidden"
+        response.url = "https://discord.com/api/v10/channels/1/messages"
+        return discord.Forbidden(response, "missing permissions")
+
+    def not_found(self) -> discord.NotFound:
+        """A ``discord.NotFound`` (HTTP 404) double — e.g. a deleted channel."""
+        response = Mock()
+        response.status = 404
+        response.reason = "Not Found"
+        response.url = "https://discord.com/api/v10/channels/1/messages"
+        return discord.NotFound(response, "unknown channel")
 
     def user(
         self, *, user_id: int = 1001, bot: bool = False, locale: str | None = None
@@ -181,5 +256,7 @@ __all__ = [
     "DiscordMockGuild",
     "DiscordMockMessage",
     "DiscordMockMessageReference",
+    "DiscordMockSendable",
+    "DiscordMockSentMessage",
     "DiscordMockUser",
 ]
