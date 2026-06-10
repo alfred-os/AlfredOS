@@ -30,6 +30,7 @@ from typing import Any, Final
 
 import structlog
 
+from alfred.comms_mcp.plugin_logging import configure_stderr_json_logging
 from alfred.comms_mcp.protocol import (
     AdapterHealthRequest,
     HealthReport,
@@ -221,7 +222,21 @@ async def _serve_stdin_stdout(server: TuiServer) -> None:  # pragma: no cover - 
 
 
 async def serve() -> None:  # pragma: no cover - process entrypoint
-    """Run the adapter's stdio loop."""
+    """Run the adapter's stdio loop.
+
+    NOTE (issue #237): this entry point ships the JSON-RPC wire CONTRACT only —
+    it does NOT yet mount the Textual ``AlfredTuiApp``, so ``alfred chat`` is
+    NOT functional end-to-end. The PTY-vs-wire conflict (Textual needs the PTY;
+    the daemon wire needs a side channel) is deferred to PR-S4-11; see issue
+    #237. Until then a launcher-spawned ``alfred chat`` reads/writes JSON-RPC
+    frames but renders no UI and accepts no keystrokes.
+
+    Structlog is pinned to stderr-JSON before the loop (review F4) so stdout
+    carries ONLY line-delimited JSON-RPC frames — the host stdio reader treats
+    every stdout line as a wire frame, so a stray console-rendered log line
+    would corrupt the channel.
+    """
+    configure_stderr_json_logging()
     await _serve_stdin_stdout(build_server())
 
 
