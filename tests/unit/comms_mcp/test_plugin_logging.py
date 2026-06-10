@@ -54,27 +54,43 @@ def _serve_source(module_name: str) -> str:
     return inspect.getsource(mod.serve)
 
 
+def _call_name(node: ast.Call) -> str | None:
+    """The callee name for a call node (``ast.Name`` or ``ast.Attribute``)."""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
 @pytest.mark.parametrize(
     "module_name",
     ["alfred_tui.server", "plugins.alfred_discord.server"],
 )
 def test_serve_configures_stderr_logging_first(module_name: str) -> None:
-    """Each plugin ``serve()`` calls ``configure_stderr_json_logging`` (F4 guard).
+    """Each plugin ``serve()`` configures stderr logging BEFORE entering its loop.
 
-    AST-walks the ``serve`` coroutine for a call to the helper. A regression
-    that drops the call (re-introducing the default stdout console renderer)
-    fails here before a runtime test catches the corrupted channel.
+    The docstring on this guard promises "before the stdio loop", but merely
+    asserting the call exists *somewhere* in ``serve()`` lets a regression that
+    moves the config call *after* the loop pass silently. This asserts ordering:
+    the ``configure_stderr_json_logging`` call must appear at a lower line than
+    the ``_serve_stdin_stdout`` loop entry, so logs are stderr-bound before the
+    first wire frame is read. (PR-S4-10 review #7.)
     """
     tree = ast.parse(_serve_source(module_name))
-    called = any(
-        isinstance(node, ast.Call)
-        and (
-            (isinstance(node.func, ast.Name) and node.func.id == "configure_stderr_json_logging")
-            or (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "configure_stderr_json_logging"
-            )
-        )
+    cfg_lines = [
+        node.lineno
         for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node) == "configure_stderr_json_logging"
+    ]
+    loop_lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node) == "_serve_stdin_stdout"
+    ]
+    assert cfg_lines, f"{module_name}.serve() must call configure_stderr_json_logging()"
+    assert loop_lines, f"{module_name}.serve() must call _serve_stdin_stdout()"
+    assert min(cfg_lines) < min(loop_lines), (
+        f"{module_name}.serve() must configure stderr JSON logging BEFORE entering "
+        "the stdio loop, not after — logs must be stderr-bound before the first frame."
     )
-    assert called, f"{module_name}.serve() must configure stderr JSON logging before its loop"
