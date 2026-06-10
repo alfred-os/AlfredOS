@@ -351,9 +351,13 @@ class Orchestrator:
         """Process one user turn end-to-end and return the assistant reply.
 
         ``user`` is the per-turn requester (may be the operator or any other
-        authorized household user). ``content`` is already tagged by the
-        adapter via :func:`alfred.identity._ingest._ingest_tier` — the
-        orchestrator reads ``content.content`` and ``content.tier.name``
+        authorized household user). ``content`` arrives already tagged at the
+        orchestrator boundary — the host-side comms-MCP ingress path owns the
+        tagging post-PR-S4-10;
+        :func:`alfred.identity._ingest._ingest_tier` encodes the
+        role-x-adapter rule but is currently unwired (reserved; see issue
+        #237). The orchestrator reads ``content.content`` and
+        ``content.tier.name``
         but does not re-tag. The accepted tiers are T1 (operator via TUI)
         and T2 (all other authenticated ingress); T3 NEVER reaches this
         method directly — T3 bytes live behind opaque ContentHandle
@@ -642,8 +646,10 @@ class Orchestrator:
         episodic = self._episodic_factory(session)
 
         # ------------------------------------------------------------------
-        # Observe — the adapter already tagged ``content`` via
-        # ``alfred.identity._ingest._ingest_tier``; read off the tier name
+        # Observe — ``content`` arrives already tagged at this boundary
+        # (host-side comms-MCP ingress owns tagging post-PR-S4-10;
+        # ``alfred.identity._ingest._ingest_tier`` is reserved/unwired, see
+        # issue #237); read off the tier name
         # for downstream rows but do not re-tag. Content is
         # ``TaggedContent[T1]`` (operator via TUI) or ``TaggedContent[T2]``
         # (all other ingress paths). T3 never reaches this method directly
