@@ -80,6 +80,15 @@ Spec anchors: [§8.5 InboundContentScanner extension + REQUIRED_CLASSIFIERS_BY_K
 
 ## §2 Architecture overview
 
+> **AUTHORITATIVE OVERRIDE (sec-1 closure).** The `sandbox.kind=none` references
+> in this §2 diagram, in §3's file table, and in Task C1 below are STALE. The
+> round-2 sec-1 HIGH closure (see line 29 above) dropped the first-party-relay
+> `kind: none` carve-out: the shipped manifest + ADR-0016 set `sandbox.kind =
+> "full"` with the bwrap policy `config/sandbox/discord-adapter.linux.bwrap.policy`.
+> Where this plan body still says `kind=none`, the `kind="full"` closure wins —
+> the manifest and ADR are the ground truth, this plan body is not edited
+> wholesale (plans are negotiated docs).
+
 ```
                     Discord
                        │  gateway WSS

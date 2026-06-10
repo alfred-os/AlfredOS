@@ -23,6 +23,11 @@ predicates:
 Discord profile fields — private fields (``email`` / ``phone``) cannot be set on
 it by construction, so no private datum can leak through the binding frame even
 if discord.py surfaces it.
+
+Wiring status (#235). The :class:`BindingEmitter` is TESTED but NOT constructed
+by the gateway in this PR, so ``adapter.binding_request`` is dead in production
+until the PR-S4-10 flag-day wires it into the live gateway. See
+``docs/subsystems/comms.md`` (Slice-4 wiring-status note) and issue #235.
 """
 
 from __future__ import annotations

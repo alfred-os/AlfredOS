@@ -15,6 +15,12 @@ never collide and a thread on one adapter cannot resume another adapter's sessio
 In-memory for this PR (a daemon restart loses the bindings — acceptable for the
 mid-flight slice; durable persistence is a Slice-5 enhancement tracked alongside
 ``OutboundQueue`` persistence). The class holds no module-level state.
+
+Wiring status (#235). This comms-4 primitive is TESTED but NOT yet on the live
+inbound path — the daemon does not spawn the discord plugin until the PR-S4-10
+flag-day. Thread→session binding is wired into the live path in PR-S4-10; until
+then it is not operationally enforced. See ``docs/subsystems/comms.md`` (Slice-4
+wiring-status note) and issue #235.
 """
 
 from __future__ import annotations
