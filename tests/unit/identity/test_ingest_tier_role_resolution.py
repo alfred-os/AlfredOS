@@ -123,6 +123,32 @@ def test_ingest_tier_recognises_discord_kind_via_adapter_id_prefix() -> None:
     assert result is T2
 
 
+@pytest.mark.parametrize(
+    "spoof_id",
+    [
+        "tuide",  # no separator — a different kind whose name starts "tui"
+        "tui_discord",  # underscore is not the kind separator
+        "tuixyz",  # arbitrary suffix glued onto "tui"
+        "tuide-evil",  # separator present, but the KIND is "tuide", not "tui"
+    ],
+)
+def test_ingest_tier_does_not_grant_t1_to_tui_lookalike_kinds(spoof_id: str) -> None:
+    """A lookalike adapter_id whose KIND is not exactly ``tui`` is NEVER T1.
+
+    PR-S4-10 review F5 (#206): the gate previously keyed on
+    ``adapter_id.startswith("tui")`` which is unanchored — ``"tuide-evil"``,
+    ``"tui_discord"``, ``"tuixyz"`` all matched and escalated an
+    operator-role user to T1. The KIND is the segment BEFORE the first
+    ``-`` separator; only the exact kind ``tui`` (bare, or ``tui-<suffix>``)
+    is the operator-trust TUI. Anything else is a different adapter and
+    falls through to the T2 safe default even for an operator. This is a
+    trust-boundary escalation guard — the negative branch is the point.
+    """
+    user = _make_user(Authorization.OPERATOR)
+    result = _ingest_tier(user, adapter_id=spoof_id)
+    assert result is T2
+
+
 def test_ingest_tier_rejects_legacy_adapter_name_kwarg() -> None:
     """The Slice-2 ``adapter_name=`` kwarg is a hard break in Slice 4.
 

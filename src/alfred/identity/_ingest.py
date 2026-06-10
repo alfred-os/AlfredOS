@@ -6,8 +6,15 @@ It lives in alfred.identity (NOT in alfred.orchestrator.core) because
 the orchestrator's invariant is that input arrives already-tagged at
 its boundary - placing this logic in core.py would violate that.
 
-Each CommsAdapter calls _ingest_tier at its ingress boundary before
-passing tagged content to the orchestrator.
+Reserved — no live caller post-PR-S4-10 (#206); see issue #237. Before the
+comms-MCP flag-day each in-process CommsAdapter called :func:`_ingest_tier`
+at its ingress boundary. After the flag-day deleted ``src/alfred/comms``,
+ingress trust-tier tagging is owned host-side by
+:mod:`alfred.comms_mcp.inbound` (T3 at the quarantine boundary). This module
+is retained for its hookpoint-declaration side effect (see
+:func:`declare_hookpoints`); the PR-S3-4 dual-LLM-split work will wire the
+``_ingest_tier`` invoke site. The function currently has unit coverage but
+NO production call path — do not describe it as live-invoked.
 
 Rule (spec §3.6) — keyed on the ``adapter_id`` KIND prefix (PR-S4-10):
 
@@ -126,13 +133,27 @@ def _ingest_tier(user: object, adapter_id: str) -> type[TrustTier]:
     PR-S4-10 (#206) migrated the parameter from ``adapter_name`` (the
     in-process ``CommsAdapter.name``, a bare kind like ``"tui"``) to
     ``adapter_id`` (the comms-MCP wire id, a per-instance value). The gate
-    keys on ``adapter_id.startswith("tui")`` rather than ``== "tui"`` so a
-    per-instance id like ``"tui-9f3c2b1e"`` still classifies correctly. The
-    kwarg rename is a hard break — a stale ``adapter_name=`` caller raises
-    ``TypeError`` rather than silently defaulting to T2.
+    matches the TUI KIND as ``adapter_id == "tui"`` OR
+    ``adapter_id.startswith("tui-")`` — the KIND is the segment before the
+    first ``-`` separator. An UNANCHORED ``startswith("tui")`` (the original
+    PR-S4-10 form) was a trust-escalation bug: it matched lookalike kinds
+    like ``"tuide-evil"`` / ``"tui_discord"`` / ``"tuixyz"`` and granted them
+    operator-tier T1 (review F5). The kwarg rename is a hard break — a stale
+    ``adapter_name=`` caller raises ``TypeError`` rather than silently
+    defaulting to T2.
+
+    Reserved — no live caller post-PR-S4-10; see issue #237. After the
+    comms-MCP flag-day the host tags ingress trust tiers in
+    :mod:`alfred.comms_mcp.inbound` (T3 at the quarantine boundary), not via
+    this role-x-adapter helper. The function is retained because its module
+    import is the publisher side-effect for the ``identity.t1_*`` hookpoints
+    (see :func:`declare_hookpoints`); the PR-S3-4 dual-LLM-split work will
+    wire its invoke site. Until then it has unit coverage but no production
+    call path.
     """
     authorization: str = getattr(user, "authorization", "")
-    if adapter_id.startswith("tui") and authorization == Authorization.OPERATOR.value:
+    is_tui_kind = adapter_id == "tui" or adapter_id.startswith("tui-")
+    if is_tui_kind and authorization == Authorization.OPERATOR.value:
         return T1
     return T2
 
