@@ -33,6 +33,19 @@ def test_body_field_for_discord_is_content() -> None:
     assert BODY_FIELD_BY_KIND["discord"] == "content"
 
 
+def test_adapter_kind_contains_tui() -> None:
+    # PR-S4-10: the TUI adapter kind lands with its BODY_FIELD_BY_KIND entry +
+    # an empty (marker-justified) REQUIRED_CLASSIFIERS_BY_KIND set in the same
+    # PR (the §8.5 AST-guard rule). The host's AdapterId validator refuses a
+    # ``tui-*`` wire id until this member exists, so the plugin's
+    # InboundMessageNotification cannot validate without it.
+    assert "tui" in adapter_kind
+
+
+def test_body_field_for_tui_is_content() -> None:
+    assert BODY_FIELD_BY_KIND["tui"] == "content"
+
+
 def test_body_field_by_kind_is_mapping_proxy() -> None:
     assert isinstance(BODY_FIELD_BY_KIND, MappingProxyType)
 
