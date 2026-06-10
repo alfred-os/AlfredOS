@@ -25,31 +25,37 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from alfred.cli.discord_cmd import discord_app
+from alfred.cli.discord_cmd import _VerifyExitCode, discord_app
 
 # ``t()`` falls back to the bare key when the catalog lacks an entry; assert on
 # the key|english alternation so the test is catalog-presence robust.
 _BOOT_KEY = "cli.discord.daemon_required"
 _BOOT_FRAGMENT = "daemon"
 
+# The launcher-failure contract this PR introduces: both bare boot and verify
+# exit ``CONFIG_FAILED == 2`` on a launch failure. Assert the EXACT code via the
+# symbolic constant so a regression back to a generic non-zero code is caught
+# rather than passing a loose ``!= 0`` check. (PR-S4-10 review #5.)
+_LAUNCH_FAILED_CODE = int(_VerifyExitCode.CONFIG_FAILED)
 
-def test_discord_boot_with_failing_launcher_exits_nonzero() -> None:
-    """Bare ``alfred discord`` with a failing launcher -> non-zero exit + message."""
+
+def test_discord_boot_with_failing_launcher_exits_config_failed() -> None:
+    """Bare ``alfred discord`` with a failing launcher -> ``CONFIG_FAILED`` + message."""
     runner = CliRunner()
     result = runner.invoke(discord_app, [], env={"ALFRED_PLUGIN_LAUNCHER": "/usr/bin/false"})
-    assert result.exit_code != 0
+    assert result.exit_code == _LAUNCH_FAILED_CODE
     assert _BOOT_KEY in result.stderr or _BOOT_FRAGMENT in result.stderr
 
 
-def test_discord_verify_with_failing_launcher_exits_nonzero() -> None:
-    """``alfred discord verify`` with a failing launcher -> non-zero exit + message."""
+def test_discord_verify_with_failing_launcher_exits_config_failed() -> None:
+    """``alfred discord verify`` with a failing launcher -> ``CONFIG_FAILED`` + message."""
     runner = CliRunner()
     result = runner.invoke(
         discord_app,
         ["verify"],
         env={"ALFRED_PLUGIN_LAUNCHER": "/usr/bin/false"},
     )
-    assert result.exit_code != 0
+    assert result.exit_code == _LAUNCH_FAILED_CODE
     assert _BOOT_KEY in result.stderr or _BOOT_FRAGMENT in result.stderr
 
 
