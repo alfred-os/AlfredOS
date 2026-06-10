@@ -132,5 +132,5 @@ def test_ingest_tier_rejects_legacy_adapter_name_kwarg() -> None:
     rather than silently binding to a forgotten kwarg. PR-S4-10 (#206).
     """
     user = _make_user(Authorization.OPERATOR)
-    with pytest.raises(TypeError, match="adapter_id|adapter_name"):
+    with pytest.raises(TypeError, match=r"adapter_id|adapter_name"):
         _ingest_tier(user, adapter_name="tui")  # type: ignore[call-arg]
