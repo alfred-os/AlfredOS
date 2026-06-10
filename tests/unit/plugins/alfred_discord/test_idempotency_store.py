@@ -79,8 +79,12 @@ def test_ttl_expiry_vacuum_prunes_old_records(tmp_path: Path) -> None:
     store.record("old-key", "platform-1", recorded_at=stale)
     store.record("fresh-key", "platform-2")
 
-    store.vacuum_expired()
+    # L2: ``vacuum_expired`` returns the pruned-row count, read INSIDE the
+    # write-lock + transaction block so a concurrent writer cannot perturb the
+    # reported figure after the lock releases.
+    pruned = store.vacuum_expired()
 
+    assert pruned == 1
     assert store.lookup("old-key") is None
     assert store.lookup("fresh-key") == "platform-2"
 

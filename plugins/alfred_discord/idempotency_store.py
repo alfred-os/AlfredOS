@@ -1,12 +1,22 @@
 """On-disk outbound idempotency ledger (Task F1, PR-S4-9 #206).
 
-:class:`IdempotencyStore` is the single-use ledger that makes outbound delivery
-idempotent across a plugin restart. The host mints a ``idempotency_key`` (a
-``UUID``) per ``outbound.message`` request; if the plugin crashes between a
-successful Discord send and the host's redelivery, the respawned plugin must
-*not* hit Discord again. An in-memory dedup set would forget across the
-subprocess boundary, so the ledger is on-disk SQLite at
-``$XDG_RUNTIME_DIR/alfred/plugin-alfred.discord/idempotency.db``.
+:class:`IdempotencyStore` is the single-use ledger that dedupes outbound delivery
+across a plugin **crash + respawn within one sandbox lifetime**. The host mints
+an ``idempotency_key`` (a ``UUID``) per ``outbound.message`` request; if the
+plugin crashes between a successful Discord send and the host's redelivery, the
+respawned plugin must *not* hit Discord again. An in-memory dedup set would forget
+across the subprocess boundary, so the ledger is on-disk SQLite.
+
+Storage location (M1 sandbox reconciliation). Under the real bwrap sandbox the
+ONLY writable surface is the ephemeral tmpfs the policy mounts at
+``/run/alfred/discord`` (``config/sandbox/discord-adapter.linux.bwrap.policy``);
+every other path is read-only. :func:`server.idempotency_db_path` resolves the db
+under that tmpfs. Because the tmpfs is fresh per sandbox launch and discarded on
+sandbox exit, the ledger survives a **crash-respawn of the plugin process inside
+a live sandbox** (the host re-execs the plugin into the same tmpfs) but NOT a
+full sandbox teardown / daemon restart — which is exactly the redelivery window
+the host's outbound queue can re-fire into. A daemon restart re-mints fresh keys,
+so a forgotten ledger across that boundary cannot double-send.
 
 Design notes:
 
@@ -130,7 +140,13 @@ class IdempotencyStore:
                 "DELETE FROM outbound_idempotency WHERE recorded_at < ?",
                 (cutoff,),
             )
-        return cursor.rowcount
+            # L2: read ``rowcount`` INSIDE the lock + transaction block. A
+            # concurrent ``record``/``vacuum_expired`` on the shared connection
+            # could mutate the cursor's reported rowcount once the ``with`` block
+            # has released the lock; capturing it here keeps the pruned count
+            # consistent with the DELETE this call actually performed.
+            pruned = cursor.rowcount
+        return pruned
 
     def close(self) -> None:
         """Close the underlying connection (flushes WAL to the main db)."""
