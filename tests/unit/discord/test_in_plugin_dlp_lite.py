@@ -67,3 +67,32 @@ def test_bot_token_with_leading_base64url_punctuation_redacted() -> None:
     # output would NOT equal the bare marker — that is the leak this guards.
     assert scrubbed == _REDACTED_MARKER
     assert leading_dash_token not in scrubbed
+
+
+def test_bot_token_with_trailing_base64url_punctuation_redacted() -> None:
+    """L4 (mirror): a base64url token may END with ``-``/``_``; a trailing ``\\b``
+    anchor would not fire after a ``-``/``_`` (both are non-word chars, so ``\\b``
+    needs a following word char). The token must still be redacted regardless of
+    the character immediately after its last segment — the symmetric leak to the
+    leading-anchor case.
+    """
+    trailing_dash_token = ".".join(
+        ("MTk4NjIyNDgzNDcxOTI1MjQ4", "GaBcDe", "7xY9zAbCdEfGhIjKlMnOpQrStU-")
+    )
+    scrubbed = scrub_in_plugin(trailing_dash_token)
+    # With the token alone on the line, the scrubbed output is exactly the marker.
+    # A ``\b``-anchored trailing boundary leaves the final ``-`` on the wire
+    # (``[REDACTED…]-``) — that is the leak this guards.
+    assert scrubbed == _REDACTED_MARKER
+    assert trailing_dash_token not in scrubbed
+
+
+def test_bot_token_redacted_when_immediately_followed_by_base64url_char() -> None:
+    """A token directly abutted by a base64url char (no separator) must still be
+    fully redacted; a trailing ``\\b`` would fire only at a non-word boundary, so
+    a ``-`` or ``_`` butting the token would leave bytes on the wire.
+    """
+    token = ".".join(("MTk4NjIyNDgzNDcxOTI1MjQ4", "GaBcDe", "7xY9zAbCdEfGhIjKlMnOpQrStUv"))
+    scrubbed = scrub_in_plugin(f"{token}-trailing")
+    assert token not in scrubbed
+    assert "REDACTED" in scrubbed
