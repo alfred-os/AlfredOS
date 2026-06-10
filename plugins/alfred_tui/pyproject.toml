@@ -1,0 +1,23 @@
+[project]
+name = "alfred_tui"
+version = "0.1.0"
+description = "AlfredOS TUI comms-MCP adapter (Textual)"
+requires-python = ">=3.12"
+# Runtime dependencies. The plugin renders with Textual and speaks the ADR-0024
+# comms-MCP wire contract. The wire schemas are owned host-side by
+# ``alfred.comms_mcp.protocol`` (PR-S4-8) — in-tree the plugin imports them
+# directly via the repo pythonpath, matching the ``plugins/alfred_discord``
+# precedent (the wire-format module is the single source of truth; there is no
+# separate re-export package). ``alfred`` is listed so a standalone install of
+# this package still resolves the protocol module.
+dependencies = [
+    "textual>=0.50",
+    "alfred",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alfred_tui"]

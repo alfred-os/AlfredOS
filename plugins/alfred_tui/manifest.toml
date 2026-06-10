@@ -1,0 +1,44 @@
+# AlfredOS TUI comms-MCP adapter manifest — Slice 4 (PR-S4-10, #206).
+#
+# manifest_version=1 is the integer Slice-3/4 baseline. The host refuses any
+# version > N+1 at handshake (spec §4.9), so bumping this without the matching
+# host-side schema bump is a release-blocker.
+#
+# No ``[[hooks]]`` blocks. ``lifecycle.start``, ``lifecycle.stop``,
+# ``adapter.health`` and ``outbound.message`` are JSON-RPC methods on the
+# plugin's own surface, NOT hookpoints registered with the orchestrator's hook
+# registry. The adapter only EMITS the ``inbound.message`` notification; it
+# subscribes to no hookpoints.
+alfred.manifest_version = 1
+
+[plugin]
+id = "alfred_tui"
+# subscriber_tier=operator: the TUI runs in the operator's interactive shell —
+# it is the operator-local terminal, not a third-party relay. ``operator`` is a
+# member of the closed capability-gate vocabulary {system, operator, user-plugin}.
+# This is a *capability-gate* tier and is orthogonal to the content trust tier:
+# the operator's typed body still becomes content trust tier T3 host-side the
+# instant it crosses ``process_inbound_message`` (the host quarantines it).
+subscriber_tier = "operator"
+# platform field reserved for the comms-MCP manifest extension (spec §4.3).
+platform = "tui"
+
+# sandbox.kind = "none", NOT "full" (unlike the Discord adapter). The TUI is an
+# operator-local foreground PTY, NOT an adversary-facing ingress: there are no
+# adversary-controlled bytes arriving from arbitrary network users. The operator
+# IS the trusted user, and the process must own the terminal (stdin/stdout) to
+# render the Textual app, which a bwrap/sandbox-exec mount namespace would sever.
+# The launcher's policy resolver (PR-S4-6 contract) acknowledges kind="none" and
+# spawns the plugin with the CLI's inherited PTY fds.
+[sandbox]
+kind = "none"
+
+# comms-MCP adapter declaration. ``adapter_kind`` is the host-side
+# ``alfred.comms_mcp.protocol.adapter_kind`` member this plugin announces; the
+# host's BODY_FIELD_BY_KIND / REQUIRED_CLASSIFIERS_BY_KIND tables are keyed on
+# it. ``classifiers_optional`` is empty: the TUI body is plain text with no
+# platform sub-payloads, so there is nothing to opt into (the host's required
+# set for "tui" is empty + marker-justified per §8.5).
+[comms_mcp]
+adapter_kind = "tui"
+classifiers_optional = []
