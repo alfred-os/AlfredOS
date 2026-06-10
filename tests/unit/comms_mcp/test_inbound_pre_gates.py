@@ -49,6 +49,12 @@ def test_cheap_validate_rejects_non_mapping_body() -> None:
     assert not _inbound_message_cheap_validate(platform_user_id="discord:1", body="x")
 
 
+def test_cheap_validate_rejects_empty_mapping_body() -> None:
+    # CR #232: an empty mapping carries no body and must be refused at the cheap
+    # gate -- not accepted just for being a Mapping.
+    assert not _inbound_message_cheap_validate(platform_user_id="discord:1", body={})
+
+
 def test_cheap_validate_accepts_valid() -> None:
     assert _inbound_message_cheap_validate(platform_user_id="discord:1", body={"x": 1})
 
