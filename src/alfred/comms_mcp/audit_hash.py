@@ -49,6 +49,7 @@ class _BrokerLike(Protocol):
 
     def get(self, name: str) -> str: ...
 
+
 # HKDF-Expand domain separator for the comms subkey (closure comms-1). Distinct
 # from operator_session's ``operator_session.*`` infos so the two subsystems
 # derive non-overlapping subkeys from the shared master pepper.

@@ -131,9 +131,7 @@ def _violations_in_source(source: str) -> list[int]:
     discord_names = _discord_bound_names(tree) | {"discord"}
     lines: list[int] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _is_discord_spec_mock(
-            node, discord_names=discord_names
-        ):
+        if isinstance(node, ast.Call) and _is_discord_spec_mock(node, discord_names=discord_names):
             lines.append(node.lineno)
     return lines
 
