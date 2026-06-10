@@ -22,7 +22,9 @@ emitted. This adapter closes both holes:
   it on the floor.
 
 The adapter holds no global state; it owns the one background task for its bot's
-lifetime and cancels nothing the bot does not already own.
+lifetime and cancels nothing the bot does not already own. ``connect`` is
+single-flight — a second call while the first gateway loop is still live is
+rejected (rather than orphaning the first task by overwriting ``_task``).
 """
 
 from __future__ import annotations
@@ -73,7 +75,16 @@ class DiscordGatewayAdapter:
         that cannot authenticate (C1). Once logged in, ``connect`` runs detached
         (it blocks until disconnect); its done-callback routes a runtime crash
         through the crash emitter.
+
+        Single-flight: a second ``connect`` while a gateway loop is already LIVE
+        is rejected with :class:`GatewayError` rather than overwriting ``_task``,
+        which would orphan the first loop (its done-callback could no longer be
+        observed and the first WSS session would leak). A sequential reconnect
+        after :meth:`close` (which clears ``_task``) is permitted.
         """
+        if self._task is not None and not self._task.done():
+            raise GatewayError("discord gateway already connected")
+
         try:
             await self._bot.login(token)
         except Exception as exc:
