@@ -280,163 +280,137 @@ def migrate() -> None:
     subprocess.run(["alembic", "upgrade", "head"], check=True)  # noqa: S607
 
 
+# The launcher's handshake-probe window (spec §8.7 / core-005). If the
+# launcher exits non-zero within this window the daemon is absent or
+# mid-restart; if it is still running after the window the TUI is live and
+# owns the operator's terminal. devex-003: the operator retries from the
+# shell rather than the plugin silently waiting in the foreground.
+_LAUNCHER_PROBE_TIMEOUT_S = 2.5
+
+
 async def _chat_main() -> None:
-    """Async bootstrap: Settings → broker → DB healthcheck → orchestrator → TUI.
+    """Spawn ``plugins/alfred_tui`` via the launcher and hand it the terminal.
 
-    Each step is fallible at the operator's first encounter — bad `.env`,
-    Postgres down, etc. — so each is mapped to a ``t()``-routed error
-    message before exiting non-zero. The TUI itself never sees these
-    failures because they happen before it launches.
+    Slice 4 (PR-S4-10, #206) inverts the Slice-2/3 model: the in-process
+    Textual launch (Settings → broker → orchestrator → in-process adapter)
+    is replaced by a thin spawn of the TUI MCP plugin through
+    ``bin/alfred-plugin-launcher.sh``. The daemon owns the orchestrator
+    graph now (spec §3.1); the CLI is just a launcher caller, so none of
+    the Slice-2 heavy imports (orchestrator, broker, providers, SQLAlchemy
+    session scope, DLP, audit writer, in-process comms adapter) are pulled
+    in here any longer.
 
-    perf-001: every heavy import (orchestrator graph, broker, providers,
-    SQLAlchemy session scope, DLP, audit writer, comms adapter factory)
-    is scoped to this function body so ``alfred --help`` and the
-    lightweight subcommands (``status``, ``migrate``, sub-app ``--help``)
-    do not pay the chat-graph load cost at module import time.
+    The launcher is invoked with the real PR-S4-6 contract — positional
+    ``<plugin_id> <executable> [args...]`` with the manifest path on
+    ``ALFRED_PLUGIN_MANIFEST_PATH`` — NOT the ``--manifest``/``--adapter-id``
+    flags an earlier plan draft assumed (the launcher has no such flags).
+    The TUI plugin's manifest declares ``sandbox.kind = "none"`` so the
+    launcher ``exec``s the plugin with the CLI's inherited PTY fds, which
+    the Textual app needs to render.
+
+    Daemon-missing / daemon-mid-restart path (spec §8.7): the launcher
+    fails (non-zero exit within the probe window, a missing launcher
+    binary, or an OS spawn error) → the CLI emits the parameterless
+    ``comms.tui.daemon_required_to_chat`` t() string on stderr and exits
+    code 3 (the same startup-failure code the Postgres-unreachable branch
+    used in Slice 2). The plugin never silently waits in its own process.
+
+    perf-001: ``asyncio``/``os``/``shlex``/``uuid`` import lazily so the
+    ``alfred --help`` path — which never invokes ``chat`` — pays nothing.
     """
     import asyncio
+    import os
+    import shlex
+    import sys
+    import uuid
+    from pathlib import Path
 
-    from sqlalchemy.exc import SQLAlchemyError
+    set_language(_operator_language())
 
-    from alfred.audit.log import AuditWriter
-    from alfred.budget.guard import BudgetGuard
-    from alfred.cli._bootstrap import (
-        build_adapter_dlp_audit_sink,
-        build_broker,
-        build_router,
-        configure_logging,
-        install_identity_factories_for_settings,
-        load_settings_or_die,
+    # Repo-root-relative defaults. The launcher + manifest + plugin source
+    # ship in-tree; an operator running ``alfred chat`` from the repo root
+    # (or with the package installed alongside ``bin/``/``plugins/``) gets
+    # the right paths. ``ALFRED_PLUGIN_LAUNCHER`` overrides the launcher
+    # for tests + bespoke deployments.
+    repo_root = Path(__file__).resolve().parents[3]
+    launcher = os.environ.get(
+        "ALFRED_PLUGIN_LAUNCHER",
+        str(repo_root / "bin" / "alfred-plugin-launcher.sh"),
     )
-    from alfred.comms.adapter import build_tui_adapter
-    from alfred.identity import (
-        InProcessTokenBucketRateLimiter,
-        Platform,
+    manifest_path = repo_root / "plugins" / "alfred_tui" / "manifest.toml"
+    plugin_src = repo_root / "plugins" / "alfred_tui" / "src"
+
+    # Per-instance comms-MCP adapter id. The ``tui`` KIND prefix is the
+    # contract the host's ``_ingest_tier`` keys on (T1 for the operator);
+    # the suffix makes the id unique per launch. The daemon delivers it to
+    # the plugin over the ``lifecycle.start`` wire request — the CLI only
+    # mints it so the launch is traceable.
+    adapter_id = f"tui-{uuid.uuid4()}"
+
+    # ``alfred_tui`` lives under the plugin's own ``src/`` (not the core
+    # package), and the server imports both ``alfred.comms_mcp`` (repo
+    # root) and ``alfred_tui`` (plugin src). Hand the child a PYTHONPATH
+    # spanning both. The kind="none" launcher ``exec``s the executable
+    # directly, inheriting this env (unlike the daemon's scrubbed
+    # subprocess path), so the child resolves both import roots.
+    child_env = dict(os.environ)
+    child_env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(manifest_path)
+    child_env["ALFRED_PLUGIN_ADAPTER_ID"] = adapter_id
+    existing_pythonpath = child_env.get("PYTHONPATH", "")
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(plugin_src), str(repo_root), existing_pythonpath) if p
     )
-    from alfred.memory.db import build_session_scope, healthcheck
-    from alfred.memory.episodic import EpisodicMemory
-    from alfred.memory.working_pool import WorkingMemoryPool
-    from alfred.orchestrator.core import Orchestrator
-    from alfred.security.dlp import OutboundDlp
 
-    settings = load_settings_or_die()
-    broker = build_broker(settings)
-    configure_logging(broker)
-    set_language(settings.operator_language)
+    cmd = [
+        *shlex.split(launcher),
+        "alfred_tui",
+        sys.executable,
+        "-m",
+        "alfred_tui.server",
+    ]
 
-    session_scope = build_session_scope(settings)
-
-    # Up-front healthcheck so a missing/down Postgres surfaces as a friendly
-    # one-liner rather than an asyncpg traceback inside the TUI on first
-    # keystroke. See ``alfred.memory.db.healthcheck`` for the rationale.
     try:
-        await healthcheck(session_scope)
-    except SQLAlchemyError as exc:
-        typer.echo(t("error.postgres_unreachable", detail=str(exc)))
-        typer.echo(t("hint.is_compose_up"))
-        raise typer.Exit(code=3) from exc
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=None,
+            stdout=None,
+            stderr=None,
+            env=child_env,
+        )
+    except (FileNotFoundError, OSError):
+        # Missing launcher binary / OS-level spawn failure. The daemon
+        # contract is unmet — surface the friendly t() string, not a
+        # traceback.
+        typer.echo(t("comms.tui.daemon_required_to_chat"), err=True)
+        raise typer.Exit(code=3) from None
 
-    # Identity: resolve the operator's canonical slug + language BEFORE
-    # constructing the orchestrator so every episode + audit row carries
-    # the canonical slug (CLAUDE.md i18n rule #3 + spec §2 identity
-    # invariants). Migration 0004 backfilled the operator row from
-    # ALFRED_OPERATOR_NAME, so the TUI binding ``(tui, operator_name)``
-    # always resolves on a freshly-set-up stack. If it doesn't, the
-    # operator skipped ``alembic upgrade head`` or removed the operator
-    # row — surface the friendly hint that points at
-    # ``alfred user add --authorization operator``.
-    #
-    # ``install_identity_factories_for_settings`` doubles as both the
-    # resolver construction and the wiring for the ``alfred user *``
-    # subcommands in the same process, so a Slice-2 operator who
-    # launches the TUI then opens another shell to add a second user
-    # gets coherent version-counter behaviour without two engines.
-    resolver = install_identity_factories_for_settings(settings)
-    operator = await asyncio.to_thread(resolver.resolve, Platform.TUI, settings.operator_name)
-    if operator is None:
-        typer.echo(t("cli.user.error.no_operator"), err=True)
-        raise typer.Exit(code=2)
-
-    router = build_router(broker, settings)
-    # PR-B Phase 1: per-user BudgetGuard. The loader resolves a canonical
-    # ``user_id`` (the resolver's slug) to the live ``User`` row; the
-    # guard reads ``daily_budget_usd`` off the row on first-touch and on
-    # every version-counter bump. Wrapping ``resolver.show`` keeps the
-    # guard ignorant of the SQLAlchemy session lifecycle — the resolver
-    # is the one that owns sessions.
-    #
-    # The operator's ``settings.daily_budget_usd`` (slice-1 single-guard
-    # cap) is no longer read here: migration 0004 backfilled it into
-    # ``users.daily_budget_usd`` for the operator row, and the loader
-    # below is what surfaces it. The per-call cap stays global.
-    budget = BudgetGuard(
-        user_loader=lambda user_id: resolver.show(slug=user_id),
-        per_call_max_usd=settings.per_call_max_usd,
-        version_counter=resolver.version_counter,  # type: ignore[attr-defined]  # reason: PR-B Phase 1 — counter promoted via ``install_identity_factories_for_settings``; Phase 5 makes it a typed property on IdentityResolver
-    )
-
-    # PR-B Phase 5: pool replaces the slice-1 single ``WorkingMemory()`` +
-    # rehydrate-on-startup block. The pool is lazy: the very first
-    # ``acquire(("alfred", user.slug))`` from the TUI rehydrates the
-    # operator's buffer from episodic; subsequent acquires hit the cache.
-    # Slice-2 single-operator deployments only ever populate one entry so
-    # the LRU cap is effectively unused — ``active_user_count=lambda: 1``
-    # makes the floor-of-50 default visible (rather than scaling with a
-    # number that doesn't change). Operators can override via
-    # ``ALFRED_WORKING_MEMORY_POOL_MAX``; Slice 4+ replaces the lambda
-    # with a live count from the identity resolver.
-    working_pool = WorkingMemoryPool(
-        episodic_factory=lambda session: EpisodicMemory(session=session),
-        pool_session_scope=session_scope,
-        max_entries=settings.working_memory_pool_max,
-        active_user_count=lambda: 1,
-    )
-
-    orchestrator = Orchestrator(
-        identity_resolver=resolver,
-        session_scope=session_scope,
-        router=router,
-        budget=budget,
-    )
-    # PR D1: construct the TuiAdapter Protocol seam rather than the
-    # AlfredTuiApp directly so the CLI consumes only the public
-    # ``alfred.comms.adapter.CommsAdapter`` surface. The adapter holds
-    # the canonical Slice-2 inject set; PR D2's Discord adapter takes
-    # the same set so the CLI bootstrap shape is unchanged when D2
-    # ships. The ``InProcessTokenBucketRateLimiter`` here is a separate
-    # instance from the one the resolver holds — both are operator-
-    # unlimited in Slice-2 single-operator mode, so the divergence is
-    # functionally invisible; Slice-3+ unifies under the supervisor.
-    # Adapter outbound DLP wires a PERSISTENT audit sink — not the
-    # structlog-bridge no-op. The DLP layer's whole point is audit-on-
-    # modification (CLAUDE.md hard rule #7); routing it to the no-op
-    # would lose every outbound-redaction event. The sink schedules an
-    # async ``AuditWriter.append`` on the running event loop so the
-    # synchronous ``_AuditSink`` contract stays satisfied without
-    # blocking the scan path. The audit writer is constructed against
-    # the same async session_scope ``install_identity_factories_for_settings``
-    # uses so audit + identity writes share lifecycle.
-    adapter_audit_writer = AuditWriter(session_factory=session_scope)
-    adapter_dlp_audit_sink = build_adapter_dlp_audit_sink(
-        audit_writer=adapter_audit_writer,
-        operator_user_id=operator.slug,
-        language=settings.operator_language,
-    )
-    outbound_dlp = OutboundDlp(broker=broker, audit=adapter_dlp_audit_sink)
-    rate_limiter = InProcessTokenBucketRateLimiter()
-    adapter = build_tui_adapter(
-        orchestrator=orchestrator,
-        identity_resolver=resolver,
-        outbound_dlp=outbound_dlp,
-        rate_limiter=rate_limiter,
-        broker=broker,
-        working_pool=working_pool,
-    )
-    await adapter.start()
+    # Probe window: a launcher that exits non-zero within the window means
+    # the daemon is absent or mid-restart. A launcher still alive after the
+    # window has handed the live TUI the terminal — re-await it without a
+    # deadline so the operator's session runs to completion.
     try:
-        await adapter.run()
-    finally:
-        await adapter.stop()
+        returncode = await asyncio.wait_for(proc.wait(), timeout=_LAUNCHER_PROBE_TIMEOUT_S)
+    except TimeoutError:
+        returncode = await proc.wait()
+
+    if returncode != 0:
+        typer.echo(t("comms.tui.daemon_required_to_chat"), err=True)
+        raise typer.Exit(code=3)
+
+
+def _operator_language() -> str:
+    """Resolve the operator language for the chat surface without the heavy graph.
+
+    The Slice-2 chat path loaded ``Settings`` purely to read
+    ``operator_language`` (and to build the now-daemon-owned orchestrator
+    graph). The launcher-spawn path needs only the language for the one
+    ``t()`` string it may emit, so read it from the environment with the
+    same default the settings model uses. Falling back to ``"en"`` keeps
+    the daemon-required message legible even on an unconfigured host.
+    """
+    import os
+
+    return os.environ.get("ALFRED_OPERATOR_LANGUAGE", "en")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual entry
