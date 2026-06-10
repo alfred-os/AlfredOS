@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 from structlog.testing import capture_logs
 
-from alfred.comms_mcp.classifier_registry import get_classifier
+from alfred.comms_mcp.classifier_registry import get_classifier, register_classifier
 from alfred.comms_mcp.classifiers.discord import (
     DiscordSubPayload,
     DiscordSubPayloadClassifier,
@@ -52,6 +52,14 @@ def _kinds(payloads: tuple[DiscordSubPayload, ...]) -> list[str]:
 
 
 def test_classifier_is_registered_under_discord_sub_payloads() -> None:
+    # Re-run the canonical import-time registration before asserting (idempotent
+    # no-op on the same class object): a sibling suite test
+    # (test_classifier_registry_import_registration) reloads the registry module,
+    # replacing the global _REGISTRY dict and dropping every classifier
+    # registered by another module. Re-registering the SAME class restores the
+    # entry order-independently — a reload would mint a new class object and trip
+    # the registry's different-class collision guard.
+    register_classifier(kind="discord", name="discord_sub_payloads")(DiscordSubPayloadClassifier)
     assert (
         get_classifier(kind="discord", name="discord_sub_payloads") is DiscordSubPayloadClassifier
     )

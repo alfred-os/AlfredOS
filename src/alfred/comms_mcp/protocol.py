@@ -55,8 +55,8 @@ InboundAddressingSignal = Literal["dm", "mention", "channel", "thread"]
 # plugin placeholder so the lifecycle harness can register.
 adapter_kind: Final[frozenset[str]] = frozenset(
     {
-        "alfred_comms_test",  # reference plugin — this PR
-        # "discord"  — added by PR-S4-9
+        "alfred_comms_test",  # reference plugin — PR-S4-8
+        "discord",  # PR-S4-9 — with its BODY_FIELD_BY_KIND + classifier entries
         # "tui"      — added by PR-S4-10
     }
 )
@@ -68,7 +68,7 @@ adapter_kind: Final[frozenset[str]] = frozenset(
 BODY_FIELD_BY_KIND: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
         "alfred_comms_test": "content",
-        # "discord":   "content",   # PR-S4-9
+        "discord": "content",  # PR-S4-9 (spec §8.6)
         # "tui":       "content",   # PR-S4-10
         # "telegram":  "text",      # post-MVP
     }
