@@ -40,12 +40,28 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 import structlog
 
 from alfred.comms_mcp.classifiers.discord import DiscordSubPayload
+from alfred.errors import AlfredError
 
 if TYPE_CHECKING:
     from alfred.comms_mcp.inbound_scanner import InboundContentScanner
     from alfred.security.quarantine import ContentHandle
 
 _log = structlog.get_logger(__name__)
+
+
+class SubPayloadPromotionError(AlfredError):
+    """A promoted sub-payload field could not be rewritten in the inbound body.
+
+    ``marker.path`` is produced by a successful HOST-side classifier match against
+    the SAME body, so the field it names is guaranteed to exist when the contract
+    holds. If rewrite cannot locate it — a missing key, an out-of-range index, an
+    indexed path over a non-list — the classifier and the body have drifted apart.
+    This is a trust-boundary failure, not a recoverable case: silently inserting a
+    handle reference under a phantom key would leave the real raw (T3) sub-payload
+    bytes elsewhere in the promoted body, reaching the privileged orchestrator
+    unredacted. The promoter therefore FAILS CLOSED — loud, never a silent no-op.
+    """
+
 
 CONTENT_HANDLE_REF_KEY: Final[str] = "$content_handle_id"
 """The single key a promoted body field carries in place of the raw sub-payload.
@@ -169,16 +185,23 @@ def _replace_at_path(body: dict[str, object], path: str, replacement: object) ->
     (``embeds[0]``, ``attachments[1]``). This honours precisely those two forms —
     no nested descent, because no classifier emits a multi-segment path. The path
     is produced by a successful host-side match, so the key/index are known to
-    exist; a contract drift (key absent) raises ``KeyError`` / ``IndexError``
-    loudly rather than silently no-op'ing.
+    exist when the contract holds; any drift FAILS CLOSED with a typed
+    :class:`SubPayloadPromotionError`. Crucially, the bare-key branch must NOT
+    silently CREATE an absent key — that would insert a handle ref under a phantom
+    field while the real raw sub-payload bytes remained elsewhere in the body
+    unredacted (a T3 leak). It refuses instead.
     """
     key, index = _parse_segment(path)
+    if key not in body:
+        raise SubPayloadPromotionError(f"path {path!r}: key {key!r} absent from body")
     if index is None:
         body[key] = replacement
         return
     target = body[key]
-    if not isinstance(target, list):  # pragma: no cover - classifier guarantees a list
-        raise KeyError(f"path {path!r}: indexed value is not a list")
+    if not isinstance(target, list):
+        raise SubPayloadPromotionError(f"path {path!r}: indexed value is not a list")
+    if not 0 <= index < len(target):
+        raise SubPayloadPromotionError(f"path {path!r}: index {index} out of range")
     target[index] = replacement
 
 
@@ -193,4 +216,5 @@ __all__ = [
     "CONTENT_HANDLE_REF_KEY",
     "PromotedBody",
     "SubPayloadPromoter",
+    "SubPayloadPromotionError",
 ]

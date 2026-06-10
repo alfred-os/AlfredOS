@@ -31,6 +31,8 @@ from alfred.comms_mcp.sub_payload_promotion import (
     CONTENT_HANDLE_REF_KEY,
     PromotedBody,
     SubPayloadPromoter,
+    SubPayloadPromotionError,
+    _replace_at_path,
 )
 from alfred.security.quarantine import ContentHandle
 
@@ -163,6 +165,43 @@ async def test_attachment_and_embed_both_promoted() -> None:
     assert promoted.sub_payload_kinds == frozenset({"embed", "attachment"})
     assert promoted.body["embeds"][0].keys() == {CONTENT_HANDLE_REF_KEY}  # type: ignore[index]
     assert promoted.body["attachments"][0].keys() == {CONTENT_HANDLE_REF_KEY}  # type: ignore[index]
+
+
+def test_replace_at_path_fails_closed_on_missing_bare_key() -> None:
+    """A promoted bare key that is absent must REFUSE, not silently appear.
+
+    ``marker.path`` is produced by a successful host-side classifier match against
+    this exact body, so a missing key signals contract drift. Silently inserting a
+    handle ref under a phantom key would leave the real (raw, T3) sub-payload bytes
+    elsewhere in the promoted body unredacted — a trust-boundary leak. Fail loud.
+    """
+    body: dict[str, object] = {"content": "hi"}
+    with pytest.raises(SubPayloadPromotionError):
+        _replace_at_path(body, "poll", {CONTENT_HANDLE_REF_KEY: "x"})
+    # The phantom key must NOT have been created.
+    assert "poll" not in body
+
+
+def test_replace_at_path_fails_closed_on_missing_indexed_key() -> None:
+    """An indexed promoted path whose container key is absent must REFUSE."""
+    body: dict[str, object] = {"content": "hi"}
+    with pytest.raises(SubPayloadPromotionError):
+        _replace_at_path(body, "embeds[0]", {CONTENT_HANDLE_REF_KEY: "x"})
+    assert "embeds" not in body
+
+
+def test_replace_at_path_fails_closed_on_out_of_range_index() -> None:
+    """An indexed promoted path whose index is out of range must REFUSE."""
+    body: dict[str, object] = {"embeds": []}
+    with pytest.raises(SubPayloadPromotionError):
+        _replace_at_path(body, "embeds[0]", {CONTENT_HANDLE_REF_KEY: "x"})
+
+
+def test_replace_at_path_fails_closed_on_non_list_indexed_target() -> None:
+    """An indexed promoted path whose target is not a list must REFUSE."""
+    body: dict[str, object] = {"embeds": {"not": "a list"}}
+    with pytest.raises(SubPayloadPromotionError):
+        _replace_at_path(body, "embeds[0]", {CONTENT_HANDLE_REF_KEY: "x"})
 
 
 @pytest.mark.asyncio
