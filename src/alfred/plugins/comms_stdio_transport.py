@@ -1,0 +1,275 @@
+"""``CommsStdioTransport`` — line-delimited JSON-RPC pipe to a comms plugin.
+
+PR-S4-11a Wave 1 (#237). The keystone the daemon comms runtime needs: today no
+host-side line-delimited comms transport exists, so a plugin -> host
+``inbound.message`` notification can never reach ``process_inbound_message``.
+This is the dumb duplex pipe that carries those frames.
+
+**Deliberately thin.** Unlike :class:`alfred.plugins.stdio_transport.StdioTransport`
+(the length-prefixed orchestrator <-> tool wire that applies DLP, secret
+substitution, T3 tagging, and the inbound canary scan), this transport does NONE
+of that. The trust-boundary work for comms lives upstream in
+``process_inbound_message`` + the ``ScannedOutboundBody`` NewType (ADR-0025
+invariant): a comms transport that re-implemented DLP here would create a second,
+divergent scan point. Its ONLY security duty is a frame-size bound
+(:data:`_MAX_COMMS_LINE_BYTES`, mirroring the stdio transport's DoS bound) and
+LOUD failure on a broken or malformed wire (CLAUDE.md hard rule #7).
+
+**Wire shape.** Line-delimited JSON-RPC: one ``json.dumps(frame) + "\\n"`` per
+frame in each direction, matching the reference plugin
+(``plugins/alfred_comms_test/main.py``) and the ``alfred_web_fetch`` /
+``alfred_quarantined_llm`` plugins. This is a DIFFERENT framing + conversation
+shape from the length-prefixed :class:`StdioTransport`; the two are not
+interchangeable, so the patterns below are mirrored, not reused.
+
+**Minimal surface — no ``request()``.** The runner
+(:class:`alfred.plugins.comms_runner.CommsPluginRunner`) does the handshake via
+:meth:`send` + :meth:`read_frame`, then owns the single reader for the pump. A
+transport-level ``request()`` that also read the stream would be a dual-reader
+footgun once the pump owns the reader, so it is deliberately absent.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import shlex
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
+import structlog
+
+from alfred.errors import AlfredError
+from alfred.i18n import t
+from alfred.plugins._comms_child_env import comms_child_env
+
+if TYPE_CHECKING:
+    from alfred.cli._launcher_spawn import PluginLaunchSpec
+
+#: Override for the launcher path (tests + bespoke deployments point this
+#: elsewhere). Matches :data:`alfred.cli._launcher_spawn._LAUNCHER_ENV_VAR` so a
+#: single env var drives both the foreground and daemon launch surfaces.
+_LAUNCHER_ENV_VAR: Final[str] = "ALFRED_PLUGIN_LAUNCHER"
+
+
+def _repo_root() -> Path:
+    """Resolve the in-tree repo root that ships ``bin/`` and ``plugins/``.
+
+    This module lives at ``src/alfred/plugins/`` so the repo root is three
+    parents up. Mirrors :func:`alfred.cli._launcher_spawn.repo_root`; resolved
+    here (not imported) so the ``plugins`` package never imports the ``cli``
+    package — ``cli._launcher_spawn`` already imports ``plugins._comms_child_env``,
+    and a back-import would close an import cycle.
+    """
+    return Path(__file__).resolve().parents[3]
+
+
+def _comms_launcher_path() -> str:
+    return os.environ.get(
+        _LAUNCHER_ENV_VAR, str(_repo_root() / "bin" / "alfred-plugin-launcher.sh")
+    )
+
+
+log = structlog.get_logger(__name__)
+
+# Mirrors :data:`alfred.plugins.stdio_transport._MAX_INBOUND_FRAME_BYTES` (10MB):
+# a plugin that emits a single line larger than this is misbehaving, and the host
+# refuses the frame rather than let a "claim 4GB on one line" wedge the loop. The
+# child's stdout ``StreamReader`` limit is set to this value at spawn so the read
+# itself fails fast instead of buffering unboundedly.
+_MAX_COMMS_LINE_BYTES: Final[int] = 10 * 1024 * 1024
+
+# close()-cooperative-wait timeout in seconds. Past this the transport escalates
+# terminate() -> kill(). Matches :data:`StdioTransport._CLOSE_TIMEOUT_S`.
+_CLOSE_TIMEOUT_S: Final[float] = 5.0
+
+
+class CommsProtocolError(AlfredError):
+    """The comms wire produced a malformed or over-bound frame.
+
+    Mirrors :class:`alfred.plugins.stdio_transport.PluginProtocolError`: a
+    wire-level violation the transport raises BEFORE the frame can reach the
+    session dispatcher. Covers an over-:data:`_MAX_COMMS_LINE_BYTES` line,
+    non-JSON bytes, and a JSON value that is not a top-level object. The raw
+    bytes are never carried on the exception (spec §5.6 — no T3 in error
+    attributes).
+    """
+
+
+class CommsStdioTransport:
+    """A line-delimited JSON-RPC duplex pipe to a comms-plugin subprocess.
+
+    The transport owns ``self._proc`` after :meth:`spawn`. It is NOT a state
+    machine beyond the spawned/closed guard — the conversation sequencing (handshake
+    then single-reader pump) is the runner's job.
+    """
+
+    def __init__(
+        self,
+        *,
+        adapter_id: str,
+        spec: PluginLaunchSpec,
+        max_line_bytes: int = _MAX_COMMS_LINE_BYTES,
+    ) -> None:
+        self._adapter_id = adapter_id
+        self._spec = spec
+        self._max_line_bytes = max_line_bytes
+        self._proc: asyncio.subprocess.Process | None = None
+
+    async def spawn(self) -> None:
+        """Spawn the plugin through the launcher with a SCRUBBED child env.
+
+        The argv is the REAL PR-S4-6 launcher contract: positional
+        ``<plugin_id> <executable> [args...]`` with the manifest path delivered
+        on ``ALFRED_PLUGIN_MANIFEST_PATH`` (set by :func:`comms_child_env`). No
+        ``pass_fds``, no provider-key pipe — comms needs no LLM key, so the fd-3
+        hazard the orchestrator transport guards against does not apply here.
+
+        The child's stdout ``StreamReader`` ``limit`` is pinned to
+        :data:`_max_line_bytes` so an over-bound line fails fast at the reader
+        rather than buffering unboundedly.
+
+        Guards against a double spawn — a second call with a live ``self._proc``
+        is a programming error, raised loudly.
+        """
+        if self._proc is not None:
+            raise RuntimeError(
+                f"CommsStdioTransport.spawn() called twice for adapter {self._adapter_id!r}"
+            )
+        cmd = [
+            *shlex.split(_comms_launcher_path()),
+            self._spec.plugin_id,
+            sys.executable,
+            "-m",
+            self._spec.module,
+        ]
+        self._proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=comms_child_env(self._spec),
+            limit=self._max_line_bytes,
+        )
+
+    async def send(self, frame: Mapping[str, object]) -> None:
+        """Write one ``json.dumps(frame) + "\\n"`` frame to the plugin's stdin.
+
+        Loud on a broken pipe (the child died mid-conversation): the
+        ``BrokenPipeError`` / ``ConnectionResetError`` propagates so the runner's
+        crash arm routes an ``adapter.crashed`` and the breaker can trip
+        (CLAUDE.md hard rule #7). Raises ``RuntimeError`` if called before
+        :meth:`spawn` (explicit guard, not ``assert`` — survives ``python -O``).
+        """
+        if self._proc is None or self._proc.stdin is None:
+            raise RuntimeError(
+                f"CommsStdioTransport.send() called before spawn() for adapter {self._adapter_id!r}"
+            )
+        payload = (json.dumps(frame) + "\n").encode()
+        try:
+            self._proc.stdin.write(payload)
+            await self._proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            log.warning(
+                "comms.transport.send_broken_pipe",
+                adapter_id=self._adapter_id,
+            )
+            raise
+
+    async def read_frame(self) -> Mapping[str, object] | None:
+        """Read one line-delimited frame; ``None`` on clean EOF.
+
+        Returns the decoded JSON object, or ``None`` when the child closed its
+        stdout cleanly (empty read). Raises :class:`CommsProtocolError` on an
+        over-bound line, non-JSON bytes, or a non-object top-level JSON value.
+        Raises ``RuntimeError`` if called before :meth:`spawn`.
+        """
+        if self._proc is None or self._proc.stdout is None:
+            raise RuntimeError(
+                f"CommsStdioTransport.read_frame() called before spawn() for adapter "
+                f"{self._adapter_id!r}"
+            )
+        try:
+            line = await self._proc.stdout.readline()
+        except (ValueError, asyncio.LimitOverrunError) as exc:
+            # The StreamReader's own limit (set to ``_max_line_bytes`` at spawn)
+            # tripped on an over-bound line. Surface it as a protocol error
+            # rather than a raw ValueError so the runner's malformed-frame arm
+            # handles it uniformly.
+            log.warning("comms.transport.frame_too_large", adapter_id=self._adapter_id)
+            raise CommsProtocolError(
+                t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
+            ) from exc
+        if not line:
+            # Clean EOF — the child closed stdout. The runner ends the pump.
+            return None
+        if len(line) > self._max_line_bytes:
+            # Belt-and-braces: a line at exactly the reader limit can slip through
+            # readline() without raising; enforce the bound explicitly too.
+            log.warning("comms.transport.frame_too_large", adapter_id=self._adapter_id)
+            raise CommsProtocolError(
+                t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
+            )
+        try:
+            decoded = json.loads(line)
+        except json.JSONDecodeError as exc:
+            log.warning("comms.transport.malformed_frame", adapter_id=self._adapter_id)
+            raise CommsProtocolError(
+                t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
+            ) from exc
+        if not isinstance(decoded, dict):
+            # A JSON-RPC frame is always a top-level object. A list / scalar is
+            # a protocol violation, not a frame the dispatcher can route.
+            log.warning("comms.transport.non_object_frame", adapter_id=self._adapter_id)
+            raise CommsProtocolError(
+                t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
+            )
+        return decoded
+
+    async def close(self) -> None:
+        """Gracefully shut the subprocess down; idempotent.
+
+        Closes stdin (clean EOF for the child), waits up to
+        :data:`_CLOSE_TIMEOUT_S` for exit, then escalates to ``terminate()`` ->
+        ``kill()``. A no-op if :meth:`spawn` was never called or the child is
+        already reaped. Mirrors :meth:`StdioTransport.close`'s escalation shape.
+        """
+        proc = self._proc
+        if proc is None:
+            return
+        if proc.returncode is not None:
+            # Already reaped — idempotent fast path.
+            return
+        if proc.stdin is not None:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                proc.stdin.close()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_CLOSE_TIMEOUT_S)
+            return
+        except TimeoutError:
+            # Child ignored the cooperative close — escalate. Suppress
+            # ProcessLookupError: the child can exit between the wait timeout and
+            # the signal (a concurrent SIGCHLD reaps it), and a raise here would
+            # surface out of the runner's ``finally`` during a supervisor
+            # TaskGroup cancellation. Mirrors :meth:`StdioTransport.kill`.
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_CLOSE_TIMEOUT_S)
+        except TimeoutError:
+            # Still wedged after SIGTERM — SIGKILL is uncatchable. Same
+            # exit-during-escalation race as terminate() above.
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=_CLOSE_TIMEOUT_S)
+
+
+__all__ = [
+    "CommsProtocolError",
+    "CommsStdioTransport",
+]

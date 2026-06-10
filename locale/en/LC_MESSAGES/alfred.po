@@ -1935,6 +1935,23 @@ msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "
 "({file_value}) disagree; the env var wins."
 
+#: src/alfred/plugins/comms_runner.py:150
+#: src/alfred/plugins/comms_runner.py:159
+msgid "comms.runner.handshake_failed"
+msgstr ""
+"Comms adapter {adapter_id} failed its lifecycle.start handshake; the "
+"plugin closed its connection or did not acknowledge. The adapter was not "
+"loaded."
+
+#: src/alfred/plugins/comms_stdio_transport.py:205
+#: src/alfred/plugins/comms_stdio_transport.py:215
+#: src/alfred/plugins/comms_stdio_transport.py:222
+#: src/alfred/plugins/comms_stdio_transport.py:229
+msgid "comms.transport.malformed_frame"
+msgstr ""
+"Comms adapter {adapter_id} sent a malformed or oversized frame; the wire "
+"frame was refused."
+
 #: src/alfred/plugins/content_store_base.py:153
 msgid "plugin.content_store.inmemory_not_production_safe"
 msgstr ""

@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 
+from alfred.plugins._comms_child_env import _SCRUBBED_ENV_ALLOWLIST, _spec_env
+
 #: Handshake-probe window (seconds). A launcher that exits non-zero within this
 #: window means the plugin never reached a live handshake (spec §8.7 /
 #: core-005); a launcher still alive after it has handed off a live session.
@@ -127,35 +129,14 @@ class PluginLaunchSpec:
     sandbox_kind: str
 
 
-#: Env keys forwarded verbatim into a scrubbed (adversary-facing) child. These
-#: are the launcher's OWN operational controls (it reads them from the env we
-#: hand it to resolve the per-OS sandbox policy + UID drop — see
-#: ``bin/alfred-plugin-launcher.sh`` ``ENVIRONMENT``) plus the locale + PATH the
-#: child interpreter needs. NO secret-bearing key (``ANTHROPIC_API_KEY``,
-#: ``DISCORD_BOT_TOKEN``, ...) is on this list — that is the whole point of F2.
-_SCRUBBED_ENV_ALLOWLIST: tuple[str, ...] = (
-    "PATH",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    # Launcher control surface (parent env -> launcher).
-    "ALFRED_ENVIRONMENT",
-    "ALFRED_SANDBOX_POLICY_DIR",
-    "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED",
-    "ALFRED_PLUGIN_UID",
-    "FAKE_UNAME",
-)
-
-
-def _spec_env(spec: PluginLaunchSpec, base: dict[str, str]) -> dict[str, str]:
-    """Overlay the spec-derived keys (manifest, adapter id, import roots) onto ``base``."""
-    base["ALFRED_PLUGIN_MANIFEST_PATH"] = str(spec.manifest_path)
-    base["ALFRED_PLUGIN_ADAPTER_ID"] = spec.adapter_id
-    existing = base.get("PYTHONPATH", "")
-    roots = [str(p) for p in spec.import_roots]
-    base["PYTHONPATH"] = os.pathsep.join(p for p in (*roots, existing) if p)
-    return base
+#: Env keys forwarded verbatim into a scrubbed (adversary-facing) child.
+#:
+#: PR-S4-11a (#237) promoted the allowlist + the :func:`_spec_env` overlay into
+#: :mod:`alfred.plugins._comms_child_env` so this foreground-launcher seam and the
+#: daemon-hosted comms transport share ONE allowlist — a key added (or a secret
+#: leaked) in one site can never drift from the other. Re-exported here under the
+#: original name so ``tests/unit/cli/test_launcher_spawn_env_scrub.py`` and any
+#: importer of the launcher's surface keep resolving it unchanged.
 
 
 def _minimal_child_env(spec: PluginLaunchSpec) -> dict[str, str]:
