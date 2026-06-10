@@ -68,6 +68,14 @@ class LaunchResult(Enum):
     #: The launcher failed (non-zero exit in the probe window, missing binary,
     #: or OS spawn error). The daemon contract is unmet.
     FAILED = auto()
+    #: The launcher was still alive after the probe window — it handed off a
+    #: live, long-running session. Only surfaced to a caller that opted out of
+    #: blocking (``block_on_handoff=False``, the ``alfred discord verify``
+    #: readiness probe): the seam terminates the child and reports this so the
+    #: probe returns promptly instead of awaiting an exit that never comes
+    #: (review F3). A blocking caller (``alfred chat`` / boot) never sees it —
+    #: it waits for the session to end and gets COMPLETED/FAILED.
+    HANDED_OFF = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +196,9 @@ def _child_env(spec: PluginLaunchSpec) -> dict[str, str]:
     return _minimal_child_env(spec)
 
 
-async def spawn_plugin_via_launcher(spec: PluginLaunchSpec) -> LaunchOutcome:
+async def spawn_plugin_via_launcher(
+    spec: PluginLaunchSpec, *, block_on_handoff: bool = True
+) -> LaunchOutcome:
     """Spawn the plugin through the launcher and resolve the probe-window outcome.
 
     Returns a :class:`LaunchOutcome` rather than emitting any operator-facing
@@ -197,6 +207,17 @@ async def spawn_plugin_via_launcher(spec: PluginLaunchSpec) -> LaunchOutcome:
     binary or OS spawn error is reported as :data:`LaunchResult.FAILED` (not
     re-raised) because, from the operator's perspective, it is the same
     "daemon/launcher unavailable" condition as a non-zero exit.
+
+    ``block_on_handoff`` governs what happens when the launcher is STILL ALIVE
+    after the probe window — i.e. it handed off a live, long-running session:
+
+    * ``True`` (default — ``alfred chat`` / ``alfred discord`` boot) — re-await
+      the child without a deadline so the foreground TUI / long-running relay
+      runs to completion; the eventual exit maps to COMPLETED/FAILED.
+    * ``False`` (the ``alfred discord verify`` readiness probe) — the hand-off
+      itself IS the success signal; awaiting a healthy relay's exit would hang
+      forever (review F3). Terminate the child and report
+      :data:`LaunchResult.HANDED_OFF`.
     """
     import sys
 
@@ -220,16 +241,46 @@ async def spawn_plugin_via_launcher(spec: PluginLaunchSpec) -> LaunchOutcome:
     except (FileNotFoundError, OSError):
         return LaunchOutcome(result=LaunchResult.FAILED, returncode=None)
 
-    # A launcher that survives the probe window handed off a live session;
-    # re-await it without a deadline so a foreground plugin (the TUI) runs to
-    # completion. A launcher that exits within the window never handed off.
+    # A launcher that exits within the probe window never handed off — map its
+    # code to COMPLETED/FAILED. A launcher still alive after the window handed
+    # off a live session.
     try:
         returncode = await asyncio.wait_for(proc.wait(), timeout=LAUNCHER_PROBE_TIMEOUT_S)
     except TimeoutError:
+        if not block_on_handoff:
+            # Readiness probe: alive past the window IS healthy. Terminate the
+            # child so the probe returns promptly rather than awaiting an exit
+            # a long-running relay never reaches.
+            await _terminate(proc)
+            return LaunchOutcome(result=LaunchResult.HANDED_OFF, returncode=proc.returncode)
+        # Blocking caller (foreground TUI / boot): run the session to
+        # completion.
         returncode = await proc.wait()
 
     result = LaunchResult.COMPLETED if returncode == 0 else LaunchResult.FAILED
     return LaunchOutcome(result=result, returncode=returncode)
+
+
+async def _terminate(proc: asyncio.subprocess.Process) -> None:
+    """Terminate a handed-off child and reap it, escalating to kill on stall.
+
+    SIGTERM first (lets the relay close its gateway cleanly); a child that does
+    not exit within a short grace window is SIGKILL'd so the readiness probe
+    never blocks on an unresponsive plugin.
+    """
+    if proc.returncode is not None:
+        return
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_TERMINATE_GRACE_S)
+    except TimeoutError:  # pragma: no cover - defensive kill on a wedged child
+        proc.kill()
+        await proc.wait()
+
+
+#: Grace window (seconds) between SIGTERM and SIGKILL when terminating a
+#: handed-off child during a readiness probe.
+_TERMINATE_GRACE_S = 2.0
 
 
 __all__ = [

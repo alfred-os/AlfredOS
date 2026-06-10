@@ -20,6 +20,9 @@ sandbox-capable host nor a Discord token.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from typer.testing import CliRunner
 
 from alfred.cli.discord_cmd import discord_app
@@ -48,6 +51,33 @@ def test_discord_verify_with_failing_launcher_exits_nonzero() -> None:
     )
     assert result.exit_code != 0
     assert _BOOT_KEY in result.stderr or _BOOT_FRAGMENT in result.stderr
+
+
+def test_discord_verify_with_healthy_long_running_plugin_returns_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``alfred discord verify`` against a HEALTHY long-running relay -> OK, no hang.
+
+    Review F3: the old verify path re-awaited ``proc.wait()`` unconditionally,
+    so a launcher that stayed alive past the probe (a healthy relay) blocked
+    forever. The launcher stand-in here ``sleep``s well past the (shortened)
+    probe window — modelling a healthy relay — and verify must observe the
+    hand-off, terminate the child, and exit 0 promptly.
+    """
+    from alfred.cli import _launcher_spawn
+
+    script = tmp_path / "sleep-launcher.sh"
+    script.write_text("#!/usr/bin/env bash\nexec sleep 30\n")
+    script.chmod(0o755)
+    monkeypatch.setattr(_launcher_spawn, "LAUNCHER_PROBE_TIMEOUT_S", 0.3)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        discord_app,
+        ["verify"],
+        env={"ALFRED_PLUGIN_LAUNCHER": str(script)},
+    )
+    assert result.exit_code == 0
 
 
 def test_discord_cmd_does_not_import_legacy_comms_adapter() -> None:
