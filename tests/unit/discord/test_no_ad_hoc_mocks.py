@@ -38,13 +38,15 @@ _GUARDED_DIRS = (
 
 _MOCK_FACTORIES = frozenset({"Mock", "MagicMock", "NonCallableMock"})
 
-# Narrow, documented exemption: the LEGACY ``alfred.comms.discord.DiscordAdapter``
-# integration test predates closure test-1's factory convention and targets the
-# dormant ``src/alfred/comms/`` package that PR-S4-10 DELETES (spec §8.8). It is
-# unrelated to the new ``plugins/alfred_discord`` adapter and is not migrated to
-# the factory — it is removed wholesale in S4-10. Every OTHER integration test is
-# guarded.
-_LEGACY_EXEMPT = frozenset({_TESTS_ROOT / "integration" / "test_discord_adapter_integration.py"})
+# No exemptions remain. The one historical exemption — the LEGACY
+# ``alfred.comms.discord.DiscordAdapter`` integration test, which predated
+# closure test-1's factory convention and targeted the in-process
+# ``src/alfred/comms/`` package — was deleted alongside that package in
+# PR-S4-10 (spec §8.8). With it gone, every guarded integration test now
+# obeys the no-ad-hoc-mocks factory convention with no carve-outs. The empty
+# set is kept (rather than deleting the seam) so a future legitimate
+# exemption has an obvious, documented home.
+_LEGACY_EXEMPT: frozenset[Path] = frozenset()
 
 
 def _guarded_files() -> Iterator[Path]:
