@@ -66,7 +66,22 @@ _STATE_GIT_IN_CONTAINER = "/var/lib/alfred/state.git"
 def _docker_available() -> bool:
     if shutil.which("docker") is None:
         return False
-    return subprocess.run(["docker", "info"], capture_output=True, check=False).returncode == 0
+    # Bound the probe: a misconfigured docker context can make ``docker info``
+    # hang indefinitely, which would bypass the perf-007 budget and stall the
+    # whole smoke suite. Treat a timed-out probe as "docker unavailable" so the
+    # test skips cleanly rather than hanging. (PR-S4-10 review #3.)
+    try:
+        return (
+            subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                check=False,
+                timeout=10,
+            ).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired:
+        return False
 
 
 @pytest.fixture(scope="module")
