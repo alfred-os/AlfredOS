@@ -1125,7 +1125,7 @@ msgstr ""
 "Unexpected ingress tier for comms.tui.input: {tier_name!r}; expected T1 "
 "or T2 per spec §3.6."
 
-#: src/alfred/comms_mcp/audit_hash.py:82
+#: src/alfred/comms_mcp/audit_hash.py:93
 #: src/alfred/i18n/_slice_4_reserve.py:120
 msgid "daemon.boot.audit_hash_pepper_missing"
 msgstr ""
