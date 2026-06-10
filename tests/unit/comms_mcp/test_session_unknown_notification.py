@@ -74,6 +74,10 @@ async def test_unknown_method_redacts_nested_secret_shaped_params() -> None:
         params={
             "envelope": {"auth": {"bearer": secret}},
             "tokens": ["clean", secret, {"deep": [secret]}],
+            # A tuple value exercises the tuple recursion branch — JSON params
+            # never produce tuples, but the redactor handles them defensively
+            # (a programmatic caller could pass one).
+            "pair": (secret, "clean"),
             "n": 7,
         },
     )
@@ -85,6 +89,7 @@ async def test_unknown_method_redacts_nested_secret_shaped_params() -> None:
     assert redacted["tokens"][0] == "clean"
     assert redacted["tokens"][1] == "[REDACTED:api-key-shape]"
     assert redacted["tokens"][2]["deep"][0] == "[REDACTED:api-key-shape]"
+    assert redacted["pair"] == ("[REDACTED:api-key-shape]", "clean")
     assert redacted["n"] == 7
 
 
