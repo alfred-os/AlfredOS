@@ -80,6 +80,37 @@ def test_discord_verify_with_healthy_long_running_plugin_returns_ok(
     assert result.exit_code == 0
 
 
+def test_discord_verify_threads_operator_timeout_into_spawn_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``alfred discord verify --timeout`` reaches the spawn helper (review F7).
+
+    The option was previously parsed then ``del``'d — a dead flag. It now
+    threads through to ``spawn_plugin_via_launcher`` as ``probe_timeout_s`` so
+    an operator can lengthen the readiness window for a slow-handshaking relay.
+    """
+    from alfred.cli import discord_cmd
+    from alfred.cli._launcher_spawn import LaunchOutcome, LaunchResult
+
+    seen: dict[str, object] = {}
+
+    async def _fake_spawn(spec: object, **kwargs: object) -> LaunchOutcome:
+        seen.update(kwargs)
+        return LaunchOutcome(result=LaunchResult.HANDED_OFF, returncode=None)
+
+    monkeypatch.setattr(discord_cmd, "spawn_plugin_via_launcher", _fake_spawn, raising=False)
+    monkeypatch.setattr(
+        "alfred.cli._launcher_spawn.spawn_plugin_via_launcher", _fake_spawn, raising=True
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(discord_app, ["verify", "--timeout", "7.5"])
+
+    assert result.exit_code == 0
+    assert seen["probe_timeout_s"] == 7.5
+    assert seen["block_on_handoff"] is False
+
+
 def test_discord_cmd_does_not_import_legacy_comms_adapter() -> None:
     """The migrated module must not IMPORT the to-be-deleted in-process adapter.
 

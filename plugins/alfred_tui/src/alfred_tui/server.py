@@ -221,6 +221,28 @@ async def _serve_stdin_stdout(server: TuiServer) -> None:  # pragma: no cover - 
             _write_frame(response)
 
 
+def bind_self_id_from_env() -> str | None:
+    """Bind the launcher-supplied ``ALFRED_PLUGIN_ADAPTER_ID`` into log context.
+
+    The launcher-spawn seam (``alfred.cli._launcher_spawn``) delivers the
+    per-instance adapter id on ``ALFRED_PLUGIN_ADAPTER_ID`` for traceability
+    (review F7 — the var was previously written but read by nothing). The wire
+    ``lifecycle.start`` still carries the AUTHORITATIVE id; this is only the
+    plugin's self-id for the stderr logs it emits BEFORE that request arrives.
+    Bound into structlog contextvars so every pre-lifecycle log line carries it.
+
+    Returns the bound id (or ``None`` when the var is absent/blank, e.g. a
+    direct ``python -m alfred_tui.server`` invocation outside the launcher).
+    """
+    import os
+
+    adapter_id = os.environ.get("ALFRED_PLUGIN_ADAPTER_ID", "").strip()
+    if not adapter_id:
+        return None
+    structlog.contextvars.bind_contextvars(adapter_id=adapter_id)
+    return adapter_id
+
+
 async def serve() -> None:  # pragma: no cover - process entrypoint
     """Run the adapter's stdio loop.
 
@@ -237,6 +259,7 @@ async def serve() -> None:  # pragma: no cover - process entrypoint
     would corrupt the channel.
     """
     configure_stderr_json_logging()
+    bind_self_id_from_env()
     await _serve_stdin_stdout(build_server())
 
 
@@ -244,4 +267,4 @@ if __name__ == "__main__":  # pragma: no cover - process entrypoint
     asyncio.run(serve())
 
 
-__all__ = ["TuiServer", "build_server", "serve"]
+__all__ = ["TuiServer", "bind_self_id_from_env", "build_server", "serve"]
