@@ -38,8 +38,6 @@ payloads before any expensive work (perf-003).
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import time
 import uuid
 from collections import OrderedDict
@@ -51,7 +49,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 import structlog
 
 from alfred.audit import audit_row_schemas
-from alfred.comms_mcp import observability
+from alfred.comms_mcp import audit_hash, observability
 from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
 from alfred.comms_mcp.errors import PromoterRequiredError
 
@@ -170,23 +168,6 @@ class _SubPayloadPromoterLike(Protocol):
     async def promote(self, body: Mapping[str, object]) -> PromotedBody: ...
 
 
-def _peppered_hash(raw: str, *, pepper: str) -> str:
-    """Return the 32-hex-char HMAC-SHA256 of ``raw`` keyed on ``pepper``.
-
-    sec-010: the raw ``platform_user_id`` (and the binding verification phrase)
-    never land in an audit row — only this peppered, truncated digest does. The
-    pepper is ``audit.hash_pepper`` from the secret broker; HMAC (not a plain
-    salted hash) binds the digest to the secret so an attacker cannot reproduce
-    it without the pepper, and the 32-char truncation keeps the row compact
-    while leaving 128 bits of collision resistance.
-    """
-    return hmac.new(
-        key=pepper.encode(),
-        msg=raw.encode(),
-        digestmod=hashlib.sha256,
-    ).hexdigest()[:32]
-
-
 def _inbound_message_cheap_validate(*, platform_user_id: object, body: object) -> bool:
     """Cheap pre-check before any expensive work (perf-003).
 
@@ -260,19 +241,20 @@ async def _emit_binding_request(
     notification: InboundMessageNotification,
     *,
     audit_writer: _AuditWriterLike,
-    pepper: str,
     language: str,
 ) -> None:
     """Emit ``COMMS_BINDING_REQUESTED_FIELDS`` for a first-contact inbound.
 
     The ``platform_user_id`` and the host-generated verification phrase are both
-    peppered-hashed before they land on the row (sec-010). The phrase itself is
-    a placeholder for the Slice-5 out-of-band binding flow; its hash anchors the
-    audit row so a later flow can correlate the binding attempt without ever
-    storing the raw phrase.
+    hashed via the authoritative comms ``audit_hash`` recipe (HKDF subkey +
+    per-field domain separation, closure comms-1) before they land on the row
+    (sec-010) — so ``hash(phrase)`` can never collide with ``hash(user_id)``. The
+    phrase itself is a placeholder for the Slice-5 out-of-band binding flow; its
+    hash anchors the audit row so a later flow can correlate the binding attempt
+    without ever storing the raw phrase.
     """
     phrase = uuid.uuid4().hex
-    platform_user_id_hash = _peppered_hash(notification.platform_user_id, pepper=pepper)
+    platform_user_id_hash = audit_hash.hash_platform_user_id(notification.platform_user_id)
     await audit_writer.append_schema(
         fields=audit_row_schemas.COMMS_BINDING_REQUESTED_FIELDS,
         schema_name="COMMS_BINDING_REQUESTED_FIELDS",
@@ -281,7 +263,7 @@ async def _emit_binding_request(
         subject={
             "adapter_id": notification.adapter_id,
             "platform_user_id_hash": platform_user_id_hash,
-            "verification_phrase_hash": _peppered_hash(phrase, pepper=pepper),
+            "verification_phrase_hash": audit_hash.hash_verification_phrase(phrase),
             "requested_at": datetime.now(UTC).isoformat(),
             "language": language,
         },
@@ -302,7 +284,6 @@ async def _emit_t3_promotion(
     inbound_message_id: str,
     sub_payload_kinds: frozenset[str],
     audit_writer: _AuditWriterLike,
-    pepper: str,
 ) -> None:
     """Emit ``COMMS_INBOUND_T3_PROMOTION_FIELDS`` after a successful extract."""
     await audit_writer.append_schema(
@@ -313,7 +294,9 @@ async def _emit_t3_promotion(
         subject={
             "adapter_id": notification.adapter_id,
             "inbound_message_id": inbound_message_id,
-            "platform_user_id_hash": _peppered_hash(notification.platform_user_id, pepper=pepper),
+            "platform_user_id_hash": audit_hash.hash_platform_user_id(
+                notification.platform_user_id
+            ),
             "canonical_user_id": resolved.canonical_user_id,
             # JSONB-serializable: a frozenset is not JSON-encodable, so the
             # audit row carries a sorted list. Determinism keeps the row stable
@@ -427,8 +410,13 @@ async def process_inbound_message(
         )
         raise PromoterRequiredError(msg)
 
-    pepper = secret_broker.get("audit.hash_pepper")
-    platform_user_id_hash = _peppered_hash(notification.platform_user_id, pepper=pepper)
+    # Wire the authoritative comms hash recipe (closure comms-1) to this call's
+    # broker. ``set_broker`` is idempotent on the same broker object, so this is
+    # cheap to call every message while keeping the dependency explicit (no hidden
+    # global construction). All identity hashing below — and in handlers.py —
+    # routes through the ONE HKDF + per-field-domain-separation recipe.
+    audit_hash.set_broker(secret_broker)
+    platform_user_id_hash = audit_hash.hash_platform_user_id(notification.platform_user_id)
 
     # Pre-resolution coarse limiter (sec-003) — runs BEFORE the resolver. The
     # production caller (InboundMessageHandler) always injects its persistent
@@ -457,7 +445,6 @@ async def process_inbound_message(
         await _emit_binding_request(
             notification,
             audit_writer=audit_writer,
-            pepper=pepper,
             language="en-US",
         )
         return
@@ -513,7 +500,6 @@ async def process_inbound_message(
         inbound_message_id=inbound_message_id,
         sub_payload_kinds=sub_payload_kinds,
         audit_writer=audit_writer,
-        pepper=pepper,
     )
 
     # 5) Ingest then 6) dispatch.

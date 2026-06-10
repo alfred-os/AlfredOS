@@ -38,7 +38,8 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from alfred.comms_mcp.inbound import _peppered_hash, process_inbound_message
+from alfred.comms_mcp import audit_hash
+from alfred.comms_mcp.inbound import process_inbound_message
 from alfred.memory.models import AuditEntry
 
 from ._comms_mcp_harness import (
@@ -126,11 +127,12 @@ async def test_152_closure_seven_assertions(postgres_url: str, monkeypatch) -> N
             assert CANONICAL_SLUG.encode() not in frame
             assert _FORGED_CANONICAL.encode() not in frame
 
-        # (5) The T3 promotion row carries a PEPPERED platform_user_id_hash; the
-        #     raw platform_user_id never lands on the row.
-        pepper = host.secret_broker.get("audit.hash_pepper")
-        assert t3_row.subject["platform_user_id_hash"] == _peppered_hash(
-            PLATFORM_USER_ID, pepper=pepper
+        # (5) The T3 promotion row carries a KEYED-HASHED platform_user_id_hash;
+        #     the raw platform_user_id never lands on the row. The production path
+        #     wired the authoritative ``audit_hash`` recipe to host.secret_broker
+        #     (H1), so the expected digest is recomputed through the same helper.
+        assert t3_row.subject["platform_user_id_hash"] == audit_hash.hash_platform_user_id(
+            PLATFORM_USER_ID
         )
         assert PLATFORM_USER_ID not in str(t3_row.subject)
         assert t3_row.subject["adapter_id"] == "alfred_comms_test"
