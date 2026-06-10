@@ -96,16 +96,34 @@ _FRAME_TIMEOUT_S = 5.0
 
 
 class _RecordedResolver:
-    """A recorded ``IdentityResolver``: counts calls + records PLATFORM kwargs."""
+    """A recorded ``IdentityResolver``: counts calls + records PLATFORM kwargs.
+
+    ``canonical_user_id`` is DERIVED from the wire's ``platform_user_id`` at
+    resolve time (not a contrived constant), so the "canonical id never on the
+    wire" assertion tests a REAL substitution: a value computed FROM a wire
+    field must still not appear on any captured wire frame (review F8). It is
+    populated to ``None`` until the first ``resolve`` so a test that asserts on
+    it after the host call reads the substituted value.
+    """
 
     def __init__(self) -> None:
         self.resolve_calls = 0
         self.last_kwargs: dict[str, str] = {}
-        self.canonical_user_id = "user:operator"
+        self.canonical_user_id: str | None = None
 
     async def resolve(self, *, adapter_id: str, platform_user_id: str) -> ResolvedInbound:
         self.resolve_calls += 1
         self.last_kwargs = {"adapter_id": adapter_id, "platform_user_id": platform_user_id}
+        # The host maps the PLATFORM id to an internal canonical id. Derive it
+        # from a stable HASH of the platform id so the downstream non-leak
+        # assertion tests a genuine platform->canonical substitution (a value
+        # computed FROM the wire) WITHOUT embedding the raw platform substring —
+        # the canonical form must be opaque, mirroring a real resolver that
+        # never round-trips the raw handle into a canonical id or an audit row.
+        import hashlib
+
+        digest = hashlib.sha256(platform_user_id.encode()).hexdigest()[:16]
+        self.canonical_user_id = f"user:{digest}"
         return ResolvedInbound(
             canonical_user_id=self.canonical_user_id,
             persona="alfred",
@@ -213,9 +231,22 @@ async def test_tui_inbound_reaches_process_inbound_message(postgres_url: str) ->
 
     # The canonical id is threaded host-side into ingest, never onto the wire.
     assert orchestrator.ingested, "production must have called ingest"
-    assert orchestrator.ingested[0]["canonical_user_id"] == resolver.canonical_user_id
+    canonical = resolver.canonical_user_id
+    assert canonical is not None
+    assert orchestrator.ingested[0]["canonical_user_id"] == canonical
+    # The canonical id is a genuine SUBSTITUTION of the on-wire platform id
+    # (review F8): it is the resolver's deterministic mapping of the EXACT
+    # platform_user_id that crossed the wire — recomputing the mapping from the
+    # frame's own platform id reproduces it. So the non-leak assertion below has
+    # teeth: it is testing that a value derived from a real wire field does not
+    # itself appear on the wire, not a constant that was never on it.
+    import hashlib
+
+    expected = f"user:{hashlib.sha256(notification.platform_user_id.encode()).hexdigest()[:16]}"
+    assert canonical == expected
     notification_dump = json.dumps(notification.model_dump(mode="json"))
-    assert resolver.canonical_user_id not in notification_dump
+    assert canonical not in notification_dump
+    assert notification.platform_user_id in notification_dump  # the platform id IS on the wire
 
 
 async def test_tui_inbound_records_peppered_audit_row(postgres_url: str) -> None:
