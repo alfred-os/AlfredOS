@@ -110,15 +110,40 @@ def test_registered_optional_classifier_runs() -> None:
     assert ran == ["scanner_test_optional"]
 
 
-def test_optional_classifiers_cannot_override_required() -> None:
-    # The required set is authoritative: passing an optional set that omits a
-    # required classifier still runs the required one.
+def test_optional_classifiers_cannot_suppress_nonempty_required() -> None:
+    # The required set is AUTHORITATIVE against a NON-EMPTY required set (CR
+    # #232): a plugin's optional set that omits the required classifier — and
+    # even names an unregistered one — must NOT suppress the required classifier.
+    # It still runs. (The reference plugin requires none, so this drives a
+    # non-empty required set through ``_required_override``.)
+    ran: list[str] = []
+
+    @register_classifier(kind="alfred_comms_test", name="scanner_test_required")
+    class _RequiredClassifier:
+        def classify(self, body: dict[str, object]) -> tuple[object, ...]:
+            ran.append("scanner_test_required")
+            return ()
+
+    scanner = InboundContentScanner()
+    scanned = scanner.scan(
+        adapter_kind="alfred_comms_test",
+        body={"content": "hi"},
+        # An optional set that does NOT include the required name and points at
+        # an unregistered classifier — neither can remove the required entry.
+        classifiers_optional=frozenset({"some_unregistered_optional"}),
+        _required_override=frozenset({"scanner_test_required"}),
+    )
+    assert scanned.classifiers_run == frozenset({"scanner_test_required"})
+    assert ran == ["scanner_test_required"]
+
+
+def test_empty_required_with_unregistered_optional_runs_nothing() -> None:
+    # Boundary case kept from the prior test: with an empty required set, an
+    # unregistered optional name is skipped silently (advisory) and nothing runs.
     scanner = InboundContentScanner()
     scanned = scanner.scan(
         adapter_kind="alfred_comms_test",
         body={"content": "hi"},
         classifiers_optional=frozenset({"some_optional"}),
     )
-    # Reference plugin requires none; optional ones that are not registered are
-    # skipped silently (advisory), required set stays empty.
     assert scanned.classifiers_run == frozenset()
