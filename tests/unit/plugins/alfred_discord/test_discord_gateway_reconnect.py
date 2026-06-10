@@ -3,11 +3,12 @@
 ``AlfredDiscordBot`` is a ``commands.Bot`` subclass whose ``on_message`` /
 ``on_message_edit`` listeners normalise a Discord event onto an
 ``inbound.message`` notification and enqueue it for stdio emission, and whose
-``on_disconnect`` / ``on_ready`` track an exponential-backoff reconnect schedule.
+``on_disconnect`` / ``on_ready`` track a reconnect OBSERVABILITY counter (H3:
+discord.py owns the reconnect loop + backoff; the bot does not sleep).
 ``on_error`` forwards an uncaught event-handler exception to the crash emitter.
 
 All Discord inputs come from ``discord_mock_factory`` (closure test-1); the bot's
-collaborators (sink, crash forwarder, sleeper) are injected so the listeners are
+collaborators (sink, crash forwarder) are injected so the listeners are
 exercised without a live gateway.
 """
 
@@ -38,19 +39,10 @@ class _CrashSpy:
         self.handled.append(exc)
 
 
-class _BackoffSpy:
-    def __init__(self) -> None:
-        self.sleeps: list[float] = []
-
-    async def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-
-
 def _bot(
     sink: _RecordingSink,
     *,
     crash: _CrashSpy | None = None,
-    backoff: _BackoffSpy | None = None,
 ) -> AlfredDiscordBot:
     return AlfredDiscordBot(
         adapter_id=_ADAPTER,
@@ -58,7 +50,6 @@ def _bot(
         sink=sink,
         crash_emitter=crash or _CrashSpy(),
         channel_listen_set=frozenset({10}),
-        sleeper=(backoff or _BackoffSpy()).sleep,
     )
 
 
@@ -115,8 +106,7 @@ async def test_reconnect_counter_resets_after_inbound(
     discord_mock_factory: DiscordMockFactory,
 ) -> None:
     sink = _RecordingSink()
-    backoff = _BackoffSpy()
-    bot = _bot(sink, backoff=backoff)
+    bot = _bot(sink)
     await bot.on_disconnect()
     await bot.on_disconnect()
     assert bot.reconnect_attempts == 2
@@ -126,14 +116,16 @@ async def test_reconnect_counter_resets_after_inbound(
     assert bot.reconnect_attempts == 0
 
 
-async def test_backoff_schedule_is_capped_and_jittered() -> None:
+async def test_on_disconnect_does_not_sleep_or_schedule_retry() -> None:
+    # H3: discord.py owns the reconnect loop + backoff; on_disconnect must only
+    # bump the observability counter and return promptly — no sleep, no retry
+    # scheduling. The bot no longer accepts a sleeper, so a dead custom backoff
+    # cannot regress in.
     sink = _RecordingSink()
     bot = _bot(sink)
-    # The schedule is min(2 ** attempts, 60) with +-20% jitter.
-    base_0 = bot.backoff_seconds(0)
-    base_6 = bot.backoff_seconds(6)  # 2**6 = 64 -> capped at 60
-    assert 0.8 <= base_0 <= 1.2  # 2**0 = 1, +-20%
-    assert 48.0 <= base_6 <= 72.0  # cap 60, +-20%
+    assert not hasattr(bot, "backoff_seconds")
+    await bot.on_disconnect()
+    assert bot.reconnect_attempts == 1
 
 
 async def test_on_error_forwards_to_crash_emitter() -> None:

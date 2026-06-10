@@ -1,10 +1,19 @@
-"""Discord gateway: ``commands.Bot`` subclass with reconnect (Task H1, #206).
+"""Discord gateway: ``commands.Bot`` subclass (Task H1, #206).
 
 :class:`AlfredDiscordBot` is the discord.py wrapper that turns live Discord
-gateway events into ``inbound.message`` notifications and tracks an
-exponential-backoff reconnect schedule. It declares a least-privilege intent set
-(messages + content + DMs + guilds; presence/voice/integration intents OFF), and
-forwards any uncaught event-handler exception to the crash emitter.
+gateway events into ``inbound.message`` notifications. It declares a
+least-privilege intent set (messages + content + DMs + guilds;
+presence/voice/integration intents OFF), and forwards any uncaught event-handler
+exception to the crash emitter.
+
+Reconnect ownership (H3). ``bot.start(token)`` runs with discord.py's default
+``reconnect=True``, so the LIBRARY owns the gateway reconnect loop and its
+exponential backoff. The bot does NOT implement its own backoff — a custom
+``on_disconnect`` sleep would govern nothing (the library's reconnect happens
+independently of any user sleep). ``reconnect_attempts`` is retained purely as an
+OBSERVABILITY counter: it increments on each ``on_disconnect`` and zeroes on the
+next inbound, giving the health snapshot a cheap "how flappy is this connection"
+signal without pretending to drive timing.
 
 Trust boundary: an inbound Discord message is adversary-authorable platform
 content. The bot does NOT promote it — :func:`inbound_emitter.normalise` marshals
@@ -17,10 +26,9 @@ unit-testable without a live gateway connection.
 
 from __future__ import annotations
 
-import random
 import sys
-from collections.abc import Awaitable, Callable, Set
-from typing import Final, Protocol, cast
+from collections.abc import Set
+from typing import Protocol, cast
 
 import discord
 import structlog
@@ -34,14 +42,6 @@ from plugins.alfred_discord.notifications import (
 )
 
 _log = structlog.get_logger(__name__)
-
-# Exponential-backoff reconnect ceiling (seconds) and jitter fraction. The cap
-# bounds the worst-case retry interval; the jitter avoids a thundering-herd of
-# adapters reconnecting in lockstep after a shared Discord outage.
-_BACKOFF_CAP_SECONDS: Final[float] = 60.0
-_JITTER_FRACTION: Final[float] = 0.2
-
-_Sleeper = Callable[[float], Awaitable[None]]
 
 
 class _CrashForwarder(Protocol):
@@ -77,7 +77,6 @@ class AlfredDiscordBot(commands.Bot):
         sink: NotificationSink,
         crash_emitter: _CrashForwarder,
         channel_listen_set: Set[int],
-        sleeper: _Sleeper,
     ) -> None:
         super().__init__(command_prefix="!", intents=_least_privilege_intents())
         self._adapter_id = adapter_id
@@ -85,8 +84,18 @@ class AlfredDiscordBot(commands.Bot):
         self._sink = sink
         self._crash_emitter = crash_emitter
         self._channel_listen_set = channel_listen_set
-        self._sleeper = sleeper
         self.reconnect_attempts = 0
+
+    @property
+    def crash_forwarder(self) -> _CrashForwarder:
+        """The crash emitter the bot forwards uncaught errors to.
+
+        Exposed so the gateway adapter (which owns the detached ``start`` task)
+        can route a task-level exception — a startup login failure or a runtime
+        gateway crash that escapes the ``start`` coroutine — through the SAME
+        crash path the event-handler ``on_error`` uses (C1).
+        """
+        return self._crash_emitter
 
     async def on_message(self, message: discord.Message) -> None:
         """Normalise + enqueue an inbound message; reset the reconnect counter."""
@@ -98,16 +107,18 @@ class AlfredDiscordBot(commands.Bot):
         await self._emit_inbound(after)
 
     async def on_disconnect(self) -> None:
-        """Count a gateway disconnect; back off before discord.py reconnects."""
+        """Count a gateway disconnect for observability (H3).
+
+        discord.py owns the reconnect loop + its backoff (``reconnect=True``), so
+        this listener does NOT sleep or schedule a retry — it only bumps the
+        observability counter and logs. The counter zeroes on the next inbound.
+        """
         self.reconnect_attempts += 1
-        delay = self.backoff_seconds(self.reconnect_attempts)
         _log.warning(
             "comms.gateway.disconnected",
             adapter=self._adapter_id,
             attempt=self.reconnect_attempts,
-            backoff_seconds=delay,
         )
-        await self._sleeper(delay)
 
     async def on_ready(self) -> None:
         """Connection re-established — log; the counter zeroes on the next inbound."""
@@ -128,12 +139,6 @@ class AlfredDiscordBot(commands.Bot):
                 event_method=event_method,
             )
             self._crash_emitter.handle_crash(exc)
-
-    def backoff_seconds(self, attempt: int) -> float:
-        """Return ``min(2 ** attempt, cap)`` with ±20% jitter (thundering-herd guard)."""
-        base = min(2.0**attempt, _BACKOFF_CAP_SECONDS)
-        jitter = base * _JITTER_FRACTION
-        return base + random.uniform(-jitter, jitter)  # noqa: S311 - jitter, not crypto
 
     async def _emit_inbound(self, message: discord.Message) -> None:
         """Normalise ``message`` and enqueue the notification if not ignored.
