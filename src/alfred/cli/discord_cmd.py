@@ -180,4 +180,9 @@ def _build_launch_spec() -> PluginLaunchSpec:
         import_roots=(root,),
         # A long-running relay, not a foreground app — pipe its stdio.
         inherit_stdio=False,
+        # ``kind="full"`` (manifest sandbox.kind): the Discord relay is
+        # adversary-facing with open egress (#230). The launcher-spawn seam
+        # hands it a SCRUBBED, allowlisted env so an operator's exported
+        # ANTHROPIC_API_KEY / DISCORD_BOT_TOKEN never crosses into it (F2).
+        sandbox_kind="full",
     )
