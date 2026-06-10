@@ -34,11 +34,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+from alfred.comms_mcp import audit_hash
 from alfred.comms_mcp.classifier_registry import (
     MARKER_NO_CLASSIFIERS_NEEDED,
     REQUIRED_CLASSIFIERS_BY_KIND,
 )
-from alfred.comms_mcp import audit_hash
 from alfred.comms_mcp.inbound import process_inbound_message
 from tests.adversarial.payload_schema import AdversarialPayload
 from tests.unit.comms_mcp._inbound_spies import (

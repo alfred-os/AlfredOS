@@ -394,9 +394,8 @@ async def process_inbound_message(
     # wire-asserted ``sub_payload_refs`` — the exact untrusted-input-trust the
     # required classifier set exists to prevent. Refuse loudly (audit + raise)
     # rather than processing the message, so a misconfigured wiring fails closed.
-    if (
-        sub_payload_promoter is None
-        and REQUIRED_CLASSIFIERS_BY_KIND.get(notification.adapter_id, frozenset())
+    if sub_payload_promoter is None and REQUIRED_CLASSIFIERS_BY_KIND.get(
+        notification.adapter_id, frozenset()
     ):
         await _emit_promoter_required(notification, audit_writer=audit_writer)
         _log.error(
