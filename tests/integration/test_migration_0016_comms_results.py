@@ -21,7 +21,17 @@ ALEMBIC_INI_PATH = "alembic.ini"
 
 pytestmark = pytest.mark.integration
 
-_COMMS_RESULTS = ("promoted", "binding_requested", "dropped", "capped", "allowed", "failed")
+# Mirror migration 0016's ``_COMMS_ADDITIONS`` exactly so the test breaks if the
+# migration's comms-only result set drifts from what the audit emitters use.
+_COMMS_RESULTS = (
+    "promoted",
+    "binding_requested",
+    "dropped",
+    "capped",
+    "allowed",
+    "failed",
+    "restart_requested",
+)
 
 
 @pytest.fixture
@@ -66,12 +76,18 @@ def _insert_audit_row(engine: sa.Engine, *, result: str) -> None:
         )
 
 
+# Pin every assertion to revision ``0016`` — NOT ``head`` — so this file keeps
+# isolating the 0016 CHECK change. With ``head`` a later migration that also
+# permits these values (or restores the constraint) would mask a broken 0016.
+_REV = "0016"
+
+
 @pytest.mark.parametrize("result", _COMMS_RESULTS)
 def test_0016_accepts_comms_result_values(
     alembic_cfg: AlembicConfig, postgres_url: str, result: str
 ) -> None:
-    """After upgrade head, every comms result value is accepted by the CHECK."""
-    alembic_command.upgrade(alembic_cfg, "head")
+    """After upgrade to 0016, every comms result value is accepted by the CHECK."""
+    alembic_command.upgrade(alembic_cfg, _REV)
     sync_url = postgres_url.replace("asyncpg", "psycopg2")
     engine = sa.create_engine(sync_url, future=True)
     try:
@@ -89,12 +105,52 @@ def test_0016_accepts_comms_result_values(
 
 def test_0016_still_refuses_unknown_result(alembic_cfg: AlembicConfig, postgres_url: str) -> None:
     """The CHECK is still closed — an unknown result value is refused."""
-    alembic_command.upgrade(alembic_cfg, "head")
+    alembic_command.upgrade(alembic_cfg, _REV)
     sync_url = postgres_url.replace("asyncpg", "psycopg2")
     engine = sa.create_engine(sync_url, future=True)
     try:
         _insert_user(engine, "op")
         with pytest.raises(sa.exc.IntegrityError):
             _insert_audit_row(engine, result="not_a_real_result")
+    finally:
+        engine.dispose()
+
+
+def test_0016_downgrade_deletes_comms_rows_and_restores_0015_check(
+    alembic_cfg: AlembicConfig, postgres_url: str
+) -> None:
+    """The destructive downgrade path: comms rows are deleted; 0015 rejects them.
+
+    ``0016.downgrade()`` reverts the CHECK to the migration-0014 domain and
+    LOUDLY deletes any audit_log row carrying a comms-only result value (the
+    ``RAISE NOTICE`` destruction discipline). This guards that rollback contract
+    so it cannot regress silently: a comms row inserted under 0016 must be gone
+    after the downgrade, a base-domain row must survive, and re-inserting a comms
+    result against the restored 0015 CHECK must be refused.
+    """
+    alembic_command.upgrade(alembic_cfg, _REV)
+    sync_url = postgres_url.replace("asyncpg", "psycopg2")
+    engine = sa.create_engine(sync_url, future=True)
+    try:
+        _insert_user(engine, "op")
+        # A comms-only row (deleted by downgrade) + a base-domain row (survives).
+        _insert_audit_row(engine, result="promoted")
+        _insert_audit_row(engine, result="success")
+
+        alembic_command.downgrade(alembic_cfg, "0015")
+
+        with engine.begin() as conn:
+            comms_count = conn.execute(
+                sa.text("SELECT count(*) FROM audit_log WHERE result = 'promoted'")
+            ).scalar_one()
+            base_count = conn.execute(
+                sa.text("SELECT count(*) FROM audit_log WHERE result = 'success'")
+            ).scalar_one()
+        assert comms_count == 0, "downgrade must delete comms-only rows"
+        assert base_count == 1, "downgrade must not touch base-domain rows"
+
+        # The restored 0015 CHECK refuses comms result values again.
+        with pytest.raises(sa.exc.IntegrityError):
+            _insert_audit_row(engine, result="promoted")
     finally:
         engine.dispose()
