@@ -57,7 +57,7 @@ adapter_kind: Final[frozenset[str]] = frozenset(
     {
         "alfred_comms_test",  # reference plugin — PR-S4-8
         "discord",  # PR-S4-9 — with its BODY_FIELD_BY_KIND + classifier entries
-        # "tui"      — added by PR-S4-10
+        "tui",  # PR-S4-10 — operator-local terminal; plain-text body, no sub-payloads
     }
 )
 
@@ -69,7 +69,7 @@ BODY_FIELD_BY_KIND: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
         "alfred_comms_test": "content",
         "discord": "content",  # PR-S4-9 (spec §8.6)
-        # "tui":       "content",   # PR-S4-10
+        "tui": "content",  # PR-S4-10 — operator keystroke-batch body text
         # "telegram":  "text",      # post-MVP
     }
 )

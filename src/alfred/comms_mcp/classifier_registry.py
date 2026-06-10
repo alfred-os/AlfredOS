@@ -39,7 +39,7 @@ REQUIRED_CLASSIFIERS_BY_KIND: Final[MappingProxyType[str, frozenset[str]]] = Map
     {
         "alfred_comms_test": frozenset(),  # plain-text only — see MARKER below
         "discord": frozenset({"discord_sub_payloads"}),  # PR-S4-9
-        # "tui":     frozenset(),                          # PR-S4-10
+        "tui": frozenset(),  # PR-S4-10 — plain-text only; see MARKER below
     }
 )
 
@@ -50,6 +50,11 @@ REQUIRED_CLASSIFIERS_BY_KIND: Final[MappingProxyType[str, frozenset[str]]] = Map
 MARKER_NO_CLASSIFIERS_NEEDED: Final[MappingProxyType[str, str]] = MappingProxyType(
     {
         "alfred_comms_test": ("reference plugin emits plain-text only; no sub-payloads possible"),
+        "tui": (
+            "operator-local terminal: the operator types plain text into the "
+            "input widget; the TUI has no platform sub-payloads (no embeds, "
+            "attachments, link unfurls) — nothing for a classifier to promote"
+        ),
     }
 )
 

@@ -53,6 +53,15 @@ def test_discord_requires_sub_payload_classifier() -> None:
     assert REQUIRED_CLASSIFIERS_BY_KIND["discord"] == frozenset({"discord_sub_payloads"})
 
 
+def test_tui_has_empty_classifier_set_with_marker() -> None:
+    # PR-S4-10: the TUI adapter kind is the plain-text / §8.5 exception — the
+    # operator types plain text into the input widget; there are no platform
+    # sub-payloads (no embeds, attachments, unfurls). Its required-classifier
+    # set is therefore empty, justified by a MARKER_NO_CLASSIFIERS_NEEDED entry.
+    assert REQUIRED_CLASSIFIERS_BY_KIND["tui"] == frozenset()
+    assert "tui" in MARKER_NO_CLASSIFIERS_NEEDED
+
+
 def test_every_required_classifier_is_registered_after_import() -> None:
     # The required table is only meaningful if each named classifier is actually
     # registered. Re-run the canonical import-time registration against the live
