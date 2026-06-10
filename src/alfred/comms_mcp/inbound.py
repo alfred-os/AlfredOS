@@ -184,7 +184,10 @@ def _inbound_message_cheap_validate(*, platform_user_id: object, body: object) -
         return False
     if not platform_user_id or len(platform_user_id) > _MAX_PLATFORM_USER_ID_LEN:
         return False
-    return isinstance(body, Mapping)
+    # An empty mapping carries no body — refuse it at the cheap gate rather than
+    # paying for Pydantic validation + resolver lookup on content-free traffic
+    # (perf-003 / CR #232 follow-up). ``bool({})`` is ``False``.
+    return isinstance(body, Mapping) and bool(body)
 
 
 class _PreResolutionLimiter:
