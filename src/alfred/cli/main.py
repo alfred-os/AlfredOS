@@ -1,16 +1,24 @@
 """AlfredOS CLI entry point.
 
-This is the single bootstrap that constructs the full slice-1/2 graph:
-``Settings`` → ``SecretBroker`` → ``ProviderRouter`` → ``IdentityResolver``
-→ ``BudgetGuard`` → ``WorkingMemoryPool`` → ``Orchestrator`` →
-``AlfredTuiApp``. The CLI is the imperative shell; every subsystem below
-is a pure-ish core that gets its dependencies passed in.
+The CLI is the imperative shell. The lighter Settings-only surfaces
+(``status``, ``alfred user *``) construct just the part of the slice-1/2
+graph they need (``Settings`` → ``SecretBroker`` → ``ProviderRouter`` /
+``IdentityResolver``) inside their own callbacks.
+
+``chat`` no longer builds an in-process Textual graph. The comms-MCP
+flag-day (PR-S4-10, #206) inverts the model: ``chat`` SPAWNS the
+``plugins/alfred_tui`` MCP plugin through ``bin/alfred-plugin-launcher.sh``
+(via :mod:`alfred.cli._launcher_spawn`) and the already-running daemon owns
+the orchestrator graph. The in-process ``Orchestrator`` → ``AlfredTuiApp``
+chain is gone from this layer; ``_chat_main`` is a thin launcher caller.
+(End-to-end ``alfred chat`` is not yet functional — the TUI plugin ships the
+wire contract only; see issue #237.)
 
 The ``status`` command exits zero after printing a short health summary so
 operators can sanity-check their `.env` before launching the TUI. The
-``chat`` command opens the Textual UI. Friendly, ``t()``-routed error
+``chat`` command spawns the TUI plugin. Friendly, ``t()``-routed error
 messages are printed (and a non-zero exit code returned) when ``Settings``
-fail to load or Postgres is unreachable — never a raw traceback.
+fail to load or the launcher/daemon is unavailable — never a raw traceback.
 
 CLAUDE.md hard rules honoured at this layer:
 
