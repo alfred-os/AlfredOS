@@ -14,6 +14,7 @@ The four ``@runtime_checkable`` protocols (``InboundHandler``, ``BindingHandler`
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -48,8 +49,12 @@ from ._inbound_spies import (
 
 
 def test_protocols_declare_process() -> None:
+    # CR #232: assert ``process`` is an async coroutine function, not merely
+    # present -- so a regression to a sync callable / property fails the contract.
     for proto in (InboundHandler, BindingHandler, RateLimitHandler, CrashHandler):
-        assert hasattr(proto, "process")
+        process = getattr(proto, "process", None)
+        assert process is not None
+        assert inspect.iscoroutinefunction(process)
 
 
 # --- InboundHandler ---------------------------------------------------------
