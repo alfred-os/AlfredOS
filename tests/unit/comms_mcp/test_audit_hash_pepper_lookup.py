@@ -117,3 +117,24 @@ def test_each_helper_is_deterministic_under_a_fixed_pepper() -> None:
     assert hash_channel_id("x") == hash_channel_id("x")
     assert hash_guild_id("x") == hash_guild_id("x")
     assert hash_verification_phrase("x") == hash_verification_phrase("x")
+
+
+def test_set_broker_for_test_always_rederives_even_on_same_object() -> None:
+    """The test seam must NEVER leak a stale subkey across a re-set.
+
+    ``set_broker`` short-circuits when re-wired with the SAME broker object (so the
+    inbound hot-path can call it per message without thrashing the cache). The TEST
+    seam must not inherit that short-circuit: a test that mutates a reused stub's
+    pepper and re-injects the SAME object must observe the new pepper, else a stale
+    subkey derived from the prior pepper silently produces wrong hashes.
+    """
+    broker = _StubBroker(_PEPPER_1)
+    audit_hash.set_broker_for_test(broker)
+    first = hash_platform_user_id("123456789")
+
+    # Mutate the SAME broker object's pepper, then re-inject it via the test seam.
+    broker._pepper = _PEPPER_2
+    audit_hash.set_broker_for_test(broker)
+    second = hash_platform_user_id("123456789")
+
+    assert first != second, "set_broker_for_test must drop the stale derived subkey"

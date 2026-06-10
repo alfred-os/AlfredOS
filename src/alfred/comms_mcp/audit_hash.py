@@ -169,11 +169,19 @@ def hash_verification_phrase(raw: str) -> str:
 
 
 def set_broker_for_test(broker: _BrokerLike) -> None:
-    """Test seam: inject a stub broker and clear the cache.
+    """Test seam: inject a stub broker and ALWAYS drop the derived subkey.
 
     Distinct public name from :func:`set_broker` so a grep for production
-    boot-wiring versus test wiring stays unambiguous; both reset the cache.
+    boot-wiring versus test wiring stays unambiguous. Unlike :func:`set_broker`
+    — which short-circuits on the SAME broker object to keep the inbound hot-path
+    from thrashing the cache — this seam UNCONDITIONALLY clears the cached subkey.
+    A test that re-injects the same stub object after mutating its pepper (or that
+    swaps a broker whose previous subkey would otherwise leak) must always observe
+    a fresh derive; an inherited short-circuit would silently reuse a stale subkey
+    and produce wrong hashes across the reset.
     """
+    global _comms_subkey
+    _comms_subkey = None
     set_broker(broker)
 
 
