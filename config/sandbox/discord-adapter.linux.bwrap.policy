@@ -1,0 +1,115 @@
+# Discord-adapter bwrap sandbox policy (Linux) — PR-S4-9, spec §7.9, ADR-0015/ADR-0016.
+#
+# This is the REAL OS-isolation policy the launcher resolves for the
+# `alfred.discord` plugin (manifest `[sandbox] kind = "full"`,
+# `[sandbox.policy_refs] linux = ...`). It is parsed by `read_policy_toml`
+# into a `SandboxPolicy` and translated by `policy_to_bwrap_flags` into the
+# bwrap CLI flag list the launcher execs (see
+# `src/alfred/plugins/sandbox_policy.py`).
+#
+# Threat model. The Discord adapter ingests adversary-controlled bytes from
+# ARBITRARY Discord users — embed titles, attachment filenames, message
+# content, reply targets. Any one of those is an injection vector. The PR #205
+# round-2 sec-1 closure dropped the first-party-relay `kind: none` carve-out:
+# the cost of bwrap is acceptable given the surface. The plugin opens its
+# Discord WSS connection INSIDE this sandbox. A compromise in the event-parsing
+# path (a crafted gateway frame triggering a discord.py / parser bug) must NOT
+# escalate beyond the kernel-enforced containment below.
+#
+# Relationship to the quarantined-LLM policy. This policy MIRRORS
+# `quarantined-llm.linux.bwrap.policy` structurally — same fs/namespace
+# containment, same fd-3 broker channel, same documented egress gap — with ONE
+# deliberate addition: the Discord adapter needs outbound TLS to the Discord
+# gateway, so it ro-binds `/etc/ssl/certs` (the system CA bundle) which the
+# quarantined LLM does not. See the cert-bind note below.
+#
+# ----------------------------------------------------------------------------
+# Filesystem confinement
+# ----------------------------------------------------------------------------
+# Read-only binds for the interpreter + its shared libraries ONLY, plus the
+# system CA bundle. We bind the usrmerged system trees (/usr, /lib, /lib64)
+# read-only so CPython + discord.py can exec and dynamically link, and NOTHING
+# else:
+#
+#   * NO /etc bind (other than the explicit /etc/ssl/certs read below) —
+#     /etc/passwd, /etc/shadow, ssh configs, the host's secrets-in-config all
+#     stay invisible.
+#   * /etc/ssl/certs IS bound read-only. SECURITY-RELEVANT DIFFERENCE from the
+#     quarantined-LLM policy: the Discord plugin establishes a TLS (WSS)
+#     connection to `gateway.discord.gg` and a REST connection to
+#     `discord.com/api`; verifying the server certificate chain requires the
+#     system CA bundle. Binding ONLY `/etc/ssl/certs` (not all of /etc) keeps
+#     host account/secret material invisible while letting TLS verification
+#     succeed. This is the minimal cert surface — no `/etc/ssl/private`, no
+#     openssl config, no other /etc path.
+#   * NO /bin bind — on usrmerged Linux /bin is a symlink to /usr/bin; the
+#     PRIMARY exec containment is `--unshare-pid` + `--die-with-parent` + the
+#     empty writable surface. Tightening the interpreter bind to the exact
+#     CPython prefix (dropping the broad /usr) is tracked in #230.
+ro_binds = [
+  ["/usr", "/usr"],
+  ["/lib", "/lib"],
+  ["/lib64", "/lib64"],
+  ["/etc/ssl/certs", "/etc/ssl/certs"],
+]
+
+# A single writable scratch directory, backed by an ephemeral tmpfs that dies
+# with the sandbox. The Discord plugin needs a place for its on-disk
+# idempotency store + scratch; this gives it one with NO host-filesystem reach.
+# The tmpfs is fresh per launch and discarded on exit — nothing the plugin
+# writes survives or leaks onto the host.
+tmpfs = ["/run/alfred/discord"]
+
+# A synthesised minimal /dev (null/zero/full/random/urandom/tty) — NOT the
+# host's /dev (no device passthrough). Required: CPython aborts at startup
+# without /dev/urandom (`_Py_HashRandomization_Init`).
+dev = true
+
+# Namespace isolation. We unshare:
+#   * pid    — the sandboxed process cannot see or signal host PIDs, and
+#              `--die-with-parent` reaps the whole subtree when the Supervisor
+#              exits. This is the load-bearing process-fork/exec containment.
+#   * uts    — its own hostname; cannot read the host's.
+#   * cgroup — cannot observe/escape the host cgroup hierarchy.
+#   * ipc    — cannot reach host System V IPC / POSIX shm.
+#
+# We DELIBERATELY DO NOT unshare `net`. SECURITY-CRITICAL — read the egress
+# note below.
+unshare = ["pid", "uts", "cgroup", "ipc"]
+
+# Reap the sandbox subtree when the Supervisor process exits — no orphaned
+# Discord plugin can outlive its parent and keep relaying T3 content.
+die_with_parent = true
+
+# fd 3 carries the Supervisor's broker channel (the plugin fetches
+# `discord_bot_token` over the broker at lifecycle.start; the broker substitutes
+# at the JSON-RPC boundary so the raw token never lands in env/argv). fd 3 is
+# inherited by default (NO CLI flag — see the `policy_to_bwrap_flags` docstring
+# + #218). `keep_fds` is the validated DECLARATION that fd 3 must survive;
+# omitting it is refused at parse time (`kind_full_requires_keep_fd_3`).
+keep_fds = [3]
+
+# ============================================================================
+# !! EGRESS IS CURRENTLY UNRESTRICTED — tracked in #230 !!
+# ============================================================================
+# The Discord plugin needs outbound network: a persistent WSS connection to
+# `gateway.discord.gg` and REST calls to `discord.com/api`. The simple
+# `SandboxPolicy` schema this file uses cannot express "egress to the Discord
+# endpoints ONLY" — there is no `network.outbound_allowlist` field yet.
+#
+# Consequently we do NOT `unshare net`: the sandbox has FULL outbound network.
+# Filesystem and process/namespace containment are STILL kernel-enforced, but a
+# compromised Discord plugin could in principle open an outbound connection to
+# an arbitrary host (data-exfiltration of whatever it holds in-process — the T3
+# content it relays + the Discord bot token). This is an ACCEPTED, DOCUMENTED
+# gap for the mid-flight slice state, IDENTICAL to the quarantined-LLM posture.
+#
+# Before the Discord adapter goes live against production traffic, #230 MUST
+# land the Discord-only egress allowlist (a `network.outbound_allowlist` field
+# + the bwrap `--unshare-net` + a slirp/pasta-style filtered forwarder pinned to
+# `gateway.discord.gg` + `discord.com`, OR an egress proxy the sandbox is pinned
+# to). The manifest's `[network] allowlist` already documents the INTENDED
+# Discord-only cap; #230 makes the policy ENFORCE it at the kernel boundary.
+# Until then this policy is for resolver/containment testing, not production
+# Discord traffic.
+# ============================================================================
