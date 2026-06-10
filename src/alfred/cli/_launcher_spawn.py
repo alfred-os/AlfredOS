@@ -99,6 +99,12 @@ class PluginLaunchSpec:
             plugin's package + the core ``alfred.comms_mcp`` protocol resolve.
         inherit_stdio: When true, the child inherits the CLI's stdio (the TUI
             needs the PTY); when false, stdio is piped.
+        sandbox_kind: The plugin's manifest ``sandbox.kind`` (``"none"`` |
+            ``"full"`` | ...). Drives the child-env posture (review F2): a
+            non-``"none"`` plugin is adversary-facing (e.g. the Discord relay,
+            ``kind="full"``, open egress per #230) and gets a SCRUBBED,
+            allowlisted env so an operator's exported secrets never cross into
+            it; ``"none"`` is the operator-local TUI and keeps full passthrough.
     """
 
     plugin_id: str
@@ -107,23 +113,79 @@ class PluginLaunchSpec:
     adapter_id: str
     import_roots: tuple[Path, ...]
     inherit_stdio: bool
+    sandbox_kind: str
+
+
+#: Env keys forwarded verbatim into a scrubbed (adversary-facing) child. These
+#: are the launcher's OWN operational controls (it reads them from the env we
+#: hand it to resolve the per-OS sandbox policy + UID drop — see
+#: ``bin/alfred-plugin-launcher.sh`` ``ENVIRONMENT``) plus the locale + PATH the
+#: child interpreter needs. NO secret-bearing key (``ANTHROPIC_API_KEY``,
+#: ``DISCORD_BOT_TOKEN``, ...) is on this list — that is the whole point of F2.
+_SCRUBBED_ENV_ALLOWLIST: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    # Launcher control surface (parent env -> launcher).
+    "ALFRED_ENVIRONMENT",
+    "ALFRED_SANDBOX_POLICY_DIR",
+    "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED",
+    "ALFRED_PLUGIN_UID",
+    "FAKE_UNAME",
+)
+
+
+def _spec_env(spec: PluginLaunchSpec, base: dict[str, str]) -> dict[str, str]:
+    """Overlay the spec-derived keys (manifest, adapter id, import roots) onto ``base``."""
+    base["ALFRED_PLUGIN_MANIFEST_PATH"] = str(spec.manifest_path)
+    base["ALFRED_PLUGIN_ADAPTER_ID"] = spec.adapter_id
+    existing = base.get("PYTHONPATH", "")
+    roots = [str(p) for p in spec.import_roots]
+    base["PYTHONPATH"] = os.pathsep.join(p for p in (*roots, existing) if p)
+    return base
+
+
+def _minimal_child_env(spec: PluginLaunchSpec) -> dict[str, str]:
+    """Build a SCRUBBED, allowlisted env for an adversary-facing child (review F2).
+
+    Mirrors :mod:`alfred.plugins.stdio_transport`'s minimal-env discipline:
+    the env is assembled from an explicit allowlist
+    (:data:`_SCRUBBED_ENV_ALLOWLIST`) — never a blanket ``dict(os.environ)`` —
+    so the operator's secret-bearing variables cannot leak into a
+    ``kind="full"`` plugin (the Discord relay opens egress per #230). The
+    AST guard in ``tests/unit/cli/test_launcher_spawn_env_scrub.py`` is the
+    release-blocker against any future patch that re-introduces a full-env
+    read here.
+    """
+    base = {name: os.environ[name] for name in _SCRUBBED_ENV_ALLOWLIST if name in os.environ}
+    return _spec_env(spec, base)
+
+
+def _full_child_env(spec: PluginLaunchSpec) -> dict[str, str]:
+    """Build a full-passthrough env for the operator-local TUI (``kind="none"``).
+
+    The ``kind="none"`` launcher path ``exec``s the executable directly and the
+    child inherits this env; the operator IS the trusted user (no adversary
+    ingress) and the foreground Textual app needs the inherited session env, so
+    a full ``dict(os.environ)`` passthrough is correct here. NOT used for any
+    adversary-facing plugin — :func:`_child_env` routes those to
+    :func:`_minimal_child_env`.
+    """
+    return _spec_env(spec, dict(os.environ))
 
 
 def _child_env(spec: PluginLaunchSpec) -> dict[str, str]:
-    """Build the child environment: manifest path, adapter id, import roots.
+    """Build the child environment, scrubbing secrets for adversary-facing plugins.
 
-    The kind="none" launcher path ``exec``s the executable directly and
-    inherits this env (unlike the daemon's scrubbed subprocess path), so the
-    child resolves both its own package and ``alfred.comms_mcp`` from
-    ``PYTHONPATH``.
+    Review F2: full ``os.environ`` passthrough is reserved for the
+    operator-local TUI (``sandbox_kind="none"``). Every other kind is
+    adversary-facing and gets a scrubbed, allowlisted env.
     """
-    env = dict(os.environ)
-    env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(spec.manifest_path)
-    env["ALFRED_PLUGIN_ADAPTER_ID"] = spec.adapter_id
-    existing = env.get("PYTHONPATH", "")
-    roots = [str(p) for p in spec.import_roots]
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (*roots, existing) if p)
-    return env
+    if spec.sandbox_kind == "none":
+        return _full_child_env(spec)
+    return _minimal_child_env(spec)
 
 
 async def spawn_plugin_via_launcher(spec: PluginLaunchSpec) -> LaunchOutcome:

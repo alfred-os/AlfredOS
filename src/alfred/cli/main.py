@@ -334,6 +334,10 @@ async def _chat_main() -> None:
         import_roots=(plugin_dir / "src", root),
         # The TUI is a foreground Textual app; it must own the operator's PTY.
         inherit_stdio=True,
+        # ``kind="none"`` (operator-local; manifest sandbox.kind). The operator
+        # IS the trusted user, so the child keeps full env passthrough — there
+        # is no adversary ingress to scrub against (review F2).
+        sandbox_kind="none",
     )
 
     outcome = await spawn_plugin_via_launcher(spec)
