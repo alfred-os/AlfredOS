@@ -1040,83 +1040,6 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/comms/discord.py:181
-msgid "discord.embed_unsupported"
-msgstr ""
-"I can only read text DMs in Slice 2. Embeds, attachments, polls, "
-"components, stickers, and references are refused."
-
-#: src/alfred/comms/discord.py:182
-msgid "discord.rate_limited"
-msgstr "You're sending messages faster than I can keep up. Try again in a moment."
-
-#: src/alfred/comms/discord.py:695 src/alfred/comms/discord.py:858
-#: src/alfred/comms/discord.py:864 src/alfred/comms/discord.py:1002
-#: src/alfred/comms/discord.py:1022 src/alfred/comms/discord.py:1049
-msgid "discord.alfred_error"
-msgstr "Something went wrong on my end. The operator's audit log has the details."
-
-# PR D2 — Discord adapter i18n catalog (spec §3 lines 514-520).
-#: src/alfred/comms/discord.py:767
-msgid "discord.unknown_user_first"
-msgstr ""
-"I don't recognise this Discord ID yet (snowflake: `{snowflake}`). Ask "
-"your operator to run: `alfred user add --name <YourName> --discord-id "
-"{snowflake}`. The operator's audit log shows this DM."
-
-#: src/alfred/comms/discord.py:846
-msgid "discord.budget_blocked"
-msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
-
-#: src/alfred/comms/tui.py:141 src/alfred/comms/tui.py:142
-msgid "tui.binding.quit"
-msgstr "Quit"
-
-#: src/alfred/comms/tui.py:143
-msgid "tui.binding.cancel_turn"
-msgstr "Cancel turn"
-
-#: src/alfred/comms/tui.py:168
-msgid "tui.input_placeholder"
-msgstr "Speak to Alfred..."
-
-#: src/alfred/comms/tui.py:193
-msgid "tui.label_you"
-msgstr "you"
-
-#: src/alfred/comms/tui.py:198
-msgid "tui.thinking"
-msgstr "thinking..."
-
-#: src/alfred/comms/tui.py:212
-msgid "tui.turn_cancelled"
-msgstr "turn cancelled"
-
-#: src/alfred/comms/tui.py:215
-msgid "tui.turn_timeout"
-msgstr "no response within {seconds}s; cancelled"
-
-#: src/alfred/comms/tui.py:220
-msgid "tui.alfred_error"
-msgstr "alfred error: {error}"
-
-#: src/alfred/comms/tui.py:228
-msgid "tui.label_alfred"
-msgstr "alfred"
-
-# Slice-3 retrospective CR-142 round-3 sec-001 — TUI ingress runtime
-# allowlist guard. ``_ingest_tier`` is the source of truth for the
-# role x adapter mapping; this message fires if a future drift in
-# that helper widens the return set to T0/T3 (both of which would
-# never reach the open ``tag()`` path under the spec §3.6 contract).
-# tier_name carries the offending class name verbatim for forensic
-# attribution. Fail-loud at the boundary, not silently downstream.
-#: src/alfred/comms/tui.py:286
-msgid "comms.tui.ingress_tier_unexpected"
-msgstr ""
-"Unexpected ingress tier for comms.tui.input: {tier_name!r}; expected T1 "
-"or T2 per spec §3.6."
-
 #: src/alfred/comms_mcp/audit_hash.py:93
 #: src/alfred/i18n/_slice_4_reserve.py:120
 msgid "daemon.boot.audit_hash_pepper_missing"
@@ -2691,4 +2614,63 @@ msgstr ""
 #~ "No operator has been added yet. "
 #~ "Run 'alfred user add --authorization "
 #~ "operator --name <YourName>' first."
+
+#~ msgid "discord.alfred_error"
+#~ msgstr ""
+#~ "Something went wrong on my end. "
+#~ "The operator's audit log has the "
+#~ "details."
+
+# PR D2 — Discord adapter i18n catalog (spec §3 lines 514-520).
+#~ msgid "discord.unknown_user_first"
+#~ msgstr ""
+#~ "I don't recognise this Discord ID "
+#~ "yet (snowflake: `{snowflake}`). Ask your "
+#~ "operator to run: `alfred user add "
+#~ "--name <YourName> --discord-id {snowflake}`."
+#~ " The operator's audit log shows this"
+#~ " DM."
+
+#~ msgid "discord.budget_blocked"
+#~ msgstr "Daily budget reached ({spent} of {cap} USD). Resets at UTC midnight."
+
+#~ msgid "tui.binding.quit"
+#~ msgstr "Quit"
+
+#~ msgid "tui.binding.cancel_turn"
+#~ msgstr "Cancel turn"
+
+#~ msgid "tui.input_placeholder"
+#~ msgstr "Speak to Alfred..."
+
+#~ msgid "tui.label_you"
+#~ msgstr "you"
+
+#~ msgid "tui.thinking"
+#~ msgstr "thinking..."
+
+#~ msgid "tui.turn_cancelled"
+#~ msgstr "turn cancelled"
+
+#~ msgid "tui.turn_timeout"
+#~ msgstr "no response within {seconds}s; cancelled"
+
+#~ msgid "tui.alfred_error"
+#~ msgstr "alfred error: {error}"
+
+#~ msgid "tui.label_alfred"
+#~ msgstr "alfred"
+
+# Slice-3 retrospective CR-142 round-3 sec-001 — TUI ingress runtime
+# allowlist guard. ``_ingest_tier`` is the source of truth for the
+# role x adapter mapping; this message fires if a future drift in
+# that helper widens the return set to T0/T3 (both of which would
+# never reach the open ``tag()`` path under the spec §3.6 contract).
+# tier_name carries the offending class name verbatim for forensic
+# attribution. Fail-loud at the boundary, not silently downstream.
+#~ msgid "comms.tui.ingress_tier_unexpected"
+#~ msgstr ""
+#~ "Unexpected ingress tier for comms.tui.input:"
+#~ " {tier_name!r}; expected T1 or T2 per"
+#~ " spec §3.6."
 
