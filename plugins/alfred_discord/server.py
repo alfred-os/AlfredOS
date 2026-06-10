@@ -252,15 +252,21 @@ class _BotTargetResolver:  # pragma: no cover - requires a live discord.py clien
         return await self._bot.fetch_channel(int(target_platform_id))
 
 
-def _build_server() -> DiscordServer:  # pragma: no cover - live-gateway assembly
+def _build_server(
+    sink: StdoutNotificationSink | None = None,
+) -> DiscordServer:  # pragma: no cover - live-gateway assembly
     """Assemble the full adapter: gateway + lifecycle + outbound dispatcher.
 
     The bot connects via the :class:`DiscordGatewayAdapter` (which the lifecycle
     drives as its ``GatewayProtocol``); the outbound dispatcher fronts the
     idempotency-keyed send-path; the crash emitter wraps the main loop in
     :func:`_serve`.
+
+    ``sink`` lets the caller pass the SAME stateless notification sink it uses for
+    the top-level crash emitter, so the entrypoint does not instantiate two.
     """
-    sink = StdoutNotificationSink()
+    if sink is None:
+        sink = StdoutNotificationSink()
     crash = CrashEmitter(adapter_id=_ADAPTER_ID, sink=sink)
     bot = AlfredDiscordBot(
         adapter_id=_ADAPTER_ID,
@@ -282,8 +288,9 @@ def _build_server() -> DiscordServer:  # pragma: no cover - live-gateway assembl
 
 async def serve() -> None:  # pragma: no cover - process entrypoint
     """Run the adapter's stdio loop, forwarding an uncaught crash to the emitter."""
-    server = _build_server()
-    crash = CrashEmitter(adapter_id=_ADAPTER_ID, sink=StdoutNotificationSink())
+    sink = StdoutNotificationSink()
+    server = _build_server(sink)
+    crash = CrashEmitter(adapter_id=_ADAPTER_ID, sink=sink)
     try:
         await _serve_stdin_stdout(server)
     except (KeyboardInterrupt, SystemExit):
