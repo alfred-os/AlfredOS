@@ -20,7 +20,7 @@ from __future__ import annotations
 import random
 import sys
 from collections.abc import Awaitable, Callable, Set
-from typing import Final, cast
+from typing import Final, Protocol, cast
 
 import discord
 import structlog
@@ -44,10 +44,10 @@ _JITTER_FRACTION: Final[float] = 0.2
 _Sleeper = Callable[[float], Awaitable[None]]
 
 
-class _CrashForwarder:
+class _CrashForwarder(Protocol):
     """Structural view of the crash emitter the gateway forwards uncaught errors to."""
 
-    def handle_crash(self, exc: BaseException) -> None: ...  # pragma: no cover - protocol
+    def handle_crash(self, exc: BaseException) -> None: ...
 
 
 def _least_privilege_intents() -> discord.Intents:

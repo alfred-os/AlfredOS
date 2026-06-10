@@ -81,13 +81,15 @@ async def test_dispatch_adapter_health() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_outbound_message_is_wave3_stub() -> None:
+async def test_dispatch_outbound_message_unwired_is_typed_refusal() -> None:
+    # An unwired server (no OutboundDispatcher injected) returns a loud, typed
+    # terminal refusal — never a silent drop. The wired path is covered by
+    # test_server_outbound_wired.py.
     server = _server()
     resp = await server.dispatch(_req("outbound.message", req_id=4))
     assert resp is not None
-    # Wave-3 seam: a loud, typed not-implemented refusal — never a silent drop.
     assert resp["result"]["outcome"] == "terminal_failure"
-    assert resp["result"]["error_class"] == "NotImplementedError"
+    assert resp["result"]["error_class"] == "OutboundDispatcherUnwired"
 
 
 @pytest.mark.asyncio
