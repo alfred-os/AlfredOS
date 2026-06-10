@@ -289,7 +289,15 @@ class AdapterCrashHandler:
                 ],
                 "crashed_at": datetime.now(UTC).isoformat(),
             },
-            trust_tier_of_trigger="T0",
+            # Provenance (PRD §7.1): the row is TRIGGERED by an UNTRUSTED plugin
+            # self-reporting a crash, so the trigger tier is T3 — same as the
+            # sibling binding / rate-limit rows, which are also plugin-triggered.
+            # Tagging it T0 would misrepresent an untrusted plugin's self-report
+            # as a trusted system trigger. (The ``comms.adapter.crashed``
+            # HOOKPOINT keeps ``carrier_tier=T0`` per spec §10 — carrier_tier is
+            # the surrounding host-daemon action's tier, a distinct concept from
+            # this trigger-provenance field.)
+            trust_tier_of_trigger="T3",
             result="crashed",
             cost_estimate_usd=0.0,
             trace_id=notification.adapter_id,
