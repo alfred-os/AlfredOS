@@ -2306,20 +2306,20 @@ msgstr ""
 # keys were marked obsolete and dropped at compile time, leaving operators
 # with raw "tui.label_you:" keys. The extract now scans `src/alfred plugins`
 # and these are restored as active msgids with their English msgstr.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:70
 #: plugins/alfred_tui/src/alfred_tui/textual/app.py:71
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:72
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:81
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:82
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:104
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:109
 msgid "tui.label_you"
 msgstr "you"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:117
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:127
 msgid "tui.label_alfred"
 msgstr "alfred"
 
