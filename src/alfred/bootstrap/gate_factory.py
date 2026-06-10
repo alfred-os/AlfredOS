@@ -240,3 +240,67 @@ async def build_real_gate(
         audit_sink=audit_sink,  # type: ignore[arg-type]
         start_heartbeat=start_heartbeat,
     )
+
+
+async def build_boot_real_gate(
+    *,
+    backend: StorageBackend,
+    audit_sink: object,
+    start_heartbeat: bool = True,
+) -> RealGate:
+    """Construct a production :class:`RealGate` with first-party grants seeded.
+
+    ADR-0026 seed-then-load ordering, encapsulated in ONE place:
+
+    1. ``await backend.seed_first_party_grants(FIRST_PARTY_SYSTEM_GRANTS)``
+       lands AlfredOS's own defences (the system-tier
+       ``security.quarantined.extract`` DLP subscriber) into
+       ``plugin_grants`` as ``approved`` rows. Additive only — the seed
+       never runs the revoke-diff, so an operator grant is never removed.
+    2. :meth:`RealGate.create` then reads the grant snapshot via
+       ``load_grants``, so the in-memory policy already contains the
+       first-party grants the moment the gate is returned.
+
+    This ordering is load-bearing: the daemon constructs a
+    :class:`alfred.security.quarantine.QuarantinedExtractor` immediately
+    after this gate, and that constructor's DLP-subscriber registration
+    is denied by the gate unless the seeded grant is already in the
+    loaded policy. Doing the seed AFTER ``create`` would load an empty
+    policy and deny the extractor (the silent half-wired-extractor shape
+    CLAUDE.md hard rule #7 forbids).
+
+    This is NOT a fail-open: the gate still denies every registration not
+    covered by an ``approved`` grant. The ONLY newly-authorised
+    registration is the seeded first-party DLP subscriber — the gate is
+    NOT special-cased to "trust first-party by module name".
+
+    A :class:`sqlalchemy.exc.SQLAlchemyError` from the seed propagates
+    (Postgres-down / write failure) so a failed seed refuses boot rather
+    than constructing a gate over an unseeded policy.
+
+    Args:
+        backend: A :class:`StorageBackend` implementation (production:
+            :class:`alfred.security.capability_gate.backend.PostgresBackend`).
+        audit_sink: The fail-closed-transition audit sink RealGate
+            requires (err-003).
+        start_heartbeat: ``True`` in production so the supervisor's
+            monitor observes a later Postgres outage; ``False`` in unit
+            tests where the background task would race the runner.
+
+    Returns:
+        A ready :class:`RealGate` whose policy includes
+        :data:`FIRST_PARTY_SYSTEM_GRANTS`. Returned RAW (not wrapped in
+        the supervisor boot-gate adapter) so the caller can run the
+        post-install grant assertion against ``check`` and install it
+        into the boot :class:`alfred.hooks.registry.HookRegistry`.
+    """
+    from alfred.security.capability_gate._bootstrap_grants import (
+        FIRST_PARTY_SYSTEM_GRANTS,
+    )
+
+    await backend.seed_first_party_grants(FIRST_PARTY_SYSTEM_GRANTS)
+    return await RealGate.create(
+        backend=backend,
+        audit_sink=audit_sink,  # type: ignore[arg-type]
+        start_heartbeat=start_heartbeat,
+    )

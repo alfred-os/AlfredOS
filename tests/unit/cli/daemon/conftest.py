@@ -9,6 +9,7 @@ supervisor.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -51,15 +52,23 @@ def fake_audit_writer() -> FakeAuditWriter:
     return FakeAuditWriter()
 
 
-@pytest.fixture
-def boot_success_env(
+def apply_boot_success_patches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    fake_audit_writer: FakeAuditWriter,
-) -> FakeAuditWriter:
+    audit_writer: FakeAuditWriter,
+) -> Callable[[], None]:
     """Patch every external builder so the boot success path runs in-memory.
 
-    Returns the recording audit writer so tests can assert on the rows.
+    The reusable body behind the :func:`boot_success_env` fixture — exposed
+    as a plain function so OTHER suites (the ``cap-2026-001`` adversarial
+    corpus entry, which lives outside this conftest's package and cannot see
+    the fixture) drive the SAME in-memory boot setup without duplicating it.
+    There is one source of truth for "what a daemon-boot-success harness
+    patches".
+
+    Returns a restore callable the caller MUST invoke at teardown to restore
+    the process registry singleton the boot path installs via
+    ``set_registry`` (otherwise the boot registry leaks into sibling tests).
     """
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", raising=False)
@@ -78,7 +87,7 @@ def boot_success_env(
 
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.build_boot_audit_writer",
-        lambda **_kw: fake_audit_writer,
+        lambda **_kw: audit_writer,
     )
     # sec-004 (INTENTIONAL launcher-probe bypass): the shipped PR-S4-1
     # launcher stub returns ``_STUB_SIGNATURE`` and so REFUSES the boot in
@@ -103,9 +112,21 @@ def boot_success_env(
         "alfred.cli.daemon._commands.build_boot_handshake",
         lambda _scope: _HealthyGate(),
     )
+    # PR-S4-11b0: the daemon now builds a RAW seeded RealGate, installs the
+    # boot HookRegistry over it, and asserts the first-party DLP grant is
+    # live. The success path needs a gate that GRANTS that first-party
+    # grant — ``make_quarantined_extract_chain_gate`` seeds exactly the
+    # ``security.quarantined.extract`` system-tier grant via a FIXTURE
+    # (RealGate, not a permissive shim — CLAUDE.md hard rule #2). The
+    # process registry singleton is restored after the test so the
+    # installed boot registry does not leak into sibling tests.
+    from alfred.hooks import get_registry, set_registry
+    from tests.helpers.gates import make_quarantined_extract_chain_gate
+
+    _prior_registry = get_registry()
     monkeypatch.setattr(
-        "alfred.cli.daemon._commands.build_boot_gate",
-        _make_async(lambda _settings: _SyncGate()),
+        "alfred.cli.daemon._commands.build_boot_real_gate_for_daemon",
+        _make_async(lambda _settings: make_quarantined_extract_chain_gate()),
     )
     monkeypatch.setattr(
         "alfred.cli.daemon._commands.read_state_git_head_sha",
@@ -125,20 +146,38 @@ def boot_success_env(
         "alfred.cli.daemon._commands.default_pidfile_path",
         lambda: tmp_path / "daemon.pid",
     )
-    return fake_audit_writer
+
+    def _restore() -> None:
+        # Restore the process registry singleton: the boot path installs a
+        # boot HookRegistry via ``set_registry``, which would otherwise leak
+        # into sibling tests and shift the active gate/sink out from under
+        # them.
+        set_registry(_prior_registry)
+
+    return _restore
+
+
+@pytest.fixture
+def boot_success_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_audit_writer: FakeAuditWriter,
+) -> Iterator[FakeAuditWriter]:
+    """Patch every external builder so the boot success path runs in-memory.
+
+    Yields the recording audit writer so tests can assert on the rows, then
+    restores the process registry singleton the boot path installed. Thin
+    wrapper over :func:`apply_boot_success_patches` (the reusable body).
+    """
+    restore = apply_boot_success_patches(monkeypatch, tmp_path, fake_audit_writer)
+    yield fake_audit_writer
+    restore()
 
 
 class _HealthyGate:
     """Async handshake double for probe (c)."""
 
     async def is_backing_store_available(self) -> bool:
-        return True
-
-
-class _SyncGate:
-    """Sync supervisor-gate double."""
-
-    def is_backing_store_available(self) -> bool:
         return True
 
 

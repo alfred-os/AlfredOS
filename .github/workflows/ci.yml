@@ -127,7 +127,25 @@ jobs:
         if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/hooks/*.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py' \
+            --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py,src/alfred/hooks/boot.py' \
+            --fail-under=100
+      - name: First-party bootstrap-grants 100% line+branch coverage
+        # N1 (PR-S4-11b0 review): ``_bootstrap_grants.py`` holds the ADR-0026
+        # ``FIRST_PARTY_SYSTEM_GRANTS`` constant — the single source of truth
+        # for the in-tree defences AlfredOS seeds at boot. It is already
+        # caught INCIDENTALLY by the ``security/*`` glob gate above; this
+        # explicit per-file gate makes it AUDITABLY named (a reviewer can see
+        # the trust-boundary constant is gated by name, not just by glob).
+        # Unlike ``_gate.py`` (whose outage paths only the integration suite
+        # exercises, so its explicit gate lives in ``coverage-gates``), this
+        # module is a pure constant + drift-guard surface fully covered by the
+        # unit tier, so gating it on unit-only ``.coverage`` data is sound.
+        # The combined-job ``Trust-boundary files`` gate names it too (the
+        # two-gates pattern — keep BOTH in sync when this file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/security/capability_gate/_bootstrap_grants.py' \
             --fail-under=100
       # NOTE: the Slice-3 trust-boundary 100% gate moved to the
       # `coverage-gates` job below. The capability-gate heartbeat /
@@ -491,7 +509,7 @@ jobs:
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/hooks/*.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py' \
+            --include='src/alfred/hooks/__init__.py,src/alfred/hooks/registry.py,src/alfred/hooks/invoke.py,src/alfred/hooks/capability.py,src/alfred/hooks/decorators.py,src/alfred/hooks/context.py,src/alfred/hooks/errors.py,src/alfred/hooks/audit_sink.py,src/alfred/hooks/boot.py' \
             --fail-under=100
       - name: Trust-boundary files 100% line+branch coverage (combined)
         # Mirror of the `python` job's gate, but driven off the merged
@@ -501,10 +519,10 @@ jobs:
         # CLAUDE.md hard rule #7 invariants would be paper-only on those
         # paths. Chained `&&` hashFiles guard per CR-138 finding #1 —
         # ANY-match must NOT no-op the gate; ALL files must be present.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != '' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py' \
+            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py,src/alfred/security/capability_gate/_bootstrap_grants.py' \
             --fail-under=100
       - name: Plugins subsystem 100% line+branch coverage (combined)
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != '' && hashFiles('src/alfred/plugins/comms_stdio_transport.py') != '' && hashFiles('src/alfred/plugins/comms_runner.py') != '' && hashFiles('src/alfred/plugins/_comms_child_env.py') != ''

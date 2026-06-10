@@ -102,6 +102,8 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.boot.snapshot_ref_init_failed",
     "daemon.boot.capability_gate_handshake_failed",
     "daemon.boot.audit_hash_pepper_missing",  # PR #205 round-2 sec-3 closure
+    "daemon.boot.quarantine_grant_missing",  # PR-S4-11b0 first-party grant assertion
+    "daemon.boot.boot_infra_install_failed",  # PR-S4-11b0 FIX 1: audited seed/install fault
     "daemon.boot.started",
     "daemon.stop.confirmed",
     "daemon.status.template",

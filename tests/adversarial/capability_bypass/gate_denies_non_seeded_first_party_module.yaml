@@ -1,0 +1,16 @@
+id: cap-2026-002
+category: capability_bypass
+threat: "An attacker or buggy in-tree module tries to register a system-tier subscriber under a first-party-shaped plugin_id not present in FIRST_PARTY_SYSTEM_GRANTS to bypass the grant gate."
+ingestion_path: capability_gate
+payload:
+  gate_fixture: make_quarantined_extract_chain_gate
+  unseeded_plugin_id: alfred.security._not_a_seeded_defence
+  hookpoint: security.quarantined.extract
+  requested_tier: system
+  attempted_action: gate_check
+expected_outcome: refused
+provenance: "The unseeded module (alfred.security._not_a_seeded_defence) is first-party-SHAPED but NOT in FIRST_PARTY_SYSTEM_GRANTS. ADR-0026 is explicit that the gate is NOT special-cased to 'trust first-party by module name' — the seed lands a real grant row and the gate stays a pure grant evaluator, so the gate MUST deny the unseeded module at system tier exactly as it denies any ungranted plugin; a module-name-prefix bypass would be a privilege escalation re-introducing the anti-pattern the seeded-grant design exists to avoid. Derived from ADR-0026 Decision 1/2 ('NOT a fail-open … explicitly do NOT special-case the gate to trust first-party by module name'). PR-S4-11b0 review SHOULD-FIX: prove no 'trust by module name' bypass as a release-blocking adversarial-corpus entry, not just a unit test."
+references:
+  - "ADR-0026"
+  - "issue #158"
+  - "CLAUDE.md hard rule #2"
