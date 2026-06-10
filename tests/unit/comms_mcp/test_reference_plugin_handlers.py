@@ -72,7 +72,7 @@ def test_adapter_health_reports_real_queue_depth_after_sends() -> None:
     # lifecycle.stop drains the same buffer it reports as flushed_messages.
     stop = main.handle_lifecycle_stop({"adapter_id": "alfred_comms_test"})
     assert stop["flushed_messages"] == 3
-    assert main.handle_adapter_health({})["queue_depth"] == 0
+    assert main.handle_adapter_health({"adapter_id": "alfred_comms_test"})["queue_depth"] == 0
 
 
 def test_build_inbound_notification_shape() -> None:
