@@ -298,15 +298,15 @@ msgstr ""
 "~/.config/alfred/secrets.toml contains a valid discord_bot_token. Detail:"
 " {detail}"
 
-#: src/alfred/cli/discord_cmd.py:173 src/alfred/cli/main.py:335
+#: src/alfred/cli/discord_cmd.py:173
 msgid "error.postgres_unreachable"
 msgstr "Postgres is unreachable: {detail}"
 
-#: src/alfred/cli/discord_cmd.py:174 src/alfred/cli/main.py:336
+#: src/alfred/cli/discord_cmd.py:174
 msgid "hint.is_compose_up"
 msgstr "Tip: run 'docker compose up -d alfred-postgres' to start the database."
 
-#: src/alfred/cli/discord_cmd.py:185 src/alfred/cli/main.py:357
+#: src/alfred/cli/discord_cmd.py:185
 msgid "cli.user.error.no_operator"
 msgstr ""
 "No operator has been added yet. Run 'alfred user add --authorization "
@@ -366,6 +366,14 @@ msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 #: src/alfred/cli/main.py:207
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
+
+# TUI gating (PR-S4-1 daemon split).
+#: src/alfred/cli/main.py:384 src/alfred/cli/main.py:397
+#: src/alfred/i18n/_slice_4_reserve.py:148
+msgid "comms.tui.daemon_required_to_chat"
+msgstr ""
+"alfred chat needs the daemon. Start it with: alfred daemon start. If you "
+"expected a daemon to be running, check status with: alfred daemon status."
 
 #: src/alfred/cli/operator_session.py:137
 #: src/alfred/i18n/_slice_4_reserve.py:42
@@ -1610,13 +1618,6 @@ msgstr ""
 "PolicyWatcher could not write the rejected-config fallback sink at "
 "{path}: both the audit store and the fallback are unwritable. The watcher"
 " continues; fix the state directory."
-
-# TUI gating (PR-S4-1 daemon split).
-#: src/alfred/i18n/_slice_4_reserve.py:148
-msgid "comms.tui.daemon_required_to_chat"
-msgstr ""
-"alfred chat needs the daemon. Start it with: alfred daemon start. If you "
-"expected a daemon to be running, check status with: alfred daemon status."
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
