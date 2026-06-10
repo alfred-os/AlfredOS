@@ -1,0 +1,17 @@
+id: cap-2026-003
+category: capability_bypass
+threat: "A comms-adapter plugin_id the operator did NOT enable (a non-enabled / non-first-party adapter, or a typo'd / attacker-supplied id) tries to clear the manifest-tier load handshake by riding the ADR-0027 config-sourced load-grant seed."
+ingestion_path: capability_gate
+payload:
+  gate_fixture: make_comms_adapter_load_gate
+  enabled_plugin_id: alfred.comms-test
+  non_enabled_plugin_id: alfred.comms-not-enabled
+  manifest_tier: user-plugin
+  attempted_action: check_plugin_load
+expected_outcome: refused
+provenance: "ADR-0027 seeds ONE plugin-LOAD grant per operator-ENABLED first-party comms adapter (config-is-authorization: the enabled set is reviewer-gated deployment config, and every entry is validated to name a real in-repo manifest). The seed lands a real GrantRow that the gate's pure check_plugin_load evaluates — the gate is NOT special-cased to 'trust first-party by name' (the same anti-pattern ADR-0026 / cap-2026-002 guard). So a plugin_id NOT among the enabled adapters MUST be DENIED at load even when it is first-party-SHAPED (alfred.comms-*); only the explicitly-enabled adapter's manifest plugin id is granted. A pass would let any comms-shaped id load by riding the seed — a privilege escalation. Positive control on the SAME RealGate: the ENABLED adapter (alfred.comms-test) IS granted, so the deny is a grant-policy verdict, not a blanket deny. Derived from the PR-S4-11b decision to seed config-sourced comms-adapter load grants; mirrors cap-2026-002 (the static-DLP analogue)."
+references:
+  - "ADR-0027"
+  - "ADR-0026"
+  - "issue #237"
+  - "CLAUDE.md hard rule #2"

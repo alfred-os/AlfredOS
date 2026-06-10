@@ -117,6 +117,8 @@ def _make_in_memory_backend(grants: Iterable[GrantRow] = ()) -> StorageBackend:
     backend.upsert_grant = AsyncMock(return_value=None)
     backend.revoke_grant = AsyncMock(return_value=None)
     backend.apply_atomic = AsyncMock(return_value=None)
+    backend.seed_first_party_grants = AsyncMock(return_value=None)
+    backend.reconcile_comms_adapter_grants = AsyncMock(return_value=None)
     return backend
 
 
@@ -247,19 +249,30 @@ async def build_boot_real_gate(
     backend: StorageBackend,
     audit_sink: object,
     start_heartbeat: bool = True,
+    extra_grants: Iterable[GrantRow] = (),
 ) -> RealGate:
     """Construct a production :class:`RealGate` with first-party grants seeded.
 
     ADR-0026 seed-then-load ordering, encapsulated in ONE place:
 
-    1. ``await backend.seed_first_party_grants(FIRST_PARTY_SYSTEM_GRANTS)``
-       lands AlfredOS's own defences (the system-tier
-       ``security.quarantined.extract`` DLP subscriber) into
-       ``plugin_grants`` as ``approved`` rows. Additive only — the seed
+    1. ``await backend.seed_first_party_grants((*FIRST_PARTY_SYSTEM_GRANTS,
+       *extra_grants))`` lands AlfredOS's own defences (the system-tier
+       ``security.quarantined.extract`` DLP subscriber) PLUS any
+       config-sourced ``extra_grants`` into ``plugin_grants`` as
+       ``approved`` rows, in ONE transaction. Additive only — the seed
        never runs the revoke-diff, so an operator grant is never removed.
     2. :meth:`RealGate.create` then reads the grant snapshot via
        ``load_grants``, so the in-memory policy already contains the
        first-party grants the moment the gate is returned.
+
+    ``extra_grants`` (ADR-0027) carries the config-sourced
+    comms-adapter plugin-LOAD grants the daemon derives from
+    ``Settings.comms_enabled_adapters`` (see
+    :func:`alfred.security.capability_gate._comms_adapter_grants.comms_adapter_load_grants`).
+    It defaults to ``()`` so every non-daemon caller (and a default-empty
+    daemon boot) seeds EXACTLY the static :data:`FIRST_PARTY_SYSTEM_GRANTS`,
+    byte-for-byte unchanged. The static seed is unchanged; the extra grants
+    are purely additive.
 
     This ordering is load-bearing: the daemon constructs a
     :class:`alfred.security.quarantine.QuarantinedExtractor` immediately
@@ -286,19 +299,37 @@ async def build_boot_real_gate(
         start_heartbeat: ``True`` in production so the supervisor's
             monitor observes a later Postgres outage; ``False`` in unit
             tests where the background task would race the runner.
+        extra_grants: Config-sourced grants to seed ALONGSIDE the static
+            first-party constant (ADR-0027 comms-adapter load grants).
+            Defaults to ``()`` — the static seed is then byte-for-byte
+            unchanged.
 
     Returns:
         A ready :class:`RealGate` whose policy includes
-        :data:`FIRST_PARTY_SYSTEM_GRANTS`. Returned RAW (not wrapped in
-        the supervisor boot-gate adapter) so the caller can run the
-        post-install grant assertion against ``check`` and install it
-        into the boot :class:`alfred.hooks.registry.HookRegistry`.
+        :data:`FIRST_PARTY_SYSTEM_GRANTS` (and any ``extra_grants``).
+        Returned RAW (not wrapped in the supervisor boot-gate adapter) so
+        the caller can run the post-install grant assertion against
+        ``check`` and install it into the boot
+        :class:`alfred.hooks.registry.HookRegistry`.
     """
     from alfred.security.capability_gate._bootstrap_grants import (
         FIRST_PARTY_SYSTEM_GRANTS,
     )
 
-    await backend.seed_first_party_grants(FIRST_PARTY_SYSTEM_GRANTS)
+    await backend.seed_first_party_grants((*FIRST_PARTY_SYSTEM_GRANTS, *extra_grants))
+    # FIX 2 (PR-S4-11b review): the static seed above is ADDITIVE-only, which is
+    # correct for the never-removed :data:`FIRST_PARTY_SYSTEM_GRANTS` but leaves
+    # a STALE comms-adapter load grant in Postgres when an operator REMOVES an
+    # adapter (the comms-adapter grants are DYNAMIC, driven by
+    # ``comms_enabled_adapters``). Reconcile them so the
+    # ``bootstrap:first-party-comms-adapter`` rows in Postgres EXACTLY mirror the
+    # current config: the scoped revoke-diff drops any sentinel-branch row not in
+    # ``extra_grants`` and (idempotently) re-upserts the desired set, in one
+    # transaction. The revoke WHERE is pinned to the comms-adapter sentinel, so it
+    # never touches the DLP system grant or an operator grant. Runs BEFORE
+    # ``RealGate.create`` so the in-memory policy load reflects the reconciled
+    # state.
+    await backend.reconcile_comms_adapter_grants(extra_grants)
     return await RealGate.create(
         backend=backend,
         audit_sink=audit_sink,  # type: ignore[arg-type]

@@ -72,14 +72,24 @@ class BootInfraInstallFailedFailure(_BootFailureBase):
     or the boot :class:`HookRegistry` install raised
     (a :class:`alfred.hooks.errors.HookError` — hookpoint metadata drift).
 
-    Before FIX 1 either fault propagated as an UNCAUGHT crash out of
+    FIX 2 (PR-S4-11b review): the seed-gate build ALSO runs the config-sourced
+    comms-adapter grants-builder
+    (:func:`alfred.security.capability_gate._comms_adapter_grants.comms_adapter_load_grants`),
+    which raises :class:`alfred.plugins.errors.ManifestError` for a corrupt or
+    ``system``-tier enabled-adapter manifest (the leaf
+    :class:`alfred.plugins.errors.CommsAdapterSystemTierError`) or
+    :class:`OSError` for an unreadable manifest file. Those faults map to THIS
+    failure too — the same audited refusal, not a raw traceback.
+
+    Before FIX 1/2 any of these faults propagated as an UNCAUGHT crash out of
     ``_start_async`` — fail-closed and safe, but it skipped the audited
     ``_refuse_boot`` path (no ``daemon.boot.failed`` row, not exit 2). The
     grant-assertion arm was already audited; this carrier makes the
-    seed/install arms match (CLAUDE.md hard rule #7 — a security-boot fault
-    is loud + audited, never a silent traceback). The distinct
-    ``failure_reason`` lets forensics tell a broken seed/install apart from a
-    seed that succeeded but failed to project the grant.
+    seed/install/grants-builder arms match (CLAUDE.md hard rule #7 — a
+    security-boot fault is loud + audited, never a silent traceback). The
+    distinct ``failure_reason`` lets forensics tell a broken
+    seed/install/manifest apart from a seed that succeeded but failed to
+    project the grant.
     """
 
     failure_reason: Literal["boot_infra_install_failed"] = "boot_infra_install_failed"
@@ -103,6 +113,37 @@ class QuarantineGrantMissingFailure(_BootFailureBase):
     failure_reason: Literal["quarantine_grant_missing"] = "quarantine_grant_missing"
 
 
+class CommsAdapterSpawnFailedFailure(_BootFailureBase):
+    """An enabled comms adapter failed to spawn / handshake at boot (PR-S4-11b).
+
+    Fail-closed (CLAUDE.md hard rule #7): an operator opted an adapter in via
+    ``comms_enabled_adapters``, so a broken manifest / spawn / not-ok handshake
+    must REFUSE the boot rather than silently skip the adapter and leave the
+    operator believing comms is live. ``adapter_id`` is a closed-vocabulary
+    config token (charset-validated by the Settings field), never raw content.
+    """
+
+    failure_reason: Literal["comms_adapter_spawn_failed"] = "comms_adapter_spawn_failed"
+    adapter_id: str = ""
+
+
+class CommsMultiAdapterUnsupportedFailure(_BootFailureBase):
+    """More than one comms adapter is enabled — unsupported in this cut (FIX 4).
+
+    PR-S4-11b builds ONE shared inbound orchestrator whose outbound sender is
+    bound per-adapter (last-writer-wins), so with two enabled adapters one
+    adapter's inbound turn would dispatch its ack through the OTHER adapter's
+    runner — a cross-route. Until per-adapter inbound routing lands
+    (PR-S4-11c), the daemon REFUSES boot fail-closed (CLAUDE.md hard rule #7)
+    rather than parking a mis-wired multi-adapter graph. ``enabled_count`` is
+    the number of enabled adapters (a small int derived from charset-validated
+    config), safe in audit rows.
+    """
+
+    failure_reason: Literal["comms_multi_adapter_unsupported"] = "comms_multi_adapter_unsupported"
+    enabled_count: int = 0
+
+
 DaemonBootFailure = Annotated[
     EnvironmentNotSetFailure
     | UnsandboxedEnvInProductionFailure
@@ -110,8 +151,12 @@ DaemonBootFailure = Annotated[
     | SnapshotRefInitFailedFailure
     | CapabilityGateHandshakeFailedFailure
     | QuarantineGrantMissingFailure
-    | BootInfraInstallFailedFailure,
+    | BootInfraInstallFailedFailure
+    | CommsAdapterSpawnFailedFailure
+    | CommsMultiAdapterUnsupportedFailure,
     Field(discriminator="failure_reason"),
 ]
 """Discriminated union over the daemon-boot refusal modes (spec §3.4 +
-ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed``)."""
+ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
+PR-S4-11b ``comms_adapter_spawn_failed`` + FIX 4
+``comms_multi_adapter_unsupported``)."""

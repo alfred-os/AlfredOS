@@ -110,6 +110,15 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the reserve.
     "daemon.boot.audit_log_unwritable",
     "daemon.boot.environment_unrecognised",  # devex-222-01: typo vs unset
+    # Comms-adapter spawn/handshake boot refusals (PR-S4-11b, #237).
+    "daemon.boot.comms_adapter_spawn_failed",
+    "daemon.boot.comms_adapter_handshake_failed",
+    # O1 (PR-S4-11b): boot-output line making a spawned comms adapter observable
+    # in `alfred daemon start` output (not just an audit-log SQL query).
+    "daemon.comms.adapter_spawned",
+    # FIX 4 (PR-S4-11b review): >1 enabled comms adapter is unsupported in
+    # this cut (outbound acks would cross-route) — refuse boot.
+    "daemon.boot.comms_multi_adapter_unsupported",
     "daemon.stop.no_daemon",
     "daemon.stop.stale_pidfile",
     "daemon.status.not_running",

@@ -64,11 +64,19 @@ _TRIGGER_INJECT_CRASH: Final[str] = "alfred_comms_test/inject_crash"
 _ADAPTER_ID: Final[str] = "alfred_comms_test"
 _PLUGIN_VERSION: Final[str] = "0.1.0"
 
-# ``ALFRED_ENV`` values under which fabricated-inbound injection is permitted.
+# Env values under which fabricated-inbound injection is permitted.
 # FAIL-CLOSED: the empty string is deliberately NOT a member — an unset or empty
-# ``ALFRED_ENV`` (the common production default) must REFUSE, never default-allow.
+# signal (the common production default) must REFUSE, never default-allow.
 # Only an explicit ``development``/``test`` signal opens the gate.
 _INJECTION_ALLOWED_ENVS: Final[frozenset[str]] = frozenset({"development", "test"})
+
+# Env var names the injection gate consults, in precedence order. ``ALFRED_ENV``
+# is the plugin's own historical dev/test signal; ``ALFRED_ENVIRONMENT`` is the
+# daemon's launcher control surface — the ONLY env-tier signal that survives the
+# daemon's SCRUBBED comms-child allowlist (alfred.plugins._comms_child_env), so a
+# daemon-spawned reference adapter is gated on it. A test process that exports
+# neither (or exports an empty / production value in both) still REFUSES.
+_INJECTION_ENV_VARS: Final[tuple[str, ...]] = ("ALFRED_ENV", "ALFRED_ENVIRONMENT")
 
 # Event name the host records when an injection is refused in production.
 _REFUSAL_EVENT: Final[str] = "comms.test_injection_refused"
@@ -231,14 +239,37 @@ def inject_inbound(body: dict[str, Any]) -> dict[str, Any]:
     Outside the dev/test allowlist it refuses with :class:`TestInjectionRefusedError`
     (event ``comms.test_injection_refused``) so a production deployment can never
     be coerced into injecting synthetic inbound traffic (plan §10 risk row).
+
+    The gate accepts a dev/test signal from EITHER ``ALFRED_ENV`` (the plugin's own
+    historical control) or ``ALFRED_ENVIRONMENT`` (the daemon's launcher control
+    surface, the only env-tier signal that survives the scrubbed comms-child
+    allowlist). Fail-closed is preserved: the gate opens ONLY if at least one var
+    carries an explicit ``development`` / ``test`` value; unset / empty / production
+    on every var REFUSES.
     """
-    env = os.environ.get("ALFRED_ENV", "").strip()
-    if env not in _INJECTION_ALLOWED_ENVS:
+    resolved_env = _resolve_injection_env()
+    if resolved_env not in _INJECTION_ALLOWED_ENVS:
         raise TestInjectionRefusedError(
-            f"inject_inbound refused: ALFRED_ENV={env!r} is not a test environment "
+            f"inject_inbound refused: env={resolved_env!r} is not a test environment "
             f"(event={_REFUSAL_EVENT})"
         )
     return build_inbound_notification(body)
+
+
+def _resolve_injection_env() -> str:
+    """Return the first explicit dev/test env signal, or ``""`` if none.
+
+    Reads :data:`_INJECTION_ENV_VARS` in precedence order and returns the first
+    value that is in the dev/test allowlist; otherwise returns the (possibly
+    empty) first var's value for the refusal message. Fail-closed: an
+    all-unset / all-empty / production-only set resolves to a non-allowlisted
+    value and the caller refuses.
+    """
+    for name in _INJECTION_ENV_VARS:
+        value = os.environ.get(name, "").strip()
+        if value in _INJECTION_ALLOWED_ENVS:
+            return value
+    return os.environ.get(_INJECTION_ENV_VARS[0], "").strip()
 
 
 def build_test_injection_refused_frame(env: str) -> dict[str, Any]:

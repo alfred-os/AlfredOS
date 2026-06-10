@@ -172,6 +172,11 @@ ignore = ["S101"]
 # arguments. (The audit-count probe is a parametrised psycopg2 query, so no
 # S608 SQL-construction ignore is needed.)
 "tests/smoke/test_slice4_daemon_dispatch.py" = ["S603", "S607"]
+# The PR-S4-11b comms-spawn smoke boots `alfred daemon start` (+ git/uv by name)
+# the same operator-shell way as the daemon-dispatch smoke above — trusted CLIs,
+# fixed-literal argv. Same S603/S607 rationale; the audit probe is a parametrised
+# psycopg2 query.
+"tests/smoke/test_slice4_daemon_comms_spawn.py" = ["S603", "S607"]
 # The Slice-4 graduation smoke drives docker compose + the deployed alfred CLI
 # by name (partial path) with fixed-literal / repo-owned argv — same trusted-CLI
 # rationale as the daemon-dispatch smoke above. No untrusted input reaches a

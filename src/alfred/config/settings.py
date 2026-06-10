@@ -7,6 +7,7 @@ they never leak into logs by accident.
 
 from __future__ import annotations
 
+import re
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Literal
@@ -20,6 +21,22 @@ from alfred.config._environment_loader import EnvironmentLoadResult, load_enviro
 # script (bin/alfred-setup.sh) and the Settings validator below so an operator
 # who skipped editing .env hits a friendly error before any provider call.
 _PLACEHOLDER_API_KEY = "sk-..."
+
+# Charset a comms-adapter id may use. Pinned tight so an id can never encode a
+# multi-segment path traversal (``/``) or a shell-meaningful character before it
+# is joined onto the ``plugins/<id>/manifest.toml`` probe path below. The charset
+# alone still admits the bare ``.`` / ``..`` single-segment probes, so the
+# validator rejects those explicitly (FIX 3) and asserts the resolved manifest
+# path stays under ``plugins/``.
+_COMMS_ADAPTER_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# Repo root, resolved from this module's location (``src/alfred/config/``). The
+# comms-adapter manifest probe joins ``plugins/<id>/manifest.toml`` onto it. We
+# do NOT import ``alfred.cli._launcher_spawn.repo_root`` here: Settings loads
+# very early in boot and pulling the CLI package into its import closure risks a
+# cycle. The path arithmetic is identical (both modules live three levels under
+# the repo root).
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # arch-002 / core-eng-pr222-2 / reviewer TOCTOU fix (#174): the dual-source
 # environment loader must run EXACTLY ONCE per ``Settings()`` construction.
@@ -115,6 +132,16 @@ class Settings(BaseSettings):
     # handler fan-out per adapter. Override via
     # ALFRED_COMMS_MAX_IN_FLIGHT_NOTIFICATIONS.
     comms_max_in_flight_notifications: int = Field(default=32, ge=1, le=1024)
+
+    # PR-S4-11b (#237): the daemon-spawned comms-adapter allowlist. Each entry is
+    # an adapter id the daemon launches a comms plugin for at boot. The default
+    # ``()`` keeps existing boot byte-for-byte unchanged — the daemon spawns no
+    # comms plugin until an operator opts adapters in. The per-entry validator
+    # below fails boot LOUDLY on a bad id (bad charset or no real manifest) rather
+    # than silently skipping it: a typo'd adapter id that silently does not spawn
+    # would leave an operator believing comms is live when it is not. Override via
+    # ALFRED_COMMS_ENABLED_ADAPTERS.
+    comms_enabled_adapters: tuple[str, ...] = Field(default=())
 
     # ADR-0021 #171: cadence of the supervisor's _proposal_dispatch_loop.
     # 30 s default — operator-action latency target per ADR-0021
@@ -251,6 +278,45 @@ class Settings(BaseSettings):
         audit row (arch-002 closure).
         """
         return self._environment_load_result
+
+    @field_validator("comms_enabled_adapters")
+    @classmethod
+    def _validate_comms_enabled_adapters(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject any adapter id that is mis-charset, traversal-shaped, or has no real manifest.
+
+        Each entry must match :data:`_COMMS_ADAPTER_ID_RE` (so a multi-segment
+        path-traversal-shaped id never reaches the filesystem probe), must NOT be
+        the single-segment ``.`` / ``..`` traversal probes (FIX 3), must resolve
+        to a manifest path UNDER ``plugins/``, AND name a real
+        ``plugins/<id>/manifest.toml``. A bad entry raises ``ValueError`` —
+        :meth:`Settings.__init__` lifts it to :class:`SettingsError`, so boot
+        fails loudly instead of silently dropping an adapter the operator
+        believes is enabled (CLAUDE.md hard rule #7). The message stays raw
+        English (no ``t()``): Settings loads too early in boot to depend on the
+        translator, matching ``_reject_placeholder_key``.
+        """
+        plugins_root = (_REPO_ROOT / "plugins").resolve()
+        for adapter_id in value:
+            if not _COMMS_ADAPTER_ID_RE.match(adapter_id):
+                raise ValueError(f"invalid comms adapter id {adapter_id!r}")
+            # FIX 3 (defence in depth): ``.`` and ``..`` are charset-clean under
+            # _COMMS_ADAPTER_ID_RE but are single-segment path-traversal probes
+            # (``.`` → ``plugins/manifest.toml``, ``..`` → escapes ``plugins/``).
+            # ``/`` is already blocked so they are capped, but ``is_file()``
+            # follows symlinks; refuse them explicitly rather than relying on the
+            # escape target not existing.
+            if adapter_id in {".", ".."}:
+                raise ValueError(f"invalid comms adapter id {adapter_id!r}")
+            manifest_path = _REPO_ROOT / "plugins" / adapter_id / "manifest.toml"
+            # Belt-and-braces containment: the resolved manifest path must stay
+            # under ``plugins/``. A traversal that slips past the charset/segment
+            # guards (e.g. a future loosened regex) is refused here before the
+            # filesystem probe trusts it.
+            if not manifest_path.resolve().is_relative_to(plugins_root):
+                raise ValueError(f"invalid comms adapter id {adapter_id!r}")
+            if not manifest_path.is_file():
+                raise ValueError(f"no manifest for comms adapter id {adapter_id!r}")
+        return value
 
     @field_validator("deepseek_api_key")
     @classmethod

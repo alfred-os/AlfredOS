@@ -336,6 +336,26 @@ class Supervisor:
         await self._started_event.wait()
         _log.info("supervisor.started")
 
+    @property
+    def shutdown_event(self) -> asyncio.Event:
+        """The live graceful-drain signal supervised tasks observe to exit.
+
+        PR-S4-11b DEFECT 1: the daemon wires this into every
+        :class:`alfred.plugins.comms_runner.CommsPluginRunner` so its pump can
+        race ``read_frame`` against it and return PROMPTLY when :meth:`stop`
+        sets it — instead of blocking on an idle plugin's stream until the
+        drain budget expires and the supervisor force-cancels (which records
+        ``cancelled_with_errors``). It is the same ``asyncio.Event`` the
+        in-supervisor :meth:`_capability_heartbeat_loop` /
+        :meth:`_proposal_dispatch_loop` already observe.
+
+        Read this AFTER :meth:`start` — :meth:`start` allocates a fresh event
+        per start/stop cycle, so a runner spawned post-``start`` gets the live
+        one. The daemon's spawn path runs after ``supervisor.start()``, so it
+        always reads the correct event.
+        """
+        return self._shutdown_event
+
     async def _run(self) -> None:
         """Hold the TaskGroup open until ``_shutdown_event`` resolves.
 

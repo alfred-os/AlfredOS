@@ -54,3 +54,8 @@ kind = "none"
 [comms_mcp]
 adapter_kind = "alfred_comms_test"
 classifiers_optional = []
+# PR-S4-11b (#237): the ``python -m`` target the daemon spawns this comms plugin
+# at. The substrate integration test launches the same module
+# (``alfred_comms_test.main``); declaring it here lets the daemon read the spawn
+# target from the manifest instead of hardcoding it.
+module = "alfred_comms_test.main"

@@ -50,6 +50,9 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from alfred.security.capability_gate._comms_adapter_grants import (
+    _COMMS_ADAPTER_PROPOSAL_BRANCH,
+)
 from alfred.security.capability_gate.policy import GrantRow
 
 _log = structlog.get_logger(__name__)
@@ -221,6 +224,34 @@ class StorageBackend(Protocol):
             sqlalchemy.exc.SQLAlchemyError: Re-raised from the driver
                 so a failed seed refuses boot (CLAUDE.md hard rule #7 —
                 no silent failures in security paths).
+        """
+        ...
+
+    async def reconcile_comms_adapter_grants(self, desired: Iterable[GrantRow]) -> None:
+        """Make the comms-adapter LOAD grants in Postgres mirror ``desired`` exactly.
+
+        FIX 2 (PR-S4-11b review). The config-sourced comms-adapter LOAD grants
+        (ADR-0027, ``proposal_branch == 'bootstrap:first-party-comms-adapter'``)
+        are DYNAMIC — driven by ``Settings.comms_enabled_adapters``. Unlike the
+        STATIC :data:`FIRST_PARTY_SYSTEM_GRANTS` (never removed, so additive-only
+        :meth:`seed_first_party_grants` is sufficient), a comms-adapter grant goes
+        STALE the moment an operator removes the adapter — additive seeding never
+        revokes it.
+
+        This method is the SCOPED reconciliation — NOT a full revoke-diff. In ONE
+        transaction it (a) DELETEs every existing ``plugin_grants`` row whose
+        ``proposal_branch`` is the comms-adapter sentinel and whose identity is
+        NOT in ``desired``, then (b) upserts ``desired`` as ``state='approved'``.
+        The revoke WHERE clause is EXACTLY scoped to the
+        ``bootstrap:first-party-comms-adapter`` sentinel, so it can NEVER touch
+        the DLP ``bootstrap:first-party-system`` grant, an operator proposal
+        grant, or any other row — that scoping is the load-bearing safety
+        property (CLAUDE.md hard rule #2 — no silent capability changes outside
+        the comms-adapter set).
+
+        Raises:
+            sqlalchemy.exc.SQLAlchemyError: Re-raised from the driver so a failed
+                reconcile refuses boot (CLAUDE.md hard rule #7).
         """
         ...
 
@@ -605,4 +636,57 @@ class PostgresBackend:
         seed_list = sorted(grants, key=_grant_sort_key)
         async with self._session() as session:
             for grant in seed_list:
+                await self._execute_upsert_grant(session, grant)
+
+    async def reconcile_comms_adapter_grants(self, desired: Iterable[GrantRow]) -> None:
+        """Make the comms-adapter LOAD grants in Postgres mirror ``desired`` exactly.
+
+        See the :meth:`StorageBackend.reconcile_comms_adapter_grants` Protocol
+        docstring for the full contract + the load-bearing safety property.
+
+        One transaction. First SELECT every existing ``plugin_grants`` row scoped
+        to the comms-adapter sentinel ``proposal_branch`` (the WHERE pins the
+        sentinel, so the read can never see the DLP ``bootstrap:first-party-system``
+        grant or an operator branch). Then compute the STALE set
+        ``existing minus desired`` by ``(plugin_id, hookpoint, subscriber_tier)``
+        identity and DELETE each stale row — the DELETE WHERE ALSO pins the
+        sentinel branch (defence in depth: even an identity collision across
+        branches could only delete the sentinel row). Finally upsert ``desired``
+        as ``state='approved'`` (idempotent ``ON CONFLICT DO UPDATE``).
+
+        ``desired`` is sorted by the same composite key the seed/apply paths use
+        so the per-row SQL/audit sequence is deterministic across boots.
+        """
+        desired_list = sorted(desired, key=_grant_sort_key)
+        desired_identities = {(g.plugin_id, g.hookpoint, g.subscriber_tier) for g in desired_list}
+        async with self._session() as session:
+            existing = await session.execute(
+                sa.text(
+                    "SELECT plugin_id, hookpoint, subscriber_tier "
+                    "FROM plugin_grants WHERE proposal_branch = :proposal_branch"
+                ),
+                {"proposal_branch": _COMMS_ADAPTER_PROPOSAL_BRANCH},
+            )
+            stale = sorted(
+                (r.plugin_id, r.hookpoint, r.subscriber_tier)
+                for r in existing.fetchall()
+                if (r.plugin_id, r.hookpoint, r.subscriber_tier) not in desired_identities
+            )
+            for plugin_id, hookpoint, subscriber_tier in stale:
+                await session.execute(
+                    sa.text(
+                        "DELETE FROM plugin_grants "
+                        "WHERE plugin_id = :plugin_id "
+                        "AND hookpoint = :hookpoint "
+                        "AND subscriber_tier = :subscriber_tier "
+                        "AND proposal_branch = :proposal_branch"
+                    ),
+                    {
+                        "plugin_id": plugin_id,
+                        "hookpoint": hookpoint,
+                        "subscriber_tier": subscriber_tier,
+                        "proposal_branch": _COMMS_ADAPTER_PROPOSAL_BRANCH,
+                    },
+                )
+            for grant in desired_list:
                 await self._execute_upsert_grant(session, grant)

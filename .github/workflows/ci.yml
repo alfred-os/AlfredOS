@@ -147,6 +147,22 @@ jobs:
           uv run coverage report \
             --include='src/alfred/security/capability_gate/_bootstrap_grants.py' \
             --fail-under=100
+      - name: Comms-adapter load-grants 100% line+branch coverage
+        # ADR-0027 (PR-S4-11b): ``_comms_adapter_grants.py`` holds the
+        # ``comms_adapter_load_grants`` builder — the config-is-authorization
+        # source of truth for the plugin-LOAD grants the daemon seeds per
+        # operator-enabled first-party comms adapter. Like ``_bootstrap_grants.py``
+        # it is a pure ``Settings -> tuple[GrantRow]`` transform fully covered by
+        # the unit tier (reads source-controlled manifests off disk, no Postgres),
+        # so gating it on unit-only ``.coverage`` data is sound. Named explicitly
+        # (not just glob-caught) so a reviewer sees the trust-boundary builder is
+        # gated by name. The combined-job ``Trust-boundary files`` gate names it
+        # too (the two-gates pattern — keep BOTH in sync when this file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/security/capability_gate/_comms_adapter_grants.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/security/capability_gate/_comms_adapter_grants.py' \
+            --fail-under=100
       # NOTE: the Slice-3 trust-boundary 100% gate moved to the
       # `coverage-gates` job below. The capability-gate heartbeat /
       # fail-closed / outage paths in
@@ -519,10 +535,10 @@ jobs:
         # CLAUDE.md hard rule #7 invariants would be paper-only on those
         # paths. Chained `&&` hashFiles guard per CR-138 finding #1 —
         # ANY-match must NOT no-op the gate; ALL files must be present.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != '' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != '' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != '' && hashFiles('src/alfred/security/capability_gate/_comms_adapter_grants.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py,src/alfred/security/capability_gate/_bootstrap_grants.py' \
+            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py,src/alfred/security/capability_gate/_bootstrap_grants.py,src/alfred/security/capability_gate/_comms_adapter_grants.py' \
             --fail-under=100
       - name: Plugins subsystem 100% line+branch coverage (combined)
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != '' && hashFiles('src/alfred/plugins/comms_stdio_transport.py') != '' && hashFiles('src/alfred/plugins/comms_runner.py') != '' && hashFiles('src/alfred/plugins/_comms_child_env.py') != ''
@@ -560,10 +576,10 @@ jobs:
         # function-scoped coverage gate is tracked as a follow-up).
         # Chained ``&&`` hashFiles guard per the plugins/supervisor precedent so
         # the gate no-ops cleanly on a branch where these files do not exist yet.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/protocol.py') != '' && hashFiles('src/alfred/comms_mcp/inbound.py') != '' && hashFiles('src/alfred/comms_mcp/inbound_scanner.py') != '' && hashFiles('src/alfred/comms_mcp/classifier_registry.py') != '' && hashFiles('src/alfred/comms_mcp/handlers.py') != '' && hashFiles('src/alfred/comms_mcp/bootstrap.py') != '' && hashFiles('src/alfred/comms_mcp/observability.py') != '' && hashFiles('src/alfred/comms_mcp/errors.py') != '' && hashFiles('src/alfred/orchestrator/burst_limiter.py') != '' && hashFiles('src/alfred/comms_mcp/sub_payload_promotion.py') != '' && hashFiles('src/alfred/comms_mcp/audit_hash.py') != '' && hashFiles('src/alfred/comms_mcp/outbound_queue.py') != '' && hashFiles('src/alfred/comms_mcp/discord_hookpoints.py') != '' && hashFiles('src/alfred/comms_mcp/classifiers/discord.py') != '' && hashFiles('src/alfred/comms_mcp/addressing_drift.py') != '' && hashFiles('src/alfred/comms_mcp/thread_conversation_ledger.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/protocol.py') != '' && hashFiles('src/alfred/comms_mcp/inbound.py') != '' && hashFiles('src/alfred/comms_mcp/inbound_scanner.py') != '' && hashFiles('src/alfred/comms_mcp/classifier_registry.py') != '' && hashFiles('src/alfred/comms_mcp/handlers.py') != '' && hashFiles('src/alfred/comms_mcp/bootstrap.py') != '' && hashFiles('src/alfred/comms_mcp/observability.py') != '' && hashFiles('src/alfred/comms_mcp/errors.py') != '' && hashFiles('src/alfred/orchestrator/burst_limiter.py') != '' && hashFiles('src/alfred/comms_mcp/sub_payload_promotion.py') != '' && hashFiles('src/alfred/comms_mcp/audit_hash.py') != '' && hashFiles('src/alfred/comms_mcp/outbound_queue.py') != '' && hashFiles('src/alfred/comms_mcp/discord_hookpoints.py') != '' && hashFiles('src/alfred/comms_mcp/classifiers/discord.py') != '' && hashFiles('src/alfred/comms_mcp/addressing_drift.py') != '' && hashFiles('src/alfred/comms_mcp/thread_conversation_ledger.py') != '' && hashFiles('src/alfred/comms_mcp/daemon_runtime.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/comms_mcp/protocol.py,src/alfred/comms_mcp/inbound.py,src/alfred/comms_mcp/inbound_scanner.py,src/alfred/comms_mcp/classifier_registry.py,src/alfred/comms_mcp/handlers.py,src/alfred/comms_mcp/bootstrap.py,src/alfred/comms_mcp/observability.py,src/alfred/comms_mcp/errors.py,src/alfred/orchestrator/burst_limiter.py,src/alfred/comms_mcp/sub_payload_promotion.py,src/alfred/comms_mcp/audit_hash.py,src/alfred/comms_mcp/outbound_queue.py,src/alfred/comms_mcp/discord_hookpoints.py,src/alfred/comms_mcp/classifiers/discord.py,src/alfred/comms_mcp/addressing_drift.py,src/alfred/comms_mcp/thread_conversation_ledger.py' \
+            --include='src/alfred/comms_mcp/protocol.py,src/alfred/comms_mcp/inbound.py,src/alfred/comms_mcp/inbound_scanner.py,src/alfred/comms_mcp/classifier_registry.py,src/alfred/comms_mcp/handlers.py,src/alfred/comms_mcp/bootstrap.py,src/alfred/comms_mcp/observability.py,src/alfred/comms_mcp/errors.py,src/alfred/orchestrator/burst_limiter.py,src/alfred/comms_mcp/sub_payload_promotion.py,src/alfred/comms_mcp/audit_hash.py,src/alfred/comms_mcp/outbound_queue.py,src/alfred/comms_mcp/discord_hookpoints.py,src/alfred/comms_mcp/classifiers/discord.py,src/alfred/comms_mcp/addressing_drift.py,src/alfred/comms_mcp/thread_conversation_ledger.py,src/alfred/comms_mcp/daemon_runtime.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor

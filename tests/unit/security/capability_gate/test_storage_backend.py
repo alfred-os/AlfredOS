@@ -793,3 +793,22 @@ def test_storage_backend_protocol_includes_apply_atomic() -> None:
     factory, _ = _fake_session_factory()
     backend = PostgresBackend(session_factory=factory)
     assert isinstance(backend, StorageBackend)
+
+
+def test_storage_backend_protocol_includes_reconcile_comms_adapter_grants() -> None:
+    """``reconcile_comms_adapter_grants`` is declared on the Protocol (FIX 2).
+
+    Pins the Protocol surface against a regression where the scoped comms-adapter
+    revoke-diff is implemented only on :class:`PostgresBackend` and the typed seam
+    drifts.
+    """
+    from alfred.security.capability_gate.backend import (
+        PostgresBackend,
+        StorageBackend,
+    )
+
+    assert hasattr(StorageBackend, "reconcile_comms_adapter_grants")
+
+    factory, _ = _fake_session_factory()
+    backend = PostgresBackend(session_factory=factory)
+    assert isinstance(backend, StorageBackend)

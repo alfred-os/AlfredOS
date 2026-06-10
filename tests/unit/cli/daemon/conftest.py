@@ -10,6 +10,7 @@ supervisor.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +36,18 @@ class FakeSupervisor:
     last_instance: FakeSupervisor | None = None
 
     def __init__(self, **kwargs: Any) -> None:
+        import asyncio
+
         self.kwargs = kwargs
         self.started = False
         self.stopped = False
+        # PR-S4-11b: every comms pump the boot path registers lands here so a
+        # test can assert exactly how many supervised tasks were scheduled.
+        self.registered_tasks: list[Any] = []
+        # PR-S4-11b DEFECT 1: the boot path reads ``supervisor.shutdown_event``
+        # to wire the comms runner's graceful-drain signal. Mirror the real
+        # Supervisor's per-instance ``asyncio.Event`` accessor.
+        self.shutdown_event = asyncio.Event()
         FakeSupervisor.last_instance = self
 
     async def start(self) -> None:
@@ -45,6 +55,18 @@ class FakeSupervisor:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    def register_plugin_task(self, coro: Any) -> Any:
+        """Record + immediately close the coroutine (no event loop scheduling).
+
+        The unit boot-wiring tests assert on the COUNT + identity of registered
+        pumps, not their execution, so the coroutine is closed to avoid a
+        "coroutine was never awaited" warning.
+        """
+        self.registered_tasks.append(coro)
+        with suppress(AttributeError):
+            coro.close()
+        return coro
 
 
 @pytest.fixture
