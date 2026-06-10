@@ -76,8 +76,12 @@ async def test_extractor_bridge_records_body_under_handle() -> None:
 
     assert len(recorded) == 1
     assert recorded[0]["body"] == {"content": "x"}
-    # The recorded handle id matches the one passed to the extractor.
-    handle = extractor.extract.await_args.args[0]
+    # The recorded handle id matches the one passed to the extractor. Resolve the
+    # handle robustly (CR #232): prefer the ``handle`` kwarg, fall back to the
+    # first positional arg, so the assertion survives a positional->keyword switch
+    # in the bridge without a spurious failure.
+    call = extractor.extract.await_args
+    handle = call.kwargs["handle"] if "handle" in call.kwargs else call.args[0]
     assert recorded[0]["handle_id"] == handle.id
 
 

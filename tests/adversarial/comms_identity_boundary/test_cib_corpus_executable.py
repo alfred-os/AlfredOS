@@ -56,6 +56,10 @@ def _load(payload_id: str) -> AdversarialPayload:
 def _suffix(payload_id: str) -> str:
     matches = sorted(_DIR.glob(f"{payload_id}-*.yaml"))
     assert matches, f"no YAML for {payload_id}"
+    # CR #232: fail fast on duplicate corpus files for one payload_id. Picking
+    # the first glob hit would silently target one file and mask corpus drift
+    # (adversarial ids must be unique / never reused).
+    assert len(matches) == 1, f"duplicate YAML files for {payload_id}: {matches}"
     return matches[0].stem.split("-", 3)[3]
 
 
