@@ -71,6 +71,8 @@ class _MessageLike(Protocol):
     id: int
     content: str
     created_at: Any
+    # ``None`` for a never-edited message; the edit timestamp once edited (M4).
+    edited_at: Any
     embeds: Iterable[object]
     attachments: Iterable[object]
     poll: object | None
@@ -185,7 +187,10 @@ def normalise(
         platform_user_id=str(message.author.id),
         body=body,
         sub_payload_refs=(),
-        received_at=message.created_at,
+        # M4: an edited message is a fresh inbound event at the edit instant, so
+        # stamp ``received_at`` with ``edited_at`` when present; a never-edited
+        # message has ``edited_at is None`` and falls back to ``created_at``.
+        received_at=message.edited_at or message.created_at,
         addressing_signal=signal,
     )
 

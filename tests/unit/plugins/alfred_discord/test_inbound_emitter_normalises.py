@@ -138,6 +138,22 @@ def test_received_at_is_message_created_at(discord_mock_factory: DiscordMockFact
     assert note.received_at == created
 
 
+def test_received_at_uses_edited_at_when_present(discord_mock_factory: DiscordMockFactory) -> None:
+    # M4: an edited message carries ``edited_at``; the inbound notification for
+    # the edit must stamp ``received_at`` with the EDIT time, not the original
+    # creation time (the edit is a fresh inbound event at the edit instant).
+    from datetime import UTC, datetime
+
+    created = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+    edited = datetime(2026, 6, 10, 12, 5, 0, tzinfo=UTC)
+    msg = discord_mock_factory.message(
+        channel=discord_mock_factory.dm_channel(), created_at=created, edited_at=edited
+    )
+    note = normalise(msg, **_kwargs())
+    assert note is not None
+    assert note.received_at == edited
+
+
 def test_language_from_guild_preferred_locale(discord_mock_factory: DiscordMockFactory) -> None:
     guild = discord_mock_factory.guild(preferred_locale="fr")
     msg = discord_mock_factory.message(
