@@ -53,14 +53,22 @@ class ThreadConversationLedger:
 
         First message in the thread mints a fresh session (``resumed=False``);
         every later message returns the same id (``resumed=True``).
+
+        First-bind is ATOMIC-by-construction via ``dict.setdefault`` rather than a
+        check-then-create (``get`` then ``[key] = mint``). The check-then-create
+        shape leaves a window where two binds could each observe no session and
+        each mint a distinct id, the second clobbering the first — splitting one
+        thread across two sessions and letting an attacker reset accumulated
+        context. ``setdefault`` commits the first writer's id and returns it for
+        every later caller, so ``resumed`` is simply "an id already existed".
         """
         key = (adapter_id, thread_id)
-        existing = self._sessions.get(key)
-        if existing is not None:
-            return ConversationBinding(conversation_session_id=existing, resumed=True)
-        session_id = str(uuid.uuid4())
-        self._sessions[key] = session_id
-        return ConversationBinding(conversation_session_id=session_id, resumed=False)
+        candidate = str(uuid.uuid4())
+        # setdefault returns the EXISTING value if present, else stores+returns
+        # the candidate. ``stored is candidate`` is True only for the writer that
+        # actually created the binding — that is the single non-resumed bind.
+        stored = self._sessions.setdefault(key, candidate)
+        return ConversationBinding(conversation_session_id=stored, resumed=stored is not candidate)
 
 
 __all__ = ["ConversationBinding", "ThreadConversationLedger"]
