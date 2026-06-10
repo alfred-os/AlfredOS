@@ -137,6 +137,16 @@ class TuiSession:
         self._last_inbound_at = note.received_at
         await self._notify(note)
 
+    def set_render_hook(self, render_outbound: RenderOutbound) -> None:
+        """Install the Textual render hook after the app is constructed.
+
+        ``render.py`` builds the :class:`AlfredTuiApp` from the session, then
+        wires the app's ``write_outbound`` back as the render hook — a
+        construction-order cycle the session breaks by allowing the hook to be
+        set post-init (it defaults to a no-op for the unit tests).
+        """
+        self._render = render_outbound
+
     async def render_outbound(self, body: str) -> None:
         """Paint a host-delivered outbound body into the Textual conversation log.
 
