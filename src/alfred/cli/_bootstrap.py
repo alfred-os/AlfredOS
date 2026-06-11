@@ -26,15 +26,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING
+from contextlib import AbstractAsyncContextManager
+from typing import TYPE_CHECKING, Protocol
 
 import structlog
 import typer
 from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 from structlog.types import EventDict
 
 from alfred.audit.log import AuditWriter
+from alfred.budget.guard import BudgetGuard
 from alfred.config.settings import Settings, SettingsError
 from alfred.i18n import t
 from alfred.identity import (
@@ -44,6 +47,9 @@ from alfred.identity import (
 )
 from alfred.identity.cli import install_factories as install_identity_factories
 from alfred.memory.db import build_session_scope
+from alfred.memory.episodic import EpisodicMemory
+from alfred.memory.working_pool import WorkingMemoryPool
+from alfred.orchestrator.core import Orchestrator, QuarantinedExtractorLike
 from alfred.providers.anthropic_native import AnthropicProvider
 from alfred.providers.deepseek import DeepSeekProvider
 from alfred.providers.router import ProviderRouter
@@ -57,7 +63,10 @@ if TYPE_CHECKING:
 __all__ = [
     "build_adapter_dlp_audit_sink",
     "build_broker",
+    "build_budget_guard",
+    "build_orchestrator",
     "build_router",
+    "build_working_memory_pool",
     "configure_logging",
     "install_identity_factories_for_settings",
     "load_settings_or_die",
@@ -321,6 +330,133 @@ def build_adapter_dlp_audit_sink(
         task.add_done_callback(_on_done)
 
     return _sink
+
+
+class _BudgetResolverLike(Protocol):
+    """The narrow resolver surface :func:`build_budget_guard` consumes.
+
+    The production :class:`IdentityResolver` satisfies this structurally: it
+    has ``show(slug=...)`` and the dynamically-promoted ``version_counter``
+    attribute the CLI pins at construction (see
+    :func:`install_identity_factories_for_settings`). Declaring exactly these
+    two members — rather than depending on the concrete resolver — keeps the
+    builder's contract honest and lets unit tests pass a minimal stub. Phase 5
+    promotes ``version_counter`` to a typed property on the resolver; until
+    then this Protocol is the single place the dependency is spelled out.
+    """
+
+    version_counter: IdentityVersionCounter
+
+    def show(self, *, slug: str) -> object | None: ...
+
+
+def build_budget_guard(
+    resolver: _BudgetResolverLike,
+    settings: Settings,
+) -> BudgetGuard:
+    """Construct the per-user :class:`BudgetGuard` for the orchestrator.
+
+    Extracted from the smoke test's inline wiring (the canonical
+    "production wiring under test"). The loader is keyed on the canonical
+    user slug and routes through ``resolver.show``; the version counter is the
+    resolver's shared instance so a budget row is invalidated in lockstep with
+    an identity mutation (PR-B Phase 1 cache-coherence contract).
+
+    The per-call cap comes from ``settings.per_call_max_usd`` — pydantic has
+    already enforced ``> 0`` on load — so the operator's configured ceiling
+    (``ALFRED_PER_CALL_MAX_USD`` / ``config/alfred.toml``) drives the gate
+    rather than a hardcoded literal.
+    """
+    return BudgetGuard(
+        user_loader=lambda user_id: resolver.show(slug=user_id),
+        per_call_max_usd=settings.per_call_max_usd,
+        version_counter=resolver.version_counter,
+    )
+
+
+def _episodic_factory(session: AsyncSession) -> EpisodicMemory:
+    """Production episodic-memory factory shared by the orchestrator + pool.
+
+    Both the orchestrator's per-turn episodic writes and the working-memory
+    pool's rehydrate read need an :class:`EpisodicMemory` bound to a live
+    session. Defining the factory once keeps the two construction sites from
+    drifting (DRY — CLAUDE.md conventions).
+    """
+    return EpisodicMemory(session=session)
+
+
+def build_working_memory_pool(
+    settings: Settings,
+    *,
+    episodic_factory: Callable[[AsyncSession], EpisodicMemory],
+    session_scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    active_user_count: Callable[[], int] = lambda: 1,
+) -> WorkingMemoryPool:
+    """Construct the per-(persona, user) :class:`WorkingMemoryPool`.
+
+    The orchestrator does NOT own the pool — the adapter acquires a buffer per
+    turn and releases it in ``finally``. This builder wires the pool's two
+    real dependencies (``episodic_factory`` for lazy rehydrate,
+    ``session_scope`` for the rehydrate query) and threads the operator's
+    optional cap override from ``settings.working_memory_pool_max`` (``None``
+    defers to the pool's ``max(50, active_user_count * 2)`` floor policy).
+
+    ``active_user_count`` has no production source yet — Slice-2 is
+    single-operator, so the pool's own ``lambda: 1`` default is the honest
+    value. It is exposed as a parameter (defaulted) so Slice-4 multi-user can
+    inject a live counter without reshaping this builder.
+    """
+    return WorkingMemoryPool(
+        episodic_factory=episodic_factory,
+        pool_session_scope=session_scope,
+        max_entries=settings.working_memory_pool_max,
+        active_user_count=active_user_count,
+    )
+
+
+def build_orchestrator(
+    settings: Settings,
+    *,
+    quarantined_extractor: QuarantinedExtractorLike | None = None,
+) -> Orchestrator:
+    """Assemble a privileged :class:`Orchestrator` from operator settings.
+
+    This is the production construction site the daemon inbound path (PR-S4-
+    11c-3) will call — before this PR ``Orchestrator(`` existed only in tests.
+    It composes the existing bootstrap helpers (``build_broker`` →
+    ``build_router``, ``install_identity_factories_for_settings``,
+    ``build_session_scope``) with :func:`build_budget_guard`.
+
+    ``quarantined_extractor`` is INJECTED (default ``None``), never built here:
+    constructing the extractor is the security-suite-gated job of PR-S4-11c-2.
+    Coupling extractor construction into this builder would invert the
+    dependency ordering of the graduation-closer epic — so the seam stays a
+    parameter. The orchestrator's ``quarantined_extract`` funnel raises loudly
+    if it is invoked while ``None`` (CLAUDE.md hard rule #7), so an un-wired
+    extractor can never silently no-op the trust boundary.
+
+    The working-memory pool is a SEPARATE builder
+    (:func:`build_working_memory_pool`): the orchestrator no longer holds the
+    buffer — the adapter brackets acquire/release around each turn.
+    """
+    broker = build_broker(settings)
+    router = build_router(broker, settings)
+    resolver = install_identity_factories_for_settings(settings)
+    session_scope = build_session_scope(settings)
+    # ``install_identity_factories_for_settings`` promotes ``version_counter``
+    # onto the resolver instance dynamically (PR-B Phase 1; Phase 5 makes it a
+    # typed property). Until then mypy sees the concrete resolver as missing
+    # the ``_BudgetResolverLike`` member, so narrow the type at the seam — the
+    # attribute is provably present because the builder above set it.
+    budget = build_budget_guard(resolver, settings)  # type: ignore[arg-type]  # reason: resolver.version_counter is the dynamically-promoted PR-B Phase 1 attribute; Phase 5 lifts it to a typed property
+    return Orchestrator(
+        identity_resolver=resolver,
+        session_scope=session_scope,
+        router=router,
+        budget=budget,
+        episodic_factory=_episodic_factory,
+        quarantined_extractor=quarantined_extractor,
+    )
 
 
 def configure_logging(broker: SecretBroker) -> None:
