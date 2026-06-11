@@ -221,6 +221,48 @@ def boot_success_env(
     restore()
 
 
+@pytest.fixture(autouse=True)
+def _assert_t3_nonce_slot_restored() -> Iterator[None]:
+    """Fail loud if a daemon-boot test leaks the authorised T3 nonce.
+
+    PR-S4-11c-2a carry-forward from the #243 review (ADR-0028 accepted-negative):
+    the daemon boot path registers the per-process authorised T3 nonce
+    (``alfred.security.tiers._AUTHORIZED_T3_NONCE``) via
+    ``create_and_register_t3_nonce``. The ``boot_success_env`` fixture cleans the
+    slot to ``None`` before the boot and restores the prior value on teardown — so
+    a test that drives boot THROUGH that harness leaves the slot exactly as it
+    found it. A test that reaches nonce registration while BYPASSING
+    ``boot_success_env`` (a new boot harness, a direct ``start_daemon`` call) would
+    instead leak a live nonce into the wider suite, flipping the previously-``None``
+    slot non-``None`` under siblings that assume an empty slot — a cross-test
+    contamination that surfaces as a baffling ``T3NonceAlreadyRegisteredError`` or a
+    silently-wrong gate identity far from its cause.
+
+    This autouse guard pins the failure to the leaking test's OWN teardown
+    boundary. It is autouse so it is set up BEFORE the explicitly-requested
+    ``boot_success_env`` and therefore TORN DOWN AFTER it (pytest finalisers run in
+    reverse setup order) — the assertion observes the slot AFTER
+    ``boot_success_env``'s ``restore()`` has run, so it never races the harness's
+    own clean/restore.
+
+    It captures the slot value at its OWN setup and asserts the slot returns to
+    that exact value — normally ``None`` in a clean pytest process, which makes the
+    common case the ``is None`` assertion the review asked for, while staying robust
+    if some earlier module legitimately registered a process nonce (no false
+    positive against a pre-existing live slot).
+    """
+    from alfred.security import tiers as _tiers
+
+    at_setup = _tiers._AUTHORIZED_T3_NONCE
+    yield
+    assert _tiers._AUTHORIZED_T3_NONCE is at_setup, (
+        "daemon-boot test leaked the authorised T3 nonce: the slot was not "
+        "restored to its pre-test value. A boot test that registers the nonce "
+        "MUST go through the boot_success_env harness (which cleans + restores "
+        "the slot) so the registration does not poison sibling tests."
+    )
+
+
 class _HealthyGate:
     """Async handshake double for probe (c)."""
 

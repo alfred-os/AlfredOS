@@ -91,6 +91,7 @@ from alfred.memory.models import Base
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
+from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
 
 pytestmark = pytest.mark.integration
@@ -380,8 +381,18 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
             # Build the comms graph + spawn the adapter the SAME way the daemon
             # does (production helpers — reuse, not reimplementation).
             outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
+            # #243 threaded a required ``t3_nonce`` onto ``_build_comms_boot_graph``;
+            # the non-root CI skip on this leg hid the missing kwarg. The reverted
+            # (ADR-0027 fixture-extractor) boot graph stores the nonce inert — it is
+            # NOT registered in the process slot and never reaches the
+            # ``_RecordedExtractTransport``, so a bare ``CapabilityGateNonce()`` is the
+            # faithful inert-DI value (no slot register/cleanup needed). The atomic
+            # production flip that consumes it lands in PR-S4-11c-2b.
             graph = _build_comms_boot_graph(
-                settings=settings, audit=audit, outbound_dlp=outbound_dlp
+                settings=settings,
+                audit=audit,
+                outbound_dlp=outbound_dlp,
+                t3_nonce=CapabilityGateNonce(),
             )
             runner = await _spawn_comms_adapter(
                 adapter_id=_ADAPTER_ID,
