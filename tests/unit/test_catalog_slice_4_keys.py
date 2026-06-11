@@ -104,6 +104,7 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.boot.audit_hash_pepper_missing",  # PR #205 round-2 sec-3 closure
     "daemon.boot.quarantine_grant_missing",  # PR-S4-11b0 first-party grant assertion
     "daemon.boot.boot_infra_install_failed",  # PR-S4-11b0 FIX 1: audited seed/install fault
+    "daemon.boot.t3_nonce_registration_failed",  # PR-S4-11c-2a0: boot T3-nonce registration refusal
     "daemon.boot.started",
     "daemon.stop.confirmed",
     "daemon.status.template",
