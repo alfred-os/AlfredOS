@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-11 10:06+0100\n"
+"POT-Creation-Date: 2026-06-11 13:59+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2325,6 +2325,26 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 #: src/alfred/security/quarantine.py:1498
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
+
+#: src/alfred/security/quarantine_transport.py:142
+msgid "security.quarantine_staging.handle_consumed"
+msgstr ""
+"Refusing to dereference a quarantine staging handle that was never staged"
+" or has already been consumed. Each inbound body is single-use; replay is"
+" refused."
+
+#: src/alfred/security/quarantine_transport.py:180
+msgid "security.quarantine_staging.nonce_unconfigured"
+msgstr ""
+"Refusing to stage an inbound body for quarantine: the authorised T3 nonce"
+" is not configured. The daemon must register it at boot before wiring the"
+" comms inbound path."
+
+#: src/alfred/security/quarantine_transport.py:250
+msgid "security.quarantine_transport.unsupported_method"
+msgstr ""
+"Quarantine transport refused an unsupported wire method '{method}'. Only "
+"quarantine.extract is dispatched on this path."
 
 #: src/alfred/security/secrets.py:240 src/alfred/security/secrets.py:251
 #: src/alfred/security/secrets.py:267 src/alfred/security/secrets.py:279

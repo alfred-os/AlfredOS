@@ -163,6 +163,24 @@ jobs:
           uv run coverage report \
             --include='src/alfred/security/capability_gate/_comms_adapter_grants.py' \
             --fail-under=100
+      - name: Quarantine transport trust-boundary 100% line+branch coverage
+        # PR-S4-11c-2a (ADR-0029): ``quarantine_transport.py`` is the host-side
+        # wire that carries a T3 inbound body to the quarantined LLM — the single-
+        # use staging map, the ``T3BodyRecorder`` boundary that tags the body T3,
+        # and the ``QuarantineStdioTransport`` ingest-then-extract dispatch. A
+        # coverage hole here is a hole at the dual-LLM trust boundary. It is
+        # already caught INCIDENTALLY by the ``security/*`` glob gate above; this
+        # explicit per-file gate makes it AUDITABLY named (a reviewer sees the
+        # trust-boundary wire is gated by name, not just by glob). Fully covered
+        # by the unit tier (``tests/unit/security/test_quarantine_transport.py``),
+        # so gating on unit-only ``.coverage`` data is sound. The combined-job
+        # ``Trust-boundary files`` gate names it too (the two-gates pattern — keep
+        # BOTH in sync when this file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/security/quarantine_transport.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/security/quarantine_transport.py' \
+            --fail-under=100
       # NOTE: the Slice-3 trust-boundary 100% gate moved to the
       # `coverage-gates` job below. The capability-gate heartbeat /
       # fail-closed / outage paths in
@@ -535,10 +553,10 @@ jobs:
         # CLAUDE.md hard rule #7 invariants would be paper-only on those
         # paths. Chained `&&` hashFiles guard per CR-138 finding #1 —
         # ANY-match must NOT no-op the gate; ALL files must be present.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != '' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != '' && hashFiles('src/alfred/security/capability_gate/_comms_adapter_grants.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/security/quarantine_transport.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != '' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != '' && hashFiles('src/alfred/security/capability_gate/_comms_adapter_grants.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py,src/alfred/security/capability_gate/_bootstrap_grants.py,src/alfred/security/capability_gate/_comms_adapter_grants.py' \
+            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/security/quarantine_transport.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py,src/alfred/security/capability_gate/_bootstrap_grants.py,src/alfred/security/capability_gate/_comms_adapter_grants.py' \
             --fail-under=100
       - name: Plugins subsystem 100% line+branch coverage (combined)
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != '' && hashFiles('src/alfred/plugins/comms_stdio_transport.py') != '' && hashFiles('src/alfred/plugins/comms_runner.py') != '' && hashFiles('src/alfred/plugins/_comms_child_env.py') != ''
