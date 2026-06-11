@@ -113,6 +113,28 @@ class QuarantineGrantMissingFailure(_BootFailureBase):
     failure_reason: Literal["quarantine_grant_missing"] = "quarantine_grant_missing"
 
 
+class T3NonceRegistrationFailedFailure(_BootFailureBase):
+    """The per-process authorised T3 nonce could not be minted + registered.
+
+    PR-S4-11c-2a0: the daemon mints the per-process
+    :class:`alfred.security.tiers.CapabilityGateNonce` and installs it in the
+    ``alfred.security.tiers._AUTHORIZED_T3_NONCE`` slot exactly once at process
+    start via :func:`alfred.bootstrap.nonce_factory.create_and_register_t3_nonce`.
+    A fresh process boots with an empty slot, so registration succeeds. A NON-empty
+    slot at boot means a nonce was already minted (a re-entrant boot path, a leaked
+    test fixture, a duplicate registration), at which point the factory raises
+    :class:`alfred.bootstrap.nonce_factory.T3NonceAlreadyRegisteredError` — there is
+    no production reset API by design (the silent-rotation failure mode of clearing
+    a live slot is worse than a loud refusal). Boot refuses fail-closed rather than
+    continue without owning the authorised nonce: without it EVERY authorised
+    T3-tagging path (``tag_t3_with_nonce``) raises, so the comms inbound body could
+    not be tagged ``TaggedContent[T3]`` (CLAUDE.md hard rule #7 — loud + audited,
+    never a silent traceback).
+    """
+
+    failure_reason: Literal["t3_nonce_registration_failed"] = "t3_nonce_registration_failed"
+
+
 class CommsAdapterSpawnFailedFailure(_BootFailureBase):
     """An enabled comms adapter failed to spawn / handshake at boot (PR-S4-11b).
 
@@ -152,11 +174,12 @@ DaemonBootFailure = Annotated[
     | CapabilityGateHandshakeFailedFailure
     | QuarantineGrantMissingFailure
     | BootInfraInstallFailedFailure
+    | T3NonceRegistrationFailedFailure
     | CommsAdapterSpawnFailedFailure
     | CommsMultiAdapterUnsupportedFailure,
     Field(discriminator="failure_reason"),
 ]
 """Discriminated union over the daemon-boot refusal modes (spec §3.4 +
 ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
-PR-S4-11b ``comms_adapter_spawn_failed`` + FIX 4
-``comms_multi_adapter_unsupported``)."""
+PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11b
+``comms_adapter_spawn_failed`` + FIX 4 ``comms_multi_adapter_unsupported``)."""

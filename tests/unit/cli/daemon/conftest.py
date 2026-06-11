@@ -90,8 +90,28 @@ def apply_boot_success_patches(
 
     Returns a restore callable the caller MUST invoke at teardown to restore
     the process registry singleton the boot path installs via
-    ``set_registry`` (otherwise the boot registry leaks into sibling tests).
+    ``set_registry`` (otherwise the boot registry leaks into sibling tests),
+    AND to restore the authorised-T3-nonce slot.
+
+    PR-S4-11c-2a0: the boot path now mints + registers the per-process
+    authorised T3 nonce via ``create_and_register_t3_nonce`` (slot
+    ``alfred.security.tiers._AUTHORIZED_T3_NONCE``). The factory raises
+    ``T3NonceAlreadyRegisteredError`` on a second call, so without a per-test
+    reset the SECOND boot test in a pytest process would refuse boot — and the
+    registered nonce would leak into the wider suite, flipping the previously-
+    ``None`` slot non-``None`` under tests that assume an empty slot. This
+    harness clears the slot to ``None`` before the boot runs (under the same
+    ``_NONCE_LOCK`` the ``clean_t3_nonce_slot`` fixture uses, so it stays
+    race-safe against a concurrent bootstrap) and the returned restore callable
+    puts the prior value back — exactly the ``clean_t3_nonce_slot`` contract,
+    inlined here so every daemon-boot-success test inherits it.
     """
+    from alfred.bootstrap.nonce_factory import _NONCE_LOCK
+    from alfred.security import tiers as _tiers
+
+    with _NONCE_LOCK:
+        _prior_t3_nonce = _tiers._AUTHORIZED_T3_NONCE
+        _tiers._set_authorized_t3_nonce(None)
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", raising=False)
     monkeypatch.setattr(
@@ -175,6 +195,11 @@ def apply_boot_success_patches(
         # into sibling tests and shift the active gate/sink out from under
         # them.
         set_registry(_prior_registry)
+        # Restore the authorised-T3-nonce slot the boot path registered (under
+        # the bootstrap lock) so the nonce this boot minted never leaks into a
+        # sibling test that assumes an empty slot.
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(_prior_t3_nonce)
 
     return _restore
 

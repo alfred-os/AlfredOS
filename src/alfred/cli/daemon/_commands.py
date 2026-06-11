@@ -39,6 +39,15 @@ from alfred.audit.audit_row_schemas import (
     DAEMON_BOOT_FAILED_FIELDS,
     DAEMON_BOOT_FIELDS,
 )
+
+# PR-S4-11c-2a0 (#237): mint + register the per-process authorised T3 nonce at
+# boot. Imported at module scope (not lazily) so the boot-wiring unit tests can
+# monkeypatch the ``alfred.cli.daemon._commands.create_and_register_t3_nonce``
+# seam to count / fault the call without a real subprocess.
+from alfred.bootstrap.nonce_factory import (
+    T3NonceAlreadyRegisteredError,
+    create_and_register_t3_nonce,
+)
 from alfred.cli.daemon._audit_fallback import build_boot_audit_writer
 from alfred.cli.daemon._daemon_pidfile import (
     DaemonPidFileError,
@@ -61,6 +70,7 @@ from alfred.cli.daemon._failures import (
     DaemonBootFailure,
     EnvironmentNotSetFailure,
     QuarantineGrantMissingFailure,
+    T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
 )
 from alfred.config._environment_loader import (
@@ -95,6 +105,7 @@ if TYPE_CHECKING:
     from alfred.hooks.capability import CapabilityGate
     from alfred.security.capability_gate._gate import RealGate
     from alfred.security.dlp import OutboundDlpProtocol
+    from alfred.security.tiers import CapabilityGateNonce
     from alfred.supervisor.core import Supervisor as _SupervisorType
 
 # Exit codes (operator-facing contract; documented in the runbook PR-S4-11).
@@ -281,6 +292,16 @@ class _CommsBootGraph:
     Built once (guarded behind ``if settings.comms_enabled_adapters``) and threaded
     into the per-adapter handler construction + spawn loop. ``inbound_orchestrator``
     has its outbound sender bound LATER, per adapter, once the runner exists.
+
+    ``t3_nonce`` is the per-process authorised :class:`CapabilityGateNonce` minted
+    at boot (PR-S4-11c-2a0). It is threaded onto the graph so PR-S4-11c-2a's
+    ``record_body`` seam can tag the inbound body ``TaggedContent[T3]`` via
+    :func:`alfred.security.tiers.tag_t3_with_nonce`. In THIS precursor it is
+    carried-but-not-yet-consumed (record_body lands in 2a) — the same
+    threaded-but-inert pattern as 11c-1's orchestrator and 11b0's grant seed. It is
+    held here (passed by DI, never re-fetched from the module slot) so the gate's
+    ``is``-identity check holds — the factory docstring forbids stashing it in any
+    module global outside ``alfred.security.tiers``.
     """
 
     secret_broker: object
@@ -288,10 +309,15 @@ class _CommsBootGraph:
     extractor_bridge: object
     burst_limiter: object
     inbound_orchestrator: CommsInboundOrchestratorAdapter
+    t3_nonce: CapabilityGateNonce
 
 
 def _build_comms_boot_graph(
-    *, settings: Settings, audit: AuditWriter, outbound_dlp: OutboundDlpProtocol
+    *,
+    settings: Settings,
+    audit: AuditWriter,
+    outbound_dlp: OutboundDlpProtocol,
+    t3_nonce: CapabilityGateNonce,
 ) -> _CommsBootGraph:
     """Construct the pre-Supervisor comms graph (PR-S4-11b construction step 1-5).
 
@@ -300,6 +326,13 @@ def _build_comms_boot_graph(
     extractor + its body-shaped bridge, the burst limiter, and the inbound
     orchestrator adapter whose outbound sender is bound per-adapter after the
     runner exists.
+
+    ``t3_nonce`` is the per-process authorised :class:`CapabilityGateNonce` the
+    daemon minted at boot. It is stored on the returned graph (PR-S4-11c-2a0
+    precursor infra) for PR-S4-11c-2a's ``record_body`` seam — it is NOT consumed
+    here yet (the ``CommsExtractorBridge`` still constructs without a
+    ``record_body``), mirroring the threaded-but-inert DI precedent of 11c-1's
+    orchestrator and 11b0's grant seed.
     """
     from typing import cast
 
@@ -335,6 +368,7 @@ def _build_comms_boot_graph(
         extractor_bridge=extractor_bridge,
         burst_limiter=burst_limiter,
         inbound_orchestrator=inbound_orchestrator,
+        t3_nonce=t3_nonce,
     )
 
 
@@ -1055,6 +1089,32 @@ async def _start_async() -> None:
     # Wrap the raw gate for the Supervisor's sync backing-store-availability
     # surface (the CapabilityGateMonitor heartbeat polls it).
     gate: object = _SupervisorBootGate(real_gate)
+
+    # PR-S4-11c-2a0 (#237): mint + register the per-process authorised T3 nonce.
+    # ALWAYS at boot (not comms-gated): the factory docstring says "once at
+    # process start" and names future non-comms consumers (StdioTransport,
+    # quarantine_host) that also need it, and a None slot is the production bug
+    # being fixed — leaving it None on a default-empty boot would keep every
+    # authorised T3-tagging path dead. The slot is the live identity the gate's
+    # ``is`` check reads; the returned object is threaded by DI into the comms
+    # boot graph (record_body lands in 2a). Placed AFTER the trust-boundary infra
+    # (seed-gate + boot registry + grant-assertion) so the nonce is registered
+    # only once that boundary is known-good — a daemon that cannot stand up its
+    # gate never gets a live T3 slot. Fail-closed: a non-None slot at boot (a
+    # re-entrant boot / leaked fixture / duplicate registration) raises
+    # T3NonceAlreadyRegisteredError → audited refusal (exit 2), never a silent
+    # rotation of a live nonce out from under its holders (CLAUDE.md hard rule #7).
+    try:
+        t3_nonce = create_and_register_t3_nonce()
+    except T3NonceAlreadyRegisteredError:
+        await _refuse_boot(
+            audit,
+            T3NonceRegistrationFailedFailure(),
+            t("daemon.boot.t3_nonce_registration_failed"),
+            boot_id=boot_id,
+            environment_source=source,
+        )
+
     started_at = datetime.now(UTC)
     state_git_head_sha = read_state_git_head_sha(settings.state_git_path)
     policies_snapshot_hash = snapshot_ref.snapshot_hash()
@@ -1092,7 +1152,12 @@ async def _start_async() -> None:
     # inbound orchestrator's outbound sender is bound per-adapter once the runner
     # exists (the late-bind seam in ``CommsInboundOrchestratorAdapter``).
     comms_graph = (
-        _build_comms_boot_graph(settings=settings, audit=audit, outbound_dlp=outbound_dlp)
+        _build_comms_boot_graph(
+            settings=settings,
+            audit=audit,
+            outbound_dlp=outbound_dlp,
+            t3_nonce=t3_nonce,
+        )
         if settings.comms_enabled_adapters
         else None
     )
