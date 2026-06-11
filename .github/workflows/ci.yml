@@ -336,6 +336,139 @@ jobs:
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
 
+  python-cross-os:
+    # Axis 1 (OS breadth) — run the PORTABLE layer of the `python` job on the
+    # non-Linux runners so a regression that only shows on macOS or Windows is
+    # caught in CI instead of on a contributor's laptop. The Linux leg stays in
+    # the dedicated `python` job above (it carries the per-subsystem 100%
+    # coverage gates, which need the combined unit+integration corpus that only
+    # the Linux `coverage-gates` job assembles — those are deliberately NOT
+    # duplicated here).
+    #
+    # Per-OS reality (assessed empirically, not assumed — see
+    # docs/ci/required-checks.md "OS matrix" note):
+    #
+    #   * macos-latest — runs lint + format + mypy + pyright. Type-checking is
+    #     pinned to the Linux deployment target (`--platform linux`, see the
+    #     mypy step) so the POSIX-only `os` surface the runtime uses
+    #     (`os.setrlimit`/`RLIMIT_CORE`, `os.writev`, `os.O_NOFOLLOW`) is checked
+    #     against the stubs it actually runs on, not the host runner's. This leg
+    #     is the real portability signal for macOS-specific path / type drift.
+    #
+    #     The UNIT suite is NOT run on macOS. ~77 unit tests under
+    #     tests/unit/plugins/web_fetch/, .../security/, .../config/ boot a real
+    #     Redis/Postgres via Testcontainers (no `@pytest.mark.integration` —
+    #     they import `testcontainers` directly), and the GitHub macOS runner
+    #     ships NO Docker daemon, so they ERROR at fixture setup with
+    #     `docker.errors.DockerException` (#245 first real run: 3731 passed /
+    #     77 errored). Those Docker-needing tests are not cleanly separable by a
+    #     single marker or path, so a deselect allowlist would rot the moment a
+    #     new Docker-backed unit test lands. Running the Docker-free unit subset
+    #     on macOS is deferred to the follow-up tracked in
+    #     docs/ci/required-checks.md (it needs a code change: a `requires_docker`
+    #     marker on the entangled tests). macOS still gets the highest-value,
+    #     zero-code-change, Docker-free layer today — lint + format + type-check.
+    #
+    #   * windows-latest — runs lint + format + mypy + pyright ONLY (same layer
+    #     as macOS). The unit suite is NOT Windows-clean either: dozens of tests
+    #     invoke the POSIX bash launcher (`/bin/sh`), `os.uname()`,
+    #     `os.geteuid()`, `signal.SIGKILL` and `subprocess(..., pass_fds=...)`
+    #     with NO `sys.platform == "win32"` skip-guard, so they would ERROR (not
+    #     skip) on Windows. Guarding them all is a cross-cutting code change out
+    #     of scope for this additive CI PR — tracked in the follow-up issue
+    #     referenced in docs/ci/required-checks.md. Lint/format/type-check ARE
+    #     portable, so Windows gets that layer today. Per the required-vs-
+    #     informational split (docs/ci/required-checks.md), the Windows leg is
+    #     informational-until-green: `continue-on-error: true` keeps a Windows-
+    #     only regression visible WITHOUT blocking merge, until the win32
+    #     skip-guards land and it can be promoted to required.
+    #
+    # Cost discipline: the heavy Integration/Smoke (Testcontainers, needs the
+    # Docker daemon) stay Linux-only; this matrix only adds the cheap
+    # static-analysis layer. `fail-fast: false` so a macOS failure does not mask
+    # a Windows failure or vice-versa.
+    name: Python cross-OS (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    # Windows is informational-until-green (see the job-level comment and
+    # docs/ci/required-checks.md): a Windows-only regression stays VISIBLE in the
+    # PR checklist but does NOT block merge until the win32 skip-guards land and
+    # the leg can be promoted to a required check. macOS is required (it must be
+    # green). `continue-on-error` is matrix-leg-scoped via the expression so it
+    # applies ONLY to the windows-latest leg; the macos-latest leg fails the job
+    # normally.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()` in
+    # job-level `if:` at workflow-parse time. The first-step `check` probes for
+    # pyproject.toml and every downstream step short-circuits on
+    # `steps.check.outputs.has_py` (mirrors the `python` job's discipline).
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check for Python project
+        id: check
+        # `shell: bash` pins the shell on ALL three platforms — Windows runners
+        # default to PowerShell, where `[ -f ... ]` / `>>"$GITHUB_OUTPUT"` is not
+        # valid. GitHub ships Git-Bash on windows-latest, so this POSIX probe
+        # runs identically everywhere.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            echo "has_py=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_py=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::pyproject.toml missing — skipping Python cross-OS job."
+          fi
+      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+        if: steps.check.outputs.has_py == 'true'
+      - if: steps.check.outputs.has_py == 'true'
+        run: uv python install 3.14
+      - if: steps.check.outputs.has_py == 'true'
+        run: uv sync --frozen --dev
+      - name: Ruff lint
+        if: steps.check.outputs.has_py == 'true'
+        run: uv run ruff check .
+      - name: Ruff format check
+        if: steps.check.outputs.has_py == 'true'
+        run: uv run ruff format --check .
+      - name: Mypy (strict, Linux target)
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
+        # `--platform linux` pins the type-check to the DEPLOYMENT target's `os`
+        # stubs regardless of the runner OS. The runtime is Linux-only (bwrap /
+        # runuser / POSIX fds), so it uses POSIX-only `os` attributes —
+        # `os.setrlimit` + `os.RLIMIT_CORE` (process_posture.py), `os.writev`
+        # (fd3_key_delivery.py), `os.O_NOFOLLOW` (_daemon_pidfile.py). Without
+        # this flag, mypy on the Windows runner type-checks against Windows `os`
+        # stubs (which lack those attrs) and reports false `attr-defined`
+        # errors for code that NEVER runs on Windows (#245 first real run). The
+        # Linux `python` job runs mypy on a Linux runner so it matches by
+        # default; here we make the platform explicit so every runner checks the
+        # same target.
+        run: uv run mypy --strict --platform linux src/
+      - name: Pyright (Linux target)
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
+        # `--pythonplatform Linux` is pyright's equivalent of mypy's
+        # `--platform linux` — pin the type-check to the Linux deployment target
+        # so the POSIX-only `os` surface (see the mypy step) resolves on every
+        # runner OS, not just Linux. Pyright defaults `pythonPlatform` to the
+        # HOST OS, so without this the macOS/Windows legs would diverge from the
+        # Linux `pyright` job.
+        run: uv run pyright --pythonplatform Linux src/
+      # NOTE: no unit-test step. ~77 tests under tests/unit/ boot Redis/Postgres
+      # via Testcontainers and the GitHub macOS runner has no Docker daemon, so
+      # they error at fixture setup. The Docker-free unit subset on macOS is
+      # deferred to the follow-up tracked in docs/ci/required-checks.md (needs a
+      # `requires_docker` marker on the entangled tests). See the job-level
+      # comment for the full rationale.
+
   integration:
     name: Integration
     runs-on: ubuntu-latest
@@ -464,6 +597,160 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 1
+
+  integration-privileged:
+    # Axis 2 (privileged-Linux depth) — closes #245 Problem 1. The
+    # launcher-spawn / real-bwrap-spawn integration + smoke legs are gated on
+    # `os.uname().sysname == "Linux" and os.geteuid() == 0` (root, so `runuser`
+    # can UID-drop a kind=none plugin) and, for the dual-LLM child, on a real
+    # `bwrap` binary. The required `Integration`/`Smoke` jobs run on the
+    # non-root `ubuntu-latest` runner, so today those legs `pytest.skip` and the
+    # gate is paper-only — a change that breaks one is invisible to CI (the
+    # concrete instance: PR #243's required-kwarg break on
+    # test_daemon_comms_inbound_turn.py was green-because-skipped; only a local
+    # root/macOS run caught it — see #245).
+    #
+    # APPROACH — `sudo`, NOT a `container:` job. The root-gated spawn legs
+    # (`test_daemon_comms_inbound_turn.py`, `test_slice4_daemon_comms_spawn.py`)
+    # boot a `PostgresContainer("postgres:16")` via **testcontainers**, which
+    # needs the host Docker daemon. A `container:` job would sever access to the
+    # runner's Docker socket (docker-in-docker is not set up), so testcontainers
+    # would fail to start Postgres. Instead we stay on the bare `ubuntu-latest`
+    # runner — which HAS Docker for testcontainers AND a passwordless-sudo user —
+    # install bubblewrap via apt, and run pytest under `sudo` so `geteuid()==0`
+    # holds while the Docker socket (root-accessible) stays reachable. This is
+    # the same machinery the existing `integration` job uses (apt bwrap + jq +
+    # apparmor relax) plus the `sudo` UID-0 wrapper.
+    #
+    # REQUIRED gate (see docs/ci/required-checks.md): a regression in the real
+    # fd-3 spawn-clobber / runuser UID-drop path now blocks merge.
+    name: Integration (privileged Linux, real spawn)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # No job-level `hashFiles()` guard: rejected at workflow-parse time. The
+    # `check` step probes the corpus; downstream steps short-circuit on
+    # `steps.check.outputs.has_spawn` (mirrors every other job here).
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check for privileged-spawn corpus
+        id: check
+        # If NO integration/smoke corpus is present (e.g. a branch before these
+        # tests land) the job no-ops cleanly — same discipline as every other
+        # job here, probed at step time because job-level `if: hashFiles(...)` is
+        # rejected at parse time.
+        run: |
+          set -euo pipefail
+          if find tests/integration tests/smoke -type f -name '*.py' \
+              -print -quit 2>/dev/null | grep -q .; then
+            echo "has_spawn=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_spawn=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no integration/smoke corpus — skipping privileged-spawn job."
+          fi
+      - name: Install bubblewrap + jq and relax unprivileged-userns
+        if: steps.check.outputs.has_spawn == 'true'
+        # bubblewrap is the real sandbox the kind=full / dual-LLM-child legs
+        # exec; jq is the launcher's JSON reader. ubuntu-latest's apt bubblewrap
+        # is >= 0.6 (sufficient — the alfred-core runtime image pins 0.8.0).
+        #
+        # ubuntu-latest ships kernel.apparmor_restrict_unprivileged_userns=1,
+        # which blocks bwrap's unprivileged user-namespace setup (surfacing as
+        # `bwrap: setting up uid map: Permission denied`). Relax it for the
+        # runner. `|| true`: the sysctl is absent on older kernels (no
+        # restriction to lift there). Same machinery as the `integration` job.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap jq
+          bwrap --version
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+        if: steps.check.outputs.has_spawn == 'true'
+      - if: steps.check.outputs.has_spawn == 'true'
+        run: uv python install 3.14
+      - if: steps.check.outputs.has_spawn == 'true'
+        run: uv sync --frozen --dev
+      - name: Assert the spawn-enabling preconditions hold (euid 0 + bwrap)
+        if: steps.check.outputs.has_spawn == 'true'
+        # Guard against this gate silently regressing to paper-only. The
+        # root-gated legs `skipif (not bwrap) or (sysname != Linux) or (geteuid
+        # != 0)`. If a future change to this job broke any of those three
+        # conditions (sudo not actually giving uid 0, bwrap install silently
+        # failing, the wrong runner image), pytest would skip the legs and the
+        # JOB would still go green — gating nothing. That is the exact #245
+        # failure mode one level up. Prove DETERMINISTICALLY, before pytest, that
+        # the environment the legs require is real: `sudo` yields euid 0 and
+        # bwrap is on root's PATH. A cheap, unambiguous precondition beats
+        # parsing pytest's skip summary.
+        run: |
+          set -euo pipefail
+          EUID_UNDER_SUDO=$(sudo python3 -c 'import os; print(os.geteuid())')
+          echo "euid under sudo: ${EUID_UNDER_SUDO}"
+          if [ "${EUID_UNDER_SUDO}" != "0" ]; then
+            echo "::error::sudo did not yield euid 0 (got ${EUID_UNDER_SUDO}); the root-gated spawn legs would SKIP and this gate would be paper-only (see #245)."
+            exit 1
+          fi
+          if ! sudo bash -c 'command -v bwrap' >/dev/null 2>&1; then
+            echo "::error::bwrap not on root PATH; the bwrap-gated real-spawn legs would SKIP and this gate would be paper-only (see #245)."
+            exit 1
+          fi
+          echo "Preconditions hold: euid 0 + bwrap present — the root-gated legs will EXECUTE, not skip."
+      - name: Run real-spawn integration + smoke legs as root
+        id: real_spawn
+        if: steps.check.outputs.has_spawn == 'true'
+        # Run pytest under `sudo` so `os.geteuid() == 0` holds and bwrap is on
+        # PATH — the legs that `skipif (not bwrap) or (sysname != Linux) or
+        # (geteuid != 0)` on the non-root runner now EXECUTE here. We
+        # deliberately run the FULL integration + smoke corpus (not a hand-picked
+        # subset): the whole point of #245 is that ANY future required-kwarg /
+        # contract break on a currently-skipped leg must surface, and an
+        # allowlist would re-create the same blind spot the moment a NEW
+        # root-gated leg lands without being added to the list.
+        #
+        # `sudo -E` preserves the environment AND keeps the root-accessible
+        # Docker socket reachable so testcontainers can still boot
+        # Postgres/Redis from inside the root pytest process.
+        #
+        # PATH propagation is the subtle part. `sudo` strips PATH down to its
+        # `secure_path` (`/etc/sudoers`) even with `-E`, so root's command
+        # lookup does NOT see the GITHUB_PATH additions setup-uv made for the
+        # runner user (`/opt/hostedtoolcache/uv/<ver>/x86_64`, `~/.local/bin`).
+        # Two consumers need uv resolvable:
+        #   1. the pytest invocation itself — handled by `$(command -v uv)`,
+        #      an absolute path that does not depend on PATH; and
+        #   2. the daemon-spawn SMOKE legs
+        #      (test_slice4_daemon_comms_spawn / test_slice4_daemon_dispatch),
+        #      which shell out to bare `subprocess.run(["uv", "run", ...])` and
+        #      inherit the pytest process's PATH. Under plain `sudo -E` that PATH
+        #      lacks uv's dir, so those legs ERROR with
+        #      `FileNotFoundError: 'uv'` (#245 first real run). We therefore
+        #      explicitly carry uv's directory onto PATH via `sudo env
+        #      "PATH=<uv-dir>:$PATH"` so the nested `uv` resolves. `UV_DIR` is
+        #      derived from the absolute uv path, so it tracks whatever location
+        #      setup-uv chose (tool-cache version dir) without hard-coding it.
+        #
+        # The kind=none launcher legs UID-drop via `runuser -u <target>`; each
+        # test sets `ALFRED_PLUGIN_UID = getpass.getuser()` itself (under sudo
+        # that is `root`, so `runuser -u root` succeeds trivially as uid 0). No
+        # job-level UID env is needed.
+        #
+        # `-p no:cacheprovider` avoids a root-owned `.pytest_cache`. The full
+        # integration suite already runs (non-root) in the `integration` job, so
+        # any leg that does NOT gate on root simply re-runs here harmlessly; the
+        # NEW signal is the previously-skipped root-gated legs now executing.
+        # `--cov-fail-under=0` because this run is about EXECUTION of the spawn
+        # legs, not the 75%/100% coverage thresholds the dedicated coverage jobs
+        # own.
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"
+          UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest tests/integration tests/smoke -q \
+            -p no:cacheprovider --cov-fail-under=0
 
   coverage-gates:
     name: Coverage gates (combined unit + integration)
