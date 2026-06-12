@@ -113,7 +113,12 @@ def test_boot_threads_same_nonce_into_comms_graph(
     original = _commands._build_comms_boot_graph
 
     async def _spy(
-        *, settings: object, audit: object, outbound_dlp: object, t3_nonce: object
+        *,
+        settings: object,
+        audit: object,
+        outbound_dlp: object,
+        t3_nonce: object,
+        policies_ref: object,
     ) -> object:
         captured.append(t3_nonce)
         graph = await original(
@@ -121,6 +126,7 @@ def test_boot_threads_same_nonce_into_comms_graph(
             audit=audit,  # type: ignore[arg-type]
             outbound_dlp=outbound_dlp,  # type: ignore[arg-type]
             t3_nonce=t3_nonce,  # type: ignore[arg-type]
+            policies_ref=policies_ref,
         )
         built_graphs.append(graph)
         return graph

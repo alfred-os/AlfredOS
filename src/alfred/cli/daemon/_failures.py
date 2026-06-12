@@ -169,6 +169,31 @@ class CommsAdapterSpawnFailedFailure(_BootFailureBase):
     adapter_id: str = ""
 
 
+class CommsPromoterMisconfiguredFailure(_BootFailureBase):
+    """A classifier-bearing comms adapter kind yielded a ``None`` promoter (PR-S4-235-1).
+
+    The boot-time mirror of the M2 fail-closed guard in
+    :func:`alfred.comms_mcp.inbound.process_inbound_message`. An adapter kind whose
+    :data:`alfred.comms_mcp.classifier_registry.REQUIRED_CLASSIFIERS_BY_KIND` set is
+    non-empty (e.g. ``"discord"``) MUST receive a host-side
+    :class:`alfred.comms_mcp.sub_payload_promotion.SubPayloadPromoter` so raw (T3)
+    sub-payloads are promoted to single-use ``ContentHandle`` references BEFORE the
+    quarantined extract (CLAUDE.md hard rule #5). The per-adapter promoter factory is
+    deterministic — it builds a promoter for exactly the classifier-bearing kinds — so
+    a ``None`` promoter for such a kind is a structural wiring defect, not a runtime
+    data condition.
+
+    Rather than wait for the FIRST inbound message to trip the M2 guard (an audited
+    refusal mid-traffic), the daemon asserts the invariant at BOOT and REFUSES
+    fail-closed with this distinct reason (CLAUDE.md hard rule #7). ``adapter_id`` is
+    the closed-vocabulary config token (charset-validated by the Settings field),
+    never raw content.
+    """
+
+    failure_reason: Literal["comms_promoter_misconfigured"] = "comms_promoter_misconfigured"
+    adapter_id: str = ""
+
+
 class CommsMultiAdapterUnsupportedFailure(_BootFailureBase):
     """More than one comms adapter is enabled — unsupported in this cut (FIX 4).
 
@@ -197,6 +222,7 @@ DaemonBootFailure = Annotated[
     | T3NonceRegistrationFailedFailure
     | QuarantineChildSpawnFailedFailure
     | CommsAdapterSpawnFailedFailure
+    | CommsPromoterMisconfiguredFailure
     | CommsMultiAdapterUnsupportedFailure,
     Field(discriminator="failure_reason"),
 ]
@@ -204,4 +230,5 @@ DaemonBootFailure = Annotated[
 ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ``quarantine_child_spawn_failed`` + PR-S4-11b ``comms_adapter_spawn_failed`` +
+PR-S4-235-1 ``comms_promoter_misconfigured`` +
 FIX 4 ``comms_multi_adapter_unsupported``)."""

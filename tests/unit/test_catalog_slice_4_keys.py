@@ -128,6 +128,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # FIX 4 (PR-S4-11b review): >1 enabled comms adapter is unsupported in
     # this cut (outbound acks would cross-route) — refuse boot.
     "daemon.boot.comms_multi_adapter_unsupported",
+    # PR-S4-235-1 (#235): boot-time mirror of the inbound M2 guard — a
+    # classifier-bearing adapter kind that yields a None sub-payload promoter
+    # refuses boot fail-closed rather than tripping M2 on the first message.
+    "daemon.boot.comms_promoter_misconfigured",
     "daemon.stop.no_daemon",
     "daemon.stop.stale_pidfile",
     "daemon.status.not_running",

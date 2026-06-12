@@ -96,6 +96,16 @@ class Settings(BaseSettings):
         default=PostgresDsn("postgresql+asyncpg://alfred:alfred@localhost:5432/alfred")
     )
 
+    # Redis (rate-limit counters, ContentHandle store, robots cache). The
+    # docker-compose stack sets ALFRED_REDIS_URL to the internal service URL
+    # (``redis://alfred-redis:6379/0``); the default below targets a local
+    # single-host Redis for bare-metal / dev runs. PR-S4-235-1 (#235) promotes
+    # this to a Settings field so the daemon's host-owned ContentStore (the
+    # SubPayloadPromoter's sub-payload sink) reads from the same auditable config
+    # surface as every other setting rather than an ad-hoc os.environ read.
+    # Override via ALFRED_REDIS_URL.
+    redis_url: str = Field(default="redis://localhost:6379/0")
+
     # Budget. Both must be > 0 — a zero or negative cap would make every
     # call an automatic refusal (daily_usd) or trivially-bypass-able
     # (per_call_max_usd), which contradicts the operator's intent of having
