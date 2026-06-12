@@ -94,7 +94,7 @@ async def test_dispatch_uses_native_path_for_native_constrained_provider() -> No
     response is JSON-schema-valid by construction. The dispatcher MUST
     pick this branch when the provider declares it.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = _fake_provider_with_capabilities(
         frozenset({ProviderCapability.NATIVE_CONSTRAINED_GENERATION}),
@@ -122,7 +122,7 @@ async def test_dispatch_uses_json_object_path_for_json_mode_provider() -> None:
     The deepseek-chat path: provider returns JSON but not schema-constrained,
     so the dispatcher validates with Pydantic after the call.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = _fake_provider_with_capabilities(
         frozenset({ProviderCapability.JSON_OBJECT_MODE}),
@@ -149,7 +149,7 @@ async def test_dispatch_uses_fallback_for_no_capability_provider() -> None:
     in the user prompt, response parsed + validated host-side, retry on
     validation failure.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = _fake_provider_with_capabilities(
         frozenset(),
@@ -179,7 +179,7 @@ async def test_native_path_wins_when_provider_has_both_capabilities() -> None:
     ambiguity. The closed-domain branch order is documented in
     :data:`ExtractionMode` (spec §6.2).
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = _fake_provider_with_capabilities(
         frozenset(
@@ -211,7 +211,7 @@ async def test_dispatch_retries_on_json_decode_error_then_succeeds() -> None:
     JSONDecodeError is one of the two ``except`` legs the dispatcher
     catches (the other is ``ValidationError``). Anything else propagates.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     bad = _json_object_response("not json")
     good = _json_object_response('{"title": "hello"}')
@@ -239,7 +239,7 @@ async def test_dispatch_returns_typed_refusal_on_retry_exhaustion() -> None:
     ``malformed_output`` mode, which would be a protocol violation
     (spec §6.7 / prov-011).
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     bad = _json_object_response("definitely not json")
     provider = AsyncMock()
@@ -267,7 +267,7 @@ async def test_dispatch_propagates_non_validation_errors() -> None:
     closed-vocab ``provider_unavailable`` leg (httpx.HTTPError); every
     other exception propagates to the supervisor.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = AsyncMock()
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
@@ -296,7 +296,7 @@ async def test_dispatch_short_circuits_on_wall_clock_budget_breach(
     ``deadline_monotonic = time.monotonic() + budget``) and then jumps
     past the deadline on the next read.
     """
-    from plugins.alfred_quarantined_llm import provider_dispatch as pd
+    from alfred.security.quarantine_child import provider_dispatch as pd
 
     bad = _json_object_response("definitely not json")
     provider = AsyncMock()
@@ -335,7 +335,7 @@ def test_cached_parsed_schema_refuses_non_object_json() -> None:
     schema; a non-object decode means a corrupt caller. Fail loud at
     the cache layer rather than blowing up far from the source.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import (
+    from alfred.security.quarantine_child.provider_dispatch import (
         _cached_parsed_schema,
     )
 
@@ -356,7 +356,7 @@ async def test_dispatch_returns_provider_unavailable_on_httpx_error() -> None:
     """
     import httpx
 
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     provider = AsyncMock()
     provider.capabilities = lambda: frozenset({ProviderCapability.JSON_OBJECT_MODE})
@@ -384,7 +384,7 @@ def test_categorise_validator_error_maps_json_decode_to_closed_label() -> None:
     ``loc`` tuples can include attacker-controlled JSON keys when the
     quarantined LLM returns a poisoned dict.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import (
+    from alfred.security.quarantine_child.provider_dispatch import (
         _categorise_validator_error,
     )
 
@@ -400,7 +400,7 @@ def test_categorise_validator_error_maps_validation_to_closed_label() -> None:
     """
     from pydantic import BaseModel, ValidationError
 
-    from plugins.alfred_quarantined_llm.provider_dispatch import (
+    from alfred.security.quarantine_child.provider_dispatch import (
         _categorise_validator_error,
     )
 
@@ -423,7 +423,7 @@ def test_build_extraction_prompt_retry_does_not_leak_pydantic_loc() -> None:
     body is fixed at the type level — even a category like
     ``"schema_mismatch"`` cannot widen into attacker text.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import (
+    from alfred.security.quarantine_child.provider_dispatch import (
         _build_extraction_prompt,
     )
 
@@ -449,7 +449,7 @@ async def test_dispatch_treats_non_object_json_as_retry_eligible() -> None:
     in Slice 4 once the schema-class serialiser threads through). The
     closed contract: extractions are objects.
     """
-    from plugins.alfred_quarantined_llm.provider_dispatch import dispatch_extraction
+    from alfred.security.quarantine_child.provider_dispatch import dispatch_extraction
 
     array_response = _json_object_response('["not", "an", "object"]')
     provider = AsyncMock()
@@ -480,7 +480,7 @@ def test_dispatch_retry_path_does_not_carry_prior_response_text() -> None:
     """
     from pydantic import BaseModel, ValidationError
 
-    from plugins.alfred_quarantined_llm.provider_dispatch import (
+    from alfred.security.quarantine_child.provider_dispatch import (
         _build_extraction_prompt,
         _categorise_validator_error,
     )

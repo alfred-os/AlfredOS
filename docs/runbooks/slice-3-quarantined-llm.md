@@ -14,7 +14,7 @@ until then the subprocess runs with UID separation only.
 
 ## Plugin manifest contract
 
-The plugin manifest is at `plugins/alfred_quarantined_llm/manifest.toml`.
+The plugin manifest is at `src/alfred/security/quarantine_child/manifest.toml`.
 Three fields are load-bearing:
 
 | Field | Required value | Why |

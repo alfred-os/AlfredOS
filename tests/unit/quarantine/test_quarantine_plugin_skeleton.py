@@ -2,7 +2,8 @@
 
 Covers three surfaces:
 
-* The on-disk plugin manifest (``plugins/alfred_quarantined_llm/manifest.toml``)
+* The on-disk plugin manifest
+  (``alfred/security/quarantine_child/manifest.toml``)
   parses through :func:`alfred.plugins.manifest.parse_manifest` with the
   canonical PluginManifest v1 shape (``alfred.manifest_version=1``,
   ``subscriber_tier="system"``).
@@ -12,7 +13,7 @@ Covers three surfaces:
   or sys.exit.
 * The in-process ``handle_ingest`` / ``handle_extract`` skeleton round-trips
   a ContentHandle id through the in-process content cache and into
-  :func:`plugins.alfred_quarantined_llm.provider_dispatch.dispatch_extraction`.
+  :func:`alfred.security.quarantine_child.provider_dispatch.dispatch_extraction`.
 
 Why these tests live in ``tests/unit/quarantine/``: the quarantined-LLM
 plugin is the load-bearing T3 boundary. Its skeleton's import-time hygiene
@@ -38,15 +39,16 @@ from alfred.providers.base import ProviderCapability
 
 
 def _manifest_path() -> Path:
-    """Resolve the manifest path from the repo root (worktree-safe).
+    """Resolve the shipped manifest path from the installed package.
 
-    The test file's location is stable relative to the worktree root:
-    ``tests/unit/quarantine/test_*.py``. Resolving from ``__file__`` keeps
-    the test runnable from any cwd without depending on a fixture for the
-    repo root.
+    The quarantine child now ships inside the wheel at
+    ``alfred/security/quarantine_child/manifest.toml``. Resolving from the
+    installed ``alfred`` package keeps the test runnable from any cwd
+    without depending on a fixture for the repo root.
     """
-    repo_root = Path(__file__).resolve().parents[3]
-    return repo_root / "plugins" / "alfred_quarantined_llm" / "manifest.toml"
+    import alfred
+
+    return Path(alfred.__file__).parent / "security" / "quarantine_child" / "manifest.toml"
 
 
 def test_quarantined_llm_manifest_file_exists() -> None:
@@ -118,7 +120,7 @@ def test_quarantine_plugin_module_imports_without_reading_fd3(
 
     # Fresh import so the side-effect would fire if module-scope code
     # called ``os.read(3, ...)``.
-    import plugins.alfred_quarantined_llm.quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     importlib.reload(qp)
     # No assertion on `calls` other than the AssertionError above firing if
@@ -130,7 +132,7 @@ def test_quarantine_plugin_exposes_handle_ingest_and_handle_extract() -> None:
     ``handle_extract``. The orchestrator's MCP transport invokes these by
     name; renaming either is a wire-protocol break.
     """
-    import plugins.alfred_quarantined_llm.quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     assert callable(qp.handle_ingest)
     assert callable(qp.handle_extract)
@@ -148,7 +150,7 @@ def _clear_content_cache() -> None:
     The Slice-3 skeleton uses an in-process dict; the production impl
     (PR-S3-5) swaps in Redis. Either way, tests must not bleed state.
     """
-    import plugins.alfred_quarantined_llm.quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     qp._content_cache.clear()
 
@@ -163,7 +165,7 @@ async def test_handle_ingest_stores_content_keyed_by_handle_id(
     plugin host's content store via Redis GETDEL. Both shapes are
     write-then-read under the same key.
     """
-    import plugins.alfred_quarantined_llm.quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     await qp.handle_ingest("handle-abc", "hello world")
     assert qp._content_cache["handle-abc"] == b"hello world"
@@ -175,15 +177,15 @@ async def test_handle_extract_delegates_to_dispatch_extraction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``handle_extract`` looks up the cached content, then delegates to
-    :func:`plugins.alfred_quarantined_llm.provider_dispatch.dispatch_extraction`.
+    :func:`alfred.security.quarantine_child.provider_dispatch.dispatch_extraction`.
 
     The skeleton test pins only the delegation shape — the capability-
     branched dispatch logic itself is Task 5. We monkeypatch
     ``dispatch_extraction`` so this test stays scoped to the plugin
     entry-point's responsibility (cache lookup + delegation).
     """
-    import plugins.alfred_quarantined_llm.provider_dispatch as pd
-    import plugins.alfred_quarantined_llm.quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
+    from alfred.security.quarantine_child import provider_dispatch as pd
 
     await qp.handle_ingest("handle-xyz", '{"title": "hi"}')
 
@@ -245,7 +247,7 @@ def test_fd3_read_returns_decoded_key_on_well_formed_frame(
     The wire format pin (spec §5.3): big-endian 4-byte length, then the
     key bytes, then no trailing bytes. Decode returns the original key.
     """
-    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     key = "sk-deepseek-abc123"
     header = len(key).to_bytes(4, "big")
@@ -271,7 +273,7 @@ def test_fd3_read_exits_when_header_is_short(
     apart the three failure modes (short_header / short_body /
     trailing_bytes) without log-format heuristics.
     """
-    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     monkeypatch.setattr("os.read", _scripted_os_read([b"\x00\x00"]))
     with pytest.raises(SystemExit) as exc_info:
@@ -293,7 +295,7 @@ def test_fd3_read_exits_when_body_is_short(
     err-003 fix: emits ``short_body`` as the discriminator so the
     supervisor knows the header was readable but the body underflowed.
     """
-    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     header = (10).to_bytes(4, "big")  # claim 10 bytes
     monkeypatch.setattr(
@@ -319,7 +321,7 @@ def test_fd3_read_exits_when_trailing_bytes_present(
     err-003 fix: emits ``trailing_bytes`` as the discriminator so the
     supervisor knows the key parsed but something extra followed.
     """
-    from plugins.alfred_quarantined_llm import quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
 
     key = "ok"
     header = len(key).to_bytes(4, "big")
@@ -347,8 +349,8 @@ async def test_handle_extract_passes_empty_bytes_when_handle_missing(
     path produce a TypedRefusal that the audit-emit path can persist with
     result="refused" (Task 6 wires this in QuarantinedExtractor).
     """
-    import plugins.alfred_quarantined_llm.provider_dispatch as pd
-    import plugins.alfred_quarantined_llm.quarantine_plugin as qp
+    from alfred.security.quarantine_child import __main__ as qp
+    from alfred.security.quarantine_child import provider_dispatch as pd
 
     captured: dict[str, Any] = {}
 

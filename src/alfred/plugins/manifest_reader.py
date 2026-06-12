@@ -44,10 +44,26 @@ import os
 import sys
 from pathlib import Path
 
-from alfred.config._environment_loader import EnvironmentSource, load_environment
-from alfred.plugins.errors import ManifestError, ManifestSandboxMissingError
-from alfred.plugins.manifest import parse_manifest
-from alfred.plugins.sandbox_policy import (
+# BUG-1 (PR-S4-11c-2b0): this module's stdout is captured by
+# ``bin/alfred-plugin-launcher.sh`` as bwrap flags. The ``from alfred...``
+# imports below transitively load :mod:`alfred.i18n.translator`, which emits a
+# missing-catalog WARNING at import time on a pip-installed alfred. Pin ALL
+# stdlib logging to stderr BEFORE those imports run so no log byte can ever reach
+# fd 1 and become a bogus bwrap argument. Must precede the alfred imports.
+from alfred._stdio_logging import configure_stderr_logging
+
+configure_stderr_logging()
+
+from alfred.config._environment_loader import (  # noqa: E402 - after stderr-logging pin (BUG-1)
+    EnvironmentSource,
+    load_environment,
+)
+from alfred.plugins.errors import (  # noqa: E402 - after stderr-logging pin (BUG-1)
+    ManifestError,
+    ManifestSandboxMissingError,
+)
+from alfred.plugins.manifest import parse_manifest  # noqa: E402 - after stderr-logging pin (BUG-1)
+from alfred.plugins.sandbox_policy import (  # noqa: E402 - after stderr-logging pin (BUG-1)
     SandboxPolicyInvalid,
     policy_to_bwrap_flags,
     read_policy_toml,

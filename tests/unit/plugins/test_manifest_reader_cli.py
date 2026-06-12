@@ -246,6 +246,58 @@ def test_no_subcommand_refuses() -> None:
     assert result.returncode != 0
 
 
+# --------------------------------------------------------------------------
+# BUG-1 (PR-S4-11c-2b0): stdout stays byte-pure even when the i18n catalog is
+# absent. The launcher captures this module's stdout as bwrap flags; a stray
+# log line on fd 1 became the bwrap exec target on a pip-installed alfred with
+# no shipped catalogs. The translator's missing-catalog warning must land on
+# stderr only.
+# --------------------------------------------------------------------------
+
+# Forces the missing-catalog case (pip-installed-without-catalogs) by making
+# every locale candidate resolve absent BEFORE the translator module is imported,
+# so its import-time warning genuinely fires down the missing-catalog branch.
+# Then runs the real CLI main() in the SAME process, as a subprocess, so the
+# captured stdout is exactly what the launcher would capture as bwrap flags.
+_FORCE_NO_LOCALE_THEN_RUN = (
+    "import sys, pathlib, importlib.resources;"
+    "pathlib.Path.is_dir = lambda self: False;"
+    "importlib.resources.files = lambda name: (_ for _ in ()).throw(ModuleNotFoundError());"
+    "import alfred.plugins.manifest_reader as _mr;"
+    "sys.exit(_mr.main(sys.argv[1:]))"
+)
+
+
+def _run_inline(*args: str, stdin: str | None = None):
+    base_env = {"PYTHONPATH": str(REPO_ROOT / "src"), "PATH": "/usr/bin:/bin"}
+    return subprocess.run(  # noqa: S603 — sys.executable + repo-owned inline driver
+        [sys.executable, "-c", _FORCE_NO_LOCALE_THEN_RUN, *args],
+        capture_output=True,
+        text=True,
+        env=base_env,
+        input=stdin,
+        check=False,
+    )
+
+
+def test_policy_to_bwrap_flags_stdout_pure_when_locale_absent() -> None:
+    """With the catalog absent, stdout is PURE bwrap flags — no warning leaks to fd 1.
+
+    The launcher reads each stdout line as a bwrap flag; the translator's
+    import-time "translations disabled" warning must not appear on stdout (it
+    once became the bwrap exec target). It is allowed on stderr.
+    """
+    policy = 'keep_fds = [3]\ntmpfs = ["/tmp"]\n'
+    result = _run_inline("--policy-to-bwrap-flags", stdin=policy)
+    assert result.returncode == 0, result.stderr
+    # Every stdout line is a real bwrap flag/value — none is the warning text.
+    assert "locale directory not found" not in result.stdout
+    assert "translations disabled" not in result.stdout
+    assert "--tmpfs" in result.stdout.splitlines()
+    # The warning is allowed to surface on stderr (it is NOT captured as a flag).
+    assert "translations disabled" in result.stderr
+
+
 def test_read_sandbox_requires_a_source() -> None:
     # Neither --manifest-path nor --plugin-id → refuse with the exact bare key.
     result = _run("--read-sandbox")

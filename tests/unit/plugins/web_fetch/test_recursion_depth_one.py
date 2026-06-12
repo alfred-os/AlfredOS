@@ -15,7 +15,11 @@ def test_quarantined_llm_manifest_declares_no_tool_calls() -> None:
     import pathlib
     import tomllib
 
-    manifest_path = pathlib.Path("plugins/alfred_quarantined_llm/manifest.toml")
+    import alfred
+
+    manifest_path = (
+        pathlib.Path(alfred.__file__).parent / "security" / "quarantine_child" / "manifest.toml"
+    )
     if not manifest_path.exists():
         pytest.skip("PR-S3-4 not yet merged — quarantined-LLM manifest not present")
     with manifest_path.open("rb") as f:

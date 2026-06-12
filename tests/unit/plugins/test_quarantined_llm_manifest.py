@@ -2,7 +2,7 @@
 
 Two guarantees:
 
-* The on-disk ``plugins/alfred_quarantined_llm/manifest.toml`` parses through
+* The on-disk ``alfred/security/quarantine_child/manifest.toml`` parses through
   the canonical parser and carries a ``kind: full`` sandbox block with the
   three per-OS ``policy_refs`` entries (B.3 — proof the migration sticks).
 * A snapshot of the parsed ``sandbox`` block catches silent drift over time
@@ -20,8 +20,9 @@ from alfred.plugins.manifest import parse_manifest
 
 
 def _manifest_path() -> Path:
-    repo_root = Path(__file__).resolve().parents[3]
-    return repo_root / "plugins" / "alfred_quarantined_llm" / "manifest.toml"
+    import alfred
+
+    return Path(alfred.__file__).parent / "security" / "quarantine_child" / "manifest.toml"
 
 
 def _parsed_sandbox() -> object:

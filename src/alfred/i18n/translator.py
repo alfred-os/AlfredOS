@@ -3,18 +3,51 @@
 from __future__ import annotations
 
 import gettext
+import importlib.resources
 import logging
+import sys
 from contextvars import ContextVar
 from pathlib import Path
 
 _DOMAIN = "alfred"
 _LOG = logging.getLogger(__name__)
 
+# Package-internal catalog directory. The wheel build force-includes the
+# compiled ``locale/`` tree here (see pyproject.toml
+# ``[tool.hatch.build.targets.wheel.force-include]``: ``locale`` → ``alfred/_locale``)
+# so a ``pip install``ed alfred carries its catalogs INSIDE the package and the
+# bwrap ``kind="full"`` ``/usr`` ro-bind reaches them without widening the
+# sandbox. The name is underscore-prefixed so it never collides with a real
+# BCP-47 ``locale`` submodule and is obviously private.
+_PACKAGE_LOCALE_RESOURCE = "_locale"
+
+
+def _installed_package_locale_dir() -> Path | None:
+    """Return the in-package ``alfred/_locale`` dir if the wheel shipped it.
+
+    Uses :func:`importlib.resources.files` so the lookup is correct regardless
+    of how ``alfred`` was installed (editable, wheel, zip-unsafe excluded — the
+    catalogs are real files). In a source checkout ``files("alfred")`` points at
+    ``src/alfred`` where ``_locale`` does NOT exist (it is created only at
+    wheel-build time), so this returns ``None`` and the dev candidate below
+    wins; in a wheel install it resolves to the force-included catalog tree.
+
+    Any resolution error (missing package metadata, non-path traversable
+    backend) degrades to ``None`` rather than raising — a catalog probe must
+    never wedge import of the translator.
+    """
+    try:
+        resource = importlib.resources.files("alfred") / _PACKAGE_LOCALE_RESOURCE
+    except (ModuleNotFoundError, TypeError):  # pragma: no cover - defensive
+        return None
+    candidate = Path(str(resource))
+    return candidate if candidate.is_dir() else None
+
 
 def _resolve_locale_dir() -> Path | None:
     """Find the first existing ``locale/`` directory across known candidates.
 
-    The catalog ships in two physically different layouts depending on how the
+    The catalog ships in three physically different layouts depending on how the
     package is invoked:
 
     * **Development (editable install / source checkout)** — the repo root sits
@@ -25,6 +58,11 @@ def _resolve_locale_dir() -> Path | None:
       ``parents[3] / "locale"`` resolved to ``/app/.venv/lib/python3.12/locale``
       (devops-1 finding on PR #89), which never existed and silently degraded
       every catalog lookup to its key.
+    * **Wheel install (pip install alfred under ``/usr``)** — the catalogs ship
+      INSIDE the package at ``alfred/_locale`` via the wheel force-include, so
+      :func:`_installed_package_locale_dir` resolves them. This is the layout the
+      bwrapped quarantine child runs under (PR-S4-11c-2b0, ADR-0030): a missing
+      catalog there previously DISABLED translations (operators saw raw keys).
 
     Returns the first existing candidate, or ``None`` if none are found (caller
     logs a warning and falls back to ``NullTranslations``).
@@ -32,35 +70,60 @@ def _resolve_locale_dir() -> Path | None:
     candidates = [
         # 1. Source-checkout layout. Three parents up: translator.py → i18n →
         #    alfred → src → <repo>. Matches `uv run pytest` from the worktree
-        #    and any editable install pointing at the source tree.
+        #    and any editable install pointing at the source tree. Checked first
+        #    so a dev worktree never accidentally prefers a stale installed copy.
         Path(__file__).resolve().parents[3] / "locale",
         # 2. Container layout. Hardcoded by the Dockerfile so any change here
         #    must be matched in docker/alfred-core.Dockerfile.
         Path("/app/locale"),
-        # 3. Installed-package fallback. If ``alfred`` is ``pip install``ed
-        #    without package_data (the current case — see pyproject.toml),
-        #    ``parents[3]`` lands inside the venv at a useless path.
-        #    ``parents[2]`` is the directory holding the ``alfred`` package
-        #    (``site-packages``) — that's where a future install layout that
-        #    drops ``locale/`` as a sibling of the package would put it.
-        #    ``parents[1]`` (the prior value) only worked if catalogs were
-        #    copied INTO the package; pyproject.toml doesn't do that today.
-        Path(__file__).resolve().parents[2] / "locale",
     ]
     for candidate in candidates:
         if candidate.is_dir():
             return candidate
-    return None
+    # 3. Wheel-installed layout. The catalogs ship inside the package at
+    #    ``alfred/_locale`` (force-include). Resolved last so dev/container
+    #    layouts keep winning, but reached for a pip-installed alfred — which
+    #    has neither a source-checkout ``parents[3]/locale`` nor ``/app/locale``.
+    return _installed_package_locale_dir()
+
+
+def _warn_locale_missing_on_stderr() -> None:
+    """Emit the missing-catalog warning, pinned to ``sys.stderr``.
+
+    BUG-1 (PR-S4-11c-2b0): this warning fires at *import* time — before any
+    entrypoint configures logging — and ``translator`` is imported transitively
+    by the ``manifest_reader`` CLI whose **stdout** the launcher captures as
+    bwrap flags (``--policy-to-bwrap-flags``), and by the quarantine child whose
+    **stdout** carries length-prefixed JSON-RPC frames. A warning that reaches
+    fd 1 corrupts both wires (it became the bwrap exec target under a
+    pip-installed alfred with no shipped catalogs). stdlib's ``lastResort``
+    already targets stderr, but it is global mutable state any caller can
+    repoint at stdout; pinning our own :class:`logging.StreamHandler` to
+    ``sys.stderr`` here makes the destination deterministic and independent of
+    whatever root config the process later installs. We do NOT raise — a missing
+    catalog must never wedge the CLI; the ``t()`` fallback returns the key so
+    operators still see a recognisable string and developers see what to add.
+    """
+    record = _LOG.makeRecord(
+        _LOG.name,
+        logging.WARNING,
+        __file__,
+        0,
+        "AlfredOS locale directory not found; translations disabled.",
+        (),
+        None,
+    )
+    handler = logging.StreamHandler(sys.stderr)
+    handler.emit(record)
 
 
 _LOCALE_DIR = _resolve_locale_dir()
-if _LOCALE_DIR is None:
-    # Logged once at import time. We do NOT raise — a missing catalog should
-    # never wedge the CLI; the t() fallback returns the key so operators still
-    # see a recognisable string and developers see what to add. The warning is
-    # surfaced through stdlib logging (not structlog) because translator.py is
-    # imported before _configure_logging() runs in cli/main.py.
-    _LOG.warning("AlfredOS locale directory not found; translations disabled.")
+if _LOCALE_DIR is None:  # pragma: no cover - import-time branch: the catalog always
+    # resolves under the test/CI tree, so this arm is unreachable in the
+    # coverage-counted process. ``_warn_locale_missing_on_stderr`` is unit-tested
+    # directly, and the wiring is exercised in a forced-missing-locale SUBPROCESS
+    # by tests/unit/quarantine/test_quarantine_child_stdout_pure.py (#237).
+    _warn_locale_missing_on_stderr()
 
 # Per-coroutine active language. ContextVar (not a plain module global) so
 # concurrent handlers — Slice-2 Discord DMs, CLI commands under

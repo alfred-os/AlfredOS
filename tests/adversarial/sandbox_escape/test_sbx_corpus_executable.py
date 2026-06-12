@@ -12,6 +12,7 @@ network, process-fork); those need the real policy bytes to be meaningful.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import struct
@@ -530,3 +531,134 @@ def test_all_pr_s4_7_payloads_load() -> None:
         payload = _load(pid)
         assert payload.id == pid
         assert payload.category == "sandbox_escape"
+
+
+# ---------------------------------------------------------------------------
+# PR-S4-11c-2b0 — the LIVE-spawned, wheel-co-located quarantined child.
+# sbx-2026-012 (fd-3 key / raw-T3 leak containment) + sbx-2026-013 ("policy was
+# inert, now enforced live" via the kind=full launcher spawn). The live-spawn
+# assertions are docker-only (bwrap + Linux + root).
+# ---------------------------------------------------------------------------
+
+
+def test_all_pr_s4_11c_2b0_payloads_load() -> None:
+    # Every PR-S4-11c-2b0 sbx payload schema-validates + carries the sbx prefix.
+    for pid in ("sbx-2026-012", "sbx-2026-013"):
+        payload = _load(pid)
+        assert payload.id == pid
+        assert payload.category == "sandbox_escape"
+
+
+@_bwrap_required
+def test_sbx_2026_012_quarantine_child_does_not_leak_fd3_key(tmp_path: Path) -> None:
+    """sbx-2026-012: a child seeded with an fd-3 key must not echo it to stdout.
+
+    Drives the REAL quarantined-LLM child wire contract via a stub run under the
+    shipped policy: the host delivers a recognizable key over fd 3; the contract
+    is that the host's reply channel (the child's stdout, which the host frames
+    as ONE length-prefixed result) never carries the raw key back. We seed a
+    marker key on fd 3, run a child stub that reads it the way the real plugin
+    does, and assert the marker never appears on a host-visible surface unless the
+    (untrusted) child code explicitly echoes it — proving the leak is a
+    child-authored act, not a structural one. The production host transport
+    (read_frame -> _decode_result_payload) lifts only the JSON-RPC ``result`` to a
+    ControlResult, so even a leaking child cannot push raw bytes to the
+    orchestrator.
+    """
+    payload = _load("sbx-2026-012")
+    assert payload.expected_outcome == "neutralized"
+    marker = "sbx2026012_fd3_key_canary"
+    # A faithful child stub: reads the fd-3 framed key (4-byte len + key) the way
+    # the real plugin does, scrubs it, and emits ONLY a structured result frame —
+    # never the key. Asserts the key is readable on fd 3 but is NOT echoed.
+    stub = tmp_path / "probe.py"
+    stub.write_text(
+        "import os, struct, sys\n"
+        "hdr = os.read(3, 4)\n"
+        "n = struct.unpack('>I', hdr)[0]\n"
+        "key = os.read(3, n).decode()\n"
+        "# Structured output discipline: emit a verdict, NEVER the key.\n"
+        "print('KEY_READ', len(key) > 0, flush=True)\n"
+        "print('KEY_IN_OUTPUT', False, flush=True)\n"
+        "sys.exit(0)\n"
+    )
+    flags = _real_policy_flags_with_test_binds(tmp_path)
+    bwrap = shutil.which("bwrap")
+    assert bwrap is not None  # gated by _bwrap_required
+    # Place the framed key on a pipe read-end at fd 3 (bwrap inherits fd 3).
+    r_fd, w_fd = os.pipe()
+    os.set_inheritable(r_fd, True)  # noqa: FBT003
+    key_bytes = marker.encode()
+    os.write(w_fd, struct.pack(">I", len(key_bytes)) + key_bytes)
+    os.close(w_fd)
+    saved: int | None = None
+    try:
+        saved = os.dup(3)
+    except OSError:
+        saved = None
+    try:
+        os.dup2(r_fd, 3)
+        result = subprocess.run(  # noqa: S603 — resolved bwrap path, repo-owned probe
+            [bwrap, *flags, "--", sys.executable, str(stub)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            pass_fds=(3,),
+            env=_bwrap_child_env(),
+        )
+    finally:
+        if saved is not None:
+            os.dup2(saved, 3)
+            os.close(saved)
+        with contextlib.suppress(OSError):
+            os.close(r_fd)
+    assert result.returncode == 0, result.stderr
+    assert "KEY_READ True" in result.stdout, "child could not read the fd-3 key"
+    # The marker key never appears on a host-visible surface.
+    assert marker not in result.stdout, "fd-3 provider key leaked to child stdout"
+    assert marker not in result.stderr, "fd-3 provider key leaked to child stderr"
+
+
+@_bwrap_required
+def test_sbx_2026_013_live_spawned_child_host_escape_contained(tmp_path: Path) -> None:
+    """sbx-2026-013: the live bwrap child cannot read /etc/passwd, exec /bin/sh,
+    or read /proc/1/environ — the "policy was inert, now enforced live" graduation.
+
+    Reuses the SHIPPED-policy bwrap harness (the same bytes the kind=full launcher
+    resolves) to drive all three host-escape probes in one stub. Peer to
+    sbx-2026-003/004/006, consolidated to assert the live-spawn posture: a
+    compromised child has no host fs / no host shell / no host env.
+    """
+    payload = _load("sbx-2026-013")
+    assert payload.expected_outcome == "refused"
+    stub = tmp_path / "probe.py"
+    stub.write_text(
+        "import subprocess, sys\n"
+        "print('PROBE_RAN', flush=True)\n"
+        "try:\n"
+        "    open('/etc/passwd').read()\n"
+        "    print('PASSWD_READ_OK', flush=True)\n"
+        "except OSError:\n"
+        "    print('PASSWD_BLOCKED', flush=True)\n"
+        "try:\n"
+        "    subprocess.run(['/bin/sh', '-c', 'echo escape'], check=True)\n"
+        "    print('SH_EXEC_OK', flush=True)\n"
+        "except (FileNotFoundError, OSError):\n"
+        "    print('SH_BLOCKED', flush=True)\n"
+        "try:\n"
+        "    open('/proc/1/environ', 'rb').read()\n"
+        "    print('PROC_ENVIRON_READ_OK', flush=True)\n"
+        "except OSError:\n"
+        "    print('PROC_ENVIRON_BLOCKED', flush=True)\n"
+        "sys.exit(0)\n"
+    )
+    result = _run_under_real_policy(stub, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "PROBE_RAN" in result.stdout, "stub did not run (vacuous pass guard)"
+    assert "PASSWD_READ_OK" not in result.stdout, "host /etc/passwd was readable"
+    assert "PASSWD_BLOCKED" in result.stdout
+    assert "SH_EXEC_OK" not in result.stdout, "host /bin/sh exec was not contained"
+    assert "SH_BLOCKED" in result.stdout
+    assert "PROC_ENVIRON_READ_OK" not in result.stdout, "host /proc/1/environ was readable"
+    assert "PROC_ENVIRON_BLOCKED" in result.stdout

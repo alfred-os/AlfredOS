@@ -101,6 +101,15 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
   release-blocker before the quarantined LLM is wired live.** Until #230 lands,
   the earlier claim that outbound calls are "kernel-enforced against the
   declared allowlist" does NOT hold and is superseded by this amendment.
+- **The quarantined-LLM child code now ships in the wheel under a bound prefix
+  (amended 2026-06-11, PR-S4-11c-2b0, ADR-0030).** The spawn target moved from
+  the repo-root, wheel-excluded `plugins/alfred_quarantined_llm/quarantine_plugin.py`
+  to the installed package `alfred.security.quarantine_child`
+  (`python -m alfred.security.quarantine_child`), so the child is import-reachable
+  under the policy's `/usr` read-only bind (site-packages) without widening the
+  sandbox. This is a FACTUAL amendment; status stays **Proposed** (the
+  `Proposed → Accepted` graduation flip is human-gated, deferred to PR-S4-11c-7).
+  See ADR-0030 for the wheel-co-location + bound-interpreter contract.
 - Per-OS sandbox policy files must be maintained and tested. The Linux policy
   is the AlfredOS primary target; macOS and Windows policies are best-effort.
 - The `bwrap` cold-start overhead adds ~50-100ms to the subprocess spawn
