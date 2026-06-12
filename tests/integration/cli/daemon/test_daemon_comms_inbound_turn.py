@@ -482,6 +482,11 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,
+                # PR-S4-235-1: the graph now builds the daemon-owned ContentStore the
+                # per-adapter promoter shares. ``alfred_comms_test`` is empty-set (None
+                # promoter), so the store is never written to here; pass ``None`` for
+                # the policies ref since this turn exercises no per-session quota deref.
+                policies_ref=None,
             )
             runner = await _spawn_comms_adapter(
                 adapter_id=_ADAPTER_ID,

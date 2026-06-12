@@ -36,6 +36,28 @@ class TestSettings:
                 == "postgresql+asyncpg://alfred:alfred@localhost:5432/alfred"
             )
 
+    def test_redis_url_defaults_to_localhost(self) -> None:
+        """PR-S4-235-1: the daemon-owned ContentStore reads its Redis URL from here."""
+        with patch.dict(
+            os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x", "ALFRED_ENVIRONMENT": "test"}, clear=True
+        ):
+            s = Settings()
+            assert s.redis_url == "redis://localhost:6379/0"
+
+    def test_redis_url_reads_alfred_redis_url_env(self) -> None:
+        """The docker-compose stack sets ALFRED_REDIS_URL to the internal service URL."""
+        with patch.dict(
+            os.environ,
+            {
+                "ALFRED_DEEPSEEK_API_KEY": "x",
+                "ALFRED_ENVIRONMENT": "test",
+                "ALFRED_REDIS_URL": "redis://alfred-redis:6379/0",
+            },
+            clear=True,
+        ):
+            s = Settings()
+            assert s.redis_url == "redis://alfred-redis:6379/0"
+
     def test_anthropic_api_key_is_optional(self) -> None:
         with patch.dict(
             os.environ, {"ALFRED_DEEPSEEK_API_KEY": "x", "ALFRED_ENVIRONMENT": "test"}, clear=True

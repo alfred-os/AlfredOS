@@ -68,6 +68,7 @@ from alfred.cli.daemon._failures import (
     BootInfraInstallFailedFailure,
     CommsAdapterSpawnFailedFailure,
     CommsMultiAdapterUnsupportedFailure,
+    CommsPromoterMisconfiguredFailure,
     DaemonBootFailure,
     EnvironmentNotSetFailure,
     QuarantineChildSpawnFailedFailure,
@@ -286,6 +287,42 @@ def _resolve_comms_adapter_wire_spec(adapter_id: str) -> _CommsAdapterWireSpec:
     )
 
 
+def _build_sub_payload_promoter(
+    *,
+    adapter_kind: str,
+    content_store: object,
+) -> object | None:
+    """Build a :class:`SubPayloadPromoter` for ``adapter_kind``, or ``None`` (PR-S4-235-1).
+
+    The deterministic per-adapter promoter factory: an adapter kind whose
+    :data:`REQUIRED_CLASSIFIERS_BY_KIND` set is NON-empty (e.g. ``"discord"``) gets a
+    configured promoter so the host promotes raw (T3) sub-payloads to single-use
+    ``ContentHandle`` references BEFORE the quarantined extract (CLAUDE.md hard rule
+    #5). An EMPTY-set kind (the reference plugin / TUI plain-text path) gets ``None``
+    — promotion is inert there, so the default-empty path stays byte-for-byte
+    unchanged (``frozenset()`` -> ``None`` -> the existing inbound behaviour).
+
+    The ``content_store`` is the daemon-owned, process-lived
+    :class:`alfred.plugins.web_fetch.content_store.ContentStore` shared across every
+    per-adapter promoter (one Redis connection pool per process, not per request). It
+    is typed ``object`` here because the promoter's structural ``_ContentStoreLike``
+    Protocol — a single ``write`` method — is what actually binds it; the concrete
+    import stays inside the function so the module's import closure does not pull the
+    Redis client into every daemon-command import.
+    """
+    from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
+    from alfred.comms_mcp.inbound_scanner import InboundContentScanner
+    from alfred.comms_mcp.sub_payload_promotion import SubPayloadPromoter
+
+    if not REQUIRED_CLASSIFIERS_BY_KIND.get(adapter_kind, frozenset()):
+        return None
+    return SubPayloadPromoter(
+        adapter_kind=adapter_kind,
+        scanner=InboundContentScanner(),
+        content_store=content_store,  # type: ignore[arg-type]
+    )
+
+
 class _CommsAdapterManifestError(Exception):
     """An enabled comms adapter's manifest is missing a required wire field."""
 
@@ -323,18 +360,43 @@ class _CommsBootGraph:
     # The LIVE quarantine transport (owns the bwrap child via its ChildIO). Held so
     # the daemon can reap the child on EVERY exit path (PR-S4-11c-2b / CR #255).
     quarantine_transport: QuarantineStdioTransport
+    # The daemon-owned, process-lived ContentStore the per-adapter SubPayloadPromoters
+    # write raw (T3) sub-payload bytes through (PR-S4-235-1). Constructed ONCE here so
+    # one Redis connection pool is shared across every promoter (perf-006), and reaped
+    # on EVERY exit path (a leaked Redis client is the analog of the leaked bwrap child
+    # — CR #255). Typed ``object`` so the module import closure stays free of the Redis
+    # client; the concrete type is ``alfred.plugins.web_fetch.content_store.ContentStore``.
+    content_store: object
 
     async def aclose(self) -> None:
-        """Reap the LIVE bwrap quarantined child the comms-graph build spawned.
+        """Reap the LIVE bwrap quarantined child + the daemon-owned ContentStore.
 
         Closes the quarantine transport (``-> child_io.aclose()`` SIGTERMs + reaps
-        the bwrap subprocess) so the child never leaks past the daemon. Called on
-        EVERY exit path after the spawn: a ``Supervisor()`` / ``write_pidfile`` /
-        ``supervisor.start()`` failure, an adapter refusal, or a normal shutdown
-        (CR #255). ``_SubprocessChildIO.aclose`` is idempotent, so a double-close
-        (e.g. shutdown after a start() failure) is safe.
+        the bwrap subprocess) so the child never leaks past the daemon, and closes the
+        process-lived ContentStore (``-> Redis client.aclose()``) so its connection
+        pool never leaks (PR-S4-235-1 — the Redis-client analog of the bwrap child;
+        CR #255). Called on EVERY exit path after the spawn: a ``Supervisor()`` /
+        ``write_pidfile`` / ``supervisor.start()`` failure, an adapter refusal, or a
+        normal shutdown. Both closes are idempotent, so a double-close (e.g. shutdown
+        after a start() failure) is safe.
+
+        The two closes are isolated so a failing transport close never skips the
+        ContentStore reap (and vice versa) — the exact leaks this teardown exists to
+        prevent. ``ContentStore.close`` is the idempotent connection-drop API
+        (NOT ``aclose`` — that is the child-IO method).
         """
-        await self.quarantine_transport.close()
+        from alfred.plugins.web_fetch.content_store import ContentStore
+
+        try:
+            await self.quarantine_transport.close()
+        finally:
+            # In production `content_store` is ALWAYS a real `ContentStore` (built in
+            # `_build_comms_boot_graph`), so the True arm always runs; the isinstance
+            # guard only spares a test double that has no `close()`. If a future
+            # structural store seam is introduced, widen this reap to it (else its
+            # client would silently leak) — see test_graph_aclose_skips_close_for_non_content_store.
+            if isinstance(self.content_store, ContentStore):
+                await self.content_store.close()
 
 
 async def _build_comms_boot_graph(
@@ -343,6 +405,7 @@ async def _build_comms_boot_graph(
     audit: AuditWriter,
     outbound_dlp: OutboundDlpProtocol,
     t3_nonce: CapabilityGateNonce,
+    policies_ref: object,
 ) -> _CommsBootGraph:
     """Construct the pre-Supervisor comms graph (PR-S4-11b construction step 1-5).
 
@@ -374,12 +437,23 @@ async def _build_comms_boot_graph(
         _build_comms_inbound_extractor,
     )
     from alfred.orchestrator.burst_limiter import BurstLimiter
+    from alfred.plugins.web_fetch.content_store import ContentStore
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 
     secret_broker = build_broker(settings)
     resolver = install_identity_factories_for_settings(settings)
     resolver_bridge = SyncIdentityResolverBridge(resolver=resolver)
+    # PR-S4-235-1: the daemon-owned ContentStore the per-adapter SubPayloadPromoters
+    # write raw (T3) sub-payload bytes through. Constructed ONCE here (one Redis
+    # connection pool per process, not per request — perf-006) and threaded onto the
+    # graph so ``aclose`` reaps it on every exit path (a leaked Redis client is the
+    # analog of the leaked bwrap child — CR #255). ``policies_ref`` carries the active
+    # snapshot so the store's per-session quota deref reads live policy.
+    content_store = ContentStore(
+        redis_url=settings.redis_url,
+        policies_ref=policies_ref,  # type: ignore[arg-type]
+    )
     # ONE single-use staging map shared between the recorder (writer) and the
     # transport (drainer) — the host owns the raw T3 body between them (ADR-0029).
     staging = QuarantineStagingMap()
@@ -418,9 +492,17 @@ async def _build_comms_boot_graph(
             inbound_orchestrator=inbound_orchestrator,
             t3_nonce=t3_nonce,
             quarantine_transport=quarantine_transport,
+            content_store=content_store,
         )
     except Exception:
-        await quarantine_transport.close()
+        # Reap BOTH the live bwrap child (via the transport) and the ContentStore's
+        # Redis client if any post-spawn assembly raises before the graph returns —
+        # otherwise neither reaches the daemon's exit-path teardown and both leak
+        # (CR #255). Isolated so a transport-close failure never skips the store reap.
+        try:
+            await quarantine_transport.close()
+        finally:
+            await content_store.close()
         raise
 
 
@@ -488,13 +570,46 @@ async def _spawn_comms_adapter(
     src_root = repo_root() / "src"
     breaker_tripper = build_supervisor_breaker_tripper(supervisor=supervisor)
     hook_invoker = CommsAdapterCrashedHookInvoker()
+    # PR-S4-235-1: build the per-adapter host-side sub-payload promoter. The factory
+    # is keyed on the WIRE ``adapter_kind`` (the host's classifier/body tables key,
+    # NOT the launcher plugin id) and returns a configured promoter for a
+    # classifier-bearing kind (e.g. ``discord``) or ``None`` for an empty-set kind
+    # (the reference plugin / TUI plain-text path — byte-for-byte unchanged). It
+    # shares the daemon-owned ContentStore so raw (T3) sub-payloads land in one
+    # process-lived Redis pool.
+    sub_payload_promoter = _build_sub_payload_promoter(
+        adapter_kind=wire.adapter_kind,
+        content_store=graph.content_store,
+    )
+    # Boot-time mirror of the inbound M2 fail-closed guard: a classifier-bearing
+    # adapter kind whose factory yielded a ``None`` promoter is a structural wiring
+    # defect (the factory is deterministic, so this never happens on a correct build
+    # — it is defence-in-depth against a future REQUIRED_CLASSIFIERS_BY_KIND /
+    # factory drift). REFUSE BOOT fail-closed NOW (audited, exit 2) rather than wait
+    # for the first inbound message to trip the runtime M2 guard mid-traffic
+    # (CLAUDE.md hard rules #5 + #7). The empty-set path (None promoter for a kind
+    # with NO required classifiers) is correct and is NOT refused.
+    from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
+
+    if sub_payload_promoter is None and REQUIRED_CLASSIFIERS_BY_KIND.get(
+        wire.adapter_kind, frozenset()
+    ):
+        await _refuse_boot(
+            audit,
+            CommsPromoterMisconfiguredFailure(adapter_id=adapter_id),
+            t("daemon.boot.comms_promoter_misconfigured", adapter_id=adapter_id),
+            boot_id=boot_id,
+            environment_source=environment_source,
+        )
+        # _refuse_boot is NoReturn (raises _BootRefusedError); unreachable defence.
+        raise AssertionError("unreachable")  # pragma: no cover
     inbound_handler = InboundMessageHandler(
         identity_resolver=graph.resolver_bridge,  # type: ignore[arg-type]
         orchestrator=graph.inbound_orchestrator,
         burst_limiter=graph.burst_limiter,  # type: ignore[arg-type]
         audit_writer=audit,  # type: ignore[arg-type]
         secret_broker=graph.secret_broker,  # type: ignore[arg-type]
-        sub_payload_promoter=None,
+        sub_payload_promoter=sub_payload_promoter,  # type: ignore[arg-type]
     )
     binding_handler = BindingRequestHandler(
         audit_writer=audit,  # type: ignore[arg-type]
@@ -1218,6 +1333,7 @@ async def _start_async() -> None:
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=t3_nonce,
+                policies_ref=snapshot_ref,
             )
         except QuarantineChildSpawnError:
             await _refuse_boot(

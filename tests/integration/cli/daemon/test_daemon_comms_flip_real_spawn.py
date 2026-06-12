@@ -335,6 +335,10 @@ async def test_daemon_flip_drives_real_bwrap_child_and_lands_extracted_row(
                 audit=audit,
                 outbound_dlp=outbound_dlp,
                 t3_nonce=nonce,
+                # PR-S4-235-1: the graph builds the daemon-owned ContentStore the
+                # per-adapter promoter shares. ``alfred_comms_test`` is empty-set
+                # (None promoter), so the store is never written to here.
+                policies_ref=None,
             )
             await _spawn_comms_adapter(
                 adapter_id=_ADAPTER_ID,

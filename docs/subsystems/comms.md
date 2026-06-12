@@ -297,19 +297,30 @@ stays dormant (an AST guard,
 `tests/unit/comms/test_no_direct_adapter_imports.py`, forbids fresh imports) and
 is deleted in PR-S4-10.
 
-> **Wiring status (PR-S4-9 vs PR-S4-10).** PR-S4-9 ships the adapter and these
-> host primitives as TESTED but NOT-YET-SPAWNED: the daemon does not spawn the
-> discord plugin, and several host primitives are not on the live path until the
-> PR-S4-10 **flag-day**. Specifically the discord `SubPayloadPromoter`
-> construction, the `BindingEmitter` (`plugins/alfred_discord/binding_emitter.py`,
-> emitting `adapter.binding_request` — never constructed by the gateway yet),
-> the [`OutboundQueue`](../glossary.md#outboundqueue) outbound-path wiring, and the
-> comms-4 addressing-drift detector (`src/alfred/comms_mcp/addressing_drift.py`) +
-> [`ThreadConversationLedger`](../glossary.md#threadconversationledger) primitives
-> are wired into the live path in PR-S4-10. Until then, comms-4 + binding are NOT
-> operationally enforced — the primitives exist and are unit/adversarially tested,
-> but the daemon path does not invoke them. Tracking: **#235**. The present-tense
-> prose below describes the post-S4-10 wired behaviour these primitives implement.
+> **Wiring status (#235 primitive wiring).** PR-S4-9 shipped the adapter and these
+> host primitives as TESTED but NOT-YET-WIRED: the five #235 primitives are wired
+> onto the live daemon path one PR at a time. **The `SubPayloadPromoter` is now
+> wired (PR-S4-235-1):** `_spawn_comms_adapter`
+> (`src/alfred/cli/daemon/_commands.py`) builds a per-adapter promoter keyed on the
+> wire `adapter_kind` — a configured promoter for a classifier-bearing kind
+> (e.g. `discord`), `None` for an empty-set kind (the reference plugin / TUI
+> plain-text path) — and injects it into the `InboundMessageHandler` so
+> `process_inbound_message` promotes T3 sub-payloads BEFORE `quarantined_extract`.
+> The promoters share a daemon-owned `ContentStore` (one Redis pool per process,
+> reaped on every exit path). A classifier-bearing kind that would yield a `None`
+> promoter REFUSES boot fail-closed (audited `comms_promoter_misconfigured`),
+> mirroring the inbound M2 guard at boot. (That refusal is defence-in-depth: the
+> factory is deterministic, so it cannot fire on a correct build — it guards against
+> future `REQUIRED_CLASSIFIERS_BY_KIND` / factory drift.) STILL NOT-YET-WIRED (separate #235 PRs):
+> the `BindingEmitter` (`plugins/alfred_discord/binding_emitter.py`, emitting
+> `adapter.binding_request`), the [`OutboundQueue`](../glossary.md#outboundqueue)
+> outbound-path wiring, and the comms-4 addressing-drift detector
+> (`src/alfred/comms_mcp/addressing_drift.py`) +
+> [`ThreadConversationLedger`](../glossary.md#threadconversationledger). Until those
+> land, comms-4 + binding are NOT operationally enforced — the primitives exist and
+> are unit/adversarially tested, but the daemon path does not invoke them. Tracking:
+> **#235**. The present-tense prose below describes the fully-wired behaviour these
+> primitives implement.
 
 ### Inbound: host-side T3 sub-payload promotion
 

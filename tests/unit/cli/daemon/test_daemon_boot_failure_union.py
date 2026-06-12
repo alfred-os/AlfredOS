@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from alfred.cli.daemon._failures import (
     BootInfraInstallFailedFailure,
     CapabilityGateHandshakeFailedFailure,
+    CommsPromoterMisconfiguredFailure,
     EnvironmentNotSetFailure,
     LauncherNotPolicyResolvingFailure,
     QuarantineChildSpawnFailedFailure,
@@ -34,11 +35,20 @@ from alfred.cli.daemon._failures import (
         (BootInfraInstallFailedFailure, "boot_infra_install_failed"),
         (T3NonceRegistrationFailedFailure, "t3_nonce_registration_failed"),
         (QuarantineChildSpawnFailedFailure, "quarantine_child_spawn_failed"),
+        (CommsPromoterMisconfiguredFailure, "comms_promoter_misconfigured"),
     ],
 )
 def test_failure_carries_literal_reason(cls: type, reason: str) -> None:
     instance = cls()
     assert instance.failure_reason == reason
+
+
+def test_comms_promoter_misconfigured_carries_adapter_id() -> None:
+    """PR-S4-235-1: the boot-time M2 mirror carries the closed-vocab adapter id."""
+    f = CommsPromoterMisconfiguredFailure(adapter_id="discord")
+    d = f.model_dump()
+    assert d["failure_reason"] == "comms_promoter_misconfigured"
+    assert d["adapter_id"] == "discord"
 
 
 def test_boot_infra_install_failure_is_distinct_from_grant_missing() -> None:
