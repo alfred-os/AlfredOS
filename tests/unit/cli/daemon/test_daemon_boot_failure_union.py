@@ -14,6 +14,7 @@ from alfred.cli.daemon._failures import (
     CapabilityGateHandshakeFailedFailure,
     EnvironmentNotSetFailure,
     LauncherNotPolicyResolvingFailure,
+    QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
     SnapshotRefInitFailedFailure,
     T3NonceRegistrationFailedFailure,
@@ -32,6 +33,7 @@ from alfred.cli.daemon._failures import (
         (QuarantineGrantMissingFailure, "quarantine_grant_missing"),
         (BootInfraInstallFailedFailure, "boot_infra_install_failed"),
         (T3NonceRegistrationFailedFailure, "t3_nonce_registration_failed"),
+        (QuarantineChildSpawnFailedFailure, "quarantine_child_spawn_failed"),
     ],
 )
 def test_failure_carries_literal_reason(cls: type, reason: str) -> None:

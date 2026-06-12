@@ -10,33 +10,96 @@ Covers the three host-side surfaces ``daemon_runtime`` adds:
   :class:`RuntimeError` (CLAUDE.md hard rule #7 — no silent failure).
 * :class:`CommsAdapterCrashedHookInvoker` — fires the ``comms.adapter.crashed``
   hookpoint through the real ``invoke`` API, system-only-subscribable.
-* :func:`_build_comms_inbound_extractor` — a REAL
-  :class:`QuarantinedExtractor` over a recorded-fixture transport, wired with a
-  real ``outbound_dlp`` (the only seam the fixture stubs is the LLM transport).
+* :func:`_build_comms_inbound_extractor` — PR-S4-11c-2b: a REAL
+  :class:`QuarantinedExtractor` over the REAL
+  :class:`alfred.security.quarantine_transport.QuarantineStdioTransport`, driven by
+  a LIVE quarantined child spawned via ``spawn_quarantine_child_io``. The unit cut
+  monkeypatches the spawn seam to an in-proc echoing child double (no bwrap), so
+  the genuine ``extract(handle, schema)`` + ingest-then-extract wire + post-stage
+  DLP scan path is exercised host-only.
+* :func:`_resolve_provider_key` — resolves the quarantined child's provider key
+  from the secret broker; an UNSET key logs a loud warning + returns the documented
+  placeholder (PR-S4-11c-2c flips that to refuse-boot).
 """
 
 from __future__ import annotations
 
+import json
+import struct
 from collections.abc import Iterator, Mapping
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.comms_mcp.bootstrap import CommsBodyExtraction, CommsExtractorBridge
 from alfred.comms_mcp.daemon_runtime import (
     CommsAdapterCrashedHookInvoker,
     CommsInboundOrchestratorAdapter,
     OutboundSenderLike,
     _build_comms_inbound_extractor,
+    _resolve_provider_key,
 )
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
 from alfred.comms_mcp.inbound import _OrchestratorLike
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
+from alfred.security import tiers as _tiers
 from alfred.security.quarantine import Extracted, declare_hookpoints
+from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
+from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
 _ADAPTER_ID = "alfred_comms_test"
+
+
+class _EchoingChildDouble:
+    """In-proc length-prefixed child double echoing the ingested body.
+
+    Mirrors the real quarantine child's single-use ingest/extract cache so the
+    daemon's ``QuarantineStdioTransport`` drives it exactly as it would the live
+    bwrap child — without a subprocess. The unit cut monkeypatches
+    ``spawn_quarantine_child_io`` to return one of these.
+    """
+
+    def __init__(self, *, provider_key: str) -> None:
+        self.provider_key = provider_key
+        self._ingested: dict[str, str] = {}
+        self._reply: bytes | None = None
+        self.aclose_calls = 0
+
+    def write_frame(self, frame: bytes) -> None:
+        length = struct.unpack(">I", frame[:4])[0]
+        obj = json.loads(frame[4 : 4 + length])
+        method, params = obj["method"], obj["params"]
+        if method == "quarantine.ingest":
+            self._ingested[params["handle_id"]] = params["context"]
+        elif method == "quarantine.extract":
+            # Fail loud on an unknown handle (CR #255) — the real transport raises
+            # rather than defaulting, so the double must too, else a broken
+            # ingest→extract handle flow silently echoes "" and false-passes.
+            if params["handle_id"] not in self._ingested:
+                raise AssertionError(f"unknown handle_id: {params['handle_id']!r}")
+            context = self._ingested.pop(params["handle_id"])
+            body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "kind": "extracted",
+                        "data": {"text": context, "intent": "greeting"},
+                        "extraction_mode": "native_constrained",
+                    },
+                }
+            ).encode("utf-8")
+            self._reply = struct.pack(">I", len(body)) + body
+
+    async def read_frame(self) -> bytes:
+        assert self._reply is not None
+        reply, self._reply = self._reply, None
+        return reply
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
 
 
 @pytest.fixture
@@ -218,19 +281,31 @@ def test_crash_invoker_defaults_to_real_invoke() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_comms_inbound_extractor — real extractor, recorded-fixture transport
+# _build_comms_inbound_extractor — real extractor over a (faked-spawn) live transport
 # ---------------------------------------------------------------------------
 
 
-async def test_build_extractor_extracts_comms_body_extraction(
+async def test_build_extractor_drives_real_transport_over_spawned_child(
     fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from alfred.comms_mcp.bootstrap import CommsExtractorBridge
+    """The flipped builder drives the REAL transport over a (faked) spawned child.
+
+    PR-S4-11c-2b go-live flip: ``_build_comms_inbound_extractor`` is async and
+    builds a ``QuarantineStdioTransport`` over a LIVE quarantined child. Here the
+    spawn seam is monkeypatched to an in-proc echoing double, so the inline-over-
+    wire content path (ingest THEN extract, body echoed back) runs host-only. The
+    ``CommsExtractorBridge`` carries a real ``T3BodyRecorder`` (the ``record_body``
+    seam) so the body is tagged T3 + staged in the SAME single-use map the
+    transport drains.
+    """
     from alfred.security.dlp import OutboundDlp
 
     del fresh_registry_allow_system  # installs the scoped gate via fixture side effect
     broker = MagicMock()
     broker.redact = MagicMock(side_effect=lambda x: x)
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
     audit_sink = MagicMock()
     audit_sink.emit = AsyncMock()
     outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
@@ -238,20 +313,188 @@ async def test_build_extractor_extracts_comms_body_extraction(
     audit_writer = MagicMock()
     audit_writer.append_schema = AsyncMock()
 
-    extractor = _build_comms_inbound_extractor(audit_writer=audit_writer, outbound_dlp=outbound_dlp)
-    bridge = CommsExtractorBridge(extractor=extractor)
+    spawned: list[_EchoingChildDouble] = []
 
-    result = await bridge.extract(
-        body={"content": "hello"}, canonical_user_id="alice", source_tier="T3"
+    async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+        child = _EchoingChildDouble(provider_key=provider_key)
+        spawned.append(child)
+        return child
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
     )
-    assert isinstance(result, Extracted)
-    assert result.data["text"] == "hello"
+
+    staging = QuarantineStagingMap()
+    with _NONCE_LOCK:
+        prior_nonce = _tiers._AUTHORIZED_T3_NONCE
+        nonce = CapabilityGateNonce()
+        _tiers._set_authorized_t3_nonce(nonce)
+    try:
+        extractor, transport = await _build_comms_inbound_extractor(
+            audit_writer=audit_writer,
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=staging,
+        )
+        # The builder returns the live transport too so the daemon can reap the
+        # child on every exit path (CR #255); it owns the faked child-IO here.
+        assert transport is not None
+        # The configured provider key flowed into the spawn (delivered over fd 3
+        # in production).
+        assert len(spawned) == 1
+        assert spawned[0].provider_key == "real-quarantine-provider-key"
+
+        recorder = T3BodyRecorder(nonce=nonce, staging=staging)
+        bridge = CommsExtractorBridge(extractor=extractor, record_body=recorder)
+
+        result = await bridge.extract(
+            body={"content": "hello"}, canonical_user_id="alice", source_tier="T3"
+        )
+        assert isinstance(result, Extracted)
+        # The body crossed the wire to the (faked) child and was echoed back. The
+        # mapping body is JSON-serialised deterministically by the recorder.
+        echoed_text = result.data["text"]
+        assert isinstance(echoed_text, str)
+        assert json.loads(echoed_text) == {"content": "hello"}
+    finally:
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(prior_nonce)
 
 
-async def test_recorded_transport_close_is_noop() -> None:
-    from alfred.comms_mcp.daemon_runtime import _RecordedExtractTransport
+async def test_build_extractor_reaps_child_when_construction_fails(
+    fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-spawn construction failure REAPS the just-spawned child (CR #255).
 
-    transport = _RecordedExtractTransport()
-    # The recorded transport has no subprocess behind it; close is an idempotent
-    # no-op the QuarantinedExtractor's teardown path can call safely.
-    assert await transport.close() is None
+    If ``QuarantinedExtractor`` construction raises AFTER the spawn, the builder
+    closes the child (via ``transport.close()``) before re-raising — it hasn't
+    returned the transport, so the daemon's exit-path teardown can't see it and the
+    bwrap child would otherwise leak.
+    """
+    from alfred.security.dlp import OutboundDlp
+
+    del fresh_registry_allow_system  # scoped gate installed via fixture side effect
+    broker = MagicMock()
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
+    audit_sink = MagicMock()
+    audit_sink.emit = AsyncMock()
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
+    audit_writer = MagicMock()
+
+    spawned: list[_EchoingChildDouble] = []
+
+    async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+        child = _EchoingChildDouble(provider_key=provider_key)
+        spawned.append(child)
+        return child
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+
+    def _boom(**_kwargs: object) -> object:
+        raise RuntimeError("extractor construction failed (test)")
+
+    monkeypatch.setattr("alfred.comms_mcp.daemon_runtime.QuarantinedExtractor", _boom)
+
+    staging = QuarantineStagingMap()
+    with pytest.raises(RuntimeError, match="construction failed"):
+        await _build_comms_inbound_extractor(
+            audit_writer=audit_writer,
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=staging,
+        )
+
+    assert len(spawned) == 1
+    # The child was reaped despite the construction failure (no leak).
+    assert spawned[0].aclose_calls == 1
+
+
+async def test_build_extractor_reaps_child_when_transport_construction_fails(
+    fresh_registry_allow_system: HookRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If TRANSPORT construction raises (transport stays None), the builder reaps the
+    child via ``child_io.aclose()`` before re-raising (CR #255).
+
+    Covers the ``else`` arm of the post-spawn cleanup — the transport was never
+    built, so there is no ``transport.close()`` to delegate the reap to.
+    """
+    from alfred.security.dlp import OutboundDlp
+
+    del fresh_registry_allow_system  # scoped gate installed via fixture side effect
+    broker = MagicMock()
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="real-quarantine-provider-key")
+    audit_sink = MagicMock()
+    audit_sink.emit = AsyncMock()
+    outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
+
+    spawned: list[_EchoingChildDouble] = []
+
+    async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+        child = _EchoingChildDouble(provider_key=provider_key)
+        spawned.append(child)
+        return child
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+
+    def _boom(**_kwargs: object) -> object:
+        raise RuntimeError("transport construction failed (test)")
+
+    # Patched at the SOURCE module — the builder imports it lazily by that path.
+    monkeypatch.setattr("alfred.security.quarantine_transport.QuarantineStdioTransport", _boom)
+
+    with pytest.raises(RuntimeError, match="transport construction failed"):
+        await _build_comms_inbound_extractor(
+            audit_writer=MagicMock(),
+            outbound_dlp=outbound_dlp,
+            secret_broker=broker,
+            staging=QuarantineStagingMap(),
+        )
+
+    assert len(spawned) == 1
+    # transport was never built, so the child itself was closed directly.
+    assert spawned[0].aclose_calls == 1
+
+
+def test_resolve_provider_key_returns_broker_value_when_set() -> None:
+    """A configured ``quarantine_provider_api_key`` is returned verbatim."""
+    broker = MagicMock()
+    broker.has = MagicMock(return_value=True)
+    broker.get = MagicMock(return_value="configured-key")
+    assert _resolve_provider_key(broker) == "configured-key"
+    broker.get.assert_called_once_with("quarantine_provider_api_key")
+
+
+def test_resolve_provider_key_warns_and_falls_back_when_unset() -> None:
+    """An unset key logs a loud warning + returns the documented placeholder.
+
+    The key is NEVER empty (the real-spawn proof asserts fd-3 delivery), so the
+    placeholder is non-empty. PR-S4-11c-2c flips this unset path to refuse-boot.
+    Uses ``structlog.testing.capture_logs`` (not pytest ``caplog``) because the
+    module logs via structlog, which does not route through stdlib logging here.
+    """
+    import structlog.testing
+
+    from alfred.comms_mcp.daemon_runtime import _PROVIDER_KEY_PLACEHOLDER
+
+    broker = MagicMock()
+    broker.has = MagicMock(return_value=False)
+    broker.get = MagicMock(side_effect=AssertionError("must not call get when unset"))
+
+    with structlog.testing.capture_logs() as captured:
+        key = _resolve_provider_key(broker)
+
+    assert key == _PROVIDER_KEY_PLACEHOLDER
+    assert key  # never empty — fd-3 delivery still happens
+    assert any(
+        entry.get("event") == "comms.daemon_runtime.quarantine_provider_key_unset"
+        and entry.get("log_level") == "warning"
+        for entry in captured
+    ), captured

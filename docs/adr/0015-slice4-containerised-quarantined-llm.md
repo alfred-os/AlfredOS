@@ -93,9 +93,14 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
   over fd 3), and the Slice-4 `SandboxPolicy` schema cannot yet express a
   provider-only egress allowlist — so the Linux policy does NOT `unshare net`
   and egress is currently **unrestricted**. This is acceptable as an interim
-  state ONLY because the orchestrator does not yet spawn the quarantined LLM
-  end-to-end (the policy files are inert — verified: `src/alfred/core/` drives
-  no quarantine extraction, `PluginLifecycle` performs no subprocess spawn).
+  state because the live quarantined child is the DETERMINISTIC-ECHO loop with no
+  provider client and no network-capable import reachable from its live loop, so
+  the unrestricted egress contains nothing that can use it. (Superseded in part by
+  the PR-S4-11c-2b note below: this bullet originally justified the open egress by
+  the child not being spawned at all — `src/alfred/core/` drove no extraction and
+  `PluginLifecycle` spawned no subprocess — but PR-S4-11c-2b flipped the daemon to
+  spawn it end-to-end, so the justification is now the no-egress-capable-child
+  property, not the absence of a spawn.)
   The provider-only egress allowlist + HTTPS-downgrade refusal are tracked in
   **[#230](https://github.com/MrReasonable/AlfredOS/issues/230) and are a
   release-blocker before the quarantined LLM is wired live.** Until #230 lands,
@@ -119,6 +124,13 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
 
 - `StdioTransport` and `AlfredPluginSession` are unchanged; the container
   boundary is below the transport layer.
+
+> **PR-S4-11c-2b note (2026-06-12).** The bwrap-sandboxed quarantined child is now
+> LIVE in production: the daemon spawns it at boot when a comms adapter is enabled
+> (ADR-0027 amendment). The shipped child is still the deterministic-echo loop — NO
+> provider client, NO network egress — so the open-egress gap (release-blocker #230)
+> still contains nothing that can use it; the real LLM + its egress allowlist land in
+> PR-S4-11c-2c.
 
 ## References
 

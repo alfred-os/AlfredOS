@@ -163,9 +163,13 @@ def test_enabled_adapter_spawns_and_registers(
     tmp_path: Path,
     boot_success_env: FakeAuditWriter,
     quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
 ) -> None:
     """One enabled adapter -> one pump registered, sender bound, handlers wired."""
     del quarantine_registry  # installed via fixture side effect
+    # PR-S4-11c-2b: the comms boot graph now spawns the bwrap quarantined child;
+    # the in-proc fake child-IO keeps this construction-only test off a real
+    # subprocess. Assert the spawn happened (the go-live flip is live).
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     _patch_comms_seams(monkeypatch)
@@ -185,6 +189,16 @@ def test_enabled_adapter_spawns_and_registers(
 
     result = CliRunner().invoke(daemon_app, ["start"])
     assert result.exit_code == 0, result.output
+
+    # PR-S4-11c-2b go-live flip: the comms boot graph spawned exactly one live
+    # quarantined child (via the fake child-IO seam) — the daemon is no longer on
+    # the ADR-0027 fixture extractor. The provider key flowed into the spawn.
+    assert len(patch_quarantine_child_spawn) == 1
+    assert patch_quarantine_child_spawn[0].provider_key
+    # CR #255: the live quarantine child is REAPED on normal shutdown — the boot
+    # graph's `aclose` ran in the daemon's `finally` (transport.close -> child_io
+    # .aclose), so the bwrap child never leaks past the daemon.
+    assert patch_quarantine_child_spawn[0].aclose_calls >= 1
 
     sup = FakeSupervisor.last_instance
     assert sup is not None
@@ -244,9 +258,11 @@ def test_boot_refuses_on_adapter_handshake_failure(
     tmp_path: Path,
     boot_success_env: FakeAuditWriter,
     quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
 ) -> None:
     """A handshake failure for an enabled adapter -> refuse boot (exit 2), no pump."""
     del quarantine_registry  # installed via fixture side effect
+    del patch_quarantine_child_spawn  # in-proc fake child-IO; no real bwrap spawn
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
     _patch_comms_seams(monkeypatch)
@@ -266,6 +282,88 @@ def test_boot_refuses_on_adapter_handshake_failure(
     # completion signal, so an adapter spawn/handshake failure must NOT have
     # emitted a (lying) daemon.boot.completed row — only the failure row.
     assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+
+
+def test_boot_refuses_fail_closed_on_quarantine_child_spawn_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+) -> None:
+    """A bwrap quarantine-child spawn failure at boot -> refuse boot (exit 2), no pump.
+
+    PR-S4-11c-2b go-live flip: ``_build_comms_boot_graph`` spawns the bwrap
+    quarantined child. On a non-Linux / unprovisioned host that spawn raises
+    ``QuarantineChildSpawnError`` — the daemon must REFUSE the boot fail-closed
+    (audited, exit 2) rather than degrade to a fixture (CLAUDE.md hard rule #7).
+    This drives the failure by monkeypatching the spawn seam to raise.
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+
+    from alfred.security.quarantine_child_io import QuarantineChildSpawnError
+
+    async def _failing_spawn(*, provider_key: str) -> Any:
+        del provider_key
+        raise QuarantineChildSpawnError("no bwrap on this host (test)")
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _failing_spawn
+    )
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    # The fail-closed refusal contract: exit 2, never a degraded boot.
+    assert result.exit_code == 2
+
+    sup = FakeSupervisor.last_instance
+    assert sup is not None
+    # The pump was NEVER registered — the refusal happens during the comms-graph
+    # build, BEFORE supervisor.start / the spawn loop.
+    assert sup.registered_tasks == []
+    # A loud daemon.boot.failed row with the EXACT fail-closed reason (not just
+    # "some refusal") — catches a wrong-refusal-arm regression (CR #255).
+    rows = boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+    assert rows
+    reasons = {r["subject"]["failure_reason"] for r in rows if isinstance(r["subject"], dict)}
+    assert "quarantine_child_spawn_failed" in reasons
+    assert boot_success_env.rows_for("DAEMON_BOOT_FIELDS") == []
+    # The operator-facing fail-closed message names the bwrap/provisioning need.
+    assert "bwrap" in result.output
+
+
+def test_boot_reaps_quarantine_child_when_post_spawn_step_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """A post-spawn boot failure still REAPS the live quarantine child (CR #255).
+
+    The comms-graph build spawns the bwrap child; if a LATER boot step
+    (``Supervisor()`` / ``write_pidfile`` / ``start()``) fails, the daemon's
+    ``finally`` must still close the quarantine transport so the child never leaks.
+    Inject the failure at ``write_pidfile`` (after the spawn + Supervisor()).
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("pidfile write failed (test)")
+
+    monkeypatch.setattr("alfred.cli.daemon._commands.write_pidfile", _boom)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code != 0
+    # The child WAS spawned (the graph built before the failure)...
+    assert len(patch_quarantine_child_spawn) == 1
+    # ...and REAPED in the finally despite the boot failing after the spawn.
+    assert patch_quarantine_child_spawn[0].aclose_calls >= 1
 
 
 def test_boot_refuses_on_multiple_enabled_adapters(
@@ -336,3 +434,71 @@ def test_boot_refuses_on_adapter_manifest_resolution_failure(
     # No runner was constructed — the refusal happened before spawn.
     assert _FakeRunner.instances == []
     assert boot_success_env.rows_for("DAEMON_BOOT_FAILED_FIELDS")
+
+
+# These two child-reaping tests run LAST in the file: the supervisor-stop case
+# boots fully (registers a pump), and the refusal tests above read the shared
+# ``FakeSupervisor.last_instance`` (not reset by the autouse instance-clear), so
+# they must not run before those refusal tests or they'd pollute that state.
+def test_boot_reaps_child_when_supervisor_stop_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """A failing ``supervisor.stop()`` must NOT skip the child reap (CR #255).
+
+    The finally isolates the steps: ``supervisor.stop()`` runs in its own ``try``
+    whose ``finally`` reaps the quarantine child + deletes the pidfile, so a
+    ``stop()`` error can't leave the bwrap child leaked.
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+
+    async def _boom_stop(_self: Any) -> None:
+        raise RuntimeError("supervisor stop failed (test)")
+
+    monkeypatch.setattr(FakeSupervisor, "stop", _boom_stop)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code != 0
+    assert len(patch_quarantine_child_spawn) == 1
+    # The child was reaped in the finally even though supervisor.stop() raised.
+    assert patch_quarantine_child_spawn[0].aclose_calls >= 1
+
+
+def test_boot_reaps_child_when_graph_assembly_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """Comms-graph assembly that raises AFTER the spawn reaps the live child (CR #255).
+
+    Once ``_build_comms_inbound_extractor`` returns the child is live; if a later
+    constructor (``T3BodyRecorder`` etc.) raises, ``_build_comms_boot_graph`` closes
+    the transport before re-raising — the graph never returns, so the daemon's
+    exit-path teardown can't see it.
+    """
+    del quarantine_registry  # installed via fixture side effect
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+
+    def _boom_recorder(**_kwargs: Any) -> object:
+        raise RuntimeError("recorder construction failed (test)")
+
+    # Patched at the SOURCE module — the boot graph imports it lazily by that path.
+    monkeypatch.setattr("alfred.security.quarantine_transport.T3BodyRecorder", _boom_recorder)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+
+    assert result.exit_code != 0
+    assert len(patch_quarantine_child_spawn) == 1
+    # The transport (owning the live child) was closed in the graph-assembly except.
+    assert patch_quarantine_child_spawn[0].aclose_calls >= 1

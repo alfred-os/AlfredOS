@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-12 11:53+0100\n"
+"POT-Creation-Date: 2026-06-12 18:28+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -940,7 +940,7 @@ msgstr ""
 "Show the daemon boot subset: PID, uptime, boot id, and last boot event. "
 "For full instance health (providers, budget, gate), see: alfred status"
 
-#: src/alfred/cli/daemon/_commands.py:420
+#: src/alfred/cli/daemon/_commands.py:463
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -948,20 +948,20 @@ msgstr ""
 "and re-run `alfred daemon start`, or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_commands.py:507
+#: src/alfred/cli/daemon/_commands.py:550
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
 "boot. Check `alfred audit log --since 5m` for the adapter's load-refused "
 "/ crash row, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:521
+#: src/alfred/cli/daemon/_commands.py:564
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
 # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the PR-S4-0b
 # reserve. Operator-facing; all bodies ship real English copy.
-#: src/alfred/cli/daemon/_commands.py:795
+#: src/alfred/cli/daemon/_commands.py:838
 msgid "daemon.boot.audit_log_unwritable"
 msgstr ""
 "The audit log is unwritable, so the daemon refuses to boot — a boot with "
@@ -969,7 +969,7 @@ msgstr ""
 " (`docker compose ps` should show alfred-pg healthy) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:936
+#: src/alfred/cli/daemon/_commands.py:979
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -977,7 +977,7 @@ msgstr ""
 " `alfred daemon start`."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:939
+#: src/alfred/cli/daemon/_commands.py:982
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -986,7 +986,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:990
+#: src/alfred/cli/daemon/_commands.py:1033
 #: src/alfred/i18n/_slice_4_reserve.py:116
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -994,7 +994,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1001
+#: src/alfred/cli/daemon/_commands.py:1044
 #: src/alfred/i18n/_slice_4_reserve.py:117
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -1003,7 +1003,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1017
+#: src/alfred/cli/daemon/_commands.py:1060
 #: src/alfred/i18n/_slice_4_reserve.py:118
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1011,7 +1011,7 @@ msgstr ""
 "Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:1031
+#: src/alfred/cli/daemon/_commands.py:1074
 #: src/alfred/i18n/_slice_4_reserve.py:119
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1019,7 +1019,7 @@ msgstr ""
 "`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1072
+#: src/alfred/cli/daemon/_commands.py:1115
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1029,7 +1029,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1085
+#: src/alfred/cli/daemon/_commands.py:1128
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "First-party DLP-subscriber grant is not live after boot. The quarantined-"
@@ -1037,7 +1037,7 @@ msgstr ""
 "refused. Check `alfred audit log --since 5m` for capability-gate seed or "
 "grant-load errors, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1113
+#: src/alfred/cli/daemon/_commands.py:1156
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1048,7 +1048,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:1142
+#: src/alfred/cli/daemon/_commands.py:1185
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1056,38 +1056,48 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS to exactly one adapter and re-run `alfred "
 "daemon start`. Multi-adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:1249
+#: src/alfred/cli/daemon/_commands.py:1217
+msgid "daemon.boot.quarantine_child_spawn_failed"
+msgstr ""
+"The quarantined child could not be spawned. Comms requires the bwrap-"
+"sandboxed quarantined child, which needs a Linux host with `bwrap` "
+"(bubblewrap) installed and the launcher provisioned. Refusing to boot. On"
+" a non-Linux or unprovisioned host, leave ALFRED_COMMS_ENABLED_ADAPTERS "
+"unset (comms disabled), or provision bwrap + the plugin launcher and re-"
+"run `alfred daemon start`."
+
+#: src/alfred/cli/daemon/_commands.py:1311
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:1295
+#: src/alfred/cli/daemon/_commands.py:1364
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1298
-#: src/alfred/cli/daemon/_commands.py:1303
+#: src/alfred/cli/daemon/_commands.py:1367
+#: src/alfred/cli/daemon/_commands.py:1372
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1305
+#: src/alfred/cli/daemon/_commands.py:1374
 #: src/alfred/i18n/_slice_4_reserve.py:122
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:1320
+#: src/alfred/cli/daemon/_commands.py:1389
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1323
+#: src/alfred/cli/daemon/_commands.py:1392
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:1331
+#: src/alfred/cli/daemon/_commands.py:1400
 #: src/alfred/i18n/_slice_4_reserve.py:123
 msgid "daemon.status.template"
 msgstr ""
@@ -1103,11 +1113,11 @@ msgstr ""
 "audit.hash_pepper is not configured. Run `bin/alfred-setup.sh` to seed "
 "it. Refusing to boot."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:158
+#: src/alfred/comms_mcp/daemon_runtime.py:169
 msgid "comms.daemon_runtime.dispatch_bad_ingested"
 msgstr "Comms dispatch received a malformed ingest result; refusing to send."
 
-#: src/alfred/comms_mcp/daemon_runtime.py:169
+#: src/alfred/comms_mcp/daemon_runtime.py:180
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
@@ -1301,11 +1311,14 @@ msgid "cli.supervisor.status.breaker_state.unknown"
 msgstr "UNKNOWN"
 
 # ---- Slice-4 additions (PR-S4-0b Component I) — spec §12.2 ----
-# 44 keys spanning login/session lifecycle, operator-session refusals,
-# supervisor reset refusals, daemon boot, sandbox refusals,
-# config-reload notifications, and TUI gating. Sourced PRs: S4-1..S4-10
-# consume these keys; this PR ships them so every consumer's `t()`
-# call resolves to a non-bare string at boot time.
+# 44 keys (the spec §12.2 FLOOR) spanning login/session lifecycle,
+# operator-session refusals, supervisor reset refusals, daemon boot, sandbox
+# refusals, config-reload notifications, and TUI gating. Implementation PRs
+# S4-1..S4-11 consume AND grow these — the live enumeration is now larger
+# (e.g.
+# the daemon-boot family includes quarantine_child_spawn_failed from
+# PR-S4-11c-2b) — so every consumer's `t()` resolves to a non-bare string at
+# boot.
 # Operator-session refusal reasons (PR-S4-5 _resolve_operator + spec §8.10).
 #: src/alfred/i18n/_slice_4_reserve.py:58
 msgid "operator_session.refused.expired"
@@ -1963,8 +1976,8 @@ msgstr "Plugin {plugin_id} sandbox policy could not be translated to bwrap flags
 msgid "supervisor.sandbox.refused.interpreter_prefix_too_broad"
 msgstr ""
 "Plugin {plugin_id} cannot be launched: the configured interpreter "
-"({interpreter}) resolves to a root-level install prefix, which would bind the "
-"entire host filesystem into the sandbox."
+"({interpreter}) resolves to a root-level install prefix, which would bind"
+" the entire host filesystem into the sandbox."
 
 #: src/alfred/plugins/_sandbox_i18n.py:71
 msgid "supervisor.sandbox.refused.fake_uname_in_production"
@@ -2333,25 +2346,25 @@ msgstr "Content clearance denied for quarantine.dereference (T3)."
 msgid "security.quarantine.downgrade_denied"
 msgstr "Content clearance denied for t3.downgrade_to_orchestrator."
 
-#: src/alfred/security/quarantine_child_io.py:232
+#: src/alfred/security/quarantine_child_io.py:243
 msgid "security.quarantine_child.stdin_unavailable"
 msgstr "The quarantined-LLM child has no stdin to write the request frame to."
 
-#: src/alfred/security/quarantine_child_io.py:250
+#: src/alfred/security/quarantine_child_io.py:261
 msgid "security.quarantine_child.stdout_unavailable"
 msgstr "The quarantined-LLM child has no stdout to read the reply frame from."
 
-#: src/alfred/security/quarantine_child_io.py:274
+#: src/alfred/security/quarantine_child_io.py:285
 msgid "security.quarantine_child.read_frame_failed"
 msgstr ""
 "Reading the quarantined-LLM child's reply failed: the wire was truncated,"
 " the child crashed, or the read exceeded its deadline."
 
-#: src/alfred/security/quarantine_child_io.py:363
+#: src/alfred/security/quarantine_child_io.py:374
 msgid "security.quarantine_child.spawn_failed"
 msgstr "The quarantined-LLM child subprocess could not be spawned."
 
-#: src/alfred/security/quarantine_child_io.py:384
+#: src/alfred/security/quarantine_child_io.py:395
 msgid "security.quarantine_child.provider_key_delivery_failed"
 msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "
@@ -2374,24 +2387,25 @@ msgstr ""
 #: src/alfred/security/quarantine_transport.py:250
 msgid "security.quarantine_transport.unsupported_method"
 msgstr ""
-"Quarantine transport refused an unsupported wire method '{method}'. Only "
-"quarantine.extract is dispatched on this path."
+"Quarantine transport refused an unsupported wire method '{method}'. "
+"`quarantine.ingest` is an internal pre-step; only `quarantine.extract` is"
+" dispatched as the extractor-observed method on this path."
 
-#: src/alfred/security/secrets.py:240 src/alfred/security/secrets.py:251
-#: src/alfred/security/secrets.py:267 src/alfred/security/secrets.py:279
-#: src/alfred/security/secrets.py:376
+#: src/alfred/security/secrets.py:250 src/alfred/security/secrets.py:261
+#: src/alfred/security/secrets.py:277 src/alfred/security/secrets.py:289
+#: src/alfred/security/secrets.py:386
 msgid "secrets.file_perms_too_open"
 msgstr ""
 "Secrets file '{path}' has insecure permissions (mode {octal_mode}); run "
 "`chmod 600 {path}` and `chmod 700 {parent}`."
 
-#: src/alfred/security/secrets.py:261
+#: src/alfred/security/secrets.py:271
 msgid "secrets.path_is_directory"
 msgstr ""
 "Secrets path '{path}' is a directory (Docker bind-mount usually causes "
 "this); fix by `rmdir {path} && touch {path} && chmod 600 {path}`."
 
-#: src/alfred/security/secrets.py:352 src/alfred/security/secrets.py:363
+#: src/alfred/security/secrets.py:362 src/alfred/security/secrets.py:373
 msgid "secrets.file_missing_required"
 msgstr ""
 "Secrets file '{path}' is required but does not exist; create with `touch "

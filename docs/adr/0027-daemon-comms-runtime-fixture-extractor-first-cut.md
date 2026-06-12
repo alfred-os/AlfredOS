@@ -16,7 +16,7 @@ Wiring both at once would conflate "the daemon spawns comms plugins and runs the
 
 ## Decision
 
-**Decision 1 — Ship the daemon comms inbound runtime against a fixture-transport extractor.** PR-S4-11b makes the daemon spawn the enabled comms plugins (the reference adapter in this cut) and run the **real** inbound trust-boundary path — real `IdentityResolver`, real `BurstLimiter`, the real `QuarantinedExtractor.extract(handle, schema)` surface, real peppered audit rows — with the quarantined-LLM response supplied by a **recorded-fixture transport** (the CLAUDE.md-sanctioned non-smoke pattern). The dual-LLM invariant stays intact: the privileged side is *absent*, not fed raw T3; the fixture extractor is the sole T3 consumer, exactly as in the integration harness.
+**Decision 1 — Ship the daemon comms inbound runtime against a fixture-transport extractor.** PR-S4-11b makes the daemon spawn the enabled comms plugins (the reference adapter in this cut) and run the **real** inbound trust-boundary path — real `IdentityResolver`, real `BurstLimiter`, the real `QuarantinedExtractor.extract(handle, schema)` surface, real peppered audit rows — with the quarantined-LLM response supplied by a **recorded-fixture transport** (the CLAUDE.md-sanctioned non-smoke pattern). The dual-LLM invariant stays intact: the privileged side is *absent*, not fed raw T3; the fixture extractor is the sole T3 consumer, exactly as in the integration harness. *(PR-S4-11b first cut — **superseded by the PR-S4-11c-2b amendment below**: the daemon now spawns the REAL bwrap quarantined child, which is the sole T3 consumer.)*
 
 **Decision 2 — A thin `CommsInboundOrchestratorAdapter` satisfies the `_OrchestratorLike` seam; the privileged orchestrator is deferred.** A new `comms_mcp/daemon_runtime.py` adapter delegates `quarantined_extract` to the real `CommsExtractorBridge` and routes `ingest`/`dispatch` to a deterministic outbound ack via a late-bound `OutboundSenderLike` (loud `RuntimeError` if dispatch fires before the sender is bound — no silent failure). It does **not** call `handle_user_message`. The real privileged-orchestrator reply is deferred to PR-S4-11c.
 
@@ -38,12 +38,45 @@ The gate stays a **pure grant evaluator** — `check_plugin_load` is NOT special
 
 **Third-party / agent-authored adapters are out of scope for this cut** and would route through the reviewer-gate proposal flow, never this seed. Config-is-authorization is sound precisely because the enabled set is restricted to in-repo first-party manifests the operator opted into.
 
+## Amendment — PR-S4-11c-2b (2026-06-12): the daemon now spawns the REAL bwrap quarantined child
+
+Decision 1's recorded-fixture transport was the **first cut**. PR-S4-11c-2b reverses
+that specific choice: the daemon's `_build_comms_inbound_extractor`
+(`comms_mcp/daemon_runtime.py`) now constructs the production
+`QuarantineStdioTransport` (ADR-0029) driving a **REAL bwrap-sandboxed quarantined
+child** spawned via `spawn_quarantine_child_io` (ADR-0030), not the
+`_RecordedExtractTransport` (now deleted). `_build_comms_boot_graph` became `async`
+to host the spawn, and CONSUMES the boot-minted authorised T3 nonce (it was
+threaded-but-inert in 11b/2a): the nonce now drives a real `T3BodyRecorder` that
+tags the inbound body `TaggedContent[T3]` and stages it in the single-use
+`QuarantineStagingMap` the transport drains — the inline-over-wire content path
+(ADR-0029) is exercised in production.
+
+What is unchanged: the 2b child runs a **deterministic-echo loop** — NO real LLM,
+NO network egress. Decision 4 still holds in spirit: there is no privileged-provider
+round-trip and no quarantined-LLM provider call. The child's provider key is
+resolved from the secret broker by the fixed id `quarantine_provider_api_key`
+(`config/routing.yaml [quarantine] secret_id`); when unset it falls back to a
+documented placeholder with a loud `structlog` warning (the echo child reads,
+scrubs, and discards it). PR-S4-11c-2c flips that unset path to refuse-boot once the
+child makes a real provider call, and lands the real LLM + its egress allowlist
+behind release-blocker #230. Graduation criterion #7 (a real `alfred chat` turn)
+still awaits 2c's real privileged orchestrator + real LLM.
+
+**Fail-closed dev-host posture.** The quarantined child is `sandbox.kind="full"`
+(bwrap), so a daemon with a comms adapter enabled now REQUIRES a Linux host with
+bwrap + the ADR-0030 bound interpreter to boot. On a non-Linux / unprovisioned host
+the spawn raises `QuarantineChildSpawnError`, which the boot path converts into an
+audited refusal (exit 2, `quarantine_child_spawn_failed`) with a clear operator
+message — there is **no dev fixture fallback**. The fixture path now lives only in
+the test tiers (in-proc echoing child doubles).
+
 ## Consequences
 
 ### Positive
 
 - For the first time, a real inbound platform message traverses plugin → wire → runner → session → `process_inbound_message` → audit in production; the daemon comms runtime is provably live (real-Postgres integration + a real-spawn smoke).
-- The dual-LLM invariant is preserved honestly: the privileged orchestrator is absent rather than mis-fed; the fixture extractor is the only T3 consumer.
+- The dual-LLM invariant is preserved honestly: the privileged orchestrator is absent rather than mis-fed; the fixture extractor is the only T3 consumer. *(First cut — superseded by PR-S4-11c-2b: the live bwrap child is now the sole T3 consumer; the invariant is preserved more strongly, since the real child reads the wire rather than the host fabricating a response.)*
 - The work is incremental and reviewable — the spawn/lifecycle/outbound/audit machinery is de-risked before the much larger privileged-orchestrator + quarantined-LLM epic.
 
 ### Negative / accepted

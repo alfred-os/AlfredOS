@@ -6,15 +6,19 @@ consume the keys. CI's ``pybabel compile --check`` enforces no orphan
 ``t()`` calls in source; this test enforces no orphan key in the
 catalog.
 
-The 44 keys span 7 families:
+The PR-S4-0b §12.2 FLOOR was 44 keys across 7 families (the test asserts
+``len(SLICE_4_KEYS) >= 44``); implementation PRs S4-1..S4-11 have since grown the
+live enumeration well past it (the daemon-boot family alone is now 17, incl.
+``quarantine_child_spawn_failed`` from PR-S4-11c-2b). The ORIGINAL floor
+composition:
 * Login / session lifecycle (12) — PR-S4-5 ``alfred login`` / ``logout``
   / ``whoami``.
 * Operator-session refusal reasons (8) — PR-S4-5 ``_resolve_operator``
   + ADR-0024 budget.
 * Supervisor reset refusals (2) — PR-S4-5 reset-permission gate.
-* Daemon boot refusals (9) — PR-S4-1 ``alfred daemon start`` (includes
-  the ``audit_hash_pepper_missing`` refusal from PR #205 round-2
-  sec-3 closure).
+* Daemon boot refusals (9 at the floor; now 17) — PR-S4-1 ``alfred daemon
+  start`` (includes ``audit_hash_pepper_missing`` from PR #205 round-2 sec-3,
+  plus the comms-adapter + quarantine-child-spawn refusals from PR-S4-11b/c).
 * Sandbox refusal reasons (6) — PR-S4-6 launcher.
 * Config-reload notifications (6) — PR-S4-4 hot-reload.
 * TUI gating (1) — PR-S4-1 daemon split.
@@ -94,8 +98,9 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "supervisor.breaker.reset.refused.not_logged_in",
     "supervisor.breaker.reset.refused.not_logged_in.recovery",
     "supervisor.breaker.reset.refused.operator_permissions_insufficient",
-    # Daemon boot (9 — includes audit_hash_pepper_missing per round-2
-    # sec-3 + arch-002 closures).
+    # Daemon boot (9 at the PR-S4-0b floor; now 17 — incl. audit_hash_pepper_missing
+    # per round-2 sec-3 + arch-002, the comms-adapter refusals (PR-S4-11b), and
+    # quarantine_child_spawn_failed (PR-S4-11c-2b)).
     "daemon.boot.environment_not_set",
     "daemon.boot.unsandboxed_in_production",
     "daemon.boot.launcher_not_policy_resolving",
@@ -114,6 +119,9 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # Comms-adapter spawn/handshake boot refusals (PR-S4-11b, #237).
     "daemon.boot.comms_adapter_spawn_failed",
     "daemon.boot.comms_adapter_handshake_failed",
+    # PR-S4-11c-2b go-live flip: the daemon spawns the bwrap quarantined child at
+    # boot; a non-Linux / unprovisioned host refuses fail-closed.
+    "daemon.boot.quarantine_child_spawn_failed",
     # O1 (PR-S4-11b): boot-output line making a spawned comms adapter observable
     # in `alfred daemon start` output (not just an audit-log SQL query).
     "daemon.comms.adapter_spawned",

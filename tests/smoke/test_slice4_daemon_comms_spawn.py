@@ -33,19 +33,24 @@ psycopg2 connection.
 
 Launcher-spawn CI posture (honest skip)
 ---------------------------------------
-The reference manifest declares ``sandbox.kind = "none"``. Under
-``ALFRED_ENVIRONMENT=test`` the daemon's launcher execs the plugin unsandboxed on
-non-Linux dev hosts; a Linux runner UID-drops via ``runuser`` (root-only). Like
-the TUI launcher-spawn leg + ``test_comms_runner_substrate.py``, this test
-skips on non-root Linux and runs on macOS + the root CI integration runner. It is
-``@pytest.mark.smoke`` so it only runs when an operator opts in via
-``uv run pytest tests/smoke -m smoke``.
+The reference manifest declares ``sandbox.kind = "none"``, but PR-S4-11c-2b's
+go-live flip means the daemon ALSO spawns the bwrap-sandboxed quarantined-LLM child
+(``sandbox.kind="full"``) at boot when a comms adapter is enabled — and FAIL-CLOSED
+refuses to boot if that spawn fails (no fixture fallback). So this smoke now needs
+the full ADR-0030 provisioning the docker-only real-spawn tests need: bwrap + Linux
++ root + ``ALFRED_QUARANTINE_CHILD_PYTHON`` set (a real interpreter binary with
+``alfred`` installed into it, whose prefix the launcher binds into the sandbox). It
+skips on macOS / non-root / unprovisioned hosts (where the quarantine-child spawn
+cannot succeed) and RUNS in the ``integration-privileged`` CI leg + a privileged
+docker box. It is ``@pytest.mark.smoke`` so it only runs when an operator opts in
+via ``uv run pytest tests/smoke -m smoke``.
 """
 
 from __future__ import annotations
 
 import getpass
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -77,16 +82,34 @@ _PLUGIN_ID = "alfred.comms-test"
 
 # The reference plugin's kind="none" launcher UID-drops via ``runuser`` on Linux
 # (root-only). Point ``ALFRED_PLUGIN_UID`` at the current user so a root Linux
-# runner can UID-drop; the skipif covers the non-root Linux runner.
+# runner can UID-drop.
 _LAUNCHER_TEST_UID = getpass.getuser()
-_LAUNCHER_REQUIRES_ROOT = os.uname().sysname == "Linux" and os.geteuid() != 0
+
+# PR-S4-11c-2b: the daemon's go-live flip spawns the bwrap quarantined child at boot,
+# so this smoke needs the docker-only provisioning (bwrap + Linux + root + the
+# ADR-0030 bound interpreter) — mirrors test_daemon_comms_flip_real_spawn. Without it
+# the daemon refuses to boot fail-closed and the boot.completed row never lands.
+_HAS_BWRAP = shutil.which("bwrap") is not None
+_CHILD_PYTHON = os.environ.get("ALFRED_QUARANTINE_CHILD_PYTHON")
+# os.uname / os.geteuid do NOT exist on Windows; since @skipif is evaluated at
+# import, probe them behind hasattr so test COLLECTION stays import-safe on
+# non-Unix (a Windows box would otherwise AttributeError before the skip; CR #255).
+_IS_LINUX_ROOT = (
+    hasattr(os, "uname")
+    and os.uname().sysname == "Linux"
+    and hasattr(os, "geteuid")
+    and os.geteuid() == 0
+)
+_DAEMON_REQUIRES_QUARANTINE_SPAWN = not _HAS_BWRAP or not _IS_LINUX_ROOT or not _CHILD_PYTHON
 
 
 @pytest.mark.smoke
 @pytest.mark.skipif(
-    _LAUNCHER_REQUIRES_ROOT,
-    reason="kind=none launcher UID-drops via runuser (root-only on Linux); "
-    "runs locally + on the root CI integration runner",
+    _DAEMON_REQUIRES_QUARANTINE_SPAWN,
+    reason="PR-S4-11c-2b go-live flip: the daemon spawns the bwrap quarantined child "
+    "at boot, so this smoke needs bwrap + Linux + root + ALFRED_QUARANTINE_CHILD_PYTHON "
+    "(ADR-0030). Skipped on macOS / non-root / unprovisioned hosts; runs in the "
+    "integration-privileged CI leg + a privileged docker box.",
 )
 def test_daemon_start_spawns_enabled_comms_adapter(tmp_path: Path) -> None:
     """End-to-end: alfred daemon start with comms enabled -> adapter loaded row."""
@@ -114,6 +137,11 @@ def test_daemon_start_spawns_enabled_comms_adapter(tmp_path: Path) -> None:
         env["ALFRED_COMMS_ENABLED_ADAPTERS"] = f'["{_ENABLED_ADAPTER}"]'
         # The runuser UID-drop target on a root Linux runner.
         env["ALFRED_PLUGIN_UID"] = _LAUNCHER_TEST_UID
+        # PR-S4-11c-2b: thread the bound interpreter into the daemon subprocess so its
+        # boot-time bwrap quarantine-child spawn resolves (ADR-0030). The skipif above
+        # guarantees this is set whenever the test runs.
+        if _CHILD_PYTHON:
+            env["ALFRED_QUARANTINE_CHILD_PYTHON"] = _CHILD_PYTHON
 
         subprocess.run(["uv", "run", "alfred", "migrate"], env=env, check=True)
 

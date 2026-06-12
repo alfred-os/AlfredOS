@@ -270,6 +270,62 @@ class _HealthyGate:
         return True
 
 
+class _FakeQuarantineChildIO:
+    """In-proc stand-in for ``spawn_quarantine_child_io``'s ``_SubprocessChildIO``.
+
+    PR-S4-11c-2b: the daemon's ``_build_comms_inbound_extractor`` now spawns a REAL
+    bwrap quarantined child. The boot-WIRING unit tests assert construction order +
+    fail-closed posture, NOT a real subprocess (the genuine bwrap spawn + round-trip
+    is the docker-only integration test's job). This fake satisfies the
+    ``alfred.security.quarantine_transport.ChildIO`` Protocol so
+    ``QuarantineStdioTransport`` constructs against it. ``write_frame`` is a no-op
+    and ``read_frame`` is never reached on the construction-only boot path (no
+    inbound turn is driven); ``aclose`` is an idempotent no-op.
+    """
+
+    def __init__(self, *, provider_key: str) -> None:
+        # Recorded so a test can assert the key flowed into the spawn (the real
+        # spawn delivers it over fd 3; here we only prove the seam carried it).
+        self.provider_key = provider_key
+        # Counts aclose() calls so a test can prove the daemon reaps the live child
+        # on its exit paths (CR #255 — the boot graph's quarantine teardown).
+        self.aclose_calls = 0
+
+    def write_frame(self, frame: bytes) -> None:
+        return None
+
+    async def read_frame(self) -> bytes:  # pragma: no cover - no inbound turn on boot-wiring path
+        raise AssertionError("the boot-wiring unit cut drives no inbound turn")
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
+@pytest.fixture
+def patch_quarantine_child_spawn(monkeypatch: pytest.MonkeyPatch) -> list[_FakeQuarantineChildIO]:
+    """Monkeypatch the quarantined-child spawn seam to an in-proc fake child-IO.
+
+    PR-S4-11c-2b: comms-enabled boot tests must NOT attempt a real bwrap spawn on a
+    non-Linux / unprovisioned CI host (it would fail-closed and refuse the boot).
+    This patches ``spawn_quarantine_child_io`` at its SOURCE module
+    (``alfred.security.quarantine_child_io``) — the seam the daemon's
+    ``_build_comms_inbound_extractor`` imports lazily — so the live-spawn path is
+    exercised structurally without a subprocess. Returns the list of spawned fakes
+    so a test can assert the spawn happened + the provider key flowed.
+    """
+    spawned: list[_FakeQuarantineChildIO] = []
+
+    async def _fake_spawn(*, provider_key: str) -> _FakeQuarantineChildIO:
+        child = _FakeQuarantineChildIO(provider_key=provider_key)
+        spawned.append(child)
+        return child
+
+    monkeypatch.setattr(
+        "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+    )
+    return spawned
+
+
 def _make_async(fn: Any) -> Any:
     async def _f(*args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)

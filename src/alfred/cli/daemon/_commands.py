@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,6 +70,7 @@ from alfred.cli.daemon._failures import (
     CommsMultiAdapterUnsupportedFailure,
     DaemonBootFailure,
     EnvironmentNotSetFailure,
+    QuarantineChildSpawnFailedFailure,
     QuarantineGrantMissingFailure,
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
@@ -88,6 +90,13 @@ from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
 from alfred.plugins.errors import ManifestError
 from alfred.plugins.manifest import parse_manifest
+
+# PR-S4-11c-2b: the comms-graph build spawns the live bwrap quarantined child;
+# its loud spawn refusal is caught at the boot call site to refuse boot fail-closed
+# (audited) on a non-Linux / unprovisioned host. Imported at module scope so the
+# boot-wiring unit tests can monkeypatch the spawn seam (``spawn_quarantine_child_io``)
+# without a real subprocess and still raise this through the boot path.
+from alfred.security.quarantine_child_io import QuarantineChildSpawnError
 from alfred.supervisor.core import Supervisor
 
 if TYPE_CHECKING:
@@ -105,6 +114,7 @@ if TYPE_CHECKING:
     from alfred.hooks.capability import CapabilityGate
     from alfred.security.capability_gate._gate import RealGate
     from alfred.security.dlp import OutboundDlpProtocol
+    from alfred.security.quarantine_transport import QuarantineStdioTransport
     from alfred.security.tiers import CapabilityGateNonce
     from alfred.supervisor.core import Supervisor as _SupervisorType
 
@@ -310,9 +320,24 @@ class _CommsBootGraph:
     burst_limiter: object
     inbound_orchestrator: CommsInboundOrchestratorAdapter
     t3_nonce: CapabilityGateNonce
+    # The LIVE quarantine transport (owns the bwrap child via its ChildIO). Held so
+    # the daemon can reap the child on EVERY exit path (PR-S4-11c-2b / CR #255).
+    quarantine_transport: QuarantineStdioTransport
+
+    async def aclose(self) -> None:
+        """Reap the LIVE bwrap quarantined child the comms-graph build spawned.
+
+        Closes the quarantine transport (``-> child_io.aclose()`` SIGTERMs + reaps
+        the bwrap subprocess) so the child never leaks past the daemon. Called on
+        EVERY exit path after the spawn: a ``Supervisor()`` / ``write_pidfile`` /
+        ``supervisor.start()`` failure, an adapter refusal, or a normal shutdown
+        (CR #255). ``_SubprocessChildIO.aclose`` is idempotent, so a double-close
+        (e.g. shutdown after a start() failure) is safe.
+        """
+        await self.quarantine_transport.close()
 
 
-def _build_comms_boot_graph(
+async def _build_comms_boot_graph(
     *,
     settings: Settings,
     audit: AuditWriter,
@@ -322,17 +347,23 @@ def _build_comms_boot_graph(
     """Construct the pre-Supervisor comms graph (PR-S4-11b construction step 1-5).
 
     Built ONLY when at least one adapter is enabled. Assembles the secret broker,
-    the sync identity-resolver bridge, the real (recorded-transport) quarantined
-    extractor + its body-shaped bridge, the burst limiter, and the inbound
-    orchestrator adapter whose outbound sender is bound per-adapter after the
-    runner exists.
+    the sync identity-resolver bridge, the REAL quarantined extractor over a LIVE
+    bwrap-spawned quarantined child (PR-S4-11c-2b go-live flip) + its body-shaped
+    bridge, the burst limiter, and the inbound orchestrator adapter whose outbound
+    sender is bound per-adapter after the runner exists.
+
+    ``async`` because the extractor build spawns the quarantined child
+    (``spawn_quarantine_child_io``). FAIL-CLOSED: on a non-Linux / unprovisioned
+    host the spawn raises ``QuarantineChildSpawnError``, which propagates so the
+    daemon refuses to boot (the caller wraps it in an audited refusal) rather than
+    silently degrading to a fixture (CLAUDE.md hard rule #7).
 
     ``t3_nonce`` is the per-process authorised :class:`CapabilityGateNonce` the
-    daemon minted at boot. It is stored on the returned graph (PR-S4-11c-2a0
-    precursor infra) for PR-S4-11c-2a's ``record_body`` seam — it is NOT consumed
-    here yet (the ``CommsExtractorBridge`` still constructs without a
-    ``record_body``), mirroring the threaded-but-inert DI precedent of 11c-1's
-    orchestrator and 11b0's grant seed.
+    daemon minted + registered at boot. PR-S4-11c-2b CONSUMES it: it is injected
+    into the :class:`T3BodyRecorder` (the ``record_body`` seam) that tags the
+    inbound body ``TaggedContent[T3]`` and stages it in the SAME single-use
+    :class:`QuarantineStagingMap` the ``QuarantineStdioTransport`` drains — closing
+    the inline-over-wire content path (ADR-0029) in production.
     """
     from typing import cast
 
@@ -344,32 +375,53 @@ def _build_comms_boot_graph(
     )
     from alfred.orchestrator.burst_limiter import BurstLimiter
     from alfred.security.dlp import OutboundDlp
+    from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 
     secret_broker = build_broker(settings)
     resolver = install_identity_factories_for_settings(settings)
     resolver_bridge = SyncIdentityResolverBridge(resolver=resolver)
+    # ONE single-use staging map shared between the recorder (writer) and the
+    # transport (drainer) — the host owns the raw T3 body between them (ADR-0029).
+    staging = QuarantineStagingMap()
     # ``_build_boot_outbound_dlp`` always constructs a concrete ``OutboundDlp``
     # (it is annotated to the Protocol for the Supervisor's narrower consumer);
     # the extractor's post-stage scan needs the concrete class, so the cast pins
     # what the runtime already guarantees rather than widening the Wave-2 helper.
-    extractor = _build_comms_inbound_extractor(
-        audit_writer=audit, outbound_dlp=cast("OutboundDlp", outbound_dlp)
-    )
-    extractor_bridge = CommsExtractorBridge(extractor=extractor)
-    # AuditWriter satisfies the BurstLimiter's ``_AuditWriterLike`` seam at
-    # runtime (its append/append_schema are the keyword forms the limiter calls);
-    # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
-    # same structural mismatch the per-adapter handlers below carry an ignore for.
-    burst_limiter = BurstLimiter(audit_writer=audit)  # type: ignore[arg-type]
-    inbound_orchestrator = CommsInboundOrchestratorAdapter(extractor_bridge=extractor_bridge)
-    return _CommsBootGraph(
+    extractor, quarantine_transport = await _build_comms_inbound_extractor(
+        audit_writer=audit,
+        outbound_dlp=cast("OutboundDlp", outbound_dlp),
         secret_broker=secret_broker,
-        resolver_bridge=resolver_bridge,
-        extractor_bridge=extractor_bridge,
-        burst_limiter=burst_limiter,
-        inbound_orchestrator=inbound_orchestrator,
-        t3_nonce=t3_nonce,
+        staging=staging,
     )
+    # The child is now LIVE. Reap it if any of the remaining (synchronous) graph
+    # assembly raises before we return the graph — otherwise `_start_async` never
+    # receives the graph, so its exit-path teardown can't see the transport and the
+    # bwrap child leaks (CR #255 round-5).
+    try:
+        # The ``record_body`` seam: tag the inbound body T3 under the boot nonce +
+        # stage it for the transport's ``quarantine.ingest`` drain. A wrong/None
+        # nonce is a loud refusal inside T3BodyRecorder (never a stage-untagged
+        # fallback).
+        recorder = T3BodyRecorder(nonce=t3_nonce, staging=staging)
+        extractor_bridge = CommsExtractorBridge(extractor=extractor, record_body=recorder)
+        # AuditWriter satisfies the BurstLimiter's ``_AuditWriterLike`` seam at
+        # runtime (its append/append_schema are the keyword forms the limiter calls);
+        # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
+        # same structural mismatch the per-adapter handlers below carry an ignore for.
+        burst_limiter = BurstLimiter(audit_writer=audit)  # type: ignore[arg-type]
+        inbound_orchestrator = CommsInboundOrchestratorAdapter(extractor_bridge=extractor_bridge)
+        return _CommsBootGraph(
+            secret_broker=secret_broker,
+            resolver_bridge=resolver_bridge,
+            extractor_bridge=extractor_bridge,
+            burst_limiter=burst_limiter,
+            inbound_orchestrator=inbound_orchestrator,
+            t3_nonce=t3_nonce,
+            quarantine_transport=quarantine_transport,
+        )
+    except Exception:
+        await quarantine_transport.close()
+        raise
 
 
 async def _spawn_comms_adapter(
@@ -1151,39 +1203,58 @@ async def _start_async() -> None:
     # unchanged (proven by ``test_default_empty_adapters_boot_unchanged``). The
     # inbound orchestrator's outbound sender is bound per-adapter once the runner
     # exists (the late-bind seam in ``CommsInboundOrchestratorAdapter``).
-    comms_graph = (
-        _build_comms_boot_graph(
-            settings=settings,
-            audit=audit,
-            outbound_dlp=outbound_dlp,
-            t3_nonce=t3_nonce,
-        )
-        if settings.comms_enabled_adapters
-        else None
-    )
+    comms_graph: _CommsBootGraph | None = None
+    if settings.comms_enabled_adapters:
+        # PR-S4-11c-2b: the comms-graph build now SPAWNS the live bwrap quarantined
+        # child (``spawn_quarantine_child_io`` inside ``_build_comms_inbound_extractor``).
+        # FAIL-CLOSED (CLAUDE.md hard rule #7): on a non-Linux / unprovisioned host
+        # that spawn raises ``QuarantineChildSpawnError`` — REFUSE boot with an
+        # audited failure + clear operator message rather than degrade to a fixture.
+        # Placed BEFORE ``write_pidfile`` / ``supervisor.start`` so the refusal has
+        # no daemon-up side effects.
+        try:
+            comms_graph = await _build_comms_boot_graph(
+                settings=settings,
+                audit=audit,
+                outbound_dlp=outbound_dlp,
+                t3_nonce=t3_nonce,
+            )
+        except QuarantineChildSpawnError:
+            await _refuse_boot(
+                audit,
+                QuarantineChildSpawnFailedFailure(),
+                t("daemon.boot.quarantine_child_spawn_failed"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
 
-    supervisor = Supervisor(
-        session_scope=session_scope,
-        gate=gate,
-        audit=audit,
-        state_git_path=settings.state_git_path,
-        proposal_dispatch_interval_s=settings.proposal_dispatch_interval_s,
-        policies_ref=snapshot_ref,
-        operator_session_resolver=_StubOperatorResolver(),
-        outbound_dlp=outbound_dlp,
-    )
-
-    # The PID file is written BEFORE start() so a concurrent ``alfred daemon
-    # stop`` can find us the instant the supervisor begins coming up.
-    pidfile_path = default_pidfile_path()
-    write_pidfile(
-        pidfile_path,
-        pid=_current_pid(),
-        boot_id=boot_id,
-        started_at=started_at.isoformat(),
-    )
-
+    # Supervisor construction + pidfile + start live INSIDE the try so the finally
+    # reaps the live quarantine child (comms_graph) on a failure of ANY of them, not
+    # just start()+ — the comms-graph build already spawned the bwrap child (CR #255).
+    supervisor: _SupervisorType | None = None
+    pidfile_path: Path | None = None
     try:
+        supervisor = Supervisor(
+            session_scope=session_scope,
+            gate=gate,
+            audit=audit,
+            state_git_path=settings.state_git_path,
+            proposal_dispatch_interval_s=settings.proposal_dispatch_interval_s,
+            policies_ref=snapshot_ref,
+            operator_session_resolver=_StubOperatorResolver(),
+            outbound_dlp=outbound_dlp,
+        )
+
+        # The PID file is written BEFORE start() so a concurrent ``alfred daemon
+        # stop`` can find us the instant the supervisor begins coming up.
+        pidfile_path = default_pidfile_path()
+        write_pidfile(
+            pidfile_path,
+            pid=_current_pid(),
+            boot_id=boot_id,
+            started_at=started_at.isoformat(),
+        )
+
         # CR #2: declare boot COMPLETE only after ``supervisor.start()``
         # succeeds. Emitting the completion row / echoing "started" BEFORE
         # start() would record a ``daemon.boot.completed`` row + tell the
@@ -1250,12 +1321,23 @@ async def _start_async() -> None:
 
         await wait_for_shutdown(supervisor)
     finally:
-        # Drain the supervisor (no-op if start() never succeeded) and remove
-        # the PID file on EVERY exit path — clean shutdown, a start() crash,
-        # or a quarantine (exit 3) on the completion row — so a failed boot
-        # never leaves a stale pidfile behind.
-        await supervisor.stop()
-        delete_pidfile(pidfile_path)
+        # Drain the supervisor (skipped if it never constructed), reap the live
+        # quarantine child, and remove the PID file on EVERY exit path — clean
+        # shutdown, a Supervisor()/write_pidfile()/start() failure, an adapter
+        # refusal, or a quarantine (exit 3) on the completion row — so a failed boot
+        # leaves neither a stale pidfile nor a leaked bwrap child behind (CR #255).
+        # Isolate the steps: a failing ``supervisor.stop()`` must NOT skip the child
+        # reap + pidfile delete (the exact leaks this finally exists to prevent;
+        # CR #255). The reap is suppressed so it never masks the real exit either.
+        try:
+            if supervisor is not None:
+                await supervisor.stop()
+        finally:
+            if comms_graph is not None:
+                with suppress(Exception):
+                    await comms_graph.aclose()
+            if pidfile_path is not None:
+                delete_pidfile(pidfile_path)
 
 
 def _current_pid() -> int:

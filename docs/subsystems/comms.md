@@ -359,6 +359,41 @@ today; `#230` makes the policy ENFORCE them at the kernel boundary. See
 [ADR-0016](../adr/0016-slice4-discord-tui-comms-mcp-rewrite.md) and
 [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md).
 
+### Daemon go-live flip + fail-closed dev-host behaviour (PR-S4-11c-2b)
+
+The daemon's inbound quarantined extraction is **live in production**. When
+`Settings.comms_enabled_adapters` is non-empty, `_build_comms_boot_graph`
+(`src/alfred/cli/daemon/_commands.py`) builds the real
+`QuarantineStdioTransport` over a **REAL bwrap-sandboxed quarantined child**
+spawned via `spawn_quarantine_child_io` — the ADR-0027 fixture extractor is gone
+(see the ADR-0027 PR-S4-11c-2b amendment). The boot-minted authorised T3 nonce
+drives a real `T3BodyRecorder` that tags the inbound body `TaggedContent[T3]` and
+stages it for the inline-over-wire content path (ADR-0029). The 2b child runs a
+**deterministic-echo loop** — no real LLM, no network egress — so the open-egress
+gap (`#230`, above) still contains nothing that can use it; the real LLM lands in
+PR-S4-11c-2c.
+
+**Fail-closed dev-host behaviour — operators read this before enabling a comms
+adapter.** The quarantined child is `[sandbox] kind = "full"` (bwrap), so a daemon
+with ANY comms adapter enabled **requires a Linux host with `bwrap` (bubblewrap)
+installed and the launcher provisioned** (ADR-0030 bound interpreter). On a
+non-Linux host (macOS), or a host where `bwrap` is unavailable or the bound
+interpreter isn't provisioned, the boot-time child spawn raises
+`QuarantineChildSpawnError` and the daemon **refuses to boot fail-closed** —
+audited `quarantine_child_spawn_failed`, exit 2, with a
+clear operator message pointing at the bwrap/provisioning requirement. There is
+**no dev fixture fallback** (the fixture/echo-double path lives only in the test
+tiers). To run the daemon without comms on such a host, leave
+`ALFRED_COMMS_ENABLED_ADAPTERS` unset (the default) — a comms-disabled boot
+constructs none of the quarantine graph and is unaffected.
+
+The child's provider key is resolved from the secret broker by the fixed id
+`quarantine_provider_api_key` (`config/routing.yaml [quarantine] secret_id`). When
+unset it falls back to a documented placeholder with a loud `structlog` warning —
+the 2b echo child reads, scrubs, and discards it without a provider call.
+PR-S4-11c-2c flips the unset path to refuse-boot once the child makes a real
+provider call.
+
 ### Rendering guidance for operator-facing audit rows (i18n-3)
 
 When a comms audit row renders to an operator surface (CLI / TUI / dashboard),

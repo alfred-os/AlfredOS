@@ -45,8 +45,10 @@ The ONLY substitutions are at seams that are not the property under proof:
 
 Everything else — the launcher spawn, the stdio transport, the session handler
 fan-out, the inbound trust-boundary path, the real ``QuarantinedExtractor`` (over
-a recorded LLM response), the real identity resolver, the real burst limiter, the
-real ``AuditWriter`` against real Postgres — is production code.
+the real ``QuarantineStdioTransport`` driving an in-proc echoing child double in
+place of the bwrap spawn this off-Linux leg cannot do — the docker-only flip test
+proves the genuine bwrap child), the real identity resolver, the real burst
+limiter, the real ``AuditWriter`` against real Postgres — is production code.
 
 Why it runs locally (macOS) + on root CI
 -----------------------------------------
@@ -61,7 +63,9 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import os
+import struct
 from collections.abc import AsyncIterator, Coroutine, Iterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -72,9 +76,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import sessionmaker
 
 from alfred.audit.log import AuditWriter
+from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.cli.daemon._commands import (
     _build_boot_outbound_dlp,
     _build_comms_boot_graph,
+    _CommsBootGraph,
     _spawn_comms_adapter,
 )
 from alfred.config.settings import Settings
@@ -89,10 +95,66 @@ from alfred.identity.models import PlatformIdentity, User
 from alfred.memory.hooks_audit_sink import EpisodicAuditSink
 from alfred.memory.models import Base
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
+from alfred.security import tiers as _tiers
 from alfred.security.capability_gate._gate import RealGate
 from alfred.security.capability_gate.policy import GatePolicy, GrantRow
 from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.gates import _make_in_memory_backend, _make_no_op_audit_sink
+
+
+class _EchoingChildDouble:
+    """In-proc length-prefixed child double echoing the ingested body.
+
+    PR-S4-11c-2b: the daemon's comms boot graph now spawns a REAL bwrap quarantined
+    child. This end-to-end proof runs on macOS / non-root Linux (no bwrap), so it
+    monkeypatches ``spawn_quarantine_child_io`` to return this double — the daemon's
+    real ``QuarantineStdioTransport`` drives it exactly as it would the live child.
+    The docker-only ``test_daemon_comms_flip_real_spawn`` proves the genuine bwrap
+    spawn; this proof keeps the full inbound-turn path runnable off-Linux.
+    """
+
+    def __init__(self, *, provider_key: str) -> None:
+        self.provider_key = provider_key
+        self._ingested: dict[str, str] = {}
+        self._reply: bytes | None = None
+
+    def write_frame(self, frame: bytes) -> None:
+        length = struct.unpack(">I", frame[:4])[0]
+        obj = json.loads(frame[4 : 4 + length])
+        method, params = obj["method"], obj["params"]
+        if method == "quarantine.ingest":
+            self._ingested[params["handle_id"]] = params["context"]
+        elif method == "quarantine.extract":
+            # Fail loud on an unknown handle rather than echoing "" — a broken
+            # ingest→extract handle flow (e.g. a split staging map) must surface as
+            # a crash here, not a synthetic "extracted" reply the audit assertions
+            # would false-pass on (CR #255).
+            try:
+                context = self._ingested.pop(params["handle_id"])
+            except KeyError as exc:  # pragma: no cover - defensive; a mismatch fails the test
+                raise AssertionError(
+                    f"unexpected quarantine handle_id {params['handle_id']!r}"
+                ) from exc
+            body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "kind": "extracted",
+                        "data": {"text": context, "intent": "greeting"},
+                        "extraction_mode": "native_constrained",
+                    },
+                }
+            ).encode("utf-8")
+            self._reply = struct.pack(">I", len(body)) + body
+
+    async def read_frame(self) -> bytes:
+        assert self._reply is not None
+        reply, self._reply = self._reply, None
+        return reply
+
+    async def aclose(self) -> None:
+        return None
+
 
 pytestmark = pytest.mark.integration
 
@@ -346,6 +408,20 @@ def _fetch_t3_promotion_rows(sync_url: str) -> list[dict[str, Any]]:
         engine.dispose()
 
 
+def _fetch_quarantine_extract_rows(sync_url: str) -> list[dict[str, Any]]:
+    """Return every ``quarantine.extract`` audit row's result (the extractor lift)."""
+    engine = create_engine(sync_url, future=True)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT result FROM audit_log WHERE event = :event"),
+                {"event": "quarantine.extract"},
+            )
+            return [dict(row._mapping) for row in result]
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.skipif(
     _LAUNCHER_REQUIRES_ROOT,
     reason="kind=none launcher UID-drops via runuser (root-only on Linux); "
@@ -371,8 +447,11 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
     # EpisodicAuditSink the daemon wires in production. Restore the singleton in
     # teardown so this test does not leak its registry into sibling tests.
     prior_registry = get_registry()
+    with _NONCE_LOCK:
+        prior_nonce = _tiers._AUTHORIZED_T3_NONCE
     gate = _boot_gate_with_comms_load_grant()
     runner = None
+    graph: _CommsBootGraph | None = None
     supervisor = _RecordingSupervisor()
     try:
         async with _boot_audit_writer(postgres_url) as audit:
@@ -381,18 +460,28 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
             # Build the comms graph + spawn the adapter the SAME way the daemon
             # does (production helpers — reuse, not reimplementation).
             outbound_dlp = _build_boot_outbound_dlp(settings=settings, audit=audit)
-            # #243 threaded a required ``t3_nonce`` onto ``_build_comms_boot_graph``;
-            # the non-root CI skip on this leg hid the missing kwarg. The reverted
-            # (ADR-0027 fixture-extractor) boot graph stores the nonce inert — it is
-            # NOT registered in the process slot and never reaches the
-            # ``_RecordedExtractTransport``, so a bare ``CapabilityGateNonce()`` is the
-            # faithful inert-DI value (no slot register/cleanup needed). The atomic
-            # production flip that consumes it lands in PR-S4-11c-2b.
-            graph = _build_comms_boot_graph(
+            # PR-S4-11c-2b: ``_build_comms_boot_graph`` is now ASYNC and CONSUMES the
+            # ``t3_nonce`` — it builds a real ``T3BodyRecorder`` that tags the inbound
+            # body ``TaggedContent[T3]`` with the AUTHORISED nonce, so the nonce must
+            # be the registered process slot (not a bare inert one). Register it for
+            # the turn + restore on teardown. The graph also SPAWNS the quarantined
+            # child; this off-Linux proof monkeypatches the spawn seam to the in-proc
+            # echoing double (the docker-only flip test proves the real bwrap spawn).
+            with _NONCE_LOCK:
+                nonce = CapabilityGateNonce()
+                _tiers._set_authorized_t3_nonce(nonce)
+
+            async def _fake_spawn(*, provider_key: str) -> _EchoingChildDouble:
+                return _EchoingChildDouble(provider_key=provider_key)
+
+            monkeypatch.setattr(
+                "alfred.security.quarantine_child_io.spawn_quarantine_child_io", _fake_spawn
+            )
+            graph = await _build_comms_boot_graph(
                 settings=settings,
                 audit=audit,
                 outbound_dlp=outbound_dlp,
-                t3_nonce=CapabilityGateNonce(),
+                t3_nonce=nonce,
             )
             runner = await _spawn_comms_adapter(
                 adapter_id=_ADAPTER_ID,
@@ -441,14 +530,37 @@ async def test_daemon_comms_inbound_turn_lands_t3_promotion_row(
             assert int(str(delivered["queue_depth"])) >= 1, delivered
         # End the audit-writer context only after the assertions that need it.
     finally:
-        if runner is not None:
-            # Cancel the supervised pump + close the transport so the subprocess
-            # never leaks past the test.
-            for task in supervisor.registered:
-                task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await asyncio.wait_for(task, timeout=_TIMEOUT_S)
+        # Tear down EVERY acquired resource regardless of how far boot got — do NOT
+        # gate on `runner` (resources are acquired BEFORE it is assigned, so a
+        # `_spawn_comms_adapter` failure mid-way would otherwise leak them). CR #255.
+        for task in supervisor.registered:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(task, timeout=_TIMEOUT_S)
+        # Close the live adapter CommsStdioTransport (captured on first send) so the
+        # launcher-spawned adapter subprocess never leaks past the test.
+        if recorder.transport is not None:
+            with suppress(Exception):
+                await recorder.transport.close()
+        # Reap the quarantine child the comms graph owns whenever the graph built
+        # (graph built => quarantine_transport => spawned child).
+        if graph is not None:
+            with suppress(Exception):
+                await graph.aclose()
         set_registry(prior_registry)
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(prior_nonce)
+
+    # The quarantine.extract row lands result="extracted" — the LOAD-BEARING
+    # extractor-lift assertion (the docker-only flip test asserts it against a real
+    # bwrap child; here it runs on every integration leg). Because the recorder
+    # stages the T3 body and the transport drains it from the SAME single-use
+    # QuarantineStagingMap, an "extracted" row also proves _build_comms_boot_graph
+    # shares ONE staging map between recorder + transport — a split map would make
+    # the drain raise (StagingHandleNotConfiguredError) and never land this row.
+    extract_rows = _fetch_quarantine_extract_rows(sync_url)
+    assert len(extract_rows) == 1, extract_rows
+    assert extract_rows[0]["result"] == "extracted", extract_rows[0]
 
     rows = _fetch_t3_promotion_rows(sync_url)
     assert len(rows) == 1, rows

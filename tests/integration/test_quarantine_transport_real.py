@@ -162,11 +162,11 @@ async def test_real_extractor_over_real_transport_records_body_and_audits(
             audit_sink.emit = AsyncMock()
             outbound_dlp = OutboundDlp(broker=broker, audit=audit_sink)
 
-            # Construct the machinery DIRECTLY (PR-S4-11c-2a ships the transport;
-            # the daemon's _build_comms_inbound_extractor still wires the ADR-0027
-            # fixture extractor — the real-transport production flip is 2b). This
-            # test proves the real extractor drives the real QuarantineStdioTransport
-            # over the injected child-IO seam + single-use staging map.
+            # Construct the machinery DIRECTLY (PR-S4-11c-2a shipped the transport;
+            # PR-S4-11c-2b flipped the daemon's _build_comms_inbound_extractor onto
+            # this real transport over a LIVE bwrap child). This 2a proof keeps the
+            # host content path covered host-only over an in-proc child double — the
+            # daemon-flip + real-bwrap proofs live in the daemon integration tests.
             staging = QuarantineStagingMap()
             child = _EchoingChildDouble()
             transport = QuarantineStdioTransport(child_io=child, staging=staging)
