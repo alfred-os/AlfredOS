@@ -46,7 +46,7 @@ dependencies = [
   # alfred-web-fetch plugin subprocess (plugins/alfred-web-fetch/
   # web_fetch_plugin.py). Pinned >=3.9 because the plugin uses
   # ``ClientTimeout(connect=..., sock_read=...)`` which landed in 3.9.
-  "aiohttp>=3.9,<4",
+  "aiohttp>=3.14.0,<4",
   # PR-S3-6 (err-002): GitPython powers the state.git grant-policy parser
   # (alfred.security.capability_gate._state_git_parser). The parser reads
   # the policies/grants/ tree at a known commit hash and projects it into
