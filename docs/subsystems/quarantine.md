@@ -2,7 +2,7 @@
 
 **Status:** shipped in Slice 3
 **Owner:** `alfred-security-engineer`
-**Code:** `src/alfred/security/quarantine.py` · `plugins/alfred_quarantined_llm/`
+**Code:** `src/alfred/security/quarantine.py` · `src/alfred/security/quarantine_child/`
 **PRD:** [§7.1 Security & Prompt-Injection Defense](../../PRD.md#71-security--prompt-injection-defense)
 **ADRs:** [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) (supersedes [ADR-0013](../adr/0013-defer-t1-t3-and-dual-llm.md)), [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md) (Slice-4 containerisation commitment)
 **Spec:** §3.4 (boundary), §3.7 (provenance), §6.2 (extraction modes), §6.4 (extractor), §6.7 (result union), §7.1 (canary), §7.3 (handle store)
@@ -227,7 +227,7 @@ content outside the privileged-orchestrator path.
 
 ### Quarantined-LLM plugin shape
 
-The quarantined LLM runs as `plugins/alfred_quarantined_llm/` under
+The quarantined LLM runs as `src/alfred/security/quarantine_child/` under
 the `alfred-quarantine` OS user — a dedicated system UID distinct from
 the `alfred` orchestrator UID. The OS-level UID separation means the
 subprocess literally cannot read the orchestrator's secrets file

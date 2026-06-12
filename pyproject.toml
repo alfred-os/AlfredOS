@@ -90,13 +90,34 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/alfred"]
 
+# BUG-2 (PR-S4-11c-2b0): ship the compiled gettext catalogs INSIDE the package so
+# a ``pip install``ed alfred carries its translations. Without this the wheel had
+# no ``locale/`` and ``_resolve_locale_dir()`` found nothing → translations
+# DISABLED (operators saw raw message keys). The bwrapped quarantine child MUST be
+# pip-installed under ``/usr``, so this is the layout the dual-LLM child runs under
+# (ADR-0030). Map the repo-root ``locale/`` tree to ``alfred/_locale`` inside the
+# package; :func:`alfred.i18n.translator._installed_package_locale_dir` resolves it
+# via ``importlib.resources.files("alfred") / "_locale"``. ``.po`` sources are
+# excluded from the wheel — only the compiled ``.mo`` catalogs are needed at
+# runtime; ``pybabel compile`` regenerates ``.mo`` from ``.po`` in CI.
+[tool.hatch.build.targets.wheel.force-include]
+"locale" = "alfred/_locale"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# PR-S3-4: ``plugins/`` lives at the repo root and is imported as a top-level
-# package (``plugins.alfred_quarantined_llm.*``). It is NOT installed via the
-# wheel (it's the supervisor-launched MCP subprocess, not part of the
-# alfred-core package), so pytest needs an explicit pythonpath entry to
-# discover it during collection.
+# PR-S3-4: ``plugins/`` lives at the repo root and the flat-layout adapters
+# (``plugins.alfred_web_fetch.*``, ``plugins.alfred_comms_test.*``,
+# ``plugins.alfred_discord.*``) are imported as top-level packages. They are NOT
+# installed via the wheel (they're supervisor-launched MCP subprocesses, not part
+# of the alfred-core package), so pytest needs an explicit pythonpath entry to
+# discover them during collection.
+#
+# PR-S4-11c-2b0 (ADR-0030): the quarantined-LLM child MOVED out of repo-root
+# ``plugins/alfred_quarantined_llm`` INTO the installed package
+# (``alfred.security.quarantine_child``) so it ships in the wheel and is reachable
+# under the bwrap ``kind="full"`` policy's ``/usr`` ro-bind. It no longer relies on
+# the ``.`` pythonpath entry, which now serves only the remaining repo-root
+# flat-layout adapters above.
 #
 # PR-S4-10: ``plugins/alfred_tui`` is a src-layout uv package whose modules
 # import each other by the bare top-level name ``alfred_tui`` (NOT the

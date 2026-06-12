@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from alfred.i18n import set_language, t
-from alfred.i18n.translator import _resolve_locale_dir
+from alfred.i18n.translator import (
+    _installed_package_locale_dir,
+    _resolve_locale_dir,
+    _warn_locale_missing_on_stderr,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +60,57 @@ class TestLocaleResolver:
         # of this test asserted a local fake_resolve() instead of the
         # production function, so a real regression in the production resolver
         # would have slipped through unnoticed.
-        from pathlib import Path
-
         monkeypatch.setattr(Path, "is_dir", lambda _self: False)
         assert _resolve_locale_dir() is None
+
+
+class TestInstalledPackageLocaleDir:
+    """The wheel-installed catalog candidate (BUG-2, PR-S4-11c-2b0).
+
+    The wheel force-includes ``locale/`` at ``alfred/_locale`` so a pip-installed
+    alfred carries its catalogs. ``_installed_package_locale_dir`` resolves that
+    in-package dir via ``importlib.resources.files``; in a source checkout it
+    points at ``src/alfred/_locale`` (which does not exist), so it returns None and
+    the dev candidate wins.
+    """
+
+    def test_returns_none_in_source_checkout(self) -> None:
+        # The source tree has no ``src/alfred/_locale`` (it is created only at
+        # wheel-build time), so the in-package candidate is absent here and the
+        # dev ``parents[3]/locale`` candidate is what actually resolves.
+        assert _installed_package_locale_dir() is None
+
+    def test_resolves_when_package_locale_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Simulate the wheel layout: a real ``alfred/_locale`` dir. Patch
+        # importlib.resources.files("alfred") to point at a temp package root so
+        # the candidate resolves to an existing dir without mutating the worktree.
+        pkg_root = tmp_path / "alfred"
+        (pkg_root / "_locale" / "en" / "LC_MESSAGES").mkdir(parents=True)
+        import alfred.i18n.translator as translator_mod
+
+        monkeypatch.setattr(translator_mod.importlib.resources, "files", lambda _name: pkg_root)
+        resolved = _installed_package_locale_dir()
+        assert resolved == pkg_root / "_locale"
+
+    def test_degrades_to_none_on_resolution_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A backend that raises (e.g. ModuleNotFoundError) must degrade to None,
+        # never wedge translator import.
+        import alfred.i18n.translator as translator_mod
+
+        def _boom(_name: str) -> object:
+            raise ModuleNotFoundError("no such package")
+
+        monkeypatch.setattr(translator_mod.importlib.resources, "files", _boom)
+        assert _installed_package_locale_dir() is None
+
+
+class TestMissingCatalogWarning:
+    """The import-time missing-catalog warning is pinned to stderr (BUG-1)."""
+
+    def test_warning_goes_to_stderr_not_stdout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        _warn_locale_missing_on_stderr()
+        captured = capsys.readouterr()
+        assert captured.out == "", "the missing-catalog warning leaked onto stdout"
+        assert "translations disabled" in captured.err

@@ -1,5 +1,5 @@
-"""Go-live gate: the quarantined LLM must NOT be wired to a live spawn path
-while sandbox egress is unrestricted (PR #231 finding-5 / #230).
+"""Go-live gate: no NETWORK-CAPABLE quarantined LLM may spawn while egress is
+unrestricted (PR #231 finding-5 / #230; re-pivoted PR-S4-11c-2b0).
 
 The shipped Linux sandbox policy deliberately does NOT ``--unshare-net`` — the
 quarantined LLM needs its own provider HTTPS egress and the simple
@@ -7,25 +7,41 @@ quarantined LLM needs its own provider HTTPS egress and the simple
 an accepted, documented gap (ADR-0015 Consequences, ``config/sandbox/README.md``,
 ``sbx-2026-005``) tracked as release-blocker #230.
 
-The deferral is SOUND only while a precondition holds: **no production code
-path spawns the ``alfred.quarantined-llm`` plugin via the launcher.** Today the
-quarantined LLM is not driven end-to-end (the only launcher invocations in
-``src/`` are the daemon ``--self-test`` probe and tests), so the open egress
-contains nothing live.
+**Re-pivot (PR-S4-11c-2b0).** Originally this gate asserted "no production path
+spawns ``alfred.quarantined-llm`` AT ALL", because every spawn of this plugin
+made a provider HTTPS call — so a live spawn == a live process consuming the open
+egress while holding T3 + the provider key. PR-S4-11c-2b0 breaks that 1:1: it
+stands up the spawn SUBSTRATE live (``security/quarantine_child_io.py`` ->
+kind=full launcher -> bwrap) but the spawned child runs a DETERMINISTIC ECHO loop
+with NO provider client and NO network egress (the real LLM + its egress is
+deferred to PR-S4-11c-2c). A live-but-inert child cannot use the open egress —
+there is no code in it that opens a socket. (2b0 is a PRECURSOR: it ships the
+spawn substrate; the daemon does not yet call it. But the substrate IS a live
+``src/alfred`` spawn site, so the gate's disposition must account for it.)
 
-That precondition is currently guarded only by prose + human memory + the
-regression guards that flip red if someone *adds* ``unshare net`` (the WRONG
-direction). There is no gate that BLOCKS wiring a live spawn while egress is
-open. THIS test is that gate:
+So the gate's safety condition is the SHARPER one it always meant: **no
+network-capable live quarantined process while egress is open.** It now enforces
+that with two release-blocking invariants instead of the line-count proxy:
 
-    It fails the moment a production spawn path for ``alfred.quarantined-llm``
-    is added to ``src/`` without the egress allowlist landing first — forcing
-    #230 to land before the quarantined LLM goes live.
+* ``test_quarantined_child_has_no_module_scope_egress_import`` — the LIVE child
+  module imports no network-egress module (httpx / anthropic / openai / socket /
+  …) at module scope. This is the teeth: it stays GREEN for the 2b echo child and
+  goes RED the moment 2c wires a real client while egress is still open.
+* ``test_only_sanctioned_quarantined_llm_spawn_while_egress_open`` — the ONLY
+  live launcher/quarantined-LLM spawn from ``src/alfred`` is the single sanctioned
+  no-egress substrate site (``security/quarantine_child_io.py``) plus the
+  ``--self-test`` probe. A SECOND spawn site, or a spawn driving a different
+  child, trips the gate.
+
+The detector (``find_live_quarantined_spawns``) is UNCHANGED — its six
+anti-false-negative proofs still hold; only the disposition of its findings
+narrowed from "none allowed" to "only the sanctioned site, and only while the
+child stays egress-free".
 
 When #230 lands the provider-only egress allowlist (``--unshare-net`` + a
-filtered forwarder), the spawn-wiring PR removes the
-``# SECURITY-GATE #230`` marker below and updates / deletes this test. Until
-then a new live spawn path makes this test go red — by design.
+filtered forwarder), 2c (the real-LLM child) lands behind it and the import-graph
+invariant relaxes. Until then, a network-capable child OR a second live spawn
+makes this gate go red — by design.
 
 Why AST, not regex (PR #231 CR finding, must-fix)
 -------------------------------------------------
@@ -65,10 +81,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SRC = _REPO_ROOT / "src" / "alfred"
 _REAL_POLICY = _REPO_ROOT / "config" / "sandbox" / "quarantined-llm.linux.bwrap.policy"
 
-# SECURITY-GATE #230: the spawn-wiring PR that drives the quarantined LLM live
-# MUST land the egress allowlist (--unshare-net + provider-only forwarder)
-# FIRST. When it does, that PR (a) makes the real policy unshare ``net`` and
-# (b) updates/removes this gate. Until then, no live spawn path may exist.
+# SECURITY-GATE #230: a NETWORK-CAPABLE quarantined-LLM spawn (the 2c real-LLM
+# child) MUST land the egress allowlist (--unshare-net + provider-only forwarder)
+# FIRST. The 2b deterministic-echo substrate spawn is allowlisted (no egress); the
+# import-graph invariant below keeps it honest. When #230 lands, that PR (a) makes
+# the real policy unshare ``net`` and (b) relaxes this gate for the real client.
 
 # The quarantined-LLM plugin id whose launcher spawn would consume the open
 # egress. A production subprocess/exec that drives the launcher with this id is
@@ -304,25 +321,124 @@ _GATE_FAILURE_HINT = (
 # ---------------------------------------------------------------------------
 
 
-def test_no_live_quarantined_llm_spawn_while_egress_open() -> None:
-    """No ``src/alfred`` module stands up a live quarantined-LLM spawn.
+# PR-S4-11c-2b0 re-pivot (security-engineer adjudication): the gate moved from
+# "no live spawn AT ALL" to "no live spawn that can reach the network." 2b0 stands
+# up the quarantined-LLM spawn substrate LIVE (``security/quarantine_child_io.py``
+# -> kind=full launcher -> bwrap), but the spawned child runs a DETERMINISTIC ECHO
+# loop with NO provider client and NO network egress (verified below), so the
+# open-egress gap (#230) contains nothing that can use it. The gate now allowlists
+# EXACTLY that one sanctioned spawn site AND enforces the load-bearing invariant
+# that the child's reachable import graph carries no egress-capable import — so 2c
+# (which wires the real LLM client) trips the gate RED again until #230's egress
+# allowlist lands.
+_SANCTIONED_SPAWN_SITE = "security/quarantine_child_io.py"
 
-    This is the inert-policy precondition the #230 egress deferral relies on.
-    A future PR that wires a live quarantined-LLM spawn — driving the launcher
-    or the plugin id from production code via ANY shape (multiline call,
-    variable, alias, indirection) — trips this gate UNLESS it is the sanctioned
-    ``--self-test`` probe. The spawn-wiring PR must instead land #230's egress
-    allowlist and update this gate.
+# The quarantined-LLM child entry module + the network-egress imports a real-LLM
+# child would pull in. The live echo loop (``_run_mcp_server``) imports none of
+# these at module scope; ``provider_dispatch`` (the only ``httpx`` importer) is a
+# LAZY in-function import on the ``handle_extract`` path the live loop never calls.
+# PR-S4-11c-2b0 (ADR-0030): the child moved INTO the wheel under
+# ``src/alfred/security/quarantine_child/__main__.py`` — the egress-import
+# invariant follows it to its new home.
+_CHILD_ENTRY_MODULE = (
+    _REPO_ROOT / "src" / "alfred" / "security" / "quarantine_child" / "__main__.py"
+)
+_EGRESS_CAPABLE_MODULES: frozenset[str] = frozenset(
+    {
+        "httpx",
+        "anthropic",
+        "openai",
+        "requests",
+        "aiohttp",
+        "socket",
+        "http.client",
+        "urllib.request",
+    }
+)
+
+
+def _module_scope_imports(src_text: str) -> set[str]:
+    """Return every module name imported at MODULE SCOPE (not inside a function).
+
+    A lazy in-function import (the dead ``handle_extract`` -> ``provider_dispatch``
+    path) is intentionally NOT reported: it is unreachable from the live echo loop
+    (``_run_mcp_server`` never calls ``handle_extract`` in 2b), so it cannot drive
+    egress. 2c making the LLM call reachable would either add a module-scope
+    network import here OR move the dispatch onto the loop path — both surface.
+    """
+    tree = ast.parse(src_text)
+    names: set[str] = set()
+    for node in tree.body:  # top-level statements only — module scope
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            names.add(node.module)
+    return names
+
+
+def test_quarantined_child_has_no_module_scope_egress_import() -> None:
+    """The LIVE quarantined-LLM child imports no network-egress module at scope.
+
+    The load-bearing invariant after the 2b0 re-pivot: the deterministic-echo
+    child has NO reachable provider/HTTP client, so a live spawn under open egress
+    (#230) cannot exfiltrate T3 + the fd-3 key over the network — there is no code
+    to do it. This goes RED the moment 2c wires a real Anthropic/DeepSeek client at
+    module scope (or otherwise makes ``provider_dispatch``/``httpx`` reachable from
+    the loop) while egress is still open — forcing #230 to land before 2c.
+    """
+    src = _CHILD_ENTRY_MODULE.read_text(encoding="utf-8")
+    scope_imports = _module_scope_imports(src)
+    egress_imports = scope_imports & _EGRESS_CAPABLE_MODULES
+    assert not egress_imports, (
+        "the quarantined-LLM child gained a module-scope network-egress import "
+        f"({sorted(egress_imports)}) while sandbox {_GATE_FAILURE_HINT}. The live "
+        "child must stay egress-free until #230's egress allowlist lands (2c)."
+    )
+
+
+def test_only_sanctioned_quarantined_llm_spawn_while_egress_open() -> None:
+    """The ONLY live quarantined-LLM spawn is the sanctioned no-egress substrate.
+
+    Re-pivoted for PR-S4-11c-2b0 (see ``_SANCTIONED_SPAWN_SITE``). The gate
+    tolerates EXACTLY the ``security/quarantine_child_io.py`` spawn — the substrate
+    that stands up the deterministic-echo child (whose egress-free invariant
+    ``test_quarantined_child_has_no_module_scope_egress_import`` enforces) — and
+    the ``--self-test`` probe. ANY OTHER live launcher/quarantined-LLM spawn from
+    ``src/alfred`` trips the gate: a second spawn site, or a spawn that drives a
+    different (egress-making) child, must land #230's egress allowlist first. The
+    detector (``find_live_quarantined_spawns``) is unchanged — only the disposition
+    of its findings narrows from "none allowed" to "only the sanctioned site".
     """
     offenders: list[str] = []
     for src in _python_sources():
         rel = src.relative_to(_SRC).as_posix()
         for finding in find_live_quarantined_spawns(src.read_text(encoding="utf-8"), rel):
+            if finding.rel_path == _SANCTIONED_SPAWN_SITE:
+                continue  # the sanctioned no-egress substrate spawn (2b0)
             offenders.append(f"{finding.rel_path}:{finding.lineno}")
 
     assert not offenders, (
-        "A live quarantined-LLM spawn path was added while sandbox "
-        f"{_GATE_FAILURE_HINT}. Offending sites:\n  " + "\n  ".join(offenders)
+        "A NON-sanctioned live quarantined-LLM spawn path was added while sandbox "
+        f"{_GATE_FAILURE_HINT}. Only {_SANCTIONED_SPAWN_SITE} (the deterministic-"
+        "echo substrate) is allowlisted. Offending sites:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_sanctioned_spawn_site_actually_exists() -> None:
+    """Anti-rot: the allowlisted spawn site must genuinely BE a detected spawn.
+
+    Guards against the allowlist silently outliving the thing it allowlists — if
+    ``security/quarantine_child_io.py`` ever stops being a detected
+    quarantined-LLM spawn (refactor / removal), the allowlist entry is dead and
+    must be revisited rather than masking a future real spawn elsewhere.
+    """
+    site = _SRC / "security" / "quarantine_child_io.py"
+    findings = find_live_quarantined_spawns(
+        site.read_text(encoding="utf-8"), _SANCTIONED_SPAWN_SITE
+    )
+    assert findings, (
+        f"{_SANCTIONED_SPAWN_SITE} is no longer a detected quarantined-LLM spawn — "
+        "the allowlist entry is stale; revisit the go-live gate."
     )
 
 

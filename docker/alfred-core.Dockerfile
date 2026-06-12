@@ -21,6 +21,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+# The wheel build force-includes ``locale/`` at ``alfred/_locale`` (pyproject.toml
+# ``[tool.hatch.build.targets.wheel.force-include]``, BUG-2 PR-S4-11c-2b0) so a
+# pip-installed alfred carries its catalogs. ``uv sync`` builds alfred here, so the
+# source ``locale/`` MUST exist in the builder stage or hatchling refuses with
+# "Forced include not found: /app/locale". The runtime stage still copies
+# ``locale/`` separately for the ``/app/locale`` container-layout finder candidate.
+COPY locale ./locale
 
 # --no-dev keeps pytest / mypy / pyright / hypothesis out of the runtime
 # venv. textual and babel are runtime deps (verified in pyproject.toml)

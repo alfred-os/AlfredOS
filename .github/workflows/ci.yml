@@ -181,6 +181,26 @@ jobs:
           uv run coverage report \
             --include='src/alfred/security/quarantine_transport.py' \
             --fail-under=100
+      - name: Quarantine child-IO trust-boundary 100% line+branch coverage
+        # PR-S4-11c-2b0 (ADR-0030): ``quarantine_child_io.py`` is the host-side
+        # SPAWN of the real bwrap-sandboxed quarantined-LLM child + the fd-3
+        # provider-key delivery — the dual-LLM trust boundary's spawn substrate.
+        # The spawn discipline (dup read-end onto fd 3, pass_fds=(3,), scrubbed
+        # allowlist env, bound-interpreter override), the bounded ``read_frame``,
+        # the fail-closed ``QuarantineChildSpawnError`` on delivery failure, and
+        # idempotent ``aclose`` are all trust-boundary code; a coverage hole here
+        # is a hole at the boundary. Caught INCIDENTALLY by the ``security/*`` glob
+        # gate above; this explicit per-file gate names it for a reviewer. Fully
+        # covered by the unit tier
+        # (``tests/unit/security/test_quarantine_child_io.py``, fake subprocess),
+        # so gating on unit-only ``.coverage`` data is sound. The combined-job
+        # ``Trust-boundary files`` gate names it too (the two-gates pattern — keep
+        # BOTH in sync when this file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/security/quarantine_child_io.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/security/quarantine_child_io.py' \
+            --fail-under=100
       # NOTE: the Slice-3 trust-boundary 100% gate moved to the
       # `coverage-gates` job below. The capability-gate heartbeat /
       # fail-closed / outage paths in
@@ -840,10 +860,10 @@ jobs:
         # CLAUDE.md hard rule #7 invariants would be paper-only on those
         # paths. Chained `&&` hashFiles guard per CR-138 finding #1 —
         # ANY-match must NOT no-op the gate; ALL files must be present.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/security/quarantine_transport.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != '' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != '' && hashFiles('src/alfred/security/capability_gate/_comms_adapter_grants.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/security/tiers.py') != '' && hashFiles('src/alfred/security/quarantine.py') != '' && hashFiles('src/alfred/security/quarantine_transport.py') != '' && hashFiles('src/alfred/security/quarantine_child_io.py') != '' && hashFiles('src/alfred/identity/_ingest.py') != '' && hashFiles('src/alfred/bootstrap/nonce_factory.py') != '' && hashFiles('src/alfred/bootstrap/gate_factory.py') != '' && hashFiles('src/alfred/security/capability_gate/__init__.py') != '' && hashFiles('src/alfred/security/capability_gate/_gate.py') != '' && hashFiles('src/alfred/security/capability_gate/backend.py') != '' && hashFiles('src/alfred/security/capability_gate/policy.py') != '' && hashFiles('src/alfred/security/capability_gate/proposals.py') != '' && hashFiles('src/alfred/security/capability_gate/_bootstrap_grants.py') != '' && hashFiles('src/alfred/security/capability_gate/_comms_adapter_grants.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/security/quarantine_transport.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py,src/alfred/security/capability_gate/_bootstrap_grants.py,src/alfred/security/capability_gate/_comms_adapter_grants.py' \
+            --include='src/alfred/security/tiers.py,src/alfred/security/quarantine.py,src/alfred/security/quarantine_transport.py,src/alfred/security/quarantine_child_io.py,src/alfred/identity/_ingest.py,src/alfred/bootstrap/nonce_factory.py,src/alfred/bootstrap/gate_factory.py,src/alfred/security/capability_gate/__init__.py,src/alfred/security/capability_gate/_gate.py,src/alfred/security/capability_gate/backend.py,src/alfred/security/capability_gate/policy.py,src/alfred/security/capability_gate/proposals.py,src/alfred/security/capability_gate/_bootstrap_grants.py,src/alfred/security/capability_gate/_comms_adapter_grants.py' \
             --fail-under=100
       - name: Plugins subsystem 100% line+branch coverage (combined)
         if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/errors.py') != '' && hashFiles('src/alfred/plugins/transport.py') != '' && hashFiles('src/alfred/plugins/manifest.py') != '' && hashFiles('src/alfred/plugins/inbound_scanner.py') != '' && hashFiles('src/alfred/plugins/content_store_base.py') != '' && hashFiles('src/alfred/plugins/stdio_transport.py') != '' && hashFiles('src/alfred/plugins/session.py') != '' && hashFiles('src/alfred/plugins/_observability.py') != '' && hashFiles('src/alfred/plugins/comms_stdio_transport.py') != '' && hashFiles('src/alfred/plugins/comms_runner.py') != '' && hashFiles('src/alfred/plugins/_comms_child_env.py') != ''
@@ -959,22 +979,23 @@ jobs:
         #     process start; a skipped branch here lets a misconfigured
         #     deployment ship with shared providers across the dual-LLM
         #     split, collapsing the trust boundary.
-        #   * ``plugins/alfred_quarantined_llm/__init__.py`` — public
-        #     re-export surface. The package-import lock is the contract
-        #     every ``from plugins.alfred_quarantined_llm import ...``
-        #     site codes against.
-        #   * ``plugins/alfred_quarantined_llm/provider_dispatch.py`` —
+        #   * ``src/alfred/security/quarantine_child/__init__.py`` — public
+        #     re-export surface (PR-S4-11c-2b0/ADR-0030: the child moved
+        #     INTO the installed package so it ships in the wheel under the
+        #     bound /usr ro-bind). The package-import lock is the contract
+        #     every ``alfred.security.quarantine_child`` import codes against.
+        #   * ``src/alfred/security/quarantine_child/provider_dispatch.py`` —
         #     capability-branched extractor dispatch (Anthropic tool-use
         #     / OpenAI strict:true / DeepSeek JSON-mode / prompt-embedded
         #     fallback). The branch matrix here is the wire-format
         #     contract for every supported provider; a skipped branch is
         #     a silent fallback to the wrong shape.
-        #   * ``plugins/alfred_quarantined_llm/quarantine_plugin.py`` —
-        #     the in-process plugin shell that hosts ``quarantine.ingest``
-        #     / ``quarantine.extract`` (spec §5.1). The handshake +
-        #     manifest validation + fd-3 provider-key path lives here;
-        #     a skipped branch on the launcher boundary is a CLAUDE.md
-        #     hard rule #6 (secrets-via-broker) violation candidate.
+        #   * ``src/alfred/security/quarantine_child/__main__.py`` —
+        #     the launcher-spawned child entry that hosts ``quarantine.ingest``
+        #     / ``quarantine.extract`` (spec §5.1). The fd-3 provider-key read
+        #     + the length-prefixed JSON-RPC loop live here; a skipped branch
+        #     on the launcher boundary is a CLAUDE.md hard rule #6
+        #     (secrets-via-broker) violation candidate.
         #
         # Per-file ``--include`` mirrors the supervisor / plugins precedent
         # so a new quarantined-LLM trust-boundary file gets added to this
@@ -982,10 +1003,10 @@ jobs:
         # < 100% coverage. Chained ``&&`` hashFiles guard per PR-S3-1 R1
         # F1: ANY-match must NOT no-op the gate; ALL files must be
         # present before the coverage report runs.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/providers/base.py') != '' && hashFiles('src/alfred/bootstrap/quarantine.py') != '' && hashFiles('plugins/alfred_quarantined_llm/__init__.py') != '' && hashFiles('plugins/alfred_quarantined_llm/provider_dispatch.py') != '' && hashFiles('plugins/alfred_quarantined_llm/quarantine_plugin.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/providers/base.py') != '' && hashFiles('src/alfred/bootstrap/quarantine.py') != '' && hashFiles('src/alfred/security/quarantine_child/__init__.py') != '' && hashFiles('src/alfred/security/quarantine_child/provider_dispatch.py') != '' && hashFiles('src/alfred/security/quarantine_child/__main__.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/providers/base.py,src/alfred/bootstrap/quarantine.py,plugins/alfred_quarantined_llm/__init__.py,plugins/alfred_quarantined_llm/provider_dispatch.py,plugins/alfred_quarantined_llm/quarantine_plugin.py' \
+            --include='src/alfred/providers/base.py,src/alfred/bootstrap/quarantine.py,src/alfred/security/quarantine_child/__init__.py,src/alfred/security/quarantine_child/provider_dispatch.py,src/alfred/security/quarantine_child/__main__.py' \
             --fail-under=100
       - name: Web-fetch trust-boundary 100% line+branch coverage (combined)
         id: web_fetch_cov_combined

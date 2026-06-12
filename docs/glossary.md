@@ -558,7 +558,7 @@ and [docs/subsystems/security.md](subsystems/security.md).
 
 ## alfred_quarantined_llm
 
-The quarantined-LLM MCP plugin package at `plugins/alfred_quarantined_llm/`.
+The quarantined-LLM MCP plugin package at `src/alfred/security/quarantine_child/`.
 Runs as an MCP stdio subprocess under the `alfred-quarantine` OS user
 (spec §5.2); the provider key is delivered over fd 3 rather than via env
 (spec §5.3). The plugin declares `subscriber_tier = "system"` and
@@ -576,7 +576,7 @@ and [docs/subsystems/security.md](subsystems/security.md).
 ## quarantine.ingest
 
 JSON-RPC method exposed by the `alfred_quarantined_llm` plugin
-(`plugins/alfred_quarantined_llm/quarantine_plugin.py`). Signature:
+(`src/alfred/security/quarantine_child/__main__.py`). Signature:
 `quarantine.ingest(handle_id: str, context: str)`. Accepts T3 bytes from
 the plugin host and caches them under `handle_id` for a single subsequent
 `quarantine.extract` call. The single-use invariant is enforced by the
@@ -590,7 +590,7 @@ See [quarantine.extract](#quarantineextract), [alfred_quarantined_llm](#alfred_q
 ## quarantine.extract
 
 JSON-RPC method exposed by the `alfred_quarantined_llm` plugin
-(`plugins/alfred_quarantined_llm/quarantine_plugin.py`). Signature:
+(`src/alfred/security/quarantine_child/__main__.py`). Signature:
 `quarantine.extract(handle_id: str, schema_json: str, schema_version: int)`.
 Dereferences the T3 bytes stored under `handle_id`, calls the configured
 provider using the `ExtractionMode` that matches its `ProviderCapability`,

@@ -61,9 +61,14 @@ def test_read_sandbox_plugin_id_ok(tmp_path, capsys, monkeypatch) -> None:
 
 def test_read_sandbox_plugin_id_default_dir(monkeypatch, capsys) -> None:
     # No ALFRED_PLUGINS_DIR → falls back to the default "plugins" root and
-    # resolves the real shipped quarantined-llm manifest.
+    # resolves a real shipped kind="full" manifest. Uses ``alfred.discord`` (the
+    # surviving repo-root kind=full plugin) — the quarantined-LLM manifest moved
+    # INTO the wheel (``alfred.security.quarantine_child``, ADR-0030) and is no
+    # longer resolvable via the default plugins-dir id-mapping; the daemon spawns
+    # it via the ALFRED_PLUGIN_MANIFEST_PATH override instead (see
+    # quarantine_child_io._child_env).
     monkeypatch.delenv("ALFRED_PLUGINS_DIR", raising=False)
-    rc = manifest_reader.main(["--read-sandbox", "--plugin-id", "alfred.quarantined-llm"])
+    rc = manifest_reader.main(["--read-sandbox", "--plugin-id", "alfred.discord"])
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["kind"] == "full"
 

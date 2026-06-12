@@ -56,7 +56,7 @@ class _EchoingChildDouble:
     """Length-prefixed JSON-RPC child double echoing the ingested body.
 
     Mirrors the quarantine child's single-use ingest/extract cache
-    (``plugins/alfred_quarantined_llm/quarantine_plugin.py`` ``handle_ingest`` /
+    (``alfred.security.quarantine_child.__main__`` ``handle_ingest`` /
     ``handle_extract``): caches the ingested ``context`` and pops it single-use on
     extract, replying with a ``CommsBodyExtraction``-valid ``extracted`` payload
     whose ``data.text`` is the echoed body. No subprocess — this is the in-test
