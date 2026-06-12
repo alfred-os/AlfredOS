@@ -81,22 +81,27 @@ _INBOUND_BODY = "hello from the real bwrap quarantine child"
 # into that interpreter (ADR-0030 bound-interpreter contract).
 _HAS_BWRAP = shutil.which("bwrap") is not None
 # Provisioning signal (ADR-0030): a real bwrap spawn needs the child importable
-# under bwrap (alfred pip-installed under the policy's /usr ro-bind) AND a bound
-# real interpreter — both supplied when the harness sets
-# ``ALFRED_QUARANTINE_CHILD_PYTHON``. The standard CI integration leg runs under
-# the uv venv (interpreter symlinked OUTSIDE any bound prefix), so this SKIPS
-# there rather than failing. Validated via ``docker run --rm --privileged
-# python:3.14-bookworm`` (pip install alfred under /usr + set the override).
-# TODO(#248): wire this into the privileged-Linux CI leg (the deployment-image
-# tail — ubuntu-latest ships py3.12, the project needs a bound py3.14 + pip-install).
+# under bwrap (alfred installed into the bound interpreter's site-packages) AND a
+# bound real interpreter whose install prefix the launcher binds read-only into
+# the sandbox — both supplied when the harness sets ``ALFRED_QUARANTINE_CHILD_PYTHON``.
+# The standard CI integration leg runs under the uv venv (interpreter symlinked
+# OUTSIDE any bound prefix), so this SKIPS there rather than failing.
+# #248 wired this into the privileged-Linux CI leg (`integration-privileged` in
+# ci.yml): a hermetic proto-managed `~/.proto/tools/python/3.14.*` (NOT a system /
+# deadsnakes /usr python) with `alfred` installed via `uv pip install --python`,
+# and `ALFRED_QUARANTINE_CHILD_PYTHON` threaded into the root pytest run — the
+# launcher binds that `~/.proto` prefix into the sandbox (ADR-0030), so this test
+# now RUNS (not skips) in CI and gates merge.
 _PROVISIONED = bool(os.environ.get("ALFRED_QUARANTINE_CHILD_PYTHON"))
 _DOCKER_ONLY = pytest.mark.skipif(
     not _HAS_BWRAP or os.uname().sysname != "Linux" or os.geteuid() != 0 or not _PROVISIONED,
     reason=(
         "real bwrap quarantine-child spawn: needs bwrap + Linux + root + the "
         "ADR-0030 bound-interpreter provisioning (ALFRED_QUARANTINE_CHILD_PYTHON set, "
-        "alfred pip-installed under /usr). Validated in `docker run --rm --privileged "
-        "python:3.14-bookworm`; CI-gating is a tracked follow-up."
+        "alfred installed into that interpreter). RUNS + gates merge in the "
+        "privileged-Linux CI leg (`integration-privileged`); skipped on macOS / "
+        "non-root / unprovisioned local boxes — reproduce via `docker run --rm "
+        "--privileged --platform linux/amd64`."
     ),
 )
 
@@ -129,6 +134,7 @@ async def _rows_with_event(sm: Any, event: str) -> list[AuditEntry]:
 @pytest.mark.asyncio
 async def test_real_bwrap_quarantine_child_round_trip_over_real_transport(
     postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A REAL bwrapped child echoes the inbound body + a quarantine.extract row lands.
 
@@ -140,23 +146,36 @@ async def test_real_bwrap_quarantine_child_round_trip_over_real_transport(
     with ``result="extracted"``. No daemon, no production flip — the machinery is
     constructed directly.
     """
+    # The launcher resolves the kind="full" bwrap policy from ALFRED_ENVIRONMENT
+    # (manifest_reader --read-environment). In production the daemon sets it; with
+    # no daemon here the test must, mirroring the conftest launcher fixture + the
+    # smoke daemon-spawn tests (ALFRED_ENVIRONMENT=test). spawn_quarantine_child_io
+    # forwards it into the SCRUBBED child env via the allowlisted _scrubbed_base();
+    # without it the launcher refuses with environment_not_set and the child exits
+    # before replying, surfacing as a truncated read_frame. "test" still bwraps the
+    # kind="full" linux child (the env only gates the kind="none" / non-Linux paths).
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     # Scoped RealGate registry granting exactly the system-tier DLP grant the
     # post-stage subscriber needs — a production gate with a fixture grant, never
     # an always-allow shim (CLAUDE.md hard rule #2).
     prior_registry = get_registry()
-    scoped_registry = HookRegistry(
-        gate=make_quarantined_extract_chain_gate(), strict_declarations=False
-    )
-    set_registry(scoped_registry)
-    declare_hookpoints(scoped_registry)
-
     with _NONCE_LOCK:
         prior_nonce = _tiers._AUTHORIZED_T3_NONCE
-        nonce = CapabilityGateNonce()
-        _tiers._set_authorized_t3_nonce(nonce)
 
     child_io = None
     try:
+        # Global registry + nonce mutations live INSIDE the try so an exception here
+        # (e.g. declare_hookpoints raising) still restores them in `finally` rather
+        # than leaking scoped global state into the next test.
+        scoped_registry = HookRegistry(
+            gate=make_quarantined_extract_chain_gate(), strict_declarations=False
+        )
+        set_registry(scoped_registry)
+        declare_hookpoints(scoped_registry)
+        with _NONCE_LOCK:
+            nonce = CapabilityGateNonce()
+            _tiers._set_authorized_t3_nonce(nonce)
+
         async with _audit_writer(postgres_url) as (audit, sm):
             from unittest.mock import AsyncMock, MagicMock
 
