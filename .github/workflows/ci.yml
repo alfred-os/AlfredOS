@@ -694,8 +694,77 @@ jobs:
         run: uv python install 3.14
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv sync --frozen --dev
+      - name: Provision the bound py3.14 quarantine-child interpreter (ADR-0030, #248)
+        id: bound_py
+        if: steps.check.outputs.has_spawn == 'true'
+        # ADR-0030 bound-interpreter contract — make the REAL bwrap quarantine-child
+        # spawn RUNNABLE here instead of paper-only. `test_quarantine_child_real_spawn.py`
+        # gates on `ALFRED_QUARANTINE_CHILD_PYTHON` being set (`_PROVISIONED`); without
+        # this step it SKIPS even under root+bwrap, so the spawn proof gates nothing (#248).
+        #
+        # WHY proto (NOT a system /usr python, NOT deadsnakes): the launcher binds
+        # the configured interpreter's PREFIX into the sandbox (the `--ro-bind`
+        # in bin/alfred-plugin-launcher.sh's bwrap exec), so the child can exec a
+        # proto-managed, self-contained python-build-standalone under ~/.proto —
+        # interpreter + stdlib + pip-installed `alfred.security.quarantine_child`
+        # all under ONE bound prefix. This removes any dependency on a system
+        # python version (the user-mandated hermetic 3.14). The uv venv still drives
+        # pytest + testcontainers; ONLY the bwrapped child execs the proto interpreter.
+        #
+        # Validated on TRUE x86_64 ubuntu-noble + bwrap 0.9.0 via qemu with this exact
+        # recipe (proto install python 3.14 + uv pip install . + launcher prefix-bind):
+        # the real round-trip test PASSED — body echoed over the wire (PROOF OK).
+        run: |
+          set -euo pipefail
+          # Hermetic Python 3.14 via PROTO — NO system python, no deadsnakes, no
+          # /usr binary. The launcher (bin/alfred-plugin-launcher.sh) binds the
+          # configured interpreter's prefix into the sandbox, so the bwrapped child
+          # execs a proto-managed, self-contained python-build-standalone under
+          # ~/.proto (interpreter + stdlib + pip-installed alfred all under one
+          # bound prefix). Validated on true x86_64 ubuntu-noble + bwrap 0.9.0 via
+          # qemu: real round-trip PROOF OK.
+          export PROTO_HOME="${HOME}/.proto"
+          curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- --yes
+          export PATH="${PROTO_HOME}/bin:${PROTO_HOME}/shims:${PATH}"
+          proto install python 3.14
+          # Resolve the interpreter from the tree `proto install` just populated —
+          # NOT via `proto bin python`. The runner image carries a stale GLOBAL proto
+          # pin (python 3.14.5) that `proto bin` resolves over the 3.14.6 `install`
+          # actually fetched, then fails `missing_executable` on a path that was never
+          # installed. The PBS layout is tools/python/<ver>/bin/python3; glob it.
+          PROTO_PY="$(ls -d "${PROTO_HOME}"/tools/python/3.14.*/bin/python3 2>/dev/null | sort -V | tail -1)"
+          if [ -z "${PROTO_PY}" ] || [ ! -x "${PROTO_PY}" ]; then
+            echo "no proto-managed python3 under ${PROTO_HOME}/tools/python" >&2
+            ls -la "${PROTO_HOME}/tools/python" 2>&1 >&2 || true
+            exit 1
+          fi
+          "${PROTO_PY}" -V
+          # World-readable so the bwrapped child (runs under sudo/root) can read+exec
+          # the interpreter the launcher binds RO into the sandbox.
+          chmod -R a+rX "${PROTO_HOME}"
+          # ONE consistent 3.14: make `python3` the proto python so the launcher's
+          # `python3 -m alfred.plugins.manifest_reader` uses the SAME interpreter
+          # (with alfred) the child execs — no alfred-less system python in the mix.
+          sudo ln -sf "${PROTO_PY}" /usr/local/bin/python3
+          python3 -V
+          # Install alfred (+ deps) INTO the proto interpreter so the child resolves
+          # `alfred.security.quarantine_child` from the bound proto prefix. `uv` (the
+          # repo's package manager, set up above) targets the proto interpreter via
+          # `--python` — faster than `pip`, and on-convention.
+          uv pip install --python "${PROTO_PY}" .
+          CHILD_FILE="$("${PROTO_PY}" -c 'import alfred.security.quarantine_child as m; print(m.__file__)')"
+          echo "quarantine_child resolves at: ${CHILD_FILE}"
+          test -n "${CHILD_FILE}"
+          echo "bound_py=${PROTO_PY}" >> "$GITHUB_OUTPUT"
+          echo "Hermetic proto py3.14 provisioned (no system python); launcher binds its prefix."
       - name: Assert the spawn-enabling preconditions hold (euid 0 + bwrap)
         if: steps.check.outputs.has_spawn == 'true'
+        # The bound-interpreter path comes in via `env:` (NOT a `${{ }}` splice into
+        # the script) so a workflow-injection audit (zizmor template-injection) stays
+        # clean — the value is a step-output, never attacker-controllable, but the
+        # env-indirection is the repo convention regardless.
+        env:
+          BOUND_PY: ${{ steps.bound_py.outputs.bound_py }}
         # Guard against this gate silently regressing to paper-only. The
         # root-gated legs `skipif (not bwrap) or (sysname != Linux) or (geteuid
         # != 0)`. If a future change to this job broke any of those three
@@ -718,7 +787,17 @@ jobs:
             echo "::error::bwrap not on root PATH; the bwrap-gated real-spawn legs would SKIP and this gate would be paper-only (see #245)."
             exit 1
           fi
-          echo "Preconditions hold: euid 0 + bwrap present — the root-gated legs will EXECUTE, not skip."
+          # #248: the real-spawn quarantine-child leg ADDITIONALLY gates on
+          # `ALFRED_QUARANTINE_CHILD_PYTHON` being set to a real /usr interpreter
+          # (`_PROVISIONED` in test_quarantine_child_real_spawn.py). The provisioning
+          # step above must have produced it; if it silently no-op'd, the spawn leg
+          # would SKIP and re-create the #245 paper-gate one level deeper. Assert it.
+          # ``BOUND_PY`` arrives via the step ``env:`` (workflow-injection-safe).
+          if [ -z "${BOUND_PY}" ] || [ ! -x "${BOUND_PY}" ]; then
+            echo "::error::bound py3.14 (ALFRED_QUARANTINE_CHILD_PYTHON) missing or not executable ('${BOUND_PY}'); the real-spawn quarantine-child leg would SKIP and gate nothing (see #248)."
+            exit 1
+          fi
+          echo "Preconditions hold: euid 0 + bwrap + bound py3.14 (${BOUND_PY}) — the root-gated legs will EXECUTE, not skip."
       - name: Run real-spawn integration + smoke legs as root
         id: real_spawn
         if: steps.check.outputs.has_spawn == 'true'
@@ -765,11 +844,53 @@ jobs:
         # `--cov-fail-under=0` because this run is about EXECUTION of the spawn
         # legs, not the 75%/100% coverage thresholds the dedicated coverage jobs
         # own.
+        #
+        # `ALFRED_QUARANTINE_CHILD_PYTHON` (#248) is threaded through the same
+        # `sudo env` (sudo strips the environment even with -E, like PATH above) so
+        # the bwrapped quarantine child execs the bound hermetic proto py3.14 (under
+        # ~/.proto, whose prefix the launcher binds into the sandbox — ADR-0030) and
+        # its `_PROVISIONED` skip-guard passes — the real-spawn round-trip RUNS here
+        # rather than skipping. The provisioning step asserted both the interpreter
+        # and the child package resolve from that bound proto prefix.
+        env:
+          ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
         run: |
           set -euo pipefail
           UV_BIN="$(command -v uv)"
           UV_DIR="$(dirname "${UV_BIN}")"
-          sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest tests/integration tests/smoke -q \
+          sudo env \
+            "PATH=${UV_DIR}:${PATH}" \
+            "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "${UV_BIN}" run pytest tests/integration tests/smoke -q \
+            -p no:cacheprovider --cov-fail-under=0
+      - name: Run the bwrap-gated sandbox-escape adversarial corpus (#248)
+        # Guard on the corpus harness existing too (not just `has_spawn`, derived
+        # from tests/integration|smoke): on a stacked branch where those suites
+        # exist but tests/adversarial/sandbox_escape hasn't landed, this step must
+        # no-op cleanly rather than hard-fail (the `.github/workflows/**` keep-
+        # hashFiles-guards guideline; CR #250).
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/adversarial/sandbox_escape/**/*.py') != ''
+        # The `@_bwrap_required` payloads in
+        # tests/adversarial/sandbox_escape/test_sbx_corpus_executable.py
+        # (incl. sbx-2026-012 fd-3 key-leak containment + sbx-2026-013 the live
+        # "policy was inert, now enforced" host-escape proof) SKIP wherever bwrap
+        # is absent. The dedicated `adversarial` workflow does NOT install bwrap,
+        # so those kernel-observable containment assertions are paper-only there
+        # (#248). This job HAS bwrap, so we run the sandbox-escape corpus here to
+        # make the bwrap-gated payloads actually execute under the SHIPPED policy.
+        #
+        # These payloads gate ONLY on `_bwrap_required` (bwrap present) — NOT root,
+        # NOT the bound interpreter (they exec `sys.executable` under the policy's
+        # flags + test binds, no launcher / no fd-3 spawn machinery). We still run
+        # them under `sudo env` PATH for parity with the spawn legs above; root is
+        # harmless here. Validated locally in `docker run --rm --privileged
+        # --platform linux/amd64 ubuntu:24.04`: sbx-2026-012/013 un-skip and pass.
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"
+          UV_DIR="$(dirname "${UV_BIN}")"
+          sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
+            tests/adversarial/sandbox_escape -q \
             -p no:cacheprovider --cov-fail-under=0
 
   coverage-gates:
