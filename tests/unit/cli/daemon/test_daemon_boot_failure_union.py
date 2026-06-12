@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from alfred.cli.daemon._failures import (
     BootInfraInstallFailedFailure,
     CapabilityGateHandshakeFailedFailure,
+    CommsAdapterBindFailedFailure,
+    CommsAdapterSpawnFailedFailure,
     CommsPromoterMisconfiguredFailure,
     EnvironmentNotSetFailure,
     LauncherNotPolicyResolvingFailure,
@@ -35,12 +37,24 @@ from alfred.cli.daemon._failures import (
         (BootInfraInstallFailedFailure, "boot_infra_install_failed"),
         (T3NonceRegistrationFailedFailure, "t3_nonce_registration_failed"),
         (QuarantineChildSpawnFailedFailure, "quarantine_child_spawn_failed"),
+        (CommsAdapterSpawnFailedFailure, "comms_adapter_spawn_failed"),
+        (CommsAdapterBindFailedFailure, "comms_adapter_bind_failed"),
         (CommsPromoterMisconfiguredFailure, "comms_promoter_misconfigured"),
     ],
 )
 def test_failure_carries_literal_reason(cls: type, reason: str) -> None:
     instance = cls()
     assert instance.failure_reason == reason
+
+
+def test_comms_adapter_bind_failure_is_distinct_from_spawn() -> None:
+    """ADR-0031: a socket-bind fault carries its OWN failure_reason, distinct from
+    the spawn/handshake refusal — so forensics can tell a bind fault apart from a
+    manifest/spawn fault in the durable boot row."""
+    assert (
+        CommsAdapterBindFailedFailure().failure_reason
+        != CommsAdapterSpawnFailedFailure().failure_reason
+    )
 
 
 def test_comms_promoter_misconfigured_carries_adapter_id() -> None:

@@ -169,6 +169,24 @@ class CommsAdapterSpawnFailedFailure(_BootFailureBase):
     adapter_id: str = ""
 
 
+class CommsAdapterBindFailedFailure(_BootFailureBase):
+    """A comms adapter's daemon-owned unix socket failed to bind at boot (ADR-0031).
+
+    The TUI-over-socket adapter listens on a daemon-owned 0600 socket under the
+    0700 runtime dir. A bind ``OSError`` (e.g. a foreign inode at the path the
+    listener refuses to unlink, or a permission fault) is a daemon-side, boot-time
+    fault — REFUSE fail-closed (CLAUDE.md hard rule #7) rather than park a
+    half-bound adapter. Distinct from ``comms_adapter_spawn_failed`` so forensics
+    can tell a socket-bind fault apart from a manifest/spawn/handshake refusal in
+    the durable boot row (ADR-0031's "audited bind failure" contract). ``adapter_id``
+    is a closed-vocabulary config token (charset-validated by the Settings field),
+    never raw content.
+    """
+
+    failure_reason: Literal["comms_adapter_bind_failed"] = "comms_adapter_bind_failed"
+    adapter_id: str = ""
+
+
 class CommsPromoterMisconfiguredFailure(_BootFailureBase):
     """A classifier-bearing comms adapter kind yielded a ``None`` promoter (PR-S4-235-1).
 
@@ -222,6 +240,7 @@ DaemonBootFailure = Annotated[
     | T3NonceRegistrationFailedFailure
     | QuarantineChildSpawnFailedFailure
     | CommsAdapterSpawnFailedFailure
+    | CommsAdapterBindFailedFailure
     | CommsPromoterMisconfiguredFailure
     | CommsMultiAdapterUnsupportedFailure,
     Field(discriminator="failure_reason"),
@@ -230,5 +249,6 @@ DaemonBootFailure = Annotated[
 ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
 PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
 ``quarantine_child_spawn_failed`` + PR-S4-11b ``comms_adapter_spawn_failed`` +
+ADR-0031 ``comms_adapter_bind_failed`` +
 PR-S4-235-1 ``comms_promoter_misconfigured`` +
 FIX 4 ``comms_multi_adapter_unsupported``)."""

@@ -42,3 +42,9 @@ kind = "none"
 [comms_mcp]
 adapter_kind = "tui"
 classifiers_optional = []
+# ADR-0031: the ``python -m`` target the foreground ``alfred chat`` runs. The daemon
+# resolves the same module from this manifest when it binds the TUI's unix socket
+# (``_resolve_comms_adapter_wire_spec``); the foreground CLI launches it directly.
+# Declaring it here keeps the serve target manifest-driven, not hardcoded — mirrors
+# the reference adapter's ``[comms_mcp] module`` key.
+module = "alfred_tui.server"

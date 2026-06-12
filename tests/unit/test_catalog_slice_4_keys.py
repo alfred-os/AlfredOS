@@ -8,17 +8,18 @@ catalog.
 
 The PR-S4-0b §12.2 FLOOR was 44 keys across 7 families (the test asserts
 ``len(SLICE_4_KEYS) >= 44``); implementation PRs S4-1..S4-11 have since grown the
-live enumeration well past it (the daemon-boot family alone is now 17, incl.
-``quarantine_child_spawn_failed`` from PR-S4-11c-2b). The ORIGINAL floor
-composition:
+live enumeration well past it (the daemon-boot family in particular has accreted
+several refusals, incl. ``quarantine_child_spawn_failed`` from PR-S4-11c-2b and
+``comms_socket_bind_failed`` from ADR-0031). The ORIGINAL floor composition:
 * Login / session lifecycle (12) — PR-S4-5 ``alfred login`` / ``logout``
   / ``whoami``.
 * Operator-session refusal reasons (8) — PR-S4-5 ``_resolve_operator``
   + ADR-0024 budget.
 * Supervisor reset refusals (2) — PR-S4-5 reset-permission gate.
-* Daemon boot refusals (9 at the floor; now 17) — PR-S4-1 ``alfred daemon
+* Daemon boot refusals (9 at the floor; grown since) — PR-S4-1 ``alfred daemon
   start`` (includes ``audit_hash_pepper_missing`` from PR #205 round-2 sec-3,
-  plus the comms-adapter + quarantine-child-spawn refusals from PR-S4-11b/c).
+  plus the comms-adapter + quarantine-child-spawn + socket-bind refusals from
+  PR-S4-11b/c).
 * Sandbox refusal reasons (6) — PR-S4-6 launcher.
 * Config-reload notifications (6) — PR-S4-4 hot-reload.
 * TUI gating (1) — PR-S4-1 daemon split.
@@ -98,9 +99,10 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "supervisor.breaker.reset.refused.not_logged_in",
     "supervisor.breaker.reset.refused.not_logged_in.recovery",
     "supervisor.breaker.reset.refused.operator_permissions_insufficient",
-    # Daemon boot (9 at the PR-S4-0b floor; now 17 — incl. audit_hash_pepper_missing
-    # per round-2 sec-3 + arch-002, the comms-adapter refusals (PR-S4-11b), and
-    # quarantine_child_spawn_failed (PR-S4-11c-2b)).
+    # Daemon boot (9 at the PR-S4-0b floor; grown since — incl. audit_hash_pepper_missing
+    # per round-2 sec-3 + arch-002, the comms-adapter refusals (PR-S4-11b),
+    # quarantine_child_spawn_failed (PR-S4-11c-2b), and comms_socket_bind_failed
+    # (ADR-0031)).
     "daemon.boot.environment_not_set",
     "daemon.boot.unsandboxed_in_production",
     "daemon.boot.launcher_not_policy_resolving",
@@ -125,6 +127,11 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # O1 (PR-S4-11b): boot-output line making a spawned comms adapter observable
     # in `alfred daemon start` output (not just an audit-log SQL query).
     "daemon.comms.adapter_spawned",
+    # ADR-0031: the foreground-TUI unix-socket carrier — a bind failure refuses
+    # boot fail-closed, and the listener-ready boot line advertises the socket
+    # (the peer `alfred chat` connects later).
+    "daemon.boot.comms_socket_bind_failed",
+    "daemon.comms.adapter_listening",
     # FIX 4 (PR-S4-11b review): >1 enabled comms adapter is unsupported in
     # this cut (outbound acks would cross-route) — refuse boot.
     "daemon.boot.comms_multi_adapter_unsupported",

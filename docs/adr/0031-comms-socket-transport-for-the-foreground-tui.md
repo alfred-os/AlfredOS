@@ -1,0 +1,45 @@
+# ADR-0031 — A unix-socket comms transport closes the foreground-TUI ↔ daemon wire
+
+- **Status**: Proposed (accepted at Slice-4 graduation, per the ADR-0015/0016/0025 precedent)
+- **Date**: 2026-06-12
+- **Slice**: 4 — `docs/superpowers/specs/2026-06-06-slice-4-design.md`
+- **Relates to**: [ADR-0025](0025-comms-stdio-transport-line-delimited-and-thin.md) (the line-delimited comms wire + thin-transport contract this reuses), [ADR-0026](0026-first-party-system-bootstrap-grants-and-boot-hook-registry.md) (the first-party comms LOAD grant), [ADR-0027](0027-daemon-comms-runtime-fixture-extractor-first-cut.md) (daemon comms boot graph), issue #237 (graduation criterion #7 — a real `alfred chat` turn)
+- **Supersedes**: —
+
+## Context
+
+PR-S4-11a/11b/11c built the host-side comms substrate: a line-delimited `CommsStdioTransport` ([ADR-0025](0025-comms-stdio-transport-line-delimited-and-thin.md)), a `CommsPluginRunner` that owns the single-reader notification pump, and a daemon boot path (`_build_comms_boot_graph` → `_spawn_comms_adapter`) that spawns each enabled comms adapter as a launcher-exec'd subprocess and routes its `inbound.message` notifications into `process_inbound_message`. That closes the wire for a **daemon-spawned** adapter (Discord, the reference plugin): the daemon owns both ends.
+
+The foreground TUI does not fit that model. `alfred chat` is a **separate, operator-owned, foreground** process: it must own the operator's PTY (`inherit_stdio=True`, `sandbox.kind = "none"`) so Textual can render. It is started by the operator's shell, not by the daemon, and it long-outlives no daemon-owned subprocess handle. Today `alfred chat` (`src/alfred/cli/main.py`) spawns `plugins/alfred_tui` directly via `spawn_plugin_via_launcher` and **never connects to the running daemon** — its `inbound.message` frames go to its own stdout and reach nobody. So an operator who types into the TUI gets no orchestrator turn: graduation criterion #7 ("a real `alfred chat` turn traverses the daemon") cannot be met by the stdio-subprocess shape, because the daemon cannot spawn-and-own a process that must instead own the operator's terminal.
+
+The missing piece is a **rendezvous** between two already-running processes: the daemon (which holds the comms boot graph — quarantined extractor, identity resolver, burst limiter, inbound orchestrator) and the foreground TUI (which holds the PTY). A local IPC channel both can open is the natural seam. The wire shape over it is **identical** to the stdio wire — the same ADR-0025 line-delimited JSON-RPC frames, the same `lifecycle.start` handshake, the same `inbound.message`/`outbound.message` exchange — only the byte-carrier changes from an anonymous pipe-to-a-child to a named local socket between peers.
+
+## Decision
+
+**Decision 1 — A `CommsSocketTransport` satisfies the existing `_CommsTransportLike` seam; the runner is unchanged.** A new `src/alfred/plugins/comms_socket_transport.py` `CommsSocketTransport` implements the same four-awaitable structural contract (`spawn`, `send`, `read_frame`, `close`) the `CommsPluginRunner` already binds to. The runner, the session, the handshake, the dispatch/ack path, and the ADR-0025 frame codec are all **reused byte-for-byte**. This is a transport swap, not a new conversation: a comms adapter reachable over a socket runs the exact same runner→session→`process_inbound_message` path as one reachable over a pipe, so the trust boundary it traverses is identical and single-sourced (no second scan point, no new orchestrator path).
+
+**Decision 2 — `spawn()` is a no-op; the accepted connection IS the wire.** A daemon-spawned adapter's `spawn()` execs a subprocess and owns its pipe. The socket transport owns no subprocess — the peer (the foreground TUI) is its own process. The daemon's boot path instead **binds a listener** and **accepts one connection**; the accepted `(StreamReader, StreamWriter)` pair is the wire. `spawn()` is therefore an inert success (the connection is already established before the runner's handshake runs), and `send`/`read_frame` drive the accepted streams using the same line-delimited codec and the same `_MAX_COMMS_LINE_BYTES` frame bound and `CommsProtocolError` loud-failure discipline as `CommsStdioTransport`.
+
+**Decision 3 — One socket per adapter id, owner-only, fresh each boot.** The listener binds `~/.run/alfred/comms-<adapter_id>.sock` under the already-`0700` daemon runtime dir (the same dir + permission discipline as `daemon.pid`), mode `0600`, owned by the daemon's uid. The path is keyed by `adapter_id` — self-documenting, and it leaves room for a future per-adapter listener at zero cost now even though **this cut accepts exactly one connection**. A stale socket from a prior boot is unlinked-then-bound (a crashed daemon leaves a socket inode behind; binding over it would `EADDRINUSE`). The socket and listener are reaped on **every** exit path — clean shutdown, a boot refusal, or a supervisor failure — mirroring `_CommsBootGraph.aclose()`'s leak-discipline.
+
+**Decision 4 — Fail-closed and audited; never a silent drop.** The same security posture as the stdio transport: an over-bound line, non-JSON bytes, or a non-object top-level frame raises `CommsProtocolError` (loud, audited via the runner's existing malformed-frame arm) rather than being silently discarded (CLAUDE.md hard rule #7). The socket is `0600` owner-only, so the only peer that can connect is a same-uid process (the operator's own `alfred chat`); there is no network ingress and no cross-uid reach. The accept is bounded so a single connection is served this cut; a second connection attempt does not race the first. No trust-boundary primitive is bypassed: T3 body tagging, quarantined extraction, and the outbound DLP scan all happen exactly where they already do (`process_inbound_message` / `ScannedOutboundBody`), upstream and downstream of this dumb carrier.
+
+**Decision 5 — Reuse the first-party comms LOAD grant; do not widen.** The socket-backed TUI adapter is loaded under the **same** first-party comms LOAD grant ([ADR-0026](0026-first-party-system-bootstrap-grants-and-boot-hook-registry.md)) seeded for every enabled first-party comms adapter at boot. The socket transport adds no new capability and no new grant — it is authorized to load by the identical config-is-authorization seed. The multi-adapter boot refusal is unchanged and still fires: a TUI-over-socket adapter **counts as an enabled adapter**, so enabling it alongside any second comms adapter refuses boot fail-closed exactly as a second stdio adapter would, until per-adapter inbound routing lands (PR-S4-11c).
+
+## Consequences
+
+### Positive
+
+- `alfred chat` can, for the first time, drive a real orchestrator turn through the running daemon: the foreground TUI connects to the daemon's socket, its `inbound.message` reaches `process_inbound_message`, and the ack returns over the same socket. Graduation criterion #7 is reachable.
+- The runner, session, codec, and the entire trust boundary are reused unchanged. The new surface is one transport class + one listener; the conversation and security contracts are inherited, so there is no second place for them to drift.
+- The socket lives under the existing `0700` runtime dir with the existing `0600` owner-only discipline (the `daemon.pid` precedent), so the local-IPC attack surface is the operator's own uid and nothing wider.
+
+### Negative / accepted
+
+- A third byte-carrier now exists (length-prefixed control-plane pipe, line-delimited comms pipe, line-delimited comms socket). The cost is one more transport class; the wire shape and codec are shared with the stdio comms transport, so it is a carrier swap, not a new protocol. The alternative — teaching the daemon to spawn-and-own the foreground TUI — is impossible, because the TUI must own the operator's PTY, not the daemon's.
+- This cut accepts exactly **one** connection on the socket. A multi-client TUI (several `alfred chat` sessions against one daemon) is out of scope; the adapter-keyed socket path is chosen now so the future per-adapter/per-session form is a path change, not a contract change.
+- The foreground `alfred chat` launch path (`src/alfred/cli/main.py`) is **not** flipped to dial the socket in this ADR's scope — the daemon-side listener + transport are the shippable substrate here. Wiring `alfred chat` to connect is the immediately-following step (it consumes this transport's peer end).
+
+### Scope boundary (this ADR)
+
+This ADR ships the **daemon-side** socket listener + `CommsSocketTransport` + the boot-path branch that selects it for the socket-shaped (TUI) adapter, proven by unit tests over the listener lifecycle (bind/accept/perms/stale-unlink/reap), the transport's `_CommsTransportLike` conformance, and the daemon boot wiring (default-empty unchanged, multi-adapter refusal still fires, reap on every exit path). The client-side `alfred chat` dial-the-socket change, and any multi-connection / per-session socket fan-out, are follow-ups.

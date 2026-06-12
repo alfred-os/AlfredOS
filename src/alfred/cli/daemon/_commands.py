@@ -66,6 +66,7 @@ from alfred.cli.daemon._daemon_probes import (
 )
 from alfred.cli.daemon._failures import (
     BootInfraInstallFailedFailure,
+    CommsAdapterBindFailedFailure,
     CommsAdapterSpawnFailedFailure,
     CommsMultiAdapterUnsupportedFailure,
     CommsPromoterMisconfiguredFailure,
@@ -88,6 +89,7 @@ from alfred.i18n import t
 # two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
 # ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
 from alfred.plugins.comms_runner import CommsPluginRunner
+from alfred.plugins.comms_socket_transport import CommsSocketListener
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
 from alfred.plugins.errors import ManifestError
 from alfred.plugins.manifest import parse_manifest
@@ -332,6 +334,53 @@ class _CommsAdapterManifestError(Exception):
         self.field = field
 
 
+# The comms ``adapter_kind`` whose host wire is a 0600 unix socket the daemon
+# binds + accepts (ADR-0031), NOT a subprocess pipe the daemon spawns. The
+# foreground ``alfred chat`` is a separate, operator-owned PTY process the daemon
+# cannot spawn-and-own, so the two peers rendezvous over a named local socket.
+_SOCKET_BACKED_ADAPTER_KIND: Final[str] = "tui"
+
+
+def _is_socket_backed_adapter_kind(adapter_kind: str) -> bool:
+    """True iff the adapter reaches the host over a unix socket (the TUI), not a pipe.
+
+    Keyed on the wire ``adapter_kind`` (the host-side closed vocabulary), not the
+    per-instance launcher id — the carrier choice is a property of the adapter KIND.
+    """
+    return adapter_kind == _SOCKET_BACKED_ADAPTER_KIND
+
+
+async def _resolve_adapter_carrier_kind(
+    *,
+    adapter_id: str,
+    audit: AuditWriter,
+    boot_id: str,
+    environment_source: str,
+) -> str:
+    """Resolve the wire ``adapter_kind`` so the boot loop can pick the carrier.
+
+    The SAME guarded manifest resolution the per-carrier builders use, hoisted so the
+    loop can choose the stdio-pipe vs unix-socket branch BEFORE dispatching. A broken
+    manifest REFUSES the boot here (audited, exit 2) — identical fail-closed posture
+    to the in-builder resolution, so a manifest failure can never slip past the
+    carrier selector into an unguarded raise (CLAUDE.md hard rule #7).
+    """
+    from alfred.plugins.errors import ManifestError
+
+    try:
+        return _resolve_comms_adapter_wire_spec(adapter_id).adapter_kind
+    except (OSError, ManifestError, _CommsAdapterManifestError) as exc:
+        await _refuse_boot(
+            audit,
+            _comms_adapter_failure(adapter_id),
+            t("daemon.boot.comms_adapter_spawn_failed", adapter_id=adapter_id),
+            boot_id=boot_id,
+            environment_source=environment_source,
+        )
+        # _refuse_boot is NoReturn (raises _BootRefusedError); unreachable defence.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
+
+
 @dataclass(frozen=True, slots=True)
 class _CommsBootGraph:
     """The pre-Supervisor comms components shared across every enabled adapter.
@@ -506,7 +555,22 @@ async def _build_comms_boot_graph(
         raise
 
 
-async def _spawn_comms_adapter(
+@dataclass(frozen=True, slots=True)
+class _CommsAdapterWiring:
+    """The per-adapter session + wire spec shared by the stdio + socket branches.
+
+    Built once by :func:`_build_comms_adapter_wiring` (manifest resolve, promoter,
+    the four handlers, the :class:`AlfredPluginSession`) so the carrier-specific
+    branches (:func:`_spawn_comms_adapter` for the stdio pipe,
+    :func:`_listen_socket_comms_adapter` for the unix socket) construct only the
+    transport + runner and never duplicate the handler fan-out.
+    """
+
+    wire: _CommsAdapterWireSpec
+    session: object
+
+
+async def _build_comms_adapter_wiring(
     *,
     adapter_id: str,
     settings: Settings,
@@ -516,24 +580,15 @@ async def _spawn_comms_adapter(
     graph: _CommsBootGraph,
     boot_id: str,
     environment_source: str,
-) -> CommsPluginRunner:
-    """Spawn + readiness-probe one enabled comms adapter, then register its pump.
+) -> _CommsAdapterWiring:
+    """Resolve the manifest + build the promoter, handlers, and plugin session.
 
-    The fail-closed boot primitive (architect's required shape): the daemon
-    ``await runner.start_and_handshake()`` BEFORE committing to the long-lived
-    pump, so a broken adapter (missing/parse-broken manifest, spawn failure,
-    not-ok handshake) REFUSES the boot via :func:`_refuse_boot` rather than
-    parking with a dead plugin. On success the pump is scheduled as a supervised
-    TaskGroup task.
-
-    Returns the live :class:`CommsPluginRunner` (post-handshake, pump scheduled)
-    so a caller that needs the host -> plugin request seam can drive it — the
-    daemon boot loop ignores the return (the runner's lifetime is the supervised
-    pump it just registered), while the end-to-end integration proof
-    (``test_daemon_comms_inbound_turn``) grabs it to drive the inbound-injection
-    trigger through the real runner rather than reimplementing the wiring.
+    The carrier-agnostic half of an adapter's boot (shared by the stdio + socket
+    branches). Every fail-closed refusal that precedes the wire — a broken manifest,
+    a misconfigured sub-payload promoter — happens here, so both carriers inherit the
+    same audited-refusal posture (CLAUDE.md hard rule #7). The transport + runner are
+    the caller's job (they differ by carrier).
     """
-    from alfred.cli._launcher_spawn import PluginLaunchSpec, repo_root
     from alfred.comms_mcp.bootstrap import build_supervisor_breaker_tripper
     from alfred.comms_mcp.daemon_runtime import CommsAdapterCrashedHookInvoker
     from alfred.comms_mcp.handlers import (
@@ -542,7 +597,7 @@ async def _spawn_comms_adapter(
         InboundMessageHandler,
         PlatformRateLimitHandler,
     )
-    from alfred.plugins.errors import ManifestError, PluginError
+    from alfred.plugins.errors import ManifestError
     from alfred.plugins.session import AlfredPluginSession
 
     try:
@@ -559,15 +614,6 @@ async def _spawn_comms_adapter(
         # line is unreachable defence-in-depth for the type checker's flow.
         raise AssertionError("unreachable") from exc  # pragma: no cover
 
-    # The ``python -m`` target the launcher execs is the manifest module
-    # ``alfred_comms_test.main`` — a top-level package under ``plugins/``. So the
-    # child PYTHONPATH must carry the ``plugins/`` PARENT (not the per-adapter dir,
-    # which would put the module's siblings on the path but not the package
-    # itself), plus ``src/`` so the core ``alfred.comms_mcp`` protocol resolves in
-    # the scrubbed child env. Mirrors the proven substrate-test spawn roots
-    # (``tests/integration/test_comms_runner_substrate.py``).
-    plugins_root = repo_root() / "plugins"
-    src_root = repo_root() / "src"
     breaker_tripper = build_supervisor_breaker_tripper(supervisor=supervisor)
     hook_invoker = CommsAdapterCrashedHookInvoker()
     # PR-S4-235-1: build the per-adapter host-side sub-payload promoter. The factory
@@ -621,16 +667,6 @@ async def _spawn_comms_adapter(
     )
     crash_handler = AdapterCrashHandler(audit_writer=audit, hook_invoker=hook_invoker)  # type: ignore[arg-type]
 
-    spec = PluginLaunchSpec(
-        plugin_id=wire.plugin_id,
-        manifest_path=wire.manifest_path,
-        module=wire.module,
-        adapter_id=wire.adapter_kind,
-        import_roots=(plugins_root, src_root),
-        inherit_stdio=False,
-        sandbox_kind=wire.sandbox_kind,
-    )
-    transport = CommsStdioTransport(adapter_id=wire.adapter_kind, spec=spec)
     session = await AlfredPluginSession.for_comms_adapter(
         adapter_id=wire.adapter_kind,
         manifest_raw=wire.manifest_raw,
@@ -644,26 +680,115 @@ async def _spawn_comms_adapter(
         transport=None,
         max_in_flight_notifications=settings.comms_max_in_flight_notifications,
     )
-    # PR-S4-11b DEFECT 1: wire the supervisor's graceful-drain signal into the
-    # runner so its pump exits PROMPTLY on ``alfred daemon stop`` instead of
-    # blocking on the idle plugin stream until the 10s drain budget force-cancels
-    # it (which recorded ``cancelled_with_errors`` + crashed the audit insert).
-    # Read AFTER ``supervisor.start()`` (this spawn runs post-start), so it is
-    # the live per-cycle event the heartbeat/dispatch loops also observe.
+    return _CommsAdapterWiring(wire=wire, session=session)
+
+
+def _build_comms_runner(
+    *,
+    session: object,
+    transport: object,
+    adapter_kind: str,
+    supervisor: _SupervisorType,
+    settings: Settings,
+    graph: _CommsBootGraph,
+) -> CommsPluginRunner:
+    """Construct the runner over an established transport + bind the outbound sender.
+
+    Shared by the stdio (pipe) and socket (TUI) branches — only the ``transport``
+    differs. Binds the inbound orchestrator's outbound sender to THIS runner so the
+    dispatch ack flows back over the same wire.
+    """
     runner = CommsPluginRunner(
-        session=session,
-        transport=transport,
-        adapter_id=wire.adapter_kind,
+        session=session,  # type: ignore[arg-type]
+        transport=transport,  # type: ignore[arg-type]
+        adapter_id=adapter_kind,
+        # PR-S4-11b DEFECT 1: the supervisor's graceful-drain signal so the pump
+        # exits PROMPTLY on ``alfred daemon stop`` instead of blocking on the idle
+        # stream until the drain budget force-cancels it.
         shutdown_event=supervisor.shutdown_event,
-        # Match the runner's in-flight dispatch-task cap to the session's per-
-        # adapter dispatch semaphore so the reader's task-tracking backpressure and
-        # the handler-execution backpressure share one bound (PR-S4-11b deadlock
-        # fix: notifications dispatch as bounded background tasks so the single
-        # reader stays free to resolve a reentrant handler's outbound ack).
+        # Match the runner's in-flight dispatch-task cap to the session's per-adapter
+        # dispatch semaphore so the two backpressure bounds share one value.
         max_in_flight_notifications=settings.comms_max_in_flight_notifications,
     )
     sender: OutboundSenderLike = _RunnerOutboundSender(runner=runner)
     graph.inbound_orchestrator.bind_outbound_sender(sender)
+    return runner
+
+
+async def _spawn_comms_adapter(
+    *,
+    adapter_id: str,
+    settings: Settings,
+    audit: AuditWriter,
+    gate: object,
+    supervisor: _SupervisorType,
+    graph: _CommsBootGraph,
+    boot_id: str,
+    environment_source: str,
+) -> CommsPluginRunner:
+    """Spawn + readiness-probe one stdio-pipe comms adapter, then register its pump.
+
+    The fail-closed boot primitive (architect's required shape): the daemon
+    ``await runner.start_and_handshake()`` BEFORE committing to the long-lived
+    pump, so a broken adapter (missing/parse-broken manifest, spawn failure,
+    not-ok handshake) REFUSES the boot via :func:`_refuse_boot` rather than
+    parking with a dead plugin. On success the pump is scheduled as a supervised
+    TaskGroup task.
+
+    This is the SUBPROCESS-PIPE carrier (Discord, the reference plugin): the daemon
+    owns both ends, so spawn → handshake → register runs inline. The unix-socket
+    carrier (the foreground TUI) is :func:`_listen_socket_comms_adapter`, whose peer
+    arrives asynchronously and so cannot handshake inline at boot (ADR-0031).
+
+    Returns the live :class:`CommsPluginRunner` (post-handshake, pump scheduled)
+    so a caller that needs the host -> plugin request seam can drive it — the
+    daemon boot loop ignores the return (the runner's lifetime is the supervised
+    pump it just registered), while the end-to-end integration proof
+    (``test_daemon_comms_inbound_turn``) grabs it to drive the inbound-injection
+    trigger through the real runner rather than reimplementing the wiring.
+    """
+    from alfred.cli._launcher_spawn import PluginLaunchSpec, repo_root
+    from alfred.plugins.errors import PluginError
+
+    wiring = await _build_comms_adapter_wiring(
+        adapter_id=adapter_id,
+        settings=settings,
+        audit=audit,
+        gate=gate,
+        supervisor=supervisor,
+        graph=graph,
+        boot_id=boot_id,
+        environment_source=environment_source,
+    )
+    wire = wiring.wire
+
+    # The ``python -m`` target the launcher execs is the manifest module
+    # ``alfred_comms_test.main`` — a top-level package under ``plugins/``. So the
+    # child PYTHONPATH must carry the ``plugins/`` PARENT (not the per-adapter dir,
+    # which would put the module's siblings on the path but not the package
+    # itself), plus ``src/`` so the core ``alfred.comms_mcp`` protocol resolves in
+    # the scrubbed child env. Mirrors the proven substrate-test spawn roots
+    # (``tests/integration/test_comms_runner_substrate.py``).
+    plugins_root = repo_root() / "plugins"
+    src_root = repo_root() / "src"
+    spec = PluginLaunchSpec(
+        plugin_id=wire.plugin_id,
+        manifest_path=wire.manifest_path,
+        module=wire.module,
+        adapter_id=wire.adapter_kind,
+        import_roots=(plugins_root, src_root),
+        inherit_stdio=False,
+        sandbox_kind=wire.sandbox_kind,
+    )
+    transport = CommsStdioTransport(adapter_id=wire.adapter_kind, spec=spec)
+    runner = _build_comms_runner(
+        session=wiring.session,
+        transport=transport,
+        adapter_kind=wire.adapter_kind,
+        supervisor=supervisor,
+        settings=settings,
+        graph=graph,
+    )
 
     try:
         await runner.start_and_handshake()
@@ -689,9 +814,148 @@ async def _spawn_comms_adapter(
     return runner
 
 
+async def _listen_socket_comms_adapter(
+    *,
+    adapter_id: str,
+    settings: Settings,
+    audit: AuditWriter,
+    gate: object,
+    supervisor: _SupervisorType,
+    graph: _CommsBootGraph,
+    boot_id: str,
+    environment_source: str,
+) -> CommsSocketListener:
+    """Bind the 0600 comms socket + schedule the accept → handshake → pump task.
+
+    The UNIX-SOCKET carrier for the foreground TUI (ADR-0031). Unlike the stdio
+    carrier (:func:`_spawn_comms_adapter`), the daemon does NOT own the peer:
+    ``alfred chat`` is a separate, operator-owned PTY process that connects LATER
+    (and may never connect). So the handshake CANNOT run inline at boot — it would
+    block ``alfred daemon start`` forever on an absent peer. Instead:
+
+    * **bind inline (fail-closed)** — binding the 0600 owner-only socket under the
+      daemon's 0700 runtime dir IS a daemon-owned, boot-time operation, so a bind
+      failure (``OSError``) REFUSES the boot via :func:`_refuse_boot` (audited, exit
+      2) exactly like a manifest resolution failure;
+    * **accept + handshake + pump as a supervised task** — once bound, a background
+      task awaits the peer, builds the runner over the accepted connection, binds the
+      outbound sender, handshakes, and pumps. A handshake failure on the peer cannot
+      refuse a boot that already completed; it routes through the runner's own crash
+      teardown (the transport closes, no leak).
+
+    Returns the :class:`CommsSocketListener` so the daemon reaps the socket + listener
+    on EVERY exit path (mirrors :meth:`_CommsBootGraph.aclose`); the socket file is
+    unlinked there so no stale inode lingers.
+    """
+    wiring = await _build_comms_adapter_wiring(
+        adapter_id=adapter_id,
+        settings=settings,
+        audit=audit,
+        gate=gate,
+        supervisor=supervisor,
+        graph=graph,
+        boot_id=boot_id,
+        environment_source=environment_source,
+    )
+    wire = wiring.wire
+
+    listener = CommsSocketListener(adapter_id=wire.adapter_kind)
+    try:
+        await listener.bind()
+    except OSError as exc:
+        # Binding the daemon's own socket failed (e.g. a foreign inode at the path
+        # this listener refuses to unlink). A daemon-owned, boot-time failure —
+        # REFUSE fail-closed (audited, exit 2), never park a half-bound adapter.
+        await listener.aclose()
+        await _refuse_boot(
+            audit,
+            _comms_adapter_bind_failure(adapter_id),
+            t("daemon.boot.comms_socket_bind_failed", adapter_id=adapter_id),
+            boot_id=boot_id,
+            environment_source=environment_source,
+        )
+        # _refuse_boot is NoReturn (raises _BootRefusedError); unreachable defence.
+        raise AssertionError("unreachable") from exc  # pragma: no cover
+
+    async def _accept_and_pump() -> None:
+        """Await the peer, then run the unchanged runner lifecycle over the socket.
+
+        Runs as a supervised task so boot never blocks on an absent peer. The runner,
+        handshake, and dispatch/ack path are reused UNCHANGED — only the transport is
+        the accepted socket connection (ADR-0031 Decision 1).
+
+        The ``accept()`` is raced against the supervisor's shutdown signal so a clean
+        ``alfred daemon stop`` drains PROMPTLY even when no peer ever connected (the
+        common post-merge state — the ``alfred chat`` client ships in a later PR).
+        Without the race, a bare ``await listener.accept()`` ignores the shutdown
+        event while parked on an absent peer, so the supervisor's graceful-drain
+        budget (``_STOP_DRAIN_TIMEOUT_SECONDS``) elapses in full before the force-
+        cancel — a 10s latency tax on every clean stop. When shutdown wins the race we
+        return; the listener is still reaped by the daemon's ``finally`` (idempotent
+        ``aclose``), so the teardown / reaping order is unchanged.
+        """
+        accept_task = asyncio.ensure_future(listener.accept())
+        shutdown_wait = asyncio.ensure_future(supervisor.shutdown_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {accept_task, shutdown_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            # Cancel whichever lost the race + reap it so no "Task was destroyed but it
+            # is pending" / unretrieved-exception warning escapes this supervised task.
+            for task in (accept_task, shutdown_wait):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(accept_task, shutdown_wait, return_exceptions=True)
+        if shutdown_wait in done:
+            # Shutdown wins the race — never build a runner / start a handshake after
+            # the daemon has begun stopping (ADR-0031 accept-vs-shutdown invariant).
+            # If BOTH futures resolved on the SAME tick, a peer was accepted moments
+            # before shutdown fired: retrieve and CLOSE that transport so the
+            # connection is discarded, never used (otherwise it leaks). The losing
+            # ``accept_task`` is cancelled by the ``finally`` only when it is still
+            # pending; here it is ``done``, so its result is the transport to reap.
+            if accept_task in done:
+                transport = accept_task.result()
+                await transport.close()
+            # Else: only shutdown is done; ``accept_task`` is still pending and the
+            # ``finally`` already cancelled it. Either way, exit so the supervisor's
+            # drain completes promptly — the listener is reaped by the daemon's
+            # finally (idempotent aclose); no runner was built.
+            return
+        # Only accept_task completed. A genuine accept() failure must still raise out
+        # of this supervised task — ``.result()`` re-raises any accept error (and is
+        # safe: accept_task is in ``done``).
+        transport = accept_task.result()
+        runner = _build_comms_runner(
+            session=wiring.session,
+            transport=transport,
+            adapter_kind=wire.adapter_kind,
+            supervisor=supervisor,
+            settings=settings,
+            graph=graph,
+        )
+        # ``run`` = ``start_and_handshake`` + ``pump``; a handshake failure here
+        # cannot refuse an already-completed boot, so it raises out of this
+        # supervised task (the runner's ``finally`` closes the transport — no leak).
+        await runner.run()
+
+    supervisor.register_plugin_task(_accept_and_pump())
+    # O1 mirror: the socket adapter is observable in `alfred daemon start` output the
+    # same as a spawned one — the socket is bound + the accept task is live (the peer
+    # connects later). "live" here means "listening", not "handshaked".
+    typer.echo(t("daemon.comms.adapter_listening", adapter_id=adapter_id))
+    return listener
+
+
 def _comms_adapter_failure(adapter_id: str) -> CommsAdapterSpawnFailedFailure:
     """A loud boot-failure carrier for a comms-adapter spawn/handshake refusal."""
     return CommsAdapterSpawnFailedFailure(adapter_id=adapter_id)
+
+
+def _comms_adapter_bind_failure(adapter_id: str) -> CommsAdapterBindFailedFailure:
+    """A loud boot-failure carrier for a comms-adapter socket-bind refusal (ADR-0031)."""
+    return CommsAdapterBindFailedFailure(adapter_id=adapter_id)
 
 
 class _BackingStoreAvailabilityGate(Protocol):
@@ -1319,6 +1583,11 @@ async def _start_async() -> None:
     # inbound orchestrator's outbound sender is bound per-adapter once the runner
     # exists (the late-bind seam in ``CommsInboundOrchestratorAdapter``).
     comms_graph: _CommsBootGraph | None = None
+    # ADR-0031: socket-backed (TUI) adapters bind a unix-socket listener the daemon
+    # must reap on EVERY exit path (the socket file + the asyncio server) — the
+    # listener-analog of the bwrap child the comms graph reaps. Collected here so the
+    # ``finally`` can ``aclose`` each one regardless of which boot step exits.
+    socket_listeners: list[CommsSocketListener] = []
     if settings.comms_enabled_adapters:
         # PR-S4-11c-2b: the comms-graph build now SPAWNS the live bwrap quarantined
         # child (``spawn_quarantine_child_io`` inside ``_build_comms_inbound_extractor``).
@@ -1394,23 +1663,51 @@ async def _start_async() -> None:
         # ``completed`` below exactly as before.
         if comms_graph is not None:
             for adapter_id in settings.comms_enabled_adapters:
-                await _spawn_comms_adapter(
+                # The session's post-handshake ``check_plugin_load`` needs the FULL
+                # CapabilityGate surface — pass the RAW ``real_gate``, NOT the
+                # ``_SupervisorBootGate`` wrapper (which exposes only
+                # ``is_backing_store_available`` for the heartbeat and would
+                # ``AttributeError`` on ``check_plugin_load``, crashing the
+                # handshake). The wrapper is the Supervisor's surface; the comms
+                # session's surface is the gate itself.
+                #
+                # ADR-0031: branch on the adapter's CARRIER. A socket-backed (TUI)
+                # adapter is loaded under the SAME first-party comms LOAD grant
+                # (ADR-0026 — no widening); the only difference is the wire is a
+                # 0600 unix socket the daemon binds + accepts, not a subprocess pipe
+                # it spawns. The selector keys on the wire ``adapter_kind``, resolved
+                # via the guarded helper so a broken manifest refuses the boot here
+                # rather than raising unguarded out of the carrier branch.
+                wire_kind = await _resolve_adapter_carrier_kind(
                     adapter_id=adapter_id,
-                    settings=settings,
                     audit=audit,
-                    # The session's post-handshake ``check_plugin_load`` needs the
-                    # FULL CapabilityGate surface — pass the RAW ``real_gate``, NOT
-                    # the ``_SupervisorBootGate`` wrapper (which exposes only
-                    # ``is_backing_store_available`` for the heartbeat and would
-                    # ``AttributeError`` on ``check_plugin_load``, crashing the
-                    # handshake). The wrapper is the Supervisor's surface; the comms
-                    # session's surface is the gate itself.
-                    gate=real_gate,
-                    supervisor=supervisor,
-                    graph=comms_graph,
                     boot_id=boot_id,
                     environment_source=source,
                 )
+                if _is_socket_backed_adapter_kind(wire_kind):
+                    socket_listeners.append(
+                        await _listen_socket_comms_adapter(
+                            adapter_id=adapter_id,
+                            settings=settings,
+                            audit=audit,
+                            gate=real_gate,
+                            supervisor=supervisor,
+                            graph=comms_graph,
+                            boot_id=boot_id,
+                            environment_source=source,
+                        )
+                    )
+                else:
+                    await _spawn_comms_adapter(
+                        adapter_id=adapter_id,
+                        settings=settings,
+                        audit=audit,
+                        gate=real_gate,
+                        supervisor=supervisor,
+                        graph=comms_graph,
+                        boot_id=boot_id,
+                        environment_source=source,
+                    )
 
         # All enabled adapters spawned + handshaked (or there were none): NOW the
         # daemon is genuinely up, so emit the completion row, invoke the
@@ -1452,6 +1749,14 @@ async def _start_async() -> None:
             if comms_graph is not None:
                 with suppress(Exception):
                     await comms_graph.aclose()
+            # ADR-0031: reap every socket listener (close the asyncio server + the
+            # underlying socket, unlink the socket file) on EVERY exit path so no
+            # stale socket inode lingers — the socket-file analog of the bwrap-child
+            # reap above. Isolated per-listener so one failing reap never skips the
+            # rest or the pidfile delete (the exact leaks this finally prevents).
+            for listener in socket_listeners:
+                with suppress(Exception):
+                    await listener.aclose()
             if pidfile_path is not None:
                 delete_pidfile(pidfile_path)
 
