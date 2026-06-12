@@ -94,23 +94,29 @@ def test_boot_threads_same_nonce_into_comms_graph(
     tmp_path: Path,
     boot_success_env: FakeAuditWriter,
     quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[object],
 ) -> None:
     """The comms boot graph is handed the SAME nonce object registered at boot."""
     del quarantine_registry  # installed via fixture side effect
+    del patch_quarantine_child_spawn  # in-proc fake child-IO; no real bwrap spawn
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
     monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
 
     # Capture the nonce threaded into the comms graph builder AND the graph it
-    # returns (where 2a's record_body will read the nonce).
+    # returns (where 2b's record_body reads the nonce). The builder is now ASYNC
+    # (PR-S4-11c-2b: it spawns the quarantined child), so the spy + delegation are
+    # async.
     captured: list[object] = []
     built_graphs: list[object] = []
     from alfred.cli.daemon import _commands
 
     original = _commands._build_comms_boot_graph
 
-    def _spy(*, settings: object, audit: object, outbound_dlp: object, t3_nonce: object) -> object:
+    async def _spy(
+        *, settings: object, audit: object, outbound_dlp: object, t3_nonce: object
+    ) -> object:
         captured.append(t3_nonce)
-        graph = original(
+        graph = await original(
             settings=settings,  # type: ignore[arg-type]
             audit=audit,  # type: ignore[arg-type]
             outbound_dlp=outbound_dlp,  # type: ignore[arg-type]
@@ -133,7 +139,7 @@ def test_boot_threads_same_nonce_into_comms_graph(
     # tiers slot — not a copy (a copy would fail the gate's ``is`` check).
     assert captured[0] is booted
 
-    # And the graph carries it through to its field (where 2a's record_body reads it).
+    # And the graph carries it through to its field (where 2b's record_body reads it).
     assert len(built_graphs) == 1
     assert built_graphs[0].t3_nonce is booted  # type: ignore[attr-defined]
 

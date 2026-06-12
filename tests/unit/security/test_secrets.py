@@ -182,6 +182,12 @@ class TestSupportedSecretsRegistry:
     def test_prefer_file_contains_discord_bot_token(self) -> None:
         assert "discord_bot_token" in _PREFER_FILE
 
+    def test_prefer_file_contains_quarantine_provider_api_key(self) -> None:
+        # PR-S4-11c-2b: the quarantined child's provider key is file-preferred so
+        # ALFRED_QUARANTINE_PROVIDER_API_KEY cannot silently override the secrets
+        # file (rule #6 — secrets in the broker/file, not plugin-readable env).
+        assert "quarantine_provider_api_key" in _PREFER_FILE
+
 
 # ---------------------------------------------------------------------------
 # Task 3: path resolution pipeline
@@ -386,6 +392,21 @@ class TestGetPrecedence:
             allow_inside_git_worktree=True,
         )
         assert broker.get("discord_bot_token") == "from-file"
+
+    def test_file_wins_for_quarantine_provider_api_key(self, tmp_path: Path) -> None:
+        # PR-S4-11c-2b precedence lock: the file value wins over
+        # ALFRED_QUARANTINE_PROVIDER_API_KEY (file-preferred, like discord_bot_token).
+        parent = tmp_path / "alfred"
+        parent.mkdir(mode=0o700)
+        path = parent / "secrets.toml"
+        path.write_text('quarantine_provider_api_key = "from-file"\n')
+        path.chmod(0o600)
+        broker = SecretBroker(
+            env={"ALFRED_QUARANTINE_PROVIDER_API_KEY": "from-env"},
+            secrets_file=path,
+            allow_inside_git_worktree=True,
+        )
+        assert broker.get("quarantine_provider_api_key") == "from-file"
 
     def test_file_falls_back_to_env_when_file_lacks_key(self, secure_secrets_file: Path) -> None:
         # File has discord_bot_token only; deepseek_api_key only in env.

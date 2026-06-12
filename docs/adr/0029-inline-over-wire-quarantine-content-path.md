@@ -68,10 +68,12 @@ child → host:  ControlResult(method="quarantine.extract", payload={kind, data|
   fails loudly (single-use pop) — replay after consumption is refused, mirroring the child's own
   single-use `pop` and the web.fetch GETDEL intent (spec §7.2).
 
-- **`quarantine.ingest` is a new wire method** coined here as the forward contract PR-S4-11c-2c
-  implements in the child's MCP loop (the child's `_run_mcp_server` is `NotImplementedError` today;
-  no wire routing exists yet). PR-S4-11c-2a ships the host half plus a test child double that
-  mirrors the `handle_ingest`/`handle_extract` single-use cache contract.
+- **`quarantine.ingest` is a new wire method** coined here as the forward contract the child's MCP
+  loop implements. *(Updated PR-S4-11c-2b: the child's `_run_mcp_server` now runs the
+  deterministic-echo loop and `quarantine.ingest`/`quarantine.extract` ARE routed over the real wire
+  in production — the "`NotImplementedError` today; no wire routing exists yet" status described the
+  2a precursor; 2c swaps the echo for a real provider call.)* PR-S4-11c-2a ships the host half plus a
+  test child double that mirrors the `handle_ingest`/`handle_extract` single-use cache contract.
 
 - **Framing is length-prefixed JSON-RPC** (`struct.pack(">I", ...)` 4-byte big-endian length header
   then a UTF-8 JSON body), peer to `StdioTransport`. `QuarantineStdioTransport` does NOT subclass
@@ -124,7 +126,10 @@ child → host:  ControlResult(method="quarantine.extract", payload={kind, data|
   frame. Acceptable: the body is bounded by the inbound-frame size cap and the alternative (a shared
   store) is rejected for the security reasons above.
 - `quarantine.ingest` adds a method to the quarantine wire vocabulary. It is a closed addition the
-  child must route in 2c; until then the host half is exercised only against the test child double.
+  real child routes — PR-S4-11c-2b (2026-06-12) wired this inline-over-wire content path into the
+  PRODUCTION daemon (`_build_comms_boot_graph` builds the real `QuarantineStdioTransport` +
+  `T3BodyRecorder` over a LIVE bwrap child, ADR-0027 amendment), so the host half now runs against a
+  real deterministic-echo child in production, not only the test child double.
 - Two `dispatch` round-trips per extract (ingest then extract). The transport sequences them inside a
   single `dispatch("quarantine.extract", ...)` call so the `QuarantinedExtractor` contract is
   unchanged — the ingest is an internal pre-step of the transport, invisible to the extractor.

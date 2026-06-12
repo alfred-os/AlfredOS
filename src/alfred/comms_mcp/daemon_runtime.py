@@ -30,17 +30,23 @@ none of them is constructed by the daemon yet (that is Wave 4's
   declared with — system + operator may observe a crash, never ``user-plugin``).
 
 * :func:`_build_comms_inbound_extractor` constructs a REAL
-  :class:`QuarantinedExtractor` over a recorded-fixture LLM transport (the
-  recorded-response pattern CLAUDE.md sanctions outside smoke tests), wired with
-  the REAL ``outbound_dlp`` the daemon owns — only the LLM transport is a
-  fixture, so the genuine ``extract(handle, schema)`` + post-stage DLP scan path
-  is exercised.
+  :class:`QuarantinedExtractor` over the REAL
+  :class:`alfred.security.quarantine_transport.QuarantineStdioTransport`, driven
+  by a LIVE bwrap-sandboxed quarantined child spawned via
+  :func:`alfred.security.quarantine_child_io.spawn_quarantine_child_io`
+  (PR-S4-11c-2b, the daemon go-live flip — ADR-0027 amended). It is ``async``
+  because the spawn is async, and FAIL-CLOSED: on a non-Linux / unprovisioned
+  host the spawn raises :class:`QuarantineChildSpawnError`, which propagates so
+  the daemon refuses to boot with a clear operator message rather than running a
+  fixture extractor in production. The 2b child runs a DETERMINISTIC ECHO loop
+  (no real LLM, no egress); the real provider client + its egress allowlist land
+  in PR-S4-11c-2c behind release-blocker #230.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import structlog
 
@@ -53,9 +59,23 @@ from alfred.security.quarantine import QuarantinedExtractor
 if TYPE_CHECKING:
     from alfred.audit.log import AuditWriter
     from alfred.comms_mcp.bootstrap import CommsExtractorBridge
-    from alfred.plugins.transport import DispatchResult
     from alfred.security.dlp import OutboundDlp
     from alfred.security.quarantine import ExtractionResult
+    from alfred.security.quarantine_transport import QuarantineStagingMap, QuarantineStdioTransport
+    from alfred.security.secrets import SecretBroker
+
+# The secret-broker id the quarantined child's provider key is resolved by
+# (config/routing.yaml ``[quarantine] secret_id`` — pinned by
+# test_routing_yaml_quarantine_block). Resolved at boot and delivered over fd 3
+# to the bwrap child; NEVER read from the child's own env.
+_PROVIDER_KEY_SECRET_ID = "quarantine_provider_api_key"  # noqa: S105 - broker lookup id, not a credential
+
+# Documented fallback used when ``quarantine_provider_api_key`` is unset. The 2b
+# deterministic-echo child reads + scrubs + discards it (no LLM call), so a
+# placeholder is safe for now; PR-S4-11c-2c flips unset -> refuse-boot once the
+# child makes a real provider call. The key MUST still flow over fd 3 (the
+# real-spawn test asserts delivery), so it is NEVER empty/omitted.
+_PROVIDER_KEY_PLACEHOLDER = "quarantine-provider-key-unset-placeholder"
 
 _log = structlog.get_logger(__name__)
 
@@ -69,15 +89,6 @@ _ACK_BODY: Mapping[str, object] = {"content": "ack"}
 # crash invoker can be unit-tested without standing up a full registry + dispatch
 # chain; the daemon wires the real ``invoke``.
 type _InvokeFn = Callable[..., Awaitable[HookContext[Any]]]
-
-# The recorded ``quarantine.extract`` response the fixture transport replays. A
-# ``CommsBodyExtraction``-valid ``extracted`` payload so the real extractor lift
-# is exercised against a deterministic response (recorded-LLM-response pattern).
-_RECORDED_EXTRACT_PAYLOAD: Final[Mapping[str, object]] = {
-    "kind": "extracted",
-    "data": {"text": "hello", "intent": "greeting"},
-    "extraction_mode": "native_constrained",
-}
 
 
 @runtime_checkable
@@ -203,53 +214,99 @@ class CommsAdapterCrashedHookInvoker:
         )
 
 
-class _RecordedExtractTransport:
-    """A :class:`PluginTransport` that replays one recorded extract response.
+def _resolve_provider_key(secret_broker: SecretBroker) -> str:
+    """Resolve the quarantined child's provider key from the secret broker.
 
-    The recorded-LLM-response substitute the daemon uses until a real quarantined
-    LLM is co-hosted (11b is the fixture cut). It implements the production
-    ``PluginTransport`` Protocol so the real :class:`QuarantinedExtractor` drives
-    it exactly as it would the stdio transport — every dispatch returns the same
-    ``CommsBodyExtraction``-valid ``ControlResult``. ``close`` is an idempotent
-    no-op (there is no subprocess behind this transport).
+    Returns the broker-held ``quarantine_provider_api_key`` when configured. When
+    unset, returns :data:`_PROVIDER_KEY_PLACEHOLDER` and emits a LOUD structlog
+    warning: the 2b deterministic-echo child reads + scrubs + discards the key
+    (``_build_provider`` does ``del key``), so a placeholder is currently safe.
+
+    The key is NEVER empty/omitted — the real-spawn proof asserts fd-3 delivery,
+    and ``spawn_quarantine_child_io`` refuses a partial/empty delivery. PR-S4-11c-2c
+    (the real provider client) flips this unset path to a refuse-boot once the
+    child actually calls the provider over the network.
     """
-
-    async def dispatch(self, method: str, params: dict[str, object]) -> DispatchResult:
-        del method, params  # the recorded response is independent of the request
-        from alfred.plugins.transport import ControlResult
-
-        return ControlResult(
-            method="quarantine.extract",
-            payload=dict(_RECORDED_EXTRACT_PAYLOAD),
-        )
-
-    async def close(self) -> None:
-        return None
-
-
-def _build_comms_inbound_extractor(
-    *, audit_writer: AuditWriter, outbound_dlp: OutboundDlp
-) -> QuarantinedExtractor:
-    """Construct a REAL :class:`QuarantinedExtractor` over a recorded transport.
-
-    Mirrors ``tests/integration/_comms_mcp_harness._build_fixture_extractor`` in
-    spirit but threads the REAL ``outbound_dlp`` the daemon owns (not a stub) so
-    the post-stage DLP scan registered at extractor construction is the
-    production scanner. Only the LLM transport is recorded
-    (:class:`_RecordedExtractTransport`) — the genuine ``extract(handle, schema)``
-    lift runs against a deterministic ``extracted`` response.
-    """
-    return QuarantinedExtractor(
-        transport=_RecordedExtractTransport(),
-        audit_writer=audit_writer,
-        outbound_dlp=outbound_dlp,
+    # ``has`` returns False (never raises) for a registered-but-unset secret, so
+    # this branch is the clean "operator has not configured a quarantine provider
+    # key yet" path — distinct from a broker construction failure (which raised
+    # earlier at ``build_broker``).
+    if secret_broker.has(_PROVIDER_KEY_SECRET_ID):
+        return secret_broker.get(_PROVIDER_KEY_SECRET_ID)
+    # TODO(PR-S4-11c-2c): flip this to a fail-closed refuse-boot once the child
+    # makes a real provider call — a placeholder key would then mean a dead LLM.
+    _log.warning(
+        "comms.daemon_runtime.quarantine_provider_key_unset",
+        secret_id=_PROVIDER_KEY_SECRET_ID,
     )
+    return _PROVIDER_KEY_PLACEHOLDER
 
 
-# ``_build_comms_inbound_extractor`` is deliberately omitted from ``__all__``:
-# its leading underscore marks it module-private. The daemon boot wiring imports
-# it by its private name (``from ...daemon_runtime import _build_comms_inbound_extractor``)
-# rather than through the public surface, so it stays out of the star-export.
+async def _build_comms_inbound_extractor(
+    *,
+    audit_writer: AuditWriter,
+    outbound_dlp: OutboundDlp,
+    secret_broker: SecretBroker,
+    staging: QuarantineStagingMap,
+) -> tuple[QuarantinedExtractor, QuarantineStdioTransport]:
+    """Construct a REAL :class:`QuarantinedExtractor` over a LIVE quarantined child.
+
+    The PR-S4-11c-2b go-live flip (ADR-0027 amended): replaces the prior
+    recorded-fixture transport with the production
+    :class:`alfred.security.quarantine_transport.QuarantineStdioTransport` driving
+    a REAL bwrap-sandboxed quarantined child spawned via
+    :func:`alfred.security.quarantine_child_io.spawn_quarantine_child_io`. The
+    spawn delivers the provider key over fd 3; the ``staging`` map is the SAME
+    single-use store the host's :class:`T3BodyRecorder` writes to, so the inline-
+    over-wire content path (ADR-0029) is exercised end to end in production.
+
+    FAIL-CLOSED (CLAUDE.md hard rule #7): on a non-Linux / unprovisioned host the
+    spawn raises :class:`QuarantineChildSpawnError`, which propagates out of this
+    builder so the daemon refuses to boot rather than silently degrading. There is
+    NO dev fixture fallback.
+
+    fd-3-clobber discipline: the provider key is resolved SYNCHRONOUSLY before the
+    spawn, so the single ``await spawn_quarantine_child_io(...)`` is the only
+    await in this builder — nothing interleaves in its dup2 window.
+    """
+    from alfred.security.quarantine_child_io import spawn_quarantine_child_io
+    from alfred.security.quarantine_transport import QuarantineStdioTransport
+
+    provider_key = _resolve_provider_key(secret_broker)
+    # SINGLE await — the spawn owns the process-wide fd-3 clobber window and must
+    # not race any other coroutine. Do not interleave awaits here.
+    child_io = await spawn_quarantine_child_io(provider_key=provider_key)
+    # Reap the just-spawned child if the (synchronous) transport/extractor
+    # construction raises: this builder hasn't returned the transport yet, so the
+    # daemon's exit-path teardown can't see it — without this the bwrap child would
+    # leak on a post-spawn construction failure (CR #255 round-4).
+    transport: QuarantineStdioTransport | None = None
+    try:
+        transport = QuarantineStdioTransport(child_io=child_io, staging=staging)
+        extractor = QuarantinedExtractor(
+            transport=transport,
+            audit_writer=audit_writer,
+            outbound_dlp=outbound_dlp,
+        )
+    except Exception:
+        if transport is not None:
+            await transport.close()
+        else:
+            await child_io.aclose()
+        raise
+    # Return the transport alongside the extractor so the daemon boot graph can
+    # reap the LIVE bwrap child on every exit path (`transport.close()` ->
+    # `child_io.aclose()`); the extractor alone exposes no teardown seam, so a
+    # boot failure after the spawn — or a normal shutdown — would otherwise leak
+    # the child (CR #255). The caller owns calling `transport.close()`.
+    return extractor, transport
+
+
+# ``_build_comms_inbound_extractor`` + ``_resolve_provider_key`` are deliberately
+# omitted from ``__all__``: their leading underscore marks them module-private. The
+# daemon boot wiring imports the builder by its private name (``from
+# ...daemon_runtime import _build_comms_inbound_extractor``) rather than through the
+# public surface, so it stays out of the star-export.
 __all__ = [
     "CommsAdapterCrashedHookInvoker",
     "CommsInboundOrchestratorAdapter",

@@ -75,13 +75,23 @@ SUPPORTED_SECRETS: frozenset[str] = frozenset(
         # ``openssl rand -hex 32``; rotation invalidates cross-row
         # correlation (spec §8.10) so the bootstrap is idempotent.
         "audit.hash_pepper",
+        # Slice-4 PR-S4-11c-2b: the quarantined-LLM child's provider API key,
+        # delivered over fd 3 to the bwrap-sandboxed child (NEVER read from the
+        # child's own env). The daemon resolves it via this id and hands it to
+        # ``spawn_quarantine_child_io``. The 2b deterministic-echo child reads +
+        # scrubs + discards it (no LLM call yet), so an UNSET key currently falls
+        # back to a documented placeholder with a loud boot warning; PR-S4-11c-2c
+        # (the real LLM client) flips unset -> refuse-boot once the child actually
+        # calls the provider. ``config/routing.yaml``'s ``[quarantine] secret_id``
+        # pins this same id (test_routing_yaml_quarantine_block).
+        "quarantine_provider_api_key",
     }
 )
 
 # Secrets whose file value wins over env. Strict subset of SUPPORTED_SECRETS —
 # the AST-scan test asserts the subset invariant so a future drift (adding
 # a key here without registering it in SUPPORTED_SECRETS) fails CI loudly.
-_PREFER_FILE: frozenset[str] = frozenset({"discord_bot_token"})
+_PREFER_FILE: frozenset[str] = frozenset({"discord_bot_token", "quarantine_provider_api_key"})
 
 # Bound on the redactor's alternation regex size. Past this point we log one
 # WARN and fall back to redacting only the 256 longest values (highest-

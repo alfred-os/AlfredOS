@@ -135,6 +135,26 @@ class T3NonceRegistrationFailedFailure(_BootFailureBase):
     failure_reason: Literal["t3_nonce_registration_failed"] = "t3_nonce_registration_failed"
 
 
+class QuarantineChildSpawnFailedFailure(_BootFailureBase):
+    """The bwrap-sandboxed quarantined-LLM child could not be spawned at boot.
+
+    PR-S4-11c-2b (the daemon go-live flip): with a comms adapter enabled, the
+    comms boot graph builds a REAL :class:`alfred.security.quarantine.QuarantinedExtractor`
+    over a LIVE quarantined child spawned via
+    :func:`alfred.security.quarantine_child_io.spawn_quarantine_child_io`. On a
+    non-Linux / unprovisioned host (no ``bwrap``, no bound interpreter) that spawn
+    raises :class:`alfred.security.quarantine_child_io.QuarantineChildSpawnError`.
+
+    Fail-closed (CLAUDE.md hard rule #7): the daemon REFUSES boot with this audited
+    failure rather than degrading to a fixture extractor in production — comms
+    requires the dual-LLM quarantine child to be live. The operator-facing message
+    points at the bwrap/Linux provisioning requirement. There is NO dev fixture
+    fallback by design.
+    """
+
+    failure_reason: Literal["quarantine_child_spawn_failed"] = "quarantine_child_spawn_failed"
+
+
 class CommsAdapterSpawnFailedFailure(_BootFailureBase):
     """An enabled comms adapter failed to spawn / handshake at boot (PR-S4-11b).
 
@@ -175,11 +195,13 @@ DaemonBootFailure = Annotated[
     | QuarantineGrantMissingFailure
     | BootInfraInstallFailedFailure
     | T3NonceRegistrationFailedFailure
+    | QuarantineChildSpawnFailedFailure
     | CommsAdapterSpawnFailedFailure
     | CommsMultiAdapterUnsupportedFailure,
     Field(discriminator="failure_reason"),
 ]
 """Discriminated union over the daemon-boot refusal modes (spec §3.4 +
 ADR-0026 ``quarantine_grant_missing`` + FIX 1 ``boot_infra_install_failed`` +
-PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11b
-``comms_adapter_spawn_failed`` + FIX 4 ``comms_multi_adapter_unsupported``)."""
+PR-S4-11c-2a0 ``t3_nonce_registration_failed`` + PR-S4-11c-2b
+``quarantine_child_spawn_failed`` + PR-S4-11b ``comms_adapter_spawn_failed`` +
+FIX 4 ``comms_multi_adapter_unsupported``)."""
