@@ -56,6 +56,12 @@ _SANDBOX_VISIBLE_KEYS: dict[str, str] = {
     "supervisor.sandbox.refused.policy_translate_failed": t(
         "supervisor.sandbox.refused.policy_translate_failed"
     ),
+    # #250 / ADR-0030: the kind=full bwrap exec binds the configured interpreter's
+    # install prefix into the sandbox; a root-level interpreter (prefix "/" or
+    # empty) would ro-bind the entire host root, so the launcher refuses loudly.
+    "supervisor.sandbox.refused.interpreter_prefix_too_broad": t(
+        "supervisor.sandbox.refused.interpreter_prefix_too_broad"
+    ),
     # sec-keystone (CR PR #229 finding-1): FAKE_UNAME set in production is a
     # loud refusal (the shim is ignored there); the non-Linux _do_exec branch
     # refuses in production when no UID-drop containment is available; and the

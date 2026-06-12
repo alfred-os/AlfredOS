@@ -63,8 +63,29 @@ Concretely, for the quarantined-LLM child (the first instance):
      resolves it, and the policy's `/usr` bind covers interpreter + site-packages.
    - **Dev / CI:** a new env override `ALFRED_QUARANTINE_CHILD_PYTHON` (consumed by
      `spawn_quarantine_child_io` in `src/alfred/security/quarantine_child_io.py`, default
-     `sys.executable`) points the child at `/usr/bin/python3` (a real binary under `/usr`) with
-     `alfred` `pip install`ed into that interpreter.
+     `sys.executable`) points the child at a real interpreter binary with `alfred` installed into it.
+
+   **Amendment (2026-06-12, PR #250):** the bound-interpreter contract no longer requires the
+   interpreter to live under `/usr`. `bin/alfred-plugin-launcher.sh` now binds the configured
+   interpreter's install prefix (`dirname`-of-`dirname` of the realpath'd executable) read-only into
+   the sandbox and execs the realpath, so the child can run a self-contained
+   python-build-standalone — a `proto`/`uv`-managed hermetic 3.14 under `~/.proto` whose interpreter,
+   stdlib, and site-packages share one prefix. The interpreter is the operator-configured
+   `<executable>` spawn arg (never attacker-controlled); the extra bind is read-only and
+   redundant-but-harmless when it already resolves under the policy's `/usr` bind. This removes the
+   system-python dependency the #248 real-spawn CI gate hit, and supersedes the earlier
+   `/usr/bin/python3` framing of this bullet. The #248 CI gate provisions 3.14 via `proto` +
+   `uv pip install --python`, NOT a system/deadsnakes python.
+
+   This extra bind is **opt-in** (CR #250): `EXECUTABLE` is the launcher's generic exec target for
+   EVERY `kind:full` plugin, so binding `dirname(dirname(realpath))` unconditionally would widen the
+   namespace for any plugin (a shallow / repo-root exec → an unintended host subtree, worst-case
+   `/`). The bind is scoped to callers that set `ALFRED_SANDBOX_BIND_INTERP_PREFIX=1` — only the
+   quarantine-child spawn (`_child_env`) does, because only it execs a bound interpreter that may
+   live outside the static binds. Generic `kind:full` plugins run under a `/usr` interpreter the
+   policy already binds, don't opt in, and are never widened. The launcher fails **closed**
+   (`supervisor.sandbox.refused.interpreter_prefix_too_broad`, hard rule #7) when the opted-in
+   prefix resolves to `/` or empty, rather than binding host root.
 
 3. **Bounded reachable surface.** The child imports only the extraction schemas + `ProviderCapability`
    — NO privileged `alfred.audit` (the signed audit writer), `alfred.core` (orchestrator / loop /

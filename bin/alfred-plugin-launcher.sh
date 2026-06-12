@@ -310,7 +310,43 @@ case "${SANDBOX_KIND}" in
 ${BWRAP_FLAGS_RAW}
 EOF
                 : "${BWRAP:=bwrap}"
-                exec "${BWRAP}" "${BWRAP_FLAGS[@]}" -- "${EXECUTABLE}" "$@"
+                # OPT-IN interpreter-prefix bind (CR #250). `EXECUTABLE` is the
+                # generic exec target for EVERY kind:full plugin, so binding
+                # dirname(dirname(realpath)) UNCONDITIONALLY would widen the sandbox
+                # for any plugin (a repo-root or shallow-path exec → an unintended
+                # host subtree). The extra bind is scoped to callers that explicitly
+                # opt in via ALFRED_SANDBOX_BIND_INTERP_PREFIX=1 — only the
+                # quarantine-child spawn (`_child_env` in quarantine_child_io.py)
+                # sets it, because only it execs a bound interpreter that may live
+                # OUTSIDE the policy's static /usr,/lib,/lib64 binds (a proto/uv
+                # self-contained python-build-standalone under ~/.proto: interpreter
+                # + stdlib + site-packages share one prefix — ADR-0030). Generic
+                # kind:full plugins run under a /usr interpreter the policy already
+                # binds, so they DON'T opt in and the namespace is never widened for
+                # them. Read-only; the interpreter is operator-configured (the spawn's
+                # <executable> arg), never attacker-controlled.
+                EXTRA_BINDS=()
+                EXEC_TARGET="${EXECUTABLE}"
+                if _truthy "${ALFRED_SANDBOX_BIND_INTERP_PREFIX:-}"; then
+                    _INTERP_REAL="$(readlink -f "${EXECUTABLE}")"
+                    _INTERP_PREFIX="$(dirname "$(dirname "${_INTERP_REAL}")")"
+                    # Fail loud (hard rule #7) rather than open: a root-level
+                    # interpreter (realpath one dir below /, e.g. /python or
+                    # /x/python) yields an empty-or-/ prefix that would ro-bind the
+                    # ENTIRE host root into the sandbox, re-exposing /etc, /proc
+                    # mounts etc. the policy omits. Operator-misconfiguration guard.
+                    if [ -z "${_INTERP_PREFIX}" ] || [ "${_INTERP_PREFIX}" = "/" ]; then
+                        printf 'supervisor.sandbox.refused.interpreter_prefix_too_broad plugin_id=%s interpreter=%s\n' "${PLUGIN_ID}" "${_INTERP_REAL}" >&2
+                        printf '{"event":"supervisor.plugin.sandbox_refused","plugin_id":"%s","reason":"interpreter_prefix_too_broad","environment":"%s","host_os":"%s"}\n' "${PLUGIN_ID}" "${ALFRED_RESOLVED_ENVIRONMENT}" "${HOST_OS}" >&2
+                        exit 1
+                    fi
+                    EXTRA_BINDS=(--ro-bind "${_INTERP_PREFIX}" "${_INTERP_PREFIX}")
+                    # Exec the realpath: a uv-venv symlink target is outside the
+                    # bound prefix and fails execvp under bwrap (ADR-0030).
+                    EXEC_TARGET="${_INTERP_REAL}"
+                fi
+                exec "${BWRAP}" "${BWRAP_FLAGS[@]}" "${EXTRA_BINDS[@]}" \
+                    -- "${EXEC_TARGET}" "$@"
                 ;;
             macos)
                 # PR-S4-7 ships the sandbox-exec invocation; PR-S4-6 refuses

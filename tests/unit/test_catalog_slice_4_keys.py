@@ -138,6 +138,7 @@ SLICE_4_KEYS: tuple[str, ...] = (
     # PR-S4-6 launcher + manifest-reader + handshake refusals.
     "supervisor.sandbox.refused.policy_ref_escapes_root",
     "supervisor.sandbox.refused.policy_translate_failed",
+    "supervisor.sandbox.refused.interpreter_prefix_too_broad",  # #250/ADR-0030
     "supervisor.sandbox.refused.macos_full_not_yet_shipped",
     "supervisor.sandbox.refused.unknown_host_os",
     "supervisor.sandbox.refused.jq_unavailable",
