@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -34,6 +34,11 @@ class FakeSupervisor:
     """No-op Supervisor double — records construction + lifecycle calls."""
 
     last_instance: FakeSupervisor | None = None
+    # When set, ``stop()`` raises — lets a test drive the boot finally's inner
+    # ``try: supervisor.stop() finally: <reap listeners + delete pidfile>`` arm,
+    # proving a failing ``stop()`` never skips the socket-listener reap or the
+    # pidfile delete (the exact leaks that inner finally exists to prevent).
+    fail_stop: ClassVar[bool] = False
 
     def __init__(self, **kwargs: Any) -> None:
         import asyncio
@@ -55,6 +60,8 @@ class FakeSupervisor:
 
     async def stop(self) -> None:
         self.stopped = True
+        if FakeSupervisor.fail_stop:
+            raise RuntimeError("supervisor.stop() failed (fake)")
 
     def register_plugin_task(self, coro: Any) -> Any:
         """Record + immediately close the coroutine (no event loop scheduling).
