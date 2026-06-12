@@ -35,3 +35,18 @@ def test_launcher_emitted_sandbox_refused_keys_are_registered() -> None:
     known = set(_SANDBOX_VISIBLE_KEYS) | set(SLICE_4_KEYS)
     missing = emitted - known
     assert not missing, f"launcher emits unregistered sandbox keys: {sorted(missing)}"
+
+
+def test_interpreter_prefix_too_broad_renders_with_emitter_kwargs() -> None:
+    # The launcher emits this refusal (#250) with `plugin_id` + `interpreter`; the
+    # catalog msgstr must substitute BOTH with no residual placeholder, else the
+    # supervisor `.format` KeyErrors at the worst possible moment — a security
+    # refusal. Render with the emitter's actual kwargs and assert full substitution.
+    rendered = t(
+        "supervisor.sandbox.refused.interpreter_prefix_too_broad",
+        plugin_id="alfred.quarantined-llm",
+        interpreter="/python",
+    )
+    assert rendered != "supervisor.sandbox.refused.interpreter_prefix_too_broad"
+    assert "{" not in rendered and "}" not in rendered
+    assert "alfred.quarantined-llm" in rendered and "/python" in rendered

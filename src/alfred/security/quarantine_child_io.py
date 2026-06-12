@@ -145,10 +145,13 @@ def _child_python() -> str:
     """Resolve the bwrap exec interpreter (ADR-0030 bound-interpreter contract).
 
     Production: unset env → ``sys.executable`` (the daemon's /usr CPython, covered
-    by the policy's /usr ro-bind). Dev/CI: ``ALFRED_QUARANTINE_CHILD_PYTHON`` →
-    ``/usr/bin/python3`` (a real binary under a bound prefix, with ``alfred``
-    pip-installed there). A uv-venv ``sys.executable`` is a symlink outside any
-    bound path and would fail ``execvp`` under bwrap — hence the override.
+    by the policy's /usr ro-bind). Dev/CI: ``ALFRED_QUARANTINE_CHILD_PYTHON`` → a
+    real interpreter binary that may live OUTSIDE the static /usr binds (the #248 CI
+    gate uses a hermetic ``proto``-managed 3.14 under ``~/.proto`` with ``alfred``
+    installed into it); the launcher binds that interpreter's install prefix into the
+    sandbox via the opt-in ``ALFRED_SANDBOX_BIND_INTERP_PREFIX`` flag ``_child_env``
+    sets (ADR-0030). A uv-venv ``sys.executable`` is a symlink outside any bound path
+    and would fail ``execvp`` under bwrap — hence the override + prefix bind.
     """
     return os.environ.get(_CHILD_PYTHON_ENV, sys.executable)
 
@@ -173,6 +176,14 @@ def _child_env() -> dict[str, str]:
     env["ALFRED_PLUGIN_MANIFEST_PATH"] = str(
         Path(__file__).resolve().parent / "quarantine_child" / "manifest.toml"
     )
+    # Opt in to the launcher's interpreter-prefix bind (CR #250, ADR-0030): the
+    # quarantine child execs a bound interpreter (``_child_python``) that may live
+    # OUTSIDE the policy's static /usr binds (a proto/uv python under ~/.proto), so
+    # the launcher must ro-bind its install prefix into the sandbox. This flag
+    # scopes that bind to THIS spawn — generic kind:full plugins (run under a /usr
+    # interpreter the policy already binds) never set it, so the launcher never
+    # widens their namespace.
+    env["ALFRED_SANDBOX_BIND_INTERP_PREFIX"] = "1"
     return env
 
 

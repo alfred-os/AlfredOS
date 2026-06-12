@@ -183,6 +183,123 @@ def test_kind_full_invokes_bwrap_without_fd_flag(run_launcher, tmp_path, echo_bw
     assert "--die-with-parent" in result.stdout
     assert "--sync-fd" not in result.stdout
     assert "--keep-fd" not in result.stdout
+    # WITHOUT opt-in (ALFRED_SANDBOX_BIND_INTERP_PREFIX unset), a generic kind:full
+    # plugin gets NO extra interpreter-prefix bind: the sandbox namespace stays the
+    # policy's static binds only, never widened to the executable's host subtree
+    # (CR #250). Only the quarantine-child spawn opts in (see the opt-in test below).
+    interp_prefix = stub.resolve().parent.parent
+    assert f"--ro-bind {interp_prefix} {interp_prefix}" not in result.stdout
+    # The exec target is the executable arg verbatim (no realpath rewrite either).
+    assert str(stub) in result.stdout
+
+
+@_requires_jq
+def test_kind_full_binds_interpreter_prefix_when_opted_in(
+    run_launcher, tmp_path, echo_bwrap
+) -> None:
+    """With ALFRED_SANDBOX_BIND_INTERP_PREFIX=1 the launcher ro-binds the resolved
+    interpreter's install prefix and execs the realpath.
+
+    This is the quarantine-child path (#248/ADR-0030): it execs a bound interpreter
+    that may live OUTSIDE the policy's static /usr,/lib,/lib64 binds (a proto/uv
+    python under ~/.proto), so its install prefix must be bound. Only the
+    quarantine-child spawn (`_child_env`) sets the flag; generic kind:full plugins
+    do not (asserted by `test_kind_full_invokes_bwrap_without_fd_flag`).
+    """
+    manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
+    stub = _stub_binary(tmp_path)
+    result = run_launcher(
+        "alfred.example",
+        str(stub),
+        env={
+            "ALFRED_ENVIRONMENT": "test",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+            "BWRAP": str(echo_bwrap),
+            "FAKE_UNAME": "Linux",
+            "ALFRED_SANDBOX_BIND_INTERP_PREFIX": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    interp_real = stub.resolve()
+    interp_prefix = interp_real.parent.parent
+    assert f"--ro-bind {interp_prefix} {interp_prefix}" in result.stdout
+    # Exec target is the realpath (resolves a venv symlink to a bound target).
+    assert str(interp_real) in result.stdout
+
+
+@_requires_jq
+def test_kind_full_opt_in_execs_realpath_of_symlinked_interpreter(
+    run_launcher, tmp_path, echo_bwrap
+) -> None:
+    """Opt-in + a SYMLINKED interpreter → bind the REAL prefix + exec the realpath.
+
+    The load-bearing reason the bind exists (ADR-0030): a uv-venv ``python3`` is a
+    symlink whose target lives OUTSIDE the bound prefix and fails ``execvp`` under
+    bwrap. The launcher must ro-bind ``dirname(dirname(realpath))`` — the REAL
+    interpreter tree, not the symlink's venv dir — and exec the realpath, not the
+    link. The plain-file opt-in test above can't prove this (arg == realpath).
+    """
+    real = tmp_path / "realprefix" / "bin" / "python3"
+    real.parent.mkdir(parents=True)
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    link = tmp_path / "venv" / "bin" / "python3"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+
+    manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
+    result = run_launcher(
+        "alfred.example",
+        str(link),
+        env={
+            "ALFRED_ENVIRONMENT": "test",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+            "BWRAP": str(echo_bwrap),
+            "FAKE_UNAME": "Linux",
+            "ALFRED_SANDBOX_BIND_INTERP_PREFIX": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    real_resolved = real.resolve()
+    real_prefix = real_resolved.parent.parent
+    # The bound prefix is the REAL interpreter tree, NOT the symlink's venv dir.
+    assert f"--ro-bind {real_prefix} {real_prefix}" in result.stdout
+    assert f"--ro-bind {link.parent.parent} " not in result.stdout
+    # The exec target is the realpath, NOT the symlink arg.
+    assert str(real_resolved) in result.stdout
+    assert str(link) not in result.stdout
+
+
+@_requires_jq
+def test_kind_full_refuses_root_level_interpreter_prefix(
+    run_launcher, tmp_path, echo_bwrap
+) -> None:
+    """Opt-in + an interpreter whose prefix resolves to ``/`` → fail-closed refusal.
+
+    A root-level interpreter (realpath one dir below ``/``) yields a ``/`` install
+    prefix that would ro-bind the ENTIRE host root into the sandbox (re-exposing
+    ``/etc``, ``/proc`` mounts the policy omits). The launcher must refuse LOUDLY
+    (hard rule #7) and NEVER reach the bwrap exec. ``/`` is the portable depth-1
+    realpath: ``readlink -f /`` == ``/`` and ``dirname(dirname(/))`` == ``/``.
+    """
+    manifest = _write_manifest(tmp_path, _FULL_MANIFEST)
+    result = run_launcher(
+        "alfred.example",
+        "/",
+        env={
+            "ALFRED_ENVIRONMENT": "test",
+            "ALFRED_PLUGIN_MANIFEST_PATH": str(manifest),
+            "BWRAP": str(echo_bwrap),
+            "FAKE_UNAME": "Linux",
+            "ALFRED_SANDBOX_BIND_INTERP_PREFIX": "1",
+        },
+    )
+    assert result.returncode != 0
+    assert "supervisor.sandbox.refused.interpreter_prefix_too_broad" in result.stderr
+    assert '"reason":"interpreter_prefix_too_broad"' in result.stderr
+    # Refused BEFORE the bwrap exec: the fake bwrap never ran, so no host-root bind.
+    assert "BWRAP_ARGS:" not in result.stdout
+    assert "--ro-bind / /" not in result.stdout
 
 
 @_requires_jq
