@@ -8,7 +8,11 @@ values + the re-export contract so a future refactor cannot quietly fork them.
 
 from __future__ import annotations
 
-from alfred.plugins import comms_socket_transport, comms_stdio_transport
+from alfred.plugins import (
+    comms_seq_codec,
+    comms_socket_transport,
+    comms_stdio_transport,
+)
 from alfred.plugins.comms_wire import _MAX_COMMS_LINE_BYTES, CommsProtocolError
 
 
@@ -28,3 +32,8 @@ def test_transports_reexport_the_same_objects() -> None:
     assert comms_stdio_transport.CommsProtocolError is CommsProtocolError
     assert comms_socket_transport.CommsProtocolError is CommsProtocolError
     assert comms_socket_transport._MAX_COMMS_LINE_BYTES is _MAX_COMMS_LINE_BYTES
+
+
+def test_no_import_cycle_when_importing_the_codec() -> None:
+    """The codec imports the bound from comms_wire, not the transport."""
+    assert comms_seq_codec._MAX_COMMS_LINE_BYTES is _MAX_COMMS_LINE_BYTES
