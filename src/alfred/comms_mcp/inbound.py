@@ -156,6 +156,13 @@ class _SecretBrokerLike(Protocol):
 
 
 @runtime_checkable
+class _InboundIdempotencyStoreLike(Protocol):
+    """Structural type for the durable accept-once commit (Spec A / G0)."""
+
+    async def commit_once(self, *, inbound_id: str, adapter_id: str) -> bool: ...
+
+
+@runtime_checkable
 class _SubPayloadPromoterLike(Protocol):
     """Structural type for the host-side sub-payload promoter (P1).
 
@@ -347,6 +354,38 @@ async def _emit_promoter_required(
     )
 
 
+async def _emit_idempotency_replay_observed(
+    notification: InboundMessageNotification,
+    *,
+    audit_writer: _AuditWriterLike,
+) -> None:
+    """Emit the content-free replay-observed row when the commit-once loses.
+
+    A replay short-circuit is a side-effecting DROP, so it must be visible in the
+    SIGNED audit log — not just a structlog line. The row carries ONLY the
+    adapter id, the PEPPERED HASH of the wire ``inbound_id`` (never the raw
+    string — sec-010), and the observation time. ``result="dropped"`` reuses the
+    existing comms drop result value (no new migration).
+    """
+    await audit_writer.append_schema(
+        fields=audit_row_schemas.COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS,
+        schema_name="COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS",
+        event="comms.inbound.idempotency.replay_observed",
+        actor_user_id=None,
+        subject={
+            "adapter_id": notification.adapter_id,
+            "inbound_id_hash": audit_hash.hash_inbound_id(notification.inbound_id),
+            "observed_at": datetime.now(UTC).isoformat(),
+        },
+        trust_tier_of_trigger="T3",
+        result="dropped",
+        cost_estimate_usd=0.0,
+        # sec-010: trace_id is a persisted, indexed column — it carries the
+        # peppered hash of inbound_id, NEVER the raw wire string.
+        trace_id=audit_hash.hash_inbound_id(notification.inbound_id),
+    )
+
+
 async def process_inbound_message(
     notification: InboundMessageNotification,
     *,
@@ -357,6 +396,7 @@ async def process_inbound_message(
     secret_broker: _SecretBrokerLike,
     pre_resolution_limiter: _PreResolutionLimiter | None = None,
     sub_payload_promoter: _SubPayloadPromoterLike | None = None,
+    idempotency_store: _InboundIdempotencyStoreLike | None = None,
 ) -> None:
     """Route one inbound comms notification through the trust boundary.
 
@@ -408,6 +448,32 @@ async def process_inbound_message(
             "without host-side sub-payload promotion"
         )
         raise PromoterRequiredError(msg)
+
+    # Spec A decision 4 (G0): durable accept-once commit on the COMPOSITE
+    # (adapter_id, inbound_id), BEFORE any per-message side effect (limiter budget
+    # / resolve / binding / extract / audit / ingest / dispatch). A replayed frame
+    # (gateway buffer replay after a core restart, or an adapter retry) hits the
+    # existing row and short-circuits here so NONE of the side effects re-run —
+    # including the unbound-first-contact binding branch, idempotent on the same
+    # id by construction. Structural refusals (cheap-validate, promoter-required)
+    # stay AHEAD of this so a misconfig fails loud and never consumes an
+    # idempotency row. Placed BEFORE the pre-resolution DoS limiter so a replay
+    # never re-charges the coarse budget (which would defeat G0). ``None`` store =
+    # pre-G0 unit callers; production always injects. A DB error in commit_once
+    # PROPAGATES (the store fails loud — hard rule #7); it is not caught here.
+    if idempotency_store is not None and not await idempotency_store.commit_once(
+        inbound_id=notification.inbound_id,
+        adapter_id=notification.adapter_id,
+    ):
+        # The replay DROP is a side effect → it is AUDITED (signed log), not just
+        # logged. Wire the broker so hash_inbound_id can derive the comms subkey.
+        audit_hash.set_broker(secret_broker)
+        await _emit_idempotency_replay_observed(notification, audit_writer=audit_writer)
+        _log.info(
+            "comms.inbound.idempotency.replay_short_circuit",
+            adapter_id=notification.adapter_id,
+        )
+        return
 
     # Wire the authoritative comms hash recipe (closure comms-1) to this call's
     # broker. ``set_broker`` is idempotent on the same broker object, so this is

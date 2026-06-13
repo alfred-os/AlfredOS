@@ -154,12 +154,15 @@ class SpyAuditWriter:
         # tests (sec-010) can prove the raw platform_user_id never lands on it.
         # ``trust_tier_of_trigger`` is captured so provenance tests can assert the
         # trigger tier (e.g. a plugin-triggered crash row must be T3, not T0).
+        # ``result`` is captured so provenance tests can pin the closed-vocab
+        # disposition (e.g. a replay row must be ``"dropped"``, never ``"success"``).
         self.schema_rows.append(
             {
                 "schema_name": schema_name,
                 "event": event,
                 "trace_id": kwargs.get("trace_id"),
                 "trust_tier_of_trigger": kwargs.get("trust_tier_of_trigger"),
+                "result": kwargs.get("result"),
                 **subject,
             }
         )
