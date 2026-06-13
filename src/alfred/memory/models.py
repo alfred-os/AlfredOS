@@ -684,6 +684,36 @@ class SandboxPolicyRegistry(Base):
     )
 
 
+class InboundIdempotency(Base):
+    """Durable inbound accept-once ledger (Spec A / G0).
+
+    One row per inbound comms frame the core has committed "accepted exactly
+    once", keyed on the durable wire ``inbound_id``. A replayed frame (gateway
+    buffer replay after a core restart) hits the existing row and short-circuits
+    BEFORE any side effect. Dedup ledger, not a content store: NO body, NO user
+    text, NO ``platform_user_id`` — so no ``language`` column (i18n hard-rule #3).
+    """
+
+    __tablename__ = "inbound_idempotency"
+
+    inbound_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    adapter_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    committed_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # Composite (adapter_id, inbound_id) PK — mirrors migration 0018. Isolates
+        # each adapter's id namespace so one adapter's reuse cannot drop another's
+        # distinct message.
+        sa.PrimaryKeyConstraint("adapter_id", "inbound_id", name="pk_inbound_idempotency"),
+        # Postgres-only char_length CHECKs live in migration 0018; SQLite unit
+        # tests cannot parse them (PoliciesSnapshotHistory precedent). The
+        # dialect-portable named PK + retention index stay here.
+        Index("ix_inbound_idempotency_committed_at", "committed_at"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cross-module Base.metadata registration
 # ---------------------------------------------------------------------------
