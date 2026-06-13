@@ -39,12 +39,14 @@ from alfred.audit.audit_row_schemas import (
     DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS,
     DAEMON_BOOT_FAILED_FIELDS,
     DAEMON_BOOT_FIELDS,
+    DAEMON_LIFECYCLE_FIELDS,
 )
 
 # PR-S4-11c-2a0 (#237): mint + register the per-process authorised T3 nonce at
 # boot. Imported at module scope (not lazily) so the boot-wiring unit tests can
 # monkeypatch the ``alfred.cli.daemon._commands.create_and_register_t3_nonce``
 # seam to count / fault the call without a real subprocess.
+from alfred.bootstrap.lifecycle_epoch import mint_boot_epoch
 from alfred.bootstrap.nonce_factory import (
     T3NonceAlreadyRegisteredError,
     create_and_register_t3_nonce,
@@ -1255,6 +1257,61 @@ async def _emit_or_quarantine(
         raise _BootRefusedError(_EXIT_AUDIT_UNWRITABLE) from exc
 
 
+async def _emit_ready(audit: AuditWriter, *, boot_id: str, epoch: str) -> None:
+    """Write the ``daemon.lifecycle.ready`` AUDIT row (Spec A G1, audit-only).
+
+    ``ready`` = HEALTH (the full security boot graph is up), not socket-bind:
+    this runs only AFTER ``daemon.boot.completed`` (invariant 1). G1 emits NO
+    wire frame — the gateway consumer + the runner send seam land in G3; G1's
+    authoritative (and only) record of the transition is this fail-loud audit
+    row. The ``ReadyNotification`` frame model exists for G3 to send.
+    """
+    await _emit_or_quarantine(
+        audit,
+        fields=DAEMON_LIFECYCLE_FIELDS,
+        schema_name="DAEMON_LIFECYCLE_FIELDS",
+        event="daemon.lifecycle.ready",
+        subject={
+            "boot_id": boot_id,
+            "epoch": epoch,
+            "phase": "ready",
+            "reason": "",
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        result="success",
+    )
+    typer.echo(t("daemon.lifecycle.ready", epoch=epoch))
+
+
+async def _emit_going_down(audit: AuditWriter, *, boot_id: str, epoch: str) -> None:
+    """Write the ``daemon.lifecycle.going_down`` AUDIT row (Spec A G1, audit-only).
+
+    Records the start of the PLANNED drain. ``reason`` is the closed
+    ``Literal["shutdown"]`` — a bare SIGTERM carries no intent and G1 has no
+    other intent-producer (G3 widens the vocabulary with its consumer). G1
+    emits NO wire frame; the ``GoingDownNotification`` model exists for G3 to
+    send. The row is fail-loud (exit 3 on an unwritable audit), exactly like
+    every other boot audit. The CALLER (the boot ``finally``) nests this emit
+    so that even if it raises, the existing child/socket/pidfile reap chain
+    STILL runs.
+    """
+    await _emit_or_quarantine(
+        audit,
+        fields=DAEMON_LIFECYCLE_FIELDS,
+        schema_name="DAEMON_LIFECYCLE_FIELDS",
+        event="daemon.lifecycle.going_down",
+        subject={
+            "boot_id": boot_id,
+            "epoch": epoch,
+            "phase": "going_down",
+            "reason": "shutdown",
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        result="success",
+    )
+    typer.echo(t("daemon.lifecycle.going_down", reason="shutdown"))
+
+
 async def _refuse_boot(
     audit: AuditWriter,
     failure: DaemonBootFailure,
@@ -1574,6 +1631,18 @@ async def _start_async() -> None:
             environment_source=source,
         )
 
+    # Spec A G1 (#237): mint the per-boot, NON-secret lifecycle epoch recorded
+    # in the ``daemon.lifecycle.ready`` / ``daemon.lifecycle.going_down`` audit
+    # rows (and reserved for the comms handshake the gateway adds in G3).
+    # Distinct from the secret CapabilityGateNonce just above — see
+    # alfred.bootstrap.lifecycle_epoch. Minted HERE (alongside the T3 nonce,
+    # past every early-refusal probe) rather than at the very top of boot: only
+    # the ``ready``/``going_down`` rows use it and both fire only after the boot
+    # graph is healthy, so an early refusal — which emits no lifecycle row —
+    # never needs (and must not leak) an epoch. This mirrors the T3 nonce's
+    # placement so a refusal before this point poisons no per-process slot.
+    epoch = mint_boot_epoch()
+
     started_at = datetime.now(UTC)
     state_git_head_sha = read_state_git_head_sha(settings.state_git_path)
     policies_snapshot_hash = snapshot_ref.snapshot_hash()
@@ -1646,6 +1715,11 @@ async def _start_async() -> None:
     # just start()+ — the comms-graph build already spawned the bwrap child (CR #255).
     supervisor: _SupervisorType | None = None
     pidfile_path: Path | None = None
+    # Spec A G1 (#237): tracks whether the boot reached the healthy/ready point,
+    # so the drain ``finally`` emits ``going_down`` ONLY for a daemon that
+    # actually came up (a refusing boot also runs the finally — invariant 3).
+    # Declared HERE, before the try, so the finally can never NameError on it.
+    ready_emitted = False
     try:
         supervisor = Supervisor(
             session_scope=session_scope,
@@ -1760,33 +1834,57 @@ async def _start_async() -> None:
 
         typer.echo(t("daemon.boot.started", boot_id=boot_id))
 
+        # Spec A G1 (#237): the boot graph is healthy — record ``ready`` + the
+        # per-boot epoch (AUDIT row; ready = HEALTH, not socket-bind). Set the
+        # flag LAST so a failure in ``_emit_ready`` (exit 3 on an unwritable
+        # audit) does NOT then emit ``going_down`` for a boot that never
+        # announced ready.
+        await _emit_ready(audit, boot_id=boot_id, epoch=epoch)
+        ready_emitted = True
+
         await wait_for_shutdown(supervisor)
     finally:
-        # Drain the supervisor (skipped if it never constructed), reap the live
-        # quarantine child, and remove the PID file on EVERY exit path — clean
-        # shutdown, a Supervisor()/write_pidfile()/start() failure, an adapter
-        # refusal, or a quarantine (exit 3) on the completion row — so a failed boot
-        # leaves neither a stale pidfile nor a leaked bwrap child behind (CR #255).
-        # Isolate the steps: a failing ``supervisor.stop()`` must NOT skip the child
-        # reap + pidfile delete (the exact leaks this finally exists to prevent;
-        # CR #255). The reap is suppressed so it never masks the real exit either.
+        # Spec A G1 (#237): record the planned drain BEFORE the teardown, but
+        # ONLY if the daemon actually came up (``ready_emitted``). The finally
+        # also runs on a boot REFUSAL (which already audits ``daemon.boot.failed``
+        # and never reached ``ready``); emitting ``going_down`` there would record
+        # a departure that never happened (invariant 3). The going_down audit row
+        # is FAIL-LOUD — but it must NEVER skip the child/socket/pidfile reap below
+        # (the exact #255 leak this finally exists to prevent). So it is nested in
+        # its OWN try whose finally IS the existing stop+reap chain: if the
+        # going_down emit raises (exit 3), the reap chain STILL runs, THEN the
+        # exception propagates.
         try:
-            if supervisor is not None:
-                await supervisor.stop()
+            if ready_emitted:
+                await _emit_going_down(audit, boot_id=boot_id, epoch=epoch)
         finally:
-            if comms_graph is not None:
-                with suppress(Exception):
-                    await comms_graph.aclose()
-            # ADR-0031: reap every socket listener (close the asyncio server + the
-            # underlying socket, unlink the socket file) on EVERY exit path so no
-            # stale socket inode lingers — the socket-file analog of the bwrap-child
-            # reap above. Isolated per-listener so one failing reap never skips the
-            # rest or the pidfile delete (the exact leaks this finally prevents).
-            for listener in socket_listeners:
-                with suppress(Exception):
-                    await listener.aclose()
-            if pidfile_path is not None:
-                delete_pidfile(pidfile_path)
+            # Drain the supervisor (skipped if it never constructed), reap the live
+            # quarantine child, and remove the PID file on EVERY exit path — clean
+            # shutdown, a Supervisor()/write_pidfile()/start() failure, an adapter
+            # refusal, or a quarantine (exit 3) on the completion row — so a failed
+            # boot leaves neither a stale pidfile nor a leaked bwrap child behind
+            # (CR #255). Isolate the steps: a failing ``supervisor.stop()`` must NOT
+            # skip the child reap + pidfile delete (the exact leaks this finally
+            # exists to prevent; CR #255). The reap is suppressed so it never masks
+            # the real exit either.
+            try:
+                if supervisor is not None:
+                    await supervisor.stop()
+            finally:
+                if comms_graph is not None:
+                    with suppress(Exception):
+                        await comms_graph.aclose()
+                # ADR-0031: reap every socket listener (close the asyncio server +
+                # the underlying socket, unlink the socket file) on EVERY exit path
+                # so no stale socket inode lingers — the socket-file analog of the
+                # bwrap-child reap above. Isolated per-listener so one failing reap
+                # never skips the rest or the pidfile delete (the exact leaks this
+                # finally prevents).
+                for listener in socket_listeners:
+                    with suppress(Exception):
+                        await listener.aclose()
+                if pidfile_path is not None:
+                    delete_pidfile(pidfile_path)
 
 
 def _current_pid() -> int:
