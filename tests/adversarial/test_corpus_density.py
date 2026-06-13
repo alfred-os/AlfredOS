@@ -183,14 +183,15 @@ def test_comms_identity_boundary_corpus_has_payloads() -> None:
     (never echoed), empty-classifier-set bypass (AST guard refuses), and
     handler-exception-silenced (positive/negative control). PR-S4-9 (#206)
     extends the category with cib-2026-006 (outbound-queue resume DLP bypass)
-    and cib-2026-007, lifting the floor to 7. The xfail-strict placeholder
-    self-destructed when the payloads arrived, by design; the floor catches a
-    silent deletion regression.
+    and cib-2026-007, lifting the floor to 7. The Spec-A G0 inbound-idempotency
+    work adds cib-2026-008 (inbound replay processed at most once), lifting the
+    floor to 8. The xfail-strict placeholder self-destructed when the payloads
+    arrived, by design; the floor catches a silent deletion regression.
     """
     category_dir = Path(__file__).parent / "comms_identity_boundary"
     count = _count_yaml_payloads(category_dir)
-    assert count >= 7, (
-        f"expected ≥7 *.yaml payloads under {category_dir} (cib-2026-001..007), "
+    assert count >= 8, (
+        f"expected ≥8 *.yaml payloads under {category_dir} (cib-2026-001..008), "
         f"found {count} — a payload was deleted or renamed"
     )
 

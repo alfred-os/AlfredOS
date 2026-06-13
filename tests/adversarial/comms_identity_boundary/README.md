@@ -23,6 +23,10 @@ attachment SHA-mismatch TOCTOU, and DLP-bypass on outbound retry.
   limiter refuses).
 - Prompt injection through Discord sub-payloads (embed-title, embed-description,
   embed-field-name, etc. — PR-S4-9 round-2 closure 9 lists nine surfaces).
+- Inbound frame replay: a duplicated/replayed `inbound_id` (gateway buffer
+  replay after a core restart, or a malicious adapter resend) is processed at
+  most once — the accept-once commit short-circuits the duplicate into a
+  content-free audited DROP, never re-running side effects (Spec A G0).
 
 **Prefix.** `cib-`
 
@@ -64,6 +68,7 @@ foundations).
 | Outbound DLP bypass via queue.pause → policy-tighten → queue.resume | PR-S4-9 (re-scan defensively at resume) |
 | Pre-resolution DoS via spray of fresh platform_user_ids | PR-S4-8 host-side `_PreResolutionLimiter` (covered by unit suite) |
 | Prompt injection through Discord sub-payloads (9 surfaces) | PR-S4-9 |
+| Inbound frame replay (buffer replay / malicious resend) reprocessed | Spec A G0 (`cib-2026-008`) — accept-once short-circuit + audited drop |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.

@@ -23,6 +23,10 @@ the payload's declared invariant actually holds at the trust boundary.
   stricter policy now redacts it, so consume REFUSES it instead of emitting.
 * cib-2026-007 (thread addressing drift, comms-4) -> a thread-retitle re-address
   (thread inbound, channel outbound) fires COMMS_ADDRESSING_DRIFT_FIELDS.
+* cib-2026-008 (inbound replay reprocessed, Spec A G0) -> an attacker resends the
+  SAME inbound_id N times: exactly ONE accept (downstream side effects run once)
+  and N-1 audited replay DROPs (result="dropped", trust_tier_of_trigger="T3"),
+  zero extra side effects.
 
 Mirrors the csb-2026 / de-2026 executable-corpus pattern.
 """
@@ -243,3 +247,65 @@ async def test_cib_007_thread_addressing_drift_audits() -> None:
     assert fired is True
     assert rows[0]["inbound_signal"] == "thread"
     assert rows[0]["outbound_mode"] == "channel"
+
+
+class _AcceptOnceStore:
+    """Models the real ``ON CONFLICT … DO NOTHING RETURNING`` accept-once.
+
+    The FIRST commit on a given ``(adapter_id, inbound_id)`` wins; every later
+    commit on the SAME composite key loses — exactly the durable Postgres
+    primitive ``process_inbound_message`` short-circuits on.
+    """
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[str, str]] = set()
+
+    async def commit_once(self, *, inbound_id: str, adapter_id: str) -> bool:
+        key = (adapter_id, inbound_id)
+        if key in self._seen:
+            return False
+        self._seen.add(key)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_cib_008_inbound_replay_is_processed_at_most_once() -> None:
+    # Threat: a replayed/duplicated inbound frame (buffer replay after a core
+    # restart, or a malicious adapter resend) must be processed AT MOST ONCE;
+    # duplicates are audited DROPs, never re-executed side effects.
+    payload = _load("cib-2026-008")
+    assert payload.expected_outcome == "audit_row_emitted"
+    resend_count = int(payload.payload["resend_count"])  # type: ignore[index]
+    inbound_id = str(payload.payload["inbound_id"])  # type: ignore[index]
+
+    store = _AcceptOnceStore()
+    # ONE long-lived orchestrator across all N sends so the side-effect counters
+    # accumulate — a re-executed duplicate would push them past 1.
+    orch = SpyOrchestrator()
+    audit = SpyAuditWriter()
+    broker = SpySecretBroker()
+
+    for _ in range(resend_count):
+        await process_inbound_message(
+            make_notification(inbound_id=inbound_id, body={"content": "replay me"}),
+            identity_resolver=SpyIdentityResolver(returns=make_resolved()),
+            orchestrator=orch,
+            burst_limiter=SpyBurstLimiter(),
+            audit_writer=audit,
+            secret_broker=broker,
+            idempotency_store=store,
+        )
+
+    # Exactly ONE frame was accepted: the downstream side effects ran ONCE.
+    assert orch.quarantined_extract_calls == 1
+    assert orch.ingest_calls == 1
+    assert orch.dispatch_calls == 1
+
+    # The other N-1 sends are audited content-free DROPs, never re-executed.
+    replays = audit.rows_with_schema("COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS")
+    assert len(replays) == resend_count - 1
+    for row in replays:
+        assert row["result"] == "dropped"
+        assert row["trust_tier_of_trigger"] == "T3"
+        assert row["inbound_id_hash"] == audit_hash.hash_inbound_id(inbound_id)
+        assert inbound_id not in str(row)  # raw wire id never on the row
