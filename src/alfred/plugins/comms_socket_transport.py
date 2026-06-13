@@ -47,10 +47,12 @@ import structlog
 
 from alfred.i18n import t
 
-# The frame codec + loud-failure type are SHARED with the stdio transport (ADR-0031
+# The frame bound + loud-failure type are SHARED across the comms wire (ADR-0031
 # Decision 1) — the socket carries the identical ADR-0025 wire, so reuse the bound
-# and the protocol-error class rather than forking a second, divergent framer.
-from alfred.plugins.comms_stdio_transport import (
+# and the protocol-error class rather than forking a second, divergent framer. They
+# live in the ``comms_wire`` leaf module (Spec A G2 / ADR-0032) so the seq/ack
+# codec can import them too without a codec<->transport import cycle.
+from alfred.plugins.comms_wire import (
     _MAX_COMMS_LINE_BYTES,
     CommsProtocolError,
 )

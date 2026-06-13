@@ -43,9 +43,14 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from alfred.errors import AlfredError
 from alfred.i18n import t
 from alfred.plugins._comms_child_env import comms_child_env
+
+# The per-frame DoS bound + the loud-failure type live in the shared leaf module
+# ``comms_wire`` (Spec A G2 / ADR-0032) so the seq/ack codec can import them
+# without closing a codec<->transport import cycle (architect F6). Re-exported
+# here (kept in ``__all__``) so existing importers see no churn.
+from alfred.plugins.comms_wire import _MAX_COMMS_LINE_BYTES, CommsProtocolError
 
 if TYPE_CHECKING:
     from alfred.cli._launcher_spawn import PluginLaunchSpec
@@ -76,28 +81,9 @@ def _comms_launcher_path() -> str:
 
 log = structlog.get_logger(__name__)
 
-# Mirrors :data:`alfred.plugins.stdio_transport._MAX_INBOUND_FRAME_BYTES` (10MB):
-# a plugin that emits a single line larger than this is misbehaving, and the host
-# refuses the frame rather than let a "claim 4GB on one line" wedge the loop. The
-# child's stdout ``StreamReader`` limit is set to this value at spawn so the read
-# itself fails fast instead of buffering unboundedly.
-_MAX_COMMS_LINE_BYTES: Final[int] = 10 * 1024 * 1024
-
 # close()-cooperative-wait timeout in seconds. Past this the transport escalates
 # terminate() -> kill(). Matches :data:`StdioTransport._CLOSE_TIMEOUT_S`.
 _CLOSE_TIMEOUT_S: Final[float] = 5.0
-
-
-class CommsProtocolError(AlfredError):
-    """The comms wire produced a malformed or over-bound frame.
-
-    Mirrors :class:`alfred.plugins.stdio_transport.PluginProtocolError`: a
-    wire-level violation the transport raises BEFORE the frame can reach the
-    session dispatcher. Covers an over-:data:`_MAX_COMMS_LINE_BYTES` line,
-    non-JSON bytes, and a JSON value that is not a top-level object. The raw
-    bytes are never carried on the exception (spec §5.6 — no T3 in error
-    attributes).
-    """
 
 
 class CommsStdioTransport:
