@@ -189,10 +189,60 @@ def _parse_kv(token: bytes, prefix: bytes) -> int:
     return value
 
 
+class SeqDedupWindow:
+    """Per-leg accept-once + cumulative-ack state machine (Spec A §4).
+
+    Constructed PER DIRECTION (``leg`` = ``"inbound"`` / ``"outbound"``), so the
+    dedup key is effectively ``seq`` within this leg — matching the spec's
+    "key = ``(leg, seq)`` ONLY — never payload-derived". :meth:`accept` returns
+    ``True`` the FIRST time a ``seq`` is seen and ``False`` on every re-sighting
+    (idempotent). :meth:`cumulative_ack` returns the highest CONTIGUOUS seq seen
+    (the top of the unbroken ``0..k`` run) — NOT merely the max — so a gap stalls
+    the ack until it is filled.
+
+    **No ack emission here.** This computes the ack VALUE; the choice of ack
+    SOURCE and COALESCING (piggyback + bounded timer) are sender/relay behaviours
+    owned by G3. G2 proves the value semantics; it does not fire acks, and the
+    transport carries an ``a=0`` placeholder rather than reading this. The G3
+    relay wires :meth:`cumulative_ack` as the ack source.
+
+    Pure: explicit state, no I/O, no clock. The seen-set grows unbounded — that is
+    correct for G2 (a pure unit under test); the bounded retention the seen-set
+    needs in production is a G4 (ReplayBuffer) concern, stated in ADR-0032's scope
+    note, not built here.
+    """
+
+    def __init__(self, *, leg: str) -> None:
+        self._leg = leg
+        self._seen: set[int] = set()
+        self._contiguous_high: int = -1
+
+    @property
+    def leg(self) -> str:
+        return self._leg
+
+    def accept(self, seq: int) -> bool:
+        """Record ``seq``; return ``True`` if NEW, ``False`` if a re-seen dup."""
+        if seq < 0:
+            raise ValueError(f"seq must be non-negative: {seq}")
+        if seq in self._seen:
+            return False
+        self._seen.add(seq)
+        # Advance the contiguous high-water as far as the unbroken run reaches.
+        while (self._contiguous_high + 1) in self._seen:
+            self._contiguous_high += 1
+        return True
+
+    def cumulative_ack(self) -> int:
+        """Highest CONTIGUOUS seq seen (top of the unbroken 0.. run); -1 if none."""
+        return self._contiguous_high
+
+
 __all__ = [
     "SEQ_MAGIC",
     "SEQ_VERSION",
     "_MAX_HEADER_BYTES",
+    "SeqDedupWindow",
     "SeqFrame",
     "decode_seq_frame",
     "encode_seq_frame",

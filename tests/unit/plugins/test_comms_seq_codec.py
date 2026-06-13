@@ -5,13 +5,14 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from alfred.plugins.comms_seq_codec import (
     _MAX_DECIMAL_WIDTH,
     _MAX_HEADER_BYTES,
     SEQ_MAGIC,
+    SeqDedupWindow,
     SeqFrame,
     decode_seq_frame,
     encode_seq_frame,
@@ -245,3 +246,90 @@ def test_seqframe_is_frozen() -> None:
     frame = SeqFrame(seq=1, ack=0, payload=b"x")
     with pytest.raises(FrozenInstanceError):
         frame.seq = 2  # type: ignore[misc]
+
+
+# --- SeqDedupWindow: per-leg accept-once + cumulative-ack state machine --------
+
+
+def test_window_accepts_in_order_and_advances_ack() -> None:
+    w = SeqDedupWindow(leg="inbound")
+    assert w.accept(0) is True
+    assert w.accept(1) is True
+    assert w.accept(2) is True
+    assert w.cumulative_ack() == 2
+
+
+def test_window_leg_is_exposed() -> None:
+    assert SeqDedupWindow(leg="outbound").leg == "outbound"
+
+
+def test_window_empty_ack_is_negative_one() -> None:
+    assert SeqDedupWindow(leg="inbound").cumulative_ack() == -1
+
+
+def test_window_drops_reseen_seq_idempotently() -> None:
+    w = SeqDedupWindow(leg="inbound")
+    assert w.accept(0) is True
+    assert w.accept(0) is False  # re-seen (leg, seq) dropped
+    assert w.accept(0) is False  # third sighting behaves like the second
+    assert w.cumulative_ack() == 0
+
+
+def test_window_gap_does_not_advance_ack() -> None:
+    w = SeqDedupWindow(leg="inbound")
+    assert w.accept(0) is True
+    assert w.accept(2) is True  # accepted (new) but NON-contiguous
+    assert w.cumulative_ack() == 0  # ack stalls at the top of the 0.. run
+    assert w.accept(1) is True  # fills the gap
+    assert w.cumulative_ack() == 2  # now the run is 0,1,2
+
+
+def test_window_first_seq_not_zero_stalls_ack() -> None:
+    """A leg that has never seen seq 0 has no contiguous run from 0 (ack == -1)."""
+    w = SeqDedupWindow(leg="inbound")
+    assert w.accept(5) is True
+    assert w.cumulative_ack() == -1
+
+
+def test_ack_is_monotonic_non_decreasing() -> None:
+    w = SeqDedupWindow(leg="inbound")
+    for s in (0, 1, 2):
+        w.accept(s)
+    high = w.cumulative_ack()
+    w.accept(2)  # re-seen — must not lower the ack
+    assert w.cumulative_ack() == high
+
+
+def test_window_rejects_negative_seq() -> None:
+    w = SeqDedupWindow(leg="inbound")
+    with pytest.raises(ValueError):
+        w.accept(-1)
+
+
+@settings(max_examples=200)
+@given(seqs=st.lists(st.integers(min_value=0, max_value=64), max_size=128))
+def test_property_ack_never_exceeds_contiguous_run(seqs: list[int]) -> None:
+    """ack == top of the unbroken 0..k run, regardless of arrival order."""
+    w = SeqDedupWindow(leg="inbound")
+    seen: set[int] = set()
+    for s in seqs:
+        accepted = w.accept(s)
+        assert accepted is (s not in seen)  # dedup idempotency
+        seen.add(s)
+    # Independent recomputation of the contiguous high-water.
+    expected = -1
+    while (expected + 1) in seen:
+        expected += 1
+    assert w.cumulative_ack() == expected
+
+
+@given(seqs=st.lists(st.integers(min_value=0, max_value=64), max_size=128))
+def test_property_replay_is_idempotent(seqs: list[int]) -> None:
+    """Replaying the whole sequence a second time accepts nothing new + same ack."""
+    w = SeqDedupWindow(leg="inbound")
+    for s in seqs:
+        w.accept(s)
+    ack_after_first = w.cumulative_ack()
+    for s in seqs:
+        assert w.accept(s) is False  # every replayed (leg, seq) is a dup
+    assert w.cumulative_ack() == ack_after_first
