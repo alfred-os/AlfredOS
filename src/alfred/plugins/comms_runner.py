@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 import structlog
 
 from alfred.i18n import t
+from alfred.plugins.comms_seq_codec import SEQ_VERSION
 from alfred.plugins.comms_stdio_transport import CommsProtocolError
 from alfred.plugins.errors import PluginError
 
@@ -125,7 +126,12 @@ class _CommsTransportLike(Protocol):
     The runner binds to this shape rather than the concrete
     :class:`alfred.plugins.comms_stdio_transport.CommsStdioTransport` so a test
     can drive it with an in-memory frame queue and so the runner never reaches
-    for transport internals beyond these four awaitables.
+    for transport internals beyond these four awaitables + the sync seq/ack flip.
+
+    ``enable_seq_ack`` (Spec A G2 / ADR-0032) is a SYNC flip (it only sets a bool),
+    not an awaitable like the other four. The runner calls it as a TYPED method
+    after the ``lifecycle.start`` handshake negotiates ``AlfredSeqAck/1`` — never
+    via ``getattr`` duck-typing — so every transport (and test fake) implements it.
     """
 
     async def spawn(self) -> None: ...
@@ -135,6 +141,8 @@ class _CommsTransportLike(Protocol):
     async def read_frame(self) -> Mapping[str, object] | None: ...
 
     async def close(self) -> None: ...
+
+    def enable_seq_ack(self) -> None: ...
 
 
 class CommsPluginRunner:
@@ -191,6 +199,10 @@ class CommsPluginRunner:
         # hang the teardown drain. Closes the post-snapshot race between a dispatch
         # task issuing a request and the pump's terminal ``_fail_all_pending``.
         self._reader_stopped = False
+        # Spec A G2 (#237): whether the lifecycle.start handshake negotiated the
+        # out-of-band seq/ack header. Flipped True only when BOTH the host
+        # advertised it AND the plugin echoed it; drives transport.enable_seq_ack.
+        self._seq_ack_negotiated = False
 
     async def send_request(
         self,
@@ -360,7 +372,13 @@ class CommsPluginRunner:
                 "jsonrpc": "2.0",
                 "id": _LIFECYCLE_START_ID,
                 "method": "lifecycle.start",
-                "params": {"adapter_id": self._adapter_id},
+                "params": {
+                    "adapter_id": self._adapter_id,
+                    # Spec A G2 (#237): advertise out-of-band seq/ack support. A
+                    # plugin that speaks it echoes the same field in its result; a
+                    # plugin that does not omits it and the wire stays plain.
+                    "seq_ack": {"version": SEQ_VERSION},
+                },
             }
         )
         while True:
@@ -381,6 +399,16 @@ class CommsPluginRunner:
                     raise PluginError(
                         t("comms.runner.handshake_failed", adapter_id=self._adapter_id)
                     )
+                seq_ack = result.get("seq_ack")
+                if isinstance(seq_ack, Mapping) and seq_ack.get("version") == SEQ_VERSION:
+                    # Both peers speak the wire version — enable the header. The
+                    # transport now frames every subsequent send with seq/ack and
+                    # strips the header on read. A plugin that omitted the echo
+                    # leaves this False and the wire stays plain ADR-0025. The flip
+                    # is a TYPED call on the _CommsTransportLike seam (architect F4)
+                    # — no getattr duck-typing.
+                    self._seq_ack_negotiated = True
+                    self._transport.enable_seq_ack()
                 break
             # A non-matching frame before the ack is not expected on a conformant
             # wire (the plugin answers lifecycle.start before emitting anything

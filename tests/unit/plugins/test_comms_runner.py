@@ -70,6 +70,7 @@ class _FakeTransport:
         self.sent: list[Mapping[str, object]] = []
         self.spawned = False
         self.closed = False
+        self.seq_ack_enabled = False
 
     async def spawn(self) -> None:
         self.spawned = True
@@ -87,6 +88,12 @@ class _FakeTransport:
 
     async def close(self) -> None:
         self.closed = True
+
+    def enable_seq_ack(self) -> None:
+        # Spec A G2 (#237): the typed _CommsTransportLike flip. The default
+        # _HANDSHAKE_OK echoes no seq_ack, so the runner never calls this here;
+        # the fake implements it so it conforms to the extended Protocol.
+        self.seq_ack_enabled = True
 
 
 class _RecordingHandler:
@@ -464,6 +471,7 @@ class _QueueTransport:
         self.sent: list[Mapping[str, object]] = []
         self.spawned = False
         self.closed = False
+        self.seq_ack_enabled = False
 
     async def spawn(self) -> None:
         self.spawned = True
@@ -479,6 +487,10 @@ class _QueueTransport:
 
     async def close(self) -> None:
         self.closed = True
+
+    def enable_seq_ack(self) -> None:
+        # Spec A G2 (#237): the typed _CommsTransportLike flip (see _FakeTransport).
+        self.seq_ack_enabled = True
 
     def push(self, item: Any) -> None:
         self._queue.put_nowait(item)
