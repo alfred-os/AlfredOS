@@ -43,3 +43,21 @@ The missing piece is a **rendezvous** between two already-running processes: the
 ### Scope boundary (this ADR)
 
 This ADR ships the **daemon-side** socket listener + `CommsSocketTransport` + the boot-path branch that selects it for the socket-shaped (TUI) adapter, proven by unit tests over the listener lifecycle (bind/accept/perms/stale-unlink/reap), the transport's `_CommsTransportLike` conformance, and the daemon boot wiring (default-empty unchanged, multi-adapter refusal still fires, reap on every exit path). The client-side `alfred chat` dial-the-socket change, and any multi-connection / per-session socket fan-out, are follow-ups.
+
+## Amendment — 2026-06-13 (PR-S4-237-2): the foreground TUI consumes the peer end (Shape A, in-process dial)
+
+PR-1 (this ADR's original cut) shipped the **daemon-side** listener + `CommsSocketTransport`. PR-S4-237-2 ships the **client (peer) end** that consumes it: the foreground `alfred chat` now DIALS the daemon's bound socket and co-hosts the Textual app + the wire in one asyncio program.
+
+- **The planned PR-2/PR-3 split collapsed into one PR.** The wire the TUI co-hosts IS the dial — there is no useful intermediate state where the dialer exists but the TUI does not co-host it (or vice versa), so splitting them only churned the same files twice. PR-2 therefore delivers both the client dialer and the co-host.
+
+- **Topology = Shape A (in-process dial; the `chat` launcher-spawn is retired).** `alfred chat` runs the TUI code **in its own process** (no `spawn_plugin_via_launcher` subprocess) — one asyncio program co-hosting Textual (via the async `App.run_async()`, never the loop-owning blocking `App.run()`) and the socket serve loop under a single `asyncio.TaskGroup`. The PR-S4-10 launcher-spawn path for `chat` is retired: the TUI is a `sandbox.kind = "none"`, operator-local, trusted foreground PTY app, so launcher scrubbing buys nothing for it, and the daemon cannot spawn-and-own a process that must instead own the operator's terminal.
+
+- **The TUI is the PLUGIN end of the wire; it does NOT use `CommsPluginRunner`.** On the socket the DAEMON runs the host-side `CommsPluginRunner` (it SENDS `lifecycle.start` / `outbound.message` requests and RECEIVES `inbound.message` notifications). So the co-host's wire task is a thin serve loop: `read_frame` → route the request through the existing `TuiServer.dispatch` → write the response back via `transport.send`; the session's inbound sink writes `inbound.message` frames to `transport.send` (replacing the retired daemon-spawned stdout sink). The runner/session/codec/dispatch path are reused unchanged — only the carrier and the direction-of-drive differ from the stdio adapter.
+
+- **New surface.** `dial_comms_socket(adapter_id)` (the connect-analog of `CommsSocketListener.accept`, reusing the carrier-symmetric `CommsSocketTransport` and pinning the dialed reader to the same `_MAX_COMMS_LINE_BYTES` frame bound) + `alfred_tui.cohost.run_cohosted` (the co-host harness). `_chat_main` flips from the launcher spawn to the in-process dial-and-co-host; a daemon-absent dial raises an `OSError` family member (`ConnectionRefusedError` / `FileNotFoundError`), mapped to the EXISTING `comms.tui.daemon_required_to_chat` t() string + exit 3 — same operator contract, detection moved from "launcher exited nonzero" to "dial failed". No new i18n key.
+
+- **Stubbed ack (scope).** The daemon still acks a fixed `{"content": "ack"}`; a real `alfred chat` turn round-trips and paints the literal `ack` into the conversation log — that IS the PR-2 success signal. The real persona reply is the separate 2c / #230 track and is out of scope here.
+
+- **Trust boundary unchanged.** PR-2 introduces no new trust-tag path: the operator's typed body crosses as a plain `inbound.message` over the dumb socket carrier; T3 tagging happens host-side in `process_inbound_message` on receipt. The `subscriber_tier = "operator"` (T1) is orthogonal to content trust tier and unchanged.
+
+- **Core→plugin layering (sanctioned narrowly).** The core CLI imports the first-party bundled `alfred_tui` package directly via `sys.path`; this is sanctioned ONLY for the operator-local foreground TUI (`alfred chat`), NOT a precedent that any sandboxed/third-party plugin may be imported into core.

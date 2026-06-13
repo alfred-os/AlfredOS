@@ -174,6 +174,16 @@ warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
 exclude = ["src/alfred/memory/migrations/.*"]
+# ``alfred.cli.main._chat_main`` imports ``alfred_tui.cohost`` (ADR-0031 Shape A:
+# the foreground TUI's in-process dial-and-co-host). ``alfred_tui`` is the TUI
+# plugin's own src-layout package under ``plugins/alfred_tui/src`` — not on the
+# core ``src`` tree, but RESOLVABLE in-tree (the import is runtime-loaded via the
+# ``sys.path.insert`` in ``_chat_main``). Putting its src on ``mypy_path`` lets
+# mypy resolve the import with REAL types (so ``run_cohosted`` is typed ``-> int``,
+# not ``Any``) rather than blanket-ignoring it; mypy still only type-checks the
+# files passed on the command line (``src``), so this only affects import
+# resolution, not the checked set.
+mypy_path = ["plugins/alfred_tui/src"]
 
 [tool.ruff]
 target-version = "py312"
@@ -239,6 +249,15 @@ pythonVersion = "3.14"
 typeCheckingMode = "standard"
 include = ["src"]
 exclude = ["src/alfred/memory/migrations"]
+# ``alfred.cli.main._chat_main`` imports ``alfred_tui.cohost`` (ADR-0031 Shape A:
+# the foreground TUI's in-process dial-and-co-host). ``alfred_tui`` is the TUI
+# plugin's own src-layout package under ``plugins/alfred_tui/src`` — not on the
+# core ``src`` tree, but RESOLVABLE in-tree (the import is runtime-loaded via the
+# ``sys.path.insert`` in ``_chat_main``). Adding its src here lets pyright resolve
+# the import for the ``src``-scoped check without a per-line suppression; the
+# plugin package itself is not added to ``include`` (still ``["src"]``), so pyright
+# only reports diagnostics on the core tree.
+extraPaths = ["plugins/alfred_tui/src"]
 
 [tool.babel]
 # i18n catalog extract config. See Task 3.5 for the consumer.

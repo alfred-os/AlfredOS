@@ -37,7 +37,9 @@ from alfred.plugins.comms_socket_transport import (
     CommsSocketListener,
     CommsSocketTransport,
     default_comms_socket_path,
+    dial_comms_socket,
 )
+from alfred.plugins.comms_stdio_transport import _MAX_COMMS_LINE_BYTES
 
 pytestmark = pytest.mark.asyncio
 
@@ -462,6 +464,97 @@ async def test_listener_second_accept_call_raises(runtime_dir: Path) -> None:
         client_w.close()
         await transport.close()
         del client_r
+    finally:
+        await listener.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Client dialer — ``dial_comms_socket`` (PR-S4-237-2, ADR-0031 amendment).
+#
+# The connect-analog of ``CommsSocketListener.accept``: the foreground
+# ``alfred chat`` dials the daemon's already-bound socket and gets the SAME
+# carrier-symmetric ``CommsSocketTransport``. These cases prove the dial round-trips
+# both directions over a real in-process unix socket, and that establishment
+# failure (no listener) and the over-bound DoS guard surface LOUD.
+# ---------------------------------------------------------------------------
+
+
+async def test_dial_round_trips_both_directions_against_a_real_listener(
+    runtime_dir: Path,
+) -> None:
+    """Bind a listener, dial it, and assert frames round-trip both ways.
+
+    The peer-end transport returned by ``dial_comms_socket`` must be a working
+    duplex: a ``read_frame`` reads what the host ``send``s, and a ``send`` reaches
+    the host's ``read_frame``. The host (accept) end and the client (dial) end run
+    on the same loop over a real ``AF_UNIX`` socket.
+    """
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        client = await dial_comms_socket(_ADAPTER_ID)
+        host = await accept_task
+
+        # host -> client.
+        await host.send({"jsonrpc": "2.0", "method": "lifecycle.start", "id": 1})
+        assert await client.read_frame() == {
+            "jsonrpc": "2.0",
+            "method": "lifecycle.start",
+            "id": 1,
+        }
+
+        # client -> host (the ``inbound.message`` direction).
+        await client.send({"jsonrpc": "2.0", "method": "inbound.message"})
+        assert await host.read_frame() == {"jsonrpc": "2.0", "method": "inbound.message"}
+
+        await client.close()
+        await host.close()
+    finally:
+        await listener.aclose()
+
+
+async def test_dial_with_no_listener_raises_loud(runtime_dir: Path) -> None:
+    """Dialing a path with no bound listener surfaces the connect error LOUD.
+
+    A daemon-absent / socket-missing dial must NOT be swallowed — the
+    ``ConnectionRefusedError`` / ``FileNotFoundError`` from
+    ``open_unix_connection`` propagates so ``_chat_main`` can map it to the
+    daemon-required operator message (CLAUDE.md hard rule #7).
+    """
+    # The runtime dir does not exist yet (no listener bound), so the socket file
+    # is absent -> FileNotFoundError; a present-but-unbound path would refuse.
+    with pytest.raises((ConnectionRefusedError, FileNotFoundError, OSError)):
+        await dial_comms_socket(_ADAPTER_ID)
+
+
+async def test_dial_bounds_the_reader_to_max_line_bytes(runtime_dir: Path) -> None:
+    """An over-bound line from the host trips the DIALED reader's limit.
+
+    Proves the ``limit=_MAX_COMMS_LINE_BYTES`` is wired on the client reader (the
+    same frame-DoS bound the accept side pins): the listener sends a line longer
+    than the bound and the dialed transport's ``read_frame`` raises
+    ``CommsProtocolError`` rather than buffering unboundedly.
+    """
+    # Bind a listener whose accepted writer can emit an over-bound line; the dialer
+    # uses the production _MAX_COMMS_LINE_BYTES bound, so we must overflow THAT.
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        client = await dial_comms_socket(_ADAPTER_ID)
+        host = await accept_task
+
+        # One JSON frame whose single line is longer than the client's
+        # _MAX_COMMS_LINE_BYTES bound -> the dialed reader's limit trips when the
+        # client reads it. ``host.send`` emits exactly one ``json.dumps(frame)+"\n"``
+        # line, so an over-long string value overflows the bound.
+        await host.send({"x": "a" * (_MAX_COMMS_LINE_BYTES + 64)})
+        with pytest.raises(CommsProtocolError):
+            await asyncio.wait_for(client.read_frame(), timeout=2.0)
+
+        await client.close()
+        await host.close()
     finally:
         await listener.aclose()
 
