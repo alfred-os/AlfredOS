@@ -52,6 +52,11 @@ from alfred.i18n import t
 # and the protocol-error class rather than forking a second, divergent framer. They
 # live in the ``comms_wire`` leaf module (Spec A G2 / ADR-0032) so the seq/ack
 # codec can import them too without a codec<->transport import cycle.
+from alfred.plugins.comms_seq_codec import (
+    SeqFrame,
+    decode_seq_frame,
+    encode_seq_frame,
+)
 from alfred.plugins.comms_wire import (
     _MAX_COMMS_LINE_BYTES,
     CommsProtocolError,
@@ -152,6 +157,23 @@ class CommsSocketTransport:
         self._writer = writer
         self._max_line_bytes = max_line_bytes
         self._closed = False
+        # Spec A G2 (#237): out-of-band seq/ack framing, OFF by default. Flipped ON
+        # (via enable_seq_ack) only when the lifecycle.start handshake negotiated
+        # ``AlfredSeqAck/1`` on BOTH peers. When OFF the wire is byte-for-byte the
+        # existing ADR-0025 plain frame. Like the stdio sibling, the transport
+        # emits an ``a=0`` PLACEHOLDER ack and stores NO received-seq high-water
+        # (the real contiguous ack is the G3 relay's concern — ADR-0032 Decision 3).
+        self._seq_ack_enabled = False
+        self._send_seq = 0
+
+    def enable_seq_ack(self) -> None:
+        """Turn the out-of-band seq/ack header ON (post-handshake, version-gated).
+
+        Idempotent flip the runner calls once the ``lifecycle.start`` negotiation
+        confirmed BOTH peers speak ``AlfredSeqAck/1``. Mirrors
+        :meth:`CommsStdioTransport.enable_seq_ack` — only the carrier differs.
+        """
+        self._seq_ack_enabled = True
 
     async def spawn(self) -> None:
         """No-op: the accepted connection IS the wire (ADR-0031 Decision 2).
@@ -171,7 +193,19 @@ class CommsSocketTransport:
         crash arm routes an ``adapter.crashed`` and the breaker can trip (CLAUDE.md
         hard rule #7).
         """
-        payload = (json.dumps(frame) + "\n").encode()
+        body = json.dumps(frame).encode()
+        if self._seq_ack_enabled:
+            payload = encode_seq_frame(
+                body,
+                seq=self._send_seq,
+                # PLACEHOLDER (ADR-0032 Decision 3) — NOT a high-water; the G3 relay
+                # wires SeqDedupWindow.cumulative_ack() as the real ack source.
+                ack=0,
+                max_unit_bytes=self._max_line_bytes,
+            )
+            self._send_seq += 1
+        else:
+            payload = body + b"\n"
         try:
             self._writer.write(payload)
             await self._writer.drain()
@@ -207,6 +241,17 @@ class CommsSocketTransport:
             raise CommsProtocolError(
                 t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
             )
+        if self._seq_ack_enabled:
+            # Spec A G2 (#237): strip the out-of-band header; the inner payload
+            # continues through the existing json.loads path unchanged. CONSUMES NO
+            # seq/ack here (no dedup, no ack, no high-water — the G3 relay is the
+            # consumer). ``decode_seq_frame`` is magic-gated, so a plain line from an
+            # un-upgraded peer still decodes via the SeqFrame(seq=None, ...) fallback
+            # (mixed-wire safety), and is fail-loud on a malformed header — surfacing
+            # through the SAME arm as a malformed plain frame. Mirrors the stdio
+            # sibling exactly; only the carrier differs.
+            frame_unit: SeqFrame = decode_seq_frame(line, max_unit_bytes=self._max_line_bytes)
+            line = frame_unit.payload
         try:
             decoded = json.loads(line)
         except json.JSONDecodeError as exc:
