@@ -122,7 +122,19 @@ def outbound_buffer_depth() -> int:
 
 
 def handle_lifecycle_start(_params: dict[str, Any]) -> dict[str, Any]:
-    """Mark the adapter running; report the plugin version."""
+    """Mark the adapter running; report the plugin version.
+
+    Spec A G2 (#237): this reference adapter does NOT advertise the seq/ack
+    capability, even though the host may advertise it on ``lifecycle.start``.
+    seq/ack is the resumable core<->gateway leg (G3); a daemon-SPAWNED plugin is
+    not the seq/ack peer — it dies with the core, so there is no resume benefit —
+    and it never deframes the out-of-band ``A1`` header in its plain ``json.loads``
+    serve loop. Echoing the capability would flip the host's version-gate ON and
+    every subsequent host->plugin frame would arrive ``A1``-wrapped, which this
+    plugin cannot parse. So the echo is deliberately ABSENT: the gate stays OFF
+    and the wire stays plain ADR-0025. The gateway (G3) is the peer that both
+    echoes the capability and deframes the header (ADR-0032).
+    """
     _state["running"] = True
     return {"ok": True, "plugin_version": _PLUGIN_VERSION}
 
