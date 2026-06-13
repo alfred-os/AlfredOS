@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-13 21:52+0100\n"
+"POT-Creation-Date: 2026-06-13 22:43+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2053,41 +2053,41 @@ msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "
 "({file_value}) disagree; the env var wins."
 
-#: src/alfred/plugins/comms_runner.py:229
-#: src/alfred/plugins/comms_runner.py:652
+#: src/alfred/plugins/comms_runner.py:241
+#: src/alfred/plugins/comms_runner.py:680
 msgid "comms.runner.request_aborted"
 msgstr ""
 "Comms adapter {adapter_id} closed its connection while an outbound "
 "request was in flight; the request was aborted."
 
-#: src/alfred/plugins/comms_runner.py:262
+#: src/alfred/plugins/comms_runner.py:274
 msgid "comms.runner.request_timeout"
 msgstr ""
 "Comms adapter {adapter_id} did not answer the {method} request before the"
 " deadline; the outbound request was abandoned."
 
-#: src/alfred/plugins/comms_runner.py:373
-#: src/alfred/plugins/comms_runner.py:382
+#: src/alfred/plugins/comms_runner.py:391
+#: src/alfred/plugins/comms_runner.py:400
 msgid "comms.runner.handshake_failed"
 msgstr ""
 "Comms adapter {adapter_id} failed its lifecycle.start handshake; the "
 "plugin closed its connection or did not acknowledge. The adapter was not "
 "loaded."
 
-#: src/alfred/plugins/comms_runner.py:625
+#: src/alfred/plugins/comms_runner.py:653
 msgid "comms.runner.response_error"
 msgstr ""
 "Comms adapter {adapter_id} returned an error response to an outbound "
 "request; the request failed."
 
-#: src/alfred/plugins/comms_socket_transport.py:196
-#: src/alfred/plugins/comms_socket_transport.py:206
-#: src/alfred/plugins/comms_socket_transport.py:213
-#: src/alfred/plugins/comms_socket_transport.py:220
-#: src/alfred/plugins/comms_stdio_transport.py:205
-#: src/alfred/plugins/comms_stdio_transport.py:215
-#: src/alfred/plugins/comms_stdio_transport.py:222
+#: src/alfred/plugins/comms_socket_transport.py:232
+#: src/alfred/plugins/comms_socket_transport.py:242
+#: src/alfred/plugins/comms_socket_transport.py:260
+#: src/alfred/plugins/comms_socket_transport.py:267
 #: src/alfred/plugins/comms_stdio_transport.py:229
+#: src/alfred/plugins/comms_stdio_transport.py:239
+#: src/alfred/plugins/comms_stdio_transport.py:258
+#: src/alfred/plugins/comms_stdio_transport.py:265
 msgid "comms.transport.malformed_frame"
 msgstr ""
 "Comms adapter {adapter_id} sent a malformed or oversized frame; the wire "
