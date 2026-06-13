@@ -147,12 +147,33 @@ class _WireModel(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class SeqAckCapability(_WireModel):
+    """Negotiated out-of-band seq/ack support (Spec A G2 / ADR-0032).
+
+    Advertised by the host in ``lifecycle.start`` params and ECHOED by the plugin
+    in the ``lifecycle.start`` result when it speaks the same wire version. The
+    out-of-band seq/ack header is emitted on the wire ONLY when BOTH peers carry
+    this field (version-gate, default-OFF). ``version`` is a CLOSED ``Literal`` —
+    only ``"1"`` exists in G2; widening it is a non-breaking change a future wire
+    revision makes with its consumer. Carries NO T3: the field is pure
+    transport-capability metadata, never payload-derived.
+    """
+
+    version: Literal["1"]
+
+
 class LifecycleStartRequest(_WireModel):
-    """Host asks the plugin to begin serving an adapter."""
+    """Host asks the plugin to begin serving an adapter.
+
+    ``seq_ack`` (Spec A G2 / ADR-0032) is the host advertising out-of-band
+    seq/ack support; ``None`` (the default) is the explicit default-OFF signal. A
+    plugin that speaks the same wire version echoes the field in its result.
+    """
 
     adapter_id: AdapterId
     credentials_ref: str = Field(min_length=1)
     policies_snapshot_hash: str = Field(min_length=1)
+    seq_ack: SeqAckCapability | None = None
 
 
 class LifecycleStartResult(_WireModel):
@@ -163,10 +184,16 @@ class LifecycleStartResult(_WireModel):
     here so the wire contract matches both spec §8.1 and the reference plugin's
     ``extra="forbid"`` output (``plugins/alfred_comms_test/main.py``) — omitting
     it would make a conformant plugin's result fail validation.
+
+    ``seq_ack`` (Spec A G2 / ADR-0032) is the plugin ECHOING out-of-band seq/ack
+    support; ``None`` (the default) means the plugin does not speak it, so the
+    wire stays plain ADR-0025 (default-OFF fallback). A pre-G2 plugin that omits
+    the field still validates because it defaults to ``None``.
     """
 
     ok: bool
     plugin_version: str = Field(min_length=1)
+    seq_ack: SeqAckCapability | None = None
 
 
 class LifecycleStopRequest(_WireModel):
@@ -406,6 +433,7 @@ __all__ = [
     "RateLimitSignal",
     "ReadyNotification",
     "ScannedOutboundBody",
+    "SeqAckCapability",
     "_OutboundDelivered",
     "_OutboundRetryable",
     "_OutboundTerminal",
