@@ -64,18 +64,26 @@ def _call_name(node: ast.Call) -> str | None:
 
 
 @pytest.mark.parametrize(
-    "module_name",
-    ["alfred_tui.server", "plugins.alfred_discord.server"],
+    ("module_name", "loop_entry"),
+    [
+        # The TUI flipped to the unix-socket carrier (ADR-0031 PR-S4-237-2): its
+        # loop entry is the co-host ``run_cohosted`` (Textual + the socket serve
+        # loop), NOT the daemon-spawned stdio reader. The stderr-logging-first
+        # invariant is identical — only the loop-entry symbol differs.
+        ("alfred_tui.server", "run_cohosted"),
+        ("plugins.alfred_discord.server", "_serve_stdin_stdout"),
+    ],
 )
-def test_serve_configures_stderr_logging_first(module_name: str) -> None:
+def test_serve_configures_stderr_logging_first(module_name: str, loop_entry: str) -> None:
     """Each plugin ``serve()`` configures stderr logging BEFORE entering its loop.
 
-    The docstring on this guard promises "before the stdio loop", but merely
-    asserting the call exists *somewhere* in ``serve()`` lets a regression that
-    moves the config call *after* the loop pass silently. This asserts ordering:
-    the ``configure_stderr_json_logging`` call must appear at a lower line than
-    the ``_serve_stdin_stdout`` loop entry, so logs are stderr-bound before the
-    first wire frame is read. (PR-S4-10 review #7.)
+    The docstring on this guard promises "before the loop", but merely asserting
+    the call exists *somewhere* in ``serve()`` lets a regression that moves the
+    config call *after* the loop pass silently. This asserts ordering: the
+    ``configure_stderr_json_logging`` call must appear at a lower line than the
+    plugin's loop entry (``run_cohosted`` for the socket-carried TUI,
+    ``_serve_stdin_stdout`` for the stdio-carried Discord relay), so logs are
+    stderr-bound before the first wire frame is read. (PR-S4-10 review #7.)
     """
     tree = ast.parse(_serve_source(module_name))
     cfg_lines = [
@@ -86,11 +94,11 @@ def test_serve_configures_stderr_logging_first(module_name: str) -> None:
     loop_lines = [
         node.lineno
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _call_name(node) == "_serve_stdin_stdout"
+        if isinstance(node, ast.Call) and _call_name(node) == loop_entry
     ]
     assert cfg_lines, f"{module_name}.serve() must call configure_stderr_json_logging()"
-    assert loop_lines, f"{module_name}.serve() must call _serve_stdin_stdout()"
+    assert loop_lines, f"{module_name}.serve() must call {loop_entry}()"
     assert min(cfg_lines) < min(loop_lines), (
         f"{module_name}.serve() must configure stderr JSON logging BEFORE entering "
-        "the stdio loop, not after — logs must be stderr-bound before the first frame."
+        "its loop, not after — logs must be stderr-bound before the first frame."
     )

@@ -99,6 +99,34 @@ def default_comms_socket_path(adapter_id: str) -> Path:
     return _runtime_dir() / f"comms-{adapter_id}.sock"
 
 
+async def dial_comms_socket(adapter_id: str) -> CommsSocketTransport:
+    """Dial the daemon's bound comms socket; return the peer-end transport.
+
+    The connect-analog of :meth:`CommsSocketListener.accept` (ADR-0031 PR-2): the
+    foreground ``alfred chat`` is a separate, already-running process, so it does
+    not get its connection accepted — it *establishes* one by dialing the daemon's
+    0600 owner-only socket. The returned :class:`CommsSocketTransport` is the SAME
+    carrier-symmetric duplex the listener hands back — only establishment differs
+    (connect vs accept); ``send`` / ``read_frame`` drive the dialed streams with the
+    identical ADR-0025 codec.
+
+    The dialed reader is pinned to :data:`_MAX_COMMS_LINE_BYTES` so the client
+    enforces the IDENTICAL frame-size DoS bound the accept side pins
+    (:meth:`CommsSocketListener.accept`), matching the stdio transport's guard.
+
+    A daemon-absent / socket-missing dial raises LOUD: ``open_unix_connection``
+    surfaces ``FileNotFoundError`` (the socket inode is gone) or
+    ``ConnectionRefusedError`` (a stale inode with no listener) — never swallowed,
+    so the caller (``_chat_main``) can map it to the daemon-required operator
+    message (CLAUDE.md hard rule #7).
+    """
+    reader, writer = await asyncio.open_unix_connection(
+        path=str(default_comms_socket_path(adapter_id)),
+        limit=_MAX_COMMS_LINE_BYTES,
+    )
+    return CommsSocketTransport(adapter_id=adapter_id, reader=reader, writer=writer)
+
+
 class CommsSocketTransport:
     """A line-delimited JSON-RPC duplex pipe over an accepted unix-socket connection.
 
@@ -385,4 +413,5 @@ __all__ = [
     "CommsSocketListener",
     "CommsSocketTransport",
     "default_comms_socket_path",
+    "dial_comms_socket",
 ]

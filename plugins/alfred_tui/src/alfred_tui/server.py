@@ -14,18 +14,17 @@ Host -> plugin requests this server answers:
   (render a dm into the conversation log; refuse any other mode)
 
 The single plugin -> host notification (``inbound.message``) is emitted by the
-session through an injected async sink; in production the sink writes one
-line-delimited JSON frame to stdout, mirroring the Discord adapter's
-``StdoutNotificationSink``. The TUI has no gateway, broker, or secrets — it
-authenticates nothing (the operator IS the trusted user), so lifecycle.start is
-a pure state transition with no credential fetch.
+session through an injected async sink. In Shape A (ADR-0031 PR-S4-237-2) that
+sink writes one line-delimited JSON frame to the 0600 unix SOCKET the foreground
+``alfred chat`` dials into — NOT to stdout (Textual owns stdin/stdout on the PTY).
+The TUI has no gateway, broker, or secrets — it authenticates nothing (the
+operator IS the trusted user), so lifecycle.start is a pure state transition with
+no credential fetch.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import sys
 from typing import Any, Final
 
 import structlog
@@ -34,7 +33,6 @@ from alfred.comms_mcp.plugin_logging import configure_stderr_json_logging
 from alfred.comms_mcp.protocol import (
     AdapterHealthRequest,
     HealthReport,
-    InboundMessageNotification,
     LifecycleStartRequest,
     LifecycleStartResult,
     LifecycleStopRequest,
@@ -53,8 +51,10 @@ _METHOD_LIFECYCLE_STOP: Final[str] = "lifecycle.stop"
 _METHOD_ADAPTER_HEALTH: Final[str] = "adapter.health"
 _METHOD_OUTBOUND_MESSAGE: Final[str] = "outbound.message"
 
-# Plugin -> host notification method name.
-_NOTIFY_INBOUND: Final[str] = "inbound.message"
+# The wire ``adapter_kind`` the host binds the 0600 comms socket on (ADR-0031):
+# the daemon's ``CommsSocketListener(adapter_id=wire.adapter_kind)`` keys the
+# socket path on ``"tui"``, so the foreground co-host dials the IDENTICAL key.
+_ADAPTER_KIND: Final[str] = "tui"
 
 # The closed, manifest-declared method set. Exposed via ``list_methods`` so a
 # caller (and the test suite) can assert the surface is closed — an undeclared
@@ -155,70 +155,19 @@ def _invalid_request(req_id: object) -> dict[str, Any]:
     }
 
 
-def _parse_error(detail: str) -> dict[str, Any]:
-    return {
-        "jsonrpc": "2.0",
-        "id": None,
-        "error": {"code": -32700, "message": "Parse error", "data": {"detail": detail}},
-    }
-
-
 def build_server(*, session: TuiSession | None = None) -> TuiServer:
-    """Construct the stdio MCP server with the four wire methods bound.
+    """Construct the MCP server with the four wire methods bound.
 
-    The session's inbound sink is wired to stdout so a keystroke-batch flush
-    emits an ``inbound.message`` notification to the host. ``set_render_hook``
+    Used directly by the unit tests for the dispatch surface. In production the
+    co-host (:func:`alfred_tui.cohost.run_cohosted`) constructs the session with
+    the SOCKET-backed inbound sink and the server from it; this default-session
+    helper keeps the dispatch tests terminal-free (a no-op sink). ``set_render_hook``
     is left for ``alfred_tui.render.build_app`` to call once the Textual app is
     constructed (the foreground PTY owns rendering).
     """
     if session is None:
-        session = TuiSession(notify=_stdout_inbound_sink)
+        session = TuiSession()
     return TuiServer(session=session)
-
-
-async def _stdout_inbound_sink(
-    note: InboundMessageNotification,
-) -> None:  # pragma: no cover - prod IO
-    """Write one ``inbound.message`` JSON-RPC notification frame to stdout."""
-    frame = {
-        "jsonrpc": "2.0",
-        "method": _NOTIFY_INBOUND,
-        "params": note.model_dump(mode="json"),
-    }
-    await asyncio.to_thread(_write_frame, frame)
-
-
-def _write_frame(frame: dict[str, Any]) -> None:  # pragma: no cover - prod IO
-    sys.stdout.write(json.dumps(frame) + "\n")
-    sys.stdout.flush()
-
-
-async def _serve_stdin_stdout(server: TuiServer) -> None:  # pragma: no cover - subprocess loop
-    """MCP stdio loop: read JSON-RPC frames, answer requests.
-
-    Covered end-to-end by integration tests that spawn this module as a
-    subprocess; :meth:`TuiServer.dispatch` carries the unit coverage.
-    """
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    loop = asyncio.get_event_loop()
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin.buffer)
-
-    while True:
-        line = await reader.readline()
-        if not line:
-            break
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _write_frame(_parse_error(str(exc)))
-            continue
-        if not isinstance(request, dict):
-            _write_frame(_invalid_request(None))
-            continue
-        response = await server.dispatch(request)
-        if response is not None:
-            _write_frame(response)
 
 
 def bind_self_id_from_env() -> str | None:
@@ -243,28 +192,34 @@ def bind_self_id_from_env() -> str | None:
     return adapter_id
 
 
-async def serve() -> None:  # pragma: no cover - process entrypoint
-    """Run the adapter's stdio loop.
+async def serve() -> int:  # pragma: no cover - process entrypoint
+    """Dial the daemon's comms socket and co-host the Textual app + the wire.
 
-    NOTE (issue #237): this entry point ships the JSON-RPC wire CONTRACT only —
-    it does NOT yet mount the Textual ``AlfredTuiApp``, so ``alfred chat`` is
-    NOT functional end-to-end. The PTY-vs-wire conflict (Textual needs the PTY;
-    the daemon wire needs a side channel) is deferred to PR-S4-11; see issue
-    #237. Until then a launcher-spawned ``alfred chat`` reads/writes JSON-RPC
-    frames but renders no UI and accepts no keystrokes.
+    Shape A (ADR-0031 PR-S4-237-2, #237): ``alfred chat`` runs the TUI IN ITS OWN
+    process and DIALS the already-running daemon's 0600 unix socket — it is no
+    longer a daemon-spawned subprocess. This entry mounts the real
+    ``AlfredTuiApp`` and the socket serve loop on one asyncio loop via
+    :func:`alfred_tui.cohost.run_cohosted`, so ``alfred chat`` is functional
+    end-to-end (a turn round-trips through the daemon and the stubbed ``ack``
+    paints into the conversation log). This retires the #237 "wire contract only"
+    stub and the daemon-spawned stdio carrier.
 
-    Structlog is pinned to stderr-JSON before the loop (review F4) so stdout
-    carries ONLY line-delimited JSON-RPC frames — the host stdio reader treats
-    every stdout line as a wire frame, so a stray console-rendered log line
-    would corrupt the channel.
+    Structlog is pinned to stderr-JSON (review F4) so the operator's PTY (which
+    Textual owns) is never corrupted by a stray console-rendered log line.
+
+    The ``adapter_id`` dialed is the wire ``adapter_kind`` (``"tui"``) the daemon
+    binds its socket on — NOT the per-instance launcher id. A dial failure
+    (daemon absent) raises out of ``run_cohosted`` for the caller to map.
     """
+    from alfred_tui.cohost import run_cohosted
+
     configure_stderr_json_logging()
     bind_self_id_from_env()
-    await _serve_stdin_stdout(build_server())
+    return await run_cohosted(adapter_id=_ADAPTER_KIND)
 
 
 if __name__ == "__main__":  # pragma: no cover - process entrypoint
-    asyncio.run(serve())
+    raise SystemExit(asyncio.run(serve()))
 
 
 __all__ = ["TuiServer", "bind_self_id_from_env", "build_server", "serve"]

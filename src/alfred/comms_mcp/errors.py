@@ -42,6 +42,20 @@ class CommsHandlerFailedError(CommsMcpError):
     """
 
 
+class DaemonUnavailableError(CommsMcpError):
+    """Dialing the daemon's comms socket failed — no daemon is reachable.
+
+    Raised by the foreground TUI co-host (``alfred_tui.cohost.run_cohosted``) when the
+    ``dial`` itself raises an ``OSError`` family member (``FileNotFoundError`` — the
+    socket inode is absent; ``ConnectionRefusedError`` — a stale inode with no
+    listener). Wrapping ONLY the dial (not the whole co-host) keeps this typed
+    condition distinct from a stray post-dial ``OSError`` (a PTY ioctl / broken render
+    pipe), which must surface LOUD rather than be mislabelled "daemon required". The
+    CLI (``_chat_main``) maps THIS error — and only this error — to the
+    ``comms.tui.daemon_required_to_chat`` t() string + exit 3.
+    """
+
+
 class PromoterRequiredError(CommsMcpError):
     """An adapter kind with a non-empty required-classifier set got no promoter.
 
@@ -59,6 +73,7 @@ class PromoterRequiredError(CommsMcpError):
 __all__ = [
     "CommsHandlerFailedError",
     "CommsMcpError",
+    "DaemonUnavailableError",
     "InboundBurstDroppedError",
     "PromoterRequiredError",
     "UnknownAdapterKindError",
