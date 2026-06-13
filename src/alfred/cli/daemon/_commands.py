@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     )
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
+    from alfred.memory.inbound_idempotency import PostgresInboundIdempotencyStore
     from alfred.security.capability_gate._gate import RealGate
     from alfred.security.dlp import OutboundDlpProtocol
     from alfred.security.quarantine_transport import QuarantineStdioTransport
@@ -416,6 +417,18 @@ class _CommsBootGraph:
     # — CR #255). Typed ``object`` so the module import closure stays free of the Redis
     # client; the concrete type is ``alfred.plugins.web_fetch.content_store.ContentStore``.
     content_store: object
+    # The daemon-owned durable accept-once store (Spec A G0). Built ONCE in
+    # ``_build_comms_boot_graph`` and injected into every per-adapter inbound
+    # handler so a replayed comms frame short-circuits before any side effect. It
+    # owns its ``session_scope`` over the SHARED DSN-cached engine (the
+    # ``audit_writer`` shape), so — unlike ``content_store`` / ``quarantine_transport``
+    # — it deliberately has NO reap on ``aclose``: ``dispose_all_engines()`` reaps
+    # that one cached engine once at process exit, and disposing it on graph
+    # teardown would pull the connection pool out from under every other daemon
+    # component that shares it. Typed concretely (NOT ``object``) so ``mypy --strict``
+    # checks the inject site; the ``TYPE_CHECKING`` import keeps the module's import
+    # closure free of the memory package at runtime.
+    idempotency_store: PostgresInboundIdempotencyStore
 
     async def aclose(self) -> None:
         """Reap the LIVE bwrap quarantined child + the daemon-owned ContentStore.
@@ -485,6 +498,7 @@ async def _build_comms_boot_graph(
         CommsInboundOrchestratorAdapter,
         _build_comms_inbound_extractor,
     )
+    from alfred.memory.inbound_idempotency import PostgresInboundIdempotencyStore
     from alfred.orchestrator.burst_limiter import BurstLimiter
     from alfred.plugins.web_fetch.content_store import ContentStore
     from alfred.security.dlp import OutboundDlp
@@ -533,6 +547,15 @@ async def _build_comms_boot_graph(
         # same structural mismatch the per-adapter handlers below carry an ignore for.
         burst_limiter = BurstLimiter(audit_writer=audit)  # type: ignore[arg-type]
         inbound_orchestrator = CommsInboundOrchestratorAdapter(extractor_bridge=extractor_bridge)
+        # Spec A G0: the durable accept-once store. Owns its ``session_scope`` over
+        # the SHARED DSN-cached engine (the ``audit_writer`` shape), so it is
+        # deliberately NOT reaped on graph teardown — see the ``idempotency_store``
+        # field comment + the resolved-open-question (shared-engine, must-not-dispose):
+        # ``dispose_all_engines()`` reaps that one cached engine at process exit, and
+        # disposing it here would break every other daemon component that shares it.
+        idempotency_store = PostgresInboundIdempotencyStore(
+            session_scope=build_boot_session_scope(settings),
+        )
         return _CommsBootGraph(
             secret_broker=secret_broker,
             resolver_bridge=resolver_bridge,
@@ -542,6 +565,7 @@ async def _build_comms_boot_graph(
             t3_nonce=t3_nonce,
             quarantine_transport=quarantine_transport,
             content_store=content_store,
+            idempotency_store=idempotency_store,
         )
     except Exception:
         # Reap BOTH the live bwrap child (via the transport) and the ContentStore's
@@ -656,6 +680,10 @@ async def _build_comms_adapter_wiring(
         audit_writer=audit,  # type: ignore[arg-type]
         secret_broker=graph.secret_broker,  # type: ignore[arg-type]
         sub_payload_promoter=sub_payload_promoter,  # type: ignore[arg-type]
+        # No ``type: ignore`` here (unlike the ``object``-typed graph fields above):
+        # ``graph.idempotency_store`` is concretely typed ``PostgresInboundIdempotencyStore``,
+        # which structurally satisfies the handler's ``_InboundIdempotencyStoreLike``.
+        idempotency_store=graph.idempotency_store,
     )
     binding_handler = BindingRequestHandler(
         audit_writer=audit,  # type: ignore[arg-type]
