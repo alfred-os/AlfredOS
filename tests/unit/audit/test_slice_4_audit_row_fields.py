@@ -30,15 +30,16 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 25 entries (Slice-4 contract surface size).
+    """Roster must contain exactly 26 entries (Slice-4 contract surface size).
 
     Adding a new Slice-4 ``*_FIELDS`` constant requires bumping this assertion
     AND extending ``SLICE_4_FIELDSET_NAMES`` in the same commit. The number
     is intentionally pinned so a roster omission surfaces here. PR-S4-2
     (#173) added ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` — the 24th;
-    G0 (Spec A) added ``COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS`` — the 25th.
+    G0 (Spec A) added ``COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS`` — the 25th;
+    G1 (Spec A) added ``DAEMON_LIFECYCLE_FIELDS`` — the 26th.
     """
-    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 25
+    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 26
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
@@ -196,6 +197,9 @@ def test_slice_4_constants_have_frozenset_shape() -> None:
         ("DAEMON_BOOT_FIELDS", "boot_id"),
         ("DAEMON_BOOT_FAILED_FIELDS", "boot_id"),
         ("DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS", "boot_id"),
+        # Spec A G1 (#237): the lifecycle ready/going_down rows join the rest
+        # of the boot lifecycle on boot_id.
+        ("DAEMON_LIFECYCLE_FIELDS", "boot_id"),
         # Carrier substitution uses (hookpoint, subscriber_id) as the
         # composite join key.
         ("CARRIER_SUBSTITUTION_FIELDS", "subscriber_id"),

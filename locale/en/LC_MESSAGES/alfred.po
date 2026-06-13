@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-13 00:32+0100\n"
+"POT-Creation-Date: 2026-06-13 20:40+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -353,7 +353,7 @@ msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/cli/main.py:353 src/alfred/i18n/_slice_4_reserve.py:148
+#: src/alfred/cli/main.py:353 src/alfred/i18n/_slice_4_reserve.py:154
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat needs the daemon. Start it with: alfred daemon start. If you "
@@ -940,8 +940,8 @@ msgstr ""
 "Show the daemon boot subset: PID, uptime, boot id, and last boot event. "
 "For full instance health (providers, budget, gate), see: alfred status"
 
-#: src/alfred/cli/daemon/_commands.py:375
-#: src/alfred/cli/daemon/_commands.py:608
+#: src/alfred/cli/daemon/_commands.py:379
+#: src/alfred/cli/daemon/_commands.py:635
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -949,7 +949,7 @@ msgstr ""
 "and re-run `alfred daemon start`, or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_commands.py:645
+#: src/alfred/cli/daemon/_commands.py:672
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -958,18 +958,18 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:798
+#: src/alfred/cli/daemon/_commands.py:829
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
 "boot. Check `alfred audit log --since 5m` for the adapter's load-refused "
 "/ crash row, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:812
+#: src/alfred/cli/daemon/_commands.py:843
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_commands.py:872
+#: src/alfred/cli/daemon/_commands.py:903
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -977,7 +977,7 @@ msgstr ""
 "permissions (it must be owner-only, mode 0700), remove any stale "
 "`comms-*.sock`, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:904
+#: src/alfred/cli/daemon/_commands.py:977
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
@@ -985,7 +985,7 @@ msgstr ""
 
 # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the PR-S4-0b
 # reserve. Operator-facing; all bodies ship real English copy.
-#: src/alfred/cli/daemon/_commands.py:1178
+#: src/alfred/cli/daemon/_commands.py:1256
 msgid "daemon.boot.audit_log_unwritable"
 msgstr ""
 "The audit log is unwritable, so the daemon refuses to boot — a boot with "
@@ -993,7 +993,17 @@ msgstr ""
 " (`docker compose ps` should show alfred-pg healthy) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1319
+#: src/alfred/cli/daemon/_commands.py:1283
+#: src/alfred/i18n/_slice_4_reserve.py:126
+msgid "daemon.lifecycle.ready"
+msgstr "Core lifecycle: ready (epoch {epoch})."
+
+#: src/alfred/cli/daemon/_commands.py:1312
+#: src/alfred/i18n/_slice_4_reserve.py:127
+msgid "daemon.lifecycle.going_down"
+msgstr "Core lifecycle: going down (reason: {reason})."
+
+#: src/alfred/cli/daemon/_commands.py:1452
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -1001,7 +1011,7 @@ msgstr ""
 " `alfred daemon start`."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:1322
+#: src/alfred/cli/daemon/_commands.py:1455
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -1010,7 +1020,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:1373
+#: src/alfred/cli/daemon/_commands.py:1506
 #: src/alfred/i18n/_slice_4_reserve.py:116
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -1018,7 +1028,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1384
+#: src/alfred/cli/daemon/_commands.py:1517
 #: src/alfred/i18n/_slice_4_reserve.py:117
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -1027,7 +1037,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1400
+#: src/alfred/cli/daemon/_commands.py:1533
 #: src/alfred/i18n/_slice_4_reserve.py:118
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1035,7 +1045,7 @@ msgstr ""
 "Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:1414
+#: src/alfred/cli/daemon/_commands.py:1547
 #: src/alfred/i18n/_slice_4_reserve.py:119
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1043,7 +1053,7 @@ msgstr ""
 "`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1455
+#: src/alfred/cli/daemon/_commands.py:1588
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1053,7 +1063,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1468
+#: src/alfred/cli/daemon/_commands.py:1601
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "First-party DLP-subscriber grant is not live after boot. The quarantined-"
@@ -1061,7 +1071,7 @@ msgstr ""
 "refused. Check `alfred audit log --since 5m` for capability-gate seed or "
 "grant-load errors, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1496
+#: src/alfred/cli/daemon/_commands.py:1629
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1072,7 +1082,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:1525
+#: src/alfred/cli/daemon/_commands.py:1670
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1080,7 +1090,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS to exactly one adapter and re-run `alfred "
 "daemon start`. Multi-adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:1563
+#: src/alfred/cli/daemon/_commands.py:1708
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1090,39 +1100,39 @@ msgstr ""
 "unset (comms disabled), or provision bwrap + the plugin launcher and re-"
 "run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1685
+#: src/alfred/cli/daemon/_commands.py:1835
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:1750
+#: src/alfred/cli/daemon/_commands.py:1924
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1753
-#: src/alfred/cli/daemon/_commands.py:1758
+#: src/alfred/cli/daemon/_commands.py:1927
+#: src/alfred/cli/daemon/_commands.py:1932
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:1760
-#: src/alfred/i18n/_slice_4_reserve.py:122
+#: src/alfred/cli/daemon/_commands.py:1934
+#: src/alfred/i18n/_slice_4_reserve.py:128
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:1775
+#: src/alfred/cli/daemon/_commands.py:1949
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1778
+#: src/alfred/cli/daemon/_commands.py:1952
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:1786
-#: src/alfred/i18n/_slice_4_reserve.py:123
+#: src/alfred/cli/daemon/_commands.py:1960
+#: src/alfred/i18n/_slice_4_reserve.py:129
 msgid "daemon.status.template"
 msgstr ""
 "Daemon PID {pid}\n"
@@ -1130,7 +1140,7 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/comms_mcp/audit_hash.py:93
+#: src/alfred/comms_mcp/audit_hash.py:94
 #: src/alfred/i18n/_slice_4_reserve.py:120
 msgid "daemon.boot.audit_hash_pepper_missing"
 msgstr ""
@@ -1541,86 +1551,86 @@ msgid "cli.plugin.grant.refused.not_logged_in.recovery"
 msgstr "Run `alfred login` first, then re-run the command."
 
 # Sandbox refusal reasons (PR-S4-6 launcher).
-#: src/alfred/i18n/_slice_4_reserve.py:126
+#: src/alfred/i18n/_slice_4_reserve.py:132
 msgid "supervisor.sandbox.refused.policy_ref_missing"
 msgstr ""
 "Plugin {plugin_id} declares sandbox kind=full but has no policy_ref for "
 "{host_os}. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:127
+#: src/alfred/i18n/_slice_4_reserve.py:133
 msgid "supervisor.sandbox.refused.policy_ref_os_mismatch"
 msgstr ""
 "Plugin {plugin_id} policy_ref points to a {policy_os} policy on a "
 "{host_os} host. Refusing to launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:130
+#: src/alfred/i18n/_slice_4_reserve.py:136
 msgid "supervisor.sandbox.refused.sandbox_block_missing"
 msgstr ""
 "Plugin {plugin_id} manifest is missing the [sandbox] block. Refusing to "
 "launch."
 
-#: src/alfred/i18n/_slice_4_reserve.py:131
+#: src/alfred/i18n/_slice_4_reserve.py:137
 msgid "supervisor.sandbox.refused.windows_stub_in_production"
 msgstr ""
 "Plugin {plugin_id} resolves to the Windows stub policy in production. "
 "Refusing to launch — Windows requires WSL2 per spec §7.7."
 
-#: src/alfred/i18n/_slice_4_reserve.py:132
+#: src/alfred/i18n/_slice_4_reserve.py:138
 msgid "supervisor.sandbox.unsandboxed_refused_in_production"
 msgstr ""
 "ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED is set in production. Refusing to "
 "launch plugin {plugin_id}."
 
 # Config-reload notifications (PR-S4-4 hot-reload).
-#: src/alfred/i18n/_slice_4_reserve.py:135 src/alfred/policies/watcher.py:377
+#: src/alfred/i18n/_slice_4_reserve.py:141 src/alfred/policies/watcher.py:377
 msgid "supervisor.config_reload.applied"
 msgstr "config/policies.yaml reloaded ({changed_keys})."
 
-#: src/alfred/i18n/_slice_4_reserve.py:136 src/alfred/policies/watcher.py:87
+#: src/alfred/i18n/_slice_4_reserve.py:142 src/alfred/policies/watcher.py:87
 msgid "supervisor.config_reload.rejected.parse_failure"
 msgstr ""
 "config/policies.yaml reload rejected: parse failure ({detail}). Live "
 "snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:137 src/alfred/policies/watcher.py:89
+#: src/alfred/i18n/_slice_4_reserve.py:143 src/alfred/policies/watcher.py:89
 msgid "supervisor.config_reload.rejected.high_blast_change"
 msgstr ""
 "config/policies.yaml reload rejected: {key} is a high-blast key and "
 "requires reviewer-gate."
 
-#: src/alfred/i18n/_slice_4_reserve.py:138 src/alfred/policies/watcher.py:91
+#: src/alfred/i18n/_slice_4_reserve.py:144 src/alfred/policies/watcher.py:91
 msgid "supervisor.config_reload.rejected.validation_failure"
 msgstr ""
 "config/policies.yaml reload rejected: validation failed for {detail}. "
 "Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:139 src/alfred/policies/watcher.py:93
+#: src/alfred/i18n/_slice_4_reserve.py:145 src/alfred/policies/watcher.py:93
 msgid "supervisor.config_reload.rejected.file_vanished"
 msgstr ""
 "config/policies.yaml vanished between stat and read. Live snapshot "
 "retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:140 src/alfred/policies/watcher.py:95
+#: src/alfred/i18n/_slice_4_reserve.py:146 src/alfred/policies/watcher.py:95
 msgid "supervisor.config_reload.rejected.stat_failed"
 msgstr "config/policies.yaml stat failed: {detail}. Live snapshot retained."
 
-#: src/alfred/i18n/_slice_4_reserve.py:141 src/alfred/policies/watcher.py:97
+#: src/alfred/i18n/_slice_4_reserve.py:147 src/alfred/policies/watcher.py:97
 msgid "supervisor.config_reload.rejected.audit_write_failed"
 msgstr ""
 "config/policies.yaml reload rejected: audit store unwritable ({detail}). "
 "Live snapshot retained; the watcher retries on the next change."
 
-#: src/alfred/i18n/_slice_4_reserve.py:142 src/alfred/policies/watcher.py:506
+#: src/alfred/i18n/_slice_4_reserve.py:148 src/alfred/policies/watcher.py:506
 msgid "supervisor.config_watcher.degraded"
 msgstr ""
 "PolicyWatcher entered degraded state ({reason}): poll cadence backed off "
 "10x. Fix the filesystem; recovery is automatic."
 
-#: src/alfred/i18n/_slice_4_reserve.py:143 src/alfred/policies/watcher.py:523
+#: src/alfred/i18n/_slice_4_reserve.py:149 src/alfred/policies/watcher.py:523
 msgid "supervisor.config_watcher.recovered"
 msgstr "PolicyWatcher recovered: poll cadence restored to normal."
 
-#: src/alfred/i18n/_slice_4_reserve.py:145 src/alfred/policies/watcher.py:489
+#: src/alfred/i18n/_slice_4_reserve.py:151 src/alfred/policies/watcher.py:489
 msgid "policies.watcher.fallback_write_failed"
 msgstr ""
 "PolicyWatcher could not write the rejected-config fallback sink at "
@@ -2070,10 +2080,10 @@ msgstr ""
 "Comms adapter {adapter_id} returned an error response to an outbound "
 "request; the request failed."
 
-#: src/alfred/plugins/comms_socket_transport.py:149
-#: src/alfred/plugins/comms_socket_transport.py:159
-#: src/alfred/plugins/comms_socket_transport.py:166
-#: src/alfred/plugins/comms_socket_transport.py:173
+#: src/alfred/plugins/comms_socket_transport.py:168
+#: src/alfred/plugins/comms_socket_transport.py:178
+#: src/alfred/plugins/comms_socket_transport.py:185
+#: src/alfred/plugins/comms_socket_transport.py:192
 #: src/alfred/plugins/comms_stdio_transport.py:205
 #: src/alfred/plugins/comms_stdio_transport.py:215
 #: src/alfred/plugins/comms_stdio_transport.py:222

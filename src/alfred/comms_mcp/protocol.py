@@ -330,6 +330,54 @@ class CrashedNotification(_WireModel):
     detail: str
 
 
+# ---------------------------------------------------------------------------
+# Host -> outward lifecycle notifications (Spec A G1 / ADR-0033)
+#
+# DIRECTION NOTE: every notification ABOVE is plugin -> host (an adapter
+# reporting inbound). These two are the OPPOSITE direction: host -> outward
+# (the core announcing its own lifecycle over the comms wire). They are
+# DEFINED here in G1 but NOT SENT in G1 — there is no consumer yet (the
+# gateway lands in G3). G1 emits only the AUDIT rows; G3 will send these
+# frames onto the same line-delimited wire (a notification, an id-less
+# JSON-RPC frame). They carry NO T3 content: the epoch is non-secret boot
+# metadata and ``reason`` is a closed vocabulary.
+# ---------------------------------------------------------------------------
+
+
+LifecycleReason = Literal["shutdown"]
+"""Closed vocabulary for a planned ``going_down``.
+
+``shutdown`` = the planned drain (operator stop / container stop / unsignalled
+SIGTERM, which carries no intent). G1 ships ONLY this value: there is no
+producer of any other intent yet, and an unreachable enum member is dead
+surface. Widening a CLOSED ``Literal`` is non-breaking, so G3 adds ``restart``
+/ aligned tokens when a real intent-producer + consumer land together. Keep
+this a CLOSED ``Literal`` forever — never ``str``. See ADR-0033.
+"""
+
+
+class GoingDownNotification(_WireModel):
+    """Core announces it has begun its planned drain (Spec A §4).
+
+    DEFINED in G1 for G3 to send; G1 itself emits only the audit row.
+    """
+
+    reason: LifecycleReason
+
+
+class ReadyNotification(_WireModel):
+    """Core announces its security boot graph is healthy + the boot epoch.
+
+    The AUDIT row is emitted ONLY after the full boot graph is healthy
+    (``ready`` = HEALTH, not socket-bind). DEFINED in G1 for G3 to send;
+    G1 itself emits only the audit row. ``epoch`` is the non-secret per-boot
+    value the gateway reconciles against (see
+    ``alfred.bootstrap.lifecycle_epoch``).
+    """
+
+    epoch: str = Field(min_length=1)
+
+
 __all__ = [
     "BODY_FIELD_BY_KIND",
     "AdapterHealthRequest",
@@ -337,10 +385,12 @@ __all__ = [
     "BindingRequestNotification",
     "ContentRef",
     "CrashedNotification",
+    "GoingDownNotification",
     "HealthReport",
     "InboundAddressingSignal",
     "InboundId",
     "InboundMessageNotification",
+    "LifecycleReason",
     "LifecycleStartRequest",
     "LifecycleStartResult",
     "LifecycleStopRequest",
@@ -350,6 +400,7 @@ __all__ = [
     "OutboundMessageResult",
     "PersonaAddressingMode",
     "RateLimitSignal",
+    "ReadyNotification",
     "ScannedOutboundBody",
     "_OutboundDelivered",
     "_OutboundRetryable",
