@@ -50,6 +50,11 @@ from alfred.plugins._comms_child_env import comms_child_env
 # ``comms_wire`` (Spec A G2 / ADR-0032) so the seq/ack codec can import them
 # without closing a codec<->transport import cycle (architect F6). Re-exported
 # here (kept in ``__all__``) so existing importers see no churn.
+from alfred.plugins.comms_seq_codec import (
+    SeqFrame,
+    decode_seq_frame,
+    encode_seq_frame,
+)
 from alfred.plugins.comms_wire import _MAX_COMMS_LINE_BYTES, CommsProtocolError
 
 if TYPE_CHECKING:
@@ -105,6 +110,27 @@ class CommsStdioTransport:
         self._spec = spec
         self._max_line_bytes = max_line_bytes
         self._proc: asyncio.subprocess.Process | None = None
+        # Spec A G2 (#237): out-of-band seq/ack framing, OFF by default. The
+        # runner flips this ON (via enable_seq_ack) only when BOTH peers
+        # advertised support at the lifecycle.start handshake (version-gate).
+        # When OFF the wire is byte-for-byte the existing ADR-0025 plain frame.
+        self._seq_ack_enabled = False
+        self._send_seq = 0  # this transport's per-direction monotonic send seq
+        # NOTE: the transport emits ``a=0`` as a PLACEHOLDER ack. It deliberately
+        # does NOT track a received-seq high-water: a ``max(seq seen)`` ack would
+        # falsely ack past gaps, contradicting the CONTIGUOUS-ack semantics
+        # (ADR-0032 Decision 3). The real contiguous ack is computed by the pure
+        # ``SeqDedupWindow.cumulative_ack()`` and wired as the ack source by the
+        # G3 relay. G2's transport carries a placeholder; it consumes no ack.
+
+    def enable_seq_ack(self) -> None:
+        """Turn the out-of-band seq/ack header ON (post-handshake, version-gated).
+
+        Idempotent flip the runner calls once the ``lifecycle.start`` negotiation
+        confirmed BOTH peers speak ``AlfredSeqAck/1``. Until then the transport
+        emits/reads the plain ADR-0025 frame (G2 default-OFF).
+        """
+        self._seq_ack_enabled = True
 
     async def spawn(self) -> None:
         """Spawn the plugin through the launcher with a SCRUBBED child env.
@@ -155,7 +181,19 @@ class CommsStdioTransport:
             raise RuntimeError(
                 f"CommsStdioTransport.send() called before spawn() for adapter {self._adapter_id!r}"
             )
-        payload = (json.dumps(frame) + "\n").encode()
+        body = json.dumps(frame).encode()
+        if self._seq_ack_enabled:
+            payload = encode_seq_frame(
+                body,
+                seq=self._send_seq,
+                # PLACEHOLDER (ADR-0032 Decision 3) — NOT a high-water; the G3 relay
+                # wires SeqDedupWindow.cumulative_ack() as the real ack source.
+                ack=0,
+                max_unit_bytes=self._max_line_bytes,
+            )
+            self._send_seq += 1
+        else:
+            payload = body + b"\n"
         try:
             self._proc.stdin.write(payload)
             await self._proc.stdin.drain()
@@ -200,6 +238,18 @@ class CommsStdioTransport:
             raise CommsProtocolError(
                 t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
             )
+        if self._seq_ack_enabled:
+            # Spec A G2 (#237): strip the out-of-band header; the inner payload
+            # continues through the existing json.loads path unchanged. G2
+            # CONSUMES NO seq/ack here — it does not dedup, advance an ack, or
+            # store a high-water (the relay, G3, is where seq/ack are consumed).
+            # ``decode_seq_frame`` is magic-gated, so a plain (un-upgraded peer)
+            # line still decodes via the SeqFrame(seq=None, ...) fallback
+            # (mixed-wire safety). It is fail-loud (CommsProtocolError) on a
+            # malformed header, surfacing through the SAME arm as a malformed
+            # plain frame — no new error handling needed.
+            frame_unit: SeqFrame = decode_seq_frame(line, max_unit_bytes=self._max_line_bytes)
+            line = frame_unit.payload
         try:
             decoded = json.loads(line)
         except json.JSONDecodeError as exc:
