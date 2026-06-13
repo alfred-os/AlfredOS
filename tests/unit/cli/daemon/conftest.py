@@ -119,6 +119,15 @@ def apply_boot_success_patches(
     with _NONCE_LOCK:
         _prior_t3_nonce = _tiers._AUTHORIZED_T3_NONCE
         _tiers._set_authorized_t3_nonce(None)
+
+    from alfred.bootstrap.lifecycle_epoch import reset_boot_epoch_for_tests
+
+    # Spec A G1 (#237): each harnessed boot mints a fresh per-boot epoch.
+    # ``mint_boot_epoch`` raises on a second mint in a process, so reset the
+    # slot before THIS boot runs and clear it on teardown — mirroring the
+    # T3-nonce clean above. The epoch is non-secret, so (unlike the nonce) the
+    # reset grants no privilege; it only prevents cross-test mint poisoning.
+    reset_boot_epoch_for_tests()
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.delenv("ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED", raising=False)
     monkeypatch.setattr(
@@ -207,6 +216,11 @@ def apply_boot_success_patches(
         # sibling test that assumes an empty slot.
         with _NONCE_LOCK:
             _tiers._set_authorized_t3_nonce(_prior_t3_nonce)
+        # Spec A G1 (#237): clear the per-boot epoch the boot minted so it never
+        # leaks into a sibling test that asserts an unminted slot (the
+        # production invariant between processes is "no epoch until boot mints
+        # one").
+        reset_boot_epoch_for_tests()
 
     return _restore
 
@@ -267,6 +281,38 @@ def _assert_t3_nonce_slot_restored() -> Iterator[None]:
         "restored to its pre-test value. A boot test that registers the nonce "
         "MUST go through the boot_success_env harness (which cleans + restores "
         "the slot) so the registration does not poison sibling tests."
+    )
+
+
+@pytest.fixture(autouse=True)
+def _assert_boot_epoch_slot_restored() -> Iterator[None]:
+    """Fail loud if a daemon-boot test leaks the per-boot lifecycle epoch.
+
+    Spec A G1 (#237): the boot path mints the per-process lifecycle epoch
+    (``alfred.bootstrap.lifecycle_epoch._BOOT_EPOCH``). ``boot_success_env``
+    resets the slot before the boot and clears it on teardown, so a test that
+    drives boot THROUGH the harness leaves the slot empty. A test that mints
+    while BYPASSING the harness would leak a live epoch, so the NEXT boot's
+    ``mint_boot_epoch`` would raise ``BootEpochAlreadyMintedError`` far from its
+    cause. This autouse guard pins the failure to the leaking test's OWN
+    teardown.
+
+    Autouse, so it is set up BEFORE the explicitly-requested ``boot_success_env``
+    and torn down AFTER it (pytest finalisers run in reverse setup order) — it
+    observes the slot AFTER ``boot_success_env``'s ``restore()`` ran, so it never
+    races the harness's own reset/clear. It captures the slot at its own setup
+    and asserts the slot returns to that value (normally ``None`` in a clean
+    process), so it never false-positives against a pre-existing minted slot.
+    """
+    from alfred.bootstrap import lifecycle_epoch as _epoch
+
+    at_setup = _epoch._BOOT_EPOCH
+    yield
+    assert _epoch._BOOT_EPOCH is at_setup, (
+        "daemon-boot test leaked the per-boot lifecycle epoch: the slot was "
+        "not cleared to its pre-test value. A boot test that mints the epoch "
+        "MUST go through the boot_success_env harness (which resets + clears "
+        "the slot) so the mint does not poison sibling tests."
     )
 
 
