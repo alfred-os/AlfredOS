@@ -119,6 +119,12 @@ def _register() -> None:
     t("daemon.boot.capability_gate_handshake_failed")
     t("daemon.boot.audit_hash_pepper_missing")
     t("daemon.boot.started")
+    # Core lifecycle signal (Spec A G1 / ADR-0033). The real call sites live in
+    # alfred.cli.daemon._commands (_emit_ready / _emit_going_down); reserved
+    # here too so the catalog drift gate is satisfied even if a refactor drops
+    # a call site.
+    t("daemon.lifecycle.ready")
+    t("daemon.lifecycle.going_down")
     t("daemon.stop.confirmed")
     t("daemon.status.template")
 

@@ -113,6 +113,8 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.boot.boot_infra_install_failed",  # PR-S4-11b0 FIX 1: audited seed/install fault
     "daemon.boot.t3_nonce_registration_failed",  # PR-S4-11c-2a0: boot T3-nonce registration refusal
     "daemon.boot.started",
+    "daemon.lifecycle.ready",  # Spec A G1 / ADR-0033: core-healthy signal
+    "daemon.lifecycle.going_down",  # Spec A G1 / ADR-0033: drain signal
     "daemon.stop.confirmed",
     "daemon.status.template",
     # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the reserve.
