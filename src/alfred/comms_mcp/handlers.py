@@ -48,6 +48,7 @@ from alfred.comms_mcp.inbound import (
     _AuditWriterLike,
     _BurstLimiterLike,
     _IdentityResolverLike,
+    _InboundIdempotencyStoreLike,
     _OrchestratorLike,
     _PreResolutionLimiter,
     _SecretBrokerLike,
@@ -161,6 +162,7 @@ class InboundMessageHandler:
         secret_broker: _SecretBrokerLike,
         pre_resolution_limiter: _PreResolutionLimiter | None = None,
         sub_payload_promoter: _SubPayloadPromoterLike | None = None,
+        idempotency_store: _InboundIdempotencyStoreLike | None = None,
     ) -> None:
         self._identity_resolver = identity_resolver
         self._orchestrator = orchestrator
@@ -175,6 +177,9 @@ class InboundMessageHandler:
         # P1: per-adapter sub-payload promoter (None → inert for the reference
         # plugin's empty required-classifier set). Forwarded on every process call.
         self._sub_payload_promoter = sub_payload_promoter
+        # G0 (Spec A): the durable accept-once store. None → idempotency inert
+        # (pre-G0 unit callers); production injects a PostgresInboundIdempotencyStore.
+        self._idempotency_store = idempotency_store
         # Persistent across every ``process`` call (sec-003). Tests may inject a
         # pre-loaded limiter to drive the cap deterministically; production
         # leaves it defaulted so the handler mints exactly one and keeps it.
@@ -194,6 +199,7 @@ class InboundMessageHandler:
             secret_broker=self._secret_broker,
             pre_resolution_limiter=self._pre_resolution_limiter,
             sub_payload_promoter=self._sub_payload_promoter,
+            idempotency_store=self._idempotency_store,
         )
 
 
