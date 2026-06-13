@@ -711,6 +711,27 @@ DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS: Final[frozenset[str]] = frozense
     }
 )
 
+# Spec A G1 (#237): core lifecycle signal rows (daemon.lifecycle.ready /
+# daemon.lifecycle.going_down). Joins the rest of the boot lifecycle on
+# ``boot_id``; carries the per-boot non-secret ``epoch`` so a consumer can
+# correlate the two ends of one process lifetime (ADR-0033).
+DAEMON_LIFECYCLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        # The per-boot audit trace id this row joins on (same value as the
+        # boot-completed row's boot_id).
+        "boot_id",
+        # The per-boot, non-secret lifecycle epoch (present on BOTH the ready
+        # and going_down rows so a consumer can correlate the two ends of a
+        # process lifetime).
+        "epoch",
+        # "ready" | "going_down".
+        "phase",
+        # The going_down reason (closed vocab); "" on the ready row.
+        "reason",
+        "occurred_at",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # state.proposal.dispatch_failure family (DLP-into-failure_detail; #173)
 # ---------------------------------------------------------------------------
@@ -1070,6 +1091,7 @@ SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
     "DAEMON_BOOT_FIELDS",
     "DAEMON_BOOT_FAILED_FIELDS",
     "DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS",
+    "DAEMON_LIFECYCLE_FIELDS",
     "PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS",
     "PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS",
     "CARRIER_SUBSTITUTION_FIELDS",
