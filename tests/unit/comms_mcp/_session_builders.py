@@ -32,6 +32,7 @@ kind = "none"
 # schema validates without error.
 INBOUND_PARAMS: dict[str, Any] = {
     "adapter_id": "alfred_comms_test",
+    "inbound_id": "frame-1",
     "platform_user_id": "discord:123",
     "body": {"content": "hi"},
     "sub_payload_refs": [],

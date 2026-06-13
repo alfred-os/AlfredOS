@@ -23,6 +23,7 @@ from alfred.comms_mcp.protocol import (
 def test_inbound_message_required_fields() -> None:
     n = InboundMessageNotification(
         adapter_id="alfred_comms_test",
+        inbound_id="frame-1",
         platform_user_id="discord:123",
         body={"content": "hello"},
         sub_payload_refs=(),
@@ -36,6 +37,7 @@ def test_inbound_message_rejects_naive_received_at() -> None:
     with pytest.raises(ValidationError):
         InboundMessageNotification(
             adapter_id="alfred_comms_test",
+            inbound_id="frame-1",
             platform_user_id="discord:123",
             body={"content": "hello"},
             sub_payload_refs=(),
@@ -48,6 +50,7 @@ def test_inbound_message_addressing_signal_literal() -> None:
     with pytest.raises(ValidationError):
         InboundMessageNotification(
             adapter_id="alfred_comms_test",
+            inbound_id="frame-1",
             platform_user_id="discord:123",
             body={"content": "hello"},
             sub_payload_refs=(),
@@ -60,6 +63,7 @@ def test_inbound_message_unknown_adapter_kind_rejected() -> None:
     with pytest.raises(ValidationError):
         InboundMessageNotification(
             adapter_id="not_a_kind",
+            inbound_id="frame-1",
             platform_user_id="discord:123",
             body={"content": "hello"},
             sub_payload_refs=(),
@@ -71,6 +75,7 @@ def test_inbound_message_unknown_adapter_kind_rejected() -> None:
 def test_inbound_message_frozen_extra_forbid() -> None:
     n = InboundMessageNotification(
         adapter_id="alfred_comms_test",
+        inbound_id="frame-1",
         platform_user_id="discord:123",
         body={"content": "hello"},
         sub_payload_refs=(),
@@ -82,6 +87,7 @@ def test_inbound_message_frozen_extra_forbid() -> None:
     with pytest.raises(ValidationError):
         InboundMessageNotification(
             adapter_id="alfred_comms_test",
+            inbound_id="frame-1",
             platform_user_id="discord:123",
             body={"content": "hello"},
             sub_payload_refs=(),

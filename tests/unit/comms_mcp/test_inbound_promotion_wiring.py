@@ -58,6 +58,7 @@ class _SpyContentStore:
 def _discord_notification(body: dict[str, object]) -> InboundMessageNotification:
     return InboundMessageNotification(
         adapter_id="discord",
+        inbound_id="frame-1",
         platform_user_id="discord:attacker",
         body=body,
         sub_payload_refs=("forged_wire_kind",),
@@ -132,6 +133,7 @@ async def test_no_promoter_preserves_legacy_wire_behaviour_for_empty_classifier_
     body = {"content": "hi"}
     notification = InboundMessageNotification(
         adapter_id="alfred_comms_test",
+        inbound_id="frame-2",
         platform_user_id="test:user",
         body=body,
         sub_payload_refs=("embed",),

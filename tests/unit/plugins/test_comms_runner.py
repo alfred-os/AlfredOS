@@ -139,6 +139,7 @@ def _inbound_frame() -> Mapping[str, object]:
         "method": "inbound.message",
         "params": {
             "adapter_id": _ADAPTER_ID,
+            "inbound_id": "frame-runner-1",
             "platform_user_id": "discord:42",
             "body": {"content": "hello"},
             "sub_payload_refs": [],

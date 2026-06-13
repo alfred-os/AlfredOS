@@ -9,6 +9,7 @@ quarantined_extract -> ingest -> dispatch) is assertable.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -190,6 +191,7 @@ class SpySecretBroker:
 def make_notification(
     *,
     adapter_id: str = "alfred_comms_test",
+    inbound_id: str | None = None,
     platform_user_id: str = "discord:victim",
     body: dict[str, object] | None = None,
     addressing_signal: str = "dm",
@@ -198,6 +200,10 @@ def make_notification(
 
     return InboundMessageNotification(
         adapter_id=adapter_id,
+        # Spec A G0 wire field. Defaults to a fresh per-call id so existing callers
+        # (the corpus, the inbound unit tests) stay green without edits; the
+        # idempotency tests pin a fixed id to drive the replay path deterministically.
+        inbound_id=inbound_id or uuid.uuid4().hex,
         platform_user_id=platform_user_id,
         body=body if body is not None else {"content": "hello"},
         sub_payload_refs=(),
