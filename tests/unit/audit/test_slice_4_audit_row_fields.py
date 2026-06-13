@@ -30,14 +30,15 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 24 entries (Slice-4 contract surface size).
+    """Roster must contain exactly 25 entries (Slice-4 contract surface size).
 
     Adding a new Slice-4 ``*_FIELDS`` constant requires bumping this assertion
     AND extending ``SLICE_4_FIELDSET_NAMES`` in the same commit. The number
     is intentionally pinned so a roster omission surfaces here. PR-S4-2
-    (#173) added ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` — the 24th.
+    (#173) added ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` — the 24th;
+    G0 (Spec A) added ``COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS`` — the 25th.
     """
-    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 24
+    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 25
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:

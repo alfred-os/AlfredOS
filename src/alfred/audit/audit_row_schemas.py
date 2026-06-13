@@ -1029,6 +1029,21 @@ COMMS_INBOUND_BUDGET_CAPPED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Emitted when the durable accept-once commit loses the race on a replayed
+# inbound frame (Spec A / G0). A replay short-circuit is a side-effecting DROP,
+# so it is recorded in the SIGNED audit log — content-free: NO body, NO user
+# text, NO platform_user_id, so no ``language`` column. ``result="dropped"``
+# reuses the existing comms drop value (migration 0016) — no new migration.
+COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        # The peppered hash of the wire inbound_id (never the raw string). A
+        # replay DROP is content-free: NO body, NO user text, NO platform id.
+        "inbound_id_hash",
+        "observed_at",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # supervisor.plugin lifecycle (PR-S4-9/10 restart wiring)
 # ---------------------------------------------------------------------------
@@ -1075,5 +1090,6 @@ SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
     "COMMS_HANDLER_FAILED_FIELDS",
     "COMMS_ADDRESSING_DRIFT_FIELDS",
     "COMMS_INBOUND_BUDGET_CAPPED_FIELDS",
+    "COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS",
     "SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS",
 )

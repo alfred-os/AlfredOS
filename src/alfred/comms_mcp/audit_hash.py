@@ -64,6 +64,7 @@ _PLATFORM_USER_PREFIX: Final = b"platform_user_id:"
 _CHANNEL_PREFIX: Final = b"channel:"
 _GUILD_PREFIX: Final = b"guild:"
 _VERIFICATION_PHRASE_PREFIX: Final = b"verification_phrase:"
+_INBOUND_ID_PREFIX: Final = b"inbound_id:"
 
 
 class AuditHashBrokerNotWiredError(AlfredError):
@@ -168,6 +169,16 @@ def hash_verification_phrase(raw: str) -> str:
     return _hash(_VERIFICATION_PHRASE_PREFIX, raw)
 
 
+def hash_inbound_id(raw: str) -> str:
+    """Keyed hash of a wire ``inbound_id`` for the replay-observed audit row.
+
+    Per-field domain separation (the ``inbound_id:`` prefix) means an
+    ``inbound_id`` digest can never collide with a platform-user-id / phrase
+    digest under the same comms subkey.
+    """
+    return _hash(_INBOUND_ID_PREFIX, raw)
+
+
 def set_broker_for_test(broker: _BrokerLike) -> None:
     """Test seam: inject a stub broker and ALWAYS drop the derived subkey.
 
@@ -197,6 +208,7 @@ __all__ = [
     "MissingAuditHashPepperError",
     "hash_channel_id",
     "hash_guild_id",
+    "hash_inbound_id",
     "hash_platform_user_id",
     "hash_verification_phrase",
     "reset_for_test",
