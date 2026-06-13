@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-13 20:40+0100\n"
+"POT-Creation-Date: 2026-06-13 21:52+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -297,63 +297,63 @@ msgstr ""
 " with: alfred daemon start. For ad-hoc verification, run the launcher "
 "directly: bin/alfred-plugin-launcher.sh alfred.discord."
 
-#: src/alfred/cli/main.py:68
+#: src/alfred/cli/main.py:71
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:165
+#: src/alfred/cli/main.py:168
 msgid "status.help"
 msgstr ""
 "Print a short instance health summary: provider, budget, optional "
 "fallback. For daemon-specific status (PID, uptime, last boot event), see:"
 " alfred daemon status"
 
-#: src/alfred/cli/main.py:195
+#: src/alfred/cli/main.py:198
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:198
+#: src/alfred/cli/main.py:201
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:199
+#: src/alfred/cli/main.py:202
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:200
+#: src/alfred/cli/main.py:203
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:201
+#: src/alfred/cli/main.py:204
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:202
+#: src/alfred/cli/main.py:205
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:203
+#: src/alfred/cli/main.py:206
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:204
+#: src/alfred/cli/main.py:207
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:210
+#: src/alfred/cli/main.py:213
 msgid "cli.login.help.user"
 msgstr "User slug to log in as."
 
-#: src/alfred/cli/main.py:213
+#: src/alfred/cli/main.py:216
 msgid "cli.login.help.expires_in"
 msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 
-#: src/alfred/cli/main.py:215
+#: src/alfred/cli/main.py:218
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/cli/main.py:353 src/alfred/i18n/_slice_4_reserve.py:154
+#: src/alfred/cli/main.py:360 src/alfred/i18n/_slice_4_reserve.py:154
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat needs the daemon. Start it with: alfred daemon start. If you "
@@ -2080,10 +2080,10 @@ msgstr ""
 "Comms adapter {adapter_id} returned an error response to an outbound "
 "request; the request failed."
 
-#: src/alfred/plugins/comms_socket_transport.py:168
-#: src/alfred/plugins/comms_socket_transport.py:178
-#: src/alfred/plugins/comms_socket_transport.py:185
-#: src/alfred/plugins/comms_socket_transport.py:192
+#: src/alfred/plugins/comms_socket_transport.py:196
+#: src/alfred/plugins/comms_socket_transport.py:206
+#: src/alfred/plugins/comms_socket_transport.py:213
+#: src/alfred/plugins/comms_socket_transport.py:220
 #: src/alfred/plugins/comms_stdio_transport.py:205
 #: src/alfred/plugins/comms_stdio_transport.py:215
 #: src/alfred/plugins/comms_stdio_transport.py:222

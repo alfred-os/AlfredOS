@@ -1,16 +1,8 @@
 """MERGE-BLOCKING: TUI MCP plugin + daemon round-trip end-to-end (#206).
 
 This is the PR-S4-10 Component-D integration gate. It exercises the real
-``plugins/alfred_tui`` adapter against the real host dispatcher across three
-load-bearing legs, none of which is mocked at the seam under test:
-
-* **launcher-spawn + stdio outbound** — the plugin is spawned through the REAL
-  ``bin/alfred-plugin-launcher.sh`` (positional ``<plugin_id> <executable>
-  [args...]`` + ``ALFRED_PLUGIN_MANIFEST_PATH`` env — the PR-S4-6 contract, no
-  ``--manifest``/``--adapter-id`` flags) running ``python -m alfred_tui.server``.
-  A line-delimited JSON-RPC ``lifecycle.start`` then ``outbound.message`` (mode
-  ``dm``) round-trips over the child's stdio and returns ``delivered`` — proving
-  the launcher hands the plugin a live MCP stdio surface.
+``plugins/alfred_tui`` adapter against the real host dispatcher across two
+load-bearing legs, neither of which is mocked at the seam under test:
 
 * **inbound -> process_inbound_message** — a keystroke-batch flushed through the
   REAL :class:`alfred_tui.session.TuiSession` (the plugin's own inbound emitter,
@@ -30,33 +22,27 @@ load-bearing legs, none of which is mocked at the seam under test:
 
 Why this shape rather than the plan's ``alfred_session_factory`` pseudocode:
 the TUI server exposes NO wire method to inject a keystroke (its inbound is
-driven by the Textual app feeding ``consume_user_input`` — there is no
-``inject_inbound`` trigger like the reference plugin's), so a launcher-spawned
-subprocess cannot emit an ``inbound.message`` without a PTY. The merge-blocking
+driven by the Textual app feeding ``consume_user_input``). The merge-blocking
 host invariants (resolver-consulted-once, canonical-id-never-on-the-wire) are
 therefore driven through the real plugin inbound emitter in-process against the
 real host dispatcher — the identical strategy ``test_discord_addressing_modes``
-uses — while the launcher subprocess proves the spawn + stdio outbound contract.
+uses.
 
-Launcher-leg note: ``alfred_tui.server.serve`` now pins structlog to
-stderr-JSON before its loop (review F4), so stdout carries only JSON-RPC
-frames. ``_read_or_skip`` still tolerates a stray non-frame line defensively
-(belt-and-braces against a future renderer change), but the channel is no
-longer expected to interleave logs. This leg is best-effort, NOT a CI gate:
-the TUI's ``sandbox.kind="none"`` launcher path uses ``runuser`` (root-only),
-which the non-root CI runner cannot exec, so it ``pytest.skip``s on CI and runs
-only on a privileged host (see ``docs/ci/required-checks.md``).
+Carrier-flip note (PR-S4-237-2, ADR-0031 Shape A): the original third leg
+spawned ``alfred_tui.server`` via the launcher and round-tripped over the
+child's stdio. That leg was RETIRED with the stdio carrier: ``alfred chat`` no
+longer launcher-spawns the TUI — it runs in-process and DIALS the daemon's 0600
+unix socket (``alfred_tui.cohost.run_cohosted``). The real-PTY + real-daemon +
+real-socket e2e turn (painting the stubbed ``ack``) is a dedicated PTY smoke
+(deferred to PR-4), not a launcher-stdio subprocess. The two in-process legs
+below carry the merge-blocking host-invariant + RichLog-round-trip coverage.
 
 Requires docker (testcontainer Postgres); skips cleanly without it.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -79,16 +65,9 @@ from alfred.security.dlp import OutboundDlp
 
 pytestmark = pytest.mark.integration
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
-_TUI_MANIFEST = _REPO_ROOT / "plugins" / "alfred_tui" / "manifest.toml"
-_PLUGIN_ID = "alfred_tui"
-_SERVER_MODULE = "alfred_tui.server"
-
 # HKDF (audit_hash) requires a >=32-byte PRK; the test pepper must clear that
 # floor exactly as the production audit.hash_pepper does.
 _TEST_PEPPER = "integration-test-pepper-0123456789abcdef-padding"
-_FRAME_TIMEOUT_S = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -328,153 +307,6 @@ async def test_tui_outbound_refuses_non_dm_addressing_mode() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. launcher-spawn: the real launcher hands the plugin a live MCP stdio surface
-# ---------------------------------------------------------------------------
-
-
-async def test_tui_launcher_spawn_stdio_outbound_round_trip() -> None:
-    """Spawn plugins/alfred_tui via the REAL launcher; outbound round-trips stdio.
-
-    Proves the PR-S4-6 launcher contract (positional args +
-    ``ALFRED_PLUGIN_MANIFEST_PATH``) hands ``alfred_tui.server`` a live
-    line-delimited JSON-RPC surface: ``lifecycle.start`` then a ``dm``
-    ``outbound.message`` returns ``delivered``.
-
-    Skips when the launcher cannot exec the plugin on this host (the kind=none
-    path needs ``runuser`` on Linux; macOS execs unsandboxed only in dev/test).
-    """
-    if not _LAUNCHER.exists():  # pragma: no cover - guarded by repo layout
-        pytest.skip("launcher script missing")
-
-    proc = await _spawn_via_launcher()
-    try:
-        assert proc.stdin is not None and proc.stdout is not None
-
-        if proc.returncode is not None and proc.returncode != 0:  # pragma: no cover
-            pytest.skip("launcher refused to exec the plugin on this host (sandbox policy)")
-
-        await _send(
-            proc.stdin,
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "lifecycle.start",
-                "params": {
-                    "adapter_id": "tui",
-                    "credentials_ref": "tui-no-credentials",
-                    "policies_snapshot_hash": "0" * 64,
-                },
-            },
-        )
-        start = await _read_or_skip(proc)
-        assert start["result"]["ok"] is True
-
-        await _send(
-            proc.stdin,
-            {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "outbound.message",
-                "params": {
-                    "adapter_id": "tui",
-                    "idempotency_key": "00000000-0000-4000-8000-000000000000",
-                    "target_platform_id": "operator",
-                    "body": ["spawned outbound", _scan_result_payload()],
-                    "attachments_refs": [],
-                    "addressing_mode": "dm",
-                },
-            },
-        )
-        outbound = await _read_or_skip(proc)
-        assert outbound["result"]["outcome"] == "delivered"
-    finally:
-        await _close(proc)
-
-
-# ---------------------------------------------------------------------------
-# launcher-spawn helpers (mirror test_comms_mcp_reference_plugin_lifecycle)
-# ---------------------------------------------------------------------------
-
-
-async def _spawn_via_launcher() -> asyncio.subprocess.Process:
-    # The launcher resolves the environment + manifest sandbox block via an
-    # internal ``python3 -m alfred.plugins.manifest_reader`` call, so the
-    # ``python3`` on PATH must be able to import ``alfred``. Prepend the active
-    # interpreter's bin dir so the launcher's helper resolves the venv python
-    # (matching how CI's uv-managed PATH exposes it) rather than a bare system
-    # python3 without the core package.
-    venv_bin = str(Path(sys.executable).parent)
-    env = {
-        **os.environ,
-        "PATH": os.pathsep.join((venv_bin, os.environ.get("PATH", ""))),
-        "ALFRED_ENVIRONMENT": "test",
-        "ALFRED_PLUGIN_MANIFEST_PATH": str(_TUI_MANIFEST),
-        "PYTHONPATH": os.pathsep.join(
-            p
-            for p in (
-                str(_REPO_ROOT / "plugins" / "alfred_tui" / "src"),
-                str(_REPO_ROOT / "src"),
-                os.environ.get("PYTHONPATH", ""),
-            )
-            if p
-        ),
-    }
-    return await asyncio.create_subprocess_exec(
-        "bash",
-        str(_LAUNCHER),
-        _PLUGIN_ID,
-        sys.executable,
-        "-m",
-        _SERVER_MODULE,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-
-
-async def _send(stdin: asyncio.StreamWriter, frame: dict[str, Any]) -> None:
-    stdin.write((json.dumps(frame) + "\n").encode())
-    await stdin.drain()
-
-
-async def _read_or_skip(proc: asyncio.subprocess.Process) -> dict[str, Any]:
-    """Read the next JSON-RPC frame, skipping any non-frame log lines.
-
-    The bare ``alfred_tui.server`` subprocess (no supervisor) leaves structlog on
-    its default console renderer, so human-readable log lines can interleave on
-    stdout. The real host ``StdioTransport`` reads line-delimited JSON-RPC
-    *frames*; this reader mirrors that by discarding any line that is not a JSON
-    object (the same ``{``-prefix filter ``test_discord_gateway_smoke`` uses).
-    See the module docstring's foundation-gap note.
-    """
-    assert proc.stdout is not None
-    deadline = asyncio.get_event_loop().time() + _FRAME_TIMEOUT_S
-    while asyncio.get_event_loop().time() < deadline:
-        try:
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=_FRAME_TIMEOUT_S)
-        except TimeoutError:  # pragma: no cover - defensive
-            pytest.skip("plugin produced no stdio frame before timeout (launcher/sandbox)")
-        if not line:  # pragma: no cover - launcher refused to hand off
-            pytest.skip("plugin closed stdout before a frame arrived (launcher refused exec)")
-        text = line.decode().strip()
-        if not text.startswith("{"):
-            continue
-        return dict(json.loads(text))
-    pytest.skip("no JSON-RPC frame within the read window (only log lines)")  # pragma: no cover
-
-
-async def _close(proc: asyncio.subprocess.Process) -> None:
-    if proc.stdin is not None and not proc.stdin.is_closing():
-        proc.stdin.close()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=_FRAME_TIMEOUT_S)
-    except TimeoutError:  # pragma: no cover - defensive
-        proc.kill()
-        await proc.wait()
-
-
-# ---------------------------------------------------------------------------
 # shared fixtures
 # ---------------------------------------------------------------------------
 
@@ -490,10 +322,3 @@ def _outbound_request(dlp: OutboundDlp, *, mode: str, text: str) -> OutboundMess
         attachments_refs=(),
         addressing_mode=mode,  # type: ignore[arg-type]
     )
-
-
-def _scan_result_payload() -> dict[str, Any]:
-    """A wire-shaped OutboundDlpScanResult for the launcher-spawn outbound frame."""
-    dlp = OutboundDlp(broker=_Broker(), audit=lambda **_: None)
-    _text, scan_result = dlp.scan_for_outbound("spawned outbound")
-    return scan_result.model_dump(mode="json")

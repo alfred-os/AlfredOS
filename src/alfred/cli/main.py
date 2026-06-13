@@ -5,20 +5,23 @@ The CLI is the imperative shell. The lighter Settings-only surfaces
 graph they need (``Settings`` → ``SecretBroker`` → ``ProviderRouter`` /
 ``IdentityResolver``) inside their own callbacks.
 
-``chat`` no longer builds an in-process Textual graph. The comms-MCP
-flag-day (PR-S4-10, #206) inverts the model: ``chat`` SPAWNS the
-``plugins/alfred_tui`` MCP plugin through ``bin/alfred-plugin-launcher.sh``
-(via :mod:`alfred.cli._launcher_spawn`) and the already-running daemon owns
-the orchestrator graph. The in-process ``Orchestrator`` → ``AlfredTuiApp``
-chain is gone from this layer; ``_chat_main`` is a thin launcher caller.
-(End-to-end ``alfred chat`` is not yet functional — the TUI plugin ships the
-wire contract only; see issue #237.)
+``chat`` no longer builds an in-process orchestrator graph, and (since
+ADR-0031 Shape A, PR-S4-237-2, #237) no longer spawns a launcher subprocess
+either. ``_chat_main`` runs the ``plugins/alfred_tui`` TUI IN-PROCESS as one
+asyncio program co-hosting Textual + the comms wire, and DIALS the already-
+running daemon's 0600 unix socket (``alfred_tui.cohost.run_cohosted`` →
+``dial_comms_socket``). The daemon owns the orchestrator graph and answers the
+dialed wire; the operator's typed turn round-trips through it (the stubbed
+``ack`` paints into the conversation log). The in-process
+``Orchestrator`` → ``AlfredTuiApp`` chain and the PR-S4-10 launcher-spawn
+path are both gone from this layer.
 
 The ``status`` command exits zero after printing a short health summary so
 operators can sanity-check their `.env` before launching the TUI. The
-``chat`` command spawns the TUI plugin. Friendly, ``t()``-routed error
-messages are printed (and a non-zero exit code returned) when ``Settings``
-fail to load or the launcher/daemon is unavailable — never a raw traceback.
+``chat`` command dials the daemon and co-hosts the TUI. Friendly,
+``t()``-routed error messages are printed (and a non-zero exit code returned)
+when ``Settings`` fail to load or the daemon is unavailable (the dial fails)
+— never a raw traceback.
 
 CLAUDE.md hard rules honoured at this layer:
 
@@ -289,69 +292,73 @@ def migrate() -> None:
 
 
 async def _chat_main() -> None:
-    """Spawn ``plugins/alfred_tui`` via the launcher and hand it the terminal.
+    """Dial the running daemon's comms socket and co-host the Textual TUI in-process.
 
-    Slice 4 (PR-S4-10, #206) inverts the Slice-2/3 model: the in-process
-    Textual launch (Settings → broker → orchestrator → in-process adapter)
-    is replaced by a thin spawn of the TUI MCP plugin through
-    ``bin/alfred-plugin-launcher.sh``. The daemon owns the orchestrator
-    graph now (spec §3.1); the CLI is just a launcher caller, so none of
-    the Slice-2 heavy imports (orchestrator, broker, providers, SQLAlchemy
-    session scope, DLP, audit writer, in-process comms adapter) are pulled
-    in here any longer.
+    Slice 4 (PR-S4-237-2, #237) adopts ADR-0031 **Shape A**: ``alfred chat``
+    runs the TUI IN ITS OWN process as one asyncio program co-hosting Textual
+    + the socket wire — it does NOT spawn a launcher subprocess. The previous
+    launcher-spawn path (PR-S4-10) is RETIRED: the TUI is a trusted,
+    operator-local foreground PTY app (``sandbox.kind = "none"``), so launcher
+    scrubbing buys nothing, and the daemon cannot spawn-and-own a process that
+    must instead own the operator's terminal. Instead the two already-running
+    peers rendezvous over the daemon's 0600 unix socket: the daemon binds +
+    accepts, ``alfred chat`` dials in, and that connection IS the wire.
 
-    The launch shape lives in :mod:`alfred.cli._launcher_spawn` (shared with
-    ``alfred discord``). The TUI plugin's manifest declares
-    ``sandbox.kind = "none"`` so the launcher ``exec``s the plugin with the
-    CLI's inherited PTY fds, which the Textual app needs to render.
+    The daemon still owns the orchestrator graph (spec §3.1); the CLI co-hosts
+    only the TUI plugin (the wire-answering ``TuiServer.dispatch`` + the Textual
+    app), so none of the Slice-2 heavy imports (orchestrator, broker, providers,
+    SQLAlchemy session scope, DLP, audit writer) are pulled in here.
 
-    Daemon-missing / daemon-mid-restart path (spec §8.7): the launcher fails
-    (non-zero exit within the probe window, a missing launcher binary, or an
-    OS spawn error) → the CLI emits the parameterless
-    ``comms.tui.daemon_required_to_chat`` t() string on stderr and exits code
-    3 (the same startup-failure code the Postgres-unreachable branch used in
-    Slice 2). The plugin never silently waits in its own process.
+    Daemon-missing / daemon-mid-restart path (spec §8.7): the dial fails —
+    ``open_unix_connection`` raises ``FileNotFoundError`` (the socket inode is
+    absent because no daemon bound it) or ``ConnectionRefusedError`` (a stale
+    inode with no listener), both ``OSError`` subclasses. ``run_cohosted`` wraps
+    ONLY that dial-OSError as ``DaemonUnavailableError``; the CLI catches THAT
+    typed error (not a bare ``OSError``, which would also swallow an unrelated
+    post-dial PTY/render ``OSError``), emits the parameterless
+    ``comms.tui.daemon_required_to_chat`` t() string on stderr, and exits code 3
+    (the same startup-failure code the launcher-exit branch used pre-flip; only
+    the detection moves from "launcher exited nonzero" to "dial failed").
 
-    perf-001: the launcher-spawn helper (and its ``asyncio`` chain) imports
-    lazily so the ``alfred --help`` path — which never invokes ``chat`` —
-    pays nothing.
+    perf-001: the co-host helper (and its Textual + socket-transport chain)
+    imports lazily so the ``alfred --help`` path — which never invokes ``chat``
+    — pays nothing.
     """
-    import uuid
+    import sys
 
-    from alfred.cli._launcher_spawn import (
-        LaunchResult,
-        PluginLaunchSpec,
-        repo_root,
-        spawn_plugin_via_launcher,
-    )
+    from alfred.cli._launcher_spawn import repo_root
+
+    # ``alfred_tui`` is a standalone uv package under the plugin's own ``src/``;
+    # in-tree it is not pip-installed, so put its ``src/`` on ``sys.path`` before
+    # importing it (the launcher previously did this via the child PYTHONPATH; the
+    # in-process dial must do it here). The core ``alfred.comms_mcp`` protocol the
+    # co-host imports already resolves via the installed ``alfred`` package.
+    plugin_src = str(repo_root() / "plugins" / "alfred_tui" / "src")
+    if plugin_src not in sys.path:
+        # Append (not front-insert): nothing else provides ``alfred_tui``, so search
+        # priority is irrelevant here, and appending avoids shadowing any same-named
+        # module the installed environment might later provide.
+        sys.path.append(plugin_src)
+
+    from alfred_tui.cohost import run_cohosted
+
+    from alfred.comms_mcp.errors import DaemonUnavailableError
 
     set_language(_operator_language())
 
-    root = repo_root()
-    plugin_dir = root / "plugins" / "alfred_tui"
-    spec = PluginLaunchSpec(
-        plugin_id="alfred_tui",
-        manifest_path=plugin_dir / "manifest.toml",
-        module="alfred_tui.server",
-        # The ``tui`` KIND prefix is the contract the host's ``_ingest_tier``
-        # keys on (T1 for the operator); the suffix makes the id unique per
-        # launch.
-        adapter_id=f"tui-{uuid.uuid4()}",
-        # ``alfred_tui`` lives under the plugin's own ``src/``; the server
-        # also imports the core ``alfred.comms_mcp`` protocol — span both.
-        import_roots=(plugin_dir / "src", root),
-        # The TUI is a foreground Textual app; it must own the operator's PTY.
-        inherit_stdio=True,
-        # ``kind="none"`` (operator-local; manifest sandbox.kind). The operator
-        # IS the trusted user, so the child keeps full env passthrough — there
-        # is no adversary ingress to scrub against (review F2).
-        sandbox_kind="none",
-    )
-
-    outcome = await spawn_plugin_via_launcher(spec)
-    if outcome.result is LaunchResult.FAILED:
+    # The dialed ``adapter_id`` is the wire ``adapter_kind`` (``"tui"``) the daemon
+    # binds its 0600 socket on (``CommsSocketListener(adapter_id=wire.adapter_kind)``)
+    # — NOT a per-instance launcher id. A daemon-absent dial raises
+    # ``DaemonUnavailableError`` (``run_cohosted`` wraps ONLY the dial's ``OSError``);
+    # map THAT — and only that — to the daemon-required operator message + exit 3
+    # (never a raw traceback). A stray post-dial ``OSError`` (PTY ioctl / broken render
+    # pipe) is NOT a DaemonUnavailableError and surfaces LOUD rather than being
+    # mislabelled "daemon required".
+    try:
+        await run_cohosted(adapter_id="tui")
+    except DaemonUnavailableError:
         typer.echo(t("comms.tui.daemon_required_to_chat"), err=True)
-        raise typer.Exit(code=3)
+        raise typer.Exit(code=3) from None
 
 
 def _operator_language() -> str:
