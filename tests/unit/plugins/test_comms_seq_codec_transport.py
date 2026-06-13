@@ -1,7 +1,7 @@
 """Gate-conditional seq/ack codec in the comms transports (Spec A G2 / ADR-0032) (#237).
 
-Drives ``CommsStdioTransport`` over in-memory streams (no subprocess) to prove
-(the ``CommsSocketTransport`` mirror is added in Task 4):
+Drives both ``CommsStdioTransport`` and ``CommsSocketTransport`` over in-memory
+streams (no subprocess / no socket bind) to prove:
 
 * default-OFF send is byte-for-byte the existing plain ADR-0025 frame;
 * negotiated-ON send carries the ``A1`` out-of-band header;
@@ -23,6 +23,7 @@ import pytest
 
 from alfred.cli._launcher_spawn import PluginLaunchSpec
 from alfred.plugins.comms_seq_codec import SEQ_MAGIC, decode_seq_frame, encode_seq_frame
+from alfred.plugins.comms_socket_transport import CommsSocketTransport
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
 
 pytestmark = pytest.mark.asyncio
@@ -89,6 +90,23 @@ def _make_stdio(
     transport = CommsStdioTransport(adapter_id="alfred_comms_test", spec=_spec())
     transport._proc = _FakeProc(stdout=stdout, stdin=stdin)  # type: ignore[assignment]
     return transport
+
+
+# --- socket transport over a real asyncio stream pair --------------------------
+
+
+async def _socket_pair() -> tuple[CommsSocketTransport, CommsSocketTransport]:
+    """A host<->peer CommsSocketTransport pair over a connected unix socketpair."""
+    import socket as _socket
+
+    # ``asyncio.open_connection(sock=...)`` adapts the socket to non-blocking
+    # itself, so no explicit ``setblocking`` is needed here.
+    s_a, s_b = _socket.socketpair()
+    reader_a, writer_a = await asyncio.open_connection(sock=s_a)
+    reader_b, writer_b = await asyncio.open_connection(sock=s_b)
+    host = CommsSocketTransport(adapter_id="tui", reader=reader_a, writer=writer_a)
+    peer = CommsSocketTransport(adapter_id="tui", reader=reader_b, writer=writer_b)
+    return host, peer
 
 
 # ---------------------------------------------------------------------------
@@ -179,3 +197,88 @@ async def test_stdio_read_over_bound_seq_unit_raises() -> None:
     transport.enable_seq_ack()
     with pytest.raises(CommsProtocolError):
         await transport.read_frame()
+
+
+# ---------------------------------------------------------------------------
+# socket transport (mirror)
+# ---------------------------------------------------------------------------
+
+
+async def test_socket_send_off_is_plain_adr0025_bytes() -> None:
+    host, peer = await _socket_pair()
+    try:
+        await host.send(_FRAME)
+        line = await peer._reader.readline()
+        assert line == json.dumps(_FRAME).encode() + b"\n"
+        assert not line.startswith(SEQ_MAGIC)
+    finally:
+        await host.close()
+        await peer.close()
+
+
+async def test_socket_send_on_carries_header() -> None:
+    host, peer = await _socket_pair()
+    try:
+        host.enable_seq_ack()
+        await host.send(_FRAME)
+        line = await peer._reader.readline()
+        assert line.startswith(SEQ_MAGIC)
+        frame = decode_seq_frame(line)
+        assert frame.seq == 0
+        assert frame.ack == 0
+        assert frame.payload == json.dumps(_FRAME).encode()
+    finally:
+        await host.close()
+        await peer.close()
+
+
+async def test_socket_send_seq_increments_per_frame() -> None:
+    host, peer = await _socket_pair()
+    try:
+        host.enable_seq_ack()
+        await host.send(_FRAME)
+        await host.send(_FRAME)
+        first = await peer._reader.readline()
+        second = await peer._reader.readline()
+        assert decode_seq_frame(first).seq == 0
+        assert decode_seq_frame(second).seq == 1
+    finally:
+        await host.close()
+        await peer.close()
+
+
+async def test_socket_read_decodes_seq_header_to_inner_object() -> None:
+    host, peer = await _socket_pair()
+    try:
+        host.enable_seq_ack()
+        peer.enable_seq_ack()
+        await host.send(_FRAME)
+        assert await peer.read_frame() == _FRAME
+    finally:
+        await host.close()
+        await peer.close()
+
+
+async def test_socket_read_fallback_decodes_plain_line_when_enabled() -> None:
+    host, peer = await _socket_pair()
+    try:
+        # host stays OFF (emits plain), peer is ON (must still decode the plain line).
+        peer.enable_seq_ack()
+        await host.send({"id": 1})
+        assert await peer.read_frame() == {"id": 1}
+    finally:
+        await host.close()
+        await peer.close()
+
+
+async def test_socket_id_preserved_across_seq_encode_decode() -> None:
+    host, peer = await _socket_pair()
+    try:
+        host.enable_seq_ack()
+        peer.enable_seq_ack()
+        await host.send(_FRAME)
+        got = await peer.read_frame()
+        assert got is not None and got["id"] == 42
+    finally:
+        await host.close()
+        await peer.close()
