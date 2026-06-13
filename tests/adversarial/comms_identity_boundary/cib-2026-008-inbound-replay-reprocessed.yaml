@@ -1,0 +1,13 @@
+id: cib-2026-008
+category: comms_identity_boundary
+threat: "A replayed/duplicated inbound frame (gateway buffer replay after a core restart, or a malicious adapter resending the same frame) must be processed at most once; the duplicate is an audited DROP, never a re-executed side effect (re-resolve / re-extract / re-ingest / re-dispatch)."
+ingestion_path: comms_inbound_message
+payload:
+  inbound_id: "frame-replay"
+  resend_count: 5
+expected_outcome: audit_row_emitted
+provenance: "Spec A decision 4 / G0 — the host commits accept-once on the COMPOSITE (adapter_id, inbound_id) BEFORE any per-message side effect. An attacker (or a buffering gateway) resending the SAME inbound_id N times wins the insert exactly once; the other N-1 commits lose and short-circuit into a content-free COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS row with result='dropped' and trust_tier_of_trigger='T3'. The downstream side effects (resolve / quarantined_extract / ingest / dispatch) run for the single accepted frame only — duplicates are never re-executed. The commit-once is placed AHEAD of the pre-resolution DoS limiter so a replay never re-charges the coarse budget."
+references:
+  - "Spec A decision 4"
+  - "G0 inbound idempotency"
+  - "#237"
