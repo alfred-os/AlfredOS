@@ -184,6 +184,15 @@ def normalise(
 
     return InboundMessageNotification(
         adapter_id=adapter_id,
+        # Spec A decision 4 (G0): a STABLE per-frame dedup id. A Discord gateway
+        # event can be redelivered (reconnect / resume), so the id is derived from
+        # the platform ``message.id`` (a stable snowflake) rather than a fresh
+        # uuid4 per emit — a redelivered event reproduces the SAME inbound_id, so
+        # the host's accept-once commit dedups the replay. (M4: an edit is a new
+        # event but keeps the same message id; the host commit-once treats the
+        # edit as a duplicate of the original — acceptable for G0, since the body
+        # extraction already happened on first contact.)
+        inbound_id=str(message.id),
         platform_user_id=str(message.author.id),
         body=body,
         sub_payload_refs=(),

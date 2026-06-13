@@ -61,6 +61,7 @@ async def test_handler_forwards_promoter_to_inbound() -> None:
     )
     notification = InboundMessageNotification(
         adapter_id="discord",
+        inbound_id="frame-1",
         platform_user_id="discord:user",
         body={"content": "hi", "embeds": [{"title": "injection"}]},
         sub_payload_refs=(),
@@ -87,6 +88,7 @@ async def test_non_empty_classifier_kind_without_promoter_fails_closed() -> None
     orchestrator = SpyOrchestrator()
     notification = InboundMessageNotification(
         adapter_id="discord",
+        inbound_id="frame-2",
         platform_user_id="discord:attacker",
         body={"content": "hi", "embeds": [{"title": "injection"}]},
         sub_payload_refs=("embed_card",),  # attacker-asserted off the untrusted wire
@@ -124,6 +126,7 @@ async def test_empty_classifier_kind_without_promoter_is_allowed() -> None:
     orchestrator = SpyOrchestrator()
     notification = InboundMessageNotification(
         adapter_id="alfred_comms_test",
+        inbound_id="frame-3",
         platform_user_id="test:user",
         body={"content": "plain hello"},
         sub_payload_refs=(),

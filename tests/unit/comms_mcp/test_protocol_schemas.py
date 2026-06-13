@@ -49,6 +49,7 @@ def test_inbound_notification_rejects_extra_fields() -> None:
     """
     valid = {
         "adapter_id": "alfred_comms_test",
+        "inbound_id": "frame-1",
         "platform_user_id": "discord:victim",
         "body": {"content": "attack"},
         "sub_payload_refs": (),
@@ -68,6 +69,7 @@ def test_inbound_notification_rejects_oversized_platform_user_id() -> None:
     """L1: a pre-resolution platform identifier is bounded (max_length=512)."""
     valid = {
         "adapter_id": "alfred_comms_test",
+        "inbound_id": "frame-1",
         "platform_user_id": "x" * 513,
         "body": {"content": "hi"},
         "sub_payload_refs": (),
@@ -250,6 +252,7 @@ def test_content_ref_kind_literal() -> None:
         ),
         protocol.InboundMessageNotification(
             adapter_id="alfred_comms_test",
+            inbound_id="frame-1",
             platform_user_id="discord:1",
             body={"content": "hi"},
             sub_payload_refs=(),

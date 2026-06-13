@@ -96,6 +96,26 @@ AdapterId = Annotated[str, AfterValidator(_check_adapter_kind)]
 # real platform id (Discord snowflake, etc.) is far shorter.
 PlatformUserId = Annotated[str, Field(min_length=1, max_length=512)]
 
+# The durable wire dedup key the gateway/adapter stamps on each inbound frame
+# (Spec A decision 4 / G0). Bounded to match the ``inbound_idempotency.inbound_id``
+# column (VARCHAR(255)); non-empty so a blank id can never collapse two frames.
+#
+# TRUST ASSUMPTION: ``inbound_id`` is adapter-supplied OPAQUE metadata. In G0 the
+# host validates SHAPE only (bounded, non-empty) — it does NOT yet trust an
+# individual adapter to mint globally-unique ids. The ``inbound_idempotency``
+# ledger's COMPOSITE ``(adapter_id, inbound_id)`` key isolates each adapter's id
+# namespace so one adapter's id reuse cannot drop another adapter's distinct
+# message. The gateway (G1+) makes this id host-trusted by deriving it from a
+# ``(leg, seq, epoch)`` envelope.
+#
+# STABILITY: dedup requires a RETRIED frame to reproduce the SAME id. A fresh
+# ``uuid4().hex`` per emit is correct ONLY for a non-buffering single-shot
+# emitter (each emit is a genuinely new frame); a buffering / retrying emitter
+# MUST carry a stable id across its own retries or dedup is a no-op for it (the
+# Discord emitter derives the id from the platform ``message.id`` for this
+# reason).
+InboundId = Annotated[str, Field(min_length=1, max_length=255)]
+
 
 def _assert_aware(value: datetime) -> datetime:
     """Reject a naive datetime (no tzinfo). Aware-timestamp invariant."""
@@ -266,9 +286,14 @@ class InboundMessageNotification(_WireModel):
 
     ``body`` is the raw adapter-specific blob (T3 host-side); the host's
     inbound scanner locates the body text via :data:`BODY_FIELD_BY_KIND`.
+    ``inbound_id`` is the durable wire dedup key (Spec A decision 4): the host
+    commits accept-once on the COMPOSITE ``(adapter_id, inbound_id)`` before any
+    side effect, so a replayed frame short-circuits. ``inbound_id`` is opaque
+    adapter-supplied metadata (see the :data:`InboundId` trust assumption).
     """
 
     adapter_id: AdapterId
+    inbound_id: InboundId
     platform_user_id: PlatformUserId
     body: Mapping[str, object]
     sub_payload_refs: tuple[str, ...]
@@ -314,6 +339,7 @@ __all__ = [
     "CrashedNotification",
     "HealthReport",
     "InboundAddressingSignal",
+    "InboundId",
     "InboundMessageNotification",
     "LifecycleStartRequest",
     "LifecycleStartResult",

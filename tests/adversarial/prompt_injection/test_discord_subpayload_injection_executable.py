@@ -74,6 +74,8 @@ def _load(payload_id: str) -> AdversarialPayload:
 
 async def _drive(
     body: dict[str, object],
+    *,
+    inbound_id: str = "frame-adv-1",
 ) -> tuple[SpyOrchestrator, SpyAuditWriter, _SpyContentStore]:
     store = _SpyContentStore()
     promoter = SubPayloadPromoter(
@@ -83,6 +85,7 @@ async def _drive(
     audit = SpyAuditWriter()
     notification = InboundMessageNotification(
         adapter_id="discord",
+        inbound_id=inbound_id,
         platform_user_id="discord:attacker",
         body=body,
         sub_payload_refs=(),
@@ -134,7 +137,7 @@ async def test_subpayload_surface_promoted_orchestrator_blind(payload_id: str) -
     assert payload.expected_outcome == "neutralized"
     kind = _EXPECTED_KIND_BY_ID[payload_id]
 
-    orch, audit, store = await _drive(_body_of(payload))
+    orch, audit, store = await _drive(_body_of(payload), inbound_id=f"frame-adv-{payload_id}")
 
     # (b) orchestrator never sees raw injected text — the extract body has no
     # injection string, only handle references.

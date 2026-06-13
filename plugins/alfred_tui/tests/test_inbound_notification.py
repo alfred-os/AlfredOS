@@ -123,6 +123,47 @@ async def test_buffer_survives_failed_notify_and_reflushes_on_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reflush_reuses_inbound_id_then_new_batch_gets_fresh_id() -> None:
+    """A buffered re-flush MUST carry the SAME ``inbound_id`` as the failed emit.
+
+    ``TuiSession`` is a buffering emitter: a failed notify keeps the buffer and a
+    retry re-flushes the SAME operator input. Minting a fresh ``inbound_id`` per
+    flush would make the host idempotency ledger see the retry as a NEW frame and
+    dispatch the operator's message TWICE. The id is the per-batch dedup key, so a
+    re-flush of the same batch reuses it; only a fresh batch (after a successful
+    flush cleared the buffer) gets a new id.
+    """
+    seen: list[InboundMessageNotification] = []
+    fail_next = {"on": True}
+
+    async def _flaky_then_capture(note: InboundMessageNotification) -> None:
+        if fail_next["on"]:
+            fail_next["on"] = False
+            seen.append(note)  # capture the id minted on the FAILED emit
+            raise RuntimeError("transient sink failure")
+        seen.append(note)
+
+    session = TuiSession(notify=_flaky_then_capture)
+    await session.start(adapter_id="tui")
+    await session.consume_user_input("retry me")
+
+    with pytest.raises(RuntimeError):
+        await session.flush_keystroke_batch()
+    await session.flush_keystroke_batch()  # sink recovered — re-flush
+
+    assert len(seen) == 2
+    failed_id, retry_id = seen[0].inbound_id, seen[1].inbound_id
+    assert retry_id == failed_id, "re-flush of the same buffered batch changed inbound_id"
+
+    # A genuinely new batch (after the successful flush cleared the buffer) must
+    # mint a FRESH id, so distinct frames stay distinct to the host ledger.
+    await session.consume_user_input("a new line")
+    await session.flush_keystroke_batch()
+    assert len(seen) == 3
+    assert seen[2].inbound_id != failed_id, "a fresh batch reused a stale inbound_id"
+
+
+@pytest.mark.asyncio
 async def test_stop_flushes_pending_buffer_count() -> None:
     session = TuiSession()
     await session.start(adapter_id="tui")

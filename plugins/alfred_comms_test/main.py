@@ -40,6 +40,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -181,6 +182,12 @@ def build_inbound_notification(body: dict[str, Any]) -> dict[str, Any]:
     _state["last_inbound_at"] = datetime.now(UTC).isoformat()
     params: dict[str, Any] = {
         "adapter_id": _ADAPTER_ID,
+        # Spec A decision 4 (G0): the durable wire dedup key. This reference
+        # plugin emits a genuinely new frame per inject, so a fresh uuid4 per
+        # build is the correct opaque id. The host validates it through
+        # ``InboundMessageNotification.model_validate(raw)``, so a missing
+        # inbound_id would fail validation host-side, not here.
+        "inbound_id": uuid.uuid4().hex,
         "platform_user_id": body.get("platform_user_id", "discord:reference"),
         "body": {"content": body.get("content", "")},
         "sub_payload_refs": [],
