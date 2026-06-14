@@ -732,6 +732,22 @@ DAEMON_LIFECYCLE_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Spec A G3-2 (#237), arch-263-001: the daemon-side audit row a
+# ``CommsSocketListener.on_peer_rejected`` callback writes when a mismatched-uid
+# peer is refused on the 0600 comms socket. A rejection is an EXPECTED adversarial
+# event (a same-uid race / wider-perm misconfig), so it does NOT refuse the boot —
+# this is a loud audit row + metric, then the listener keeps waiting. ``peer_uid``
+# is the rejected connector's reported uid (``None`` → "" on the wire); ``expected_uid``
+# is the daemon's own uid. Both are non-secret integers — no T3 content.
+COMMS_SOCKET_PEER_REJECTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "peer_uid",
+        "expected_uid",
+        "occurred_at",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # state.proposal.dispatch_failure family (DLP-into-failure_detail; #173)
 # ---------------------------------------------------------------------------
@@ -1088,6 +1104,7 @@ SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
 # adding its name to this tuple in the same commit (the AST guard catches
 # omissions).
 SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
+    "COMMS_SOCKET_PEER_REJECTED_FIELDS",
     "DAEMON_BOOT_FIELDS",
     "DAEMON_BOOT_FAILED_FIELDS",
     "DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS",

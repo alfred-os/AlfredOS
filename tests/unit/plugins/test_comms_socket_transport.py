@@ -479,6 +479,79 @@ async def test_listener_rejects_mismatched_uid_peer_then_serves_same_uid(
         await listener.aclose()
 
 
+async def test_listener_fires_on_peer_rejected_callback_with_uid(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec A G3-2 (#237): a rejected peer fires ``on_peer_rejected`` with its uid.
+
+    The daemon supplies this callback to write the ``comms.socket.peer_uid_rejected``
+    audit row at the reject point. It must receive the REJECTED peer's uid (a counter
+    would lose it — security M-3) and fire BEFORE the impostor's writer is closed,
+    while a legitimate same-uid dial-in still serves (boot is not refused).
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    uids = iter([os.getuid() + 7777, os.getuid()])
+    monkeypatch.setattr(cst, "_resolve_peer_uid", lambda _sock: next(uids))
+
+    rejected: list[int | None] = []
+    # Deterministic callback-gated wait (CR #264): the reject fires
+    # ``_on_rejected`` asynchronously, so signal an Event from it and await that
+    # instead of a fixed ``asyncio.sleep`` that can flake under slow scheduling.
+    rejected_fired = asyncio.Event()
+
+    async def _on_rejected(peer_uid: int | None) -> None:
+        rejected.append(peer_uid)
+        rejected_fired.set()
+
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID, on_peer_rejected=_on_rejected)
+    await listener.bind()
+    sock_path = default_comms_socket_path(_ADAPTER_ID)
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        imp_r, imp_w = await asyncio.open_unix_connection(str(sock_path))
+        await asyncio.wait_for(rejected_fired.wait(), timeout=2.0)
+        assert not accept_task.done()
+        # The callback fired with the impostor's foreign uid.
+        assert rejected == [os.getuid() + 7777]
+        # A legitimate same-uid peer still serves — the reject did not wedge the boot.
+        leg_r, leg_w = await asyncio.open_unix_connection(str(sock_path))
+        transport = await asyncio.wait_for(accept_task, timeout=2.0)
+        assert transport is not None
+        # The legitimate accept did NOT fire the reject callback again.
+        assert rejected == [os.getuid() + 7777]
+        for w in (imp_w, leg_w):
+            w.close()
+        del imp_r, leg_r
+        await transport.close()
+    finally:
+        await listener.aclose()
+
+
+def test_resolve_peer_uid_no_so_peercred_logs_breadcrumb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """devex-263-002: the no-``SO_PEERCRED`` degrade leaves a structlog breadcrumb.
+
+    On a macOS dev host the peer-uid check is SKIPPED (platform), not
+    attempted-and-failed; the breadcrumb lets a trace tell those apart.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    class _RecLog:
+        def debug(self, event: str, **kw: object) -> None:
+            events.append((event, kw))
+
+        def warning(self, event: str, **kw: object) -> None: ...
+
+    monkeypatch.setattr(cst, "log", _RecLog())
+    monkeypatch.delattr(socket, "SO_PEERCRED", raising=False)
+    assert cst._resolve_peer_uid(_FakeSock(returns=b"")) is None  # type: ignore[arg-type]
+    assert any(e == "comms.socket.peer_cred_unsupported" for e, _ in events)
+
+
 async def test_listener_second_accept_call_raises(runtime_dir: Path) -> None:
     """A SECOND ``accept()`` *call* raises — one-shot lifecycle (ADR-0031 Decision 4).
 

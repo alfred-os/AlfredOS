@@ -41,7 +41,7 @@ import re
 import socket
 import stat
 import struct
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Final
 
@@ -91,6 +91,10 @@ def _runtime_dir() -> Path:
 # ``{ pid_t pid; uid_t uid; gid_t gid; }``; ``"3I"`` matches it (uid is unsigned).
 _UCRED_STRUCT: Final[str] = "3I"
 
+# Perf (devex carry-forward): hoist the fixed struct width to a module constant so
+# ``_resolve_peer_uid`` does not recompute ``struct.calcsize`` on every accept.
+_UCRED_WIDTH: Final[int] = struct.calcsize(_UCRED_STRUCT)
+
 
 def _resolve_peer_uid(sock: socket.socket | None) -> int | None:
     """Return the connected peer's uid, or ``None`` when unknowable.
@@ -105,8 +109,17 @@ def _resolve_peer_uid(sock: socket.socket | None) -> int | None:
     callback and wedging the listener.
     """
     if sock is None or not hasattr(socket, "SO_PEERCRED"):
+        # devex-263-002: leave a breadcrumb on the no-SO_PEERCRED branch (a macOS
+        # dev host) so the FS-perms-of-record degrade is distinguishable in a trace
+        # from a short-read / getsockopt-fault degrade — the operator can tell the
+        # peer-uid check was SKIPPED (platform), not ATTEMPTED-and-failed.
+        log.debug(
+            "comms.socket.peer_cred_unsupported",
+            so_peercred_present=hasattr(socket, "SO_PEERCRED"),
+            sock_present=sock is not None,
+        )
         return None
-    width = struct.calcsize(_UCRED_STRUCT)
+    width = _UCRED_WIDTH
     try:
         # ``SO_PEERCRED`` is a Linux-only socket constant; the ``hasattr`` guard
         # above gates the access. pyright on a macOS dev host cannot see the
@@ -368,6 +381,7 @@ class CommsSocketListener:
         *,
         adapter_id: str,
         max_line_bytes: int = _MAX_COMMS_LINE_BYTES,
+        on_peer_rejected: Callable[[int | None], Awaitable[None]] | None = None,
     ) -> None:
         self._adapter_id = adapter_id
         self._max_line_bytes = max_line_bytes
@@ -375,6 +389,16 @@ class CommsSocketListener:
         self._sock: socket.socket | None = None
         self._server: asyncio.AbstractServer | None = None
         self._accepted: asyncio.Future[CommsSocketTransport] | None = None
+        # Spec A G3-2 (#237) — arch-263-001 (closes the G3-1 deferral): a CALLBACK
+        # (not a counter — security M-3) fired in ``_on_connect`` at the reject
+        # point, passing the rejected peer's uid. The daemon supplies a callback
+        # that writes the ``comms.socket.peer_uid_rejected`` AUDIT row (peer_uid +
+        # expected_uid) via the audit writer it already holds. A counter would lose
+        # the peer_uid and could miss a reject immediately followed by a legitimate
+        # accept. A rejection is an EXPECTED adversarial event, so it does NOT refuse
+        # the boot (that would be a self-inflicted DoS): loud audit row, boot
+        # continues, the listener keeps waiting for a legitimate same-uid peer.
+        self._on_peer_rejected = on_peer_rejected
 
     @property
     def path(self) -> Path:
@@ -490,6 +514,11 @@ class CommsSocketListener:
                     adapter_id=self._adapter_id,
                     peer_uid=peer_uid,
                 )
+                # Fire the daemon's reject callback (the audit-row writer) at the
+                # reject point, BEFORE closing the impostor's writer, so the loud
+                # audit row records every reject (arch-263-001). Boot is NOT refused.
+                if self._on_peer_rejected is not None:
+                    await self._on_peer_rejected(peer_uid)
                 writer.close()
                 return
             self._accepted.set_result(

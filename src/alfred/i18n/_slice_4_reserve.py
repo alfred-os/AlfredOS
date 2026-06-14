@@ -156,6 +156,7 @@ def _register() -> None:
     # Comms socket peer-auth (Spec A G3-1 / ADR-0032). The listener
     # (alfred.plugins.comms_socket_transport) logs this via structlog on a
     # mismatched-uid accept reject; the DAEMON-side audit row that consumes it
-    # lands in G3-2 (the daemon caller owns the audit writer). Reserved here so
-    # the catalog drift gate is satisfied ahead of that audit-row call site.
-    t("comms.socket.peer_uid_rejected", peer_uid=1000)
+    # lands in G3-2 (the daemon caller owns the audit writer). G3-2 (devex-263-001)
+    # enriches the message with ``expected_uid`` + an actionable next-step so an
+    # operator can act on it.
+    t("comms.socket.peer_uid_rejected", peer_uid=1000, expected_uid=501)

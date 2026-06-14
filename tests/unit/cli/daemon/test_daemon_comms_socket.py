@@ -58,8 +58,11 @@ class _FakeSocketListener:
     instances: ClassVar[list[_FakeSocketListener]] = []
     fail_bind: ClassVar[bool] = False
 
-    def __init__(self, *, adapter_id: str) -> None:
+    def __init__(self, *, adapter_id: str, on_peer_rejected: Any = None) -> None:
         self.adapter_id = adapter_id
+        # Spec A G3-2 (#237): the boot path supplies the peer-auth-reject audit
+        # callback. Record it so a test can drive it + assert the audit row.
+        self.on_peer_rejected = on_peer_rejected
         self.bind_called = False
         self.accept_called = False
         self.aclose_calls = 0
@@ -104,9 +107,7 @@ class _FakeRunner:
     async def pump(self) -> None:  # pragma: no cover
         return None
 
-    async def send_notification(
-        self, method: str, params: Any
-    ) -> None:  # pragma: no cover
+    async def send_notification(self, method: str, params: Any) -> None:  # pragma: no cover
         return None
 
     async def send_request(self, method: str, params: Any) -> Any:  # pragma: no cover
@@ -175,6 +176,67 @@ def test_tui_adapter_binds_listener_and_schedules_accept_task(
     from alfred.i18n import t
 
     assert t("daemon.comms.adapter_listening", adapter_id=_TUI_ADAPTER) in result.output
+
+
+def test_tui_adapter_peer_reject_callback_writes_audit_row(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """Spec A G3-2 (#237) arch-263-001: the boot wires a peer-reject audit callback.
+
+    The daemon supplies ``CommsSocketListener(on_peer_rejected=...)`` with a callback
+    that writes the ``comms.socket.peer_uid_rejected`` audit row (peer_uid +
+    expected_uid). Drive the captured callback and assert the row records.
+    """
+    del quarantine_registry, tmp_path, patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
+    _patch_socket_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 0, result.output
+
+    listener = _FakeSocketListener.instances[0]
+    callback = listener.on_peer_rejected
+    assert callback is not None, "boot must wire the peer-reject audit callback"
+
+    # Drive the callback as the listener would on a mismatched-uid reject.
+    asyncio.run(callback(424242))
+
+    rows = boot_success_env.rows_for("COMMS_SOCKET_PEER_REJECTED_FIELDS")
+    assert len(rows) == 1
+    subject = rows[0]["subject"]
+    assert subject["peer_uid"] == "424242"
+    assert subject["expected_uid"]  # the daemon's own uid, non-empty
+    assert subject["adapter_id"] == "tui"
+    assert rows[0]["result"] == "refused"
+
+
+def test_tui_adapter_peer_reject_callback_handles_unknown_uid(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """A ``None`` peer uid (no SO_PEERCRED) records as an empty ``peer_uid`` field."""
+    del quarantine_registry, patch_quarantine_child_spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
+    _patch_socket_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 0, result.output
+
+    callback = _FakeSocketListener.instances[0].on_peer_rejected
+    assert callback is not None
+    asyncio.run(callback(None))
+
+    rows = boot_success_env.rows_for("COMMS_SOCKET_PEER_REJECTED_FIELDS")
+    assert len(rows) == 1
+    assert rows[0]["subject"]["peer_uid"] == ""
 
 
 def test_tui_adapter_listener_reaped_on_clean_shutdown(
@@ -357,8 +419,9 @@ class _BlockingAcceptListener:
 
     instances: ClassVar[list[_BlockingAcceptListener]] = []
 
-    def __init__(self, *, adapter_id: str) -> None:
+    def __init__(self, *, adapter_id: str, on_peer_rejected: Any = None) -> None:
         self.adapter_id = adapter_id
+        self.on_peer_rejected = on_peer_rejected
         self.accept_started = asyncio.Event()
         self.aclose_calls = 0
         _BlockingAcceptListener.instances.append(self)
@@ -468,8 +531,9 @@ class _SameTickAcceptListener:
 
     instances: ClassVar[list[_SameTickAcceptListener]] = []
 
-    def __init__(self, *, adapter_id: str) -> None:
+    def __init__(self, *, adapter_id: str, on_peer_rejected: Any = None) -> None:
         self.adapter_id = adapter_id
+        self.on_peer_rejected = on_peer_rejected
         self.transport = _ClosingTransport()
         self.aclose_calls = 0
         _SameTickAcceptListener.instances.append(self)

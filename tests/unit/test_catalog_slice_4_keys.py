@@ -206,20 +206,22 @@ def test_all_slice_4_keys_resolve_to_non_bare_strings() -> None:
     assert not bare, f"Slice-4 catalog keys without translations (returned bare): {bare}"
 
 
-def test_comms_socket_peer_uid_rejected_renders_with_format_arg() -> None:
-    """The G3-1 peer-auth reject catalog key renders with its ``{peer_uid}`` arg.
+def test_comms_socket_peer_uid_rejected_renders_with_format_args() -> None:
+    """The peer-auth reject catalog key renders with BOTH ``{peer_uid}`` + ``{expected_uid}``.
 
     ``comms.socket.peer_uid_rejected`` (Spec A G3-1 / ADR-0032) is deliberately
     NOT in ``SLICE_4_KEYS``: its ``comms.socket.`` prefix sits outside the
     slice-4 family enumeration, matching its older ``comms.socket.*`` event
     siblings (``send_broken_pipe``, ``frame_too_large``), so the family tests
-    above do not cover it. This focused assertion guards the catalog entry +
-    its ``{peer_uid}`` format arg against drift (a recurring catalog CI catch)
-    for the G3-2 daemon audit-row consumer that will call it.
+    above do not cover it. G3-2 (devex-263-001) enriched the message with
+    ``{expected_uid}`` + an actionable next-step; this focused assertion guards
+    BOTH format args against drift (a recurring catalog CI catch) for the G3-2
+    daemon audit-row consumer that calls it.
     """
-    rendered = t("comms.socket.peer_uid_rejected", peer_uid=1000)
+    rendered = t("comms.socket.peer_uid_rejected", peer_uid=1000, expected_uid=501)
     assert rendered != "comms.socket.peer_uid_rejected", "catalog key returned bare"
-    assert "1000" in rendered, f"format arg not interpolated: {rendered!r}"
+    assert "1000" in rendered, f"peer_uid not interpolated: {rendered!r}"
+    assert "501" in rendered, f"expected_uid not interpolated: {rendered!r}"
 
 
 def test_slice_4_keys_count_at_floor() -> None:
