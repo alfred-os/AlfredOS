@@ -1,17 +1,20 @@
-"""Core lifecycle signal emission at boot-healthy + drain (Spec A G1) (#237).
+"""Core lifecycle signal emission at boot-healthy + drain (Spec A G1/G3-2) (#237).
 
-G1 is AUDIT-ONLY: the daemon writes ``daemon.lifecycle.ready`` /
-``daemon.lifecycle.going_down`` AUDIT rows at the right lifecycle points and
-mints the per-boot epoch, but sends NO wire frame (the gateway consumer + the
-runner send seam land in G3). These tests assert the audit rows and the
-audit-only contract.
+The daemon writes ``daemon.lifecycle.ready`` / ``daemon.lifecycle.going_down``
+AUDIT rows at the right lifecycle points and mints the per-boot epoch (G1). As of
+G3-2 the core ALSO SENDS those lifecycle frames over the socket-listener carrier
+via the ``LifecycleBroadcaster`` (the runner's id-less ``send_notification``
+seam). The audit row stays authoritative; the wire frame is best-effort — a
+zero-sender boot is a clean no-op and the audit rows still record. These tests
+assert the audit rows AND the wire-send-via-seam contract (broadcast through
+``send_notification``, never by constructing the gateway-consume frame models).
 """
 
 from __future__ import annotations
 
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -23,9 +26,84 @@ from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.security.quarantine import declare_hookpoints
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
-from .conftest import FakeAuditWriter
+from .conftest import FakeAuditWriter, FakeSupervisor
 
 _COMMS_TEST_ADAPTER = "alfred_comms_test"
+_TUI_ADAPTER = "alfred_tui"
+
+
+class _ImmediateAcceptListener:
+    """Stands in for ``CommsSocketListener`` — ``accept()`` resolves at once.
+
+    Returns a closeable transport so the boot's ``_accept_and_pump`` proceeds past
+    the accept race into the runner build + handshake + broadcaster register — the
+    path the wire-send-via-seam contract test drives.
+    """
+
+    instances: ClassVar[list[_ImmediateAcceptListener]] = []
+
+    def __init__(self, *, adapter_id: str, on_peer_rejected: Any = None) -> None:
+        self.adapter_id = adapter_id
+        self.on_peer_rejected = on_peer_rejected
+        self.aclose_calls = 0
+        _ImmediateAcceptListener.instances.append(self)
+
+    async def bind(self) -> None:
+        return None
+
+    async def accept(self) -> Any:
+        class _T:
+            async def close(self) -> None:
+                return None
+
+        return _T()
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
+class _SeamRunner:
+    """Stands in for ``CommsPluginRunner`` (socket carrier) for the seam test.
+
+    ``send_notification`` is the bound id-less sender the boot must register with the
+    ``LifecycleBroadcaster``; the test asserts the registered callable IS this method.
+    ``pump`` returns at once so ``_accept_and_pump`` completes cleanly.
+    """
+
+    instances: ClassVar[list[_SeamRunner]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.handshake_called = False
+        _SeamRunner.instances.append(self)
+
+    async def start_and_handshake(self) -> None:
+        self.handshake_called = True
+
+    async def pump(self) -> None:
+        return None
+
+    async def send_notification(self, method: str, params: Any) -> None:
+        return None
+
+    async def send_request(self, method: str, params: Any) -> Any:
+        return {}
+
+
+class _CapturingSupervisor(FakeSupervisor):
+    """A ``FakeSupervisor`` that CAPTURES the supervised coroutine instead of closing it.
+
+    The shared ``FakeSupervisor.register_plugin_task`` closes the coroutine immediately
+    (boot-wiring tests assert COUNT, not execution). The seam test must actually RUN
+    ``_accept_and_pump`` to reach the register call, so it captures the coroutine for
+    the test to drive under a bounded ``wait_for``.
+    """
+
+    captured: ClassVar[list[Any]] = []
+
+    def register_plugin_task(self, coro: Any) -> Any:
+        _CapturingSupervisor.captured.append(coro)
+        return coro
 
 
 def fault_audit_writer_on_phase(writer: FakeAuditWriter, phase: str) -> None:
@@ -175,23 +253,80 @@ def test_default_empty_adapters_emits_audit_rows_without_wire(
     assert all(r["subject"]["epoch"] for r in lifecycle)
 
 
-def test_boot_path_is_audit_only_no_wire_send() -> None:
-    """G1 contract: the daemon boot path sends NO lifecycle wire frame.
+def test_boot_path_registers_runner_send_notification_with_broadcaster(
+    monkeypatch: pytest.MonkeyPatch,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """G3-2 contract: the boot feeds the runner's id-less seam to the broadcaster.
 
-    A socket-backed (TUI) adapter boot emits the ``ready`` AUDIT row (proven by
-    the default + socket boot tests) but produces NO ``ready`` WIRE frame — the
-    gateway consumer + the send seam land in G3. There is no runner captured and
-    no ``send_notification`` plumbed in G1, so the audit-only contract is locked
-    structurally: the boot module references no lifecycle wire send.
+    G3-2 SENDS the lifecycle frames (G1 was audit-only). The send goes through the
+    runner's ``send_notification`` seam — NOT by the boot path constructing the
+    ``ReadyNotification`` / ``GoingDownNotification`` wire models itself (those are
+    the G3-3 gateway-CONSUME shapes; the core sends a plain id-less JSON-RPC frame).
+
+    Behavioural, not source-text: this drives the REAL socket-carrier accept path to
+    completion (a peer connects, the runner handshakes, the boot registers it) and
+    asserts the callable handed to ``LifecycleBroadcaster.register`` IS the runner's
+    bound ``send_notification`` — never the frame-model constructors. A regression
+    that registered a hand-rolled frame builder (or wired a wrong sender) fails here.
+    """
+    del quarantine_registry  # installed via fixture side effect
+    del patch_quarantine_child_spawn  # in-proc fake child-IO; no real bwrap spawn
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
+
+    registered: list[tuple[str, object]] = []
+    original_register = _daemon_commands.LifecycleBroadcaster.register
+
+    def _spy_register(self: object, adapter_id: str, sender: object) -> None:
+        registered.append((adapter_id, sender))
+        original_register(self, adapter_id, sender)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_daemon_commands.LifecycleBroadcaster, "register", _spy_register)
+    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _ImmediateAcceptListener)
+    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _SeamRunner)
+    monkeypatch.setattr("alfred.cli.daemon._commands.Supervisor", _CapturingSupervisor)
+
+    _ImmediateAcceptListener.instances.clear()
+    _SeamRunner.instances.clear()
+    _CapturingSupervisor.captured.clear()
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 0, result.output
+
+    # Boot captured exactly one supervised accept-task; drive it to completion so a
+    # peer "connects", the runner handshakes, and the boot reaches the register call.
+    assert len(_CapturingSupervisor.captured) == 1
+    import asyncio
+
+    asyncio.run(asyncio.wait_for(_CapturingSupervisor.captured[0], timeout=1.0))
+
+    # Exactly one runner built; its send_notification is what the boot registered.
+    assert len(_SeamRunner.instances) == 1
+    runner = _SeamRunner.instances[0]
+    assert runner.handshake_called is True
+    assert len(registered) == 1
+    adapter_id, sender = registered[0]
+    assert adapter_id == "tui"  # the wire adapter_kind
+    # The registered callable IS the runner's bound send_notification seam — NOT a
+    # frame-model constructor and NOT some other sender (the structural invariant).
+    assert sender == runner.send_notification
+
+
+def test_boot_path_never_constructs_lifecycle_frame_models() -> None:
+    """The core must not construct the gateway-CONSUME frame models.
+
+    Complements the behavioural register test above: the core sends a PLAIN id-less
+    JSON-RPC frame via ``send_notification`` and never builds ``ReadyNotification`` /
+    ``GoingDownNotification`` (those are G3-3's gateway DECODE shapes). This is a
+    cheap structural backstop; the wire-send-via-seam behaviour is pinned above.
     """
     src = Path(inspect.getfile(_daemon_commands)).read_text()
-    assert "send_notification" not in src, (
-        "G1 is audit-only: the daemon boot path must not call send_notification "
-        "for lifecycle frames (that seam + its consumer land in G3)."
-    )
     assert "ReadyNotification(" not in src and "GoingDownNotification(" not in src, (
-        "G1 is audit-only: the daemon boot path must not construct a lifecycle "
-        "wire frame (the frames are DEFINED for G3 to send)."
+        "The core sends a plain id-less JSON-RPC frame; it must not construct the "
+        "gateway-consume frame models (those are G3-3's decode shapes)."
     )
 
 
