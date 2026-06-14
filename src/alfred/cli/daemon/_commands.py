@@ -46,7 +46,7 @@ from alfred.audit.audit_row_schemas import (
 # boot. Imported at module scope (not lazily) so the boot-wiring unit tests can
 # monkeypatch the ``alfred.cli.daemon._commands.create_and_register_t3_nonce``
 # seam to count / fault the call without a real subprocess.
-from alfred.bootstrap.lifecycle_epoch import mint_boot_epoch
+from alfred.bootstrap.lifecycle_epoch import current_boot_epoch, mint_boot_epoch
 from alfred.bootstrap.nonce_factory import (
     T3NonceAlreadyRegisteredError,
     create_and_register_t3_nonce,
@@ -90,6 +90,10 @@ from alfred.i18n import t
 # PR-S4-11b (#237): module-level so the boot-wiring unit tests monkeypatch these
 # two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
 # ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
+from alfred.comms_mcp.protocol import (
+    DAEMON_LIFECYCLE_GOING_DOWN,
+    DAEMON_LIFECYCLE_READY,
+)
 from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.comms_socket_transport import CommsSocketListener
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
@@ -739,6 +743,12 @@ def _build_comms_runner(
         # Match the runner's in-flight dispatch-task cap to the session's per-adapter
         # dispatch semaphore so the two backpressure bounds share one value.
         max_in_flight_notifications=settings.comms_max_in_flight_notifications,
+        # Spec A G3-2 (#237) — architect H-2: thread the non-secret per-boot epoch
+        # into the ``lifecycle.start`` handshake so the G3-3 gateway reconciles
+        # core-liveness from the handshake (the boot-``ready`` broadcast normally
+        # reaches zero senders). ``current_boot_epoch()`` is ``None`` only before
+        # ``mint_boot_epoch`` runs at boot — by the time a runner is built it is set.
+        boot_epoch=current_boot_epoch(),
     )
     sender: OutboundSenderLike = _RunnerOutboundSender(runner=runner)
     graph.inbound_orchestrator.bind_outbound_sender(sender)
@@ -1270,7 +1280,10 @@ async def _emit_ready(audit: AuditWriter, *, boot_id: str, epoch: str) -> None:
         audit,
         fields=DAEMON_LIFECYCLE_FIELDS,
         schema_name="DAEMON_LIFECYCLE_FIELDS",
-        event="daemon.lifecycle.ready",
+        # Spec A G3-2 (#237) — architect L-1: the audit ``event`` uses the SAME
+        # constant the runner frames on the wire, so the audit-event-name and the
+        # wire-method-name cannot drift.
+        event=DAEMON_LIFECYCLE_READY,
         subject={
             "boot_id": boot_id,
             "epoch": epoch,
@@ -1299,7 +1312,8 @@ async def _emit_going_down(audit: AuditWriter, *, boot_id: str, epoch: str) -> N
         audit,
         fields=DAEMON_LIFECYCLE_FIELDS,
         schema_name="DAEMON_LIFECYCLE_FIELDS",
-        event="daemon.lifecycle.going_down",
+        # Spec A G3-2 (#237) — architect L-1: SAME constant as the wire method.
+        event=DAEMON_LIFECYCLE_GOING_DOWN,
         subject={
             "boot_id": boot_id,
             "epoch": epoch,

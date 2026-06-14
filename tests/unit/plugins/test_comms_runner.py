@@ -1423,3 +1423,81 @@ async def test_run_still_composes_start_and_handshake_then_pump() -> None:
     assert calls == ["start_and_handshake", "pump"]
     assert len(inbound_handler.processed) == 1
     assert transport.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Spec A G3-2 (#237): id-less ``send_notification`` seam + boot epoch in the
+# ``lifecycle.start`` handshake (architect H-2 — load-bearing for G3-3).
+# ---------------------------------------------------------------------------
+
+
+async def test_send_notification_writes_idless_frame() -> None:
+    """``send_notification`` writes ONE id-less frame and awaits NO response."""
+    from alfred.comms_mcp.protocol import DAEMON_LIFECYCLE_READY
+
+    transport = _FakeTransport([])
+    session = await _make_session(
+        gate=make_permissive_fixture_gate(),
+        transport=transport,
+        inbound_handler=_RecordingHandler(),
+    )
+    runner = CommsPluginRunner(session=session, transport=transport, adapter_id=_ADAPTER_ID)
+
+    await runner.send_notification(DAEMON_LIFECYCLE_READY, {"epoch": "a" * 32})
+
+    (frame,) = transport.sent
+    assert frame["method"] == "daemon.lifecycle.ready"
+    assert "id" not in frame
+    assert frame["params"] == {"epoch": "a" * 32}
+    # No response awaited — no pending future registered.
+    assert runner._pending == {}
+
+
+async def test_handshake_carries_boot_epoch() -> None:
+    """The ``lifecycle.start`` request carries the injected boot epoch.
+
+    G3-3 reconciles core-liveness from the handshake epoch (the boot-``ready``
+    broadcast reaches zero senders normally — architect H-1/H-2), so the epoch
+    MUST ride the handshake.
+    """
+    transport = _FakeTransport([dict(_HANDSHAKE_OK), _inbound_frame()])
+    session = await _make_session(
+        gate=make_permissive_fixture_gate(),
+        transport=transport,
+        inbound_handler=_RecordingHandler(),
+    )
+    runner = CommsPluginRunner(
+        session=session,
+        transport=transport,
+        adapter_id=_ADAPTER_ID,
+        boot_epoch="b" * 32,
+    )
+
+    await runner.start_and_handshake()
+
+    start = transport.sent[0]
+    assert start["method"] == "lifecycle.start"
+    params = start["params"]
+    assert isinstance(params, Mapping)
+    assert params["epoch"] == "b" * 32
+
+
+async def test_handshake_omits_epoch_when_unset() -> None:
+    """A runner with no boot epoch sends ``lifecycle.start`` without an ``epoch`` key.
+
+    The stdio (daemon-spawned) adapters do not carry a boot epoch; the field is
+    omitted rather than sent as ``None`` so the wire stays the pre-G3-2 shape.
+    """
+    transport = _FakeTransport([dict(_HANDSHAKE_OK), _inbound_frame()])
+    session = await _make_session(
+        gate=make_permissive_fixture_gate(),
+        transport=transport,
+        inbound_handler=_RecordingHandler(),
+    )
+    runner = CommsPluginRunner(session=session, transport=transport, adapter_id=_ADAPTER_ID)
+
+    await runner.start_and_handshake()
+
+    params = transport.sent[0]["params"]
+    assert isinstance(params, Mapping)
+    assert "epoch" not in params
