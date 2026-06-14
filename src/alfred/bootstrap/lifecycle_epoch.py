@@ -1,11 +1,13 @@
 """Per-boot, non-secret lifecycle epoch (Spec A G1 / ADR-0033).
 
 The epoch is a per-process, serialisable, NON-secret value minted once at
-boot and carried in the ``core.lifecycle.ready`` notification (and reserved
-for the comms handshake). The gateway (G3) rejects a ``ready``/handshake
-whose epoch mismatches the one it retained, and binds the last-acked
-exchange to it, so a fresh core's ``seq=0`` reconciles against the gateway's
-retained high-water mark (spec §4).
+boot and carried in the ``daemon.lifecycle.ready`` notification AND in the
+comms ``lifecycle.start`` handshake params (Spec A G3-2 — the handshake epoch
+is the load-bearing one: the boot ``ready`` broadcast reaches zero senders in
+the normal case, so the gateway derives liveness from the handshake). The
+gateway (G3) rejects a ``ready``/handshake whose epoch mismatches the one it
+retained, and binds the last-acked exchange to it, so a fresh core's ``seq=0``
+reconciles against the gateway's retained high-water mark (spec §4).
 
 It deliberately mirrors the SHAPE of
 ``alfred.bootstrap.nonce_factory.create_and_register_t3_nonce`` (module slot
