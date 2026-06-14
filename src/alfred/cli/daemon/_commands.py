@@ -37,6 +37,7 @@ import typer
 from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.audit.audit_row_schemas import (
+    COMMS_SOCKET_PEER_REJECTED_FIELDS,
     DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS,
     DAEMON_BOOT_FAILED_FIELDS,
     DAEMON_BOOT_FIELDS,
@@ -80,13 +81,6 @@ from alfred.cli.daemon._failures import (
     T3NonceRegistrationFailedFailure,
     UnsandboxedEnvInProductionFailure,
 )
-from alfred.config._environment_loader import (
-    EnvironmentLoadResult,
-    EnvironmentSource,
-    load_environment,
-)
-from alfred.hooks.errors import HookError
-from alfred.i18n import t
 
 # PR-S4-11b (#237): module-level so the boot-wiring unit tests monkeypatch these
 # two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
@@ -95,10 +89,17 @@ from alfred.comms_mcp.protocol import (
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
 )
+from alfred.config._environment_loader import (
+    EnvironmentLoadResult,
+    EnvironmentSource,
+    load_environment,
+)
+from alfred.hooks.errors import HookError
+from alfred.i18n import t
 from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.comms_socket_transport import CommsSocketListener
-from alfred.plugins.comms_wire import CommsProtocolError
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
+from alfred.plugins.comms_wire import CommsProtocolError
 from alfred.plugins.errors import ManifestError
 from alfred.plugins.manifest import parse_manifest
 
@@ -1004,7 +1005,36 @@ async def _listen_socket_comms_adapter(
     )
     wire = wiring.wire
 
-    listener = CommsSocketListener(adapter_id=wire.adapter_kind)
+    async def _on_peer_rejected(peer_uid: int | None) -> None:
+        """Write the loud ``comms.socket.peer_uid_rejected`` audit row (arch-263-001).
+
+        Fired by the listener at the reject point. A mismatched-uid peer is an
+        EXPECTED adversarial event, so the boot is NOT refused (refusing here would
+        be a self-inflicted DoS — an attacker racing the socket could kill every
+        boot). The row is loud; ``peer_uid``/``expected_uid`` are non-secret ints.
+        If the audit WRITE itself fails, ``_emit_or_quarantine`` is fail-loud (hard
+        rule #7) and raises out of this supervised accept task.
+        """
+        import os
+
+        await _emit_or_quarantine(
+            audit,
+            fields=COMMS_SOCKET_PEER_REJECTED_FIELDS,
+            schema_name="COMMS_SOCKET_PEER_REJECTED_FIELDS",
+            event="comms.socket.peer_uid_rejected",
+            subject={
+                "adapter_id": wire.adapter_kind,
+                "peer_uid": "" if peer_uid is None else str(peer_uid),
+                "expected_uid": str(os.getuid()),
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            result="refused",
+        )
+
+    listener = CommsSocketListener(
+        adapter_id=wire.adapter_kind,
+        on_peer_rejected=_on_peer_rejected,
+    )
     try:
         await listener.bind()
     except OSError as exc:

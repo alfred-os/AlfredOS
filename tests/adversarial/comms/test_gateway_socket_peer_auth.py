@@ -95,3 +95,51 @@ async def test_impostor_refused_then_legitimate_resolves(
         await transport.close()
     finally:
         await listener.aclose()
+
+
+@pytest.mark.asyncio
+async def test_impostor_fires_reject_callback_and_does_not_refuse_boot(
+    short_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec A G3-2 (#237) arch-263-001: a rejected impostor fires the audit callback.
+
+    The daemon supplies an ``on_peer_rejected`` callback that writes the
+    ``comms.socket.peer_uid_rejected`` audit row. The callback MUST fire with the
+    impostor's uid, and the listener must NOT refuse the boot (a rejection is an
+    EXPECTED adversarial event — refusing here would be a self-inflicted DoS an
+    attacker could trigger by racing the socket). A legitimate same-uid peer still
+    serves afterwards.
+    """
+    del short_runtime_dir
+    uids = iter([os.getuid() + 9999, os.getuid()])
+    monkeypatch.setattr(cst, "_resolve_peer_uid", lambda _sock: next(uids))
+
+    rejected: list[int | None] = []
+    # Deterministic callback-gated wait (CR #264): await an Event set by the reject
+    # callback rather than a fixed ``asyncio.sleep`` that can flake under slow CI.
+    rejected_fired = asyncio.Event()
+
+    async def _on_rejected(peer_uid: int | None) -> None:
+        rejected.append(peer_uid)
+        rejected_fired.set()
+
+    listener = CommsSocketListener(adapter_id="tui", on_peer_rejected=_on_rejected)
+    await listener.bind()
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        _r1, w1 = await asyncio.open_unix_connection(str(listener.path))
+        await asyncio.wait_for(rejected_fired.wait(), timeout=2.0)
+        # The reject callback fired with the impostor uid — the audit row's source.
+        assert rejected == [os.getuid() + 9999]
+        # Boot is NOT refused: the accept stays pending, ready for a legitimate peer.
+        assert not accept_task.done()
+        _r2, w2 = await asyncio.open_unix_connection(str(listener.path))
+        transport = await asyncio.wait_for(accept_task, timeout=2.0)
+        assert transport is not None
+        # The legitimate accept did not re-fire the reject callback.
+        assert rejected == [os.getuid() + 9999]
+        for w in (w1, w2):
+            w.close()
+        await transport.close()
+    finally:
+        await listener.aclose()

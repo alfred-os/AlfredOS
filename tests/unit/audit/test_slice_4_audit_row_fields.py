@@ -37,9 +37,10 @@ def test_slice_4_fieldset_names_count() -> None:
     is intentionally pinned so a roster omission surfaces here. PR-S4-2
     (#173) added ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` — the 24th;
     G0 (Spec A) added ``COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS`` — the 25th;
-    G1 (Spec A) added ``DAEMON_LIFECYCLE_FIELDS`` — the 26th.
+    G1 (Spec A) added ``DAEMON_LIFECYCLE_FIELDS`` — the 26th;
+    G3-2 (Spec A) added ``COMMS_SOCKET_PEER_REJECTED_FIELDS`` — the 27th.
     """
-    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 26
+    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 27
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
