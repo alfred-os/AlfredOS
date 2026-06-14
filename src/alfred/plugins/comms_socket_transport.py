@@ -518,7 +518,28 @@ class CommsSocketListener:
                 # reject point, BEFORE closing the impostor's writer, so the loud
                 # audit row records every reject (arch-263-001). Boot is NOT refused.
                 if self._on_peer_rejected is not None:
-                    await self._on_peer_rejected(peer_uid)
+                    try:
+                        await self._on_peer_rejected(peer_uid)
+                    except Exception as exc:
+                        # The reject ITSELF is benign (keep waiting). But a FAILED
+                        # audit-write of a security-boundary reject is hard-rule-#7
+                        # territory — it must NOT be orphaned in this detached
+                        # ``start_unix_server`` callback (asyncio would surface it
+                        # only as an unretrieved-task-exception log). Escalate it to
+                        # the supervised ``accept()`` awaiter so the pump task fails
+                        # LOUD (an audited supervisor crash), making the callback's
+                        # fail-loud contract true. ``CancelledError`` is a
+                        # ``BaseException`` and propagates past this ``except``.
+                        # The ``done()`` branch covers the rare race where a
+                        # concurrent legit peer resolved the future during the audit
+                        # await: re-raise so the broken audit still surfaces via
+                        # asyncio's unretrieved-exception handler.
+                        if self._accepted.done():  # pragma: no cover - concurrent-resolve race
+                            writer.close()
+                            raise
+                        self._accepted.set_exception(exc)
+                        writer.close()
+                        return
                 writer.close()
                 return
             self._accepted.set_result(

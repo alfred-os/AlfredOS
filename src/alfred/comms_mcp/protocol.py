@@ -394,6 +394,15 @@ surface. Widening a CLOSED ``Literal`` is non-breaking, so G3 adds ``restart``
 this a CLOSED ``Literal`` forever — never ``str``. See ADR-0033.
 """
 
+LIFECYCLE_REASON_SHUTDOWN: Final[LifecycleReason] = "shutdown"
+"""The single ``going_down`` reason value, bound once (core-264-002).
+
+``_emit_going_down`` writes this into the audit subject, the wire broadcast, and
+the operator echo — binding it to one constant keeps those three call sites from
+drifting when G3 widens the closed ``LifecycleReason`` vocabulary (architect L-1
+no-drift discipline, applied to the reason value as well as the method name).
+"""
+
 
 class GoingDownNotification(_WireModel):
     """Core announces it has begun its planned drain (Spec A §4).
@@ -425,6 +434,7 @@ __all__ = [
     "BODY_FIELD_BY_KIND",
     "DAEMON_LIFECYCLE_GOING_DOWN",
     "DAEMON_LIFECYCLE_READY",
+    "LIFECYCLE_REASON_SHUTDOWN",
     "AdapterHealthRequest",
     "AdapterId",
     "BindingRequestNotification",

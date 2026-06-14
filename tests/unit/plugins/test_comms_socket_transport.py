@@ -528,6 +528,42 @@ async def test_listener_fires_on_peer_rejected_callback_with_uid(
         await listener.aclose()
 
 
+async def test_reject_callback_audit_failure_escalates_to_accept(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec A G3-2 (#237): a FAILED audit-write of a peer reject fails LOUD.
+
+    The reject ITSELF is benign (keep waiting), but a broken audit write on a
+    security-boundary reject is hard-rule-#7 territory and must NOT be orphaned in
+    the detached ``start_unix_server`` callback. ``_on_connect`` escalates the
+    callback's exception onto the supervised ``accept()`` future, so the awaiter
+    raises it (an audited supervisor crash, not a silent asyncio swallow).
+    Corroborated finding from the PR #264 fleet (core/comms/security/error).
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    monkeypatch.setattr(cst, "_resolve_peer_uid", lambda _sock: os.getuid() + 7777)
+
+    class _AuditUnwritableError(Exception):
+        pass
+
+    async def _failing_reject(_peer_uid: int | None) -> None:
+        raise _AuditUnwritableError("audit log unwritable")
+
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID, on_peer_rejected=_failing_reject)
+    await listener.bind()
+    sock_path = default_comms_socket_path(_ADAPTER_ID)
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        imp_r, imp_w = await asyncio.open_unix_connection(str(sock_path))
+        with pytest.raises(_AuditUnwritableError):
+            await asyncio.wait_for(accept_task, timeout=2.0)
+        imp_w.close()
+        del imp_r
+    finally:
+        await listener.aclose()
+
+
 def test_resolve_peer_uid_no_so_peercred_logs_breadcrumb(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -88,6 +88,7 @@ from alfred.cli.daemon._failures import (
 from alfred.comms_mcp.protocol import (
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
+    LIFECYCLE_REASON_SHUTDOWN,
 )
 from alfred.config._environment_loader import (
     EnvironmentLoadResult,
@@ -1012,8 +1013,11 @@ async def _listen_socket_comms_adapter(
         EXPECTED adversarial event, so the boot is NOT refused (refusing here would
         be a self-inflicted DoS — an attacker racing the socket could kill every
         boot). The row is loud; ``peer_uid``/``expected_uid`` are non-secret ints.
-        If the audit WRITE itself fails, ``_emit_or_quarantine`` is fail-loud (hard
-        rule #7) and raises out of this supervised accept task.
+        If the audit WRITE itself fails, ``_emit_or_quarantine`` raises; the
+        listener's ``_on_connect`` catches that and ESCALATES it onto the supervised
+        ``accept()`` future (``set_exception``), so the broken security audit fails
+        LOUD (an audited supervisor crash) rather than being orphaned in the
+        detached ``start_unix_server`` callback (hard rule #7).
         """
         import os
 
@@ -1483,13 +1487,13 @@ async def _emit_going_down(
             "boot_id": boot_id,
             "epoch": epoch,
             "phase": "going_down",
-            "reason": "shutdown",
+            "reason": LIFECYCLE_REASON_SHUTDOWN,
             "occurred_at": datetime.now(UTC).isoformat(),
         },
         result="success",
     )
-    await broadcaster.broadcast_going_down("shutdown")
-    typer.echo(t("daemon.lifecycle.going_down", reason="shutdown"))
+    await broadcaster.broadcast_going_down(LIFECYCLE_REASON_SHUTDOWN)
+    typer.echo(t("daemon.lifecycle.going_down", reason=LIFECYCLE_REASON_SHUTDOWN))
 
 
 async def _refuse_boot(
