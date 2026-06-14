@@ -116,6 +116,13 @@ class CommsStdioTransport:
         # When OFF the wire is byte-for-byte the existing ADR-0025 plain frame.
         self._seq_ack_enabled = False
         self._send_seq = 0  # this transport's per-direction monotonic send seq
+        # Spec A G3-2 (#237) C2 — DEFENSIVE symmetry with the socket sibling: there
+        # is no second writer on the stdio carrier in G3-2 (the daemon-spawned
+        # adapters never carry the lifecycle-send — only the socket carrier is
+        # registered with the broadcaster), so the lock is uncontended here. It
+        # future-proofs Spec B and keeps the two transports' send contract identical.
+        # Spans encode -> write -> drain -> seq-increment; the reader never takes it.
+        self._send_lock = asyncio.Lock()
         # NOTE: the transport emits ``a=0`` as a PLACEHOLDER ack. It deliberately
         # does NOT track a received-seq high-water: a ``max(seq seen)`` ack would
         # falsely ack past gaps, contradicting the CONTIGUOUS-ack semantics
@@ -182,27 +189,32 @@ class CommsStdioTransport:
                 f"CommsStdioTransport.send() called before spawn() for adapter {self._adapter_id!r}"
             )
         body = json.dumps(frame).encode()
-        if self._seq_ack_enabled:
-            payload = encode_seq_frame(
-                body,
-                seq=self._send_seq,
-                # PLACEHOLDER (ADR-0032 Decision 3) — NOT a high-water; the G3 relay
-                # wires SeqDedupWindow.cumulative_ack() as the real ack source.
-                ack=0,
-                max_unit_bytes=self._max_line_bytes,
-            )
-            self._send_seq += 1
-        else:
-            payload = body + b"\n"
-        try:
-            self._proc.stdin.write(payload)
-            await self._proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            log.warning(
-                "comms.transport.send_broken_pipe",
-                adapter_id=self._adapter_id,
-            )
-            raise
+        # Spec A G3-2 (#237) C2 (defensive symmetry): serialise the whole
+        # encode -> write -> drain -> seq-increment critical section. Uncontended on
+        # stdio in G3-2 (no second writer), but keeps the send contract identical to
+        # the socket sibling and future-proofs Spec B.
+        async with self._send_lock:
+            if self._seq_ack_enabled:
+                payload = encode_seq_frame(
+                    body,
+                    seq=self._send_seq,
+                    # PLACEHOLDER (ADR-0032 Decision 3) — NOT a high-water; the G3 relay
+                    # wires SeqDedupWindow.cumulative_ack() as the real ack source.
+                    ack=0,
+                    max_unit_bytes=self._max_line_bytes,
+                )
+                self._send_seq += 1
+            else:
+                payload = body + b"\n"
+            try:
+                self._proc.stdin.write(payload)
+                await self._proc.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                log.warning(
+                    "comms.transport.send_broken_pipe",
+                    adapter_id=self._adapter_id,
+                )
+                raise
 
     async def read_frame(self) -> Mapping[str, object] | None:
         """Read one line-delimited frame; ``None`` on clean EOF.
