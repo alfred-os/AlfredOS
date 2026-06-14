@@ -36,9 +36,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import socket
 import stat
+import struct
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
@@ -83,6 +85,59 @@ _ADAPTER_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9_-]+$")
 def _runtime_dir() -> Path:
     """Resolve ``~/.run/alfred`` at call time (honours a changed ``$HOME``)."""
     return Path.home() / ".run" / "alfred"
+
+
+# The kernel ``struct ucred`` returned by ``SO_PEERCRED`` is three UNSIGNED ints
+# ``{ pid_t pid; uid_t uid; gid_t gid; }``; ``"3I"`` matches it (uid is unsigned).
+_UCRED_STRUCT: Final[str] = "3I"
+
+
+def _resolve_peer_uid(sock: socket.socket | None) -> int | None:
+    """Return the connected peer's uid, or ``None`` when unknowable.
+
+    Linux answers via ``SO_PEERCRED`` (kernel-attested ``(pid, uid, gid)``). A
+    platform without it (macOS dev hosts) returns ``None`` — the 0600 socket under
+    the 0700 runtime dir is the same-uid enforcement-of-record there; ``SO_PEERCRED``
+    is defense-in-depth, not the only line. NEVER raises: ``getsockopt`` may return
+    fewer bytes than requested (a short read makes ``struct.unpack`` raise
+    ``struct.error``), and a closed/non-AF_UNIX socket raises ``OSError`` — both
+    degrade to ``None`` (accept on FS perms) rather than crashing the accept
+    callback and wedging the listener.
+    """
+    if sock is None or not hasattr(socket, "SO_PEERCRED"):
+        return None
+    width = struct.calcsize(_UCRED_STRUCT)
+    try:
+        # ``SO_PEERCRED`` is a Linux-only socket constant; the ``hasattr`` guard
+        # above gates the access. pyright on a macOS dev host cannot see the
+        # Linux-platform typeshed stub, so silence the attr-access there (mypy on
+        # this host resolves it, hence ``unused-ignore`` keeps the Linux gate quiet).
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, width)  # type: ignore[attr-defined, unused-ignore]
+        if len(creds) != width:
+            return None
+        # ``struct.unpack`` is typed ``tuple[Any, ...]``; the ``"3I"`` format
+        # guarantees three ints, so coerce the uid to ``int`` for mypy --strict.
+        _pid, uid, _gid = struct.unpack(_UCRED_STRUCT, creds)
+    except (OSError, struct.error) as exc:
+        # Degrade-open to the FS-perms-of-record (return None -> authorized). This
+        # is benign for the enumerated cases (short read, closed/non-AF_UNIX socket),
+        # but a security check that fails open should leave a breadcrumb so an
+        # UNEXPECTED getsockopt fault on a SO_PEERCRED-advertising host is not
+        # indistinguishable from the normal degrade path (review err-263-001).
+        log.debug("comms.socket.peer_cred_unavailable", error=repr(exc))
+        return None
+    return int(uid)
+
+
+def _peer_uid_authorized(*, reported_uid: int | None) -> bool:
+    """True if the peer is the same uid as us, or unknowable (FS-perms-of-record).
+
+    ``None`` (no ``SO_PEERCRED`` / short read) is authorized: the only peer that can
+    ``connect`` a 0600 socket under a 0700 dir is the owner. A reported uid that
+    mismatches ``os.getuid()`` is a genuine impostor (a same-uid race that re-bound
+    or a wider-perm misconfig) and is refused.
+    """
+    return reported_uid is None or reported_uid == os.getuid()
 
 
 def default_comms_socket_path(adapter_id: str) -> Path:
@@ -406,6 +461,23 @@ class CommsSocketListener:
             if self._accepted.done():
                 # This cut serves a single connection; a second dial-in is closed
                 # immediately rather than racing the first (ADR-0031 Decision 4).
+                writer.close()
+                return
+            # ``get_extra_info("socket")`` is the ACCEPTED CHILD socket (per-
+            # connection), so SO_PEERCRED reads the CONNECTOR's creds. Never read
+            # peer creds off ``self._sock`` (the listener) — that returns our own
+            # uid and always passes, defeating the check.
+            peer_uid = _resolve_peer_uid(writer.get_extra_info("socket"))
+            if not _peer_uid_authorized(reported_uid=peer_uid):
+                # A different-uid peer beat a legitimate dial-in to the socket
+                # (stale-socket race / wider-perm misconfig). Refuse it loudly and
+                # KEEP WAITING — do NOT resolve the future, so a legitimate same-uid
+                # peer can still connect (CLAUDE.md hard rule #7: never ack-and-drop).
+                log.warning(
+                    "comms.socket.peer_uid_rejected",
+                    adapter_id=self._adapter_id,
+                    peer_uid=peer_uid,
+                )
                 writer.close()
                 return
             self._accepted.set_result(

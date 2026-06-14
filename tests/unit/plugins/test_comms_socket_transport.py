@@ -24,7 +24,9 @@ import asyncio
 import inspect
 import json
 import os
+import socket
 import stat
+import struct
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -441,6 +443,42 @@ async def test_listener_second_connection_is_closed(runtime_dir: Path) -> None:
         await listener.aclose()
 
 
+async def test_listener_rejects_mismatched_uid_peer_then_serves_same_uid(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mismatched-uid peer is refused without wedging a legitimate same-uid dial-in.
+
+    Drives the ``_on_connect`` peer-auth REJECT arm (log + ``writer.close`` + no
+    future resolution) in the unit tier so the per-file 100%-branch gate — which
+    reports against the unit-only ``.coverage`` data — covers it. ``_resolve_peer_uid``
+    is monkeypatched to report a FOREIGN uid for the first connection and OUR uid for
+    the second; the accept must resolve to the SECOND transport.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    uids = iter([os.getuid() + 7777, os.getuid()])
+    monkeypatch.setattr(cst, "_resolve_peer_uid", lambda _sock: next(uids))
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    sock_path = default_comms_socket_path(_ADAPTER_ID)
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        # Impostor: refused; the accept future stays pending (no ack-and-drop).
+        imp_r, imp_w = await asyncio.open_unix_connection(str(sock_path))
+        await asyncio.sleep(0.1)
+        assert not accept_task.done()
+        # Legitimate same-uid peer: the accept resolves.
+        leg_r, leg_w = await asyncio.open_unix_connection(str(sock_path))
+        transport = await asyncio.wait_for(accept_task, timeout=2.0)
+        assert transport is not None
+        for w in (imp_w, leg_w):
+            w.close()
+        del imp_r, leg_r
+        await transport.close()
+    finally:
+        await listener.aclose()
+
+
 async def test_listener_second_accept_call_raises(runtime_dir: Path) -> None:
     """A SECOND ``accept()`` *call* raises — one-shot lifecycle (ADR-0031 Decision 4).
 
@@ -557,6 +595,120 @@ async def test_dial_bounds_the_reader_to_max_line_bytes(runtime_dir: Path) -> No
         await host.close()
     finally:
         await listener.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Peer-auth predicate (Spec A G3-1 / ADR-0032): cross-platform same-uid check.
+# ---------------------------------------------------------------------------
+
+
+def test_peer_uid_same_uid_accepted() -> None:
+    from alfred.plugins.comms_socket_transport import _peer_uid_authorized
+
+    # SO_PEERCRED reports our own uid -> authorized.
+    assert _peer_uid_authorized(reported_uid=os.getuid()) is True
+
+
+def test_peer_uid_different_uid_rejected() -> None:
+    from alfred.plugins.comms_socket_transport import _peer_uid_authorized
+
+    assert _peer_uid_authorized(reported_uid=os.getuid() + 1) is False
+
+
+def test_peer_uid_unknown_accepted_on_fs_perms() -> None:
+    from alfred.plugins.comms_socket_transport import _peer_uid_authorized
+
+    # A platform without SO_PEERCRED reports None -> the 0600/0700 FS perms are the
+    # enforcement-of-record; the check degrades to accept rather than fail-closing
+    # the mac dev loop.
+    assert _peer_uid_authorized(reported_uid=None) is True
+
+
+def test_resolve_peer_uid_none_socket_is_none() -> None:
+    """A ``None`` socket (no per-connection socket available) resolves to ``None``.
+
+    Drives the ``sock is None`` short-circuit branch of ``_resolve_peer_uid`` so the
+    accept callback degrades to the FS-perms guarantee instead of raising — keeps the
+    per-file 100%-branch gate green on the no-creds path.
+    """
+    from alfred.plugins.comms_socket_transport import _resolve_peer_uid
+
+    assert _resolve_peer_uid(None) is None
+
+
+class _FakeSock:
+    """Minimal ``socket``-shaped stub whose ``getsockopt`` is scripted per test.
+
+    ``_resolve_peer_uid`` only calls ``getsockopt(level, optname, buflen)``, so a
+    stub that returns canned bytes (or raises) drives every kernel-creds branch
+    deterministically — no real ``SO_PEERCRED`` peer needed, so the short-read /
+    ``OSError`` arms are covered on every platform (the per-file 100%-branch gate
+    runs on Linux CI but the real getsockopt cannot synthesise a short read).
+    """
+
+    def __init__(
+        self, *, returns: bytes | None = None, raises: BaseException | None = None
+    ) -> None:
+        self._returns = returns
+        self._raises = raises
+
+    def getsockopt(self, _level: int, _optname: int, _buflen: int) -> bytes:
+        if self._raises is not None:
+            raise self._raises
+        assert self._returns is not None
+        return self._returns
+
+
+def test_resolve_peer_uid_no_so_peercred_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A platform without ``SO_PEERCRED`` (macOS) resolves to ``None`` (FS-perms).
+
+    Deletes the constant so the ``not hasattr(socket, "SO_PEERCRED")`` arm is hit
+    deterministically even on Linux CI, where the attribute is otherwise present.
+    """
+    from alfred.plugins.comms_socket_transport import _resolve_peer_uid
+
+    monkeypatch.delattr(socket, "SO_PEERCRED", raising=False)
+    assert _resolve_peer_uid(_FakeSock(returns=b"")) is None  # type: ignore[arg-type]
+
+
+def test_resolve_peer_uid_short_read_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short ``getsockopt`` read (fewer bytes than the ucred width) resolves None.
+
+    Ensures ``SO_PEERCRED`` is present (so the body runs even on macOS) then feeds a
+    truncated buffer; the ``len(creds) != width`` guard returns ``None`` rather than
+    letting ``struct.unpack`` raise.
+    """
+    from alfred.plugins.comms_socket_transport import _UCRED_STRUCT, _resolve_peer_uid
+
+    monkeypatch.setattr(socket, "SO_PEERCRED", 17, raising=False)
+    short = b"\x00" * (struct.calcsize(_UCRED_STRUCT) - 1)
+    assert _resolve_peer_uid(_FakeSock(returns=short)) is None  # type: ignore[arg-type]
+
+
+def test_resolve_peer_uid_getsockopt_oserror_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed / non-AF_UNIX socket (``getsockopt`` raises ``OSError``) resolves None.
+
+    Drives the ``except (OSError, struct.error)`` arm so a getsockopt failure degrades
+    to the FS-perms guarantee instead of crashing the accept callback.
+    """
+    from alfred.plugins.comms_socket_transport import _resolve_peer_uid
+
+    monkeypatch.setattr(socket, "SO_PEERCRED", 17, raising=False)
+    sock = _FakeSock(raises=OSError("socket closed"))
+    assert _resolve_peer_uid(sock) is None  # type: ignore[arg-type]
+
+
+def test_resolve_peer_uid_returns_uid_on_full_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full ``struct ucred`` read returns the unpacked (unsigned) uid.
+
+    Drives the happy path + the ``int(uid)`` coercion with a synthesised kernel-creds
+    buffer, so the success arm is covered without a real same-uid peer.
+    """
+    from alfred.plugins.comms_socket_transport import _UCRED_STRUCT, _resolve_peer_uid
+
+    monkeypatch.setattr(socket, "SO_PEERCRED", 17, raising=False)
+    creds = struct.pack(_UCRED_STRUCT, 4321, 1000, 1000)
+    assert _resolve_peer_uid(_FakeSock(returns=creds)) == 1000  # type: ignore[arg-type]
 
 
 class _FakeWriter:

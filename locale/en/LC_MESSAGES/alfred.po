@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-13 22:43+0100\n"
+"POT-Creation-Date: 2026-06-14 03:42+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1637,6 +1637,10 @@ msgstr ""
 "{path}: both the audit store and the fallback are unwritable. The watcher"
 " continues; fix the state directory."
 
+#: src/alfred/i18n/_slice_4_reserve.py:161
+msgid "comms.socket.peer_uid_rejected"
+msgstr "Refused a comms socket peer with a mismatched uid ({peer_uid})."
+
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
 # Only keys with live call-sites are retained; help-text long forms and
@@ -2080,10 +2084,10 @@ msgstr ""
 "Comms adapter {adapter_id} returned an error response to an outbound "
 "request; the request failed."
 
-#: src/alfred/plugins/comms_socket_transport.py:232
-#: src/alfred/plugins/comms_socket_transport.py:242
-#: src/alfred/plugins/comms_socket_transport.py:260
-#: src/alfred/plugins/comms_socket_transport.py:267
+#: src/alfred/plugins/comms_socket_transport.py:281
+#: src/alfred/plugins/comms_socket_transport.py:291
+#: src/alfred/plugins/comms_socket_transport.py:309
+#: src/alfred/plugins/comms_socket_transport.py:316
 #: src/alfred/plugins/comms_stdio_transport.py:229
 #: src/alfred/plugins/comms_stdio_transport.py:239
 #: src/alfred/plugins/comms_stdio_transport.py:258
