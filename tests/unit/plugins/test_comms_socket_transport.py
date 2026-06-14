@@ -740,3 +740,75 @@ class _FakeWriter:
 
     async def wait_closed(self) -> None:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Spec A G3-2 (#237) C2: single-writer lock — the boot lifecycle-send is now a
+# SECOND writer racing the pump's send_request, so two concurrent ``send`` calls
+# must produce two WHOLE, non-interleaved seq frames (never a torn write).
+# ---------------------------------------------------------------------------
+
+
+class _YieldingFakeWriter:
+    """Records per-send critical-section entry/exit ordering; ``drain`` yields.
+
+    ``drain`` yields control (``asyncio.sleep(0)``) so a concurrent ``send`` gets a
+    chance to run mid-critical-section. The C2 lock spans ``encode -> write -> drain
+    -> seq-increment``, so a second ``send`` must NOT begin writing while the first
+    is suspended at ``drain``. ``events`` records ``"write"`` / ``"drain_exit"`` so
+    the test can assert the two sends did NOT interleave.
+    """
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.drained = 0
+        self.events: list[str] = []
+
+    def write(self, data: bytes) -> None:
+        self.events.append("write")
+        self.buffer.extend(data)
+
+    async def drain(self) -> None:
+        self.drained += 1
+        # Yield control mid-send so a concurrent send would interleave absent a lock.
+        await asyncio.sleep(0)
+        self.events.append("drain_exit")
+
+    def is_closing(self) -> bool:
+        return False
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+async def test_concurrent_sends_do_not_interleave() -> None:
+    """Two gathered sends each run write->drain atomically — never interleaved.
+
+    Without the C2 lock the gather schedules write_A, drain_A(yield), write_B,
+    drain_B(yield), drain_exit_A, drain_exit_B — write_B lands BEFORE drain_exit_A,
+    so the critical sections overlap (event order ``write, write, drain_exit,
+    drain_exit``). With the lock the order is ``write, drain_exit, write,
+    drain_exit`` (each send completes before the next begins), and the seqs are the
+    contiguous 0, 1 with both payloads intact (no torn frame).
+    """
+    from alfred.plugins.comms_seq_codec import decode_seq_frame
+
+    reader = asyncio.StreamReader()
+    writer = _YieldingFakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    transport.enable_seq_ack()
+
+    await asyncio.gather(
+        transport.send({"jsonrpc": "2.0", "method": "a"}),
+        transport.send({"jsonrpc": "2.0", "method": "b"}),
+    )
+
+    # The lock serialises the critical sections: each ``write`` is immediately
+    # followed by its own ``drain_exit`` before the next ``write`` begins.
+    assert writer.events == ["write", "drain_exit", "write", "drain_exit"]
+
+    # Each written unit decodes cleanly with contiguous seqs (0, 1) and intact bodies.
+    units = [line + b"\n" for line in bytes(writer.buffer).split(b"\n") if line]
+    decoded = [decode_seq_frame(u) for u in units]
+    assert sorted(f.seq for f in decoded if f.seq is not None) == [0, 1]
+    assert {json.loads(f.payload)["method"] for f in decoded} == {"a", "b"}

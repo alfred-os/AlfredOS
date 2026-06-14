@@ -220,6 +220,14 @@ class CommsSocketTransport:
         # (the real contiguous ack is the G3 relay's concern — ADR-0032 Decision 3).
         self._seq_ack_enabled = False
         self._send_seq = 0
+        # Spec A G3-2 (#237) C2 — REQUIRED on the socket carrier: a second writer
+        # (the boot coroutine's lifecycle-send via ``CommsPluginRunner.send_notification``)
+        # now races the pump's reentrant ``send_request``, so ``send`` serialises the
+        # whole ``encode -> write -> drain -> seq-increment`` critical section under
+        # this lock. A torn frame is worse than a delayed one, so the lock
+        # intentionally spans ``drain``. The reader (:meth:`read_frame`) NEVER takes
+        # this lock, so there is no reader/writer deadlock.
+        self._send_lock = asyncio.Lock()
 
     def enable_seq_ack(self) -> None:
         """Turn the out-of-band seq/ack header ON (post-handshake, version-gated).
@@ -249,24 +257,28 @@ class CommsSocketTransport:
         hard rule #7).
         """
         body = json.dumps(frame).encode()
-        if self._seq_ack_enabled:
-            payload = encode_seq_frame(
-                body,
-                seq=self._send_seq,
-                # PLACEHOLDER (ADR-0032 Decision 3) — NOT a high-water; the G3 relay
-                # wires SeqDedupWindow.cumulative_ack() as the real ack source.
-                ack=0,
-                max_unit_bytes=self._max_line_bytes,
-            )
-            self._send_seq += 1
-        else:
-            payload = body + b"\n"
-        try:
-            self._writer.write(payload)
-            await self._writer.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            log.warning("comms.socket.send_broken_pipe", adapter_id=self._adapter_id)
-            raise
+        # Spec A G3-2 (#237) C2: the entire encode -> write -> drain -> seq-increment
+        # critical section is serialised so a concurrent second writer (the boot
+        # lifecycle-send) cannot interleave a frame or race ``_send_seq``.
+        async with self._send_lock:
+            if self._seq_ack_enabled:
+                payload = encode_seq_frame(
+                    body,
+                    seq=self._send_seq,
+                    # PLACEHOLDER (ADR-0032 Decision 3) — NOT a high-water; the G3 relay
+                    # wires SeqDedupWindow.cumulative_ack() as the real ack source.
+                    ack=0,
+                    max_unit_bytes=self._max_line_bytes,
+                )
+                self._send_seq += 1
+            else:
+                payload = body + b"\n"
+            try:
+                self._writer.write(payload)
+                await self._writer.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                log.warning("comms.socket.send_broken_pipe", adapter_id=self._adapter_id)
+                raise
 
     async def read_frame(self) -> Mapping[str, object] | None:
         """Read one line-delimited frame; ``None`` on clean EOF.
