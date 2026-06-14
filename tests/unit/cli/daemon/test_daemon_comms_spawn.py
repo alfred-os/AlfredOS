@@ -95,10 +95,14 @@ class _FakeRunner:
         adapter_id: str,
         shutdown_event: Any = None,
         max_in_flight_notifications: int = 32,
+        boot_epoch: str | None = None,
     ) -> None:
         self.session = session
         self.transport = transport
         self.adapter_id = adapter_id
+        # Spec A G3-2 (#237): the boot path now threads the per-boot epoch into the
+        # runner so it rides the handshake (architect H-2). Record it for assertions.
+        self.boot_epoch = boot_epoch
         # PR-S4-11b DEFECT 1: the boot path now injects the supervisor's
         # graceful-drain signal; record it so a test can assert the wiring.
         self.shutdown_event = shutdown_event
@@ -212,6 +216,14 @@ def test_enabled_adapter_spawns_and_registers(
     assert runner.handshake_called is True
     # The wire adapter_kind (from the manifest) keys the runner/transport.
     assert runner.adapter_id == _ENABLED_ADAPTER
+    # Spec A G3-2 (#237): the daemon threads the minted per-boot epoch INTO the
+    # runner (it rides the handshake, architect H-2). Pin the actual value so the
+    # daemon->runner epoch wiring can't silently regress to None / a stale epoch.
+    from alfred.bootstrap.lifecycle_epoch import current_boot_epoch
+
+    minted_epoch = current_boot_epoch()
+    assert minted_epoch is not None
+    assert runner.boot_epoch == minted_epoch
     # PR-S4-11b DEFECT 1: the runner is wired with the supervisor's graceful-drain
     # signal (the SAME event object) so its pump exits promptly on stop.
     assert runner.shutdown_event is sup.shutdown_event

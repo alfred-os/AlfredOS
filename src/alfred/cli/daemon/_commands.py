@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NoReturn, Protocol
 
+import structlog
 import typer
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -96,6 +97,7 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.comms_socket_transport import CommsSocketListener
+from alfred.plugins.comms_wire import CommsProtocolError
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
 from alfred.plugins.errors import ManifestError
 from alfred.plugins.manifest import parse_manifest
@@ -109,7 +111,7 @@ from alfred.security.quarantine_child_io import QuarantineChildSpawnError
 from alfred.supervisor.core import Supervisor
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -127,6 +129,8 @@ if TYPE_CHECKING:
     from alfred.security.quarantine_transport import QuarantineStdioTransport
     from alfred.security.tiers import CapabilityGateNonce
     from alfred.supervisor.core import Supervisor as _SupervisorType
+
+log = structlog.get_logger(__name__)
 
 # Exit codes (operator-facing contract; documented in the runbook PR-S4-11).
 _EXIT_REFUSED: Final[int] = 2
@@ -386,6 +390,106 @@ async def _resolve_adapter_carrier_kind(
         )
         # _refuse_boot is NoReturn (raises _BootRefusedError); unreachable defence.
         raise AssertionError("unreachable") from exc  # pragma: no cover
+
+
+# Spec A G3-2 (#237): the narrow transport-error family a per-sender broadcast catch
+# tolerates. A wire-send failure to a single peer is best-effort (the audit row at the
+# callsite is authoritative), so a dead/torn peer connection is logged-not-fatal — but
+# the catch is NARROW (never bare ``Exception``): a programming error must still surface
+# loud (CLAUDE.md hard rule #7), and ``asyncio.CancelledError`` (a BaseException, not in
+# this tuple) MUST propagate so the ``going_down`` broadcast — which runs in the boot
+# drain ``finally`` — never swallows a cancellation and wedges the drain.
+_LIFECYCLE_WIRE_SEND_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
+    BrokenPipeError,
+    ConnectionResetError,
+    CommsProtocolError,
+    OSError,
+)
+
+# A wedged-but-connected peer that stops draining must not hang the daemon's
+# lifecycle broadcast (especially ``going_down`` in the shutdown ``finally``). The
+# frame is best-effort, so bound each per-sender send with a short timeout and move
+# on. This is the per-broadcast SEND timeout (closing the sec-264-002 / CR #264
+# shutdown-hang) — distinct from the G4 replay back-pressure the fleet deferred. A
+# healthy same-uid peer drains instantly; 2s is generous before declaring it wedged.
+_LIFECYCLE_BROADCAST_TIMEOUT_SECONDS: Final[float] = 2.0
+
+
+class LifecycleBroadcaster:
+    """Boot-local fan-out of the core's lifecycle frames to the socket carrier(s).
+
+    Spec A G3-2 (#237). Held as a BOOT-LOCAL var in :func:`daemon_start` (NOT a field
+    on the frozen :class:`_CommsBootGraph` — architect M-1: the graph is an immutable
+    DI bundle and a mutable late-binding registry on it would risk broadcasting through
+    an already-reaped transport at ``aclose`` time). The socket-carrier runner registers
+    its id-less ``send_notification`` here AFTER its handshake; ``_emit_ready`` /
+    ``_emit_going_down`` broadcast through it AFTER the (authoritative) audit row.
+
+    ONLY the socket-listener carrier registers — never the daemon-spawned stdio
+    adapters, which die with the core and so neither need nor receive the frames
+    (G2-lesson). In the normal boot the socket peer connects on-demand later, so the
+    boot-time ``ready`` broadcast reaches ZERO senders — a clean DEBUG no-op (the
+    headline G3-2 runtime behaviour, architect H-1). The wire frame is best-effort; the
+    audit row is authoritative (spec §6).
+    """
+
+    def __init__(self) -> None:
+        self._senders: list[tuple[str, Callable[[str, Mapping[str, object]], Awaitable[None]]]] = []
+
+    def register(
+        self,
+        adapter_id: str,
+        sender: Callable[[str, Mapping[str, object]], Awaitable[None]],
+    ) -> None:
+        """Register one socket-carrier runner's id-less notification sender."""
+        self._senders.append((adapter_id, sender))
+
+    async def broadcast_ready(self, epoch: str) -> None:
+        """Fan ``daemon.lifecycle.ready`` (with the boot epoch) to every sender."""
+        await self._broadcast(DAEMON_LIFECYCLE_READY, {"epoch": epoch}, phase="ready")
+
+    async def broadcast_going_down(self, reason: str) -> None:
+        """Fan ``daemon.lifecycle.going_down`` (with the reason) to every sender."""
+        await self._broadcast(DAEMON_LIFECYCLE_GOING_DOWN, {"reason": reason}, phase="going_down")
+
+    async def _broadcast(self, method: str, params: Mapping[str, object], *, phase: str) -> None:
+        if not self._senders:
+            # The headline normal-boot no-op (architect H-1): the socket peer
+            # connects on-demand, so a boot-time broadcast reaches no sender. Clean
+            # DEBUG, never a warning — this is the expected path, not a fault.
+            log.debug("comms.lifecycle.no_peer", phase=phase)
+            return
+        for adapter_id, sender in self._senders:
+            try:
+                await asyncio.wait_for(
+                    sender(method, params),
+                    timeout=_LIFECYCLE_BROADCAST_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # A wedged-but-connected peer that stopped draining: bound the
+                # best-effort frame and move on (the audit row at the callsite is
+                # authoritative). ``wait_for`` cancels the inner send; abandoning a
+                # partial frame to an already-wedged peer is acceptable. Loud, never
+                # silent (CR #264 / sec-264-002).
+                log.warning(
+                    "comms.lifecycle.wire_send_timeout",
+                    adapter_id=adapter_id,
+                    phase=phase,
+                    timeout_s=_LIFECYCLE_BROADCAST_TIMEOUT_SECONDS,
+                )
+            except _LIFECYCLE_WIRE_SEND_EXCEPTIONS as exc:
+                # Best-effort wire frame: a dead/torn peer is logged-not-fatal (the
+                # audit row at the callsite is authoritative). NEVER catch bare
+                # ``Exception`` (a real bug surfaces loud) and NEVER swallow
+                # ``CancelledError`` (it is a BaseException outside this tuple, so it
+                # propagates — the ``going_down`` broadcast runs in the shutdown
+                # finally and must not wedge the drain).
+                log.warning(
+                    "comms.lifecycle.wire_send_failed",
+                    adapter_id=adapter_id,
+                    phase=phase,
+                    error=repr(exc),
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -864,6 +968,7 @@ async def _listen_socket_comms_adapter(
     graph: _CommsBootGraph,
     boot_id: str,
     environment_source: str,
+    broadcaster: LifecycleBroadcaster,
 ) -> CommsSocketListener:
     """Bind the 0600 comms socket + schedule the accept → handshake → pump task.
 
@@ -975,10 +1080,20 @@ async def _listen_socket_comms_adapter(
             settings=settings,
             graph=graph,
         )
-        # ``run`` = ``start_and_handshake`` + ``pump``; a handshake failure here
+        # Spec A G3-2 (#237): split ``run`` into ``start_and_handshake`` + ``pump``
+        # so the socket-carrier runner's id-less ``send_notification`` is registered
+        # with the lifecycle broadcaster ONLY AFTER its handshake completes — the
+        # wire is then negotiated + live, so a lifecycle frame the broadcaster fans
+        # to it is framed correctly (architect H-2/H-3). A handshake failure here
         # cannot refuse an already-completed boot, so it raises out of this
-        # supervised task (the runner's ``finally`` closes the transport — no leak).
-        await runner.run()
+        # supervised task (the runner's ``finally`` closes the transport — no leak),
+        # and the runner is never registered (no broadcast to a dead peer).
+        await runner.start_and_handshake()
+        # Register ONLY the socket carrier — never the daemon-spawned stdio adapters,
+        # which die with the core and so neither need nor receive lifecycle frames
+        # (G2-lesson).
+        broadcaster.register(wire.adapter_kind, runner.send_notification)
+        await runner.pump()
 
     supervisor.register_plugin_task(_accept_and_pump())
     # O1 mirror: the socket adapter is observable in `alfred daemon start` output the
@@ -1267,14 +1382,23 @@ async def _emit_or_quarantine(
         raise _BootRefusedError(_EXIT_AUDIT_UNWRITABLE) from exc
 
 
-async def _emit_ready(audit: AuditWriter, *, boot_id: str, epoch: str) -> None:
-    """Write the ``daemon.lifecycle.ready`` AUDIT row (Spec A G1, audit-only).
+async def _emit_ready(
+    audit: AuditWriter,
+    *,
+    boot_id: str,
+    epoch: str,
+    broadcaster: LifecycleBroadcaster,
+) -> None:
+    """Write the ``daemon.lifecycle.ready`` AUDIT row, THEN broadcast the wire frame.
 
     ``ready`` = HEALTH (the full security boot graph is up), not socket-bind:
-    this runs only AFTER ``daemon.boot.completed`` (invariant 1). G1 emits NO
-    wire frame — the gateway consumer + the runner send seam land in G3; G1's
-    authoritative (and only) record of the transition is this fail-loud audit
-    row. The ``ReadyNotification`` frame model exists for G3 to send.
+    this runs only AFTER ``daemon.boot.completed`` (invariant 1). The
+    fail-loud audit row is AUTHORITATIVE; G3-2 additionally broadcasts the
+    id-less ``daemon.lifecycle.ready`` notification over the socket carrier
+    (best-effort, spec §6) AFTER the row commits. In the normal boot the socket
+    peer connects on-demand later, so this broadcast reaches ZERO senders — a
+    clean DEBUG no-op (architect H-1); the gateway derives liveness from the
+    handshake epoch instead (architect H-2).
     """
     await _emit_or_quarantine(
         audit,
@@ -1293,20 +1417,31 @@ async def _emit_ready(audit: AuditWriter, *, boot_id: str, epoch: str) -> None:
         },
         result="success",
     )
+    # Broadcast AFTER the authoritative audit row (spec §6 — the frame is
+    # best-effort; a wire-send failure is logged-not-fatal inside the broadcaster).
+    await broadcaster.broadcast_ready(epoch)
     typer.echo(t("daemon.lifecycle.ready", epoch=epoch))
 
 
-async def _emit_going_down(audit: AuditWriter, *, boot_id: str, epoch: str) -> None:
-    """Write the ``daemon.lifecycle.going_down`` AUDIT row (Spec A G1, audit-only).
+async def _emit_going_down(
+    audit: AuditWriter,
+    *,
+    boot_id: str,
+    epoch: str,
+    broadcaster: LifecycleBroadcaster,
+) -> None:
+    """Write the ``daemon.lifecycle.going_down`` AUDIT row, THEN broadcast the frame.
 
     Records the start of the PLANNED drain. ``reason`` is the closed
-    ``Literal["shutdown"]`` — a bare SIGTERM carries no intent and G1 has no
-    other intent-producer (G3 widens the vocabulary with its consumer). G1
-    emits NO wire frame; the ``GoingDownNotification`` model exists for G3 to
-    send. The row is fail-loud (exit 3 on an unwritable audit), exactly like
-    every other boot audit. The CALLER (the boot ``finally``) nests this emit
-    so that even if it raises, the existing child/socket/pidfile reap chain
-    STILL runs.
+    ``Literal["shutdown"]`` — a bare SIGTERM carries no intent (G3 widens the
+    vocabulary with its consumer). The fail-loud audit row (exit 3 on an
+    unwritable audit) is AUTHORITATIVE; G3-2 additionally broadcasts the id-less
+    ``daemon.lifecycle.going_down`` notification over the socket carrier
+    (best-effort, spec §6) AFTER the row. The CALLER (the boot ``finally``) nests
+    this emit so that even if it raises, the existing child/socket/pidfile reap
+    chain STILL runs. H1 ordering: this broadcast runs BEFORE
+    ``supervisor.stop()`` (which sets ``shutdown_event`` → the pump closes the
+    transport), so the frame still reaches a connected peer.
     """
     await _emit_or_quarantine(
         audit,
@@ -1323,6 +1458,7 @@ async def _emit_going_down(audit: AuditWriter, *, boot_id: str, epoch: str) -> N
         },
         result="success",
     )
+    await broadcaster.broadcast_going_down("shutdown")
     typer.echo(t("daemon.lifecycle.going_down", reason="shutdown"))
 
 
@@ -1699,6 +1835,12 @@ async def _start_async() -> None:
     # listener-analog of the bwrap child the comms graph reaps. Collected here so the
     # ``finally`` can ``aclose`` each one regardless of which boot step exits.
     socket_listeners: list[CommsSocketListener] = []
+    # Spec A G3-2 (#237): the boot-LOCAL lifecycle-frame fan-out (architect M-1 — NOT
+    # a field on the frozen ``_CommsBootGraph``). The socket-carrier runner registers
+    # its id-less sender here post-handshake; ``_emit_ready`` / ``_emit_going_down``
+    # broadcast through it after the (authoritative) audit row. Zero registrations in
+    # the normal boot (the peer connects on-demand) → a clean DEBUG no-op.
+    lifecycle_broadcaster = LifecycleBroadcaster()
     if settings.comms_enabled_adapters:
         # PR-S4-11c-2b: the comms-graph build now SPAWNS the live bwrap quarantined
         # child (``spawn_quarantine_child_io`` inside ``_build_comms_inbound_extractor``).
@@ -1811,6 +1953,7 @@ async def _start_async() -> None:
                             graph=comms_graph,
                             boot_id=boot_id,
                             environment_source=source,
+                            broadcaster=lifecycle_broadcaster,
                         )
                     )
                 else:
@@ -1853,7 +1996,7 @@ async def _start_async() -> None:
         # flag LAST so a failure in ``_emit_ready`` (exit 3 on an unwritable
         # audit) does NOT then emit ``going_down`` for a boot that never
         # announced ready.
-        await _emit_ready(audit, boot_id=boot_id, epoch=epoch)
+        await _emit_ready(audit, boot_id=boot_id, epoch=epoch, broadcaster=lifecycle_broadcaster)
         ready_emitted = True
 
         await wait_for_shutdown(supervisor)
@@ -1870,7 +2013,12 @@ async def _start_async() -> None:
         # exception propagates.
         try:
             if ready_emitted:
-                await _emit_going_down(audit, boot_id=boot_id, epoch=epoch)
+                await _emit_going_down(
+                    audit,
+                    boot_id=boot_id,
+                    epoch=epoch,
+                    broadcaster=lifecycle_broadcaster,
+                )
         finally:
             # Drain the supervisor (skipped if it never constructed), reap the live
             # quarantine child, and remove the PID file on EVERY exit path — clean
@@ -1882,6 +2030,13 @@ async def _start_async() -> None:
             # exists to prevent; CR #255). The reap is suppressed so it never masks
             # the real exit either.
             try:
+                # Spec A G3-2 (#237) H1 ORDERING INVARIANT: ``_emit_going_down``
+                # (above) broadcasts the ``going_down`` wire frame BEFORE this
+                # ``supervisor.stop()``. ``stop()`` sets the supervisor's
+                # ``shutdown_event``, which the socket-carrier pump observes and
+                # closes the transport — so a ``going_down`` broadcast AFTER
+                # ``stop()`` would race a closing transport and lose the frame. Keep
+                # the broadcast strictly before this call.
                 if supervisor is not None:
                     await supervisor.stop()
             finally:

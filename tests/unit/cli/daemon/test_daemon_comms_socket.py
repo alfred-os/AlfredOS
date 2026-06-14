@@ -88,12 +88,25 @@ class _FakeRunner:
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
+        self.handshake_called = False
         _FakeRunner.instances.append(self)
 
     async def run(self) -> None:  # pragma: no cover - the unit cut never drives it
         return None
 
+    async def start_and_handshake(self) -> None:
+        # Spec A G3-2 (#237): the socket boot path splits run() into
+        # start_and_handshake() + register(send_notification) + pump() so the
+        # carrier's id-less sender registers with the lifecycle broadcaster only
+        # AFTER its handshake. Record the call so a test can assert it ran.
+        self.handshake_called = True
+
     async def pump(self) -> None:  # pragma: no cover
+        return None
+
+    async def send_notification(
+        self, method: str, params: Any
+    ) -> None:  # pragma: no cover
         return None
 
     async def send_request(self, method: str, params: Any) -> Any:  # pragma: no cover
