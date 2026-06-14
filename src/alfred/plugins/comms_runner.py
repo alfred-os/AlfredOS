@@ -162,10 +162,19 @@ class CommsPluginRunner:
         adapter_id: str,
         shutdown_event: asyncio.Event | None = None,
         max_in_flight_notifications: int = _DEFAULT_MAX_IN_FLIGHT_NOTIFICATIONS,
+        boot_epoch: str | None = None,
     ) -> None:
         self._session = session
         self._transport = transport
         self._adapter_id = adapter_id
+        # Spec A G3-2 (#237) — architect H-2: the non-secret per-boot epoch the
+        # runner threads into the ``lifecycle.start`` handshake params alongside
+        # ``seq_ack``. The G3-3 gateway reconciles core-liveness from the HANDSHAKE
+        # epoch (the boot-``ready`` broadcast reaches zero senders in the normal
+        # case — the socket peer connects on-demand later), so without this the
+        # gateway has no epoch to bind its retained high-water to. ``None`` (the
+        # stdio, daemon-spawned adapters) omits the key — the wire stays plain.
+        self._boot_epoch = boot_epoch
         # PR-S4-11b DEFECT 1: the supervisor's graceful-drain signal. When the
         # daemon wires this (the supervisor's own ``_shutdown_event`` via
         # ``Supervisor.shutdown_event``), :meth:`pump` races ``read_frame`` against
@@ -274,6 +283,22 @@ class CommsPluginRunner:
                 t("comms.runner.request_timeout", adapter_id=self._adapter_id, method=method)
             ) from exc
 
+    async def send_notification(self, method: str, params: Mapping[str, object]) -> None:
+        """Send an id-less JSON-RPC NOTIFICATION (no response awaited).
+
+        Unlike :meth:`send_request`, a notification carries NO ``id`` and registers
+        NO pending future — the core announces lifecycle state
+        (``daemon.lifecycle.ready`` / ``daemon.lifecycle.going_down``, Spec A G3-2)
+        that the peer consumes without acking at the JSON-RPC layer. Writes through
+        the single-writer-locked ``transport.send`` (C2) so it cannot interleave a
+        concurrent ``send_request`` frame — the boot coroutine's lifecycle-send is a
+        SECOND writer racing the pump's reentrant outbound acks. On a negotiated
+        ``AlfredSeqAck/1`` wire the notification still occupies a seq slot (architect
+        H-3): it rides IN-BAND in the seq stream, out-of-band only in JSON-RPC
+        semantics; the gateway ``decode_seq_frame``s it then routes by ``method``.
+        """
+        await self._transport.send({"jsonrpc": "2.0", "method": method, "params": dict(params)})
+
     async def run(self) -> None:
         """Spawn, handshake, pump, then tear down — the full adapter lifecycle.
 
@@ -367,18 +392,25 @@ class CommsPluginRunner:
         denial raises :class:`PluginError` out of the session, unwinding ``run``
         WITHOUT entering the pump.
         """
+        params: dict[str, object] = {
+            "adapter_id": self._adapter_id,
+            # Spec A G2 (#237): advertise out-of-band seq/ack support. A plugin
+            # that speaks it echoes the same field in its result; a plugin that
+            # does not omits it and the wire stays plain.
+            "seq_ack": {"version": SEQ_VERSION},
+        }
+        # Spec A G3-2 (#237) — architect H-2: carry the non-secret boot epoch so
+        # the G3-3 gateway reconciles core-liveness from the HANDSHAKE (the
+        # boot-``ready`` broadcast reaches zero senders normally). Omitted when
+        # unset (the stdio adapters) so the wire stays the pre-G3-2 shape.
+        if self._boot_epoch is not None:
+            params["epoch"] = self._boot_epoch
         await self._transport.send(
             {
                 "jsonrpc": "2.0",
                 "id": _LIFECYCLE_START_ID,
                 "method": "lifecycle.start",
-                "params": {
-                    "adapter_id": self._adapter_id,
-                    # Spec A G2 (#237): advertise out-of-band seq/ack support. A
-                    # plugin that speaks it echoes the same field in its result; a
-                    # plugin that does not omits it and the wire stays plain.
-                    "seq_ack": {"version": SEQ_VERSION},
-                },
+                "params": params,
             }
         )
         while True:

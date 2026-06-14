@@ -371,6 +371,18 @@ class CrashedNotification(_WireModel):
 # ---------------------------------------------------------------------------
 
 
+# Canonical wire method names for the two host -> outward lifecycle notifications
+# (Spec A G3-2 / ADR-0033). They live HERE, next to the ``*Notification`` models,
+# so BOTH the core-send (``_emit_ready`` / ``_emit_going_down`` reference the SAME
+# constant for their audit ``event=`` AND the runner frames them on the wire) and
+# the G3-3 gateway-consume import them without a gateway->runner dependency
+# (architect L-1). The audit-event-name and the wire-method-name are therefore the
+# SAME string by construction — they cannot drift. ``daemon.lifecycle.*`` matches
+# the G1 audit events; do NOT rename to ``core.lifecycle.*``.
+DAEMON_LIFECYCLE_READY: Final[str] = "daemon.lifecycle.ready"
+DAEMON_LIFECYCLE_GOING_DOWN: Final[str] = "daemon.lifecycle.going_down"
+
+
 LifecycleReason = Literal["shutdown"]
 """Closed vocabulary for a planned ``going_down``.
 
@@ -411,6 +423,8 @@ class ReadyNotification(_WireModel):
 
 __all__ = [
     "BODY_FIELD_BY_KIND",
+    "DAEMON_LIFECYCLE_GOING_DOWN",
+    "DAEMON_LIFECYCLE_READY",
     "AdapterHealthRequest",
     "AdapterId",
     "BindingRequestNotification",
