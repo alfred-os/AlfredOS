@@ -44,3 +44,17 @@ The following decisions are recorded by G2 (the codec); the gateway, buffer, epo
 ### Scope boundary (this ADR / G2)
 
 G2 ships the codec (`CommsSeqCodec` + `SeqDedupWindow`), the `comms_wire` leaf module, the handshake version-gate (`SeqAckCapability`), and the gate-conditional transport insertion. It builds NO gateway (G3), NO `ReplayBuffer` (G4), NO ack-coalescing timer, NO send-window/back-pressure, and changes NO resume behaviour. The buffer-security, epoch-auth, shared-volume AF_UNIX, and gateway-local audit-reconcile sections the spec assigns to ADR-0032 are amended by G3/G4.
+
+## Amendment — Peer authentication (G3-1)
+
+The gateway↔core leg rendezvous over the ADR-0031 named AF_UNIX socket (`CommsSocketListener` binds + accepts; the gateway/foreground `alfred chat` dials in). Spec A §4/§6 require the core to authenticate the peer via `SO_PEERCRED` on accept, in BOTH directions. G3-1 lands the **accept side**; the dial side (the gateway authenticating the core after `connect`) is G3-3.
+
+- **FS perms are the enforcement-of-record.** The socket is `0600` under a `0700` runtime dir, so only the owner uid can `connect()` it. This already bars a cross-uid peer on every platform; the `SO_PEERCRED` check is defense-in-depth ON TOP, not the only line.
+
+- **`SO_PEERCRED` is cross-platform best-effort.** On Linux, `_resolve_peer_uid` reads the kernel-attested `(pid, uid, gid)` of the connector off the **accepted child socket** (`writer.get_extra_info("socket")`) — never the listening socket, which would return our own uid and always pass. The creds are unpacked as three UNSIGNED ints (`"3I"` — the kernel `struct ucred`). A platform without `SO_PEERCRED` (macOS dev hosts) resolves to `None`.
+
+- **It NEVER fail-closes on an unanswerable platform.** `_peer_uid_authorized` accepts a `None` uid (degrade to the FS-perms guarantee) and a uid equal to `os.getuid()`; it refuses only a uid that genuinely mismatches ours (a same-uid-race re-bind or a wider-perm misconfig). `getsockopt` may also return fewer bytes than requested — a length-guard plus an `(OSError, struct.error)` catch degrade a short read / closed socket to `None` rather than crashing the accept callback and wedging the listener (CLAUDE.md hard rule #7).
+
+- **A rejected peer is refused without wedging a legitimate dial-in.** On reject the listener closes the writer, logs `comms.socket.peer_uid_rejected` (structlog), and does NOT resolve the accept future — so a subsequent same-uid peer still connects. The core-side daemon AUDIT row for the rejection lands in G3-2 (the daemon caller owns the injected audit writer; the G3-1 listener is a dependency-light library whose loud surface is the structlog warning + the refusal).
+
+This amendment introduces NO env override: the configurable runtime/socket dir (`ALFRED_COMMS_RUNTIME_DIR`, behind fail-closed validation) is deferred to G3-4 with the shared-volume mount it serves.
