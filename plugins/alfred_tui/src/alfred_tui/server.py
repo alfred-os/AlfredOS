@@ -80,12 +80,14 @@ class TuiServer:
         return _METHODS
 
     async def dispatch(self, request: dict[str, Any]) -> dict[str, Any] | None:
-        """Route one request frame to its handler; return the response frame.
+        """Route one request frame to its handler; return the response frame, or ``None``.
 
-        None of the four methods is a notification, so a well-formed request
-        always yields a response. A malformed frame (missing/empty method)
-        yields an ``Invalid Request``; an unknown method yields
-        ``Method not found``.
+        A malformed frame (missing/empty method) yields an ``Invalid Request``.
+        A REQUEST (carries ``id``) with an unknown method yields ``Method not
+        found``. Spec A G3-2 (#237): an id-LESS NOTIFICATION with an unknown method
+        (the daemon's ``daemon.lifecycle.*`` broadcasts) is logged + IGNORED —
+        ``return None``, never a malformed ``id:null`` reply. The known methods are
+        all requests, so a known method still dispatches and replies.
         """
         has_response_id = "id" in request
         req_id = request.get("id")
@@ -97,7 +99,15 @@ class TuiServer:
 
         result = await self._handle(method, params)
         if result is None:
-            return _method_not_found(method, req_id if has_response_id else None)
+            if not has_response_id:
+                # An id-less NOTIFICATION with an unknown method — the correct
+                # JSON-RPC behaviour is to ignore it (a notification expects no
+                # reply, and replying with ``id:null`` would be malformed). The
+                # daemon broadcasts ``daemon.lifecycle.ready`` / ``...going_down``
+                # this way; the TUI has no handler and silently drops them.
+                _log.debug("comms.tui.notification_ignored", method=method)
+                return None
+            return _method_not_found(method, req_id)
 
         response: dict[str, Any] = {"jsonrpc": "2.0", "result": result}
         if has_response_id:

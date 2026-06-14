@@ -119,3 +119,39 @@ async def test_dispatch_malformed_frame_is_invalid_request() -> None:
     response = await server.dispatch({"jsonrpc": "2.0", "id": 5, "params": {}})
     assert response is not None
     assert response["error"]["code"] == -32600
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unknown_idless_notification_is_ignored() -> None:
+    """Spec A G3-2 (#237): an unknown id-less NOTIFICATION returns ``None`` (ignored).
+
+    The daemon now broadcasts ``daemon.lifecycle.ready`` / ``...going_down`` id-less
+    notifications onto the wire. The TUI has no handler for them and they carry no
+    ``id``, so the correct JSON-RPC behaviour is to log + ignore — NEVER reply with a
+    malformed ``id:null`` error frame.
+    """
+    server = build_server()
+    response = await server.dispatch(
+        {
+            "jsonrpc": "2.0",
+            "method": "daemon.lifecycle.ready",
+            "params": {"epoch": "a" * 32},
+        }
+    )
+    assert response is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unknown_method_with_id_still_returns_method_not_found() -> None:
+    """A REQUEST (has ``id``) with an unknown method STILL returns -32601 (security M-4).
+
+    The notification-ignored branch must not swallow a real request: only an id-LESS
+    unknown method is ignored; an unknown method carrying an ``id`` is still a
+    method-not-found error.
+    """
+    server = build_server()
+    response = await server.dispatch(
+        {"jsonrpc": "2.0", "id": 7, "method": "daemon.lifecycle.ready", "params": {}}
+    )
+    assert response is not None
+    assert response["error"]["code"] == -32601

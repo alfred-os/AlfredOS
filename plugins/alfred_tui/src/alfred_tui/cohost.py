@@ -128,10 +128,11 @@ async def _serve_wire(transport: _TransportLike, server: TuiServer) -> None:
     out of ``read_frame`` — propagated LOUD so the co-host's ``TaskGroup`` tears the
     app down rather than limping on a corrupt wire.
 
-    ``server.dispatch`` always returns a response frame for a well-formed request
-    (none of the four wire methods is a notification; an invalid/unknown method still
-    yields an ``Invalid Request`` / ``Method not found`` response), so the response is
-    sent unconditionally — there is no notification path to guard against.
+    ``server.dispatch`` returns a response frame for a well-formed REQUEST, but
+    ``None`` for an id-less NOTIFICATION with an unknown method (Spec A G3-2 #237: the
+    daemon now broadcasts ``daemon.lifecycle.*`` notifications onto this wire). So the
+    response is sent ONLY when it is not ``None`` — a bare ``transport.send(None)``
+    would write a malformed ``null`` frame back (architect C-2).
     """
     while True:
         frame = await transport.read_frame()
@@ -141,7 +142,11 @@ async def _serve_wire(transport: _TransportLike, server: TuiServer) -> None:
             # the app so the operator sees "daemon disconnected", not a silent hang.
             _log.info("comms.tui.wire_eof")
             return
-        await transport.send(await server.dispatch(dict(frame)))
+        response = await server.dispatch(dict(frame))
+        if response is not None:
+            # An id-less notification (unknown method) dispatches to ``None`` — skip
+            # the write so no malformed ``null`` reply goes back (architect C-2).
+            await transport.send(response)
 
 
 async def run_cohosted(
