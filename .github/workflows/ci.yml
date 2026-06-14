@@ -713,6 +713,13 @@ jobs:
     # what makes `test_alfred_core_image_bwrap.py` green here — amd64's
     # `/lib64` ld-linux-x86-64 path does not exist on arm64.
     #
+    # NOTE — no `integration-privileged-arm64` twin (yet): its first arm64 run
+    # caught a REAL arm64 bug (the dual-LLM real-bwrap-spawn child produces a
+    # truncated frame on aarch64 -> `read_frame_failed` -> a `ck_audit_log_result`
+    # CHECK violation), tracked in #269 (overlapping #252). Rather than land a red
+    # leg on `main`, that privileged arm64 leg is added with the #269 fix (after
+    # #251 un-swallows the child stderr to diagnose it). See ADR-0034 Decision 1.
+    #
     # ADD, do NOT RENAME (ADR-0034): a SEPARATE job emitting the SEPARATE check
     # context `Integration (arm64)` alongside the unchanged amd64 `integration`
     # job — converting `integration` to a matrix would rename its required
