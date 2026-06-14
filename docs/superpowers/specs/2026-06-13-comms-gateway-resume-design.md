@@ -44,7 +44,7 @@ Out-of-band header (decision 3) adds:
 - **Per-direction monotonic seq**, distinct from + additive to the JSON-RPC `id` (gateway preserves `id` end-to-end so the runner's request/response correlation survives the relay) `[fleet comms]`.
 - **Cumulative ack** of the highest contiguous seq the receiver **durably intaken** — the ack point is the core's durable intake commit (decision 4), decoupled from the core's existing out-of-order dispatch fan-out `[fleet comms]`. Acks coalesced (piggyback + bounded timer); no standalone ack per data frame `[fleet perf]`.
 - **Idempotent dedup**, key = `(leg, seq)` only — never payload-derived `[fleet security]`.
-- **Core lifecycle** (ADR-0033, core-owned): `core.lifecycle.going_down{reason}` on the drain; `core.lifecycle.ready` only after the **full security boot graph is healthy** (`ready` = health, not socket-bind) `[fleet error]`. Gateway holds buffers until `ready`.
+- **Core lifecycle** (ADR-0033, core-owned): `daemon.lifecycle.going_down{reason}` on the drain; `daemon.lifecycle.ready` only after the **full security boot graph is healthy** (`ready` = health, not socket-bind) `[fleet error]`. Gateway holds buffers until `ready`.
 - **Per-core-boot epoch nonce** at the handshake (reuse the boot-nonce pattern); gateway rejects a `ready`/handshake whose epoch mismatches; binds the last-acked exchange to the epoch (seq resets on a fresh core; epoch reconciles "new-core seq=0" vs the gateway's retained high-water) `[fleet security/reviewer]`. Conversely, the **core authenticates the gateway** via `SO_PEERCRED` on accept (a stale-socket race must not let an impostor bind first) `[fleet security]`.
 - **Client control frames:** `link.reconnecting` / `restored` / `unavailable` (the last is the back-pressure/breaker signal).
 
@@ -77,7 +77,7 @@ Injectable seams `[fleet test]`: fake clock; explicit link-state machine (`UP / 
 
 - **`CommsSeqCodec`** — out-of-band header encode/decode; payload verbatim. Pure, hypothesis-property-testable (replay idempotent; ack-trim; FIFO).
 - **`ReplayBuffer`** — per-direction un-acked retention; trim+zero on ack; cap+TTL+breaker+back-pressure; FIFO replay. Pure state machine, no deps.
-- **`GatewayCoreLink`** — gateway→core connection over the shared-volume socket; fake-clock reconnect/backoff; epoch handshake; consumes `core.lifecycle.*`.
+- **`GatewayCoreLink`** — gateway→core connection over the shared-volume socket; fake-clock reconnect/backoff; epoch handshake; consumes `daemon.lifecycle.*` (the canonical method names — Spec A G3-2 reconciled the audit-event + wire-method names; see ADR-0033).
 - **`GatewayClientListener`** — stable kernel: binds client-facing sockets (PR #258 posture), terminates connections, emits control frames.
 - **Core `InboundIdempotencyCommit`** (decision 4) — durable accept-once keyed on the wire inbound-id, consulted **before** identity-resolve/rate-limit/extract/audit (NOT the existing late `uuid4` in `process_inbound_message`); the unbound-first-contact binding-request branch is itself idempotent on the same id. With `alfred-memory-engineer` (schema) + `alfred-security-engineer` `[fleet comms]`.
 - **Core `LifecycleSignaller`** (ADR-0033).
