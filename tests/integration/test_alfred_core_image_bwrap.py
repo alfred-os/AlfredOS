@@ -209,10 +209,19 @@ def test_bwrap_inherits_fd3_into_sandbox_without_flag(
     # it. bwrap's default inheritance must carry fd 3 through to the child.
     #   exec 3< <(printf %s MARKER)   -- place the read end on fd 3
     #   bwrap <isolation flags> -- python -c 'os.write(1, os.read(3, 64))'
+    # ``/lib64`` is bound ONLY when it exists: amd64 Debian keeps its dynamic
+    # linker (``ld-linux-x86-64.so.2``) under ``/lib64`` and python3 cannot exec
+    # without it, but arm64 Debian has NO ``/lib64`` — its linker lives in
+    # ``/lib`` (already bound). An unconditional ``--ro-bind /lib64`` fails on
+    # arm64 with "Can't find source path /lib64". This mirrors the production
+    # launcher, which binds ``/usr`` (and only existing prefixes), never a
+    # hard-coded ``/lib64`` — so the test stays arch-portable across the CI
+    # matrix instead of being amd64-only.
     inner = (
         f"exec 3< <(printf %s {_FD3_MARKER}); "
         "bwrap "
-        "--ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 "
+        "--ro-bind /usr /usr --ro-bind /lib /lib "
+        "$([ -e /lib64 ] && printf -- '--ro-bind /lib64 /lib64 ') "
         "--ro-bind /bin /bin --proc /proc --dev /dev "
         "--unshare-pid --unshare-uts --unshare-ipc --unshare-cgroup "
         "--die-with-parent "
