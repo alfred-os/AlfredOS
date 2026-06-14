@@ -181,6 +181,54 @@ async def test_serve_loop_handles_consecutive_requests() -> None:
     assert [f["id"] for f in transport.sent] == [1, 2]
 
 
+async def test_serve_loop_ignores_unknown_idless_notification_writes_nothing() -> None:
+    """Spec A G3-2 (#237): a ``daemon.lifecycle.*`` notification is ignored, no reply.
+
+    Drive the REAL ``_serve_wire`` loop with a daemon-broadcast ``ready``
+    notification (NO ``id``). ``dispatch`` returns ``None`` and ``_serve_wire`` skips
+    the write — so NO bytes go back. The fix targets the production receive loop, not
+    just ``dispatch``: a bare ``transport.send(None)`` would write a malformed
+    ``null`` frame (architect C-2).
+    """
+    transport = _FakeTransport(
+        inbound=[
+            {
+                "jsonrpc": "2.0",
+                "method": "daemon.lifecycle.ready",
+                "params": {"epoch": "a" * 32},
+            }
+        ]
+    )
+    await _serve_wire(transport, TuiServer(session=TuiSession()))
+    # No reply written for an id-less notification (no ``null`` frame, no error frame).
+    assert transport.sent == []
+
+
+async def test_serve_loop_still_replies_to_a_following_request() -> None:
+    """A notification is skipped but a subsequent request is still answered.
+
+    Guards that the ``response is None`` skip does not break the loop for the next
+    real request (the lifecycle frame interleaves with the normal request stream).
+    """
+    transport = _FakeTransport(
+        inbound=[
+            {
+                "jsonrpc": "2.0",
+                "method": "daemon.lifecycle.going_down",
+                "params": {"reason": "shutdown"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "adapter.health",
+                "params": {"adapter_id": "tui"},
+            },
+        ]
+    )
+    await _serve_wire(transport, TuiServer(session=TuiSession()))
+    assert [f.get("id") for f in transport.sent] == [9]
+
+
 # ---------------------------------------------------------------------------
 # Co-host lifecycle — controllable app double.
 # ---------------------------------------------------------------------------
