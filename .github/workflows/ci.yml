@@ -364,6 +364,83 @@ jobs:
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
 
+  python-arm64:
+    # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
+    # `python` job on a native arm64 Linux runner so an architecture-specific
+    # regression (ctypes struct layout, byte-order, native-extension wheel,
+    # POSIX-fd / struct-format assumptions) is caught in CI rather than on an
+    # Apple-Silicon / Graviton operator's host. The repo is PUBLIC, so the
+    # `ubuntu-24.04-arm` runner is free (GitHub bills arm64 minutes at 0× on
+    # public repos), which is why this leg can run the full unit suite rather
+    # than a static-analysis subset like `python-cross-os`.
+    #
+    # ADD, do NOT RENAME (see docs/adr/0034-ci-os-hardware-matrix.md): this is a
+    # SEPARATE job emitting a SEPARATE check context (`Python (lint, types, unit)
+    # (arm64)`) ALONGSIDE the unchanged amd64 `python` job. Converting `python`
+    # to a `matrix` would rename its check context to `... (amd64)` and break
+    # branch protection on `main` for every open PR until the protection rules
+    # were updated atomically — a hazard this additive shape avoids.
+    #
+    # COVERAGE GATES STAY amd64-ONLY. The per-subsystem 100% line+branch gates
+    # (`security/*`, `hooks/*`, plugins / web-fetch trust-boundary files) are the
+    # single source of truth and live on the amd64 `python` + `coverage-gates`
+    # jobs. Coverage is arch-INVARIANT (the same lines/branches execute on
+    # arm64), so duplicating the gates here would add CI cost and a second place
+    # to keep the per-file `--include` lists in sync for ZERO additional signal.
+    # This leg therefore runs the unit suite with `--cov-fail-under=0` and emits
+    # NO coverage-report step — it is a run-to-green arm64 portability signal.
+    name: Python (lint, types, unit) (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()` in
+    # job-level `if:` at workflow-parse time. The first-step `check` probes for
+    # pyproject.toml and every downstream step short-circuits on
+    # `steps.check.outputs.has_py` (mirrors the amd64 `python` job's discipline).
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check for Python project
+        id: check
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ]; then
+            echo "has_py=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_py=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::pyproject.toml missing — skipping Python arm64 job."
+          fi
+      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+        if: steps.check.outputs.has_py == 'true'
+      - if: steps.check.outputs.has_py == 'true'
+        run: uv python install 3.14
+      - if: steps.check.outputs.has_py == 'true'
+        run: uv sync --frozen --dev
+      - name: Ruff lint
+        if: steps.check.outputs.has_py == 'true'
+        run: uv run ruff check .
+      - name: Ruff format check
+        if: steps.check.outputs.has_py == 'true'
+        run: uv run ruff format --check .
+      - name: Mypy (strict)
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
+        run: uv run mypy --strict src/
+      - name: Pyright
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/**/*.py') != ''
+        run: uv run pyright src/
+      - name: Unit tests (arm64 — no coverage gate)
+        if: steps.check.outputs.has_py == 'true' && hashFiles('tests/unit/**/*.py') != ''
+        # `--cov-fail-under=0` overrides `[tool.coverage.report] fail_under = 75`
+        # in pyproject.toml: coverage is arch-invariant and the gates are the
+        # amd64 `python` / `coverage-gates` jobs' single source of truth (see the
+        # job-level comment + ADR-0034). This leg proves the unit suite PASSES on
+        # arm64; the per-subsystem 100% gates are deliberately NOT duplicated
+        # here, so no follow-up `coverage report --include=... --fail-under=100`
+        # step exists.
+        run: uv run pytest tests/unit -q --cov=src/alfred --cov-fail-under=0
+
   python-cross-os:
     # Axis 1 (OS breadth) — run the PORTABLE layer of the `python` job on the
     # non-Linux runners so a regression that only shows on macOS or Windows is
@@ -625,6 +702,103 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 1
+
+  integration-arm64:
+    # Axis 3 (arch breadth — #265) — run the integration suite on a native
+    # arm64 Linux runner so an architecture-specific regression in the real
+    # bwrap launcher / testcontainers path is caught in CI. The postgres / redis
+    # / qdrant service images below all publish multi-arch (amd64 + arm64)
+    # manifests, so Docker pulls the arm64 variant automatically on this runner.
+    # The bwrap `/lib64` arch-portability fix (commit d9f487e1 on this branch) is
+    # what makes `test_alfred_core_image_bwrap.py` green here — amd64's
+    # `/lib64` ld-linux-x86-64 path does not exist on arm64.
+    #
+    # ADD, do NOT RENAME (ADR-0034): a SEPARATE job emitting the SEPARATE check
+    # context `Integration (arm64)` alongside the unchanged amd64 `integration`
+    # job — converting `integration` to a matrix would rename its required
+    # context and break branch protection for every open PR.
+    #
+    # Does NOT upload the `coverage-integration` artifact: only the amd64
+    # `integration` job uploads it, and two uploaders of the same artifact name
+    # collide. arm64 is a run-to-green portability signal; coverage is
+    # arch-invariant and stays the amd64 `coverage-gates` job's single source of
+    # truth (see ADR-0034). This leg therefore runs with `--cov-fail-under=0` and
+    # no artifact upload.
+    name: Integration (arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # No job-level `hashFiles()` guard: rejected at workflow-parse time. The
+    # `check` step probes the corpus; downstream steps short-circuit on
+    # `steps.check.outputs.has_integration` (mirrors the amd64 `integration` job).
+    services:
+      # Service container images are pinned to major tags — same rationale as the
+      # amd64 `integration` job (well-known official images; Dependabot watches
+      # docker-compose.yaml, not GHA service blocks; digest-pinning would block
+      # the patch-level postgres/redis security updates we want). All three
+      # publish multi-arch manifests, so the arm64 variant is pulled here.
+      postgres:
+        image: postgres:16  # zizmor: ignore[unpinned-images]
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports: ["5432:5432"]
+      redis:
+        image: redis:7  # zizmor: ignore[unpinned-images]
+        ports: ["6379:6379"]
+      qdrant:
+        image: qdrant/qdrant:v1.12.4  # zizmor: ignore[unpinned-images]
+        ports: ["6333:6333"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check for integration suite
+        id: check
+        run: |
+          set -euo pipefail
+          # `find … -print -quit` is shell-stable (independent of bash `globstar`,
+          # which is OFF by default) — same probe as the amd64 `integration` job.
+          if find tests/integration -type f -name '*.py' -print -quit 2>/dev/null | grep -q .; then
+            echo "has_integration=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_integration=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::tests/integration/**/*.py missing — skipping Integration arm64 job."
+          fi
+      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+        if: steps.check.outputs.has_integration == 'true'
+      - if: steps.check.outputs.has_integration == 'true'
+        run: uv sync --frozen --dev
+      - name: Install bubblewrap + jq for the launcher policy-resolver test
+        # Same machinery as the amd64 `integration` job: bubblewrap is the real
+        # sandbox the merge-blocking `test_launcher_policy_resolver.py` execs and
+        # jq is the launcher's JSON reader; without them the test silently skips
+        # and the gate is paper-only. ubuntu-24.04-arm's apt bubblewrap is >= 0.6.
+        # The apparmor sysctl relax lifts the unprivileged-userns restriction
+        # ubuntu 24.04 ships (`bwrap: setting up uid map: Permission denied`);
+        # `|| true` because the sysctl is absent on kernels without it.
+        if: steps.check.outputs.has_integration == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap jq
+          bwrap --version
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Run integration tests (arm64 — no coverage upload)
+        if: steps.check.outputs.has_integration == 'true'
+        # `--cov-fail-under=0`: integration-only coverage is ~46% by construction
+        # and the 75% / 100% gates are the amd64 jobs' single source of truth
+        # (arch-invariant — see ADR-0034). Unlike the amd64 `integration` job
+        # this leg does NOT run `--cov-append` or upload the `coverage-integration`
+        # artifact (a second uploader of that name would collide with amd64's);
+        # arm64 is a run-to-green portability signal.
+        run: |
+          uv run pytest tests/integration -q --cov=src/alfred --cov-branch --cov-fail-under=0
 
   integration-privileged:
     # Axis 2 (privileged-Linux depth) — closes #245 Problem 1. The
@@ -900,6 +1074,7 @@ jobs:
           sudo env "PATH=${UV_DIR}:${PATH}" "${UV_BIN}" run pytest \
             tests/adversarial/sandbox_escape -q \
             -p no:cacheprovider --cov-fail-under=0
+
 
   coverage-gates:
     name: Coverage gates (combined unit + integration)
