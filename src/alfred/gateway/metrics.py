@@ -42,9 +42,15 @@ CORE_UNAVAILABLE_SECONDS: Final[Counter] = Counter(
     "Cumulative seconds the core link spent not-UP.",
 )
 
+PEER_AUTH_REJECTED: Final[Counter] = Counter(
+    "gateway_peer_auth_rejected",
+    "Count of client-leg SO_PEERCRED peer-uid rejections at the gateway's client socket.",
+)
+
 
 __all__ = [
     "CORE_LINK_UP",
     "CORE_UNAVAILABLE_SECONDS",
+    "PEER_AUTH_REJECTED",
     "RECONNECT_ATTEMPTS",
 ]
