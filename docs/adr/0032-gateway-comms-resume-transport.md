@@ -116,3 +116,27 @@ The both-direction `SO_PEERCRED` G3-1 deferred ships here as a `dial_comms_socke
 ### Audit deferral (unchanged from G3-3a)
 
 Link transitions + epoch rejects are loud via structlog; the durable, signed, reconcilable gateway-local audit row is **G4** (spec §6) — the gateway still has no audit sink. `gateway_core_unavailable_seconds_total` accrues the not-UP wall time as the operational signal in the interim. This is a deliberate deferral, NOT a gap.
+
+## Amendment — Opaque relay engine (G3-3b-2a)
+
+G3-3b-2a makes the gateway a **payload-blind, byte-for-byte relay** between the dial-in client (the TUI) and the core — the first real `AlfredSeqAck/1` peer that DEFRAMES one leg and REFRAMES onto the other. NO process/CLI yet (G3-3b-2b); NO buffer/resume (G4).
+
+### The wire reality: the client leg is PLAIN in production
+
+The merged TUI never negotiates seq/ack, so **in production only the gateway↔core leg is seq/ack-enabled; the gateway↔client leg is plain ADR-0025.** The relay is seq-gated per leg (each `CommsSocketTransport` carries its own `_seq_ack_enabled`): the plain-client path is the production path; a seq-enabled-client path is forward-looking (G4/G5 may upgrade the TUI for resume). The across-restart client-leg-seq invariant (the client `seq` climbs monotonically across a core reconnect because the single-accept-for-life client transport is never replaced) therefore applies only on the forward-looking seq-enabled-client wire; on the plain production leg the relay simply forwards plain lines.
+
+### The opaque seam + routing
+
+`CommsSocketTransport.read_payload_unit() -> SeqFrame | None` returns the opaque ADR-0025 payload bytes (the `SeqFrame.payload`, `seq=None` on a plain line) WITHOUT `json.loads`-ing them; `send_payload_unit(payload, *, ack)` reframes with this leg's `_send_seq` + the supplied REAL ack (not the merged `a=0` placeholder), seq-gated, under `_send_lock`. `read_frame`/`read_payload_unit` share one private read+bound+seq-deframe helper so the three-point DoS bound never diverges. To ROUTE, the relay peeks the JSON-RPC `method` on a COPY of the payload — wrapped `try/except (JSONDecodeError, ValueError, RecursionError)`, and on ANY parse failure it **fails TOWARD relay** (forwards the original bytes, never drops/consumes — hard rule #7): a `daemon.lifecycle.*` method is CONSUMED (the merged forgery-defended `_consume_frame` — a forged `ready` is still epoch-rejected), everything else (incl. a no-`method` response) is RELAYED byte-for-byte. The client→core leg does ZERO body parse (pure opaque forward). T3 stays in the core; the canary trips only in the core (the gateway never reads a body, and a relayed canary never reaches a gateway log row or metric label).
+
+### The ack tracker — bounded (the first long-lived process)
+
+The gateway is the first real `cumulative_ack()` source. It does NOT reuse the merged `SeqDedupWindow` (its `_seen` grows unbounded; pruning it would break its idempotent-`accept()` contract). Instead `relay.py` owns a `BoundedSeqAckTracker`: the contiguous high-water + a bounded out-of-order gap set — a seq more than `_MAX_OOO_GAP` (1024) beyond the high-water is REJECTED loud, closing the every-other-seq adversary (`0,2,4,…` would otherwise grow the gap set unbounded since the holes are all ABOVE the high-water). The ack a leg writes is that SAME leg's receive-tracker `cumulative_ack()` (the ack rides the reverse-flowing frames of the leg it acknowledges). The gateway computes its own ack from its own tracker — it NEVER trusts the peer's `ack` field. The send-seq is capped by `encode_seq_frame`'s width guard (~10^8 frames); exhaustion is a loud fatal leg error (G4 resume resets epoch+seq on reconnect).
+
+### No buffering + reconnect-race
+
+`relay_to_core` snapshots the link's CURRENT core transport into a local before writing (swap-atomic from the reverse pump's view; the link binds the transport reference only post-handshake), so a write racing a reconnect hits the captured (old, closing) transport → a clean broken-pipe/closed-state → **loud DROP** (`gateway.relay.core_send_dropped`), never buffered/retried/crashed. A frame in flight across a core gap is dropped; the core tracker's `cumulative_ack()` stalls at the gap. G4's `ReplayBuffer` adds resume.
+
+### The non-root wire-contract gate (#245 paper-gate fix)
+
+The relay's contract is proven by an in-process, NON-root test over REAL loopback `CommsSocketTransport`s + a REAL `GatewayClientListener` (the G2 lesson: a launcher/root-only test is not a real gate). It asserts byte-for-byte payloads, the §9 control sequence, RESEQ (the client-leg sent seq ≠ the core-leg received seq — proving reframe, not pass-through), the client-leg seq climbing across a reconnect, the payload-blindness canary (byte-identical + no body parse + no log leak), and the forgery/dial-reject paths. (This real gate caught a `-1`-initial-ack crash the in-process fakes could not — the exact value of testing the real wire.)
