@@ -58,3 +58,33 @@ The gateway↔core leg rendezvous over the ADR-0031 named AF_UNIX socket (`Comms
 - **A rejected peer is refused without wedging a legitimate dial-in.** On reject the listener closes the writer, logs `comms.socket.peer_uid_rejected` (structlog), and does NOT resolve the accept future — so a subsequent same-uid peer still connects. The core-side daemon AUDIT row for the rejection lands in G3-2 (the daemon caller owns the injected audit writer; the G3-1 listener is a dependency-light library whose loud surface is the structlog warning + the refusal).
 
 This amendment introduces NO env override: the configurable runtime/socket dir (`ALFRED_COMMS_RUNTIME_DIR`, behind fail-closed validation) is deferred to G3-4 with the shared-volume mount it serves.
+
+## Amendment — Link-state machine + control frames (G3-3a)
+
+G3-3a lands the gateway's **stable kernel**: the part that decides what the client is told when the core link gaps and recovers. The kernel is two pieces — a pure state machine and three control-frame wire models — plus a thin client-facing listener that emits them. NO core dial, NO seq/ack relay, NO buffer (those are G3-3b/G4).
+
+### The `LinkStateMachine` (pure, typed-event-driven)
+
+`LinkStateMachine.feed(event) -> LinkControl | None` is a total function of `(state, event)` over four states (`UP` / `DOWN_SIGNALLED` / `DOWN_CRASH` / `REDIALING`) and four events (`core_going_down` / `core_crash_eof` / `redial_started` / `core_ready`). It is **pure — no I/O, no clock**: the wire send, the socket, and the reconnect/backoff loop all sit above it (the G3-3b core-link). That split is what makes the §9 invariant hypothesis-testable in isolation.
+
+- **Typed events only — the kernel makes NO wire-trust decision.** `feed` accepts a `GatewayLinkEvent`, never a raw wire frame. Deriving `core_ready` from a lifecycle frame is a G3-3b obligation: the frame must be `ReadyNotification`-parsed and epoch-checked BEFORE `feed(core_ready)` is called. The pure machine is structurally incapable of being driven by raw bytes, so a forged `ready` cannot reach it (the forged-`ready` defense itself is G3-3b).
+
+- **The §9 invariant.** No `restored` without a preceding `reconnecting`; exactly one control frame per gap; never a spurious second `restored`. A hypothesis property over random event sequences proves it.
+
+- **Fail-loud on an undefined pair.** An unmodelled `(state, event)` raises `GatewayLinkStateError` (CLAUDE.md hard rule #7) — never a silent no-op. The transition table is deliberately permissive on the legitimate races: the idempotent self-loops (a second down-signal within one gap, repeated redial attempts, a late/duplicate `core_ready` while already `UP`) emit nothing, and `DOWN_SIGNALLED`/`DOWN_CRASH + core_ready -> UP` emits `restored` directly (a `core_ready` can legitimately race AHEAD of `redial_started`; the gap closes regardless, so this must NOT crash a real sequence). The only genuinely-undefined pair is `UP + redial_started` (a redial cannot begin while the link is up — no gap is open).
+
+### The control frames — pure state signals, NO banner, NO T3
+
+The gateway→client vocabulary is exactly three id-less notifications: `link.reconnecting` / `link.restored` / `link.unavailable` (the wire-method constant and the model are the SAME string by construction). They are **pure STATE signals** — fieldless `_WireModel` subclasses (`extra="forbid"` rejects any smuggled field loudly) carrying NO operator-text and NO `adapter_id`.
+
+- **No `banner`/`reason` text on the wire.** An open `str` field here would be a standing invitation to later smuggle a core-supplied / T3-derived reason into a client-visible frame, and operator text on the wire breaks i18n rule #1. The gateway sends only the STATE; the **client (the TUI, G5) renders its own localized banner from the method**, against `{user.language}` where the user's language lives. The gateway is a T1 carrier — T3 stays in the core.
+
+- **`link.unavailable` is defined but never emitted in G3-3a.** Its trigger — the ReplayBuffer cap breach (spec §5) — lands with the G4 breaker. Defining the model now keeps the wire vocabulary whole without a half-specified G4 edge; G3-3a ships no transition that emits it.
+
+### The client listener
+
+`GatewayClientListener` reuses the merged `CommsSocketListener` (`adapter_id="gateway"`, socket `comms-gateway.sock` — the gateway's own stable externally-owned path per spec §10) so it inherits the `0600`/`0700` posture + the `SO_PEERCRED` peer-auth. **Single-accept-for-life:** the client connection is held across core restarts; all reconnect churn is on the core-link (G3-3b), never a client re-accept. `send_control` routes the id-less frame through the accepted transport's `send()` (NOT a bespoke serialize — inherits its single-writer lock + the future client-leg seq/ack wrapping). A write to a dead client is LOUD (`comms.gateway.control_send_failed`) and re-raised.
+
+### Audit deferral
+
+Every link-state transition is **loud via structlog** in G3-3a: a SUCCESSFUL emit logs `comms.gateway.control_sent` at INFO (so a reconnect/restore is observable, not just failures), and a write to a dead client logs `comms.gateway.control_send_failed` + re-raises. The durable, signed, reconcilable gateway-local audit row is **G4** (spec §6) — the 3a kernel has no audit sink. Likewise the peer-auth reject seam is a structlog-only stub here (the gateway stub warns `comms.gateway.peer_uid_rejected`, and the reused listener independently warns `comms.socket.peer_uid_rejected` at the reject point); the durable reject audit row + the `gateway_peer_auth_rejected_total` metric are G3-3b/G4. This is a deliberate deferral, NOT a gap.
