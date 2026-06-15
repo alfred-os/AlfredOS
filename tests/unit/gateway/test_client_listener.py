@@ -25,32 +25,21 @@ import pytest
 from alfred.comms_mcp.protocol import (
     LINK_RECONNECTING,
     LINK_RESTORED,
-    LINK_UNAVAILABLE,
     LinkReconnectingNotification,
     LinkRestoredNotification,
     LinkUnavailableNotification,
 )
+from alfred.gateway import control_notification
 from alfred.gateway.client_listener import (
     _GATEWAY_ADAPTER_ID,
+    _METHOD_BY_MODEL,
     GatewayClientListener,
     _structlog_only_peer_rejected,
 )
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
-    LinkControl,
     LinkStateMachine,
 )
-
-_CONTROL_TO_MODEL = {
-    LinkControl.RECONNECTING: LinkReconnectingNotification,
-    LinkControl.RESTORED: LinkRestoredNotification,
-    LinkControl.UNAVAILABLE: LinkUnavailableNotification,
-}
-_CONTROL_TO_METHOD = {
-    LinkControl.RECONNECTING: LINK_RECONNECTING,
-    LinkControl.RESTORED: LINK_RESTORED,
-    LinkControl.UNAVAILABLE: LINK_UNAVAILABLE,
-}
 
 
 @pytest.fixture
@@ -191,8 +180,9 @@ async def test_machine_to_wire_emits_section9_sequence(
     for event in sequence:
         control = machine.feed(event)
         if control is not None:
-            await listener.send_control(_CONTROL_TO_MODEL[control]())
-            expected_methods.append(_CONTROL_TO_METHOD[control])
+            notification = control_notification(control)
+            await listener.send_control(notification)
+            expected_methods.append(_METHOD_BY_MODEL[type(notification)])
     observed: list[str] = []
     for _ in range(len(expected_methods)):
         line = await asyncio.wait_for(reader.readline(), timeout=2.0)

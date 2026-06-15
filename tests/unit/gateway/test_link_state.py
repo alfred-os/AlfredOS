@@ -24,6 +24,7 @@ from alfred.comms_mcp.protocol import (
     LinkRestoredNotification,
     LinkUnavailableNotification,
 )
+from alfred.gateway import control_notification
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
@@ -58,8 +59,31 @@ def test_link_control_frames_are_empty_state_signals() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Task 2 — the LinkStateMachine transition table
+# Task 4b — the LinkControl -> LinkControlNotification helper (the shared map)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("control", "model"),
+    [
+        (LinkControl.RECONNECTING, LinkReconnectingNotification),
+        (LinkControl.RESTORED, LinkRestoredNotification),
+        (LinkControl.UNAVAILABLE, LinkUnavailableNotification),
+    ],
+)
+def test_control_notification_maps_each_member(
+    control: LinkControl, model: type[LinkReconnectingNotification]
+) -> None:
+    assert isinstance(control_notification(control), model)
+
+
+def test_control_notification_maps_every_member_exhaustively() -> None:
+    # Every LinkControl member MUST map — a future member with no mapping is a loud
+    # failure (assert_never), never a silent KeyError default. This iterates the full
+    # enum so adding a member without extending the map fails this test.
+    for control in LinkControl:
+        assert control_notification(control) is not None
+
 
 _UP = GatewayLinkState.UP
 _DOWN_SIGNALLED = GatewayLinkState.DOWN_SIGNALLED
