@@ -201,6 +201,26 @@ jobs:
           uv run coverage report \
             --include='src/alfred/security/quarantine_child_io.py' \
             --fail-under=100
+      - name: Gateway kernel trust-boundary 100% line+branch coverage
+        # Spec A G3-3a (#237, ADR-0032): ``src/alfred/gateway/`` is the
+        # always-up gateway's stable kernel — the client-facing T1 carrier.
+        # ``link_state.py`` is the pure link-state machine enforcing the §9
+        # reconnecting/restored invariant (a coverage hole could ship an
+        # un-exercised transition that breaks the no-restored-without-
+        # reconnecting contract); ``client_listener.py`` is the client-facing
+        # socket + control-frame emit (the reused 0600/0700 peer-auth posture +
+        # the loud-on-dead-client send seam). Both are trust-boundary kernel,
+        # so 100% line+branch is the bar (architect L2 — a new trust-boundary
+        # package needs its gate wired, not assumed). Fully covered by the unit
+        # tier (``tests/unit/gateway/``, in-process loopback sockets — no root,
+        # no Postgres), so gating on unit-only ``.coverage`` data is sound. The
+        # combined-job gate names these two files too (the two-gates pattern —
+        # keep BOTH in sync when this file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py' \
+            --fail-under=100
       # NOTE: the Slice-3 trust-boundary 100% gate moved to the
       # `coverage-gates` job below. The capability-gate heartbeat /
       # fail-closed / outage paths in
@@ -1216,6 +1236,21 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/comms_mcp/protocol.py,src/alfred/comms_mcp/inbound.py,src/alfred/comms_mcp/inbound_scanner.py,src/alfred/comms_mcp/classifier_registry.py,src/alfred/comms_mcp/handlers.py,src/alfred/comms_mcp/bootstrap.py,src/alfred/comms_mcp/observability.py,src/alfred/comms_mcp/errors.py,src/alfred/orchestrator/burst_limiter.py,src/alfred/comms_mcp/sub_payload_promotion.py,src/alfred/comms_mcp/audit_hash.py,src/alfred/comms_mcp/outbound_queue.py,src/alfred/comms_mcp/discord_hookpoints.py,src/alfred/comms_mcp/classifiers/discord.py,src/alfred/comms_mcp/addressing_drift.py,src/alfred/comms_mcp/thread_conversation_ledger.py,src/alfred/comms_mcp/daemon_runtime.py' \
+            --fail-under=100
+      - name: Gateway kernel trust-boundary 100% line+branch coverage (combined)
+        # Spec A G3-3a (#237, ADR-0032): the gateway's stable kernel — the pure
+        # link-state machine (``link_state.py``) + the client-facing socket /
+        # control-frame emit (``client_listener.py``). The client-facing T1
+        # carrier is a trust boundary; a coverage hole could ship an
+        # un-exercised transition that breaks the §9 reconnecting/restored
+        # invariant. Fully covered by the unit tier (``tests/unit/gateway/``,
+        # in-process loopback sockets), so its coverage is in the unit corpus;
+        # named here too (the two-gates pattern — mirrors the python-job
+        # ``Gateway kernel`` gate; keep BOTH in sync when this file changes).
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
