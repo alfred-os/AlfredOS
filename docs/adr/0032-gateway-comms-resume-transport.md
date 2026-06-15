@@ -88,3 +88,31 @@ The gateway→client vocabulary is exactly three id-less notifications: `link.re
 ### Audit deferral
 
 Every link-state transition is **loud via structlog** in G3-3a: a SUCCESSFUL emit logs `comms.gateway.control_sent` at INFO (so a reconnect/restore is observable, not just failures), and a write to a dead client logs `comms.gateway.control_send_failed` + re-raises. The durable, signed, reconcilable gateway-local audit row is **G4** (spec §6) — the 3a kernel has no audit sink. Likewise the peer-auth reject seam is a structlog-only stub here (the gateway stub warns `comms.gateway.peer_uid_rejected`, and the reused listener independently warns `comms.socket.peer_uid_rejected` at the reject point); the durable reject audit row + the `gateway_peer_auth_rejected_total` metric are G3-3b/G4. This is a deliberate deferral, NOT a gap.
+
+## Amendment — Core-link manager (G3-3b-1)
+
+G3-3b-1 lands the gateway's **core-facing half**: the connection to the core that drives the G3-3a kernel and the reconnect banner. NO payload relay (non-lifecycle frames are dropped + counted; the opaque relay is G3-3b-2), NO buffer (G4).
+
+### Role direction — the gateway is PEER on the core leg
+
+The core (daemon) **binds + accepts** its socket and runs `CommsPluginRunner` as **HOST** (`src/alfred/cli/daemon/_commands.py` `_listen_socket_comms_adapter` / `_build_comms_runner`); the HOST sends `lifecycle.start` first (`comms_runner.py` `_handshake`). The gateway **dials** the core's socket (`dial_comms_socket`, default `adapter_id="tui"` — G3-4 relocates it to a shared volume), so on the core leg the gateway is the **PEER**: it RECEIVES `lifecycle.start`, validates it, captures the core's per-boot `epoch`, and RESPONDS with `{"ok": true, "plugin_version": ..., "seq_ack": {...}}` (echoing `AlfredSeqAck/1` iff the core advertised it, then enabling core-leg seq/ack). On the client leg the gateway is HOST (it binds `comms-gateway.sock`, the TUI dials in) — that client-leg host handshake is G3-3b-2 (only the relay needs client-leg seq/ack).
+
+### The handshake epoch IS the liveness signal
+
+In the normal boot the core emits its `daemon.lifecycle.ready` broadcast **before the gateway has dialed in** (zero senders — `comms_runner.py` reconciliation note), so the gateway never receives a `ready` frame on first connect. Therefore a **successful core-leg handshake (with a valid 32-hex epoch captured) is itself the `core_ready` signal** — `GatewayCoreLink` feeds `CORE_READY` on handshake success, not on a separate `ready` frame. This is provably safe against a premature banner-clear: the core's socket only becomes dialable **after `supervisor.start()` succeeds** (`_commands.py` boot order: `mint_boot_epoch` → `supervisor.start()` → `listener.bind()`), so a completed handshake genuinely implies a healthy core.
+
+### The epoch-reconcile forgery defense
+
+A `daemon.lifecycle.ready` frame that DOES arrive mid-connection is corroboration only: it is `ReadyNotification`-parsed (epoch pinned 32-hex) and its epoch is **reconciled against the captured handshake epoch**. A match → `feed(CORE_READY)` (idempotent). A **mismatch** → a stale/forged `ready` (a same-uid peer past `SO_PEERCRED` injecting a false liveness signal) → rejected: NO `feed`, NO control frame, a loud `gateway.core_link.ready_epoch_mismatch` warning. **A false `restored` is an attack surface**, so this is a forgery defense, not noise — it is exercised by an adversarial-corpus test now (the forgery attempt is test-observable before the durable sink exists). G4 owes a **dedicated** durable `ready_epoch_mismatch` audit row (NOT bundled with generic link transitions). The typed-event boundary the G3-3a kernel established holds: a raw/forged frame is Pydantic-validated + epoch-checked BEFORE the typed `feed(core_ready)` — it can never reach the pure machine as bytes. A malformed lifecycle frame (`reason`/`epoch` shape) is likewise loud (`gateway.core_link.malformed_lifecycle_frame`) + dropped, never fed.
+
+### Reconnect / backoff
+
+On a gap (a planned `going_down` then EOF, or a crash EOF / transport-crash exception) the core-link reconnects with exponential backoff + full jitter: an injectable-clock loop whose backoff SCHEDULE ceiling starts at `0.25 s` (the schedule floor never starts at a `0` ceiling), ×2 to a `5.0 s` ceiling, with the actual per-attempt delay a full-jitter draw in `[0, ceiling]` (an individual draw CAN land near `0` — full jitter by definition can collapse a single wait — but the schedule ceiling itself never starts at `0`); each attempt feeds `redial_started` + increments `gateway_reconnect_attempts_total`. A successful dial + handshake feeds `core_ready` → from `REDIALING` emits `restored`. A half-open transport (dial succeeds, handshake then fails) is closed before retrying (no FD leak). The §9 invariant holds end-to-end across a real gap+reconnect: exactly `[reconnecting, restored]`, one per gap.
+
+### Dial-side peer-auth (recorded under ADR-0031)
+
+The both-direction `SO_PEERCRED` G3-1 deferred ships here as a `dial_comms_socket` extension (**ADR-0031**'s socket-transport concern — it owns the accept-side peer-auth): a `CommsPeerAuthError` (a `CommsProtocolError` subclass) on a mismatched-uid listener. It is **Linux-enforcing** (where `SO_PEERCRED` answers); on a degrade-open host (no `SO_PEERCRED`) the dial side does NOT own the dialed inode, so a **pre-dial `lstat` owner+socket guard** is the backstop (the dialed path must be a socket owned by the current uid). The reconnect loop treats a dial peer-auth reject as a transient and retries.
+
+### Audit deferral (unchanged from G3-3a)
+
+Link transitions + epoch rejects are loud via structlog; the durable, signed, reconcilable gateway-local audit row is **G4** (spec §6) — the gateway still has no audit sink. `gateway_core_unavailable_seconds_total` accrues the not-UP wall time as the operational signal in the interim. This is a deliberate deferral, NOT a gap.

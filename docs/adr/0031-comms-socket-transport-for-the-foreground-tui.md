@@ -61,3 +61,14 @@ PR-1 (this ADR's original cut) shipped the **daemon-side** listener + `CommsSock
 - **Trust boundary unchanged.** PR-2 introduces no new trust-tag path: the operator's typed body crosses as a plain `inbound.message` over the dumb socket carrier; T3 tagging happens host-side in `process_inbound_message` on receipt. The `subscriber_tier = "operator"` (T1) is orthogonal to content trust tier and unchanged.
 
 - **Core→plugin layering (sanctioned narrowly).** The core CLI imports the first-party bundled `alfred_tui` package directly via `sys.path`; this is sanctioned ONLY for the operator-local foreground TUI (`alfred chat`), NOT a precedent that any sandboxed/third-party plugin may be imported into core.
+
+## Amendment — dial-side peer-auth (G3-3b-1, PR-S4-G3-3b)
+
+PR-2 (above) shipped the dialer with a daemon-absent dial mapped to `OSError`. The gateway core-link (Spec A G3-3b-1, #237) DIALS this same socket and adds the **dial-side** half of the `SO_PEERCRED` peer-auth, extending PR-2's `dial_comms_socket`. ADR-0032 references this as "recorded under ADR-0031" because socket-transport peer-auth is this ADR's concern (it owns the accept-side check); this records the symmetric dial-side half.
+
+The dial side now authenticates the peer in **both directions** (the accept side already verifies the connector's uid), via two layers:
+
+- **Post-connect `SO_PEERCRED` (Linux-enforcing).** After `connect`, the connected peer's uid is read off `writer.get_extra_info("socket")` (the CONNECTED socket, never a listener) and the dial is refused with a `CommsPeerAuthError` (a `CommsProtocolError` subclass) if it is not the current uid.
+- **Pre-dial `lstat` owner backstop (degrade-open hosts).** On a host without `SO_PEERCRED` (e.g. a macOS dev box) the post-connect check returns `None` → authorized. The dialer does NOT own the dialed inode (the daemon binds it), so a pre-dial `lstat` is the only owner enforcement there: the resolved path must be an `S_ISSOCK` inode owned by `os.getuid()`, or the dial is refused. It uses `lstat` (never `stat`) so a planted symlink target is never followed — reusing `CommsSocketListener._unlink_stale`'s discipline.
+
+A daemon-absent / socket-missing dial still surfaces LOUD as the existing `FileNotFoundError` / `ConnectionRefusedError` daemon-required contract (CLAUDE.md hard rule #7); only an uid-mismatch / non-owned-inode refusal raises `CommsPeerAuthError`. The gateway reconnect loop treats a dial peer-auth reject as a transient and retries; the foreground TUI cohost (`alfred chat`) maps it — like the daemon-absent `OSError` — to the daemon-required operator message + exit 3, so a planted-inode / uid-squat / wider-perm misconfig is one clean operator line, never a traceback.

@@ -216,10 +216,18 @@ jobs:
         # no Postgres), so gating on unit-only ``.coverage`` data is sound. The
         # combined-job gate names these two files too (the two-gates pattern —
         # keep BOTH in sync when this file changes).
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != ''
+        # G3-3b-1 (#237) extends the kernel with the core-facing half:
+        # ``core_link.py`` is the core-leg PEER handshake + the epoch-reconcile
+        # forgery defense (a mismatched-epoch ``ready`` is rejected, never fed —
+        # a false ``restored`` is an attack surface) + the reconnect/backoff
+        # loop; ``metrics.py`` is the core-link Prometheus instrumentation;
+        # ``_control_frames.py`` is the control-path bind point (its
+        # ``assert_never`` makes a missing mapping a loud failure). All are
+        # trust-boundary, so 100% line+branch is the bar.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != '' && hashFiles('src/alfred/gateway/core_link.py') != '' && hashFiles('src/alfred/gateway/metrics.py') != '' && hashFiles('src/alfred/gateway/_control_frames.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py' \
+            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py,src/alfred/gateway/core_link.py,src/alfred/gateway/metrics.py,src/alfred/gateway/_control_frames.py' \
             --fail-under=100
       # NOTE: the Slice-3 trust-boundary 100% gate moved to the
       # `coverage-gates` job below. The capability-gate heartbeat /
@@ -1247,10 +1255,14 @@ jobs:
         # in-process loopback sockets), so its coverage is in the unit corpus;
         # named here too (the two-gates pattern — mirrors the python-job
         # ``Gateway kernel`` gate; keep BOTH in sync when this file changes).
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != ''
+        # G3-3b-1 (#237) adds ``core_link.py`` (core-leg PEER handshake +
+        # epoch-reconcile forgery defense + reconnect/backoff) + ``metrics.py``
+        # (core-link instrumentation) + ``_control_frames.py`` (the control-path
+        # bind point with an ``assert_never``) — all trust-boundary, 100% line+branch.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != '' && hashFiles('src/alfred/gateway/core_link.py') != '' && hashFiles('src/alfred/gateway/metrics.py') != '' && hashFiles('src/alfred/gateway/_control_frames.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py' \
+            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py,src/alfred/gateway/core_link.py,src/alfred/gateway/metrics.py,src/alfred/gateway/_control_frames.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
