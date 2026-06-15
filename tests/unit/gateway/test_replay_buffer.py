@@ -217,6 +217,17 @@ def test_evict_returns_empty_when_nothing_expired() -> None:
     assert buf.evict_expired(now=1.0) == ()
 
 
+def test_evict_rejects_regressed_now() -> None:
+    """A backwards clock into evict_expired raises (would silently under-evict)."""
+    buf = _buffer(ttl_seconds=10.0)
+    buf.append(0, b"x", now=5.0)
+    buf.evict_expired(now=8.0)  # advances the shared monotonic floor to 8.0
+    with pytest.raises(ReplayBufferError, match="monotonic"):
+        buf.evict_expired(now=7.0)  # clock went backwards
+    with pytest.raises(ReplayBufferError, match="monotonic"):
+        buf.append(1, b"y", now=7.5)  # append floor also advanced by the evict
+
+
 def test_unacked_frames_returns_fifo_replayframes_carrying_seq() -> None:
     buf = _buffer()
     buf.append(0, b"a", now=1.0)
@@ -358,9 +369,13 @@ def test_replay_order_and_seqs_match_append(payloads: list[tuple[bytes, float]])
 
 
 @given(_payloads, st.floats(min_value=0.0, max_value=10_000.0))
-def test_evict_is_a_fifo_prefix(payloads: list[tuple[bytes, float]], horizon: float) -> None:
+def test_evict_is_a_fifo_prefix(payloads: list[tuple[bytes, float]], extra: float) -> None:
     buf, bodies = _fill(payloads)
     depth_before = buf.depth_frames
+    # evict_expired enforces a monotonic ``now`` (>= the last appended time), so the
+    # horizon must sit at or after the fill's final clock — ``max(_last_now, 0.0)``
+    # handles the empty-fill ``-inf`` floor without a backwards-clock raise.
+    horizon = max(buf._last_now, 0.0) + extra
     evicted = buf.evict_expired(now=horizon)
     assert len(evicted) + buf.depth_frames == depth_before
     assert list(evicted) == sorted(evicted)  # leading ascending run
