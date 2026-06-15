@@ -31,3 +31,11 @@ def test_core_unavailable_seconds_is_a_counter() -> None:
 
 def test_core_unavailable_seconds_exposes_total_suffix() -> None:
     assert REGISTRY.get_sample_value("gateway_core_unavailable_seconds_total") is not None
+
+
+def test_peer_auth_rejected_is_a_counter() -> None:
+    assert isinstance(metrics.PEER_AUTH_REJECTED, Counter)
+
+
+def test_peer_auth_rejected_exposes_total_suffix() -> None:
+    assert REGISTRY.get_sample_value("gateway_peer_auth_rejected_total") is not None
