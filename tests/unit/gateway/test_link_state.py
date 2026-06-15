@@ -176,6 +176,31 @@ def test_up_breaker_emits_unavailable_without_a_preceding_reconnecting() -> None
     assert m.feed(GatewayLinkEvent.BREAKER_TRIPPED) is LinkControl.UNAVAILABLE
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        GatewayLinkEvent.BREAKER_TRIPPED,  # repeated trip while latched -> idempotent
+        GatewayLinkEvent.CORE_READY,  # core revived but buffer still wedged -> NO restored
+        GatewayLinkEvent.CORE_GOING_DOWN,
+        GatewayLinkEvent.CORE_CRASH_EOF,
+        GatewayLinkEvent.REDIAL_STARTED,
+    ],
+)
+def test_unavailable_absorbs_every_event_emitting_nothing(event: GatewayLinkEvent) -> None:
+    m = LinkStateMachine()
+    m.feed(GatewayLinkEvent.BREAKER_TRIPPED)  # -> UNAVAILABLE
+    assert m.feed(event) is None
+    assert m.state is GatewayLinkState.UNAVAILABLE
+
+
+def test_core_ready_after_unavailable_never_emits_restored() -> None:
+    """A wedged buffer is not un-wedged by a core returning — recovery is a fresh session."""
+    m = LinkStateMachine()
+    m.feed(GatewayLinkEvent.CORE_GOING_DOWN)  # -> DOWN_SIGNALLED, RECONNECTING
+    m.feed(GatewayLinkEvent.BREAKER_TRIPPED)  # -> UNAVAILABLE, UNAVAILABLE
+    assert m.feed(GatewayLinkEvent.CORE_READY) is None  # NOT RESTORED
+
+
 def test_undefined_transition_fails_loud() -> None:
     # ``UP + redial_started`` is genuinely undefined: a redial cannot begin while
     # the link is up (no gap is open). With the H2 fix, ``DOWN_* + core_ready`` IS
