@@ -31,6 +31,7 @@ G3-3b/G4.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import structlog
@@ -90,10 +91,17 @@ class GatewayClientListener:
     Does NOT relay payload (G3-3b).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_peer_rejected: Callable[[int | None], Awaitable[None]] | None = None,
+    ) -> None:
+        # ``on_peer_rejected`` is the injectable peer-auth reject seam: G3-3b wires its
+        # metric-incrementing handler here. Default → the structlog-only stub, so the
+        # default caller's behaviour (a mismatch logs ``comms.gateway.peer_uid_rejected``)
+        # is unchanged.
         self._listener = CommsSocketListener(
             adapter_id=_GATEWAY_ADAPTER_ID,
-            on_peer_rejected=_structlog_only_peer_rejected,
+            on_peer_rejected=on_peer_rejected or _structlog_only_peer_rejected,
         )
         self._transport: CommsSocketTransport | None = None
 
@@ -101,6 +109,14 @@ class GatewayClientListener:
     def path(self) -> Path:
         """The bound socket path (delegates to the composed listener)."""
         return self._listener.path
+
+    @property
+    def transport(self) -> CommsSocketTransport | None:
+        """The accepted client transport (``None`` before :meth:`accept`).
+
+        The relay handoff seam: G3-3b hands this transport to the client<->core relay.
+        """
+        return self._transport
 
     async def bind(self) -> None:
         """Create the 0600 owner-only client-facing socket (delegates)."""
