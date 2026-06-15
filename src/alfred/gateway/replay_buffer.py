@@ -197,5 +197,28 @@ class ReplayBuffer:
         if len(self._retained) > self._max_frames or self._depth_bytes > self._max_bytes:
             self._breaker_tripped = True
 
+    def trim_to_ack(self, cumulative_ack: int) -> None:
+        """Remove + zero every retained frame with ``seq <= cumulative_ack``.
+
+        ``cumulative_ack`` is the core's epoch-validated durable contiguous-intake
+        high-water (spec §4). Because retention is FIFO-ascending in seq, the acked
+        frames are a leading prefix. ``-1`` / below-first-seq is a no-op; at/above the
+        last seq empties. Does NOT clear :attr:`breaker_tripped`.
+
+        This is the ONE removal that is not input-loss (the frames are durably
+        committed), so it returns nothing. Security precondition (G4b's obligation):
+        ``cumulative_ack`` must come only from an epoch-validated ack — a spoofed ack
+        would zero un-committed input, and the pure buffer cannot tell them apart.
+        """
+        removed = 0
+        for entry in self._retained:
+            if entry.seq > cumulative_ack:
+                break
+            self._depth_bytes -= len(entry.body)
+            _zero(entry.body)
+            removed += 1
+        if removed:
+            del self._retained[:removed]
+
 
 __all__ = ["ReplayBuffer", "ReplayBufferError", "ReplayFrame"]
