@@ -82,6 +82,15 @@ class BoundedSeqAckTracker:
         # Advance the contiguous high-water as far as the unbroken run now reaches.
         while (self._contiguous_high + 1) in self._seen:
             self._contiguous_high += 1
+        # Prune every now-SETTLED seq (``<= _contiguous_high``) from the seen-set: the
+        # tracker needs only the contiguous high-water + the holes ABOVE it. Without
+        # this an ordinary in-order stream (``0,1,2,…``) grows ``_seen`` one entry per
+        # seq FOREVER on an always-up gateway (the OOO adversary is bounded by
+        # ``_MAX_OOO_GAP``, but the in-order common case was not). Unlike the merged
+        # ``SeqDedupWindow`` this tracker does NOT promise idempotent re-accept (it
+        # only answers a cumulative ack), so dropping settled entries is safe for its
+        # contract; ``cumulative_ack()`` (== ``_contiguous_high``) is unaffected.
+        self._seen = {seq for seq in self._seen if seq > self._contiguous_high}
 
     def cumulative_ack(self) -> int:
         """Highest CONTIGUOUS seq seen (top of the unbroken 0.. run); ``-1`` if none."""

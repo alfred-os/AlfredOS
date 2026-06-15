@@ -26,6 +26,51 @@ def test_contiguous_run_advances_high_water() -> None:
     assert tracker.cumulative_ack() == 2
 
 
+def test_contiguous_stream_prunes_settled_seqs_from_seen() -> None:
+    """A long IN-ORDER stream ``0..N`` settles every seq, so the seen-set is pruned to
+    EMPTY — it does not grow one entry per seq forever on an always-up gateway.
+
+    The OOO adversary is bounded by ``_MAX_OOO_GAP``, but the in-order common case
+    must be bounded too: every seq ``<= _contiguous_high`` is SETTLED (the tracker
+    needs only the high-water + the holes above it), so it is discarded. A
+    keep-everything impl would leave ``len(_seen) == N`` here and fail.
+    """
+    tracker = BoundedSeqAckTracker()
+
+    n = 5000
+    for seq in range(n):
+        tracker.observe(seq)
+
+    assert tracker.cumulative_ack() == n - 1
+    # All settled (<= high-water) -> pruned. Bounded (and in fact empty here), NOT n.
+    assert len(tracker._seen) == 0
+
+
+def test_above_high_water_holes_are_retained_under_the_gap_cap() -> None:
+    """Pruning drops only SETTLED seqs — holes ABOVE the high-water are retained (so a
+    later gap-fill still advances), capped at ``_MAX_OOO_GAP`` by the window guard.
+    """
+    tracker = BoundedSeqAckTracker()
+
+    # A run 0..9, then a hole at 10 with several seqs stacked above it (all within the
+    # OOO cap). The high-water settles at 9; the above-high-water seqs are retained.
+    for seq in range(10):
+        tracker.observe(seq)
+    above = {12, 14, 16, 18}
+    for seq in above:
+        tracker.observe(seq)
+
+    assert tracker.cumulative_ack() == 9
+    # Settled 0..9 pruned; the above-high-water holes are exactly what remains.
+    assert tracker._seen == above
+    # Filling the hole at 10 then 11 advances the high-water through the retained 12.
+    tracker.observe(10)
+    tracker.observe(11)
+    assert tracker.cumulative_ack() == 12
+    # 12 is now settled -> pruned; only the still-above-high-water holes remain.
+    assert tracker._seen == {14, 16, 18}
+
+
 def test_empty_tracker_acks_negative_one() -> None:
     assert BoundedSeqAckTracker().cumulative_ack() == -1
 

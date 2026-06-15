@@ -75,6 +75,7 @@ class _GatewayHarness:
     client_listener: GatewayClientListener
     client: CommsSocketTransport
     core_host: CommsSocketTransport
+    core_listener: CommsSocketListener
 
 
 async def _accept_core_host(listener: CommsSocketListener, *, epoch: str) -> CommsSocketTransport:
@@ -159,6 +160,7 @@ async def _build_harness(
         client_listener=client_listener,
         client=client,
         core_host=core_host,
+        core_listener=core_listener,
     )
     return harness, core_listener
 
@@ -244,9 +246,11 @@ async def test_wire_contract_control_frame_sequence_on_client_leg(harness: _Gate
     # Stand up a fresh core HOST for the gateway's reconnect (a NEW epoch -> restored).
     epoch2 = uuid4().hex
     core_listener2 = CommsSocketListener(adapter_id=_CORE_ADAPTER_ID)
-    # The gateway will re-dial the SAME path; close the first core listener so the
-    # reconnect lands on the fresh one bound at the same adapter id.
+    # The gateway will re-dial the SAME path; close BOTH the first core HOST transport
+    # AND its listener (mirroring a real reconnect, which frees the socket inode first)
+    # so the fresh listener binds the same adapter id without a socket-path collision.
     await harness.core_host.close()
+    await harness.core_listener.aclose()
 
     # Read the client control channel: the gateway pushes id-less link.* frames over the
     # SAME client connection (interleaved with payloads), so read frames and pick out the
@@ -290,22 +294,34 @@ async def test_reseq_client_leg_seq_differs_from_core_leg_seq(runtime_dir: Path)
     harness, core_listener = await _build_harness(client_seq_enabled=True)
     try:
         # core -> client: the HOST sends a few throwaway units to advance its core-leg
-        # send seq, then the payload-under-test — so the core-leg seq the payload carries
-        # is non-zero, while the gateway re-mints the client-leg seq from its OWN counter.
+        # send seq, then a CONSUMED ``ready`` (correct epoch -> idempotent UP, NOT
+        # relayed to the client) so the core-leg send counter advances WITHOUT advancing
+        # the gateway's client-leg send counter. This FORCES the two counters to diverge,
+        # so the payload-under-test provably arrives on the client leg under a DIFFERENT
+        # seq than it left the core leg with — a real reframe, not a pass-through.
         for i in range(3):
             await harness.core_host.send_payload_unit(f'{{"id":{i}}}'.encode(), ack=0)
             drained = await asyncio.wait_for(harness.client.read_payload_unit(), timeout=2.0)
             assert drained is not None
+        # A consumed ``ready`` advances the core-leg send seq but is not relayed down.
+        ready = json.dumps(
+            {"method": DAEMON_LIFECYCLE_READY, "params": {"epoch": harness.core_link._core_epoch}}
+        ).encode()
+        await harness.core_host.send_payload_unit(ready, ack=0)
+        # The payload-under-test: capture the EXACT core-leg seq it is sent with (the
+        # HOST's next send seq) so we can compare it to the client-leg seq it arrives on.
+        core_sent_seq = harness.core_host._send_seq
         down_body = b'{"jsonrpc":"2.0","id":1,"method":"inbound.message","params":{}}'
         await harness.core_host.send_payload_unit(down_body, ack=0)
         down_frame = await asyncio.wait_for(harness.client.read_payload_unit(), timeout=2.0)
         assert down_frame is not None
         assert down_frame.payload == down_body
-        # The client-leg seq the gateway minted is its OWN monotonic client-leg send
-        # counter — the 4th client-leg send is seq 3, NOT the core-leg seq the payload
-        # arrived with. (The two counters happen to coincide here only because both legs
-        # sent 4 units; the client->core leg below makes the independence unambiguous.)
+        # The reframe proof: the client-leg seq the gateway MINTED for this payload
+        # DIFFERS from the core-leg seq the payload arrived with (the consumed ``ready``
+        # advanced the core-leg counter past the client-leg counter). A broken
+        # pass-through that forwarded the core header verbatim would make these EQUAL.
         assert down_frame.seq is not None
+        assert down_frame.seq != core_sent_seq
 
         # client -> core: send TWO client-leg units so the client-leg send counter is
         # ahead of the core-leg receive; the gateway re-mints the core-leg seq from its
@@ -352,7 +368,10 @@ async def test_reseq_client_leg_seq_monotonic_across_core_reconnect(runtime_dir:
             {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": LIFECYCLE_REASON_SHUTDOWN}}
         ).encode()
         await harness.core_host.send_payload_unit(going_down, ack=0)
+        # Free the original socket inode (HOST transport + listener) before the fresh
+        # listener rebinds the same adapter id — no socket-path collision/leak.
         await harness.core_host.close()
+        await harness.core_listener.aclose()
         # reconnecting control frame on the (seq-enabled) client leg.
         reconnecting = await asyncio.wait_for(harness.client.read_frame(), timeout=2.0)
         assert reconnecting is not None

@@ -224,6 +224,47 @@ async def test_peer_handshake_rejects_eof_before_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_peer_handshake_resets_core_tracker_per_fresh_connect() -> None:
+    """THE RESUME-CORRECTNESS RESET: each fresh core handshake is a NEW seq space.
+
+    ``_core_tracker`` is the core->gateway RECEIVE tracker the gateway acks the core
+    from. It is process-lifetime, but every fresh core transport is a NEW boot starting
+    its seq run at 0 (a new epoch). After a reconnect the OLD boot's high-water (say
+    1000) would make the new boot's low seqs (0,1,2) look already-settled, so
+    ``cumulative_ack()`` would stay stuck at the stale high-water and the gateway would
+    ack the new boot for frames it never sent (the corruption G4 builds on).
+
+    ``_peer_handshake`` must RESET ``_core_tracker`` on EVERY (re)connect. Drive an
+    initial handshake + a contiguous run so the tracker's high-water advances, then a
+    SECOND handshake (the reconnect) → the tracker is fresh (``cumulative_ack() == -1``)
+    and the new boot's ``seq 0`` advances it to 0 (NOT stuck at the stale high-water).
+    Deleting the reset MUST make this FAIL (the stale high-water survives the reconnect).
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+
+    # Initial handshake, then a contiguous core-leg receive run 0..999 (high-water 999).
+    await link._peer_handshake(
+        _FakeCoreTransport([_start_frame(epoch=epoch1, seq_ack={"version": SEQ_VERSION})])
+    )
+    for seq in range(1000):
+        link._core_tracker.observe(seq)
+    assert link._core_tracker.cumulative_ack() == 999
+
+    # A reconnect: a fresh handshake (new boot, new epoch) must reset the tracker.
+    await link._peer_handshake(
+        _FakeCoreTransport([_start_frame(epoch=epoch2, seq_ack={"version": SEQ_VERSION})])
+    )
+
+    # Fresh tracker: nothing acked yet, NOT the stale 999.
+    assert link._core_tracker.cumulative_ack() == -1
+    # The new boot's seq 0 advances the fresh high-water to 0 — not "already settled".
+    link._core_tracker.observe(0)
+    assert link._core_tracker.cumulative_ack() == 0
+
+
+@pytest.mark.asyncio
 async def test_peer_handshake_warns_and_drops_pre_handshake_frame() -> None:
     epoch = uuid4().hex
     pre = {"jsonrpc": "2.0", "method": "inbound.message", "params": {}}
@@ -1472,6 +1513,62 @@ async def test_relay_to_core_drops_loud_on_none_transport() -> None:
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
     assert dropped[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_closing_clears_current_transport_before_close() -> None:
+    """``_reconnect_closing`` drops ``_current_core_transport`` to ``None`` BEFORE closing
+    the gapped leg (architect M3), so a concurrent ``relay_to_core`` racing the gap snapshots
+    ``None`` (the clean None-drop) instead of the closing transport.
+
+    The stale transport's ``close()`` BLOCKS on an event the test controls; while it is
+    blocked we assert ``_current_core_transport`` is already ``None`` and a ``relay_to_core``
+    issued in that window loud-drops via the None path (``reason="no_core_transport"``),
+    NOT via a write into the half-closed leg. Moving the clear to AFTER ``stale.close()``
+    would let the snapshot see the closing transport and this assertion would FAIL.
+    """
+    close_entered = asyncio.Event()
+    close_release = asyncio.Event()
+
+    class _SlowCloseTransport(_FakeCoreTransport):
+        async def close(self) -> None:
+            close_entered.set()
+            await close_release.wait()
+            await super().close()
+
+    epoch = uuid4().hex
+    stale = _SlowCloseTransport([])
+    fresh = _ready_transport(epoch)
+
+    async def _instant_sleep(_delay: float) -> None:
+        return None
+
+    link = GatewayCoreLink(
+        client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
+        machine=_gapped_machine(),
+        dial=_DialRecorder([lambda: fresh]),  # type: ignore[arg-type]
+        sleep=_instant_sleep,
+        jitter=lambda hi: hi,
+    )
+    link._current_core_transport = stale
+
+    reconnect_task = asyncio.ensure_future(link._reconnect_closing(stale))
+    await asyncio.wait_for(close_entered.wait(), timeout=1.0)
+
+    # The clear already happened (before the blocking close): a racing relay snapshots None.
+    assert link._current_core_transport is None
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"payload")  # races the in-flight close
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("reason") == "no_core_transport"
+    # The racing send never reached the stale transport's send path.
+    assert stale.sent_units == []
+
+    close_release.set()
+    result = await asyncio.wait_for(reconnect_task, timeout=1.0)
+    assert result is fresh
+    assert stale.closed is True
 
 
 @pytest.mark.asyncio

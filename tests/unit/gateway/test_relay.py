@@ -103,6 +103,10 @@ class _FakeTransport:
         if isinstance(entry, asyncio.Event):
             await entry.wait()
             return None
+        if isinstance(entry, BaseException):
+            # A scripted READ FAULT: a torn/malformed client frame the pump must isolate
+            # (the FIX-D client-leg fault-isolation tests).
+            raise entry
         assert isinstance(entry, SeqFrame)
         return entry
 
@@ -317,6 +321,66 @@ async def test_client_eof_ends_client_pump_then_shutdown_ends_relay() -> None:
     assert not task.done()  # core pump still running
     shutdown.set()
     await asyncio.wait_for(task, timeout=1.0)
+    assert core.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        CommsProtocolError("malformed client frame"),
+        BrokenPipeError(),
+        ConnectionResetError(),
+        asyncio.IncompleteReadError(b"", 1),
+        EOFError(),
+        ValueError("seq must be non-negative: -1"),
+    ],
+    ids=["protocol_error", "broken_pipe", "conn_reset", "incomplete_read", "eof", "value_error"],
+)
+async def test_client_read_fault_isolated_from_core_pump(error: BaseException) -> None:
+    """A malformed/torn client frame (``CommsProtocolError`` / a transport tear) or a
+    negative client seq (``ValueError`` from ``observe``) is ISOLATED to the client leg:
+    the client pump loud-logs ``gateway.relay.client_read_failed`` and RETURNS, the relay
+    then rides the core pump to a clean shutdown — NO unhandled ``ExceptionGroup`` crash.
+
+    Without the ``try/except`` in ``_client_to_core_pump`` the raise would abort the whole
+    ``asyncio.TaskGroup`` (tearing down the core pump too) as an un-triaged crash, and
+    ``relay.run()`` would raise an ``ExceptionGroup`` — this test would FAIL.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    blocked_core = asyncio.Event()
+    core = _FakeTransport(frames=[_start_frame(epoch, seq_ack=True)], units=[blocked_core])
+    # The client read raises the fault on its FIRST read. A negative-seq ValueError needs a
+    # seq-enabled client (so ``observe`` runs); the others fire from ``read_payload_unit``.
+    client_seq_enabled = isinstance(error, ValueError)
+    if client_seq_enabled:
+        # A unit carrying a negative seq -> ``observe`` raises ValueError inside the pump.
+        client = _FakeTransport(
+            units=[SeqFrame(seq=-1, ack=0, payload=b"{}")], seq_ack_enabled=True
+        )
+    else:
+        client = _FakeTransport(units=[error])
+    relay, _core_link, _recorder = _build_relay(
+        core=core, client=client, client_seq_enabled=client_seq_enabled, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    with structlog.testing.capture_logs() as captured:
+        await _drive_until(
+            lambda: any(c.get("event") == "gateway.relay.client_read_failed" for c in captured),
+            task=task,
+        )
+        shutdown.set()
+        # No ExceptionGroup: ``run()`` returns cleanly despite the client-leg fault.
+        await asyncio.wait_for(task, timeout=1.0)
+
+    failed = [c for c in captured if c.get("event") == "gateway.relay.client_read_failed"]
+    assert len(failed) == 1
+    assert failed[0].get("log_level") == "warning"
+    # The client fault never reached the core (nothing forwarded) and the core pump shut
+    # down cleanly — the fault was isolated, not propagated.
+    assert core.sent_units == []
     assert core.closed is True
 
 
