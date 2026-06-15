@@ -28,6 +28,7 @@ the host runner's behaviour for a peer that front-runs the handshake.
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -45,6 +46,7 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.errors import AlfredError
 from alfred.gateway._control_frames import control_notification
+from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
@@ -56,7 +58,7 @@ from alfred.gateway.metrics import (
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
-from alfred.plugins.comms_seq_codec import SEQ_VERSION
+from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsProtocolError
 
 log = structlog.get_logger(__name__)
@@ -162,6 +164,10 @@ class _CommsTransportLike(Protocol):
 
     async def read_frame(self) -> Mapping[str, object] | None: ...
 
+    async def read_payload_unit(self) -> SeqFrame | None: ...
+
+    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None: ...
+
     async def close(self) -> None: ...
 
     def enable_seq_ack(self) -> None: ...
@@ -187,6 +193,7 @@ class GatewayCoreLink:
         jitter: Callable[[float], float] | None = None,
         shutdown_event: asyncio.Event | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        payload_relay: Callable[[bytes], Awaitable[None]] | None = None,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
         self._client_listener = client_listener
@@ -234,6 +241,21 @@ class GatewayCoreLink:
         # while UP — set on an UP->not-UP edge, read + cleared on the not-UP->UP edge
         # to accrue the elapsed not-UP seconds onto ``CORE_UNAVAILABLE_SECONDS``.
         self._gap_started_at: float | None = None
+        # The opaque client<->core payload relay sink (Spec A G3-3b-2 / ADR-0032). When
+        # ``None`` the pump reads PARSED frames and drops payloads (the merged 3b-1
+        # behaviour). When SET the pump reads RAW units and ROUTES them: a lifecycle
+        # frame is CONSUMED, everything else is forwarded byte-for-byte to this sink (T1
+        # carrier — the body is NEVER ``json.loads``'d beyond a method-peek).
+        self._payload_relay = payload_relay
+        # The core-leg RECEIVE tracker: the relay reads ``cumulative_ack()`` from it to
+        # send the core its real contiguous ack. Bounded (unlike the merged G2 window)
+        # so an always-up gateway cannot be memory-DoS'd by an every-other-seq stream.
+        self._core_tracker = BoundedSeqAckTracker()
+        # The CURRENT live core transport, bound at the SAME points ``run`` binds its
+        # local ``transport`` (only AFTER a successful handshake). ``relay_to_core``
+        # snapshots this into a local so a reconnect swap is atomic w.r.t. the send;
+        # ``None`` outside an UP leg (the reconnect-race write window — architect M3).
+        self._current_core_transport: _CommsTransportLike | None = None
 
     async def _default_dial(self) -> _CommsTransportLike:
         """Production dial: connect the core's comms socket on the keyed adapter id.
@@ -270,33 +292,73 @@ class GatewayCoreLink:
         transport: _CommsTransportLike | None = None
         try:
             transport = await self._initial_connect()
+            self._current_core_transport = transport
             while True:
                 if self._shutdown_event is not None and self._shutdown_event.is_set():
                     return
                 try:
-                    frame = await self._read_frame_or_shutdown(transport)
+                    handled = await self._pump_once(transport)
                 except _TRANSPORT_CRASH_EXCEPTIONS as exc:
                     # A torn wire / dropped peer / wire violation: a GAP, not fatal.
                     # Loud (CLAUDE.md hard rule #7), open/keep the gap, then reconnect.
                     log.warning("gateway.core_link.pump_crash", error=repr(exc))
                     await self._feed(GatewayLinkEvent.CORE_CRASH_EOF)
                     transport = await self._reconnect_closing(transport)
+                    self._current_core_transport = transport
                     continue
-                if frame is None:
+                if not handled:
                     # A clean EOF: the gap is already announced if a ``going_down``
                     # preceded it (idempotent CRASH_EOF), else this opens it.
                     await self._feed(GatewayLinkEvent.CORE_CRASH_EOF)
                     transport = await self._reconnect_closing(transport)
+                    self._current_core_transport = transport
                     continue
-                await self._consume_frame(frame)
         except _Shutdown:
             # A shutdown signalled during a pump read OR while (re)connecting — a CLEAN
             # stop, never a gap: return without a spurious banner. The ``finally`` closes
             # the live transport (``None`` if the initial connect never completed).
             return
         finally:
+            # Drop the relay's transport reference BEFORE closing so a concurrent
+            # ``relay_to_core`` snapshots ``None`` (a loud drop) rather than a
+            # mid-close transport (CLAUDE.md hard rule #7 — no silent send-into-a-corpse).
+            self._current_core_transport = None
             if transport is not None:
                 await transport.close()
+
+    async def _pump_once(self, transport: _CommsTransportLike) -> bool:
+        """Read + process ONE core-leg event; ``False`` on a clean EOF (the gap arm).
+
+        Dispatches on the relay wiring (the ONLY divergence — the crash / gap /
+        reconnect arms in :meth:`run` are shared):
+
+        * **No relay (``_payload_relay is None``)** — the merged 3b-1 behaviour: read a
+          PARSED frame via :meth:`_read_frame_or_shutdown` and route it through
+          :meth:`_consume_frame` (consume lifecycle, drop payload). A torn read raises a
+          crash exception (handled by ``run``); a clean EOF returns ``False``.
+        * **Relay set** — read a RAW :class:`SeqFrame` via
+          :meth:`_read_payload_unit_or_shutdown`, feed its ``seq`` (if any) to the
+          receive tracker, then route it via :meth:`_route_unit` (consume lifecycle,
+          relay everything else byte-for-byte). The shutdown / crash / EOF arms are
+          identical to the parsed path.
+
+        Returns ``True`` when an event was processed (continue pumping), ``False`` on a
+        clean EOF (``run`` opens the gap + reconnects). A :class:`_Shutdown` from either
+        read-race propagates to ``run``'s clean return.
+        """
+        if self._payload_relay is None:
+            frame = await self._read_frame_or_shutdown(transport)
+            if frame is None:
+                return False
+            await self._consume_frame(frame)
+            return True
+        unit = await self._read_payload_unit_or_shutdown(transport)
+        if unit is None:
+            return False
+        if unit.seq is not None:
+            self._core_tracker.observe(unit.seq)
+        await self._route_unit(unit)
+        return True
 
     async def _initial_connect(self) -> _CommsTransportLike:
         """Dial + handshake the core leg ONCE; on failure open the gap + reconnect.
@@ -335,21 +397,40 @@ class GatewayCoreLink:
     async def _read_frame_or_shutdown(
         self, transport: _CommsTransportLike
     ) -> Mapping[str, object] | None:
-        """Read the next core frame, aborting the read if shutdown is signalled.
+        """Read the next PARSED core frame, aborting the read if shutdown is signalled.
 
-        With no shutdown event wired this is a bare ``read_frame`` await. With one
-        wired, the read races ``shutdown_event.wait()`` (FIRST_COMPLETED): a read win
-        flows its frame / EOF / raise on exactly as a bare await would; a shutdown win
-        CANCELS the in-flight read (so a blocking ``read_frame`` does not leak), awaits
-        its cancellation, and raises :class:`_Shutdown` so the pump returns WITHOUT
-        feeding a gap. Mirrors :meth:`CommsPluginRunner._read_frame_or_shutdown`.
+        The merged 3b-1 (relay-OFF) pump read. A thin wrapper over the shared
+        :meth:`_read_or_shutdown` race template (only the read coroutine differs from
+        the raw-unit variant). Mirrors :meth:`CommsPluginRunner._read_frame_or_shutdown`.
+        """
+        return await self._read_or_shutdown(transport.read_frame())
+
+    async def _read_payload_unit_or_shutdown(
+        self, transport: _CommsTransportLike
+    ) -> SeqFrame | None:
+        """Read the next RAW :class:`SeqFrame` unit, aborting on shutdown.
+
+        The relay-ON pump read: same shutdown-race / crash / EOF discipline as
+        :meth:`_read_frame_or_shutdown`, only the inner read is ``read_payload_unit``
+        (the opaque-unit seam) so the body is forwarded byte-for-byte.
+        """
+        return await self._read_or_shutdown(transport.read_payload_unit())
+
+    async def _read_or_shutdown[R](self, read: Awaitable[R]) -> R:
+        """Await ``read``, aborting it (via :class:`_Shutdown`) if shutdown is signalled.
+
+        The shared race template for both pump reads (the parsed-frame read and the
+        raw-unit read). With no shutdown event wired this is a bare ``await read``. With
+        one wired, the read races ``shutdown_event.wait()`` (FIRST_COMPLETED): a read win
+        flows its result / EOF / raise on exactly as a bare await would; a shutdown win
+        CANCELS the in-flight read (so a blocking read does not leak), awaits its
+        cancellation, and raises :class:`_Shutdown` so the pump returns WITHOUT feeding a
+        gap. The ``read`` MUST be a fresh coroutine each call (it is wrapped in a task).
         """
         if self._shutdown_event is None:
-            return await transport.read_frame()
+            return await read
 
-        read_task: asyncio.Task[Mapping[str, object] | None] = asyncio.ensure_future(
-            transport.read_frame()
-        )
+        read_task: asyncio.Task[R] = asyncio.ensure_future(read)
         shutdown_task: asyncio.Task[bool] = asyncio.ensure_future(self._shutdown_event.wait())
         try:
             done, _pending = await asyncio.wait(
@@ -555,6 +636,69 @@ class GatewayCoreLink:
         """True iff the core advertised the matching out-of-band seq/ack version."""
         seq_ack = params.get("seq_ack") if isinstance(params, Mapping) else None
         return isinstance(seq_ack, Mapping) and seq_ack.get("version") == SEQ_VERSION
+
+    async def _route_unit(self, frame: SeqFrame) -> None:
+        """Route ONE raw relay unit: CONSUME lifecycle, FORWARD everything else verbatim.
+
+        The relay-ON router (Spec A G3-3b-2 / ADR-0032). The gateway is a T1 carrier:
+        it peeks ONLY the ``method`` of the opaque payload (a single ``json.loads`` to
+        read the routing key — never to act on the body) to decide whether the unit is
+        one of the two ``daemon.lifecycle.*`` control frames it CONSUMES (through the
+        merged forgery-defended :meth:`_consume_frame` — a forged ``ready`` is STILL
+        epoch-rejected before any feed) or an opaque payload it FORWARDS byte-for-byte
+        to :attr:`_payload_relay`.
+
+        **Fail-toward-relay (security SEC-3 / CLAUDE.md hard rule #7).** A payload whose
+        method-peek FAILS — non-JSON bytes, a non-object top-level value, a too-deep
+        nesting — is NEVER dropped and NEVER consumed-as-lifecycle: it is forwarded to
+        the relay sink verbatim. The carrier does not get to silently swallow a body it
+        could not classify; the core (the real trust boundary) re-parses it.
+        """
+        assert self._payload_relay is not None  # routed only on the relay-ON path
+        try:
+            parsed = json.loads(frame.payload)
+            method = parsed.get("method") if isinstance(parsed, Mapping) else None
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            # Un-parseable / non-object / pathological body: forward it untouched.
+            # T1 carrier never drops or interprets — the core re-parses (hard rule #7).
+            await self._payload_relay(frame.payload)
+            return
+        if method in (DAEMON_LIFECYCLE_READY, DAEMON_LIFECYCLE_GOING_DOWN):
+            # A lifecycle control frame: CONSUME it (the forgery-defended path). The
+            # parsed dict is fed to ``_consume_frame``, which Pydantic-validates +
+            # epoch-reconciles BEFORE any machine feed — so a forged ``ready`` on the
+            # raw path is rejected exactly as on the parsed pump.
+            await self._consume_frame(parsed)
+            return
+        # An opaque payload (incl. a no-``method`` response): forward the ORIGINAL bytes.
+        await self._payload_relay(frame.payload)
+
+    async def relay_to_core(self, payload: bytes) -> None:
+        """Forward an opaque client payload to the core leg, carrying the real ack.
+
+        The send-half of the relay (Spec A G3-3b-2 / ADR-0032). Snapshots the CURRENT
+        core transport into a local FIRST (so a concurrent reconnect swap is atomic
+        w.r.t. this send — architect M3), then writes the opaque ``payload`` with the
+        receive tracker's :meth:`BoundedSeqAckTracker.cumulative_ack` as the ``ack``.
+
+        **Loud drop, NO buffering (CLAUDE.md hard rule #7; G4 owns buffering).** A
+        ``None``/closed current transport (the reconnect-race write window) or a
+        :class:`BrokenPipeError` / :class:`ConnectionResetError` mid-write is a LOUD
+        drop — never raised, never buffered. The client side keeps running; the dropped
+        unit is the core's to re-request once the leg is back (a G4 ReplayBuffer
+        concern), not this carrier's to hold.
+        """
+        local = self._current_core_transport
+        if local is None:
+            log.warning(
+                "gateway.relay.core_send_dropped",
+                reason="no_core_transport",
+            )
+            return
+        try:
+            await local.send_payload_unit(payload, ack=self._core_tracker.cumulative_ack())
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            log.warning("gateway.relay.core_send_dropped", error=repr(exc))
 
     async def _consume_frame(self, frame: Mapping[str, object]) -> None:
         """Route ONE post-handshake core-leg frame: consume lifecycle, drop payload.
