@@ -37,6 +37,13 @@ The forbidden-prefix list is intentionally conservative:
   ``alfred.comms``. Kept here as a PERMANENT FLOOR — a regression that
   resurrects the in-process adapter on the ``--help`` path fails loudly
   rather than silently re-adding the import cost.
+* ``alfred.gateway.process`` / ``alfred.gateway.relay`` — the
+  ``alfred gateway start`` relay graph (client listener + core link +
+  the two-direction pump). PR-S4-G3-3b-2b (#237) registers the
+  ``gateway`` Typer group at module-top but imports the process /
+  relay chain LAZILY inside the ``start`` command body, so
+  ``alfred --help`` never pays the relay import cost. Pinned here so a
+  refactor that hoists the relay import back to module-top fails loudly.
 
 ``alfred.memory.models`` is **deliberately not in the list** because
 :class:`alfred.identity.models` (which the ``alfred user`` Typer surface
@@ -73,6 +80,8 @@ _FORBIDDEN_PREFIXES: Final[tuple[str, ...]] = (
     "alfred.orchestrator",
     "alfred.budget",
     "alfred.comms.adapter",
+    "alfred.gateway.process",
+    "alfred.gateway.relay",
 )
 
 
@@ -215,6 +224,7 @@ def test_alfred_cli_main_lazy_load_keeps_help_surface_intact() -> None:
         "config",
         "supervisor",
         "audit",
+        "gateway",
     )
     for subcommand in expected_subcommands:
         assert subcommand in child.stdout, (
