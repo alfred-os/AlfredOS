@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError, ReplayFrame
 
@@ -290,3 +292,57 @@ def test_discard_does_not_reset_now_floor() -> None:
     buf.discard()
     with pytest.raises(ReplayBufferError):
         buf.append(1, b"y", now=9.0)  # clock can't go backwards across a discard either
+
+
+# (payload, monotonic dt) appends with strictly-increasing seq 0..n-1 and non-decreasing now.
+_payloads = st.lists(
+    st.tuples(st.binary(min_size=0, max_size=16), st.floats(min_value=0.0, max_value=5.0)),
+    min_size=0,
+    max_size=40,
+)
+
+
+def _fill(payloads: list[tuple[bytes, float]]) -> tuple[ReplayBuffer, list[bytes]]:
+    # Generous caps so the hard ceiling never fires in these structural properties.
+    buf = ReplayBuffer(max_frames=10_000, max_bytes=10_000_000, ttl_seconds=10_000.0)
+    bodies: list[bytes] = []
+    clock = 0.0
+    for seq, (payload, dt) in enumerate(payloads):
+        clock += dt  # dt >= 0 -> now is non-decreasing
+        buf.append(seq, payload, now=clock)
+        bodies.append(payload)
+    return buf, bodies
+
+
+@given(_payloads)
+def test_depth_bytes_equals_sum_of_retained_lengths(payloads: list[tuple[bytes, float]]) -> None:
+    buf, bodies = _fill(payloads)
+    assert buf.depth_bytes == sum(len(b) for b in bodies)
+    assert buf.depth_frames == len(bodies)
+
+
+@given(_payloads, st.integers(min_value=-1, max_value=60))
+def test_trim_is_a_fifo_prefix_and_never_grows_depth(
+    payloads: list[tuple[bytes, float]], ack: int
+) -> None:
+    buf, bodies = _fill(payloads)
+    before = buf.depth_frames
+    buf.trim_to_ack(ack)
+    assert buf.depth_frames <= before
+    expected = [(seq, b) for seq, b in enumerate(bodies) if seq > ack]
+    assert [(f.seq, f.payload) for f in buf.unacked_frames()] == expected
+
+
+@given(_payloads)
+def test_replay_order_and_seqs_match_append(payloads: list[tuple[bytes, float]]) -> None:
+    buf, bodies = _fill(payloads)
+    assert [(f.seq, f.payload) for f in buf.unacked_frames()] == list(enumerate(bodies))
+
+
+@given(_payloads, st.floats(min_value=0.0, max_value=10_000.0))
+def test_evict_is_a_fifo_prefix(payloads: list[tuple[bytes, float]], horizon: float) -> None:
+    buf, _ = _fill(payloads)
+    depth_before = buf.depth_frames
+    evicted = buf.evict_expired(now=horizon)
+    assert len(evicted) + buf.depth_frames == depth_before
+    assert list(evicted) == sorted(evicted)  # leading ascending run
