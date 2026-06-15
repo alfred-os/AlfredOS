@@ -71,3 +71,37 @@ def test_append_stores_independent_mutable_copy() -> None:
     buf.append(0, bytes(source), now=1.0)
     source[:] = b"XXXXXXX"  # mutating the source must not change what we retained
     assert buf.unacked_frames() == (ReplayFrame(seq=0, payload=b"mutable"),)
+
+
+def test_trim_removes_acked_prefix() -> None:
+    buf = _buffer()
+    for seq in range(5):
+        buf.append(seq, bytes([seq]) * 4, now=float(seq))
+    buf.trim_to_ack(2)  # acks seqs 0,1,2
+    assert buf.depth_frames == 2  # 3,4 remain
+    assert buf.depth_bytes == 4 + 4
+
+
+def test_trim_zeroes_removed_bodies() -> None:
+    buf = _buffer()
+    buf.append(0, b"secret", now=1.0)
+    body = buf._retained[0].body  # noqa: SLF001 - white-box assertion of zeroing
+    buf.trim_to_ack(0)
+    assert bytes(body) == b"\x00" * len(b"secret")
+
+
+def test_trim_below_first_seq_is_noop() -> None:
+    buf = _buffer()
+    buf.append(3, b"x", now=1.0)
+    buf.trim_to_ack(-1)
+    buf.trim_to_ack(2)
+    assert buf.depth_frames == 1
+
+
+def test_trim_at_or_past_last_seq_empties() -> None:
+    buf = _buffer()
+    buf.append(0, b"a", now=1.0)
+    buf.append(1, b"bb", now=2.0)
+    buf.trim_to_ack(9)
+    assert buf.depth_frames == 0
+    assert buf.depth_bytes == 0
