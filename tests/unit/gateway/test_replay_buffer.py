@@ -246,3 +246,47 @@ def test_normal_restart_replay_then_continue_never_trips_monotonic_guard() -> No
     # operator types again; gateway mints the next seq -> accepted, no reset needed.
     buf.append(6, b"z", now=6.0)
     assert [f.seq for f in buf.unacked_frames()] == [2, 3, 4, 5, 6]
+
+
+def test_discard_empties_and_clears_breaker() -> None:
+    buf = _buffer(max_frames=1, max_bytes=10_000)
+    buf.append(0, b"a", now=1.0)
+    buf.append(1, b"b", now=2.0)  # trips breaker
+    assert buf.breaker_tripped is True
+    buf.discard()
+    assert buf.depth_frames == 0
+    assert buf.depth_bytes == 0
+    assert buf.breaker_tripped is False
+
+
+def test_discard_zeroes_all_bodies() -> None:
+    buf = _buffer()
+    buf.append(0, b"alpha", now=1.0)
+    buf.append(1, b"bravo", now=2.0)
+    bodies = [entry.body for entry in buf._retained]  # noqa: SLF001 - white-box zeroing assertion
+    buf.discard()
+    assert all(bytes(b) == b"\x00" * len(b) for b in bodies)
+
+
+def test_discard_does_not_reset_seq_floor() -> None:
+    """Security F1 / Architect CRITICAL: the gateway-owned seq stays monotonic.
+
+    discard is the give-up/shutdown path; it must NOT re-admit a lower seq, so a
+    late stale-stream frame after discard cannot be silently accepted. A genuine
+    seq-space restart is G4b's epoch-handshake concern, not a discard side-effect.
+    """
+    buf = _buffer()
+    buf.append(7, b"x", now=1.0)
+    buf.discard()
+    with pytest.raises(ReplayBufferError):
+        buf.append(5, b"stale", now=2.0)  # below the retained floor -> loud reject
+    buf.append(8, b"ok", now=3.0)  # still-monotonic continuation is accepted
+    assert buf.unacked_frames() == (ReplayFrame(seq=8, payload=b"ok"),)
+
+
+def test_discard_does_not_reset_now_floor() -> None:
+    buf = _buffer()
+    buf.append(0, b"x", now=10.0)
+    buf.discard()
+    with pytest.raises(ReplayBufferError):
+        buf.append(1, b"y", now=9.0)  # clock can't go backwards across a discard either
