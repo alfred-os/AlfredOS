@@ -72,3 +72,25 @@ The dial side now authenticates the peer in **both directions** (the accept side
 - **Pre-dial `lstat` owner backstop (degrade-open hosts).** On a host without `SO_PEERCRED` (e.g. a macOS dev box) the post-connect check returns `None` → authorized. The dialer does NOT own the dialed inode (the daemon binds it), so a pre-dial `lstat` is the only owner enforcement there: the resolved path must be an `S_ISSOCK` inode owned by `os.getuid()`, or the dial is refused. It uses `lstat` (never `stat`) so a planted symlink target is never followed — reusing `CommsSocketListener._unlink_stale`'s discipline.
 
 A daemon-absent / socket-missing dial still surfaces LOUD as the existing `FileNotFoundError` / `ConnectionRefusedError` daemon-required contract (CLAUDE.md hard rule #7); only an uid-mismatch / non-owned-inode refusal raises `CommsPeerAuthError`. The gateway reconnect loop treats a dial peer-auth reject as a transient and retries; the foreground TUI cohost (`alfred chat`) maps it — like the daemon-absent `OSError` — to the daemon-required operator message + exit 3, so a planted-inode / uid-squat / wider-perm misconfig is one clean operator line, never a traceback.
+
+## Amendment — the `alfred gateway` process (Spec A G3-3b-2b)
+
+G3-3b-2b ships the runnable `alfred gateway` PROCESS (`src/alfred/gateway/process.py` + `alfred gateway start|status`) wrapping the merged relay engine. It mirrors the daemon socket-carrier (`_listen_socket_comms_adapter`): bind the `GatewayClientListener` inline (fail-closed on `OSError`), accept ONE client racing the shutdown event, run the client-leg HOST handshake, build `GatewayCoreLink` + `GatewayRelay`, supervise `relay.run()`, and reap the listener (the accepted transport + the socket file) on EVERY exit path — including a cancel / `KeyboardInterrupt` unwind, via `run()`'s `finally`.
+
+### Client-leg HOST handshake
+
+The gateway is HOST on the client leg: it sends `lifecycle.start` with `{adapter_id: "tui", seq_ack: {version}}` (the same minimal shape the merged runner sends — see ADR-0035, which relaxed `LifecycleStartRequest.credentials_ref`/`policies_snapshot_hash` to optional because no producer ever sent them and the sole strict consumer, the TUI, discards them). It enables client-leg seq/ack IFF the client echoes `seq_ack` — the real TUI returns `seq_ack=None`, so the production client leg is PLAIN. A bounded pre-ack frame cap (`_MAX_PRE_ACK_FRAMES`) keeps a torn/hostile peer from hanging the handshake; a not-ok / EOF / over-cap / malformed result is a fail-closed `GatewayHandshakeError`.
+
+### Dual-identity invariant (do NOT align them)
+
+The gateway BINDS its client socket on adapter-id `"gateway"` (`comms-gateway.sock` — path ownership) but HANDSHAKES toward the TUI with wire `adapter_id="tui"` (wire compat — the TUI's `AdapterId` validator only knows `{"alfred_comms_test","discord","tui"}`). These are deliberately different axes; a future contributor must not "fix" the apparent inconsistency.
+
+### Security sign-offs (recorded deliberately)
+
+- **Peer-auth reject is metric + structlog ONLY in the G3→G4 window.** A wrong-uid client at the gateway's client socket increments `gateway_peer_auth_rejected_total` + emits a loud `gateway.process.peer_uid_rejected` row (preserving `peer_uid`), but the durable SIGNED reject audit row is HARD-SCHEDULED for G4 (the gateway has no audit sink yet). This is the accepted interim: the gateway is NOT the production front door until G5 re-points `alfred chat`, by which point G4's audit sink is in place — so production peer-reject exposure never runs without a durable trail.
+- **Bind-side owner guarantee is the 0700 parent dir.** The client socket lives under `~/.run/alfred` (mode 0700, owner-only). G3-4's shared-volume socket relocation MUST re-establish an equivalent owner-only-parent invariant or a shared-volume socket becomes plantable.
+- **`status` never speaks the wire.** `alfred gateway status` is a `Path.exists()` + runtime-dir-posture check only — it never dials or reads the socket (no un-authenticated wire read).
+
+### Criterion #7 scope
+
+2b PROVES the TRANSPORT substance of #237 criterion #7 — a real opaque payload relays byte-for-byte through the running process, and the client is held across a core reconnect (`reconnecting`/`restored` reaches it) — via a non-root in-process e2e + adversarial gate. The full real-orchestrator turn (real client → real core → real persona reply) is gated on 2c/#230 (no real reply yet) and production `alfred chat` re-pointing (G5).
