@@ -145,6 +145,62 @@ async def test_structlog_only_peer_rejected_is_a_noop_callback() -> None:
     await _structlog_only_peer_rejected(None)
 
 
+async def test_injected_on_peer_rejected_routes_a_mismatch(
+    runtime_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An injected ``on_peer_rejected`` (G3-3b wires the metric-incrementing reject
+    # handler here) receives the mismatched peer_uid — NOT the structlog stub. Force a
+    # uid mismatch by monkeypatching the listener's peer-uid resolver to a foreign uid.
+    import os
+
+    import alfred.plugins.comms_socket_transport as transport_mod
+
+    foreign_uid = os.getuid() + 1
+    monkeypatch.setattr(transport_mod, "_resolve_peer_uid", lambda _sock: foreign_uid)
+
+    rejected: asyncio.Future[int | None] = asyncio.get_running_loop().create_future()
+
+    async def _capture(peer_uid: int | None) -> None:
+        if not rejected.done():
+            rejected.set_result(peer_uid)
+
+    listener = GatewayClientListener(on_peer_rejected=_capture)
+    await listener.bind()
+    accept_task = asyncio.create_task(listener.accept())
+    try:
+        reader, writer = await asyncio.open_unix_connection(path=str(listener.path))
+        observed = await asyncio.wait_for(rejected, timeout=2.0)
+        assert observed == foreign_uid
+        writer.close()
+        await writer.wait_closed()
+        del reader
+    finally:
+        accept_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await accept_task
+        await listener.aclose()
+
+
+async def test_default_on_peer_rejected_is_the_structlog_stub() -> None:
+    # The DEFAULT (no injection) still routes to ``_structlog_only_peer_rejected`` —
+    # unchanged behaviour for the default caller.
+    listener = GatewayClientListener()
+    assert listener._listener._on_peer_rejected is _structlog_only_peer_rejected
+
+
+async def test_transport_getter_is_none_before_accept_then_set(
+    _connected: tuple[GatewayClientListener, asyncio.StreamReader, asyncio.StreamWriter],
+) -> None:
+    # Before accept, ``.transport`` is None; after accept the getter exposes the
+    # accepted CommsSocketTransport (the relay handoff seam for G3-3b).
+    unbound = GatewayClientListener()
+    assert unbound.transport is None
+    listener, _reader, _writer = _connected
+    assert listener.transport is not None
+    assert listener.transport is listener._transport
+
+
 async def test_aclose_is_idempotent(runtime_dir: Path) -> None:
     listener = GatewayClientListener()
     await listener.bind()
