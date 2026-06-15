@@ -185,8 +185,8 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "supervisor.config_watcher.recovered",
     # Fallback-sink write failure (1; PR-S4-4 round-3 err-S4-4-3).
     "policies.watcher.fallback_write_failed",
-    # TUI (1).
-    "comms.tui.daemon_required_to_chat",
+    # Chat gating (1; re-pointed daemon->gateway in Spec A G5).
+    "comms.tui.gateway_required_to_chat",
 )
 
 
@@ -293,7 +293,7 @@ def test_no_orphan_slice_4_msgids_in_po_outside_enumeration() -> None:
         "supervisor.config_watcher.",
         "policies.watcher.",
         "daemon.",
-        "comms.tui.daemon_required_to_chat",
+        "comms.tui.gateway_required_to_chat",
     )
     slice_4_msgids_in_po = {
         m for m in all_active_msgids if any(m.startswith(prefix) for prefix in slice_4_prefixes)

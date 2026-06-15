@@ -150,8 +150,8 @@ def _register() -> None:
     # Fallback-sink write failure (PR-S4-4 round-3 err-S4-4-3).
     t("policies.watcher.fallback_write_failed")
 
-    # TUI gating (PR-S4-1).
-    t("comms.tui.daemon_required_to_chat")
+    # Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
+    t("comms.tui.gateway_required_to_chat")
 
     # Comms socket peer-auth (Spec A G3-1 / ADR-0032). The listener
     # (alfred.plugins.comms_socket_transport) logs this via structlog on a

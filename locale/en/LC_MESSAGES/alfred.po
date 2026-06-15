@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-15 13:28+0100\n"
+"POT-Creation-Date: 2026-06-15 14:59+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -352,12 +352,13 @@ msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
-# TUI gating (PR-S4-1 daemon split).
-#: src/alfred/cli/main.py:367 src/alfred/i18n/_slice_4_reserve.py:154
-msgid "comms.tui.daemon_required_to_chat"
+# Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
+#: src/alfred/cli/main.py:372 src/alfred/i18n/_slice_4_reserve.py:154
+msgid "comms.tui.gateway_required_to_chat"
 msgstr ""
-"alfred chat needs the daemon. Start it with: alfred daemon start. If you "
-"expected a daemon to be running, check status with: alfred daemon status."
+"alfred chat needs the gateway. Start it with: alfred gateway start. If "
+"you expected a gateway to be running, check status with: alfred gateway "
+"status."
 
 #: src/alfred/cli/operator_session.py:137
 #: src/alfred/i18n/_slice_4_reserve.py:42
@@ -1172,14 +1173,14 @@ msgstr ""
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
-"that a compatible `alfred chat` client is connecting, then re-run `alfred "
-"gateway start`."
+"that a compatible `alfred chat` client is connecting, then re-run `alfred"
+" gateway start`."
 
 #: src/alfred/cli/gateway/_commands.py:111
 msgid "gateway.start.bind_failed"
 msgstr ""
-"The gateway could not bind its client socket — another gateway may already "
-"be running. Stop it first, then re-run `alfred gateway start`."
+"The gateway could not bind its client socket — another gateway may "
+"already be running. Stop it first, then re-run `alfred gateway start`."
 
 #: src/alfred/cli/gateway/_commands.py:113
 msgid "gateway.start.stopped"

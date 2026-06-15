@@ -43,16 +43,19 @@ class CommsHandlerFailedError(CommsMcpError):
 
 
 class DaemonUnavailableError(CommsMcpError):
-    """Dialing the daemon's comms socket failed — no daemon is reachable.
+    """Dialing the comms socket failed — no peer is reachable on it.
 
     Raised by the foreground TUI co-host (``alfred_tui.cohost.run_cohosted``) when the
     ``dial`` itself raises an ``OSError`` family member (``FileNotFoundError`` — the
     socket inode is absent; ``ConnectionRefusedError`` — a stale inode with no
-    listener). Wrapping ONLY the dial (not the whole co-host) keeps this typed
-    condition distinct from a stray post-dial ``OSError`` (a PTY ioctl / broken render
-    pipe), which must surface LOUD rather than be mislabelled "daemon required". The
-    CLI (``_chat_main``) maps THIS error — and only this error — to the
-    ``comms.tui.daemon_required_to_chat`` t() string + exit 3.
+    listener). Spec A G5 (#237) re-points the chat client off the daemon's
+    ``comms-tui.sock`` to the GATEWAY's ``comms-gateway.sock`` (no dual-mode), so the
+    unreachable peer is now the gateway; the name is retained as the shared typed
+    dial-failure condition. Wrapping ONLY the dial (not the whole co-host) keeps this
+    typed condition distinct from a stray post-dial ``OSError`` (a PTY ioctl / broken
+    render pipe), which must surface LOUD rather than be mislabelled "gateway required".
+    The CLI (``_chat_main``) maps THIS error — and only this error — to the
+    ``comms.tui.gateway_required_to_chat`` t() string + exit 3.
     """
 
 

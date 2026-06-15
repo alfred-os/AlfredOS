@@ -39,6 +39,7 @@ from alfred.comms_mcp.protocol import (
     LifecycleStopResult,
     OutboundMessageRequest,
 )
+from alfred.gateway.client_listener import _GATEWAY_ADAPTER_ID
 from alfred_tui import __version__
 from alfred_tui.outbound import handle_outbound_message
 from alfred_tui.session import TuiSession
@@ -51,10 +52,13 @@ _METHOD_LIFECYCLE_STOP: Final[str] = "lifecycle.stop"
 _METHOD_ADAPTER_HEALTH: Final[str] = "adapter.health"
 _METHOD_OUTBOUND_MESSAGE: Final[str] = "outbound.message"
 
-# The wire ``adapter_kind`` the host binds the 0600 comms socket on (ADR-0031):
-# the daemon's ``CommsSocketListener(adapter_id=wire.adapter_kind)`` keys the
-# socket path on ``"tui"``, so the foreground co-host dials the IDENTICAL key.
-_ADAPTER_KIND: Final[str] = "tui"
+# The id the foreground chat client DIALS (Spec A G5, #237): the GATEWAY's own stable
+# client-facing socket (``comms-gateway.sock``), NOT the daemon's ``comms-tui.sock``.
+# The gateway sits between chat and the daemon and holds the client connection across
+# core restarts. Reuse the gateway's shared bind-id constant (not a bare literal) so
+# the dial id provably equals the gateway's bind id (architect L2). There is NO
+# dual-mode: the daemon-side ``"tui"`` socket is only the gateway<->daemon leg.
+_ADAPTER_KIND: Final[str] = _GATEWAY_ADAPTER_ID
 
 # The closed, manifest-declared method set. Exposed via ``list_methods`` so a
 # caller (and the test suite) can assert the surface is closed — an undeclared
@@ -203,23 +207,24 @@ def bind_self_id_from_env() -> str | None:
 
 
 async def serve() -> int:  # pragma: no cover - process entrypoint
-    """Dial the daemon's comms socket and co-host the Textual app + the wire.
+    """Dial the gateway's comms socket and co-host the Textual app + the wire.
 
-    Shape A (ADR-0031 PR-S4-237-2, #237): ``alfred chat`` runs the TUI IN ITS OWN
-    process and DIALS the already-running daemon's 0600 unix socket — it is no
-    longer a daemon-spawned subprocess. This entry mounts the real
-    ``AlfredTuiApp`` and the socket serve loop on one asyncio loop via
-    :func:`alfred_tui.cohost.run_cohosted`, so ``alfred chat`` is functional
-    end-to-end (a turn round-trips through the daemon and the stubbed ``ack``
-    paints into the conversation log). This retires the #237 "wire contract only"
-    stub and the daemon-spawned stdio carrier.
+    Spec A G5 (#237) re-points this entry from the daemon's ``comms-tui.sock`` to the
+    GATEWAY's own stable ``comms-gateway.sock`` (``_ADAPTER_KIND == _GATEWAY_ADAPTER_ID``)
+    — there is NO dual-mode. The gateway sits between chat and the daemon and holds the
+    client connection across core restarts.
+
+    Otherwise Shape A (ADR-0031 PR-S4-237-2): ``alfred chat`` runs the TUI IN ITS OWN
+    process and DIALS the already-running gateway's 0600 unix socket — it is no longer a
+    daemon-spawned subprocess. This entry mounts the real ``AlfredTuiApp`` and the socket
+    serve loop on one asyncio loop via :func:`alfred_tui.cohost.run_cohosted`.
 
     Structlog is pinned to stderr-JSON (review F4) so the operator's PTY (which
     Textual owns) is never corrupted by a stray console-rendered log line.
 
-    The ``adapter_id`` dialed is the wire ``adapter_kind`` (``"tui"``) the daemon
-    binds its socket on — NOT the per-instance launcher id. A dial failure
-    (daemon absent) raises out of ``run_cohosted`` for the caller to map.
+    The ``adapter_id`` dialed is the gateway's stable client-facing id (``"gateway"``)
+    the gateway binds its socket on — NOT the daemon-side ``"tui"`` socket. A dial
+    failure (gateway absent) raises out of ``run_cohosted`` for the caller to map.
     """
     from alfred_tui.cohost import run_cohosted
 
