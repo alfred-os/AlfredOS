@@ -254,5 +254,22 @@ class ReplayBuffer:
         """
         return tuple(ReplayFrame(seq=entry.seq, payload=bytes(entry.body)) for entry in self._retained)
 
+    def discard(self) -> None:
+        """Remove + zero EVERYTHING and clear the breaker latch.
+
+        Called by G4b on clean gateway shutdown and when the reconnect retry-window
+        is exhausted (resume gave up — the max-retry-window cap the pure buffer cannot
+        observe). Does NOT reset the monotonic seq/now floor: the inbound seq is
+        gateway-owned and stays monotonic across a core restart (spec §4), and not
+        resetting here means a late stale-stream frame after a discard is rejected loud
+        rather than silently admitted (Security F1). A genuine seq-space restart is
+        G4b's epoch-handshake concern, sequenced after the old leg is torn down.
+        """
+        for entry in self._retained:
+            _zero(entry.body)
+        self._retained.clear()
+        self._depth_bytes = 0
+        self._breaker_tripped = False
+
 
 __all__ = ["ReplayBuffer", "ReplayBufferError", "ReplayFrame"]
