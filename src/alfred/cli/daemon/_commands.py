@@ -123,6 +123,7 @@ if TYPE_CHECKING:
         CommsInboundOrchestratorAdapter,
         OutboundSenderLike,
     )
+    from alfred.comms_mcp.protocol import OutboundMessageRequest
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
     from alfred.memory.inbound_idempotency import PostgresInboundIdempotencyStore
@@ -248,20 +249,15 @@ class _RunnerOutboundSender:
     def __init__(self, *, runner: CommsPluginRunner) -> None:
         self._runner = runner
 
-    async def send_outbound(
-        self,
-        *,
-        adapter_id: str,
-        target_platform_id: str,
-        body: Mapping[str, object],
-    ) -> Mapping[str, object]:
+    async def send_outbound(self, request: OutboundMessageRequest) -> Mapping[str, object]:
+        # Serialise the fully-validated request onto the wire. ``model_dump(mode=
+        # "json")`` produces a JSON-round-trippable dict whose ``body`` is the
+        # ``[redacted_text, scan_result]`` pair the consumer re-validates back into
+        # the DLP-minted ``ScannedOutboundBody`` (G5 #237) — so the params SATISFY
+        # ``OutboundMessageRequest.model_validate`` on the real TUI / Discord plugin.
         return await self._runner.send_request(
             "outbound.message",
-            {
-                "adapter_id": adapter_id,
-                "target_platform_id": target_platform_id,
-                "body": dict(body),
-            },
+            request.model_dump(mode="json"),
         )
 
 
@@ -658,7 +654,13 @@ async def _build_comms_boot_graph(
         # mypy flags the more-specific override against the ``**kwargs`` Protocol, the
         # same structural mismatch the per-adapter handlers below carry an ignore for.
         burst_limiter = BurstLimiter(audit_writer=audit)  # type: ignore[arg-type]
-        inbound_orchestrator = CommsInboundOrchestratorAdapter(extractor_bridge=extractor_bridge)
+        inbound_orchestrator = CommsInboundOrchestratorAdapter(
+            extractor_bridge=extractor_bridge,
+            # The stubbed ack dispatch routes the ack through this DLP chokepoint
+            # before it crosses the wire (G5 #237; CLAUDE.md hard rule #4). The same
+            # concrete ``OutboundDlp`` the extractor's post-stage scan uses.
+            outbound_dlp=cast("OutboundDlp", outbound_dlp),
+        )
         # Spec A G0: the durable accept-once store. Owns its ``session_scope`` over
         # the SHARED DSN-cached engine (the ``audit_writer`` shape), so it is
         # deliberately NOT reaped on graph teardown — see the ``idempotency_store``

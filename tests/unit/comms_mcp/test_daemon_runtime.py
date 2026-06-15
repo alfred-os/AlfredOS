@@ -43,8 +43,10 @@ from alfred.comms_mcp.daemon_runtime import (
 )
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
 from alfred.comms_mcp.inbound import _OrchestratorLike
+from alfred.comms_mcp.protocol import OutboundMessageRequest
 from alfred.hooks.registry import HookRegistry, get_registry, set_registry
 from alfred.security import tiers as _tiers
+from alfred.security.dlp import OutboundDlp, OutboundDlpScanResult
 from alfred.security.quarantine import Extracted, declare_hookpoints
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
@@ -129,19 +131,38 @@ class _RecordingSender:
     """Records every outbound the adapter emits; satisfies ``OutboundSenderLike``."""
 
     def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
+        self.requests: list[OutboundMessageRequest] = []
 
-    async def send_outbound(
-        self, *, adapter_id: str, target_platform_id: str, body: Mapping[str, object]
-    ) -> Mapping[str, object]:
-        self.calls.append(
-            {
-                "adapter_id": adapter_id,
-                "target_platform_id": target_platform_id,
-                "body": body,
-            }
-        )
+    async def send_outbound(self, request: OutboundMessageRequest) -> Mapping[str, object]:
+        self.requests.append(request)
         return {"platform_message_id": "msg-1"}
+
+
+class _SpyingOutboundDlp:
+    """Records every ``scan_for_outbound`` call; delegates to a real ``OutboundDlp``.
+
+    Lets a test assert the ack text was routed through the DLP chokepoint (hard
+    rule #4) while still minting a genuine :data:`ScannedOutboundBody` — the ONLY
+    type the ``OutboundMessageRequest.body`` field accepts.
+    """
+
+    def __init__(self) -> None:
+        broker = MagicMock()
+        broker.redact = MagicMock(side_effect=lambda x: x)
+        self._dlp = OutboundDlp(broker=broker, audit=lambda *, event, subject: None)
+        self.scanned_raw_bodies: list[str] = []
+
+    def scan_for_outbound(self, raw_body: str) -> Any:
+        self.scanned_raw_bodies.append(raw_body)
+        return self._dlp.scan_for_outbound(raw_body)
+
+
+def _make_adapter(bridge: CommsExtractorBridge) -> CommsInboundOrchestratorAdapter:
+    """Construct the adapter over a real (broker-stubbed) ``OutboundDlp``."""
+    broker = MagicMock()
+    broker.redact = MagicMock(side_effect=lambda x: x)
+    dlp = OutboundDlp(broker=broker, audit=lambda *, event, subject: None)
+    return CommsInboundOrchestratorAdapter(extractor_bridge=bridge, outbound_dlp=dlp)
 
 
 def _greeting_extracted() -> Extracted:
@@ -166,13 +187,13 @@ def _extractor_bridge() -> tuple[CommsExtractorBridge, MagicMock]:
 
 def test_adapter_satisfies_orchestrator_like_protocol() -> None:
     bridge, _ = _extractor_bridge()
-    adapter = CommsInboundOrchestratorAdapter(extractor_bridge=bridge)
+    adapter = _make_adapter(bridge)
     assert isinstance(adapter, _OrchestratorLike)
 
 
 async def test_quarantined_extract_delegates_to_bridge() -> None:
     bridge, extractor = _extractor_bridge()
-    adapter = CommsInboundOrchestratorAdapter(extractor_bridge=bridge)
+    adapter = _make_adapter(bridge)
 
     result = await adapter.quarantined_extract(
         {"content": "hello"}, canonical_user_id="alice", source_tier="T3"
@@ -187,7 +208,7 @@ async def test_quarantined_extract_delegates_to_bridge() -> None:
 
 async def test_ingest_before_bind_raises_runtime_error() -> None:
     bridge, _ = _extractor_bridge()
-    adapter = CommsInboundOrchestratorAdapter(extractor_bridge=bridge)
+    adapter = _make_adapter(bridge)
 
     with pytest.raises(RuntimeError):
         await adapter.ingest(
@@ -201,7 +222,7 @@ async def test_ingest_before_bind_raises_runtime_error() -> None:
 
 async def test_dispatch_before_bind_raises_runtime_error() -> None:
     bridge, _ = _extractor_bridge()
-    adapter = CommsInboundOrchestratorAdapter(extractor_bridge=bridge)
+    adapter = _make_adapter(bridge)
 
     with pytest.raises(RuntimeError):
         await adapter.dispatch({"ingested": True})
@@ -209,7 +230,8 @@ async def test_dispatch_before_bind_raises_runtime_error() -> None:
 
 async def test_dispatch_after_bind_sends_fixed_ack_outbound() -> None:
     bridge, _ = _extractor_bridge()
-    adapter = CommsInboundOrchestratorAdapter(extractor_bridge=bridge)
+    spy_dlp = _SpyingOutboundDlp()
+    adapter = CommsInboundOrchestratorAdapter(extractor_bridge=bridge, outbound_dlp=spy_dlp)  # type: ignore[arg-type]
     sender = _RecordingSender()
     adapter.bind_outbound_sender(sender)
 
@@ -226,17 +248,58 @@ async def test_dispatch_after_bind_sends_fixed_ack_outbound() -> None:
     )
     await adapter.dispatch(ingested)
 
-    assert len(sender.calls) == 1
-    call = sender.calls[0]
-    assert call["adapter_id"] == _ADAPTER_ID
+    # CLAUDE.md hard rule #4: the ack was routed through the outbound DLP chokepoint
+    # — ``scan_for_outbound`` was called with the raw ack content text, never bypassed.
+    assert spy_dlp.scanned_raw_bodies == ["ack"]
+
+    assert len(sender.requests) == 1
+    request = sender.requests[0]
+    assert request.adapter_id == _ADAPTER_ID
     # Only the platform id crosses outward — never the canonical user id.
-    assert call["target_platform_id"] == "discord:42"
-    assert "alice" not in str(call)
+    assert request.target_platform_id == "discord:42"
+    assert "alice" not in str(request)
+    # The ack is a direct reply; the TUI handler only accepts ``"dm"``.
+    assert request.addressing_mode == "dm"
+    assert request.attachments_refs == ()
+
+    # The body is the DLP-MINTED ``ScannedOutboundBody`` tuple — NOT a raw dict.
+    # ``request.body[0]`` is the redacted ack text; ``[1]`` is the scan result.
+    assert isinstance(request.body, tuple)
+    redacted_text, scan_result = request.body
+    assert redacted_text == "ack"
+    assert isinstance(scan_result, OutboundDlpScanResult)
+
+    # A REAL client would accept this frame: the wire params round-trip back
+    # through ``OutboundMessageRequest.model_validate`` (the consumer's path).
+    wire_params = request.model_dump(mode="json")
+    revalidated = OutboundMessageRequest.model_validate(wire_params)
+    assert revalidated.body[0] == "ack"
+
+
+async def test_dispatch_ack_body_is_not_a_raw_dict() -> None:
+    """Mutation guard: the ack body MUST be the DLP-minted tuple, not a raw dict.
+
+    The pre-fix behaviour sent ``body={"content": "ack"}`` (a raw dict), which (a)
+    bypassed the DLP chokepoint (hard rule #4) and (b) fails
+    ``OutboundMessageRequest.model_validate`` on a real client. This asserts the
+    emitted request carries a genuine ``ScannedOutboundBody`` — a dict body would
+    have failed ``OutboundMessageRequest(...)`` construction at dispatch time.
+    """
+    bridge, _ = _extractor_bridge()
+    adapter = _make_adapter(bridge)
+    sender = _RecordingSender()
+    adapter.bind_outbound_sender(sender)
+
+    await adapter.dispatch({"adapter_id": _ADAPTER_ID, "target_platform_id": "discord:42"})
+
+    request = sender.requests[0]
+    assert not isinstance(request.body, Mapping)
+    assert request.body[0] == "ack"
 
 
 async def test_dispatch_non_mapping_ingested_raises_runtime_error() -> None:
     bridge, _ = _extractor_bridge()
-    adapter = CommsInboundOrchestratorAdapter(extractor_bridge=bridge)
+    adapter = _make_adapter(bridge)
     adapter.bind_outbound_sender(_RecordingSender())
 
     # A non-Mapping ``ingested`` is a contract violation — fail loudly, not silent.

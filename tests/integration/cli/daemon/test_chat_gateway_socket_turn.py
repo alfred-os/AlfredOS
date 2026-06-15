@@ -117,7 +117,9 @@ _TIMEOUT_S = 20.0
 _LAUNCHER_TEST_UID = getpass.getuser()
 _LAUNCHER_REQUIRES_ROOT = os.uname().sysname == "Linux" and os.geteuid() != 0
 
-# The ack the daemon's stubbed dispatch emits (``daemon_runtime._ACK_BODY``).
+# The ack content the daemon's stubbed dispatch emits (``daemon_runtime._ACK_CONTENT``).
+# The ack is routed through the outbound DLP chokepoint + wrapped in a valid
+# OutboundMessageRequest (G5 #237 / hard rule #4); the cohost renders ``body[0]``.
 _ACK_CONTENT = "ack"
 
 
@@ -338,32 +340,6 @@ def _fetch_t3_promotion_rows(sync_url: str) -> list[dict[str, Any]]:
         engine.dispose()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "G5 chain progress — BUGS 1 + 2 are now FIXED (proven by this very test: the "
-        "core leg holds UP after the handshake AND the inbound's comms.inbound.t3_promoted "
-        "row lands in real Postgres, so neither the seq-framing-asymmetry nor the missing "
-        "tui->Platform resolver mapping fires any longer). The test still blocks on a "
-        "THIRD, DISTINCT, newly-diagnosed production wire-contract bug surfaced by the SAME "
-        "first-ever gateway<->daemon connection: the daemon's stubbed outbound ack "
-        "(daemon_runtime._ACK_BODY via _RunnerOutboundSender.send_outbound in "
-        "cli/daemon/_commands.py) emits an `outbound.message` whose params are "
-        "{adapter_id, target_platform_id, body={'content':'ack'}} — MISSING the four "
-        "required OutboundMessageRequest fields the production TUI/Discord plugins validate: "
-        "`addressing_mode` (must be 'dm'), `idempotency_key` (UUID), `attachments_refs` "
-        "(tuple), and `body` must be the DLP-minted ScannedOutboundBody (redacted_text, "
-        "scan_result) tuple — NOT a raw dict. So TuiServer.dispatch raises 4 pydantic "
-        "ValidationErrors and the ack never renders, timing out the round-trip assertion. "
-        "This is OUT OF SCOPE for the bug-1/bug-2 fix (it is a security-boundary change: the "
-        "ack currently BYPASSES the outbound DLP chokepoint, a hard-rule-#4 violation, so the "
-        "fix must route _ACK_BODY through OutboundDlp.scan_for_outbound + construct a valid "
-        "OutboundMessageRequest — its own focused, security-reviewed PR + adversarial "
-        "coverage). This xfail is STRICT so it flips to a HARD FAILURE the instant that third "
-        "fix lands — forcing the next fixer to remove it and prove the criterion-#7 turn "
-        "round-trips end to end. Do NOT weaken the assertions to make it pass."
-    ),
-)
 @pytest.mark.skipif(
     _LAUNCHER_REQUIRES_ROOT,
     reason="parity with the launcher-spawn legs; runs locally + on the root CI runner",
@@ -375,17 +351,22 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
 ) -> None:
     """REAL chain: cohost -> gateway -> daemon -> stubbed ack -> cohost, + reconnect banner.
 
-    See the ``xfail(strict=True)`` reason above. This proof is the FIRST exercise of
-    the full cohost->gateway->daemon chain. It originally surfaced THREE real composition
-    bugs no prior layer's tests could catch (the launcher-spawn legs skip on non-root CI;
-    the #274 e2e used a FAKE core; the reference plugin tolerates loose wire shapes the
-    production TUI rejects). BUGS 1 (handshake seq-framing asymmetry) and 2 (missing
-    tui->Platform resolver mapping) are now FIXED — this test proves it by reaching the
-    held-UP core leg + the real-Postgres T3-promotion row. The remaining xfail records the
-    THIRD bug (the daemon's stubbed outbound ack does not satisfy the OutboundMessageRequest
-    wire contract, and routing it through the outbound DLP chokepoint is its own
-    security-boundary change) AND auto-detects its fix. Do NOT weaken the assertions to make
-    it pass — fix the third bug.
+    This proof is the FIRST exercise of the full cohost->gateway->daemon chain. It
+    surfaced THREE real composition bugs no prior layer's tests could catch (the
+    launcher-spawn legs skip on non-root CI; the #274 e2e used a FAKE core; the reference
+    plugin tolerates loose wire shapes the production TUI rejects), all now FIXED:
+
+    * BUG 1 — the handshake seq-framing asymmetry on the core leg;
+    * BUG 2 — the missing tui->Platform resolver mapping;
+    * BUG 3 (G5 #237) — the daemon's stubbed outbound ack BYPASSED the outbound DLP
+      chokepoint (hard rule #4) AND failed the ``OutboundMessageRequest`` wire contract
+      (raw ``{"content": "ack"}`` dict body, missing ``idempotency_key`` /
+      ``attachments_refs`` / ``addressing_mode``). The fix routes the ack through
+      ``OutboundDlp.scan_for_outbound`` + constructs a valid ``OutboundMessageRequest``,
+      so the production ``TuiServer`` accepts it and the ack renders.
+
+    With all three fixed, this is the criterion-#7 PROOF: a real ``alfred chat`` turn
+    round-trips end to end + the reconnect banner fires. Do NOT weaken the assertions.
     """
     settings = Settings()  # type: ignore[no-untyped-call]  # env-driven; mirrors daemon boot
     sync_url = postgres_url.replace("+asyncpg", "+psycopg2")
