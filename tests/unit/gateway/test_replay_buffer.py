@@ -190,6 +190,10 @@ def test_evict_removes_only_expired_frames() -> None:
     evicted = buf.evict_expired(now=11.0)  # frame@0 age 11 > 10; @5 age 6; @9 age 2
     assert evicted == (0,)
     assert buf.depth_frames == 2
+    # depth_bytes must drop by exactly the evicted frame's length — the byte-cap
+    # accounting line (depth_bytes -= len(body)) executes on a partial evict but is
+    # only pinned here, so a regression can't hide behind 100% line coverage.
+    assert buf.depth_bytes == len(b"mid") + len(b"new")
 
 
 def test_evict_boundary_age_equal_ttl_is_retained() -> None:
@@ -355,8 +359,12 @@ def test_replay_order_and_seqs_match_append(payloads: list[tuple[bytes, float]])
 
 @given(_payloads, st.floats(min_value=0.0, max_value=10_000.0))
 def test_evict_is_a_fifo_prefix(payloads: list[tuple[bytes, float]], horizon: float) -> None:
-    buf, _ = _fill(payloads)
+    buf, bodies = _fill(payloads)
     depth_before = buf.depth_frames
     evicted = buf.evict_expired(now=horizon)
     assert len(evicted) + buf.depth_frames == depth_before
     assert list(evicted) == sorted(evicted)  # leading ascending run
+    # Byte accounting survives a partial evict: depth_bytes equals the sum of the
+    # surviving (un-evicted suffix) payload lengths.
+    survivors = bodies[len(evicted) :]
+    assert buf.depth_bytes == sum(len(b) for b in survivors)
