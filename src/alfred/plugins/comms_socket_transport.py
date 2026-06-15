@@ -337,37 +337,72 @@ class CommsSocketTransport:
         hard rule #7).
         """
         body = json.dumps(frame).encode()
-        # Spec A G3-2 (#237) C2: the entire encode -> write -> drain -> seq-increment
-        # critical section is serialised so a concurrent second writer (the boot
-        # lifecycle-send) cannot interleave a frame or race ``_send_seq``.
+        # ``send`` carries the ``a=0`` PLACEHOLDER ack (ADR-0032 Decision 3) — NOT a
+        # high-water. The opaque relay seam (:meth:`send_payload_unit`) is the path
+        # that carries a REAL ack; both share the same locked critical section.
+        await self._write_payload_unit(body, ack=0)
+
+    async def _write_payload_unit(self, payload: bytes, *, ack: int) -> None:
+        """Serialised encode -> write -> drain -> seq-increment for one wire unit.
+
+        Spec A G3-2 (#237) C2: the entire critical section is serialised under
+        ``_send_lock`` so a concurrent second writer (the boot lifecycle-send) cannot
+        interleave a frame or race ``_send_seq``. Shared by :meth:`send` (which passes
+        the ``a=0`` placeholder ack) and :meth:`send_payload_unit` (which passes a real
+        relay ack) so the lock discipline + broken-pipe loud-reraise live in ONE place.
+
+        With seq/ack ON, ``encode_seq_frame``'s over-bound :class:`CommsProtocolError`
+        propagates (the reframe-ceiling guard, hard rule #7). With it OFF the unit is
+        the byte-for-byte ADR-0025 ``payload + "\\n"`` and ``ack`` is unused.
+        """
         async with self._send_lock:
             if self._seq_ack_enabled:
-                payload = encode_seq_frame(
-                    body,
+                unit = encode_seq_frame(
+                    payload,
                     seq=self._send_seq,
-                    # PLACEHOLDER (ADR-0032 Decision 3) — NOT a high-water; the G3 relay
-                    # wires SeqDedupWindow.cumulative_ack() as the real ack source.
-                    ack=0,
+                    ack=ack,
                     max_unit_bytes=self._max_line_bytes,
                 )
                 self._send_seq += 1
             else:
-                payload = body + b"\n"
+                unit = payload + b"\n"
             try:
-                self._writer.write(payload)
+                self._writer.write(unit)
                 await self._writer.drain()
             except (BrokenPipeError, ConnectionResetError):
                 log.warning("comms.socket.send_broken_pipe", adapter_id=self._adapter_id)
                 raise
 
-    async def read_frame(self) -> Mapping[str, object] | None:
-        """Read one line-delimited frame; ``None`` on clean EOF.
+    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
+        """Write one OPAQUE ADR-0025 payload unit verbatim, carrying a REAL ``ack``.
 
-        Returns the decoded JSON object, or ``None`` when the peer closed the
-        connection cleanly (empty read). Raises :class:`CommsProtocolError` on an
-        over-bound line, non-JSON bytes, or a non-object top-level JSON value — the
-        SAME malformed-frame discipline as :meth:`CommsStdioTransport.read_frame` so
-        the runner's existing malformed-frame arm handles it uniformly.
+        The send-half of the gateway relay seam (Spec A G3-3b-2 / ADR-0032). The relay
+        forwards the opaque inner payload between its two legs WITHOUT ``json.dumps``-ing
+        anything itself — ``payload`` is the pre-serialised body the seam emits
+        byte-for-byte (T1 carrier; the gateway never parses it — CLAUDE.md hard rule
+        #5). Unlike :meth:`send`, the caller supplies the cumulative ``ack`` (the relay
+        wires ``SeqDedupWindow.cumulative_ack()`` as the source) rather than the ``a=0``
+        placeholder. On the seq-OFF (plain TUI) leg the ``ack`` is unused and the unit
+        is a plain ``payload + "\\n"`` line. Loud on a broken pipe and on an over-bound
+        reframe, exactly like :meth:`send`.
+        """
+        await self._write_payload_unit(payload, ack=ack)
+
+    async def _read_seq_frame(self) -> SeqFrame | None:
+        """Read+bound+deframe one wire unit into a raw :class:`SeqFrame`; ``None`` on EOF.
+
+        The single read/bound/deframe primitive shared by :meth:`read_frame` (which
+        then ``json.loads`` the payload) and :meth:`read_payload_unit` (which returns
+        the raw frame untouched). Concentrating the THREE bound checks here — the
+        ``readline`` limit arm, the explicit ``_max_line_bytes`` belt-and-braces
+        re-check, and ``decode_seq_frame``'s own ``max_unit_bytes`` + header validation
+        — means a future bound-fix patches BOTH consumers at once (architect M1).
+
+        Returns ``None`` on a clean EOF (empty read) and raises
+        :class:`CommsProtocolError` on every over-bound / malformed arm (hard rule #7).
+        When seq/ack is OFF the payload is the line sans trailing newline; when ON,
+        ``decode_seq_frame`` (magic-gated) strips the header, falling back to an
+        un-sequenced :class:`SeqFrame` for a plain line from an un-upgraded peer.
         """
         try:
             line = await self._reader.readline()
@@ -379,7 +414,7 @@ class CommsSocketTransport:
                 t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
             ) from exc
         if not line:
-            # Clean EOF — the peer closed the connection. The runner ends the pump.
+            # Clean EOF — the peer closed the connection. The caller ends the pump.
             return None
         if len(line) > self._max_line_bytes:
             # Belt-and-braces: a line at exactly the reader limit can slip through
@@ -389,18 +424,47 @@ class CommsSocketTransport:
                 t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
             )
         if self._seq_ack_enabled:
-            # Spec A G2 (#237): strip the out-of-band header; the inner payload
-            # continues through the existing json.loads path unchanged. CONSUMES NO
-            # seq/ack here (no dedup, no ack, no high-water — the G3 relay is the
-            # consumer). ``decode_seq_frame`` is magic-gated, so a plain line from an
-            # un-upgraded peer still decodes via the SeqFrame(seq=None, ...) fallback
-            # (mixed-wire safety), and is fail-loud on a malformed header — surfacing
-            # through the SAME arm as a malformed plain frame. Mirrors the stdio
-            # sibling exactly; only the carrier differs.
-            frame_unit: SeqFrame = decode_seq_frame(line, max_unit_bytes=self._max_line_bytes)
-            line = frame_unit.payload
+            # Spec A G2 (#237): strip the out-of-band header. CONSUMES NO seq/ack here
+            # (no dedup, no ack, no high-water — the G3 relay is the consumer).
+            # ``decode_seq_frame`` is magic-gated, so a plain line from an un-upgraded
+            # peer still decodes via the SeqFrame(seq=None, ...) fallback (mixed-wire
+            # safety), and is fail-loud on a malformed header — surfacing through the
+            # SAME arm as a malformed plain frame.
+            return decode_seq_frame(line, max_unit_bytes=self._max_line_bytes)
+        # seq/ack OFF — a plain ADR-0025 line; strip only the trailing newline so the
+        # payload is byte-for-byte what an un-upgraded peer wrote.
+        body = line[:-1] if line.endswith(b"\n") else line
+        return SeqFrame(seq=None, ack=None, payload=body)
+
+    async def read_payload_unit(self) -> SeqFrame | None:
+        """Read one OPAQUE wire unit as a raw :class:`SeqFrame`; ``None`` on clean EOF.
+
+        The read-half of the gateway relay seam (Spec A G3-3b-2 / ADR-0032). Returns
+        the raw frame — header seq/ack plus the opaque ADR-0025 payload bytes
+        verbatim — WITHOUT ``json.loads``-ing the payload, so the relay forwards the
+        body byte-for-byte and T3 stays in the core (CLAUDE.md hard rule #5). Same
+        read/bound/deframe discipline as :meth:`read_frame` (both share
+        :meth:`_read_seq_frame`); only the parse step differs.
+        """
+        return await self._read_seq_frame()
+
+    async def read_frame(self) -> Mapping[str, object] | None:
+        """Read one line-delimited frame; ``None`` on clean EOF.
+
+        Returns the decoded JSON object, or ``None`` when the peer closed the
+        connection cleanly (empty read). Raises :class:`CommsProtocolError` on an
+        over-bound line, non-JSON bytes, or a non-object top-level JSON value — the
+        SAME malformed-frame discipline as :meth:`CommsStdioTransport.read_frame` so
+        the runner's existing malformed-frame arm handles it uniformly. The read +
+        bound + deframe is shared with :meth:`read_payload_unit` via
+        :meth:`_read_seq_frame`; this method adds only the JSON parse + non-object
+        guard on top of the raw payload.
+        """
+        frame = await self._read_seq_frame()
+        if frame is None:
+            return None
         try:
-            decoded = json.loads(line)
+            decoded = json.loads(frame.payload)
         except json.JSONDecodeError as exc:
             log.warning("comms.socket.malformed_frame", adapter_id=self._adapter_id)
             raise CommsProtocolError(

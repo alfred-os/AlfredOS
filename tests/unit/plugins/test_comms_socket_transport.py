@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from alfred.plugins.comms_runner import _CommsTransportLike
+from alfred.plugins.comms_seq_codec import SeqFrame
 from alfred.plugins.comms_socket_transport import (
     CommsProtocolError,
     CommsSocketListener,
@@ -1161,3 +1162,209 @@ async def test_concurrent_sends_do_not_interleave() -> None:
     decoded = [decode_seq_frame(u) for u in units]
     assert sorted(f.seq for f in decoded if f.seq is not None) == [0, 1]
     assert {json.loads(f.payload)["method"] for f in decoded} == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# Spec A G3-3b-2 (#237) / ADR-0032: the opaque-payload seam.
+#
+# ``read_payload_unit`` / ``send_payload_unit`` are the RAW-byte seam the G3 relay
+# uses to forward the opaque ADR-0025 inner payload between its two legs (the
+# seq/ack-enabled core leg and the PLAIN TUI leg) WITHOUT ``json.loads``-ing it (T3
+# stays in the core; the gateway is a T1 carrier — CLAUDE.md hard rule #5). The seam
+# returns the raw ``SeqFrame`` (header seq/ack + opaque payload bytes) and lets the
+# caller supply the ack (NOT the ``a=0`` placeholder ``send`` carries). It shares the
+# read+bound+deframe discipline of ``read_frame`` via the ``_read_seq_frame`` helper,
+# so a future bound-fix patches both paths.
+# ---------------------------------------------------------------------------
+
+
+async def test_read_payload_unit_plain_leg_returns_unsequenced_frame(
+    runtime_dir: Path,
+) -> None:
+    """seq DISABLED (production TUI leg): ``send_payload_unit`` writes a PLAIN line.
+
+    With seq/ack OFF the seam is byte-for-byte the existing ADR-0025 plain frame: no
+    header, just ``payload + "\\n"``. The peer's ``read_payload_unit`` returns an
+    UN-sequenced ``SeqFrame(seq=None, ack=None, payload=...)`` — the opaque bytes
+    verbatim. The supplied ``ack`` is IGNORED on the seq-off branch (no header).
+    """
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        client = await dial_comms_socket(_ADAPTER_ID)
+        host = await accept_task
+
+        # Both legs seq-OFF (production client leg) — ``ack=0`` is ignored.
+        await host.send_payload_unit(b'{"x":1}', ack=0)
+        unit = await client.read_payload_unit()
+        assert unit == SeqFrame(seq=None, ack=None, payload=b'{"x":1}')
+
+        await client.close()
+        await host.close()
+    finally:
+        await listener.aclose()
+
+
+async def test_send_read_payload_unit_seq_enabled_round_trips_non_json(
+    runtime_dir: Path,
+) -> None:
+    """seq ENABLED (core leg): the seam carries seq + the SUPPLIED ack, byte-for-byte.
+
+    With seq/ack ON both peers, ``send_payload_unit(payload, ack=5)`` emits the
+    out-of-band header carrying the sender's monotonic ``seq`` and the caller's ``ack``
+    (NOT the ``a=0`` placeholder ``send`` uses). The peer's ``read_payload_unit``
+    returns the raw ``SeqFrame`` with the opaque payload verbatim — a NON-JSON payload
+    round-trips intact, proving the seam never ``json.loads`` the body.
+    """
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        client = await dial_comms_socket(_ADAPTER_ID)
+        host = await accept_task
+        host.enable_seq_ack()
+        client.enable_seq_ack()
+
+        # First send: seq starts at 0; ack is the caller-supplied 5 (not a=0).
+        await host.send_payload_unit(b'{"x":1}', ack=5)
+        unit = await client.read_payload_unit()
+        assert unit == SeqFrame(seq=0, ack=5, payload=b'{"x":1}')
+
+        # A NON-JSON payload round-trips byte-for-byte — the seam never parses it.
+        await host.send_payload_unit(b"\x00not-json", ack=9)
+        unit2 = await client.read_payload_unit()
+        assert unit2 == SeqFrame(seq=1, ack=9, payload=b"\x00not-json")
+
+        await client.close()
+        await host.close()
+    finally:
+        await listener.aclose()
+
+
+async def test_read_payload_unit_seq_enabled_reads_plain_line_as_unsequenced(
+    runtime_dir: Path,
+) -> None:
+    """MIXED-WIRE: a seq-ENABLED reader reads a PLAIN line as ``SeqFrame(seq=None, ...)``.
+
+    ``decode_seq_frame`` is magic-gated, so a seq-enabled ``read_payload_unit`` reading
+    a line WITHOUT the magic (written by a seq-disabled peer) falls back to the
+    un-sequenced frame rather than raising — mirroring ``read_frame``'s mixed-wire
+    safety. The host leg is seq-ON; the client leg stays seq-OFF and writes a plain line.
+    """
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        client = await dial_comms_socket(_ADAPTER_ID)
+        host = await accept_task
+        # Only the HOST upgrades; the client stays plain (one-direction-only wire).
+        host.enable_seq_ack()
+
+        await client.send_payload_unit(b'{"x":1}', ack=0)
+        unit = await host.read_payload_unit()
+        assert unit == SeqFrame(seq=None, ack=None, payload=b'{"x":1}')
+
+        await client.close()
+        await host.close()
+    finally:
+        await listener.aclose()
+
+
+async def test_read_payload_unit_returns_none_on_clean_eof() -> None:
+    """A clean EOF (peer closed) resolves ``read_payload_unit`` to ``None``.
+
+    Mirrors ``read_frame``'s clean-EOF contract: the relay ends its pump loop when the
+    peer closes, rather than seeing a spurious empty frame.
+    """
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    reader.feed_eof()
+    assert await transport.read_payload_unit() is None
+
+
+async def test_read_payload_unit_raises_on_reader_limit_overrun() -> None:
+    """THREE-point bound (a): a ``readline`` limit overrun raises ``CommsProtocolError``.
+
+    The first bound check — the ``StreamReader`` limit tripping in ``readline`` — must
+    surface as a protocol error from the seam too, not a raw ``ValueError``.
+    """
+    reader = asyncio.StreamReader(limit=8)
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    reader.feed_data(b"a" * 64)  # no newline within the limit -> LimitOverrunError
+    with pytest.raises(CommsProtocolError):
+        await transport.read_payload_unit()
+
+
+async def test_read_payload_unit_raises_on_explicit_over_bound_line() -> None:
+    """THREE-point bound (b): a line AT/over ``_max_line_bytes`` raises (belt-and-braces).
+
+    A line that slips past ``readline`` but exceeds the explicit ``_max_line_bytes``
+    belt-and-braces check must still raise — the seam shares ``read_frame``'s explicit
+    length re-check.
+    """
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(
+        adapter_id=_ADAPTER_ID,
+        reader=reader,
+        writer=writer,  # type: ignore[arg-type]
+        max_line_bytes=16,
+    )
+    reader.feed_data(b'{"x": "' + b"a" * 64 + b'"}\n')
+    with pytest.raises(CommsProtocolError):
+        await transport.read_payload_unit()
+
+
+async def test_read_payload_unit_raises_on_malformed_seq_header() -> None:
+    """THREE-point bound (c): a seq-enabled malformed header raises ``CommsProtocolError``.
+
+    The third bound is ``decode_seq_frame``'s own validation — here a declared-length
+    mismatch (``n=`` disagreeing with the payload run). A seq-enabled reader fed such a
+    line must raise through the SAME arm as a malformed plain frame.
+    """
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    transport.enable_seq_ack()
+    # ``n=99`` but the payload is 3 bytes -> decode_seq_frame declared-length mismatch.
+    reader.feed_data(b"A1 s=0 a=0 n=99 |abc\n")
+    with pytest.raises(CommsProtocolError):
+        await transport.read_payload_unit()
+
+
+async def test_send_payload_unit_reframe_ceiling_raises_seq_enabled() -> None:
+    """REFRAME CEILING (seq on): a payload at ``_max_line_bytes`` leaves no header room.
+
+    With seq/ack ON, ``encode_seq_frame`` bounds the WHOLE unit (header + payload +
+    newline) by ``max_unit_bytes``. A payload whose length already equals
+    ``_max_line_bytes`` cannot fit the header/newline, so ``encode_seq_frame`` raises
+    ``CommsProtocolError`` and ``send_payload_unit`` lets it propagate (loud, hard
+    rule #7).
+    """
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(
+        adapter_id=_ADAPTER_ID,
+        reader=reader,
+        writer=writer,  # type: ignore[arg-type]
+        max_line_bytes=32,
+    )
+    transport.enable_seq_ack()
+    with pytest.raises(CommsProtocolError):
+        await transport.send_payload_unit(b"a" * 32, ack=0)
+
+
+async def test_send_payload_unit_loud_on_broken_pipe() -> None:
+    """A broken pipe mid-send_payload_unit re-raises loud (hard rule #7).
+
+    Mirrors ``send``: the ``BrokenPipeError`` / ``ConnectionResetError`` propagates so
+    the relay's crash arm can route the failure, never swallowed.
+    """
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter(broken=True)
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    with pytest.raises((BrokenPipeError, ConnectionResetError)):
+        await transport.send_payload_unit(b'{"x":1}', ack=0)
