@@ -220,5 +220,26 @@ class ReplayBuffer:
         if removed:
             del self._retained[:removed]
 
+    def evict_expired(self, *, now: float) -> tuple[int, ...]:
+        """Remove + zero frames older than ``ttl_seconds``; return the evicted seqs.
+
+        A frame is expired when ``now - enqueued_at > ttl_seconds`` (exactly-at-TTL
+        retained). Because ``append`` enforces a monotonic ``now``, the expired frames
+        are a leading FIFO prefix. Evicting un-acked input is deliberate
+        security-over-liveness loss (pre-DLP input cannot be pinned across an unbounded
+        crash-loop), so it is OBSERVABLE — the returned seqs let G4b write the spec §6
+        loud audit row per dropped frame. Does NOT clear :attr:`breaker_tripped`.
+        """
+        evicted: list[int] = []
+        for entry in self._retained:
+            if now - entry.enqueued_at <= self._ttl_seconds:
+                break
+            self._depth_bytes -= len(entry.body)
+            _zero(entry.body)
+            evicted.append(entry.seq)
+        if evicted:
+            del self._retained[: len(evicted)]
+        return tuple(evicted)
+
 
 __all__ = ["ReplayBuffer", "ReplayBufferError", "ReplayFrame"]
