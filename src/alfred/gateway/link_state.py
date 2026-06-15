@@ -198,6 +198,32 @@ _TRANSITIONS: dict[
         GatewayLinkState.UNAVAILABLE,
         LinkControl.UNAVAILABLE,
     ),
+    # --- UNAVAILABLE (absorbing) ------------------------------------------
+    # Terminal: every event keeps the machine here and emits nothing. A repeated
+    # BREAKER_TRIPPED (the relay re-feeds while the latch holds) is idempotent — the
+    # gap was already escalated. A CORE_READY does NOT un-wedge the buffer (its
+    # breaker latch clears only on ``discard``), so it must never emit a spurious
+    # RESTORED. Recovery is a fresh session (a new machine), not an in-place exit.
+    (GatewayLinkState.UNAVAILABLE, GatewayLinkEvent.BREAKER_TRIPPED): (
+        GatewayLinkState.UNAVAILABLE,
+        None,
+    ),
+    (GatewayLinkState.UNAVAILABLE, GatewayLinkEvent.CORE_READY): (
+        GatewayLinkState.UNAVAILABLE,
+        None,
+    ),
+    (GatewayLinkState.UNAVAILABLE, GatewayLinkEvent.CORE_GOING_DOWN): (
+        GatewayLinkState.UNAVAILABLE,
+        None,
+    ),
+    (GatewayLinkState.UNAVAILABLE, GatewayLinkEvent.CORE_CRASH_EOF): (
+        GatewayLinkState.UNAVAILABLE,
+        None,
+    ),
+    (GatewayLinkState.UNAVAILABLE, GatewayLinkEvent.REDIAL_STARTED): (
+        GatewayLinkState.UNAVAILABLE,
+        None,
+    ),
 }
 
 
