@@ -47,10 +47,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from uuid import uuid4
 
 import structlog
 
 from alfred.comms_mcp.hookpoints import ADAPTER_CRASHED_HOOKPOINT
+from alfred.comms_mcp.protocol import OutboundMessageRequest
 from alfred.hooks.context import HookContext
 from alfred.hooks.registry import SYSTEM_OPERATOR_TIERS
 from alfred.i18n import t
@@ -79,11 +81,19 @@ _PROVIDER_KEY_PLACEHOLDER = "quarantine-provider-key-unset-placeholder"
 
 _log = structlog.get_logger(__name__)
 
-# The fixed ack body the 11b dispatch emits. A deterministic, content-free
-# acknowledgement so the inbound -> extract -> ingest -> dispatch -> outbound
-# round-trip is observable end to end without invoking the (out-of-scope)
-# privileged per-turn machinery.
-_ACK_BODY: Mapping[str, object] = {"content": "ack"}
+# The fixed ack *content text* the 11b dispatch emits. A deterministic,
+# content-free acknowledgement so the inbound -> extract -> ingest -> dispatch ->
+# outbound round-trip is observable end to end without invoking the (out-of-scope)
+# privileged per-turn machinery. This is the RAW body string the outbound DLP
+# chokepoint scans (:meth:`OutboundDlp.scan_for_outbound`) before the ack is
+# wrapped in an :class:`OutboundMessageRequest` — the ack does NOT bypass DLP
+# (CLAUDE.md hard rule #4: no outbound, not even a stubbed ack, skips the redactor).
+_ACK_CONTENT: str = "ack"
+
+# The ack is a direct reply, so it addresses the recipient in DM mode. The TUI
+# handler refuses anything other than ``"dm"`` (it is 1:1); a stubbed ack to any
+# adapter is conceptually a direct reply to the originating user.
+_ACK_ADDRESSING_MODE: Literal["dm"] = "dm"
 
 # The hook-invoke seam shape (:func:`alfred.hooks.invoke.invoke`). Injected so the
 # crash invoker can be unit-tested without standing up a full registry + dispatch
@@ -100,15 +110,16 @@ class OutboundSenderLike(Protocol):
     ``outbound.message`` JSON-RPC request. Kept as a structural Protocol so this
     module never imports the runner (one-directional import graph) and tests can
     drive it with a recording double.
+
+    The seam takes a fully-validated :class:`OutboundMessageRequest` (G5 #237) —
+    NOT a loose ``(adapter_id, target_platform_id, body)`` triple. Passing the
+    typed request makes the wire contract type-safe at the construction site AND
+    means the DLP-minted :data:`ScannedOutboundBody` body cannot be bypassed: the
+    request is unconstructable without first routing the body through the outbound
+    DLP chokepoint (CLAUDE.md hard rule #4). The sender serialises it onto the wire.
     """
 
-    async def send_outbound(
-        self,
-        *,
-        adapter_id: str,
-        target_platform_id: str,
-        body: Mapping[str, object],
-    ) -> Mapping[str, object]: ...
+    async def send_outbound(self, request: OutboundMessageRequest) -> Mapping[str, object]: ...
 
 
 class CommsInboundOrchestratorAdapter:
@@ -120,8 +131,15 @@ class CommsInboundOrchestratorAdapter:
     why a pre-bind ``ingest`` / ``dispatch`` fails loudly.
     """
 
-    def __init__(self, *, extractor_bridge: CommsExtractorBridge) -> None:
+    def __init__(
+        self, *, extractor_bridge: CommsExtractorBridge, outbound_dlp: OutboundDlp
+    ) -> None:
         self._extractor_bridge = extractor_bridge
+        # The outbound DLP chokepoint the stubbed ack is routed through before it
+        # crosses the wire (CLAUDE.md hard rule #4 — no outbound, not even an ack,
+        # bypasses the redactor). ``scan_for_outbound`` is the ONLY minter of the
+        # ``ScannedOutboundBody`` the ``OutboundMessageRequest`` body field accepts.
+        self._outbound_dlp = outbound_dlp
         self._outbound_sender: OutboundSenderLike | None = None
 
     def bind_outbound_sender(self, sender: OutboundSenderLike) -> None:
@@ -163,15 +181,32 @@ class CommsInboundOrchestratorAdapter:
         }
 
     async def dispatch(self, ingested: object) -> None:
-        """Emit the fixed-shape ack outbound through the late-bound sender."""
+        """Emit the fixed-shape ack outbound through the late-bound sender.
+
+        The ack body is routed through the outbound DLP chokepoint
+        (:meth:`OutboundDlp.scan_for_outbound`) and wrapped in a fully-validated
+        :class:`OutboundMessageRequest` so the production TUI / Discord plugins
+        accept it (G5 #237). The DLP-minted :data:`ScannedOutboundBody` is the
+        body — never a raw dict — so the ack cannot bypass the redactor (CLAUDE.md
+        hard rule #4) and the wire frame satisfies ``OutboundMessageRequest`` on
+        the consumer's ``model_validate``.
+        """
         sender = self._require_sender()
         if not isinstance(ingested, Mapping):
             raise RuntimeError(t("comms.daemon_runtime.dispatch_bad_ingested"))
-        await sender.send_outbound(
+        # MANDATORY DLP chokepoint: mint the ScannedOutboundBody from the raw ack
+        # content text. This is the ONLY way to obtain the body type the request
+        # requires, so the ack physically cannot skip the scan.
+        scanned_body = self._outbound_dlp.scan_for_outbound(_ACK_CONTENT)
+        request = OutboundMessageRequest(
             adapter_id=str(ingested["adapter_id"]),
+            idempotency_key=uuid4(),
             target_platform_id=str(ingested["target_platform_id"]),
-            body=_ACK_BODY,
+            body=scanned_body,
+            attachments_refs=(),
+            addressing_mode=_ACK_ADDRESSING_MODE,
         )
+        await sender.send_outbound(request)
 
     def _require_sender(self) -> OutboundSenderLike:
         """Return the bound sender or raise loudly (no silent failure)."""

@@ -243,23 +243,45 @@ def test_enabled_adapter_spawns_and_registers(
     assert _FakeCommsTransport.instances[0].adapter_id == _ENABLED_ADAPTER
 
     # The inbound orchestrator's outbound sender was bound exactly once, and it
-    # routes through the runner's send_request (the dispatch-ack seam is live).
+    # routes through the runner's send_request (the dispatch-ack seam is live). The
+    # seam now takes a fully-validated OutboundMessageRequest (G5 #237) whose body
+    # is the DLP-minted ScannedOutboundBody — it serialises to the wire params the
+    # real TUI / Discord plugin re-validates.
     assert len(bound_senders) == 1
     sender = bound_senders[0]
     import asyncio
+    from uuid import uuid4
 
-    asyncio.run(
-        sender.send_outbound(
-            adapter_id=_ENABLED_ADAPTER, target_platform_id="discord:7", body={"content": "ack"}
-        )
+    from alfred.comms_mcp.protocol import OutboundMessageRequest
+    from alfred.security.dlp import OutboundDlp
+
+    class _PassthroughBroker:
+        def redact(self, text: str) -> str:
+            return text
+
+    dlp = OutboundDlp(broker=_PassthroughBroker(), audit=lambda *, event, subject: None)
+    scanned = dlp.scan_for_outbound("ack")
+    idem = uuid4()
+    request = OutboundMessageRequest(
+        adapter_id=_ENABLED_ADAPTER,
+        idempotency_key=idem,
+        target_platform_id="discord:7",
+        body=scanned,
+        attachments_refs=(),
+        addressing_mode="dm",
     )
+
+    asyncio.run(sender.send_outbound(request))
     assert runner.outbound_calls == [
         {
             "method": "outbound.message",
             "params": {
                 "adapter_id": _ENABLED_ADAPTER,
+                "idempotency_key": str(idem),
                 "target_platform_id": "discord:7",
-                "body": {"content": "ack"},
+                "body": ["ack", {"dlp_redactions_count": 0, "canary_tripped": False}],
+                "attachments_refs": [],
+                "addressing_mode": "dm",
             },
         }
     ]
