@@ -41,7 +41,12 @@ from typing import Any, Final, Protocol
 import structlog
 
 from alfred.comms_mcp.errors import DaemonUnavailableError
-from alfred.comms_mcp.protocol import InboundMessageNotification
+from alfred.comms_mcp.protocol import (
+    LINK_RECONNECTING,
+    LINK_RESTORED,
+    LINK_UNAVAILABLE,
+    InboundMessageNotification,
+)
 from alfred.plugins.comms_socket_transport import (
     CommsPeerAuthError,
     CommsSocketTransport,
@@ -95,6 +100,29 @@ class _TransportLike(Protocol):
 type _Dial = Callable[[str], Awaitable[CommsSocketTransport]]
 type _BuildApp = Callable[[TuiSession], _AppLike]
 
+# A narrow allowlist of the gateway's client-TERMINAL link-state control frames
+# (Spec A G3-3a / ADR-0031). These id-less notifications carry NO payload and NO
+# ``adapter_id`` — they are pure STATE signals the pump routes to a banner callback
+# (the TUI paints its own localized banner from the method in a later task). They
+# are NOT relayed/dispatched/acked, and are NOT in ``TuiServer``'s method set.
+_LINK_STATE_METHODS: Final[frozenset[str]] = frozenset(
+    {LINK_RECONNECTING, LINK_RESTORED, LINK_UNAVAILABLE}
+)
+
+# The banner callback the pump invokes with the link-state METHOD string. Kept a
+# bare ``str`` (the wire method) — the pump only routes the STATE; the banner TEXT
+# (and its ``t()`` localization) is the app's job in a later task.
+type _OnLinkState = Callable[[str], Awaitable[None]]
+
+
+async def _noop_link_state(_state: str) -> None:
+    """Default ``on_link_state``: drop the signal (no banner consumer wired yet).
+
+    Keeps every existing caller behaviour-identical — a ``link.*`` frame is still
+    recognised as client-terminal (never relayed/dispatched), it simply has no
+    visible effect until the TUI wires a real banner callback.
+    """
+
 
 def _make_socket_inbound_sink(
     transport: _TransportLike,
@@ -121,7 +149,12 @@ def _make_socket_inbound_sink(
     return _sink
 
 
-async def _serve_wire(transport: _TransportLike, server: TuiServer) -> None:
+async def _serve_wire(
+    transport: _TransportLike,
+    server: TuiServer,
+    *,
+    on_link_state: _OnLinkState = _noop_link_state,
+) -> None:
     """Read request frames off the socket, dispatch them, write responses back.
 
     The daemon-side runner SENDS ``lifecycle.start`` / ``adapter.health`` /
@@ -131,6 +164,14 @@ async def _serve_wire(transport: _TransportLike, server: TuiServer) -> None:
     a graceful ``alfred daemon stop``). A malformed frame raises ``CommsProtocolError``
     out of ``read_frame`` — propagated LOUD so the co-host's ``TaskGroup`` tears the
     app down rather than limping on a corrupt wire.
+
+    The gateway's client-TERMINAL ``link.*`` control frames (Spec A G3-3a / ADR-0031)
+    are routed by a NARROW ALLOWLIST *before* ``dispatch``: a frame whose ``method``
+    is one of :data:`_LINK_STATE_METHODS` invokes ``on_link_state`` (the banner
+    callback) and is NOT relayed/dispatched/acked. The allowlist is deliberately
+    narrow on the METHOD — NOT a catch-all on "id-less": an id-less
+    ``daemon.lifecycle.*`` (or any other unknown notification) is NOT a link signal
+    and still falls through to the existing dispatch->``None`` skip below.
 
     ``server.dispatch`` returns a response frame for a well-formed REQUEST, but
     ``None`` for an id-less NOTIFICATION with an unknown method (Spec A G3-2 #237: the
@@ -146,7 +187,17 @@ async def _serve_wire(transport: _TransportLike, server: TuiServer) -> None:
             # the app so the operator sees "daemon disconnected", not a silent hang.
             _log.info("comms.tui.wire_eof")
             return
-        response = await server.dispatch(dict(frame))
+        frame_dict = dict(frame)
+        method = frame_dict.get("method")
+        if isinstance(method, str) and method in _LINK_STATE_METHODS:
+            # Gateway link-state control frame — route to the banner callback and
+            # STOP (client-terminal: never relayed/dispatched/acked). The narrow
+            # method allowlist keeps a daemon.lifecycle.* / unknown notification on
+            # the dispatch->``None`` skip path below.
+            _log.info("comms.tui.link_state", state=method)
+            await on_link_state(method)
+            continue
+        response = await server.dispatch(frame_dict)
         if response is not None:
             # An id-less notification (unknown method) dispatches to ``None`` — skip
             # the write so no malformed ``null`` reply goes back (architect C-2).
@@ -158,6 +209,7 @@ async def run_cohosted(
     adapter_id: str,
     dial: _Dial = dial_comms_socket,
     build_app_fn: _BuildApp = build_app,
+    on_link_state: _OnLinkState = _noop_link_state,
 ) -> int:
     """Dial the daemon and co-host the Textual app + the socket serve loop.
 
@@ -167,6 +219,11 @@ async def run_cohosted(
     The ``dial`` / ``build_app_fn`` seams default to the production
     :func:`alfred.plugins.comms_socket_transport.dial_comms_socket` /
     :func:`alfred_tui.render.build_app`; tests inject in-memory doubles.
+
+    ``on_link_state`` is the banner callback the wire pump invokes with a gateway
+    ``link.*`` state method (Spec A G5 / ADR-0031). It defaults to a no-op so every
+    current caller is behaviour-identical; the TUI wires a real banner painter into
+    it in a later task.
 
     Construction order breaks the session<->app render-hook cycle: the session is
     built FIRST with the socket inbound sink, then ``build_app_fn`` cross-wires the
@@ -205,7 +262,7 @@ async def run_cohosted(
     try:
         async with asyncio.TaskGroup() as tg:
             app_task = tg.create_task(app.run_async())
-            wire_task = tg.create_task(_serve_wire(transport, server))
+            wire_task = tg.create_task(_serve_wire(transport, server, on_link_state=on_link_state))
 
             # The app task owns the lifecycle: when the operator quits, end the wire
             # pump too (it would otherwise block forever on the daemon's socket).

@@ -231,6 +231,136 @@ async def test_serve_loop_still_replies_to_a_following_request() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Gateway ``link.*`` control frames -> banner callback (Spec A G5 / ADR-0031).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["link.reconnecting", "link.restored", "link.unavailable"],
+)
+async def test_serve_loop_routes_link_control_frame_to_banner_callback(method: str) -> None:
+    """A gateway ``link.*`` id-less frame invokes ``on_link_state`` (not ``dispatch``).
+
+    The gateway sends id-less ``link.reconnecting`` / ``link.restored`` /
+    ``link.unavailable`` STATE signals when the core link gaps/restores. The pump
+    routes them to the banner callback via a NARROW allowlist BEFORE
+    ``server.dispatch`` — they are client-terminal (no relay/ack). The server is a
+    spy that fails the test if ``dispatch`` is ever reached for one.
+    """
+    states: list[str] = []
+
+    async def _record(state: str) -> None:
+        states.append(state)
+
+    class _SpyServer:
+        async def dispatch(self, request: dict[str, Any]) -> dict[str, Any] | None:
+            raise AssertionError(f"link.* frame must not reach dispatch: {request!r}")
+
+    transport = _FakeTransport(inbound=[{"jsonrpc": "2.0", "method": method, "params": {}}])
+    await _serve_wire(transport, _SpyServer(), on_link_state=_record)  # type: ignore[arg-type]
+
+    assert states == [method]
+    assert transport.sent == []  # client-terminal: no reply/ack written back
+
+
+async def test_serve_loop_request_still_routes_to_dispatch_with_link_callback() -> None:
+    """A daemon REQUEST still routes through ``server.dispatch`` + a response is sent.
+
+    The ``link.*`` allowlist must not touch the normal request path: an
+    ``outbound.message`` dm still reaches ``dispatch`` and its response goes back —
+    even when an ``on_link_state`` callback is wired in.
+    """
+    states: list[str] = []
+
+    async def _record(state: str) -> None:
+        states.append(state)
+
+    session = TuiSession()
+    session.set_render_hook(lambda _text: None)
+    req = OutboundMessageRequest(
+        adapter_id="tui",
+        idempotency_key=uuid4(),
+        target_platform_id="local-operator",
+        body=_scanned("ack"),
+        attachments_refs=(),
+        addressing_mode="dm",
+    )
+    transport = _FakeTransport(
+        inbound=[
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "outbound.message",
+                "params": req.model_dump(mode="json"),
+            }
+        ]
+    )
+    server = TuiServer(session=session)
+    await _serve_wire(transport, server, on_link_state=_record)
+
+    assert states == []  # a request is NOT a link-state signal
+    assert transport.sent[0]["id"] == 5
+    assert transport.sent[0]["result"]["outcome"] == "delivered"
+
+
+async def test_serve_loop_daemon_lifecycle_notification_is_not_a_banner() -> None:
+    """An id-less ``daemon.lifecycle.*`` notification keeps the EXISTING skip path.
+
+    The allowlist is NARROW: only ``link.*`` becomes a banner. A daemon-lifecycle
+    broadcast (also id-less, unknown method) still falls through to
+    ``dispatch`` -> ``None`` -> skip — it does NOT invoke ``on_link_state``.
+    """
+    states: list[str] = []
+
+    async def _record(state: str) -> None:
+        states.append(state)
+
+    transport = _FakeTransport(
+        inbound=[
+            {
+                "jsonrpc": "2.0",
+                "method": "daemon.lifecycle.ready",
+                "params": {"epoch": "a" * 32},
+            }
+        ]
+    )
+    await _serve_wire(transport, TuiServer(session=TuiSession()), on_link_state=_record)
+
+    assert states == []  # NOT a banner — the existing dispatch->None skip handled it
+    assert transport.sent == []
+
+
+async def test_serve_loop_arbitrary_unknown_idless_notification_is_not_a_banner() -> None:
+    """An arbitrary unknown id-less notification is NOT a banner either (narrow allowlist)."""
+    states: list[str] = []
+
+    async def _record(state: str) -> None:
+        states.append(state)
+
+    transport = _FakeTransport(
+        inbound=[{"jsonrpc": "2.0", "method": "some.unknown.notification", "params": {}}]
+    )
+    await _serve_wire(transport, TuiServer(session=TuiSession()), on_link_state=_record)
+
+    assert states == []
+    assert transport.sent == []
+
+
+async def test_link_methods_are_absent_from_the_plugin_method_set() -> None:
+    """``link.*`` is NOT in the plugin's closed method set (it is client-terminal).
+
+    The ``link.*`` frames are routed by the pump's allowlist, never dispatched, so
+    they must not be added to ``TuiServer.list_methods()`` — that set stays the four
+    host->plugin request methods.
+    """
+    methods = TuiServer(session=TuiSession()).list_methods()
+    assert "link.reconnecting" not in methods
+    assert "link.restored" not in methods
+    assert "link.unavailable" not in methods
+
+
+# ---------------------------------------------------------------------------
 # Co-host lifecycle — controllable app double.
 # ---------------------------------------------------------------------------
 
