@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from typing import Final, Protocol, runtime_checkable
 
 import structlog
@@ -49,7 +51,11 @@ from alfred.gateway.link_state import (
     GatewayLinkState,
     LinkStateMachine,
 )
-from alfred.gateway.metrics import CORE_LINK_UP, RECONNECT_ATTEMPTS
+from alfred.gateway.metrics import (
+    CORE_LINK_UP,
+    CORE_UNAVAILABLE_SECONDS,
+    RECONNECT_ATTEMPTS,
+)
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
 from alfred.plugins.comms_wire import CommsProtocolError
 
@@ -75,6 +81,30 @@ _BACKOFF_FACTOR: Final[float] = 2.0
 # the handshake is warn-and-dropped (mirrors the host runner's pre-handshake arm).
 _LIFECYCLE_START_METHOD: Final[str] = "lifecycle.start"
 
+# A core-leg read that ends one of these ways is a GAP, not a fatal error: the
+# socket tore, the peer dropped, or a wire violation landed. The pump treats them
+# uniformly with a clean EOF — open/keep the gap, then reconnect. Mirrors the host
+# runner's ``_TRANSPORT_READ_EXCEPTIONS`` (kept local so this trust-boundary module
+# owns the exact family it gaps on). ``CommsProtocolError`` subsumes ``CommsPeerAuthError``.
+_TRANSPORT_CRASH_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
+    BrokenPipeError,
+    ConnectionResetError,
+    asyncio.IncompleteReadError,
+    EOFError,
+    CommsProtocolError,
+)
+
+
+class _Shutdown(Exception):  # noqa: N818 — internal control signal, not an error
+    """Internal control-flow signal: the shutdown event fired during a pump read.
+
+    Raised by :meth:`GatewayCoreLink._read_frame_or_shutdown` when the shutdown
+    waiter wins the read race, so :meth:`GatewayCoreLink.run` returns through its
+    ``finally`` (closing the transport) WITHOUT feeding ``CORE_CRASH_EOF`` — a
+    shutdown is a clean stop, never a gap, so it must NOT emit ``reconnecting``.
+    Mirrors :class:`alfred.plugins.comms_runner._ShutdownSignalled`.
+    """
+
 
 class GatewayCoreLinkError(AlfredError):
     """The core-leg peer handshake failed (fail-loud, CLAUDE.md hard rule #7).
@@ -84,6 +114,26 @@ class GatewayCoreLinkError(AlfredError):
     hex). Mirrors the host runner's :class:`PluginError` handshake-failure arm —
     an unusable core handshake is never a silent no-op.
     """
+
+
+# The errors a FAILED INITIAL dial/handshake can raise. A first-attempt failure is
+# not fatal — it is just the first not-UP edge: open the gap, then reconnect (which
+# retries with backoff). Wider than the pump's crash family because the *initial*
+# connect can also hit a missing/refused socket (the daemon not up yet) or a
+# malformed handshake (``GatewayCoreLinkError`` — defined just above). It MUST also
+# cover the read-crash family the steady-state pump tolerates: a ``read_frame`` on
+# the FIRST handshake can raise ``EOFError`` / ``asyncio.IncompleteReadError`` (its
+# subclass) if the core tears the leg mid-handshake — that is a gap-and-reconnect,
+# never an uncaught escape that leaks the half-open transport + crashes ``run``.
+_INITIAL_DIAL_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
+    FileNotFoundError,
+    ConnectionRefusedError,
+    OSError,
+    EOFError,
+    asyncio.IncompleteReadError,
+    CommsProtocolError,
+    GatewayCoreLinkError,
+)
 
 
 @runtime_checkable
@@ -126,6 +176,8 @@ class GatewayCoreLink:
         dial: Callable[[], Awaitable[_CommsTransportLike]] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[float], float] | None = None,
+        shutdown_event: asyncio.Event | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
         self._client_listener = client_listener
@@ -161,6 +213,16 @@ class GatewayCoreLink:
         # lifecycle control frames the gateway CONSUMES nor (yet) the payload frames
         # it RELAYS (the relay is G3-3b-2). T1 carrier: counted, never acted on.
         self._dropped_payload_frames: int = 0
+        # The supervised-lifecycle seams (Task 6). The shutdown event ends ``run`` as
+        # a CLEAN stop (no spurious ``reconnecting``); when ``None`` the pump read is a
+        # bare ``read_frame`` await. ``monotonic`` is injected so the not-UP duration
+        # ``CORE_UNAVAILABLE_SECONDS`` accrues is deterministic under test.
+        self._shutdown_event = shutdown_event
+        self._monotonic = monotonic
+        # The monotonic timestamp the link last left UP (the gap-open edge). ``None``
+        # while UP — set on an UP->not-UP edge, read + cleared on the not-UP->UP edge
+        # to accrue the elapsed not-UP seconds onto ``CORE_UNAVAILABLE_SECONDS``.
+        self._gap_started_at: float | None = None
 
     async def _default_dial(self) -> _CommsTransportLike:
         """Production dial: connect the core's comms socket on the keyed adapter id.
@@ -172,6 +234,123 @@ class GatewayCoreLink:
         from alfred.plugins.comms_socket_transport import dial_comms_socket
 
         return await dial_comms_socket(self._dial_adapter_id)
+
+    async def run(self) -> None:
+        """Supervised core-link lifecycle: dial, handshake, pump, reconnect on a gap.
+
+        The top-level entry point. Dials + handshakes the core leg, then PUMPS the
+        core frames — consuming lifecycle control frames (driving the §9 invariant)
+        and dropping payload frames — reconnecting with backoff on a gap (a planned
+        ``going_down`` then EOF, or a crash EOF). Returns promptly + cleanly when the
+        shutdown event fires, WITHOUT a spurious ``reconnecting`` (a shutdown is a
+        clean stop, not a gap).
+
+        **No FD leak (CLAUDE.md hard rule #7).** The live transport is ``close()``d on
+        EVERY exit path — shutdown, a clean run completion, or a propagating cancel —
+        via the pump's ``try/finally``. **Fail-loud:** a gap is announced (not
+        swallowed); only the shutdown signal is a quiet return.
+        """
+        transport = await self._initial_connect()
+        try:
+            while True:
+                if self._shutdown_event is not None and self._shutdown_event.is_set():
+                    return
+                try:
+                    frame = await self._read_frame_or_shutdown(transport)
+                except _Shutdown:
+                    return
+                except _TRANSPORT_CRASH_EXCEPTIONS as exc:
+                    # A torn wire / dropped peer / wire violation: a GAP, not fatal.
+                    # Loud (CLAUDE.md hard rule #7), open/keep the gap, then reconnect.
+                    log.warning("gateway.core_link.pump_crash", error=repr(exc))
+                    await self._feed(GatewayLinkEvent.CORE_CRASH_EOF)
+                    transport = await self._reconnect_closing(transport)
+                    continue
+                if frame is None:
+                    # A clean EOF: the gap is already announced if a ``going_down``
+                    # preceded it (idempotent CRASH_EOF), else this opens it.
+                    await self._feed(GatewayLinkEvent.CORE_CRASH_EOF)
+                    transport = await self._reconnect_closing(transport)
+                    continue
+                await self._consume_frame(frame)
+        finally:
+            await transport.close()
+
+    async def _initial_connect(self) -> _CommsTransportLike:
+        """Dial + handshake the core leg ONCE; on failure open the gap + reconnect.
+
+        A clean initial connect feeds ``CORE_READY`` from UP (idempotent — emits no
+        banner, so there is no spurious ``restored`` at startup). A failed initial
+        dial/handshake closes any half-open transport, opens the gap via
+        ``CORE_CRASH_EOF`` (the first not-UP edge), and reconnects with backoff — so a
+        daemon that is not up yet does not crash ``run`` (CLAUDE.md hard rule #7).
+        """
+        transport: _CommsTransportLike | None = None
+        try:
+            transport = await self._dial()
+            await self._peer_handshake(transport)
+        except _INITIAL_DIAL_EXCEPTIONS as exc:
+            log.warning("gateway.core_link.initial_connect_failed", error=repr(exc))
+            if transport is not None:
+                # A dial that connected but whose handshake raised leaves a half-open
+                # transport — close it before reconnecting (no FD leak).
+                await transport.close()
+            await self._feed(GatewayLinkEvent.CORE_CRASH_EOF)
+            return await self._reconnect()
+        await self._feed(GatewayLinkEvent.CORE_READY)
+        return transport
+
+    async def _reconnect_closing(self, stale: _CommsTransportLike) -> _CommsTransportLike:
+        """Close the gapped transport, then reconnect — never leak the stale FD.
+
+        The pump's ``finally`` only closes the CURRENT live transport; when a gap
+        rebinds ``transport`` to a fresh leg the OLD one must be closed here or it
+        leaks for the life of the process.
+        """
+        await stale.close()
+        return await self._reconnect()
+
+    async def _read_frame_or_shutdown(
+        self, transport: _CommsTransportLike
+    ) -> Mapping[str, object] | None:
+        """Read the next core frame, aborting the read if shutdown is signalled.
+
+        With no shutdown event wired this is a bare ``read_frame`` await. With one
+        wired, the read races ``shutdown_event.wait()`` (FIRST_COMPLETED): a read win
+        flows its frame / EOF / raise on exactly as a bare await would; a shutdown win
+        CANCELS the in-flight read (so a blocking ``read_frame`` does not leak), awaits
+        its cancellation, and raises :class:`_Shutdown` so the pump returns WITHOUT
+        feeding a gap. Mirrors :meth:`CommsPluginRunner._read_frame_or_shutdown`.
+        """
+        if self._shutdown_event is None:
+            return await transport.read_frame()
+
+        read_task: asyncio.Task[Mapping[str, object] | None] = asyncio.ensure_future(
+            transport.read_frame()
+        )
+        shutdown_task: asyncio.Task[bool] = asyncio.ensure_future(self._shutdown_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {read_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            # A force-cancel tearing down ``run``: cancel both children so neither
+            # leaks, then let the CancelledError propagate — the pump's ``finally``
+            # still closes the transport (cancellation-safety, CLAUDE.md rule #7).
+            read_task.cancel()
+            shutdown_task.cancel()
+            raise
+        if read_task in done:
+            # The read won — cancel the (still-pending) shutdown waiter and surface
+            # the read's result/exception exactly as a bare await would.
+            shutdown_task.cancel()
+            return read_task.result()
+        # Shutdown won: cancel the in-flight blocking read so it does not leak, await
+        # its cancellation, then signal the pump to exit cleanly (no gap fed).
+        read_task.cancel()
+        with suppress(asyncio.CancelledError, *_TRANSPORT_CRASH_EXCEPTIONS):
+            await read_task
+        raise _Shutdown
 
     async def _reconnect(self) -> _CommsTransportLike:
         """Dial + handshake the core leg, retrying with exponential backoff + jitter.
@@ -369,18 +548,29 @@ class GatewayCoreLink:
         await self._feed(GatewayLinkEvent.CORE_READY)
 
     async def _feed(self, event: GatewayLinkEvent) -> None:
-        """Feed a TYPED event to the machine; emit any control frame; refresh the gauge.
+        """Feed a TYPED event to the machine; emit any control frame; refresh metrics.
 
         The control frame (if any) is mapped via :func:`control_notification` and
         pushed to the client through the listener. ``CORE_LINK_UP`` is set to ``1``
         iff the resulting machine state is UP, else ``0``.
+
+        The UP-ness EDGE is observed here (the one place every transition flows
+        through): on UP->not-UP stamp the gap-open clock; on not-UP->UP accrue the
+        elapsed seconds onto ``CORE_UNAVAILABLE_SECONDS``. An idempotent transition
+        (UP->UP, or a not-UP->not-UP within one gap) crosses no edge and touches
+        neither — so a multi-attempt gap accrues its seconds exactly once.
         """
+        was_up = self._machine.state is GatewayLinkState.UP
         control = self._machine.feed(event)
         if control is not None:
             await self._client_listener.send_control(control_notification(control))
-        # CORE_UNAVAILABLE_SECONDS is a Task-6 concern (it needs a clock to accrue the
-        # not-UP duration); the gauge is the only metric the pure transition updates.
-        CORE_LINK_UP.set(1 if self._machine.state is GatewayLinkState.UP else 0)
+        now_up = self._machine.state is GatewayLinkState.UP
+        if was_up and not now_up:
+            self._gap_started_at = self._monotonic()
+        elif not was_up and now_up and self._gap_started_at is not None:
+            CORE_UNAVAILABLE_SECONDS.inc(self._monotonic() - self._gap_started_at)
+            self._gap_started_at = None
+        CORE_LINK_UP.set(1 if now_up else 0)
 
 
 __all__ = [
