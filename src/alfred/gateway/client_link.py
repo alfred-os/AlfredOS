@@ -23,6 +23,12 @@ malformed result, or a hostile peer that floods more than
 ONLY when the TUI ECHOES the matching wire version; a result that omits the echo
 leaves the leg plain ADR-0025. The real operator-local TUI returns
 ``seq_ack=None``.
+
+**Stricter than the runner's ack check (deliberate hardening).** The runner
+accepts a loose ``result.get("ok")``; this leg instead validates the result via
+:class:`LifecycleStartResult` (``plugin_version`` required, ``extra="forbid"``) —
+the correct hardening for the attacker-reachable client leg, where a malformed or
+smuggled-field result must fail closed rather than be read positionally.
 """
 
 from __future__ import annotations
@@ -122,7 +128,13 @@ async def client_handshake(transport: _ClientHandshakeTransport) -> bool:
             raise GatewayHandshakeError(
                 f"client link closed before lifecycle.start ack (adapter_id={_CLIENT_ADAPTER_ID!r})"
             )
-        if frame.get("id") == _CLIENT_LIFECYCLE_START_ID:
+        frame_id = frame.get("id")
+        # ``frame.get("id") == _CLIENT_LIFECYCLE_START_ID`` ALONE would also match
+        # ``{"id": false, ...}`` because ``False == 0`` in Python — a non-conformant
+        # frame would be treated as the ack. Guard the int type (and exclude ``bool``,
+        # an int subclass) so only a genuine integer ``0`` is the ack; a boolean id is
+        # warn-dropped as a pre-ack frame within the cap.
+        if type(frame_id) is int and frame_id == _CLIENT_LIFECYCLE_START_ID:
             return _negotiate_from_result(transport, frame.get("result"))
         # A non-matching frame before the ack is not expected on a conformant TUI
         # wire (the TUI answers lifecycle.start before emitting anything else);

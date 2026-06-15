@@ -1,6 +1,6 @@
 # ADR-0035 — `lifecycle.start` credentials are optional (adapter-dependent), not a credential-delivery channel
 
-- **Status**: Accepted
+- **Status**: Proposed (Spec A; accepted on G3-3b-2b merge)
 - **Date**: 2026-06-14
 - **Slice**: Spec A — `docs/superpowers/specs/2026-06-13-comms-gateway-resume-design.md` (§8 G3-3b)
 - **Relates to**: [ADR-0016](0016-slice4-discord-tui-comms-mcp-rewrite.md) (the comms-MCP rewrite whose wire-format schemas this model belongs to), [ADR-0025](0025-comms-stdio-transport-line-delimited-and-thin.md) (the line-delimited wire the handshake rides), [ADR-0031](0031-comms-socket-transport-for-the-foreground-tui.md) (the TUI socket carrier whose handshake this fixes), [ADR-0032](0032-gateway-comms-resume-transport.md) (the gateway client leg that sends `lifecycle.start`), issue #237 (graduation criterion #7)
@@ -11,7 +11,7 @@
 `lifecycle.start` is the first frame the host (a runner, or the G3 gateway acting
 as HOST on its client leg) sends to a comms peer. Its params are validated by
 `LifecycleStartRequest` in `src/alfred/comms_mcp/protocol.py`. As shipped in
-ADR-0024 the model REQUIRED two non-empty string fields — `credentials_ref` and
+ADR-0016 the model REQUIRED two non-empty string fields — `credentials_ref` and
 `policies_snapshot_hash` (`Field(min_length=1)`).
 
 Three facts make those fields over-specified:
