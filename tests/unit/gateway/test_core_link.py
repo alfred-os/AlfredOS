@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import json
 import time
 from collections.abc import Mapping
 from uuid import uuid4
@@ -42,7 +43,7 @@ from alfred.gateway.metrics import (
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
-from alfred.plugins.comms_seq_codec import SEQ_VERSION
+from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsPeerAuthError
 
 
@@ -86,6 +87,12 @@ class _FakeCoreTransport:
         self.sent: list[dict[str, object]] = []
         self.seq_ack_enabled = False
         self.closed = False
+        # Spec A G3-3b-2 relay seam: a queue of raw units ``read_payload_unit`` pops,
+        # the payloads/acks ``send_payload_unit`` records, and an optional injected
+        # error a single ``send_payload_unit`` raises (the broken-pipe drop tests).
+        self.units: collections.deque[SeqFrame] = collections.deque()
+        self.sent_units: list[tuple[bytes, int]] = []
+        self.send_unit_error: BaseException | None = None
 
     async def spawn(self) -> None:  # pragma: no cover - unused on the peer leg
         return None
@@ -95,6 +102,14 @@ class _FakeCoreTransport:
 
     async def read_frame(self) -> Mapping[str, object] | None:
         return self._inbound.popleft() if self._inbound else None
+
+    async def read_payload_unit(self) -> SeqFrame | None:
+        return self.units.popleft() if self.units else None
+
+    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
+        if self.send_unit_error is not None:
+            raise self.send_unit_error
+        self.sent_units.append((payload, ack))
 
     async def close(self) -> None:
         self.closed = True
@@ -715,21 +730,27 @@ async def test_reconnect_clamps_oversized_jitter_to_backoff() -> None:
 
 
 class _ScriptedCoreTransport:
-    """A fake ``_CommsTransportLike`` whose ``read_frame`` follows a queued script.
+    """A fake ``_CommsTransportLike`` whose reads follow a single queued script.
 
     Each script entry is one of:
-      * a ``Mapping`` — a frame ``read_frame`` returns,
-      * ``None`` — a clean EOF (``read_frame`` returns ``None``),
-      * a :class:`BaseException` INSTANCE — a transport-crash ``read_frame`` raises,
-      * an :class:`asyncio.Event` — ``read_frame`` AWAITS the event, then (once set)
-        returns ``None`` (a genuinely-pending read used to drive the shutdown race).
+      * a ``Mapping`` — a frame ``read_frame`` returns (the handshake ``start``),
+      * a :class:`SeqFrame` — a raw unit ``read_payload_unit`` returns (the relay path),
+      * ``None`` — a clean EOF (the read returns ``None``),
+      * a :class:`BaseException` INSTANCE — a transport-crash the read raises,
+      * an :class:`asyncio.Event` — the read AWAITS the event, then (once set) returns
+        ``None`` (a genuinely-pending read used to drive the shutdown race).
 
-    ``sent`` records writebacks (the handshake ack), ``closed`` flips on ``close()``.
+    The SAME ``_script`` feeds both ``read_frame`` (the handshake) and
+    ``read_payload_unit`` (the post-handshake relay pump), so a single scripted
+    transport drives handshake-then-relay end to end. ``sent`` records writebacks
+    (the handshake ack), ``sent_units`` records relay-back payloads, ``closed`` flips
+    on ``close()``.
     """
 
     def __init__(self, script: list[object]) -> None:
         self._script: collections.deque[object] = collections.deque(script)
         self.sent: list[dict[str, object]] = []
+        self.sent_units: list[tuple[bytes, int]] = []
         self.seq_ack_enabled = False
         self.closed = False
 
@@ -739,7 +760,11 @@ class _ScriptedCoreTransport:
     async def send(self, frame: Mapping[str, object]) -> None:
         self.sent.append(dict(frame))
 
-    async def read_frame(self) -> Mapping[str, object] | None:
+    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
+        self.sent_units.append((payload, ack))
+
+    async def _next(self) -> object | None:
+        """Pop the next script entry, awaiting an ``Event`` / raising a crash."""
         if not self._script:
             return None
         entry = self._script.popleft()
@@ -748,9 +773,20 @@ class _ScriptedCoreTransport:
             return None
         if isinstance(entry, BaseException):
             raise entry
+        return entry
+
+    async def read_frame(self) -> Mapping[str, object] | None:
+        entry = await self._next()
         if entry is None:
             return None
         assert isinstance(entry, Mapping)
+        return entry
+
+    async def read_payload_unit(self) -> SeqFrame | None:
+        entry = await self._next()
+        if entry is None:
+            return None
+        assert isinstance(entry, SeqFrame)
         return entry
 
     async def close(self) -> None:
@@ -776,6 +812,7 @@ def _run_link(
     monotonic: object | None = None,
     sleep: object | None = None,
     machine: LinkStateMachine | None = None,
+    payload_relay: object | None = None,
 ) -> tuple[GatewayCoreLink, _RecordingClientListener]:
     recorder = _RecordingClientListener()
 
@@ -790,6 +827,7 @@ def _run_link(
         jitter=lambda hi: hi,
         shutdown_event=shutdown_event,
         monotonic=monotonic if monotonic is not None else time.monotonic,  # type: ignore[arg-type]
+        payload_relay=payload_relay,  # type: ignore[arg-type]
     )
     return link, recorder
 
@@ -1220,3 +1258,424 @@ async def test_sleep_or_shutdown_cancel_cancels_both_children() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — raw-unit relay sink + relay_to_core (Spec A G3-3b-2 / ADR-0032)
+# ---------------------------------------------------------------------------
+
+
+class _RelaySink:
+    """A recording relay sink: every opaque payload byte run the gateway forwards."""
+
+    def __init__(self) -> None:
+        self.received: list[bytes] = []
+
+    async def __call__(self, payload: bytes) -> None:
+        self.received.append(payload)
+
+
+def _payload_unit(body: bytes, *, seq: int | None = None) -> SeqFrame:
+    """A raw :class:`SeqFrame` carrying ``body`` as its opaque payload."""
+    return SeqFrame(seq=seq, ack=0, payload=body)
+
+
+def _link_with_relay(
+    *, epoch: str | None = None
+) -> tuple[GatewayCoreLink, _RecordingClientListener, _RelaySink]:
+    """A core-link wired with a recording relay sink + (optionally) a captured epoch."""
+    recorder = _RecordingClientListener()
+    sink = _RelaySink()
+    link = GatewayCoreLink(client_listener=recorder, payload_relay=sink)  # type: ignore[arg-type]
+    if epoch is not None:
+        link._core_epoch = epoch
+    return link, recorder, sink
+
+
+@pytest.mark.asyncio
+async def test_route_unit_forwards_payload_bytes_byte_for_byte() -> None:
+    """A payload frame is forwarded to the sink VERBATIM (not re-serialized)."""
+    link, _recorder, sink = _link_with_relay()
+    # A payload whose JSON would re-serialize differently (extra spaces) — proving the
+    # relay forwards the ORIGINAL bytes, not a re-dumped form.
+    body = b'{"method": "inbound.message" ,  "params": {}}'
+
+    await link._route_unit(_payload_unit(body))
+
+    assert sink.received == [body]
+    assert link._dropped_payload_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_route_unit_consumes_going_down_does_not_relay() -> None:
+    """A ``going_down`` unit is CONSUMED (feeds the machine -> reconnecting), NOT relayed."""
+    epoch = uuid4().hex
+    link, recorder, sink = _link_with_relay(epoch=epoch)
+    body = json.dumps(
+        {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": "shutdown"}}
+    ).encode()
+
+    await link._route_unit(_payload_unit(body))
+
+    assert sink.received == []
+    assert len(recorder.controls) == 1
+    assert isinstance(recorder.controls[0], LinkReconnectingNotification)
+    assert link._machine.state is not GatewayLinkState.UP
+    # security L2: a consumed lifecycle frame never bumps the dropped-payload counter.
+    assert link._dropped_payload_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_route_unit_parse_failure_fails_toward_relay() -> None:
+    """A payload that is NOT valid JSON is RELAYED (fail-toward-relay), never dropped.
+
+    security SEC-3 / hard rule #7: the gateway is a T1 carrier; an un-parseable body
+    is still forwarded byte-for-byte, never consumed-as-lifecycle and never silently
+    dropped. Deleting the ``except`` fail-toward-relay arm would let the garbage
+    bytes never reach the sink.
+    """
+    link, _recorder, sink = _link_with_relay()
+    garbage = b"\x00garbage-not-json"
+
+    await link._route_unit(_payload_unit(garbage))
+
+    assert sink.received == [garbage]
+    assert link._dropped_payload_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_route_unit_no_method_response_is_relayed() -> None:
+    """A JSON-RPC response (no ``method`` key) is relayed, not consumed."""
+    link, _recorder, sink = _link_with_relay()
+    body = json.dumps({"id": 7, "result": {}}).encode()
+
+    await link._route_unit(_payload_unit(body))
+
+    assert sink.received == [body]
+
+
+@pytest.mark.asyncio
+async def test_route_unit_forged_ready_rejected_no_relay_no_feed() -> None:
+    """THE FORGERY ON THE RAW PATH: a ``ready`` unit whose epoch != the handshake
+    epoch is rejected — no feed (no false ``restored``) AND not relayed-as-payload.
+
+    The raw relay path peeks the method and routes a lifecycle ``ready`` through the
+    SAME merged forgery-defended ``_consume_frame``; the epoch guard still rejects the
+    forgery loud. It is NOT forwarded to the sink (a lifecycle frame is consumed, not
+    relayed) and the machine stays out of UP.
+    """
+    epoch = uuid4().hex
+    forged = uuid4().hex
+    assert forged != epoch
+    link, recorder, sink = _link_with_relay(epoch=epoch)
+    # Open a gap first so a (forged) ready would otherwise emit a real ``restored``.
+    await link._route_unit(
+        _payload_unit(
+            json.dumps(
+                {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": "shutdown"}}
+            ).encode()
+        )
+    )
+    assert [type(c) for c in recorder.controls] == [LinkReconnectingNotification]
+
+    with structlog.testing.capture_logs() as captured:
+        await link._route_unit(
+            _payload_unit(
+                json.dumps({"method": DAEMON_LIFECYCLE_READY, "params": {"epoch": forged}}).encode()
+            )
+        )
+
+    # No false restored, no relay-as-payload, the gap stays open, loud mismatch fired.
+    assert [type(c) for c in recorder.controls] == [LinkReconnectingNotification]
+    assert sink.received == []
+    assert link._machine.state is not GatewayLinkState.UP
+    mismatch = [c for c in captured if c.get("event") == "gateway.core_link.ready_epoch_mismatch"]
+    assert len(mismatch) == 1, captured
+    assert mismatch[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_route_unit_valid_ready_matching_epoch_closes_gap_no_relay() -> None:
+    """A VALID ``ready`` (matching epoch) on the raw path closes the gap (restored),
+    is consumed not relayed — the positive arm mirroring the forgery test.
+    """
+    epoch = uuid4().hex
+    link, recorder, sink = _link_with_relay(epoch=epoch)
+    await link._route_unit(
+        _payload_unit(
+            json.dumps(
+                {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": "shutdown"}}
+            ).encode()
+        )
+    )
+    await link._route_unit(
+        _payload_unit(
+            json.dumps({"method": DAEMON_LIFECYCLE_READY, "params": {"epoch": epoch}}).encode()
+        )
+    )
+
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert sink.received == []
+    assert link._machine.state is GatewayLinkState.UP
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_sends_payload_with_cumulative_ack() -> None:
+    """``relay_to_core`` writes the opaque payload to the core leg with the receive
+    tracker's cumulative ack.
+    """
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+    # Feed the core-leg tracker a contiguous 0,1,2 run -> cumulative ack 2.
+    for seq in (0, 1, 2):
+        link._core_tracker.observe(seq)
+
+    await link.relay_to_core(b'{"id":1,"result":{}}')
+
+    assert transport.sent_units == [(b'{"id":1,"result":{}}', 2)]
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_drops_loud_on_broken_pipe() -> None:
+    """A ``BrokenPipeError`` mid-write is a LOUD drop — no raise, no buffering."""
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    transport.send_unit_error = BrokenPipeError()
+    link._current_core_transport = transport
+    link._core_tracker.observe(0)
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"payload")  # must NOT raise
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("log_level") == "warning"
+    # The drop does NOT disturb the receive tracker's cumulative ack.
+    assert link._core_tracker.cumulative_ack() == 0
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_drops_loud_on_none_transport() -> None:
+    """A None current transport (the reconnect-race write window — architect M3) is a
+    loud drop, never a raise.
+    """
+    link, _recorder, _sink = _link_with_relay()
+    link._current_core_transport = None
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"payload")  # must NOT raise
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_drops_loud_on_connection_reset() -> None:
+    """A ``ConnectionResetError`` mid-write is also a loud drop (no raise)."""
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    transport.send_unit_error = ConnectionResetError()
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"payload")
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_relay_pump_feeds_tracker_and_forwards_payload() -> None:
+    """End-to-end ``run`` with a relay sink: a seq-framed payload unit on the core leg
+    feeds the receive tracker AND is forwarded to the sink byte-for-byte.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    sink = _RelaySink()
+    body = b'{"method":"inbound.message","params":{}}'
+    blocked = asyncio.Event()
+    # Handshake start (read via read_frame), then ONE seq=0 payload unit (read via
+    # read_payload_unit), then a blocked read so shutdown can end the pump cleanly.
+    transport = _ScriptedCoreTransport([_start_only(epoch), _payload_unit(body, seq=0), blocked])
+    dial = _DialRecorder([lambda: transport])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, payload_relay=sink)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if sink.received:  # the payload reached the sink -> pump processed the unit
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert sink.received == [body]
+    # The seq=0 unit advanced the receive tracker's cumulative ack to 0.
+    assert link._core_tracker.cumulative_ack() == 0
+    assert recorder.controls == []  # a payload frame emits no link.* control
+    assert transport.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_relay_pump_consumes_going_down_unit() -> None:
+    """With a relay sink wired, a ``going_down`` SeqFrame unit is CONSUMED (drives the
+    machine -> reconnecting), not relayed — the raw path honours lifecycle consume.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+    sink = _RelaySink()
+    going_down = _payload_unit(json.dumps(_going_down_frame()).encode(), seq=0)
+    first = _ScriptedCoreTransport([_start_only(epoch1), going_down, None])
+    blocked = asyncio.Event()
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+    dial = _DialRecorder([lambda: first, lambda: second])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, payload_relay=sink)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The going_down was consumed (gap), not relayed; the reconnect restored.
+    assert sink.received == []
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_relay_pump_eof_gaps_and_reconnects() -> None:
+    """The relay pump's clean-EOF arm opens the gap + reconnects (identical to the
+    parsed-pump EOF arm), so the relay path keeps the reconnect machinery.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+    sink = _RelaySink()
+    first = _ScriptedCoreTransport([_start_only(epoch1), None])  # start then immediate EOF
+    blocked = asyncio.Event()
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+    dial = _DialRecorder([lambda: first, lambda: second])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, payload_relay=sink)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert first.closed is True
+    assert second.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_relay_pump_crash_exception_gaps_and_reconnects() -> None:
+    """The relay pump's transport-crash arm (a raised read) gaps + reconnects too."""
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+    sink = _RelaySink()
+    first = _ScriptedCoreTransport([_start_only(epoch1), ConnectionResetError()])
+    blocked = asyncio.Event()
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+    dial = _DialRecorder([lambda: first, lambda: second])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, payload_relay=sink)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_relay_pump_shutdown_at_loop_top_returns_clean() -> None:
+    """The relay pump's top-of-loop shutdown check returns cleanly (no banner)."""
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    shutdown.set()
+    sink = _RelaySink()
+    only = _ScriptedCoreTransport([_start_only(epoch)])  # handshake only
+    dial = _DialRecorder([lambda: only])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, payload_relay=sink)
+
+    await asyncio.wait_for(link.run(), timeout=1.0)
+
+    assert recorder.controls == []
+    assert only.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_relay_pump_shutdown_while_blocked_returns_clean() -> None:
+    """Shutdown while the relay pump is BLOCKED on a payload read returns clean."""
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    sink = _RelaySink()
+    read_blocked = asyncio.Event()
+    only = _ScriptedCoreTransport([_start_only(epoch), read_blocked])
+    dial = _DialRecorder([lambda: only])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, payload_relay=sink)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if only.sent:
+            break
+    assert only.sent, "handshake should have completed before shutdown"
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert recorder.controls == []
+    assert only.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_relay_pump_unit_without_seq_skips_tracker() -> None:
+    """A relay unit with ``seq is None`` (a plain non-negotiated frame on the leg) is
+    still FORWARDED but does NOT touch the receive tracker — the ``_pump_once``
+    seq-None branch.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    sink = _RelaySink()
+    body = b'{"method":"inbound.message","params":{}}'
+    blocked = asyncio.Event()
+    # A unit with seq=None (a plain frame) followed by a blocked read.
+    transport = _ScriptedCoreTransport([_start_only(epoch), _payload_unit(body, seq=None), blocked])
+    dial = _DialRecorder([lambda: transport])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, payload_relay=sink)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if sink.received:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert sink.received == [body]
+    # No seq -> the receive tracker never advanced past its initial -1.
+    assert link._core_tracker.cumulative_ack() == -1
+    assert recorder.controls == []
