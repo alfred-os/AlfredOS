@@ -381,7 +381,7 @@ class CommsSocketTransport:
         anything itself — ``payload`` is the pre-serialised body the seam emits
         byte-for-byte (T1 carrier; the gateway never parses it — CLAUDE.md hard rule
         #5). Unlike :meth:`send`, the caller supplies the cumulative ``ack`` (the relay
-        wires ``SeqDedupWindow.cumulative_ack()`` as the source) rather than the ``a=0``
+        wires ``BoundedSeqAckTracker.cumulative_ack()`` as the source) rather than the ``a=0``
         placeholder. On the seq-OFF (plain TUI) leg the ``ack`` is unused and the unit
         is a plain ``payload + "\\n"`` line. Loud on a broken pipe and on an over-bound
         reframe, exactly like :meth:`send`.

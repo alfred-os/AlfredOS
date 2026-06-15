@@ -50,6 +50,7 @@ import structlog
 
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.gateway.core_link import GatewayCoreLink, _CommsTransportLike
+from alfred.plugins.comms_wire import CommsProtocolError
 
 log = structlog.get_logger(__name__)
 
@@ -126,11 +127,15 @@ class GatewayRelay:
         cumulative ack when the client leg is seq-enabled, else ``0`` (the plain client
         transport ignores ``ack`` and emits a plain ADR-0025 line).
 
-        **Loud drop, never raise into the core pump (CLAUDE.md hard rule #7).** A dead
-        client (:class:`BrokenPipeError` / :class:`ConnectionResetError`) is a LOUD drop —
-        the client hung up, but the core leg must keep running (it is held across client
-        churn just as it is held across core churn). Raising here would crash the core
-        pump for a client-side fault, which is wrong.
+        **Loud drop, never raise into the core pump (CLAUDE.md hard rule #7).** Any
+        send-path fault is a LOUD drop — the core leg must keep running (it is held
+        across client churn just as it is held across core churn), so raising here would
+        crash the core pump for a client-side fault, which is wrong. The widened family:
+        transport-died (:class:`BrokenPipeError` / :class:`ConnectionResetError`),
+        encode-failed (:class:`ValueError` from :func:`encode_seq_frame` send-seq
+        decimal-width exhaustion, or :class:`CommsProtocolError` from an over-bound
+        reframe), or a write to a client transport ``close()``d mid-reconnect-swap
+        (:class:`RuntimeError` "unable to perform operation on closed transport").
 
         The seq-enabled ack is FLOORED to ``0`` (mirroring :meth:`GatewayCoreLink.relay_to_core`):
         the client tracker's ``-1`` ("nothing acked yet") is the wire's ``a=0`` placeholder,
@@ -140,7 +145,13 @@ class GatewayRelay:
         ack = max(self._client_tracker.cumulative_ack(), 0) if self._client_seq_enabled else 0
         try:
             await self._client_transport.send_payload_unit(payload, ack=ack)
-        except (BrokenPipeError, ConnectionResetError) as exc:
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            RuntimeError,
+            ValueError,
+            CommsProtocolError,
+        ) as exc:
             log.warning("gateway.relay.client_send_dropped", error=repr(exc))
 
     async def _client_to_core_pump(self) -> None:

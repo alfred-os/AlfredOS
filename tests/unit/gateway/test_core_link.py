@@ -44,7 +44,7 @@ from alfred.gateway.metrics import (
     RECONNECT_ATTEMPTS,
 )
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
-from alfred.plugins.comms_wire import CommsPeerAuthError
+from alfred.plugins.comms_wire import CommsPeerAuthError, CommsProtocolError
 
 
 class _RecordingClientListener:
@@ -1487,6 +1487,62 @@ async def test_relay_to_core_drops_loud_on_connection_reset() -> None:
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_drops_loud_on_closed_transport_runtime_error() -> None:
+    """A ``RuntimeError`` from a write to a transport ``close()``d mid-reconnect-swap is
+    a LOUD drop — never a raw TaskGroup crash, never a disturbed receive tracker.
+    """
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    transport.send_unit_error = RuntimeError("unable to perform operation on closed transport")
+    link._current_core_transport = transport
+    link._core_tracker.observe(0)
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"payload")  # must NOT raise
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("log_level") == "warning"
+    assert link._core_tracker.cumulative_ack() == 0
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_drops_loud_on_encode_value_error() -> None:
+    """A ``ValueError`` (``encode_seq_frame`` send-seq decimal-width exhaustion) is a
+    LOUD drop — never a raw TaskGroup crash.
+    """
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    transport.send_unit_error = ValueError("send seq exceeds the encodable decimal width")
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"payload")  # must NOT raise
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_drops_loud_on_over_bound_reframe() -> None:
+    """A ``CommsProtocolError`` (over-bound reframe) is a LOUD drop — never a raw
+    TaskGroup crash.
+    """
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    transport.send_unit_error = CommsProtocolError("reframed unit exceeds the bound")
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"payload")  # must NOT raise
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("log_level") == "warning"
 
 
 @pytest.mark.asyncio

@@ -230,6 +230,8 @@ class GatewayCoreLink:
         # Count of frames dropped by the per-frame router because they are neither
         # lifecycle control frames the gateway CONSUMES nor (yet) the payload frames
         # it RELAYS (the relay is G3-3b-2). T1 carrier: counted, never acted on.
+        # NB advances ONLY on the relay-OFF (3b-1 standalone) path; with the relay ON,
+        # ``_route_unit`` forwards the payload via ``_payload_relay`` instead of counting.
         self._dropped_payload_frames: int = 0
         # The supervised-lifecycle seams (Task 6). The shutdown event ends ``run`` as
         # a CLEAN stop (no spurious ``reconnecting``); when ``None`` the pump read is a
@@ -688,12 +690,18 @@ class GatewayCoreLink:
         (``test_relay_wire_contract``) is what surfaces this; the in-process fakes do not
         encode, so they cannot.
 
-        **Loud drop, NO buffering (CLAUDE.md hard rule #7; G4 owns buffering).** A
-        ``None``/closed current transport (the reconnect-race write window) or a
-        :class:`BrokenPipeError` / :class:`ConnectionResetError` mid-write is a LOUD
-        drop — never raised, never buffered. The client side keeps running; the dropped
-        unit is the core's to re-request once the leg is back (a G4 ReplayBuffer
-        concern), not this carrier's to hold.
+        **Loud drop, NO buffering (CLAUDE.md hard rule #7; G4 owns buffering).** Any
+        send-path fault — transport-died (:class:`BrokenPipeError` /
+        :class:`ConnectionResetError`), encode-failed (:class:`ValueError` from
+        :func:`encode_seq_frame` send-seq decimal-width exhaustion, or
+        :class:`CommsProtocolError` from an over-bound reframe), or a write to a
+        transport ``close()``d mid-reconnect-swap (:class:`RuntimeError` "unable to
+        perform operation on closed transport") — is a LOUD drop: never raised, never
+        buffered. A ``None`` current transport (the reconnect-race write window) is the
+        same loud drop. The client side keeps running; the dropped unit is the core's to
+        re-request once the leg is back (a G4 ReplayBuffer concern), not this carrier's
+        to hold. Letting any of these escape would crash the relay TaskGroup on an
+        OPERATIONAL edge (a dead/swapping leg is expected), or gap the WRONG leg.
         """
         local = self._current_core_transport
         if local is None:
@@ -705,7 +713,13 @@ class GatewayCoreLink:
         ack = max(self._core_tracker.cumulative_ack(), 0)
         try:
             await local.send_payload_unit(payload, ack=ack)
-        except (BrokenPipeError, ConnectionResetError) as exc:
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            RuntimeError,
+            ValueError,
+            CommsProtocolError,
+        ) as exc:
             log.warning("gateway.relay.core_send_dropped", error=repr(exc))
 
     async def _consume_frame(self, frame: Mapping[str, object]) -> None:
@@ -731,6 +745,7 @@ class GatewayCoreLink:
         else:
             # A payload frame the relay (G3-3b-2) will forward, or a JSON-RPC response
             # (``None`` method). Drop + count for now — never fed, never acted on.
+            # Reached only on the relay-OFF path; the relay-ON ``_route_unit`` forwards.
             self._dropped_payload_frames += 1
             log.debug(
                 "gateway.core_link.payload_frame_dropped",
