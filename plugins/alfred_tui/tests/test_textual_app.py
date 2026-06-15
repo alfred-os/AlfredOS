@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import pytest
 from alfred_tui.textual.app import AlfredTuiApp
-from textual.widgets import Input, RichLog
+from textual.widgets import Input, RichLog, Static
+
+from alfred.comms_mcp.protocol import (
+    LINK_RECONNECTING,
+    LINK_RESTORED,
+    LINK_UNAVAILABLE,
+)
+from alfred.i18n import t
 
 
 def _plain_text(log: RichLog) -> str:
@@ -103,3 +110,78 @@ async def test_echoed_user_input_markup_is_rendered_literally_not_interpreted() 
     assert "[blink]boom[/blink]" in rendered, (
         "echoed user markup was interpreted, not escaped — markup-injection vector"
     )
+
+
+# ---------------------------------------------------------------------------
+# Reconnect banner — gateway link-state render (Spec A G5 / ADR-0031).
+#
+# The gateway sends only the STATE (the ``link.*`` method); the TUI paints its
+# OWN localized banner text via ``t("tui.banner.*")`` (no operator text on the
+# wire). ``set_link_state`` is invoked by the cohost pump on the SAME loop as the
+# Textual app (M1) — a direct reactive set, never ``call_from_thread``.
+# ---------------------------------------------------------------------------
+
+
+def _banner(app: AlfredTuiApp) -> Static:
+    return app.query_one("#link_banner", Static)
+
+
+@pytest.mark.asyncio
+async def test_banner_hidden_on_mount() -> None:
+    """No link gap yet: the banner is not displayed when the app first mounts."""
+    app = AlfredTuiApp(session=_RecordingSession())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        banner = _banner(app)
+        assert banner.display is False
+
+
+@pytest.mark.asyncio
+async def test_reconnecting_state_shows_localized_banner() -> None:
+    """``link.reconnecting`` paints the localized reconnecting banner text."""
+    app = AlfredTuiApp(session=_RecordingSession())
+    async with app.run_test() as pilot:
+        app.set_link_state(LINK_RECONNECTING)
+        await pilot.pause()
+        banner = _banner(app)
+        assert banner.display is True
+        assert _plain_text_static(banner) == t("tui.banner.reconnecting")
+
+
+@pytest.mark.asyncio
+async def test_restored_state_clears_the_banner() -> None:
+    """``link.restored`` hides the banner after a prior gap."""
+    app = AlfredTuiApp(session=_RecordingSession())
+    async with app.run_test() as pilot:
+        app.set_link_state(LINK_RECONNECTING)
+        await pilot.pause()
+        app.set_link_state(LINK_RESTORED)
+        await pilot.pause()
+        banner = _banner(app)
+        assert banner.display is False
+
+
+@pytest.mark.asyncio
+async def test_unavailable_state_shows_localized_banner() -> None:
+    """``link.unavailable`` (G4-latent) paints the localized unavailable text."""
+    app = AlfredTuiApp(session=_RecordingSession())
+    async with app.run_test() as pilot:
+        app.set_link_state(LINK_UNAVAILABLE)
+        await pilot.pause()
+        banner = _banner(app)
+        assert banner.display is True
+        assert _plain_text_static(banner) == t("tui.banner.unavailable")
+
+
+def _plain_text_static(banner: Static) -> str:
+    """The visible plain text of the banner ``Static``, stripped of style noise."""
+    from rich.console import Console
+    from rich.text import Text
+
+    renderable = banner.render()
+    if isinstance(renderable, str):
+        return renderable
+    if isinstance(renderable, Text):
+        return renderable.plain
+    # Any other Rich renderable: render to a throwaway console and read the glyphs.
+    return "".join(seg.text for seg in Console().render(renderable)).rstrip("\n")

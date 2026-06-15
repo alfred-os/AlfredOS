@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-15 14:59+0100\n"
+"POT-Creation-Date: 2026-06-15 15:10+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2605,25 +2605,39 @@ msgstr ""
 "request_plugin_restart refused: {reason!r} is not a known restart reason."
 " Pass a valid PluginRestartReason."
 
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:59
+#: plugins/alfred_tui/tests/test_textual_app.py:148
+msgid "tui.banner.reconnecting"
+msgstr "Reconnecting to Alfred..."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:60
+msgid "tui.banner.restored"
+msgstr "Reconnected to Alfred."
+
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:61
+#: plugins/alfred_tui/tests/test_textual_app.py:173
+msgid "tui.banner.unavailable"
+msgstr "Alfred is unavailable. Retrying..."
+
 # PR-S4-10 review F1 (#206): the TUI render layer moved to
 # plugins/alfred_tui; the CI extract scanned src/alfred ONLY, so these LIVE
 # keys were marked obsolete and dropped at compile time, leaving operators
 # with raw "tui.label_you:" keys. The extract now scans `src/alfred plugins`
 # and these are restored as active msgids with their English msgstr.
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:71
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:72
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:106
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:107
 msgid "tui.binding.quit"
 msgstr "Quit"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:82
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:123
 msgid "tui.input_placeholder"
 msgstr "Speak to Alfred..."
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:109
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:150
 msgid "tui.label_you"
 msgstr "you"
 
-#: plugins/alfred_tui/src/alfred_tui/textual/app.py:127
+#: plugins/alfred_tui/src/alfred_tui/textual/app.py:168
 msgid "tui.label_alfred"
 msgstr "alfred"
 
