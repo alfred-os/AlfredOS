@@ -1,0 +1,159 @@
+"""``ReplayBuffer`` — pure un-acked inbound retention for the resume gateway.
+
+Spec A G4a / ADR-0032 (#237). The always-up ``alfred-gateway`` holds the client
+connection across a core restart; this buffer is where the operator's un-acked
+**inbound** (client->core) frames live between the moment the gateway forwards them
+and the moment the (possibly freshly-restarted) core durably acks them. On
+reconnect the gateway replays the un-acked remainder so nothing typed is lost
+(spec §5); the core dedups by ``(leg, seq)`` so replay never double-executes.
+
+**Seq is gateway-owned and monotonic across a core restart.** The client->core seq
+the gateway mints does NOT reset on a core bounce (only the core->client direction
+resets — spec §4). A normal reconnect does NOT discard; the gateway keeps minting
+the next seq, so the monotonic guard is never tripped on a successful resume. A
+genuine seq-space restart is a G4b epoch-handshake concern; :meth:`discard` does
+NOT reset the monotonic floor.
+
+**Pure — no I/O, no clock, no logging.** Mirrors the sibling pure machines
+:class:`~alfred.gateway.link_state.LinkStateMachine` and
+:class:`~alfred.gateway._seq_tracker.BoundedSeqAckTracker`. Time is injected as an
+explicit, monotonic ``now`` argument (the spec §7 fake-clock seam). **Loudness is
+the G4b wiring's job:** this class never audits/logs; it surfaces signals
+(:meth:`evict_expired` return value, :attr:`breaker_tripped`, the hard-ceiling
+raise) the reconnect/relay layer polls to write the spec §6 loud audit rows.
+
+**Trust posture (spec §6).** A **T1 carrier** of opaque, *pre-DLP* operator input
+(payload-blind — never decodes a frame; T3 tagging stays in the core). Pinning that
+input in the always-up process across a crash-loop is an exposure, so the cap
+(``max_frames`` + ``max_bytes``) and ``ttl_seconds`` retention bound are **security**
+properties, and every byte that leaves on a removal path is overwritten before its
+reference is dropped.
+
+**Bounded retention is a two-part contract.** On a soft-cap breach :meth:`append`
+KEEPS the frame (the no-silent-drop guarantee) and trips :attr:`breaker_tripped`;
+G4b enforces the bound by ceasing to drain the client socket. Post-breach growth is
+bounded only by G4b's read-halt latency — the residual window this pure layer does
+not close. As a backstop against a buggy G4b, :meth:`append` raises at a hard
+ceiling (``_HARD_CAP_MULTIPLIER`` x each soft cap) so the process cannot be driven
+to OOM (fail-closed, loud — never silent).
+
+**Zeroing is best-effort.** We overwrite our own mutable ``bytearray`` body in place
+on every removal. Python gives no crypto-erase guarantee; ``MADV_DONTDUMP`` /
+core-dump suppression are G4b process-level mitigations, out of scope here. The
+immutable ``bytes`` a caller passes to :meth:`append`, and those
+:meth:`unacked_frames` returns (a flapping reconnect can mint many live copies at
+once), are caller/wire-owned and not ours to zero — G4b's process hardening bounds
+that exposure.
+
+**No-silent-failure (CLAUDE.md hard rule #7).** TTL eviction returns the evicted
+seqs (G4b audits each as input-loss); a non-monotonic/negative ``seq``, a
+non-monotonic ``now``, a non-positive cap, and a hard-ceiling breach all raise
+:class:`ReplayBufferError`. :meth:`trim_to_ack` is the one removal that is NOT
+input-loss (it removes durably-acked frames) and so returns nothing — G4b must only
+ever pass an epoch-validated cumulative ack.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Final
+
+from alfred.errors import AlfredError
+
+_DEFAULT_MAX_FRAMES: Final[int] = 4096
+_DEFAULT_MAX_BYTES: Final[int] = 8 * 1024 * 1024
+_DEFAULT_TTL_SECONDS: Final[float] = 300.0
+
+# The soft cap (``max_frames``/``max_bytes``) is the back-pressure SIGNAL: a breach
+# trips the breaker but keeps the frame (no silent drop). The hard ceiling is this
+# multiple of the soft cap and is a fail-closed BACKSTOP: reaching it means G4b
+# ignored the back-pressure signal (a bug/wedge), so ``append`` refuses loud rather
+# than let the always-up security process grow to OOM. 2x leaves generous head-room
+# for the in-flight frames between a breach and G4b halting its read loop.
+_HARD_CAP_MULTIPLIER: Final[int] = 2
+
+
+class ReplayBufferError(AlfredError):
+    """A programming-error / fail-closed misuse of the buffer.
+
+    Fail-loud (CLAUDE.md hard rule #7): a non-monotonic or negative ``seq``, a
+    non-monotonic ``now``, a non-positive cap, or a hard-ceiling breach is never a
+    silent no-op.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayFrame:
+    """A replayable un-acked frame: its gateway-owned per-direction seq + opaque payload.
+
+    Replay MUST carry the ORIGINAL ``seq`` — the core dedups on ``(leg, seq)`` (spec
+    §4 decision 4), so re-minting would defeat the no-double-effect guarantee.
+    """
+
+    seq: int
+    payload: bytes
+
+
+@dataclass(slots=True)
+class _Retained:
+    """One retained un-acked inbound frame.
+
+    Mutable by design (unlike the frozen public :class:`ReplayFrame`): ``body`` is a
+    MUTABLE copy of the opaque payload so it can be zeroed in place on removal, and
+    the retention list is sliced in place on trim/evict. ``enqueued_at`` is the
+    caller-supplied monotonic stamp the TTL reads.
+    """
+
+    seq: int
+    body: bytearray
+    enqueued_at: float
+
+
+def _zero(body: bytearray) -> None:
+    """Best-effort in-place overwrite of a retained body before its ref is dropped."""
+    body[:] = b"\x00" * len(body)
+
+
+class ReplayBuffer:
+    """Pure FIFO retention of un-acked inbound frames; cap + TTL + breaker + zeroing."""
+
+    def __init__(
+        self,
+        *,
+        max_frames: int = _DEFAULT_MAX_FRAMES,
+        max_bytes: int = _DEFAULT_MAX_BYTES,
+        ttl_seconds: float = _DEFAULT_TTL_SECONDS,
+    ) -> None:
+        if max_frames <= 0 or max_bytes <= 0 or ttl_seconds <= 0:
+            raise ReplayBufferError(
+                "ReplayBuffer caps must be positive: "
+                f"max_frames={max_frames} max_bytes={max_bytes} ttl_seconds={ttl_seconds}"
+            )
+        self._max_frames: Final[int] = max_frames
+        self._max_bytes: Final[int] = max_bytes
+        self._ttl_seconds: Final[float] = ttl_seconds
+        self._hard_max_frames: Final[int] = max_frames * _HARD_CAP_MULTIPLIER
+        self._hard_max_bytes: Final[int] = max_bytes * _HARD_CAP_MULTIPLIER
+        self._retained: list[_Retained] = []
+        self._depth_bytes: int = 0
+        self._last_seq: int = -1
+        self._last_now: float = float("-inf")
+        self._breaker_tripped: bool = False
+
+    @property
+    def depth_frames(self) -> int:
+        """Number of un-acked frames currently retained."""
+        return len(self._retained)
+
+    @property
+    def depth_bytes(self) -> int:
+        """Sum of retained payload lengths (the byte-cap measure)."""
+        return self._depth_bytes
+
+    @property
+    def breaker_tripped(self) -> bool:
+        """``True`` once a soft cap was breached; cleared only by :meth:`discard`."""
+        return self._breaker_tripped
+
+
+__all__ = ["ReplayBuffer", "ReplayBufferError", "ReplayFrame"]
