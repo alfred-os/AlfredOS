@@ -64,7 +64,6 @@ def test_append_requires_non_decreasing_now() -> None:
     buf.append(1, b"b", now=5.0)  # equal now is allowed
 
 
-@pytest.mark.skip(reason="unacked_frames lands in Task 6")
 def test_append_stores_independent_mutable_copy() -> None:
     buf = _buffer()
     source = bytearray(b"mutable")
@@ -146,6 +145,20 @@ def test_hard_byte_ceiling_refuses_loud() -> None:
     assert buf.depth_bytes == 8
 
 
+def test_hard_byte_ceiling_refuses_a_single_oversized_first_payload() -> None:
+    """One giant frame on an empty buffer blows past the byte ceiling on the first append.
+
+    The byte cap exists precisely for this adversarial "one huge payload" shape:
+    frames=1 is fine but the payload alone exceeds ``hard_max_bytes``, so the very
+    first append must fail-closed loud rather than store-then-OOM.
+    """
+    buf = _buffer(max_frames=100, max_bytes=4)  # hard=8 bytes
+    with pytest.raises(ReplayBufferError, match="hard ceiling"):
+        buf.append(0, b"xxxxxxxxx", now=1.0)  # 9 bytes > hard ceiling of 8
+    assert buf.depth_frames == 0
+    assert buf.depth_bytes == 0
+
+
 def test_breaker_is_a_latch_trim_does_not_clear() -> None:
     buf = _buffer(max_frames=1, max_bytes=10_000)
     buf.append(0, b"a", now=1.0)
@@ -185,3 +198,51 @@ def test_evict_returns_empty_when_nothing_expired() -> None:
     buf = _buffer(ttl_seconds=10.0)
     buf.append(0, b"x", now=0.0)
     assert buf.evict_expired(now=1.0) == ()
+
+
+def test_unacked_frames_returns_fifo_replayframes_carrying_seq() -> None:
+    buf = _buffer()
+    buf.append(0, b"a", now=1.0)
+    buf.append(1, b"bb", now=2.0)
+    buf.append(2, b"ccc", now=3.0)
+    frames = buf.unacked_frames()
+    assert frames == (
+        ReplayFrame(seq=0, payload=b"a"),
+        ReplayFrame(seq=1, payload=b"bb"),
+        ReplayFrame(seq=2, payload=b"ccc"),
+    )
+    assert all(isinstance(f.payload, bytes) for f in frames)  # immutable for the wire
+
+
+def test_unacked_frames_does_not_remove() -> None:
+    buf = _buffer()
+    buf.append(0, b"a", now=1.0)
+    buf.unacked_frames()
+    buf.unacked_frames()
+    assert buf.depth_frames == 1  # still retained until the NEW core acks
+
+
+def test_unacked_frames_reflects_post_trim_remainder_with_original_seqs() -> None:
+    buf = _buffer()
+    for seq in range(4):
+        buf.append(seq, bytes([65 + seq]), now=float(seq))  # b"A".."D"
+    buf.trim_to_ack(1)
+    # The remainder carries its ORIGINAL seqs 2,3 (the core dedups on (leg, seq)).
+    assert buf.unacked_frames() == (ReplayFrame(seq=2, payload=b"C"), ReplayFrame(seq=3, payload=b"D"))
+
+
+def test_normal_restart_replay_then_continue_never_trips_monotonic_guard() -> None:
+    """Spec §4: inbound seq is gateway-owned + monotonic across a core restart."""
+    buf = _buffer()
+    for seq in range(4):
+        buf.append(seq, bytes([seq]), now=float(seq))
+    buf.trim_to_ack(1)  # core durably acked 0,1
+    # ...core crashes; gateway keeps buffering inbound (no discard)...
+    buf.append(4, b"x", now=4.0)
+    buf.append(5, b"y", now=5.0)
+    # ...new core handshakes, advertises high-water 1 -> trim no-op -> replay remainder.
+    replayed = buf.unacked_frames()
+    assert [f.seq for f in replayed] == [2, 3, 4, 5]
+    # operator types again; gateway mints the next seq -> accepted, no reset needed.
+    buf.append(6, b"z", now=6.0)
+    assert [f.seq for f in buf.unacked_frames()] == [2, 3, 4, 5, 6]
