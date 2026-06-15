@@ -29,9 +29,14 @@ from alfred.gateway.core_link import (
     GatewayCoreLink,
     GatewayCoreLinkError,
 )
-from alfred.gateway.link_state import GatewayLinkState
-from alfred.gateway.metrics import CORE_LINK_UP
+from alfred.gateway.link_state import (
+    GatewayLinkEvent,
+    GatewayLinkState,
+    LinkStateMachine,
+)
+from alfred.gateway.metrics import CORE_LINK_UP, RECONNECT_ATTEMPTS
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
+from alfred.plugins.comms_wire import CommsPeerAuthError
 
 
 class _RecordingClientListener:
@@ -391,3 +396,267 @@ async def test_consume_payload_or_response_frame_is_dropped_and_counted(
     assert recorder.controls == []
     assert link._machine.state is GatewayLinkState.UP
     assert link._dropped_payload_frames == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — reconnect/backoff loop with full jitter
+# ---------------------------------------------------------------------------
+
+
+class _DialRecorder:
+    """A controllable ``dial`` seam: a queue of outcomes consumed one per call.
+
+    Each entry is either a callable returning a transport (a successful dial) or an
+    exception INSTANCE to raise (a failed dial). The recorder also tracks how many
+    times it was called so a test can assert the loop dialed exactly once per retry.
+    """
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self._outcomes: collections.deque[object] = collections.deque(outcomes)
+        self.calls = 0
+
+    async def __call__(self) -> _FakeCoreTransport:
+        self.calls += 1
+        outcome = self._outcomes.popleft()
+        if isinstance(outcome, BaseException):
+            raise outcome
+        assert callable(outcome)
+        return outcome()  # type: ignore[no-any-return]
+
+
+def _ready_transport(epoch: str) -> _FakeCoreTransport:
+    """A transport queued with a valid ``lifecycle.start`` so the handshake succeeds."""
+    return _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack=None)])
+
+
+def _gapped_machine() -> LinkStateMachine:
+    """A machine with an OPEN gap — the loop's precondition.
+
+    ``_reconnect`` is only entered AFTER a gap opens (a ``CORE_GOING_DOWN`` /
+    ``CORE_CRASH_EOF`` drove the link out of UP); UP forbids ``REDIAL_STARTED`` by
+    design (no gap to redial). Drive the machine to DOWN_CRASH so the first
+    ``REDIAL_STARTED`` is a defined transition.
+    """
+    machine = LinkStateMachine()
+    machine.feed(GatewayLinkEvent.CORE_CRASH_EOF)  # UP -> DOWN_CRASH
+    return machine
+
+
+def _link_for_reconnect(
+    *,
+    dial: object,
+    sleep: object,
+    jitter: object | None = None,
+    machine: LinkStateMachine | None = None,
+) -> tuple[GatewayCoreLink, _RecordingClientListener]:
+    recorder = _RecordingClientListener()
+    link = GatewayCoreLink(
+        client_listener=recorder,  # type: ignore[arg-type]
+        machine=machine if machine is not None else _gapped_machine(),
+        dial=dial,  # type: ignore[arg-type]
+        sleep=sleep,  # type: ignore[arg-type]
+        jitter=jitter,  # type: ignore[arg-type]
+    )
+    return link, recorder
+
+
+@pytest.mark.asyncio
+async def test_reconnect_first_delay_is_initial_never_zero() -> None:
+    epoch = uuid4().hex
+    slept: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        slept.append(delay)
+
+    dial = _DialRecorder([lambda: _ready_transport(epoch)])
+    link, _ = _link_for_reconnect(dial=dial, sleep=_sleep, jitter=lambda hi: hi)
+
+    transport = await link._reconnect()
+
+    # Identity jitter (lambda hi: hi) reads the bare SCHEDULE ceiling: the first
+    # attempt's ceiling is exactly INITIAL (the schedule floor never starts at a 0
+    # ceiling). The real full-jitter draw is a uniform pick in [0, ceiling].
+    assert slept == [0.25]
+    assert isinstance(transport, _FakeCoreTransport)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_backoff_schedule_doubles_capped_at_max() -> None:
+    epoch = uuid4().hex
+    slept: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        slept.append(delay)
+
+    # Eight failed dials then a success — the success is never reached because we
+    # only assert the failed-attempt schedule; queue a final success so the loop ends.
+    fails: list[object] = [ConnectionRefusedError()] * 8
+    dial = _DialRecorder([*fails, lambda: _ready_transport(epoch)])
+    link, _ = _link_for_reconnect(dial=dial, sleep=_sleep, jitter=lambda hi: hi)
+
+    await link._reconnect()
+
+    # The identity jitter exposes the bare schedule: INITIAL, then doubling, capped at MAX.
+    assert slept[:8] == [0.25, 0.5, 1.0, 2.0, 4.0, 5.0, 5.0, 5.0]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_each_attempt_feeds_redial_started_and_increments_metric() -> None:
+    epoch = uuid4().hex
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    # Drive from an OPEN gap so REDIAL_STARTED is a defined transition (UP forbids it).
+    machine = LinkStateMachine()
+    machine.feed(GatewayLinkEvent.CORE_CRASH_EOF)  # UP -> DOWN_CRASH
+
+    dial = _DialRecorder(
+        [ConnectionRefusedError(), ConnectionRefusedError(), lambda: _ready_transport(epoch)]
+    )
+    link, _ = _link_for_reconnect(
+        dial=dial, sleep=_sleep, jitter=lambda hi: hi, machine=machine
+    )
+
+    before = RECONNECT_ATTEMPTS._value.get()
+    await link._reconnect()
+    after = RECONNECT_ATTEMPTS._value.get()
+
+    # Three attempts (two fail, one succeeds): three REDIAL_STARTED feeds, three
+    # metric increments, and the machine ends UP via the final CORE_READY.
+    assert dial.calls == 3
+    assert after - before == 3
+    assert machine.state is GatewayLinkState.UP
+
+
+@pytest.mark.asyncio
+async def test_reconnect_retries_transient_errors_then_succeeds_and_restores() -> None:
+    epoch = uuid4().hex
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    # A gap is already open + a redial began: the machine is REDIALING, so the
+    # success-path CORE_READY emits ``restored`` (spec §9: no restored without a
+    # preceding reconnecting/redial).
+    machine = LinkStateMachine()
+    machine.feed(GatewayLinkEvent.CORE_CRASH_EOF)  # UP -> DOWN_CRASH
+    machine.feed(GatewayLinkEvent.REDIAL_STARTED)  # DOWN_CRASH -> REDIALING
+
+    dial = _DialRecorder(
+        [
+            FileNotFoundError(),
+            ConnectionRefusedError(),
+            CommsPeerAuthError("peer uid mismatch"),
+            lambda: _ready_transport(epoch),
+        ]
+    )
+    link, recorder = _link_for_reconnect(
+        dial=dial, sleep=_sleep, jitter=lambda hi: hi, machine=machine
+    )
+
+    transport = await link._reconnect()
+
+    assert dial.calls == 4
+    assert machine.state is GatewayLinkState.UP
+    # The successful handshake captured the epoch and emitted ``restored`` to the client.
+    assert link._core_epoch == epoch
+    assert isinstance(recorder.controls[-1], LinkRestoredNotification)
+    assert isinstance(transport, _FakeCoreTransport)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_loud_on_each_failed_attempt() -> None:
+    epoch = uuid4().hex
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    dial = _DialRecorder([ConnectionRefusedError(), lambda: _ready_transport(epoch)])
+    link, _ = _link_for_reconnect(dial=dial, sleep=_sleep, jitter=lambda hi: hi)
+
+    with structlog.testing.capture_logs() as captured:
+        await link._reconnect()
+
+    failed = [c for c in captured if c.get("event") == "gateway.core_link.reconnect_failed"]
+    assert len(failed) == 1
+    assert failed[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_closes_half_open_transport_when_handshake_fails() -> None:
+    epoch = uuid4().hex
+
+    async def _sleep(_delay: float) -> None:
+        return None
+
+    # The first dial SUCCEEDS (returns a transport) but its queued lifecycle.start has
+    # a malformed epoch, so the handshake raises GatewayCoreLinkError. The half-open
+    # transport must be close()d before the loop retries (no FD leak).
+    half_open = _FakeCoreTransport([_start_frame(epoch="not-32-hex", seq_ack=None)])
+    good = _ready_transport(epoch)
+    dial = _DialRecorder([lambda: half_open, lambda: good])
+    link, _ = _link_for_reconnect(dial=dial, sleep=_sleep, jitter=lambda hi: hi)
+
+    transport = await link._reconnect()
+
+    assert half_open.closed is True
+    assert transport is good
+    assert link._core_epoch == epoch
+
+
+@pytest.mark.asyncio
+async def test_default_dial_delegates_to_dial_comms_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default ``dial`` thunk connects the keyed adapter's comms socket.
+
+    The thunk imports ``dial_comms_socket`` LAZILY (inside the function) to keep
+    importing this trust-boundary module cheap and cycle-free, so patch the symbol
+    on its source module and assert the keyed ``adapter_id`` threads through.
+    """
+    epoch = uuid4().hex
+    sentinel = _ready_transport(epoch)
+    seen: list[str] = []
+
+    async def _fake_dial(adapter_id: str) -> _FakeCoreTransport:
+        seen.append(adapter_id)
+        return sentinel
+
+    monkeypatch.setattr(
+        "alfred.plugins.comms_socket_transport.dial_comms_socket", _fake_dial
+    )
+    link = GatewayCoreLink(
+        client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
+        dial_adapter_id="gateway",
+    )
+
+    result = await link._default_dial()
+
+    assert result is sentinel
+    assert seen == ["gateway"]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_full_jitter_default_bounds_delay() -> None:
+    epoch = uuid4().hex
+    slept: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        slept.append(delay)
+
+    # No jitter override -> the default full-jitter draw in [0, backoff] is used. With
+    # a single successful dial the backoff is INITIAL, so the slept delay is in
+    # [0, 0.25] — assert the bound, not an exact value (the draw is random).
+    dial = _DialRecorder([lambda: _ready_transport(epoch)])
+    link = GatewayCoreLink(
+        client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
+        machine=_gapped_machine(),
+        dial=dial,  # type: ignore[arg-type]
+        sleep=_sleep,
+    )
+
+    await link._reconnect()
+
+    assert len(slept) == 1
+    assert 0.0 <= slept[0] <= 0.25

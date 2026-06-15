@@ -27,7 +27,9 @@ the host runner's behaviour for a peer that front-runs the handshake.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+import random
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Final, Protocol, runtime_checkable
 
 import structlog
@@ -47,8 +49,9 @@ from alfred.gateway.link_state import (
     GatewayLinkState,
     LinkStateMachine,
 )
-from alfred.gateway.metrics import CORE_LINK_UP
+from alfred.gateway.metrics import CORE_LINK_UP, RECONNECT_ATTEMPTS
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
+from alfred.plugins.comms_wire import CommsProtocolError
 
 log = structlog.get_logger(__name__)
 
@@ -120,9 +123,32 @@ class GatewayCoreLink:
         client_listener: GatewayClientListener,
         machine: LinkStateMachine | None = None,
         dial_adapter_id: str = _DEFAULT_DIAL_ADAPTER_ID,
+        dial: Callable[[], Awaitable[_CommsTransportLike]] | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        jitter: Callable[[float], float] | None = None,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
         self._client_listener = client_listener
+        # The reconnect-loop seams (all injectable so a test drives a deterministic
+        # fake clock). The dial default lazily imports ``dial_comms_socket`` INSIDE
+        # the thunk so importing this module does not pull the socket transport (and
+        # so there is no import cycle if the transport ever reaches back here).
+        self._dial: Callable[[], Awaitable[_CommsTransportLike]] = (
+            dial if dial is not None else self._default_dial
+        )
+        self._sleep = sleep
+        # Full jitter (AWS "Exponential Backoff And Jitter"): each delay is a uniform
+        # draw in ``[0, backoff]``, NOT the bare backoff — independent processes that
+        # gap together must not redial in lockstep. The default RNG is unseeded
+        # (jitter is not security-sensitive); a test injects ``lambda hi: hi`` to read
+        # the bare schedule, or a seeded ``random.Random`` for a fixed draw.
+        # S311: backoff jitter spreads coincident redials; it is NOT a security
+        # primitive (no token, nonce, or key derives from it), so the non-crypto PRNG
+        # is correct and a CSPRNG would be needless overhead.
+        rng = random.Random()  # noqa: S311
+        self._jitter: Callable[[float], float] = (
+            jitter if jitter is not None else (lambda hi: rng.uniform(0.0, hi))
+        )
         # The merged link-state machine — the kernel that decides which control frame
         # (if any) a lifecycle transition emits. Starts UP; one per gateway process.
         self._machine = machine if machine is not None else LinkStateMachine()
@@ -135,6 +161,67 @@ class GatewayCoreLink:
         # lifecycle control frames the gateway CONSUMES nor (yet) the payload frames
         # it RELAYS (the relay is G3-3b-2). T1 carrier: counted, never acted on.
         self._dropped_payload_frames: int = 0
+
+    async def _default_dial(self) -> _CommsTransportLike:
+        """Production dial: connect the core's comms socket on the keyed adapter id.
+
+        The import is local (not module-top) so importing this trust-boundary module
+        stays cheap and cannot close an import cycle with the socket transport, which
+        in turn imports this package's siblings.
+        """
+        from alfred.plugins.comms_socket_transport import dial_comms_socket
+
+        return await dial_comms_socket(self._dial_adapter_id)
+
+    async def _reconnect(self) -> _CommsTransportLike:
+        """Dial + handshake the core leg, retrying with exponential backoff + jitter.
+
+        Loops until a dial AND its peer handshake both succeed, returning the live
+        transport. Each attempt feeds ``REDIAL_STARTED`` to the link-state machine,
+        increments :data:`RECONNECT_ATTEMPTS`, then sleeps a FULL-JITTER delay BEFORE
+        dialing (spec §4). The backoff SCHEDULE floor starts at
+        ``INITIAL_BACKOFF_SECONDS`` (the ceiling never starts at 0) and doubles by
+        ``_BACKOFF_FACTOR`` up to ``MAX_BACKOFF_SECONDS`` on every failed attempt; the
+        actual delay each attempt is a full-jitter draw in ``[0, backoff]`` (so an
+        individual draw CAN land near 0 — the jitter, by design, can collapse a single
+        wait — but the schedule ceiling itself never starts at 0).
+
+        A transient transport fault (``FileNotFoundError`` / ``ConnectionRefusedError``
+        / ``OSError`` — a daemon-absent or stale-socket dial) and a wire/peer-auth
+        failure (``CommsProtocolError``, which subsumes ``CommsPeerAuthError``) are
+        caught, logged LOUD (CLAUDE.md hard rule #7), and retried.
+
+        A dial that SUCCEEDS but whose handshake then RAISES leaves a half-open
+        transport: it is ``close()``d before the loop retries so a repeatedly-failing
+        handshake cannot leak an FD per attempt.
+        """
+        backoff = INITIAL_BACKOFF_SECONDS
+        while True:
+            await self._feed(GatewayLinkEvent.REDIAL_STARTED)
+            RECONNECT_ATTEMPTS.inc()
+            await self._sleep(self._jitter(backoff))
+            try:
+                transport = await self._dial()
+            except (FileNotFoundError, ConnectionRefusedError, OSError, CommsProtocolError) as exc:
+                # OSError is a superclass of ConnectionRefusedError; the explicit names
+                # document the expected dial faults. CommsProtocolError subsumes
+                # CommsPeerAuthError (a wrong-uid peer answered the dial).
+                log.warning("gateway.core_link.reconnect_failed", error=repr(exc))
+                backoff = min(backoff * _BACKOFF_FACTOR, MAX_BACKOFF_SECONDS)
+                continue
+            try:
+                await self._peer_handshake(transport)
+            except (GatewayCoreLinkError, CommsProtocolError, OSError) as exc:
+                # The dial connected but the handshake failed (malformed/absent epoch,
+                # a torn wire, or the peer dropping mid-handshake). Close the half-open
+                # transport (no FD leak) and retry — a freshly-dialed transport that
+                # cannot complete the handshake is a retryable gap, not a fatal crash.
+                log.warning("gateway.core_link.reconnect_failed", error=repr(exc))
+                await transport.close()
+                backoff = min(backoff * _BACKOFF_FACTOR, MAX_BACKOFF_SECONDS)
+                continue
+            await self._feed(GatewayLinkEvent.CORE_READY)
+            return transport
 
     async def _peer_handshake(self, transport: _CommsTransportLike) -> None:
         """Receive the core's ``lifecycle.start``, validate + capture the epoch, ack.
