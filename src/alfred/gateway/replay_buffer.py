@@ -155,5 +155,47 @@ class ReplayBuffer:
         """``True`` once a soft cap was breached; cleared only by :meth:`discard`."""
         return self._breaker_tripped
 
+    def append(self, seq: int, payload: bytes, *, now: float) -> None:
+        """FIFO-append a fresh un-acked inbound frame.
+
+        ``seq`` is the gateway's per-direction monotonic counter and must be ``>= 0``
+        and strictly greater than the previously appended seq; ``now`` must be ``>=``
+        the previously appended ``now`` (a monotonic clock — the TTL prefix invariant
+        depends on it). A violation is a programming error, raised loud. The payload
+        is copied into a mutable ``bytearray`` we own (so we can zero it on removal)
+        and stamped with ``now``.
+
+        Soft cap: appending NEVER drops (spec §5). If it pushes depth past
+        ``max_frames``/``max_bytes`` the frame is kept and :attr:`breaker_tripped` is
+        set so G4b back-pressures the client read. Hard ceiling: if the append would
+        push depth past ``_HARD_CAP_MULTIPLIER`` x either cap it raises
+        :class:`ReplayBufferError` BEFORE storing — a fail-closed backstop against a
+        G4b that ignored back-pressure, so the always-up process cannot OOM.
+        """
+        if seq < 0:
+            raise ReplayBufferError(f"seq must be non-negative: {seq}")
+        if seq <= self._last_seq:
+            raise ReplayBufferError(
+                f"seq must strictly increase: got {seq} after {self._last_seq}"
+            )
+        if now < self._last_now:
+            raise ReplayBufferError(
+                f"now must be monotonic: got {now} after {self._last_now}"
+            )
+        if (
+            len(self._retained) + 1 > self._hard_max_frames
+            or self._depth_bytes + len(payload) > self._hard_max_bytes
+        ):
+            raise ReplayBufferError(
+                "ReplayBuffer hard ceiling breached — G4b is not honouring "
+                f"back-pressure (frames={len(self._retained)}, bytes={self._depth_bytes})"
+            )
+        self._retained.append(_Retained(seq=seq, body=bytearray(payload), enqueued_at=now))
+        self._depth_bytes += len(payload)
+        self._last_seq = seq
+        self._last_now = now
+        if len(self._retained) > self._max_frames or self._depth_bytes > self._max_bytes:
+            self._breaker_tripped = True
+
 
 __all__ = ["ReplayBuffer", "ReplayBufferError", "ReplayFrame"]
