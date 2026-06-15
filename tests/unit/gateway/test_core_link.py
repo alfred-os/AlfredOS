@@ -27,6 +27,7 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.gateway.client_listener import LinkControlNotification
 from alfred.gateway.core_link import (
+    _MIN_RECONNECT_DELAY_SECONDS,
     GATEWAY_PLUGIN_VERSION,
     GatewayCoreLink,
     GatewayCoreLinkError,
@@ -647,9 +648,10 @@ async def test_reconnect_full_jitter_default_bounds_delay() -> None:
     async def _sleep(delay: float) -> None:
         slept.append(delay)
 
-    # No jitter override -> the default full-jitter draw in [0, backoff] is used. With
-    # a single successful dial the backoff is INITIAL, so the slept delay is in
-    # [0, 0.25] — assert the bound, not an exact value (the draw is random).
+    # No jitter override -> the default full-jitter draw in [0, backoff] is used, CLAMPED
+    # to [_MIN_RECONNECT_DELAY_SECONDS, backoff]. With a single successful dial the
+    # backoff is INITIAL, so the realised delay is in [0.05, 0.25] — never 0 (spec §4) —
+    # assert the floored bound, not an exact value (the draw is random).
     dial = _DialRecorder([lambda: _ready_transport(epoch)])
     link = GatewayCoreLink(
         client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
@@ -661,7 +663,50 @@ async def test_reconnect_full_jitter_default_bounds_delay() -> None:
     await link._reconnect()
 
     assert len(slept) == 1
-    assert 0.0 <= slept[0] <= 0.25
+    assert _MIN_RECONNECT_DELAY_SECONDS <= slept[0] <= 0.25
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_draw", [0.0, -1.0])
+async def test_reconnect_clamps_zero_or_negative_jitter_to_floor(bad_draw: float) -> None:
+    """Spec §4 in CODE: a jitter draw of 0 (the default full-jitter CAN return ~0) or a
+    pathological negative injected draw is FLOORED to ``_MIN_RECONNECT_DELAY_SECONDS`` —
+    never a 0-delay (or negative) first retry. Deleting the ``max(..., floor)`` clamp in
+    ``_reconnect`` MUST make this FAIL (the slept delay would be 0.0 / -1.0).
+    """
+    epoch = uuid4().hex
+    slept: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        slept.append(delay)
+
+    dial = _DialRecorder([lambda: _ready_transport(epoch)])
+    link, _ = _link_for_reconnect(dial=dial, sleep=_sleep, jitter=lambda _hi: bad_draw)
+
+    await link._reconnect()
+
+    assert slept == [_MIN_RECONNECT_DELAY_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_clamps_oversized_jitter_to_backoff() -> None:
+    """The clamp's UPPER bound: a pathological injected jitter returning MORE than the
+    current backoff is pinned back to ``backoff`` (the first attempt's ceiling is
+    ``INITIAL_BACKOFF_SECONDS``), so the realised delay never exceeds the schedule.
+    """
+    epoch = uuid4().hex
+    slept: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        slept.append(delay)
+
+    dial = _DialRecorder([lambda: _ready_transport(epoch)])
+    # A jitter returning far above the backoff ceiling on attempt 1 (backoff == 0.25).
+    link, _ = _link_for_reconnect(dial=dial, sleep=_sleep, jitter=lambda _hi: 999.0)
+
+    await link._reconnect()
+
+    assert slept == [0.25]
 
 
 # ---------------------------------------------------------------------------
@@ -1070,6 +1115,105 @@ async def test_read_frame_or_shutdown_cancel_cancels_both_children() -> None:
     )
 
     task = asyncio.ensure_future(link._read_frame_or_shutdown(transport))  # type: ignore[arg-type]
+    # Let the race reach ``asyncio.wait`` (both children pending), then cancel it.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+# ---------------------------------------------------------------------------
+# FIX B — honour shutdown WHILE reconnecting (not just while pumping)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_shutdown_between_reconnect_attempts_returns_promptly() -> None:
+    """Shutdown signalled BETWEEN reconnect attempts ends ``run()`` promptly via the
+    reconnect loop's top-of-iteration check: no further dial, no spurious banner.
+
+    The initial dial FAILS (opening the gap → ``reconnecting``), then the reconnect
+    loop's first dial also fails and SETS the shutdown event; the loop's next
+    top-of-iteration check raises ``_Shutdown`` BEFORE any further dial. Removing that
+    top-of-loop check would make the loop dial forever and this test would hang/timeout.
+    """
+    shutdown = asyncio.Event()
+    dial_calls: list[int] = []
+
+    async def _failing_dial_then_signal() -> _FakeCoreTransport:
+        dial_calls.append(1)
+        if len(dial_calls) >= 2:
+            # The reconnect loop's first dial: fail AND signal shutdown so the NEXT
+            # top-of-iteration check ends the loop before a third dial.
+            shutdown.set()
+        raise ConnectionRefusedError
+
+    link, recorder = _run_link(dial=_failing_dial_then_signal, shutdown_event=shutdown)
+
+    await asyncio.wait_for(link.run(), timeout=1.0)
+
+    # The initial dial (1) + exactly one reconnect-loop dial (2); the top-of-loop check
+    # then ends the loop — NO third dial.
+    assert len(dial_calls) == 2
+    # A gap opened (reconnecting) but shutdown is a clean stop: NO ``restored`` follows.
+    assert [type(c) for c in recorder.controls] == [LinkReconnectingNotification]
+
+
+@pytest.mark.asyncio
+async def test_run_shutdown_during_reconnect_backoff_sleep_returns_promptly() -> None:
+    """Shutdown signalled DURING the reconnect backoff sleep returns ``run()`` promptly
+    (racing the sleep) instead of waiting out the full backoff.
+
+    The injected ``_sleep`` BLOCKS on an event the test controls; once the pump reaches
+    that blocking sleep the test sets shutdown, so ``_sleep_or_shutdown``'s race resolves
+    on the shutdown waiter (NOT the still-blocked sleep) and raises ``_Shutdown``. Without
+    racing the sleep against shutdown, ``run()`` would hang on the blocked sleep and this
+    test would time out. Deterministic — no wall-clock wait.
+    """
+    shutdown = asyncio.Event()
+    sleep_entered = asyncio.Event()
+    sleep_release = asyncio.Event()  # never set: the sleep stays genuinely blocked
+
+    async def _blocking_sleep(_delay: float) -> None:
+        sleep_entered.set()
+        await sleep_release.wait()
+
+    # The initial dial FAILS → the gap opens and the reconnect loop sleeps (blocking).
+    dial = _DialRecorder([ConnectionRefusedError()])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown, sleep=_blocking_sleep)
+
+    task = asyncio.ensure_future(link.run())
+    # Let the reconnect loop reach the blocking backoff sleep, then signal shutdown.
+    await asyncio.wait_for(sleep_entered.wait(), timeout=1.0)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The sleep was still blocked (never released); the shutdown waiter won the race and
+    # ``run()`` returned cleanly. A gap opened (reconnecting) but NO ``restored``.
+    assert not sleep_release.is_set()
+    assert [type(c) for c in recorder.controls] == [LinkReconnectingNotification]
+
+
+@pytest.mark.asyncio
+async def test_sleep_or_shutdown_cancel_cancels_both_children() -> None:
+    """A force-cancel WHILE the sleep/shutdown race is pending cancels both children and
+    re-raises ``CancelledError`` (cancellation-safety, no leaked tasks) — mirrors the
+    ``_read_frame_or_shutdown`` cancel arm.
+    """
+    shutdown = asyncio.Event()
+    sleep_release = asyncio.Event()  # never set: the sleep stays genuinely pending
+
+    async def _blocking_sleep(_delay: float) -> None:
+        await sleep_release.wait()
+
+    link = GatewayCoreLink(
+        client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
+        sleep=_blocking_sleep,
+        shutdown_event=shutdown,
+    )
+
+    task = asyncio.ensure_future(link._sleep_or_shutdown(0.25))
     # Let the race reach ``asyncio.wait`` (both children pending), then cancel it.
     for _ in range(10):
         await asyncio.sleep(0)
