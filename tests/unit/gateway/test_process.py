@@ -360,6 +360,50 @@ async def test_bind_oserror_refuses_loud(runtime_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# accept() RAISES while shutdown is also set — the genuine accept error is
+# re-raised (not swallowed, not the stale transport). FIX 5.
+# ---------------------------------------------------------------------------
+
+
+async def test_accept_error_with_shutdown_set_propagates(runtime_dir: Path) -> None:
+    """An ``accept()`` that RAISES while ``shutdown_event`` is also set propagates the
+    accept error — it is NOT swallowed into a clean stop and is NOT the stale transport.
+
+    Guards :meth:`GatewayProcess._accept_racing_shutdown`'s same-tick both-done branch,
+    where ``accept_task.result()`` re-raises a genuine accept error. This test FAILS if
+    line ~162's ``accept_task.result()`` were dropped (the error would be swallowed and
+    the stale ``listener.transport`` returned instead — a silent failure).
+
+    A fake listener whose ``accept()`` raises ``OSError`` immediately is driven with the
+    shutdown event ALREADY set, so both children of the race resolve on the same tick.
+    """
+
+    class _ExplodingAcceptListener:
+        """A minimal stand-in: ``accept()`` raises; ``bind``/``aclose`` are no-ops."""
+
+        def __init__(self) -> None:
+            self.transport = object()  # the STALE transport the bug would return
+            self.aclosed = False
+
+        async def bind(self) -> None:
+            return None
+
+        async def accept(self) -> object:
+            raise OSError("accept refused under shutdown")
+
+        async def aclose(self) -> None:
+            self.aclosed = True
+
+    shutdown = asyncio.Event()
+    shutdown.set()  # shutdown already won — forces the same-tick both-done path.
+    process = GatewayProcess(shutdown_event=shutdown)
+    listener = _ExplodingAcceptListener()
+
+    with pytest.raises(OSError, match="accept refused under shutdown"):
+        await process._accept_racing_shutdown(listener)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # Mismatched-uid client — PEER_AUTH_REJECTED increments + the loud row fires.
 # ---------------------------------------------------------------------------
 

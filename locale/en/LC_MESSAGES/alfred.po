@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-15 13:02+0100\n"
+"POT-Creation-Date: 2026-06-15 13:28+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1143,9 +1143,9 @@ msgstr ""
 #: src/alfred/cli/gateway/__init__.py:25
 msgid "gateway.help.root"
 msgstr ""
-"Run and inspect the AlfredOS gateway — the resumable front door that stands "
-"in for the daemon toward `alfred chat`, surviving a core restart so a "
-"session is not torn down by a daemon bounce."
+"Run and inspect the AlfredOS gateway — the resumable front door that "
+"stands in for the daemon toward `alfred chat`, surviving a core restart "
+"so a session is not torn down by a daemon bounce."
 
 #: src/alfred/cli/gateway/__init__.py:28
 msgid "gateway.help.start"
@@ -1157,32 +1157,46 @@ msgstr ""
 "Show whether the gateway socket is present and the runtime-dir posture, "
 "without dialing it. For full instance health, see: alfred status"
 
-#: src/alfred/cli/gateway/_commands.py:61
+#: src/alfred/cli/gateway/_commands.py:65
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:91
+#: src/alfred/cli/gateway/_commands.py:95
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:93
+#: src/alfred/cli/gateway/_commands.py:102
+msgid "gateway.start.handshake_failed"
+msgstr ""
+"The gateway could not complete the client handshake with the TUI. Check "
+"that a compatible `alfred chat` client is connecting, then re-run `alfred "
+"gateway start`."
+
+#: src/alfred/cli/gateway/_commands.py:111
+msgid "gateway.start.bind_failed"
+msgstr ""
+"The gateway could not bind its client socket — another gateway may already "
+"be running. Stop it first, then re-run `alfred gateway start`."
+
+#: src/alfred/cli/gateway/_commands.py:113
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:106
+#: src/alfred/cli/gateway/_commands.py:134
+#: src/alfred/cli/gateway/_commands.py:148
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:114
+#: src/alfred/cli/gateway/_commands.py:152
 msgid "gateway.status.socket_present"
 msgstr ""
-"Gateway socket present at {path} (runtime dir mode {runtime_mode}, "
-"owner uid {uid}); the gateway appears to be running."
+"Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
+"uid {uid}); the gateway appears to be running."
 
 #: src/alfred/comms_mcp/audit_hash.py:94
 #: src/alfred/i18n/_slice_4_reserve.py:120

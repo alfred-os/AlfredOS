@@ -34,15 +34,18 @@ from alfred.plugins.comms_socket_transport import default_comms_socket_path
 
 log = structlog.get_logger(__name__)
 
-# The gateway's own stable client-facing socket id (spec §10) — the
-# ``GatewayClientListener`` binds ``comms-gateway.sock`` keyed on this id, so the
-# status probe resolves the same path. Single source of truth with
-# :data:`alfred.gateway.client_listener._GATEWAY_ADAPTER_ID`.
-_GATEWAY_ADAPTER_ID = "gateway"
-
 # The exit code a friendly "core / socket setup unavailable" refusal returns. Mirrors
 # the daemon's non-zero refuse codes — a distinct non-zero so scripts can branch on it.
 _EXIT_UNAVAILABLE = 3
+
+# A friendly "the client socket could not be bound" refusal (e.g. ``EADDRINUSE`` —
+# another gateway already holds the socket). A distinct non-zero so an operator script
+# can tell "address in use" apart from "core unreachable".
+_EXIT_BIND_FAILED = 4
+
+# A friendly "the client handshake with the TUI failed" refusal. A distinct non-zero so
+# a torn / malformed client leg is scriptable apart from the bind / core-dial refusals.
+_EXIT_HANDSHAKE_FAILED = 5
 
 
 def start_gateway() -> None:
@@ -56,6 +59,7 @@ def start_gateway() -> None:
     # perf-001: the relay graph imports lazily here, not at module-top, so
     # ``alfred --help`` never pays the gateway-process import cost.
     from alfred.comms_mcp.errors import DaemonUnavailableError
+    from alfred.gateway.client_link import GatewayHandshakeError
     from alfred.gateway.process import GatewayProcess
 
     typer.echo(t("gateway.start.starting"))
@@ -90,6 +94,22 @@ def start_gateway() -> None:
         log.warning("gateway.cli.core_unavailable", error=repr(exc))
         typer.echo(t("gateway.start.unavailable"))
         raise typer.Exit(code=_EXIT_UNAVAILABLE) from exc
+    except GatewayHandshakeError as exc:
+        # Friendly refusal — the client (TUI) handshake failed (a torn / not-ok /
+        # malformed client leg). An EXPECTED operator condition, NOT a programming bug,
+        # so surface a next-step message + a distinct non-zero exit, never a traceback.
+        log.warning("gateway.cli.handshake_failed", error=repr(exc))
+        typer.echo(t("gateway.start.handshake_failed"))
+        raise typer.Exit(code=_EXIT_HANDSHAKE_FAILED) from exc
+    except OSError as exc:
+        # Friendly refusal — the client socket could not be bound (e.g. ``EADDRINUSE``:
+        # another gateway already holds it). An EXPECTED operator condition, so surface a
+        # next-step message + a distinct non-zero exit rather than a bare traceback.
+        # NOTE: scoped to ``OSError`` (bind/socket faults) ONLY — a programming bug
+        # (``TypeError``, ``ValueError``, …) still surfaces LOUD (CLAUDE.md hard rule #7).
+        log.warning("gateway.cli.bind_failed", error=repr(exc))
+        typer.echo(t("gateway.start.bind_failed"))
+        raise typer.Exit(code=_EXIT_BIND_FAILED) from exc
     typer.echo(t("gateway.start.stopped"))
 
 
@@ -101,6 +121,14 @@ def status_gateway() -> None:
     check) plus the owner-only ``0700`` posture of the runtime dir when the socket is
     present. Read-only: a missing socket (no gateway running) is NOT an error — exit 0.
     """
+    # perf-001: import the gateway adapter id LAZILY from its single source of truth
+    # (the listener that binds the socket), NOT a module-top re-declaration — so the
+    # status probe resolves the EXACT path the listener binds and a future rename
+    # cannot drift them apart. The import is local because ``alfred.gateway`` eagerly
+    # pulls the relay graph (``alfred.gateway.process`` / ``relay``), which the
+    # ``alfred --help`` path must never pay (pinned by ``test_main_lazy_imports.py``).
+    from alfred.gateway.client_listener import _GATEWAY_ADAPTER_ID
+
     socket_path = default_comms_socket_path(_GATEWAY_ADAPTER_ID)
     if not socket_path.exists():
         typer.echo(t("gateway.status.socket_absent", path=str(socket_path)))
@@ -108,7 +136,17 @@ def status_gateway() -> None:
     # The socket is present — report it alongside the runtime-dir posture. The mode is a
     # stat of the PARENT dir (the owner-only 0700 guarantee), NOT a connect: presence +
     # perms is all a non-dialing probe is permitted to read (security L3).
-    runtime_mode = stat.S_IMODE(socket_path.parent.stat().st_mode)
+    #
+    # TOCTOU: the runtime dir can vanish between the ``exists()`` check above and this
+    # stat (a concurrent reaper / a ``rm -rf ~/.run``). A raw ``OSError`` here would
+    # surface as a traceback, breaking this command's "never a raw traceback" contract,
+    # so a vanished dir falls back to the friendly socket-absent line + exit 0 — the
+    # socket is, by then, genuinely gone.
+    try:
+        runtime_mode = stat.S_IMODE(socket_path.parent.stat().st_mode)
+    except OSError:
+        typer.echo(t("gateway.status.socket_absent", path=str(socket_path)))
+        return
     typer.echo(
         t(
             "gateway.status.socket_present",

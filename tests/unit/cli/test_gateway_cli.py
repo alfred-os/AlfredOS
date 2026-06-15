@@ -142,6 +142,91 @@ def test_start_unavailable_socket_is_friendly_not_traceback(
     assert t("gateway.start.unavailable") in result.stdout
 
 
+def test_start_bind_oserror_is_friendly_not_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bind ``OSError`` (e.g. ``EADDRINUSE``) is a friendly message + non-zero exit.
+
+    Another gateway already holding the socket is an EXPECTED operator condition, not a
+    programming bug — it must surface a next-step line, never a raw traceback.
+    """
+
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise OSError("address already in use")
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code != 0
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert t("gateway.start.bind_failed") in result.stdout
+    # The bind-failed line is DISTINCT from the core-unavailable / handshake lines.
+    assert t("gateway.start.unavailable") not in result.stdout
+    assert t("gateway.start.handshake_failed") not in result.stdout
+
+
+def test_start_handshake_error_is_friendly_not_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``GatewayHandshakeError`` (the TUI client handshake failed) is a friendly line.
+
+    A torn / not-ok / malformed client leg is an EXPECTED operator condition, so it
+    surfaces a next-step message + a distinct non-zero exit, never a raw traceback.
+    """
+    from alfred.gateway.client_link import GatewayHandshakeError
+
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise GatewayHandshakeError("client link closed before lifecycle.start ack")
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code != 0
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert t("gateway.start.handshake_failed") in result.stdout
+    # The handshake-failed line is DISTINCT from the bind / core-unavailable lines.
+    assert t("gateway.start.bind_failed") not in result.stdout
+    assert t("gateway.start.unavailable") not in result.stdout
+
+
+def test_start_programming_bug_still_surfaces_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-EXPECTED error (a programming bug) is NOT mapped to a friendly line.
+
+    FIX 6 maps only EXPECTED operator conditions (``DaemonUnavailableError`` / bind
+    ``OSError`` / ``GatewayHandshakeError``); a ``ValueError`` is a bug and MUST still
+    surface LOUD (CLAUDE.md hard rule #7 — no silent / friendly-masked failures).
+    """
+
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            pass
+
+        async def run(self) -> None:
+            raise ValueError("a real programming bug")
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code != 0
+    # The bug escapes as a real exception — not masked by any friendly line.
+    assert isinstance(result.exception, ValueError)
+    assert t("gateway.start.bind_failed") not in result.stdout
+    assert t("gateway.start.handshake_failed") not in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # ``alfred gateway status``  (MUST NOT dial — security L3)
 # ---------------------------------------------------------------------------
@@ -184,6 +269,46 @@ def test_status_socket_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     result = CliRunner().invoke(gateway_app, ["status"])
 
     assert result.exit_code == 0, result.stdout
+    assert t("gateway.status.socket_absent", path=str(sock)) in result.stdout
+
+
+def test_status_runtime_dir_vanishes_between_checks_is_friendly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A TOCTOU race — the runtime dir vanishes after ``exists()`` but before the parent
+    ``stat()`` — falls back to the friendly socket-absent line + exit 0, NOT a traceback.
+
+    The present-branch ``socket_path.parent.stat()`` would raise ``OSError`` if a
+    concurrent reaper / ``rm -rf ~/.run`` removed the dir between the two probes; the
+    command's "never a raw traceback" contract requires the friendly fallback instead.
+    """
+    runtime_dir = tmp_path / ".run" / "alfred"
+    runtime_dir.mkdir(mode=0o700, parents=True)
+    sock = runtime_dir / "comms-gateway.sock"
+    sock.touch()
+
+    monkeypatch.setattr(
+        "alfred.cli.gateway._commands.default_comms_socket_path",
+        lambda _adapter_id: sock,
+    )
+
+    # Make the PARENT-dir ``stat()`` raise (the dir vanished post-``exists()``), while
+    # the ``socket_path.exists()`` probe still reports present. Patch ``Path.stat`` to
+    # raise only for the parent dir so the existence check is unaffected.
+    real_stat = Path.stat
+
+    def _vanishing_stat(self: Path, *args: object, **kwargs: object) -> object:
+        if self == sock.parent:
+            raise OSError("runtime dir vanished mid-probe")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "stat", _vanishing_stat)
+
+    result = CliRunner().invoke(gateway_app, ["status"])
+
+    assert result.exit_code == 0, result.stdout
+    # No traceback escaped — the friendly socket-absent fallback rendered.
+    assert result.exception is None or isinstance(result.exception, SystemExit)
     assert t("gateway.status.socket_absent", path=str(sock)) in result.stdout
 
 

@@ -169,6 +169,23 @@ async def test_pre_ack_cap_fails_closed_without_infinite_loop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bool_false_id_is_not_treated_as_the_ack() -> None:
+    # ``{"id": false}`` would match ``id == 0`` naively because ``False == 0`` in
+    # Python. The int-type guard treats a boolean id as a NON-matching pre-ack frame
+    # (warn-dropped within the cap), then processes the genuine integer-0 ack that
+    # follows — a non-conformant frame is never mistaken for the ack.
+    bogus = {"jsonrpc": "2.0", "id": False, "result": {"ok": True, "plugin_version": "x"}}
+    transport = _FakeTuiTransport([bogus, _ack(seq_ack={"version": SEQ_VERSION})])
+
+    enabled = await client_handshake(transport)
+
+    # The genuine ack (integer 0) negotiated seq/ack — proving the bool frame was
+    # dropped as a pre-ack frame, not consumed as the ack.
+    assert enabled is True
+    assert transport.seq_ack_enabled is True
+
+
+@pytest.mark.asyncio
 async def test_pre_ack_cap_exact_boundary_still_processes_the_ack() -> None:
     # Exactly _MAX_PRE_ACK_FRAMES non-matching frames are tolerated; the ack on
     # the next read still processes (the cap is a drop count, not a read count).
