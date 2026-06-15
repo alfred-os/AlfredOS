@@ -11,6 +11,8 @@ Covers two things (the machine->wire round-trip, Task 2b, lives in
 
 from __future__ import annotations
 
+import itertools
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -26,6 +28,7 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.gateway import control_notification
 from alfred.gateway.link_state import (
+    _TRANSITIONS,
     GatewayLinkEvent,
     GatewayLinkState,
     GatewayLinkStateError,
@@ -142,8 +145,8 @@ def test_machine_starts_up() -> None:
 
 
 def test_unavailable_state_and_breaker_event_exist() -> None:
-    from alfred.gateway.link_state import GatewayLinkEvent, GatewayLinkState
-
+    # Pin the on-the-wire StrEnum values (the control-frame vocabulary the TUI banner
+    # and audit rows key on) — names use the module-level imports already in scope.
     assert GatewayLinkState.UNAVAILABLE == "unavailable"
     assert GatewayLinkEvent.BREAKER_TRIPPED == "breaker_tripped"
 
@@ -224,6 +227,11 @@ def test_undefined_transition_fails_loud() -> None:
 # that begins from ``UP`` must avoid feeding ``redial_started`` while up (that is
 # the genuinely-undefined pair). So the property drives the machine but skips a
 # step that would fail-loud, focusing the property on the §9 ordering invariant.
+# NB: kept to the four pre-breaker events ON PURPOSE — the gap-open cross-check in
+# `test_restored_always_preceded_by_reconnecting` (`gap_open == (state is not UP)`)
+# is only valid while UNAVAILABLE is unreachable (UNAVAILABLE is not-UP yet not
+# gap-open). BREAKER_TRIPPED coverage lives in the new property
+# `test_invariant_no_control_after_unavailable_...`.
 _ALL_EVENTS = (
     GatewayLinkEvent.CORE_GOING_DOWN,
     GatewayLinkEvent.CORE_CRASH_EOF,
@@ -269,3 +277,69 @@ def test_restored_always_preceded_by_reconnecting(
         # but landed in a wrong state would otherwise slip past the §9 property
         # (test-g33a-002).
         assert gap_open == (machine.state is not GatewayLinkState.UP)
+
+
+# ---------------------------------------------------------------------------
+# G4b-1 — the §9 invariant refined for the breaker escalation + absorbing sink
+# ---------------------------------------------------------------------------
+
+
+@given(st.lists(st.sampled_from(list(GatewayLinkEvent)), min_size=0, max_size=40))
+def test_invariant_no_control_after_unavailable_and_no_unprefixed_restored(
+    events: list[GatewayLinkEvent],
+) -> None:
+    """§9 (refined for G4b-1): RESTORED only after a RECONNECTING since the last UP;
+    no control of ANY kind once UNAVAILABLE has been emitted; feed never raises.
+    """
+    m = LinkStateMachine()
+    reconnecting_open = False
+    unavailable_emitted = False
+    for ev in events:
+        # feed is total EXCEPT (UP, REDIAL_STARTED) — the H2 fail-loud hole. Skip it
+        # exactly as the existing §9 property does, so a real undefined pair still
+        # surfaces as a raise rather than being swallowed here.
+        if m.state is GatewayLinkState.UP and ev is GatewayLinkEvent.REDIAL_STARTED:
+            with pytest.raises(GatewayLinkStateError):
+                m.feed(ev)
+            continue
+        control = m.feed(ev)  # raises only on the H2 hole, skipped above
+        if unavailable_emitted:
+            assert control is None  # absorbing terminal: nothing after UNAVAILABLE
+        if control is LinkControl.RECONNECTING:
+            reconnecting_open = True
+        elif control is LinkControl.RESTORED:
+            assert reconnecting_open, "RESTORED without a preceding RECONNECTING"
+            reconnecting_open = False
+        elif control is LinkControl.UNAVAILABLE:
+            unavailable_emitted = True
+        # State cross-check (the terminal-sink analogue of the gap-open cross-check
+        # in `test_restored_always_preceded_by_reconnecting`): once UNAVAILABLE has
+        # been emitted the machine state is forever the terminal sink. This catches a
+        # "right control frame, wrong next_state" table typo the control-only
+        # bookkeeping above would otherwise miss.
+        if unavailable_emitted:
+            assert m.state is GatewayLinkState.UNAVAILABLE
+
+
+# The one deliberately-undefined pair (H2 fix): a redial cannot begin while the
+# link is UP — no gap is open, so feed(UP, REDIAL_STARTED) must fail loud. The
+# table is total over state x event EXCEPT here; see GatewayLinkStateError.
+_SANCTIONED_UNDEFINED: frozenset[tuple[GatewayLinkState, GatewayLinkEvent]] = frozenset(
+    {(GatewayLinkState.UP, GatewayLinkEvent.REDIAL_STARTED)}
+)
+
+
+def test_transition_table_is_total_except_the_sanctioned_hole() -> None:
+    """Every (state, event) has a row except the one fail-loud H2 hole.
+
+    Pins both directions: (a) all 24 modelled pairs present, so a future hand-edit
+    that drops a row fails here; (b) (UP, REDIAL_STARTED) stays ABSENT, so the
+    fail-loud guard + its test remain meaningful. Complements (does not replace)
+    test_undefined_transition_fails_loud.
+    """
+    for state, event in itertools.product(GatewayLinkState, GatewayLinkEvent):
+        present = (state, event) in _TRANSITIONS
+        if (state, event) in _SANCTIONED_UNDEFINED:
+            assert not present, f"sanctioned hole must stay absent: {state} x {event}"
+        else:
+            assert present, f"missing transition: {state} x {event}"

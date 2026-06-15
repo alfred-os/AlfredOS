@@ -19,10 +19,16 @@ and epoch-checked BEFORE ``feed(core_ready)`` is called. The pure machine is
 structurally incapable of being driven by raw bytes, so a forged ``ready`` cannot
 reach it.
 
-**Spec §9 invariant.** No ``restored`` without a preceding ``reconnecting``; exactly
-one control frame per gap. The transition table below encodes it; the hypothesis
-property in ``tests/unit/gateway/test_link_state.py`` proves it over random event
-sequences.
+**Spec §9 invariant (refined for the G4b-1 breaker).** No ``restored`` without a
+preceding ``reconnecting``. On the happy path a gap emits ``[reconnecting(, restored)]``.
+The G4b breaker escalates instead to a terminal ``unavailable``: it may follow a
+``reconnecting`` (a buffer that filled while the core was down and never returned)
+or stand alone from ``UP`` (the wedged-but-connected core, spec §6(d) — the link
+never dropped, so there is no preceding ``reconnecting``). Once ``unavailable`` is
+emitted the state absorbs every event and emits no further control (a wedged buffer
+is not un-wedged by a core returning; recovery is a fresh session = a new machine).
+The transition table below encodes it; the hypothesis properties in
+``tests/unit/gateway/test_link_state.py`` prove it over random event sequences.
 """
 
 from __future__ import annotations
@@ -241,8 +247,11 @@ class LinkStateMachine:
     def feed(self, event: GatewayLinkEvent) -> LinkControl | None:
         """Apply ``event`` to the current state; return the control frame to emit.
 
-        Raises :class:`GatewayLinkStateError` on an undefined ``(state, event)`` pair
-        — never a silent no-op (CLAUDE.md hard rule #7).
+        The table is total over ``state x event`` save the one H2-sanctioned hole
+        ``UP + redial_started`` (a redial cannot begin while the link is up). That
+        pair — and any genuinely-future unmodelled pair — raises
+        :class:`GatewayLinkStateError`, never a silent no-op (CLAUDE.md hard rule #7).
+        Once ``UNAVAILABLE`` is reached every event absorbs and emits ``None``.
         """
         try:
             next_state, emitted = _TRANSITIONS[(self.state, event)]
