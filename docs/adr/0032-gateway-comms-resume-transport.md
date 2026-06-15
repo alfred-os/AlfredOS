@@ -140,3 +140,29 @@ The gateway is the first real `cumulative_ack()` source. It does NOT reuse the m
 ### The non-root wire-contract gate (#245 paper-gate fix)
 
 The relay's contract is proven by an in-process, NON-root test over REAL loopback `CommsSocketTransport`s + a REAL `GatewayClientListener` (the G2 lesson: a launcher/root-only test is not a real gate). It asserts byte-for-byte payloads, the §9 control sequence, RESEQ (the client-leg sent seq ≠ the core-leg received seq — proving reframe, not pass-through), the client-leg seq climbing across a reconnect, the payload-blindness canary (byte-identical + no body parse + no log leak), and the forgery/dial-reject paths. (This real gate caught a `-1`-initial-ack crash the in-process fakes could not — the exact value of testing the real wire.)
+
+## Amendment — ReplayBuffer security-bounded retention (G4a)
+
+G4a lands the gateway's pure `ReplayBuffer` (`src/alfred/gateway/replay_buffer.py`): the un-acked **inbound** (client→core) frames live here between the moment the relay forwards them and the moment the (possibly freshly-restarted) core durably acks them, so a core restart never loses typed input (spec §5). It is a pure state machine in the same family as `LinkStateMachine` and `BoundedSeqAckTracker` — no I/O, no clock, no logging; time is injected as an explicit monotonic `now`. The reconnect/relay wiring that consumes it (drives `breaker_tripped` into the link state, writes the audit rows, halts the client read on back-pressure) is **G4b**.
+
+### What the buffer retains — pre-DLP, payload-blind, T1-carrier input
+
+The `ReplayBuffer` stores opaque inbound bytes verbatim and replays them verbatim — it never inspects, decodes, or trust-tags them (T3 tagging stays in the core, per hard rule #5). Because it pins **pre-DLP operator input** in the always-up process across a crash-loop, its bounded retention is a **security** property, not just a resource cap.
+
+### Bounded retention as a security property
+
+- **Soft cap (`max_frames` + `max_bytes`)** — a breach KEEPS the frame (the spec §5 no-silent-drop guarantee) and trips a monotone `breaker_tripped` latch. The latch is the back-pressure SIGNAL; G4b enforces the bound by ceasing to drain the client socket. Post-breach growth is bounded only by G4b's read-halt latency — the residual window this pure layer does not close (the adversarial wedged-core-flood corpus entry, spec §6(d), is a G4b release-blocker proving G4b actually halts).
+- **Hard ceiling (`2×` each soft cap)** — a defence-in-depth backstop against a buggy G4b that ignores back-pressure: an append that would breach it raises loud (`ReplayBufferError`, fail-closed — never a silent drop) so the always-up security process cannot be driven to OOM.
+- **TTL (`ttl_seconds`)** — pre-DLP input cannot be pinned across an unbounded crash-loop, so a frame older than the TTL is evicted. TTL eviction IS input-loss, so it is **observable**: `evict_expired` returns the evicted seqs and G4b writes a loud audit row per dropped frame (hard rule #7). The monotonic-`now` invariant on `append` is what makes "expired frames are a leading FIFO prefix" a guarantee rather than a hope.
+
+### Zero-on-removal (best-effort)
+
+Every byte that leaves on a removal path (`trim_to_ack` ack-trim, `evict_expired` TTL-eviction, `discard`) is overwritten in place (`bytearray` overwrite) before its reference is dropped, with white-box tests asserting the captured body reads all-zero. **Residual-risk caveat:** Python gives no crypto-erase guarantee (the GC may have copied, interned, or paged the bytes). The buffer zeros only its own mutable copy; the immutable `bytes` a caller passes to `append`, and the immutable copies `unacked_frames` hands back (a flapping reconnect can mint many live at once), are caller/wire-owned and not the buffer's to zero. `MADV_DONTDUMP` / core-dump suppression are the G4b process-level mitigations and G4b must not retain replay results beyond the single send.
+
+### Seq is gateway-owned and monotonic across a core restart
+
+The inbound (client→core) seq the gateway mints does NOT reset on a core bounce (only the core→client direction resets — Decision 1/§4); a normal reconnect does NOT discard, so the gateway keeps minting the next seq and the monotonic guard is never tripped on a successful resume. Replay carries each frame's ORIGINAL seq (`ReplayFrame(seq, payload)`) so the core dedups on `(leg, seq)` (Decision 4) — re-minting would defeat the no-double-effect guarantee. `discard` (clean shutdown / retry-window exhaustion) zeroes everything and clears the breaker but **deliberately does NOT reset the monotonic floor**: a late stale-stream frame after a discard is rejected loud rather than silently re-admitted. A genuine seq-space restart is a G4b epoch-handshake concern, sequenced after the old leg is torn down.
+
+### Loudness is the G4b wiring's obligation
+
+The pure buffer exposes signals — `evict_expired`'s returned seqs, the `breaker_tripped` latch, and the hard-ceiling raise — but writes no audit row and no log. G4b turns every signal loud (audits each eviction / breaker-trip / hard-ceiling raise, drives `breaker_tripped` → `GatewayLinkEvent.BREAKER_TRIPPED` → `LinkControl.UNAVAILABLE`, and gates `trim_to_ack` on epoch-validated durable acks — a spoofed/stale-epoch ack would zero un-committed input, and the pure buffer cannot tell a real ack from a forged one).
