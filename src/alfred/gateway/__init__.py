@@ -17,6 +17,7 @@ This package is built in two PRs:
 from __future__ import annotations
 
 from alfred.gateway._control_frames import control_notification
+from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink, GatewayCoreLinkError
 from alfred.gateway.link_state import (
@@ -26,14 +27,17 @@ from alfred.gateway.link_state import (
     LinkControl,
     LinkStateMachine,
 )
+from alfred.gateway.relay import GatewayRelay
 
 __all__ = [
+    "BoundedSeqAckTracker",
     "GatewayClientListener",
     "GatewayCoreLink",
     "GatewayCoreLinkError",
     "GatewayLinkEvent",
     "GatewayLinkState",
     "GatewayLinkStateError",
+    "GatewayRelay",
     "LinkControl",
     "LinkStateMachine",
     "control_notification",

@@ -679,7 +679,14 @@ class GatewayCoreLink:
         The send-half of the relay (Spec A G3-3b-2 / ADR-0032). Snapshots the CURRENT
         core transport into a local FIRST (so a concurrent reconnect swap is atomic
         w.r.t. this send — architect M3), then writes the opaque ``payload`` with the
-        receive tracker's :meth:`BoundedSeqAckTracker.cumulative_ack` as the ``ack``.
+        receive tracker's :meth:`BoundedSeqAckTracker.cumulative_ack` as the ``ack``,
+        FLOORED to ``0``: the tracker's ``-1`` ("no contiguous run acked yet") maps to
+        the wire's ``a=0`` placeholder. Without the floor the FIRST client->core unit —
+        sent before the core leg has yet delivered a single seq — would carry ``ack=-1``,
+        which :func:`encode_seq_frame` rejects (non-negative counters), crashing the
+        client->core pump on a seq-enabled core leg. The real loopback wire-contract test
+        (``test_relay_wire_contract``) is what surfaces this; the in-process fakes do not
+        encode, so they cannot.
 
         **Loud drop, NO buffering (CLAUDE.md hard rule #7; G4 owns buffering).** A
         ``None``/closed current transport (the reconnect-race write window) or a
@@ -695,8 +702,9 @@ class GatewayCoreLink:
                 reason="no_core_transport",
             )
             return
+        ack = max(self._core_tracker.cumulative_ack(), 0)
         try:
-            await local.send_payload_unit(payload, ack=self._core_tracker.cumulative_ack())
+            await local.send_payload_unit(payload, ack=ack)
         except (BrokenPipeError, ConnectionResetError) as exc:
             log.warning("gateway.relay.core_send_dropped", error=repr(exc))
 
