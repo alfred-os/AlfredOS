@@ -80,6 +80,7 @@ from alfred.config.settings import Settings
 from alfred.gateway.client_link import client_handshake as _gateway_client_handshake
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink
+from alfred.gateway.link_state import GatewayLinkState
 from alfred.gateway.relay import GatewayRelay
 from alfred.hooks.boot import install_boot_hook_registry
 from alfred.hooks.registry import get_registry, set_registry
@@ -523,8 +524,6 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
             # falls to REDIALING — a one-shot carrier then never re-handshakes, so the
             # leg never recovers. The "stayed up" re-check after a short settle window
             # is what distinguishes a held leg from a captured-then-torn one.
-            from alfred.gateway.link_state import GatewayLinkState
-
             await _wait_for(lambda: core_link._core_epoch is not None, _TIMEOUT_S)
             await asyncio.sleep(0.2)  # let an ack-rejection tear the leg if it will
             assert core_link._machine.state is GatewayLinkState.UP, (
