@@ -27,6 +27,7 @@ from alfred.gateway.link_state import (
     LinkControl,
     LinkStateMachine,
 )
+from alfred.gateway.process import GatewayProcess
 from alfred.gateway.relay import GatewayRelay
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "GatewayLinkEvent",
     "GatewayLinkState",
     "GatewayLinkStateError",
+    "GatewayProcess",
     "GatewayRelay",
     "LinkControl",
     "LinkStateMachine",
