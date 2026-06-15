@@ -17,6 +17,7 @@ This package is built in two PRs:
 from __future__ import annotations
 
 from alfred.gateway.client_listener import GatewayClientListener
+from alfred.gateway.core_link import GatewayCoreLink, GatewayCoreLinkError
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
@@ -27,6 +28,8 @@ from alfred.gateway.link_state import (
 
 __all__ = [
     "GatewayClientListener",
+    "GatewayCoreLink",
+    "GatewayCoreLinkError",
     "GatewayLinkEvent",
     "GatewayLinkState",
     "GatewayLinkStateError",
