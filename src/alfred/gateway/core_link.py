@@ -77,6 +77,15 @@ INITIAL_BACKOFF_SECONDS: Final[float] = 0.25
 MAX_BACKOFF_SECONDS: Final[float] = 5.0
 _BACKOFF_FACTOR: Final[float] = 2.0
 
+# A non-zero floor on EVERY reconnect delay (anti-stampede; honours spec §4's "never
+# a 0-delay first retry" in CODE, not just docs). Full jitter draws in ``[0, backoff]``,
+# so an UNCLAMPED draw — or a pathological injected jitter returning 0 / negative — could
+# collapse a wait to 0 and tight-spin / thundering-herd. 50ms is negligible to an operator
+# yet guarantees a real gap between redials. The clamp also bounds the ABOVE side (a jitter
+# returning > backoff is pinned back to backoff), so every delay lands in
+# ``[_MIN_RECONNECT_DELAY_SECONDS, backoff]``.
+_MIN_RECONNECT_DELAY_SECONDS: Final[float] = 0.05
+
 # The JSON-RPC method the core sends first on the core leg. Anything else before
 # the handshake is warn-and-dropped (mirrors the host runner's pre-handshake arm).
 _LIFECYCLE_START_METHOD: Final[str] = "lifecycle.start"
@@ -189,11 +198,13 @@ class GatewayCoreLink:
             dial if dial is not None else self._default_dial
         )
         self._sleep = sleep
-        # Full jitter (AWS "Exponential Backoff And Jitter"): each delay is a uniform
-        # draw in ``[0, backoff]``, NOT the bare backoff — independent processes that
-        # gap together must not redial in lockstep. The default RNG is unseeded
+        # Full jitter (AWS "Exponential Backoff And Jitter"): each raw draw is uniform in
+        # ``[0, backoff]``, NOT the bare backoff — independent processes that gap together
+        # must not redial in lockstep. ``_reconnect`` then CLAMPS that draw to
+        # ``[_MIN_RECONNECT_DELAY_SECONDS, backoff]`` so the realised delay is never 0 /
+        # negative (spec §4: never a 0-delay first retry). The default RNG is unseeded
         # (jitter is not security-sensitive); a test injects ``lambda hi: hi`` to read
-        # the bare schedule, or a seeded ``random.Random`` for a fixed draw.
+        # the bare (clamped) schedule, or a seeded ``random.Random`` for a fixed draw.
         # S311: backoff jitter spreads coincident redials; it is NOT a security
         # primitive (no token, nonce, or key derives from it), so the non-crypto PRNG
         # is correct and a CSPRNG would be needless overhead.
@@ -249,16 +260,21 @@ class GatewayCoreLink:
         EVERY exit path — shutdown, a clean run completion, or a propagating cancel —
         via the pump's ``try/finally``. **Fail-loud:** a gap is announced (not
         swallowed); only the shutdown signal is a quiet return.
+
+        **Shutdown while (re)connecting.** A :class:`_Shutdown` raised from
+        :meth:`_reconnect` — whether via :meth:`_initial_connect`'s failure path or the
+        pump-gap :meth:`_reconnect_closing` — is caught at this top level and routed to
+        the SAME clean return as the pump's read-race shutdown: no spurious
+        ``reconnecting``/``restored``, the live transport still closed in the ``finally``.
         """
-        transport = await self._initial_connect()
+        transport: _CommsTransportLike | None = None
         try:
+            transport = await self._initial_connect()
             while True:
                 if self._shutdown_event is not None and self._shutdown_event.is_set():
                     return
                 try:
                     frame = await self._read_frame_or_shutdown(transport)
-                except _Shutdown:
-                    return
                 except _TRANSPORT_CRASH_EXCEPTIONS as exc:
                     # A torn wire / dropped peer / wire violation: a GAP, not fatal.
                     # Loud (CLAUDE.md hard rule #7), open/keep the gap, then reconnect.
@@ -273,8 +289,14 @@ class GatewayCoreLink:
                     transport = await self._reconnect_closing(transport)
                     continue
                 await self._consume_frame(frame)
+        except _Shutdown:
+            # A shutdown signalled during a pump read OR while (re)connecting — a CLEAN
+            # stop, never a gap: return without a spurious banner. The ``finally`` closes
+            # the live transport (``None`` if the initial connect never completed).
+            return
         finally:
-            await transport.close()
+            if transport is not None:
+                await transport.close()
 
     async def _initial_connect(self) -> _CommsTransportLike:
         """Dial + handshake the core leg ONCE; on failure open the gap + reconnect.
@@ -352,18 +374,65 @@ class GatewayCoreLink:
             await read_task
         raise _Shutdown
 
+    async def _sleep_or_shutdown(self, delay: float) -> None:
+        """Sleep ``delay`` seconds, returning EARLY (via :class:`_Shutdown`) on shutdown.
+
+        With no shutdown event wired this is a bare ``self._sleep(delay)`` await — so the
+        deterministic reconnect-schedule tests (which record the slept delays) see the
+        delay unchanged. With one wired, the sleep races ``shutdown_event.wait()``
+        (FIRST_COMPLETED): a sleep win returns normally; a shutdown win CANCELS the
+        in-flight sleep (so it does not leak), awaits its cancellation, and raises
+        :class:`_Shutdown` so :meth:`_reconnect` ends promptly INSTEAD of waiting out the
+        full backoff. Mirrors :meth:`_read_frame_or_shutdown`'s race template.
+        """
+        if self._shutdown_event is None:
+            await self._sleep(delay)
+            return
+
+        sleep_task: asyncio.Task[None] = asyncio.ensure_future(self._sleep(delay))
+        shutdown_task: asyncio.Task[bool] = asyncio.ensure_future(self._shutdown_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {sleep_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            # A force-cancel tearing down ``run``: cancel both children so neither leaks,
+            # then let the CancelledError propagate (cancellation-safety, CLAUDE.md rule #7).
+            sleep_task.cancel()
+            shutdown_task.cancel()
+            raise
+        if sleep_task in done:
+            # The sleep elapsed first — cancel the (still-pending) shutdown waiter and
+            # surface any sleep exception exactly as a bare await would.
+            shutdown_task.cancel()
+            sleep_task.result()
+            return
+        # Shutdown won: cancel the in-flight sleep so it does not leak, await its
+        # cancellation, then signal ``_reconnect`` to exit promptly.
+        sleep_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await sleep_task
+        raise _Shutdown
+
     async def _reconnect(self) -> _CommsTransportLike:
         """Dial + handshake the core leg, retrying with exponential backoff + jitter.
 
         Loops until a dial AND its peer handshake both succeed, returning the live
-        transport. Each attempt feeds ``REDIAL_STARTED`` to the link-state machine,
-        increments :data:`RECONNECT_ATTEMPTS`, then sleeps a FULL-JITTER delay BEFORE
-        dialing (spec §4). The backoff SCHEDULE floor starts at
-        ``INITIAL_BACKOFF_SECONDS`` (the ceiling never starts at 0) and doubles by
-        ``_BACKOFF_FACTOR`` up to ``MAX_BACKOFF_SECONDS`` on every failed attempt; the
-        actual delay each attempt is a full-jitter draw in ``[0, backoff]`` (so an
-        individual draw CAN land near 0 — the jitter, by design, can collapse a single
-        wait — but the schedule ceiling itself never starts at 0).
+        transport. Each attempt first checks the shutdown event (so a shutdown signalled
+        BETWEEN attempts ends the loop promptly via :class:`_Shutdown`), then feeds
+        ``REDIAL_STARTED`` to the link-state machine, increments
+        :data:`RECONNECT_ATTEMPTS`, then sleeps the backoff delay (racing the shutdown
+        event, via :meth:`_sleep_or_shutdown`) BEFORE dialing (spec §4).
+
+        **Full jitter with a non-zero floor (spec §4: never a 0-delay first retry).**
+        The backoff CEILING starts at ``INITIAL_BACKOFF_SECONDS`` and doubles by
+        ``_BACKOFF_FACTOR`` up to ``MAX_BACKOFF_SECONDS`` on every failed attempt. The
+        realised delay each attempt is the full-jitter draw ``self._jitter(backoff)``
+        CLAMPED to ``[_MIN_RECONNECT_DELAY_SECONDS, backoff]`` — so the FIRST (and every)
+        retry delay is in ``[_MIN_RECONNECT_DELAY_SECONDS, INITIAL_BACKOFF_SECONDS]`` on
+        attempt 1, NEVER 0. The clamp also defends a pathological injected jitter: a draw
+        of 0 / negative is floored to ``_MIN_RECONNECT_DELAY_SECONDS`` and a draw > backoff
+        is pinned back to ``backoff``.
 
         A transient transport fault (``FileNotFoundError`` / ``ConnectionRefusedError``
         / ``OSError`` — a daemon-absent or stale-socket dial) and a wire/peer-auth
@@ -373,12 +442,23 @@ class GatewayCoreLink:
         A dial that SUCCEEDS but whose handshake then RAISES leaves a half-open
         transport: it is ``close()``d before the loop retries so a repeatedly-failing
         handshake cannot leak an FD per attempt.
+
+        **Honours shutdown while reconnecting (CLAUDE.md hard rule #7).** During a
+        prolonged core outage an operator shutdown must NOT hang behind the dial-forever
+        loop: the top-of-iteration check raises :class:`_Shutdown` if shutdown is already
+        set, and :meth:`_sleep_or_shutdown` returns promptly (raising :class:`_Shutdown`)
+        if shutdown fires DURING the backoff sleep instead of waiting out the backoff.
+        :meth:`run` catches that :class:`_Shutdown` and returns cleanly (no spurious
+        ``reconnecting``/``restored``).
         """
         backoff = INITIAL_BACKOFF_SECONDS
         while True:
+            if self._shutdown_event is not None and self._shutdown_event.is_set():
+                raise _Shutdown
             await self._feed(GatewayLinkEvent.REDIAL_STARTED)
             RECONNECT_ATTEMPTS.inc()
-            await self._sleep(self._jitter(backoff))
+            delay = min(max(self._jitter(backoff), _MIN_RECONNECT_DELAY_SECONDS), backoff)
+            await self._sleep_or_shutdown(delay)
             try:
                 transport = await self._dial()
             except (FileNotFoundError, ConnectionRefusedError, OSError, CommsProtocolError) as exc:
