@@ -154,3 +154,34 @@ def test_breaker_is_a_latch_trim_does_not_clear() -> None:
     buf.trim_to_ack(1)  # back to empty, under cap
     assert buf.depth_frames == 0
     assert buf.breaker_tripped is True  # still latched
+
+
+def test_evict_removes_only_expired_frames() -> None:
+    buf = _buffer(ttl_seconds=10.0)
+    buf.append(0, b"old", now=0.0)
+    buf.append(1, b"mid", now=5.0)
+    buf.append(2, b"new", now=9.0)
+    evicted = buf.evict_expired(now=11.0)  # frame@0 age 11 > 10; @5 age 6; @9 age 2
+    assert evicted == (0,)
+    assert buf.depth_frames == 2
+
+
+def test_evict_boundary_age_equal_ttl_is_retained() -> None:
+    buf = _buffer(ttl_seconds=10.0)
+    buf.append(0, b"x", now=0.0)
+    assert buf.evict_expired(now=10.0) == ()  # age exactly 10, not > 10
+    assert buf.depth_frames == 1
+
+
+def test_evict_zeroes_removed_bodies() -> None:
+    buf = _buffer(ttl_seconds=1.0)
+    buf.append(0, b"secret", now=0.0)
+    body = buf._retained[0].body  # noqa: SLF001 - white-box assertion of zeroing
+    buf.evict_expired(now=100.0)
+    assert bytes(body) == b"\x00" * len(b"secret")
+
+
+def test_evict_returns_empty_when_nothing_expired() -> None:
+    buf = _buffer(ttl_seconds=10.0)
+    buf.append(0, b"x", now=0.0)
+    assert buf.evict_expired(now=1.0) == ()
