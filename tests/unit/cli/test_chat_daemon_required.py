@@ -149,18 +149,28 @@ def test_no_tui_direct_dial_remains_in_either_chat_dial_site() -> None:
     to ``run_cohosted`` and both reference the shared gateway id.
     """
     import inspect
+    import re
 
     import alfred_tui.server as server_mod
 
-    chat_src = inspect.getsource(main_mod._chat_main)
-    serve_src = inspect.getsource(server_mod.serve)
+    # Normalize whitespace around ``=`` so the membership test catches the
+    # spaced form (``adapter_id = "tui"``) too — a bare ``'adapter_id="tui"' not in``
+    # would pass FALSELY on a reformatted spaced literal. This guard is a BACKSTOP;
+    # the behavioral ``test_chat_main_dials_the_gateway_socket`` is the real proof
+    # that the gateway id (not "tui") reaches ``run_cohosted``.
+    def _normalize(src: str) -> str:
+        return re.sub(r"\s*=\s*", "=", src)
+
+    chat_src = _normalize(inspect.getsource(main_mod._chat_main))
+    serve_src = _normalize(inspect.getsource(server_mod.serve))
 
     # No "tui" literal direct-dial from the chat path (the daemon-side binding lives
-    # elsewhere and is out of scope).
+    # elsewhere and is out of scope). Whitespace-normalized above so the spaced form
+    # cannot slip past.
     assert 'adapter_id="tui"' not in chat_src
     assert 'adapter_id="tui"' not in serve_src
 
-    # Both dial the shared gateway id. ``_chat_main`` imports the constant; ``serve()``
-    # pins its ``_ADAPTER_KIND`` to the gateway id.
+    # Both dial the shared gateway id. ``_chat_main`` references the constant by name;
+    # ``serve()`` pins its ``_ADAPTER_KIND`` to the gateway id.
     assert "_GATEWAY_ADAPTER_ID" in chat_src
     assert server_mod._ADAPTER_KIND == _GATEWAY_ADAPTER_ID == "gateway"

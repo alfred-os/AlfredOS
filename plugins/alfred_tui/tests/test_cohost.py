@@ -347,6 +347,38 @@ async def test_serve_loop_arbitrary_unknown_idless_notification_is_not_a_banner(
     assert transport.sent == []
 
 
+async def test_serve_loop_id_bearing_link_frame_is_not_silently_dropped() -> None:
+    """An id-BEARING ``link.*`` frame is a wire-contract violation — NOT silently dropped.
+
+    ``link.*`` are spec'd id-LESS pure-STATE notifications. A frame that carries an
+    ``id`` AND a ``link.*`` method violates that contract: if the pump took the banner
+    branch on the METHOD alone, it would invoke the banner + ``continue`` WITHOUT
+    answering the ``id`` — a silent drop of an id-bearing frame (CLAUDE.md hard rule
+    #7). FIX 2 gates the banner branch on ``"id" not in frame``, so an id-bearing
+    ``link.*`` falls through to ``dispatch`` instead: it does NOT paint the banner, and
+    the daemon's ``id`` IS answered (here, a ``Method not found`` for the unknown
+    method). The frame is handled, never swallowed.
+    """
+    states: list[str] = []
+
+    async def _record(state: str) -> None:
+        states.append(state)
+
+    transport = _FakeTransport(
+        inbound=[{"jsonrpc": "2.0", "id": 9, "method": "link.reconnecting", "params": {}}]
+    )
+    await _serve_wire(transport, TuiServer(session=TuiSession()), on_link_state=_record)
+
+    # NOT a banner — the id-bearing frame bypassed the banner allowlist.
+    assert states == []
+    # The id was ANSWERED (not silently dropped): dispatch wrote a response keyed on
+    # the request id. ``link.reconnecting`` is an unknown plugin method, so the reply
+    # is a JSON-RPC ``Method not found`` error — but the point is the id got a reply.
+    assert len(transport.sent) == 1
+    assert transport.sent[0]["id"] == 9
+    assert transport.sent[0]["error"]["code"] == -32601  # Method not found
+
+
 async def test_link_methods_are_absent_from_the_plugin_method_set() -> None:
     """``link.*`` is NOT in the plugin's closed method set (it is client-terminal).
 
