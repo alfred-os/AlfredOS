@@ -1,0 +1,538 @@
+"""Unit tests for ``GatewayRelay`` — the two-direction opaque relay (Spec A G3-3b-2).
+
+The relay binds two pumps:
+
+* **core->client** IS :meth:`GatewayCoreLink.run` (the merged supervised pump), whose
+  ``payload_relay`` sink the relay wires to :meth:`GatewayRelay._send_to_client` — so a
+  payload the core leg forwards is written to the client transport.
+* **client->core** is the relay's own :meth:`GatewayRelay._client_to_core_pump`: it
+  reads the client transport's raw units and calls :meth:`GatewayCoreLink.relay_to_core`,
+  doing ZERO body parse on that leg (pure opaque forward; security H3).
+
+The PRIMARY suite is the PRODUCTION shape: the core leg is seq/ack-ENABLED, the client
+(TUI) leg is PLAIN. A SECONDARY suite drives seq-enabled-BOTH (forward-looking, G4/G5),
+proving RESEQ — the client-leg seq the gateway mints is a fresh per-client counter, not
+the core-leg seq passed through.
+
+These tests use the same in-memory fake transports as ``test_core_link.py`` (the
+``_CommsTransportLike`` shape) so the relay's wiring is exercised without a real socket;
+the real-loopback wire-contract proof lives in ``test_relay_wire_contract.py``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import collections
+import json
+from collections.abc import Mapping
+from uuid import uuid4
+
+import pytest
+import structlog.testing
+
+from alfred.comms_mcp.protocol import (
+    DAEMON_LIFECYCLE_GOING_DOWN,
+    LinkReconnectingNotification,
+    LinkRestoredNotification,
+)
+from alfred.gateway.client_listener import LinkControlNotification
+from alfred.gateway.core_link import GatewayCoreLink
+from alfred.gateway.relay import GatewayRelay
+from alfred.plugins.comms_seq_codec import SeqFrame
+
+
+class _RecordingClientListener:
+    """A fake ``GatewayClientListener`` recording every ``send_control`` call."""
+
+    def __init__(self) -> None:
+        self.controls: list[LinkControlNotification] = []
+
+    async def send_control(self, notification: LinkControlNotification) -> None:
+        self.controls.append(notification)
+
+
+class _FakeTransport:
+    """In-memory ``_CommsTransportLike`` — a queue of inbound units + recorded sends.
+
+    Drives BOTH legs in these tests: as a CORE transport it pops ``read_frame`` frames
+    (the handshake) and ``read_payload_unit`` units (the pump), recording writebacks via
+    ``sent`` / ``sent_units``; as a CLIENT transport it pops ``read_payload_unit`` units
+    (what the TUI sends up) and records ``send_payload_unit`` calls (what the relay
+    writes down to the client). ``send_unit_error`` lets a single ``send_payload_unit``
+    raise (the reconnect-race drop tests).
+    """
+
+    def __init__(
+        self,
+        *,
+        frames: list[Mapping[str, object]] | None = None,
+        units: list[object] | None = None,
+        seq_ack_enabled: bool = False,
+    ) -> None:
+        self._frames: collections.deque[Mapping[str, object]] = collections.deque(frames or [])
+        self._units: collections.deque[object] = collections.deque(units or [])
+        self.sent: list[dict[str, object]] = []
+        self.sent_units: list[tuple[bytes, int]] = []
+        self.seq_ack_enabled = seq_ack_enabled
+        self.closed = False
+        self.send_unit_error: BaseException | None = None
+
+    async def spawn(self) -> None:  # pragma: no cover - unused on these legs
+        return None
+
+    async def send(self, frame: Mapping[str, object]) -> None:
+        self.sent.append(dict(frame))
+
+    async def read_frame(self) -> Mapping[str, object] | None:
+        return self._frames.popleft() if self._frames else None
+
+    async def read_payload_unit(self) -> SeqFrame | None:
+        if not self._units:
+            return None
+        entry = self._units.popleft()
+        if entry is None:
+            # An explicit clean EOF entry in the script (a core leg that drops).
+            return None
+        if isinstance(entry, tuple):
+            # A ``(gate, frame)`` pair: AWAIT the gate event, THEN return the frame —
+            # lets a test order a client read AFTER a core-leg condition holds (no race).
+            gate, frame = entry
+            await gate.wait()
+            return frame
+        if isinstance(entry, asyncio.Event):
+            await entry.wait()
+            return None
+        assert isinstance(entry, SeqFrame)
+        return entry
+
+    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
+        if self.send_unit_error is not None:
+            raise self.send_unit_error
+        self.sent_units.append((payload, ack))
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def enable_seq_ack(self) -> None:
+        self.seq_ack_enabled = True
+
+
+def _start_frame(epoch: str, *, seq_ack: bool) -> dict[str, object]:
+    params: dict[str, object] = {"adapter_id": "gateway", "epoch": epoch}
+    if seq_ack:
+        params["seq_ack"] = {"version": "1"}
+    return {"jsonrpc": "2.0", "id": 0, "method": "lifecycle.start", "params": params}
+
+
+def _unit(body: bytes, *, seq: int | None = None) -> SeqFrame:
+    return SeqFrame(seq=seq, ack=0, payload=body)
+
+
+def _build_relay(
+    *,
+    core: _FakeTransport,
+    client: _FakeTransport,
+    client_seq_enabled: bool,
+    shutdown: asyncio.Event,
+) -> tuple[GatewayRelay, GatewayCoreLink, _RecordingClientListener]:
+    """Wire a real ``GatewayCoreLink`` (seq-on core) + a ``GatewayRelay`` over fakes."""
+    recorder = _RecordingClientListener()
+
+    async def _dial() -> _FakeTransport:
+        return core
+
+    async def _instant_sleep(_delay: float) -> None:
+        return None
+
+    core_link = GatewayCoreLink(
+        client_listener=recorder,  # type: ignore[arg-type]
+        dial=_dial,  # type: ignore[arg-type]
+        sleep=_instant_sleep,
+        jitter=lambda hi: hi,
+        shutdown_event=shutdown,
+    )
+    relay = GatewayRelay(
+        core_link=core_link,
+        client_transport=client,  # type: ignore[arg-type]
+        client_seq_enabled=client_seq_enabled,
+    )
+    return relay, core_link, recorder
+
+
+async def _drive_until(predicate: object, *, task: asyncio.Task[None]) -> None:
+    """Step the loop until ``predicate()`` is true (bounded), then return."""
+    assert callable(predicate)
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if predicate():
+            return
+        if task.done():
+            return
+
+
+# ---------------------------------------------------------------------------
+# PRIMARY suite — production shape: core seq-ENABLED, client seq-DISABLED.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_payload_relay_sink_is_wired_to_send_to_client() -> None:
+    """Constructing the relay binds ``core_link.payload_relay`` to its client sink."""
+    core = _FakeTransport()
+    client = _FakeTransport()
+    shutdown = asyncio.Event()
+    relay, core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+    assert core_link._payload_relay == relay._send_to_client
+
+
+@pytest.mark.asyncio
+async def test_core_to_client_forwards_payload_byte_for_byte_plain_client() -> None:
+    """A payload unit on the seq-on core leg is forwarded to the PLAIN client leg
+    byte-for-byte, with ``ack=0`` (the plain client transport ignores ack).
+
+    The inner JSON-RPC ``id`` survives unchanged in the relayed bytes.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    body = b'{"jsonrpc":"2.0","id":42,"method":"inbound.message","params":{}}'
+    blocked = asyncio.Event()
+    core = _FakeTransport(
+        frames=[_start_frame(epoch, seq_ack=True)],
+        units=[_unit(body, seq=0), blocked],
+    )
+    client = _FakeTransport(units=[asyncio.Event()])  # client never sends
+    relay, _core_link, recorder = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    await _drive_until(lambda: bool(client.sent_units), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert client.sent_units == [(body, 0)]
+    # The JSON-RPC id is intact in the relayed bytes (byte-for-byte, same id run).
+    assert b'"id":42' in client.sent_units[0][0]
+    assert recorder.controls == []
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_forwards_with_core_cumulative_ack() -> None:
+    """A client->core unit carries ``ack = core_link._core_tracker.cumulative_ack()`` —
+    the gateway's REAL contiguous ack of what the CORE sent it.
+
+    Drive a core-leg seq run (0,1) so cumulative_ack is 1, then a client unit must be
+    forwarded to the core with ack=1.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    client_body = b'{"jsonrpc":"2.0","id":7,"method":"chat.send","params":{}}'
+    blocked_core = asyncio.Event()
+    core = _FakeTransport(
+        frames=[_start_frame(epoch, seq_ack=True)],
+        units=[_unit(b'{"id":1}', seq=0), _unit(b'{"id":2}', seq=1), blocked_core],
+    )
+    # Gate the client send behind ``client_gate`` so it is forwarded only AFTER the core
+    # leg has observed seqs 0,1 (cumulative ack 1) — deterministic, no read race.
+    client_gate = asyncio.Event()
+    client = _FakeTransport(units=[(client_gate, _unit(client_body)), asyncio.Event()])
+    relay, core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    # Wait until the core tracker has the contiguous 0,1 run, THEN release the client.
+    await _drive_until(lambda: core_link._core_tracker.cumulative_ack() == 1, task=task)
+    client_gate.set()
+    await _drive_until(lambda: bool(core.sent_units), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The client body reached the core carrying the core-leg cumulative ack (1).
+    assert core.sent_units == [(client_body, 1)]
+    assert core_link._core_tracker.cumulative_ack() == 1
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_does_zero_body_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client->core leg NEVER ``json.loads`` the body (pure opaque forward; H3).
+
+    Spy on ``json.loads`` in the relay module: a client unit forwarded to the core must
+    not have triggered a parse on the relay's leg.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    import alfred.gateway.relay as relay_mod
+
+    calls: list[object] = []
+    real_loads = json.loads
+
+    def _spy(*args: object, **kwargs: object) -> object:
+        calls.append(args[0] if args else None)
+        return real_loads(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(relay_mod.json, "loads", _spy)
+
+    client_body = b'{"jsonrpc":"2.0","id":3,"method":"chat.send","params":{}}'
+    blocked_core = asyncio.Event()
+    core = _FakeTransport(frames=[_start_frame(epoch, seq_ack=True)], units=[blocked_core])
+    client = _FakeTransport(units=[_unit(client_body), asyncio.Event()])
+    relay, _core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    await _drive_until(lambda: bool(core.sent_units), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The core leg observed no seqs, so the cumulative ack is its initial -1, FLOORED to
+    # the wire's a=0 placeholder by ``relay_to_core`` (a -1 ack would crash the codec).
+    assert core.sent_units == [(client_body, 0)]
+    # The relay module never parsed the client body (pure opaque forward; H3).
+    assert client_body not in calls
+
+
+@pytest.mark.asyncio
+async def test_client_eof_ends_client_pump_then_shutdown_ends_relay() -> None:
+    """Client EOF (``read_payload_unit`` -> None) returns the client pump; the relay
+    then waits on the core pump until shutdown ends it.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    blocked_core = asyncio.Event()
+    core = _FakeTransport(frames=[_start_frame(epoch, seq_ack=True)], units=[blocked_core])
+    client = _FakeTransport(units=[])  # immediate EOF
+    relay, _core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    # The client pump returns on EOF; the relay stays up on the core pump until shutdown.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()  # core pump still running
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert core.closed is True
+
+
+@pytest.mark.asyncio
+async def test_send_to_client_drops_loud_on_broken_pipe() -> None:
+    """A ``BrokenPipeError`` writing to the client is a LOUD drop — the core pump is
+    NOT crashed by a dead client (``gateway.relay.client_send_dropped``).
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    body = b'{"id":1}'
+    blocked = asyncio.Event()
+    core = _FakeTransport(
+        frames=[_start_frame(epoch, seq_ack=True)], units=[_unit(body, seq=0), blocked]
+    )
+    client = _FakeTransport(units=[asyncio.Event()])
+    client.send_unit_error = BrokenPipeError()
+    relay, _core_link, _recorder = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    with structlog.testing.capture_logs() as captured:
+        await _drive_until(
+            lambda: any(c.get("event") == "gateway.relay.client_send_dropped" for c in captured),
+            task=task,
+        )
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.client_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("log_level") == "warning"
+    # The dead client did not crash the relay — it shut down cleanly.
+    assert core.closed is True
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_on_gapped_core_drops_loud_ack_stalls() -> None:
+    """A client->core unit while the core leg is GAPPED is a LOUD drop (no buffering),
+    and the core tracker's cumulative_ack STALLS at the gap.
+
+    Force the gap by making the core ``send_payload_unit`` raise (the reconnect-race
+    write window analogue): ``relay_to_core`` drops loud, and because we never advance
+    the core tracker the ack stays where it was.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    client_body = b'{"id":9}'
+    blocked_core = asyncio.Event()
+    # Core sends seq=0 only (cumulative ack 0), then blocks. A subsequent client send
+    # to the core raises -> loud drop.
+    core = _FakeTransport(
+        frames=[_start_frame(epoch, seq_ack=True)], units=[_unit(b'{"id":1}', seq=0), blocked_core]
+    )
+    core.send_unit_error = ConnectionResetError()
+    client = _FakeTransport(units=[_unit(client_body), asyncio.Event()])
+    relay, core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    with structlog.testing.capture_logs() as captured:
+        await _drive_until(
+            lambda: any(c.get("event") == "gateway.relay.core_send_dropped" for c in captured),
+            task=task,
+        )
+        shutdown.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    # Dropped, NOT buffered — the core never recorded the client unit.
+    assert core.sent_units == []
+    # The receive tracker's cumulative ack stalled at the last contiguous seq (0).
+    assert core_link._core_tracker.cumulative_ack() == 0
+
+
+@pytest.mark.asyncio
+async def test_relayed_frame_does_not_bump_dropped_payload_counter() -> None:
+    """A relayed core->client frame does NOT increment ``_dropped_payload_frames`` — the
+    counter still means 'a frame neither consumed nor relayed', so its meaning is stable.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    body = b'{"id":1,"result":{}}'
+    blocked = asyncio.Event()
+    core = _FakeTransport(
+        frames=[_start_frame(epoch, seq_ack=True)], units=[_unit(body, seq=0), blocked]
+    )
+    client = _FakeTransport(units=[asyncio.Event()])
+    relay, core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    await _drive_until(lambda: bool(client.sent_units), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert client.sent_units == [(body, 0)]
+    assert core_link._dropped_payload_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_core_going_down_consumed_emits_reconnecting_not_relayed() -> None:
+    """A ``going_down`` unit on the core leg is CONSUMED (emits reconnecting), never
+    relayed to the client — the relay rides the core-link's lifecycle consume.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+    going_down = _unit(
+        json.dumps(
+            {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": "shutdown"}}
+        ).encode(),
+        seq=0,
+    )
+    core1 = _FakeTransport(frames=[_start_frame(epoch1, seq_ack=True)], units=[going_down, None])
+    blocked = asyncio.Event()
+    core2 = _FakeTransport(frames=[_start_frame(epoch2, seq_ack=True)], units=[blocked])
+    client = _FakeTransport(units=[asyncio.Event()])
+    recorder = _RecordingClientListener()
+
+    cores = collections.deque([core1, core2])
+
+    async def _dial() -> _FakeTransport:
+        return cores.popleft()
+
+    async def _instant_sleep(_delay: float) -> None:
+        return None
+
+    core_link = GatewayCoreLink(
+        client_listener=recorder,  # type: ignore[arg-type]
+        dial=_dial,  # type: ignore[arg-type]
+        sleep=_instant_sleep,
+        jitter=lambda hi: hi,
+        shutdown_event=shutdown,
+    )
+    relay = GatewayRelay(
+        core_link=core_link,
+        client_transport=client,
+        client_seq_enabled=False,  # type: ignore[arg-type]
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    await _drive_until(lambda: bool(core2.sent), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert client.sent_units == []  # the going_down was consumed, not relayed
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+
+
+# ---------------------------------------------------------------------------
+# SECONDARY suite — forward-looking: seq-enabled on BOTH legs (G4/G5).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_seq_enabled_client_resequences_not_pass_through() -> None:
+    """With a seq-ENABLED client leg, the client-leg ``ack`` the relay sends is the
+    gateway's OWN client-receive cumulative ack — NOT the core-leg seq passed through.
+
+    Feed the client leg a seq run (0,1) so the client tracker's cumulative ack is 1;
+    a core->client payload then carries ack=1 (the resequenced client ack), proving the
+    relay maintains a SEPARATE client tracker (RESEQ), not a pass-through of core acks.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    core_body = b'{"id":1,"result":{}}'
+    blocked_core = asyncio.Event()
+    blocked_client = asyncio.Event()
+    core = _FakeTransport(
+        frames=[_start_frame(epoch, seq_ack=True)],
+        units=[_unit(core_body, seq=5), blocked_core],
+    )
+    # The client SENDS two units (seq 0,1) BEFORE the core payload is relayed down, so
+    # the client tracker's cumulative ack is 1 when the relay writes to the client.
+    client = _FakeTransport(
+        units=[_unit(b'{"id":100}', seq=0), _unit(b'{"id":101}', seq=1), blocked_client],
+        seq_ack_enabled=True,
+    )
+    relay, _core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=True, shutdown=shutdown
+    )
+
+    task = asyncio.ensure_future(relay.run())
+    await _drive_until(lambda: bool(client.sent_units), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert len(client.sent_units) == 1
+    relayed_payload, relayed_ack = client.sent_units[0]
+    assert relayed_payload == core_body
+    # RESEQ: the client-leg ack is the gateway's client-receive ack (1), NOT the
+    # core-leg seq the payload arrived with (5).
+    assert relayed_ack == 1
+    assert relayed_ack != 5
+
+
+@pytest.mark.asyncio
+async def test_seq_enabled_client_tracker_independent_of_core_seq() -> None:
+    """The client tracker (used for the client-leg ack) is wholly separate from the
+    core tracker — they advance on DIFFERENT streams.
+    """
+    core = _FakeTransport()
+    client = _FakeTransport(seq_ack_enabled=True)
+    shutdown = asyncio.Event()
+    relay, core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=True, shutdown=shutdown
+    )
+    # Advance ONLY the client tracker; the core tracker must be untouched.
+    relay._client_tracker.observe(0)
+    relay._client_tracker.observe(1)
+    assert relay._client_tracker.cumulative_ack() == 1
+    assert core_link._core_tracker.cumulative_ack() == -1
