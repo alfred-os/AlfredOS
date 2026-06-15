@@ -28,9 +28,37 @@ from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.widgets import Input, RichLog
+from textual.reactive import reactive
+from textual.widgets import Input, RichLog, Static
 
+from alfred.comms_mcp.protocol import LINK_RECONNECTING, LINK_UNAVAILABLE
 from alfred.i18n import t
+
+# Map the gateway's id-less ``link.*`` STATE method (Spec A G5 / ADR-0031) to the
+# LOCAL catalog key the TUI renders. The gateway carries NO operator text — only
+# the state — so the banner copy is the TUI's own localized ``t()`` render. The
+# ``link.restored`` state is absent: it CLEARS the banner (no text to show).
+# ``link.unavailable`` is vocab-complete but latent until G4 wires its trigger.
+_LINK_STATE_BANNER_KEY: dict[str, str] = {
+    LINK_RECONNECTING: "tui.banner.reconnecting",
+    LINK_UNAVAILABLE: "tui.banner.unavailable",
+}
+
+
+def _reserve_banner_catalog_keys() -> None:
+    """Pybabel-extraction anchor for the reconnect-banner catalog keys.
+
+    The banner copy is rendered via ``t(banner_key)`` where ``banner_key`` comes
+    from :data:`_LINK_STATE_BANNER_KEY` — a VARIABLE, which ``pybabel extract``
+    cannot follow. These literal ``t(...)`` calls give the extractor a static
+    reference so ``tui.banner.*`` are active msgids (not marked obsolete on the
+    next ``pybabel update``, which the i18n drift gate trips on). The
+    ``tui.banner.restored`` key is reserved for symmetry/future use even though
+    the restored STATE clears the banner rather than rendering text. Never called.
+    """
+    t("tui.banner.reconnecting")
+    t("tui.banner.restored")
+    t("tui.banner.unavailable")
 
 
 class _SessionLike(Protocol):
@@ -59,10 +87,17 @@ class AlfredTuiApp(App[None]):
 
     CSS = """
     Screen { layout: vertical; }
+    #link_banner { dock: top; width: 100%; padding: 0 1; background: $warning; color: $text; }
     #conversation_log { height: 1fr; border: solid white; padding: 1; }
     #user_input { dock: bottom; }
     #user_input.busy { background: $boost; color: $text-muted; }
     """
+
+    # The current gateway link-state banner key, or ``None`` when the link is
+    # healthy (banner hidden). A Textual ``reactive`` so a ``set_link_state``
+    # mutation drives the ``watch_*`` render on the app's own loop (M1) — no
+    # off-loop ``call_from_thread`` (the cohost pump shares this loop).
+    _link_banner_key: reactive[str | None] = reactive[str | None](None)
 
     BINDINGS = [  # noqa: RUF012  # Textual reads BINDINGS off the class; mutable is the documented contract.
         # Footer descriptions are operator-facing and go through t() per
@@ -77,6 +112,12 @@ class AlfredTuiApp(App[None]):
         self._session = session
 
     def compose(self) -> ComposeResult:
+        # The reconnect banner is mounted hidden (``display=False``); it is shown
+        # and its text set by ``watch__link_banner_key`` when the gateway signals a
+        # core-link gap, and re-hidden on restore.
+        banner = Static(id="link_banner")
+        banner.display = False
+        yield banner
         yield Vertical(
             RichLog(id="conversation_log", highlight=True, markup=True, wrap=True),
             Input(placeholder=t("tui.input_placeholder"), id="user_input"),
@@ -125,3 +166,34 @@ class AlfredTuiApp(App[None]):
         # app-controlled label prefix keeps its legitimate markup.
         # (PR-S4-10 review #1 — markup-injection guard.)
         log.write(f"[bold green]{t('tui.label_alfred')}[/]: {escape(body)}")
+
+    def set_link_state(self, method: str) -> None:
+        """Update the reconnect banner from a gateway ``link.*`` state method.
+
+        Invoked by the cohost wire pump (``run_cohosted``'s ``on_link_state``) on
+        the SAME asyncio loop as this app (M1 — the pump and ``run_async()`` share
+        one ``TaskGroup``/loop), so this is a DIRECT reactive set, NOT
+        ``call_from_thread`` (which is for OFF-loop threads). Mutating the reactive
+        drives ``watch__link_banner_key`` on the next render cycle.
+
+        ``link.reconnecting`` / ``link.unavailable`` show the matching localized
+        banner; ``link.restored`` clears it. ``link.unavailable`` is vocab-complete
+        but latent until G4 wires its trigger (the gateway only emits
+        ``reconnecting`` / ``restored`` today).
+        """
+        self._link_banner_key = _LINK_STATE_BANNER_KEY.get(method)
+
+    def watch__link_banner_key(self, banner_key: str | None) -> None:
+        """Paint or hide the reconnect banner when the link-state reactive changes.
+
+        ``None`` (healthy / restored) hides the banner; a catalog key shows it with
+        the TUI's OWN localized ``t()`` render — the gateway sends only state, never
+        operator text (Spec A G5). The banner text is app-controlled (a fixed
+        catalog string, no untrusted interpolation), so no markup-escape is needed.
+        """
+        banner = self.query_one("#link_banner", Static)
+        if banner_key is None:
+            banner.display = False
+            return
+        banner.update(t(banner_key))
+        banner.display = True

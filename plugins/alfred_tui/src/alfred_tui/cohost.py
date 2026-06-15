@@ -79,6 +79,15 @@ class _AppLike(Protocol):
 
     def exit(self) -> None: ...
 
+    def set_link_state(self, method: str) -> None:
+        """Paint/clear the reconnect banner from a gateway ``link.*`` state method.
+
+        A SYNCHRONOUS reactive set (the app mutates a Textual ``reactive``); the
+        co-host calls it on the SAME loop as ``run_async()`` (one ``TaskGroup``),
+        so there is no ``call_from_thread`` hop (M1).
+        """
+        ...
+
 
 class _TransportLike(Protocol):
     """The three-awaitable carrier seam the wire serve loop drives (no ``spawn`` —
@@ -221,9 +230,13 @@ async def run_cohosted(
     :func:`alfred_tui.render.build_app`; tests inject in-memory doubles.
 
     ``on_link_state`` is the banner callback the wire pump invokes with a gateway
-    ``link.*`` state method (Spec A G5 / ADR-0031). It defaults to a no-op so every
-    current caller is behaviour-identical; the TUI wires a real banner painter into
-    it in a later task.
+    ``link.*`` state method (Spec A G5 / ADR-0031). When a caller leaves it at the
+    :func:`_noop_link_state` default (production), the co-host wires it to the
+    constructed app's ``set_link_state`` so a ``link.*`` frame paints/clears the
+    TUI's reconnect banner — a SAME-LOOP async call into a synchronous reactive set
+    (M1: the pump and ``app.run_async()`` share one ``TaskGroup``/loop, so no
+    ``call_from_thread``). A test may inject its own recording callback to keep the
+    app/pump seam isolated.
 
     Construction order breaks the session<->app render-hook cycle: the session is
     built FIRST with the socket inbound sink, then ``build_app_fn`` cross-wires the
@@ -259,10 +272,21 @@ async def run_cohosted(
     app = build_app_fn(session)
     server = TuiServer(session=session)
 
+    # Default wiring (production): route a gateway ``link.*`` state to the app's
+    # banner. ``set_link_state`` is a SYNCHRONOUS reactive set on THIS loop (M1) — no
+    # ``call_from_thread`` hop. A test that injected its own callback keeps it.
+    link_state_cb: _OnLinkState = on_link_state
+    if link_state_cb is _noop_link_state:
+
+        async def _paint_banner(method: str) -> None:
+            app.set_link_state(method)
+
+        link_state_cb = _paint_banner
+
     try:
         async with asyncio.TaskGroup() as tg:
             app_task = tg.create_task(app.run_async())
-            wire_task = tg.create_task(_serve_wire(transport, server, on_link_state=on_link_state))
+            wire_task = tg.create_task(_serve_wire(transport, server, on_link_state=link_state_cb))
 
             # The app task owns the lifecycle: when the operator quits, end the wire
             # pump too (it would otherwise block forever on the daemon's socket).
