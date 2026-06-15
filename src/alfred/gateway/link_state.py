@@ -176,6 +176,28 @@ _TRANSITIONS: dict[
         GatewayLinkState.REDIALING,
         None,
     ),
+    # --- BREAKER escalation (G4b-1, spec §5) ------------------------------
+    # The buffer's back-pressure breaker trips -> escalate to the terminal
+    # UNAVAILABLE, emitting link.unavailable exactly ONCE. Valid from every live
+    # state: UP covers the wedged-but-connected core (spec §6(d) — the link never
+    # dropped, so there is no preceding RECONNECTING); the gap states cover a buffer
+    # that filled while the core was down and never returned in time.
+    (GatewayLinkState.UP, GatewayLinkEvent.BREAKER_TRIPPED): (
+        GatewayLinkState.UNAVAILABLE,
+        LinkControl.UNAVAILABLE,
+    ),
+    (GatewayLinkState.DOWN_SIGNALLED, GatewayLinkEvent.BREAKER_TRIPPED): (
+        GatewayLinkState.UNAVAILABLE,
+        LinkControl.UNAVAILABLE,
+    ),
+    (GatewayLinkState.DOWN_CRASH, GatewayLinkEvent.BREAKER_TRIPPED): (
+        GatewayLinkState.UNAVAILABLE,
+        LinkControl.UNAVAILABLE,
+    ),
+    (GatewayLinkState.REDIALING, GatewayLinkEvent.BREAKER_TRIPPED): (
+        GatewayLinkState.UNAVAILABLE,
+        LinkControl.UNAVAILABLE,
+    ),
 }
 
 
