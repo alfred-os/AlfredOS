@@ -392,7 +392,15 @@ class GatewayCoreLink:
         The pump's ``finally`` only closes the CURRENT live transport; when a gap
         rebinds ``transport`` to a fresh leg the OLD one must be closed here or it
         leaks for the life of the process.
+
+        **Clear-before-close (architect M3).** ``_current_core_transport`` is dropped
+        to ``None`` BEFORE ``stale.close()`` — mirroring :meth:`run`'s ``finally`` — so a
+        concurrent :meth:`relay_to_core` snapshots ``None`` (the clean None-drop) rather
+        than the closing transport. The widened send-fault family would loud-drop the
+        resulting closed-FD ``RuntimeError`` anyway, but clearing first is cleaner: the
+        race resolves via the None-check, not via an exception on a half-closed leg.
         """
+        self._current_core_transport = None
         await stale.close()
         return await self._reconnect()
 
@@ -588,6 +596,16 @@ class GatewayCoreLink:
             transport.enable_seq_ack()
 
         await transport.send({"jsonrpc": "2.0", "id": frame.get("id"), "result": result})
+        # FRESH receive tracker per (re)connect (resume correctness). Each core
+        # transport is a NEW seq space starting at 0 — a new boot, a new epoch. A
+        # process-lifetime tracker carries the OLD boot's high-water (say 1000), so
+        # the new boot's low seqs (0,1,2) look already-settled and ``cumulative_ack``
+        # stays stuck at the stale high-water — the gateway would ack the new boot for
+        # frames it never sent (the resume-correctness corruption G4 builds on). This
+        # reset runs on EVERY handshake (incl. the initial — a harmless reset of an
+        # already-empty tracker), so a reconnect always rebinds the ack to the fresh
+        # boot's seq space.
+        self._core_tracker = BoundedSeqAckTracker()
 
     async def _read_until_start(self, transport: _CommsTransportLike) -> Mapping[str, object]:
         """Read frames until ``lifecycle.start``; warn-and-drop anything before it.

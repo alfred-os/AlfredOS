@@ -173,15 +173,40 @@ class GatewayRelay:
         Cancellation-safe: when the core pump returns on shutdown the group cancels this
         task, interrupting a blocked client read — the read is cancellable, so the cancel
         propagates cleanly (no leaked read, no swallowed cancel).
+
+        **Client-leg fault isolation (CLAUDE.md hard rule #7).** A malformed/torn client
+        frame (:meth:`read_payload_unit` raising :class:`CommsProtocolError` or a
+        transport-tear), or a negative client seq (:meth:`observe` raising
+        :class:`ValueError`), is the CLIENT leg's fault — not the core leg's. It must NOT
+        escape this pump and abort the whole :class:`asyncio.TaskGroup` (tearing the core
+        pump down with it) as an un-triaged crash. We LOUD-LOG it and RETURN: the client
+        leg is unusable, so the client->core direction ends cleanly; the TaskGroup then
+        reaps the core pump via its normal done-callback — a handled stop, not an
+        unhandled ``ExceptionGroup``. A clean client EOF (``read_payload_unit() -> None``)
+        stays the existing quiet return.
         """
         while True:
-            frame = await self._client_transport.read_payload_unit()
-            if frame is None:
-                # Clean client EOF — the operator closed ``alfred chat``. Return the
-                # pump; the relay rides the core pump to its shutdown.
+            try:
+                frame = await self._client_transport.read_payload_unit()
+                if frame is None:
+                    # Clean client EOF — the operator closed ``alfred chat``. Return the
+                    # pump; the relay rides the core pump to its shutdown.
+                    return
+                if self._client_seq_enabled and frame.seq is not None:
+                    self._client_tracker.observe(frame.seq)
+            except (
+                CommsProtocolError,
+                BrokenPipeError,
+                ConnectionResetError,
+                asyncio.IncompleteReadError,
+                EOFError,
+                ValueError,
+            ) as exc:
+                # A torn/malformed client frame or a negative client seq: the client leg
+                # is unusable. Loud (hard rule #7), then end THIS direction cleanly so the
+                # fault does not crash the core pump's TaskGroup.
+                log.warning("gateway.relay.client_read_failed", error=repr(exc))
                 return
-            if self._client_seq_enabled and frame.seq is not None:
-                self._client_tracker.observe(frame.seq)
             await self._core_link.relay_to_core(frame.payload)
 
 
