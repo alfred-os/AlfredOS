@@ -185,11 +185,18 @@ class CommsInboundOrchestratorAdapter:
 
         The ack body is routed through the outbound DLP chokepoint
         (:meth:`OutboundDlp.scan_for_outbound`) and wrapped in a fully-validated
-        :class:`OutboundMessageRequest` so the production TUI / Discord plugins
-        accept it (G5 #237). The DLP-minted :data:`ScannedOutboundBody` is the
-        body — never a raw dict — so the ack cannot bypass the redactor (CLAUDE.md
-        hard rule #4) and the wire frame satisfies ``OutboundMessageRequest`` on
-        the consumer's ``model_validate``.
+        :class:`OutboundMessageRequest`. The DLP-minted :data:`ScannedOutboundBody`
+        is the body — never a raw dict — so the ack cannot bypass the redactor
+        (CLAUDE.md hard rule #4) and the wire frame satisfies
+        ``OutboundMessageRequest`` on the consumer's ``model_validate``.
+
+        ``addressing_mode`` is pinned :data:`_ACK_ADDRESSING_MODE` (``"dm"``), which
+        is correct for the TODAY-shipped path: the 1:1 TUI reply leg (the TUI handler
+        is dm-only). It is NOT yet derived from the ingested inbound — for a future
+        GROUP-addressed Discord inbound a hard ``"dm"`` ack would be a behavioral
+        mismatch. Deriving ``addressing_mode`` from the ingested inbound is a
+        follow-up for when the Discord outbound path lands (G5 #237 scopes this to the
+        TUI 1:1 reply path).
         """
         sender = self._require_sender()
         if not isinstance(ingested, Mapping):
@@ -199,14 +206,28 @@ class CommsInboundOrchestratorAdapter:
         # requires, so the ack physically cannot skip the scan.
         scanned_body = self._outbound_dlp.scan_for_outbound(_ACK_CONTENT)
         request = OutboundMessageRequest(
-            adapter_id=str(ingested["adapter_id"]),
+            adapter_id=self._require_ingested_key(ingested, "adapter_id"),
             idempotency_key=uuid4(),
-            target_platform_id=str(ingested["target_platform_id"]),
+            target_platform_id=self._require_ingested_key(ingested, "target_platform_id"),
             body=scanned_body,
             attachments_refs=(),
             addressing_mode=_ACK_ADDRESSING_MODE,
         )
         await sender.send_outbound(request)
+
+    @staticmethod
+    def _require_ingested_key(ingested: Mapping[str, object], key: str) -> str:
+        """Return ``str(ingested[key])`` or raise a CONTEXTUAL error on a missing key.
+
+        Symmetry with the ``dispatch_bad_ingested`` guard above: a malformed ingest
+        result missing a required key surfaces the same operator-facing ``t()`` string
+        (``comms.daemon_runtime.dispatch_missing_ingested_key``) rather than a bare,
+        contextless ``KeyError`` (CLAUDE.md hard rule #7 — loud AND clear).
+        """
+        if key not in ingested:
+            _log.error("comms.daemon_runtime.dispatch_missing_ingested_key", missing_key=key)
+            raise RuntimeError(t("comms.daemon_runtime.dispatch_missing_ingested_key"))
+        return str(ingested[key])
 
     def _require_sender(self) -> OutboundSenderLike:
         """Return the bound sender or raise loudly (no silent failure)."""

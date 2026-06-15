@@ -307,6 +307,36 @@ async def test_dispatch_non_mapping_ingested_raises_runtime_error() -> None:
         await adapter.dispatch("not-a-mapping")
 
 
+@pytest.mark.parametrize("missing_key", ["adapter_id", "target_platform_id"])
+async def test_dispatch_missing_ingested_key_raises_contextual_runtime_error(
+    missing_key: str,
+) -> None:
+    """A malformed ingest mapping MISSING a required key raises a CONTEXTUAL error.
+
+    FIX 4 (Spec A G5 review): a Mapping missing ``adapter_id`` / ``target_platform_id``
+    previously raised a bare, contextless ``KeyError`` (loud but useless to an
+    operator), asymmetric with the ``dispatch_bad_ingested`` ``t()``-string
+    ``RuntimeError`` two lines up. Now both surface a localized operator message — and
+    crucially it is NOT a bare ``KeyError`` (no silent/contextless drop, CLAUDE.md
+    hard rule #7).
+    """
+    from alfred.i18n import t
+
+    bridge, _ = _extractor_bridge()
+    adapter = _make_adapter(bridge)
+    adapter.bind_outbound_sender(_RecordingSender())
+
+    ingested = {"adapter_id": _ADAPTER_ID, "target_platform_id": "discord:42"}
+    del ingested[missing_key]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await adapter.dispatch(ingested)
+
+    # Contextual ``t()`` string — explicitly NOT a bare ``KeyError``.
+    assert not isinstance(excinfo.value, KeyError)
+    assert str(excinfo.value) == t("comms.daemon_runtime.dispatch_missing_ingested_key")
+
+
 def test_recording_sender_satisfies_outbound_sender_like() -> None:
     assert isinstance(_RecordingSender(), OutboundSenderLike)
 

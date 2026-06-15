@@ -549,6 +549,19 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
             # The daemon dispatched the stubbed ack as an outbound.message REQUEST; it
             # relayed back through the gateway to the cohost, which renders the body.
             # The ack content round-trips byte-for-byte.
+            #
+            # SCOPE of this e2e assertion: it proves the ack TRAVERSES the outbound DLP
+            # chokepoint (the daemon's dispatch cannot construct an OutboundMessageRequest
+            # without minting a ScannedOutboundBody via OutboundDlp.scan_for_outbound). It
+            # does NOT prove redaction itself — ``"ack"`` trips no canary, so a clean
+            # round-trip is expected. The redaction PROPERTY (scan IS called; the body on
+            # the wire IS the minted ScannedOutboundBody, never a raw dict) is UNIT-covered
+            # in tests/unit/comms_mcp/test_daemon_runtime.py — see
+            # ``test_dispatch_after_bind_sends_fixed_ack_outbound`` (the ``_SpyingOutboundDlp``
+            # records the scan call) and ``test_dispatch_ack_body_is_not_a_raw_dict``. Those
+            # plus the type-level ``ScannedOutboundBody`` invariant (the only minter is
+            # ``scan_for_outbound``) make the chokepoint unbypassable, so this e2e need not
+            # carry a heavy canary variant.
             await _wait_for(lambda: _ACK_CONTENT in rendered, _TIMEOUT_S)
             assert rendered == [_ACK_CONTENT], rendered
 

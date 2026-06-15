@@ -112,15 +112,16 @@ type _BuildApp = Callable[[TuiSession], _AppLike]
 # A narrow allowlist of the gateway's client-TERMINAL link-state control frames
 # (Spec A G3-3a / ADR-0031). These id-less notifications carry NO payload and NO
 # ``adapter_id`` — they are pure STATE signals the pump routes to a banner callback
-# (the TUI paints its own localized banner from the method in a later task). They
-# are NOT relayed/dispatched/acked, and are NOT in ``TuiServer``'s method set.
+# the TUI renders via its own localized ``t("tui.banner.*")`` (``run_cohosted``
+# wires it to ``AlfredTuiApp.set_link_state``). They are NOT relayed/dispatched/
+# acked, and are NOT in ``TuiServer``'s method set.
 _LINK_STATE_METHODS: Final[frozenset[str]] = frozenset(
     {LINK_RECONNECTING, LINK_RESTORED, LINK_UNAVAILABLE}
 )
 
 # The banner callback the pump invokes with the link-state METHOD string. Kept a
 # bare ``str`` (the wire method) — the pump only routes the STATE; the banner TEXT
-# (and its ``t()`` localization) is the app's job in a later task.
+# (and its ``t()`` localization) is the app's job (``AlfredTuiApp.set_link_state``).
 type _OnLinkState = Callable[[str], Awaitable[None]]
 
 
@@ -176,11 +177,19 @@ async def _serve_wire(
 
     The gateway's client-TERMINAL ``link.*`` control frames (Spec A G3-3a / ADR-0031)
     are routed by a NARROW ALLOWLIST *before* ``dispatch``: a frame whose ``method``
-    is one of :data:`_LINK_STATE_METHODS` invokes ``on_link_state`` (the banner
-    callback) and is NOT relayed/dispatched/acked. The allowlist is deliberately
-    narrow on the METHOD — NOT a catch-all on "id-less": an id-less
-    ``daemon.lifecycle.*`` (or any other unknown notification) is NOT a link signal
-    and still falls through to the existing dispatch->``None`` skip below.
+    is one of :data:`_LINK_STATE_METHODS` AND that carries NO ``id`` invokes
+    ``on_link_state`` (the banner callback) and is NOT relayed/dispatched/acked. The
+    allowlist is deliberately narrow on the METHOD — NOT a catch-all on "id-less": an
+    id-less ``daemon.lifecycle.*`` (or any other unknown notification) is NOT a link
+    signal and still falls through to the existing dispatch->``None`` skip below.
+
+    ``link.*`` frames are spec'd id-LESS (pure STATE notifications). An id-BEARING
+    ``link.*`` is a wire-contract violation: taking the banner branch for it would
+    invoke the banner and ``continue`` WITHOUT answering the ``id`` — a silent drop of
+    an id-bearing frame. So the banner branch is gated on ``"id" not in frame``; an
+    id-bearing ``link.*`` is logged LOUD (``gateway.cohost.id_bearing_link_frame``) and
+    falls through to the normal ``dispatch`` path (which answers/handles the ``id``)
+    rather than being silently swallowed (CLAUDE.md hard rule #7).
 
     ``server.dispatch`` returns a response frame for a well-formed REQUEST, but
     ``None`` for an id-less NOTIFICATION with an unknown method (Spec A G3-2 #237: the
@@ -199,13 +208,21 @@ async def _serve_wire(
         frame_dict = dict(frame)
         method = frame_dict.get("method")
         if isinstance(method, str) and method in _LINK_STATE_METHODS:
-            # Gateway link-state control frame — route to the banner callback and
-            # STOP (client-terminal: never relayed/dispatched/acked). The narrow
-            # method allowlist keeps a daemon.lifecycle.* / unknown notification on
-            # the dispatch->``None`` skip path below.
-            _log.info("comms.tui.link_state", state=method)
-            await on_link_state(method)
-            continue
+            if "id" in frame_dict:
+                # Wire-contract violation: ``link.*`` is spec'd id-LESS. Taking the
+                # banner branch here would invoke the banner + ``continue`` WITHOUT
+                # answering the ``id`` — a SILENT drop of an id-bearing frame. Log
+                # LOUD and fall through to ``dispatch`` (which answers/handles the
+                # ``id``) instead of swallowing it (CLAUDE.md hard rule #7).
+                _log.warning("gateway.cohost.id_bearing_link_frame", method=method)
+            else:
+                # Gateway link-state control frame — route to the banner callback and
+                # STOP (client-terminal: never relayed/dispatched/acked). The narrow
+                # method allowlist keeps a daemon.lifecycle.* / unknown notification on
+                # the dispatch->``None`` skip path below.
+                _log.info("comms.tui.link_state", state=method)
+                await on_link_state(method)
+                continue
         response = await server.dispatch(frame_dict)
         if response is not None:
             # An id-less notification (unknown method) dispatches to ``None`` — skip
