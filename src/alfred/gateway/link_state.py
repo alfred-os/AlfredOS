@@ -57,13 +57,15 @@ class GatewayLinkState(StrEnum):
     REDIALING = "redialing"
     """A reconnect attempt is in flight; the gap is still open."""
 
+    UNAVAILABLE = "unavailable"
+    """The buffer's back-pressure breaker tripped (spec §5): a terminal, absorbing
+    state. The gap is escalated to ``link.unavailable``; recovery is a fresh session
+    (a new machine), never an in-place exit — the buffer's breaker latch clears only
+    on ``discard``."""
+
 
 class GatewayLinkEvent(StrEnum):
-    """The four events that drive the G3-3a link-state machine.
-
-    NB: ``breaker_tripped`` (the trigger for ``unavailable``) is a G4 event — its
-    source is the ReplayBuffer cap breach (spec §5), so it is NOT modelled here.
-    """
+    """The events that drive the G3-3a link-state machine."""
 
     CORE_GOING_DOWN = "core_going_down"
     """The core sent a planned ``daemon.lifecycle.going_down``."""
@@ -76,6 +78,11 @@ class GatewayLinkEvent(StrEnum):
 
     CORE_READY = "core_ready"
     """The core sent a (validated, epoch-checked) ``daemon.lifecycle.ready``."""
+
+    BREAKER_TRIPPED = "breaker_tripped"
+    """The ReplayBuffer's back-pressure breaker tripped (soft-cap breach, spec §5).
+    Fed by the G4b relay when ``buffer.breaker_tripped`` is observed after an append;
+    escalates the link to the absorbing ``UNAVAILABLE`` state."""
 
 
 class LinkControl(StrEnum):

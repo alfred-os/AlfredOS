@@ -141,6 +141,13 @@ def test_machine_starts_up() -> None:
     assert LinkStateMachine().state is GatewayLinkState.UP
 
 
+def test_unavailable_state_and_breaker_event_exist() -> None:
+    from alfred.gateway.link_state import GatewayLinkEvent, GatewayLinkState
+
+    assert GatewayLinkState.UNAVAILABLE == "unavailable"
+    assert GatewayLinkEvent.BREAKER_TRIPPED == "breaker_tripped"
+
+
 def test_undefined_transition_fails_loud() -> None:
     # ``UP + redial_started`` is genuinely undefined: a redial cannot begin while
     # the link is up (no gap is open). With the H2 fix, ``DOWN_* + core_ready`` IS
