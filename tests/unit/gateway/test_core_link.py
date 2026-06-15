@@ -160,6 +160,56 @@ async def test_peer_handshake_negotiates_seq_ack_and_captures_epoch() -> None:
     assert link._core_epoch == epoch
 
 
+class _OrderRecordingCoreTransport(_FakeCoreTransport):
+    """Records, per ``send``, whether ``enable_seq_ack`` had already been called.
+
+    The handshake ack MUST go out PLAIN: ``enable_seq_ack`` may only flip AFTER
+    the ack is on the wire (the core reads the ack with its framing still OFF —
+    flip-after-read). ``send_seq_states`` captures ``seq_ack_enabled`` at the
+    instant of each ``send`` so the test can assert the ack was written plain and
+    the flip happened strictly afterwards.
+    """
+
+    def __init__(self, inbound: list[Mapping[str, object]]) -> None:
+        super().__init__(inbound)
+        self.send_seq_states: list[bool] = []
+
+    async def send(self, frame: Mapping[str, object]) -> None:
+        self.send_seq_states.append(self.seq_ack_enabled)
+        await super().send(frame)
+
+
+@pytest.mark.asyncio
+async def test_peer_handshake_ack_is_plain_then_flips_seq_ack_after() -> None:
+    """The negotiated ack is sent PLAIN; ``enable_seq_ack`` flips strictly AFTER.
+
+    Mutation guard for the G5 chain bug: the merged code flipped
+    ``enable_seq_ack`` BEFORE sending the ack, so the ack went out seq-framed and
+    the core rejected it as malformed JSON. Both peers must flip-after-read, so
+    the ack frame must be on the wire while framing is still OFF, and the flip
+    must follow. Reordering back to flip-before-send fails this assertion.
+    """
+    epoch = uuid4().hex
+    transport = _OrderRecordingCoreTransport(
+        [_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})]
+    )
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())
+
+    await link._peer_handshake(transport)
+
+    # Exactly one frame (the ack) was sent, and at that instant framing was OFF.
+    assert transport.send_seq_states == [False]
+    # The result CONTENT still advertises seq_ack (the core learns we support it).
+    assert transport.sent[0]["result"] == {  # type: ignore[index]
+        "ok": True,
+        "plugin_version": GATEWAY_PLUGIN_VERSION,
+        "seq_ack": {"version": SEQ_VERSION},
+    }
+    # …and the transport framing flipped ON only AFTER the plain ack — the NEXT
+    # frame would be seq-framed.
+    assert transport.seq_ack_enabled is True
+
+
 @pytest.mark.asyncio
 async def test_peer_handshake_plain_wire_when_seq_ack_omitted() -> None:
     epoch = uuid4().hex

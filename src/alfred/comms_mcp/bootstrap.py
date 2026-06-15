@@ -15,9 +15,10 @@ each seam onto the real Slice-3 surface:
 * :class:`SyncIdentityResolverBridge` adapts the async
   ``_IdentityResolverLike.resolve`` seam onto the real **sync**
   :meth:`alfred.identity.resolver.IdentityResolver.resolve(platform, platform_id)`.
-  The :class:`Platform` enum ships only ``TUI``/``DISCORD`` (Slice-2); the
-  reference adapter kind ``alfred_comms_test`` is mapped onto ``Platform.DISCORD``
-  via :data:`_ADAPTER_KIND_TO_PLATFORM` until PR-S4-9/10 add native members.
+  The :class:`Platform` enum ships ``TUI``/``DISCORD`` (Slice-2); the native
+  ``tui``/``discord`` adapter kinds map 1:1, and the reference adapter kind
+  ``alfred_comms_test`` keeps the legacy ``Platform.DISCORD`` placeholder, all
+  via :data:`_ADAPTER_KIND_TO_PLATFORM`.
 * :class:`SupervisorBreakerTripper` adapts the handlers' ``trip_comms_breaker``
   seam onto :meth:`alfred.supervisor.core.Supervisor.trip_breaker`.
 
@@ -77,13 +78,15 @@ class _SupervisorTripLike(Protocol):
 # (matches the orchestrator's single-persona pin).
 _DEFAULT_PERSONA = "alfred"
 
-# Adapter-kind -> Platform mapping. The Slice-2 ``Platform`` enum ships only
-# ``TUI``/``DISCORD``; the reference plugin's ``alfred_comms_test`` kind has no
-# native member, so it maps onto ``DISCORD`` for the resolver lookup (the
-# integration test binds its synthetic user under that platform). PR-S4-9/10 add
-# the native ``discord``/``tui`` adapter kinds, at which point this table maps
-# them 1:1.
+# Adapter-kind -> Platform mapping. The Slice-2 ``Platform`` enum ships
+# ``TUI``/``DISCORD``. The native ``tui``/``discord`` adapter kinds map 1:1 onto
+# their owning platform; the reference plugin's ``alfred_comms_test`` kind has no
+# native member, so it keeps the legacy ``DISCORD`` placeholder for the resolver
+# lookup (the reference-plugin integration test binds its synthetic user under
+# that platform).
 _ADAPTER_KIND_TO_PLATFORM: Mapping[str, Platform] = {
+    "tui": Platform.TUI,
+    "discord": Platform.DISCORD,
     "alfred_comms_test": Platform.DISCORD,
 }
 
@@ -180,8 +183,9 @@ class SyncIdentityResolverBridge:
         except KeyError as exc:
             # An unmapped adapter kind must fail loud — silently defaulting to
             # DISCORD would resolve the user against the wrong platform's
-            # binding table. The ``alfred_comms_test -> DISCORD`` placeholder is
-            # the ONLY allowed non-native mapping; PR-S4-9/10 add native kinds.
+            # binding table. The native ``tui``/``discord`` kinds map 1:1; the
+            # ``alfred_comms_test -> DISCORD`` placeholder is the only non-native
+            # mapping the reference plugin relies on.
             raise UnknownAdapterKindError(
                 f"no Platform mapping for adapter_id {adapter_id!r}"
             ) from exc

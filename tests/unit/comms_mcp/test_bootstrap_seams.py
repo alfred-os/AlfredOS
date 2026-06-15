@@ -154,6 +154,38 @@ async def test_resolver_bridge_returns_none_on_unbound_user() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_id", "expected_platform"),
+    [
+        ("tui", Platform.TUI),
+        ("discord", Platform.DISCORD),
+    ],
+)
+async def test_resolver_bridge_maps_native_adapter_kinds(
+    adapter_id: str, expected_platform: Platform
+) -> None:
+    """The native ``tui``/``discord`` adapter kinds resolve against their own Platform.
+
+    A real TUI inbound carries ``adapter_id="tui"``; before the mapping landed it
+    raised ``UnknownAdapterKindError`` (the second of the two G5 chain gaps). The
+    native kinds must map 1:1 onto their owning :class:`Platform`, never onto the
+    ``alfred_comms_test -> DISCORD`` reference placeholder.
+    """
+    resolver = MagicMock()
+    resolver.resolve = MagicMock(return_value=_fake_user(slug="u_alice", language="en-GB"))
+    bridge = SyncIdentityResolverBridge(resolver=resolver)
+
+    resolved = await bridge.resolve(adapter_id=adapter_id, platform_user_id="p:1")
+
+    assert resolved is not None
+    assert resolved.canonical_user_id == "u_alice"
+    assert resolved.adapter_id == adapter_id
+    resolver.resolve.assert_called_once()
+    assert resolver.resolve.call_args.args[0] is expected_platform
+    assert resolver.resolve.call_args.args[1] == "p:1"
+
+
+@pytest.mark.asyncio
 async def test_resolver_bridge_raises_on_unknown_adapter_kind() -> None:
     """A truly unknown adapter_id must NOT silently map onto DISCORD.
 
