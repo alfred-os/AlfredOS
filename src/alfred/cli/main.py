@@ -62,6 +62,7 @@ from alfred.cli.audit import audit_app
 from alfred.cli.config import config_app
 from alfred.cli.daemon import daemon_app
 from alfred.cli.discord_cmd import discord_app
+from alfred.cli.gateway import gateway_app
 from alfred.cli.plugin import plugin_app
 from alfred.cli.supervisor import supervisor_app
 from alfred.cli.web import web_app
@@ -125,6 +126,12 @@ app.add_typer(audit_app, name="audit")
 # PR-S4-1 (#174): the production daemon entrypoint. ``alfred daemon
 # start | stop | status`` wires the Supervisor + proposal-dispatch loop.
 app.add_typer(daemon_app, name="daemon")
+# PR-S4-G3-3b-2b (#237): the resumable-gateway entrypoint. ``alfred gateway
+# start | status`` runs the GatewayProcess (the front door that survives a
+# core restart, ADR-0031). ``status`` is non-dialing (security L3). The
+# command bodies lazy-import the relay graph (perf-001), pinned by
+# test_main_lazy_imports.py.
+app.add_typer(gateway_app, name="gateway")
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-15 09:12+0100\n"
+"POT-Creation-Date: 2026-06-15 13:02+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -297,63 +297,63 @@ msgstr ""
 " with: alfred daemon start. For ad-hoc verification, run the launcher "
 "directly: bin/alfred-plugin-launcher.sh alfred.discord."
 
-#: src/alfred/cli/main.py:71
+#: src/alfred/cli/main.py:72
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:168
+#: src/alfred/cli/main.py:175
 msgid "status.help"
 msgstr ""
 "Print a short instance health summary: provider, budget, optional "
 "fallback. For daemon-specific status (PID, uptime, last boot event), see:"
 " alfred daemon status"
 
-#: src/alfred/cli/main.py:198
+#: src/alfred/cli/main.py:205
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:201
+#: src/alfred/cli/main.py:208
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:202
+#: src/alfred/cli/main.py:209
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:203
+#: src/alfred/cli/main.py:210
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:204
+#: src/alfred/cli/main.py:211
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:205
+#: src/alfred/cli/main.py:212
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:206
+#: src/alfred/cli/main.py:213
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:207
+#: src/alfred/cli/main.py:214
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:213
+#: src/alfred/cli/main.py:220
 msgid "cli.login.help.user"
 msgstr "User slug to log in as."
 
-#: src/alfred/cli/main.py:216
+#: src/alfred/cli/main.py:223
 msgid "cli.login.help.expires_in"
 msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 
-#: src/alfred/cli/main.py:218
+#: src/alfred/cli/main.py:225
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # TUI gating (PR-S4-1 daemon split).
-#: src/alfred/cli/main.py:360 src/alfred/i18n/_slice_4_reserve.py:154
+#: src/alfred/cli/main.py:367 src/alfred/i18n/_slice_4_reserve.py:154
 msgid "comms.tui.daemon_required_to_chat"
 msgstr ""
 "alfred chat needs the daemon. Start it with: alfred daemon start. If you "
@@ -1139,6 +1139,50 @@ msgstr ""
 "Started: {started_at}\n"
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
+
+#: src/alfred/cli/gateway/__init__.py:25
+msgid "gateway.help.root"
+msgstr ""
+"Run and inspect the AlfredOS gateway — the resumable front door that stands "
+"in for the daemon toward `alfred chat`, surviving a core restart so a "
+"session is not torn down by a daemon bounce."
+
+#: src/alfred/cli/gateway/__init__.py:28
+msgid "gateway.help.start"
+msgstr "Run the gateway process until SIGTERM/SIGINT stops it."
+
+#: src/alfred/cli/gateway/__init__.py:35
+msgid "gateway.help.status"
+msgstr ""
+"Show whether the gateway socket is present and the runtime-dir posture, "
+"without dialing it. For full instance health, see: alfred status"
+
+#: src/alfred/cli/gateway/_commands.py:61
+msgid "gateway.start.starting"
+msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
+
+#: src/alfred/cli/gateway/_commands.py:91
+msgid "gateway.start.unavailable"
+msgstr ""
+"The gateway could not reach the AlfredOS core daemon socket. Start the "
+"daemon first with `alfred daemon start`, then re-run `alfred gateway "
+"start`."
+
+#: src/alfred/cli/gateway/_commands.py:93
+msgid "gateway.start.stopped"
+msgstr "The AlfredOS gateway stopped cleanly."
+
+#: src/alfred/cli/gateway/_commands.py:106
+msgid "gateway.status.socket_absent"
+msgstr ""
+"Gateway socket not present at {path} — the gateway is not running. Start "
+"it with `alfred gateway start`."
+
+#: src/alfred/cli/gateway/_commands.py:114
+msgid "gateway.status.socket_present"
+msgstr ""
+"Gateway socket present at {path} (runtime dir mode {runtime_mode}, "
+"owner uid {uid}); the gateway appears to be running."
 
 #: src/alfred/comms_mcp/audit_hash.py:94
 #: src/alfred/i18n/_slice_4_reserve.py:120
@@ -2103,10 +2147,10 @@ msgstr ""
 "peer's uid did not match this user (a stale-socket race or wider-"
 "permission misconfiguration); the connection was closed."
 
-#: src/alfred/plugins/comms_socket_transport.py:379
-#: src/alfred/plugins/comms_socket_transport.py:389
-#: src/alfred/plugins/comms_socket_transport.py:407
 #: src/alfred/plugins/comms_socket_transport.py:414
+#: src/alfred/plugins/comms_socket_transport.py:424
+#: src/alfred/plugins/comms_socket_transport.py:471
+#: src/alfred/plugins/comms_socket_transport.py:478
 #: src/alfred/plugins/comms_stdio_transport.py:241
 #: src/alfred/plugins/comms_stdio_transport.py:251
 #: src/alfred/plugins/comms_stdio_transport.py:270
