@@ -22,6 +22,7 @@ from alfred_tui.session import TuiSession
 
 from alfred.comms_mcp.errors import DaemonUnavailableError
 from alfred.comms_mcp.protocol import OutboundMessageRequest
+from alfred.plugins.comms_socket_transport import CommsPeerAuthError
 from alfred.security.dlp import OutboundDlp, ScannedOutboundBody
 
 pytestmark = pytest.mark.asyncio
@@ -380,6 +381,26 @@ async def test_cohost_dial_failure_wraps_oserror_as_daemon_unavailable() -> None
     with pytest.raises(DaemonUnavailableError) as excinfo:
         await run_cohosted(adapter_id="tui", dial=_dial, build_app_fn=_FakeApp)  # type: ignore[arg-type]
     assert isinstance(excinfo.value.__cause__, ConnectionRefusedError)
+
+
+async def test_cohost_dial_peer_auth_failure_wraps_as_daemon_unavailable() -> None:
+    """A dial that the SO_PEERCRED backstop refuses surfaces as daemon-unavailable.
+
+    ``CommsPeerAuthError`` is a ``CommsProtocolError``/``AlfredError`` (NOT an
+    ``OSError``), so a planted-inode / uid-squat / wider-perm misconfig dial would
+    otherwise escape ``run_cohosted`` as a raw traceback. The co-host wraps it as
+    :class:`DaemonUnavailableError` — a same-uid socket the dialer cannot
+    peer-authenticate IS "no usable daemon socket" — so ``_chat_main`` maps it to the
+    one clean daemon-required message + exit 3. The original is preserved as
+    ``__cause__`` for diagnosability.
+    """
+
+    async def _dial(_adapter_id: str) -> Any:
+        raise CommsPeerAuthError("dialed socket uid mismatch")
+
+    with pytest.raises(DaemonUnavailableError) as excinfo:
+        await run_cohosted(adapter_id="tui", dial=_dial, build_app_fn=_FakeApp)  # type: ignore[arg-type]
+    assert isinstance(excinfo.value.__cause__, CommsPeerAuthError)
 
 
 class _BlockingReadTransport:

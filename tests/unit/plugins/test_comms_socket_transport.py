@@ -820,6 +820,246 @@ def test_resolve_peer_uid_returns_uid_on_full_creds(monkeypatch: pytest.MonkeyPa
     assert _resolve_peer_uid(_FakeSock(returns=creds)) == 1000  # type: ignore[arg-type]
 
 
+# ---------------------------------------------------------------------------
+# Dial-side peer-auth (Spec A G3-3b / ADR-0031): the "both-direction SO_PEERCRED"
+# the G3-1 accept side already has, now hardened on the DIAL side. The gateway
+# dials the core socket and must verify (a) the dialed inode is a socket it owns
+# (the pre-dial lstat backstop — the only owner enforcement on a no-SO_PEERCRED
+# host where the post-connect check returns None->authorized), and (b) the
+# connected peer's SO_PEERCRED uid is ours (Linux-enforcing).
+# ---------------------------------------------------------------------------
+
+
+def _has_peer(sock: socket.socket) -> bool:
+    """True if ``sock`` is a CONNECTED socket (``getpeername`` succeeds).
+
+    A connected ``AF_UNIX`` peer socket answers ``getpeername``; a bound-but-
+    unconnected listener socket raises ``OSError`` (ENOTCONN). Used to assert the
+    dial-side peer-auth read creds off the CONNECTED socket, not the listener. Accepts
+    the duck-typed ``asyncio.trsock.TransportSocket`` that ``get_extra_info("socket")``
+    returns (it exposes ``getpeername`` too).
+    """
+    try:
+        sock.getpeername()
+    except OSError:
+        return False
+    return True
+
+
+async def test_dial_peer_auth_succeeds_same_uid_loopback(runtime_dir: Path) -> None:
+    """A same-uid loopback dial passes both the pre-dial lstat + post-connect check.
+
+    The listener is bound by the current uid, so the dialed inode is an owned socket
+    (pre-dial lstat passes) and the connected peer's SO_PEERCRED uid is ours (or
+    ``None`` on a no-SO_PEERCRED host — both authorized). The dial SUCCEEDS.
+    """
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    try:
+        accept_task = asyncio.ensure_future(listener.accept())
+        client = await dial_comms_socket(_ADAPTER_ID)
+        host = await accept_task
+        await client.close()
+        await host.close()
+    finally:
+        await listener.aclose()
+
+
+async def test_dial_peer_auth_rejects_mismatched_uid_and_closes_writer(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A post-connect SO_PEERCRED mismatch raises ``CommsPeerAuthError`` + reaps the FD.
+
+    ``_resolve_peer_uid`` is monkeypatched to report a FOREIGN uid for the connected
+    socket, so the post-connect check refuses the dial. The error is a
+    ``CommsProtocolError`` subclass (the runner's malformed-wire arm handles it), and
+    the dialed writer is closed — no FD leak.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    # Capture the dialed writer so the test can assert it was closed on the reject
+    # path (no FD leak). The monkeypatched ``_resolve_peer_uid`` reports a foreign uid
+    # for EVERY connected socket, so the listener's accept arm refuses the peer too
+    # and never resolves — the dangling accept is cancelled in the finally.
+    dialed_writers: list[asyncio.StreamWriter] = []
+    real_open = asyncio.open_unix_connection
+
+    async def _capturing_open(
+        *a: object, **k: object
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        reader, writer = await real_open(*a, **k)  # type: ignore[arg-type]
+        dialed_writers.append(writer)
+        return reader, writer
+
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    accept_task = asyncio.ensure_future(listener.accept())
+    try:
+        monkeypatch.setattr(cst, "_resolve_peer_uid", lambda _sock: os.getuid() + 1)
+        monkeypatch.setattr(cst.asyncio, "open_unix_connection", _capturing_open)
+        with pytest.raises(cst.CommsPeerAuthError) as exc_info:
+            await dial_comms_socket(_ADAPTER_ID)
+        # A CommsPeerAuthError is a CommsProtocolError so the runner's existing
+        # malformed-wire arm routes it uniformly.
+        assert isinstance(exc_info.value, CommsProtocolError)
+        # No FD leak: the dialed writer was closed on the reject path BEFORE raising.
+        assert len(dialed_writers) == 1
+        assert dialed_writers[0].is_closing()
+    finally:
+        accept_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await accept_task
+        await listener.aclose()
+
+
+async def test_dial_peer_auth_reads_creds_off_connected_socket_not_listener(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEC-2b: the dial-side ``_resolve_peer_uid`` is called on the CONNECTED socket.
+
+    Reading creds off the wrong socket (e.g. re-resolving the listener) returns our
+    OWN uid and always passes, defeating the check. A spy captures the socket passed
+    to ``_resolve_peer_uid`` and asserts it is exactly ``writer.get_extra_info("socket")``
+    of the dialed connection — a real connected ``AF_UNIX`` socket, and that a real
+    same-uid loopback resolves to ``os.getuid()``.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    # Record the socket the DIAL side passes to ``_resolve_peer_uid``. The spy returns
+    # our own uid unconditionally so the dial is authorized (the check is satisfied);
+    # we only care WHICH socket the resolve saw. Capturing the FIRST call is the dial
+    # side — ``dial_comms_socket`` resolves the peer immediately after connecting,
+    # before the listener's detached accept callback gets a turn.
+    dial_sockets: list[socket.socket | None] = []
+
+    def _spy(sock: socket.socket | None) -> int | None:
+        dial_sockets.append(sock)
+        return os.getuid()
+
+    listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+    await listener.bind()
+    accept_task = asyncio.ensure_future(listener.accept())
+    try:
+        monkeypatch.setattr(cst, "_resolve_peer_uid", _spy)
+        client = await dial_comms_socket(_ADAPTER_ID)
+        # The dial resolved exactly once at connect time; the first capture is the
+        # dial-side socket.
+        assert dial_sockets, "dial-side _resolve_peer_uid was never called"
+        dial_sock = dial_sockets[0]
+        # It must be the socket of the dialed CONNECTED connection
+        # (``writer.get_extra_info("socket")`` — an ``asyncio.trsock.TransportSocket``
+        # wrapping the connected fd), NOT the listener's bound socket. Reading creds
+        # off the listener returns our own uid and silently defeats the check, so
+        # prove the resolve saw a CONNECTED peer socket: it is ``AF_UNIX`` and answers
+        # ``getpeername`` with the dialed path (the listener's bound-only socket does
+        # not). It is duck-typed (a ``TransportSocket``, not a bare ``socket.socket``),
+        # so assert the socket-shaped attributes rather than the concrete class.
+        assert dial_sock is not None
+        assert dial_sock.family == socket.AF_UNIX
+        assert _has_peer(dial_sock), (
+            "dial-side _resolve_peer_uid was not called on the CONNECTED socket "
+            "(it must read the PEER's creds off the dialed connection, not the listener)"
+        )
+        # The connected peer is the listener's bound socket path (proving the dialed
+        # connection, not some other socket).
+        assert str(dial_sock.getpeername()) == str(listener.path)
+        await client.close()
+    finally:
+        accept_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await accept_task
+        await listener.aclose()
+
+
+async def test_dial_peer_auth_pre_dial_lstat_refuses_non_socket(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SEC-2: a non-socket inode at the dial path raises BEFORE ``open_unix_connection``.
+
+    On a no-SO_PEERCRED host the post-connect check returns ``None``->authorized, so
+    the pre-dial lstat is the ONLY owner enforcement. A regular file at the resolved
+    path must raise ``CommsPeerAuthError`` and never attempt to connect.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    sock_path = default_comms_socket_path(_ADAPTER_ID)
+    sock_path.write_bytes(b"not a socket")
+
+    connect_called = False
+
+    async def _spy_connect(*a: object, **k: object) -> tuple[object, object]:
+        nonlocal connect_called
+        connect_called = True
+        raise AssertionError("open_unix_connection must not be reached")
+
+    monkeypatch.setattr(cst.asyncio, "open_unix_connection", _spy_connect)
+    with pytest.raises(cst.CommsPeerAuthError):
+        await dial_comms_socket(_ADAPTER_ID)
+    assert connect_called is False
+
+
+def test_dial_path_owned_helper_rejects_foreign_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SEC-2: the FS-guard helper refuses a socket owned by a DIFFERENT uid.
+
+    A non-root unit cannot chown a socket to another uid, so monkeypatch ``Path.lstat``
+    to report a socket inode with a foreign ``st_uid``. The helper must raise
+    ``CommsPeerAuthError`` — the wider-perm / stale-socket-race backstop.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    # A synthetic label only — ``Path.lstat`` is monkeypatched below, so this path is
+    # never touched on disk (it is the stat-source, not an FS access).
+    path = Path("/nonexistent/alfred-test-foreign.sock")
+
+    class _Stat:
+        st_mode = stat.S_IFSOCK | 0o600
+        st_uid = os.getuid() + 4242
+
+    monkeypatch.setattr(Path, "lstat", lambda _self: _Stat())
+    with pytest.raises(cst.CommsPeerAuthError):
+        cst._assert_dial_path_owned(path)
+
+
+def test_dial_path_owned_helper_accepts_owned_socket(runtime_dir: Path) -> None:
+    """SEC-2: the FS-guard helper accepts a same-uid socket inode (no raise).
+
+    Binds a real listener (an owned 0600 socket) and asserts the helper returns
+    without raising — the happy-path owner branch.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    async def _bound() -> Path:
+        listener = CommsSocketListener(adapter_id=_ADAPTER_ID)
+        await listener.bind()
+        return listener.path
+
+    sock_path = asyncio.run(_bound())
+    try:
+        # No raise -> the owned-socket branch passes.
+        cst._assert_dial_path_owned(sock_path)
+    finally:
+        sock_path.unlink(missing_ok=True)
+
+
+def test_dial_path_owned_helper_passes_missing_path_through(
+    runtime_dir: Path,
+) -> None:
+    """SEC-2: a MISSING dial path is NOT swallowed by the FS guard.
+
+    The daemon-absent path is the loud operator-facing contract: lstat raises
+    ``FileNotFoundError`` and the helper must let it surface (or let the subsequent
+    ``open_unix_connection`` fire its own ``FileNotFoundError``) — never silently
+    treat an absent socket as authorized.
+    """
+    import alfred.plugins.comms_socket_transport as cst
+
+    runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    missing = default_comms_socket_path(_ADAPTER_ID)
+    with pytest.raises(FileNotFoundError):
+        cst._assert_dial_path_owned(missing)
+
+
 class _FakeWriter:
     """Records everything written; configurable broken-pipe + EOF/close tracking."""
 

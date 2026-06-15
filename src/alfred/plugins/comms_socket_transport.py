@@ -61,6 +61,7 @@ from alfred.plugins.comms_seq_codec import (
 )
 from alfred.plugins.comms_wire import (
     _MAX_COMMS_LINE_BYTES,
+    CommsPeerAuthError,
     CommsProtocolError,
 )
 
@@ -174,6 +175,37 @@ def default_comms_socket_path(adapter_id: str) -> Path:
     return _runtime_dir() / f"comms-{adapter_id}.sock"
 
 
+def _assert_dial_path_owned(path: Path) -> None:
+    """Pre-dial owner-backstop: the dial path must be a socket WE own, or raise.
+
+    The dial side's degrade-open hazard: on a host without ``SO_PEERCRED`` (a macOS
+    dev box) the POST-connect peer-uid check returns ``None`` -> authorized, so the
+    gateway would otherwise dial whatever inode squats at the path. The gateway does
+    NOT own the dialed inode (the core daemon binds it), so an attacker who won a
+    same-dir race could plant a socket of their own. This pre-dial ``lstat`` is the
+    only owner enforcement on those hosts: refuse anything that is not an
+    :func:`stat.S_ISSOCK` inode owned by ``os.getuid()``.
+
+    Reuses the :meth:`CommsSocketListener._unlink_stale` discipline: ``lstat`` (NOT
+    ``stat``) so a symlink target is never followed, and ``S_ISSOCK`` so a regular
+    file / FIFO / device is refused. A ``FileNotFoundError`` (the daemon socket is
+    absent) is NOT caught here — it surfaces as the existing loud daemon-absent
+    contract (the caller maps it to the daemon-required operator message).
+    """
+    # ``lstat`` (not stat) so an attacker-planted symlink to a victim socket is not
+    # followed — we assert on the link inode itself.
+    st = path.lstat()
+    if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid():
+        log.warning(
+            "comms.socket.dial_path_unowned",
+            path=str(path),
+            st_mode=f"{stat.S_IFMT(st.st_mode):#o}",
+            st_uid=st.st_uid,
+            expected_uid=os.getuid(),
+        )
+        raise CommsPeerAuthError(t("comms.transport.dial_path_unowned", path=str(path)))
+
+
 async def dial_comms_socket(adapter_id: str) -> CommsSocketTransport:
     """Dial the daemon's bound comms socket; return the peer-end transport.
 
@@ -189,16 +221,51 @@ async def dial_comms_socket(adapter_id: str) -> CommsSocketTransport:
     enforces the IDENTICAL frame-size DoS bound the accept side pins
     (:meth:`CommsSocketListener.accept`), matching the stdio transport's guard.
 
-    A daemon-absent / socket-missing dial raises LOUD: ``open_unix_connection``
-    surfaces ``FileNotFoundError`` (the socket inode is gone) or
-    ``ConnectionRefusedError`` (a stale inode with no listener) — never swallowed,
-    so the caller (``_chat_main``) can map it to the daemon-required operator
-    message (CLAUDE.md hard rule #7).
+    **Both-direction peer-auth (Spec A G3-3b / ADR-0031).** The accept side already
+    verifies the connector's ``SO_PEERCRED`` uid; the dial side now mirrors it with
+    two layers:
+
+    * **Pre-dial lstat (the owner backstop)** — :func:`_assert_dial_path_owned`
+      refuses anything at the resolved path that is not a socket owned by us BEFORE
+      connecting. On a no-``SO_PEERCRED`` host the post-connect check degrades open
+      (returns ``None`` -> authorized), so this lstat is the ONLY owner enforcement
+      there: the gateway does not own the dialed inode and must verify it.
+    * **Post-connect ``SO_PEERCRED`` (Linux-enforcing)** — after connecting, the
+      connected peer's uid is read off ``writer.get_extra_info("socket")`` (the
+      CONNECTED socket, never the listener) and refused if it is not ours.
+
+    A daemon-absent / socket-missing dial raises LOUD: the pre-dial ``lstat`` lets a
+    ``FileNotFoundError`` surface (the socket inode is gone), or
+    ``open_unix_connection`` surfaces ``FileNotFoundError`` /
+    ``ConnectionRefusedError`` (a stale inode with no listener) — never swallowed, so
+    the caller (``_chat_main``) can map it to the daemon-required operator message
+    (CLAUDE.md hard rule #7). A peer-auth refusal raises :class:`CommsPeerAuthError`.
     """
+    path = default_comms_socket_path(adapter_id)
+    # PRE-DIAL owner backstop — runs BEFORE the connect so a non-owned / non-socket
+    # inode is refused without ever establishing a connection (the only owner
+    # enforcement on a no-SO_PEERCRED host). A missing socket surfaces FileNotFoundError.
+    _assert_dial_path_owned(path)
     reader, writer = await asyncio.open_unix_connection(
-        path=str(default_comms_socket_path(adapter_id)),
+        path=str(path),
         limit=_MAX_COMMS_LINE_BYTES,
     )
+    # POST-CONNECT SO_PEERCRED (Linux-enforcing; degrade-open on no-SO_PEERCRED). The
+    # connected socket is ``writer.get_extra_info("socket")`` — NEVER the listener,
+    # whose creds are our own uid and always pass (mirrors the accept-side comment).
+    peer_uid = _resolve_peer_uid(writer.get_extra_info("socket"))
+    if not _peer_uid_authorized(reported_uid=peer_uid):
+        # A different-uid peer answered the dial (stale-socket race / wider-perm
+        # misconfig). Close the dialed writer (no FD leak) and refuse LOUD — never
+        # speak the wire to a peer we could not authenticate (CLAUDE.md hard rule #7).
+        log.warning(
+            "comms.socket.dial_peer_uid_rejected",
+            adapter_id=adapter_id,
+            peer_uid=peer_uid,
+            expected_uid=os.getuid(),
+        )
+        writer.close()
+        raise CommsPeerAuthError(t("comms.transport.dial_peer_uid_rejected", adapter_id=adapter_id))
     return CommsSocketTransport(adapter_id=adapter_id, reader=reader, writer=writer)
 
 
@@ -590,9 +657,12 @@ class CommsSocketListener:
 
 
 __all__ = [
+    "CommsPeerAuthError",
     "CommsProtocolError",
     "CommsSocketListener",
     "CommsSocketTransport",
+    "_peer_uid_authorized",
+    "_resolve_peer_uid",
     "default_comms_socket_path",
     "dial_comms_socket",
 ]
