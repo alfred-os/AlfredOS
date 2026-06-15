@@ -120,14 +120,28 @@ async def _accept_core_host(listener: CommsSocketListener, *, epoch: str) -> Com
     return transport
 
 
-async def _reap_run_task(run_task: asyncio.Task[None], shutdown: asyncio.Event) -> None:
-    """End ``run()`` via a clean shutdown, reaping the task even if it must be cancelled."""
+async def _assert_clean_shutdown(run_task: asyncio.Task[None], shutdown: asyncio.Event) -> None:
+    """Assert ``run()`` stops CLEANLY on ``shutdown_event`` — WITHOUT a forced cancel.
+
+    Sets ``shutdown`` and awaits ``run_task`` directly. The clean stop is the property
+    under test, so a forced ``cancel()`` must NOT be used to satisfy teardown: a relay
+    that never observes ``shutdown_event`` (a real bug) makes ``wait_for`` raise
+    ``TimeoutError`` here — the test FAILS loudly instead of a cancel papering over it.
+    Mutation-sound: making ``GatewayProcess.run``'s shutdown-observation a no-op makes
+    this assertion fail (the ``run_task`` never returns within the timeout).
+
+    The caller's ``finally`` keeps a last-resort ``cancel()`` for the case where THIS
+    assertion already raised — that cancel reaps a now-known-broken task, it never
+    substitutes for the clean stop the assertion proves.
+    """
     shutdown.set()
     with structlog.testing.capture_logs():
-        try:
-            await asyncio.wait_for(run_task, timeout=3.0)
-        except (TimeoutError, asyncio.CancelledError):
-            run_task.cancel()
+        # No try/except-cancel: a TimeoutError here is a genuine FAILURE (run() ignored
+        # shutdown_event), not something to mask. asyncio.wait_for raises CancelledError
+        # only if the awaiting test itself is cancelled, which is also a real failure.
+        await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done()
+    assert not run_task.cancelled()  # it RETURNED on shutdown — was not force-cancelled.
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +194,9 @@ async def test_opaque_turn_both_directions_byte_for_byte_through_process(
             # Clean stop FIRST (shutdown is a quiet return, never a gap — no control
             # frame is pushed to the client), THEN reap the loopback ends. Reaping the
             # ends before the clean stop would EOF the core leg and race a gap-feed onto
-            # a closing client transport.
-            await _reap_run_task(run_task, shutdown)
+            # a closing client transport. The assertion below is mutation-sound: it FAILS
+            # (TimeoutError) if run() ignores shutdown_event — no forced cancel masks it.
+            await _assert_clean_shutdown(run_task, shutdown)
         finally:
             await core_host.close()
             await client.close()
@@ -269,7 +284,8 @@ async def test_core_gap_reconnect_holds_client_and_relays_after_restore(
 
             # Clean stop FIRST (a quiet return over the live second core leg), THEN reap
             # the ends — so the shutdown does not race a gap-feed onto a closing client.
-            await _reap_run_task(run_task, shutdown)
+            # Mutation-sound: a relay ignoring shutdown_event makes this FAIL, not pass.
+            await _assert_clean_shutdown(run_task, shutdown)
         finally:
             await core_host2.close()
             await core_listener2.aclose()

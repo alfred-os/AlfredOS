@@ -38,6 +38,7 @@ from uuid import uuid4
 
 import pytest
 import structlog.testing
+from prometheus_client import REGISTRY
 
 from alfred.comms_mcp.protocol import (
     DAEMON_LIFECYCLE_GOING_DOWN,
@@ -120,13 +121,55 @@ async def _accept_core_host(listener: CommsSocketListener, *, epoch: str) -> Com
 
 
 async def _reap_run_task(run_task: asyncio.Task[None], shutdown: asyncio.Event) -> None:
-    """End ``run()`` via a clean shutdown, reaping the task even if it must be cancelled."""
+    """Last-resort teardown reap for tests whose load-bearing assertion is NOT the clean
+    stop (e.g. the peer-reject test asserts the reject row + that the process stayed up,
+    THEN tears down). Sets ``shutdown`` and reaps, falling back to a forced cancel only if
+    the task does not return — acceptable here because the clean stop is not what's under
+    test. Tests that DO assert a clean shutdown must use :func:`_assert_clean_shutdown`.
+    """
     shutdown.set()
     with structlog.testing.capture_logs():
         try:
             await asyncio.wait_for(run_task, timeout=3.0)
         except (TimeoutError, asyncio.CancelledError):
             run_task.cancel()
+
+
+async def _assert_clean_shutdown(run_task: asyncio.Task[None], shutdown: asyncio.Event) -> None:
+    """Assert ``run()`` stops CLEANLY on ``shutdown_event`` — WITHOUT a forced cancel.
+
+    The clean stop is the property under test, so a forced ``cancel()`` must NOT satisfy
+    teardown: a relay that never observes ``shutdown_event`` (a real bug) makes
+    ``wait_for`` raise ``TimeoutError`` here and the test FAILS, rather than a cancel
+    masking it. Mutation-sound: a no-op shutdown-observation in ``GatewayProcess.run``
+    makes this assertion fail. The caller's ``finally`` keeps a last-resort ``cancel()``
+    only for the case where THIS assertion already raised (reaping a known-broken task).
+    """
+    shutdown.set()
+    with structlog.testing.capture_logs():
+        await asyncio.wait_for(run_task, timeout=3.0)
+    assert run_task.done()
+    assert not run_task.cancelled()  # it RETURNED on shutdown — was not force-cancelled.
+
+
+def _assert_canary_in_no_metric(canary: str) -> None:
+    """Assert ``canary`` appears in NO prometheus metric the gateway exposes — not in a
+    metric NAME, a label KEY, a label VALUE, or a sample name (CLAUDE.md hard rule #5:
+    a canary must leak to neither logs NOR metrics).
+
+    The gateway metrics are label-free by design (:mod:`alfred.gateway.metrics`); this
+    walks the *whole* default :class:`~prometheus_client.CollectorRegistry` so a future
+    collector that started attaching a payload-derived label would trip this guard. We
+    iterate ``REGISTRY.collect()`` rather than the metric objects so the assertion covers
+    every sample's name + labels (and stays robust to new gateway collectors).
+    """
+    for metric in REGISTRY.collect():
+        assert canary not in metric.name, metric.name
+        for sample in metric.samples:
+            assert canary not in sample.name, sample.name
+            for label_key, label_value in sample.labels.items():
+                assert canary not in label_key, sample
+                assert canary not in label_value, sample
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +307,8 @@ async def test_process_forged_ready_epoch_paints_no_false_restored(runtime_dir: 
 
             # Clean stop FIRST (a quiet return over the live second core leg), THEN reap
             # the ends — so the shutdown does not race a gap-feed onto a closing client.
-            await _reap_run_task(run_task, shutdown)
+            # Mutation-sound: a relay ignoring shutdown_event makes this FAIL, not pass.
+            await _assert_clean_shutdown(run_task, shutdown)
         finally:
             await core_host2.close()
             await core_listener2.aclose()
@@ -284,7 +328,12 @@ async def test_process_forged_ready_epoch_paints_no_false_restored(runtime_dir: 
 async def test_process_canary_payload_relays_blind_no_log_leak(runtime_dir: Path) -> None:
     """A canary-T3-bearing payload relayed client->core through the RUNNING process
     arrives byte-identical AND the canary token appears in NO gateway structlog row
-    (key or value) — the front door is a payload-blind T1 carrier (hard rule #5).
+    (key or value) NOR any prometheus metric (name, label key, label value, sample) —
+    the front door is a payload-blind T1 carrier (hard rule #5: logs AND metrics).
+
+    The metric assertion makes the label-free invariant load-bearing: the gateway
+    collectors carry no labels by design, so a canary can never reach a metric label —
+    this test would catch a regression that started deriving a label from payload bytes.
     """
     epoch = uuid4().hex
     shutdown = asyncio.Event()
@@ -321,8 +370,13 @@ async def test_process_canary_payload_relays_blind_no_log_leak(runtime_dir: Path
                     assert canary not in str(key), row
                     assert canary not in str(value), row
 
+            # And in NO prometheus metric — name, label key, label value, or sample
+            # (hard rule #5 is logs AND metrics; the gateway metrics are label-free).
+            _assert_canary_in_no_metric(canary)
+
             # Clean stop FIRST (a quiet return, never a gap), THEN reap the ends.
-            await _reap_run_task(run_task, shutdown)
+            # Mutation-sound: a relay ignoring shutdown_event makes this FAIL, not pass.
+            await _assert_clean_shutdown(run_task, shutdown)
         finally:
             await core_host.close()
             await client.close()
