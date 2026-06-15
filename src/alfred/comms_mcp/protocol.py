@@ -430,11 +430,63 @@ class ReadyNotification(_WireModel):
     epoch: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
 
 
+# ---------------------------------------------------------------------------
+# Gateway -> client link-state control frames (Spec A G3-3a / ADR-0032)
+# ---------------------------------------------------------------------------
+# The gateway (the always-up front door) terminates the client connection and
+# dials the core; when the core link gaps and recovers it signals the client so
+# the TUI can paint a reconnect banner. These three frames are the WHOLE wire
+# vocabulary for that. They are PURE STATE SIGNALS — id-less notifications that
+# carry NO operator-text and NO ``adapter_id`` (see the per-model comments). The
+# constant and the wire-method are the SAME string by construction (the G3-3b
+# gateway sends them; the G5 client renders its own localized banner from the
+# method), so the two cannot drift.
+LINK_RECONNECTING: Final[str] = "link.reconnecting"
+LINK_RESTORED: Final[str] = "link.restored"
+LINK_UNAVAILABLE: Final[str] = "link.unavailable"
+
+
+class LinkReconnectingNotification(_WireModel):
+    """Gateway->client: the core link gapped; a reconnect is in progress.
+
+    A pure STATE signal — NOT adapter-keyed (deliberately no ``adapter_id``), and
+    NO ``banner``/``reason`` text on the wire. An open ``str`` field here would be
+    a standing invitation to later smuggle a core-supplied / T3-derived reason into
+    a client-visible frame, and operator text on the wire breaks i18n rule #1. The
+    client (the TUI, G5) renders its own localized banner from the METHOD, against
+    ``{user.language}`` where the user's language lives — the gateway sends only the
+    state. ``extra="forbid"`` rejects any smuggled field loudly.
+    """
+
+
+class LinkRestoredNotification(_WireModel):
+    """Gateway->client: the core link recovered after a gap.
+
+    A pure STATE signal — NOT adapter-keyed (deliberately no ``adapter_id``), NO
+    banner/reason text — the client renders its own localized banner from the
+    method (see :class:`LinkReconnectingNotification`).
+    """
+
+
+class LinkUnavailableNotification(_WireModel):
+    """Gateway->client: the core link is durably unavailable.
+
+    A pure STATE signal — NOT adapter-keyed (deliberately no ``adapter_id``), NO
+    banner/reason text — the client renders its own localized banner from the
+    method (see :class:`LinkReconnectingNotification`). DEFINED in G3-3a to keep the
+    wire vocabulary whole, but G3-3a emits NO transition that sends it: its trigger
+    (the ReplayBuffer cap breach, spec §5) lands with the breaker in G4.
+    """
+
+
 __all__ = [
     "BODY_FIELD_BY_KIND",
     "DAEMON_LIFECYCLE_GOING_DOWN",
     "DAEMON_LIFECYCLE_READY",
     "LIFECYCLE_REASON_SHUTDOWN",
+    "LINK_RECONNECTING",
+    "LINK_RESTORED",
+    "LINK_UNAVAILABLE",
     "AdapterHealthRequest",
     "AdapterId",
     "BindingRequestNotification",
@@ -450,6 +502,9 @@ __all__ = [
     "LifecycleStartResult",
     "LifecycleStopRequest",
     "LifecycleStopResult",
+    "LinkReconnectingNotification",
+    "LinkRestoredNotification",
+    "LinkUnavailableNotification",
     "OutboundDlpScanResult",
     "OutboundMessageRequest",
     "OutboundMessageResult",
