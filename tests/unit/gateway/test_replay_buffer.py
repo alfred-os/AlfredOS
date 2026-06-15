@@ -105,3 +105,52 @@ def test_trim_at_or_past_last_seq_empties() -> None:
     buf.trim_to_ack(9)
     assert buf.depth_frames == 0
     assert buf.depth_bytes == 0
+
+
+def test_soft_frame_cap_breach_trips_breaker_and_keeps_frame() -> None:
+    buf = _buffer(max_frames=2, max_bytes=10_000)
+    buf.append(0, b"a", now=1.0)
+    buf.append(1, b"b", now=2.0)
+    assert buf.breaker_tripped is False
+    buf.append(2, b"c", now=3.0)  # 3rd frame, over soft max_frames=2 (hard=4)
+    assert buf.breaker_tripped is True
+    assert buf.depth_frames == 3  # NEVER dropped
+
+
+def test_soft_byte_cap_breach_trips_breaker_and_keeps_frame() -> None:
+    buf = _buffer(max_frames=100, max_bytes=8)
+    buf.append(0, b"aaaa", now=1.0)
+    buf.append(1, b"bbbb", now=2.0)  # depth_bytes == 8 == cap, not over
+    assert buf.breaker_tripped is False
+    buf.append(2, b"c", now=3.0)  # depth_bytes == 9 > 8 (hard=16)
+    assert buf.breaker_tripped is True
+    assert buf.depth_frames == 3
+
+
+def test_hard_frame_ceiling_refuses_loud() -> None:
+    buf = _buffer(max_frames=2, max_bytes=10_000)  # hard=4 frames
+    for seq in range(4):
+        buf.append(seq, b"x", now=float(seq))  # fills to the hard ceiling
+    assert buf.depth_frames == 4
+    with pytest.raises(ReplayBufferError, match="hard ceiling"):
+        buf.append(4, b"y", now=5.0)
+    assert buf.depth_frames == 4  # the refused frame was NOT stored
+
+
+def test_hard_byte_ceiling_refuses_loud() -> None:
+    buf = _buffer(max_frames=100, max_bytes=4)  # hard=8 bytes
+    buf.append(0, b"aaaa", now=1.0)
+    buf.append(1, b"bbbb", now=2.0)  # depth_bytes == 8 == hard ceiling
+    with pytest.raises(ReplayBufferError, match="hard ceiling"):
+        buf.append(2, b"c", now=3.0)  # would be 9 > 8
+    assert buf.depth_bytes == 8
+
+
+def test_breaker_is_a_latch_trim_does_not_clear() -> None:
+    buf = _buffer(max_frames=1, max_bytes=10_000)
+    buf.append(0, b"a", now=1.0)
+    buf.append(1, b"b", now=2.0)  # trips
+    assert buf.breaker_tripped is True
+    buf.trim_to_ack(1)  # back to empty, under cap
+    assert buf.depth_frames == 0
+    assert buf.breaker_tripped is True  # still latched
