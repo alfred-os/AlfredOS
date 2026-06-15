@@ -241,5 +241,18 @@ class ReplayBuffer:
             del self._retained[: len(evicted)]
         return tuple(evicted)
 
+    def unacked_frames(self) -> tuple[ReplayFrame, ...]:
+        """Return the retained un-acked frames as :class:`ReplayFrame`, FIFO order.
+
+        The G4b reconnect path calls this after a fresh core handshakes + emits
+        ``ready`` to re-send the un-acked inbound (spec §5 step 3). Each frame carries
+        its ORIGINAL seq so the core dedups on ``(leg, seq)`` — a replayed,
+        already-committed frame short-circuits. Read-only: frames stay retained until
+        the NEW core acks them. G4b call contract: ``trim_to_ack(core_durable_high_water)``
+        FIRST, then this returns exactly the un-acked remainder. Each returned
+        ``payload`` is a fresh immutable copy of a retained body.
+        """
+        return tuple(ReplayFrame(seq=entry.seq, payload=bytes(entry.body)) for entry in self._retained)
+
 
 __all__ = ["ReplayBuffer", "ReplayBufferError", "ReplayFrame"]
