@@ -24,8 +24,11 @@ import pytest
 
 from alfred.plugins import comms_socket_transport as cst
 from alfred.plugins.comms_socket_transport import (
+    CommsPeerAuthError,
     CommsSocketListener,
+    _assert_dial_path_owned,
     _peer_uid_authorized,
+    dial_comms_socket,
 )
 
 
@@ -143,3 +146,103 @@ async def test_impostor_fires_reject_callback_and_does_not_refuse_boot(
         await transport.close()
     finally:
         await listener.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Dial-side peer-auth (Spec A G3-3b): the "both-direction SO_PEERCRED" the
+# accept side already has, now closed out on the DIAL side. The gateway is the
+# dial-side PEER and does NOT own the dialed inode, so it needs BOTH a pre-dial
+# lstat owner-backstop (the only owner enforcement on a no-SO_PEERCRED host,
+# where the post-connect check degrades open) AND a post-connect SO_PEERCRED
+# refusal. Threat: an attacker plants a socket they own at the dial path (a
+# stale-socket race / wider-perm misconfig) and lures the gateway into dialing it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dial_refuses_post_connect_mismatched_uid(
+    short_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dialed peer whose ``SO_PEERCRED`` uid is not ours is refused, FD reaped.
+
+    The post-connect Linux-enforcing arm: even past the FS perms + the pre-dial
+    lstat, a connected peer reporting a foreign uid is refused with
+    ``CommsPeerAuthError`` (a ``CommsProtocolError``) and the dialed writer is closed
+    — the gateway never speaks the wire to a peer it could not authenticate.
+    """
+    del short_runtime_dir
+    dialed_writers: list[asyncio.StreamWriter] = []
+    real_open = asyncio.open_unix_connection
+
+    async def _capturing_open(
+        *a: object, **k: object
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        reader, writer = await real_open(*a, **k)  # type: ignore[arg-type]
+        dialed_writers.append(writer)
+        return reader, writer
+
+    listener = CommsSocketListener(adapter_id="tui")
+    await listener.bind()
+    accept_task = asyncio.ensure_future(listener.accept())
+    try:
+        monkeypatch.setattr(cst, "_resolve_peer_uid", lambda _sock: os.getuid() + 9999)
+        monkeypatch.setattr(cst.asyncio, "open_unix_connection", _capturing_open)
+        with pytest.raises(CommsPeerAuthError):
+            await dial_comms_socket("tui")
+        # The dialed writer was closed on the reject path — no FD leak.
+        assert len(dialed_writers) == 1
+        assert dialed_writers[0].is_closing()
+    finally:
+        accept_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await accept_task
+        await listener.aclose()
+
+
+@pytest.mark.asyncio
+async def test_dial_refuses_planted_non_socket_before_connecting(
+    short_runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-socket inode planted at the dial path is refused BEFORE connecting.
+
+    On a no-``SO_PEERCRED`` host the post-connect check degrades open, so the pre-dial
+    lstat is the ONLY owner enforcement. An attacker who plants a regular file (or any
+    non-socket inode) at the dial path must trip ``CommsPeerAuthError`` without the
+    gateway ever attempting ``open_unix_connection`` (no connect to an attacker inode).
+    """
+    runtime = short_runtime_dir
+    runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+    planted = cst.default_comms_socket_path("tui")
+    planted.write_bytes(b"attacker-planted, not a socket")
+
+    connect_attempted = False
+
+    async def _forbidden_connect(*a: object, **k: object) -> tuple[object, object]:
+        nonlocal connect_attempted
+        connect_attempted = True
+        raise AssertionError("open_unix_connection must not be reached")
+
+    monkeypatch.setattr(cst.asyncio, "open_unix_connection", _forbidden_connect)
+    with pytest.raises(CommsPeerAuthError):
+        await dial_comms_socket("tui")
+    assert connect_attempted is False
+
+
+def test_dial_path_owned_backstop_refuses_foreign_owned_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-dial lstat backstop refuses a socket owned by a DIFFERENT uid.
+
+    A non-root test cannot chown a socket to another uid, so ``Path.lstat`` is
+    monkeypatched to report a socket inode owned by a foreign uid — the wider-perm /
+    stale-socket-race the gateway's owner-backstop exists to refuse.
+    """
+    import stat
+
+    class _ForeignStat:
+        st_mode = stat.S_IFSOCK | 0o600
+        st_uid = os.getuid() + 9999
+
+    monkeypatch.setattr(Path, "lstat", lambda _self: _ForeignStat())
+    with pytest.raises(CommsPeerAuthError):
+        _assert_dial_path_owned(Path("/nonexistent/attacker.sock"))

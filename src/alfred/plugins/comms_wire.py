@@ -36,7 +36,20 @@ class CommsProtocolError(AlfredError):
     """
 
 
+class CommsPeerAuthError(CommsProtocolError):
+    """A dialed/accepted comms peer's uid did not match ours.
+
+    Raised when the socket peer-auth refuses a connection: a different-uid peer
+    beat a legitimate dial-in to a 0600 socket (a stale-socket race), or a
+    wider-perm misconfig left the socket inode owned by another uid. A
+    :class:`CommsProtocolError` subclass so the runner's existing malformed-wire
+    arm routes it uniformly. Carries NO T3 — only the local uids involved
+    (spec §5.6).
+    """
+
+
 __all__ = [
     "_MAX_COMMS_LINE_BYTES",
+    "CommsPeerAuthError",
     "CommsProtocolError",
 ]

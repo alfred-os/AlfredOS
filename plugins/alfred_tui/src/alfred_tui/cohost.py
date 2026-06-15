@@ -42,7 +42,11 @@ import structlog
 
 from alfred.comms_mcp.errors import DaemonUnavailableError
 from alfred.comms_mcp.protocol import InboundMessageNotification
-from alfred.plugins.comms_socket_transport import CommsSocketTransport, dial_comms_socket
+from alfred.plugins.comms_socket_transport import (
+    CommsPeerAuthError,
+    CommsSocketTransport,
+    dial_comms_socket,
+)
 from alfred_tui.render import build_app
 from alfred_tui.server import TuiServer
 from alfred_tui.session import TuiSession
@@ -167,10 +171,14 @@ async def run_cohosted(
     Construction order breaks the session<->app render-hook cycle: the session is
     built FIRST with the socket inbound sink, then ``build_app_fn`` cross-wires the
     app's ``write_outbound`` back as the session render hook. The dial happens before
-    the ``TaskGroup`` so a daemon-absent failure raises out of HERE. ONLY the dial's
-    ``OSError`` is wrapped as :class:`DaemonUnavailableError` (mapped by ``_chat_main``
-    to the daemon-required operator message + exit 3); a stray post-dial ``OSError``
-    (PTY ioctl / broken render pipe) is NOT wrapped and surfaces LOUD rather than being
+    the ``TaskGroup`` so a daemon-absent failure raises out of HERE. The dial's
+    ``OSError`` (no daemon reachable) AND its :class:`CommsPeerAuthError` (a same-uid
+    socket the dialer cannot peer-authenticate — a planted-inode / uid-squat /
+    wider-perm misconfig the dial-side ``SO_PEERCRED`` backstop refuses) are both
+    wrapped as :class:`DaemonUnavailableError` (mapped by ``_chat_main`` to the
+    daemon-required operator message + exit 3): an unauthenticable socket is, from the
+    operator's seat, "no usable daemon socket". A stray post-dial ``OSError`` (PTY
+    ioctl / broken render pipe) is NOT wrapped and surfaces LOUD rather than being
     mislabelled "daemon required".
 
     Teardown (CLAUDE.md hard rule #7) is SYMMETRIC: each half ending tears the other
@@ -182,10 +190,13 @@ async def run_cohosted(
     """
     try:
         transport = await dial(adapter_id)
-    except OSError as exc:
-        # The dial — and ONLY the dial — failing with an OSError family member means
-        # no daemon is reachable. Wrap it so ``_chat_main`` maps THIS typed condition
-        # (not a stray post-dial OSError) to the daemon-required message + exit 3.
+    except (OSError, CommsPeerAuthError) as exc:
+        # The dial — and ONLY the dial — failing means no USABLE daemon socket is
+        # reachable: either an OSError family member (no daemon listening) OR a
+        # CommsPeerAuthError (a same-uid socket the dial-side SO_PEERCRED backstop
+        # refused — a planted-inode / uid-squat / wider-perm misconfig). Wrap both so
+        # ``_chat_main`` maps THIS typed condition (not a stray post-dial OSError) to
+        # the daemon-required message + exit 3 — one clean operator line, no traceback.
         raise DaemonUnavailableError(adapter_id) from exc
     session = TuiSession(notify=_make_socket_inbound_sink(transport))
     app = build_app_fn(session)
