@@ -220,12 +220,20 @@ class ReplayBuffer:
         """Remove + zero frames older than ``ttl_seconds``; return the evicted seqs.
 
         A frame is expired when ``now - enqueued_at > ttl_seconds`` (exactly-at-TTL
-        retained). Because ``append`` enforces a monotonic ``now``, the expired frames
-        are a leading FIFO prefix. Evicting un-acked input is deliberate
+        retained). ``now`` must be monotonic — like :meth:`append`, a regressed ``now``
+        raises :class:`ReplayBufferError` rather than silently under-evicting (a
+        backwards clock would compute ages too small and retain expired pre-DLP input
+        past its TTL, weakening the spec §6 bound — CLAUDE.md hard rule #7). The
+        observed time advances the shared monotonic floor, so a later append/evict
+        cannot present an earlier time. Because the floor is monotonic, the expired
+        frames are a leading FIFO prefix. Evicting un-acked input is deliberate
         security-over-liveness loss (pre-DLP input cannot be pinned across an unbounded
         crash-loop), so it is OBSERVABLE — the returned seqs let G4b write the spec §6
         loud audit row per dropped frame. Does NOT clear :attr:`breaker_tripped`.
         """
+        if now < self._last_now:
+            raise ReplayBufferError(f"now must be monotonic: got {now} after {self._last_now}")
+        self._last_now = now
         evicted: list[int] = []
         for entry in self._retained:
             if now - entry.enqueued_at <= self._ttl_seconds:
