@@ -299,33 +299,35 @@ def migrate() -> None:
 
 
 async def _chat_main() -> None:
-    """Dial the running daemon's comms socket and co-host the Textual TUI in-process.
+    """Dial the running gateway's comms socket and co-host the Textual TUI in-process.
 
-    Slice 4 (PR-S4-237-2, #237) adopts ADR-0031 **Shape A**: ``alfred chat``
-    runs the TUI IN ITS OWN process as one asyncio program co-hosting Textual
-    + the socket wire — it does NOT spawn a launcher subprocess. The previous
-    launcher-spawn path (PR-S4-10) is RETIRED: the TUI is a trusted,
-    operator-local foreground PTY app (``sandbox.kind = "none"``), so launcher
-    scrubbing buys nothing, and the daemon cannot spawn-and-own a process that
-    must instead own the operator's terminal. Instead the two already-running
-    peers rendezvous over the daemon's 0600 unix socket: the daemon binds +
-    accepts, ``alfred chat`` dials in, and that connection IS the wire.
+    Spec A G5 (#237) re-points ``alfred chat`` from the daemon's ``comms-tui.sock``
+    to the GATEWAY's own stable ``comms-gateway.sock`` — there is NO dual-mode. The
+    gateway sits between chat and the daemon: it terminates this one client connection
+    on a stable socket and HOLDS it across core restarts, so ``alfred chat`` survives a
+    daemon restart that the direct-dial path could not.
 
-    The daemon still owns the orchestrator graph (spec §3.1); the CLI co-hosts
-    only the TUI plugin (the wire-answering ``TuiServer.dispatch`` + the Textual
-    app), so none of the Slice-2 heavy imports (orchestrator, broker, providers,
-    SQLAlchemy session scope, DLP, audit writer) are pulled in here.
+    Otherwise unchanged from ADR-0031 **Shape A** (PR-S4-237-2): ``alfred chat`` runs
+    the TUI IN ITS OWN process as one asyncio program co-hosting Textual + the socket
+    wire — it does NOT spawn a launcher subprocess. The two already-running peers
+    rendezvous over the gateway's 0600 unix socket: the gateway binds + accepts,
+    ``alfred chat`` dials in, and that connection IS the wire.
 
-    Daemon-missing / daemon-mid-restart path (spec §8.7): the dial fails —
-    ``open_unix_connection`` raises ``FileNotFoundError`` (the socket inode is
-    absent because no daemon bound it) or ``ConnectionRefusedError`` (a stale
-    inode with no listener), both ``OSError`` subclasses. ``run_cohosted`` wraps
-    ONLY that dial-OSError as ``DaemonUnavailableError``; the CLI catches THAT
-    typed error (not a bare ``OSError``, which would also swallow an unrelated
-    post-dial PTY/render ``OSError``), emits the parameterless
-    ``comms.tui.daemon_required_to_chat`` t() string on stderr, and exits code 3
-    (the same startup-failure code the launcher-exit branch used pre-flip; only
-    the detection moves from "launcher exited nonzero" to "dial failed").
+    The daemon still owns the orchestrator graph (spec §3.1); the CLI co-hosts only the
+    TUI plugin (the wire-answering ``TuiServer.dispatch`` + the Textual app), so none of
+    the Slice-2 heavy imports (orchestrator, broker, providers, SQLAlchemy session
+    scope, DLP, audit writer) are pulled in here.
+
+    Gateway-missing / gateway-mid-restart path (spec §8.7): the dial fails —
+    ``open_unix_connection`` raises ``FileNotFoundError`` (the socket inode is absent
+    because no gateway bound it) or ``ConnectionRefusedError`` (a stale inode with no
+    listener), both ``OSError`` subclasses. ``run_cohosted`` wraps ONLY that dial-OSError
+    as ``DaemonUnavailableError``; the CLI catches THAT typed error (not a bare
+    ``OSError``, which would also swallow an unrelated post-dial PTY/render ``OSError``),
+    emits the parameterless ``comms.tui.gateway_required_to_chat`` t() string on stderr
+    (pointing the operator at ``alfred gateway start``), and exits code 3 (the same
+    startup-failure code the launcher-exit branch used pre-flip; only the detection moves
+    from "launcher exited nonzero" to "dial failed").
 
     perf-001: the co-host helper (and its Textual + socket-transport chain)
     imports lazily so the ``alfred --help`` path — which never invokes ``chat``
@@ -350,21 +352,24 @@ async def _chat_main() -> None:
     from alfred_tui.cohost import run_cohosted
 
     from alfred.comms_mcp.errors import DaemonUnavailableError
+    from alfred.gateway.client_listener import _GATEWAY_ADAPTER_ID
 
     set_language(_operator_language())
 
-    # The dialed ``adapter_id`` is the wire ``adapter_kind`` (``"tui"``) the daemon
-    # binds its 0600 socket on (``CommsSocketListener(adapter_id=wire.adapter_kind)``)
-    # — NOT a per-instance launcher id. A daemon-absent dial raises
-    # ``DaemonUnavailableError`` (``run_cohosted`` wraps ONLY the dial's ``OSError``);
-    # map THAT — and only that — to the daemon-required operator message + exit 3
-    # (never a raw traceback). A stray post-dial ``OSError`` (PTY ioctl / broken render
-    # pipe) is NOT a DaemonUnavailableError and surfaces LOUD rather than being
-    # mislabelled "daemon required".
+    # The dialed ``adapter_id`` is the GATEWAY's own stable client-facing id
+    # (``_GATEWAY_ADAPTER_ID == "gateway"``, socket ``comms-gateway.sock``) — Spec A G5
+    # re-points the chat client off the daemon's ``comms-tui.sock`` (no dual-mode). Sharing
+    # the gateway's bind-id constant (not a bare ``"gateway"`` literal) makes the chat
+    # dial-id provably equal the gateway's bind-id (architect L2). A gateway-absent dial
+    # raises ``DaemonUnavailableError`` (``run_cohosted`` wraps ONLY the dial's
+    # ``OSError``); map THAT — and only that — to the gateway-required operator message +
+    # exit 3 (never a raw traceback). A stray post-dial ``OSError`` (PTY ioctl / broken
+    # render pipe) is NOT a DaemonUnavailableError and surfaces LOUD rather than being
+    # mislabelled "gateway required".
     try:
-        await run_cohosted(adapter_id="tui")
+        await run_cohosted(adapter_id=_GATEWAY_ADAPTER_ID)
     except DaemonUnavailableError:
-        typer.echo(t("comms.tui.daemon_required_to_chat"), err=True)
+        typer.echo(t("comms.tui.gateway_required_to_chat"), err=True)
         raise typer.Exit(code=3) from None
 
 
