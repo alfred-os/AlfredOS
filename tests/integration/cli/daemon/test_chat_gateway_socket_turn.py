@@ -341,22 +341,27 @@ def _fetch_t3_promotion_rows(sync_url: str) -> list[dict[str, Any]]:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "G5 SURFACED TWO REAL gateway<->daemon composition bugs in the "
-        "never-before-connected chain (the valuable find — NOT papered over). "
-        "(1) HANDSHAKE SEQ-FRAMING ASYMMETRY (gateway): the daemon's CommsPluginRunner "
-        "(HOST) advertises seq_ack in lifecycle.start; the gateway core-link's "
-        "_peer_handshake flips transport.enable_seq_ack() BEFORE sending its ack, so "
-        "the ack goes out seq-framed (`A1 s=0 a=0 n=.. |{json}`), but the daemon reads "
-        "that ack with seq still OFF (it flips only AFTER validating the ack) and "
-        "rejects it as malformed JSON -> closes -> the gateway loops in REDIALING. Fix: "
-        "the gateway must send the ack PLAIN and flip enable_seq_ack AFTER, mirroring the "
-        "daemon runner's flip-after-read. "
-        "(2) MISSING tui->Platform RESOLVER MAPPING (comms): "
-        "CommsResolverBridge._ADAPTER_KIND_TO_PLATFORM maps only "
-        "{alfred_comms_test: DISCORD} — it OMITS 'tui' (and 'discord'), so a real TUI "
-        "inbound raises UnknownAdapterKindError before resolution. This xfail is STRICT "
-        "so it flips to a HARD FAILURE the instant BOTH fixes land — forcing the fixer to "
-        "remove it and prove the criterion-#7 turn round-trips end to end."
+        "G5 chain progress — BUGS 1 + 2 are now FIXED (proven by this very test: the "
+        "core leg holds UP after the handshake AND the inbound's comms.inbound.t3_promoted "
+        "row lands in real Postgres, so neither the seq-framing-asymmetry nor the missing "
+        "tui->Platform resolver mapping fires any longer). The test still blocks on a "
+        "THIRD, DISTINCT, newly-diagnosed production wire-contract bug surfaced by the SAME "
+        "first-ever gateway<->daemon connection: the daemon's stubbed outbound ack "
+        "(daemon_runtime._ACK_BODY via _RunnerOutboundSender.send_outbound in "
+        "cli/daemon/_commands.py) emits an `outbound.message` whose params are "
+        "{adapter_id, target_platform_id, body={'content':'ack'}} — MISSING the four "
+        "required OutboundMessageRequest fields the production TUI/Discord plugins validate: "
+        "`addressing_mode` (must be 'dm'), `idempotency_key` (UUID), `attachments_refs` "
+        "(tuple), and `body` must be the DLP-minted ScannedOutboundBody (redacted_text, "
+        "scan_result) tuple — NOT a raw dict. So TuiServer.dispatch raises 4 pydantic "
+        "ValidationErrors and the ack never renders, timing out the round-trip assertion. "
+        "This is OUT OF SCOPE for the bug-1/bug-2 fix (it is a security-boundary change: the "
+        "ack currently BYPASSES the outbound DLP chokepoint, a hard-rule-#4 violation, so the "
+        "fix must route _ACK_BODY through OutboundDlp.scan_for_outbound + construct a valid "
+        "OutboundMessageRequest — its own focused, security-reviewed PR + adversarial "
+        "coverage). This xfail is STRICT so it flips to a HARD FAILURE the instant that third "
+        "fix lands — forcing the next fixer to remove it and prove the criterion-#7 turn "
+        "round-trips end to end. Do NOT weaken the assertions to make it pass."
     ),
 )
 @pytest.mark.skipif(
@@ -370,13 +375,17 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
 ) -> None:
     """REAL chain: cohost -> gateway -> daemon -> stubbed ack -> cohost, + reconnect banner.
 
-    See the ``xfail(strict=True)`` reason above: this proof is the FIRST exercise of
-    the full cohost->gateway->daemon chain and it surfaced TWO real composition bugs
-    that no prior layer's tests could catch (the launcher-spawn legs skip on non-root
-    CI; the #274 e2e used a FAKE core; the reference plugin tolerates loose wire
-    shapes the production TUI rejects). The test body asserts the REAL property
-    end-to-end; the xfail records that the property does not yet hold AND auto-detects
-    the fix. Do NOT weaken the assertions to make it pass — fix the two bugs.
+    See the ``xfail(strict=True)`` reason above. This proof is the FIRST exercise of
+    the full cohost->gateway->daemon chain. It originally surfaced THREE real composition
+    bugs no prior layer's tests could catch (the launcher-spawn legs skip on non-root CI;
+    the #274 e2e used a FAKE core; the reference plugin tolerates loose wire shapes the
+    production TUI rejects). BUGS 1 (handshake seq-framing asymmetry) and 2 (missing
+    tui->Platform resolver mapping) are now FIXED — this test proves it by reaching the
+    held-UP core leg + the real-Postgres T3-promotion row. The remaining xfail records the
+    THIRD bug (the daemon's stubbed outbound ack does not satisfy the OutboundMessageRequest
+    wire contract, and routing it through the outbound DLP chokepoint is its own
+    security-boundary change) AND auto-detects its fix. Do NOT weaken the assertions to make
+    it pass — fix the third bug.
     """
     settings = Settings()  # type: ignore[no-untyped-call]  # env-driven; mirrors daemon boot
     sync_url = postgres_url.replace("+asyncpg", "+psycopg2")

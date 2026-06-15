@@ -591,11 +591,22 @@ class GatewayCoreLink:
         self._core_epoch = self._validate_epoch(epoch)
 
         result: dict[str, object] = {"ok": True, "plugin_version": GATEWAY_PLUGIN_VERSION}
-        if self._core_advertised_seq_ack(params):
+        # The ack ITSELF must go out PLAIN, even when seq/ack is negotiated: the
+        # core (HOST) reads the ack with its own framing still OFF (it flips
+        # ``enable_seq_ack`` only AFTER validating our ack — the flip-after-read
+        # pattern in ``CommsPluginRunner._handshake``). Seq-framing the ack would
+        # make the core ``json.loads("A1 s=0 ...")`` and reject it as malformed,
+        # tearing the leg into an endless redial loop. The result CONTENT still
+        # advertises ``seq_ack`` so the core knows we support it; we flip our own
+        # framing only AFTER the plain ack is on the wire, so subsequent frames
+        # are seq-framed — both peers flip-after, symmetrically.
+        negotiated = self._core_advertised_seq_ack(params)
+        if negotiated:
             result["seq_ack"] = {"version": SEQ_VERSION}
-            transport.enable_seq_ack()
 
         await transport.send({"jsonrpc": "2.0", "id": frame.get("id"), "result": result})
+        if negotiated:
+            transport.enable_seq_ack()
         # FRESH receive tracker per (re)connect (resume correctness). Each core
         # transport is a NEW seq space starting at 0 — a new boot, a new epoch. A
         # process-lifetime tracker carries the OLD boot's high-water (say 1000), so
