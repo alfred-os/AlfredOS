@@ -94,3 +94,31 @@ The gateway BINDS its client socket on adapter-id `"gateway"` (`comms-gateway.so
 ### Criterion #7 scope
 
 2b PROVES the TRANSPORT substance of #237 criterion #7 — a real opaque payload relays byte-for-byte through the running process, and the client is held across a core reconnect (`reconnecting`/`restored` reaches it) — via a non-root in-process e2e + adversarial gate. The full real-orchestrator turn (real client → real core → real persona reply) is gated on 2c/#230 (no real reply yet) and production `alfred chat` re-pointing (G5).
+
+## Amendment — `alfred chat` re-pointed at the gateway (Spec A G5)
+
+G5 makes `alfred chat` dial the gateway (`comms-gateway.sock`) instead of the daemon directly (`comms-tui.sock`): the foreground TUI → gateway → daemon. The TUI renders the gateway's reconnect banner, and the #259 direct cohost→daemon dial is DELETED (Spec A: no dual-mode).
+
+### The re-point + the dual-identity (unchanged invariant)
+
+Both chat-client dial sites (`cli/main.py` `_chat_main` + `alfred_tui/server.py` `serve()`) now dial `_GATEWAY_ADAPTER_ID="gateway"` (the gateway's bind path). The wire `adapter_id` the gateway sends in `lifecycle.start` is still `"tui"` (the kind the TUI's `AdapterId` validator knows) — the dual-identity invariant holds: dial-path-id = `gateway`, wire-adapter-id = `tui`. The cohost is protocol-agnostic on the dial-id, so the re-point does not touch its handshake or turn shape. A gateway-absent dial surfaces the existing `DaemonUnavailableError` → a friendly "start the gateway with `alfred gateway start`" message + exit 3.
+
+### TUI banners — the gateway sends state, the TUI renders its own text
+
+The gateway's id-less `link.reconnecting`/`link.restored`/`link.unavailable` notifications are routed by the cohost's `_serve_wire` (a NARROW allowlist BEFORE `TuiServer.dispatch` — they are NOT in the plugin's method set; they are client-TERMINAL, never relayed/acked) to an `on_link_state` callback that paints a Textual banner with the TUI's OWN localized `t("tui.banner.*")` text. The gateway carries no operator text on the wire (i18n rule #1). `link.unavailable` is rendered but its gateway trigger is G4 (ReplayBuffer cap-breach) — the render ships ahead of the trigger.
+
+### The operator prerequisite + the three failure modes
+
+`alfred chat` now requires THREE processes: (1) `alfred daemon start` with `comms_enabled_adapters=("tui",)` so the daemon binds `comms-tui.sock`; (2) `alfred gateway start`; (3) `alfred chat`. The daemon default is NOT changed (not every deployment wants the socket; the Compose deploy that wires this is G3-4). The deleted direct-dial path means three failure modes the operator must distinguish (the runbook enumerates them; the chat error stays honest and does not overclaim to diagnose the gateway-internal ones): (a) gateway down → "start the gateway" + exit 3; (b) gateway up but daemon down → a reconnect/unavailable banner, no turn echoes; (c) daemon up but the tui adapter not enabled → the gateway's core dial fails → also a banner.
+
+### THREE real bugs the first real connection surfaced (the never-connected chain)
+
+The gateway, the cohost, and the daemon's outbound ack were built to a shared spec but NEVER connected — the prior tests used a fake core (#274), the reference plugin tolerated loose wire shapes, and the launcher legs skip on non-root CI. G5's real-socket integration test (real daemon + real gateway + real cohost + real Postgres) is their first connection, and it surfaced three real production bugs (all fixed in G5):
+
+1. **Handshake seq-framing asymmetry (gateway):** `GatewayCoreLink._peer_handshake` flipped `enable_seq_ack()` BEFORE sending its ack, so the ack went out seq-framed while the daemon read it plain (the daemon flips after validating) → the leg broke → REDIALING forever. Fixed: send the ack PLAIN, flip AFTER — the handshake-ack-is-plain invariant (both peers flip-after-read).
+2. **Missing `tui`→Platform resolver mapping (comms):** `_ADAPTER_KIND_TO_PLATFORM` omitted `"tui"` (and `"discord"`) → a real TUI inbound's binding could not resolve (`UnknownAdapterKindError`). Fixed: map the native kinds to their `Platform` members.
+3. **Stubbed ack bypassed DLP + the wire contract (security):** the daemon's `{"content":"ack"}` ack was a raw dict that bypassed the outbound DLP chokepoint (hard rule #4) and failed `OutboundMessageRequest` validation → the real client rejected it. Fixed: the ack routes through `OutboundDlp.scan_for_outbound` (the only `ScannedOutboundBody` minter) + is constructed as a valid `OutboundMessageRequest` — the first production construction site of that model.
+
+### Criterion #7 scope — transport substance CLOSED
+
+With the three fixes, the real `cohost → gateway → daemon → DLP-scanned ack → cohost` turn round-trips end-to-end (proven by the G5 integration test against real Postgres, with the reconnect banner firing on a daemon-socket re-bind and the held connection surviving). This CLOSES #237 criterion #7's transport substance. The real persona REPLY (vs the stubbed ack) is 2c/#230; the production Compose deploy + the PTY-against-Compose smoke are G3-4; resume (no message loss across a gap) is G4 — the interim no-resume window between #259 and G4 stands, per Spec A.
