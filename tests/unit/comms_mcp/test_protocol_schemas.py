@@ -106,6 +106,50 @@ def test_lifecycle_start_request_fields() -> None:
     assert req.adapter_id == "alfred_comms_test"
 
 
+def test_lifecycle_start_request_credentials_optional() -> None:
+    """ADR-0035: ``credentials_ref``/``policies_snapshot_hash`` are optional.
+
+    No producer sends them (the host runner handshake emits only
+    ``{adapter_id, seq_ack, epoch?}``), and the sole strict consumer — the TUI
+    co-host — reads only ``adapter_id`` and discards the rest. This is the
+    exact shape the runner + gateway actually put on the wire.
+    """
+    req = protocol.LifecycleStartRequest.model_validate(
+        {"adapter_id": "tui", "seq_ack": {"version": "1"}}
+    )
+    assert req.adapter_id == "tui"
+    assert req.credentials_ref is None
+    assert req.policies_snapshot_hash is None
+    assert req.seq_ack is not None and req.seq_ack.version == "1"
+
+
+def test_lifecycle_start_request_credentials_back_compat() -> None:
+    """A request carrying both fields still validates and round-trips them."""
+    req = protocol.LifecycleStartRequest.model_validate(
+        {
+            "adapter_id": "alfred_comms_test",
+            "credentials_ref": "secret-id-123",
+            "policies_snapshot_hash": "abc123",
+        }
+    )
+    assert req.credentials_ref == "secret-id-123"
+    assert req.policies_snapshot_hash == "abc123"
+
+
+def test_lifecycle_start_request_still_forbids_extra_field() -> None:
+    """Relaxing the credential fields does not relax ``extra="forbid"``."""
+    with pytest.raises(ValidationError):
+        protocol.LifecycleStartRequest.model_validate({"adapter_id": "tui", "bogus": 1})
+
+
+def test_lifecycle_start_request_credentials_optional_still_validates_adapter() -> None:
+    """``adapter_id`` stays required + validated against the ``adapter_kind`` set."""
+    with pytest.raises(ValidationError):
+        protocol.LifecycleStartRequest.model_validate({"adapter_id": "not_a_real_kind"})
+    with pytest.raises(ValidationError):
+        protocol.LifecycleStartRequest.model_validate({"seq_ack": {"version": "1"}})
+
+
 def test_lifecycle_start_request_rejects_unknown_adapter_kind() -> None:
     with pytest.raises(ValidationError):
         protocol.LifecycleStartRequest(
