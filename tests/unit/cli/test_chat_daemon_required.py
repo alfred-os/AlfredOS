@@ -166,9 +166,11 @@ def test_no_tui_direct_dial_remains_in_either_chat_dial_site() -> None:
 
     # No "tui" literal direct-dial from the chat path (the daemon-side binding lives
     # elsewhere and is out of scope). Whitespace-normalized above so the spaced form
-    # cannot slip past.
-    assert 'adapter_id="tui"' not in chat_src
-    assert 'adapter_id="tui"' not in serve_src
+    # cannot slip past; the regex catches BOTH quote styles so a reformat to
+    # ``adapter_id='tui'`` cannot weaken the Spec A G5 no-dual-mode invariant either.
+    _direct_dial = re.compile(r"""adapter_id=['"]tui['"]""")
+    assert _direct_dial.search(chat_src) is None
+    assert _direct_dial.search(serve_src) is None
 
     # Both dial the shared gateway id. ``_chat_main`` references the constant by name;
     # ``serve()`` pins its ``_ADAPTER_KIND`` to the gateway id.
