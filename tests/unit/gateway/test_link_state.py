@@ -148,6 +148,34 @@ def test_unavailable_state_and_breaker_event_exist() -> None:
     assert GatewayLinkEvent.BREAKER_TRIPPED == "breaker_tripped"
 
 
+@pytest.mark.parametrize(
+    "to_gap",
+    [
+        [],  # UP -> breaker (wedged-but-connected core; no prior reconnecting)
+        [GatewayLinkEvent.CORE_GOING_DOWN],  # DOWN_SIGNALLED -> breaker
+        [GatewayLinkEvent.CORE_CRASH_EOF],  # DOWN_CRASH -> breaker
+        [
+            GatewayLinkEvent.CORE_GOING_DOWN,
+            GatewayLinkEvent.REDIAL_STARTED,
+        ],  # REDIALING -> breaker
+    ],
+)
+def test_breaker_escalates_each_live_state_to_unavailable_once(
+    to_gap: list[GatewayLinkEvent],
+) -> None:
+    m = LinkStateMachine()
+    for ev in to_gap:
+        m.feed(ev)
+    assert m.feed(GatewayLinkEvent.BREAKER_TRIPPED) is LinkControl.UNAVAILABLE
+    assert m.state is GatewayLinkState.UNAVAILABLE
+
+
+def test_up_breaker_emits_unavailable_without_a_preceding_reconnecting() -> None:
+    """The wedged-but-connected-core case: link never dropped, so no RECONNECTING first."""
+    m = LinkStateMachine()
+    assert m.feed(GatewayLinkEvent.BREAKER_TRIPPED) is LinkControl.UNAVAILABLE
+
+
 def test_undefined_transition_fails_loud() -> None:
     # ``UP + redial_started`` is genuinely undefined: a redial cannot begin while
     # the link is up (no gap is open). With the H2 fix, ``DOWN_* + core_ready`` IS
