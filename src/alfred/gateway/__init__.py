@@ -16,6 +16,7 @@ This package is built in two PRs:
 
 from __future__ import annotations
 
+from alfred.gateway._control_frames import control_notification
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink, GatewayCoreLinkError
 from alfred.gateway.link_state import (
@@ -35,4 +36,5 @@ __all__ = [
     "GatewayLinkStateError",
     "LinkControl",
     "LinkStateMachine",
+    "control_notification",
 ]

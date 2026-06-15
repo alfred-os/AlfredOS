@@ -33,8 +33,21 @@ from typing import Final, Protocol, runtime_checkable
 import structlog
 from pydantic import ValidationError
 
-from alfred.comms_mcp.protocol import ReadyNotification
+from alfred.comms_mcp.protocol import (
+    DAEMON_LIFECYCLE_GOING_DOWN,
+    DAEMON_LIFECYCLE_READY,
+    GoingDownNotification,
+    ReadyNotification,
+)
 from alfred.errors import AlfredError
+from alfred.gateway._control_frames import control_notification
+from alfred.gateway.client_listener import GatewayClientListener
+from alfred.gateway.link_state import (
+    GatewayLinkEvent,
+    GatewayLinkState,
+    LinkStateMachine,
+)
+from alfred.gateway.metrics import CORE_LINK_UP
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
 
 log = structlog.get_logger(__name__)
@@ -101,13 +114,27 @@ class GatewayCoreLink:
     the reconnect loop + the client<->core relay.
     """
 
-    def __init__(self, *, dial_adapter_id: str = _DEFAULT_DIAL_ADAPTER_ID) -> None:
+    def __init__(
+        self,
+        *,
+        client_listener: GatewayClientListener,
+        machine: LinkStateMachine | None = None,
+        dial_adapter_id: str = _DEFAULT_DIAL_ADAPTER_ID,
+    ) -> None:
         self._dial_adapter_id = dial_adapter_id
+        self._client_listener = client_listener
+        # The merged link-state machine — the kernel that decides which control frame
+        # (if any) a lifecycle transition emits. Starts UP; one per gateway process.
+        self._machine = machine if machine is not None else LinkStateMachine()
         # The most recently captured core boot epoch (32-hex). ``None`` until the
         # first successful peer handshake; a later G4 resume binds its retained
         # high-water to this so a core BOUNCE (new epoch) is distinguishable from a
         # transient reconnect to the SAME boot.
         self._core_epoch: str | None = None
+        # Count of frames dropped by the per-frame router because they are neither
+        # lifecycle control frames the gateway CONSUMES nor (yet) the payload frames
+        # it RELAYS (the relay is G3-3b-2). T1 carrier: counted, never acted on.
+        self._dropped_payload_frames: int = 0
 
     async def _peer_handshake(self, transport: _CommsTransportLike) -> None:
         """Receive the core's ``lifecycle.start``, validate + capture the epoch, ack.
@@ -182,6 +209,91 @@ class GatewayCoreLink:
         """True iff the core advertised the matching out-of-band seq/ack version."""
         seq_ack = params.get("seq_ack") if isinstance(params, Mapping) else None
         return isinstance(seq_ack, Mapping) and seq_ack.get("version") == SEQ_VERSION
+
+    async def _consume_frame(self, frame: Mapping[str, object]) -> None:
+        """Route ONE post-handshake core-leg frame: consume lifecycle, drop payload.
+
+        The gateway CONSUMES the two ``daemon.lifecycle.*`` control frames (it does
+        NOT relay them) — driving the merged :class:`LinkStateMachine`. Every other
+        method (a payload frame the G3-3b-2 relay will forward, or a JSON-RPC
+        response) is dropped + counted here; this cut does NOT relay it.
+
+        **Typed-event boundary (security M4).** A raw/forged frame is Pydantic-validated
+        and (for ``ready``) epoch-reconciled BEFORE the typed :meth:`LinkStateMachine.feed`.
+        A malformed control frame is loud-and-returned (NOT a state transition); a
+        ``ready`` whose epoch != the captured handshake epoch is a false-liveness
+        forgery — rejected with NO feed, NO control frame (a false ``restored`` is an
+        attack surface). T1 carrier: a payload body is NEVER ``json.loads``'d or acted on.
+        """
+        method = frame.get("method")
+        if method == DAEMON_LIFECYCLE_GOING_DOWN:
+            await self._consume_going_down(frame)
+        elif method == DAEMON_LIFECYCLE_READY:
+            await self._consume_ready(frame)
+        else:
+            # A payload frame the relay (G3-3b-2) will forward, or a JSON-RPC response
+            # (``None`` method). Drop + count for now — never fed, never acted on.
+            self._dropped_payload_frames += 1
+            log.debug(
+                "gateway.core_link.payload_frame_dropped",
+                dial_adapter_id=self._dial_adapter_id,
+                method=method,
+            )
+
+    async def _consume_going_down(self, frame: Mapping[str, object]) -> None:
+        """Validate + consume a ``daemon.lifecycle.going_down``; feed CORE_GOING_DOWN."""
+        try:
+            GoingDownNotification.model_validate(frame.get("params") or {})
+        except ValidationError:
+            # A malformed control frame is NOT a state transition — loud + return, no
+            # feed (CLAUDE.md hard rule #7). No exc detail logged (it could echo a
+            # malformed wire field); the method name is enough to triage.
+            log.warning(
+                "gateway.core_link.malformed_lifecycle_frame",
+                dial_adapter_id=self._dial_adapter_id,
+                method=DAEMON_LIFECYCLE_GOING_DOWN,
+            )
+            return
+        await self._feed(GatewayLinkEvent.CORE_GOING_DOWN)
+
+    async def _consume_ready(self, frame: Mapping[str, object]) -> None:
+        """Validate + epoch-reconcile a ``daemon.lifecycle.ready``; feed CORE_READY.
+
+        THE FORGERY DEFENSE: a ``ready`` whose ``epoch`` != the captured handshake
+        epoch is a false-liveness injection (a same-uid peer past ``SO_PEERCRED``
+        lying). REJECT it — no feed, no control frame — so a forged ``restored`` can
+        never reach the client (CLAUDE.md hard rule #7: loud + return).
+        """
+        try:
+            parsed = ReadyNotification.model_validate(frame.get("params") or {})
+        except ValidationError:
+            log.warning(
+                "gateway.core_link.malformed_lifecycle_frame",
+                dial_adapter_id=self._dial_adapter_id,
+                method=DAEMON_LIFECYCLE_READY,
+            )
+            return
+        if parsed.epoch != self._core_epoch:
+            log.warning(
+                "gateway.core_link.ready_epoch_mismatch",
+                dial_adapter_id=self._dial_adapter_id,
+            )
+            return
+        await self._feed(GatewayLinkEvent.CORE_READY)
+
+    async def _feed(self, event: GatewayLinkEvent) -> None:
+        """Feed a TYPED event to the machine; emit any control frame; refresh the gauge.
+
+        The control frame (if any) is mapped via :func:`control_notification` and
+        pushed to the client through the listener. ``CORE_LINK_UP`` is set to ``1``
+        iff the resulting machine state is UP, else ``0``.
+        """
+        control = self._machine.feed(event)
+        if control is not None:
+            await self._client_listener.send_control(control_notification(control))
+        # CORE_UNAVAILABLE_SECONDS is a Task-6 concern (it needs a clock to accrue the
+        # not-UP duration); the gauge is the only metric the pure transition updates.
+        CORE_LINK_UP.set(1 if self._machine.state is GatewayLinkState.UP else 0)
 
 
 __all__ = [
