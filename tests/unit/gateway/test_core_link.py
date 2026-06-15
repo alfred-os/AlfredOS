@@ -10,7 +10,9 @@ tests drive the peer half with an in-memory fake transport implementing the
 
 from __future__ import annotations
 
+import asyncio
 import collections
+import time
 from collections.abc import Mapping
 from uuid import uuid4
 
@@ -34,7 +36,11 @@ from alfred.gateway.link_state import (
     GatewayLinkState,
     LinkStateMachine,
 )
-from alfred.gateway.metrics import CORE_LINK_UP, RECONNECT_ATTEMPTS
+from alfred.gateway.metrics import (
+    CORE_LINK_UP,
+    CORE_UNAVAILABLE_SECONDS,
+    RECONNECT_ATTEMPTS,
+)
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
 from alfred.plugins.comms_wire import CommsPeerAuthError
 
@@ -514,9 +520,7 @@ async def test_reconnect_each_attempt_feeds_redial_started_and_increments_metric
     dial = _DialRecorder(
         [ConnectionRefusedError(), ConnectionRefusedError(), lambda: _ready_transport(epoch)]
     )
-    link, _ = _link_for_reconnect(
-        dial=dial, sleep=_sleep, jitter=lambda hi: hi, machine=machine
-    )
+    link, _ = _link_for_reconnect(dial=dial, sleep=_sleep, jitter=lambda hi: hi, machine=machine)
 
     before = RECONNECT_ATTEMPTS._value.get()
     await link._reconnect()
@@ -623,9 +627,7 @@ async def test_default_dial_delegates_to_dial_comms_socket(
         seen.append(adapter_id)
         return sentinel
 
-    monkeypatch.setattr(
-        "alfred.plugins.comms_socket_transport.dial_comms_socket", _fake_dial
-    )
+    monkeypatch.setattr("alfred.plugins.comms_socket_transport.dial_comms_socket", _fake_dial)
     link = GatewayCoreLink(
         client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
         dial_adapter_id="gateway",
@@ -660,3 +662,417 @@ async def test_reconnect_full_jitter_default_bounds_delay() -> None:
 
     assert len(slept) == 1
     assert 0.0 <= slept[0] <= 0.25
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — run(): supervised dial / handshake / pump / reconnect lifecycle
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedCoreTransport:
+    """A fake ``_CommsTransportLike`` whose ``read_frame`` follows a queued script.
+
+    Each script entry is one of:
+      * a ``Mapping`` — a frame ``read_frame`` returns,
+      * ``None`` — a clean EOF (``read_frame`` returns ``None``),
+      * a :class:`BaseException` INSTANCE — a transport-crash ``read_frame`` raises,
+      * an :class:`asyncio.Event` — ``read_frame`` AWAITS the event, then (once set)
+        returns ``None`` (a genuinely-pending read used to drive the shutdown race).
+
+    ``sent`` records writebacks (the handshake ack), ``closed`` flips on ``close()``.
+    """
+
+    def __init__(self, script: list[object]) -> None:
+        self._script: collections.deque[object] = collections.deque(script)
+        self.sent: list[dict[str, object]] = []
+        self.seq_ack_enabled = False
+        self.closed = False
+
+    async def spawn(self) -> None:  # pragma: no cover - unused on the peer leg
+        return None
+
+    async def send(self, frame: Mapping[str, object]) -> None:
+        self.sent.append(dict(frame))
+
+    async def read_frame(self) -> Mapping[str, object] | None:
+        if not self._script:
+            return None
+        entry = self._script.popleft()
+        if isinstance(entry, asyncio.Event):
+            await entry.wait()
+            return None
+        if isinstance(entry, BaseException):
+            raise entry
+        if entry is None:
+            return None
+        assert isinstance(entry, Mapping)
+        return entry
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def enable_seq_ack(self) -> None:
+        self.seq_ack_enabled = True
+
+
+def _start_only(epoch: str) -> dict[str, object]:
+    """A ``lifecycle.start`` frame (no following frames) for the handshake."""
+    return _start_frame(epoch=epoch, seq_ack=None)
+
+
+def _going_down_frame() -> dict[str, object]:
+    return {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": "shutdown"}}
+
+
+def _run_link(
+    *,
+    dial: object,
+    shutdown_event: asyncio.Event | None = None,
+    monotonic: object | None = None,
+    sleep: object | None = None,
+    machine: LinkStateMachine | None = None,
+) -> tuple[GatewayCoreLink, _RecordingClientListener]:
+    recorder = _RecordingClientListener()
+
+    async def _instant_sleep(_delay: float) -> None:
+        return None
+
+    link = GatewayCoreLink(
+        client_listener=recorder,  # type: ignore[arg-type]
+        machine=machine,
+        dial=dial,  # type: ignore[arg-type]
+        sleep=sleep if sleep is not None else _instant_sleep,  # type: ignore[arg-type]
+        jitter=lambda hi: hi,
+        shutdown_event=shutdown_event,
+        monotonic=monotonic if monotonic is not None else time.monotonic,  # type: ignore[arg-type]
+    )
+    return link, recorder
+
+
+@pytest.mark.asyncio
+async def test_run_end_to_end_going_down_then_reconnect_emits_reconnecting_then_restored() -> None:
+    """§9 end-to-end: UP start (no banner) -> going_down (reconnecting) -> EOF
+    (idempotent, no 2nd banner) -> reconnect to a NEW epoch (restored). Exactly
+    ``[reconnecting, restored]`` across the single gap.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+
+    # First transport: handshake start, then a going_down, then EOF (gap).
+    first = _ScriptedCoreTransport([_start_only(epoch1), _going_down_frame(), None])
+    # Second transport: a fresh-epoch handshake start, then a read that blocks on a
+    # SEPARATE never-set event (so only the shutdown waiter — not this read — wins the
+    # race; reusing the shutdown event here would let the read return EOF first).
+    blocked = asyncio.Event()
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+
+    dial = _DialRecorder([lambda: first, lambda: second])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    task = asyncio.ensure_future(link.run())
+    # Let the pump reach the second transport's blocking read, then signal shutdown.
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:  # the second handshake completed -> pump is on the new leg
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # Exactly one gap: reconnecting (going_down), then restored (the reconnect).
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert link._core_epoch == epoch2
+    assert first.closed is True
+    assert second.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_crash_gap_emits_reconnecting_then_restored() -> None:
+    """A crash gap (EOF with no preceding going_down): UP -> EOF (reconnecting) ->
+    reconnect (restored). Exactly ``[reconnecting, restored]``.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+
+    blocked = asyncio.Event()
+    first = _ScriptedCoreTransport([_start_only(epoch1), None])  # start then immediate EOF
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+
+    dial = _DialRecorder([lambda: first, lambda: second])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert first.closed is True
+    assert second.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_crash_via_transport_exception_emits_reconnecting_then_restored() -> None:
+    """A crash surfaced as a transport-crash EXCEPTION (not a clean EOF) opens the
+    gap the same way as an EOF: reconnecting -> restored.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+
+    blocked = asyncio.Event()
+    first = _ScriptedCoreTransport([_start_only(epoch1), ConnectionResetError()])
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+
+    dial = _DialRecorder([lambda: first, lambda: second])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert first.closed is True
+    assert second.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_shutdown_while_blocked_returns_without_spurious_reconnecting() -> None:
+    """Shutdown fired while the pump is BLOCKED on a read returns ``run()`` promptly
+    with NO ``reconnecting`` emitted (a shutdown is a clean close, not a gap) and the
+    live transport closed.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    read_blocked = asyncio.Event()
+
+    # Start (handshake), then a read that blocks until ``read_blocked`` is set. The
+    # read is genuinely pending when shutdown fires.
+    only = _ScriptedCoreTransport([_start_only(epoch), read_blocked])
+    dial = _DialRecorder([lambda: only])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    task = asyncio.ensure_future(link.run())
+    # Let the pump complete the handshake and block on the read.
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if only.sent:
+            break
+    assert only.sent, "handshake should have completed before shutdown"
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # A clean UP start then shutdown: NO banner at all, transport closed.
+    assert recorder.controls == []
+    assert only.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_failed_initial_dial_opens_gap_and_reconnects() -> None:
+    """A failed INITIAL dial does not crash ``run()``: it opens the gap
+    (reconnecting) and reconnects (restored).
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+
+    blocked = asyncio.Event()
+    second = _ScriptedCoreTransport([_start_only(epoch), blocked])
+    # The first dial FAILS; the reconnect loop's next dial succeeds.
+    dial = _DialRecorder([ConnectionRefusedError(), lambda: second])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert link._core_epoch == epoch
+    assert second.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_accrues_core_unavailable_seconds_across_one_gap() -> None:
+    """``CORE_UNAVAILABLE_SECONDS`` accrues the wall-seconds the link spent not-UP.
+
+    A scripted monotonic clock makes the gap exactly 3.0s: it stamps the UP->not-UP
+    edge at the gap open and the not-UP->UP edge 3.0s later at the restore.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+
+    blocked = asyncio.Event()
+    first = _ScriptedCoreTransport([_start_only(epoch1), _going_down_frame(), None])
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+    dial = _DialRecorder([lambda: first, lambda: second])
+
+    # Scripted clock: the gap-open edge reads 10.0, the restore edge reads 13.0
+    # (delta 3.0). Extra trailing values guard against an unexpected extra read.
+    ticks = collections.deque([10.0, 13.0, 13.0, 13.0, 13.0])
+
+    def _monotonic() -> float:
+        return ticks.popleft() if ticks else 13.0
+
+    link, _ = _run_link(dial=dial, shutdown_event=shutdown, monotonic=_monotonic)
+
+    before = CORE_UNAVAILABLE_SECONDS._value.get()
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+    after = CORE_UNAVAILABLE_SECONDS._value.get()
+
+    assert after - before == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_run_returns_at_loop_top_when_shutdown_already_set() -> None:
+    """Shutdown set BEFORE the first pump read: the top-of-loop check returns the
+    handshake-only run cleanly (no read race, no banner, transport closed).
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    shutdown.set()  # already signalled before run() starts
+
+    only = _ScriptedCoreTransport([_start_only(epoch)])  # handshake only
+    dial = _DialRecorder([lambda: only])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    await asyncio.wait_for(link.run(), timeout=1.0)
+
+    # The handshake completed (UP, no banner); the loop's top-check returned at once.
+    assert recorder.controls == []
+    assert only.sent  # the ack went out
+    assert only.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_initial_handshake_failure_closes_half_open_then_reconnects() -> None:
+    """The INITIAL dial CONNECTS but its handshake RAISES: the half-open transport is
+    closed (no FD leak), the gap opens (reconnecting), and the reconnect restores.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+
+    # First transport handshakes with a malformed epoch -> GatewayCoreLinkError.
+    half_open = _ScriptedCoreTransport([_start_frame(epoch="not-32-hex", seq_ack=None)])
+    blocked = asyncio.Event()
+    good = _ScriptedCoreTransport([_start_only(epoch), blocked])
+    dial = _DialRecorder([lambda: half_open, lambda: good])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if good.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert half_open.closed is True
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert link._core_epoch == epoch
+    assert good.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_initial_handshake_read_crash_gaps_and_reconnects_no_leak() -> None:
+    """The INITIAL handshake's first ``read_frame`` RAISES a read-crash (EOFError /
+    its ``asyncio.IncompleteReadError`` subclass): ``_initial_connect`` must gap +
+    reconnect (NOT crash ``run``) and CLOSE the half-open transport (no FD leak).
+
+    Without ``EOFError`` in ``_INITIAL_DIAL_EXCEPTIONS`` this read-crash would escape
+    ``_initial_connect`` uncaught, leak the half-open leg, and crash ``run`` with no
+    reconnect — even though the steady-state pump tolerates the same family.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+
+    # The first dialed transport CONNECTS but its handshake read raises a read-crash.
+    half_open = _ScriptedCoreTransport([asyncio.IncompleteReadError(b"", 1)])
+    blocked = asyncio.Event()
+    good = _ScriptedCoreTransport([_start_only(epoch), blocked])
+    dial = _DialRecorder([lambda: half_open, lambda: good])
+    link, recorder = _run_link(dial=dial, shutdown_event=shutdown)
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if good.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The half-open leg is closed (no FD leak); the gap opened + the reconnect restored.
+    assert half_open.closed is True
+    assert [type(c) for c in recorder.controls] == [
+        LinkReconnectingNotification,
+        LinkRestoredNotification,
+    ]
+    assert link._core_epoch == epoch
+    assert good.closed is True
+
+
+@pytest.mark.asyncio
+async def test_read_frame_or_shutdown_bare_read_when_no_event() -> None:
+    """With NO shutdown event wired, the read is a bare ``read_frame`` await."""
+    epoch = uuid4().hex
+    frame = _start_only(epoch)
+    transport = _ScriptedCoreTransport([frame])
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+
+    result = await link._read_frame_or_shutdown(transport)  # type: ignore[arg-type]
+
+    assert result == frame
+
+
+@pytest.mark.asyncio
+async def test_read_frame_or_shutdown_cancel_cancels_both_children() -> None:
+    """A force-cancel WHILE the read race is pending cancels both children and
+    re-raises ``CancelledError`` (cancellation-safety, no leaked tasks).
+    """
+    shutdown = asyncio.Event()
+    blocked = asyncio.Event()  # never set: the read stays genuinely pending
+    transport = _ScriptedCoreTransport([blocked])
+    link = GatewayCoreLink(
+        client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
+        shutdown_event=shutdown,
+    )
+
+    task = asyncio.ensure_future(link._read_frame_or_shutdown(transport))  # type: ignore[arg-type]
+    # Let the race reach ``asyncio.wait`` (both children pending), then cancel it.
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
