@@ -168,11 +168,22 @@ class LifecycleStartRequest(_WireModel):
     ``seq_ack`` (Spec A G2 / ADR-0032) is the host advertising out-of-band
     seq/ack support; ``None`` (the default) is the explicit default-OFF signal. A
     plugin that speaks the same wire version echoes the field in its result.
+
+    ``credentials_ref`` and ``policies_snapshot_hash`` are OPTIONAL and
+    adapter-dependent (Spec A G3-3b-2b / ADR-0035). The operator-local TUI leg
+    has neither, and NO host producer sends them on the wire today: the runner
+    handshake emits only ``{adapter_id, seq_ack, epoch?}`` and the sole strict
+    consumer (the TUI co-host) reads only ``adapter_id``. Making them optional
+    does NOT weaken any adapter's credential handling — REAL adapter
+    credentials flow through the secret broker at the tool-call boundary (hard
+    rule #6), never via these lifecycle.start params. They remain here so a
+    future credential-bearing adapter's host can supply them, and a request that
+    DOES carry them still validates (back-compat).
     """
 
     adapter_id: AdapterId
-    credentials_ref: str = Field(min_length=1)
-    policies_snapshot_hash: str = Field(min_length=1)
+    credentials_ref: str | None = None
+    policies_snapshot_hash: str | None = None
     seq_ack: SeqAckCapability | None = None
 
 
