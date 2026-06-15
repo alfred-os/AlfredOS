@@ -39,6 +39,7 @@ from alfred.gateway.client_listener import LinkControlNotification
 from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.relay import GatewayRelay
 from alfred.plugins.comms_seq_codec import SeqFrame
+from alfred.plugins.comms_wire import CommsProtocolError
 
 
 class _RecordingClientListener:
@@ -351,6 +352,37 @@ async def test_send_to_client_drops_loud_on_broken_pipe() -> None:
     assert dropped[0].get("log_level") == "warning"
     # The dead client did not crash the relay — it shut down cleanly.
     assert core.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("unable to perform operation on closed transport"),
+        ValueError("send seq exceeds the encodable decimal width"),
+        CommsProtocolError("reframed unit exceeds the bound"),
+    ],
+    ids=["closed_transport_runtime_error", "encode_value_error", "over_bound_reframe"],
+)
+async def test_send_to_client_drops_loud_on_widened_send_fault(error: Exception) -> None:
+    """A write to the client transport ``close()``d mid-reconnect-swap (``RuntimeError``),
+    an ``encode_seq_frame`` exhaustion (``ValueError``), or an over-bound reframe
+    (``CommsProtocolError``) is a LOUD drop — never a raw TaskGroup crash into the core
+    pump (``gateway.relay.client_send_dropped``).
+    """
+    shutdown = asyncio.Event()
+    client = _FakeTransport()
+    client.send_unit_error = error
+    relay, _core_link, _recorder = _build_relay(
+        core=_FakeTransport(), client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await relay._send_to_client(b'{"id":1}')  # must NOT raise
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.client_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("log_level") == "warning"
 
 
 @pytest.mark.asyncio
