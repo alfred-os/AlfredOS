@@ -175,13 +175,9 @@ class ReplayBuffer:
         if seq < 0:
             raise ReplayBufferError(f"seq must be non-negative: {seq}")
         if seq <= self._last_seq:
-            raise ReplayBufferError(
-                f"seq must strictly increase: got {seq} after {self._last_seq}"
-            )
+            raise ReplayBufferError(f"seq must strictly increase: got {seq} after {self._last_seq}")
         if now < self._last_now:
-            raise ReplayBufferError(
-                f"now must be monotonic: got {now} after {self._last_now}"
-            )
+            raise ReplayBufferError(f"now must be monotonic: got {now} after {self._last_now}")
         if (
             len(self._retained) + 1 > self._hard_max_frames
             or self._depth_bytes + len(payload) > self._hard_max_bytes
@@ -252,7 +248,9 @@ class ReplayBuffer:
         FIRST, then this returns exactly the un-acked remainder. Each returned
         ``payload`` is a fresh immutable copy of a retained body.
         """
-        return tuple(ReplayFrame(seq=entry.seq, payload=bytes(entry.body)) for entry in self._retained)
+        return tuple(
+            ReplayFrame(seq=entry.seq, payload=bytes(entry.body)) for entry in self._retained
+        )
 
     def discard(self) -> None:
         """Remove + zero EVERYTHING and clear the breaker latch.

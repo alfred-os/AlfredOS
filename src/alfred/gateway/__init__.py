@@ -29,6 +29,7 @@ from alfred.gateway.link_state import (
 )
 from alfred.gateway.process import GatewayProcess
 from alfred.gateway.relay import GatewayRelay
+from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError, ReplayFrame
 
 __all__ = [
     "BoundedSeqAckTracker",
@@ -42,5 +43,8 @@ __all__ = [
     "GatewayRelay",
     "LinkControl",
     "LinkStateMachine",
+    "ReplayBuffer",
+    "ReplayBufferError",
+    "ReplayFrame",
     "control_notification",
 ]

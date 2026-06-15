@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -9,7 +11,9 @@ from hypothesis import strategies as st
 from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError, ReplayFrame
 
 
-def _buffer(*, max_frames: int = 8, max_bytes: int = 1024, ttl_seconds: float = 30.0) -> ReplayBuffer:
+def _buffer(
+    *, max_frames: int = 8, max_bytes: int = 1024, ttl_seconds: float = 30.0
+) -> ReplayBuffer:
     return ReplayBuffer(max_frames=max_frames, max_bytes=max_bytes, ttl_seconds=ttl_seconds)
 
 
@@ -22,13 +26,20 @@ def test_fresh_buffer_is_empty_and_not_tripped() -> None:
 
 def test_replay_frame_is_frozen() -> None:
     frame = ReplayFrame(seq=3, payload=b"x")
-    with pytest.raises(Exception):  # frozen dataclass -> FrozenInstanceError
+    with pytest.raises(dataclasses.FrozenInstanceError):  # frozen dataclass
         frame.seq = 4  # type: ignore[misc]
 
 
 @pytest.mark.parametrize(
     ("max_frames", "max_bytes", "ttl_seconds"),
-    [(0, 1024, 30.0), (-1, 1024, 30.0), (8, 0, 30.0), (8, -1, 30.0), (8, 1024, 0.0), (8, 1024, -1.0)],
+    [
+        (0, 1024, 30.0),
+        (-1, 1024, 30.0),
+        (8, 0, 30.0),
+        (8, -1, 30.0),
+        (8, 1024, 0.0),
+        (8, 1024, -1.0),
+    ],
 )
 def test_non_positive_caps_raise(max_frames: int, max_bytes: int, ttl_seconds: float) -> None:
     with pytest.raises(ReplayBufferError):
@@ -86,7 +97,7 @@ def test_trim_removes_acked_prefix() -> None:
 def test_trim_zeroes_removed_bodies() -> None:
     buf = _buffer()
     buf.append(0, b"secret", now=1.0)
-    body = buf._retained[0].body  # noqa: SLF001 - white-box assertion of zeroing
+    body = buf._retained[0].body  # white-box assertion of zeroing
     buf.trim_to_ack(0)
     assert bytes(body) == b"\x00" * len(b"secret")
 
@@ -191,7 +202,7 @@ def test_evict_boundary_age_equal_ttl_is_retained() -> None:
 def test_evict_zeroes_removed_bodies() -> None:
     buf = _buffer(ttl_seconds=1.0)
     buf.append(0, b"secret", now=0.0)
-    body = buf._retained[0].body  # noqa: SLF001 - white-box assertion of zeroing
+    body = buf._retained[0].body  # white-box assertion of zeroing
     buf.evict_expired(now=100.0)
     assert bytes(body) == b"\x00" * len(b"secret")
 
@@ -230,7 +241,10 @@ def test_unacked_frames_reflects_post_trim_remainder_with_original_seqs() -> Non
         buf.append(seq, bytes([65 + seq]), now=float(seq))  # b"A".."D"
     buf.trim_to_ack(1)
     # The remainder carries its ORIGINAL seqs 2,3 (the core dedups on (leg, seq)).
-    assert buf.unacked_frames() == (ReplayFrame(seq=2, payload=b"C"), ReplayFrame(seq=3, payload=b"D"))
+    assert buf.unacked_frames() == (
+        ReplayFrame(seq=2, payload=b"C"),
+        ReplayFrame(seq=3, payload=b"D"),
+    )
 
 
 def test_normal_restart_replay_then_continue_never_trips_monotonic_guard() -> None:
@@ -265,7 +279,7 @@ def test_discard_zeroes_all_bodies() -> None:
     buf = _buffer()
     buf.append(0, b"alpha", now=1.0)
     buf.append(1, b"bravo", now=2.0)
-    bodies = [entry.body for entry in buf._retained]  # noqa: SLF001 - white-box zeroing assertion
+    bodies = [entry.body for entry in buf._retained]  # white-box zeroing assertion
     buf.discard()
     assert all(bytes(b) == b"\x00" * len(b) for b in bodies)
 
