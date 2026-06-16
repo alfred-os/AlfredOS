@@ -198,6 +198,7 @@ def make_notification(
     platform_user_id: str = "discord:victim",
     body: dict[str, object] | None = None,
     addressing_signal: str = "dm",
+    wire_seq: int | None = None,
 ) -> Any:
     from alfred.comms_mcp.protocol import InboundMessageNotification
 
@@ -212,4 +213,8 @@ def make_notification(
         sub_payload_refs=(),
         received_at=datetime.now(UTC),
         addressing_signal=addressing_signal,  # type: ignore[arg-type]
+        # Spec A G4b-2a-pre: the carrier out-of-band wire seq. ``None`` (the default)
+        # for stdio / un-sequenced callers, so existing tests stay byte-for-byte; the
+        # durable-intake-ack tests pin a value to drive ``observe``.
+        wire_seq=wire_seq,
     )
