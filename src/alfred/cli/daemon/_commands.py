@@ -86,6 +86,7 @@ from alfred.cli.daemon._failures import (
 # two seams (``alfred.cli.daemon._commands.CommsStdioTransport`` /
 # ``...CommsPluginRunner``) to fakes — no real subprocess spawns in unit tests.
 from alfred.comms_mcp.protocol import (
+    DAEMON_COMMS_ACK,
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
     LIFECYCLE_REASON_SHUTDOWN,
@@ -95,6 +96,7 @@ from alfred.config._environment_loader import (
     EnvironmentSource,
     load_environment,
 )
+from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.hooks.errors import HookError
 from alfred.i18n import t
 from alfred.plugins.comms_runner import CommsPluginRunner
@@ -411,6 +413,73 @@ _LIFECYCLE_WIRE_SEND_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
 # shutdown-hang) — distinct from the G4 replay back-pressure the fleet deferred. A
 # healthy same-uid peer drains instantly; 2s is generous before declaring it wedged.
 _LIFECYCLE_BROADCAST_TIMEOUT_SECONDS: Final[float] = 2.0
+
+# The bounded interval (seconds) between durable-intake ack emits (Spec A
+# G4b-2a-pre / ADR-0032 Decision 3 coalescing — "piggyback + bounded timer; no
+# standalone ack per data frame"). 1s gives a steady, message-rate-INDEPENDENT ack
+# that drains the gateway's ReplayBuffer (G4b-2a) on a quiet-but-healthy link too,
+# while coalescing a burst of inbound commits into ONE ack frame rather than one per
+# message. The timer only emits on a high-water ADVANCE, so a quiet link costs one
+# cheap ``cumulative_ack()`` read per interval and no wire traffic.
+_DURABLE_INTAKE_ACK_INTERVAL_SECONDS: Final[float] = 1.0
+
+# The last-emitted sentinel for the ack timer. ``-1`` (NOT 0) so the FIRST durable
+# commit (``cumulative_ack`` ``-1 -> 0``) is an ADVANCE that DOES emit — a ``0``
+# sentinel would suppress the first ack forever and the gateway's first trim would
+# never fire (F5). The tracker itself returns ``-1`` before any contiguous run, so
+# the emitted value is floored to ``max(ack, 0)`` (mirrors ``core_link.py``'s
+# relay-ack floor — the wire's ``a=0`` placeholder maps the "nothing acked yet" -1).
+_ACK_NOT_YET_EMITTED: Final[int] = -1
+
+
+async def _emit_durable_intake_ack_loop(
+    *,
+    send_notification: Callable[[str, Mapping[str, object]], Awaitable[None]],
+    cumulative_ack: Callable[[], int],
+    shutdown_event: asyncio.Event,
+    interval_seconds: float = _DURABLE_INTAKE_ACK_INTERVAL_SECONDS,
+) -> None:
+    """Per-connection bounded timer that emits ``daemon.comms.ack`` on a high-water advance.
+
+    Spec A G4b-2a-pre / ADR-0032 (#237 — F2/F4/F5). Reads the host durable-intake
+    tracker's ``cumulative_ack`` on each ``interval_seconds`` tick and emits ONE
+    id-less ``daemon.comms.ack{cumulative_ack}`` via ``send_notification`` IFF the
+    high-water advanced since the last emit. The frame rides IN the seq stream
+    (``send_notification`` consumes a send-seq), which is exactly WHY the gateway's
+    ``_route_unit`` needs a consume arm for it.
+
+    Lifetime is the ACCEPTED CONNECTION: the caller (``_accept_and_pump``)
+    constructs the tracker + schedules this loop per connection and reaps it in its
+    teardown ``finally`` (a cancel -> ``await gather(..., return_exceptions=True)``).
+    The loop also returns cleanly when ``shutdown_event`` fires so a graceful
+    ``alfred daemon stop`` drains promptly without waiting for the cancel.
+
+    FAIL-LOUD send (F5 / hard rule #7): a broken-pipe / transport-closed send
+    PROPAGATES — it is NOT swallowed into a quiet retry. The peer is gone; the pump's
+    crash arm owns the connection-death routing. The loop never re-tries a dead wire.
+    """
+    last_emitted = _ACK_NOT_YET_EMITTED
+    while not shutdown_event.is_set():
+        # Race the interval sleep against the shutdown signal so a clean stop ends the
+        # loop within one tick rather than after a full interval (cancellation-safe:
+        # the caller's reap cancels this wait too).
+        with suppress(TimeoutError):
+            async with asyncio.timeout(interval_seconds):
+                await shutdown_event.wait()
+        if shutdown_event.is_set():
+            return
+        # Gate on the RAW high-water (``-1`` when NOTHING has durably committed yet)
+        # against the ``-1`` sentinel — so a truly quiet link (no commit ever) never
+        # emits, while the FIRST commit (raw ``-1 -> 0``) is a genuine advance that
+        # does. Only the EMITTED value is floored to ``max(ack, 0)`` (the wire's
+        # non-negative counter; the ``-1`` "nothing acked" maps to the ``a=0``
+        # placeholder, mirroring ``core_link.py``'s relay-ack floor).
+        ack = cumulative_ack()
+        if ack <= last_emitted:
+            # Quiet link / no advance since the last emit — suppress (no wire traffic).
+            continue
+        await send_notification(DAEMON_COMMS_ACK, {"cumulative_ack": max(ack, 0)})
+        last_emitted = ack
 
 
 class LifecycleBroadcaster:
@@ -1135,7 +1204,37 @@ async def _listen_socket_comms_adapter(
         # which die with the core and so neither need nor receive lifecycle frames
         # (G2-lesson).
         broadcaster.register(wire.adapter_kind, runner.send_notification)
-        await runner.pump()
+
+        # Spec A G4b-2a-pre (#237 — F2/F4): construct the PER-CONNECTION durable-intake
+        # ack tracker HERE (not in the per-boot ``_build_comms_adapter_wiring``), bind it
+        # onto the inbound handler so each G0 ``commit_once`` advances it, and schedule
+        # the per-connection ack-emit timer. The daemon's comms listener is ONE-SHOT per
+        # boot (``accept()`` raises on a second call), so a single tracker per accepted
+        # connection is correct today; G4b-2b's reconnect-replay MUST reset/reconstruct
+        # the tracker per accepted connection (see ``InboundMessageHandler.set_ack_tracker``).
+        # Both the tracker and the timer are REAPED in this task's teardown ``finally``
+        # (NOT ``_CommsBootGraph.aclose`` — that reaps process-singletons; wrong lifetime).
+        ack_tracker = BoundedSeqAckTracker()
+        wiring.inbound_handler.set_ack_tracker(ack_tracker)  # type: ignore[attr-defined]
+        ack_timer = asyncio.ensure_future(
+            _emit_durable_intake_ack_loop(
+                send_notification=runner.send_notification,
+                cumulative_ack=ack_tracker.cumulative_ack,
+                shutdown_event=supervisor.shutdown_event,
+            )
+        )
+        try:
+            await runner.pump()
+        finally:
+            # Reap the per-connection ack timer on EVERY pump exit (clean EOF, peer
+            # crash, shutdown, or a cancel of this supervised task). Mirrors the
+            # accept-race reap above: cancel -> await gather(return_exceptions=True) so
+            # no "Task was destroyed but it is pending" / unretrieved-exception warning
+            # escapes. A fail-loud ack-send (broken pipe) surfaces as the timer task's
+            # exception, retrieved-and-discarded here — the pump's crash arm already
+            # owns the connection-death routing.
+            ack_timer.cancel()
+            await asyncio.gather(ack_timer, return_exceptions=True)
 
     supervisor.register_plugin_task(_accept_and_pump())
     # O1 mirror: the socket adapter is observable in `alfred daemon start` output the
