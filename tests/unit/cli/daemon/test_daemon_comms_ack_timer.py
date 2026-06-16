@@ -144,8 +144,26 @@ async def test_broken_pipe_send_is_fail_loud() -> None:
             )
 
 
-async def test_shutdown_event_ends_the_loop() -> None:
-    # Setting the shutdown event ends the loop promptly (no cancel needed).
+async def test_shutdown_before_first_tick_ends_the_loop() -> None:
+    # Shutdown already set before the first ``while`` check — exits at the top guard.
+    sender = _RecordingSender()
+    tracker = BoundedSeqAckTracker()
+    shutdown = asyncio.Event()
+    shutdown.set()
+    async with asyncio.timeout(2.0):
+        await _emit_durable_intake_ack_loop(
+            send_notification=sender.send_notification,
+            cumulative_ack=tracker.cumulative_ack,
+            shutdown_event=shutdown,
+            interval_seconds=_FAST_INTERVAL,
+        )
+    assert sender.sent == []
+
+
+async def test_shutdown_during_a_parked_tick_ends_the_loop() -> None:
+    # The loop is parked in the interval wait (long interval); setting the shutdown
+    # mid-wait wins the race and the loop returns at the post-wait guard — NOT after a
+    # full interval. Drives the mid-loop shutdown return (graceful-stop promptness).
     sender = _RecordingSender()
     tracker = BoundedSeqAckTracker()
     shutdown = asyncio.Event()
@@ -154,9 +172,11 @@ async def test_shutdown_event_ends_the_loop() -> None:
             send_notification=sender.send_notification,
             cumulative_ack=tracker.cumulative_ack,
             shutdown_event=shutdown,
-            interval_seconds=_FAST_INTERVAL,
+            interval_seconds=30.0,  # long — the loop is parked in the wait
         )
     )
+    await asyncio.sleep(_FAST_INTERVAL)  # let the loop enter the parked wait
     shutdown.set()
     async with asyncio.timeout(2.0):
-        await task  # returns cleanly, no cancel
+        await task  # returns promptly (does NOT wait out the 30s interval)
+    assert sender.sent == []
