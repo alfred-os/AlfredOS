@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 from alfred.plugins.comms_runner import _CommsTransportLike
-from alfred.plugins.comms_seq_codec import SeqFrame
+from alfred.plugins.comms_seq_codec import SeqFrame, decode_seq_frame
 from alfred.plugins.comms_socket_transport import (
     CommsProtocolError,
     CommsSocketListener,
@@ -1195,8 +1195,8 @@ async def test_read_payload_unit_plain_leg_returns_unsequenced_frame(
         client = await dial_comms_socket(_ADAPTER_ID)
         host = await accept_task
 
-        # Both legs seq-OFF (production client leg) — ``ack=0`` is ignored.
-        await host.send_payload_unit(b'{"x":1}', ack=0)
+        # Both legs seq-OFF (production client leg) — ``seq``/``ack`` ignored.
+        await host.send_payload_unit(b'{"x":1}', seq=0, ack=0)
         unit = await client.read_payload_unit()
         assert unit == SeqFrame(seq=None, ack=None, payload=b'{"x":1}')
 
@@ -1211,7 +1211,7 @@ async def test_send_read_payload_unit_seq_enabled_round_trips_non_json(
 ) -> None:
     """seq ENABLED (core leg): the seam carries seq + the SUPPLIED ack, byte-for-byte.
 
-    With seq/ack ON both peers, ``send_payload_unit(payload, ack=5)`` emits the
+    With seq/ack ON both peers, ``send_payload_unit(payload, seq=0, ack=5)`` emits the
     out-of-band header carrying the sender's monotonic ``seq`` and the caller's ``ack``
     (NOT the ``a=0`` placeholder ``send`` uses). The peer's ``read_payload_unit``
     returns the raw ``SeqFrame`` with the opaque payload verbatim — a NON-JSON payload
@@ -1226,13 +1226,13 @@ async def test_send_read_payload_unit_seq_enabled_round_trips_non_json(
         host.enable_seq_ack()
         client.enable_seq_ack()
 
-        # First send: seq starts at 0; ack is the caller-supplied 5 (not a=0).
-        await host.send_payload_unit(b'{"x":1}', ack=5)
+        # First send: the caller OWNS the seq (G4b-2-pre); ack is 5 (not a=0).
+        await host.send_payload_unit(b'{"x":1}', seq=0, ack=5)
         unit = await client.read_payload_unit()
         assert unit == SeqFrame(seq=0, ack=5, payload=b'{"x":1}')
 
         # A NON-JSON payload round-trips byte-for-byte — the seam never parses it.
-        await host.send_payload_unit(b"\x00not-json", ack=9)
+        await host.send_payload_unit(b"\x00not-json", seq=1, ack=9)
         unit2 = await client.read_payload_unit()
         assert unit2 == SeqFrame(seq=1, ack=9, payload=b"\x00not-json")
 
@@ -1261,7 +1261,7 @@ async def test_read_payload_unit_seq_enabled_reads_plain_line_as_unsequenced(
         # Only the HOST upgrades; the client stays plain (one-direction-only wire).
         host.enable_seq_ack()
 
-        await client.send_payload_unit(b'{"x":1}', ack=0)
+        await client.send_payload_unit(b'{"x":1}', seq=0, ack=0)
         unit = await host.read_payload_unit()
         assert unit == SeqFrame(seq=None, ack=None, payload=b'{"x":1}')
 
@@ -1354,7 +1354,7 @@ async def test_send_payload_unit_reframe_ceiling_raises_seq_enabled() -> None:
     )
     transport.enable_seq_ack()
     with pytest.raises(CommsProtocolError):
-        await transport.send_payload_unit(b"a" * 32, ack=0)
+        await transport.send_payload_unit(b"a" * 32, seq=0, ack=0)
 
 
 async def test_send_payload_unit_loud_on_broken_pipe() -> None:
@@ -1367,4 +1367,61 @@ async def test_send_payload_unit_loud_on_broken_pipe() -> None:
     writer = _FakeWriter(broken=True)
     transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
     with pytest.raises((BrokenPipeError, ConnectionResetError)):
-        await transport.send_payload_unit(b'{"x":1}', ack=0)
+        await transport.send_payload_unit(b'{"x":1}', seq=0, ack=0)
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2-pre (#237) / ADR-0032: caller-owned send seq.
+#
+# ``send_payload_unit`` now requires an explicit ``seq`` (the gateway relay mints it,
+# so a G4b-2a buffered frame's wire seq equals its ReplayBuffer key). The internal
+# ``_send_seq`` auto-increment is reserved for the lifecycle ``send`` path; an
+# explicit-seq relay send encodes the caller's seq verbatim and does NOT advance the
+# internal counter.
+# ---------------------------------------------------------------------------
+
+
+def _make_seq_enabled_transport() -> tuple[CommsSocketTransport, _FakeWriter]:
+    """A seq/ack-ON transport over a capturing fake writer (relay-path tests)."""
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    transport.enable_seq_ack()
+    return transport, writer
+
+
+def _last_written_unit(writer: _FakeWriter) -> bytes:
+    """The final newline-terminated unit handed to the writer."""
+    units = [line + b"\n" for line in bytes(writer.buffer).split(b"\n") if line]
+    return units[-1]
+
+
+async def test_send_payload_unit_encodes_the_caller_supplied_seq() -> None:
+    """The relay path encodes the caller's explicit seq, not the internal counter."""
+    transport, writer = _make_seq_enabled_transport()
+    await transport.send_payload_unit(b"hello", seq=7, ack=2)
+    frame = decode_seq_frame(_last_written_unit(writer))
+    assert frame.seq == 7
+    assert frame.ack == 2
+    assert frame.payload == b"hello"
+
+
+async def test_relay_path_does_not_touch_internal_send_seq() -> None:
+    """An explicit-seq send must NOT advance the internal ``_send_seq`` (that counter is
+    only for the lifecycle ``send()`` path)."""
+    transport, _writer = _make_seq_enabled_transport()
+    before = transport._send_seq
+    await transport.send_payload_unit(b"a", seq=100, ack=0)
+    await transport.send_payload_unit(b"b", seq=101, ack=0)
+    assert transport._send_seq == before  # untouched by the relay path
+
+
+async def test_send_lifecycle_path_still_uses_and_increments_internal_seq() -> None:
+    """``send()`` (an ``a=0`` lifecycle frame) keeps minting from the internal counter."""
+    transport, writer = _make_seq_enabled_transport()
+    start = transport._send_seq
+    await transport.send({"jsonrpc": "2.0", "method": "ping"})
+    assert transport._send_seq == start + 1
+    frame = decode_seq_frame(_last_written_unit(writer))
+    assert frame.seq == start
+    assert frame.ack == 0

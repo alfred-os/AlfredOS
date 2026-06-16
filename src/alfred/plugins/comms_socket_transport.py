@@ -342,8 +342,10 @@ class CommsSocketTransport:
         # that carries a REAL ack; both share the same locked critical section.
         await self._write_payload_unit(body, ack=0)
 
-    async def _write_payload_unit(self, payload: bytes, *, ack: int) -> None:
-        """Serialised encode -> write -> drain -> seq-increment for one wire unit.
+    async def _write_payload_unit(
+        self, payload: bytes, *, ack: int, seq: int | None = None
+    ) -> None:
+        """Serialised encode -> write -> drain for one wire unit.
 
         Spec A G3-2 (#237) C2: the entire critical section is serialised under
         ``_send_lock`` so a concurrent second writer (the boot lifecycle-send) cannot
@@ -351,19 +353,29 @@ class CommsSocketTransport:
         the ``a=0`` placeholder ack) and :meth:`send_payload_unit` (which passes a real
         relay ack) so the lock discipline + broken-pipe loud-reraise live in ONE place.
 
+        ``seq`` selects the source of the wire seq (Spec A G4b-2-pre / ADR-0032): when
+        ``None`` (the :meth:`send` lifecycle path) the internal ``self._send_seq`` is
+        used AND post-incremented; when an explicit ``seq`` is given (the
+        :meth:`send_payload_unit` relay path) it is encoded verbatim and ``_send_seq``
+        is NOT touched — so the gateway can OWN the relay seq and key its ReplayBuffer
+        on it without the transport's counter drifting on a loud-dropped send.
+
         With seq/ack ON, ``encode_seq_frame``'s over-bound :class:`CommsProtocolError`
         propagates (the reframe-ceiling guard, hard rule #7). With it OFF the unit is
-        the byte-for-byte ADR-0025 ``payload + "\\n"`` and ``ack`` is unused.
+        the byte-for-byte ADR-0025 ``payload + "\\n"`` and both ``seq`` and ``ack`` are
+        unused.
         """
         async with self._send_lock:
             if self._seq_ack_enabled:
+                wire_seq = self._send_seq if seq is None else seq
                 unit = encode_seq_frame(
                     payload,
-                    seq=self._send_seq,
+                    seq=wire_seq,
                     ack=ack,
                     max_unit_bytes=self._max_line_bytes,
                 )
-                self._send_seq += 1
+                if seq is None:
+                    self._send_seq += 1
             else:
                 unit = payload + b"\n"
             try:
@@ -373,20 +385,22 @@ class CommsSocketTransport:
                 log.warning("comms.socket.send_broken_pipe", adapter_id=self._adapter_id)
                 raise
 
-    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
-        """Write one OPAQUE ADR-0025 payload unit verbatim, carrying a REAL ``ack``.
+    async def send_payload_unit(self, payload: bytes, *, seq: int, ack: int) -> None:
+        """Write one OPAQUE ADR-0025 payload unit verbatim, carrying a CALLER-OWNED seq.
 
         The send-half of the gateway relay seam (Spec A G3-3b-2 / ADR-0032). The relay
         forwards the opaque inner payload between its two legs WITHOUT ``json.dumps``-ing
         anything itself — ``payload`` is the pre-serialised body the seam emits
         byte-for-byte (T1 carrier; the gateway never parses it — CLAUDE.md hard rule
-        #5). Unlike :meth:`send`, the caller supplies the cumulative ``ack`` (the relay
-        wires ``BoundedSeqAckTracker.cumulative_ack()`` as the source) rather than the ``a=0``
-        placeholder. On the seq-OFF (plain TUI) leg the ``ack`` is unused and the unit
-        is a plain ``payload + "\\n"`` line. Loud on a broken pipe and on an over-bound
-        reframe, exactly like :meth:`send`.
+        #5). Unlike :meth:`send`, the caller supplies BOTH the cumulative ``ack`` (the
+        relay wires ``BoundedSeqAckTracker.cumulative_ack()`` as the source) AND the
+        client->core ``seq`` (Spec A G4b-2-pre / ADR-0032): the gateway mints the seq so
+        a G4b-2a buffered frame's wire seq equals its ReplayBuffer key even across a
+        loud-dropped send. On the seq-OFF (plain TUI) leg both ``seq`` and ``ack`` are
+        unused and the unit is a plain ``payload + "\\n"`` line. Loud on a broken pipe
+        and on an over-bound reframe, exactly like :meth:`send`.
         """
-        await self._write_payload_unit(payload, ack=ack)
+        await self._write_payload_unit(payload, seq=seq, ack=ack)
 
     async def _read_seq_frame(self) -> SeqFrame | None:
         """Read+bound+deframe one wire unit into a raw :class:`SeqFrame`; ``None`` on EOF.
