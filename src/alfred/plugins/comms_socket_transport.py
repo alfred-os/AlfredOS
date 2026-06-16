@@ -492,15 +492,21 @@ class CommsSocketTransport:
             raise CommsProtocolError(
                 t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
             )
-        if frame.seq is not None:
-            # Spec A G4b-2a-pre (#237): fold the decoded out-of-band wire seq onto
-            # the returned frame under the reserved TOP-LEVEL key so the host binds
-            # it to THIS frame's params (F1 — the seq travels WITH its own frame,
-            # never via a shared per-transport slot the next read would clobber).
-            # Only a seq-bearing unit carries it; a plain line from an un-upgraded
-            # peer (``SeqFrame(seq=None)``) folds nothing (mixed-wire safety). The
-            # reserved key is a FRAME key, never a ``params`` key, so the wire
-            # model's ``extra="forbid"`` never sees it.
+        # Spec A G4b-2a-pre (#237): fold the decoded out-of-band wire seq onto the
+        # returned frame under the reserved TOP-LEVEL key so the host binds it to THIS
+        # frame's params (F1 — the seq travels WITH its own frame, never via a shared
+        # per-transport slot the next read would clobber). ``wire_seq`` is carrier
+        # HEADER metadata, NEVER payload-derived (ADR-0032), so FIRST strip any
+        # peer-smuggled top-level ``"_wire_seq"`` carried inside the decoded body — a
+        # peer must never inject host-authored sequence metadata. THEN, only on the
+        # seq-enabled leg, fold the host's own value: ``frame.seq`` is ``None`` for a
+        # plain mixed-wire unit (an un-upgraded peer's bare line), which the host
+        # treats as "no seq". On the seq-disabled (stdio) leg nothing is folded, so the
+        # frame stays byte-for-byte the plain ADR-0025 object (back-compat). The
+        # reserved key is a FRAME key, never a ``params`` key, so the wire model's
+        # ``extra="forbid"`` never sees it.
+        decoded.pop(WIRE_SEQ_FRAME_KEY, None)
+        if self._seq_ack_enabled:
             decoded[WIRE_SEQ_FRAME_KEY] = frame.seq
         return decoded
 

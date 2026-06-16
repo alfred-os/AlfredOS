@@ -427,10 +427,16 @@ per-connection wire seq and advance a cumulative ack on each durable commit.
 carrier, so do NOT widen it. Instead add a thin seq-bearing read path on the socket
 carrier only: have the runner's pump, on a seq-enabled transport, read via
 `read_payload_unit()` (`comms_socket_transport.py:453` — it ALREADY returns the full
-`SeqFrame` with `seq` + opaque payload) and `json.loads` the body itself, OR (preferred,
-smaller blast radius) thread the just-decoded `frame.seq` from `_read_seq_frame` onto a
-per-transport `last_received_seq` slot that the host-side inbound wiring reads when it
-constructs the `InboundMessageNotification`. The notification model gains an OPTIONAL
+`SeqFrame` with `seq` + opaque payload) and `json.loads` the body itself. The seq MUST
+travel WITH its own frame: a shared per-transport `last_received_seq` slot is **RACY and
+REJECTED** — the pump detaches dispatch as a background task then immediately reads the
+next frame, clobbering the slot before the dispatched task builds the notification
+(`session.py:738`). **Implemented form:** the socket carrier's `read_frame` folds the
+decoded `frame.seq` onto the returned frame under a reserved TOP-LEVEL key
+(`WIRE_SEQ_FRAME_KEY`), set UNCONDITIONALLY (`None` on a plain unit, which clears any
+peer-smuggled body `_wire_seq`); the pump lifts it synchronously and threads it as an
+explicit per-task `wire_seq` arg into the per-frame `model_validate` merge. The
+notification model gains an OPTIONAL
 `wire_seq: int | None` field (`protocol.py`), defaulted `None` so the stdio adapters
 (Discord, reference plugin — plain ADR-0025, no seq) and every existing test are
 byte-for-byte unchanged. `wire_seq` is carrier metadata, never payload-derived — it
@@ -461,9 +467,11 @@ bounded interval, sends one lifecycle-style notification
 `runner.send_notification` whenever the high-water has advanced since the last emit.
 The gateway's core-link router already has the seam to consume it: `_route_unit`
 (`core_link.py:680`) peeks the method; add `daemon.comms.ack` to the CONSUMED set
-(alongside the two `daemon.lifecycle.*` frames) and route its `cumulative_ack` to the
-buffer's `trim_to_ack` (this design §5). This keeps the gateway payload-blind — the ack
-frame is a control frame the gateway consumes, never a relayed body.
+(alongside the two `daemon.lifecycle.*` frames) and **(in G4b-2a)** route its
+`cumulative_ack` to the buffer's `trim_to_ack` (this design §5). **In G4b-2a-pre the
+gateway consume is drop-only** (a `log.debug` no-op) — the `trim_to_ack` wiring lands
+with the buffer in G4b-2a, per the §9.5/§9.7 split. This keeps the gateway payload-blind
+— the ack frame is a control frame the gateway consumes, never a relayed body.
 
   *Why a standalone ack frame over piggybacking on the dispatch reply:* the dispatch
   `outbound.message` reply is a per-message JSON-RPC RESPONSE; it (i) is not emitted for

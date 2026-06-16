@@ -1085,7 +1085,11 @@ async def test_read_frame_folds_wire_seq_when_seq_enabled() -> None:
 
 
 async def test_read_frame_omits_wire_seq_when_seq_disabled() -> None:
-    """A plain (seq-OFF) frame carries NO reserved seq key — stdio back-compat."""
+    """A plain (seq-OFF / stdio) frame carries NO reserved seq key — byte-for-byte back-compat.
+
+    The fold only runs on the seq-enabled leg, so a stdio adapter's frames stay the
+    plain ADR-0025 object the rest of the host expects.
+    """
     from alfred.plugins.comms_seq_codec import WIRE_SEQ_FRAME_KEY
 
     reader = asyncio.StreamReader()
@@ -1097,11 +1101,32 @@ async def test_read_frame_omits_wire_seq_when_seq_disabled() -> None:
     assert WIRE_SEQ_FRAME_KEY not in frame
 
 
-async def test_read_frame_omits_wire_seq_for_unsequenced_unit_on_enabled_leg() -> None:
-    """A seq-enabled leg reading a plain (un-upgraded-peer) line folds no seq.
+async def test_read_frame_strips_smuggled_wire_seq_when_seq_disabled() -> None:
+    """A stdio frame whose BODY smuggles a top-level ``_wire_seq`` has it STRIPPED.
 
-    ``decode_seq_frame`` falls back to ``SeqFrame(seq=None, ...)`` for a bare line;
-    a ``None`` seq must NOT fold a reserved key (mixed-wire safety).
+    ADR-0032: ``wire_seq`` is carrier HEADER metadata, never payload-derived. Even on
+    the seq-disabled leg (no host ack tracker observes it), the reserved key is popped
+    so a peer can never inject host-authored sequence metadata — defence-in-depth.
+    """
+    from alfred.plugins.comms_seq_codec import WIRE_SEQ_FRAME_KEY
+
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    reader.feed_data(
+        b'{"jsonrpc": "2.0", "method": "inbound.message", "params": {}, "_wire_seq": 5}\n'
+    )
+    frame = await transport.read_frame()
+    assert frame is not None
+    assert WIRE_SEQ_FRAME_KEY not in frame  # the smuggled 5 was stripped
+
+
+async def test_read_frame_clears_smuggled_wire_seq_on_unsequenced_unit() -> None:
+    """A seq-enabled leg reading a plain mixed-wire unit CLEARS a smuggled ``_wire_seq`` to None.
+
+    On the seq-enabled leg the host folds its own ``frame.seq`` (``None`` for a bare
+    un-upgraded-peer line), overwriting any peer-supplied ``"_wire_seq"`` in the body
+    so it can never reach the host ack tracker.
     """
     from alfred.plugins.comms_seq_codec import WIRE_SEQ_FRAME_KEY
 
@@ -1109,10 +1134,12 @@ async def test_read_frame_omits_wire_seq_for_unsequenced_unit_on_enabled_leg() -
     writer = _FakeWriter()
     transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
     transport.enable_seq_ack()
-    reader.feed_data(b'{"jsonrpc": "2.0", "method": "inbound.message", "params": {}}\n')
+    reader.feed_data(
+        b'{"jsonrpc": "2.0", "method": "inbound.message", "params": {}, "_wire_seq": 5}\n'
+    )
     frame = await transport.read_frame()
     assert frame is not None
-    assert WIRE_SEQ_FRAME_KEY not in frame
+    assert frame[WIRE_SEQ_FRAME_KEY] is None  # the smuggled 5 was cleared
 
 
 class _FakeWriter:
