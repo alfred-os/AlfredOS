@@ -166,7 +166,7 @@ class _CommsTransportLike(Protocol):
 
     async def read_payload_unit(self) -> SeqFrame | None: ...
 
-    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None: ...
+    async def send_payload_unit(self, payload: bytes, *, seq: int, ack: int) -> None: ...
 
     async def close(self) -> None: ...
 
@@ -258,6 +258,11 @@ class GatewayCoreLink:
         # snapshots this into a local so a reconnect swap is atomic w.r.t. the send;
         # ``None`` outside an UP leg (the reconnect-race write window — architect M3).
         self._current_core_transport: _CommsTransportLike | None = None
+        # Spec A G4b-2-pre (#237): the gateway OWNS the client->core send-seq (so a
+        # G4b-2a buffered frame's wire seq equals its ReplayBuffer key even across a
+        # loud-dropped send). Per-connection: reset to 0 each ``_peer_handshake``, like
+        # the receive tracker — a fresh core leg is a fresh seq space (design §3.2).
+        self._client_to_core_seq = 0
 
     async def _default_dial(self) -> _CommsTransportLike:
         """Production dial: connect the core's comms socket on the keyed adapter id.
@@ -617,6 +622,10 @@ class GatewayCoreLink:
         # already-empty tracker), so a reconnect always rebinds the ack to the fresh
         # boot's seq space.
         self._core_tracker = BoundedSeqAckTracker()
+        # Spec A G4b-2-pre (#237): reset the OWNED client->core send-seq alongside the
+        # receive tracker — a fresh core leg is a fresh per-connection seq space, so the
+        # first relay_to_core on the new leg sends wire seq 0 (resume correctness).
+        self._client_to_core_seq = 0
 
     async def _read_until_start(self, transport: _CommsTransportLike) -> Mapping[str, object]:
         """Read frames until ``lifecycle.start``; warn-and-drop anything before it.
@@ -740,8 +749,14 @@ class GatewayCoreLink:
             )
             return
         ack = max(self._core_tracker.cumulative_ack(), 0)
+        # Spec A G4b-2-pre (#237): mint the OWNED client->core seq AFTER the None-check
+        # (a no-transport drop must NOT consume a seq) and pass it EXPLICITLY — the
+        # counter advances per relay_to_core call regardless of whether the send then
+        # loud-drops, so a G4b-2a buffer-append-per-call keys on the exact wire seq.
+        seq = self._client_to_core_seq
+        self._client_to_core_seq += 1
         try:
-            await local.send_payload_unit(payload, ack=ack)
+            await local.send_payload_unit(payload, seq=seq, ack=ack)
         except (
             BrokenPipeError,
             ConnectionResetError,
