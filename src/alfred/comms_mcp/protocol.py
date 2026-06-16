@@ -337,6 +337,20 @@ class InboundMessageNotification(_WireModel):
     sub_payload_refs: tuple[str, ...]
     received_at: AwareDatetime
     addressing_signal: InboundAddressingSignal
+    # The carrier out-of-band wire seq (the gateway's per-connection client->core
+    # send-seq), read off the seq-enabled SOCKET leg only (Spec A G4b-2a-pre /
+    # ADR-0032). ``None`` (the default) for the plain/stdio adapters (Discord, the
+    # reference plugin, the plain TUI leg) that carry NO seq — so every existing
+    # producer and test is byte-for-byte unchanged. The host durable-intake ack
+    # tracker (``BoundedSeqAckTracker``) ``observe``s this value ONLY on a fresh
+    # G0 ``commit_once``, so it must be NON-NEGATIVE (``Field(ge=0)``) — a forged
+    # negative is refused HERE, at the wire, so it can never reach ``observe``
+    # (which raises ``ValueError`` on a negative). It is carrier HEADER metadata
+    # the daemon legitimately reads off its OWN wire — NEVER payload-derived, and
+    # NEVER used to derive ``inbound_id`` (that ``(leg, seq, epoch)`` derivation is
+    # forbidden until Spec B/C). ``_WireModel``'s ``extra="forbid"`` is preserved;
+    # the default keeps it optional for producers that omit it.
+    wire_seq: int | None = Field(default=None, ge=0)
 
 
 class BindingRequestNotification(_WireModel):
