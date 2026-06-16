@@ -53,6 +53,17 @@ from alfred.plugins.comms_wire import (
 SEQ_VERSION: Final[str] = "1"
 SEQ_MAGIC: Final[bytes] = b"A" + SEQ_VERSION.encode()
 
+#: Reserved TOP-LEVEL frame key under which the seq-enabled socket carrier folds
+#: the decoded wire seq onto the JSON-RPC frame ``read_frame`` returns (Spec A
+#: G4b-2a-pre / ADR-0032). The runner's pump lifts it and threads it as an
+#: explicit per-frame ``wire_seq`` argument into ``model_validate`` so the seq
+#: TRAVELS WITH ITS OWN FRAME (never a shared per-transport slot — F1, racy). It
+#: is a FRAME key (alongside ``method``/``params``), NOT a ``params`` key, so it
+#: never collides with a wire-model field and ``extra="forbid"`` never sees it.
+#: The leading ``_`` keeps it visually distinct from JSON-RPC's own keys; a plain
+#: / stdio frame (no seq) never carries it.
+WIRE_SEQ_FRAME_KEY: Final[str] = "_wire_seq"
+
 # The single header/payload delimiter. It cannot occur in the fixed
 # ``A1 s= a= n=`` header grammar, so the FIRST ``|`` unambiguously ends the
 # header and begins the opaque payload run.
@@ -241,6 +252,7 @@ class SeqDedupWindow:
 __all__ = [
     "SEQ_MAGIC",
     "SEQ_VERSION",
+    "WIRE_SEQ_FRAME_KEY",
     "_MAX_HEADER_BYTES",
     "SeqDedupWindow",
     "SeqFrame",

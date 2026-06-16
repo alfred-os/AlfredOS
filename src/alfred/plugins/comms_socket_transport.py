@@ -55,6 +55,7 @@ from alfred.i18n import t
 # live in the ``comms_wire`` leaf module (Spec A G2 / ADR-0032) so the seq/ack
 # codec can import them too without a codec<->transport import cycle.
 from alfred.plugins.comms_seq_codec import (
+    WIRE_SEQ_FRAME_KEY,
     SeqFrame,
     decode_seq_frame,
     encode_seq_frame,
@@ -491,6 +492,16 @@ class CommsSocketTransport:
             raise CommsProtocolError(
                 t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
             )
+        if frame.seq is not None:
+            # Spec A G4b-2a-pre (#237): fold the decoded out-of-band wire seq onto
+            # the returned frame under the reserved TOP-LEVEL key so the host binds
+            # it to THIS frame's params (F1 — the seq travels WITH its own frame,
+            # never via a shared per-transport slot the next read would clobber).
+            # Only a seq-bearing unit carries it; a plain line from an un-upgraded
+            # peer (``SeqFrame(seq=None)``) folds nothing (mixed-wire safety). The
+            # reserved key is a FRAME key, never a ``params`` key, so the wire
+            # model's ``extra="forbid"`` never sees it.
+            decoded[WIRE_SEQ_FRAME_KEY] = frame.seq
         return decoded
 
     async def close(self) -> None:
