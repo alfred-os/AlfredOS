@@ -412,6 +412,36 @@ async def test_reseq_client_leg_seq_monotonic_across_core_reconnect(runtime_dir:
 
 
 # ---------------------------------------------------------------------------
+# Spec A G4b-2-pre (#237) / ADR-0032: real-encode round-trip — the gateway-OWNED
+# client->core seq is the seq that lands on the wire and decodes back at the core.
+# ---------------------------------------------------------------------------
+
+
+async def test_relay_explicit_seq_lands_on_the_wire_and_decodes_back(runtime_dir: Path) -> None:
+    """End-to-end real-encode: the gateway's MINTED client->core seq is the seq on the
+    wire. Two client->core payloads relay through ``GatewayCoreLink.relay_to_core`` and
+    arrive at the real core HOST carrying the gateway's owned, contiguous seqs 0 then 1.
+    """
+    harness, core_listener = await _build_harness(client_seq_enabled=True)
+    try:
+        up_body0 = b'{"jsonrpc":"2.0","id":1,"method":"chat.send","params":{}}'
+        up_body1 = b'{"jsonrpc":"2.0","id":2,"method":"chat.send","params":{}}'
+        await harness.client.send_payload_unit(up_body0, seq=0, ack=0)
+        await harness.client.send_payload_unit(up_body1, seq=1, ack=0)
+
+        core_frame0 = await asyncio.wait_for(harness.core_host.read_payload_unit(), timeout=2.0)
+        core_frame1 = await asyncio.wait_for(harness.core_host.read_payload_unit(), timeout=2.0)
+        assert core_frame0 is not None
+        assert core_frame1 is not None
+        # The payloads survive byte-for-byte AND the gateway-minted core-leg seqs are the
+        # contiguous 0,1 the gateway OWNS (G4b-2-pre) — read off the REAL wire, decoded.
+        assert (core_frame0.payload, core_frame0.seq) == (up_body0, 0)
+        assert (core_frame1.payload, core_frame1.seq) == (up_body1, 1)
+    finally:
+        await _reap_harness(harness, core_listener)
+
+
+# ---------------------------------------------------------------------------
 # Payload-blindness canary (spec §6) — the gateway never parses, never logs the body.
 # ---------------------------------------------------------------------------
 

@@ -19,6 +19,8 @@ from uuid import uuid4
 
 import pytest
 import structlog.testing
+from hypothesis import given
+from hypothesis import strategies as st
 
 from alfred.comms_mcp.protocol import (
     DAEMON_LIFECYCLE_GOING_DOWN,
@@ -1555,6 +1557,32 @@ async def test_relay_to_core_mints_contiguous_seq_and_passes_it_explicitly() -> 
 
 
 @pytest.mark.asyncio
+async def test_relay_to_core_loud_drop_still_advances_the_send_seq() -> None:
+    """A broken-pipe loud drop STILL consumes its wire seq (G4b-2a buffer-key alignment).
+
+    The seq is minted + advanced BEFORE the write attempt (the mint is past the
+    None-transport check but ahead of the ``try``), so a broken-pipe drop consumes seq
+    0; the next successful send must carry seq 1, never re-use 0. A refactor moving the
+    increment inside the ``try`` (freeing a dropped send's seq) would desync the wire
+    seq from the future ReplayBuffer key — this pins against exactly that regression,
+    which branch coverage alone cannot catch (the post-increment runs unconditionally).
+    """
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    transport.send_unit_error = BrokenPipeError()
+    with structlog.testing.capture_logs():
+        await link.relay_to_core(b"dropped")  # loud drop — consumes seq 0
+    assert transport.sent_units == []  # nothing reached the wire
+
+    transport.send_unit_error = None
+    await link.relay_to_core(b"after")  # succeeds on the live leg
+    # seq CONTINUED at 1 — the dropped frame consumed seq 0 and did not free it.
+    assert transport.sent_units == [(b"after", 1, 0)]
+
+
+@pytest.mark.asyncio
 async def test_relay_to_core_none_transport_drop_does_not_consume_a_seq() -> None:
     """A no-transport loud drop happens BEFORE the mint, so it does NOT consume a seq —
     the next real send on a live leg still starts at 0 (design §3.2)."""
@@ -1581,14 +1609,32 @@ async def test_peer_handshake_resets_the_client_to_core_seq() -> None:
     await link.relay_to_core(b"b")  # _client_to_core_seq now at 2
 
     epoch = uuid4().hex
-    transport2 = _FakeCoreTransport(
-        [_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})]
-    )
+    transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
     await link._peer_handshake(transport2)  # fresh leg resets the seq space
     link._current_core_transport = transport2
     await link.relay_to_core(b"c")
 
     assert transport2.sent_units[-1][1] == 0  # reset to 0 on the new leg
+
+
+@given(st.lists(st.binary(min_size=0, max_size=8), min_size=0, max_size=30))
+def test_minted_core_seqs_are_contiguous_within_a_leg(payloads: list[bytes]) -> None:
+    """Each ``relay_to_core`` mints the next contiguous seq within a single leg.
+
+    Hypothesis drives a sync body that runs the async relay via ``asyncio.run`` (the
+    project's @given+async pattern avoids the function-scoped-loop pitfall of combining
+    @given with @pytest.mark.asyncio).
+    """
+
+    async def _drive() -> list[int]:
+        link, _recorder, _sink = _link_with_relay()
+        transport = _FakeCoreTransport([])
+        link._current_core_transport = transport
+        for p in payloads:
+            await link.relay_to_core(p)
+        return [s for (_p, s, _a) in transport.sent_units]
+
+    assert asyncio.run(_drive()) == list(range(len(payloads)))
 
 
 @pytest.mark.asyncio
