@@ -1061,6 +1061,60 @@ def test_dial_path_owned_helper_passes_missing_path_through(
         cst._assert_dial_path_owned(missing)
 
 
+# ---------------------------------------------------------------------------
+# Spec A G4b-2a-pre (#237) — read_frame folds the decoded wire seq into the
+# returned frame under the reserved key so the host can bind it to ITS frame's
+# params (F1: the seq travels WITH its frame, never via a shared slot).
+# ---------------------------------------------------------------------------
+
+
+async def test_read_frame_folds_wire_seq_when_seq_enabled() -> None:
+    """A seq-enabled inbound unit surfaces its decoded seq under the reserved key."""
+    from alfred.plugins.comms_seq_codec import WIRE_SEQ_FRAME_KEY, encode_seq_frame
+
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    transport.enable_seq_ack()
+    body = json.dumps({"jsonrpc": "2.0", "method": "inbound.message", "params": {}}).encode()
+    reader.feed_data(encode_seq_frame(body, seq=5, ack=0, max_unit_bytes=_MAX_COMMS_LINE_BYTES))
+    frame = await transport.read_frame()
+    assert frame is not None
+    assert frame[WIRE_SEQ_FRAME_KEY] == 5
+    assert frame["method"] == "inbound.message"
+
+
+async def test_read_frame_omits_wire_seq_when_seq_disabled() -> None:
+    """A plain (seq-OFF) frame carries NO reserved seq key — stdio back-compat."""
+    from alfred.plugins.comms_seq_codec import WIRE_SEQ_FRAME_KEY
+
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    reader.feed_data(b'{"jsonrpc": "2.0", "method": "inbound.message", "params": {}}\n')
+    frame = await transport.read_frame()
+    assert frame is not None
+    assert WIRE_SEQ_FRAME_KEY not in frame
+
+
+async def test_read_frame_omits_wire_seq_for_unsequenced_unit_on_enabled_leg() -> None:
+    """A seq-enabled leg reading a plain (un-upgraded-peer) line folds no seq.
+
+    ``decode_seq_frame`` falls back to ``SeqFrame(seq=None, ...)`` for a bare line;
+    a ``None`` seq must NOT fold a reserved key (mixed-wire safety).
+    """
+    from alfred.plugins.comms_seq_codec import WIRE_SEQ_FRAME_KEY
+
+    reader = asyncio.StreamReader()
+    writer = _FakeWriter()
+    transport = CommsSocketTransport(adapter_id=_ADAPTER_ID, reader=reader, writer=writer)  # type: ignore[arg-type]
+    transport.enable_seq_ack()
+    reader.feed_data(b'{"jsonrpc": "2.0", "method": "inbound.message", "params": {}}\n')
+    frame = await transport.read_frame()
+    assert frame is not None
+    assert WIRE_SEQ_FRAME_KEY not in frame
+
+
 class _FakeWriter:
     """Records everything written; configurable broken-pipe + EOF/close tracking."""
 

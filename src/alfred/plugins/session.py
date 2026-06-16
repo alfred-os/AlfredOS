@@ -573,7 +573,11 @@ class AlfredPluginSession:
     # ------------------------------------------------------------------
 
     async def _on_post_handshake_method(
-        self, method: str, params: Mapping[str, object] | None = None
+        self,
+        method: str,
+        params: Mapping[str, object] | None = None,
+        *,
+        wire_seq: int | None = None,
     ) -> None:
         """Route a post-handshake JSON-RPC method through the security gate.
 
@@ -630,7 +634,7 @@ class AlfredPluginSession:
             return
 
         if method in _COMMS_NOTIFICATION_METHODS:
-            await self._dispatch_comms_notification(method, params)
+            await self._dispatch_comms_notification(method, params, wire_seq=wire_seq)
             return
 
         # Unknown post-handshake method on a comms session — not silently
@@ -666,9 +670,14 @@ class AlfredPluginSession:
         return self._adapter_id
 
     async def _dispatch_comms_notification(
-        self, method: str, params: Mapping[str, object] | None
+        self, method: str, params: Mapping[str, object] | None, *, wire_seq: int | None = None
     ) -> None:
         """Validate + fan a comms notification to its handler under the semaphore.
+
+        ``wire_seq`` (Spec A G4b-2a-pre / ADR-0032) is THIS frame's out-of-band wire
+        seq, forwarded to :meth:`_route_comms_notification` where the
+        ``inbound.message`` arm merges it into the model so it reaches
+        ``model_validate`` bound to its own frame (F1); ``None`` for stdio.
 
         ``async with self._dispatch_semaphore`` (not ``acquire``/``release``)
         guarantees the slot is released on the exception path (core-008). The
@@ -684,7 +693,7 @@ class AlfredPluginSession:
         async with self._dispatch_semaphore:
             started = time.monotonic()
             try:
-                await self._route_comms_notification(method, params)
+                await self._route_comms_notification(method, params, wire_seq=wire_seq)
             except Exception as exc:
                 # Task 62: one increment per COMMS_HANDLER_FAILED_FIELDS emit,
                 # observed on the same loud failure path (err-007).
@@ -715,7 +724,7 @@ class AlfredPluginSession:
                 comms_observability.record_inbound_dispatch_seconds(time.monotonic() - started)
 
     async def _route_comms_notification(
-        self, method: str, params: Mapping[str, object] | None
+        self, method: str, params: Mapping[str, object] | None, *, wire_seq: int | None = None
     ) -> None:
         """Validate ``params`` against the wire schema + await the one handler.
 
@@ -723,6 +732,14 @@ class AlfredPluginSession:
         notification never fans out to two handlers concurrently (spec §8.4
         last paragraph; perf-003 clarification). Concurrency across
         notifications is bounded only by the dispatch semaphore.
+
+        ``wire_seq`` (Spec A G4b-2a-pre / ADR-0032 — F1) is merged into the
+        ``inbound.message`` model at ``model_validate`` so the host durable-intake
+        ack tracker sees the seq BOUND TO THIS FRAME. It is merged ONLY for
+        ``inbound.message`` (the only notification carrying ``wire_seq``); the other
+        three arms ignore it. When ``None`` (stdio / un-sequenced) nothing is merged,
+        so the model defaults ``wire_seq`` to ``None`` and the dispatch is
+        byte-for-byte unchanged from the pre-G4b path.
         """
         from alfred.comms_mcp.protocol import (
             BindingRequestNotification,
@@ -735,6 +752,15 @@ class AlfredPluginSession:
         match method:
             case "inbound.message":
                 assert self._inbound_handler is not None
+                # Bind the seq to THIS frame's model — the HOST is authoritative.
+                # Set it UNCONDITIONALLY (even to ``None``): ``wire_seq`` is carrier
+                # header metadata, NEVER payload-derived (ADR-0032), so a peer that
+                # smuggles a ``"wire_seq"`` into ``params`` must NOT reach the host ack
+                # tracker. On an un-sequenced (mixed-wire) socket unit the host folds
+                # ``None``, which here actively CLEARS any smuggled value. ``raw`` is a
+                # per-call dict (a fresh copy of ``params``), never shared — no
+                # cross-frame bleed even under concurrent dispatch.
+                raw["wire_seq"] = wire_seq
                 await self._inbound_handler.process(InboundMessageNotification.model_validate(raw))
             case "adapter.binding_request":
                 assert self._binding_handler is not None

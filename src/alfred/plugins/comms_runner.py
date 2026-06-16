@@ -54,7 +54,7 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 import structlog
 
 from alfred.i18n import t
-from alfred.plugins.comms_seq_codec import SEQ_VERSION
+from alfred.plugins.comms_seq_codec import SEQ_VERSION, WIRE_SEQ_FRAME_KEY
 from alfred.plugins.comms_stdio_transport import CommsProtocolError
 from alfred.plugins.errors import PluginError
 
@@ -107,6 +107,20 @@ _TRANSPORT_READ_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
     EOFError,
     CommsProtocolError,
 )
+
+
+def _wire_seq_of(frame: Mapping[str, object]) -> int | None:
+    """Lift the reserved out-of-band wire seq the socket carrier folded onto a frame.
+
+    Spec A G4b-2a-pre (#237). The seq-enabled socket carrier's ``read_frame``
+    folds the decoded wire seq under :data:`WIRE_SEQ_FRAME_KEY`; a stdio frame (and
+    any un-sequenced socket frame) never carries it. Returns the seq when present
+    AND a non-negative ``int`` (defence-in-depth: only an ``int`` advances the
+    host ack tracker; anything else is treated as absent and stays ``None`` — the
+    wire-model ``ge=0`` validator is the authoritative second gate).
+    """
+    raw = frame.get(WIRE_SEQ_FRAME_KEY)
+    return raw if isinstance(raw, int) and raw >= 0 else None
 
 
 class _ShutdownSignalled(Exception):  # noqa: N818 — internal control signal, not an error
@@ -528,7 +542,15 @@ class CommsPluginRunner:
             # A NOTIFICATION. Dispatch it as a tracked background task and KEEP
             # READING — the reader must stay free to resolve the response a
             # reentrant handler's ``send_request`` awaits (module docstring).
-            self._spawn_notification_dispatch(str(method), frame.get("params"))
+            #
+            # Spec A G4b-2a-pre (#237) — F1: lift THIS frame's reserved wire seq
+            # HERE (synchronously, before the next read clobbers nothing — the seq
+            # rides ON the frame, not a slot) and bind it as a per-task argument so
+            # it travels with its own dispatched frame all the way to
+            # ``model_validate``. ``None`` for a stdio / un-sequenced frame.
+            self._spawn_notification_dispatch(
+                str(method), frame.get("params"), wire_seq=_wire_seq_of(frame)
+            )
             # Backpressure into the pipe: cap the number of in-flight dispatch
             # tasks. Only the NEXT notification intake is gated — responses are
             # resolved above WITHOUT a cap check — so an in-flight dispatch's
@@ -583,7 +605,9 @@ class CommsPluginRunner:
             await read_task
         raise _ShutdownSignalled
 
-    def _spawn_notification_dispatch(self, method: str, params: object) -> None:
+    def _spawn_notification_dispatch(
+        self, method: str, params: object, *, wire_seq: int | None = None
+    ) -> None:
         """Schedule one notification's dispatch as a tracked background task.
 
         The task runs :meth:`_route_notification` (which already swallows a single
@@ -592,8 +616,15 @@ class CommsPluginRunner:
         set is the live drain/cancel surface :meth:`pump` uses on teardown. The
         reader does NOT await the task — that is the whole point: keep reading so a
         reentrant ``send_request`` response is resolved while the dispatch runs.
+
+        ``wire_seq`` (Spec A G4b-2a-pre / ADR-0032 — F1) is THIS frame's out-of-band
+        wire seq, captured in the pump before the next read and bound here as a
+        per-task argument so it travels with its own dispatched frame; ``None`` for
+        a stdio / un-sequenced frame.
         """
-        task: asyncio.Task[None] = asyncio.ensure_future(self._route_notification(method, params))
+        task: asyncio.Task[None] = asyncio.ensure_future(
+            self._route_notification(method, params, wire_seq=wire_seq)
+        )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
 
@@ -712,17 +743,23 @@ class CommsPluginRunner:
                     PluginError(t("comms.runner.request_aborted", adapter_id=self._adapter_id))
                 )
 
-    async def _route_notification(self, method: str, params: object) -> None:
+    async def _route_notification(
+        self, method: str, params: object, *, wire_seq: int | None = None
+    ) -> None:
         """Fan one notification into the session; survive a single handler failure.
 
         The session's dispatch arm RE-RAISES a handler exception (err-007 — it has
         already emitted ``COMMS_HANDLER_FAILED`` + counted toward the breaker). The
         runner catches it here and continues to the next frame, matching the
         session docstring's "the reader logs + continues" contract.
+
+        ``wire_seq`` (Spec A G4b-2a-pre / ADR-0032) is THIS frame's out-of-band wire
+        seq, threaded into the session's validated dispatch so it reaches
+        ``model_validate`` bound to its own frame (F1); ``None`` for stdio.
         """
         params_mapping = params if isinstance(params, Mapping) else None
         try:
-            await self._session._on_post_handshake_method(method, params_mapping)
+            await self._session._on_post_handshake_method(method, params_mapping, wire_seq=wire_seq)
         except Exception:
             # Catch-and-continue: the session already audited + counted this
             # failure. The reader must survive so a single bad handler does not

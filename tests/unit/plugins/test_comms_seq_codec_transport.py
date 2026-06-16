@@ -22,7 +22,12 @@ from pathlib import Path
 import pytest
 
 from alfred.cli._launcher_spawn import PluginLaunchSpec
-from alfred.plugins.comms_seq_codec import SEQ_MAGIC, decode_seq_frame, encode_seq_frame
+from alfred.plugins.comms_seq_codec import (
+    SEQ_MAGIC,
+    WIRE_SEQ_FRAME_KEY,
+    decode_seq_frame,
+    encode_seq_frame,
+)
 from alfred.plugins.comms_socket_transport import CommsSocketTransport
 from alfred.plugins.comms_stdio_transport import CommsStdioTransport
 
@@ -253,7 +258,14 @@ async def test_socket_read_decodes_seq_header_to_inner_object() -> None:
         host.enable_seq_ack()
         peer.enable_seq_ack()
         await host.send(_FRAME)
-        assert await peer.read_frame() == _FRAME
+        # Spec A G4b-2a-pre (#237): a seq-enabled read folds the decoded wire seq
+        # onto the returned frame under the reserved key (the first ``send`` on a
+        # fresh seq-enabled transport carries ``seq=0``). The inner JSON-RPC object
+        # is otherwise byte-for-byte the sent frame.
+        frame = await peer.read_frame()
+        assert frame is not None
+        assert frame[WIRE_SEQ_FRAME_KEY] == 0
+        assert {k: v for k, v in frame.items() if k != WIRE_SEQ_FRAME_KEY} == _FRAME
     finally:
         await host.close()
         await peer.close()
