@@ -210,14 +210,15 @@ async def test_wire_contract_payloads_both_directions_byte_for_byte(
     down_body = b'{"jsonrpc":"2.0","id":11,"method":"inbound.message","params":{"x": 1 }}'
     up_body = b'{"jsonrpc":"2.0","id":22,"method":"chat.send","params":{}}'
 
-    # core -> client (seq-framed on the core leg, plain on the client leg).
-    await harness.core_host.send_payload_unit(down_body, ack=0)
+    # core -> client (seq-framed on the core leg, plain on the client leg). The test
+    # peer OWNS its send seq now (G4b-2-pre): the core HOST's first send is seq 0.
+    await harness.core_host.send_payload_unit(down_body, seq=0, ack=0)
     got_down = await _read_client_payload(harness.client)
     assert got_down == down_body
     assert b'"id":11' in got_down
 
     # client -> core (plain on the client leg, opaque-forwarded to the seq core leg).
-    await harness.client.send_payload_unit(up_body, ack=0)
+    await harness.client.send_payload_unit(up_body, seq=0, ack=0)
     got_up = await asyncio.wait_for(harness.core_host.read_payload_unit(), timeout=2.0)
     assert got_up is not None
     assert got_up.payload == up_body
@@ -233,7 +234,7 @@ async def test_wire_contract_control_frame_sequence_on_client_leg(harness: _Gate
     """
     # A payload before the gap relays fine.
     pre_body = b'{"jsonrpc":"2.0","id":1,"method":"inbound.message","params":{}}'
-    await harness.core_host.send_payload_unit(pre_body, ack=0)
+    await harness.core_host.send_payload_unit(pre_body, seq=0, ack=0)
     assert await _read_client_payload(harness.client) == pre_body
 
     # An interleaved going_down consumed MID payload-stream: the gateway consumes it
@@ -241,7 +242,7 @@ async def test_wire_contract_control_frame_sequence_on_client_leg(harness: _Gate
     going_down = json.dumps(
         {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": LIFECYCLE_REASON_SHUTDOWN}}
     ).encode()
-    await harness.core_host.send_payload_unit(going_down, ack=0)
+    await harness.core_host.send_payload_unit(going_down, seq=1, ack=0)
 
     # Stand up a fresh core HOST for the gateway's reconnect (a NEW epoch -> restored).
     epoch2 = uuid4().hex
@@ -270,7 +271,7 @@ async def test_wire_contract_control_frame_sequence_on_client_leg(harness: _Gate
         assert restored["method"] == LINK_RESTORED
         # A post-restore payload still relays byte-for-byte (the relay survived the gap).
         post_body = b'{"jsonrpc":"2.0","id":99,"method":"inbound.message","params":{}}'
-        await core_host2.send_payload_unit(post_body, ack=0)
+        await core_host2.send_payload_unit(post_body, seq=0, ack=0)
         assert await _read_client_payload(harness.client) == post_body
     finally:
         await core_host2.close()
@@ -300,19 +301,21 @@ async def test_reseq_client_leg_seq_differs_from_core_leg_seq(runtime_dir: Path)
         # so the payload-under-test provably arrives on the client leg under a DIFFERENT
         # seq than it left the core leg with — a real reframe, not a pass-through.
         for i in range(3):
-            await harness.core_host.send_payload_unit(f'{{"id":{i}}}'.encode(), ack=0)
+            await harness.core_host.send_payload_unit(f'{{"id":{i}}}'.encode(), seq=i, ack=0)
             drained = await asyncio.wait_for(harness.client.read_payload_unit(), timeout=2.0)
             assert drained is not None
         # A consumed ``ready`` advances the core-leg send seq but is not relayed down.
         ready = json.dumps(
             {"method": DAEMON_LIFECYCLE_READY, "params": {"epoch": harness.core_link._core_epoch}}
         ).encode()
-        await harness.core_host.send_payload_unit(ready, ack=0)
-        # The payload-under-test: capture the EXACT core-leg seq it is sent with (the
-        # HOST's next send seq) so we can compare it to the client-leg seq it arrives on.
-        core_sent_seq = harness.core_host._send_seq
+        await harness.core_host.send_payload_unit(ready, seq=3, ack=0)
+        # The payload-under-test: the test peer OWNS its send seq (G4b-2-pre), so the
+        # EXACT core-leg seq this payload is sent with is the explicit seq we pass (4 —
+        # after the 3 throwaways + the consumed ``ready``). We compare it to the
+        # client-leg seq the gateway mints for this same payload.
+        core_sent_seq = 4
         down_body = b'{"jsonrpc":"2.0","id":1,"method":"inbound.message","params":{}}'
-        await harness.core_host.send_payload_unit(down_body, ack=0)
+        await harness.core_host.send_payload_unit(down_body, seq=core_sent_seq, ack=0)
         down_frame = await asyncio.wait_for(harness.client.read_payload_unit(), timeout=2.0)
         assert down_frame is not None
         assert down_frame.payload == down_body
@@ -328,8 +331,8 @@ async def test_reseq_client_leg_seq_differs_from_core_leg_seq(runtime_dir: Path)
         # own (independent) core-leg send counter.
         up_body0 = b'{"jsonrpc":"2.0","id":10,"method":"chat.send","params":{}}'
         up_body1 = b'{"jsonrpc":"2.0","id":11,"method":"chat.send","params":{}}'
-        await harness.client.send_payload_unit(up_body0, ack=0)
-        await harness.client.send_payload_unit(up_body1, ack=0)
+        await harness.client.send_payload_unit(up_body0, seq=0, ack=0)
+        await harness.client.send_payload_unit(up_body1, seq=1, ack=0)
         core_frame0 = await asyncio.wait_for(harness.core_host.read_payload_unit(), timeout=2.0)
         core_frame1 = await asyncio.wait_for(harness.core_host.read_payload_unit(), timeout=2.0)
         assert core_frame0 is not None
@@ -355,7 +358,7 @@ async def test_reseq_client_leg_seq_monotonic_across_core_reconnect(runtime_dir:
         # how many control frames preceded it — assert the post-gap seq is STRICTLY
         # GREATER, which is the monotonic-across-the-gap property we care about).
         body_a = b'{"jsonrpc":"2.0","id":1,"method":"inbound.message","params":{}}'
-        await harness.core_host.send_payload_unit(body_a, ack=0)
+        await harness.core_host.send_payload_unit(body_a, seq=0, ack=0)
         frame_a = await asyncio.wait_for(harness.client.read_payload_unit(), timeout=2.0)
         assert frame_a is not None
         assert frame_a.seq is not None
@@ -367,7 +370,7 @@ async def test_reseq_client_leg_seq_monotonic_across_core_reconnect(runtime_dir:
         going_down = json.dumps(
             {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": LIFECYCLE_REASON_SHUTDOWN}}
         ).encode()
-        await harness.core_host.send_payload_unit(going_down, ack=0)
+        await harness.core_host.send_payload_unit(going_down, seq=1, ack=0)
         # Free the original socket inode (HOST transport + listener) before the fresh
         # listener rebinds the same adapter id — no socket-path collision/leak.
         await harness.core_host.close()
@@ -391,7 +394,7 @@ async def test_reseq_client_leg_seq_monotonic_across_core_reconnect(runtime_dir:
             # gateway's client-leg seq CONTINUES past the gap (never reset — the held
             # client transport's send counter only ever climbs).
             body_b = b'{"jsonrpc":"2.0","id":2,"method":"inbound.message","params":{}}'
-            await core_host2.send_payload_unit(body_b, ack=0)
+            await core_host2.send_payload_unit(body_b, seq=0, ack=0)
             frame_b = await asyncio.wait_for(harness.client.read_payload_unit(), timeout=2.0)
             assert frame_b is not None
             assert frame_b.payload == body_b
@@ -436,7 +439,7 @@ async def test_payload_blindness_canary_never_leaks_to_logs(
     monkeypatch.setattr(relay_mod.json, "loads", _spy)
 
     with structlog.testing.capture_logs() as captured:
-        await harness.client.send_payload_unit(body, ack=0)
+        await harness.client.send_payload_unit(body, seq=0, ack=0)
         got = await asyncio.wait_for(harness.core_host.read_payload_unit(), timeout=2.0)
 
     assert got is not None
@@ -466,7 +469,7 @@ async def test_forged_ready_on_core_leg_emits_no_false_restored(harness: _Gatewa
     going_down = json.dumps(
         {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": LIFECYCLE_REASON_SHUTDOWN}}
     ).encode()
-    await harness.core_host.send_payload_unit(going_down, ack=0)
+    await harness.core_host.send_payload_unit(going_down, seq=0, ack=0)
 
     reconnecting = await asyncio.wait_for(harness.client.read_frame(), timeout=2.0)
     assert reconnecting is not None
@@ -477,7 +480,7 @@ async def test_forged_ready_on_core_leg_emits_no_false_restored(harness: _Gatewa
         {"method": DAEMON_LIFECYCLE_READY, "params": {"epoch": forged_epoch}}
     ).encode()
     with structlog.testing.capture_logs() as captured:
-        await harness.core_host.send_payload_unit(forged_ready, ack=1)
+        await harness.core_host.send_payload_unit(forged_ready, seq=1, ack=1)
         # Give the gateway time to process the forged frame.
         for _ in range(50):
             await asyncio.sleep(0)

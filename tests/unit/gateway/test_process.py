@@ -135,14 +135,14 @@ async def test_run_binds_accepts_handshakes_and_relays(runtime_dir: Path) -> Non
         try:
             # core -> client (seq-framed on the core leg, plain on the client leg).
             down = b'{"jsonrpc":"2.0","id":11,"method":"inbound.message","params":{}}'
-            await core_host.send_payload_unit(down, ack=0)
+            await core_host.send_payload_unit(down, seq=0, ack=0)
             got_down = await asyncio.wait_for(client.read_payload_unit(), timeout=2.0)
             assert got_down is not None
             assert got_down.payload == down
 
             # client -> core (plain client leg, opaque-forwarded to the seq core leg).
             up = b'{"jsonrpc":"2.0","id":22,"method":"chat.send","params":{}}'
-            await client.send_payload_unit(up, ack=0)
+            await client.send_payload_unit(up, seq=0, ack=0)
             got_up = await asyncio.wait_for(core_host.read_payload_unit(), timeout=2.0)
             assert got_up is not None
             assert got_up.payload == up
@@ -227,7 +227,7 @@ async def test_shutdown_mid_relay_returns_and_reaps(runtime_dir: Path) -> None:
         try:
             # A turn flows, proving the relay is live mid-stream.
             body = b'{"jsonrpc":"2.0","id":1,"method":"inbound.message","params":{}}'
-            await core_host.send_payload_unit(body, ack=0)
+            await core_host.send_payload_unit(body, seq=0, ack=0)
             got = await asyncio.wait_for(client.read_payload_unit(), timeout=2.0)
             assert got is not None and got.payload == body
 
@@ -269,7 +269,7 @@ async def test_cancel_mid_relay_still_reaps_listener(runtime_dir: Path) -> None:
         core_host = await asyncio.wait_for(core_host_task, timeout=3.0)
         try:
             body = b'{"jsonrpc":"2.0","id":1,"method":"inbound.message","params":{}}'
-            await core_host.send_payload_unit(body, ack=0)
+            await core_host.send_payload_unit(body, seq=0, ack=0)
             got = await asyncio.wait_for(client.read_payload_unit(), timeout=2.0)
             assert got is not None and got.payload == body
 
@@ -483,7 +483,7 @@ async def test_run_relays_control_frame_on_core_going_down(runtime_dir: Path) ->
                     "params": {"reason": LIFECYCLE_REASON_SHUTDOWN},
                 }
             ).encode()
-            await core_host.send_payload_unit(going_down, ack=0)
+            await core_host.send_payload_unit(going_down, seq=0, ack=0)
             # Close the core HOST so the gateway gaps; the §9 invariant emits reconnecting.
             await core_host.close()
             await core_listener.aclose()

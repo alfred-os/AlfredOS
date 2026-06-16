@@ -257,7 +257,7 @@ async def test_process_forged_ready_epoch_paints_no_false_restored(runtime_dir: 
         going_down = json.dumps(
             {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": LIFECYCLE_REASON_SHUTDOWN}}
         ).encode()
-        await core_host1.send_payload_unit(going_down, ack=0)
+        await core_host1.send_payload_unit(going_down, seq=0, ack=0)
         await core_host1.close()
         await core_listener1.aclose()
 
@@ -288,7 +288,7 @@ async def test_process_forged_ready_epoch_paints_no_false_restored(runtime_dir: 
                 {"method": DAEMON_LIFECYCLE_READY, "params": {"epoch": forged_epoch}}
             ).encode()
             with structlog.testing.capture_logs() as captured:
-                await core_host2.send_payload_unit(forged_ready, ack=1)
+                await core_host2.send_payload_unit(forged_ready, seq=0, ack=1)
                 # Give the gateway time to process + reject the forged frame.
                 for _ in range(50):
                     await asyncio.sleep(0)
@@ -354,7 +354,7 @@ async def test_process_canary_payload_relays_blind_no_log_leak(runtime_dir: Path
         ).encode()
         try:
             with structlog.testing.capture_logs() as captured:
-                await client.send_payload_unit(body, ack=0)
+                await client.send_payload_unit(body, seq=0, ack=0)
                 got = await asyncio.wait_for(core_host.read_payload_unit(), timeout=2.0)
                 # Drive a few yields so any relay log row is captured within the block.
                 for _ in range(20):
