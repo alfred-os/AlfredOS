@@ -39,6 +39,7 @@ import structlog
 from pydantic import ValidationError
 
 from alfred.comms_mcp.protocol import (
+    DAEMON_COMMS_ACK,
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
     GoingDownNotification,
@@ -702,6 +703,17 @@ class GatewayCoreLink:
             # Un-parseable / non-object / pathological body: forward it untouched.
             # T1 carrier never drops or interprets — the core re-parses (hard rule #7).
             await self._payload_relay(frame.payload)
+            return
+        if method == DAEMON_COMMS_ACK:
+            # Spec A G4b-2a-pre (#237 — F4): the daemon's durable-intake ACK. CONSUME
+            # it in its OWN arm, BEFORE the ``_consume_frame`` lifecycle path: it has
+            # NO epoch and is NOT a forgery-defended LinkStateMachine event, so routing
+            # it through ``_consume_frame`` would trip epoch validation on every ack.
+            # Consume == no-op/log here (``trim_to_ack`` lands in G4b-2a); the point is
+            # it must NEITHER fall into the relay ``else`` (leaking a host control frame
+            # to the client) NOR feed the link-state machine. Payload-blind: a missing /
+            # malformed ``cumulative_ack`` is still consumed, never relayed.
+            log.debug("gateway.core_link.daemon_comms_ack_consumed")
             return
         if method in (DAEMON_LIFECYCLE_READY, DAEMON_LIFECYCLE_GOING_DOWN):
             # A lifecycle control frame: CONSUME it (the forgery-defended path). The

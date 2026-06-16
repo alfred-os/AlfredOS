@@ -23,6 +23,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from alfred.comms_mcp.protocol import (
+    DAEMON_COMMS_ACK,
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
     LinkReconnectingNotification,
@@ -1418,6 +1419,47 @@ async def test_route_unit_consumes_going_down_does_not_relay() -> None:
     assert isinstance(recorder.controls[0], LinkReconnectingNotification)
     assert link._machine.state is not GatewayLinkState.UP
     # security L2: a consumed lifecycle frame never bumps the dropped-payload counter.
+    assert link._dropped_payload_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_route_unit_consumes_daemon_comms_ack_does_not_relay() -> None:
+    """A ``daemon.comms.ack`` unit is CONSUMED in its OWN arm — not relayed, not a feed.
+
+    Spec A G4b-2a-pre (#237 — F4): the daemon's durable-intake ack is a host control
+    frame the gateway consumes (``trim_to_ack`` lands in G4b-2a; this PR no-ops the
+    body). It must NOT fall into the relay ``else`` (which would leak the control
+    frame to the client as an opaque body) NOR into ``_consume_frame`` (which would
+    trip epoch validation — the ack has no epoch and is not a LinkStateMachine
+    event). It is not a dropped payload frame either.
+    """
+    epoch = uuid4().hex
+    link, recorder, sink = _link_with_relay(epoch=epoch)
+    body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {"cumulative_ack": 4}}).encode()
+
+    await link._route_unit(_payload_unit(body))
+
+    assert sink.received == []  # NOT relayed to the client
+    assert recorder.controls == []  # NOT a link-state feed (no reconnecting/restored)
+    assert link._machine.state is GatewayLinkState.UP  # epoch validation never ran
+    assert link._dropped_payload_frames == 0  # not counted as a dropped payload
+
+
+@pytest.mark.asyncio
+async def test_route_unit_consumes_daemon_comms_ack_with_malformed_body_does_not_relay() -> None:
+    """A ``daemon.comms.ack`` whose body is malformed is still CONSUMED, never relayed.
+
+    The consume arm is payload-blind for this PR (no ``trim_to_ack`` yet), so a
+    missing/garbage ``cumulative_ack`` must not fall through to the relay — the
+    gateway never leaks a host control frame to the client even when its body is junk.
+    """
+    epoch = uuid4().hex
+    link, _recorder, sink = _link_with_relay(epoch=epoch)
+    body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {}}).encode()
+
+    await link._route_unit(_payload_unit(body))
+
+    assert sink.received == []
     assert link._dropped_payload_frames == 0
 
 

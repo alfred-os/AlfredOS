@@ -407,6 +407,18 @@ class CrashedNotification(_WireModel):
 DAEMON_LIFECYCLE_READY: Final[str] = "daemon.lifecycle.ready"
 DAEMON_LIFECYCLE_GOING_DOWN: Final[str] = "daemon.lifecycle.going_down"
 
+# Canonical wire method name for the host -> outward durable-intake ACK control
+# frame (Spec A G4b-2a-pre / ADR-0032). The daemon emits this id-less notification
+# on a per-connection bounded timer carrying ``{"cumulative_ack": <int>}`` — the
+# high-water of the gateway's client->core wire seqs the core has DURABLY intaken
+# (advanced on each G0 ``commit_once``). It travels the SAME line-delimited comms
+# wire as the lifecycle frames and is CONSUMED (payload-blind) by the gateway's
+# ``_route_unit``, NEVER relayed to the client. ``daemon.comms.ack`` is a WIRE
+# IDENTIFIER, not an operator string — no ``t()``. The ack SOURCE is the core's
+# durable tracker (the gateway is the SENDER of inbound, so it cannot ack its own
+# frames); the G3 relay owns the REVERSE (core->client) ack.
+DAEMON_COMMS_ACK: Final[str] = "daemon.comms.ack"
+
 
 LifecycleReason = Literal["shutdown"]
 """Closed vocabulary for a planned ``going_down``.
@@ -506,6 +518,7 @@ class LinkUnavailableNotification(_WireModel):
 
 __all__ = [
     "BODY_FIELD_BY_KIND",
+    "DAEMON_COMMS_ACK",
     "DAEMON_LIFECYCLE_GOING_DOWN",
     "DAEMON_LIFECYCLE_READY",
     "LIFECYCLE_REASON_SHUTDOWN",
