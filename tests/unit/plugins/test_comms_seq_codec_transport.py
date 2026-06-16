@@ -277,7 +277,11 @@ async def test_socket_read_fallback_decodes_plain_line_when_enabled() -> None:
         # host stays OFF (emits plain), peer is ON (must still decode the plain line).
         peer.enable_seq_ack()
         await host.send({"id": 1})
-        assert await peer.read_frame() == {"id": 1}
+        # The plain line decodes; the seq-enabled leg ALWAYS folds the host's own seq
+        # under the reserved key — ``None`` here (a mixed-wire plain unit has no seq),
+        # which also clears any peer-smuggled ``_wire_seq`` (ADR-0032: carrier header
+        # metadata, never payload-derived — Spec A G4b-2a-pre / #237).
+        assert await peer.read_frame() == {"_wire_seq": None, "id": 1}
     finally:
         await host.close()
         await peer.close()
