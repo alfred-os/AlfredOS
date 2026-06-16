@@ -73,7 +73,8 @@ class _FakeTransport:
         self._frames: collections.deque[Mapping[str, object]] = collections.deque(frames or [])
         self._units: collections.deque[object] = collections.deque(units or [])
         self.sent: list[dict[str, object]] = []
-        self.sent_units: list[tuple[bytes, int]] = []
+        # Spec A G4b-2-pre (#237): records (payload, seq, ack) — caller-owned seq.
+        self.sent_units: list[tuple[bytes, int, int]] = []
         self.seq_ack_enabled = seq_ack_enabled
         self.closed = False
         self.send_unit_error: BaseException | None = None
@@ -110,10 +111,10 @@ class _FakeTransport:
         assert isinstance(entry, SeqFrame)
         return entry
 
-    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
+    async def send_payload_unit(self, payload: bytes, *, seq: int, ack: int) -> None:
         if self.send_unit_error is not None:
             raise self.send_unit_error
-        self.sent_units.append((payload, ack))
+        self.sent_units.append((payload, seq, ack))
 
     async def close(self) -> None:
         self.closed = True
@@ -217,7 +218,7 @@ async def test_core_to_client_forwards_payload_byte_for_byte_plain_client() -> N
     shutdown.set()
     await asyncio.wait_for(task, timeout=1.0)
 
-    assert client.sent_units == [(body, 0)]
+    assert client.sent_units == [(body, 0, 0)]  # (payload, minted seq, ack)
     # The JSON-RPC id is intact in the relayed bytes (byte-for-byte, same id run).
     assert b'"id":42' in client.sent_units[0][0]
     assert recorder.controls == []
@@ -255,8 +256,8 @@ async def test_client_to_core_forwards_with_core_cumulative_ack() -> None:
     shutdown.set()
     await asyncio.wait_for(task, timeout=1.0)
 
-    # The client body reached the core carrying the core-leg cumulative ack (1).
-    assert core.sent_units == [(client_body, 1)]
+    # The client body reached the core carrying the minted seq 0 + cumulative ack 1.
+    assert core.sent_units == [(client_body, 0, 1)]
     assert core_link._core_tracker.cumulative_ack() == 1
 
 
@@ -295,7 +296,8 @@ async def test_client_to_core_pump_does_zero_body_parse(monkeypatch: pytest.Monk
 
     # The core leg observed no seqs, so the cumulative ack is its initial -1, FLOORED to
     # the wire's a=0 placeholder by ``relay_to_core`` (a -1 ack would crash the codec).
-    assert core.sent_units == [(client_body, 0)]
+    # (payload, minted seq 0, floored ack 0).
+    assert core.sent_units == [(client_body, 0, 0)]
     # The relay module never parsed the client body (pure opaque forward; H3).
     assert client_body not in calls
 
@@ -512,7 +514,7 @@ async def test_relayed_frame_does_not_bump_dropped_payload_counter() -> None:
     shutdown.set()
     await asyncio.wait_for(task, timeout=1.0)
 
-    assert client.sent_units == [(body, 0)]
+    assert client.sent_units == [(body, 0, 0)]  # (payload, minted seq, ack)
     assert core_link._dropped_payload_frames == 0
 
 
@@ -608,12 +610,41 @@ async def test_seq_enabled_client_resequences_not_pass_through() -> None:
     await asyncio.wait_for(task, timeout=1.0)
 
     assert len(client.sent_units) == 1
-    relayed_payload, relayed_ack = client.sent_units[0]
+    relayed_payload, relayed_seq, relayed_ack = client.sent_units[0]
     assert relayed_payload == core_body
+    assert relayed_seq == 0  # the relay mints its own core->client seq (first = 0)
     # RESEQ: the client-leg ack is the gateway's client-receive ack (1), NOT the
     # core-leg seq the payload arrived with (5).
     assert relayed_ack == 1
     assert relayed_ack != 5
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2-pre (#237) / ADR-0032: the relay OWNS its core->client send-seq.
+# ``_send_to_client`` mints a contiguous per-relay seq and passes it explicitly (the
+# post-G4b-2-pre ``send_payload_unit`` signature requires one). On the plain production
+# TUI leg the transport ignores the seq, but the call must still carry it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_to_client_passes_an_explicit_minted_seq() -> None:
+    """``_send_to_client`` mints its own core->client seq and passes it explicitly.
+
+    On the production plain-client leg the seq is ignored by the transport, but the
+    call must still pass one (the post-G4b-2-pre signature requires it).
+    """
+    core = _FakeTransport()
+    client = _FakeTransport(seq_ack_enabled=True)
+    shutdown = asyncio.Event()
+    relay, _core_link, _recorder = _build_relay(
+        core=core, client=client, client_seq_enabled=True, shutdown=shutdown
+    )
+
+    await relay._send_to_client(b"x")
+    await relay._send_to_client(b"y")
+
+    assert [(p, s) for (p, s, _a) in client.sent_units] == [(b"x", 0), (b"y", 1)]
 
 
 @pytest.mark.asyncio

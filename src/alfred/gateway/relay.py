@@ -82,6 +82,10 @@ class GatewayRelay:
         # through. Bounded (like the core tracker) so an always-up gateway cannot be
         # memory-DoS'd by an every-other-seq client stream.
         self._client_tracker = BoundedSeqAckTracker()
+        # Spec A G4b-2-pre (#237): the relay OWNS its core->client send-seq (the post-
+        # G4b-2-pre ``send_payload_unit`` requires a caller seq). On the plain production
+        # TUI leg the transport ignores it; a seq-enabled client (G4/G5) carries it.
+        self._client_send_seq = 0
         # Wire the core pump's sink to our client-send half. The core-link's run() reads
         # raw units, consumes lifecycle frames, and forwards every opaque payload to this
         # callable — so binding it here is what turns the core-link's pump into the
@@ -143,8 +147,13 @@ class GatewayRelay:
         core->client unit sent before the client leg has delivered a seq.
         """
         ack = max(self._client_tracker.cumulative_ack(), 0) if self._client_seq_enabled else 0
+        # Spec A G4b-2-pre (#237): mint the OWNED core->client seq and pass it
+        # explicitly. The counter advances per send regardless of a loud drop, keeping
+        # the wire seq the single source of truth a G4 client-side buffer could key on.
+        seq = self._client_send_seq
+        self._client_send_seq += 1
         try:
-            await self._client_transport.send_payload_unit(payload, ack=ack)
+            await self._client_transport.send_payload_unit(payload, seq=seq, ack=ack)
         except (
             BrokenPipeError,
             ConnectionResetError,
