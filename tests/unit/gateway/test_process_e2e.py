@@ -177,7 +177,7 @@ async def test_opaque_turn_both_directions_byte_for_byte_through_process(
             up_body = (
                 b'{"jsonrpc":"2.0","id":99,"method":"inbound.message","params":{"text":"hello"}}'
             )
-            await client.send_payload_unit(up_body, ack=0)
+            await client.send_payload_unit(up_body, seq=0, ack=0)
             got_up = await asyncio.wait_for(core_host.read_payload_unit(), timeout=2.0)
             assert got_up is not None
             assert got_up.payload == up_body  # byte-for-byte at the core
@@ -185,7 +185,7 @@ async def test_opaque_turn_both_directions_byte_for_byte_through_process(
 
             # core -> client: the matching opaque response frame (same inner id).
             down_body = b'{"jsonrpc":"2.0","id":99,"result":{"ack":true}}'
-            await core_host.send_payload_unit(down_body, ack=0)
+            await core_host.send_payload_unit(down_body, seq=0, ack=0)
             got_down = await asyncio.wait_for(client.read_payload_unit(), timeout=2.0)
             assert got_down is not None
             assert got_down.payload == down_body  # byte-for-byte at the client
@@ -241,7 +241,7 @@ async def test_core_gap_reconnect_holds_client_and_relays_after_restore(
 
         # A pre-gap turn relays fine over the first core leg.
         pre_body = b'{"jsonrpc":"2.0","id":1,"method":"inbound.message","params":{}}'
-        await core_host1.send_payload_unit(pre_body, ack=0)
+        await core_host1.send_payload_unit(pre_body, seq=0, ack=0)
         got_pre = await asyncio.wait_for(client.read_payload_unit(), timeout=2.0)
         assert got_pre is not None and got_pre.payload == pre_body
 
@@ -249,7 +249,7 @@ async def test_core_gap_reconnect_holds_client_and_relays_after_restore(
         going_down = json.dumps(
             {"method": DAEMON_LIFECYCLE_GOING_DOWN, "params": {"reason": LIFECYCLE_REASON_SHUTDOWN}}
         ).encode()
-        await core_host1.send_payload_unit(going_down, ack=0)
+        await core_host1.send_payload_unit(going_down, seq=1, ack=0)
         # Free the original socket inode (HOST transport + listener) BEFORE the fresh
         # listener rebinds the same adapter id — the merged #273 reconnect fix: close the
         # first core listener so the redial does not collide on the socket path.
@@ -277,7 +277,7 @@ async def test_core_gap_reconnect_holds_client_and_relays_after_restore(
 
             # The held client survived the gap: a fresh client->core turn still relays.
             post_body = b'{"jsonrpc":"2.0","id":2,"method":"inbound.message","params":{}}'
-            await client.send_payload_unit(post_body, ack=0)
+            await client.send_payload_unit(post_body, seq=0, ack=0)
             got_post = await asyncio.wait_for(core_host2.read_payload_unit(), timeout=2.0)
             assert got_post is not None
             assert got_post.payload == post_body  # byte-for-byte over the fresh core leg
