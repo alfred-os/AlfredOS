@@ -45,6 +45,7 @@ import structlog
 from alfred.audit import audit_row_schemas
 from alfred.comms_mcp import audit_hash
 from alfred.comms_mcp.inbound import (
+    _AckTrackerLike,
     _AuditWriterLike,
     _BurstLimiterLike,
     _IdentityResolverLike,
@@ -163,6 +164,7 @@ class InboundMessageHandler:
         pre_resolution_limiter: _PreResolutionLimiter | None = None,
         sub_payload_promoter: _SubPayloadPromoterLike | None = None,
         idempotency_store: _InboundIdempotencyStoreLike | None = None,
+        ack_tracker: _AckTrackerLike | None = None,
     ) -> None:
         self._identity_resolver = identity_resolver
         self._orchestrator = orchestrator
@@ -180,6 +182,13 @@ class InboundMessageHandler:
         # G0 (Spec A): the durable accept-once store. None → idempotency inert
         # (pre-G0 unit callers); production injects a PostgresInboundIdempotencyStore.
         self._idempotency_store = idempotency_store
+        # G4b-2a-pre (Spec A): the host durable-intake ack tracker, advanced ONLY on
+        # the durable commit_once. It is PER-CONNECTION, not per-boot: the socket
+        # carrier constructs a fresh tracker per accepted connection and binds it via
+        # :meth:`set_ack_tracker` AFTER the handshake (the handler is built once per
+        # boot, before any peer connects). ``None`` until set — the stdio path never
+        # sets one, so its inbound advances no ack.
+        self._ack_tracker = ack_tracker
         # Persistent across every ``process`` call (sec-003). Tests may inject a
         # pre-loaded limiter to drive the cap deterministically; production
         # leaves it defaulted so the handler mints exactly one and keeps it.
@@ -188,6 +197,22 @@ class InboundMessageHandler:
             if pre_resolution_limiter is not None
             else _PreResolutionLimiter()
         )
+
+    def set_ack_tracker(self, ack_tracker: _AckTrackerLike) -> None:
+        """Bind the PER-CONNECTION durable-intake ack tracker (Spec A G4b-2a-pre).
+
+        Called by the socket carrier in ``_accept_and_pump`` AFTER the handshake —
+        the handler is built once per boot (before any peer connects), but the
+        tracker's lifetime is the ACCEPTED CONNECTION (F2/F4). The daemon's comms
+        listener is one-shot per boot (``accept()`` raises on a second call), so a
+        single set is correct today. G4b-2b's reconnect-replay MUST call this again
+        per accepted connection to RESET the tracker — else the long-lived tracker
+        carries the old connection's high-water and the new connection's seqs
+        (restarting at 0) look already-settled, so the daemon acks frames the new
+        connection never sent (mirrors ``core_link._peer_handshake``'s tracker
+        reset).
+        """
+        self._ack_tracker = ack_tracker
 
     async def process(self, notification: InboundMessageNotification) -> None:
         await process_inbound_message(
@@ -200,6 +225,7 @@ class InboundMessageHandler:
             pre_resolution_limiter=self._pre_resolution_limiter,
             sub_payload_promoter=self._sub_payload_promoter,
             idempotency_store=self._idempotency_store,
+            ack_tracker=self._ack_tracker,
         )
 
 

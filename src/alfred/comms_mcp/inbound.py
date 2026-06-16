@@ -163,6 +163,20 @@ class _InboundIdempotencyStoreLike(Protocol):
 
 
 @runtime_checkable
+class _AckTrackerLike(Protocol):
+    """Structural type for the host durable-intake ack tracker (Spec A / G4b-2a-pre).
+
+    The daemon's per-connection ``BoundedSeqAckTracker`` (reused from the gateway —
+    ``gateway/_seq_tracker.py``); this module binds to its SHAPE (``observe``) so it
+    stays decoupled from the gateway package. ``observe`` is pure-CPU (no ``await``),
+    so the ``commit_once``->``observe`` pair is atomic w.r.t. the single-threaded
+    event loop and needs no lock under the runner's concurrent dispatch fan-out.
+    """
+
+    def observe(self, seq: int) -> None: ...
+
+
+@runtime_checkable
 class _SubPayloadPromoterLike(Protocol):
     """Structural type for the host-side sub-payload promoter (P1).
 
@@ -397,6 +411,7 @@ async def process_inbound_message(
     pre_resolution_limiter: _PreResolutionLimiter | None = None,
     sub_payload_promoter: _SubPayloadPromoterLike | None = None,
     idempotency_store: _InboundIdempotencyStoreLike | None = None,
+    ack_tracker: _AckTrackerLike | None = None,
 ) -> None:
     """Route one inbound comms notification through the trust boundary.
 
@@ -461,19 +476,35 @@ async def process_inbound_message(
     # never re-charges the coarse budget (which would defeat G0). ``None`` store =
     # pre-G0 unit callers; production always injects. A DB error in commit_once
     # PROPAGATES (the store fails loud — hard rule #7); it is not caught here.
-    if idempotency_store is not None and not await idempotency_store.commit_once(
-        inbound_id=notification.inbound_id,
-        adapter_id=notification.adapter_id,
-    ):
-        # The replay DROP is a side effect → it is AUDITED (signed log), not just
-        # logged. Wire the broker so hash_inbound_id can derive the comms subkey.
-        audit_hash.set_broker(secret_broker)
-        await _emit_idempotency_replay_observed(notification, audit_writer=audit_writer)
-        _log.info(
-            "comms.inbound.idempotency.replay_short_circuit",
+    if idempotency_store is not None:
+        if not await idempotency_store.commit_once(
+            inbound_id=notification.inbound_id,
             adapter_id=notification.adapter_id,
-        )
-        return
+        ):
+            # REPLAY branch (commit_once == False) — UNCHANGED. The replay DROP is a
+            # side effect → it is AUDITED (signed log), not just logged. Wire the
+            # broker so hash_inbound_id can derive the comms subkey.
+            audit_hash.set_broker(secret_broker)
+            await _emit_idempotency_replay_observed(notification, audit_writer=audit_writer)
+            _log.info(
+                "comms.inbound.idempotency.replay_short_circuit",
+                adapter_id=notification.adapter_id,
+            )
+            return
+        # DURABLE accept (commit_once == True): advance the host durable-intake ack
+        # (Spec A G4b-2a-pre / ADR-0032 — F2/F4). The ack means "highest CONTIGUOUS
+        # seq the core has DURABLY accepted", so it advances ONLY here — never on the
+        # replay branch above, never on the structural refusals ahead of this gate,
+        # never on the None-store fallthrough below. ``observe`` is pure-CPU (no
+        # ``await``), so the commit_once->observe pair is atomic w.r.t. the single
+        # event loop under the runner's concurrent dispatch — no lock needed, and the
+        # contiguous high-water is correct regardless of dispatch order. ``wire_seq``
+        # is the VALIDATED model field (Task 1's ``ge=0`` validator already ran), so
+        # a forged negative can never reach ``observe`` (which would raise).
+        if ack_tracker is not None and notification.wire_seq is not None:
+            ack_tracker.observe(notification.wire_seq)
+    # None-store path (pre-G0 unit callers) falls through UNCHANGED to the rest of
+    # the pipeline — it advances no ack (no durable accept was adjudicated).
 
     # Wire the authoritative comms hash recipe (closure comms-1) to this call's
     # broker. ``set_broker`` is idempotent on the same broker object, so this is

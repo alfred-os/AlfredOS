@@ -702,10 +702,16 @@ class _CommsAdapterWiring:
     branches (:func:`_spawn_comms_adapter` for the stdio pipe,
     :func:`_listen_socket_comms_adapter` for the unix socket) construct only the
     transport + runner and never duplicate the handler fan-out.
+
+    ``inbound_handler`` is exposed so the SOCKET carrier can bind a PER-CONNECTION
+    durable-intake ack tracker onto it AFTER the handshake (Spec A G4b-2a-pre — the
+    tracker's lifetime is the accepted connection, not the per-boot wiring). The
+    stdio carrier never touches it (its inbound carries no wire seq).
     """
 
     wire: _CommsAdapterWireSpec
     session: object
+    inbound_handler: object
 
 
 async def _build_comms_adapter_wiring(
@@ -822,7 +828,7 @@ async def _build_comms_adapter_wiring(
         transport=None,
         max_in_flight_notifications=settings.comms_max_in_flight_notifications,
     )
-    return _CommsAdapterWiring(wire=wire, session=session)
+    return _CommsAdapterWiring(wire=wire, session=session, inbound_handler=inbound_handler)
 
 
 def _build_comms_runner(
