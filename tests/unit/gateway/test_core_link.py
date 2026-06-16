@@ -91,7 +91,9 @@ class _FakeCoreTransport:
         # the payloads/acks ``send_payload_unit`` records, and an optional injected
         # error a single ``send_payload_unit`` raises (the broken-pipe drop tests).
         self.units: collections.deque[SeqFrame] = collections.deque()
-        self.sent_units: list[tuple[bytes, int]] = []
+        # Spec A G4b-2-pre (#237): records (payload, seq, ack) — the caller now OWNS
+        # the wire seq it passes (no internal counter).
+        self.sent_units: list[tuple[bytes, int, int]] = []
         self.send_unit_error: BaseException | None = None
 
     async def spawn(self) -> None:  # pragma: no cover - unused on the peer leg
@@ -106,10 +108,10 @@ class _FakeCoreTransport:
     async def read_payload_unit(self) -> SeqFrame | None:
         return self.units.popleft() if self.units else None
 
-    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
+    async def send_payload_unit(self, payload: bytes, *, seq: int, ack: int) -> None:
         if self.send_unit_error is not None:
             raise self.send_unit_error
-        self.sent_units.append((payload, ack))
+        self.sent_units.append((payload, seq, ack))
 
     async def close(self) -> None:
         self.closed = True
@@ -841,7 +843,8 @@ class _ScriptedCoreTransport:
     def __init__(self, script: list[object]) -> None:
         self._script: collections.deque[object] = collections.deque(script)
         self.sent: list[dict[str, object]] = []
-        self.sent_units: list[tuple[bytes, int]] = []
+        # Spec A G4b-2-pre (#237): records (payload, seq, ack) — caller-owned seq.
+        self.sent_units: list[tuple[bytes, int, int]] = []
         self.seq_ack_enabled = False
         self.closed = False
 
@@ -851,8 +854,8 @@ class _ScriptedCoreTransport:
     async def send(self, frame: Mapping[str, object]) -> None:
         self.sent.append(dict(frame))
 
-    async def send_payload_unit(self, payload: bytes, *, ack: int) -> None:
-        self.sent_units.append((payload, ack))
+    async def send_payload_unit(self, payload: bytes, *, seq: int, ack: int) -> None:
+        self.sent_units.append((payload, seq, ack))
 
     async def _next(self) -> object | None:
         """Pop the next script entry, awaiting an ``Event`` / raising a crash."""
@@ -1527,7 +1530,65 @@ async def test_relay_to_core_sends_payload_with_cumulative_ack() -> None:
 
     await link.relay_to_core(b'{"id":1,"result":{}}')
 
-    assert transport.sent_units == [(b'{"id":1,"result":{}}', 2)]
+    # First relay call on a fresh leg mints seq 0; ack is the cumulative 2.
+    assert transport.sent_units == [(b'{"id":1,"result":{}}', 0, 2)]
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2-pre (#237) / ADR-0032: the gateway OWNS the client->core send-seq.
+# ``relay_to_core`` mints a contiguous per-leg seq and passes it explicitly; a fresh
+# ``_peer_handshake`` resets it to 0 (a new core leg is a new seq space).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_mints_contiguous_seq_and_passes_it_explicitly() -> None:
+    """``relay_to_core`` mints 0,1,2,... and passes each as the explicit send seq."""
+    link, _recorder, _sink = _link_with_relay()
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    await link.relay_to_core(b"one")
+    await link.relay_to_core(b"two")
+
+    assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"one", 0), (b"two", 1)]
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_none_transport_drop_does_not_consume_a_seq() -> None:
+    """A no-transport loud drop happens BEFORE the mint, so it does NOT consume a seq —
+    the next real send on a live leg still starts at 0 (design §3.2)."""
+    link, _recorder, _sink = _link_with_relay()
+    link._current_core_transport = None
+
+    with structlog.testing.capture_logs():
+        await link.relay_to_core(b"dropped")  # no transport -> loud drop, no mint
+
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+    await link.relay_to_core(b"first-real")
+
+    assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"first-real", 0)]
+
+
+@pytest.mark.asyncio
+async def test_peer_handshake_resets_the_client_to_core_seq() -> None:
+    """A fresh handshake (new core leg) resets the send-seq to 0 — per-connection space."""
+    link, _recorder, _sink = _link_with_relay()
+    transport1 = _FakeCoreTransport([])
+    link._current_core_transport = transport1
+    await link.relay_to_core(b"a")
+    await link.relay_to_core(b"b")  # _client_to_core_seq now at 2
+
+    epoch = uuid4().hex
+    transport2 = _FakeCoreTransport(
+        [_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})]
+    )
+    await link._peer_handshake(transport2)  # fresh leg resets the seq space
+    link._current_core_transport = transport2
+    await link.relay_to_core(b"c")
+
+    assert transport2.sent_units[-1][1] == 0  # reset to 0 on the new leg
 
 
 @pytest.mark.asyncio
