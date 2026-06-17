@@ -46,16 +46,20 @@ class _FakeStore:
 
     def __init__(self, *, won: bool) -> None:
         self._won = won
-        self._committed: set[str] = set()
+        # Dedupe on the COMPOSITE (adapter_id, inbound_id) — the real G0 ledger key
+        # (Spec A decision 4) — so a same-inbound_id under a different adapter is NOT a
+        # false replay and adapter-scoping regressions can't hide (CodeRabbit).
+        self._committed: set[tuple[str, str]] = set()
         self.calls: list[tuple[str, str]] = []
 
     async def commit_once(self, *, inbound_id: str, adapter_id: str) -> bool:
         self.calls.append((inbound_id, adapter_id))
         if not self._won:
             return False
-        if inbound_id in self._committed:
+        key = (adapter_id, inbound_id)
+        if key in self._committed:
             return False
-        self._committed.add(inbound_id)
+        self._committed.add(key)
         return True
 
 

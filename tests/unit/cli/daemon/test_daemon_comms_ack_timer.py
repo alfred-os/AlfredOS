@@ -21,7 +21,8 @@ interval + a shutdown event so the cancellation path is deterministic.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -47,14 +48,20 @@ class _RecordingSender:
         self.sent.append((method, params))
 
 
-async def _run_until(
-    *,
-    sender: _RecordingSender,
-    tracker: BoundedSeqAckTracker,
-    condition: Callable[[], bool],
-    timeout: float = 2.0,
-) -> None:
-    """Start the loop, wait for ``condition()``, then cancel + reap it."""
+@asynccontextmanager
+async def _running_loop(
+    *, sender: _RecordingSender, tracker: BoundedSeqAckTracker
+) -> AsyncIterator[None]:
+    """Run ONE ack loop for the whole block; cancel + reap on exit.
+
+    Unlike :func:`_run_until` (which cancels as soon as its condition fires), the loop
+    stays ALIVE for the entire ``async with`` body — so a test can drive the tracker,
+    wait for an emit, AND then assert over a further quiet/advance window against the
+    SAME loop instance. The loop's internal ``last_emitted`` state therefore persists
+    across those steps, which is exactly what the F5 emit-on-advance invariant needs
+    (a fresh loop per step would reset ``last_emitted`` to the ``-1`` sentinel and make
+    the suppression / re-emit assertions vacuous — CodeRabbit, Spec A G4b-2a-pre).
+    """
     shutdown = asyncio.Event()
     task = asyncio.ensure_future(
         _emit_durable_intake_ack_loop(
@@ -65,12 +72,29 @@ async def _run_until(
         )
     )
     try:
-        async with asyncio.timeout(timeout):
-            while not condition():
-                await asyncio.sleep(_FAST_INTERVAL)
+        yield
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+async def _wait_until(condition: Callable[[], bool], *, timeout: float = 2.0) -> None:
+    """Poll ``condition()`` on the fast interval until true (or the timeout fires)."""
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(_FAST_INTERVAL)
+
+
+async def _run_until(
+    *,
+    sender: _RecordingSender,
+    tracker: BoundedSeqAckTracker,
+    condition: Callable[[], bool],
+    timeout: float = 2.0,
+) -> None:
+    """Start the loop, wait for ``condition()``, then cancel + reap it (one-shot)."""
+    async with _running_loop(sender=sender, tracker=tracker):
+        await _wait_until(condition, timeout=timeout)
 
 
 async def test_first_commit_emits_ack_zero() -> None:
@@ -106,24 +130,31 @@ async def test_quiet_link_emits_nothing() -> None:
 
 
 async def test_emits_once_per_advance_not_per_tick() -> None:
-    # Advance to 2, wait for the emit, then assert no further frame while quiet.
+    # Advance to 2, wait for the emit, then — with the SAME loop STILL RUNNING — assert
+    # a quiet window produces no second frame. The loop must be alive during the quiet
+    # window or the suppression check is vacuous (CodeRabbit).
     sender = _RecordingSender()
     tracker = BoundedSeqAckTracker()
     for seq in (0, 1, 2):
         tracker.observe(seq)
-    await _run_until(sender=sender, tracker=tracker, condition=lambda: len(sender.sent) >= 1)
-    # A quiet window after the emit must NOT produce a second redundant frame.
-    await asyncio.sleep(_FAST_INTERVAL * 4)
-    assert [p["cumulative_ack"] for _m, p in sender.sent] == [2]
+    async with _running_loop(sender=sender, tracker=tracker):
+        await _wait_until(lambda: len(sender.sent) >= 1)
+        # Many ticks elapse with no advance — the live loop must NOT re-emit.
+        await asyncio.sleep(_FAST_INTERVAL * 5)
+        assert [p["cumulative_ack"] for _m, p in sender.sent] == [2]
 
 
 async def test_advance_after_emit_emits_again() -> None:
+    # ONE loop instance: emit at 0, then a LATER advance to 1 must emit again — proving
+    # the loop's internal last_emitted carries 0 across the advance (a fresh loop per
+    # step would reset to the -1 sentinel and emit 1 regardless, hiding the bug).
     sender = _RecordingSender()
     tracker = BoundedSeqAckTracker()
     tracker.observe(0)
-    await _run_until(sender=sender, tracker=tracker, condition=lambda: len(sender.sent) >= 1)
-    tracker.observe(1)
-    await _run_until(sender=sender, tracker=tracker, condition=lambda: len(sender.sent) >= 2)
+    async with _running_loop(sender=sender, tracker=tracker):
+        await _wait_until(lambda: len(sender.sent) >= 1)
+        tracker.observe(1)
+        await _wait_until(lambda: len(sender.sent) >= 2)
     assert [p["cumulative_ack"] for _m, p in sender.sent] == [0, 1]
 
 
