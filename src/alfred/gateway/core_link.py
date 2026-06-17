@@ -775,6 +775,13 @@ class GatewayCoreLink:
         # loud-drops, so a G4b-2a buffer-append-per-call keys on the exact wire seq.
         seq = self._client_to_core_seq
         self._client_to_core_seq += 1
+        if self._replay_buffer is not None:
+            # append-before-send (design §3.3): the buffer is the durable no-loss
+            # record; the send below is best-effort and may loud-drop. Keyed on the
+            # exact wire seq (G4b-2-pre) so a buffered frame's seq == its wire seq even
+            # across a loud-dropped send. The buffer's hard-ceiling raise is the
+            # fail-closed backstop if G4b's read-halt is buggy.
+            self._replay_buffer.append(seq, payload, now=self._monotonic())
         try:
             await local.send_payload_unit(payload, seq=seq, ack=ack)
         except (

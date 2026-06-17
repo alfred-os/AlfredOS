@@ -1699,6 +1699,86 @@ async def test_relay_to_core_drops_loud_on_broken_pipe() -> None:
     assert link._core_tracker.cumulative_ack() == 0
 
 
+# ---------------------------------------------------------------------------
+# Task 3 (Spec A G4b-2a / ADR-0032): append-before-send into the ReplayBuffer.
+# ``relay_to_core`` appends the inbound frame keyed on its wire seq BEFORE the
+# best-effort send, so a loud-dropped send still leaves the frame durably held.
+# ---------------------------------------------------------------------------
+
+
+def _link_with_relay_and_buffer(
+    *, buffer: ReplayBuffer
+) -> tuple[GatewayCoreLink, _RecordingClientListener, _RelaySink]:
+    """A relay-wired core link with an injected :class:`ReplayBuffer`."""
+    recorder = _RecordingClientListener()
+    sink = _RelaySink()
+    link = GatewayCoreLink(
+        client_listener=recorder,  # type: ignore[arg-type]
+        payload_relay=sink,  # type: ignore[arg-type]
+        replay_buffer=buffer,
+    )
+    return link, recorder, sink
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_appends_inbound_frame_keyed_on_wire_seq() -> None:
+    """With a buffer injected, ``relay_to_core`` appends ``(seq=0, payload)`` then sends.
+
+    The buffered seq is the EXACT wire seq passed to the transport — append-before-send
+    keys the durable record on the same counter the send carries.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    await link.relay_to_core(b"x")
+
+    assert buf.depth_frames == 1
+    # The seq passed to the transport equals the buffered seq (0).
+    wire_seq = transport.sent_units[0][1]
+    assert wire_seq == 0
+    assert buf.unacked_frames()[0].seq == wire_seq
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_loud_drop_still_leaves_frame_buffered() -> None:
+    """A loud-dropped send STILL leaves the appended frame in the buffer.
+
+    Append happens BEFORE the send, so a broken-pipe drop does not unwind the durable
+    record — G4b-2b replays the held frame once the leg is back.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    transport.send_unit_error = BrokenPipeError()
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs():
+        await link.relay_to_core(b"x")  # send loud-drops; append already happened
+
+    assert transport.sent_units == []  # nothing reached the wire
+    assert buf.depth_frames == 1  # the frame is still durably held
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_no_buffer_still_advances_seq() -> None:
+    """With NO buffer (default ``None``), ``relay_to_core`` behaves exactly as before.
+
+    No crash on a buffer-less link, and the send-seq still advances: a second call
+    mints seq 1.
+    """
+    link, _recorder, _sink = _link_with_relay()  # default replay_buffer=None
+    assert link._replay_buffer is None
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    await link.relay_to_core(b"one")
+    await link.relay_to_core(b"two")
+
+    assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"one", 0), (b"two", 1)]
+
+
 @pytest.mark.asyncio
 async def test_relay_to_core_drops_loud_on_none_transport() -> None:
     """A None current transport (the reconnect-race write window — architect M3) is a
