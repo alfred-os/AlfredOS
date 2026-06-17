@@ -43,6 +43,27 @@ The relay's `_client_to_core_pump` (a separate task) calls `relay_to_core` for f
 
 ---
 
+### PLAN-REVIEW REVISIONS (architect + security, 2026-06-17) — these supersede conflicting task prose
+
+**Decision confirmed:** Option A (the `_replay_pending` gate) is APPROVED by both reviewers (mirrors the read-halt; no deadlock — the parked client pump is a *separate task* from `run()`'s flush task; the buffer-side seq-reservation third option is rejected for splitting seq-mint authority). Replay re-append is sound (no double-count: reset empties+zeros, the new core must re-ack because exactly-once is the in-payload `inbound_id`).
+
+**R1 — None-transport-at-flush = RE-STASH, never accept-drop (both reviewers; BLOCKER otherwise).** Accept-drop is a hard-rule-#7 silent cross-restart loss AND a lying audit (`buffer_replayed` would claim a resume that did not send). `_flush_pending_replay` must, per frame, check `self._current_core_transport is None` BEFORE calling `relay_to_core`: on None, re-stash the un-sent remainder into `self._pending_replay`, emit ONE loud `gateway.comms.buffer_replay_deferred` row (`deferred=<n>`, `reason="transport_lost_mid_replay"`), and RETURN leaving the gate CLEARED (the next bind's flush retries; the client pump stays parked — correct, the leg is unusable). Emit `buffer_replayed` only for a frame that was actually handed to `relay_to_core`. The gate `set()` happens ONLY on a COMPLETE flush — implement as `finally: if not self._pending_replay: self._replay_pending.set()` (a defer leaves `_pending_replay` non-empty → gate stays clear; a complete/empty flush → gate set; a stray `relay_to_core` raise still hits the `finally` → gate set = the S5 DoS fail-safe). NOTE: a *broken-pipe* mid-replay (transport non-None, send raises inside `relay_to_core`) is SELF-HEALING — `relay_to_core` already appended the frame before the send, so it stays buffered (un-acked) and replays next reconnect; only the None-transport case needs the explicit re-stash (`relay_to_core` returns early on None WITHOUT appending).
+
+**R2 — Task 6 also corrects `ReplayFrame` (`replay_buffer.py:91-93`)** — its docstring "Replay MUST carry the ORIGINAL seq — the core dedups on `(leg, seq)`" is the most direct contradiction of the per-connection-reseq + inbound-id model. Add it to Task 6's touch list alongside the module / `unacked_frames` / `discard` docstrings.
+
+**R3 — Task 5 adversarial assertions are tightened to POSITIVE call-count gates (security; these are the owed corpus entries):**
+
+- (a) **forged-ready → flush-not-called:** feed a forged/stale-epoch `ready` to `_consume_ready` and assert `_flush_pending_replay` was NOT called (spy/call-count == 0) AND `_pending_replay` is untouched — not merely "no CORE_READY feed".
+- (b) **payload-blind replay:** a `json.loads`-never-called spy over the replay path (both `relay.json.loads` and `core_link.json.loads`, as the §6(d) flood test does) asserts `loads_calls == []` across the whole replay.
+- (c) **stash-residency:** after a COMPLETE flush, assert `_pending_replay == ()` (no lingering pre-DLP refs pinned in the always-up process).
+- (d) **None-transport defer:** force `_current_core_transport = None` mid-flush → assert re-stash (`_pending_replay` holds the remainder), the loud `buffer_replay_deferred` row, and the gate stays CLEARED.
+- (e) **gate fail-safe:** a flush whose loop raises mid-way still SETS the gate (no client→core wedge / DoS).
+- (f) **trim-mid-flush benign:** the new core's early ack arriving during the flush (`trim_to_ack` on a partially-appended buffer) removes only `seq <= ack` and does not corrupt the ascending replay — assert no loss/corruption.
+
+**R4 — gate-clear-before-CORE_READY ordering invariant (architect A5).** The gate is cleared in `_peer_handshake` (Task 2), which COMPLETES before its caller (`_reconnect`/`_initial_connect`) feeds `CORE_READY` and before `run()` rebinds the transport + flushes. So the client pump can never observe an unparked gate between CORE_READY and the flush. Make this explicit in the Task 2 comment; Task 5 asserts replay-precedes-fresh-input by SEQ ORDER (a fresh client frame queued during the gap gets `seq >= N`).
+
+---
+
 ## File structure
 
 - **Modify:** `src/alfred/gateway/core_link.py` — `__init__` (`_pending_replay` stash + `_replay_pending` Event); `_peer_handshake` (capture-before-reset, replacing the loss-log); `run()` (call `_flush_pending_replay` after each transport bind); new `_flush_pending_replay()`.
@@ -126,11 +147,28 @@ The relay's `_client_to_core_pump` (a separate task) calls `relay_to_core` for f
         frames = self._pending_replay
         self._pending_replay = ()
         try:
-            for frame in frames:
+            for index, frame in enumerate(frames):
+                if self._current_core_transport is None:
+                    # R1: the leg vanished mid-flush (a reconnect race). Re-stash the
+                    # un-sent remainder so the next bind retries; do NOT claim resume for
+                    # frames that never went out (hard rule #7). Gate stays CLEARED (the
+                    # client pump stays parked until the retry flush completes).
+                    self._pending_replay = frames[index:]
+                    log.warning(
+                        "gateway.comms.buffer_replay_deferred",
+                        deferred=len(self._pending_replay),
+                        reason="transport_lost_mid_replay",
+                    )
+                    return
                 log.warning("gateway.comms.buffer_replayed", seq=frame.seq, reason="reconnect_resume")
-                await self.relay_to_core(frame.payload)
+                await self.relay_to_core(frame.payload)  # append-before-send, fresh seq
         finally:
-            self._replay_pending.set()
+            # Release the held client->core pump ONLY on a COMPLETE flush. A defer (R1)
+            # leaves _pending_replay non-empty -> gate stays clear; a complete/empty flush
+            # -> gate set; a stray relay_to_core raise still hits this -> gate set (the S5
+            # DoS fail-safe, no client->core wedge).
+            if not self._pending_replay:
+                self._replay_pending.set()
 ```
 
   Wire into `run()`: after BOTH `self._current_core_transport = transport` bindings (the initial ~393 and the reconnect ~416), add `await self._flush_pending_replay()`. (Initial connect: empty stash → no-op. Place BEFORE the reconnect arm's `continue`.)
