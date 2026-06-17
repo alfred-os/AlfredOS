@@ -721,6 +721,19 @@ class GatewayCoreLink:
             # it must NEITHER fall into the relay ``else`` (leaking a host control frame
             # to the client) NOR feed the link-state machine. Payload-blind: a missing /
             # malformed ``cumulative_ack`` is still consumed, never relayed.
+            #
+            # Spec A G4b-2a (#237): the daemon emits this ONLY on its G0 durable-intake
+            # commit, so the ack is epoch-validated by construction (current UP leg) —
+            # the security precondition the ReplayBuffer.trim_to_ack docstring names.
+            # Payload-blind robustness: a missing/malformed cumulative_ack is still
+            # CONSUMED (never relayed, never crashes), it just does not trim.
+            if self._replay_buffer is not None:
+                params = parsed.get("params") if isinstance(parsed, Mapping) else None
+                ack = params.get("cumulative_ack") if isinstance(params, Mapping) else None
+                if isinstance(ack, int) and not isinstance(ack, bool) and ack >= 0:
+                    self._replay_buffer.trim_to_ack(ack)
+                else:
+                    log.warning("gateway.core_link.daemon_comms_ack_malformed")
             log.debug("gateway.core_link.daemon_comms_ack_consumed")
             return
         if method in (DAEMON_LIFECYCLE_READY, DAEMON_LIFECYCLE_GOING_DOWN):

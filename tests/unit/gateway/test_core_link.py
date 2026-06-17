@@ -1464,6 +1464,83 @@ async def test_route_unit_consumes_daemon_comms_ack_with_malformed_body_does_not
     assert link._dropped_payload_frames == 0
 
 
+# ---------------------------------------------------------------------------
+# Task 4 (Spec A G4b-2a / ADR-0032): the daemon.comms.ack trims the ReplayBuffer.
+# The daemon emits the ack ONLY on its G0 durable-intake commit, so the cumulative
+# ack is epoch-validated by construction; trim drops the seq<=ack leading prefix.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_route_unit_daemon_comms_ack_trims_the_replay_buffer() -> None:
+    """A ``daemon.comms.ack`` with ``cumulative_ack=2`` trims seqs 0,1,2 — seq 3 stays.
+
+    The ack unit is CONSUMED (never relayed) and ``trim_to_ack(2)`` removes the leading
+    prefix, leaving only the un-acked seq 3.
+    """
+    epoch = uuid4().hex
+    buf = ReplayBuffer()
+    for seq in (0, 1, 2, 3):
+        buf.append(seq, b"x", now=float(seq))
+    link, _recorder, sink = _link_with_relay_and_buffer(buffer=buf)
+    link._core_epoch = epoch
+    body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {"cumulative_ack": 2}}).encode()
+
+    await link._route_unit(_payload_unit(body))
+
+    assert buf.depth_frames == 1  # only seq 3 retained
+    assert buf.unacked_frames()[0].seq == 3
+    assert sink.received == []  # the ack unit was NOT forwarded to the client
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},  # no cumulative_ack at all
+        {"cumulative_ack": "2"},  # non-int
+        {"cumulative_ack": True},  # a JSON ``true`` must NOT be treated as ack=1
+        {"cumulative_ack": -1},  # negative
+    ],
+)
+@pytest.mark.asyncio
+async def test_route_unit_daemon_comms_ack_malformed_does_not_trim(
+    params: dict[str, object],
+) -> None:
+    """A malformed/missing ``cumulative_ack`` is CONSUMED, never trims, never raises."""
+    epoch = uuid4().hex
+    buf = ReplayBuffer()
+    for seq in (0, 1, 2):
+        buf.append(seq, b"x", now=float(seq))
+    link, _recorder, sink = _link_with_relay_and_buffer(buffer=buf)
+    link._core_epoch = epoch
+    body = json.dumps({"method": DAEMON_COMMS_ACK, "params": params}).encode()
+
+    with structlog.testing.capture_logs() as captured:
+        await link._route_unit(_payload_unit(body))  # must NOT raise
+
+    assert buf.depth_frames == 3  # unchanged — no trim
+    assert sink.received == []  # still consumed, never relayed
+    malformed = [
+        c for c in captured if c.get("event") == "gateway.core_link.daemon_comms_ack_malformed"
+    ]
+    assert len(malformed) == 1
+    assert malformed[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_route_unit_daemon_comms_ack_no_buffer_is_noop() -> None:
+    """With NO buffer injected, the ack consume is the existing no-op (not relayed)."""
+    epoch = uuid4().hex
+    link, _recorder, sink = _link_with_relay(epoch=epoch)  # default replay_buffer=None
+    assert link._replay_buffer is None
+    body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {"cumulative_ack": 4}}).encode()
+
+    await link._route_unit(_payload_unit(body))  # no crash
+
+    assert sink.received == []
+    assert link._dropped_payload_frames == 0
+
+
 @pytest.mark.asyncio
 async def test_route_unit_parse_failure_fails_toward_relay() -> None:
     """A payload that is NOT valid JSON is RELAYED (fail-toward-relay), never dropped.
