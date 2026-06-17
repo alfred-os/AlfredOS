@@ -274,6 +274,28 @@ class GatewayCoreLink:
         # foundation cut wires only the injection; the append/trim lands in a later task.
         self._replay_buffer = replay_buffer
 
+    @property
+    def replay_buffer_tripped(self) -> bool:
+        """``True`` iff the injected ReplayBuffer's back-pressure breaker has latched.
+
+        The relay's client->core pump polls this to halt the client read (Spec A
+        G4b-2a back-pressure / R4); ``False`` when no buffer is injected (buffering off).
+        """
+        return self._replay_buffer.breaker_tripped if self._replay_buffer is not None else False
+
+    async def wait_for_shutdown(self) -> None:
+        """Block until this link's shutdown event fires (or forever, until cancelled).
+
+        The client read-halt parks here while the buffer breaker is latched (Spec A
+        G4b-2a / R4): when a shutdown event is wired it returns on shutdown; when it is
+        not (a unit-test link), it blocks until the relay TaskGroup cancels the parked
+        pump. Either way the park is cancellation-safe.
+        """
+        if self._shutdown_event is not None:
+            await self._shutdown_event.wait()
+        else:
+            await asyncio.Event().wait()  # no event wired: block until cancelled
+
     async def _default_dial(self) -> _CommsTransportLike:
         """Production dial: connect the core's comms socket on the keyed adapter id.
 

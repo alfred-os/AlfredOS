@@ -2472,3 +2472,77 @@ async def test_relay_to_core_no_buffer_never_references_breaker() -> None:
     assert recorder.controls == []  # buffer-less link never escalates
     rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
     assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2a (#237 / R4): the relay's client read-halt seams on GatewayCoreLink —
+# a read-only ``replay_buffer_tripped`` property the relay polls, and a
+# ``wait_for_shutdown`` park the halted pump blocks on until the relay TaskGroup
+# cancels it (the latch is TERMINAL in 2a; 2b adds the reset that clears it).
+# ---------------------------------------------------------------------------
+
+
+def test_replay_buffer_tripped_is_false_with_no_buffer() -> None:
+    """No buffer injected -> the property is ``False`` (buffering off)."""
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+    assert link._replay_buffer is None
+    assert link.replay_buffer_tripped is False
+
+
+def test_replay_buffer_tripped_is_false_with_untripped_buffer() -> None:
+    """An injected but un-latched buffer -> ``False``."""
+    buf = ReplayBuffer()
+    link = GatewayCoreLink(client_listener=_RecordingClientListener(), replay_buffer=buf)  # type: ignore[arg-type]
+    assert buf.breaker_tripped is False
+    assert link.replay_buffer_tripped is False
+
+
+@pytest.mark.asyncio
+async def test_replay_buffer_tripped_is_true_after_breaker_latches() -> None:
+    """Once the injected buffer's breaker latches (soft-cap breach), the property is ``True``.
+
+    Drive a real trip via the relay path on a ``max_frames=1`` buffer: the second
+    append breaches the soft cap and latches the breaker.
+    """
+    buf = ReplayBuffer(max_frames=1)
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    assert link.replay_buffer_tripped is False
+    with structlog.testing.capture_logs():
+        await link.relay_to_core(b"one")  # depth 1 — no trip
+        assert link.replay_buffer_tripped is False
+        await link.relay_to_core(b"two")  # depth 2 > 1 — trips
+
+    assert buf.breaker_tripped is True
+    assert link.replay_buffer_tripped is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_shutdown_returns_when_wired_event_set() -> None:
+    """With a wired shutdown event, ``wait_for_shutdown`` RETURNS once the event fires."""
+    shutdown = asyncio.Event()
+    link = GatewayCoreLink(
+        client_listener=_RecordingClientListener(),  # type: ignore[arg-type]
+        shutdown_event=shutdown,
+    )
+
+    shutdown.set()
+    # Returns promptly (the event is already set) — no timeout.
+    await asyncio.wait_for(link.wait_for_shutdown(), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_shutdown_blocks_forever_with_no_event() -> None:
+    """With NO shutdown event wired, ``wait_for_shutdown`` BLOCKS (parks until cancelled).
+
+    Covers the ``shutdown_event is None`` else branch: the park does not complete within
+    a short window, so ``asyncio.wait_for`` times out (the throwaway block-forever Event
+    is never set; only a cancel — which ``wait_for`` raises here as a timeout — ends it).
+    """
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+    assert link._shutdown_event is None
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(link.wait_for_shutdown(), timeout=0.05)
