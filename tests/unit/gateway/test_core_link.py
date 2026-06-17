@@ -2208,3 +2208,159 @@ def test_init_replay_buffer_defaults_to_none() -> None:
     """
     link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
     assert link._replay_buffer is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (Spec A G4b-2a / ADR-0032 — R1): a fresh core leg is a fresh seq space, so
+# any frames still held under the OLD epoch cannot be replayed in 2a (reconnect-replay
+# is 2b). They must NOT survive into epoch B — epoch B's seq restarts at 0 (which the
+# buffer's strict-increase guard would reject) and a fresh-leg ack would trim frames
+# the new core never committed. ``_peer_handshake`` LOUDLY audits each dropped seq (hard
+# rule #7), then resets the buffer's floor. The first handshake is a natural no-op.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_peer_handshake_drops_and_resets_buffer_on_reconnect() -> None:
+    """A reconnect handshake LOUDLY drops held epoch-A frames, then resets for epoch B.
+
+    Pre-load two frames via the REAL relay path (faithful: append-before-send keys on
+    the wire seq), drive a fresh ``_peer_handshake``, and assert ONE
+    ``gateway.comms.buffer_reset_input_loss`` row per held seq, an emptied + un-tripped
+    buffer afterwards, and a subsequent epoch-B ``relay_to_core`` appending seq 0
+    WITHOUT raising (the strict-increase guard would otherwise reject 0 after seq N).
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport1 = _FakeCoreTransport([])
+    link._current_core_transport = transport1
+    await link.relay_to_core(b"a")  # buffered seq 0
+    await link.relay_to_core(b"b")  # buffered seq 1
+    assert buf.depth_frames == 2
+
+    epoch = uuid4().hex
+    transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
+    with structlog.testing.capture_logs() as captured:
+        await link._peer_handshake(transport2)  # fresh leg -> drop + reset
+
+    loss = [c for c in captured if c.get("event") == "gateway.comms.buffer_reset_input_loss"]
+    assert [c.get("seq") for c in loss] == [0, 1]  # ONE loud row per held seq, in FIFO order
+    assert all(c.get("log_level") == "warning" for c in loss)
+    assert all(c.get("reason") == "reconnect_no_replay_2a" for c in loss)
+    assert buf.depth_frames == 0  # the held frames are gone
+    assert buf.breaker_tripped is False  # the reset cleared the latch too
+
+    # Epoch B: the send-seq restarted at 0, and the buffer floor reset accepts it.
+    link._current_core_transport = transport2
+    await link.relay_to_core(b"fresh")  # must NOT raise the strict-increase guard
+    assert buf.depth_frames == 1
+    assert buf.unacked_frames()[0].seq == 0
+
+
+@pytest.mark.asyncio
+async def test_peer_handshake_reset_prevents_cross_epoch_trim() -> None:
+    """After the reset, a fresh-leg ack over the OLD seqs removes nothing epoch B holds.
+
+    The epoch-A frames are already gone (dropped + reset), so a ``daemon.comms.ack``
+    whose ``cumulative_ack`` is >= the old high-water trims only what epoch B appended —
+    never silently losing a frame the NEW core never committed.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    epoch_a_transport = _FakeCoreTransport([])
+    link._current_core_transport = epoch_a_transport
+    await link.relay_to_core(b"a")  # epoch-A seq 0
+    await link.relay_to_core(b"b")  # epoch-A seq 1
+
+    epoch = uuid4().hex
+    transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
+    with structlog.testing.capture_logs():
+        await link._peer_handshake(transport2)  # drop epoch-A frames + reset
+    link._current_core_transport = transport2
+    await link.relay_to_core(b"fresh")  # epoch-B seq 0
+    assert buf.depth_frames == 1  # only the epoch-B frame
+
+    # An ack carrying a cumulative_ack >= the old epoch-A high-water (1). It can only
+    # trim epoch B's seq-0 frame (which IS <= 5) — there is nothing stale left to lose.
+    body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {"cumulative_ack": 5}}).encode()
+    await link._route_unit(_payload_unit(body))
+    assert buf.depth_frames == 0  # only the epoch-B append was ever reflected, then trimmed
+
+
+@pytest.mark.asyncio
+async def test_peer_handshake_first_connect_empty_buffer_is_noop() -> None:
+    """The VERY FIRST handshake (empty buffer) emits NO loss row and does not raise.
+
+    The floor reset runs UNCONDITIONALLY (comms-1), but an empty buffer has no
+    retained seqs, so ``retained_seqs()`` is empty -> no loss row, and the reset is a
+    no-op beyond the (already-fresh) floor rebind — no ``_has_connected`` flag needed.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport(
+        [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await link._peer_handshake(transport)  # empty buffer -> no drop, no reset effect
+
+    loss = [c for c in captured if c.get("event") == "gateway.comms.buffer_reset_input_loss"]
+    assert loss == []  # nothing held -> nothing dropped
+    assert buf.depth_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_peer_handshake_fully_acked_reconnect_resets_floor_no_crash() -> None:
+    """A FULLY-ACKED reconnect (empty buffer, stale-high floor) resets the floor cleanly.
+
+    The crash (comms-1): ``trim_to_ack`` empties the buffer WITHOUT resetting
+    ``_last_seq`` (stale-frame rejection by design). So a reconnect after the daemon
+    acked everything hits the handshake with ``depth_frames == 0`` — a depth>0 reset
+    guard would SKIP the floor reset, leave ``_last_seq`` stale-high, and the next
+    ``relay_to_core`` epoch-B ``append(0, …)`` would trip the strict-increase guard and
+    crash the relay pump. The fix resets the floor UNCONDITIONALLY: assert the post-
+    reconnect ``relay_to_core(b"x")`` appends seq 0 WITHOUT raising, and that NO
+    input-loss row was emitted (an empty buffer dropped nothing).
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport1 = _FakeCoreTransport([])
+    link._current_core_transport = transport1
+    await link.relay_to_core(b"a")  # buffered seq 0
+    await link.relay_to_core(b"b")  # buffered seq 1
+    # The daemon durably acks EVERYTHING — the buffer drains but _last_seq stays high (1).
+    buf.trim_to_ack(1)
+    assert buf.depth_frames == 0
+    assert buf._last_seq == 1  # stale-high floor: the bug's precondition
+
+    epoch = uuid4().hex
+    transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
+    with structlog.testing.capture_logs() as captured:
+        await link._peer_handshake(transport2)  # reconnect: must reset the floor
+
+    # No input-loss row: the buffer was empty, so nothing was dropped.
+    loss = [c for c in captured if c.get("event") == "gateway.comms.buffer_reset_input_loss"]
+    assert loss == []
+    # Epoch B: the floor reset accepts a fresh seq-0 append WITHOUT the strict-increase
+    # crash that would otherwise escape the relay pump and tear the gateway down.
+    link._current_core_transport = transport2
+    await link.relay_to_core(b"x")  # must NOT raise ReplayBufferError("seq must strictly increase")
+    assert buf.depth_frames == 1
+    assert buf.unacked_frames()[0].seq == 0
+
+
+@pytest.mark.asyncio
+async def test_peer_handshake_no_buffer_injected_does_not_crash() -> None:
+    """A link with ``replay_buffer=None`` handshakes normally — no buffer touched."""
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+    assert link._replay_buffer is None
+    transport = _FakeCoreTransport(
+        [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await link._peer_handshake(transport)  # must NOT crash on a None buffer
+
+    assert link._core_epoch is not None  # the handshake still captured the epoch
+    loss = [c for c in captured if c.get("event") == "gateway.comms.buffer_reset_input_loss"]
+    assert loss == []

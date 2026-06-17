@@ -635,6 +635,29 @@ class GatewayCoreLink:
         # receive tracker — a fresh core leg is a fresh per-connection seq space, so the
         # first relay_to_core on the new leg sends wire seq 0 (resume correctness).
         self._client_to_core_seq = 0
+        # Spec A G4b-2a (#237 / R1): a fresh core leg is a fresh seq space, so any frames
+        # still held under the OLD epoch cannot be replayed in 2a (reconnect-replay is
+        # 2b) and must not survive into epoch B — epoch B's seq restarts at 0, which the
+        # buffer's strict-increase guard would reject, and a fresh-leg ack would trim
+        # frames the new core never committed. So enumerate + LOUDLY audit each dropped
+        # seq (hard rule #7 — interim input-loss, not silent), then reset the buffer's
+        # floor for the new epoch. 2b replaces this drop with drain-replay-then-reset.
+        if self._replay_buffer is not None:
+            # Reset the buffer floor on EVERY reconnect (not just when non-empty): a
+            # fully-acked reconnect drains the buffer via trim_to_ack WITHOUT resetting
+            # _last_seq (stale-frame rejection by design), so a depth>0 guard would skip
+            # the reset, leave _last_seq stale-high, and crash the relay pump when epoch
+            # B's append(0, …) trips the strict-increase guard (comms-1). Loud per-seq
+            # input-loss only when frames were actually dropped (hard rule #7); the floor
+            # reset is unconditional. reset_for_new_epoch on an empty buffer is a no-op
+            # beyond the floor rebind. retained_seqs() is body-free — no pre-DLP copy.
+            for seq in self._replay_buffer.retained_seqs():
+                log.warning(
+                    "gateway.comms.buffer_reset_input_loss",
+                    seq=seq,
+                    reason="reconnect_no_replay_2a",
+                )
+            self._replay_buffer.reset_for_new_epoch()
 
     async def _read_until_start(self, transport: _CommsTransportLike) -> Mapping[str, object]:
         """Read frames until ``lifecycle.start``; warn-and-drop anything before it.
