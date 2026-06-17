@@ -262,6 +262,36 @@ def test_unacked_frames_reflects_post_trim_remainder_with_original_seqs() -> Non
     )
 
 
+def test_retained_seqs_returns_fifo_seqs_body_free() -> None:
+    """``retained_seqs`` yields the retained seqs in FIFO order without copying a body.
+
+    Unlike :meth:`unacked_frames` (which mints a fresh immutable ``bytes`` per body —
+    an extra un-zeroable pre-DLP copy), this returns ONLY the seqs, so the reconnect
+    loss-audit path can name each dropped seq without minting plaintext copies.
+    """
+    buf = _buffer()
+    buf.append(0, b"a", now=1.0)
+    buf.append(1, b"bb", now=2.0)
+    buf.append(2, b"ccc", now=3.0)
+    assert buf.retained_seqs() == (0, 1, 2)
+    # White-box: no retained body was copied out — the returned tuple is int-only.
+    assert all(isinstance(s, int) for s in buf.retained_seqs())
+
+
+def test_retained_seqs_empty_buffer_is_empty_tuple() -> None:
+    """A fresh (or fully-drained) buffer reports no retained seqs."""
+    assert _buffer().retained_seqs() == ()
+
+
+def test_retained_seqs_reflects_post_trim_remainder() -> None:
+    """After a trim the retained seqs are the un-acked remainder, original seqs intact."""
+    buf = _buffer()
+    for seq in range(4):
+        buf.append(seq, bytes([65 + seq]), now=float(seq))
+    buf.trim_to_ack(1)
+    assert buf.retained_seqs() == (2, 3)
+
+
 def test_normal_restart_replay_then_continue_never_trips_monotonic_guard() -> None:
     """Spec §4: inbound seq is gateway-owned + monotonic across a core restart."""
     buf = _buffer()
@@ -321,6 +351,32 @@ def test_discard_does_not_reset_now_floor() -> None:
     buf.discard()
     with pytest.raises(ReplayBufferError):
         buf.append(1, b"y", now=9.0)  # clock can't go backwards across a discard either
+
+
+def test_reset_for_new_epoch_zeroes_clears_and_rebinds_floor() -> None:
+    """G4b-2a reconnect reset: a fresh core epoch is a fresh seq space restarting at 0.
+
+    Unlike :meth:`discard` (which preserves the monotonic floor so a stale
+    post-discard frame is rejected loud), this rebinds the floor so the new epoch's
+    seq-0 frame is admitted — while still zeroing every retained pre-DLP body.
+    """
+    buf = _buffer(max_frames=1, max_bytes=10_000)
+    buf.append(0, b"alpha", now=1.0)
+    buf.append(1, b"bravo", now=2.0)  # trips the breaker on max_frames=1
+    assert buf.breaker_tripped is True
+    bodies = [entry.body for entry in buf._retained]  # white-box: capture before reset
+
+    buf.reset_for_new_epoch()
+
+    assert buf.depth_frames == 0
+    assert buf.depth_bytes == 0
+    assert buf.breaker_tripped is False
+    assert all(bytes(b) == b"\x00" * len(b) for b in bodies)  # bodies zeroed in place
+
+    # The floor is rebound: a fresh seq space restarting at 0 is admitted (discard
+    # would raise "seq must strictly increase" here), with now also reset to -inf.
+    buf.append(0, b"fresh", now=0.0)
+    assert buf.unacked_frames() == (ReplayFrame(seq=0, payload=b"fresh"),)
 
 
 # (payload, monotonic dt) appends with strictly-increasing seq 0..n-1 and non-decreasing now.
