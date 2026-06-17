@@ -190,3 +190,43 @@ G4b-2a wires the pure G4a `ReplayBuffer` into the live core-link — the STEADY-
 - **TTL eviction + observability.** A supervised per-`run()` timer (spawned once after the initial connect — it spans reconnects — and reaped on every `run()` exit path) calls `evict_expired` and writes one loud `gateway.comms.buffer_evicted` row per dropped seq (pre-DLP input cannot be pinned across an unbounded crash-loop). The sweep is fail-loud-and-resilient: a `ReplayBufferError` (e.g. a regressed monotonic read) is logged loud and the loop CONTINUES (a one-off must not silently end TTL enforcement — hard rule #7), and a done-callback surfaces any unexpected loop death. Four label-less gauges track the buffer: `gateway_buffer_depth_frames`, `gateway_buffer_depth_bytes`, `gateway_buffer_cap_ratio`, `gateway_circuit_breaker_open`.
 
 - **Audit posture (interim).** The gateway process has ZERO DB wiring, so 2a's breaker-trip / input-loss / eviction events are LOUD STRUCTLOG rows (the gateway's honest current logging — loud satisfies hard rule #7), NOT signed `AuditWriter` rows. The signed buffer-local-audit-reconcile-into-the-core-log mechanism (spec §6) is a tracked follow-up that must not give the always-up front door a boot-time DB dependency or the core signing key.
+
+## Amendment — Reconnect-replay (G4b-2b)
+
+G4b-2b replaces the 2a loud-loss drop on reconnect with a **drain → reset → replay** sequence: the gateway captures the un-acked frames, resets the buffer for the new epoch, and re-sends the captured frames onto the fresh core leg before the pump resumes. No held input is discarded under a normal reconnect.
+
+### Drain → reset → replay sequence
+
+On a fresh `_peer_handshake` (after the prior core leg closes), `relay_to_core` previously dropped any un-acked frames with a loud `gateway.comms.buffer_reset_input_loss` row per seq (the 2a interim posture). G4b-2b replaces that with:
+
+1. **Capture** — `unacked_frames()` is called BEFORE `reset_for_new_epoch`, snapshotting the un-acked remainder as an immutable `tuple[ReplayFrame, …]` into `_pending_replay`.
+2. **Reset** — `reset_for_new_epoch()` zeros and empties the buffer and rebinds the monotonic seq/now floor to `-1` / `-inf`, making it ready to accept fresh epoch-0 seqs.
+3. **Flush** — `_flush_pending_replay()` re-sends each captured frame via `relay_to_core` with FRESH per-connection seqs (`0, 1, …`), holding a `_replay_pending` gate (see below) until the flush completes; the re-sent frames are appended to the now-empty buffer under their new seqs exactly as a live frame would be.
+
+The flush runs inside `run()`'s main loop, BEFORE the client→core pump resumes draining the socket. This ordering ensures replayed frames take the lowest seqs on the new leg — no live input can interleave ahead of a replay frame.
+
+### The `_replay_pending` gate (FIFO barrier)
+
+A gate (`_replay_pending`, an `asyncio.Event`) is **cleared** when `_peer_handshake` captures the un-acked frames into `_pending_replay`, and **set** again only once `_flush_pending_replay()` completes a full flush. The relay's client→core pump (`_client_to_core_pump`) `await`s this gate before reading each fresh client frame: while it is cleared the pump parks, so no new live frame is read until the flush has re-sent the captured frames. This is the FIFO barrier: replayed frames take the lowest seqs and are always sequenced below any new live frames on the same leg. (`run()` performs the flush on its own task after binding the new transport; on a None-transport defer the gate stays cleared, so the pump keeps parking until the next bind's flush completes.)
+
+### None-transport mid-flush: re-stash, no silent loss
+
+If the core transport goes `None` (the core goes down again) during `_flush_pending_replay()`, the relay does NOT drop the unsent remainder. Instead it:
+
+1. Re-stashes the un-sent tail back into `_pending_replay`.
+2. Emits one loud `gateway.comms.buffer_replay_deferred` structlog row (hard rule #7 — not silent).
+3. Leaves `_replay_pending` cleared so the NEXT successful `_peer_handshake` re-enters the capture → reset → flush sequence, picking up the re-stashed remainder.
+
+There is no silent loss on a mid-flush disconnect: every frame either reaches the new core or is re-stashed for the subsequent reconnect.
+
+### §6.2 dedup correction — cross-restart exactly-once is `inbound_id`, NOT `(leg, seq)` (supersedes G4a and G4b-2a-pre framing)
+
+The G4a amendment ("Seq is gateway-owned and monotonic across a core restart", lines 162-164) and the G4b-2a-pre amendment both state that replay carries each frame's ORIGINAL seq so the core dedups on `(leg, seq)`. That framing is **superseded** for the cross-restart case.
+
+The wired G4b-2b model is:
+
+- The client→core seq space is **per-connection** (resets to 0 on each handshake). `reset_for_new_epoch` rebinds the floor; replay re-mints FRESH seqs starting at 0 on the new leg.
+- The `SeqDedupWindow` (`(leg, seq)`) is a per-connection in-memory dedup; it does not survive a core restart.
+- Cross-restart exactly-once is the **durable in-payload `inbound_id`** that G0 `commit_once` keys on `(adapter_id, inbound_id)`. A replayed frame carries the same `inbound_id` in its payload as the original; `commit_once` returns `False` on the second intake regardless of what seq the replay carries on the wire. The `inbound_id` is payload content — it lives inside the opaque body the gateway never decodes (the relay is payload-blind), so the gateway cannot derive or forge it.
+
+The G4a section and the G4b-2a-pre framing are **not deleted** — they record the design reasoning at each stage. This amendment completes the correction the G4b-2a amendment began.

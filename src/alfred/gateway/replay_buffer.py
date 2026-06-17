@@ -4,17 +4,19 @@ Spec A G4a / ADR-0032 (#237). The always-up ``alfred-gateway`` holds the client
 connection across a core restart; this buffer is where the operator's un-acked
 **inbound** (client->core) frames live between the moment the gateway forwards them
 and the moment the (possibly freshly-restarted) core durably acks them. On
-reconnect the gateway replays the un-acked remainder so nothing typed is lost
-(spec §5); the core dedups by ``(leg, seq)`` so replay never double-executes.
+reconnect (G4b-2b) the gateway captures the un-acked frames via
+:meth:`unacked_frames`, calls :meth:`reset_for_new_epoch`, and re-sends them on
+the fresh leg with FRESH per-connection seqs (``0, 1, …``); the core dedups on the
+durable in-payload ``inbound_id`` (G0 ``commit_once`` on ``(adapter_id, inbound_id)``),
+NOT on ``(leg, seq)``, so replay never double-executes across a restart.
 
-**Seq is gateway-owned and PER-CONNECTION (G4b-2-pre/G4b-2a wired).** The gateway
-mints the client->core seq; with the wired reconnect model that seq space is
-per-connection — it restarts at 0 on each core handshake, and the reconnect path
-calls :meth:`reset_for_new_epoch` to rebind the monotonic floor for the fresh
-connection (the 2a posture drops the held un-acked remainder with loud input-loss;
-2b replaces that drop with drain-replay-then-reset). :meth:`discard` — the distinct
-shutdown / retry-exhaustion path — does the same purge but does NOT reset the floor,
-so a late stale-stream frame arriving after a discard is rejected loud (Security F1).
+**Seq is gateway-owned and PER-CONNECTION (G4b-2-pre/G4b-2a/G4b-2b wired).** The
+gateway mints the client->core seq; that seq space resets to 0 on each core
+handshake. The reconnect path calls :meth:`reset_for_new_epoch` to rebind the
+monotonic floor for the fresh connection before the flush re-sends held frames with
+fresh seqs. :meth:`discard` — the distinct shutdown / retry-exhaustion path — does
+the same purge but does NOT reset the floor, so a late stale-stream frame arriving
+after a discard is rejected loud (Security F1).
 
 **Pure — no I/O, no clock, no logging.** Mirrors the sibling pure machines
 :class:`~alfred.gateway.link_state.LinkStateMachine` and
@@ -88,8 +90,12 @@ class ReplayBufferError(AlfredError):
 class ReplayFrame:
     """A replayable un-acked frame: its gateway-owned per-direction seq + opaque payload.
 
-    Replay MUST carry the ORIGINAL ``seq`` — the core dedups on ``(leg, seq)`` (spec
-    §4 decision 4), so re-minting would defeat the no-double-effect guarantee.
+    On reconnect the gateway re-mints FRESH per-connection seqs (starting at 0) when
+    it replays held frames onto the new leg — ``seq`` here is the seq the frame carried
+    on the ORIGINAL leg (used internally by the buffer; the relay assigns the fresh
+    replay seq at send time). Cross-restart exactly-once is guaranteed by the durable
+    in-payload ``inbound_id`` (G0 ``commit_once`` on ``(adapter_id, inbound_id)``), NOT
+    by ``(leg, seq)``; ``seq`` is the per-connection per-direction wire counter.
     """
 
     seq: int
@@ -261,13 +267,15 @@ class ReplayBuffer:
     def unacked_frames(self) -> tuple[ReplayFrame, ...]:
         """Return the retained un-acked frames as :class:`ReplayFrame`, FIFO order.
 
-        The G4b reconnect path calls this after a fresh core handshakes + emits
-        ``ready`` to re-send the un-acked inbound (spec §5 step 3). Each frame carries
-        its ORIGINAL seq so the core dedups on ``(leg, seq)`` — a replayed,
-        already-committed frame short-circuits. Read-only: frames stay retained until
-        the NEW core acks them. G4b call contract: ``trim_to_ack(core_durable_high_water)``
-        FIRST, then this returns exactly the un-acked remainder. Each returned
-        ``payload`` is a fresh immutable copy of a retained body.
+        The G4b-2b reconnect path captures the un-acked inbound remainder by calling
+        this BEFORE :meth:`reset_for_new_epoch` (spec §5 step 3). The relay then
+        re-sends each frame on the fresh leg with FRESH per-connection seqs (``0, 1,
+        …``); the core dedups on the in-payload ``inbound_id`` (G0 ``commit_once`` on
+        ``(adapter_id, inbound_id)``), not on the wire ``(leg, seq)``. Read-only:
+        frames stay retained until the NEW core acks them. G4b call contract:
+        ``trim_to_ack(core_durable_high_water)`` FIRST, then this returns exactly the
+        un-acked remainder. Each returned ``payload`` is a fresh immutable copy of a
+        retained body.
         """
         return tuple(
             ReplayFrame(seq=entry.seq, payload=bytes(entry.body)) for entry in self._retained
@@ -293,8 +301,10 @@ class ReplayBuffer:
         is exhausted (resume gave up — the max-retry-window cap the pure buffer cannot
         observe). Does NOT reset the monotonic seq/now floor: not resetting here means a
         late stale-stream frame after a discard is rejected loud rather than silently
-        admitted (Security F1). The per-connection seq-space restart is the distinct
-        :meth:`reset_for_new_epoch` path the reconnect handshake uses.
+        admitted (Security F1). The per-connection seq-space reset (``_last_seq = -1``)
+        is the distinct :meth:`reset_for_new_epoch` path the reconnect handshake uses;
+        on the same connection the floor still correctly rejects stale frames whose seq
+        is at or below the pre-discard high-water.
         """
         self._purge()
 
