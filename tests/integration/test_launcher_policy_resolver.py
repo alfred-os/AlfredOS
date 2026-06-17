@@ -68,9 +68,20 @@ def _adequate_policy_body(plugin_dir: Path, *, unshare_net: bool = False) -> str
     # ``cpython-3.14-`` -> ``cpython-3.14.6-``), so the binds survive a uv-managed
     # interpreter-location shift; ``plugin_dir`` carries the stub script.
     interp_roots = interpreter_sandbox_roots() | {str(plugin_dir)}
-    for root in sorted(interp_roots):
-        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin")):
-            binds.append(f'["{root}", "{root}"]')
+    appended_roots = [
+        root
+        for root in sorted(interp_roots)
+        if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin"))
+    ]
+    # finding-3 (PR #231) parity: an interpreter/plugin bind must NEVER resolve
+    # under /etc or /bin and silently widen the sandbox's read surface — fail loud
+    # rather than quietly bind host secrets (a venv-layout shift must not erode the
+    # /etc-unreadable / /bin/sh-contained assertions below).
+    assert not any(
+        os.path.realpath(root).startswith(("/etc", "/bin")) for root in appended_roots
+    ), f"test bind resolves under /etc or /bin — would widen the sandbox: {appended_roots}"
+    for root in appended_roots:
+        binds.append(f'["{root}", "{root}"]')
     # NOTE: deliberately NO ``tmpfs = ["/tmp"]`` — pytest's tmp_path (where the
     # stub lives) is typically UNDER /tmp, so a fresh tmpfs there would shadow
     # the just-bound plugin_dir. The stubs need no writable /tmp; the escape
