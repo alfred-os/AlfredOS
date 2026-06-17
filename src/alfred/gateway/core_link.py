@@ -59,6 +59,7 @@ from alfred.gateway.metrics import (
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
+from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsProtocolError
 
@@ -195,6 +196,7 @@ class GatewayCoreLink:
         shutdown_event: asyncio.Event | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         payload_relay: Callable[[bytes], Awaitable[None]] | None = None,
+        replay_buffer: ReplayBuffer | None = None,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
         self._client_listener = client_listener
@@ -264,6 +266,12 @@ class GatewayCoreLink:
         # loud-dropped send). Per-connection: reset to 0 each ``_peer_handshake``, like
         # the receive tracker — a fresh core leg is a fresh seq space (design §3.2).
         self._client_to_core_seq = 0
+        # Spec A G4b-2a (#237): the optional un-acked-inbound retention buffer. The
+        # client->core seqs the gateway mints get appended here so a core BOUNCE can
+        # replay the un-acked remainder (spec §5). ``None`` (the default) leaves
+        # buffering OFF — the merged G3 relay tests construct unchanged — so this
+        # foundation cut wires only the injection; the append/trim lands in a later task.
+        self._replay_buffer = replay_buffer
 
     async def _default_dial(self) -> _CommsTransportLike:
         """Production dial: connect the core's comms socket on the keyed adapter id.
