@@ -7,12 +7,14 @@ and the moment the (possibly freshly-restarted) core durably acks them. On
 reconnect the gateway replays the un-acked remainder so nothing typed is lost
 (spec §5); the core dedups by ``(leg, seq)`` so replay never double-executes.
 
-**Seq is gateway-owned and monotonic across a core restart.** The client->core seq
-the gateway mints does NOT reset on a core bounce (only the core->client direction
-resets — spec §4). A normal reconnect does NOT discard; the gateway keeps minting
-the next seq, so the monotonic guard is never tripped on a successful resume. A
-genuine seq-space restart is a G4b epoch-handshake concern; :meth:`discard` does
-NOT reset the monotonic floor.
+**Seq is gateway-owned and PER-CONNECTION (G4b-2-pre/G4b-2a wired).** The gateway
+mints the client->core seq; with the wired reconnect model that seq space is
+per-connection — it restarts at 0 on each core handshake, and the reconnect path
+calls :meth:`reset_for_new_epoch` to rebind the monotonic floor for the fresh
+connection (the 2a posture drops the held un-acked remainder with loud input-loss;
+2b replaces that drop with drain-replay-then-reset). :meth:`discard` — the distinct
+shutdown / retry-exhaustion path — does the same purge but does NOT reset the floor,
+so a late stale-stream frame arriving after a discard is rejected loud (Security F1).
 
 **Pure — no I/O, no clock, no logging.** Mirrors the sibling pure machines
 :class:`~alfred.gateway.link_state.LinkStateMachine` and
@@ -245,6 +247,15 @@ class ReplayBuffer:
             del self._retained[: len(evicted)]
         return tuple(evicted)
 
+    def retained_seqs(self) -> tuple[int, ...]:
+        """The retained un-acked seqs, FIFO order — body-free (no pre-DLP copy minted).
+
+        For the G4b reconnect/eviction audit paths that need only the seqs to write the
+        loud input-loss rows: unlike :meth:`unacked_frames` this never copies a retained
+        body, so it does not mint extra un-zeroable plaintext copies of pre-DLP input.
+        """
+        return tuple(entry.seq for entry in self._retained)
+
     def unacked_frames(self) -> tuple[ReplayFrame, ...]:
         """Return the retained un-acked frames as :class:`ReplayFrame`, FIFO order.
 
@@ -260,22 +271,44 @@ class ReplayBuffer:
             ReplayFrame(seq=entry.seq, payload=bytes(entry.body)) for entry in self._retained
         )
 
-    def discard(self) -> None:
-        """Remove + zero EVERYTHING and clear the breaker latch.
+    def _purge(self) -> None:
+        """Zero every retained body, empty the queue, reset depth + clear the breaker.
 
-        Called by G4b on clean gateway shutdown and when the reconnect retry-window
-        is exhausted (resume gave up — the max-retry-window cap the pure buffer cannot
-        observe). Does NOT reset the monotonic seq/now floor: the inbound seq is
-        gateway-owned and stays monotonic across a core restart (spec §4), and not
-        resetting here means a late stale-stream frame after a discard is rejected loud
-        rather than silently admitted (Security F1). A genuine seq-space restart is
-        G4b's epoch-handshake concern, sequenced after the old leg is torn down.
+        The shared core of :meth:`discard` and :meth:`reset_for_new_epoch` (the two
+        differ ONLY in whether they also rebind the monotonic seq/now floor). Does NOT
+        touch the floor — a caller that needs the per-connection reset adds it.
         """
         for entry in self._retained:
             _zero(entry.body)
         self._retained.clear()
         self._depth_bytes = 0
         self._breaker_tripped = False
+
+    def discard(self) -> None:
+        """Remove + zero EVERYTHING and clear the breaker latch.
+
+        Called by G4b on clean gateway shutdown and when the reconnect retry-window
+        is exhausted (resume gave up — the max-retry-window cap the pure buffer cannot
+        observe). Does NOT reset the monotonic seq/now floor: not resetting here means a
+        late stale-stream frame after a discard is rejected loud rather than silently
+        admitted (Security F1). The per-connection seq-space restart is the distinct
+        :meth:`reset_for_new_epoch` path the reconnect handshake uses.
+        """
+        self._purge()
+
+    def reset_for_new_epoch(self) -> None:
+        """Zero + empty + clear the breaker AND reset the monotonic seq/now floor.
+
+        The per-connection-reset path the reconnect handshake uses (G4b-2-pre/G4b-2a):
+        the client->core seq space is per-connection (it restarts at 0 each handshake),
+        so unlike :meth:`discard` (the shutdown/retry-exhaustion path, which PRESERVES
+        the floor — a stale post-discard frame is rejected loud) this rebinds the floor
+        for the fresh connection. Zeroes every retained body first (the spec §6 pre-DLP
+        bound).
+        """
+        self._purge()
+        self._last_seq = -1
+        self._last_now = float("-inf")
 
 
 __all__ = ["ReplayBuffer", "ReplayBufferError", "ReplayFrame"]
