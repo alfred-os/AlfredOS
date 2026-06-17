@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       # markdownlint-cli2 is run via npx directly rather than the
@@ -31,7 +31,7 @@ jobs:
       # workflow fails to parse (`startup_failure`) regardless of SHA
       # pinning. The CLI itself is a regular npm package and works fine
       # called directly. `actions/setup-node` IS GitHub-published.
-      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '20'
       - name: Run markdownlint-cli2
@@ -52,7 +52,7 @@ jobs:
     # contexts. The first-step `check` below probes for pyproject.toml and
     # every downstream step short-circuits on `steps.check.outputs.has_py`.
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for Python project
@@ -65,7 +65,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -427,7 +427,7 @@ jobs:
     # pyproject.toml and every downstream step short-circuits on
     # `steps.check.outputs.has_py` (mirrors the amd64 `python` job's discipline).
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for Python project
@@ -440,7 +440,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python arm64 job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -542,7 +542,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for Python project
@@ -560,7 +560,7 @@ jobs:
             echo "has_py=false" >> "$GITHUB_OUTPUT"
             echo "::notice::pyproject.toml missing — skipping Python cross-OS job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_py == 'true'
       - if: steps.check.outputs.has_py == 'true'
         run: uv python install 3.14
@@ -635,7 +635,7 @@ jobs:
         image: qdrant/qdrant:v1.12.4  # zizmor: ignore[unpinned-images]
         ports: ["6333:6333"]
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for integration suite
@@ -652,7 +652,7 @@ jobs:
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/integration/**/*.py missing — skipping Integration job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
         run: uv sync --frozen --dev
@@ -723,7 +723,7 @@ jobs:
           uv run pytest tests/integration -q --cov=src/alfred --cov-append --cov-branch --cov-fail-under=0
       - name: Upload integration coverage artifact
         if: steps.check.outputs.has_integration == 'true'
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-integration
           path: .coverage
@@ -790,7 +790,7 @@ jobs:
         image: qdrant/qdrant:v1.12.4  # zizmor: ignore[unpinned-images]
         ports: ["6333:6333"]
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for integration suite
@@ -805,7 +805,7 @@ jobs:
             echo "has_integration=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/integration/**/*.py missing — skipping Integration arm64 job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_integration == 'true'
       - if: steps.check.outputs.has_integration == 'true'
         run: uv sync --frozen --dev
@@ -870,7 +870,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for privileged-spawn corpus
@@ -905,7 +905,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends bubblewrap jq
           bwrap --version
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_spawn == 'true'
       - if: steps.check.outputs.has_spawn == 'true'
         run: uv python install 3.14
@@ -1123,7 +1123,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for combined coverage corpus
@@ -1141,7 +1141,7 @@ jobs:
             echo "has_coverage_corpus=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/unit or tests/integration missing — skipping coverage-gates job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_coverage_corpus == 'true'
       - if: steps.check.outputs.has_coverage_corpus == 'true'
         run: uv python install 3.14
@@ -1158,7 +1158,7 @@ jobs:
         run: uv run pytest tests/unit -q --cov=src/alfred --cov-branch
       - name: Download integration coverage artifact
         if: steps.check.outputs.has_coverage_corpus == 'true'
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: coverage-integration
           path: .coverage-integration-dir
@@ -1426,7 +1426,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for smoke corpus
@@ -1443,7 +1443,7 @@ jobs:
             echo "has_smoke=false" >> "$GITHUB_OUTPUT"
             echo "::notice::tests/smoke/**/*.py missing — skipping Smoke job."
           fi
-      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf # v3 latest
+      - uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v3 latest
         if: steps.check.outputs.has_smoke == 'true'
       - if: steps.check.outputs.has_smoke == 'true'
         run: uv python install 3.14
@@ -1481,7 +1481,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
       - name: Check for setup script
