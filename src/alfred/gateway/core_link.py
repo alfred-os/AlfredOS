@@ -52,6 +52,7 @@ from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
+    LinkControl,
     LinkStateMachine,
 )
 from alfred.gateway.metrics import (
@@ -818,6 +819,22 @@ class GatewayCoreLink:
             # across a loud-dropped send. The buffer's hard-ceiling raise is the
             # fail-closed backstop if G4b's read-halt is buggy.
             self._replay_buffer.append(seq, payload, now=self._monotonic())
+        if self._replay_buffer is not None and self._replay_buffer.breaker_tripped:
+            # Spec A G4b-2a (#237 / R3): a soft-cap breach latched the breaker. Feed
+            # BREAKER_TRIPPED UNCONDITIONALLY — the link-state machine (not a gateway
+            # flag) absorbs repeats (link_state.py: UNAVAILABLE is absorbing), emitting
+            # LinkControl.UNAVAILABLE exactly ONCE. On that once-only escalation edge,
+            # write the single loud audit row (CLAUDE.md hard rule #7 — back-pressure is
+            # never silent). Task 6 then halts the client read. The structlog row is the
+            # gateway's honest audit (it has no DB; the signed-log reconcile is a tracked
+            # 2b/design-§6 follow-up).
+            control = await self._feed(GatewayLinkEvent.BREAKER_TRIPPED)
+            if control is LinkControl.UNAVAILABLE:
+                log.warning(
+                    "gateway.comms.breaker_tripped",
+                    depth_frames=self._replay_buffer.depth_frames,
+                    depth_bytes=self._replay_buffer.depth_bytes,
+                )
         try:
             await local.send_payload_unit(payload, seq=seq, ack=ack)
         except (
@@ -901,8 +918,10 @@ class GatewayCoreLink:
             return
         await self._feed(GatewayLinkEvent.CORE_READY)
 
-    async def _feed(self, event: GatewayLinkEvent) -> None:
-        """Feed a TYPED event to the machine; emit any control frame; refresh metrics.
+    async def _feed(self, event: GatewayLinkEvent) -> LinkControl | None:
+        """Feed a TYPED event; emit any control frame; refresh metrics; RETURN it.
+
+        Returns the control the machine emitted for ``event`` (or ``None``).
 
         The control frame (if any) is mapped via :func:`control_notification` and
         pushed to the client through the listener. ``CORE_LINK_UP`` is set to ``1``
@@ -925,6 +944,7 @@ class GatewayCoreLink:
             CORE_UNAVAILABLE_SECONDS.inc(self._monotonic() - self._gap_started_at)
             self._gap_started_at = None
         CORE_LINK_UP.set(1 if now_up else 0)
+        return control
 
 
 __all__ = [
