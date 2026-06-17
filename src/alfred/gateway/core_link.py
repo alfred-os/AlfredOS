@@ -407,6 +407,7 @@ class GatewayCoreLink:
         try:
             transport = await self._initial_connect()
             self._current_core_transport = transport
+            await self._flush_pending_replay()
             if self._replay_buffer is not None:
                 # Spec A G4b-2a (#237): the supervised TTL-eviction sweep runs only when a
                 # buffer is injected. Spawned AFTER the initial connect (so a shutdown
@@ -430,6 +431,7 @@ class GatewayCoreLink:
                     await self._feed(GatewayLinkEvent.CORE_CRASH_EOF)
                     transport = await self._reconnect_closing(transport)
                     self._current_core_transport = transport
+                    await self._flush_pending_replay()
                     continue
                 if not handled:
                     # A clean EOF: the gap is already announced if a ``going_down``
@@ -437,6 +439,7 @@ class GatewayCoreLink:
                     await self._feed(GatewayLinkEvent.CORE_CRASH_EOF)
                     transport = await self._reconnect_closing(transport)
                     self._current_core_transport = transport
+                    await self._flush_pending_replay()
                     continue
         except _Shutdown:
             # A shutdown signalled during a pump read OR while (re)connecting — a CLEAN
@@ -458,6 +461,50 @@ class GatewayCoreLink:
             self._current_core_transport = None
             if transport is not None:
                 await transport.close()
+
+    async def _flush_pending_replay(self) -> None:
+        """Re-send the captured un-acked remainder on the freshly-bound leg (G4b-2b).
+
+        Called from ``run`` after a (re)connect binds ``_current_core_transport`` and the
+        link is UP, BEFORE the pump resumes. Each stashed payload is re-sent via
+        ``relay_to_core`` (append-before-send, fresh per-connection seq 0,1,…) so the core
+        G0-dedups on the in-payload ``inbound_id`` (ADR-0032 §6.2), then the replay-pending
+        gate is SET so the held client->core pump resumes — replayed frames have taken the
+        lowest seqs, so fresh input follows in FIFO order. Idempotent: clears the stash at
+        entry so a re-entrant call cannot double-replay.
+
+        **No silent loss (R1, hard rule #7).** If the leg vanished mid-flush
+        (``_current_core_transport is None`` — a reconnect race), the un-sent remainder is
+        RE-STASHED and a loud ``buffer_replay_deferred`` row is written; the gate stays
+        CLEARED so the next bind's flush retries (the client pump stays parked — the leg is
+        unusable). ``buffer_replayed`` is emitted ONLY for a frame actually handed to
+        ``relay_to_core``. A broken-pipe mid-replay (transport non-None, send raises inside
+        ``relay_to_core``) is SELF-HEALING — ``relay_to_core`` appended the frame before the
+        send, so it stays buffered and replays next reconnect; only the None case re-stashes.
+        """
+        frames = self._pending_replay
+        self._pending_replay = ()
+        try:
+            for index, frame in enumerate(frames):
+                if self._current_core_transport is None:
+                    self._pending_replay = frames[index:]
+                    log.warning(
+                        "gateway.comms.buffer_replay_deferred",
+                        deferred=len(self._pending_replay),
+                        reason="transport_lost_mid_replay",
+                    )
+                    return
+                log.warning(
+                    "gateway.comms.buffer_replayed", seq=frame.seq, reason="reconnect_resume"
+                )
+                await self.relay_to_core(frame.payload)
+        finally:
+            # Release the held pump ONLY on a COMPLETE flush. A defer (R1) leaves
+            # _pending_replay non-empty -> gate stays clear; a complete/empty flush -> gate
+            # set; a stray relay_to_core raise still hits this -> gate set (S5 DoS fail-safe,
+            # no client->core wedge).
+            if not self._pending_replay:
+                self._replay_pending.set()
 
     async def _pump_once(self, transport: _CommsTransportLike) -> bool:
         """Read + process ONE core-leg event; ``False`` on a clean EOF (the gap arm).

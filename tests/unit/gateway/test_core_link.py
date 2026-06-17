@@ -32,6 +32,7 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.gateway.client_listener import LinkControlNotification
 from alfred.gateway.core_link import (
+    _BUFFER_EVICT_INTERVAL_SECONDS,
     _MIN_RECONNECT_DELAY_SECONDS,
     GATEWAY_PLUGIN_VERSION,
     GatewayCoreLink,
@@ -2974,3 +2975,227 @@ def test_refresh_buffer_metrics_is_a_noop_with_no_buffer() -> None:
     link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
     assert link._replay_buffer is None
     link._refresh_buffer_metrics()  # must not crash
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (Spec A G4b-2b / ADR-0032): ``_flush_pending_replay`` re-sends the captured
+# un-acked remainder on the freshly-bound leg, in FIFO order with fresh per-connection
+# seqs (the core G0-dedups on the in-payload inbound_id), then SETS the replay-pending
+# gate so the held client->core pump resumes. Security-reviewed shape (R1): a leg that
+# vanishes mid-flush (a None transport — reconnect race) RE-STASHES the un-sent
+# remainder and leaves the gate CLEARED (no accept-drop — that would be hard-rule-#7
+# silent cross-restart loss + a lying ``buffer_replayed`` audit). A complete/empty flush
+# (or even a stray ``relay_to_core`` raise — the S5 DoS fail-safe) sets the gate.
+# ---------------------------------------------------------------------------
+
+
+async def _capture_replay(link: GatewayCoreLink, payloads: list[bytes]) -> None:
+    """Relay ``payloads`` on a throwaway leg, then handshake a fresh leg to CAPTURE them.
+
+    Drives the REAL relay + capture path (Task 2): each ``relay_to_core`` appends to the
+    buffer keyed on its wire seq, then the fresh ``_peer_handshake`` stashes the un-acked
+    remainder into ``_pending_replay`` (clearing the gate) and resets the buffer floor —
+    leaving the link in the exact pre-flush state ``run`` reaches after a reconnect binds.
+    """
+    leg1 = _FakeCoreTransport([])
+    link._current_core_transport = leg1
+    for payload in payloads:
+        await link.relay_to_core(payload)
+    handshake = _FakeCoreTransport(
+        [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
+    )
+    with structlog.testing.capture_logs():
+        await link._peer_handshake(handshake)
+
+
+@pytest.mark.asyncio
+async def test_flush_pending_replay_resends_fifo_fresh_seqs_and_releases_gate() -> None:
+    """A reconnect flush re-sends the captured frames FIFO with fresh seqs 0,1,2.
+
+    Capture 3 frames, bind a fresh leg, flush: the leg receives the 3 payloads with
+    seqs ``0,1,2`` in FIFO order; the buffer re-holds them (append-before-send), one
+    ``buffer_replayed`` row per seq, the stash is cleared, and the gate is SET.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    await _capture_replay(link, [b"a", b"b", b"c"])
+    assert link.replay_pending_gate.is_set() is False  # capture cleared it
+
+    fresh = _FakeCoreTransport([])
+    link._current_core_transport = fresh
+    with structlog.testing.capture_logs() as captured:
+        await link._flush_pending_replay()
+
+    # FIFO payloads, fresh per-connection seqs 0,1,2 (the captured original seqs were
+    # also 0,1,2, but the FLUSH mints its own via relay_to_core on the new leg).
+    assert fresh.sent_units == [(b"a", 0, 0), (b"b", 1, 0), (b"c", 2, 0)]
+    # append-before-send re-buffered all 3 on the fresh leg (un-acked).
+    assert buf.depth_frames == 3
+    replayed = [c for c in captured if c.get("event") == "gateway.comms.buffer_replayed"]
+    assert [c.get("seq") for c in replayed] == [0, 1, 2]
+    assert link._pending_replay == ()
+    assert link.replay_pending_gate.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_flush_pending_replay_empty_stash_is_noop_gate_stays_set() -> None:
+    """An empty stash (the initial-connect case) sends nothing and leaves the gate SET."""
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    fresh = _FakeCoreTransport([])
+    link._current_core_transport = fresh
+    assert link._pending_replay == ()
+    assert link.replay_pending_gate.is_set() is True
+
+    with structlog.testing.capture_logs() as captured:
+        await link._flush_pending_replay()
+
+    assert fresh.sent_units == []
+    assert [c for c in captured if c.get("event") == "gateway.comms.buffer_replayed"] == []
+    assert link.replay_pending_gate.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_flush_pending_replay_none_transport_defers_no_loss() -> None:
+    """R1: a None transport before the first send RE-STASHES all frames, gate stays CLEAR.
+
+    Zero sends, ``_pending_replay`` holds all 3 (re-stashed), one ``buffer_replay_deferred``
+    row (``deferred=3``), no ``buffer_replayed`` row, and the gate is CLEARED — the next
+    bind's flush retries. Mutation guard: removing the None-check loses the frames.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    await _capture_replay(link, [b"a", b"b", b"c"])
+    captured_frames = link._pending_replay  # snapshot the captured remainder
+
+    link._current_core_transport = None
+    with structlog.testing.capture_logs() as captured:
+        await link._flush_pending_replay()
+
+    assert link._pending_replay == captured_frames  # all 3 re-stashed, none lost
+    deferred = [c for c in captured if c.get("event") == "gateway.comms.buffer_replay_deferred"]
+    assert len(deferred) == 1
+    assert deferred[0].get("deferred") == 3
+    assert [c for c in captured if c.get("event") == "gateway.comms.buffer_replayed"] == []
+    assert link.replay_pending_gate.is_set() is False  # stays clear -> next bind retries
+
+
+@pytest.mark.asyncio
+async def test_flush_pending_replay_partial_defer_on_mid_flush_loss() -> None:
+    """R1 partial: the leg vanishes after the 1st send -> 1 replayed, 2 deferred.
+
+    A leg whose ``send_payload_unit`` nulls ``_current_core_transport`` after the first
+    call: one ``buffer_replayed``, then a defer with the remaining 2 re-stashed, a
+    ``buffer_replay_deferred`` (``deferred=2``), and the gate CLEARED.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    await _capture_replay(link, [b"a", b"b", b"c"])
+
+    class _LegThatVanishesAfterFirstSend(_FakeCoreTransport):
+        async def send_payload_unit(self, payload: bytes, *, seq: int, ack: int) -> None:
+            await super().send_payload_unit(payload, seq=seq, ack=ack)
+            link._current_core_transport = None
+
+    fresh = _LegThatVanishesAfterFirstSend([])
+    link._current_core_transport = fresh
+    with structlog.testing.capture_logs() as captured:
+        await link._flush_pending_replay()
+
+    assert fresh.sent_units == [(b"a", 0, 0)]  # only the first frame went out
+    replayed = [c for c in captured if c.get("event") == "gateway.comms.buffer_replayed"]
+    assert len(replayed) == 1
+    deferred = [c for c in captured if c.get("event") == "gateway.comms.buffer_replay_deferred"]
+    assert len(deferred) == 1
+    assert deferred[0].get("deferred") == 2
+    assert [f.payload for f in link._pending_replay] == [b"b", b"c"]
+    assert link.replay_pending_gate.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_flush_pending_replay_relay_raise_still_sets_gate() -> None:
+    """S5 fail-safe: a ``relay_to_core`` that RAISES mid-flush still SETS the gate.
+
+    Production ``relay_to_core`` never raises (it loud-drops), but a stray raise must not
+    wedge the client->core pump: the ``finally`` sets the gate on a complete-or-empty
+    stash even as the exception propagates. (Here the stash IS emptied at entry, so the
+    finally's ``not self._pending_replay`` is True -> gate set.)
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    await _capture_replay(link, [b"a"])
+    fresh = _FakeCoreTransport([])
+    link._current_core_transport = fresh
+
+    async def _boom(_payload: bytes) -> None:
+        raise RuntimeError("relay blew up")
+
+    link.relay_to_core = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="relay blew up"):
+        await link._flush_pending_replay()
+
+    assert link.replay_pending_gate.is_set() is True  # no wedge
+
+
+@pytest.mark.asyncio
+async def test_run_reconnect_flushes_replay_before_pump_resumes() -> None:
+    """run() through a reconnect: the captured frames replay on the NEW leg, gate ends SET.
+
+    The first leg handshakes, the test relays one client->core frame (buffered), then the
+    first leg EOFs -> reconnect. The second leg's handshake CAPTURES the un-acked frame and
+    the reconnect-arm ``_flush_pending_replay`` re-sends it on the new leg BEFORE the pump
+    resumes. Assert the second leg received the replayed payload and the gate ends SET.
+    """
+    epoch1 = uuid4().hex
+    epoch2 = uuid4().hex
+    shutdown = asyncio.Event()
+    sink = _RelaySink()
+    buf = ReplayBuffer()
+
+    # First leg: handshake, then a read that BLOCKS until we release it (so we can relay a
+    # client->core frame onto the live first leg before it EOFs).
+    first_eof = asyncio.Event()
+    first = _ScriptedCoreTransport([_start_only(epoch1), first_eof])
+    blocked = asyncio.Event()
+    second = _ScriptedCoreTransport([_start_only(epoch2), blocked])
+    dial = _DialRecorder([lambda: first, lambda: second])
+
+    async def _sleep(delay: float) -> None:
+        # The buffer-injected ``run`` spawns the TTL-evict loop, whose 30s sweep cadence
+        # shares this ``_sleep`` seam with the reconnect backoff. PARK the evict sweep (so
+        # it does not busy-spin and starve the loop) while keeping the (sub-second)
+        # reconnect backoff instant — yielding once so the reconnect still progresses.
+        if delay >= _BUFFER_EVICT_INTERVAL_SECONDS:
+            await asyncio.Event().wait()
+        await asyncio.sleep(0)
+
+    link, _recorder = _run_link(
+        dial=dial,
+        shutdown_event=shutdown,
+        payload_relay=sink,
+        replay_buffer=buf,
+        sleep=_sleep,
+    )
+
+    task = asyncio.ensure_future(link.run())
+    # Wait for the first handshake to complete (pump live on leg 1).
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if first.sent:
+            break
+    # Relay one client->core frame onto the live first leg -> buffered un-acked seq 0.
+    await link.relay_to_core(b"buffered")
+    assert buf.depth_frames == 1
+    # Release the first leg's read -> EOF -> reconnect to leg 2 (capture + flush).
+    first_eof.set()
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if second.sent_units:  # the flush replayed onto leg 2
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The buffered frame was replayed on the NEW leg (fresh seq 0).
+    assert [payload for payload, _seq, _ack in second.sent_units] == [b"buffered"]
+    assert link.replay_pending_gate.is_set() is True
+    assert link._pending_replay == ()
