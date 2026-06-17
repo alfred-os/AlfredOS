@@ -36,6 +36,7 @@ from alfred.supervisor.fd3_key_delivery import (
     ProviderKeyDeliveryError,
     deliver_provider_key_via_fd3,
 )
+from tests._sandbox_interp import interpreter_sandbox_roots
 from tests.adversarial.payload_schema import AdversarialPayload
 
 _DIR = Path(__file__).parent
@@ -93,16 +94,13 @@ def _real_policy_flags_with_test_binds(plugin_dir: Path) -> list[str]:
             continue
         pruned.append(flag)
         i += 1
-    # Append the test-interpreter + plugin_dir binds. sys.prefix (venv),
-    # sys.base_prefix (base interpreter the venv symlinks to), the realpath'd
-    # interpreter root, and plugin_dir. Skip anything already under a system
-    # bind so we never double-bind /usr.
-    interp_roots = {
-        sys.prefix,
-        sys.base_prefix,
-        str(Path(os.path.realpath(sys.executable)).parents[1]),
-        str(plugin_dir),
-    }
+    # Append the test-interpreter + plugin_dir binds.
+    # ``interpreter_sandbox_roots`` walks ``sys.executable``'s full symlink chain
+    # (venv + base interpreter install + any uv minor-version alias hop, e.g.
+    # ``cpython-3.14-`` -> ``cpython-3.14.6-``) so the venv interpreter is
+    # exec'able in bwrap regardless of the uv-managed interpreter location. Skip
+    # anything already under a system bind so we never double-bind /usr.
+    interp_roots = interpreter_sandbox_roots() | {str(plugin_dir)}
     appended_roots = [
         root
         for root in sorted(interp_roots)
