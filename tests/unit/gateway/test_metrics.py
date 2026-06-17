@@ -39,3 +39,40 @@ def test_peer_auth_rejected_is_a_counter() -> None:
 
 def test_peer_auth_rejected_exposes_total_suffix() -> None:
     assert REGISTRY.get_sample_value("gateway_peer_auth_rejected_total") is not None
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2a (#237): the four ReplayBuffer observability gauges.
+# ---------------------------------------------------------------------------
+
+
+def test_buffer_depth_frames_is_a_gauge() -> None:
+    assert isinstance(metrics.BUFFER_DEPTH_FRAMES, Gauge)
+
+
+def test_buffer_depth_frames_registered_under_its_exposed_name() -> None:
+    assert REGISTRY.get_sample_value("gateway_buffer_depth_frames") is not None
+
+
+def test_buffer_depth_bytes_is_a_gauge() -> None:
+    assert isinstance(metrics.BUFFER_DEPTH_BYTES, Gauge)
+
+
+def test_buffer_depth_bytes_registered_under_its_exposed_name() -> None:
+    assert REGISTRY.get_sample_value("gateway_buffer_depth_bytes") is not None
+
+
+def test_buffer_cap_ratio_is_a_gauge() -> None:
+    assert isinstance(metrics.BUFFER_CAP_RATIO, Gauge)
+
+
+def test_buffer_cap_ratio_registered_under_its_exposed_name() -> None:
+    assert REGISTRY.get_sample_value("gateway_buffer_cap_ratio") is not None
+
+
+def test_circuit_breaker_open_is_a_gauge() -> None:
+    assert isinstance(metrics.CIRCUIT_BREAKER_OPEN, Gauge)
+
+
+def test_circuit_breaker_open_registered_under_its_exposed_name() -> None:
+    assert REGISTRY.get_sample_value("gateway_circuit_breaker_open") is not None

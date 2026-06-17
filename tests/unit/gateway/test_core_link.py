@@ -43,11 +43,15 @@ from alfred.gateway.link_state import (
     LinkStateMachine,
 )
 from alfred.gateway.metrics import (
+    BUFFER_CAP_RATIO,
+    BUFFER_DEPTH_BYTES,
+    BUFFER_DEPTH_FRAMES,
+    CIRCUIT_BREAKER_OPEN,
     CORE_LINK_UP,
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
-from alfred.gateway.replay_buffer import ReplayBuffer
+from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsPeerAuthError, CommsProtocolError
 
@@ -912,6 +916,7 @@ def _run_link(
     sleep: object | None = None,
     machine: LinkStateMachine | None = None,
     payload_relay: object | None = None,
+    replay_buffer: ReplayBuffer | None = None,
 ) -> tuple[GatewayCoreLink, _RecordingClientListener]:
     recorder = _RecordingClientListener()
 
@@ -927,6 +932,7 @@ def _run_link(
         shutdown_event=shutdown_event,
         monotonic=monotonic if monotonic is not None else time.monotonic,  # type: ignore[arg-type]
         payload_relay=payload_relay,  # type: ignore[arg-type]
+        replay_buffer=replay_buffer,
     )
     return link, recorder
 
@@ -2546,3 +2552,330 @@ async def test_wait_for_shutdown_blocks_forever_with_no_event() -> None:
 
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(link.wait_for_shutdown(), timeout=0.05)
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2a (#237): buffer observability gauges + the supervised TTL-eviction
+# timer. The gauges track the live buffer after every mutation; the evict loop
+# periodically drops TTL-expired un-acked frames, auditing each as input-loss.
+# ---------------------------------------------------------------------------
+
+
+def _reset_buffer_gauges() -> None:
+    """Zero the process-global buffer gauges so a test reads only its own writes.
+
+    The four gauges are module-level singletons shared across every test; resetting
+    at the top of a test that asserts a gauge VALUE keeps it independent of ordering.
+    """
+    BUFFER_DEPTH_FRAMES.set(0)
+    BUFFER_DEPTH_BYTES.set(0)
+    BUFFER_CAP_RATIO.set(0)
+    CIRCUIT_BREAKER_OPEN.set(0)
+
+
+@pytest.mark.asyncio
+async def test_buffer_evict_loop_audits_each_dropped_seq_and_refreshes_gauges() -> None:
+    """One sweep evicts the TTL-expired prefix, audits each seq, and pushes the gauges.
+
+    Pre-load three frames, advance the injected monotonic clock past the TTL, and run
+    ONE evict sweep: every evicted seq gets a ``gateway.comms.buffer_evicted`` warn row,
+    and the depth gauges reflect the post-evict (empty) buffer.
+    """
+    _reset_buffer_gauges()
+    buf = ReplayBuffer(max_frames=8, max_bytes=1024, ttl_seconds=30.0)
+    for seq in range(3):
+        buf.append(seq, b"x", now=float(seq))
+
+    clock = {"now": 100.0}  # 100 > 2 (last enqueue) + 30 (ttl) -> all three expired
+
+    sweeps = {"n": 0}
+
+    async def _sleep(_delay: float) -> None:
+        # Return immediately on the FIRST call (so the loop body runs one sweep), then
+        # park forever on every later call until the test cancels the loop task — a
+        # second sweep would find an empty buffer (the 0-evict branch has its own test).
+        sweeps["n"] += 1
+        if sweeps["n"] == 1:
+            return
+        await asyncio.Event().wait()
+
+    link, _recorder = _run_link(
+        dial=_DialRecorder([]),
+        sleep=_sleep,
+        monotonic=lambda: clock["now"],
+        replay_buffer=buf,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        task = asyncio.ensure_future(link._buffer_evict_loop())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if buf.depth_frames == 0:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    evicted = [c for c in captured if c.get("event") == "gateway.comms.buffer_evicted"]
+    assert [c.get("seq") for c in evicted] == [0, 1, 2]
+    assert all(c.get("log_level") == "warning" for c in evicted)
+    assert all(c.get("reason") == "ttl_expired" for c in evicted)
+    assert buf.depth_frames == 0
+    assert BUFFER_DEPTH_FRAMES._value.get() == 0
+    assert BUFFER_DEPTH_BYTES._value.get() == 0
+
+
+@pytest.mark.asyncio
+async def test_buffer_evict_loop_empty_sweep_audits_nothing() -> None:
+    """A sweep that evicts NOTHING (no frame expired) writes no input-loss row.
+
+    Covers the empty per-seq loop branch: the buffer holds an un-expired frame, so the
+    single sweep evicts nothing and emits no ``buffer_evicted`` audit.
+    """
+    _reset_buffer_gauges()
+    buf = ReplayBuffer(max_frames=8, max_bytes=1024, ttl_seconds=30.0)
+    buf.append(0, b"x", now=0.0)
+
+    sweeps = {"n": 0}
+
+    async def _sleep(_delay: float) -> None:
+        # One sweep, then park (as in the eviction test) so the body runs exactly once.
+        sweeps["n"] += 1
+        if sweeps["n"] == 1:
+            return
+        await asyncio.Event().wait()
+
+    link, _recorder = _run_link(
+        dial=_DialRecorder([]),
+        sleep=_sleep,
+        monotonic=lambda: 1.0,  # 1 - 0 = 1 <= 30 ttl -> nothing expired
+        replay_buffer=buf,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        task = asyncio.ensure_future(link._buffer_evict_loop())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert [c for c in captured if c.get("event") == "gateway.comms.buffer_evicted"] == []
+    assert buf.depth_frames == 1  # the un-expired frame is retained
+
+
+@pytest.mark.asyncio
+async def test_buffer_evict_loop_is_loud_and_continues_when_a_sweep_raises() -> None:
+    """A sweep that raises ``ReplayBufferError`` is LOUD and the loop CONTINUES (H2).
+
+    The TTL bound is a security property (spec §6) — a one-off sweep fault (e.g. a
+    regressed monotonic read) must NOT silently end enforcement (hard rule #7). Inject a
+    buffer whose ``evict_expired`` raises ONCE then succeeds; assert the loop logs
+    ``gateway.comms.buffer_evict_failed`` on the first tick and goes on to evict on the
+    second (proving it did not die).
+    """
+    _reset_buffer_gauges()
+    buf = ReplayBuffer(max_frames=8, max_bytes=1024, ttl_seconds=30.0)
+    buf.append(0, b"x", now=0.0)
+    clock = {"now": 100.0}  # 100 > 0 + 30 ttl -> seq 0 is expired on the real sweep
+
+    real_evict = buf.evict_expired
+    calls = {"n": 0}
+
+    def _evict_once_raises(*, now: float) -> tuple[int, ...]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ReplayBufferError("simulated regressed-clock sweep fault")
+        return real_evict(now=now)
+
+    buf.evict_expired = _evict_once_raises  # type: ignore[method-assign]
+
+    sweeps = {"n": 0}
+
+    async def _sleep(_delay: float) -> None:
+        # Two sweeps (the raise, then the success), then park forever.
+        sweeps["n"] += 1
+        if sweeps["n"] <= 2:
+            return
+        await asyncio.Event().wait()
+
+    link, _recorder = _run_link(
+        dial=_DialRecorder([]),
+        sleep=_sleep,
+        monotonic=lambda: clock["now"],
+        replay_buffer=buf,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        task = asyncio.ensure_future(link._buffer_evict_loop())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if buf.depth_frames == 0:  # the SECOND (successful) sweep evicted seq 0
+                break
+        assert not task.done(), "the loop must survive the raising sweep, not die"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    failed = [c for c in captured if c.get("event") == "gateway.comms.buffer_evict_failed"]
+    assert len(failed) == 1  # the first sweep raised -> loud, exactly once
+    assert failed[0].get("log_level") == "error"
+    # The loop CONTINUED: the second sweep evicted seq 0 (the loop did not die on the raise).
+    evicted = [c for c in captured if c.get("event") == "gateway.comms.buffer_evicted"]
+    assert [c.get("seq") for c in evicted] == [0]
+    assert buf.depth_frames == 0
+
+
+@pytest.mark.asyncio
+async def test_on_evict_task_done_is_loud_on_failure_silent_on_cancel() -> None:
+    """``_on_evict_task_done`` logs ``buffer_evict_loop_died`` on a failed task, and is
+    SILENT on a cancelled one (the loop's normal reap path).
+
+    A pure callback test: it inspects the task's cancelled/exception state (the futures
+    are constructed under a running loop). The done-callback is the backstop that makes
+    an unexpected (non-cancelled) loop death loud (H2 / hard rule #7).
+    """
+    loop = asyncio.get_running_loop()
+    # A failed task: an exception escaped the loop -> loud death row.
+    failed_task: asyncio.Future[None] = loop.create_future()
+    failed_task.set_exception(ReplayBufferError("loop died unexpectedly"))
+    with structlog.testing.capture_logs() as captured:
+        GatewayCoreLink._on_evict_task_done(failed_task)  # type: ignore[arg-type]
+    died = [c for c in captured if c.get("event") == "gateway.comms.buffer_evict_loop_died"]
+    assert len(died) == 1
+    assert died[0].get("log_level") == "error"
+    failed_task.exception()  # retrieve so the loop does not warn about an un-retrieved exc
+
+    # A cancelled task: the normal reap path -> NO row (the callback returns early).
+    cancelled_task: asyncio.Future[None] = loop.create_future()
+    cancelled_task.cancel()
+    with structlog.testing.capture_logs() as captured:
+        GatewayCoreLink._on_evict_task_done(cancelled_task)  # type: ignore[arg-type]
+    assert [c for c in captured if c.get("event") == "gateway.comms.buffer_evict_loop_died"] == []
+
+    # A normally-completed task (no exception, not cancelled): also SILENT. The loop is
+    # ``while True`` so it never returns cleanly in production, but the callback is a
+    # generic done-handler and the ``exc is None`` exit branch must stay covered.
+    done_task: asyncio.Future[None] = loop.create_future()
+    done_task.set_result(None)
+    with structlog.testing.capture_logs() as captured:
+        GatewayCoreLink._on_evict_task_done(done_task)  # type: ignore[arg-type]
+    assert [c for c in captured if c.get("event") == "gateway.comms.buffer_evict_loop_died"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_spawns_and_reaps_the_evict_task_when_a_buffer_is_injected() -> None:
+    """``run`` spawns the evict loop after the initial connect and cancels it on shutdown.
+
+    With a buffer injected, the supervised lifecycle creates the evict task; when the
+    shutdown event fires ``run`` returns and the evict task is reaped (done) — no leak.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    blocked = asyncio.Event()
+    transport = _ScriptedCoreTransport([_start_only(epoch), blocked])
+    dial = _DialRecorder([lambda: transport])
+
+    async def _evict_sleep(_delay: float) -> None:
+        await asyncio.Event().wait()  # the evict loop parks; shutdown reaps it
+
+    buf = ReplayBuffer()
+    link, _recorder = _run_link(
+        dial=dial, shutdown_event=shutdown, sleep=_evict_sleep, replay_buffer=buf
+    )
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if transport.sent:  # handshake done -> the evict task has been spawned
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The evict task was created AND reaped: run() left no leaked background task.
+    assert transport.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_spawn_evict_task_with_no_buffer() -> None:
+    """With NO buffer injected, ``run`` takes the buffer-None branch: no evict task.
+
+    The run() lifecycle is unchanged for a buffer-less gateway — exercised by driving a
+    full handshake-then-shutdown with ``replay_buffer=None`` (the merged-G3 default).
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    blocked = asyncio.Event()
+    transport = _ScriptedCoreTransport([_start_only(epoch), blocked])
+    dial = _DialRecorder([lambda: transport])
+    link, _recorder = _run_link(dial=dial, shutdown_event=shutdown)  # replay_buffer=None
+    assert link._replay_buffer is None
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if transport.sent:
+            break
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert transport.closed is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_buffer_metrics_tracks_append_trim_and_reset() -> None:
+    """The gauges follow the live buffer: append moves them, trim moves them back,
+    a reconnect reset zeroes them.
+    """
+    _reset_buffer_gauges()
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    await link.relay_to_core(b"abc")  # append seq 0 (3 bytes)
+    assert BUFFER_DEPTH_FRAMES._value.get() == 1
+    assert BUFFER_DEPTH_BYTES._value.get() == 3
+
+    # A daemon ack trims seq 0 -> the gauges fall back to empty.
+    body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {"cumulative_ack": 0}}).encode()
+    await link._route_unit(_payload_unit(body))
+    assert BUFFER_DEPTH_FRAMES._value.get() == 0
+    assert BUFFER_DEPTH_BYTES._value.get() == 0
+
+    # Re-load, then a reconnect handshake resets the buffer -> the gauges zero again.
+    await link.relay_to_core(b"defgh")  # append seq 1 (5 bytes)
+    assert BUFFER_DEPTH_FRAMES._value.get() == 1
+    assert BUFFER_DEPTH_BYTES._value.get() == 5
+    handshake = _FakeCoreTransport(
+        [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
+    )
+    with structlog.testing.capture_logs():
+        await link._peer_handshake(handshake)
+    assert BUFFER_DEPTH_FRAMES._value.get() == 0
+    assert BUFFER_DEPTH_BYTES._value.get() == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_buffer_metrics_sets_breaker_gauge_on_trip() -> None:
+    """The ``CIRCUIT_BREAKER_OPEN`` gauge flips to 1 once the soft cap breaks."""
+    _reset_buffer_gauges()
+    buf = ReplayBuffer(max_frames=2, max_bytes=1024)
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs():
+        for _ in range(3):  # third append breaches the 2-frame soft cap
+            await link.relay_to_core(b"x")
+
+    assert buf.breaker_tripped is True
+    assert CIRCUIT_BREAKER_OPEN._value.get() == 1
+    assert BUFFER_CAP_RATIO._value.get() == 3 / 2
+
+
+def test_refresh_buffer_metrics_is_a_noop_with_no_buffer() -> None:
+    """``_refresh_buffer_metrics`` on a buffer-less link is a no-op (the None branch)."""
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+    assert link._replay_buffer is None
+    link._refresh_buffer_metrics()  # must not crash

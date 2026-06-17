@@ -439,3 +439,49 @@ def test_evict_is_a_fifo_prefix(payloads: list[tuple[bytes, float]], extra: floa
     # surviving (un-evicted suffix) payload lengths.
     survivors = bodies[len(evicted) :]
     assert buf.depth_bytes == sum(len(b) for b in survivors)
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2a (#237): cap_ratio — the buffer owns its caps, so it computes its
+# own fullness for the gateway to export as ``gateway_buffer_cap_ratio``.
+# ---------------------------------------------------------------------------
+
+
+def test_cap_ratio_empty_buffer_is_zero() -> None:
+    assert _buffer().cap_ratio == 0.0
+
+
+def test_cap_ratio_is_one_when_a_soft_cap_is_exactly_hit() -> None:
+    # Exactly fill the FRAME cap (8 frames) while staying well under the byte cap:
+    # the frame-ratio is 1.0 and dominates.
+    buf = _buffer(max_frames=8, max_bytes=1024)
+    for seq in range(8):
+        buf.append(seq, b"x", now=float(seq))
+    assert buf.cap_ratio == 1.0
+
+
+def test_cap_ratio_takes_the_max_when_the_byte_ratio_wins() -> None:
+    # 1 frame of 512 bytes against a 1024-byte cap: byte-ratio 0.5; frame-ratio 1/8 =
+    # 0.125. The byte-ratio is the larger and is what cap_ratio reports.
+    buf = _buffer(max_frames=8, max_bytes=1024)
+    buf.append(0, b"y" * 512, now=0.0)
+    assert buf.cap_ratio == 0.5
+
+
+def test_cap_ratio_takes_the_max_when_the_frame_ratio_wins() -> None:
+    # 4 frames of 1 byte against an 8-frame cap: frame-ratio 0.5; byte-ratio 4/1024.
+    # The frame-ratio is the larger and is what cap_ratio reports.
+    buf = _buffer(max_frames=8, max_bytes=1024)
+    for seq in range(4):
+        buf.append(seq, b"z", now=float(seq))
+    assert buf.cap_ratio == 0.5
+
+
+def test_cap_ratio_exceeds_one_after_a_soft_cap_overshoot() -> None:
+    # Push one frame PAST the soft frame cap (the breaker latches but the frame is
+    # kept) — the ratio rises above 1.0, the post-breach overshoot an operator sees.
+    buf = _buffer(max_frames=4, max_bytes=1024)
+    for seq in range(5):
+        buf.append(seq, b"x", now=float(seq))
+    assert buf.breaker_tripped is True
+    assert buf.cap_ratio == 5 / 4
