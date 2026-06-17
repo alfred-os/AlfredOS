@@ -28,6 +28,7 @@ from alfred.comms_mcp.protocol import (
     DAEMON_LIFECYCLE_READY,
     LinkReconnectingNotification,
     LinkRestoredNotification,
+    LinkUnavailableNotification,
 )
 from alfred.gateway.client_listener import LinkControlNotification
 from alfred.gateway.core_link import (
@@ -2364,3 +2365,110 @@ async def test_peer_handshake_no_buffer_injected_does_not_crash() -> None:
     assert link._core_epoch is not None  # the handshake still captured the epoch
     loss = [c for c in captured if c.get("event") == "gateway.comms.buffer_reset_input_loss"]
     assert loss == []
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (Spec A G4b-2a / ADR-0032): a ReplayBuffer soft-cap breach latches the
+# breaker; ``relay_to_core`` feeds BREAKER_TRIPPED UNCONDITIONALLY and the link-state
+# machine (NOT a gateway-local flag) escalates to UNAVAILABLE exactly ONCE — emitting
+# a single ``link.unavailable`` control to the client + ONE loud audit row. A repeat
+# tripped append re-feeds the absorbing machine, which returns ``None`` (no second
+# control, no second row). CLAUDE.md hard rule #7 — back-pressure is never silent.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_breaker_trip_escalates_link_unavailable_once() -> None:
+    """A soft-cap breach sends ONE ``link.unavailable`` + ONE ``breaker_tripped`` row.
+
+    ``max_frames=1`` -> the first append (depth 1) does NOT trip; the second append
+    (depth 2 > 1) trips the breaker. On that tripped ``relay_to_core`` the gateway
+    feeds BREAKER_TRIPPED, the machine escalates UP -> UNAVAILABLE emitting
+    ``LinkControl.UNAVAILABLE``, and the gateway pushes a single
+    :class:`LinkUnavailableNotification` to the client + writes ONE loud structlog row
+    carrying the buffer depth.
+    """
+    buf = ReplayBuffer(max_frames=1)
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"one")  # depth 1 — no trip, no escalation
+        assert not buf.breaker_tripped
+        assert recorder.controls == []
+        await link.relay_to_core(b"two")  # depth 2 > 1 — trips + escalates
+
+    assert buf.breaker_tripped
+    # The client received exactly ONE link.unavailable control frame (listener spy).
+    assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
+    # Exactly ONE loud audit row, carrying the buffer depth (no secrets).
+    rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert len(rows) == 1
+    assert rows[0].get("log_level") == "warning"
+    assert rows[0].get("depth_frames") == buf.depth_frames
+    assert rows[0].get("depth_bytes") == buf.depth_bytes
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_breaker_idempotent_refeed_no_second_escalation() -> None:
+    """A repeat tripped append re-feeds the absorbing machine — NO second control/row.
+
+    ``max_frames=2`` -> hard ceiling = 4 frames. Depths 1,2 do not trip; depth 3 (> 2)
+    trips + escalates; depth 4 (> 2, latch held) is the IDEMPOTENT re-feed. The machine
+    is UNAVAILABLE (absorbing) on that second tripped append, so ``_feed`` returns
+    ``None``: the client sees only ONE ``link.unavailable`` and only ONE row across BOTH
+    tripped appends. Depth 4 stays strictly under the hard ceiling (4 frames), so the
+    second append does not raise.
+    """
+    buf = ReplayBuffer(max_frames=2)
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"a")  # depth 1
+        await link.relay_to_core(b"b")  # depth 2 — at cap, no trip
+        await link.relay_to_core(b"c")  # depth 3 > 2 — trips + escalates ONCE
+        await link.relay_to_core(b"d")  # depth 4 > 2 — latch held, idempotent re-feed
+
+    assert buf.breaker_tripped
+    assert buf.depth_frames == 4  # all four held; hard ceiling (4) NOT breached
+    # Exactly ONE escalation reached the client despite TWO tripped appends.
+    assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
+    rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert len(rows) == 1  # the absorbing re-feed returned None -> no second row
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_under_cap_no_breaker_escalation() -> None:
+    """An append that stays under the cap feeds NO BREAKER_TRIPPED + writes no row."""
+    buf = ReplayBuffer(max_frames=8)
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"x")
+
+    assert not buf.breaker_tripped
+    assert recorder.controls == []  # no escalation
+    assert link._machine.state is GatewayLinkState.UP  # machine untouched by the breaker
+    rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_relay_to_core_no_buffer_never_references_breaker() -> None:
+    """With ``replay_buffer=None`` the breaker branch is never entered (no escalation)."""
+    link, recorder, _sink = _link_with_relay()  # default replay_buffer=None
+    assert link._replay_buffer is None
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.relay_to_core(b"one")
+
+    assert recorder.controls == []  # buffer-less link never escalates
+    rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert rows == []
