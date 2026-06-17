@@ -56,11 +56,15 @@ from alfred.gateway.link_state import (
     LinkStateMachine,
 )
 from alfred.gateway.metrics import (
+    BUFFER_CAP_RATIO,
+    BUFFER_DEPTH_BYTES,
+    BUFFER_DEPTH_FRAMES,
+    CIRCUIT_BREAKER_OPEN,
     CORE_LINK_UP,
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
-from alfred.gateway.replay_buffer import ReplayBuffer
+from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsProtocolError
 
@@ -90,6 +94,12 @@ _BACKOFF_FACTOR: Final[float] = 2.0
 # returning > backoff is pinned back to backoff), so every delay lands in
 # ``[_MIN_RECONNECT_DELAY_SECONDS, backoff]``.
 _MIN_RECONNECT_DELAY_SECONDS: Final[float] = 0.05
+
+# Spec A G4b-2a (#237): the cadence of the supervised TTL-eviction sweep. The
+# ReplayBuffer's TTL (default 300s) is the real retention bound; this is just how
+# often the gateway checks for frames that have crossed it. 30s keeps the post-TTL
+# residency window small relative to the TTL without busy-sweeping the buffer.
+_BUFFER_EVICT_INTERVAL_SECONDS: Final[float] = 30.0
 
 # The JSON-RPC method the core sends first on the core leg. Anything else before
 # the handshake is warn-and-dropped (mirrors the host runner's pre-handshake arm).
@@ -296,6 +306,54 @@ class GatewayCoreLink:
         else:
             await asyncio.Event().wait()  # no event wired: block until cancelled
 
+    def _refresh_buffer_metrics(self) -> None:
+        """Push the current ReplayBuffer depth/cap/breaker state onto the gauges.
+
+        Called after every buffer mutation (append, trim, reset, evict) so the gauges
+        track the live buffer. A no-op when no buffer is injected (buffering off).
+        """
+        if self._replay_buffer is None:
+            return
+        BUFFER_DEPTH_FRAMES.set(self._replay_buffer.depth_frames)
+        BUFFER_DEPTH_BYTES.set(self._replay_buffer.depth_bytes)
+        BUFFER_CAP_RATIO.set(self._replay_buffer.cap_ratio)
+        CIRCUIT_BREAKER_OPEN.set(1 if self._replay_buffer.breaker_tripped else 0)
+
+    async def _buffer_evict_loop(self) -> None:
+        """Periodically evict TTL-expired un-acked frames; audit each as input-loss.
+
+        A supervised background task spawned by :meth:`run` (reaped in its ``finally``).
+        Runs only when a buffer is injected. Each sweep evicts frames older than the
+        buffer's TTL — deliberate security-over-liveness loss (pre-DLP input cannot be
+        pinned across an unbounded crash-loop, spec §6), so every dropped seq gets a LOUD
+        audit row (CLAUDE.md hard rule #7). The monotonic clock keeps ``evict_expired``'s
+        non-regression precondition; the injected ``_sleep`` makes the interval testable.
+        """
+        assert self._replay_buffer is not None  # spawned only when a buffer is present
+        while True:
+            await self._sleep(_BUFFER_EVICT_INTERVAL_SECONDS)
+            try:
+                evicted = self._replay_buffer.evict_expired(now=self._monotonic())
+            except ReplayBufferError:
+                # The TTL bound is a security property (spec §6) — a sweep that raises
+                # (e.g. a regressed monotonic read) must be LOUD (hard rule #7), never a
+                # silent end to enforcement. Log + retry next tick (a fresh monotonic read
+                # re-establishes the floor); do NOT let the loop die unobserved.
+                log.error("gateway.comms.buffer_evict_failed", exc_info=True)
+                continue
+            for seq in evicted:
+                log.warning("gateway.comms.buffer_evicted", seq=seq, reason="ttl_expired")
+            self._refresh_buffer_metrics()
+
+    @staticmethod
+    def _on_evict_task_done(task: asyncio.Task[None]) -> None:
+        """Surface an unexpected evict-loop death loud (it should only end via cancel)."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("gateway.comms.buffer_evict_loop_died", error=repr(exc))
+
     async def _default_dial(self) -> _CommsTransportLike:
         """Production dial: connect the core's comms socket on the keyed adapter id.
 
@@ -329,9 +387,21 @@ class GatewayCoreLink:
         ``reconnecting``/``restored``, the live transport still closed in the ``finally``.
         """
         transport: _CommsTransportLike | None = None
+        evict_task: asyncio.Task[None] | None = None
         try:
             transport = await self._initial_connect()
             self._current_core_transport = transport
+            if self._replay_buffer is not None:
+                # Spec A G4b-2a (#237): the supervised TTL-eviction sweep runs only when a
+                # buffer is injected. Spawned AFTER the initial connect (so a shutdown
+                # DURING the initial connect never leaves an orphaned timer) and reaped in
+                # the ``finally`` on every exit path.
+                evict_task = asyncio.create_task(self._buffer_evict_loop())
+                # Surface an UNEXPECTED loop death loud: the loop should only ever end via
+                # the reap cancel below. A non-cancelled exception escaping it (despite the
+                # in-loop ReplayBufferError guard) would silently stop TTL enforcement —
+                # the done-callback makes that loud (hard rule #7).
+                evict_task.add_done_callback(self._on_evict_task_done)
             while True:
                 if self._shutdown_event is not None and self._shutdown_event.is_set():
                     return
@@ -358,6 +428,14 @@ class GatewayCoreLink:
             # the live transport (``None`` if the initial connect never completed).
             return
         finally:
+            # Reap the supervised evict timer FIRST (cancel + await-suppress the
+            # CancelledError — the daemon reap pattern) so no background sweep outlives
+            # ``run`` (CLAUDE.md hard rule #7 — no leaked task). ``None`` when no buffer
+            # was injected or the initial connect never completed.
+            if evict_task is not None:
+                evict_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await evict_task
             # Drop the relay's transport reference BEFORE closing so a concurrent
             # ``relay_to_core`` snapshots ``None`` (a loud drop) rather than a
             # mid-close transport (CLAUDE.md hard rule #7 — no silent send-into-a-corpse).
@@ -681,6 +759,8 @@ class GatewayCoreLink:
                     reason="reconnect_no_replay_2a",
                 )
             self._replay_buffer.reset_for_new_epoch()
+            # Spec A G4b-2a (#237): the reset emptied the buffer — zero the gauges.
+            self._refresh_buffer_metrics()
 
     async def _read_until_start(self, transport: _CommsTransportLike) -> Mapping[str, object]:
         """Read frames until ``lifecycle.start``; warn-and-drop anything before it.
@@ -778,6 +858,9 @@ class GatewayCoreLink:
                 ack = params.get("cumulative_ack") if isinstance(params, Mapping) else None
                 if isinstance(ack, int) and not isinstance(ack, bool) and ack >= 0:
                     self._replay_buffer.trim_to_ack(ack)
+                    # Spec A G4b-2a (#237): the trim shrank the buffer — refresh the
+                    # depth/cap gauges to the post-trim state.
+                    self._refresh_buffer_metrics()
                 else:
                     log.warning("gateway.core_link.daemon_comms_ack_malformed")
             log.debug("gateway.core_link.daemon_comms_ack_consumed")
@@ -857,6 +940,11 @@ class GatewayCoreLink:
                     depth_frames=self._replay_buffer.depth_frames,
                     depth_bytes=self._replay_buffer.depth_bytes,
                 )
+        if self._replay_buffer is not None:
+            # Spec A G4b-2a (#237): push the post-append (+ post-trip) buffer state onto
+            # the observability gauges. After the breaker feed so a trip reflects on the
+            # CIRCUIT_BREAKER_OPEN gauge in the same refresh.
+            self._refresh_buffer_metrics()
         try:
             await local.send_payload_unit(payload, seq=seq, ack=ack)
         except (

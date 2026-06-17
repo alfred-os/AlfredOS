@@ -157,6 +157,17 @@ class ReplayBuffer:
         """``True`` once a soft cap was breached; cleared only by :meth:`discard`."""
         return self._breaker_tripped
 
+    @property
+    def cap_ratio(self) -> float:
+        """Fullness as a fraction of the SOFT cap — ``max`` of the frame- and byte-ratios.
+
+        ``1.0`` means a soft cap is exactly hit; ``> 1.0`` is the post-breach overshoot
+        the breaker has already latched on (G4b's read-halt then bounds the growth). The
+        gateway exports this as ``gateway_buffer_cap_ratio`` so an operator sees how close
+        the always-up buffer is to back-pressure.
+        """
+        return max(self.depth_frames / self._max_frames, self._depth_bytes / self._max_bytes)
+
     def append(self, seq: int, payload: bytes, *, now: float) -> None:
         """FIFO-append a fresh un-acked inbound frame.
 
