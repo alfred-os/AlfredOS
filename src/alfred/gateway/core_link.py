@@ -752,28 +752,26 @@ class GatewayCoreLink:
         # receive tracker — a fresh core leg is a fresh per-connection seq space, so the
         # first relay_to_core on the new leg sends wire seq 0 (resume correctness).
         self._client_to_core_seq = 0
-        # Spec A G4b-2a (#237 / R1): a fresh core leg is a fresh seq space, so any frames
-        # still held under the OLD epoch cannot be replayed in 2a (reconnect-replay is
-        # 2b) and must not survive into epoch B — epoch B's seq restarts at 0, which the
-        # buffer's strict-increase guard would reject, and a fresh-leg ack would trim
-        # frames the new core never committed. So enumerate + LOUDLY audit each dropped
-        # seq (hard rule #7 — interim input-loss, not silent), then reset the buffer's
-        # floor for the new epoch. 2b replaces this drop with drain-replay-then-reset.
         if self._replay_buffer is not None:
-            # Reset the buffer floor on EVERY reconnect (not just when non-empty): a
-            # fully-acked reconnect drains the buffer via trim_to_ack WITHOUT resetting
-            # _last_seq (stale-frame rejection by design), so a depth>0 guard would skip
-            # the reset, leave _last_seq stale-high, and crash the relay pump when epoch
-            # B's append(0, …) trips the strict-increase guard (comms-1). Loud per-seq
-            # input-loss only when frames were actually dropped (hard rule #7); the floor
-            # reset is unconditional. reset_for_new_epoch on an empty buffer is a no-op
-            # beyond the floor rebind. retained_seqs() is body-free — no pre-DLP copy.
-            for seq in self._replay_buffer.retained_seqs():
-                log.warning(
-                    "gateway.comms.buffer_reset_input_loss",
-                    seq=seq,
-                    reason="reconnect_no_replay_2a",
-                )
+            # Spec A G4b-2b (#237): CAPTURE the un-acked remainder BEFORE the floor-reset so
+            # it can be replayed on the fresh leg (the bodies are independent copies that
+            # survive the reset's zeroing) — replacing the G4b-2a loud-loss drop. Clear the
+            # replay-pending gate so the relay's client->core pump HOLDS until the flush
+            # re-sends these: replayed frames must take the lowest seqs (precede fresh input,
+            # spec §4). ORDERING INVARIANT (R4): this clear runs inside _peer_handshake, which
+            # COMPLETES before the caller feeds CORE_READY and before run() rebinds the
+            # transport + flushes — so the pump can never observe an unparked gate between
+            # CORE_READY and the flush. An empty buffer (first connect / fully-acked
+            # reconnect) is a no-op: nothing to replay, gate stays set. The unconditional
+            # reset_for_new_epoch (the comms-1 fix) stays.
+            # FIFO-MERGE (review): PREPEND any deferred remainder from a prior None-transport
+            # flush (R1) ahead of this epoch's capture, rather than overwriting it — else the
+            # deferred frames (which are NOT in the buffer) are silently lost, breaking the R1
+            # no-silent-loss guarantee. Deferred frames are older in the stream, so they replay
+            # first; the core dedups any already-committed re-send on the in-payload inbound_id.
+            self._pending_replay = self._pending_replay + self._replay_buffer.unacked_frames()
+            if self._pending_replay:
+                self._replay_pending.clear()
             self._replay_buffer.reset_for_new_epoch()
             # Spec A G4b-2a (#237): the reset emptied the buffer — zero the gauges.
             self._refresh_buffer_metrics()

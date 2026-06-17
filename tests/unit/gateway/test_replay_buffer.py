@@ -262,36 +262,6 @@ def test_unacked_frames_reflects_post_trim_remainder_with_original_seqs() -> Non
     )
 
 
-def test_retained_seqs_returns_fifo_seqs_body_free() -> None:
-    """``retained_seqs`` yields the retained seqs in FIFO order without copying a body.
-
-    Unlike :meth:`unacked_frames` (which mints a fresh immutable ``bytes`` per body —
-    an extra un-zeroable pre-DLP copy), this returns ONLY the seqs, so the reconnect
-    loss-audit path can name each dropped seq without minting plaintext copies.
-    """
-    buf = _buffer()
-    buf.append(0, b"a", now=1.0)
-    buf.append(1, b"bb", now=2.0)
-    buf.append(2, b"ccc", now=3.0)
-    assert buf.retained_seqs() == (0, 1, 2)
-    # White-box: no retained body was copied out — the returned tuple is int-only.
-    assert all(isinstance(s, int) for s in buf.retained_seqs())
-
-
-def test_retained_seqs_empty_buffer_is_empty_tuple() -> None:
-    """A fresh (or fully-drained) buffer reports no retained seqs."""
-    assert _buffer().retained_seqs() == ()
-
-
-def test_retained_seqs_reflects_post_trim_remainder() -> None:
-    """After a trim the retained seqs are the un-acked remainder, original seqs intact."""
-    buf = _buffer()
-    for seq in range(4):
-        buf.append(seq, bytes([65 + seq]), now=float(seq))
-    buf.trim_to_ack(1)
-    assert buf.retained_seqs() == (2, 3)
-
-
 def test_normal_restart_replay_then_continue_never_trips_monotonic_guard() -> None:
     """Spec §4: inbound seq is gateway-owned + monotonic across a core restart."""
     buf = _buffer()

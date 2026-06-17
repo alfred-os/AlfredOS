@@ -31,9 +31,10 @@ The defenses under test (deleting ANY of them must fail this module):
   established H3 spy) and assert it is never called during the flood.
 
 A SECOND test pins the security HIGH (R1): on reconnect the held OLD-epoch frames
-are dropped-with-loud-input-loss and the buffer floor is reset — they are NOT
-replayed in 2a and a FRESH-leg ack can NOT silently "confirm" (trim) input the new
-core never received. The buffer only ever reflects epoch-B state.
+are CAPTURED into ``_pending_replay`` for replay on the fresh leg (G4b-2b) and the
+buffer floor is reset — a FRESH-leg ack can NOT silently "confirm" (trim) input the
+new core never received. The buffer only ever reflects epoch-B state; the captured
+stash awaits fresh-seq replay.
 
 Standalone adversarial module (a wire-protocol / resource-bound integrity property,
 not a corpus content payload). In-process and NON-ROOT — it drives the relay's
@@ -268,15 +269,18 @@ async def test_wedged_core_flood_emits_exactly_one_loud_breaker_row() -> None:
     assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
 
 
-async def test_reconnect_drops_old_epoch_no_trim_by_fresh_ack() -> None:
-    """R1 security HIGH: held OLD-epoch frames are loud-loss-dropped + reset on
-    reconnect, and a FRESH-leg ack can NOT trim/resurrect them.
+async def test_reconnect_captures_old_epoch_no_trim_by_fresh_ack() -> None:
+    """Security HIGH: held OLD-epoch frames are CAPTURED for replay + the buffer is
+    reset on reconnect, and a FRESH-leg ack can NOT trim/resurrect them.
 
-    A fresh-leg ``daemon.comms.ack`` whose ``cumulative_ack`` covers the OLD epoch's
-    seqs must NOT silently "confirm" (trim) input the NEW core never received — the
-    held frames are GONE (reset, not trimmed), so the buffer only ever reflects
-    epoch-B state. Without the reconnect reset, a stale fresh-leg ack would zero
-    un-committed pre-DLP input the new core never durably intook.
+    G4b-2b: on reconnect the held un-acked frames are captured into ``_pending_replay``
+    (for re-send on the fresh leg with FRESH seqs — the core G0-dedups on the in-payload
+    ``inbound_id``, not ``(leg, seq)``) and the buffer floor is reset, so the buffer no
+    longer holds any OLD-epoch seq. A fresh-leg ``daemon.comms.ack`` whose
+    ``cumulative_ack`` covers the OLD epoch's seqs therefore trims NOTHING from the (empty)
+    buffer and CANNOT touch the captured stash — it cannot silently "confirm" input the
+    NEW core never durably intook. (G4b-2a dropped the held frames with a loud loss row;
+    G4b-2b replaces that drop with capture-and-replay so nothing typed is lost.)
     """
     _reset_gauges()
     buf = ReplayBuffer(max_frames=_MAX_FRAMES)
@@ -295,16 +299,19 @@ async def test_reconnect_drops_old_epoch_no_trim_by_fresh_ack() -> None:
     assert buf.breaker_tripped is True
 
     # Reconnect: a FRESH core leg handshakes (epoch B). The held epoch-A frames are
-    # enumerated as loud per-seq input-loss, then the buffer floor is reset.
+    # CAPTURED into _pending_replay (not dropped), the replay-pending gate is cleared,
+    # and the buffer floor is reset. NO loud loss row (that was the G4b-2a behaviour).
     epoch_b = uuid4().hex
     fresh_core = _FakeTransport(frames=[_start_frame(epoch_b, seq_ack=True)])
     with structlog.testing.capture_logs() as captured:
         await link._peer_handshake(fresh_core)  # type: ignore[arg-type]
 
-    loss = [c for c in captured if c.get("event") == "gateway.comms.buffer_reset_input_loss"]
-    assert sorted(c["seq"] for c in loss) == held_a  # one loud loss row per held seq
-    assert all(c.get("log_level") == "warning" for c in loss)
-    # The buffer is now EMPTY and the breaker is cleared — epoch-A frames are GONE.
+    assert [c for c in captured if c.get("event") == "gateway.comms.buffer_reset_input_loss"] == []
+    # The held epoch-A frames were captured for replay (FIFO, original seqs), gate cleared.
+    assert [f.seq for f in link._pending_replay] == held_a
+    assert link.replay_pending_gate.is_set() is False
+    # The buffer itself is now EMPTY and the breaker is cleared — no OLD-epoch seq remains
+    # IN THE BUFFER (the captured copies live in the stash, awaiting fresh-seq replay).
     assert buf.depth_frames == 0
     assert buf.breaker_tripped is False
     assert buf.unacked_frames() == ()
@@ -323,5 +330,8 @@ async def test_reconnect_drops_old_epoch_no_trim_by_fresh_ack() -> None:
     # (trim_to_ack on an empty buffer is a no-op; the point is no resurrection of A.)
     assert buf.depth_frames == 0
     assert buf.unacked_frames() == ()
+    # The ack covers OLD-epoch seqs but CANNOT touch the captured stash — the replay re-mints
+    # FRESH seqs, so the new core dedups on inbound_id, never on these stale (leg, seq) values.
+    assert [f.seq for f in link._pending_replay] == held_a
     # And the carrier relayed NO ack control to the client (it is consumed, not relayed).
     assert isinstance(ack_body, bytes)  # payload-blind: the ack was bytes, never an object
