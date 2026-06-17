@@ -68,6 +68,24 @@ def test_terminates_on_a_symlink_cycle(tmp_path: Path, monkeypatch: pytest.Monke
     assert isinstance(roots, set)
 
 
+def test_terminates_on_a_relative_dotdot_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative ``..`` symlink that re-aliases itself must not slip the guard.
+
+    ``d/link -> ../d/link`` revisits the same node under a DIFFERENT raw string
+    (``d/../d/link``) each hop. The lexically-normalized ``seen`` key (+ the hard
+    depth bound) must still terminate the walk (CodeRabbit).
+    """
+    d = tmp_path / "d"
+    d.mkdir()
+    link = d / "link"
+    link.symlink_to(Path("..") / "d" / "link")  # relative, contains ``..``, self-aliasing
+    monkeypatch.setattr(sys, "executable", str(link))
+    roots = interpreter_sandbox_roots()  # must RETURN (no hang)
+    assert isinstance(roots, set)
+
+
 def test_non_symlink_executable_yields_just_the_static_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

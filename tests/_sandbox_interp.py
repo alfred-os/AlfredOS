@@ -48,10 +48,21 @@ def interpreter_sandbox_roots() -> set[str]:
     # Walk the symlink chain hop by hop. The interpreter file lives at
     # ``<root>/bin/<exe>``; for each hop we bind ``<root>`` (parents[1]) so an
     # intermediate alias dir is covered, not just the fully-resolved patch dir.
+    #
+    # The ``seen`` key is LEXICALLY NORMALIZED (``os.path.normpath`` collapses
+    # ``.``/``..``) so a relative hop target containing ``..`` cannot revisit the
+    # same node under a different string and slip the cycle guard. A hard depth
+    # bound is the belt-and-braces backstop: a >64-deep interpreter symlink chain
+    # is pathological, so the walk always terminates (CodeRabbit).
     current = Path(sys.executable)
     seen: set[str] = set()
-    while current.is_symlink() and str(current) not in seen:
-        seen.add(str(current))
+    for _ in range(64):
+        if not current.is_symlink():
+            break
+        key = os.path.normpath(str(current))
+        if key in seen:
+            break
+        seen.add(key)
         target = current.readlink()
         current = target if target.is_absolute() else current.parent / target
         if len(current.parents) >= 2:
