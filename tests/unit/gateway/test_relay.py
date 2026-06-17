@@ -682,11 +682,22 @@ class _HaltStubCoreLink:
     tripped). ``_payload_relay`` is the sink slot the relay binds at construction.
     """
 
-    def __init__(self, *, tripped: bool) -> None:
+    def __init__(self, *, tripped: bool, replay_pending: bool = False) -> None:
         self.replay_buffer_tripped = tripped
         self._release = asyncio.Event()
         self.forwarded: list[bytes] = []
         self._payload_relay: object | None = None
+        # Spec A G4b-2b (#237): the replay-pending gate the pump awaits before reading a
+        # fresh client frame. SET == no replay pending (the normal case, pump proceeds);
+        # CLEARED == a captured reconnect-replay is waiting to flush (pump holds). Default
+        # SET so the existing read-halt tests (which never touch it) stay byte-for-byte.
+        self._replay_pending_gate = asyncio.Event()
+        if not replay_pending:
+            self._replay_pending_gate.set()
+
+    @property
+    def replay_pending_gate(self) -> asyncio.Event:
+        return self._replay_pending_gate
 
     async def wait_for_shutdown(self) -> None:
         await self._release.wait()
@@ -794,3 +805,126 @@ async def test_client_to_core_pump_reads_when_not_tripped() -> None:
 
     # The client body reached the core (the not-tripped path read + forwarded it).
     assert core.sent_units == [(client_body, 0, 0)]
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2b (#237): reconnect-replay pending-gate hold. After the breaker
+# back-pressure halt and BEFORE the read, ``_client_to_core_pump`` awaits the
+# core-link's ``replay_pending_gate`` — so replayed frames (re-sent by run()'s
+# flush, taking seqs 0..N-1) precede fresh client input in seq order (spec §4).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_holds_while_replay_pending_gate_cleared() -> None:
+    """While a reconnect-replay is pending (gate CLEARED) the pump HOLDS — no fresh read.
+
+    With ``replay_buffer_tripped`` False but ``replay_pending_gate`` CLEARED, the pump must
+    park on the gate and NEVER await ``read_payload_unit`` (read spy stays at 0). SETTING
+    the gate (run()'s flush completing) releases the hold: the pump then reads + forwards.
+    """
+    core_link = _HaltStubCoreLink(tripped=False, replay_pending=True)
+    client = _read_spy_transport(units=[_unit(b"held-then-read"), asyncio.Event()])
+    relay = GatewayRelay(
+        core_link=core_link,  # type: ignore[arg-type]
+        client_transport=client,
+        client_seq_enabled=False,
+    )
+
+    task = asyncio.ensure_future(relay._client_to_core_pump())
+    # Let the pump reach the gate hold; the read is never attempted while the gate is clear.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()  # held on the gate, not returned
+    assert client.read_calls == 0  # type: ignore[attr-defined]
+    assert core_link.forwarded == []
+
+    # SET the gate (replay flush done): the pump resumes, reads the unit, and forwards it.
+    core_link.replay_pending_gate.set()
+    await _drive_until(lambda: bool(core_link.forwarded), task=task)
+    assert client.read_calls >= 1  # type: ignore[attr-defined]
+    assert core_link.forwarded == [b"held-then-read"]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_replay_gate_hold_is_cancellable() -> None:
+    """Cancelling the pump while it HOLDS on the replay gate propagates ``CancelledError``.
+
+    The gate ``wait()`` is OUTSIDE the read ``try`` (a shutdown cancel must not be swallowed
+    by the read's except family), so cancelling the held pump surfaces the cancel cleanly.
+    """
+    core_link = _HaltStubCoreLink(tripped=False, replay_pending=True)  # gate never set
+    client = _read_spy_transport(units=[_unit(b"never-read")])
+    relay = GatewayRelay(
+        core_link=core_link,  # type: ignore[arg-type]
+        client_transport=client,
+        client_seq_enabled=False,
+    )
+
+    task = asyncio.ensure_future(relay._client_to_core_pump())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()  # held on the gate
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert client.read_calls == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_passes_through_when_replay_gate_set() -> None:
+    """The normal case (gate SET) reads + forwards with zero hold overhead.
+
+    A real ``GatewayCoreLink`` on a fresh link has its ``replay_pending_gate`` SET, so the
+    pump never holds — the existing read/forward path is unchanged.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    client_body = b'{"id":9,"method":"chat.send","params":{}}'
+    blocked_core = asyncio.Event()
+    core = _FakeTransport(frames=[_start_frame(epoch, seq_ack=True)], units=[blocked_core])
+    client = _FakeTransport(units=[_unit(client_body), asyncio.Event()])
+    relay, core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+    assert core_link.replay_pending_gate.is_set() is True
+
+    task = asyncio.ensure_future(relay.run())
+    await _drive_until(lambda: bool(core.sent_units), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert core.sent_units == [(client_body, 0, 0)]
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_tripped_breaker_halts_before_gate_wait() -> None:
+    """The breaker halt is checked BEFORE the gate wait: a tripped breaker still parks.
+
+    With BOTH ``replay_buffer_tripped`` True AND ``replay_pending_gate`` SET, the pump must
+    still take the breaker back-pressure park (``wait_for_shutdown``), not the gate path —
+    the ordering guarantees a latched breaker wins even when no replay is pending.
+    """
+    core_link = _HaltStubCoreLink(tripped=True, replay_pending=False)  # gate SET, breaker on
+    client = _read_spy_transport(units=[_unit(b"never-read")])
+    relay = GatewayRelay(
+        core_link=core_link,  # type: ignore[arg-type]
+        client_transport=client,
+        client_seq_enabled=False,
+    )
+
+    task = asyncio.ensure_future(relay._client_to_core_pump())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()  # parked on the breaker halt, not reading
+    assert client.read_calls == 0  # type: ignore[attr-defined]
+
+    # Releasing the breaker park (a wired shutdown) returns the pump — proving it parked on
+    # ``wait_for_shutdown`` (the breaker path), not the already-SET gate.
+    core_link.release()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert client.read_calls == 0  # type: ignore[attr-defined]

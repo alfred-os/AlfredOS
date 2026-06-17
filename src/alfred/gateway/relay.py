@@ -207,6 +207,14 @@ class GatewayRelay:
                 # buffer drains) is the G4b-2b concern, not wired here.
                 await self._core_link.wait_for_shutdown()
                 return
+            # Spec A G4b-2b (#237): hold the client->core pump while a reconnect-replay is
+            # pending. _peer_handshake cleared this gate on capture; run()'s flush re-sends
+            # the captured frames (taking seqs 0..N-1) then SETS the gate. Awaiting here
+            # before reading a fresh client frame guarantees replayed frames precede fresh
+            # input in seq order (spec §4). On a fresh link / no buffer the gate is always
+            # SET so this returns immediately (no overhead). OUTSIDE the read ``try`` so a
+            # shutdown CancelledError propagates cleanly (not swallowed).
+            await self._core_link.replay_pending_gate.wait()
             try:
                 frame = await self._client_transport.read_payload_unit()
                 if frame is None:
