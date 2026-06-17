@@ -46,6 +46,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._sandbox_interp import interpreter_sandbox_roots
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 _REAL_POLICY = _REPO_ROOT / "config" / "sandbox" / "quarantined-llm.linux.bwrap.policy"
@@ -86,12 +88,11 @@ def _real_policy_body_with_test_binds(plugin_dir: Path) -> str:
     # /usr,/lib,/lib64 binds, so bind the venv (sys.prefix), the base
     # interpreter install (sys.base_prefix — where the venv's bin/python symlink
     # resolves), the realpath'd interpreter root, and plugin_dir.
-    interp_roots = {
-        sys.prefix,
-        sys.base_prefix,
-        str(Path(os.path.realpath(sys.executable)).parents[1]),
-        str(plugin_dir),
-    }
+    # ``interpreter_sandbox_roots`` walks ``sys.executable``'s full symlink chain
+    # (incl. any uv minor-version alias hop, e.g. ``cpython-3.14-`` ->
+    # ``cpython-3.14.6-``) so the venv interpreter is exec'able in bwrap regardless
+    # of the uv-managed interpreter location; ``plugin_dir`` carries the stub.
+    interp_roots = interpreter_sandbox_roots() | {str(plugin_dir)}
     appended_roots = [
         root
         for root in sorted(interp_roots)

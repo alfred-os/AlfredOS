@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._sandbox_interp import interpreter_sandbox_roots
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LAUNCHER = _REPO_ROOT / "bin" / "alfred-plugin-launcher.sh"
 
@@ -60,16 +62,12 @@ def _adequate_policy_body(plugin_dir: Path, *, unshare_net: bool = False) -> str
     # python), and its script lives under ``plugin_dir`` (pytest's tmp_path).
     # Neither is under the system binds above, so BOTH must be bound or bwrap
     # fails with ``execvp .../python: No such file or directory`` (interpreter)
-    # or the interpreter can't open the script (plugin_dir). Bind the venv
-    # (``sys.prefix``), the base interpreter install (``sys.base_prefix`` —
-    # where the venv's ``bin/python`` symlink resolves, e.g. the uv-managed
-    # CPython on CI) + the realpath'd interpreter root, and ``plugin_dir``.
-    interp_roots = {
-        sys.prefix,
-        sys.base_prefix,
-        str(Path(os.path.realpath(sys.executable)).parents[1]),
-        str(plugin_dir),
-    }
+    # or the interpreter can't open the script (plugin_dir).
+    # ``interpreter_sandbox_roots`` walks ``sys.executable``'s full symlink chain
+    # (venv + base interpreter install + any uv minor-version ALIAS hop, e.g.
+    # ``cpython-3.14-`` -> ``cpython-3.14.6-``), so the binds survive a uv-managed
+    # interpreter-location shift; ``plugin_dir`` carries the stub script.
+    interp_roots = interpreter_sandbox_roots() | {str(plugin_dir)}
     for root in sorted(interp_roots):
         if Path(root).exists() and not root.startswith(("/usr", "/lib", "/bin")):
             binds.append(f'["{root}", "{root}"]')
