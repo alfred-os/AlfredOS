@@ -195,6 +195,18 @@ class GatewayRelay:
         stays the existing quiet return.
         """
         while True:
+            if self._core_link.replay_buffer_tripped:
+                # Back-pressure (Spec A G4b-2a / R4): the ReplayBuffer breaker latched, so
+                # STOP draining the client socket — the OS socket buffer back-pressures the
+                # TUI (loss-free; never a drop). The latch is TERMINAL in 2a (only 2b's
+                # reset clears it), so park until shutdown: the relay TaskGroup cancels this
+                # pump on the core pump's shutdown return, interrupting the park cleanly.
+                # OUTSIDE the read ``try`` so the CancelledError is not swallowed.
+                # DELIBERATE 2a DEFERRAL: this park does NOT resume if a later reconnect
+                # clears the breaker — resume-after-reset (the read loop restarting once the
+                # buffer drains) is the G4b-2b concern, not wired here.
+                await self._core_link.wait_for_shutdown()
+                return
             try:
                 frame = await self._client_transport.read_payload_unit()
                 if frame is None:

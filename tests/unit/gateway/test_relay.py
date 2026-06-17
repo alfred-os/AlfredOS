@@ -663,3 +663,134 @@ async def test_seq_enabled_client_tracker_independent_of_core_seq() -> None:
     relay._client_tracker.observe(1)
     assert relay._client_tracker.cumulative_ack() == 1
     assert core_link._core_tracker.cumulative_ack() == -1
+
+
+# ---------------------------------------------------------------------------
+# Spec A G4b-2a (#237 / R4): client read-halt back-pressure. When the core-link's
+# ReplayBuffer breaker latches, ``_client_to_core_pump`` STOPS draining the client
+# socket (OS socket-buffer back-pressure to the TUI; loss-free) and PARKS on the
+# core-link's ``wait_for_shutdown`` until the relay TaskGroup cancels the parked pump.
+# ---------------------------------------------------------------------------
+
+
+class _HaltStubCoreLink:
+    """A minimal ``GatewayCoreLink`` stand-in exposing only the two halt seams.
+
+    ``replay_buffer_tripped`` is the controllable latch the pump polls;
+    ``wait_for_shutdown`` parks on a test-controlled event so a test can release the
+    halt deterministically. ``relay_to_core`` records forwards (asserted untouched while
+    tripped). ``_payload_relay`` is the sink slot the relay binds at construction.
+    """
+
+    def __init__(self, *, tripped: bool) -> None:
+        self.replay_buffer_tripped = tripped
+        self._release = asyncio.Event()
+        self.forwarded: list[bytes] = []
+        self._payload_relay: object | None = None
+
+    async def wait_for_shutdown(self) -> None:
+        await self._release.wait()
+
+    def release(self) -> None:
+        self._release.set()
+
+    async def relay_to_core(self, payload: bytes) -> None:
+        self.forwarded.append(payload)
+
+
+def _read_spy_transport(*, units: list[object] | None = None) -> _FakeTransport:
+    """A client ``_FakeTransport`` that counts ``read_payload_unit`` invocations."""
+    transport = _FakeTransport(units=units)
+    transport.read_calls = 0  # type: ignore[attr-defined]
+    original = transport.read_payload_unit
+
+    async def _counting_read() -> SeqFrame | None:
+        transport.read_calls += 1  # type: ignore[attr-defined]
+        return await original()
+
+    transport.read_payload_unit = _counting_read  # type: ignore[method-assign]
+    return transport
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_halts_while_buffer_tripped() -> None:
+    """While the breaker is tripped the pump PARKS — it NEVER reads the client socket.
+
+    Run ``_client_to_core_pump`` against a stub core-link whose
+    ``replay_buffer_tripped`` is ``True``: the pump must park on ``wait_for_shutdown``
+    and never await ``read_payload_unit`` (read spy stays at 0). Releasing the park (the
+    wired-shutdown analogue) returns the pump cleanly.
+    """
+    core_link = _HaltStubCoreLink(tripped=True)
+    client = _read_spy_transport(units=[_unit(b"never-read")])
+    relay = GatewayRelay(
+        core_link=core_link,  # type: ignore[arg-type]
+        client_transport=client,
+        client_seq_enabled=False,
+    )
+
+    task = asyncio.ensure_future(relay._client_to_core_pump())
+    # Let the pump reach the park; the read is never attempted while tripped.
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()  # parked, not returned
+    assert client.read_calls == 0  # type: ignore[attr-defined]
+    assert core_link.forwarded == []
+
+    # Release the park (a wired shutdown firing): the pump returns cleanly.
+    core_link.release()
+    await asyncio.wait_for(task, timeout=1.0)
+    assert client.read_calls == 0  # type: ignore[attr-defined]  # still never read
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_halt_park_is_cancellable() -> None:
+    """Cancelling the PARKED pump (no shutdown fired) propagates ``CancelledError`` cleanly.
+
+    The TaskGroup cancels the parked client pump on the core pump's shutdown return; the
+    park must surface that cancel (the halt is OUTSIDE the read ``try`` so it is never
+    swallowed by the read's except family).
+    """
+    core_link = _HaltStubCoreLink(tripped=True)  # never released
+    client = _read_spy_transport(units=[_unit(b"never-read")])
+    relay = GatewayRelay(
+        core_link=core_link,  # type: ignore[arg-type]
+        client_transport=client,
+        client_seq_enabled=False,
+    )
+
+    task = asyncio.ensure_future(relay._client_to_core_pump())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()  # parked
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert client.read_calls == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_client_to_core_pump_reads_when_not_tripped() -> None:
+    """When the breaker is NOT tripped the pump reads + forwards exactly as before.
+
+    A real ``GatewayCoreLink`` with NO buffer (``replay_buffer_tripped`` always
+    ``False``) forwards the client unit to the core leg — the no-halt path is unchanged.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    client_body = b'{"id":7,"method":"chat.send","params":{}}'
+    blocked_core = asyncio.Event()
+    core = _FakeTransport(frames=[_start_frame(epoch, seq_ack=True)], units=[blocked_core])
+    client = _FakeTransport(units=[_unit(client_body), asyncio.Event()])
+    relay, core_link, _ = _build_relay(
+        core=core, client=client, client_seq_enabled=False, shutdown=shutdown
+    )
+    assert core_link.replay_buffer_tripped is False
+
+    task = asyncio.ensure_future(relay.run())
+    await _drive_until(lambda: bool(core.sent_units), task=task)
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # The client body reached the core (the not-tripped path read + forwarded it).
+    assert core.sent_units == [(client_body, 0, 0)]
