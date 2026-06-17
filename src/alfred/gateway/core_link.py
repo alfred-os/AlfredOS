@@ -64,7 +64,7 @@ from alfred.gateway.metrics import (
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
-from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError
+from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError, ReplayFrame
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsProtocolError
 
@@ -283,6 +283,22 @@ class GatewayCoreLink:
         # buffering OFF — the merged G3 relay tests construct unchanged — so this
         # foundation cut wires only the injection; the append/trim lands in a later task.
         self._replay_buffer = replay_buffer
+        # Spec A G4b-2b (#237): the reconnect-replay seams. ``_pending_replay`` holds the
+        # un-acked frames captured before a reconnect reset, awaiting re-send on the fresh
+        # leg. ``_replay_pending`` is a gate the relay's client->core pump awaits: SET = the
+        # pump may run; CLEARED (by the reconnect capture) = the pump parks until the flush
+        # re-sends the replay (so replayed frames take the lowest seqs, preceding fresh
+        # input). It starts SET (no replay pending on a fresh link / first connect).
+        self._pending_replay: tuple[ReplayFrame, ...] = ()
+        self._replay_pending: asyncio.Event = asyncio.Event()
+        self._replay_pending.set()
+
+    @property
+    def replay_pending_gate(self) -> asyncio.Event:
+        """The gate the relay's client->core pump awaits — SET while no reconnect-replay
+        is pending, CLEARED while a captured replay is waiting to be flushed (Spec A
+        G4b-2b). On a link with no ReplayBuffer it is permanently SET (never cleared)."""
+        return self._replay_pending
 
     @property
     def replay_buffer_tripped(self) -> bool:

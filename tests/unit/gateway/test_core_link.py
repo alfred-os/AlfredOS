@@ -2217,6 +2217,27 @@ def test_init_replay_buffer_defaults_to_none() -> None:
     assert link._replay_buffer is None
 
 
+def test_init_pending_replay_starts_empty() -> None:
+    """Spec A G4b-2b (#237): a fresh link's ``_pending_replay`` stash is the empty tuple.
+
+    The reconnect-replay foundation: the un-acked frames captured before a reconnect
+    reset land here awaiting re-send. A fresh link / first connect has none pending.
+    """
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+    assert link._pending_replay == ()
+
+
+def test_init_replay_pending_gate_starts_set() -> None:
+    """Spec A G4b-2b (#237): the replay-pending gate is an ``asyncio.Event``, SET at ctor.
+
+    The relay's client->core pump awaits this gate; SET = the pump may run. A fresh link
+    has no reconnect-replay pending, so the gate starts SET.
+    """
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+    assert isinstance(link.replay_pending_gate, asyncio.Event)
+    assert link.replay_pending_gate.is_set() is True
+
+
 # ---------------------------------------------------------------------------
 # Task 5 (Spec A G4b-2a / ADR-0032 — R1): a fresh core leg is a fresh seq space, so
 # any frames still held under the OLD epoch cannot be replayed in 2a (reconnect-replay
