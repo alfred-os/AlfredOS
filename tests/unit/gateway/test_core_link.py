@@ -46,6 +46,7 @@ from alfred.gateway.metrics import (
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
+from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsPeerAuthError, CommsProtocolError
 
@@ -2031,3 +2032,22 @@ async def test_run_relay_pump_unit_without_seq_skips_tracker() -> None:
     # No seq -> the receive tracker never advanced past its initial -1.
     assert link._core_tracker.cumulative_ack() == -1
     assert recorder.controls == []
+
+
+def test_init_stores_injected_replay_buffer() -> None:
+    """Spec A G4b-2a (#237): an injected ``ReplayBuffer`` is stored on the link.
+
+    The first foundation step: the (already-merged, pure) un-acked-inbound retention
+    buffer is constructor-injected so later G4b-2a tasks can append/trim against it.
+    """
+    buf = ReplayBuffer()
+    link = GatewayCoreLink(client_listener=_RecordingClientListener(), replay_buffer=buf)  # type: ignore[arg-type]
+    assert link._replay_buffer is buf
+
+
+def test_init_replay_buffer_defaults_to_none() -> None:
+    """No ``replay_buffer`` kwarg leaves buffering OFF — the merged G3 relay tests
+    construct unchanged (``None`` is the default, so no behaviour shifts).
+    """
+    link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+    assert link._replay_buffer is None
