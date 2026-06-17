@@ -258,15 +258,6 @@ class ReplayBuffer:
             del self._retained[: len(evicted)]
         return tuple(evicted)
 
-    def retained_seqs(self) -> tuple[int, ...]:
-        """The retained un-acked seqs, FIFO order — body-free (no pre-DLP copy minted).
-
-        For the G4b reconnect/eviction audit paths that need only the seqs to write the
-        loud input-loss rows: unlike :meth:`unacked_frames` this never copies a retained
-        body, so it does not mint extra un-zeroable plaintext copies of pre-DLP input.
-        """
-        return tuple(entry.seq for entry in self._retained)
-
     def unacked_frames(self) -> tuple[ReplayFrame, ...]:
         """Return the retained un-acked frames as :class:`ReplayFrame`, FIFO order.
 
