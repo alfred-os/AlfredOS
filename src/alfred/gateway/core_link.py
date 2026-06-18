@@ -455,6 +455,17 @@ class GatewayCoreLink:
                 evict_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await evict_task
+            # Zero the retained PRE-DLP bytes on EVERY run() exit (security): the buffer
+            # holds mutable bytearray copies of un-acked operator input so they can be
+            # scrubbed in place; discard() zeros + empties them. Without this, a shutdown /
+            # disconnect with un-acked frames leaves pre-DLP input resident in the always-up
+            # process until GC (CLAUDE.md hard rule #7 — no silent residual exposure). Runs
+            # AFTER the evict-task reap above so the evict loop cannot mutate concurrently.
+            # discard() preserves the seq floor (correct for a terminal exit, unlike the
+            # per-connection reset_for_new_epoch); the IMMUTABLE bytes in ``_pending_replay``
+            # cannot be zeroed in place, so they are left to GC (the existing security model).
+            if self._replay_buffer is not None:
+                self._replay_buffer.discard()
             # Drop the relay's transport reference BEFORE closing so a concurrent
             # ``relay_to_core`` snapshots ``None`` (a loud drop) rather than a
             # mid-close transport (CLAUDE.md hard rule #7 — no silent send-into-a-corpse).

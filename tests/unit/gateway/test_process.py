@@ -32,6 +32,7 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.gateway import client_listener as client_listener_mod
 from alfred.gateway.client_link import GatewayHandshakeError
+from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.metrics import PEER_AUTH_REJECTED
 from alfred.gateway.process import GatewayProcess
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
@@ -501,3 +502,162 @@ async def test_run_relays_control_frame_on_core_going_down(runtime_dir: Path) ->
                 run_task.cancel()
 
     assert not _gateway_socket_path().exists()
+
+
+# ---------------------------------------------------------------------------
+# G5 resume activation — the always-up process now wires a ReplayBuffer + the
+# determinism seams into the GatewayCoreLink, so the resume happens in prod.
+# ---------------------------------------------------------------------------
+
+
+def _capture_core_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[GatewayCoreLink]:
+    """Spy ``GatewayCoreLink`` construction inside ``process.run()``.
+
+    Returns a list the test reads after driving ``run()``; each constructed core-link is
+    appended so the test can assert on the buffer/seams threaded in (without reaching into
+    ``run()``'s locals). The real class is constructed — only its ``__init__`` is wrapped.
+    """
+    import alfred.gateway.process as process_mod
+
+    built: list[GatewayCoreLink] = []
+    real_cls = process_mod.GatewayCoreLink
+
+    def _spy(*args: object, **kwargs: object) -> GatewayCoreLink:
+        link = real_cls(*args, **kwargs)  # type: ignore[arg-type]
+        built.append(link)
+        return link
+
+    monkeypatch.setattr(process_mod, "GatewayCoreLink", _spy)
+    return built
+
+
+async def test_default_process_activates_resume_buffer(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DEFAULT ``GatewayProcess(shutdown_event=...)`` build path constructs a
+    ``GatewayCoreLink`` with a NON-None ``replay_buffer`` — the resume is ACTIVE in prod.
+
+    Pre-change (``replay_buffer=None`` in ``run()``) this FAILS: the built core-link has
+    ``_replay_buffer is None``. The drive is the happy-path harness up to the first turn.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    core_listener = CommsSocketListener(adapter_id=_CORE_ADAPTER_ID)
+    await core_listener.bind()
+    core_host_task = asyncio.create_task(_accept_core_host(core_listener, epoch=epoch))
+
+    built = _capture_core_link(monkeypatch)
+    process = GatewayProcess(shutdown_event=shutdown)
+    run_task = asyncio.ensure_future(process.run())
+    try:
+        client = await _dial_gateway_with_retry()
+        await _client_handshake_host(client)
+        core_host = await asyncio.wait_for(core_host_task, timeout=3.0)
+        try:
+            assert len(built) == 1
+            # The resume is ACTIVE: the production default threaded a real ReplayBuffer in.
+            assert built[0]._replay_buffer is not None
+            shutdown.set()
+            with structlog.testing.capture_logs():
+                await asyncio.wait_for(run_task, timeout=3.0)
+        finally:
+            await core_host.close()
+            await client.close()
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+        await core_listener.aclose()
+
+    assert not _gateway_socket_path().exists()
+
+
+async def test_injected_seams_thread_through_to_core_link(
+    runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An injected ``replay_buffer_factory`` is called EXACTLY ONCE and its buffer reaches
+    the core-link; the injected ``sleep``/``jitter``/``monotonic`` are threaded through too.
+    """
+    from alfred.gateway.replay_buffer import ReplayBuffer
+
+    factory_calls = 0
+    spy_buffer = ReplayBuffer(max_frames=4, max_bytes=1024, ttl_seconds=60.0)
+
+    def _factory() -> ReplayBuffer:
+        nonlocal factory_calls
+        factory_calls += 1
+        return spy_buffer
+
+    # ``_sleep`` PARKS (awaits a never-set event) so the core-link's TTL-eviction loop
+    # idles like it does under the real ``asyncio.sleep`` — a no-op return would busy-spin
+    # the eviction loop and starve the relay. Cancellation (on shutdown) unwinds it.
+    park = asyncio.Event()
+
+    async def _sleep(_delay: float) -> None:
+        await park.wait()
+
+    def _jitter(hi: float) -> float:
+        return hi
+
+    def _monotonic() -> float:
+        return 123.0
+
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    core_listener = CommsSocketListener(adapter_id=_CORE_ADAPTER_ID)
+    await core_listener.bind()
+    core_host_task = asyncio.create_task(_accept_core_host(core_listener, epoch=epoch))
+
+    built = _capture_core_link(monkeypatch)
+    process = GatewayProcess(
+        shutdown_event=shutdown,
+        replay_buffer_factory=_factory,
+        sleep=_sleep,
+        jitter=_jitter,
+        monotonic=_monotonic,
+    )
+    run_task = asyncio.ensure_future(process.run())
+    try:
+        client = await _dial_gateway_with_retry()
+        await _client_handshake_host(client)
+        core_host = await asyncio.wait_for(core_host_task, timeout=3.0)
+        try:
+            assert len(built) == 1
+            link = built[0]
+            assert factory_calls == 1
+            assert link._replay_buffer is spy_buffer
+            assert link._sleep is _sleep
+            assert link._jitter is _jitter
+            assert link._monotonic is _monotonic
+            shutdown.set()
+            with structlog.testing.capture_logs():
+                await asyncio.wait_for(run_task, timeout=3.0)
+        finally:
+            await core_host.close()
+            await client.close()
+    finally:
+        if not run_task.done():
+            run_task.cancel()
+        await core_listener.aclose()
+
+    assert not _gateway_socket_path().exists()
+
+
+def test_default_construction_uses_production_seam_defaults() -> None:
+    """A bare ``GatewayProcess(shutdown_event=...)`` constructs with the PRODUCTION seam
+    defaults: the ``ReplayBuffer`` factory, ``asyncio.sleep``, ``None`` jitter (core-link's
+    own full-jitter), and ``time.monotonic`` — the all-defaults ``start_gateway`` shape.
+    """
+    import time
+
+    from alfred.gateway.replay_buffer import ReplayBuffer
+
+    process = GatewayProcess(shutdown_event=asyncio.Event())
+    assert process._replay_buffer_factory is ReplayBuffer
+    assert process._sleep is asyncio.sleep
+    assert process._jitter is None
+    assert process._monotonic is time.monotonic
+    # The factory default builds the production-capped retention buffer at its own caps.
+    buffer = process._replay_buffer_factory()
+    assert isinstance(buffer, ReplayBuffer)
