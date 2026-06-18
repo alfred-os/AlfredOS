@@ -35,6 +35,15 @@ alfred user add --authorization operator --name "Your Name"   # one-time
 alfred chat                 # start a TUI conversation
 ```
 
+`docker compose up -d` also starts **`alfred-gateway`** — the always-up resumable front
+door that (once linked to the core in a later release) holds an `alfred chat` session
+across a core restart. It exposes Prometheus metrics on the compose-internal
+`alfred-gateway:9464/metrics` (see `ops/prometheus/prometheus.yml`). Note: the
+`alfred_run` volume inherits ownership from the image on **first** creation; if you are
+upgrading an older deployment that already has an `alfred_run` volume with the wrong
+owner, run `docker compose down && docker volume rm <project>_alfred_run` before
+`up -d` so it is re-created owned by the `alfred` user.
+
 ### Enable Discord (Developer Mode walkthrough)
 
 Slice 2 ships a DM-only Discord adapter. Operator workflow for a fresh
