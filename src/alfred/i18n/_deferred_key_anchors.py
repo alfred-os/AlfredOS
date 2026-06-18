@@ -107,18 +107,6 @@ def _anchor_deferred_keys() -> tuple[str, ...]:
         # default — extracting the literal at this anchor closes the
         # extraction gap.
         t("cli.supervisor.status.breaker_state.unknown"),
-        # gateway.help.healthcheck / gateway.healthcheck.* (Spec B G6-0) —
-        # the `alfred gateway healthcheck` command + its two unhealthy-path
-        # messages land in a deferred PR. `gateway.help.healthcheck` is
-        # resolved at import time by the command decorator
-        # (`@gateway_app.command(help=t("gateway.help.healthcheck"))`), so the
-        # key must be warm in the compiled catalog before that command's
-        # module imports. Anchored here so the drift gate preserves all
-        # three until the live call sites in alfred.cli.gateway take over the
-        # extraction footprint.
-        t("gateway.help.healthcheck"),
-        t("gateway.healthcheck.unreachable"),
-        t("gateway.healthcheck.breaker_open"),
     )
 
 

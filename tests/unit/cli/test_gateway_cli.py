@@ -48,6 +48,7 @@ def test_gateway_subcommands_listed() -> None:
     assert result.exit_code == 0
     assert "start" in result.stdout
     assert "status" in result.stdout
+    assert "healthcheck" in result.stdout
 
 
 # ---------------------------------------------------------------------------
