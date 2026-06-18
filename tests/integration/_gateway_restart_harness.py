@@ -59,6 +59,12 @@ from alfred.gateway.core_link import _BUFFER_EVICT_INTERVAL_SECONDS
 from alfred.gateway.process import GatewayProcess
 from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
+from alfred.plugins.comms_socket_transport import default_comms_socket_path
+
+# The gateway's own stable client-facing socket id (mirrors
+# ``alfred.gateway.client_listener._GATEWAY_ADAPTER_ID``): the chat dials
+# ``comms-gateway.sock`` and the listener binds it.
+_GATEWAY_ADAPTER_ID = "gateway"
 
 # How many cooperative-yield ticks a bounded settle loop spins before giving up on
 # its observable. Generous enough to absorb the multi-hop real-socket round-trip
@@ -349,6 +355,7 @@ class _GatewayStack:
     link_states: list[str]
     session: TuiSession
     dial: _DialRecorder
+    socket_path: Path
     _gateway: GatewayProcess = field(repr=False)
 
     async def send_operator_input(self, text: str) -> None:
@@ -461,6 +468,7 @@ async def _running_gateway_stack(
         link_states=link_states,
         session=captured_session["s"],
         dial=dial,
+        socket_path=default_comms_socket_path(_GATEWAY_ADAPTER_ID),
         _gateway=gateway,
     )
     try:
