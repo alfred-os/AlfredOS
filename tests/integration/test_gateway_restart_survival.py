@@ -26,6 +26,7 @@ bounded ``settle`` on an observable, never a fixed timeout.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from alfred_tui.session import TuiSession
@@ -168,3 +169,107 @@ async def _assert_banner_paints_then_clears(methods: list[str]) -> None:
         await pilot.pause()
         # restored CLEARS the banner (restore = hide; no tui.banner.restored render).
         assert app.query_one("#link_banner", Static).display is False
+
+
+# ---------------------------------------------------------------------------
+# TASK 3 — un-acked operator input REPLAYS across the restart (the crit-#7 proof, R4).
+# ---------------------------------------------------------------------------
+
+
+def _operator_text(payload: bytes) -> str:
+    """The operator-typed text inside a relayed ``inbound.message`` payload.
+
+    The opaque client->core payload is the inner ``inbound.message`` JSON-RPC frame; the
+    TUI body is ``{"content": "<typed text>"}`` (``BODY_FIELD_BY_KIND["tui"] == "content"``).
+    Extracting it lets the test identify WHICH operator turn a recorded/replayed unit is.
+    """
+    frame = json.loads(payload)
+    body = frame["params"]["body"]
+    content = body["content"]
+    assert isinstance(content, str)
+    return content
+
+
+def _texts(units: list[tuple[bytes, int, int]]) -> list[str]:
+    """The operator texts of a transport's recorded ``sent_units``, in order."""
+    return [_operator_text(payload) for payload, _seq, _ack in units]
+
+
+async def test_unacked_operator_input_replays_across_a_core_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un-acked operator input replays on the NEW core; already-acked input does NOT.
+
+    THE crit-#7 proof (R4 / G4b-2b resume). Send operator turns chat -> gateway -> core
+    over the REAL socket. The fake core WITHHOLDS ``daemon.comms.ack`` for the input that
+    must replay (it stays genuinely UN-ACKED at restart), but DELIVERS an ack for a
+    CONTROL turn first. Then ``go_down()`` opens the gap and the reconnect binds a fresh
+    core. Assert:
+
+    * the un-acked turns replay on the NEW core, in FIFO order, with FRESH per-connection
+      seqs (0, 1, ...) — the resume re-sends the buffered remainder;
+    * a post-restart fresh turn lands AFTER the replayed ones (fresh input never jumps the
+      replay);
+    * CONTROL (non-vacuity): the ALREADY-ACKED turn does NOT replay — else a blind re-send
+      of the whole stream would pass trivially.
+
+    Mutation note: with Task 0's buffer injection removed (``replay_buffer=None``) nothing
+    is buffered, so nothing replays and this test FAILS — the buffer is load-bearing.
+    """
+    epoch1 = fresh_epoch()
+    epoch2 = fresh_epoch()
+    first = _GoDownCoreTransport(epoch1)
+    blocked = asyncio.Event()
+    second = _ScriptedCoreTransport([start_frame(epoch2), blocked])
+
+    async with gateway_stack(
+        monkeypatch=monkeypatch, core_outcomes=[lambda: first, lambda: second]
+    ) as stack:
+        assert await settle(lambda: bool(first.sent))  # epoch-1 handshake done
+
+        # Three operator turns on the live leg, each a REAL inbound.message over the REAL
+        # socket. The gateway mints client->core seqs 0,1,2 and buffers each (un-acked).
+        await stack.send_operator_input("acked-turn")  # seq 0 — will be ACKED (control)
+        await stack.send_operator_input("unacked-one")  # seq 1 — stays un-acked -> replays
+        await stack.send_operator_input("unacked-two")  # seq 2 — stays un-acked -> replays
+        # Settle until all three reached the live core (its sent_units recorded them).
+        assert await settle(
+            lambda: (
+                _texts(first.sent_units)
+                == [
+                    "acked-turn",
+                    "unacked-one",
+                    "unacked-two",
+                ]
+            )
+        ), f"live core never received all three turns: {_texts(first.sent_units)}"
+
+        # The core ACKS ONLY the first turn (cumulative_ack=0 covers seq 0). That trims
+        # "acked-turn" from the gateway's ReplayBuffer BEFORE the gap — so it is NOT
+        # un-acked at restart and must NOT replay (the non-vacuity control).
+        first.deliver_ack(0, seq=10)
+        # The seqs 1,2 ("unacked-one"/"unacked-two") are NEVER acked: genuinely un-acked.
+
+        # Trigger the restart: going_down -> reconnecting -> reconnect to epoch 2.
+        first.go_down()
+        assert await settle(lambda: bool(second.sent)), "reconnect never handshaked epoch 2"
+
+        # The resume replays the un-acked remainder on the NEW core, FIFO, FRESH seqs 0,1.
+        assert await settle(lambda: _texts(second.sent_units) == ["unacked-one", "unacked-two"]), (
+            f"un-acked input did not replay on the new core: {_texts(second.sent_units)}"
+        )
+        replayed = list(second.sent_units)
+        # FRESH per-connection seqs 0,1 (NOT the original 1,2) — the G4b-2b reseq.
+        assert [seq for _p, seq, _a in replayed] == [0, 1]
+        # CONTROL: the already-acked turn is ABSENT from the replay (no blind re-send).
+        assert "acked-turn" not in _texts(replayed)
+
+        # A post-restart fresh turn lands AFTER the replayed ones (fresh input never jumps
+        # the replay): it takes the next fresh seq (2) and trails the two replayed frames.
+        await stack.send_operator_input("post-restart")
+        assert await settle(
+            lambda: _texts(second.sent_units) == ["unacked-one", "unacked-two", "post-restart"]
+        ), f"post-restart input did not land after the replay: {_texts(second.sent_units)}"
+        assert second.sent_units[-1][1] == 2  # fresh seq 2, after the replayed 0,1
+
+        assert not stack.chat_task.done()  # chat survived the whole restart
