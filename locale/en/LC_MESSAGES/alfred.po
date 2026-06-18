@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-17 10:15+0100\n"
+"POT-Creation-Date: 2026-06-18 21:41+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1406,6 +1406,24 @@ msgstr "HALF_OPEN"
 #: src/alfred/i18n/_deferred_key_anchors.py:109
 msgid "cli.supervisor.status.breaker_state.unknown"
 msgstr "UNKNOWN"
+
+#: src/alfred/i18n/_deferred_key_anchors.py:119
+msgid "gateway.help.healthcheck"
+msgstr ""
+"Two-tier liveness/readiness probe for Docker HEALTHCHECK (exit 0 healthy,"
+" 1 unhealthy)."
+
+#: src/alfred/i18n/_deferred_key_anchors.py:120
+msgid "gateway.healthcheck.unreachable"
+msgstr ""
+"Gateway metrics endpoint unreachable on port {port}; the gateway is not "
+"serving. Marking unhealthy."
+
+#: src/alfred/i18n/_deferred_key_anchors.py:121
+msgid "gateway.healthcheck.breaker_open"
+msgstr ""
+"Gateway back-pressure breaker is latched (buffer past cap); marking "
+"unhealthy."
 
 # ---- Slice-4 additions (PR-S4-0b Component I) — spec §12.2 ----
 # 44 keys (the spec §12.2 FLOOR) spanning login/session lifecycle,
