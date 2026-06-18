@@ -1,0 +1,52 @@
+"""Validity assertions for the ops/ observability scaffold (Spec B G6-0).
+
+Asserts the committed config parses, declares the gateway scrape job + the three
+gateway alerts + a non-empty dashboard, and that every metric name referenced by an
+alert/panel actually EXISTS in src/alfred/gateway/metrics.py (no silently-dead alerts).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).parent.parent.parent
+OPS = ROOT / "ops"
+METRICS_SRC = (ROOT / "src" / "alfred" / "gateway" / "metrics.py").read_text()
+
+
+def _known_metric_bases() -> set[str]:
+    names = set(re.findall(r'"(gateway_[a-z_]+)"', METRICS_SRC))
+    return names | {f"{n}_total" for n in names}
+
+
+def test_prometheus_scrape_has_gateway_job() -> None:
+    cfg = yaml.safe_load((OPS / "prometheus" / "prometheus.yml").read_text())
+    assert "alfred-gateway" in {s["job_name"] for s in cfg["scrape_configs"]}
+
+
+def test_gateway_alerts_present_and_reference_real_metrics() -> None:
+    cfg = yaml.safe_load((OPS / "alerts" / "gateway.yml").read_text())
+    rules = [r for g in cfg["groups"] for r in g["rules"] if "alert" in r]
+    names = {r["alert"] for r in rules}
+    assert {"GatewayCoreUnavailable", "GatewayBufferNearCap", "GatewayCircuitBreakerOpen"} <= names
+    known = _known_metric_bases()
+    for r in rules:
+        referenced = set(re.findall(r"gateway_[a-z_]+", r["expr"]))
+        unknown = referenced - known
+        assert referenced <= known, f"alert {r['alert']} references unknown metric(s): {unknown}"
+
+
+def test_gateway_dashboard_parses_and_references_real_metrics() -> None:
+    dash = json.loads((OPS / "grafana" / "gateway.json").read_text())
+    assert dash.get("title")
+    assert len(dash.get("panels", [])) >= 1
+    known = _known_metric_bases()
+    for panel in dash["panels"]:
+        for target in panel.get("targets", []):
+            referenced = set(re.findall(r"gateway_[a-z_]+", target.get("expr", "")))
+            unknown = referenced - known
+            assert referenced <= known, f"panel {panel.get('title')} references unknown: {unknown}"
