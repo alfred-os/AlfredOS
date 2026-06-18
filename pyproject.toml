@@ -214,6 +214,14 @@ ignore = ["S101"]
 # subprocess; the one ``sh -c`` script interpolates only a JSON blob built from
 # a uuid + fixed literals.
 "tests/smoke/test_slice4_graduation.py" = ["S603", "S607"]
+# The G5 live-stack restart smoke drives the three real CLIs (daemon / gateway /
+# chat) the operator-shell way: uv/git/alfred by name (partial path) with fixed-
+# literal argv — same trusted-CLI rationale as the daemon smokes above. It ALSO
+# forks ``alfred chat`` under a PTY via ``os.execvpe`` (S606 shell-less spawn /
+# S607 partial path — trusted CLI, fixed literal argv). The synthetic placeholder
+# DeepSeek key is named so S105 accepts it on its own (no file-wide ignore), keeping
+# secret-scanning active for every future edit in this smoke.
+"tests/smoke/test_gateway_chat_restart_smoke.py" = ["S603", "S606", "S607"]
 # read_state_git_head_sha coverage exercises a real temp git repo via
 # trusted `git` invocations (partial path, fixed-literal args).
 "tests/unit/cli/daemon/test_daemon_internal_helpers.py" = ["S603", "S607"]
