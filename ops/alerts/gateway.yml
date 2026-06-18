@@ -1,0 +1,28 @@
+# AlfredOS gateway alerting rules (Spec B G6-0, #288).
+groups:
+  - name: alfred-gateway
+    rules:
+      - alert: GatewayCoreUnavailable
+        expr: gateway_core_link_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AlfredOS gateway core link has been down for 5m"
+          description: "gateway_core_link_up has been 0 for 5m; the gateway is buffering operator input and cannot reach the core daemon."
+      - alert: GatewayBufferNearCap
+        expr: gateway_buffer_cap_ratio > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AlfredOS gateway ReplayBuffer is near its soft cap"
+          description: "gateway_buffer_cap_ratio > 0.8 for 2m; approaching the back-pressure breaker."
+      - alert: GatewayCircuitBreakerOpen
+        expr: gateway_circuit_breaker_open == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AlfredOS gateway back-pressure breaker is latched"
+          description: "gateway_circuit_breaker_open == 1; the gateway has stopped draining the client (buffer past cap). Operator input is held, not dropped."
