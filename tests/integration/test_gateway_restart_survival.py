@@ -33,7 +33,8 @@ from alfred_tui.session import TuiSession
 from alfred_tui.textual.app import AlfredTuiApp
 from textual.widgets import Static
 
-from alfred.comms_mcp.protocol import LINK_RECONNECTING, LINK_RESTORED
+from alfred.comms_mcp.protocol import LINK_RECONNECTING, LINK_RESTORED, LINK_UNAVAILABLE
+from alfred.gateway.replay_buffer import ReplayBuffer
 from tests.integration._gateway_restart_harness import (
     _GoDownCoreTransport,
     _ScriptedCoreTransport,
@@ -273,3 +274,89 @@ async def test_unacked_operator_input_replays_across_a_core_restart(
         assert second.sent_units[-1][1] == 2  # fresh seq 2, after the replayed 0,1
 
         assert not stack.chat_task.done()  # chat survived the whole restart
+
+
+# ---------------------------------------------------------------------------
+# TASK 4 — unavailable terminal + symmetric teardown.
+# ---------------------------------------------------------------------------
+
+
+async def test_wedged_core_trips_breaker_and_chat_shows_unavailable_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flood of un-acked input against a wedged core trips the breaker -> link.unavailable.
+
+    The terminal back-pressure path (R4): the core handshakes then WEDGES (never acks,
+    never EOFs), so operator input piles into the gateway's ReplayBuffer un-acked. A small
+    ``max_frames=2`` buffer means the 3rd un-acked turn breaches the soft cap and LATCHES
+    the breaker; the gateway escalates the link-state machine to UNAVAILABLE and pushes a
+    ``link.unavailable`` control frame over the REAL socket to chat. Assert chat receives
+    EXACTLY ``[link.unavailable]`` (terminal — no reconnecting/restored), and the same
+    method paints the ``tui.banner.unavailable`` banner in a REAL AlfredTuiApp.
+    """
+    epoch = fresh_epoch()
+    blocked = asyncio.Event()
+    # The wedged core: handshake, then park forever (never acks, never EOFs).
+    wedged = _ScriptedCoreTransport([start_frame(epoch), blocked])
+
+    async with gateway_stack(
+        monkeypatch=monkeypatch,
+        core_outcomes=[lambda: wedged],
+        # A tiny frame cap so a 3-turn flood breaches the soft cap (hard ceiling = 4, so
+        # 3 frames stays under it). The byte cap is generous so the FRAME count is the
+        # trigger, not bytes (each inbound.message frame is a few hundred bytes).
+        replay_buffer_factory=lambda: ReplayBuffer(max_frames=2, max_bytes=1_000_000),
+    ) as stack:
+        assert await settle(lambda: bool(wedged.sent))  # handshake done
+
+        # Three un-acked turns: depths 1, 2 (at cap, no trip), 3 (> 2 — trips the breaker).
+        await stack.send_operator_input("flood-1")
+        await stack.send_operator_input("flood-2")
+        await stack.send_operator_input("flood-3")
+
+        # The breaker trip escalated the machine to UNAVAILABLE -> a single link.unavailable
+        # control frame crossed the REAL socket to chat.
+        assert await settle(lambda: stack.link_states == [LINK_UNAVAILABLE]), (
+            f"breaker trip did not push link.unavailable: {stack.link_states}"
+        )
+        # Terminal: no reconnecting/restored — the breaker latch is terminal in 2a.
+        assert LINK_RECONNECTING not in stack.link_states
+        assert LINK_RESTORED not in stack.link_states
+
+    # The terminal state paints the unavailable banner in a REAL AlfredTuiApp.
+    app = AlfredTuiApp(session=TuiSession())
+    async with app.run_test() as pilot:
+        app.set_link_state(LINK_UNAVAILABLE)
+        await pilot.pause()
+        # unavailable PAINTS the terminal banner (the tui.banner.unavailable render shows).
+        assert app.query_one("#link_banner", Static).display is True
+
+
+async def test_gateway_shutdown_closes_chat_wire_gracefully_no_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gateway shutdown tears the whole stack down symmetrically end-to-end (hard rule #7).
+
+    The symmetric-teardown half of R4. Drive to steady state, then a gateway shutdown: the
+    relay returns, the cohost's wire-ended arm gracefully exits the chat app, and the
+    chat pump returns its clean exit code. Assert no leaked task (both done), the fake-core
+    transport closed, AND the gateway's REAL client socket file unlinked — the listener's
+    ``aclose`` reaped the inode on the shutdown path.
+    """
+    epoch = fresh_epoch()
+    blocked = asyncio.Event()
+    core = _ScriptedCoreTransport([start_frame(epoch), blocked])
+
+    async with gateway_stack(monkeypatch=monkeypatch, core_outcomes=[lambda: core]) as stack:
+        assert await settle(lambda: bool(core.sent))  # steady state
+        # The real client socket exists while the gateway holds the accepted connection.
+        assert stack.socket_path.exists()
+        # The shutdown fires on the context-manager exit below (the symmetric teardown).
+
+    # After teardown: both legs returned (no leaked task), the chat exited cleanly (0), the
+    # fake-core transport closed, and the gateway's socket inode was reaped.
+    assert stack.gateway_task.done()
+    assert stack.chat_task.done()
+    assert stack.chat_task.result() == 0
+    assert core.closed is True
+    assert not stack.socket_path.exists(), "the gateway client socket inode leaked on shutdown"
