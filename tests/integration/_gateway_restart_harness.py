@@ -12,11 +12,15 @@ shares:
   exactly what the proof exercises, so it must be a genuine AF_UNIX socket.
 
 * a **controllable fake core** — :class:`_ScriptedCoreTransport` /
-  :class:`_DialRecorder`, LIFTED verbatim from ``tests/unit/gateway/test_core_link.py``
-  (NOT reinvented). ``_DialRecorder`` pops a fresh-epoch ``_ScriptedCoreTransport``
-  per dial; each scripts ``lifecycle.start``(epoch) -> the post-handshake relay
-  pump (ack-echo / lifecycle / EOF). The gateway is the PEER on the core leg, so
-  the fake core SENDS ``lifecycle.start`` first and the gateway RECEIVES it.
+  :class:`_DialRecorder` are IMPORTED from ``tests/unit/gateway/test_core_link.py``
+  (the canonical fakes — not copy-pasted; CLAUDE.md rejects copy-paste
+  reimplementations). On top of them the harness adds the
+  :class:`_GoDownCoreTransport` subclass — an on-demand ack/go-down relay-pump
+  control the unit suite has no need for. ``_DialRecorder`` pops a fresh-epoch
+  ``_ScriptedCoreTransport`` per dial; each scripts ``lifecycle.start``(epoch) ->
+  the post-handshake relay pump (ack-echo / lifecycle / EOF). The gateway is the
+  PEER on the core leg, so the fake core SENDS ``lifecycle.start`` first and the
+  gateway RECEIVES it.
 
 * the **real cohost wire pump** — the chat side runs the REAL
   :func:`alfred_tui.cohost.run_cohosted` serve loop (it answers the gateway's
@@ -37,12 +41,11 @@ never a fixed timeout.
 from __future__ import annotations
 
 import asyncio
-import collections
 import contextlib
 import json
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -61,6 +64,13 @@ from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_socket_transport import default_comms_socket_path
 
+# The controllable fake core: IMPORTED from the unit suite (the canonical fakes) so the
+# harness does NOT copy-paste them (CLAUDE.md rejects copy-paste reimplementations). The
+# unit module is a plain test module — importing it just defines its classes; pytest still
+# collects it separately. The harness extends ``_ScriptedCoreTransport`` with the on-demand
+# ``_GoDownCoreTransport`` below; ``_DialRecorder`` pops one fake core per dial.
+from tests.unit.gateway.test_core_link import _DialRecorder, _ScriptedCoreTransport
+
 # The gateway's own stable client-facing socket id (mirrors
 # ``alfred.gateway.client_listener._GATEWAY_ADAPTER_ID``): the chat dials
 # ``comms-gateway.sock`` and the listener binds it.
@@ -73,101 +83,21 @@ _GATEWAY_ADAPTER_ID = "gateway"
 # vector this loop replaces).
 _SETTLE_TICKS = 200
 
+# Wall-clock bound on the post-cancellation drain. Tasks are already cancelled by the
+# time we gather them, so this should resolve near-instantly; a task that refuses to
+# honour cancellation within this window is a real bug — fail loud rather than let the
+# suite hang indefinitely.
+_CANCEL_DRAIN_TIMEOUT_S = 5.0
+
 
 # ---------------------------------------------------------------------------
-# The controllable fake core — LIFTED verbatim from
-# tests/unit/gateway/test_core_link.py (Task 6 section). The gateway is the PEER on
-# the core leg: the fake core SENDS lifecycle.start first and the gateway RECEIVES
-# it via read_frame, then the relay pump reads SeqFrames via read_payload_unit.
+# The controllable fake core. ``_ScriptedCoreTransport`` + ``_DialRecorder`` are
+# IMPORTED from tests/unit/gateway/test_core_link.py (above) — the canonical fakes,
+# not copies. The harness ADDS only the ``_GoDownCoreTransport`` subclass below: an
+# on-demand ack/go-down relay-pump control the unit suite has no need for. The gateway
+# is the PEER on the core leg: the fake core SENDS lifecycle.start first and the gateway
+# RECEIVES it via read_frame, then the relay pump reads SeqFrames via read_payload_unit.
 # ---------------------------------------------------------------------------
-
-
-class _ScriptedCoreTransport:
-    """A fake ``_CommsTransportLike`` whose reads follow a single queued script.
-
-    Each script entry is one of:
-      * a ``Mapping`` — a frame ``read_frame`` returns (the handshake ``start``),
-      * a :class:`SeqFrame` — a raw unit ``read_payload_unit`` returns (the relay path),
-      * ``None`` — a clean EOF (the read returns ``None``),
-      * a :class:`BaseException` INSTANCE — a transport-crash the read raises,
-      * an :class:`asyncio.Event` — the read AWAITS the event, then (once set) returns
-        ``None`` (a genuinely-pending read used to drive the shutdown / go-down race).
-
-    The SAME ``_script`` feeds both ``read_frame`` (the handshake) and
-    ``read_payload_unit`` (the post-handshake relay pump). ``sent`` records writebacks
-    (the handshake ack), ``sent_units`` records relay-back payloads, ``closed`` flips on
-    ``close()``.
-    """
-
-    def __init__(self, script: list[object]) -> None:
-        self._script: collections.deque[object] = collections.deque(script)
-        self.sent: list[dict[str, object]] = []
-        # Spec A G4b-2-pre (#237): records (payload, seq, ack) — caller-owned seq.
-        self.sent_units: list[tuple[bytes, int, int]] = []
-        self.seq_ack_enabled = False
-        self.closed = False
-
-    async def spawn(self) -> None:  # pragma: no cover - unused on the peer leg
-        return None
-
-    async def send(self, frame: Mapping[str, object]) -> None:
-        self.sent.append(dict(frame))
-
-    async def send_payload_unit(self, payload: bytes, *, seq: int, ack: int) -> None:
-        self.sent_units.append((payload, seq, ack))
-
-    async def _next(self) -> object | None:
-        """Pop the next script entry, awaiting an ``Event`` / raising a crash."""
-        if not self._script:
-            return None
-        entry = self._script.popleft()
-        if isinstance(entry, asyncio.Event):
-            await entry.wait()
-            return None
-        if isinstance(entry, BaseException):
-            raise entry
-        return entry
-
-    async def read_frame(self) -> Mapping[str, object] | None:
-        entry = await self._next()
-        if entry is None:
-            return None
-        assert isinstance(entry, Mapping)
-        return entry
-
-    async def read_payload_unit(self) -> SeqFrame | None:
-        entry = await self._next()
-        if entry is None:
-            return None
-        assert isinstance(entry, SeqFrame)
-        return entry
-
-    async def close(self) -> None:
-        self.closed = True
-
-    def enable_seq_ack(self) -> None:
-        self.seq_ack_enabled = True
-
-
-class _DialRecorder:
-    """A controllable ``dial`` seam: a queue of outcomes consumed one per call.
-
-    Each entry is either a callable returning a transport (a successful dial) or an
-    exception INSTANCE to raise (a failed dial). ``calls`` tracks how many times the
-    loop dialed so a test can assert exactly one dial per (re)connect.
-    """
-
-    def __init__(self, outcomes: list[object]) -> None:
-        self._outcomes: collections.deque[object] = collections.deque(outcomes)
-        self.calls = 0
-
-    async def __call__(self) -> _ScriptedCoreTransport:
-        self.calls += 1
-        outcome = self._outcomes.popleft()
-        if isinstance(outcome, BaseException):
-            raise outcome
-        assert callable(outcome)
-        return outcome()  # type: ignore[no-any-return]
 
 
 class _GoDownCoreTransport(_ScriptedCoreTransport):
@@ -487,7 +417,12 @@ async def _drain_tasks(*tasks: asyncio.Task[Any]) -> None:
     for task in tasks:
         if not task.done():
             task.cancel()
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Bound the drain: the tasks are already cancelled, so this resolves promptly. A
+    # task that does not honour cancellation within the window is a real bug — surface
+    # it loudly instead of hanging the suite forever.
+    results = await asyncio.wait_for(
+        asyncio.gather(*tasks, return_exceptions=True), _CANCEL_DRAIN_TIMEOUT_S
+    )
     for result in results:
         if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
             raise result
