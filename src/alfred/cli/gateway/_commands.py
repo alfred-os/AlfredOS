@@ -23,9 +23,9 @@ LAZILY inside :func:`start_gateway`, so ``alfred --help`` never pulls the relay 
 from __future__ import annotations
 
 import asyncio
+import http.client
 import os
 import stat
-import urllib.request
 from typing import Final
 
 import structlog
@@ -173,12 +173,18 @@ _EXIT_UNHEALTHY: Final[int] = 1
 
 
 def _fetch_metrics_text(port: int) -> str:
-    """GET the gateway /metrics exposition text. Raises OSError when unreachable."""
-    url = f"http://{_HEALTHCHECK_HOST}:{port}/metrics"
-    with urllib.request.urlopen(  # noqa: S310 — fixed localhost http scheme, not attacker-controllable
-        url, timeout=_HEALTHCHECK_TIMEOUT_S
-    ) as resp:
-        body: bytes = resp.read()
+    """GET the gateway /metrics exposition text over loopback.
+
+    Uses ``http.client`` against a FIXED loopback host (no dynamic-URL / SSRF surface).
+    Raises ``OSError`` (e.g. ConnectionRefusedError / TimeoutError) when the endpoint is
+    unreachable — i.e. the gateway is not serving.
+    """
+    conn = http.client.HTTPConnection(_HEALTHCHECK_HOST, port, timeout=_HEALTHCHECK_TIMEOUT_S)
+    try:
+        conn.request("GET", "/metrics")
+        body: bytes = conn.getresponse().read()
+    finally:
+        conn.close()
     # Lossless-safe decode: a non-UTF-8 body must not raise UnicodeDecodeError (a
     # ValueError, not OSError) and escape the healthcheck's "never a traceback" contract.
     return body.decode("utf-8", errors="replace")
@@ -219,7 +225,13 @@ def healthcheck_gateway() -> None:
     """
     from alfred.gateway.metrics_server import resolve_metrics_port
 
-    port = resolve_metrics_port()
+    try:
+        port = resolve_metrics_port()
+    except ValueError as exc:
+        # Malformed ALFRED_GATEWAY_METRICS_PORT — can't probe; report unhealthy, not a traceback.
+        log.warning("gateway.healthcheck.unreachable", port="unset", error=repr(exc))
+        typer.echo(t("gateway.healthcheck.unreachable", port="unset"))
+        raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
     try:
         metrics_text = _fetch_metrics_text(port)
     except OSError as exc:

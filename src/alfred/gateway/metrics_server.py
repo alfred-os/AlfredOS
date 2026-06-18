@@ -35,7 +35,10 @@ def resolve_metrics_port() -> int:
     raw = os.environ.get(_METRICS_PORT_ENV)
     if raw is None or raw == "":
         return _DEFAULT_METRICS_PORT
-    return int(raw)
+    port = int(raw)  # ValueError on a non-int surfaces loud.
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{_METRICS_PORT_ENV} must be in 1..65535, got {port}")
+    return port
 
 
 def start_metrics_server(port: int) -> bool:

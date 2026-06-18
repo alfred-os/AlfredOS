@@ -70,3 +70,17 @@ def test_malformed_sample_is_not_a_traceback(monkeypatch: pytest.MonkeyPatch) ->
     result = CliRunner().invoke(gateway_app, ["healthcheck"])
     assert result.exit_code in (0, 1)
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_malformed_sample_treated_as_not_latched(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A garbled breaker value must parse as NOT latched (healthy), not silently unhealthy.
+    _patch_fetch(monkeypatch, "gateway_circuit_breaker_open NaNgarbage\n")
+    assert CliRunner().invoke(gateway_app, ["healthcheck"]).exit_code == 0
+
+
+def test_bad_port_env_is_unhealthy_not_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A malformed ALFRED_GATEWAY_METRICS_PORT must exit unhealthy, never raw-traceback.
+    monkeypatch.setenv("ALFRED_GATEWAY_METRICS_PORT", "notaport")
+    result = CliRunner().invoke(gateway_app, ["healthcheck"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
