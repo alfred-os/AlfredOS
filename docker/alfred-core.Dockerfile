@@ -36,6 +36,7 @@ RUN uv sync --frozen --no-dev
 
 FROM python:3.14-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 \
+    HOME=/home/alfred \
     PATH="/app/.venv/bin:${PATH}"
 
 # Install git + util-linux.
@@ -70,7 +71,10 @@ RUN groupadd --system alfred \
     && useradd --system --gid alfred --create-home --home-dir /home/alfred alfred \
     && useradd --system --no-create-home --user-group alfred-quarantine \
     && mkdir -p /var/lib/alfred \
-    && chown -R alfred:alfred /var/lib/alfred
+    && chown -R alfred:alfred /var/lib/alfred \
+    && mkdir -p /home/alfred/.run \
+    && chown alfred:alfred /home/alfred/.run \
+    && chmod 0700 /home/alfred/.run
 
 WORKDIR /app
 COPY --from=builder /app /app
