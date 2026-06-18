@@ -23,6 +23,15 @@ def test_resolve_port_rejects_nonint(monkeypatch: pytest.MonkeyPatch) -> None:
         metrics_server.resolve_metrics_port()
 
 
+def test_resolve_port_rejects_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_GATEWAY_METRICS_PORT", "99999")
+    with pytest.raises(ValueError):
+        metrics_server.resolve_metrics_port()
+    monkeypatch.setenv("ALFRED_GATEWAY_METRICS_PORT", "0")
+    with pytest.raises(ValueError):
+        metrics_server.resolve_metrics_port()
+
+
 def test_start_calls_prometheus_and_returns_true(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     monkeypatch.setattr(metrics_server, "start_http_server", lambda port: calls.append(port))

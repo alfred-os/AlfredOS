@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-18 22:30+0100\n"
+"POT-Creation-Date: 2026-06-18 22:49+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1205,17 +1205,19 @@ msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:227
+#: src/alfred/cli/gateway/_commands.py:233
+#: src/alfred/cli/gateway/_commands.py:239
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:231
+#: src/alfred/cli/gateway/_commands.py:243
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
-"unhealthy."
+"unhealthy. The core daemon is not draining buffered input — check it is "
+"reachable and restart it if wedged."
 
 #: src/alfred/comms_mcp/audit_hash.py:94
 #: src/alfred/i18n/_slice_4_reserve.py:120
