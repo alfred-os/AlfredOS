@@ -142,7 +142,8 @@ Cadence per PR: plan → architect + security plan-review → subagent-driven TD
 
 | PR | Scope |
 | --- | --- |
-| **G6-0** | **Deployment precursor (completes Spec A's deferred G3-4):** long-running `alfred-gateway` Compose service + `alfred-core` daemon-ification + shared `alfred_run` volume + two-tier healthcheck + **create** the `ops/grafana/gateway.json` + `ops/alerts/gateway.yml` scaffolding + Prometheus scrape. No adapter hosting yet. `[fleet devops-001/002]` |
+| **G6-0** | **Deployable gateway substrate (gateway-side only):** long-running `alfred-gateway` Compose service + shared `alfred_run` volume (image HOME pin + pre-own) + the first Prometheus `/metrics` exposition + two-tier healthcheck + **create** the `ops/` scrape/alerts/dashboard scaffold. `alfred-core` UNCHANGED; no comms enabled; gateway boots healthy-while-core-down. Zero quarantine/crash-loop risk. Plan: `docs/superpowers/plans/2026-06-18-g6-0-deployable-gateway.md`. `[plan-review split]` |
+| **G6-0b** | **Gateway↔core link-up (core-side):** `alfred-core` daemon-ification + enable the socket-backed (`tui`-kind) comms adapter + couple the gateway dial id ↔ the core bound id by construction + the always-up-core quarantine provisioning invariant (Linux + launcher + `quarantine_provider_api_key`) with crash-loop mitigation + the `docker compose up -d` / setup / README / stale-header flag-day + a **real-daemon ↔ real-gateway integration test** (closes the fake-core gap in Spec A's G5 proof). `[plan-review arch-001/arch-002/sec-001/devops-002]` |
 | **G6-1** | ADR-0036 + devops-010 reframe (positive SETUID allowed-set; delete discord assertions) + gateway image gains bubblewrap/launcher/`SETUID` (no hosting yet). Lands the privilege reframe + security co-sign in isolation. |
 | **G6-2** | `GatewayAdapterSupervisor` + relocate/share `CommsPluginRunner`/`CommsStdioTransport` into the gateway host role; spawn + handshake + crash + bounded-backoff restart + per-adapter breaker; `gateway.adapter.*` status notifications + core-side status observer/auditor. **Exercises the lifecycle machine against the §4 fake-core/fake-cred seam only** `[fleet arch-003, rev-001]` — real-credential spawn is provable at G6-3. |
 | **G6-3** | `GatewayAdapterCredentialClient` + `CoreAdapterCredentialResolver` (`spawn_request`/`spawn_grant`, **fd-3 delivery**, transient-hold, zero-after-write, fail-closed, await-core-on-outage per §5). |
@@ -150,7 +151,7 @@ Cadence per PR: plan → architect + security plan-review → subagent-driven TD
 | **G6-5** | Discord flag-day: delete the Compose service, rewire the secret path (incl. the adapter's own `lifecycle.start` token path → fd-3), migrate the full test suite per §7, update setup script (+ migration runbook, verify command, log-access command) + compose-invariant tests. |
 | **G6-6** | Adversarial corpus (§6 a–g; b/c/e/f release-blocking) + integration restart-survival test (a Discord session survives a core restart, inbound replayed exactly once). |
 
-Critical path is linear G6-0 → G6-1 → G6-2 → G6-3 → G6-4 → G6-5 → G6-6; G6-0 (deployment) and G6-1 (privilege reframe + ADR) can land as soon as the co-sign is in the ADR.
+Critical path is linear G6-0 → G6-0b → G6-1 → G6-2 → G6-3 → G6-4 → G6-5 → G6-6; G6-0 (substrate) and G6-1 (privilege reframe + ADR) can land as soon as the co-sign is in the ADR. G6-0b (the core-side link-up + quarantine provisioning invariant) was split out of G6-0 by the plan-review — it carries the deployment risk and gets its own plan + plan-review.
 
 ## 10. Testing
 
