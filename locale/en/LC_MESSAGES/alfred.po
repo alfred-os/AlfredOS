@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-18 21:41+0100\n"
+"POT-Creation-Date: 2026-06-18 22:30+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1158,46 +1158,64 @@ msgstr ""
 "Show whether the gateway socket is present and the runtime-dir posture, "
 "without dialing it. For full instance health, see: alfred status"
 
-#: src/alfred/cli/gateway/_commands.py:65
+#: src/alfred/cli/gateway/__init__.py:42
+msgid "gateway.help.healthcheck"
+msgstr ""
+"Two-tier liveness/readiness probe for Docker HEALTHCHECK (exit 0 healthy,"
+" 1 unhealthy)."
+
+#: src/alfred/cli/gateway/_commands.py:67
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:95
+#: src/alfred/cli/gateway/_commands.py:104
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:102
+#: src/alfred/cli/gateway/_commands.py:111
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:111
+#: src/alfred/cli/gateway/_commands.py:120
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:113
+#: src/alfred/cli/gateway/_commands.py:122
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:134
-#: src/alfred/cli/gateway/_commands.py:148
+#: src/alfred/cli/gateway/_commands.py:143
+#: src/alfred/cli/gateway/_commands.py:157
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:152
+#: src/alfred/cli/gateway/_commands.py:161
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
+
+#: src/alfred/cli/gateway/_commands.py:227
+msgid "gateway.healthcheck.unreachable"
+msgstr ""
+"Gateway metrics endpoint unreachable on port {port}; the gateway is not "
+"serving. Marking unhealthy."
+
+#: src/alfred/cli/gateway/_commands.py:231
+msgid "gateway.healthcheck.breaker_open"
+msgstr ""
+"Gateway back-pressure breaker is latched (buffer past cap); marking "
+"unhealthy."
 
 #: src/alfred/comms_mcp/audit_hash.py:94
 #: src/alfred/i18n/_slice_4_reserve.py:120
@@ -1406,24 +1424,6 @@ msgstr "HALF_OPEN"
 #: src/alfred/i18n/_deferred_key_anchors.py:109
 msgid "cli.supervisor.status.breaker_state.unknown"
 msgstr "UNKNOWN"
-
-#: src/alfred/i18n/_deferred_key_anchors.py:119
-msgid "gateway.help.healthcheck"
-msgstr ""
-"Two-tier liveness/readiness probe for Docker HEALTHCHECK (exit 0 healthy,"
-" 1 unhealthy)."
-
-#: src/alfred/i18n/_deferred_key_anchors.py:120
-msgid "gateway.healthcheck.unreachable"
-msgstr ""
-"Gateway metrics endpoint unreachable on port {port}; the gateway is not "
-"serving. Marking unhealthy."
-
-#: src/alfred/i18n/_deferred_key_anchors.py:121
-msgid "gateway.healthcheck.breaker_open"
-msgstr ""
-"Gateway back-pressure breaker is latched (buffer past cap); marking "
-"unhealthy."
 
 # ---- Slice-4 additions (PR-S4-0b Component I) — spec §12.2 ----
 # 44 keys (the spec §12.2 FLOOR) spanning login/session lifecycle,

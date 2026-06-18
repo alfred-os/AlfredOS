@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import urllib.request
+from typing import Final
 
 import structlog
 import typer
@@ -164,4 +166,70 @@ def status_gateway() -> None:
     )
 
 
-__all__ = ["start_gateway", "status_gateway"]
+_HEALTHCHECK_HOST: Final[str] = "127.0.0.1"
+_HEALTHCHECK_TIMEOUT_S: Final[float] = 2.0
+_BREAKER_METRIC: Final[str] = "gateway_circuit_breaker_open"
+_EXIT_UNHEALTHY: Final[int] = 1
+
+
+def _fetch_metrics_text(port: int) -> str:
+    """GET the gateway /metrics exposition text. Raises OSError when unreachable."""
+    url = f"http://{_HEALTHCHECK_HOST}:{port}/metrics"
+    with urllib.request.urlopen(  # noqa: S310 — fixed localhost http scheme, not attacker-controllable
+        url, timeout=_HEALTHCHECK_TIMEOUT_S
+    ) as resp:
+        body: bytes = resp.read()
+    # Lossless-safe decode: a non-UTF-8 body must not raise UnicodeDecodeError (a
+    # ValueError, not OSError) and escape the healthcheck's "never a traceback" contract.
+    return body.decode("utf-8", errors="replace")
+
+
+def _breaker_latched(metrics_text: str) -> bool:
+    """True iff a gateway_circuit_breaker_open SAMPLE reports >= 1.
+
+    Skips ``# HELP`` / ``# TYPE`` comment lines and any line whose value cannot be
+    parsed as a float (a malformed/exemplar line must never crash the HEALTHCHECK
+    process with a traceback).
+    """
+    # The gateway breaker gauge is unlabelled by design, so prometheus emits the bare
+    # "name value" form; a future labelled variant ("name{...} value") would need a parser change.
+    sample_prefix = f"{_BREAKER_METRIC} "
+    for line in metrics_text.splitlines():
+        if line.startswith("#"):
+            continue
+        if not line.startswith(sample_prefix):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            return float(parts[1]) >= 1.0
+        except ValueError:
+            continue
+    return False
+
+
+def healthcheck_gateway() -> None:
+    """Two-tier Docker healthcheck (G6-0).
+
+    Liveness: the /metrics endpoint is reachable. Readiness: the ReplayBuffer
+    back-pressure breaker is NOT latched. A core-down gateway that is buffering is
+    HEALTHY (only wedged-past-breaker is unhealthy). Exits 0 (healthy) or 1
+    (unhealthy); never raises a traceback.
+    """
+    from alfred.gateway.metrics_server import resolve_metrics_port
+
+    port = resolve_metrics_port()
+    try:
+        metrics_text = _fetch_metrics_text(port)
+    except OSError as exc:
+        log.warning("gateway.healthcheck.unreachable", port=port, error=repr(exc))
+        typer.echo(t("gateway.healthcheck.unreachable", port=port))
+        raise typer.Exit(code=_EXIT_UNHEALTHY) from exc
+    if _breaker_latched(metrics_text):
+        log.warning("gateway.healthcheck.breaker_open")
+        typer.echo(t("gateway.healthcheck.breaker_open"))
+        raise typer.Exit(code=_EXIT_UNHEALTHY)
+
+
+__all__ = ["healthcheck_gateway", "start_gateway", "status_gateway"]

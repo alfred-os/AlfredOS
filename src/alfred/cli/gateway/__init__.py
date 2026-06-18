@@ -39,4 +39,11 @@ def status() -> None:
     status_gateway()
 
 
+@gateway_app.command("healthcheck", help=t("gateway.help.healthcheck"))
+def healthcheck() -> None:
+    from alfred.cli.gateway._commands import healthcheck_gateway
+
+    healthcheck_gateway()
+
+
 __all__ = ["gateway_app"]
