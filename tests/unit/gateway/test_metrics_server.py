@@ -72,6 +72,7 @@ def test_gateway_exposition_has_no_per_user_labels() -> None:
         capture_output=True,
         text=True,
         env={**os.environ, "ALFRED_ENVIRONMENT": "test"},
+        timeout=20,  # bound runtime: an import-path regression must fail, not hang CI (CR #289)
     )
     assert result.returncode == 0, (
         f"gateway exposition leak-guard failed:\nstdout={result.stdout}\nstderr={result.stderr}"
