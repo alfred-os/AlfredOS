@@ -155,7 +155,35 @@ services:
       - ${HOME}/.config/alfred/secrets.toml:/etc/alfred/secrets.toml:ro
     user: "${UID:-1000}:${GID:-1000}"
 
+  # Spec B G6-0 (#288) — the always-up resumable gateway, deployed as its own service.
+  # Reuses the alfred-core image (one Dockerfile) and runs `alfred gateway start`. In
+  # G6-0 it is a pure relay (no adapter hosting, no SETUID — G6-1+) and is NOT yet
+  # linked to the core (G6-0b enables comms on the core + couples the socket ids); it
+  # boots HEALTHY in its core-down/buffering state (only wedged-past-breaker is
+  # unhealthy). It shares alfred_run so it can bind its client socket + (in G6-0b) dial
+  # the core. No depends_on: readiness is independent of the core, and the core is not a
+  # long-running service until G6-0b. /metrics is compose-internal (no host port).
+  alfred-gateway:
+    build:
+      context: .
+      dockerfile: docker/alfred-core.Dockerfile
+    command: ["gateway", "start"]
+    restart: unless-stopped
+    environment:
+      ALFRED_ENVIRONMENT: ${ALFRED_ENVIRONMENT:-production}
+      ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}
+      ALFRED_GATEWAY_METRICS_PORT: ${ALFRED_GATEWAY_METRICS_PORT:-9464}
+    volumes:
+      - alfred_run:/home/alfred/.run
+    healthcheck:
+      test: ["CMD", "alfred", "gateway", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   alfred_pg_data:
   alfred_redis_data:
   alfred_state_git:
+  alfred_run:
