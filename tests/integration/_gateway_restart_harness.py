@@ -165,43 +165,44 @@ class _DialRecorder:
 
 
 class _GoDownCoreTransport(_ScriptedCoreTransport):
-    """A scripted core that HOLDS the relay pump in steady state until ``go_down()``.
+    """A scripted core that HOLDS the relay pump in steady state until driven, ON DEMAND.
 
-    After the handshake, the post-handshake relay pump reads via
-    :meth:`read_payload_unit`; this override parks that read until the test calls
-    :meth:`go_down`, at which point it delivers a ``going_down`` unit and then a clean
-    EOF — exactly a daemon's planned drain (``daemon.lifecycle.going_down`` -> socket
-    close). So the gateway stays in steady state (no banner) until the test triggers the
-    restart, then sees the planned-drain gap.
+    After the handshake (consumed via the base ``read_frame`` script), the post-handshake
+    relay pump reads via :meth:`read_payload_unit`; this override parks that read on an
+    :class:`asyncio.Queue` the test feeds ON DEMAND:
 
-    ``ack_units`` are OPTIONAL units to deliver from the relay pump BEFORE the drain (a
-    ``daemon.comms.ack`` that trims the gateway's ReplayBuffer). They are queued ahead of
-    the park so a test can ack some operator input on the live leg before triggering the
-    drain (the Task-3 already-acked control).
+    * :meth:`deliver_ack` pushes a ``daemon.comms.ack`` unit (the live leg acks some
+      buffered operator input, trimming the gateway's ReplayBuffer) — for the Task-3
+      already-acked CONTROL;
+    * :meth:`go_down` pushes a ``going_down`` unit then a clean-EOF sentinel — a daemon's
+      planned drain (``daemon.lifecycle.going_down`` -> socket close), opening the gap.
+
+    The on-demand queue (vs a pre-baked script) is what makes the restart DETERMINISTIC:
+    the test sequences "send input -> settle on receipt -> ack/go_down" with no race, and
+    a single drained read returns ``None`` (EOF) exactly once.
     """
 
-    def __init__(self, epoch: str, *, ack_units: list[SeqFrame] | None = None) -> None:
+    _EOF = object()  # the clean-EOF sentinel pushed onto the relay queue.
+
+    def __init__(self, epoch: str) -> None:
         super().__init__([start_frame(epoch)])
-        self._pending_units: collections.deque[SeqFrame] = collections.deque(ack_units or [])
-        self._go_down = asyncio.Event()
-        self._drain_emitted = False
+        self._relay_q: asyncio.Queue[object] = asyncio.Queue()
+
+    def deliver_ack(self, cumulative_ack: int, *, seq: int) -> None:
+        """Push a ``daemon.comms.ack`` onto the live leg (trims the ReplayBuffer)."""
+        self._relay_q.put_nowait(ack_unit(cumulative_ack, seq=seq))
 
     def go_down(self) -> None:
-        """Trigger the planned drain: the next relay read delivers ``going_down`` then EOF."""
-        self._go_down.set()
+        """Trigger the planned drain: deliver ``going_down`` then a clean EOF (the gap)."""
+        self._relay_q.put_nowait(going_down_unit())
+        self._relay_q.put_nowait(self._EOF)
 
     async def read_payload_unit(self) -> SeqFrame | None:
-        # First the handshake start is consumed via read_frame (the base script); this
-        # override only governs the post-handshake relay pump. Deliver any queued ack
-        # units first (the live leg acks operator input), then park until go_down().
-        if self._pending_units:
-            return self._pending_units.popleft()
-        await self._go_down.wait()
-        if not self._drain_emitted:
-            self._drain_emitted = True
-            return going_down_unit()
-        # After the going_down, a clean EOF: the daemon closed the socket (the gap).
-        return None
+        entry = await self._relay_q.get()
+        if entry is self._EOF:
+            return None
+        assert isinstance(entry, SeqFrame)
+        return entry
 
 
 # ---------------------------------------------------------------------------
