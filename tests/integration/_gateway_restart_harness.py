@@ -164,6 +164,46 @@ class _DialRecorder:
         return outcome()  # type: ignore[no-any-return]
 
 
+class _GoDownCoreTransport(_ScriptedCoreTransport):
+    """A scripted core that HOLDS the relay pump in steady state until ``go_down()``.
+
+    After the handshake, the post-handshake relay pump reads via
+    :meth:`read_payload_unit`; this override parks that read until the test calls
+    :meth:`go_down`, at which point it delivers a ``going_down`` unit and then a clean
+    EOF — exactly a daemon's planned drain (``daemon.lifecycle.going_down`` -> socket
+    close). So the gateway stays in steady state (no banner) until the test triggers the
+    restart, then sees the planned-drain gap.
+
+    ``ack_units`` are OPTIONAL units to deliver from the relay pump BEFORE the drain (a
+    ``daemon.comms.ack`` that trims the gateway's ReplayBuffer). They are queued ahead of
+    the park so a test can ack some operator input on the live leg before triggering the
+    drain (the Task-3 already-acked control).
+    """
+
+    def __init__(self, epoch: str, *, ack_units: list[SeqFrame] | None = None) -> None:
+        super().__init__([start_frame(epoch)])
+        self._pending_units: collections.deque[SeqFrame] = collections.deque(ack_units or [])
+        self._go_down = asyncio.Event()
+        self._drain_emitted = False
+
+    def go_down(self) -> None:
+        """Trigger the planned drain: the next relay read delivers ``going_down`` then EOF."""
+        self._go_down.set()
+
+    async def read_payload_unit(self) -> SeqFrame | None:
+        # First the handshake start is consumed via read_frame (the base script); this
+        # override only governs the post-handshake relay pump. Deliver any queued ack
+        # units first (the live leg acks operator input), then park until go_down().
+        if self._pending_units:
+            return self._pending_units.popleft()
+        await self._go_down.wait()
+        if not self._drain_emitted:
+            self._drain_emitted = True
+            return going_down_unit()
+        # After the going_down, a clean EOF: the daemon closed the socket (the gap).
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Core-leg script builders — the fake daemon's per-leg frame sequence.
 # ---------------------------------------------------------------------------
