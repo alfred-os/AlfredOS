@@ -64,6 +64,13 @@ def start_gateway() -> None:
 
     typer.echo(t("gateway.start.starting"))
 
+    # G6-0: stand up the Prometheus exposition before the relay so a scrape can read
+    # gateway_* series. Loud-and-continue on a bind failure; the healthcheck surfaces
+    # a degraded endpoint.
+    from alfred.gateway.metrics_server import resolve_metrics_port, start_metrics_server
+
+    start_metrics_server(resolve_metrics_port())
+
     async def _main() -> None:
         shutdown_event = asyncio.Event()
         loop = asyncio.get_running_loop()
