@@ -106,3 +106,61 @@ def test_alfred_redis_has_maxmemory(compose: dict[str, Any]) -> None:
         "alfred-redis must declare --maxmemory so volatile-lru can evict. "
         "Without it Redis grows unbounded and OOMs under load (devops-002)."
     )
+
+
+def test_alfred_gateway_service_exists(compose: dict[str, Any]) -> None:
+    gw = compose.get("services", {}).get("alfred-gateway")
+    assert gw is not None, "alfred-gateway service must exist (Spec B G6-0)."
+    assert gw.get("command") == ["gateway", "start"]
+    assert gw.get("restart") == "unless-stopped"
+
+
+def test_alfred_gateway_has_no_setuid(compose: dict[str, Any]) -> None:
+    """G6-0: the gateway is still a pure relay — SETUID arrives in G6-1, not here."""
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    assert "SETUID" not in (gw.get("cap_add", []) or []), (
+        "alfred-gateway must NOT have SETUID in G6-0; it moves in G6-1 with ADR-0036."
+    )
+
+
+def test_alfred_gateway_has_no_state_git_volume(compose: dict[str, Any]) -> None:
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    entries = _volume_strings(gw.get("volumes", []) or [])
+    assert not any("alfred_state_git" in v for v in entries), (
+        "alfred-gateway must not mount alfred_state_git — the relay has no grant files."
+    )
+
+
+def test_alfred_gateway_has_alfred_run_volume(compose: dict[str, Any]) -> None:
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    entries = _volume_strings(gw.get("volumes", []) or [])
+    assert "alfred_run:/home/alfred/.run" in entries, (
+        "alfred-gateway must mount alfred_run at /home/alfred/.run for its sockets."
+    )
+
+
+def test_alfred_run_mounted_only_by_gateway(compose: dict[str, Any]) -> None:
+    """G6-0: only alfred-gateway mounts alfred_run (core joins in G6-0b)."""
+    services = compose.get("services", {})
+    mounters = {
+        name
+        for name, svc in services.items()
+        if any("alfred_run" in v for v in _volume_strings(svc.get("volumes", []) or []))
+    }
+    assert mounters == {"alfred-gateway"}, (
+        f"alfred_run must be mounted only by alfred-gateway in G6-0; got {mounters}."
+    )
+
+
+def test_alfred_gateway_publishes_no_host_port(compose: dict[str, Any]) -> None:
+    """The /metrics endpoint stays compose-internal — no host port published."""
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    assert not (gw.get("ports") or []), (
+        "alfred-gateway must publish no host port — /metrics is compose-internal only."
+    )
+
+
+def test_alfred_gateway_has_healthcheck(compose: dict[str, Any]) -> None:
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    hc = gw.get("healthcheck", {})
+    assert hc.get("test") == ["CMD", "alfred", "gateway", "healthcheck"]
