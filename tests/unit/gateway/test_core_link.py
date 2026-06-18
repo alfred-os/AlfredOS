@@ -3199,3 +3199,52 @@ async def test_run_reconnect_flushes_replay_before_pump_resumes() -> None:
     assert [payload for payload, _seq, _ack in second.sent_units] == [b"buffered"]
     assert link.replay_pending_gate.is_set() is True
     assert link._pending_replay == ()
+
+
+@pytest.mark.asyncio
+async def test_run_discards_replay_buffer_on_terminal_exit_zeroing_pre_dlp_bytes() -> None:
+    """``run`` zeroes + empties the injected ReplayBuffer on EVERY exit (security).
+
+    The buffer holds mutable ``bytearray`` copies of PRE-DLP operator input so the un-acked
+    remainder can be scrubbed in place on a terminal exit (CLAUDE.md hard rule #7 — no
+    residual exposure in the always-up process). PRE-FIX this test FAILS: ``run``'s
+    ``finally`` reaped the evict task + closed the transport but never zeroed the buffer, so
+    a shutdown with an un-acked frame left the body RESIDENT until GC. POST-FIX the
+    ``finally`` calls ``discard()`` — depth drops to 0 and the retained body reads all-zero.
+    """
+    epoch = uuid4().hex
+    shutdown = asyncio.Event()
+    blocked = asyncio.Event()
+    transport = _ScriptedCoreTransport([_start_only(epoch), blocked])
+    dial = _DialRecorder([lambda: transport])
+
+    async def _evict_sleep(_delay: float) -> None:
+        await asyncio.Event().wait()  # park the evict loop; shutdown reaps it
+
+    buf = ReplayBuffer()
+    link, _recorder = _run_link(
+        dial=dial, shutdown_event=shutdown, sleep=_evict_sleep, replay_buffer=buf
+    )
+
+    task = asyncio.ensure_future(link.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if transport.sent:  # handshake done -> the live leg is bound
+            break
+    # Append one un-acked PRE-DLP frame onto the live leg so the buffer is non-empty at the
+    # terminal exit (this is the residency the fix must scrub).
+    await link.relay_to_core(b"pre-dlp-secret")
+    assert buf.depth_frames == 1
+    # White-box: hold the retained bytearray so we can assert it was zeroed IN PLACE (the
+    # mutable copy the buffer owns precisely so it CAN be scrubbed), mirroring the buffer's
+    # own zeroing tests.
+    retained_body = buf._retained[0].body
+    assert bytes(retained_body) == b"pre-dlp-secret"
+
+    shutdown.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    # discard() ran in run()'s finally: the buffer is empty AND the retained body is zeroed.
+    assert buf.depth_frames == 0
+    assert retained_body == bytearray(len(b"pre-dlp-secret"))
+    assert transport.closed is True

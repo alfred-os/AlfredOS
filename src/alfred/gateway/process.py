@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections.abc import Awaitable, Callable
 
 import structlog
@@ -43,6 +44,7 @@ from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink, _CommsTransportLike
 from alfred.gateway.metrics import PEER_AUTH_REJECTED
 from alfred.gateway.relay import GatewayRelay
+from alfred.gateway.replay_buffer import ReplayBuffer
 
 log = structlog.get_logger(__name__)
 
@@ -62,12 +64,27 @@ class GatewayProcess:
         shutdown_event: asyncio.Event,
         dial_adapter_id: str = "tui",
         core_dial: Callable[[], Awaitable[_CommsTransportLike]] | None = None,
+        replay_buffer_factory: Callable[[], ReplayBuffer] = ReplayBuffer,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        jitter: Callable[[float], float] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._shutdown_event = shutdown_event
         self._dial_adapter_id = dial_adapter_id
         # The core dial is injectable so a test drives a fake core leg; ``None`` defers to
         # :meth:`GatewayCoreLink._default_dial` (the production socket dial).
         self._core_dial = core_dial
+        # G5 resume seams (Spec A G5 / #237). ``replay_buffer_factory`` is a ZERO-arg
+        # factory: the production default ``ReplayBuffer`` constructs the always-up
+        # retention buffer at its own SECURITY caps (4096 frames / 8 MiB / 300 s TTL), and
+        # a fresh one is minted per accepted client in :meth:`run`. ``sleep`` / ``jitter`` /
+        # ``monotonic`` are the core-link's determinism seams (reconnect backoff + TTL
+        # eviction): a test injects fakes; the production defaults preserve live behaviour —
+        # ``jitter=None`` defers to :class:`GatewayCoreLink`'s own full-jitter default.
+        self._replay_buffer_factory = replay_buffer_factory
+        self._sleep = sleep
+        self._jitter = jitter
+        self._monotonic = monotonic
 
     async def _on_peer_rejected(self, peer_uid: int | None) -> None:
         """The client-leg peer-auth reject seam: increment the metric + emit the loud row.
@@ -110,11 +127,22 @@ class GatewayProcess:
             # The client-leg HOST handshake. A GatewayHandshakeError propagates LOUD
             # (fail-closed) — never build a relay over an unusable client leg.
             client_seq_enabled = await client_handshake(client_transport)
+            # G5 production resume activation (Spec A G5 / #237). The always-up gateway now
+            # buffers + replays un-acked client->core input across a core restart (spec §5),
+            # activating the resume + the back-pressure breaker + TTL-eviction in the front
+            # door. The buffer is minted ONCE per accepted client; its caps / TTL / zeroing
+            # bound the pre-DLP operator-input exposure the retention introduces. Passing
+            # ``self._jitter`` (default ``None``) preserves production behaviour:
+            # ``GatewayCoreLink`` maps ``None`` to its own full-jitter default.
             core_link = GatewayCoreLink(
                 client_listener=listener,
                 shutdown_event=self._shutdown_event,
                 dial_adapter_id=self._dial_adapter_id,
                 dial=self._core_dial,
+                replay_buffer=self._replay_buffer_factory(),
+                sleep=self._sleep,
+                jitter=self._jitter,
+                monotonic=self._monotonic,
             )
             relay = GatewayRelay(
                 core_link=core_link,
