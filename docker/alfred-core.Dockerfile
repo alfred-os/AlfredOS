@@ -58,6 +58,9 @@ RUN apt-get update -qq \
 # follow-up). Bump deliberately. The relocation glob stays patch-tolerant so a
 # pin bump needs only this one line.
 ARG ALFRED_PYTHON_VERSION=3.14.0
+# DL4006 / CodeRabbit (#290): pipefail so a mid-stream `curl` failure fails the build
+# rather than letting `bash` exit 0 on a truncated proto installer.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- --yes \
     && "${PROTO_HOME}/bin/proto" install python "${ALFRED_PYTHON_VERSION}" \
     && PROTO_PY_DIR="$(ls -d "${PROTO_HOME}"/tools/python/3.14.* | sort -V | tail -1)" \
