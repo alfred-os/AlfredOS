@@ -42,6 +42,23 @@ jobs:
         if: steps.check.outputs.has_e2e == 'true'
       - if: steps.check.outputs.has_e2e == 'true'
         run: uv sync --frozen --dev
+      - name: Load the bwrap userns AppArmor profile (#290)
+        if: steps.check.outputs.has_e2e == 'true'
+        # docker-compose.yaml pins alfred-core at `security_opt:
+        # apparmor=alfred-bwrap`. Docker REFUSES to create the container if that
+        # named profile is not loaded into the host kernel — so the stack fails to
+        # boot before any e2e test runs. Load it here (the GH ubuntu runner has
+        # passwordless sudo). Guarded on `command -v apparmor_parser` so a future
+        # non-AppArmor runner skips gracefully (where the security_opt line is a
+        # runtime no-op anyway).
+        run: |
+          set -euo pipefail
+          if command -v apparmor_parser >/dev/null 2>&1; then
+            sudo apparmor_parser -r -W docker/apparmor/alfred-bwrap
+            echo "Loaded alfred-bwrap AppArmor profile."
+          else
+            echo "::notice::apparmor_parser absent — skipping profile load (security_opt is a no-op on this host)."
+          fi
       - name: Boot stack
         if: steps.check.outputs.has_e2e == 'true'
         run: docker compose up -d --wait
