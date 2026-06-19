@@ -52,8 +52,14 @@ ENV PYTHONUNBUFFERED=1 \
 # uses for fd-3 provider-key inheritance into the sandbox. Without bwrap
 # Linux production refuses to launch the quarantined-LLM with
 # `policy_ref_unreadable` because no binary can apply the policy.
+# jq: the bash launcher (bin/alfred-plugin-launcher.sh) reads the plugin
+# manifest's [sandbox] kind + policy_refs via jq to translate them into bwrap
+# flags. Without it the launcher refuses EVERY kind=full spawn with
+# `jq_unavailable` — so the dual-LLM quarantine child cannot start in the
+# production container at all (#290). The launcher's own comment already assumes
+# "alfred-core apt-installs jq"; this line makes that true.
 RUN apt-get update -qq \
-    && apt-get install -y --no-install-recommends git util-linux bubblewrap \
+    && apt-get install -y --no-install-recommends git util-linux bubblewrap jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user. /var/lib/alfred is owned by alfred:alfred so
