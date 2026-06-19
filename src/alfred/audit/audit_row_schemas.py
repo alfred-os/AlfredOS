@@ -1164,7 +1164,7 @@ SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# Slice-4 fieldset roster (test surface)
+# Audit fieldset roster (test surface)
 # ---------------------------------------------------------------------------
 #
 # Names enumerated for ``tests/unit/audit/test_slice_4_audit_row_fields.py``
@@ -1172,10 +1172,12 @@ SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
 # declared AFTER the Slice-4 section marker (it has no end-bound), so any new
 # post-marker field-set — Slice-4 or a later spec — MUST be listed here in the
 # same commit (the bidirectional walk catches both a missing roster entry and a
-# missing constant). Spec B (#288) G6-2a appends the ``GATEWAY_ADAPTER_*`` family
-# below; those are NOT Slice-4 work but ride the same AST guard because they live
-# past the marker.
-SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
+# missing constant). The roster is slice-agnostic: it owns Spec-B vocab too
+# (#288 / G6-2a appended the ``GATEWAY_ADAPTER_*`` family below), so the name
+# is ``AUDIT_FIELDSET_ROSTER`` rather than slice-specific (#295 rename) — those
+# Spec-B field-sets are NOT Slice-4 work but ride the same AST guard because they
+# live past the marker.
+AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "COMMS_SOCKET_PEER_REJECTED_FIELDS",
     "DAEMON_BOOT_FIELDS",
     "DAEMON_BOOT_FAILED_FIELDS",
