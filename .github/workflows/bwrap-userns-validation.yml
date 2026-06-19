@@ -124,14 +124,28 @@ jobs:
             --cap-add SETUID \
             -e ALFRED_ENVIRONMENT=production \
             -e ALFRED_PLUGIN_LAUNCHER=/app/bin/alfred-plugin-launcher.sh \
-            -v "${{ github.workspace }}/scripts/quarantine_spawn_probe.py:/tmp/probe.py:ro" \
+            -v "${GITHUB_WORKSPACE}/scripts/quarantine_spawn_probe.py:/tmp/probe.py:ro" \
             --entrypoint /opt/alfred-python/bin/python3 \
             alfred-core-290 /tmp/probe.py 2>&1 | tee control.log || true
           if grep -q '^QUARANTINE_SPAWN_PROBE_RESULT=OK$' control.log; then
             echo "::error::Spawn SUCCEEDED without the custom AppArmor+seccomp profiles on a restrictive host — the gate is NOT isolating the profile (paper-gate, see #245)."
             exit 1
           fi
+          # Belt-and-braces #2 (review-fix): absence of OK is necessary but not
+          # sufficient — an UNRELATED failure (image build issue, probe import
+          # error, OOM) would also print no OK line and let the control pass for
+          # the wrong reason. Require a POSITIVE userns-refusal marker: the probe
+          # emits FAILED:<reason> when the bwrap child cannot build its namespace.
+          # Without the custom profiles on a restrictive host that is precisely
+          # what must happen, so the control is only valid if a FAILED line is
+          # present.
+          if ! grep -q '^QUARANTINE_SPAWN_PROBE_RESULT=FAILED:' control.log; then
+            echo "::error::Control did not emit a QUARANTINE_SPAWN_PROBE_RESULT=FAILED: line — the spawn did not refuse for the expected userns reason (it may have failed for an unrelated cause, making the control vacuous). See #245."
+            grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' control.log || echo "(no result line emitted at all)"
+            exit 1
+          fi
           echo "Control OK: spawn correctly refused without the custom profiles."
+          grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' control.log
 
       - name: VALIDATE — spawn WITH the custom AppArmor + seccomp profiles must succeed
         id: validate
@@ -148,7 +162,7 @@ jobs:
             --security-opt seccomp=docker/seccomp/alfred-bwrap.json \
             -e ALFRED_ENVIRONMENT=production \
             -e ALFRED_PLUGIN_LAUNCHER=/app/bin/alfred-plugin-launcher.sh \
-            -v "${{ github.workspace }}/scripts/quarantine_spawn_probe.py:/tmp/probe.py:ro" \
+            -v "${GITHUB_WORKSPACE}/scripts/quarantine_spawn_probe.py:/tmp/probe.py:ro" \
             --entrypoint /opt/alfred-python/bin/python3 \
             alfred-core-290 /tmp/probe.py 2>&1 | tee validate.log
           echo "--- result line ---"
