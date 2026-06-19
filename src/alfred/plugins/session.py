@@ -74,6 +74,7 @@ import structlog
 from alfred.audit import audit_row_schemas
 from alfred.audit.log import AuditWriter
 from alfred.comms_mcp import observability as comms_observability
+from alfred.comms_mcp.protocol import GATEWAY_ADAPTER_STATUS_PREFIX
 from alfred.hooks.capability import CapabilityGate
 from alfred.plugins.errors import (
     ManifestError,
@@ -242,6 +243,23 @@ class _SupervisorLike(Protocol):
     async def request_plugin_restart(self, *, adapter_id: str, reason: str) -> None: ...
 
 
+@runtime_checkable
+class _StatusObserverLike(Protocol):
+    """Narrow structural seam for the gateway-adapter-status observer (Spec B G6-2b-2a).
+
+    The session routes every ``gateway.adapter.*`` frame here. The concrete type is
+    :class:`alfred.comms_mcp.adapter_status_observer.AdapterStatusObserver`; the session
+    depends on this Protocol so it does not import the comms-MCP observer concretely. The
+    observer NEVER raises on a bad/forged frame (it audits a loud refusal); the ONLY
+    raise path is a genuine signed-audit-write failure (a typed
+    ``AdapterStatusAuditWriteError``), which the arm lets propagate so the live
+    fire-and-forget runner can ESCALATE it (loud ``log.error`` + restart request),
+    NOT swallow it (SEC-1).
+    """
+
+    async def observe(self, method: object, params: object) -> None: ...
+
+
 class _NoopSemaphore:
     """An async-context-manager no-op standing in for the dispatch semaphore.
 
@@ -299,6 +317,7 @@ class AlfredPluginSession:
         rate_limit_handler: RateLimitHandler | None = None,
         crash_handler: CrashHandler | None = None,
         supervisor: _SupervisorLike | None = None,
+        status_observer: _StatusObserverLike | None = None,
         dispatch_semaphore: asyncio.BoundedSemaphore | _NoopSemaphore | None = None,
         error_counter: SlidingWindowCounter | None = None,
     ) -> None:
@@ -328,6 +347,11 @@ class AlfredPluginSession:
         self._rate_limit_handler = rate_limit_handler
         self._crash_handler = crash_handler
         self._supervisor = supervisor
+        # Spec B G6-2b-2a (#288): the core-side gateway-adapter-status observer. Injected
+        # into every comms session by the daemon boot graph (correction #8 — ALL comms
+        # sessions, not just a gateway leg), so a ``gateway.adapter.*`` frame is routed to
+        # it BEFORE the comms-notification dispatch + the unknown-method tail.
+        self._status_observer = status_observer
         self._dispatch_semaphore: asyncio.BoundedSemaphore | _NoopSemaphore = (
             dispatch_semaphore if dispatch_semaphore is not None else _NoopSemaphore()
         )
@@ -401,6 +425,7 @@ class AlfredPluginSession:
         binding_handler: BindingHandler,
         rate_limit_handler: RateLimitHandler,
         crash_handler: CrashHandler,
+        status_observer: _StatusObserverLike | None = None,
         transport: StdioTransport | None = None,
         max_in_flight_notifications: int = _DEFAULT_MAX_IN_FLIGHT,
     ) -> AlfredPluginSession:
@@ -442,6 +467,7 @@ class AlfredPluginSession:
             rate_limit_handler=rate_limit_handler,
             crash_handler=crash_handler,
             supervisor=supervisor,
+            status_observer=status_observer,
             dispatch_semaphore=asyncio.BoundedSemaphore(value=max_in_flight_notifications),
             error_counter=SlidingWindowCounter(),
         )
@@ -622,6 +648,25 @@ class AlfredPluginSession:
                 correlation_id=self._correlation_id,
             )
             await self._quarantine_teardown(reason_base="protocol_violation")
+            return
+
+        # Spec B G6-2b-2a (#288), corrections #2 + SEC-2: a gateway-reported
+        # adapter-status frame (``gateway.adapter.*``). Routed to the
+        # AdapterStatusObserver (validate -> epoch-reconcile -> audit -> refuse forged),
+        # NOT the comms-notification handler fan-out and NOT the T3 inbound pipeline.
+        # Evaluated BEFORE the ``not _is_comms_session`` early return so the observer is
+        # the SOLE authority over the WHOLE ``gateway.adapter.*`` namespace regardless of
+        # session type — a forged ``gateway.adapter.bogus`` hits the observer's
+        # ``unknown_method`` refusal (audited ``status_rejected``), never the generic
+        # unknown-method handler that would restart the leg. The ``and`` short-circuits so
+        # ``_route_...`` is called ONLY for the prefix; it returns True when the observer
+        # consumed the frame. With NO observer wired (defensive — production always injects
+        # one) it returns False and we FALL THROUGH to the shared unknown-method tail below
+        # (non-comms: no-op; comms: loud unknown + restart) — one covered path, no
+        # duplicated tail.
+        if method.startswith(
+            GATEWAY_ADAPTER_STATUS_PREFIX
+        ) and await self._route_gateway_adapter_status(method, params):
             return
 
         # Slice-3 in-process sessions (no comms wiring) keep the legacy no-op
@@ -817,6 +862,37 @@ class AlfredPluginSession:
             cost_estimate_usd=_AUDIT_COST_USD,
             trace_id=self._correlation_id,
         )
+
+    async def _route_gateway_adapter_status(
+        self, method: str, params: Mapping[str, object] | None
+    ) -> bool:
+        """Hand one ``gateway.adapter.*`` frame to the injected status observer.
+
+        Spec B G6-2b-2a (#288). The observer validates / epoch-reconciles / audits /
+        refuses — it NEVER raises on a bad or forged frame (a loud audited refusal is
+        not an exception). The ONLY exception it raises is a genuine signed-audit-write
+        failure (the typed :class:`AdapterStatusAuditWriteError`); this method does NOT
+        catch it (SEC-1) — it must propagate so the live runner's
+        :meth:`alfred.plugins.comms_runner.CommsPluginRunner._route_notification`
+        recognises it past its blanket catch-and-continue and ESCALATES it loudly
+        (``log.error`` + restart request — NOT a re-raise, since the runner only ever
+        runs this fire-and-forget; CLAUDE.md hard rules #5/#7).
+
+        Returns ``True`` when an observer consumed the frame, ``False`` when NO observer
+        is wired (a non-gateway leg, or a Slice-3 session that somehow received the
+        method). On ``False`` the caller falls through to the shared unknown-method tail
+        in :meth:`_on_post_handshake_method`, which handles it uniformly: a non-comms
+        session no-ops it (like any other Slice-3 method), a comms session emits the loud
+        audited unknown row + requests a restart — never silently dropped (hard rule #7).
+        Correction #8 documents that in production the observer is injected into EVERY
+        comms session, so the ``False`` path is defensive. Delegating to the single shared
+        tail (rather than duplicating it here) keeps one covered code path and avoids an
+        ``_effective_adapter_id`` assert on a non-comms session.
+        """
+        if self._status_observer is not None:
+            await self._status_observer.observe(method, params)
+            return True
+        return False
 
     async def _emit_unknown_notification(
         self, method: str, params: Mapping[str, object] | None

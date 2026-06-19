@@ -417,6 +417,13 @@ class CrashedNotification(_WireModel):
 # link-auth tests.
 # ---------------------------------------------------------------------------
 
+# The shared namespace prefix for every gateway->core adapter-status method (Spec B
+# G6-2b-2a / #288). The core-side session router intercepts the WHOLE prefix — NOT just
+# the four known constants — so a forged ``gateway.adapter.<bogus>`` reaches the
+# AdapterStatusObserver's ``unknown_method`` refusal (audited ``status_rejected``)
+# rather than the generic unknown-method handler that would restart the gateway leg.
+# This makes the observer the SOLE authority over the whole ``gateway.adapter.*`` space.
+GATEWAY_ADAPTER_STATUS_PREFIX: Final[str] = "gateway.adapter."
 GATEWAY_ADAPTER_UP: Final[str] = "gateway.adapter.up"
 GATEWAY_ADAPTER_DOWN: Final[str] = "gateway.adapter.down"
 GATEWAY_ADAPTER_CRASHED: Final[str] = "gateway.adapter.crashed"
@@ -643,6 +650,7 @@ __all__ = [
     "GATEWAY_ADAPTER_BREAKER_OPEN",
     "GATEWAY_ADAPTER_CRASHED",
     "GATEWAY_ADAPTER_DOWN",
+    "GATEWAY_ADAPTER_STATUS_PREFIX",
     "GATEWAY_ADAPTER_UP",
     "LIFECYCLE_REASON_SHUTDOWN",
     "LINK_RECONNECTING",

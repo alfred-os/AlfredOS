@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import structlog
 
+from alfred.comms_mcp.adapter_status_observer import AdapterStatusAuditWriteError
 from alfred.i18n import t
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, WIRE_SEQ_FRAME_KEY
 from alfred.plugins.comms_stdio_transport import CommsProtocolError
@@ -94,6 +95,10 @@ _TRANSPORT_CRASH_DETAIL: Final[str] = "comms transport closed mid-conversation"
 
 # Closed-vocab restart reason for a malformed-frame wire violation.
 _MALFORMED_FRAME_RESTART_REASON: Final[str] = "malformed_frame"
+
+# Closed-vocab restart reason for a failed signed-audit write while recording a
+# ``gateway.adapter.*`` status transition (SEC-1, Spec B G6-2b-2a / #288).
+_STATUS_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "status_audit_unwritable"
 
 # The transport-crash exception family the pump's read arm already handles. When
 # a shutdown wins the race against an in-flight ``read_frame`` (PR-S4-11b DEFECT
@@ -753,6 +758,16 @@ class CommsPluginRunner:
         runner catches it here and continues to the next frame, matching the
         session docstring's "the reader logs + continues" contract.
 
+        This coroutine is ALWAYS run FIRE-AND-FORGET — :meth:`_spawn_notification_dispatch`
+        is its only production caller, scheduling it via ``ensure_future`` whose
+        done-callback (:attr:`_inflight`'s ``discard``) never retrieves the result.
+        So an exception that escaped here would NOT propagate anywhere a caller
+        awaits — it would only surface as a GC-time "Task exception was never
+        retrieved" warning. Every terminal disposition is therefore handled HERE:
+        the method never raises, and the failed-audit-write escalation below is what
+        makes that fault non-skippable (NOT a re-raise — there is no awaiter to
+        catch one).
+
         ``wire_seq`` (Spec A G4b-2a-pre / ADR-0032) is THIS frame's out-of-band wire
         seq, threaded into the session's validated dispatch so it reaches
         ``model_validate`` bound to its own frame (F1); ``None`` for stdio.
@@ -760,6 +775,37 @@ class CommsPluginRunner:
         params_mapping = params if isinstance(params, Mapping) else None
         try:
             await self._session._on_post_handshake_method(method, params_mapping, wire_seq=wire_seq)
+        except AdapterStatusAuditWriteError:
+            # SEC-1 (Spec B G6-2b-2a / #288): a FAILED signed-audit write for a
+            # ``gateway.adapter.*`` status transition is NOT an ordinary handler
+            # fault — it is a non-skippable security event (CLAUDE.md hard rules
+            # #5/#7). It MUST NOT fall into the blanket catch-and-continue below
+            # (which would silently downgrade it to a structlog warning). The LOUD
+            # escalation IS the teardown for a failed non-skippable audit write: a
+            # ``log.error`` row + a restart request (the runner's quarantine/restart
+            # path). We do NOT re-raise — this coroutine only ever runs
+            # fire-and-forget (see the method docstring), so a re-raise would reach
+            # no awaiter and merely leak an unretrieved-task-exception warning. The
+            # escalation, not propagation, is what defeats the blanket catch-and-
+            # continue.
+            log.error(
+                "comms.runner.status_audit_unwritable",
+                adapter_id=self._adapter_id,
+                notification_method=method,
+            )
+            try:
+                await self._request_restart(reason=_STATUS_AUDIT_UNWRITABLE_RESTART_REASON)
+            except Exception:
+                # CR #297: the audit-write failure is ALREADY escalated loudly (the
+                # log.error above). If the restart REQUEST itself raises, log it and
+                # swallow — this coroutine runs fire-and-forget, so propagating would only
+                # leak an unretrieved-task-exception warning (it reaches no awaiter), not
+                # add any teardown. The loud security signal stands; we never go silent.
+                log.error(
+                    "comms.runner.status_audit_restart_request_failed",
+                    adapter_id=self._adapter_id,
+                    notification_method=method,
+                )
         except Exception:
             # Catch-and-continue: the session already audited + counted this
             # failure. The reader must survive so a single bad handler does not
@@ -797,10 +843,24 @@ class CommsPluginRunner:
             )
 
     async def _request_restart(self, *, reason: str) -> None:
-        """Ask the supervisor to restart the adapter, if one is wired."""
+        """Ask the supervisor to restart the adapter, if one is wired.
+
+        With NO supervisor wired the restart cannot be actuated. A comms session
+        always has one in production (``for_comms_adapter`` requires it), so this
+        branch is defensive — but a security-path escalation (e.g. the SEC-1
+        ``status_audit_unwritable`` arm) that silently no-ops would violate the
+        fail-loud posture (CLAUDE.md hard rule #7). Log it LOUD so the missing
+        actuator is visible rather than swallowed (error-low-#2).
+        """
         supervisor: _SupervisorLike | None = self._session._supervisor
         if supervisor is not None:
             await supervisor.request_plugin_restart(adapter_id=self._adapter_id, reason=reason)
+            return
+        log.error(
+            "comms.runner.restart_request_no_supervisor",
+            adapter_id=self._adapter_id,
+            reason=reason,
+        )
 
 
 __all__ = [
