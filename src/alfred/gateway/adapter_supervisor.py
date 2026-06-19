@@ -150,9 +150,15 @@ class _AdapterRun:
         self.machine = AdapterLifecycleMachine()
         self.stop_event = asyncio.Event()
         self.cred_event = asyncio.Event()
-        self.up_event = asyncio.Event()
         self.awaiting_core_event = asyncio.Event()
         self.breaker_open_event = asyncio.Event()
+        # Incarnation-aware UP signalling: ``up_incarnation`` counts how many times the
+        # adapter has reached the serving state (one per spawn that handshakes OK).
+        # ``up_cond`` lets an observer await a SPECIFIC incarnation (e.g. "the 2nd up,
+        # after the 1st crashed") without racing a still-set one-shot event.
+        self.up_cond = asyncio.Condition()
+        self.up_incarnation = 0
+        self.is_up = False
         # In-memory crash timestamps (monotonic) for the per-adapter breaker window.
         self.recent_crashes: deque[float] = deque()
         # The current exponential backoff base (doubles per crash, clamped).
@@ -203,9 +209,16 @@ class GatewayAdapterSupervisor:
     # Test/observability synchronisation helpers
     # ------------------------------------------------------------------
 
-    async def wait_until_up(self, adapter_id: str) -> None:
-        """Await the adapter reaching the ``up`` state (test/observability helper)."""
-        await self._run(adapter_id).up_event.wait()
+    async def wait_until_up(self, adapter_id: str, *, incarnation: int = 1) -> None:
+        """Await the adapter reaching its ``incarnation``-th ``up`` state.
+
+        ``incarnation=1`` is the first serving state; ``incarnation=2`` is the up
+        after the first crash+restart, and so on. Count-based (not a one-shot event)
+        so an observer can await "the up AFTER the crash" without racing a stale set.
+        """
+        run = self._run(adapter_id)
+        async with run.up_cond:
+            await run.up_cond.wait_for(lambda: run.up_incarnation >= incarnation)
 
     async def wait_until_awaiting_core(self, adapter_id: str) -> None:
         """Await the adapter parking in ``AWAITING_CORE`` (cred-down)."""
@@ -328,7 +341,10 @@ class GatewayAdapterSupervisor:
 
     async def _enter_up(self, run: _AdapterRun) -> None:
         await self._apply(run, AdapterLifecycleEvent.HANDSHAKE_OK)  # -> UP, EMIT_UP
-        run.up_event.set()
+        async with run.up_cond:
+            run.up_incarnation += 1
+            run.is_up = True
+            run.up_cond.notify_all()
         run.awaiting_core_event.clear()
         # A fresh, healthy incarnation: reset the backoff ramp.
         run.backoff_base = _INITIAL_BACKOFF_SECONDS
@@ -366,7 +382,7 @@ class GatewayAdapterSupervisor:
 
     async def _stop(self, run: _AdapterRun) -> None:
         ADAPTER_UP.labels(adapter=run.adapter_id).set(0)
-        run.up_event.clear()
+        run.is_up = False
         await self._apply(
             run, AdapterLifecycleEvent.STOP_REQUESTED, reason="operator"
         )  # -> DOWN, EMIT_DOWN
@@ -382,7 +398,7 @@ class GatewayAdapterSupervisor:
         error_class, detail = run.pending_crash
         if run.machine.state is AdapterLifecycleState.UP:
             ADAPTER_UP.labels(adapter=run.adapter_id).set(0)
-            run.up_event.clear()
+            run.is_up = False
             await self._apply(
                 run,
                 AdapterLifecycleEvent.CHILD_EXITED,

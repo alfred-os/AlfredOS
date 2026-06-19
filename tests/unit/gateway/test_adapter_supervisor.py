@@ -131,6 +131,16 @@ class _FakeCredSeam:
         return self.available
 
 
+class _RecordingSleep:
+    """A sleep seam that records each requested delay and never actually sleeps."""
+
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.delays.append(seconds)
+
+
 def _make_supervisor(
     *,
     factory: _FakeChildFactory,
@@ -138,16 +148,17 @@ def _make_supervisor(
     sink: _RecordingSink,
     rng_seed: int = 1,
     monotonic: Callable[[], float] | None = None,
+    sleep: Callable[[float], object] | None = None,
 ) -> GatewayAdapterSupervisor:
     emitter = AdapterStatusEmitter(sink=sink)
-    # Deterministic seams: a no-op sleep (records nothing, returns instantly), a
-    # seeded RNG for decorrelated jitter, and a synthetic clock.
+    # Deterministic seams: a no-op (or recording) sleep, a seeded RNG for
+    # decorrelated jitter, and a synthetic clock.
     return GatewayAdapterSupervisor(
         child_factory=factory,
         cred_seam=cred,
         emitter=emitter,
         epoch=_EPOCH,
-        sleep=_instant_sleep,
+        sleep=sleep or _instant_sleep,  # type: ignore[arg-type]
         rng=random.Random(rng_seed),  # noqa: S311 — deterministic test jitter, not a crypto primitive
         monotonic=monotonic or _FakeClock().monotonic,
     )
@@ -224,3 +235,83 @@ async def test_fail_closed_spawn_raises_typed_error_not_log_and_continue() -> No
         await sup.supervise_one(_A)
     # No false ``up`` was emitted for a child that never started.
     assert "gateway.adapter.up" not in sink.methods()
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — crash detection -> bounded decorrelated-jitter restart
+# ---------------------------------------------------------------------------
+
+
+async def test_child_exit_emits_crashed_with_redacted_bounded_detail_then_restarts() -> None:
+    factory = _FakeChildFactory()
+    factory.script(_A, ["ok", "ok"])  # first crashes, second is the restart
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sleep = _RecordingSleep()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink, sleep=sleep)
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A)
+
+    # Crash the first child with a detail carrying a secret-shaped token longer than
+    # the crash-detail bound, so we prove BOTH redaction AND bounding on the wire.
+    secret = "sk-" + "A" * 40
+    long_detail = (secret + " ") * 50  # >256 chars, secret repeated
+    first_child = factory.children[0]
+    first_child.exit_future.set_result(("BrokenPipeError", long_detail))
+
+    # The restart brings the adapter back UP (the second scripted child = 2nd up).
+    await sup.wait_until_up(_A, incarnation=2)
+
+    crashed = [p for m, p in sink.frames if m == "gateway.adapter.crashed"]
+    assert len(crashed) == 1
+    detail_on_wire = crashed[0]["detail"]
+    assert isinstance(detail_on_wire, str)
+    # REDACTED (no sk- fragment survives) AND BOUND (<= _MAX_CRASH_DETAIL_LEN).
+    assert "sk-" not in detail_on_wire
+    assert "[REDACTED:api-key-shape]" in detail_on_wire
+    assert len(detail_on_wire) <= 256
+    assert crashed[0]["error_class"] == "BrokenPipeError"
+
+    # A restart was scheduled with a bounded, non-zero backoff drawn from the seam.
+    assert len(sleep.delays) == 1
+    assert 0.05 <= sleep.delays[0] <= 30.0
+    assert REGISTRY.get_sample_value("gateway_adapter_restarts_total", {"adapter": _A}) == 1.0
+
+    await sup.request_stop(_A)
+    await task
+
+
+async def test_backoff_is_decorrelated_per_adapter() -> None:
+    """Two adapters with DISTINCT seeds draw INDEPENDENT restart-delay sequences.
+
+    Proves no stampede (spec §4 [fleet perf-004]): coincident crashes do not collapse
+    onto one lockstep delay. We crash each adapter a few times under a no-breaker
+    threshold (kept below the trip count) and compare the captured delay sequences.
+    """
+    delays_by_seed: dict[int, list[float]] = {}
+    for seed in (1, 999):
+        factory = _FakeChildFactory()
+        factory.script(_A, ["ok", "ok", "ok"])  # up, crash, up, crash, up
+        cred = _FakeCredSeam(available=True)
+        sink = _RecordingSink()
+        sleep = _RecordingSleep()
+        sup = _make_supervisor(factory=factory, cred=cred, sink=sink, rng_seed=seed, sleep=sleep)
+
+        task = asyncio.ensure_future(sup.supervise_one(_A))
+        # Two crashes (below the breaker threshold of 3) -> two restart delays. Each
+        # iteration waits for the i-th up, crashes that child, then the (i+1)-th up.
+        for i in range(2):
+            await sup.wait_until_up(_A, incarnation=i + 1)
+            factory.children[i].exit_future.set_result(("BrokenPipeError", ""))
+            await sup.wait_until_up(_A, incarnation=i + 2)
+        await sup.request_stop(_A)
+        await task
+        delays_by_seed[seed] = list(sleep.delays)
+
+    # Independent draws given distinct seeds: the two sequences differ.
+    assert delays_by_seed[1] != delays_by_seed[999]
+    # Both still respect the clamp window.
+    for seq in delays_by_seed.values():
+        for d in seq:
+            assert 0.05 <= d <= 30.0
