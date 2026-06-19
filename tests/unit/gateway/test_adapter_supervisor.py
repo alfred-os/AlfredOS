@@ -315,3 +315,60 @@ async def test_backoff_is_decorrelated_per_adapter() -> None:
     for seq in delays_by_seed.values():
         for d in seq:
             assert 0.05 <= d <= 30.0
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — per-adapter circuit breaker -> BREAKER_OPEN
+# ---------------------------------------------------------------------------
+
+
+async def test_crash_loop_trips_breaker_once_terminal_absorbing() -> None:
+    """Three crashes in the window trip the per-adapter breaker -> BREAKER_OPEN.
+
+    Exactly one AdapterBreakerOpenNotification (retry_after_seconds >= 0); the machine
+    is terminal-absorbing afterwards (no second breaker emit); supervise_one returns.
+    """
+    factory = _FakeChildFactory()
+    # Three healthy spawns that each then crash; the 3rd crash trips the breaker.
+    factory.script(_A, ["ok", "ok", "ok"])
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink)
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    # Crash each incarnation; the 3rd crash trips the breaker (threshold 3).
+    for i in range(3):
+        await sup.wait_until_up(_A, incarnation=i + 1)
+        factory.children[i].exit_future.set_result(("BrokenPipeError", ""))
+    # supervise_one returns on the terminal breaker trip.
+    await task
+
+    breaker_frames = [p for m, p in sink.frames if m == "gateway.adapter.breaker_open"]
+    assert len(breaker_frames) == 1
+    retry_after = breaker_frames[0]["retry_after_seconds"]
+    assert isinstance(retry_after, int)
+    assert retry_after >= 0
+    # Three crashes -> three crashed frames, then exactly one breaker_open.
+    assert sink.methods().count("gateway.adapter.crashed") == 3
+    assert sink.methods().count("gateway.adapter.breaker_open") == 1
+
+    # Metrics: breaker open == 1, up == 0.
+    assert REGISTRY.get_sample_value("gateway_adapter_breaker_open", {"adapter": _A}) == 1.0
+    assert REGISTRY.get_sample_value("gateway_adapter_up", {"adapter": _A}) == 0.0
+
+
+async def test_breaker_open_is_observable_via_helper() -> None:
+    """``wait_until_breaker_open`` resolves when the breaker trips (observability)."""
+    factory = _FakeChildFactory()
+    factory.script(_A, ["ok", "ok", "ok"])
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink)
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    for i in range(3):
+        await sup.wait_until_up(_A, incarnation=i + 1)
+        factory.children[i].exit_future.set_result(("BrokenPipeError", ""))
+    await sup.wait_until_breaker_open(_A)
+    await task
+    assert "gateway.adapter.breaker_open" in sink.methods()
