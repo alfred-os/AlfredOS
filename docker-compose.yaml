@@ -102,6 +102,12 @@ services:
     # has no SETUID and never spawns the launcher (it must not impersonate the
     # quarantine UID — see test_compose_invariants), and the G6-0 gateway is a
     # pure relay; the spawn moves there in G6-1 with its own grant.
+    # NOTE: the seccomp path is resolved by the Docker CLI RELATIVE TO THE
+    # COMPOSE-INVOCATION CWD, not relative to this file. Run `docker compose`
+    # from the repository root or the profile load fails with a "no such file"
+    # error (README documents this). The apparmor entry is a NAMED profile that
+    # must already be loaded into the host kernel (`bin/alfred-setup.sh` or
+    # `sudo apparmor_parser -r docker/apparmor/alfred-bwrap`).
     security_opt:
       - "apparmor=alfred-bwrap"
       - "seccomp=docker/seccomp/alfred-bwrap.json"

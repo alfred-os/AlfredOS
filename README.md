@@ -44,6 +44,25 @@ upgrading an older deployment that already has an `alfred_run` volume with the w
 owner, run `docker compose down && docker volume rm <project>_alfred_run` before
 `up -d` so it is re-created owned by the `alfred` user.
 
+> **AppArmor hosts (Ubuntu 23.10+ and other userns-restricted Linux):** the dual-LLM
+> quarantine child runs under bubblewrap, which builds an unprivileged user namespace.
+> On hosts with `kernel.apparmor_restrict_unprivileged_userns=1` (the modern Ubuntu
+> default) the kernel refuses that namespace unless the container runs under an AppArmor
+> profile carrying `userns,`. `bin/alfred-setup.sh` loads the bundled
+> `docker/apparmor/alfred-bwrap` profile for you. If you run `docker compose` directly
+> (skipping the setup script), load it first or `alfred-core` crash-loops with
+> `bwrap: No permissions to create new namespace`:
+>
+> ```sh
+> sudo apparmor_parser -r docker/apparmor/alfred-bwrap
+> ```
+>
+> Run all `docker compose` commands **from the repository root**: the compose
+> `security_opt: seccomp=docker/seccomp/alfred-bwrap.json` path resolves relative to the
+> compose-invocation directory, not the compose file. macOS and non-AppArmor Linux hosts
+> need none of this (the `security_opt` lines are runtime no-ops there). The bundled PBS
+> interpreter adds roughly +110 MB to the `alfred-core` image.
+
 ### Enable Discord (Developer Mode walkthrough)
 
 Slice 2 ships a DM-only Discord adapter. Operator workflow for a fresh
