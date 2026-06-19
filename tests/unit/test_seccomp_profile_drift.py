@@ -13,8 +13,8 @@ so it runs hermetically in CI. To fix a failure, run::
 
     python3 scripts/gen_alfred_seccomp.py
 
-and commit the result (or, for a deliberate moby-default refresh,
-``python3 scripts/gen_alfred_seccomp.py --download`` first).
+and commit the result (or, for a deliberate moby-default refresh, hand-fetch the
+pinned URL and pass ``--default-profile <path>``).
 """
 
 from __future__ import annotations
