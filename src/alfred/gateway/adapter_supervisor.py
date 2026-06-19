@@ -46,7 +46,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import deque
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
@@ -187,7 +187,11 @@ class GatewayAdapterSupervisor:
         cred_seam: _CredSeamLike,
         emitter: AdapterStatusEmitter,
         epoch: str,
-        sleep: Callable[[float], Coroutine[object, object, None]] = asyncio.sleep,
+        # ``Awaitable`` (not the narrower ``Coroutine``): the supervisor only ``await``s
+        # the result, so any awaitable-returning sleep seam (the production
+        # ``asyncio.sleep``, a test's plain ``async def`` fake, or ``GatewayProcess._sleep``)
+        # satisfies it without a call-site ``type: ignore``.
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
         monotonic: Callable[[], float] | None = None,
         max_concurrent_boots: int = _DEFAULT_MAX_CONCURRENT_BOOTS,

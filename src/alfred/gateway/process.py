@@ -36,17 +36,60 @@ import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
+from typing import Final
 
 import structlog
 
+from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
+from alfred.gateway.adapter_supervisor import (
+    GatewayAdapterSpawnError,
+    GatewayAdapterSupervisor,
+    _AdapterChildLike,
+)
 from alfred.gateway.client_link import client_handshake
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink, _CommsTransportLike
 from alfred.gateway.metrics import PEER_AUTH_REJECTED
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
+from alfred.gateway.status_leg import GatewayCoreLinkStatusSink
 
 log = structlog.get_logger(__name__)
+
+# 2b-2a empty-set placeholder epoch: no ``up`` is emitted on the empty adapter set, so
+# this 32-hex placeholder is NEVER put on the wire. G6-3 reads the live captured epoch
+# via ``core_link.current_core_epoch()`` per spawn instead of this snapshot.
+_PLACEHOLDER_EPOCH: Final[str] = "0" * 32
+
+
+class _UnspawnedAdapterChildFactory:
+    """G6-2b-2a placeholder: refuses to spawn (no real launcher until G6-3).
+
+    With the 2b-2a empty adapter set this is NEVER called. It raises
+    :class:`GatewayAdapterSpawnError` loud (fail-closed, CLAUDE.md hard rule #7)
+    rather than fabricating a child, so a premature non-empty adapter set fails
+    audibly instead of running a credential-less / child-less adapter.
+    """
+
+    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _AdapterChildLike:
+        # ``epoch`` is part of the factory Protocol (G6-3 stamps it onto the spawned
+        # child); this placeholder never spawns, so it is referenced only in the
+        # fail-closed error for forensic context. The ``_AdapterChildLike`` return type
+        # satisfies the factory Protocol; the method always raises, so it never returns.
+        raise GatewayAdapterSpawnError(
+            f"adapter child spawn is not wired until G6-3 "
+            f"(adapter_id={adapter_id!r}, epoch={epoch!r})"
+        )
+
+
+class _UnavailableCredSeam:
+    """G6-2b-2a placeholder cred seam: always unavailable (real cred is G6-3)."""
+
+    async def is_available(self, *, adapter_id: str) -> bool:
+        # ``adapter_id`` is part of the cred Protocol; this placeholder is uniformly
+        # unavailable (real per-adapter credential lookup is G6-3), so it is unused here.
+        del adapter_id
+        return False
 
 
 class GatewayProcess:
@@ -68,9 +111,15 @@ class GatewayProcess:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[float], float] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        adapter_ids: list[str] | None = None,
     ) -> None:
         self._shutdown_event = shutdown_event
         self._dial_adapter_id = dial_adapter_id
+        # The configured comms-adapter set the gateway supervises (Spec B G6-2b-2a / #288).
+        # EMPTY in 2b-2a (gap b): the supervisor is wired LIVE but spawns nothing —
+        # ``supervise_all([])`` is a clean no-op. G6-3 supplies the real ids (Discord) +
+        # a real credential client + child factory.
+        self._adapter_ids: list[str] = list(adapter_ids or [])
         # The core dial is injectable so a test drives a fake core leg; ``None`` defers to
         # :meth:`GatewayCoreLink._default_dial` (the production socket dial).
         self._core_dial = core_dial
@@ -102,6 +151,77 @@ class GatewayProcess:
             peer_uid=peer_uid,
             expected_uid=os.getuid(),
         )
+
+    def _build_adapter_supervisor(self, core_link: GatewayCoreLink) -> GatewayAdapterSupervisor:
+        """Build the live-wired adapter supervisor for this gateway process (#288).
+
+        Spec B G6-2b-2a: bind the supervisor's status emitter to the LIVE gateway->core
+        status leg (:class:`GatewayCoreLinkStatusSink` over ``core_link.send_status_frame``),
+        replacing 2b-1's fake sink. The adapter set is EMPTY in 2b-2a (gap b) — the
+        plumbing is live but no child is spawned until G6-3 supplies a real credential
+        client + child factory. The epoch is read LAZILY from the core link at emit time
+        (gap c): the supervisor ctor's ``epoch`` snapshot is unused for the empty set (no
+        ``up`` is emitted), and G6-3 reads ``core_link.current_core_epoch()`` per spawn.
+        """
+        sink = GatewayCoreLinkStatusSink(core_link=core_link)
+        emitter = AdapterStatusEmitter(sink=sink)
+        return GatewayAdapterSupervisor(
+            child_factory=_UnspawnedAdapterChildFactory(),
+            cred_seam=_UnavailableCredSeam(),
+            emitter=emitter,
+            # Empty-set boot: no ``up`` emits, so this placeholder epoch is never put on
+            # the wire. G6-3 reads the live ``core_link.current_core_epoch()`` per spawn.
+            epoch=core_link.current_core_epoch() or _PLACEHOLDER_EPOCH,
+            sleep=self._sleep,
+        )
+
+    async def _run_relay_and_supervisor(
+        self, relay: GatewayRelay, supervisor: GatewayAdapterSupervisor
+    ) -> None:
+        """Run the relay (the serving lifetime) + supervised adapter supervisor.
+
+        The RELAY's lifetime is the process's serving lifetime — it returns on a clean
+        shutdown. The supervisor runs CONCURRENTLY; correction #5: it is CANCELLED +
+        reaped when the relay returns rather than awaited to its own completion.
+        ``supervise_all([])`` returns immediately today (empty set), but a future
+        NON-empty set (G6-3) would otherwise park forever (an adapter in AWAITING_CORE /
+        steady state never returns on its own), so leaving it un-reaped would hang the
+        gateway shutdown.
+
+        A supervisor that RAISES a fail-closed :class:`GatewayAdapterSpawnError` BEFORE
+        the relay returns is surfaced loudly (it aborts the relay too) so a real spawn
+        failure is never swallowed; a supervisor that simply returns (empty-set no-op) is
+        ignored — the relay keeps serving. The relay is the sole completion anchor.
+        """
+        relay_task: asyncio.Task[None] = asyncio.ensure_future(relay.run())
+        supervisor_task: asyncio.Task[None] = asyncio.ensure_future(
+            supervisor.supervise_all(self._adapter_ids)
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {relay_task, supervisor_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if supervisor_task in done:
+                # The supervisor finished first. A fail-closed spawn error must surface
+                # (``.result()`` re-raises it, and the ``finally`` then cancels the relay);
+                # a clean empty-set no-op return is ignored — keep serving until the relay
+                # itself ends below.
+                supervisor_task.result()
+            if relay_task not in done:
+                # The relay is the serving-lifetime anchor: wait for IT to end (shutdown)
+                # even after the empty-set supervisor returned.
+                await relay_task
+            # ``.result()`` re-raises a genuine relay error (the prior bare-await
+            # behaviour) once the relay has completed.
+            relay_task.result()
+        finally:
+            # Cancel + reap both on EVERY exit (the relay returned, or a raise is
+            # unwinding): never leave a parked supervisor/relay task outliving the process.
+            if not supervisor_task.done():
+                supervisor_task.cancel()
+            if not relay_task.done():
+                relay_task.cancel()
+            await asyncio.gather(relay_task, supervisor_task, return_exceptions=True)
 
     async def run(self) -> None:
         """Bind, accept ONE client (racing shutdown), handshake, supervise the relay, reap.
@@ -149,7 +269,12 @@ class GatewayProcess:
                 client_transport=client_transport,
                 client_seq_enabled=client_seq_enabled,
             )
-            await relay.run()
+            # Spec B G6-2b-2a (#288): the adapter supervisor is wired LIVE (its status
+            # emitter bound to ``core_link.send_status_frame``) alongside the relay, with
+            # an EMPTY configured set (spawns nothing until G6-3). It is cancelled/reaped
+            # on shutdown (correction #5) so a future non-empty set cannot block the stop.
+            supervisor = self._build_adapter_supervisor(core_link)
+            await self._run_relay_and_supervisor(relay, supervisor)
         finally:
             # Reap the accepted transport + the socket file on EVERY exit path, including a
             # cancel/KeyboardInterrupt unwind (security M2 — no leaked inode on shutdown).
@@ -191,4 +316,8 @@ class GatewayProcess:
         return listener.transport
 
 
-__all__ = ["GatewayProcess"]
+__all__ = [
+    "GatewayProcess",
+    "_UnavailableCredSeam",
+    "_UnspawnedAdapterChildFactory",
+]
