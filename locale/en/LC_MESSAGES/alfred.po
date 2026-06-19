@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-18 22:49+0100\n"
+"POT-Creation-Date: 2026-06-19 18:10+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1164,55 +1164,55 @@ msgstr ""
 "Two-tier liveness/readiness probe for Docker HEALTHCHECK (exit 0 healthy,"
 " 1 unhealthy)."
 
-#: src/alfred/cli/gateway/_commands.py:67
+#: src/alfred/cli/gateway/_commands.py:74
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:104
+#: src/alfred/cli/gateway/_commands.py:115
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:111
+#: src/alfred/cli/gateway/_commands.py:122
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:120
+#: src/alfred/cli/gateway/_commands.py:131
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:122
+#: src/alfred/cli/gateway/_commands.py:133
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:143
-#: src/alfred/cli/gateway/_commands.py:157
+#: src/alfred/cli/gateway/_commands.py:154
+#: src/alfred/cli/gateway/_commands.py:168
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:161
+#: src/alfred/cli/gateway/_commands.py:172
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:233
-#: src/alfred/cli/gateway/_commands.py:239
+#: src/alfred/cli/gateway/_commands.py:244
+#: src/alfred/cli/gateway/_commands.py:250
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:243
+#: src/alfred/cli/gateway/_commands.py:254
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
@@ -1728,6 +1728,34 @@ msgstr ""
 "same-uid client can still connect. Check that only your own user runs the"
 " daemon and the foreground client, and that ~/.run/alfred is owner-only "
 "(0700)."
+
+#: src/alfred/i18n/_spec_b_reserve.py:19
+msgid "gateway.adapter.status.up"
+msgstr "up"
+
+#: src/alfred/i18n/_spec_b_reserve.py:20
+msgid "gateway.adapter.status.down"
+msgstr "down"
+
+#: src/alfred/i18n/_spec_b_reserve.py:21
+msgid "gateway.adapter.status.crashed"
+msgstr "crashed"
+
+#: src/alfred/i18n/_spec_b_reserve.py:22
+msgid "gateway.adapter.status.breaker_open"
+msgstr "circuit breaker open"
+
+#: src/alfred/i18n/_spec_b_reserve.py:24
+msgid "gateway.adapter.status_rejected.malformed_frame"
+msgstr "rejected: malformed status frame"
+
+#: src/alfred/i18n/_spec_b_reserve.py:25
+msgid "gateway.adapter.status_rejected.epoch_mismatch"
+msgstr "rejected: status frame epoch mismatch (possible forgery)"
+
+#: src/alfred/i18n/_spec_b_reserve.py:26
+msgid "gateway.adapter.status_rejected.unknown_method"
+msgstr "rejected: unknown status method"
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
