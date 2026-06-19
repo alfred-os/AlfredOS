@@ -219,6 +219,16 @@ so the carrier-auth is proven by 2b-2's live-leg integration test + the existing
 Spec A link-auth tests; G6-2b-1's unit suite proves the application-level
 validation (validate-on-produce + epoch reconcile) in isolation.
 
+> **G6-2b-2a annotation (audit-of-record):** Spec §6 calls the gateway-LOCAL
+> signed audit append + reconcile "Spec A's mechanism reused", but that
+> gateway-local signed-reconcile component does NOT exist on main (Spec A shipped
+> only structlog breadcrumbs; the gateway holds no DB and no signing key). For the
+> 2b-2a slice the per-transition **audit-of-record is the CORE-side
+> `AdapterStatusObserver`'s `audit.append_schema`** (one row per accepted
+> transition + one `status_rejected` row per refusal, written into the signed core
+> audit log) — which is spec-faithful (the signed reconcile target IS the core log).
+> The gateway-LOCAL signed reconcile is a later-slice component, not a Spec A reuse.
+
 ### Adversarial corpus (before ship, §6)
 
 - **(a)** cross-adapter credential read attempt → refused + audited.
