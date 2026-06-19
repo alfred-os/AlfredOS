@@ -99,6 +99,49 @@ jobs:
           echo "--- result line (compose-equivalent caps) ---"
           grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' probe-compose-caps.log || echo "no result line"
 
+      - name: TEMP DIAGNOSTIC — surface the child/bwrap stderr (#251 swallows it)
+        if: always()
+        # The probe transport swallows the child's stderr, so the FAILED reason is
+        # opaque. Drive bin/alfred-plugin-launcher.sh exactly as
+        # spawn_quarantine_child_io does (dup the fd-3 key pipe, kind=full bwrap),
+        # but capture + print the child's stderr verbatim. THROWAWAY.
+        run: |
+          set -uo pipefail
+          docker run --rm \
+            --cap-add SETUID \
+            -e ALFRED_ENVIRONMENT=production \
+            --entrypoint /usr/local/bin/python3.14 \
+            alfred-core-g6-0b-probe -c '
+          import os, struct, subprocess, sys, json
+          os.environ["ALFRED_SANDBOX_BIND_INTERP_PREFIX"] = "1"
+          os.environ["ALFRED_PLUGIN_MANIFEST_PATH"] = "/usr/local/lib/python3.14/site-packages/alfred/security/quarantine_child/manifest.toml"
+          os.chdir("/app")
+          key = b"placeholder-key"
+          r, w = os.pipe(); os.set_inheritable(r, True)
+          saved = os.dup(3)
+          try:
+              os.dup2(r, 3)
+              argv = ["bin/alfred-plugin-launcher.sh", "alfred.quarantined-llm", "/usr/local/bin/python3.14", "-m", "alfred.security.quarantine_child"]
+              p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(3,), env=dict(os.environ))
+          finally:
+              os.dup2(saved, 3); os.close(saved); os.close(r)
+          os.write(w, struct.pack(">I", len(key)) + key); os.close(w)
+          def frame(method, params):
+              body = json.dumps({"jsonrpc":"2.0","id":1,"method":method,"params":params}).encode()
+              return struct.pack(">I", len(body)) + body
+          try:
+              p.stdin.write(frame("quarantine.ingest", {"handle_id":"h","context":"hello-echo"}))
+              p.stdin.write(frame("quarantine.extract", {"handle_id":"h","schema_json":"{}","schema_version":1}))
+              p.stdin.flush()
+          except BrokenPipeError:
+              print("[diag] child stdin broken (child already exited)")
+          out, err = p.communicate(timeout=20)
+          print("[diag] child rc:", p.returncode)
+          print("[diag] ===== child STDERR =====")
+          sys.stdout.write(err.decode("utf-8", "replace"))
+          print("[diag] ===== child STDOUT len:", len(out), "head:", out[:160])
+          ' 2>&1 | tee child-stderr.log || true
+
       - name: Echo the decisive marker
         if: always()
         run: |
