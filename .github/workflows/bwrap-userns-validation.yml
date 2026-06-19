@@ -1,0 +1,296 @@
+# bwrap userns AppArmor + seccomp validation (#290).
+#
+# The DECISIVE gate for PR-290a. Proves that the custom AppArmor profile
+# (docker/apparmor/alfred-bwrap) + custom seccomp profile
+# (docker/seccomp/alfred-bwrap.json) are what let the dual-LLM bwrap quarantine
+# child build its user namespace inside the production-posture alfred-core
+# container — running as the NON-root `alfred` user with only `cap_add: SETUID`,
+# NO --privileged, NO SYS_ADMIN, NO seccomp=unconfined, NO apparmor=unconfined.
+#
+# It runs the real spawn probe (scripts/quarantine_spawn_probe.py) and asserts
+# QUARANTINE_SPAWN_PROBE_RESULT=OK.
+#
+# CRITICAL — the host sysctl must NOT do the work. The existing
+# `integration-privileged`/`integration` jobs RELAX
+# kernel.apparmor_restrict_unprivileged_userns to 0; that is exactly the lax-host
+# posture #290 replaces. This job instead sets it RESTRICTIVE (=1) so the ONLY
+# thing that can make the spawn succeed is the loaded AppArmor profile + custom
+# seccomp profile. A `control` run WITHOUT the profile (still sysctl=1) must FAIL,
+# proving the profile — not the host — is load-bearing.
+#
+# Promote the `validate` job to a required status check after merge (see the
+# author-gating-workflow skill + docs/ci/required-checks.md).
+name: bwrap-userns-validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - main
+      # Validation branch for #290 so the gate can be driven green BEFORE a PR
+      # is opened. Remove this branch entry when PR-290a merges — the
+      # pull_request trigger above is the steady-state gate.
+      - fix-290-bwrap-userns-apparmor
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: bwrap spawn under custom AppArmor + seccomp (non-root, restrictive host)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Probe the runner's userns + apparmor posture
+        # Diagnostic only: record what the runner ships so a future drift (e.g. a
+        # runner image that pre-relaxes the sysctl) is visible in the log. We do
+        # NOT depend on these values — the next step forces the restrictive one.
+        run: |
+          set -uo pipefail
+          echo "apparmor_restrict_unprivileged_userns (before): $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 'absent')"
+          echo "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'absent')"
+          aa-status --version 2>/dev/null || true
+          command -v apparmor_parser && apparmor_parser --version || echo "apparmor_parser absent"
+
+      - name: Force the host userns restriction ON (prove the profile does the work)
+        # =1 is the modern Ubuntu default that BLOCKS unprivileged userns unless
+        # the process is under an AppArmor profile carrying `userns,`. By forcing
+        # it ON (not relaxing to 0 like the other jobs) we guarantee the spawn can
+        # only succeed BECAUSE of the loaded profile, never because of a lax host.
+        # `|| true`: the knob is absent on older kernels; the load+control steps
+        # still distinguish profile-vs-no-profile there.
+        run: |
+          set -uo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1 || true
+          echo "apparmor_restrict_unprivileged_userns (after): $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 'absent')"
+
+      - name: Load the custom AppArmor profile
+        # The decisive host step: parse + load docker/apparmor/alfred-bwrap so the
+        # kernel knows the `alfred-bwrap` profile (referenced by the container's
+        # `--security-opt apparmor=alfred-bwrap`). The GH ubuntu runner has
+        # passwordless sudo for apparmor_parser. Fail LOUD if the load fails — a
+        # silently-unloaded profile would make the container fall back to
+        # docker-default and the gate would be testing the wrong thing.
+        run: |
+          set -euo pipefail
+          sudo apparmor_parser -r -W docker/apparmor/alfred-bwrap
+          echo "Loaded profiles containing alfred-bwrap:"
+          sudo aa-status 2>/dev/null | grep alfred-bwrap || {
+            echo "::error::alfred-bwrap profile not present in aa-status after load."
+            exit 1
+          }
+
+      - name: Validate the custom seccomp profile is well-formed JSON
+        run: |
+          set -euo pipefail
+          python3 -c "import json,sys; json.load(open('docker/seccomp/alfred-bwrap.json')); print('seccomp profile is valid JSON')"
+
+      - name: Build the alfred-core image
+        run: docker build -t alfred-core-290 -f docker/alfred-core.Dockerfile .
+
+      - name: Build the validation layer (self-contained child interpreter under /opt)
+        # WHY a provisioned interpreter, not the image's /usr CPython:
+        #
+        # This gate isolates the USERNS variable (does the bwrap sandbox BUILD
+        # under the custom AppArmor + seccomp profiles?). Two OTHER, orthogonal
+        # #290 sub-causes would otherwise mask that signal and must be removed:
+        #
+        #   1. Editable alfred: the shipped image installs alfred EDITABLE into
+        #      /app/.venv (real code at /app/src via a .pth), which bwrap does not
+        #      bind — the child can't import alfred from there.
+        #   2. ld.so-cache interpreter: the python.org /usr CPython finds
+        #      libpython3.14.so.1.0 via /etc/ld.so.cache, which the bwrap policy
+        #      omits (no /etc bind) — so it dies with
+        #      "libpython3.14.so.1.0: cannot open shared object file" AFTER the
+        #      namespace is already built (proving userns worked, but failing the
+        #      round trip for an unrelated reason).
+        #
+        # We therefore install a SELF-CONTAINED python-build-standalone interpreter
+        # under /opt/uvpy (RUNPATH-linked — needs no ld.so.cache) and pip-install
+        # alfred (+deps) INTO it, exactly as the integration-privileged job does
+        # (ADR-0030). The launcher's opt-in interpreter-prefix bind ro-binds that
+        # prefix into the sandbox, so the child both execs AND imports alfred from
+        # one bound, cache-independent prefix. The ONLY thing left that can block
+        # the round trip is the userns layer the profiles fix. (The bake-this-into-
+        # the-shipped-image interpreter fix is the separate #290 sub-task.)
+        run: |
+          set -euo pipefail
+          cat > Dockerfile.290validate <<'DOCKERFILE'
+          FROM alfred-core-290 AS validate
+          USER root
+          COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
+          WORKDIR /app
+          # Hermetic python-build-standalone 3.14 via PROTO (NOT `uv python
+          # install`: the image's pinned uv 0.5.4 predates 3.14 PBS availability —
+          # "No download found for cpython-3.14-linux-x86_64-gnu"). This is the
+          # exact interpreter recipe the integration-privileged job proves on the
+          # x86_64 runner (ADR-0030 / #248): proto fetches a self-contained PBS
+          # interpreter under /opt/proto (RUNPATH-linked, needs no ld.so.cache),
+          # and uv installs alfred (+deps) INTO it so the child resolves both the
+          # interpreter and `alfred` from one bound prefix.
+          ENV PROTO_HOME=/opt/proto
+          ENV PATH=/opt/proto/bin:/opt/proto/shims:/usr/local/bin:/usr/bin:/bin
+          # xz-utils: proto's python-build-standalone tarball is .tar.xz; the slim
+          # base lacks xz so tar can't extract it ("xz: Cannot exec").
+          RUN apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates xz-utils \
+              && rm -rf /var/lib/apt/lists/* \
+              && curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- --yes \
+              && proto install python 3.14 \
+              && PROTO_PY="$(ls -d /opt/proto/tools/python/3.14.*/bin/python3 | sort -V | tail -1)" \
+              && test -x "$PROTO_PY" \
+              && uv pip install --python "$PROTO_PY" /app \
+              && "$PROTO_PY" -c "import alfred.security.quarantine_child as m; print('child interp resolves alfred at', m.__file__)" \
+              && ln -sfn "$PROTO_PY" /opt/protopy \
+              # The launcher resolves the environment via `python3 -m
+              # alfred.plugins.manifest_reader --read-environment`; bare `python3`
+              # must therefore import alfred. Point /usr/local/bin/python3 at the
+              # alfred-bearing proto interpreter (the integration-privileged
+              # recipe) so the launcher does not refuse with environment_not_set.
+              && ln -sf "$PROTO_PY" /usr/local/bin/python3 \
+              && chmod -R a+rX /opt/proto /opt/protopy
+          USER alfred
+          DOCKERFILE
+          docker build -t alfred-core-290-validate -f Dockerfile.290validate .
+          # Confirm the provisioned interpreter resolves alfred (self-contained).
+          docker run --rm --entrypoint /opt/protopy alfred-core-290-validate \
+            -c "import alfred.security.quarantine_child as m; print('alfred importable from', m.__file__)"
+
+      - name: CONTROL — spawn WITHOUT the custom profiles must FAIL (host stays restrictive)
+        # Belt-and-braces against a paper gate (#245): if the runner's posture ever
+        # let the spawn succeed WITHOUT our profiles, the real test below would be
+        # green for the wrong reason. With the host sysctl forced to 1 and stock
+        # docker-default apparmor + seccomp, the spawn MUST refuse. If it
+        # succeeds, the gate is not isolating the profile — fail loud.
+        run: |
+          set -uo pipefail
+          docker run --rm \
+            --user alfred \
+            --cap-add SETUID \
+            -e ALFRED_ENVIRONMENT=production \
+            -e ALFRED_QUARANTINE_CHILD_PYTHON=/opt/protopy \
+            -e ALFRED_PLUGIN_LAUNCHER=/app/bin/alfred-plugin-launcher.sh \
+            -v "${{ github.workspace }}/scripts/quarantine_spawn_probe.py:/tmp/probe.py:ro" \
+            --entrypoint /opt/protopy \
+            alfred-core-290-validate /tmp/probe.py 2>&1 | tee control.log || true
+          if grep -q '^QUARANTINE_SPAWN_PROBE_RESULT=OK$' control.log; then
+            echo "::error::Spawn SUCCEEDED without the custom AppArmor+seccomp profiles on a restrictive host — the gate is NOT isolating the profile (paper-gate, see #245)."
+            exit 1
+          fi
+          echo "Control OK: spawn correctly refused without the custom profiles."
+
+      - name: VALIDATE — spawn WITH the custom AppArmor + seccomp profiles must succeed
+        id: validate
+        # The whole point. NON-root alfred + only cap_add SETUID (production
+        # posture), the host sysctl forced restrictive, and the custom
+        # AppArmor + seccomp profiles applied. The spawn must complete the real
+        # round-trip: QUARANTINE_SPAWN_PROBE_RESULT=OK.
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user alfred \
+            --cap-add SETUID \
+            --security-opt apparmor=alfred-bwrap \
+            --security-opt seccomp=docker/seccomp/alfred-bwrap.json \
+            -e ALFRED_ENVIRONMENT=production \
+            -e ALFRED_QUARANTINE_CHILD_PYTHON=/opt/protopy \
+            -e ALFRED_PLUGIN_LAUNCHER=/app/bin/alfred-plugin-launcher.sh \
+            -v "${{ github.workspace }}/scripts/quarantine_spawn_probe.py:/tmp/probe.py:ro" \
+            --entrypoint /opt/protopy \
+            alfred-core-290-validate /tmp/probe.py 2>&1 | tee validate.log
+          echo "--- result line ---"
+          if ! grep -q '^QUARANTINE_SPAWN_PROBE_RESULT=OK$' validate.log; then
+            echo "::error::bwrap quarantine-child spawn did NOT succeed under the custom AppArmor+seccomp profiles (non-root, restrictive host)."
+            grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' validate.log || echo "(no result line emitted)"
+            exit 1
+          fi
+          echo "PROOF: QUARANTINE_SPAWN_PROBE_RESULT=OK under custom AppArmor + seccomp, non-root alfred, restrictive host."
+
+      - name: DIAGNOSTIC — surface the swallowed child stderr on failure (#251)
+        if: failure()
+        # The transport swallows the child's stderr (#251), so a FAILED probe is
+        # opaque. Drive bin/alfred-plugin-launcher.sh exactly as
+        # spawn_quarantine_child_io does (dup the fd-3 key pipe, kind=full bwrap)
+        # under the SAME custom profiles, but capture + print the child's stderr
+        # verbatim so the real blocker (userns? bind? import?) is visible.
+        run: |
+          set -uo pipefail
+          docker run --rm \
+            --user alfred \
+            --cap-add SETUID \
+            --security-opt apparmor=alfred-bwrap \
+            --security-opt seccomp=docker/seccomp/alfred-bwrap.json \
+            -e ALFRED_ENVIRONMENT=production \
+            --entrypoint /usr/local/bin/python3.14 \
+            alfred-core-290-validate -c '
+          import os, struct, subprocess, sys
+          os.environ["ALFRED_SANDBOX_BIND_INTERP_PREFIX"] = "1"
+          os.environ["ALFRED_PLUGIN_MANIFEST_PATH"] = "/usr/local/lib/python3.14/site-packages/alfred/security/quarantine_child/manifest.toml"
+          os.chdir("/app")
+          key = b"placeholder-key"
+          r, w = os.pipe(); os.set_inheritable(r, True)
+          saved = os.dup(3)
+          try:
+              os.dup2(r, 3)
+              argv = ["bin/alfred-plugin-launcher.sh", "alfred.quarantined-llm", "/usr/local/bin/python3.14", "-m", "alfred.security.quarantine_child"]
+              p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(3,), env=dict(os.environ))
+          finally:
+              os.dup2(saved, 3); os.close(saved); os.close(r)
+          os.write(w, struct.pack(">I", len(key)) + key); os.close(w)
+          out, err = p.communicate(timeout=20)
+          print("[diag] child rc:", p.returncode)
+          print("[diag] ===== child STDERR =====")
+          sys.stdout.write(err.decode("utf-8", "replace"))
+          print("[diag] ===== child STDOUT len:", len(out), "head:", out[:160])
+          ' 2>&1 | tail -40 || true
+
+      - name: DIAGNOSTIC — confirm userns works + isolate the ld.so-cache lib resolution
+        if: failure()
+        # Two probes that together pinpoint whether the AppArmor+seccomp userns
+        # fix worked and what (if anything) is left:
+        #   1. Bare bwrap that ONLY creates a user namespace + echoes. If THIS
+        #      prints "userns-ok", the profile fix is proven — the namespace was
+        #      built as non-root with no SYS_ADMIN.
+        #   2. The real policy binds + the interpreter, once WITHOUT and once WITH
+        #      `--setenv LD_LIBRARY_PATH /usr/local/lib`. The python.org image
+        #      finds libpython via /etc/ld.so.cache, which the policy omits (no
+        #      /etc bind); if (2-with) succeeds where (2-without) fails, the only
+        #      remaining gap is the orthogonal #290 interpreter/ld-cache sub-cause,
+        #      NOT userns.
+        run: |
+          set -uo pipefail
+          docker run --rm \
+            --user alfred \
+            --cap-add SETUID \
+            --security-opt apparmor=alfred-bwrap \
+            --security-opt seccomp=docker/seccomp/alfred-bwrap.json \
+            --entrypoint /bin/sh \
+            alfred-core-290-validate -c '
+              echo "=== (1) bare userns probe ==="
+              bwrap --unshare-user --uid 0 --gid 0 --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev -- /bin/echo userns-ok 2>&1 || echo "userns FAILED"
+              echo "=== (2-without) policy binds + interp, no LD_LIBRARY_PATH ==="
+              bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 --tmpfs /run/alfred/quarantined --dev /dev --proc /proc --unshare-pid --unshare-uts --unshare-cgroup --unshare-ipc --die-with-parent --ro-bind /usr/local /usr/local -- /usr/local/bin/python3.14 -c "print(\"py-ok-nocache\")" 2>&1 || echo "(2-without) FAILED"
+              echo "=== (2-with) same + --setenv LD_LIBRARY_PATH /usr/local/lib ==="
+              bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 --tmpfs /run/alfred/quarantined --dev /dev --proc /proc --unshare-pid --unshare-uts --unshare-cgroup --unshare-ipc --die-with-parent --ro-bind /usr/local /usr/local --setenv LD_LIBRARY_PATH /usr/local/lib -- /usr/local/bin/python3.14 -c "print(\"py-ok-ldpath\")" 2>&1 || echo "(2-with) FAILED"
+            ' 2>&1 | tail -30 || true
+
+      - name: Confirm the container ran as non-root alfred
+        # Independent assertion of the production posture: the whole gate is moot
+        # if the container silently ran as root.
+        run: |
+          set -euo pipefail
+          UID_IN_CONTAINER=$(docker run --rm --user alfred --entrypoint id alfred-core-290-validate -u)
+          echo "container uid: ${UID_IN_CONTAINER}"
+          if [ "${UID_IN_CONTAINER}" = "0" ]; then
+            echo "::error::container ran as root — the gate must run as the non-root alfred user."
+            exit 1
+          fi
+          echo "Confirmed: container runs as non-root alfred (uid ${UID_IN_CONTAINER})."
