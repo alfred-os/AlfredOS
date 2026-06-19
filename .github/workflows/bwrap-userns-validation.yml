@@ -190,9 +190,10 @@ jobs:
             -e ALFRED_ENVIRONMENT=production \
             --entrypoint /opt/alfred-python/bin/python3 \
             alfred-core-290 -c '
-          import os, struct, subprocess, sys
+          import importlib.util, os, struct, subprocess, sys
           os.environ["ALFRED_SANDBOX_BIND_INTERP_PREFIX"] = "1"
-          os.environ["ALFRED_PLUGIN_MANIFEST_PATH"] = "/opt/alfred-python/lib/python3.14/site-packages/alfred/security/quarantine_child/manifest.toml"
+          _qc = importlib.util.find_spec("alfred.security.quarantine_child").origin
+          os.environ["ALFRED_PLUGIN_MANIFEST_PATH"] = os.path.join(os.path.dirname(_qc), "manifest.toml")
           os.chdir("/app")
           key = b"placeholder-key"
           r, w = os.pipe(); os.set_inheritable(r, True)
