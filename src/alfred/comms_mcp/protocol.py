@@ -383,6 +383,125 @@ class CrashedNotification(_WireModel):
 
 
 # ---------------------------------------------------------------------------
+# Gateway -> core adapter-status notifications (Spec B G6-2a / #288 / ADR-0036)
+#
+# DIRECTION: gateway -> core. The gateway (the adapter child's supervising
+# parent, Spec B) OBSERVES the adapter lifecycle and reports each transition to
+# the core as an id-less notification. The core never COMMANDS the lifecycle; it
+# consumes these via ``AdapterStatusObserver`` (adapter_status_observer.py),
+# Pydantic-validates, epoch-reconciles, and audits. The PRODUCER (the
+# GatewayAdapterSupervisor) + the live wire leg land in G6-2b; G6-2a ships ONLY
+# the wire contract + the core-side consumer, exercised against synthetic frames.
+#
+# ANTI-FORGERY (Spec B §3, the G3 lesson): never trust a raw frame. ``up``
+# asserts liveness, so it carries the per-core-boot ``epoch`` (same 32-hex rule
+# as ``ReadyNotification``); the observer rejects an ``up`` whose epoch != the
+# core's expected epoch — a forged ``up`` while dark is a false-liveness attack.
+# Every model is frozen + ``extra="forbid"`` + closed-vocab ``adapter_id``, so a
+# forged/typo'd field is a loud ValidationError at the boundary, never a silent
+# state change. These frames carry NO T3 message body — only non-secret
+# supervision metadata (adapter_id, epoch, closed-vocab reason, error class).
+#
+# CARRIER-AUTH POSTURE (sec-1, ride-along to an ADR-0036 follow-up annotation in
+# G6-2b): the live gateway->core leg's ``0600`` + ``SO_PEERCRED`` + per-boot-epoch
+# envelope (Spec A) authenticates frame origin and anti-replays cross-boot, so the
+# NON-``up`` status frames rely on the carrier for origin-auth + replay-defense;
+# the ``up`` payload-epoch is the ADDITIONAL application-level false-liveness-replay
+# defense Spec B §6(f) mandates. ``down``/``crashed``/``breaker_open`` are NOT
+# epoch-bound (spec-faithful — ``up`` is the only liveness-asserting frame). A
+# forged-downgrade's blast radius is low: the core only OBSERVES (it issues no
+# lifecycle directive), so a forged ``down``/``crashed`` mutates only the
+# ``alfred status`` snapshot + an audit row, never an actuation. 2a's fake-gateway
+# unit suite proves the application-level validation ONLY; the carrier-auth of the
+# live leg is proven by G6-2b's live-leg integration test + the existing Spec A
+# link-auth tests.
+# ---------------------------------------------------------------------------
+
+GATEWAY_ADAPTER_UP: Final[str] = "gateway.adapter.up"
+GATEWAY_ADAPTER_DOWN: Final[str] = "gateway.adapter.down"
+GATEWAY_ADAPTER_CRASHED: Final[str] = "gateway.adapter.crashed"
+GATEWAY_ADAPTER_BREAKER_OPEN: Final[str] = "gateway.adapter.breaker_open"
+
+AdapterDownReason = Literal["operator", "supervisor", "config_reload", "shutdown"]
+"""Closed vocabulary for a planned/observed adapter-down transition.
+
+Mirrors ``LifecycleStopRequest.reason`` (the host-side stop reasons) so the
+down-notification's reason and the stop request's reason share one vocabulary.
+A crash is NOT a down — it is the distinct ``gateway.adapter.crashed`` frame.
+"""
+
+
+class AdapterUpNotification(_WireModel):
+    """Gateway->core: an adapter reached the ``up`` (serving) state.
+
+    Carries the per-core-boot ``epoch`` (same 32-hex rule as
+    :class:`ReadyNotification`) so the observer can reject a false-liveness
+    forgery (an ``up`` asserted against a stale/foreign epoch). ``up`` is the
+    only status frame that asserts liveness, so it is the only one epoch-bound
+    (Spec B §3); the carrier (Spec A ``0600`` + ``SO_PEERCRED`` + per-boot-epoch
+    envelope) covers origin-auth + cross-boot replay for the non-``up`` frames.
+    """
+
+    adapter_id: AdapterId
+    epoch: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
+
+
+class AdapterDownNotification(_WireModel):
+    """Gateway->core: an adapter left the serving state for a known reason.
+
+    NOT epoch-bound (spec-faithful — only ``up`` asserts liveness). The live
+    leg's carrier (Spec A) authenticates origin + anti-replays; a forged
+    ``down`` only mutates the observer's snapshot + an audit row — the core
+    issues no lifecycle directive in response (low forged-downgrade blast radius).
+    """
+
+    adapter_id: AdapterId
+    reason: AdapterDownReason
+
+
+class AdapterCrashedNotification(_WireModel):
+    """Gateway->core: the gateway observed the adapter child process exit.
+
+    This is the gateway's PROCESS-level crash signal (authoritative for
+    host-supervision/audit, Spec B §3) — distinct from the in-child
+    :class:`CrashedNotification` (the adapter's own code-level error). The
+    implementer must NOT rename or merge the existing ``CrashedNotification``:
+    Spec B §3 explicitly notes the two crash signals COEXIST. ``detail`` is
+    redacted by the gateway before it crosses the wire; the core re-scrubs it
+    before any audit row carries it (mirrors :class:`CrashedNotification`).
+
+    NOT epoch-bound (spec-faithful — only ``up`` asserts liveness; carrier-auth
+    covers origin + replay for this frame).
+
+    CRASH DE-DUP (Spec B §3) — DEFERRED TO G6-2b: the core must de-dup the two
+    coexisting crash signals (this gateway frame vs the in-child
+    ``CrashedNotification``) by correlating on ``adapter_id`` + a host-restart
+    sequence. That core-side join is owned by G6-2b — the in-child frame arrives
+    via the relay/session, this gateway frame via the status leg, and the
+    host-restart sequence is the 2b supervisor's per-adapter restart counter
+    (none of which exist in 2a). Because 2a ships NO producer, this frozen model
+    can be extended ADDITIVELY in 2b (e.g. a ``host_restart_seq``/incarnation
+    field) with zero live-contract risk if the join needs it — the freeze here is
+    not a permanent omission.
+    """
+
+    adapter_id: AdapterId
+    error_class: str = Field(min_length=1)
+    detail: str
+
+
+class AdapterBreakerOpenNotification(_WireModel):
+    """Gateway->core: the gateway opened the per-adapter circuit breaker.
+
+    NOT epoch-bound (spec-faithful — only ``up`` asserts liveness; carrier-auth
+    covers origin + replay for this frame).
+    """
+
+    adapter_id: AdapterId
+    retry_after_seconds: int = Field(ge=0)
+
+
+# ---------------------------------------------------------------------------
 # Host -> outward lifecycle notifications (Spec A G1 / ADR-0033)
 #
 # DIRECTION NOTE: every notification ABOVE is plugin -> host (an adapter
@@ -521,12 +640,21 @@ __all__ = [
     "DAEMON_COMMS_ACK",
     "DAEMON_LIFECYCLE_GOING_DOWN",
     "DAEMON_LIFECYCLE_READY",
+    "GATEWAY_ADAPTER_BREAKER_OPEN",
+    "GATEWAY_ADAPTER_CRASHED",
+    "GATEWAY_ADAPTER_DOWN",
+    "GATEWAY_ADAPTER_UP",
     "LIFECYCLE_REASON_SHUTDOWN",
     "LINK_RECONNECTING",
     "LINK_RESTORED",
     "LINK_UNAVAILABLE",
+    "AdapterBreakerOpenNotification",
+    "AdapterCrashedNotification",
+    "AdapterDownNotification",
+    "AdapterDownReason",
     "AdapterHealthRequest",
     "AdapterId",
+    "AdapterUpNotification",
     "BindingRequestNotification",
     "ContentRef",
     "CrashedNotification",
