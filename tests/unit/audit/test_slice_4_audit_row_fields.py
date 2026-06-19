@@ -1,6 +1,6 @@
 """Tests for the Slice-4 audit-row constants in audit_row_schemas.py.
 
-These tests act as the AST-walk guard the ``SLICE_4_FIELDSET_NAMES``
+These tests act as the AST-walk guard the ``AUDIT_FIELDSET_ROSTER``
 roster's doc-comment promises: every Slice-4 ``*_FIELDS`` constant has
 the correct shape (frozenset of non-empty strings), carries its required
 forensic-join keys (``correlation_id`` / ``boot_id`` / equivalents), and
@@ -33,7 +33,7 @@ def test_slice_4_fieldset_names_count() -> None:
     """Roster must contain exactly 32 entries (post-marker field-set surface).
 
     Adding a new post-marker ``*_FIELDS`` constant requires bumping this
-    assertion AND extending ``SLICE_4_FIELDSET_NAMES`` in the same commit. The
+    assertion AND extending ``AUDIT_FIELDSET_ROSTER`` in the same commit. The
     number is intentionally pinned so a roster omission surfaces here. PR-S4-2
     (#173) added ``PROPOSAL_DISPATCH_DLP_SCAN_FAILED_FIELDS`` — the 24th;
     G0 (Spec A) added ``COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS`` — the 25th;
@@ -43,7 +43,7 @@ def test_slice_4_fieldset_names_count() -> None:
     — the 28th-32nd (these are Spec B, not Slice-4, but ride the same AST guard
     because they live past the Slice-4 section marker — see the roster header).
     """
-    assert len(audit_row_schemas.SLICE_4_FIELDSET_NAMES) == 32
+    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 32
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
@@ -51,7 +51,7 @@ def test_slice_4_roster_matches_module_attrs() -> None:
     missing: list[str] = []
     bad_type: list[str] = []
     bad_member: list[tuple[str, object]] = []
-    for name in audit_row_schemas.SLICE_4_FIELDSET_NAMES:
+    for name in audit_row_schemas.AUDIT_FIELDSET_ROSTER:
         if not hasattr(audit_row_schemas, name):
             missing.append(name)
             continue
@@ -69,7 +69,7 @@ def test_slice_4_roster_matches_module_attrs() -> None:
 
 def test_slice_4_roster_no_duplicates() -> None:
     """Roster is order-stable AND unique — duplicates would mask a real omission."""
-    names = audit_row_schemas.SLICE_4_FIELDSET_NAMES
+    names = audit_row_schemas.AUDIT_FIELDSET_ROSTER
     assert len(set(names)) == len(names)
 
 
@@ -128,17 +128,17 @@ def test_slice_4_constants_ast_walk_matches_roster_both_directions() -> None:
     the forward direction; this bidirectional walk does.
     """
     assigned = set(_walk_slice_4_constants())
-    roster = set(audit_row_schemas.SLICE_4_FIELDSET_NAMES)
+    roster = set(audit_row_schemas.AUDIT_FIELDSET_ROSTER)
 
     missing_from_roster = assigned - roster
     assert missing_from_roster == set(), (
         f"Slice-4 ``*_FIELDS`` constants assigned in source but missing from "
-        f"SLICE_4_FIELDSET_NAMES roster: {missing_from_roster}"
+        f"AUDIT_FIELDSET_ROSTER roster: {missing_from_roster}"
     )
 
     missing_from_source = roster - assigned
     assert missing_from_source == set(), (
-        f"SLICE_4_FIELDSET_NAMES roster names not assigned in Slice-4 source "
+        f"AUDIT_FIELDSET_ROSTER roster names not assigned in Slice-4 source "
         f"section: {missing_from_source}"
     )
 
@@ -306,7 +306,7 @@ def test_no_oversized_field_sets() -> None:
     """
     oversized = {
         name: len(getattr(audit_row_schemas, name))
-        for name in audit_row_schemas.SLICE_4_FIELDSET_NAMES
+        for name in audit_row_schemas.AUDIT_FIELDSET_ROSTER
         if len(getattr(audit_row_schemas, name)) > 10
     }
     assert oversized == {}, f"field sets >10 fields (too coarse): {oversized}"
@@ -316,7 +316,7 @@ def test_no_empty_field_sets() -> None:
     """An empty frozenset would emit a row with no fields — silent contract."""
     empty = [
         name
-        for name in audit_row_schemas.SLICE_4_FIELDSET_NAMES
+        for name in audit_row_schemas.AUDIT_FIELDSET_ROSTER
         if len(getattr(audit_row_schemas, name)) == 0
     ]
     assert empty == [], f"empty frozenset Slice-4 constants: {empty}"
