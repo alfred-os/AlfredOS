@@ -52,8 +52,14 @@ RUN apt-get update -qq \
 # (${ALFRED_PYTHON_PREFIX}) so the runtime stage, the entrypoint, the launcher
 # prefix-bind, and ALFRED_QUARANTINE_CHILD_PYTHON all reference one fixed path —
 # a PBS interpreter is RUNPATH-relative and relocates cleanly.
+# Pin the PBS patch version (not bare `3.14`) so the shipped interpreter is
+# reproducible across rebuilds — bare `3.14` would float to whatever PBS patch
+# release is latest at build time (tracked as the #254 pin-proto-install
+# follow-up). Bump deliberately. The relocation glob stays patch-tolerant so a
+# pin bump needs only this one line.
+ARG ALFRED_PYTHON_VERSION=3.14.0
 RUN curl -fsSL https://moonrepo.dev/install/proto.sh | bash -s -- --yes \
-    && "${PROTO_HOME}/bin/proto" install python 3.14 \
+    && "${PROTO_HOME}/bin/proto" install python "${ALFRED_PYTHON_VERSION}" \
     && PROTO_PY_DIR="$(ls -d "${PROTO_HOME}"/tools/python/3.14.* | sort -V | tail -1)" \
     && test -x "${PROTO_PY_DIR}/bin/python3" \
     && cp -a "${PROTO_PY_DIR}" "${ALFRED_PYTHON_PREFIX}" \
@@ -78,7 +84,13 @@ COPY locale ./locale
 # site-packages, reachable under the launcher's prefix-bind. We resolve deps from
 # the frozen lockfile for reproducibility (`uv pip sync` the locked set), then
 # install the project itself without deps on top.
-RUN uv pip install --python "${ALFRED_PYTHON_PREFIX}/bin/python3" --no-cache . \
+# BuildKit cache mount for uv's download/wheel cache so repeated builds reuse
+# resolved wheels (the lockfile guarantees the RESOLVED set is reproducible, so
+# a warm cache cannot change what is installed — only how fast). Dropped the
+# prior `--no-cache`: it forced a cold re-download every build for no
+# reproducibility gain (uv.lock is the reproducibility source of truth).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python "${ALFRED_PYTHON_PREFIX}/bin/python3" . \
     && "${ALFRED_PYTHON_PREFIX}/bin/python3" -c \
        "import alfred.security.quarantine_child as m; print('child resolves alfred at', m.__file__)" \
     && test -x "${ALFRED_PYTHON_PREFIX}/bin/alfred"
