@@ -22,8 +22,8 @@ The moby default base is VENDORED at
 ``--check`` drift guard) is OFFLINE-DETERMINISTIC: no network is touched by
 default, which is what lets the CI drift check + the unit test
 (``tests/unit/test_seccomp_profile_drift.py``) run hermetically. The
-``--default-profile`` / network fetch paths remain only for a deliberate
-maintainer refresh against a newer Docker Engine default.
+``--default-profile`` path is only for a deliberate maintainer refresh against a
+newer Docker Engine default (hand-fetch the pinned URL first — no network here).
 
 Usage::
 
@@ -34,10 +34,8 @@ Usage::
     # on drift; offline):
     python3 scripts/gen_alfred_seccomp.py --check
 
-    # Refresh by DOWNLOADING the pinned Docker default tag (maintainer-only):
-    python3 scripts/gen_alfred_seccomp.py --download
-
-    # Or feed a local copy of Docker's default profile:
+    # Refresh against a local copy of Docker's default profile (maintainer-only;
+    # hand-fetch the pinned _DEFAULT_PROFILE_URL, then point at it — no network here):
     python3 scripts/gen_alfred_seccomp.py --default-profile /path/to/default.json
 
 The script is deterministic: re-running it on the same Docker default yields a
@@ -48,8 +46,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +59,7 @@ _DEFAULT_PROFILE_URL = (
 # Vendored copy of the pinned moby default (the exact bytes the committed
 # alfred-bwrap.json was generated from). Reading this — not the network — is the
 # DEFAULT base, so regeneration + the --check drift guard are offline and
-# hermetic. Refresh it together with _DEFAULT_PROFILE_URL via --download.
+# hermetic. Refresh it by hand-fetching _DEFAULT_PROFILE_URL + --default-profile.
 _VENDORED_DEFAULT = Path(__file__).resolve().parent / "vendor" / "moby-seccomp-default-v24.0.0.json"
 
 # The namespace syscalls bubblewrap needs to assemble its sandbox as a non-root,
@@ -92,29 +88,13 @@ _PROFILE_COMMENT = (
 _OUTPUT = Path(__file__).resolve().parent.parent / "docker" / "seccomp" / "alfred-bwrap.json"
 
 
-def _download_default() -> dict[str, Any]:
-    """Fetch the pinned moby default over the network (maintainer refresh only)."""
-    try:
-        with urllib.request.urlopen(_DEFAULT_PROFILE_URL, timeout=30) as resp:  # noqa: S310 - pinned https tag URL
-            loaded = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(
-            f"Could not download the pinned Docker default seccomp profile from "
-            f"{_DEFAULT_PROFILE_URL}: {exc}. The download path is for a deliberate "
-            f"maintainer refresh only — for offline/CI use run without --download "
-            f"(reads the vendored {_VENDORED_DEFAULT.name}) or pass "
-            f"--default-profile <path> to a local copy."
-        ) from exc
-    if not isinstance(loaded, dict):
-        raise TypeError(f"Docker default seccomp profile is not a JSON object: {type(loaded)!r}")
-    return loaded
-
-
-def _load_default(path: str | None, *, download: bool) -> dict[str, Any]:
+def _load_default(path: str | None) -> dict[str, Any]:
+    """Load the Docker default seccomp profile: a local ``--default-profile`` path if
+    given, else the vendored pinned copy. No network — refresh the vendored file by
+    fetching ``_DEFAULT_PROFILE_URL`` by hand and passing it via ``--default-profile``.
+    """
     if path is not None:
         loaded: Any = json.loads(Path(path).read_text())
-    elif download:
-        return _download_default()
     else:
         loaded = json.loads(_VENDORED_DEFAULT.read_text())
     if not isinstance(loaded, dict):
@@ -157,18 +137,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--default-profile",
-        help=(
-            "Path to a local Docker default seccomp profile "
-            "(else read the vendored copy, or --download the pinned tag)."
-        ),
-    )
-    parser.add_argument(
-        "--download",
-        action="store_true",
-        help=(
-            "Download the pinned moby default tag instead of reading the "
-            "vendored copy (maintainer refresh)."
-        ),
+        help=("Path to a local Docker default seccomp profile (else read the vendored copy)."),
     )
     parser.add_argument(
         "--check",
@@ -180,7 +149,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    default_profile = _load_default(args.default_profile, download=args.download)
+    default_profile = _load_default(args.default_profile)
     rendered = render(default_profile)
 
     if args.check:
