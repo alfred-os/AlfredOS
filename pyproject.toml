@@ -233,6 +233,12 @@ ignore = ["S101"]
 # DeepSeek key is named so S105 accepts it on its own (no file-wide ignore), keeping
 # secret-scanning active for every future edit in this smoke.
 "tests/smoke/test_gateway_chat_restart_smoke.py" = ["S603", "S606", "S607"]
+# The G6-0b deployed-link smoke drives docker compose + apparmor_parser + the
+# state.git seed script the operator-shell way: docker/sudo/bash by name (partial
+# path) with fixed-literal / repo-owned argv (the throwaway compose project name is
+# a uuid hex prefix + fixed literals) — same trusted-CLI rationale as the daemon
+# smokes above. No untrusted input reaches a subprocess.
+"tests/smoke/test_gateway_core_link_smoke.py" = ["S603", "S607"]
 # read_state_git_head_sha coverage exercises a real temp git repo via
 # trusted `git` invocations (partial path, fixed-literal args).
 "tests/unit/cli/daemon/test_daemon_internal_helpers.py" = ["S603", "S607"]
