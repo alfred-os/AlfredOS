@@ -224,10 +224,18 @@ jobs:
         # ``_control_frames.py`` is the control-path bind point (its
         # ``assert_never`` makes a missing mapping a loud failure). All are
         # trust-boundary, so 100% line+branch is the bar.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != '' && hashFiles('src/alfred/gateway/core_link.py') != '' && hashFiles('src/alfred/gateway/metrics.py') != '' && hashFiles('src/alfred/gateway/_control_frames.py') != '' && hashFiles('src/alfred/gateway/relay.py') != '' && hashFiles('src/alfred/gateway/_seq_tracker.py') != '' && hashFiles('src/alfred/gateway/process.py') != '' && hashFiles('src/alfred/gateway/client_link.py') != '' && hashFiles('src/alfred/gateway/replay_buffer.py') != ''
+        # G6-2b-1 (#288, ADR-0036) adds the per-adapter supervision shell:
+        # ``adapter_lifecycle.py`` is the pure spawn/handshake/crash/breaker
+        # state machine (an un-exercised transition could ship a false-liveness
+        # ``up`` or a silently-dark crash-loop); ``adapter_supervisor.py`` is the
+        # imperative shell whose every transition emits its ``gateway.adapter.*``
+        # status frame BY CONSTRUCTION; ``adapter_status_emitter.py`` is the
+        # REDACT-then-bound producer for those frames; ``adapter_metrics.py`` is
+        # the per-adapter Prometheus instrumentation. All trust-boundary, 100%.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != '' && hashFiles('src/alfred/gateway/core_link.py') != '' && hashFiles('src/alfred/gateway/metrics.py') != '' && hashFiles('src/alfred/gateway/_control_frames.py') != '' && hashFiles('src/alfred/gateway/relay.py') != '' && hashFiles('src/alfred/gateway/_seq_tracker.py') != '' && hashFiles('src/alfred/gateway/process.py') != '' && hashFiles('src/alfred/gateway/client_link.py') != '' && hashFiles('src/alfred/gateway/replay_buffer.py') != '' && hashFiles('src/alfred/gateway/adapter_lifecycle.py') != '' && hashFiles('src/alfred/gateway/adapter_metrics.py') != '' && hashFiles('src/alfred/gateway/adapter_status_emitter.py') != '' && hashFiles('src/alfred/gateway/adapter_supervisor.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py,src/alfred/gateway/core_link.py,src/alfred/gateway/metrics.py,src/alfred/gateway/_control_frames.py,src/alfred/gateway/relay.py,src/alfred/gateway/_seq_tracker.py,src/alfred/gateway/process.py,src/alfred/gateway/client_link.py,src/alfred/gateway/replay_buffer.py' \
+            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py,src/alfred/gateway/core_link.py,src/alfred/gateway/metrics.py,src/alfred/gateway/_control_frames.py,src/alfred/gateway/relay.py,src/alfred/gateway/_seq_tracker.py,src/alfred/gateway/process.py,src/alfred/gateway/client_link.py,src/alfred/gateway/replay_buffer.py,src/alfred/gateway/adapter_lifecycle.py,src/alfred/gateway/adapter_metrics.py,src/alfred/gateway/adapter_status_emitter.py,src/alfred/gateway/adapter_supervisor.py' \
             --fail-under=100
       # NOTE: the Slice-3 trust-boundary 100% gate moved to the
       # `coverage-gates` job below. The capability-gate heartbeat /
@@ -1259,10 +1267,15 @@ jobs:
         # epoch-reconcile forgery defense + reconnect/backoff) + ``metrics.py``
         # (core-link instrumentation) + ``_control_frames.py`` (the control-path
         # bind point with an ``assert_never``) — all trust-boundary, 100% line+branch.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != '' && hashFiles('src/alfred/gateway/core_link.py') != '' && hashFiles('src/alfred/gateway/metrics.py') != '' && hashFiles('src/alfred/gateway/_control_frames.py') != '' && hashFiles('src/alfred/gateway/relay.py') != '' && hashFiles('src/alfred/gateway/_seq_tracker.py') != '' && hashFiles('src/alfred/gateway/process.py') != '' && hashFiles('src/alfred/gateway/client_link.py') != '' && hashFiles('src/alfred/gateway/replay_buffer.py') != ''
+        # G6-2b-1 (#288, ADR-0036) adds the per-adapter supervision shell
+        # (``adapter_lifecycle.py`` pure machine, ``adapter_supervisor.py`` shell,
+        # ``adapter_status_emitter.py`` REDACT-then-bound producer,
+        # ``adapter_metrics.py``) — all trust-boundary, 100% line+branch. Keep BOTH
+        # gates (this combined one + the python-job one) in sync when editing.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/gateway/link_state.py') != '' && hashFiles('src/alfred/gateway/client_listener.py') != '' && hashFiles('src/alfred/gateway/core_link.py') != '' && hashFiles('src/alfred/gateway/metrics.py') != '' && hashFiles('src/alfred/gateway/_control_frames.py') != '' && hashFiles('src/alfred/gateway/relay.py') != '' && hashFiles('src/alfred/gateway/_seq_tracker.py') != '' && hashFiles('src/alfred/gateway/process.py') != '' && hashFiles('src/alfred/gateway/client_link.py') != '' && hashFiles('src/alfred/gateway/replay_buffer.py') != '' && hashFiles('src/alfred/gateway/adapter_lifecycle.py') != '' && hashFiles('src/alfred/gateway/adapter_metrics.py') != '' && hashFiles('src/alfred/gateway/adapter_status_emitter.py') != '' && hashFiles('src/alfred/gateway/adapter_supervisor.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py,src/alfred/gateway/core_link.py,src/alfred/gateway/metrics.py,src/alfred/gateway/_control_frames.py,src/alfred/gateway/relay.py,src/alfred/gateway/_seq_tracker.py,src/alfred/gateway/process.py,src/alfred/gateway/client_link.py,src/alfred/gateway/replay_buffer.py' \
+            --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py,src/alfred/gateway/core_link.py,src/alfred/gateway/metrics.py,src/alfred/gateway/_control_frames.py,src/alfred/gateway/relay.py,src/alfred/gateway/_seq_tracker.py,src/alfred/gateway/process.py,src/alfred/gateway/client_link.py,src/alfred/gateway/replay_buffer.py,src/alfred/gateway/adapter_lifecycle.py,src/alfred/gateway/adapter_metrics.py,src/alfred/gateway/adapter_status_emitter.py,src/alfred/gateway/adapter_supervisor.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
