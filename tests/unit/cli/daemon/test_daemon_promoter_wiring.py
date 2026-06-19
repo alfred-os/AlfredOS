@@ -285,6 +285,7 @@ async def test_graph_aclose_skips_close_for_non_content_store() -> None:
         quarantine_transport=_FakeTransport(),  # type: ignore[arg-type]
         content_store=not_a_store,
         idempotency_store=object(),  # type: ignore[arg-type]  # unused by aclose
+        status_observer=object(),  # type: ignore[arg-type]  # unused by aclose
     )
 
     await graph.aclose()
