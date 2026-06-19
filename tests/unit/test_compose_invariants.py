@@ -234,17 +234,57 @@ def test_alfred_gateway_has_alfred_run_volume(compose: dict[str, Any]) -> None:
     )
 
 
-def test_alfred_run_mounted_only_by_gateway(compose: dict[str, Any]) -> None:
-    """G6-0: only alfred-gateway mounts alfred_run (core joins in G6-0b)."""
+def test_alfred_run_mounted_only_by_core_and_gateway(compose: dict[str, Any]) -> None:
+    """G6-0b: alfred_run is shared by exactly {alfred-core, alfred-gateway} (the socket
+    dir for the gateway↔core link). No other service may mount it."""
     services = compose.get("services", {})
     mounters = {
         name
         for name, svc in services.items()
-        if any("alfred_run" in v for v in _volume_strings(svc.get("volumes", []) or []))
+        # Match the volume SOURCE exactly (the part before ``:``), not as a substring, so a
+        # future volume whose name merely CONTAINS ``alfred_run`` (e.g. ``alfred_runtime``)
+        # cannot silently satisfy or break this invariant.
+        if any(
+            v.split(":", 1)[0] == "alfred_run"
+            for v in _volume_strings(svc.get("volumes", []) or [])
+        )
     }
-    assert mounters == {"alfred-gateway"}, (
-        f"alfred_run must be mounted only by alfred-gateway in G6-0; got {mounters}."
+    assert mounters == {"alfred-core", "alfred-gateway"}, (
+        f"alfred_run must be mounted only by core+gateway; got {mounters}."
     )
+
+
+def test_alfred_core_is_long_running_daemon(compose: dict[str, Any]) -> None:
+    """alfred-core runs `daemon start` with a restart policy (Spec B G6-0b)."""
+    core = compose.get("services", {}).get("alfred-core", {})
+    assert core.get("command") == ["daemon", "start"]
+    assert core.get("restart") == "unless-stopped"
+
+
+def test_alfred_core_shares_alfred_run(compose: dict[str, Any]) -> None:
+    """alfred-core mounts alfred_run so the gateway can dial comms-tui.sock."""
+    core = compose.get("services", {}).get("alfred-core", {})
+    assert "alfred_run:/home/alfred/.run" in _volume_strings(core.get("volumes", []) or [])
+
+
+def test_alfred_core_enables_tui_adapter(compose: dict[str, Any]) -> None:
+    """alfred-core enables the socket-backed alfred_tui adapter (binds comms-tui.sock)."""
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "alfred_tui" in str(env.get("ALFRED_COMMS_ENABLED_ADAPTERS", ""))
+
+
+def test_alfred_core_sets_environment(compose: dict[str, Any]) -> None:
+    """alfred-core pins the ALFRED_ENVIRONMENT default chain (hard boot req for the daemon).
+
+    Pin the exact ``${ALFRED_ENVIRONMENT:-production}`` default chain, not just key presence:
+    the daemon refuse-boots without ALFRED_ENVIRONMENT, and the deployed stack must default to
+    ``production`` while still honouring an operator override — so a drift that drops the
+    fallback (or flips the default) is caught here.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert env.get("ALFRED_ENVIRONMENT") == "${ALFRED_ENVIRONMENT:-production}"
 
 
 def test_alfred_gateway_publishes_no_host_port(compose: dict[str, Any]) -> None:

@@ -2,11 +2,15 @@
 #
 # Two services:
 #   * alfred-postgres — long-running daemon, healthchecked, restart-on-fail.
-#   * alfred-core     — command runner. Invoked as
-#                       `docker compose run --rm -it alfred-core <cmd>`.
-#                       Deliberately carries no `restart:` and no `command:` —
-#                       adding restart would flap it forever once each
-#                       subcommand exits.
+#   * alfred-core     — Spec B G6-0b (#288): the long-running core daemon
+#                       (`daemon start`, `restart: unless-stopped`). The always-up
+#                       alfred-gateway dials its `comms-tui.sock`, so the core
+#                       stays up and shares the `alfred_run` socket volume.
+#                       `docker compose run --rm alfred-core <cmd>` still works
+#                       for one-off subcommands (migrate, user add, chat, …) —
+#                       `run` overrides `command`. Requires a seeded
+#                       audit.hash_pepper (bin/alfred-setup.sh) before `up -d`,
+#                       or the daemon refuse-boots and (under restart) crash-loops.
 #
 # The compose service is named exactly `alfred-postgres` because the i18n
 # string `hint.is_compose_up` advertises that name to operators.
@@ -68,6 +72,14 @@ services:
     build:
       context: .
       dockerfile: docker/alfred-core.Dockerfile
+    # Spec B G6-0b (#288): alfred-core is the long-running daemon. The always-up
+    # gateway dials its comms-tui.sock (bound when the socket-backed alfred_tui
+    # adapter is enabled), so the core must stay up and share alfred_run.
+    # `docker compose run --rm alfred-core <cmd>` still works for one-off
+    # subcommands (run overrides command). Requires a seeded audit.hash_pepper
+    # (bin/alfred-setup.sh) before `up -d`, or the daemon refuse-boots/crash-loops.
+    command: ["daemon", "start"]
+    restart: unless-stopped
     depends_on:
       alfred-postgres:
         condition: service_healthy
@@ -112,6 +124,14 @@ services:
       - "apparmor=alfred-bwrap"
       - "seccomp=docker/seccomp/alfred-bwrap.json"
     environment:
+      # G6-0b (#288): hard boot requirement — _load_settings_or_die refuses to
+      # boot the daemon without it. Defaults to production for the deployed stack.
+      ALFRED_ENVIRONMENT: ${ALFRED_ENVIRONMENT:-production}
+      # G6-0b (#288): enable the socket-backed alfred_tui adapter so the core
+      # binds comms-tui.sock — the socket the always-up gateway dials. SINGLE-
+      # QUOTED so the JSON list survives YAML scalar parsing (pydantic parses it
+      # to a tuple). Override with ALFRED_COMMS_ENABLED_ADAPTERS in `.env`.
+      ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_COMMS_ENABLED_ADAPTERS:-["alfred_tui"]}'
       ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
       ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
       # Reuse the same Postgres credentials so `.env` is the single source of
@@ -131,11 +151,15 @@ services:
     # alfred-discord — the comms adapter has no business writing grants.
     volumes:
       - alfred_state_git:/var/lib/alfred
+      # G6-0b (#288): the comms socket dir, shared with alfred-gateway so the
+      # gateway can dial the comms-tui.sock the core binds.
+      - alfred_run:/home/alfred/.run
 
   # PR D2 — Slice-2 Discord adapter. Reuses the alfred-core image (one
   # Dockerfile, one entrypoint) and runs the long-running `alfred discord`
-  # subcommand. Restart policy is ``unless-stopped`` because this IS the
-  # daemon (unlike alfred-core which is a one-shot command runner). The
+  # subcommand. Restart policy is ``unless-stopped`` because this IS a
+  # long-running daemon (like alfred-core since G6-0b — both stay up under
+  # ``unless-stopped``; one-off subcommands still use ``run --rm``). The
   # 256M memory cap is sized for the DM-only Slice-2 workload with
   # discord.Client(max_messages=100, chunk_guilds_at_startup=False,
   # member_cache_flags=MemberCacheFlags.none()) — measured RSS for a
