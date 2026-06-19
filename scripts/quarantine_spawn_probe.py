@@ -15,11 +15,15 @@ provisioned hermetic interpreter — that does NOT reflect the shipped container
 The CI validation job for #290 (``bwrap-userns-apparmor``) runs THIS probe inside
 the built image as non-root ``alfred`` under the custom AppArmor + seccomp
 profiles, with the host userns-restriction sysctl set RESTRICTIVE, to prove the
-profiles (not a lax host) are what let the sandbox build. It passes
-``ALFRED_QUARANTINE_CHILD_PYTHON=/usr/local/bin/python3.14`` so the bwrap exec
-interpreter is a real binary under the policy's ``/usr`` ro-bind (the launcher's
-venv-symlink ``sys.executable`` is unbindable — an orthogonal #290 sub-cause),
-isolating the userns/AppArmor variable this gate is about.
+profiles (not a lax host) are what let the sandbox build. Since #290 Option B the
+image's PRIMARY interpreter is a self-contained python-build-standalone under
+``/opt/alfred-python`` (RUNPATH-linked → needs no ld.so.cache) with ``alfred``
+installed NON-editable into it, set as ``ALFRED_QUARANTINE_CHILD_PYTHON`` in the
+image ENV. The launcher ro-binds that prefix into the sandbox (the opt-in
+``ALFRED_SANDBOX_BIND_INTERP_PREFIX`` flag ``_child_env`` sets), so the child execs
++ imports ``alfred`` from one bound, cache-independent prefix — the two orthogonal
+#290 sub-causes (editable install + ld.so-cache interpreter) are fixed in the image
+itself, leaving only the userns/AppArmor variable this gate isolates.
 
 The probe drives the SAME production machinery the real-spawn test uses
 (``spawn_quarantine_child_io`` -> ``QuarantineStdioTransport`` ingest/extract),

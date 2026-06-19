@@ -217,15 +217,29 @@ def test_bwrap_inherits_fd3_into_sandbox_without_flag(
     # launcher, which binds ``/usr`` (and only existing prefixes), never a
     # hard-coded ``/lib64`` — so the test stays arch-portable across the CI
     # matrix instead of being amd64-only.
+    #
+    # #290 (Option B): the image's primary interpreter is now a self-contained
+    # python-build-standalone under ``/opt/alfred-python`` (RUNPATH-linked, no
+    # ld.so.cache dependency), NOT a ``/usr`` CPython. ``python3`` resolves to
+    # ``/usr/local/bin/python3`` → ``/opt/alfred-python/bin/python3.14``, whose
+    # real binary + libpython live OUTSIDE the ``/usr,/lib,/lib64,/bin`` binds.
+    # We therefore ro-bind that interpreter prefix and exec the REALPATH —
+    # exactly the production launcher's opt-in ``ALFRED_SANDBOX_BIND_INTERP_PREFIX``
+    # behaviour (ADR-0030). This keeps the test proving the SAME fd-3 inheritance
+    # contract against the SAME interpreter the dual-LLM child execs.
     inner = (
         f"exec 3< <(printf %s {_FD3_MARKER}); "
+        'PY="$(readlink -f "$(command -v python3)")"; '
+        'PREFIX="$(dirname "$(dirname "$PY")")"; '
         "bwrap "
         "--ro-bind /usr /usr --ro-bind /lib /lib "
         "$([ -e /lib64 ] && printf -- '--ro-bind /lib64 /lib64 ') "
-        "--ro-bind /bin /bin --proc /proc --dev /dev "
+        "--ro-bind /bin /bin "
+        '--ro-bind "$PREFIX" "$PREFIX" '
+        "--proc /proc --dev /dev "
         "--unshare-pid --unshare-uts --unshare-ipc --unshare-cgroup "
         "--die-with-parent "
-        "-- python3 -c "
+        '-- "$PY" -c '
         "'import os,sys; sys.stdout.write(os.read(3, 64).decode())'"
     )
     result = subprocess.run(
