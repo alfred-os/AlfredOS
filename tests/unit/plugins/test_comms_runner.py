@@ -16,10 +16,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from typing import Any
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog
 
+from alfred.comms_mcp.adapter_status_observer import AdapterStatusAuditWriteError
 from alfred.comms_mcp.handlers import (
     BindingHandler,
     CrashHandler,
@@ -412,9 +415,11 @@ async def test_crash_route_swallows_a_failing_crash_handler() -> None:
     assert transport.closed is True
 
 
-async def test_malformed_frame_without_supervisor_is_noop_restart() -> None:
+async def test_malformed_frame_without_supervisor_logs_loud_no_raise() -> None:
     # A comms session always has a supervisor, but the restart helper guards on
-    # ``supervisor is None`` defensively. Drive that branch by nulling it.
+    # ``supervisor is None`` defensively. Drive that branch by nulling it: the
+    # runner must still end cleanly (no raise) AND log LOUD that the restart could
+    # not be actuated (error-low-#2 / hard rule #7), rather than silently no-op.
     def _raise_malformed() -> Mapping[str, object]:
         raise CommsProtocolError("bad wire")
 
@@ -427,10 +432,180 @@ async def test_malformed_frame_without_supervisor_is_noop_restart() -> None:
     session._supervisor = None  # type: ignore[assignment]
     runner = CommsPluginRunner(session=session, transport=transport, adapter_id=_ADAPTER_ID)
 
-    # No supervisor to ask — the runner ends cleanly without raising.
-    await runner.run()
+    # No supervisor to ask — the runner ends cleanly without raising, and the
+    # missing actuator is surfaced LOUD instead of swallowed.
+    with structlog.testing.capture_logs() as log_records:
+        await runner.run()
 
     assert transport.closed is True
+    assert any(
+        rec.get("event") == "comms.runner.restart_request_no_supervisor"
+        and rec.get("log_level") == "error"
+        and rec.get("reason") == "malformed_frame"
+        for rec in log_records
+    ), log_records
+
+
+async def test_status_audit_write_failure_escalates_loud_not_swallowed() -> None:
+    """SEC-1 (#288): a gateway.adapter.* audit-write failure ESCALATES, not swallowed.
+
+    The runner's ``_route_notification`` blanket ``except Exception`` would otherwise
+    SWALLOW the observer's :class:`AdapterStatusAuditWriteError`, silently downgrading a
+    failed signed-audit write to a structlog warning. The REAL mechanism that makes the
+    fault non-skippable is the LOUD escalation done in the typed-exception arm — a
+    ``comms.runner.status_audit_unwritable`` ``log.error`` row + a restart request (the
+    quarantine/restart path) — NOT a re-raise: ``_route_notification`` only ever runs
+    fire-and-forget, so a propagating raise would reach no awaiter (see
+    :func:`test_status_audit_write_failure_via_dispatch_no_unretrieved_warning`). This
+    case drives the coroutine directly and asserts the escalation fired AND the method
+    did NOT re-raise.
+    """
+    supervisor = MagicMock()
+    supervisor.request_plugin_restart = AsyncMock()
+    transport = _FakeTransport([dict(_HANDSHAKE_OK)])
+    session = await _make_session(
+        gate=make_permissive_fixture_gate(),
+        transport=transport,
+        inbound_handler=_RecordingHandler(),
+        supervisor=supervisor,
+    )
+
+    async def _raise_audit_failure(
+        method: str, params: object, *, wire_seq: int | None = None
+    ) -> None:
+        raise AdapterStatusAuditWriteError("status audit write failed")
+
+    session._on_post_handshake_method = _raise_audit_failure  # type: ignore[method-assign]
+    runner = CommsPluginRunner(session=session, transport=transport, adapter_id=_ADAPTER_ID)
+
+    with structlog.testing.capture_logs() as log_records:
+        # The audit-write failure does NOT propagate — the escalation IS the
+        # teardown, so the fire-and-forget coroutine returns normally.
+        await runner._route_notification(
+            "gateway.adapter.up", {"adapter_id": _ADAPTER_ID, "epoch": "a" * 32}
+        )
+
+    # The REAL mechanism: a loud log.error row was emitted...
+    assert any(
+        rec.get("event") == "comms.runner.status_audit_unwritable"
+        and rec.get("log_level") == "error"
+        for rec in log_records
+    ), log_records
+    # ...AND a restart was requested (the quarantine/restart path).
+    supervisor.request_plugin_restart.assert_awaited_once()
+    _, kwargs = supervisor.request_plugin_restart.call_args
+    assert kwargs["reason"] == "status_audit_unwritable"
+    assert kwargs["adapter_id"] == _ADAPTER_ID
+
+
+async def test_status_audit_restart_request_failure_stays_loud_no_leak() -> None:
+    """CR #297: if the SEC-1 restart REQUEST itself raises, stay loud + don't propagate.
+
+    The audit-write failure is already escalated loudly (the ``status_audit_unwritable``
+    error row). If ``request_plugin_restart`` then raises, ``_route_notification`` must
+    log a second loud row (``status_audit_restart_request_failed``) and RETURN — never
+    let the exception escape into the fire-and-forget dispatch task (which would leak an
+    unretrieved-task-exception warning). The loud security signal stands; we never go
+    silent and never leak.
+    """
+    supervisor = MagicMock()
+    supervisor.request_plugin_restart = AsyncMock(side_effect=RuntimeError("restart bus down"))
+    transport = _FakeTransport([dict(_HANDSHAKE_OK)])
+    session = await _make_session(
+        gate=make_permissive_fixture_gate(),
+        transport=transport,
+        inbound_handler=_RecordingHandler(),
+        supervisor=supervisor,
+    )
+
+    async def _raise_audit_failure(
+        method: str, params: object, *, wire_seq: int | None = None
+    ) -> None:
+        raise AdapterStatusAuditWriteError("status audit write failed")
+
+    session._on_post_handshake_method = _raise_audit_failure  # type: ignore[method-assign]
+    runner = CommsPluginRunner(session=session, transport=transport, adapter_id=_ADAPTER_ID)
+
+    with structlog.testing.capture_logs() as log_records:
+        # Must NOT raise even though the restart request raises.
+        await runner._route_notification(
+            "gateway.adapter.up", {"adapter_id": _ADAPTER_ID, "epoch": "a" * 32}
+        )
+
+    events = {rec.get("event") for rec in log_records}
+    # The original audit-write failure is loud...
+    assert "comms.runner.status_audit_unwritable" in events
+    # ...AND the restart-request failure is ALSO loud (never silent).
+    assert "comms.runner.status_audit_restart_request_failed" in events
+    assert any(
+        rec.get("event") == "comms.runner.status_audit_restart_request_failed"
+        and rec.get("log_level") == "error"
+        for rec in log_records
+    ), log_records
+
+
+async def test_status_audit_write_failure_via_dispatch_no_unretrieved_warning() -> None:
+    """SEC-1 (#288): the REAL fire-and-forget path escalates with NO leaked task warning.
+
+    The production entry is :meth:`_spawn_notification_dispatch` ->
+    ``ensure_future(_route_notification(...))`` whose done-callback only ``discard``s the
+    task — it NEVER retrieves the exception. So a re-raise out of ``_route_notification``
+    would NOT propagate to any awaiter; it would only surface as a GC-time "Task
+    exception was never retrieved" warning. This drives a ``gateway.adapter.up`` frame
+    through the actual pump so the observer's audit write fails on the live fire-and-
+    forget path, then asserts: the restart escalation fired AND the dispatch task
+    completed WITHOUT an unretrieved exception (the gap neither prior test covered).
+    """
+    supervisor = MagicMock()
+    supervisor.request_plugin_restart = AsyncMock()
+    status_frame: Mapping[str, object] = {
+        "jsonrpc": "2.0",
+        "method": "gateway.adapter.up",
+        "params": {"adapter_id": _ADAPTER_ID, "epoch": "a" * 32},
+    }
+    transport = _FakeTransport([dict(_HANDSHAKE_OK), dict(status_frame)])
+    session = await _make_session(
+        gate=make_permissive_fixture_gate(),
+        transport=transport,
+        inbound_handler=_RecordingHandler(),
+        supervisor=supervisor,
+    )
+
+    async def _raise_audit_failure(
+        method: str, params: object, *, wire_seq: int | None = None
+    ) -> None:
+        raise AdapterStatusAuditWriteError("status audit write failed")
+
+    session._on_post_handshake_method = _raise_audit_failure  # type: ignore[method-assign]
+    runner = CommsPluginRunner(session=session, transport=transport, adapter_id=_ADAPTER_ID)
+
+    # ``ensure_future`` fans the dispatch onto THIS loop's task set; capture every
+    # task it creates so we can assert none retained an unretrieved exception.
+    spawned: list[asyncio.Task[object]] = []
+    real_ensure_future = asyncio.ensure_future
+
+    def _tracking_ensure_future(coro: Any, **kwargs: Any) -> asyncio.Task[object]:
+        task = real_ensure_future(coro, **kwargs)
+        spawned.append(task)
+        return task
+
+    with mock.patch.object(asyncio, "ensure_future", _tracking_ensure_future):
+        # Drive the REAL pump: handshake, then the status frame is dispatched
+        # fire-and-forget through _spawn_notification_dispatch, then clean EOF.
+        await runner.run()
+
+    # The fire-and-forget escalation fired through the production path...
+    supervisor.request_plugin_restart.assert_awaited_once()
+    _, kwargs = supervisor.request_plugin_restart.call_args
+    assert kwargs["reason"] == "status_audit_unwritable"
+
+    # ...and the dispatch task(s) completed WITHOUT a leaked, unretrieved exception:
+    # ``_route_notification`` swallowed-and-escalated rather than re-raising, so no
+    # task carries an exception that would warn at GC time.
+    dispatch_tasks = [t for t in spawned if t.done() and not t.cancelled()]
+    assert dispatch_tasks, "expected at least one fire-and-forget dispatch task"
+    for task in dispatch_tasks:
+        assert task.exception() is None, task
 
 
 async def test_handshake_eof_before_ack_tears_down() -> None:

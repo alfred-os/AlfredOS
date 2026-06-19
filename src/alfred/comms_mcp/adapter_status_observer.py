@@ -56,6 +56,7 @@ from alfred.comms_mcp.protocol import (
     AdapterDownNotification,
     AdapterUpNotification,
 )
+from alfred.errors import AlfredError
 from alfred.security.dlp import redact_secret_shapes
 
 log = structlog.get_logger(__name__)
@@ -73,9 +74,29 @@ _RejectionReason = Literal["malformed_frame", "epoch_mismatch", "unknown_method"
 __all__ = [
     "_MAX_CRASH_DETAIL_LEN",
     "AdapterState",
+    "AdapterStatusAuditWriteError",
     "AdapterStatusObserver",
     "AdapterStatusSnapshot",
 ]
+
+
+class AdapterStatusAuditWriteError(AlfredError):
+    """A signed-audit-write failure while recording a ``gateway.adapter.*`` transition.
+
+    SEC-1 (G6-2b-2a / #288): the DISTINCT typed marker the observer raises when an
+    ``append_schema`` for an accepted transition OR a ``status_rejected`` refusal
+    fails to persist. It exists so the live core leg's
+    :meth:`alfred.plugins.comms_runner.CommsPluginRunner._route_notification` can
+    DISTINGUISH a non-skippable signed-audit-write failure from an ordinary handler
+    fault and ESCALATE it loudly — a ``log.error`` row + a restart request (trip
+    restart/quarantine) — instead of letting its blanket ``except Exception: log +
+    continue`` SWALLOW it (which would silently downgrade a failed signed-audit write
+    to a structlog warning, defeating CLAUDE.md hard rules #5/#7). The escalation,
+    NOT a re-raise, is what makes the fault non-skippable: ``_route_notification``
+    only ever runs fire-and-forget, so a re-raise would reach no awaiter. The
+    observer NEVER raises this on a bad/forged frame (that is a loud audited refusal,
+    not an exception) — ONLY on a genuine write failure.
+    """
 
 
 class _AuditWriterLike(Protocol):
@@ -182,6 +203,49 @@ class AdapterStatusObserver:
 
         await self._accept(parsed, fields, schema_name, str(method), state)
 
+    async def _append_or_raise(
+        self,
+        *,
+        fields: frozenset[str],
+        schema_name: str,
+        event: str,
+        subject: dict[str, object],
+        result: str,
+        trace_id: str,
+    ) -> None:
+        """Write one status audit row; translate a write failure to the typed marker.
+
+        SEC-1 (#288): the observer's two ``append_schema`` sites funnel through here so
+        a genuine signed-audit-write failure raises the DISTINCT
+        :class:`AdapterStatusAuditWriteError` (CLAUDE.md hard rules #5/#7 — never a
+        silent downgrade). The observer reaches this helper only on a frame it has
+        ALREADY decided to record (an accepted transition or a loud refusal), so any
+        exception from ``append_schema`` here is — by the audit writer's contract — a
+        write failure, not a frame-validity decision; wrapping it gives the live core
+        leg a typed handle to ESCALATE (loud ``log.error`` + restart request) instead
+        of swallow.
+        """
+        try:
+            await self._audit.append_schema(
+                fields=fields,
+                schema_name=schema_name,
+                event=event,
+                actor_user_id=None,
+                subject=subject,
+                trust_tier_of_trigger=_STATUS_TRUST_TIER,
+                result=result,
+                cost_estimate_usd=0.0,
+                trace_id=trace_id,
+            )
+        except Exception as exc:
+            # Loud + typed: a failed signed-audit write for a status transition is a
+            # non-skippable event. Raising the DISTINCT marker (not the raw backend
+            # error) is what lets the live runner's _route_notification recognise it
+            # past its blanket catch-and-continue (SEC-1) and ESCALATE loudly
+            # (log.error + restart request) instead of swallowing it — every other
+            # caller still sees a loud AlfredError.
+            raise AdapterStatusAuditWriteError(f"status audit write failed for {event!r}") from exc
+
     async def _accept(
         self,
         parsed: object,
@@ -193,15 +257,12 @@ class AdapterStatusObserver:
         occurred_at = self._now()
         subject = self._subject_for(parsed, occurred_at)
         adapter_id = str(subject["adapter_id"])
-        await self._audit.append_schema(
+        await self._append_or_raise(
             fields=fields,
             schema_name=schema_name,
             event=event,
-            actor_user_id=None,
             subject=subject,
-            trust_tier_of_trigger=_STATUS_TRUST_TIER,
             result="success",
-            cost_estimate_usd=0.0,
             # Per-adapter correlation handle (correction #4), not the timestamp.
             trace_id=adapter_id,
         )
@@ -252,20 +313,17 @@ class AdapterStatusObserver:
             rejection_reason=reason,
             adapter_id=adapter_id,
         )
-        await self._audit.append_schema(
+        await self._append_or_raise(
             fields=GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS,
             schema_name="GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS",
             event="gateway.adapter.status_rejected",
-            actor_user_id=None,
             subject={
                 "adapter_id": adapter_id,
                 "rejected_method": str(method),
                 "rejection_reason": reason,
                 "occurred_at": occurred_at.isoformat(),
             },
-            trust_tier_of_trigger=_STATUS_TRUST_TIER,
             result="refused",
-            cost_estimate_usd=0.0,
             # Per-adapter correlation handle (correction #4); "" when the frame
             # was unparseable. The audit ``trace_id`` column is a plain
             # ``String(64)`` with no non-empty CHECK, so an empty correlation

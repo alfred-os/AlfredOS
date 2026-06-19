@@ -24,6 +24,7 @@ import pytest
 
 from alfred.comms_mcp.adapter_status_observer import (
     _MAX_CRASH_DETAIL_LEN,
+    AdapterStatusAuditWriteError,
     AdapterStatusObserver,
     AdapterStatusSnapshot,
 )
@@ -343,20 +344,28 @@ def _observer_with_raising_audit() -> AdapterStatusObserver:
 
 @pytest.mark.asyncio
 async def test_audit_write_failure_propagates_on_accept() -> None:
-    """An accepted frame whose audit append fails must RAISE (fail-loud, hard rule #7)."""
+    """An accepted frame whose audit append fails must RAISE (fail-loud, hard rule #7).
+
+    SEC-1 (#288): the raise is the DISTINCT typed
+    :class:`AdapterStatusAuditWriteError` (so the live runner can re-raise it past its
+    blanket catch-and-continue), with the raw backend error preserved as the cause.
+    """
     obs = _observer_with_raising_audit()
-    with pytest.raises(RuntimeError, match="audit backend down"):
+    with pytest.raises(AdapterStatusAuditWriteError) as excinfo:
         await obs.observe("gateway.adapter.up", {"adapter_id": "discord", "epoch": _EPOCH})
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "audit backend down"
     # The failed write means no snapshot was recorded (append precedes the record).
     assert obs.latest("discord") is None
 
 
 @pytest.mark.asyncio
 async def test_audit_write_failure_propagates_on_reject() -> None:
-    """A refused frame whose status_rejected audit append fails must also RAISE."""
+    """A refused frame whose status_rejected audit append fails must also RAISE typed."""
     obs = _observer_with_raising_audit()
-    with pytest.raises(RuntimeError, match="audit backend down"):
+    with pytest.raises(AdapterStatusAuditWriteError) as excinfo:
         await obs.observe("gateway.adapter.teleport", {"adapter_id": "discord"})
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
 
 
 @pytest.mark.asyncio
