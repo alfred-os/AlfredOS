@@ -142,6 +142,29 @@ jobs:
           print("[diag] ===== child STDOUT len:", len(out), "head:", out[:160])
           ' 2>&1 | tee child-stderr.log || true
 
+      - name: TEMP DIAGNOSTIC — what cap/seccomp does the bwrap userns need?
+        if: always()
+        # CI showed: bwrap "No permissions to create new namespace". Inside a
+        # container, unshare(CLONE_NEWUSER) is blocked by Docker's default seccomp
+        # profile without CAP_SYS_ADMIN even after the host apparmor relax. Probe
+        # the minimal posture that lets the child spawn. THROWAWAY.
+        run: |
+          set -uo pipefail
+          run_probe () {
+            local label="$1"; shift
+            echo "===== POSTURE: $label ====="
+            docker run --rm "$@" \
+              -e ALFRED_ENVIRONMENT=production \
+              -v "${{ github.workspace }}/scripts/_experiment_g6_0b_spawn_probe.py:/tmp/probe.py:ro" \
+              --entrypoint python alfred-core-g6-0b-probe /tmp/probe.py 2>&1 \
+              | grep -E 'QUARANTINE_SPAWN_PROBE_RESULT=' || echo "  (no result line)"
+          }
+          run_probe "SETUID + SYS_ADMIN"                 --cap-add SETUID --cap-add SYS_ADMIN
+          run_probe "SETUID + seccomp=unconfined"        --cap-add SETUID --security-opt seccomp=unconfined
+          run_probe "SETUID + SYS_ADMIN + seccomp=uncon" --cap-add SETUID --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+          run_probe "default caps + seccomp=unconfined"  --security-opt seccomp=unconfined
+          run_probe "SETUID + sysctl userns clone"       --cap-add SETUID --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+
       - name: Echo the decisive marker
         if: always()
         run: |
