@@ -5,6 +5,7 @@
 - **Slice**: 4 — `docs/superpowers/specs/2026-06-06-slice-4-design.md`
 - **Relates to**: [ADR-0025](0025-comms-stdio-transport-line-delimited-and-thin.md) (the line-delimited comms wire + thin-transport contract this reuses), [ADR-0026](0026-first-party-system-bootstrap-grants-and-boot-hook-registry.md) (the first-party comms LOAD grant), [ADR-0027](0027-daemon-comms-runtime-fixture-extractor-first-cut.md) (daemon comms boot graph), issue #237 (graduation criterion #7 — a real `alfred chat` turn)
 - **Supersedes**: —
+- **Amended by**: [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — Spec B G6-1: the gateway becomes a privileged adapter-hosting tier in addition to the socket relay.
 
 ## Context
 

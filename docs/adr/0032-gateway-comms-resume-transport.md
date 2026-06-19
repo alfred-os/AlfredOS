@@ -5,6 +5,7 @@
 - **Slice**: Spec A (Comms-Resume Gateway) — `docs/superpowers/specs/2026-06-13-comms-gateway-resume-design.md`
 - **Relates to**: ADR-0025 (the line-delimited comms transport this extends), ADR-0031 (the TUI socket carrier), ADR-0033 (core lifecycle signalling / epoch, G1), issue #237 (graduation criterion #7).
 - **Supersedes**: —
+- **Amended by**: [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — Spec B reuses this wire for the gateway-hosted adapter legs + the spawn-credential control frames.
 
 ## Context
 

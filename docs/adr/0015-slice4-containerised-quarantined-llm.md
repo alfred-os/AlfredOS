@@ -6,6 +6,8 @@ Proposed
 
 **Date:** 2026-05-31
 
+**Amended by:** [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — Spec B G6-1: the gateway is now a SECOND launcher / bwrap host (in addition to alfred-core), with `cap_add: SETUID` + the `alfred-bwrap` AppArmor/seccomp profiles.
+
 ## Context
 
 Slice 3 ships the quarantined LLM as an MCP stdio subprocess under the
