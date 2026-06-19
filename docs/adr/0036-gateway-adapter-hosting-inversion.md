@@ -190,6 +190,35 @@ metric + an audit row; never a silent drop.
   status frame is never silently dropped — it is refused, audited, and triggers
   link scrutiny.
 
+### Status-leg carrier-auth posture (G6-2a / G6-2b-1 follow-up annotation)
+
+G6-2a (the core-side `AdapterStatusObserver`) and G6-2b-1 (the gateway-side
+producer: `GatewayAdapterSupervisor` + `AdapterStatusEmitter`) flagged that the
+**authenticity** of the `gateway.adapter.*` status leg rests on two distinct,
+complementary layers — recorded here so the split is auditable ADR-side and not
+only in the module docstrings:
+
+- **Carrier-auth (the live leg, Spec A mechanism).** The live gateway→core status
+  leg's `0600` socket + `SO_PEERCRED` peer-uid check + per-core-boot-epoch envelope
+  is what authenticates each status frame's **origin** and **anti-replays it across
+  boots**. This is the authoritative defence for the non-`up` frames
+  (`down` / `crashed` / `breaker_open`), which are deliberately **not** epoch-bound
+  in their payload (spec-faithful — only `up` asserts liveness). A forged-downgrade's
+  blast radius is low: the core only **observes** (it issues no lifecycle directive
+  per decision 2), so a forged `down` / `crashed` mutates only the `alfred status`
+  snapshot + an audit row, never an actuation.
+- **Application-level false-liveness defence (the producer's `up` payload-epoch).**
+  The producer (G6-2b-1) stamps the per-core-boot epoch onto the **`up`** frame —
+  the only liveness-asserting frame — and the observer (G6-2a) reconciles it,
+  refusing an `up` against a stale / foreign epoch (the G3 anti-forgery lesson: a
+  forged `up` while dark is a false-liveness attack). This is the **additional**
+  application-level anti-replay defence Spec B §6(f) mandates on top of the carrier.
+
+The live leg itself is **2b-2** (G6-2b-1 emits to an injected sink, not the wire),
+so the carrier-auth is proven by 2b-2's live-leg integration test + the existing
+Spec A link-auth tests; G6-2b-1's unit suite proves the application-level
+validation (validate-on-produce + epoch reconcile) in isolation.
+
 ### Adversarial corpus (before ship, §6)
 
 - **(a)** cross-adapter credential read attempt → refused + audited.
