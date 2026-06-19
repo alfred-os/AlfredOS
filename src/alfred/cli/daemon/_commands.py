@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from alfred.audit.log import AuditWriter
+    from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
     from alfred.comms_mcp.daemon_runtime import (
         CommsInboundOrchestratorAdapter,
         OutboundSenderLike,
@@ -606,6 +607,12 @@ class _CommsBootGraph:
     # checks the inject site; the ``TYPE_CHECKING`` import keeps the module's import
     # closure free of the memory package at runtime.
     idempotency_store: PostgresInboundIdempotencyStore
+    # Spec B G6-2b-2a (#288): the core-side observer/auditor for gateway-reported
+    # adapter status. Built ONCE here, injected into every per-adapter session so a
+    # gateway.adapter.* frame is validated / epoch-reconciled / audited / refused
+    # core-side. Holds no resource to reap (pure validator + in-memory snapshot map),
+    # so ``aclose`` does not touch it.
+    status_observer: AdapterStatusObserver
 
     async def aclose(self) -> None:
         """Reap the LIVE bwrap quarantined child + the daemon-owned ContentStore.
@@ -739,6 +746,26 @@ async def _build_comms_boot_graph(
         idempotency_store = PostgresInboundIdempotencyStore(
             session_scope=build_boot_session_scope(settings),
         )
+        # Spec B G6-2b-2a (#288): the core-side adapter-status observer. Its
+        # ``expected_epoch`` is a callable so it reads the daemon's per-boot epoch at
+        # OBSERVE time (correction #3: wrap ``current_boot_epoch() -> str | None`` into
+        # ``Callable[[], str]`` — passing ``current_boot_epoch`` directly fails
+        # mypy-strict on the ``str | None`` return). The epoch is the SAME value
+        # threaded into the runner's ``lifecycle.start`` handshake, so a genuine live
+        # ``up`` matches and a forged/stale epoch is refused (the false-liveness defense).
+        from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
+
+        def _expected_epoch() -> str:
+            epoch = current_boot_epoch()
+            if epoch is None:  # pragma: no cover - boot epoch is minted before the graph
+                raise RuntimeError("boot epoch unset when building the status observer")
+            return epoch
+
+        status_observer = AdapterStatusObserver(
+            audit=audit,
+            expected_epoch=_expected_epoch,
+            now=lambda: datetime.now(UTC),
+        )
         return _CommsBootGraph(
             secret_broker=secret_broker,
             resolver_bridge=resolver_bridge,
@@ -749,6 +776,7 @@ async def _build_comms_boot_graph(
             quarantine_transport=quarantine_transport,
             content_store=content_store,
             idempotency_store=idempotency_store,
+            status_observer=status_observer,
         )
     except Exception:
         # Reap BOTH the live bwrap child (via the transport) and the ContentStore's
@@ -894,6 +922,7 @@ async def _build_comms_adapter_wiring(
         binding_handler=binding_handler,
         rate_limit_handler=rate_limit_handler,
         crash_handler=crash_handler,
+        status_observer=graph.status_observer,
         transport=None,
         max_in_flight_notifications=settings.comms_max_in_flight_notifications,
     )
