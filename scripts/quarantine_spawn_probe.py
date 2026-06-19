@@ -60,8 +60,9 @@ def _assert_non_root_posture() -> str | None:
     """
     if os.geteuid() == 0:
         return "running as root (euid 0) — probe must run as the non-root alfred user"
-    if os.uname().sysname != "Linux":
-        return f"not Linux (sysname={os.uname().sysname}) — production posture is x86-64 Linux"
+    uname = os.uname()
+    if uname.sysname != "Linux":
+        return f"not Linux (sysname={uname.sysname}) — production posture is x86-64 Linux"
     return None
 
 

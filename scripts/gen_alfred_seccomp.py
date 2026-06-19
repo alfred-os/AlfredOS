@@ -95,7 +95,7 @@ _OUTPUT = Path(__file__).resolve().parent.parent / "docker" / "seccomp" / "alfre
 def _download_default() -> dict[str, Any]:
     """Fetch the pinned moby default over the network (maintainer refresh only)."""
     try:
-        with urllib.request.urlopen(_DEFAULT_PROFILE_URL) as resp:  # noqa: S310 - pinned https tag URL
+        with urllib.request.urlopen(_DEFAULT_PROFILE_URL, timeout=30) as resp:  # noqa: S310 - pinned https tag URL
             loaded = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError) as exc:
         raise RuntimeError(
