@@ -1,0 +1,110 @@
+# THROWAWAY EXPERIMENT (#288, G6-0b) — DELETE this workflow after G6-0b is decided.
+#
+# Answers ONE question, decisively: does the bwrap-sandboxed quarantine child
+# spawn + complete a real ingest->extract round-trip inside the `alfred-core`
+# image running under the PRODUCTION compose posture — the NON-root `alfred` user
+# with only `cap_add: [SETUID]` (NOT root, NOT --privileged) — on an x86-64 Linux
+# GitHub runner?
+#
+# WHY this is not already proven: the required `integration-privileged` job runs
+# the only real-spawn test under `sudo` (geteuid()==0) and provisions a hermetic
+# proto python via ALFRED_QUARANTINE_CHILD_PYTHON. Production runs as neither root
+# nor with that provisioning. G6-0b enables comms on a daemon-ified core; if THIS
+# spawn refuses at boot under `restart: unless-stopped`, the default deployment
+# crash-loops.
+#
+# The job's pass/fail IS the answer: the probe step fails loudly (non-zero) if the
+# production-faithful spawn refuses. Grep the logs for:
+#     QUARANTINE_SPAWN_PROBE_RESULT=OK            (spawn works under prod posture)
+#     QUARANTINE_SPAWN_PROBE_RESULT=FAILED:<why>  (spawn refuses — G6-0b blocker)
+name: zz-experiment-g6-0b-spawn-probe
+
+on:
+  push:
+    branches: [experiment/g6-0b-spawn-probe]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zz-experiment-g6-0b-spawn-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spawn-probe:
+    name: Quarantine spawn probe (non-root alfred + SETUID)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Relax unprivileged-userns (host-kernel knob, orthogonal to the posture question)
+        # ubuntu-latest ships kernel.apparmor_restrict_unprivileged_userns=1,
+        # which blocks bwrap's unprivileged user-namespace setup on the HOST
+        # kernel. This is a host-tuning prerequisite operators face regardless
+        # of the container posture (same relax the `integration-privileged` job
+        # applies); it is NOT the non-root + SETUID question this probe answers.
+        # `|| true`: absent on older kernels (no restriction to lift).
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Build the alfred-core image
+        run: docker build -t alfred-core-g6-0b-probe -f docker/alfred-core.Dockerfile .
+
+      - name: Run the probe as the PRODUCTION posture (non-root alfred + cap_add SETUID)
+        id: probe
+        # This is the whole point: NO `--privileged`, NO `--user root`. The image
+        # already declares `USER alfred`, so the container runs as the non-root
+        # alfred user; `--cap-add SETUID` mirrors the compose alfred-core service
+        # exactly. `ALFRED_ENVIRONMENT=production` exercises the launcher's
+        # production branches. `ALFRED_QUARANTINE_CHILD_PYTHON` is deliberately
+        # UNSET so the child python is the production default (sys.executable =
+        # the image venv python) — the real production behaviour.
+        #
+        # `--cap-drop ALL` + a single `--cap-add SETUID` makes the capability set
+        # exactly the production posture (compose only ADDS SETUID on top of the
+        # default set; we tighten to make the answer unambiguous about what the
+        # spawn actually needs). If SETUID alone is insufficient, the probe FAILS
+        # and the answer is "the production posture is not enough".
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --cap-drop ALL \
+            --cap-add SETUID \
+            -e ALFRED_ENVIRONMENT=production \
+            -v "${{ github.workspace }}/scripts/_experiment_g6_0b_spawn_probe.py:/tmp/probe.py:ro" \
+            --entrypoint python \
+            alfred-core-g6-0b-probe \
+            /tmp/probe.py | tee probe-prod-posture.log
+          echo "--- result line (prod posture) ---"
+          grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' probe-prod-posture.log
+
+      - name: Diagnostic — same probe with compose-equivalent cap set (default caps + SETUID)
+        # Belt-and-braces: compose `cap_add: [SETUID]` ADDS to Docker's DEFAULT
+        # capability set (it does not drop the rest). This variant mirrors that
+        # literally so we can tell apart "SETUID alone is enough" from "needs
+        # SETUID on top of the default caps". Non-gating diagnostic: `|| true` so
+        # the gating step above owns the job verdict.
+        if: always()
+        run: |
+          set -uo pipefail
+          docker run --rm \
+            --cap-add SETUID \
+            -e ALFRED_ENVIRONMENT=production \
+            -v "${{ github.workspace }}/scripts/_experiment_g6_0b_spawn_probe.py:/tmp/probe.py:ro" \
+            --entrypoint python \
+            alfred-core-g6-0b-probe \
+            /tmp/probe.py 2>&1 | tee probe-compose-caps.log || true
+          echo "--- result line (compose-equivalent caps) ---"
+          grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' probe-compose-caps.log || echo "no result line"
+
+      - name: Echo the decisive marker
+        if: always()
+        run: |
+          echo "================ G6-0b SPAWN PROBE SUMMARY ================"
+          echo "prod posture (--cap-drop ALL --cap-add SETUID):"
+          grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' probe-prod-posture.log || echo "  (no result — see step logs)"
+          echo "compose-equivalent caps (default + SETUID):"
+          grep -E '^QUARANTINE_SPAWN_PROBE_RESULT=' probe-compose-caps.log || echo "  (no result — see step logs)"
+          echo "=========================================================="
