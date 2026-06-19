@@ -309,6 +309,16 @@ class GatewayCoreLink:
         """
         return self._replay_buffer.breaker_tripped if self._replay_buffer is not None else False
 
+    def current_core_epoch(self) -> str | None:
+        """The most recently captured core boot epoch (32-hex), or ``None``.
+
+        ``None`` until the first successful peer handshake captures it (Spec B
+        §3 / G6-2b-2a). The status leg reads this LAZILY at emit time (not at
+        construction) so an ``up`` frame stamps the epoch the live handshake
+        captured — a forged/stale epoch is what the core-side observer refuses.
+        """
+        return self._core_epoch
+
     async def wait_for_shutdown(self) -> None:
         """Block until this link's shutdown event fires (or forever, until cancelled).
 
@@ -1028,6 +1038,34 @@ class GatewayCoreLink:
         ) as exc:
             log.warning("gateway.relay.core_send_dropped", error=repr(exc))
 
+    async def send_status_frame(self, method: str, params: Mapping[str, object]) -> None:
+        """Send a ``gateway.adapter.*`` status frame over the SEPARATE status channel.
+
+        Spec B §3 / G6-2b-2a (#288). The status seam is DISTINCT from the opaque
+        T3 ``_payload_relay`` (payload-blindness, CLAUDE.md hard rule #5): a status
+        frame is a method-bearing JSON-RPC notification sent via the transport's
+        :meth:`send` (the same primitive the handshake ack uses), so it lands in the
+        core HOST's :meth:`alfred.plugins.comms_runner.CommsPluginRunner._pump` as a
+        routed notification — NEVER via :meth:`send_payload_unit` (the opaque relay
+        carrier). The gateway does not parse any T3 body to build this frame;
+        ``params`` is supervision metadata.
+
+        **Loud drop, NO buffering (CLAUDE.md hard rule #7).** A ``None`` current
+        transport (the reconnect-race / pre-UP window) or any send-path fault is a
+        LOUD drop, never raised, never buffered — mirroring :meth:`relay_to_core`.
+        A dropped status frame is re-derivable from the next live transition; the
+        status leg is observability, not durable-intake.
+        """
+        local = self._current_core_transport
+        if local is None:
+            log.warning("gateway.status.send_dropped", reason="no_core_transport", method=method)
+            return
+        frame: dict[str, object] = {"jsonrpc": "2.0", "method": method, "params": dict(params)}
+        try:
+            await local.send(frame)
+        except (BrokenPipeError, ConnectionResetError, RuntimeError, CommsProtocolError) as exc:
+            log.warning("gateway.status.send_dropped", error=repr(exc), method=method)
+
     async def _consume_frame(self, frame: Mapping[str, object]) -> None:
         """Route ONE post-handshake core-leg frame: consume lifecycle, drop payload.
 
@@ -1133,4 +1171,10 @@ __all__ = [
     "GATEWAY_PLUGIN_VERSION",
     "GatewayCoreLink",
     "GatewayCoreLinkError",
+    # REV-2 (#288): the shared transport-seam Protocol is part of this module's
+    # public surface — ``alfred.gateway.relay`` binds to it as the type of the
+    # core/client transport. Re-export it so a cross-module consumer reaches a
+    # declared name rather than a ``_``-prefixed internal (the leading underscore
+    # marks it as not-instantiable, not module-private).
+    "_CommsTransportLike",
 ]
