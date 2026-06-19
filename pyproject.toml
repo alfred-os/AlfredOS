@@ -56,6 +56,17 @@ dependencies = [
   # has been stable since 3.1; pinned <4 because GitPython has not
   # historically followed semver across major bumps.
   "GitPython>=3.1,<4",
+  # PyYAML is a genuine RUNTIME dependency: config loading
+  # (alfred.cli.config), the daemon readiness probes
+  # (alfred.cli.daemon._daemon_probes), and the policy loader/watcher
+  # (alfred.policies.load / .watcher) all ``import yaml`` at module scope. It
+  # was previously satisfied only transitively (via pre-commit, a dev dep) so
+  # the editable ``uv sync`` venv happened to carry it — but a NON-editable
+  # install of just the runtime deps (#290 PBS image) dropped it, breaking the
+  # ``alfred`` entrypoint with ``ModuleNotFoundError: No module named 'yaml'``.
+  # Declaring it explicitly fixes that latent gap. ``types-PyYAML`` (dev group)
+  # supplies the stubs.
+  "PyYAML>=6,<7",
 ]
 
 [dependency-groups]
