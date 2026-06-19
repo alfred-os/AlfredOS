@@ -372,3 +372,116 @@ async def test_breaker_open_is_observable_via_helper() -> None:
     await sup.wait_until_breaker_open(_A)
     await task
     assert "gateway.adapter.breaker_open" in sink.methods()
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — concurrent multi-adapter boot under a bounded TaskGroup
+# ---------------------------------------------------------------------------
+
+
+class _BarrierChildFactory:
+    """Factory whose spawns all rendezvous at a barrier before any completes.
+
+    Each ``spawn_and_handshake`` records its start and waits until ``started_count``
+    reaches ``parties``; only then does any spawn return. If the supervisor SERIALISED
+    the boots, the first spawn would block forever waiting for the others to start —
+    so the boots all reaching ``up`` PROVES they overlapped (spec §4 [fleet perf-004]).
+    """
+
+    def __init__(self, parties: int) -> None:
+        self._parties = parties
+        self._started = 0
+        self._all_started = asyncio.Event()
+        self.start_order: list[str] = []
+        self.children: dict[str, _FakeChild] = {}
+
+    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _FakeChild:
+        self.start_order.append(adapter_id)
+        self._started += 1
+        if self._started >= self._parties:
+            self._all_started.set()
+        await self._all_started.wait()  # rendezvous: deadlocks if boots serialise
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[tuple[str, str]] = loop.create_future()
+        child = _FakeChild(adapter_id=adapter_id, spawned_at=0.0, exit_future=fut)
+        self.children[adapter_id] = child
+        return child
+
+
+async def test_supervise_all_boots_adapters_concurrently() -> None:
+    factory = _BarrierChildFactory(parties=3)
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink)  # type: ignore[arg-type]
+
+    boot = asyncio.ensure_future(sup.supervise_all([_A, _B, _C]))
+    for adapter in (_A, _B, _C):
+        await sup.wait_until_up(adapter)
+    # All three started spawning before any completed -> the barrier released, which
+    # only happens when all three are concurrently inside spawn_and_handshake.
+    assert set(factory.start_order) == {_A, _B, _C}
+    up_ids = {p["adapter_id"] for m, p in sink.frames if m == "gateway.adapter.up"}
+    assert up_ids == {_A, _B, _C}
+
+    for adapter in (_A, _B, _C):
+        await sup.request_stop(adapter)
+    await boot
+
+
+class _OneFailsFactory:
+    """Healthy spawns for every adapter EXCEPT ``failing_id``, which raises a
+    fail-closed spawn error only AFTER the siblings have reached up.
+
+    Proves one adapter's fail-closed spawn does not prevent the siblings booting: the
+    failure is gated behind ``siblings_up`` so the surviving adapters demonstrably
+    emit their ``up`` frames before the TaskGroup aggregates the one failure.
+    """
+
+    def __init__(self, *, failing_id: str, sibling_count: int) -> None:
+        self._failing_id = failing_id
+        self._sibling_count = sibling_count
+        self._siblings_up = 0
+        self._siblings_done = asyncio.Event()
+        self.children: dict[str, _FakeChild] = {}
+
+    def mark_sibling_up(self) -> None:
+        self._siblings_up += 1
+        if self._siblings_up >= self._sibling_count:
+            self._siblings_done.set()
+
+    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _FakeChild:
+        if adapter_id == self._failing_id:
+            # Wait until the siblings are up, THEN fail closed.
+            await self._siblings_done.wait()
+            raise GatewayAdapterSpawnError(f"fake spawn refused for {adapter_id!r}")
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[tuple[str, str]] = loop.create_future()
+        child = _FakeChild(adapter_id=adapter_id, spawned_at=0.0, exit_future=fut)
+        self.children[adapter_id] = child
+        return child
+
+
+async def test_one_fail_closed_spawn_does_not_block_siblings() -> None:
+    factory = _OneFailsFactory(failing_id=_C, sibling_count=2)
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink)  # type: ignore[arg-type]
+
+    boot = asyncio.ensure_future(sup.supervise_all([_A, _B, _C]))
+    # The two siblings reach up; tell the factory so the failing one may now raise.
+    for adapter in (_A, _B):
+        await sup.wait_until_up(adapter)
+        factory.mark_sibling_up()
+
+    # supervise_all aggregates the one fail-closed spawn into an ExceptionGroup; the
+    # TaskGroup cancels the (healthy, never-terminating) siblings as it unwinds.
+    with pytest.raises(BaseExceptionGroup) as excinfo:
+        await boot
+    spawn_errors = [e for e in excinfo.value.exceptions if isinstance(e, GatewayAdapterSpawnError)]
+    assert len(spawn_errors) == 1
+
+    # The surviving two adapters demonstrably emitted their ``up`` frames before the
+    # failure unwound the group.
+    up_ids = {p["adapter_id"] for m, p in sink.frames if m == "gateway.adapter.up"}
+    assert {_A, _B} <= up_ids
+    assert _C not in up_ids  # the failing adapter never reached up
