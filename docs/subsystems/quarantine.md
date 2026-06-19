@@ -270,6 +270,43 @@ The plugin exposes exactly two JSON-RPC methods:
 The quarantined LLM has no `tool_calls` capability and emits no
 free-form text the orchestrator consumes as instructions.
 
+### Production sandbox boundary (AppArmor + seccomp + bound interpreter)
+
+The `bwrap` `kind=full` quarantine child builds an **unprivileged user
+namespace**. In the production `alfred-core` posture (non-root `alfred` +
+`cap_add: [SETUID]`, no `--privileged`) two container-level confinement layers
+otherwise block that, and the fix (#290, [ADR-0037](../adr/0037-production-quarantine-sandbox-boundary.md))
+applies two custom least-privilege profiles to `alfred-core` only:
+
+- **`docker/apparmor/alfred-bwrap`** (`security_opt: apparmor=alfred-bwrap`) —
+  `flags=(unconfined) { userns, }`, replacing `docker-default` to grant the
+  `userns,` permission Ubuntu 23.10+ kernels require for unprivileged
+  `unshare(CLONE_NEWUSER)`. AppArmor is deliberately NOT the load-bearing
+  containment here — the kernel-enforced **bwrap policy**
+  (`config/sandbox/quarantined-llm.linux.bwrap.policy`) is.
+- **`docker/seccomp/alfred-bwrap.json`** (`security_opt:
+  seccomp=docker/seccomp/alfred-bwrap.json`) — Docker's default profile plus an
+  unconditional ALLOW for exactly the eight namespace syscalls bwrap needs
+  (`clone`/`clone3`/`unshare`/`setns`/`mount`/`umount2`/`pivot_root`/`keyctl`).
+  Every other default deny is preserved — NOT `seccomp=unconfined`. It is a
+  generated artifact (`scripts/gen_alfred_seccomp.py`, drift-guarded by
+  `scripts/gen_alfred_seccomp.py --check` + `tests/unit/test_seccomp_profile_drift.py`).
+
+The child execs the image's bound python-build-standalone interpreter under
+`/opt/alfred-python` with `alfred` installed non-editable into it
+([ADR-0030](../adr/0030-first-party-kind-full-plugin-ships-in-wheel-under-bound-prefix.md)),
+so both the interpreter and `alfred.security.quarantine_child` resolve from one
+bound, cache-independent prefix inside the sandbox.
+
+**Host-load requirement.** The named AppArmor profile must be loaded into the
+host kernel before the container starts (`bin/alfred-setup.sh` does it; running
+compose directly needs `sudo apparmor_parser -r docker/apparmor/alfred-bwrap`
+first), and `docker compose` must run from the repository root (the seccomp
+`security_opt` path is CWD-relative). macOS and non-AppArmor Linux hosts need
+neither (the `security_opt` lines are runtime no-ops there). The end-to-end proof
+is `.github/workflows/bwrap-userns-validation.yml` (restrictive host, non-root,
+with a non-vacuous control arm).
+
 ### Provider routing and `ProviderCapability`
 
 `Provider.capabilities() -> frozenset[ProviderCapability]` governs
