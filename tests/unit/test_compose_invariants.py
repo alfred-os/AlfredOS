@@ -151,6 +151,44 @@ def test_bwrap_security_opt_scoped_to_core(compose: dict[str, Any]) -> None:
         )
 
 
+def test_alfred_core_is_not_privileged(compose: dict[str, Any]) -> None:
+    """alfred-core must NOT run privileged (#290 broad-grant regression guard).
+
+    The whole point of the #290 fix is least-privilege: custom AppArmor + seccomp
+    profiles + cap_add SETUID, NEVER `privileged: true`. A future change that
+    flips privileged on would silently grant the core every capability + drop
+    confinement — far broader than the userns exemption the spawn needs.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    assert core.get("privileged") is not True, (
+        "alfred-core must NOT set `privileged: true` — the bwrap quarantine "
+        "child spawns under least-privilege custom AppArmor + seccomp profiles "
+        "plus cap_add SETUID (#290), never full privilege."
+    )
+
+
+def test_alfred_core_has_no_unconfined_security_opt(compose: dict[str, Any]) -> None:
+    """alfred-core must NOT carry any *=unconfined security_opt (#290 guard).
+
+    `seccomp=unconfined` / `apparmor=unconfined` (or the bare `unconfined`
+    shorthand) is the sledgehammer the #290 design explicitly rejected in favour
+    of the custom least-privilege profiles. Pinning the negative stops a future
+    refactor from "fixing" a spawn failure by disabling confinement wholesale.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    security_opt = core.get("security_opt", []) or []
+    offenders = [
+        entry
+        for entry in security_opt
+        if entry.strip() == "unconfined" or entry.strip().endswith("=unconfined")
+    ]
+    assert not offenders, (
+        f"alfred-core must NOT carry any *=unconfined security_opt; found {offenders}. "
+        "The #290 design uses custom least-privilege AppArmor + seccomp profiles, "
+        "never seccomp=unconfined / apparmor=unconfined."
+    )
+
+
 def test_alfred_redis_has_maxmemory(compose: dict[str, Any]) -> None:
     """alfred-redis command must include --maxmemory (devops-002).
 

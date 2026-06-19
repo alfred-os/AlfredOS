@@ -68,7 +68,7 @@
         "keyctl"
       ],
       "action": "SCMP_ACT_ALLOW",
-      "comment": "AlfredOS #290: allow bwrap to build its user/mount/pid namespaces as a non-root, non-CAP_SYS_ADMIN process for the dual-LLM quarantine child. Minimal delta over docker-default \u2014 NOT seccomp=unconfined."
+      "comment": "AlfredOS #290: allow bwrap to build its user/mount/pid namespaces as a non-root, non-CAP_SYS_ADMIN process for the dual-LLM quarantine child. Minimal delta over docker-default \u2014 NOT seccomp=unconfined. NOTE: the mount-family syscalls (mount/umount2/pivot_root/setns) are widened CONTAINER-WIDE, not just for the child PID \u2014 seccomp filters are per-process and applied at container create, with no per-PID scoping. This is acceptable because the bwrap quarantine child is the only userns user in alfred-core, and the kernel-enforced bwrap policy (no /etc bind, tmpfs-only writable surface, --die-with-parent) is the load-bearing containment around the T3 child \u2014 not this seccomp delta."
     },
     {
       "names": [
