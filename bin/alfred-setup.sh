@@ -133,7 +133,13 @@ if command -v apparmor_parser >/dev/null 2>&1; then
     fi
     echo "Loaded AppArmor profile 'alfred-bwrap' (grants userns for the bwrap quarantine child)."
   else
-    warn "$APPARMOR_PROFILE not found — skipping AppArmor profile load. The dual-LLM quarantine child may fail to spawn on a userns-restricted host."
+    # This host HAS AppArmor (apparmor_parser is present) but the profile file is
+    # absent from the checkout. That is a build-integrity error, NOT a
+    # graceful-skip case: docker-compose.yaml pins alfred-core at
+    # `security_opt: apparmor=alfred-bwrap`, so Docker will REFUSE to create the
+    # container against an unloaded profile and the stack will not boot. Fail
+    # loud rather than warn-and-continue into a confusing later failure.
+    fail "$APPARMOR_PROFILE not found, but this host has AppArmor (apparmor_parser present). The compose file requires this profile (security_opt: apparmor=alfred-bwrap) — restore it from the repo and re-run. Without it alfred-core will not start on this host."
   fi
 else
   warn "apparmor_parser not found (non-AppArmor host, e.g. macOS/SELinux). Skipping the userns AppArmor profile load — the security_opt line is a no-op on this host. If the dual-LLM quarantine child later fails to spawn with 'No permissions to create new namespace', this host needs a userns exemption."
