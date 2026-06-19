@@ -749,6 +749,74 @@ COMMS_SOCKET_PEER_REJECTED_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# gateway.adapter.* status family (Spec B G6-2a / #288 / ADR-0036)
+# ---------------------------------------------------------------------------
+#
+# The core-side AdapterStatusObserver writes ONE audit row per ACCEPTED status
+# transition the gateway reports, plus a ``status_rejected`` row on every
+# refused frame (malformed / forged-epoch / unknown-method). A malformed/forged
+# status frame is NEVER silently dropped (Spec B §6) — the rejection row is the
+# loud audit. The producer (GatewayAdapterSupervisor) + the live wire leg land in
+# G6-2b; these constants ship now so the observer is fully testable in isolation.
+#
+# ``adapter_id`` is the closed-vocab adapter kind (the join key). ``occurred_at``
+# is the observer's UTC ISO timestamp (the family-wide timestamp — internally
+# consistent across all four transitions; this NEW family is not constrained by
+# the older ``crashed_at`` of the in-child COMMS_ADAPTER_CRASHED row).
+# ``crashed.detail`` is RE-SCRUBBED by the observer before it lands as
+# ``detail_redacted`` (the wire ``detail`` is never persisted raw — the field name
+# matches the existing COMMS_ADAPTER_CRASHED ``detail_redacted`` convention).
+# The rejection row carries NO raw frame field — only the refused method, a
+# closed-vocab reason, and the observed ``adapter_id`` ("" when it could not be
+# parsed) — so a forged frame can never smuggle bytes into the audit log.
+
+GATEWAY_ADAPTER_UP_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "epoch",
+        "occurred_at",
+    }
+)
+
+GATEWAY_ADAPTER_DOWN_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "reason",
+        "occurred_at",
+    }
+)
+
+GATEWAY_ADAPTER_CRASHED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "error_class",
+        "detail_redacted",
+        "occurred_at",
+    }
+)
+
+GATEWAY_ADAPTER_BREAKER_OPEN_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "retry_after_seconds",
+        "occurred_at",
+    }
+)
+
+GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        # The observed adapter_id; "" when the frame was unparseable (so a forged
+        # adapter kind cannot be persisted as if it were a known one).
+        "adapter_id",
+        # The wire method that was refused (gateway.adapter.* or an unknown string).
+        "rejected_method",
+        # Closed-vocab rejection reason (see AdapterStatusObserver._RejectionReason).
+        "rejection_reason",
+        "occurred_at",
+    }
+)
+
+# ---------------------------------------------------------------------------
 # state.proposal.dispatch_failure family (DLP-into-failure_detail; #173)
 # ---------------------------------------------------------------------------
 
@@ -1100,9 +1168,13 @@ SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
 # ---------------------------------------------------------------------------
 #
 # Names enumerated for ``tests/unit/audit/test_slice_4_audit_row_fields.py``
-# AST-walk verification. Adding a new Slice-4 ``*_FIELDS`` constant requires
-# adding its name to this tuple in the same commit (the AST guard catches
-# omissions).
+# AST-walk verification. The AST guard sweeps EVERY ``*_FIELDS`` constant
+# declared AFTER the Slice-4 section marker (it has no end-bound), so any new
+# post-marker field-set — Slice-4 or a later spec — MUST be listed here in the
+# same commit (the bidirectional walk catches both a missing roster entry and a
+# missing constant). Spec B (#288) G6-2a appends the ``GATEWAY_ADAPTER_*`` family
+# below; those are NOT Slice-4 work but ride the same AST guard because they live
+# past the marker.
 SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
     "COMMS_SOCKET_PEER_REJECTED_FIELDS",
     "DAEMON_BOOT_FIELDS",
@@ -1131,4 +1203,11 @@ SLICE_4_FIELDSET_NAMES: Final[tuple[str, ...]] = (
     "COMMS_INBOUND_BUDGET_CAPPED_FIELDS",
     "COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS",
     "SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS",
+    # Spec B (#288) G6-2a gateway.adapter.* status family — listed here because
+    # the AST guard sweeps all post-marker ``*_FIELDS`` (see the roster header).
+    "GATEWAY_ADAPTER_UP_FIELDS",
+    "GATEWAY_ADAPTER_DOWN_FIELDS",
+    "GATEWAY_ADAPTER_CRASHED_FIELDS",
+    "GATEWAY_ADAPTER_BREAKER_OPEN_FIELDS",
+    "GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS",
 )
