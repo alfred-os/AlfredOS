@@ -52,8 +52,13 @@ ENV PYTHONUNBUFFERED=1 \
 # uses for fd-3 provider-key inheritance into the sandbox. Without bwrap
 # Linux production refuses to launch the quarantined-LLM with
 # `policy_ref_unreadable` because no binary can apply the policy.
+# jq: the bash launcher parses the manifest's [sandbox] JSON with jq before
+# resolving the kind=full bwrap policy (bin/alfred-plugin-launcher.sh — it
+# refuses with `jq_unavailable` if absent). #290: without jq the
+# quarantined-LLM child never spawns and the inbound turn fails with a
+# truncated-wire read.
 RUN apt-get update -qq \
-    && apt-get install -y --no-install-recommends git util-linux bubblewrap \
+    && apt-get install -y --no-install-recommends git util-linux bubblewrap jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user. /var/lib/alfred is owned by alfred:alfred so
@@ -89,6 +94,47 @@ COPY locale ./locale
 # into the image so the seed script is reachable from
 # `docker compose run --rm --entrypoint /bin/sh alfred-core ...`.
 COPY bin ./bin
+
+# ---------------------------------------------------------------------------
+# Quarantined-LLM child spawn prerequisites (#290, ADR-0030).
+# ---------------------------------------------------------------------------
+# The dual-LLM quarantine child is spawned under bwrap with the kind=full
+# policy (config/sandbox/quarantined-llm.linux.bwrap.policy), which ro-binds
+# ONLY /usr, /lib, /lib64 and DELIBERATELY omits /etc (threat model: no host
+# /etc/passwd, resolv.conf, secrets-in-config inside the adversary-facing
+# child). Three things must therefore hold for the child interpreter to start
+# AND import `alfred` from INSIDE that sandbox — none held before #290, so the
+# child crashed on startup and the host read a truncated wire:
+#
+#  1. libpython must be findable WITHOUT /etc/ld.so.cache. The slim base ships
+#     libpython3.14.so.1.0 under /usr/local/lib, which the loader finds only via
+#     /etc/ld.so.cache (absent in the sandbox) — the interpreter dies with
+#     "error while loading shared libraries". Symlinking it into /usr/lib (a
+#     glibc DEFAULT search dir, already covered by the policy's /usr bind) makes
+#     it discoverable with no /etc and no env tweak.
+#
+#  2. `alfred` must live UNDER a bound prefix. `uv sync` installs the runtime
+#     venv as an EDITABLE install rooted at /app/src (via an .pth file); /app is
+#     NOT bound into the sandbox, so `import alfred` fails. We additionally
+#     install `alfred` NON-editable into the /usr-resident system CPython so the
+#     package lands at /usr/local/lib/python3.14/site-packages/alfred — under
+#     the policy's /usr bind (ADR-0030's "child ships in the wheel under a
+#     /usr-resident interpreter" intent). The /app venv stays the ENTRYPOINT
+#     interpreter; this second install only backs the quarantine child.
+#
+#  3. The child must EXEC that /usr-resident interpreter. ALFRED_QUARANTINE_-
+#     CHILD_PYTHON pins it to /usr/local/bin/python3.14 (a real binary whose
+#     prefix /usr/local is under the /usr bind) instead of the venv's
+#     sys.executable (a /app/.venv symlink outside every bind).
+COPY --from=ghcr.io/astral-sh/uv:0.5.4 /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock README.md /tmp/alfred-quarantine-install/
+COPY src /tmp/alfred-quarantine-install/src
+COPY locale /tmp/alfred-quarantine-install/locale
+RUN ln -sf /usr/local/lib/libpython3.14.so.1.0 /usr/lib/libpython3.14.so.1.0 \
+    && uv pip install --system --python /usr/local/bin/python3.14 --no-deps \
+        /tmp/alfred-quarantine-install \
+    && rm -rf /tmp/alfred-quarantine-install /usr/local/bin/uv
+ENV ALFRED_QUARANTINE_CHILD_PYTHON=/usr/local/bin/python3.14
 
 RUN chown -R alfred:alfred /app
 USER alfred
