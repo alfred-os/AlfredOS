@@ -62,6 +62,4 @@ def test_no_orphan_spec_b_msgids_in_po_outside_enumeration() -> None:
     assert not orphans_in_po, (
         f"gateway.adapter.* msgids in .po not in SPEC_B_KEYS: {sorted(orphans_in_po)}"
     )
-    assert not missing_from_po, (
-        f"SPEC_B_KEYS missing from .po: {sorted(missing_from_po)}"
-    )
+    assert not missing_from_po, f"SPEC_B_KEYS missing from .po: {sorted(missing_from_po)}"
