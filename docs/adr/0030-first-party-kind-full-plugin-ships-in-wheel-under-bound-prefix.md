@@ -12,6 +12,7 @@
   (process-boundary isolation, hybrid-isolation relaxation), ADR-0029 (inline-over-wire quarantine
   content path), PRD §5 (hybrid isolation line 119, dual-LLM split line 122, **DEC-007** line 606),
   spec §5.1 / §5.2 / §5.3 / §7.1.
+- **Amended by:** [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — Spec B G6-1: the gateway is now a SECOND launcher / bwrap host (in addition to alfred-core), with `cap_add: SETUID` + the `alfred-bwrap` AppArmor/seccomp profiles.
 
 ## Context
 

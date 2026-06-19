@@ -5,6 +5,7 @@
 - **Slice**: Spec A — `docs/superpowers/specs/2026-06-13-comms-gateway-resume-design.md` (§4, §8 G1)
 - **Relates to**: [ADR-0025](0025-comms-stdio-transport-line-delimited-and-thin.md) (the line-delimited comms wire these frames are defined for), [ADR-0031](0031-comms-socket-transport-for-the-foreground-tui.md) (the TUI socket carrier), [ADR-0028](0028-boot-time-authorized-t3-nonce-registration.md) (boot-time T3 nonce — the epoch mirrors its bootstrap shape, NOT its trust), issue #237 (graduation criterion #7)
 - **Supersedes**: —
+- **Amended by**: [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — Spec B reuses this lifecycle for the gateway-hosted adapter legs + the spawn-credential control frames.
 
 ## Context
 
