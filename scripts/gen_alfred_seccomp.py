@@ -150,7 +150,8 @@ def main() -> int:
     args = parser.parse_args()
 
     default_profile = _load_default(args.default_profile)
-    rendered = render(default_profile)
+    built = build(default_profile)
+    rendered = json.dumps(built, indent=2) + "\n"
 
     if args.check:
         committed = _OUTPUT.read_text() if _OUTPUT.exists() else ""
@@ -164,7 +165,7 @@ def main() -> int:
         return 0
 
     _OUTPUT.write_text(rendered)
-    print(f"wrote {_OUTPUT} ({len(build(default_profile)['syscalls'])} syscall blocks)")
+    print(f"wrote {_OUTPUT} ({len(built['syscalls'])} syscall blocks)")
     return 0
 
 
