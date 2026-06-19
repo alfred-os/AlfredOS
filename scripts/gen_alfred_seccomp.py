@@ -17,10 +17,25 @@ Why pin a copy rather than read the live daemon's profile? An operator running
 artifact. The committed JSON is the source of truth; this script documents how it
 was produced and lets a maintainer refresh it against a newer Docker default.
 
+The moby default base is VENDORED at
+``scripts/vendor/moby-seccomp-default-v24.0.0.json`` so generation (and the
+``--check`` drift guard) is OFFLINE-DETERMINISTIC: no network is touched by
+default, which is what lets the CI drift check + the unit test
+(``tests/unit/test_seccomp_profile_drift.py``) run hermetically. The
+``--default-profile`` / network fetch paths remain only for a deliberate
+maintainer refresh against a newer Docker Engine default.
+
 Usage::
 
-    # Refresh from the pinned Docker default (downloads it):
+    # Regenerate from the VENDORED Docker default (offline, default):
     python3 scripts/gen_alfred_seccomp.py
+
+    # Verify the committed profile is in sync (CI drift guard, exits non-zero
+    # on drift; offline):
+    python3 scripts/gen_alfred_seccomp.py --check
+
+    # Refresh by DOWNLOADING the pinned Docker default tag (maintainer-only):
+    python3 scripts/gen_alfred_seccomp.py --download
 
     # Or feed a local copy of Docker's default profile:
     python3 scripts/gen_alfred_seccomp.py --default-profile /path/to/default.json
@@ -33,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -43,6 +59,12 @@ from typing import Any
 _DEFAULT_PROFILE_URL = (
     "https://raw.githubusercontent.com/moby/moby/v24.0.0/profiles/seccomp/default.json"
 )
+
+# Vendored copy of the pinned moby default (the exact bytes the committed
+# alfred-bwrap.json was generated from). Reading this — not the network — is the
+# DEFAULT base, so regeneration + the --check drift guard are offline and
+# hermetic. Refresh it together with _DEFAULT_PROFILE_URL via --download.
+_VENDORED_DEFAULT = Path(__file__).resolve().parent / "vendor" / "moby-seccomp-default-v24.0.0.json"
 
 # The namespace syscalls bubblewrap needs to assemble its sandbox as a non-root,
 # non-CAP_SYS_ADMIN process. This is the ONLY delta over Docker's default.
@@ -70,15 +92,39 @@ _PROFILE_COMMENT = (
 _OUTPUT = Path(__file__).resolve().parent.parent / "docker" / "seccomp" / "alfred-bwrap.json"
 
 
-def _load_default(path: str | None) -> dict[str, Any]:
-    if path is not None:
-        loaded = json.loads(Path(path).read_text())
-    else:
+def _download_default() -> dict[str, Any]:
+    """Fetch the pinned moby default over the network (maintainer refresh only)."""
+    try:
         with urllib.request.urlopen(_DEFAULT_PROFILE_URL) as resp:  # noqa: S310 - pinned https tag URL
             loaded = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(
+            f"Could not download the pinned Docker default seccomp profile from "
+            f"{_DEFAULT_PROFILE_URL}: {exc}. The download path is for a deliberate "
+            f"maintainer refresh only — for offline/CI use run without --download "
+            f"(reads the vendored {_VENDORED_DEFAULT.name}) or pass "
+            f"--default-profile <path> to a local copy."
+        ) from exc
     if not isinstance(loaded, dict):
         raise TypeError(f"Docker default seccomp profile is not a JSON object: {type(loaded)!r}")
     return loaded
+
+
+def _load_default(path: str | None, *, download: bool) -> dict[str, Any]:
+    if path is not None:
+        loaded: Any = json.loads(Path(path).read_text())
+    elif download:
+        return _download_default()
+    else:
+        loaded = json.loads(_VENDORED_DEFAULT.read_text())
+    if not isinstance(loaded, dict):
+        raise TypeError(f"Docker default seccomp profile is not a JSON object: {type(loaded)!r}")
+    return loaded
+
+
+def render(default_profile: dict[str, Any]) -> str:
+    """Serialise the AlfredOS profile to its canonical on-disk byte form."""
+    return json.dumps(build(default_profile), indent=2) + "\n"
 
 
 def build(default_profile: dict[str, Any]) -> dict[str, Any]:
@@ -89,7 +135,14 @@ def build(default_profile: dict[str, Any]) -> dict[str, Any]:
         "comment": (
             "AlfredOS #290: allow bwrap to build its user/mount/pid namespaces as "
             "a non-root, non-CAP_SYS_ADMIN process for the dual-LLM quarantine "
-            "child. Minimal delta over docker-default — NOT seccomp=unconfined."
+            "child. Minimal delta over docker-default — NOT seccomp=unconfined. "
+            "NOTE: the mount-family syscalls (mount/umount2/pivot_root/setns) are "
+            "widened CONTAINER-WIDE, not just for the child PID — seccomp filters "
+            "are per-process and applied at container create, with no per-PID "
+            "scoping. This is acceptable because the bwrap quarantine child is the "
+            "only userns user in alfred-core, and the kernel-enforced bwrap policy "
+            "(no /etc bind, tmpfs-only writable surface, --die-with-parent) is the "
+            "load-bearing containment around the T3 child — not this seccomp delta."
         ),
     }
     syscalls = [allow_userns, *default_profile.get("syscalls", [])]
@@ -104,14 +157,45 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--default-profile",
-        help="Path to a local Docker default seccomp profile (else download the pinned tag).",
+        help=(
+            "Path to a local Docker default seccomp profile "
+            "(else read the vendored copy, or --download the pinned tag)."
+        ),
+    )
+    parser.add_argument(
+        "--download",
+        action="store_true",
+        help=(
+            "Download the pinned moby default tag instead of reading the "
+            "vendored copy (maintainer refresh)."
+        ),
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Verify the committed profile matches a fresh build "
+            "(offline drift guard); exit 1 on drift."
+        ),
     )
     args = parser.parse_args()
 
-    default_profile = _load_default(args.default_profile)
-    profile = build(default_profile)
-    _OUTPUT.write_text(json.dumps(profile, indent=2) + "\n")
-    print(f"wrote {_OUTPUT} ({len(profile['syscalls'])} syscall blocks)")
+    default_profile = _load_default(args.default_profile, download=args.download)
+    rendered = render(default_profile)
+
+    if args.check:
+        committed = _OUTPUT.read_text() if _OUTPUT.exists() else ""
+        if rendered != committed:
+            print(
+                f"::error::{_OUTPUT} is OUT OF SYNC with scripts/gen_alfred_seccomp.py. "
+                f"Run `python3 scripts/gen_alfred_seccomp.py` and commit the result."
+            )
+            return 1
+        print(f"OK: {_OUTPUT} matches the generator output (no drift).")
+        return 0
+
+    _OUTPUT.write_text(rendered)
+    print(f"wrote {_OUTPUT} ({len(build(default_profile)['syscalls'])} syscall blocks)")
     return 0
 
 
