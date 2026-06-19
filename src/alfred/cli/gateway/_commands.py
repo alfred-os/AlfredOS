@@ -49,6 +49,13 @@ _EXIT_BIND_FAILED = 4
 # a torn / malformed client leg is scriptable apart from the bind / core-dial refusals.
 _EXIT_HANDSHAKE_FAILED = 5
 
+# The adapter id the gateway dials on the core (the core binds ``comms-{adapter_kind}.sock``;
+# the socket-backed ``alfred_tui`` adapter has manifest ``adapter_kind="tui"``). Operator-
+# overridable via the env so the dial target is not a hidden constant (Spec B G6-0b / #288).
+# The default mirrors ``alfred.gateway.core_link._DEFAULT_DIAL_ADAPTER_ID``.
+_DIAL_ADAPTER_ID_ENV: Final[str] = "ALFRED_GATEWAY_DIAL_ADAPTER_ID"
+_DEFAULT_DIAL_ADAPTER_ID: Final[str] = "tui"
+
 
 def start_gateway() -> None:
     """Run the long-running gateway process until SIGTERM / SIGINT (Spec A G3-3b-2b).
@@ -93,7 +100,11 @@ def start_gateway() -> None:
             # (security M2). The operator just loses the SIGTERM-driven clean stop.
             log.warning("gateway.cli.signal_handler_unavailable")
 
-        await GatewayProcess(shutdown_event=shutdown_event).run()
+        dial_adapter_id = os.environ.get(_DIAL_ADAPTER_ID_ENV) or _DEFAULT_DIAL_ADAPTER_ID
+        await GatewayProcess(
+            shutdown_event=shutdown_event,
+            dial_adapter_id=dial_adapter_id,
+        ).run()
 
     try:
         asyncio.run(_main())

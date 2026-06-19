@@ -84,3 +84,72 @@ def test_bad_port_env_is_unhealthy_not_traceback(monkeypatch: pytest.MonkeyPatch
     result = CliRunner().invoke(gateway_app, ["healthcheck"])
     assert result.exit_code == 1
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_start_honors_dial_adapter_id_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`alfred gateway start` passes ALFRED_GATEWAY_DIAL_ADAPTER_ID into GatewayProcess
+    so the gateway's core-dial target is operator-configurable (not a hidden constant)."""
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run(self) -> None:
+            return None
+
+    # start_gateway imports these LAZILY from their definition modules, so patch
+    # at the source — not on `_commands` — to exercise the real start body.
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+    monkeypatch.setattr("alfred.gateway.metrics_server.start_metrics_server", lambda port: True)
+    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda: 9464)
+    monkeypatch.setenv("ALFRED_GATEWAY_DIAL_ADAPTER_ID", "alfred_tui")
+    CliRunner().invoke(gateway_app, ["start"])
+    assert captured.get("dial_adapter_id") == "alfred_tui"
+
+
+def test_start_defaults_dial_adapter_id_to_tui(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the env unset, start_gateway preserves the legacy `"tui"` dial target."""
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+    monkeypatch.setattr("alfred.gateway.metrics_server.start_metrics_server", lambda port: True)
+    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda: 9464)
+    monkeypatch.delenv("ALFRED_GATEWAY_DIAL_ADAPTER_ID", raising=False)
+    CliRunner().invoke(gateway_app, ["start"])
+    assert captured.get("dial_adapter_id") == "tui"
+
+
+def test_start_coalesces_empty_dial_adapter_id_env_to_tui(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An EMPTY ``ALFRED_GATEWAY_DIAL_ADAPTER_ID`` coalesces to the ``"tui"`` default.
+
+    The start body resolves the dial target via ``os.environ.get(env) or _DEFAULT`` — so an
+    env set to the empty string (an operator who exported the var with no value, or a shell
+    that passes ``VAR=``) must fall through to the legacy ``"tui"`` default, NOT dial the
+    empty-string adapter id (``default_comms_socket_path("")`` would itself raise on the
+    adapter-id charset guard, a confusing failure mode). The ``or`` short-circuit is the
+    intended semantics; this pins it so a future refactor to ``get(env, _DEFAULT)`` — which
+    would pass the empty string through — is caught.
+    """
+    captured: dict[str, object] = {}
+
+    class _FakeProcess:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+    monkeypatch.setattr("alfred.gateway.metrics_server.start_metrics_server", lambda port: True)
+    monkeypatch.setattr("alfred.gateway.metrics_server.resolve_metrics_port", lambda: 9464)
+    monkeypatch.setenv("ALFRED_GATEWAY_DIAL_ADAPTER_ID", "")
+    CliRunner().invoke(gateway_app, ["start"])
+    assert captured.get("dial_adapter_id") == "tui"
