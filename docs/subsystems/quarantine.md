@@ -276,7 +276,12 @@ The `bwrap` `kind=full` quarantine child builds an **unprivileged user
 namespace**. In the production `alfred-core` posture (non-root `alfred` +
 `cap_add: [SETUID]`, no `--privileged`) two container-level confinement layers
 otherwise block that, and the fix (#290, [ADR-0037](../adr/0037-production-quarantine-sandbox-boundary.md))
-applies two custom least-privilege profiles to `alfred-core` only:
+applies two custom least-privilege profiles. They are carried by exactly the
+`bwrap`-spawning services: `alfred-core` (the quarantine child), and — since
+Spec B G6-1 ([ADR-0036](../adr/0036-gateway-adapter-hosting-inversion.md)) —
+`alfred-gateway` (which spawns the sandboxed comms-adapter children; the
+capability is granted there but dormant until the G6-2 supervisor uses it). The
+two profiles:
 
 - **`docker/apparmor/alfred-bwrap`** (`security_opt: apparmor=alfred-bwrap`) —
   `flags=(unconfined) { userns, }`, replacing `docker-default` to grant the
