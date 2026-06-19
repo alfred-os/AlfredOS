@@ -209,20 +209,40 @@ services:
       - ${HOME}/.config/alfred/secrets.toml:/etc/alfred/secrets.toml:ro
     user: "${UID:-1000}:${GID:-1000}"
 
-  # Spec B G6-0 (#288) — the always-up resumable gateway, deployed as its own service.
-  # Reuses the alfred-core image (one Dockerfile) and runs `alfred gateway start`. In
-  # G6-0 it is a pure relay (no adapter hosting, no SETUID — G6-1+) and is NOT yet
-  # linked to the core (G6-0b enables comms on the core + couples the socket ids); it
-  # boots HEALTHY in its core-down/buffering state (only wedged-past-breaker is
-  # unhealthy). It shares alfred_run so it can bind its client socket + (in G6-0b) dial
-  # the core. No depends_on: readiness is independent of the core, and the core is not a
-  # long-running service until G6-0b. /metrics is compose-internal (no host port).
+  # Spec B (#288) — the always-up resumable gateway, deployed as its own service.
+  # Reuses the alfred-core image (one Dockerfile) and runs `alfred gateway start`. It is
+  # linked to the core over the shared alfred_run socket volume (G6-0b couples the socket
+  # ids) and, as of G6-1 (ADR-0036), is a privileged adapter-hosting tier — it carries
+  # SETUID + the alfred-bwrap profiles (see the block comment below; the supervisor that
+  # uses them lands in G6-2). It boots HEALTHY in its core-down/buffering state (only
+  # wedged-past-breaker is unhealthy) and shares alfred_run so it can bind its client
+  # socket + dial the core. No depends_on: readiness is independent of the core.
+  # /metrics is compose-internal (no host port).
   alfred-gateway:
     build:
       context: .
       dockerfile: docker/alfred-core.Dockerfile
     command: ["gateway", "start"]
     restart: unless-stopped
+    # Spec B G6-1 (ADR-0036): the gateway is reframed from "dumb/stable/low-privilege
+    # relay" to a "stable-code, privileged" adapter-hosting tier. It gains SETUID +
+    # the same alfred-bwrap AppArmor/seccomp profiles alfred-core carries (ADR-0037)
+    # so it CAN spawn bwrap-sandboxed adapter children. The capability is granted
+    # here; the GatewayAdapterSupervisor that USES it lands in G6-2 — so for the
+    # G6-1→G6-2 window the gateway is privileged but spawns nothing (the dormant-
+    # privilege window, accepted in ADR-0036). The image already carries bubblewrap +
+    # the launcher (shared docker/alfred-core.Dockerfile); only this Compose service
+    # is flipped. The gateway still mounts NO alfred_state_git (the grant store stays
+    # core-only). The named alfred-bwrap AppArmor profile must be loaded on the host
+    # first (bin/alfred-setup.sh / nightly already load it for alfred-core; it is
+    # host-global once loaded — no new load step), and the seccomp path is resolved
+    # RELATIVE TO THE COMPOSE-INVOCATION CWD, so run `docker compose` from the repo
+    # root (same constraint as alfred-core).
+    cap_add:
+      - SETUID
+    security_opt:
+      - "apparmor=alfred-bwrap"
+      - "seccomp=docker/seccomp/alfred-bwrap.json"
     environment:
       ALFRED_ENVIRONMENT: ${ALFRED_ENVIRONMENT:-production}
       ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}

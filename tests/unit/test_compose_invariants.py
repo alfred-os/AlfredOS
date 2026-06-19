@@ -71,6 +71,22 @@ def test_alfred_core_has_setuid(compose: dict[str, Any]) -> None:
     )
 
 
+def test_setuid_allowed_set_is_core_and_gateway(compose: dict[str, Any]) -> None:
+    """G6-1 (ADR-0036): cap_add SETUID is granted to EXACTLY {alfred-core, alfred-gateway}.
+
+    The positive allowed-set is the devops-010 reframe: rather than asserting each service
+    individually, pin the whole set so a NEW service silently gaining SETUID fails loud, and
+    so the privilege concentration is auditable in one place. Adapters never get SETUID.
+    """
+    services = compose.get("services", {})
+    with_setuid = {
+        name for name, svc in services.items() if "SETUID" in (svc.get("cap_add", []) or [])
+    }
+    assert with_setuid == {"alfred-core", "alfred-gateway"}, (
+        f"SETUID must be granted to exactly {{alfred-core, alfred-gateway}}; got {with_setuid}."
+    )
+
+
 def test_alfred_core_has_state_git_volume(compose: dict[str, Any]) -> None:
     """alfred-core must mount alfred_state_git at /var/lib/alfred (spec §11.1).
 
@@ -132,23 +148,24 @@ def test_alfred_core_has_bwrap_seccomp_profile(compose: dict[str, Any]) -> None:
     )
 
 
-def test_bwrap_security_opt_scoped_to_core(compose: dict[str, Any]) -> None:
-    """Only alfred-core gets the bwrap security_opt profiles (#290 isolation).
-
-    alfred-discord has no SETUID and never spawns the launcher (it must not be
-    able to impersonate the quarantine UID — see test_alfred_discord_has_no_setuid).
-    The G6-0 gateway is a pure relay (no SETUID yet). Granting either the
-    userns-enabling AppArmor profile would needlessly widen its posture, so the
-    profiles are scoped to the one service that actually spawns the bwrap child.
+def test_bwrap_security_opt_set_is_core_and_gateway(compose: dict[str, Any]) -> None:
+    """G6-1 (ADR-0036): the alfred-bwrap AppArmor/seccomp profiles are carried by EXACTLY
+    {alfred-core, alfred-gateway} — the two bwrap-spawning hosts. alfred-core spawns the
+    quarantine child (#290); the gateway spawns bwrap adapter children (capability granted in
+    G6-1, used in G6-2). Adapters (alfred-discord) must NEVER carry them — an adapter that
+    could build the userns sandbox could impersonate the quarantine UID (see
+    test_alfred_discord_has_no_setuid).
     """
     services = compose.get("services", {})
-    for name in ("alfred-discord", "alfred-gateway"):
-        security_opt = services.get(name, {}).get("security_opt", []) or []
-        assert not any("alfred-bwrap" in entry for entry in security_opt), (
-            f"{name} must NOT carry the alfred-bwrap security_opt profiles — they "
-            "are scoped to alfred-core, the only service that spawns the bwrap "
-            "quarantine child (#290)."
-        )
+    with_bwrap_profiles = {
+        name
+        for name, svc in services.items()
+        if any("alfred-bwrap" in entry for entry in (svc.get("security_opt", []) or []))
+    }
+    assert with_bwrap_profiles == {"alfred-core", "alfred-gateway"}, (
+        f"the alfred-bwrap profiles must be scoped to exactly {{alfred-core, alfred-gateway}}; "
+        f"got {with_bwrap_profiles}. Adapters must never carry them (#290 / ADR-0036)."
+    )
 
 
 def test_alfred_core_is_not_privileged(compose: dict[str, Any]) -> None:
@@ -210,12 +227,16 @@ def test_alfred_gateway_service_exists(compose: dict[str, Any]) -> None:
     assert gw.get("restart") == "unless-stopped"
 
 
-def test_alfred_gateway_has_no_setuid(compose: dict[str, Any]) -> None:
-    """G6-0: the gateway is still a pure relay — SETUID arrives in G6-1, not here."""
+def test_alfred_gateway_has_setuid_and_sandbox_profiles(compose: dict[str, Any]) -> None:
+    """G6-1 (ADR-0036): the gateway gains SETUID + the alfred-bwrap AppArmor/seccomp profiles
+    so it can spawn bwrap-sandboxed adapter children (capability granted; hosting lands G6-2)."""
     gw = compose.get("services", {}).get("alfred-gateway", {})
-    assert "SETUID" not in (gw.get("cap_add", []) or []), (
-        "alfred-gateway must NOT have SETUID in G6-0; it moves in G6-1 with ADR-0036."
+    assert "SETUID" in (gw.get("cap_add", []) or []), (
+        "alfred-gateway must have cap_add: SETUID in G6-1 (ADR-0036) to host bwrap adapters."
     )
+    security_opt = gw.get("security_opt", []) or []
+    assert "apparmor=alfred-bwrap" in security_opt
+    assert "seccomp=docker/seccomp/alfred-bwrap.json" in security_opt
 
 
 def test_alfred_gateway_has_no_state_git_volume(compose: dict[str, Any]) -> None:
