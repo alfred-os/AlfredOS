@@ -13,7 +13,8 @@ the pure :class:`alfred.gateway.adapter_lifecycle.AdapterLifecycleMachine`:
   transition that emits a control inseparably puts its frame on the sink, Spec B §6
   / correction #2);
 * detect a crash (the child process exit), restart with bounded decorrelated-jitter
-  backoff (per-adapter, no stampede — spec §4 ``[fleet perf-004]``);
+  backoff (one shared RNG, distinct consecutive draws => no stampede — spec §4
+  ``[fleet perf-004]``);
 * trip a per-adapter circuit breaker on a crash-loop -> ``BREAKER_OPEN`` (spec §6(c):
   never silently dark).
 
@@ -50,12 +51,14 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+from alfred.comms_mcp.protocol import AdapterDownReason
 from alfred.errors import AlfredError
 from alfred.gateway.adapter_lifecycle import (
     AdapterControl,
     AdapterLifecycleEvent,
     AdapterLifecycleMachine,
     AdapterLifecycleState,
+    AdapterLifecycleStateError,
 )
 from alfred.gateway.adapter_metrics import (
     ADAPTER_AWAITING_CORE,
@@ -66,7 +69,6 @@ from alfred.gateway.adapter_metrics import (
 )
 
 if TYPE_CHECKING:
-    from alfred.comms_mcp.protocol import AdapterDownReason
     from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
 
 log = structlog.get_logger(__name__)
@@ -190,16 +192,24 @@ class GatewayAdapterSupervisor:
         monotonic: Callable[[], float] | None = None,
         max_concurrent_boots: int = _DEFAULT_MAX_CONCURRENT_BOOTS,
     ) -> None:
+        if max_concurrent_boots < 1:
+            # A 0 / negative cap makes the boot semaphore in supervise_all
+            # unacquirable -> the whole fleet boot hangs forever (a silent
+            # deadlock). Fail loud at construction (CLAUDE.md hard rule #7).
+            raise ValueError(f"max_concurrent_boots must be >= 1, got {max_concurrent_boots!r}")
         self._factory = child_factory
         self._cred = cred_seam
         self._emitter = emitter
         self._epoch = epoch
         self._sleep = sleep
-        # Decorrelated jitter: each adapter draws its backoff from its OWN seeded RNG
-        # stream so two adapters that crash together do not redial in lockstep (spec
-        # §4 anti-stampede). The default RNG is unseeded; jitter is NOT a security
-        # primitive (no token/nonce derives from it), so the non-crypto PRNG is
-        # correct (S311 would be a false positive on a CSPRNG demand).
+        # Decorrelated jitter: every adapter draws its backoff from this ONE shared RNG
+        # stream. The anti-stampede property does NOT require a per-adapter stream — it
+        # comes from each draw being an independent sample: two adapters that crash
+        # together take CONSECUTIVE draws from the shared sequence, which are distinct,
+        # so they do not redial in lockstep (spec §4 anti-stampede). The default RNG is
+        # unseeded; jitter is NOT a security primitive (no token/nonce derives from it),
+        # so the non-crypto PRNG is correct (S311 would be a false positive on a CSPRNG
+        # demand).
         self._rng = rng if rng is not None else random.Random()  # noqa: S311
         self._monotonic = monotonic if monotonic is not None else _default_monotonic
         self._max_concurrent_boots = max_concurrent_boots
@@ -273,6 +283,15 @@ class GatewayAdapterSupervisor:
         run = self._run(adapter_id)
         try:
             while True:
+                # STOP gate BEFORE any (re)spawn (Spec B §6: STOP_REQUESTED is
+                # honoured in EVERY live state, not only UP / AWAITING_CORE). A stop
+                # that landed during a crash backoff (CRASHED / RESTARTING) must
+                # short-circuit to the terminal ``down`` here, NOT let the loop spin
+                # back round and bring the adapter up again (which would emit a
+                # spurious ``up`` after a stop was requested).
+                if run.stop_event.is_set():
+                    await self._stop(run)
+                    break
                 # Cred gate BEFORE spawn — a cred-down parks in AWAITING_CORE.
                 if not await self._cred.is_available(adapter_id=adapter_id):
                     await self._enter_awaiting_core(run)
@@ -335,6 +354,13 @@ class GatewayAdapterSupervisor:
                 raise
             if await self._handle_crash(run):
                 return None  # breaker tripped
+            if run.stop_event.is_set():
+                # A stop landed during the spawn-fail backoff (Spec B §6): emit the
+                # terminal ``down`` here instead of recursing into another re-spawn.
+                # Returning None makes supervise_one take its terminal break (the
+                # ``down`` is already on the wire, exactly once).
+                await self._stop(run)
+                return None
             return await self._spawn_or_terminal(run)  # backoff elapsed -> retry
         ADAPTER_INFLIGHT.labels(adapter=run.adapter_id).set(0)
         return child
@@ -383,6 +409,9 @@ class GatewayAdapterSupervisor:
     async def _stop(self, run: _AdapterRun) -> None:
         ADAPTER_UP.labels(adapter=run.adapter_id).set(0)
         run.is_up = False
+        # 2b-1 only ever stops an adapter via an operator/planned request; the broader
+        # AdapterDownReason vocabulary (supervisor / config_reload / shutdown) arrives
+        # in 2b-2, at which point _stop will take the reason as a parameter.
         await self._apply(
             run, AdapterLifecycleEvent.STOP_REQUESTED, reason="operator"
         )  # -> DOWN, EMIT_DOWN
@@ -482,7 +511,7 @@ class GatewayAdapterSupervisor:
         *,
         error_class: str = "",
         detail: str = "",
-        reason: str = "operator",
+        reason: AdapterDownReason = "operator",
         retry_after_seconds: int = 0,
     ) -> None:
         """Feed ``event`` to the machine and EMIT the resulting frame inseparably.
@@ -504,7 +533,7 @@ class GatewayAdapterSupervisor:
                 await self._emitter.emit_up(adapter_id=adapter_id, epoch=self._epoch)
                 ADAPTER_UP.labels(adapter=adapter_id).set(1)
             case AdapterControl.EMIT_DOWN:
-                await self._emitter.emit_down(adapter_id=adapter_id, reason=_down_reason(reason))
+                await self._emitter.emit_down(adapter_id=adapter_id, reason=reason)
             case AdapterControl.EMIT_CRASHED:
                 await self._emitter.emit_crashed(
                     adapter_id=adapter_id,
@@ -515,6 +544,15 @@ class GatewayAdapterSupervisor:
                 await self._emitter.emit_breaker_open(
                     adapter_id=adapter_id, retry_after_seconds=retry_after_seconds
                 )
+            case _:  # pragma: no cover - exhaustive over the closed AdapterControl enum
+                # Defensive: AdapterControl is a closed 4-member enum and ``control is
+                # None`` is already filtered above, so every reachable value matches a
+                # case. A new control added to the kernel without a frame here is a
+                # programming error — fail loud (CLAUDE.md hard rule #7) rather than
+                # silently dropping a status frame.
+                raise AdapterLifecycleStateError(
+                    f"no status frame mapped for adapter control {control!r}"
+                )
 
     # ------------------------------------------------------------------
     # Backoff + bookkeeping
@@ -523,11 +561,13 @@ class GatewayAdapterSupervisor:
     def _next_backoff(self, run: _AdapterRun) -> float:
         """A decorrelated-jitter backoff for this adapter, clamped to the window.
 
-        Full jitter: draw uniformly in ``[0, base]`` from the adapter's OWN RNG stream
-        (independent draws => no stampede), then CLAMP to
-        ``[_MIN_BACKOFF_SECONDS, _MAX_BACKOFF_SECONDS]`` so a 0 / negative / oversized
-        draw can never tight-spin or stall (mirrors core_link.py). The base doubles per
-        crash up to the cap.
+        Full jitter: draw uniformly in ``[0, base]`` from the supervisor's single
+        SHARED RNG stream, then CLAMP to ``[_MIN_BACKOFF_SECONDS, _MAX_BACKOFF_SECONDS]``
+        so a 0 / negative / oversized draw can never tight-spin or stall (mirrors
+        core_link.py). The base doubles per crash up to the cap. The no-stampede
+        guarantee comes from each draw being an independent sample of the shared stream:
+        two adapters crashing together take consecutive (distinct) draws, so they never
+        redial in lockstep — a per-adapter RNG is NOT required for that property.
         """
         raw = self._rng.uniform(0.0, run.backoff_base)
         clamped = max(_MIN_BACKOFF_SECONDS, min(raw, _MAX_BACKOFF_SECONDS))
@@ -545,20 +585,6 @@ class GatewayAdapterSupervisor:
             run = _AdapterRun(adapter_id)
             self._runs[adapter_id] = run
         return run
-
-
-def _down_reason(reason: str) -> AdapterDownReason:
-    """Coerce a stop reason to the closed AdapterDownReason vocabulary.
-
-    The model validates the literal; an unexpected reason defaults to ``operator``
-    (the planned-stop default) so a programming slip surfaces as the wrong-but-valid
-    reason rather than a producer ValidationError that would mask the stop.
-    """
-    match reason:
-        case "operator" | "supervisor" | "config_reload" | "shutdown":
-            return reason
-        case _:
-            return "operator"
 
 
 def _default_monotonic() -> float:
