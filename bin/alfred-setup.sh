@@ -104,6 +104,41 @@ if [[ "${ALFRED_DEEPSEEK_API_KEY}" == "sk-..." ]]; then
   exit 1
 fi
 
+step "Loading the bwrap userns AppArmor profile (#290)"
+# The dual-LLM quarantine child runs under bubblewrap, which builds an
+# unprivileged user namespace. On Ubuntu 24.04+ / kernel-6.x hosts with
+# `kernel.apparmor_restrict_unprivileged_userns=1` (the modern default), the
+# kernel refuses that namespace UNLESS the container process runs under an
+# AppArmor profile carrying `userns,`. docker-compose.yaml points alfred-core at
+# the custom `alfred-bwrap` profile via `security_opt`; that profile has to be
+# loaded into the host kernel first. This is a one-time, root-requiring host
+# step (apparmor_parser writes to the kernel). It is idempotent — re-running
+# `apparmor_parser -r` replaces the profile in place.
+#
+# Skips GRACEFULLY where AppArmor is unavailable: macOS (no AppArmor at all) and
+# SELinux/other-LSM Linux hosts have no `apparmor_parser`. There the
+# `security_opt: apparmor=alfred-bwrap` line is ignored by the container runtime
+# and the userns restriction this profile lifts is typically not present, so the
+# spawn works without it. We WARN rather than fail so setup still completes.
+APPARMOR_PROFILE="docker/apparmor/alfred-bwrap"
+if command -v apparmor_parser >/dev/null 2>&1; then
+  if [[ -f "$APPARMOR_PROFILE" ]]; then
+    # Needs root to write the profile into the kernel. Use sudo only if we are
+    # not already root, so the script works both as a normal user (prompts for
+    # sudo) and under `sudo bin/alfred-setup.sh`.
+    if [[ "$(id -u)" -eq 0 ]]; then
+      apparmor_parser -r -W "$APPARMOR_PROFILE"
+    else
+      sudo apparmor_parser -r -W "$APPARMOR_PROFILE"
+    fi
+    echo "Loaded AppArmor profile 'alfred-bwrap' (grants userns for the bwrap quarantine child)."
+  else
+    warn "$APPARMOR_PROFILE not found — skipping AppArmor profile load. The dual-LLM quarantine child may fail to spawn on a userns-restricted host."
+  fi
+else
+  warn "apparmor_parser not found (non-AppArmor host, e.g. macOS/SELinux). Skipping the userns AppArmor profile load — the security_opt line is a no-op on this host. If the dual-LLM quarantine child later fails to spawn with 'No permissions to create new namespace', this host needs a userns exemption."
+fi
+
 step "Building images"
 docker compose build
 

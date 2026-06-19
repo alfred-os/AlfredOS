@@ -1,0 +1,75 @@
+# AlfredOS custom AppArmor profile (#290) — userns exemption for the bwrap
+# dual-LLM quarantine child.
+#
+# WHY THIS EXISTS
+# ---------------
+# The dual-LLM quarantine child (the ONLY component that touches raw T3 content)
+# runs under `bubblewrap`, which builds an unprivileged user namespace to
+# sandbox itself. On an Ubuntu 24.04+ / kernel-6.x host with
+# `kernel.apparmor_restrict_unprivileged_userns=1` (the modern default), the
+# kernel REFUSES unprivileged `unshare(CLONE_NEWUSER)` UNLESS the calling
+# process runs under an AppArmor profile that carries the `userns,` permission.
+# A container started with Docker's stock `docker-default` AppArmor profile does
+# NOT carry it, so bwrap fails with:
+#
+#     bwrap: No permissions to create new namespace, likely because the kernel
+#            does not allow non-privileged user namespaces.
+#
+# Applying THIS profile to the `alfred-core` (and any launcher-spawning) service
+# via `security_opt: ["apparmor=alfred-bwrap"]` grants exactly that `userns,`
+# permission so the sandbox can be built — WITHOUT `--privileged`, WITHOUT
+# `CAP_SYS_ADMIN`, and WITHOUT flipping the host-wide
+# `apparmor_restrict_unprivileged_userns` sysctl to 0 (which would lift the
+# restriction for EVERY process on the host, not just our container).
+#
+# THE TRADE-OFF (documented for the security review)
+# --------------------------------------------------
+# `flags=(unconfined)` makes this profile a no-op AppArmor confinement — it
+# REPLACES Docker's `docker-default` AppArmor confinement on the targeted
+# container. We accept this narrowly because:
+#
+#   1. The userns exemption (`userns,`) is the whole point — and on current
+#      AppArmor, a process can only be GRANTED userns by being under a profile
+#      that allows it. A fully-enforcing custom profile that ALSO allow-lists
+#      everything bwrap + CPython + the alfred runtime touch is far larger,
+#      brittle across base-image/glibc bumps, and would itself need continuous
+#      maintenance; `flags=(unconfined) { userns, }` is the pragmatic,
+#      well-documented Ubuntu pattern for "let this one container do userns".
+#   2. AppArmor is NOT the load-bearing containment for the quarantine child.
+#      The real, kernel-enforced isolation around the T3 child is the bwrap
+#      policy itself (`config/sandbox/quarantined-llm.linux.bwrap.policy`):
+#      no /etc bind, synthesised /dev, unshared pid/uts/cgroup/ipc, tmpfs-only
+#      writable surface, `--die-with-parent`. That policy is what the
+#      adversarial sandbox-escape corpus asserts — it is unaffected by this
+#      AppArmor profile.
+#   3. The companion custom seccomp profile (`docker/seccomp/alfred-bwrap.json`)
+#      stays in force (it is a separate `security_opt`): every Docker default
+#      syscall deny is preserved EXCEPT the minimal namespace-syscall delta
+#      bwrap needs. So syscall confinement is NOT dropped.
+#
+# Net: this profile trades AppArmor's (path-based) confinement on the core for
+# the userns capability the dual-LLM sandbox requires, while seccomp confinement
+# and the bwrap kernel-namespace containment remain fully in force.
+#
+# TIGHTER ALTERNATIVE (future work)
+# ---------------------------------
+# A non-`unconfined` profile that `include <abstractions/base>` + allow-lists
+# the interpreter prefix, libs, and the bwrap mount operations and adds
+# `userns,` would restore path-based confinement. It was deliberately deferred:
+# it needs the in-image interpreter layout pinned first (the #290 interpreter
+# sub-fix) and a dedicated hardening pass. Tracked as follow-up to #290.
+#
+# LOADING
+# -------
+# Host-side, one-time (needs root):
+#     sudo apparmor_parser -r -W docker/apparmor/alfred-bwrap
+# `bin/alfred-setup.sh` does this idempotently and skips gracefully where
+# AppArmor is unavailable (macOS / non-AppArmor Linux).
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile alfred-bwrap flags=(unconfined) {
+  userns,
+}

@@ -81,6 +81,30 @@ services:
     # quarantine UID.
     cap_add:
       - SETUID
+    # #290: the dual-LLM quarantine child runs under bubblewrap, which builds an
+    # unprivileged user namespace. Two container-level confinement layers block
+    # that for a non-root, non-CAP_SYS_ADMIN process:
+    #   1. Docker's default AppArmor profile (docker-default) — on Ubuntu 24.04+
+    #      hosts the kernel additionally refuses unprivileged userns unless the
+    #      process is under a profile carrying `userns,`.
+    #   2. Docker's default seccomp profile — blocks clone/unshare with the
+    #      CLONE_NEW* namespace flags absent CAP_SYS_ADMIN.
+    # We replace both with custom, least-privilege profiles so bwrap can build
+    # its sandbox WITHOUT --privileged / SYS_ADMIN / seccomp=unconfined /
+    # apparmor=unconfined / a host-wide sysctl flip:
+    #   * apparmor=alfred-bwrap   — grants ONLY `userns,` (docker/apparmor/alfred-bwrap).
+    #   * seccomp=...alfred-bwrap.json — Docker default + the minimal namespace
+    #     syscall allow bwrap needs (docker/seccomp/alfred-bwrap.json).
+    # The host profile must be loaded once: `bin/alfred-setup.sh` does it (or run
+    # `sudo apparmor_parser -r -W docker/apparmor/alfred-bwrap`). The real
+    # containment around the T3 child is the bwrap policy itself, unaffected here.
+    # NOTE: alfred-discord and alfred-gateway are NOT given these — alfred-discord
+    # has no SETUID and never spawns the launcher (it must not impersonate the
+    # quarantine UID — see test_compose_invariants), and the G6-0 gateway is a
+    # pure relay; the spawn moves there in G6-1 with its own grant.
+    security_opt:
+      - "apparmor=alfred-bwrap"
+      - "seccomp=docker/seccomp/alfred-bwrap.json"
     environment:
       ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
       ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}

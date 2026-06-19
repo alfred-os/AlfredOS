@@ -94,6 +94,63 @@ def test_alfred_core_has_state_git_volume(compose: dict[str, Any]) -> None:
     )
 
 
+def test_alfred_core_has_bwrap_apparmor_profile(compose: dict[str, Any]) -> None:
+    """alfred-core must carry the custom AppArmor profile for the bwrap userns (#290).
+
+    The dual-LLM quarantine child runs under bubblewrap, which builds an
+    unprivileged user namespace. On userns-restricted hosts the kernel only
+    permits that under an AppArmor profile carrying ``userns,``; alfred-core
+    points at the custom ``alfred-bwrap`` profile via ``security_opt``. Pinning
+    it here stops a refactor from silently dropping the line and re-breaking the
+    spawn (the #290 failure mode).
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    security_opt = core.get("security_opt", []) or []
+    assert "apparmor=alfred-bwrap" in security_opt, (
+        "alfred-core requires security_opt 'apparmor=alfred-bwrap' so the bwrap "
+        "quarantine child can build its user namespace on a userns-restricted "
+        "host (#290). Without it the dual-LLM spawn refuses with "
+        "'No permissions to create new namespace'."
+    )
+
+
+def test_alfred_core_has_bwrap_seccomp_profile(compose: dict[str, Any]) -> None:
+    """alfred-core must carry the custom seccomp profile for the bwrap userns (#290).
+
+    Docker's default seccomp profile blocks the namespace syscalls
+    (clone/clone3/unshare) bwrap needs absent CAP_SYS_ADMIN. The custom profile
+    is the minimal delta — NOT seccomp=unconfined. Pinning it complements the
+    AppArmor assertion: both layers must stay in place for the spawn to work.
+    """
+    core = compose.get("services", {}).get("alfred-core", {})
+    security_opt = core.get("security_opt", []) or []
+    assert "seccomp=docker/seccomp/alfred-bwrap.json" in security_opt, (
+        "alfred-core requires security_opt "
+        "'seccomp=docker/seccomp/alfred-bwrap.json' so bwrap's namespace "
+        "syscalls are permitted for the non-root quarantine child (#290). This "
+        "is the least-privilege alternative to seccomp=unconfined."
+    )
+
+
+def test_bwrap_security_opt_scoped_to_core(compose: dict[str, Any]) -> None:
+    """Only alfred-core gets the bwrap security_opt profiles (#290 isolation).
+
+    alfred-discord has no SETUID and never spawns the launcher (it must not be
+    able to impersonate the quarantine UID — see test_alfred_discord_has_no_setuid).
+    The G6-0 gateway is a pure relay (no SETUID yet). Granting either the
+    userns-enabling AppArmor profile would needlessly widen its posture, so the
+    profiles are scoped to the one service that actually spawns the bwrap child.
+    """
+    services = compose.get("services", {})
+    for name in ("alfred-discord", "alfred-gateway"):
+        security_opt = services.get(name, {}).get("security_opt", []) or []
+        assert not any("alfred-bwrap" in entry for entry in security_opt), (
+            f"{name} must NOT carry the alfred-bwrap security_opt profiles — they "
+            "are scoped to alfred-core, the only service that spawns the bwrap "
+            "quarantine child (#290)."
+        )
+
+
 def test_alfred_redis_has_maxmemory(compose: dict[str, Any]) -> None:
     """alfred-redis command must include --maxmemory (devops-002).
 
