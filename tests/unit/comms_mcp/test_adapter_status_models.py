@@ -75,3 +75,40 @@ def test_breaker_open_requires_nonnegative_retry() -> None:
     AdapterBreakerOpenNotification(adapter_id="discord", retry_after_seconds=0)
     with pytest.raises(ValidationError):
         AdapterBreakerOpenNotification(adapter_id="discord", retry_after_seconds=-1)
+
+
+def test_status_audit_field_sets_exist_and_carry_join_keys() -> None:
+    from alfred.audit.audit_row_schemas import (
+        GATEWAY_ADAPTER_BREAKER_OPEN_FIELDS,
+        GATEWAY_ADAPTER_CRASHED_FIELDS,
+        GATEWAY_ADAPTER_DOWN_FIELDS,
+        GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS,
+        GATEWAY_ADAPTER_UP_FIELDS,
+    )
+
+    # Every accepted-transition row joins on adapter_id + occurred_at.
+    for fields in (
+        GATEWAY_ADAPTER_UP_FIELDS,
+        GATEWAY_ADAPTER_DOWN_FIELDS,
+        GATEWAY_ADAPTER_CRASHED_FIELDS,
+        GATEWAY_ADAPTER_BREAKER_OPEN_FIELDS,
+    ):
+        assert "adapter_id" in fields
+        assert "occurred_at" in fields
+
+    assert GATEWAY_ADAPTER_UP_FIELDS == frozenset({"adapter_id", "epoch", "occurred_at"})
+    assert GATEWAY_ADAPTER_DOWN_FIELDS == frozenset({"adapter_id", "reason", "occurred_at"})
+    # ``detail_redacted`` matches the existing COMMS_ADAPTER_CRASHED_FIELDS
+    # convention (correction #2): the scrubbed crash detail field name is
+    # ``detail_redacted`` repo-wide.
+    assert GATEWAY_ADAPTER_CRASHED_FIELDS == frozenset(
+        {"adapter_id", "error_class", "detail_redacted", "occurred_at"}
+    )
+    assert GATEWAY_ADAPTER_BREAKER_OPEN_FIELDS == frozenset(
+        {"adapter_id", "retry_after_seconds", "occurred_at"}
+    )
+    # The rejection row never carries the raw frame — only a closed-vocab reason
+    # + the method that was refused + the observed adapter_id ("" when unparseable).
+    assert GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS == frozenset(
+        {"adapter_id", "rejected_method", "rejection_reason", "occurred_at"}
+    )
