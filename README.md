@@ -35,14 +35,25 @@ alfred user add --authorization operator --name "Your Name"   # one-time
 alfred chat                 # start a TUI conversation
 ```
 
+`docker compose up -d` now starts **`alfred-core`** as a **long-running daemon**
+(`alfred daemon start`, `restart: unless-stopped`) — earlier releases ran it as a
+one-shot command runner. One-off subcommands still work via
+`docker compose run --rm alfred-core <cmd>` (`migrate`, `user add`, `chat`, …) because
+`run` overrides the service `command`. **Run `bin/alfred-setup.sh` _before_
+`docker compose up -d`**: it seeds the `audit.hash_pepper` and provisions secrets the
+daemon requires to boot. Skip it and the daemon refuse-boots and, under
+`restart: unless-stopped`, crash-loops.
+
 `docker compose up -d` also starts **`alfred-gateway`** — the always-up resumable front
-door that (once linked to the core in a later release) holds an `alfred chat` session
-across a core restart. It exposes Prometheus metrics on the compose-internal
-`alfred-gateway:9464/metrics` (see `ops/prometheus/prometheus.yml`). Note: the
-`alfred_run` volume inherits ownership from the image on **first** creation; if you are
-upgrading an older deployment that already has an `alfred_run` volume with the wrong
-owner, run `docker compose down && docker volume rm <project>_alfred_run` before
-`up -d` so it is re-created owned by the `alfred` user.
+door that holds an `alfred chat` session across a core restart. As of this release the
+gateway **links to the core**: the daemon binds `comms-tui.sock` on the shared
+`alfred_run` volume and the gateway dials it (its compose-internal
+`alfred-gateway:9464/metrics` `gateway_core_link_up` gauge reads `1` once both are up;
+see `ops/prometheus/prometheus.yml`). Note: the `alfred_run` volume inherits ownership
+from the image on **first** creation; if you are upgrading an older deployment that
+already has an `alfred_run` volume with the wrong owner, run
+`docker compose down && docker volume rm <project>_alfred_run` before `up -d` so it is
+re-created owned by the `alfred` user.
 
 > **AppArmor hosts (Ubuntu 23.10+ and other userns-restricted Linux):** the dual-LLM
 > quarantine child runs under bubblewrap, which builds an unprivileged user namespace.
@@ -188,7 +199,7 @@ See [`PRD.md`](./PRD.md) for the full design, including:
 
 Contributions welcome. Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) and our [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md). Contributions are licensed under the project's [Apache-2.0 license](./LICENSE).
 
-For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain *why* the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
+For Python work specifically: [`docs/python-conventions.md`](./docs/python-conventions.md) is the canonical reference (tooling, types, errors, async, testing, security, i18n). AI agents should dispatch the [`alfred-python-developer`](./.rulesync/subagents/alfred-python-developer.md) subagent, which applies it without being asked. The [`docs/adr/`](./docs/adr/) directory holds the Architecture Decision Records that explain _why_ the conventions look the way they do. The most recent — [ADR-0014: pluggable hooks for every action](./docs/adr/0014-pluggable-hooks-for-every-action.md) — records the Slice 2.5 hooks subsystem.
 
 If you (or an AI agent) are contributing to this repository, also read [`.rulesync/rules/CLAUDE.md`](./.rulesync/rules/CLAUDE.md) for repo conventions, security rules, and the self-improvement process.
 

@@ -399,5 +399,9 @@ if [[ -t 0 ]]; then
 fi
 
 step "Setup complete"
-echo "Run 'docker compose run --rm -it alfred-core chat' to open the TUI."
+echo "Run 'docker compose up -d' to start the long-running alfred-core daemon + gateway."
+# 'chat' dials the always-up gateway over the shared alfred_run socket volume, so the
+# one-off container links into the running stack (gateway holds the session across a
+# core restart). 'run --rm' overrides the service's 'daemon start' command.
+echo "Run 'docker compose run --rm -it alfred-core chat' to open the TUI (via the gateway)."
 echo "Run 'docker compose up -d alfred-discord' to start the Discord adapter daemon."
