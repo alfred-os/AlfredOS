@@ -40,6 +40,7 @@ from alfred.comms_mcp.adapter_status_observer import (
     AdapterStatusAuditWriteError,
     AdapterStatusObserver,
 )
+from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
 from alfred.comms_mcp.handlers import (
     BindingHandler,
     CrashHandler,
@@ -146,6 +147,10 @@ async def _make_observer_session(
         audit=audit,  # type: ignore[arg-type]
         expected_epoch=_expected_epoch,
         now=lambda: datetime.now(UTC),
+        # G6-2b-2b (#288): the observer now requires the shared crash-dedup reconciler.
+        # This live leg exercises the validate/epoch-reconcile/audit path, not the
+        # crash-dedup join, so a fresh reconciler suffices here.
+        reconciler=CrashIncidentReconciler(),
     )
     session = await AlfredPluginSession.for_comms_adapter(
         adapter_id="alfred_comms_test",
