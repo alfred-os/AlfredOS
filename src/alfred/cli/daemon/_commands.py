@@ -62,6 +62,12 @@ from alfred.cli.daemon._daemon_pidfile import (
     load_pidfile,
     write_pidfile,
 )
+from alfred.cli.daemon._daemon_status_publisher import DaemonStatusSnapshotPublisher
+from alfred.cli.daemon._daemon_status_snapshot import (
+    DaemonStatusSnapshotFileError,
+    default_status_snapshot_path,
+    load_status_snapshot,
+)
 from alfred.cli.daemon._daemon_probes import (
     _truthy_env,
     probe_capability_gate_handshake,
@@ -2059,6 +2065,24 @@ async def _start_async() -> None:
                 environment_source=source,
             )
 
+    # Spec B G6-2b-2c (#288): the periodic status-snapshot publisher. Built + started
+    # ONLY when the comms graph exists (it polls the graph's observer + reconciler) and
+    # reaped on EVERY exit path in the drain ``finally`` (cancel + await + delete the
+    # 0600 snapshot file — the snapshot-file analog of the socket-listener / pidfile
+    # reap). Declared HERE, before the supervisor ``try``, so the finally can never
+    # NameError on it. Self-healing + non-fatal: a write failure logs loud but never
+    # crashes the daemon (observability is best-effort, NOT a security path).
+    status_publisher: DaemonStatusSnapshotPublisher | None = None
+    if comms_graph is not None:
+        status_publisher = DaemonStatusSnapshotPublisher(
+            path=default_status_snapshot_path(),
+            boot_id=boot_id,
+            observer=comms_graph.status_observer,
+            reconciler=comms_graph.crash_incident_reconciler,
+            now=lambda: datetime.now(UTC),
+        )
+        status_publisher.start()
+
     # Supervisor construction + pidfile + start live INSIDE the try so the finally
     # reaps the live quarantine child (comms_graph) on a failure of ANY of them, not
     # just start()+ — the comms-graph build already spawned the bwrap child (CR #255).
@@ -2245,6 +2269,17 @@ async def _start_async() -> None:
                 for listener in socket_listeners:
                     with suppress(Exception):
                         await listener.aclose()
+                # Spec B G6-2b-2c (#288): reap the status-snapshot publisher on EVERY
+                # exit path (cancel + await the task, delete the 0600 file) so a dead
+                # daemon leaves no stale snapshot — the boot_id cross-check is the belt,
+                # this reap is the braces. Isolated with the SAME ``suppress(Exception)``
+                # shape as the sibling listener / child reaps above (arch-H2, correction
+                # #3) so a failing publisher reap never skips the pidfile delete; the
+                # publisher's own ``aclose`` already suppresses CancelledError +
+                # missing-file, so this outer guard is the consistency belt.
+                if status_publisher is not None:
+                    with suppress(Exception):
+                        await status_publisher.aclose()
                 if pidfile_path is not None:
                     delete_pidfile(pidfile_path)
 
