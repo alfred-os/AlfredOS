@@ -57,6 +57,17 @@ INGRESS_REFUSAL_AUDIT_FIELDS: Final[frozenset[str]] = frozenset(
 # ``alfred.i18n._spec_b_reserve``). A reason is rendered via ``t(f"{_REASON_KEY_PREFIX}{reason.value}")``.
 _REASON_KEY_PREFIX: Final[str] = "gateway.ingress.refused."
 
+# The FIXED metric label for a forged/unknown-adapter refusal (K4). The forged id is NEVER
+# used as a label value (a flood of distinct forged ids would otherwise blow up the metric
+# cardinality — a DoS) — every unknown-adapter refusal increments this single sentinel
+# series instead. The forged id is recorded only as a BOUNDED structlog FIELD for forensics.
+_UNKNOWN_ADAPTER_LABEL: Final[str] = "<unknown>"
+
+# How many characters of a forged adapter_id to keep on the audit row. Bounded so a giant
+# forged id cannot bloat the log line (audit-injection defence) while preserving enough for
+# triage.
+_FORGED_ID_MAX_LEN: Final[int] = 64
+
 INGRESS_THROTTLED_TOTAL: Final[Counter] = Counter(
     "gateway_ingress_throttled",
     "Count of gateway per-adapter ingress refusals (rate / in-flight / global-cap / unknown).",
@@ -113,11 +124,31 @@ def record_ingress_refusal(
     )
 
 
+def record_unknown_adapter_refusal(forged_adapter_id: str) -> None:
+    """Refuse a forged/unknown-adapter envelope: SENTINEL-labelled metric + loud row (K4).
+
+    The forged ``adapter_id`` is NEVER used as a prometheus label (cardinality DoS) — the
+    fixed :data:`_UNKNOWN_ADAPTER_LABEL` series absorbs every such refusal. The forged id is
+    recorded only as a BOUNDED structlog field (truncated to :data:`_FORGED_ID_MAX_LEN`) for
+    triage; the opaque body is never passed here (payload-blind — there is nowhere to put
+    it). This is the single sink for the ``unknown_adapter`` reason; it is loud + refusing,
+    never a silent drop (CLAUDE.md hard rule #7).
+    """
+    INGRESS_THROTTLED_TOTAL.labels(adapter=_UNKNOWN_ADAPTER_LABEL).inc()
+    log.warning(
+        "gateway.ingress.refused",
+        adapter_id=_UNKNOWN_ADAPTER_LABEL,
+        reason=IngressRefusalReason.UNKNOWN_ADAPTER.value,
+        forged_adapter_id=forged_adapter_id[:_FORGED_ID_MAX_LEN],
+    )
+
+
 __all__ = [
     "INGRESS_REFUSAL_AUDIT_FIELDS",
     "INGRESS_THROTTLED_TOTAL",
     "IngressRefusalReason",
     "reason_i18n_key",
     "record_ingress_refusal",
+    "record_unknown_adapter_refusal",
     "touch_ingress_series",
 ]
