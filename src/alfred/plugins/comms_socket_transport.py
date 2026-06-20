@@ -39,8 +39,6 @@ import json
 import os
 import re
 import socket
-import stat
-import struct
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Final
@@ -48,6 +46,36 @@ from typing import Final
 import structlog
 
 from alfred.i18n import t
+
+# Re-exported for import compatibility: ``test_comms_socket_transport`` imports
+# ``_UCRED_STRUCT`` from this module to build short/full SO_PEERCRED fixtures. The
+# canonical definitions now live in ``_local_socket`` (one copy); these aliases keep
+# the existing importers green UNCHANGED (correction arch-H2b).
+from alfred.plugins._local_socket import _UCRED_STRUCT  # noqa: F401
+
+# G6-2b-2c (#288, ADR-0038): the peer-uid auth, owner-only bind, and call-time
+# runtime-dir resolution are EXTRACTED to the shared ``_local_socket`` module so the
+# comms wire AND the daemon control socket reuse ONE audited implementation. The
+# module-level helpers below stay as thin wrappers calling the shared functions with
+# the ``comms.socket`` log prefix — so this module's existing log/alert breadcrumbs are
+# unchanged AND existing tests/importers that monkeypatch ``cst._resolve_peer_uid`` /
+# import ``_peer_uid_authorized`` keep working (the listener/dial code references these
+# names via the module namespace, so a monkeypatch still takes effect).
+from alfred.plugins._local_socket import (
+    assert_path_owned as _assert_path_owned,
+)
+from alfred.plugins._local_socket import (
+    bind_owner_only_unix_socket as _bind_owner_only_unix_socket,
+)
+from alfred.plugins._local_socket import (
+    peer_uid_authorized as _shared_peer_uid_authorized,
+)
+from alfred.plugins._local_socket import (
+    resolve_peer_uid as _shared_resolve_peer_uid,
+)
+from alfred.plugins._local_socket import (
+    runtime_dir as _shared_runtime_dir,
+)
 
 # The frame bound + loud-failure type are SHARED across the comms wire (ADR-0031
 # Decision 1) — the socket carries the identical ADR-0025 wire, so reuse the bound
@@ -68,12 +96,10 @@ from alfred.plugins.comms_wire import (
 
 log = structlog.get_logger(__name__)
 
-# The daemon runtime dir + permission discipline mirror the PID file
-# (:mod:`alfred.cli.daemon._daemon_pidfile`): ~/.run/alfred at mode 0700, owner =
-# current uid. The socket lives here so the local-IPC surface is the operator's own
-# uid and nothing wider.
-_SOCKET_MODE: Final[int] = 0o600
-_RUNTIME_DIR_MODE: Final[int] = 0o700
+# The comms socket keys all its degrade-open / dial-path breadcrumbs under this
+# prefix (ADR-0031); passed into the shared ``_local_socket`` primitives so the
+# extraction never relabels an existing log/alert query (correction Task-1).
+_COMMS_SOCKET_LOG_PREFIX: Final[str] = "comms.socket"
 
 # An ``adapter_id`` is interpolated straight into the socket FILENAME, so it must be
 # a single path segment with no traversal potential: lowercase alnum plus ``_``/``-``.
@@ -85,74 +111,31 @@ _ADAPTER_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9_-]+$")
 
 
 def _runtime_dir() -> Path:
-    """Resolve ``~/.run/alfred`` at call time (honours a changed ``$HOME``)."""
-    return Path.home() / ".run" / "alfred"
+    """Resolve ``~/.run/alfred`` at call time (thin wrapper over the shared primitive).
 
-
-# The kernel ``struct ucred`` returned by ``SO_PEERCRED`` is three UNSIGNED ints
-# ``{ pid_t pid; uid_t uid; gid_t gid; }``; ``"3I"`` matches it (uid is unsigned).
-_UCRED_STRUCT: Final[str] = "3I"
-
-# Perf (devex carry-forward): hoist the fixed struct width to a module constant so
-# ``_resolve_peer_uid`` does not recompute ``struct.calcsize`` on every accept.
-_UCRED_WIDTH: Final[int] = struct.calcsize(_UCRED_STRUCT)
+    Kept as a module-level name so existing importers / tests that monkeypatch
+    ``cst._runtime_dir`` still take effect (callers reference it via the module
+    namespace).
+    """
+    return _shared_runtime_dir()
 
 
 def _resolve_peer_uid(sock: socket.socket | None) -> int | None:
-    """Return the connected peer's uid, or ``None`` when unknowable.
+    """Return the connected peer's uid, or ``None`` (thin wrapper, ``comms.socket`` prefix).
 
-    Linux answers via ``SO_PEERCRED`` (kernel-attested ``(pid, uid, gid)``). A
-    platform without it (macOS dev hosts) returns ``None`` — the 0600 socket under
-    the 0700 runtime dir is the same-uid enforcement-of-record there; ``SO_PEERCRED``
-    is defense-in-depth, not the only line. NEVER raises: ``getsockopt`` may return
-    fewer bytes than requested (a short read makes ``struct.unpack`` raise
-    ``struct.error``), and a closed/non-AF_UNIX socket raises ``OSError`` — both
-    degrade to ``None`` (accept on FS perms) rather than crashing the accept
-    callback and wedging the listener.
+    Delegates to :func:`alfred.plugins._local_socket.resolve_peer_uid`. Kept as a
+    module-level name so the listener/dial code (and tests that monkeypatch
+    ``cst._resolve_peer_uid``) reference the shared logic via this module's namespace.
     """
-    if sock is None or not hasattr(socket, "SO_PEERCRED"):
-        # devex-263-002: leave a breadcrumb on the no-SO_PEERCRED branch (a macOS
-        # dev host) so the FS-perms-of-record degrade is distinguishable in a trace
-        # from a short-read / getsockopt-fault degrade — the operator can tell the
-        # peer-uid check was SKIPPED (platform), not ATTEMPTED-and-failed.
-        log.debug(
-            "comms.socket.peer_cred_unsupported",
-            so_peercred_present=hasattr(socket, "SO_PEERCRED"),
-            sock_present=sock is not None,
-        )
-        return None
-    width = _UCRED_WIDTH
-    try:
-        # ``SO_PEERCRED`` is a Linux-only socket constant; the ``hasattr`` guard
-        # above gates the access. pyright on a macOS dev host cannot see the
-        # Linux-platform typeshed stub, so silence the attr-access there (mypy on
-        # this host resolves it, hence ``unused-ignore`` keeps the Linux gate quiet).
-        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, width)  # type: ignore[attr-defined, unused-ignore]
-        if len(creds) != width:
-            return None
-        # ``struct.unpack`` is typed ``tuple[Any, ...]``; the ``"3I"`` format
-        # guarantees three ints, so coerce the uid to ``int`` for mypy --strict.
-        _pid, uid, _gid = struct.unpack(_UCRED_STRUCT, creds)
-    except (OSError, struct.error) as exc:
-        # Degrade-open to the FS-perms-of-record (return None -> authorized). This
-        # is benign for the enumerated cases (short read, closed/non-AF_UNIX socket),
-        # but a security check that fails open should leave a breadcrumb so an
-        # UNEXPECTED getsockopt fault on a SO_PEERCRED-advertising host is not
-        # indistinguishable from the normal degrade path (review err-263-001).
-        log.debug("comms.socket.peer_cred_unavailable", error=repr(exc))
-        return None
-    return int(uid)
+    return _shared_resolve_peer_uid(sock, log_prefix=_COMMS_SOCKET_LOG_PREFIX, log_to=log)
 
 
 def _peer_uid_authorized(*, reported_uid: int | None) -> bool:
-    """True if the peer is the same uid as us, or unknowable (FS-perms-of-record).
+    """True if the peer is the same uid as us, or unknowable (thin wrapper).
 
-    ``None`` (no ``SO_PEERCRED`` / short read) is authorized: the only peer that can
-    ``connect`` a 0600 socket under a 0700 dir is the owner. A reported uid that
-    mismatches ``os.getuid()`` is a genuine impostor (a same-uid race that re-bound
-    or a wider-perm misconfig) and is refused.
+    Delegates to :func:`alfred.plugins._local_socket.peer_uid_authorized`.
     """
-    return reported_uid is None or reported_uid == os.getuid()
+    return _shared_peer_uid_authorized(reported_uid=reported_uid)
 
 
 def default_comms_socket_path(adapter_id: str) -> Path:
@@ -177,34 +160,14 @@ def default_comms_socket_path(adapter_id: str) -> Path:
 
 
 def _assert_dial_path_owned(path: Path) -> None:
-    """Pre-dial owner-backstop: the dial path must be a socket WE own, or raise.
+    """Pre-dial owner-backstop (thin wrapper, ``comms.socket`` prefix).
 
-    The dial side's degrade-open hazard: on a host without ``SO_PEERCRED`` (a macOS
-    dev box) the POST-connect peer-uid check returns ``None`` -> authorized, so the
-    gateway would otherwise dial whatever inode squats at the path. The gateway does
-    NOT own the dialed inode (the core daemon binds it), so an attacker who won a
-    same-dir race could plant a socket of their own. This pre-dial ``lstat`` is the
-    only owner enforcement on those hosts: refuse anything that is not an
-    :func:`stat.S_ISSOCK` inode owned by ``os.getuid()``.
-
-    Reuses the :meth:`CommsSocketListener._unlink_stale` discipline: ``lstat`` (NOT
-    ``stat``) so a symlink target is never followed, and ``S_ISSOCK`` so a regular
-    file / FIFO / device is refused. A ``FileNotFoundError`` (the daemon socket is
-    absent) is NOT caught here — it surfaces as the existing loud daemon-absent
-    contract (the caller maps it to the daemon-required operator message).
+    Delegates to :func:`alfred.plugins._local_socket.assert_path_owned`. Kept as a
+    module-level name so existing importers/tests reference the shared logic through
+    this module. A ``FileNotFoundError`` (the daemon socket is absent) surfaces BARE —
+    the caller maps it to the daemon-required operator message.
     """
-    # ``lstat`` (not stat) so an attacker-planted symlink to a victim socket is not
-    # followed — we assert on the link inode itself.
-    st = path.lstat()
-    if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid():
-        log.warning(
-            "comms.socket.dial_path_unowned",
-            path=str(path),
-            st_mode=f"{stat.S_IFMT(st.st_mode):#o}",
-            st_uid=st.st_uid,
-            expected_uid=os.getuid(),
-        )
-        raise CommsPeerAuthError(t("comms.transport.dial_path_unowned", path=str(path)))
+    _assert_path_owned(path, log_prefix=_COMMS_SOCKET_LOG_PREFIX, log_to=log)
 
 
 async def dial_comms_socket(adapter_id: str) -> CommsSocketTransport:
@@ -583,52 +546,13 @@ class CommsSocketListener:
             raise RuntimeError(
                 f"CommsSocketListener.bind() called twice for adapter {self._adapter_id!r}"
             )
-        runtime_dir = self._path.parent
-        runtime_dir.mkdir(mode=_RUNTIME_DIR_MODE, parents=True, exist_ok=True)
-        # ``mkdir(mode=...)`` only applies at CREATION (and is umask-masked even
-        # then); a pre-existing ``~/.run/alfred`` from a looser-umask boot keeps
-        # its old perms, leaving the 0600 socket under a too-open dir. Tighten the
-        # dir to 0700 UNCONDITIONALLY so the bind->chmod window's 0700 invariant
-        # holds every boot (CLAUDE.md hard rule #7, fail-closed). The dir is
-        # alfred-owned runtime state and its parent is the user's owner-only home,
-        # so this chmod cannot be redirected through an attacker-controlled symlink.
-        runtime_dir.chmod(_RUNTIME_DIR_MODE)
-        self._unlink_stale()
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.bind(str(self._path))
-            # A freshly-bound unix socket is created under the process umask; pin it
-            # to 0600 explicitly so it is owner-only regardless of the umask.
-            self._path.chmod(_SOCKET_MODE)
-            sock.listen(1)
-            # ``asyncio.start_unix_server(sock=...)`` puts the socket in non-blocking
-            # mode itself when it adapts it in :meth:`accept`, so we do not set it
-            # here (and avoid a bare boolean-positional call).
-        except BaseException:
-            sock.close()
-            self._unlink_stale()
-            raise
-        self._sock = sock
-
-    def _unlink_stale(self) -> None:
-        """Remove a leftover socket/file at the path; a missing path is not an error.
-
-        Only ever removes a path the listener owns (the adapter-keyed socket under
-        the daemon's own 0700 runtime dir). A non-socket regular file from a prior
-        crash is also removed — the daemon re-owns its own runtime path each boot.
-        """
-        with contextlib.suppress(FileNotFoundError):
-            # ``lstat`` (not stat) so a symlink target is never followed.
-            st = self._path.lstat()
-            if stat.S_ISSOCK(st.st_mode) or stat.S_ISREG(st.st_mode):
-                self._path.unlink()
-            else:
-                # A FIFO / device / symlink at our runtime path is anomalous — refuse
-                # rather than blindly unlink something we do not recognise as ours.
-                raise RuntimeError(
-                    f"comms socket path {self._path} is not a socket or regular file: "
-                    f"{stat.S_IFMT(st.st_mode):#o}"
-                )
+        # ADR-0038: delegate the mkdir-0700 + unconditional dir-chmod + unlink-stale +
+        # bind + chmod-0600 + listen discipline to the ONE shared implementation. The
+        # comms wire is one-shot, so it passes ``backlog=1`` to preserve its
+        # ``listen(1)`` semantics (the control plane is multi-connection and uses the
+        # default backlog). ``start_unix_server(sock=...)`` puts the socket in
+        # non-blocking mode itself when it adapts it in :meth:`accept`.
+        self._sock = _bind_owner_only_unix_socket(self._path, backlog=1)
 
     async def accept(self) -> CommsSocketTransport:
         """Await ONE peer connection; return the transport over it.
