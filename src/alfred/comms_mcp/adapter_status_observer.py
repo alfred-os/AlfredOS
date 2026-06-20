@@ -45,6 +45,7 @@ from alfred.audit.audit_row_schemas import (
     GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS,
     GATEWAY_ADAPTER_UP_FIELDS,
 )
+from alfred.comms_mcp.crash_incident_reconciler import CrashFoldResult, CrashIncidentReconciler
 from alfred.comms_mcp.handlers import _MAX_CRASH_DETAIL_LEN
 from alfred.comms_mcp.protocol import (
     GATEWAY_ADAPTER_BREAKER_OPEN,
@@ -162,10 +163,17 @@ class AdapterStatusObserver:
         audit: _AuditWriterLike,
         expected_epoch: Callable[[], str],
         now: Callable[[], datetime],
+        reconciler: CrashIncidentReconciler,
     ) -> None:
         self._audit = audit
         self._expected_epoch = expected_epoch
         self._now = now
+        # The SHARED crash-dedup reconciler (G6-2b-2b / #288). The daemon injects the
+        # SAME instance into the per-adapter in-child AdapterCrashHandler, so a gateway
+        # crash (this arm) and an in-child crash for one physical crash fold into one
+        # incident. Required (no None-default): a missing reconciler would be a silent
+        # no-dedup path, which is a trust-boundary regression — fail loud at construction.
+        self._reconciler = reconciler
         self._latest: dict[str, AdapterStatusSnapshot] = {}
 
     def latest(self, adapter_id: str) -> AdapterStatusSnapshot | None:
@@ -255,7 +263,19 @@ class AdapterStatusObserver:
         state: AdapterState,
     ) -> None:
         occurred_at = self._now()
-        subject = self._subject_for(parsed, occurred_at)
+        # Fold the crash-dedup signal BEFORE building the subject + writing the row, so
+        # the row carries the incident handle/source and a replayed (duplicate) crash is
+        # FLAGGED + still audited (never suppressed — hard rule #7). The fold is the
+        # gateway arm; the in-child AdapterCrashHandler folds the child arm into the SAME
+        # shared reconciler.
+        fold = (
+            self._reconciler.observe_gateway_crash(
+                adapter_id=parsed.adapter_id, host_restart_seq=parsed.host_restart_seq
+            )
+            if isinstance(parsed, AdapterCrashedNotification)
+            else None
+        )
+        subject = self._subject_for(parsed, occurred_at, fold)
         adapter_id = str(subject["adapter_id"])
         await self._append_or_raise(
             fields=fields,
@@ -269,15 +289,35 @@ class AdapterStatusObserver:
         self._latest[adapter_id] = AdapterStatusSnapshot(
             adapter_id=adapter_id, state=state, occurred_at=occurred_at
         )
+        # SEC-01 (#288): advance the reconciler's current incarnation on an accepted up
+        # (a fresh serving run) AFTER the audit write succeeds, so a later in-child crash
+        # — which fires before the gateway observes process-exit — tags to the run that
+        # was actually serving. ``up`` carries the incarnation being STARTED.
+        if isinstance(parsed, AdapterUpNotification):
+            self._reconciler.note_incarnation(
+                adapter_id=parsed.adapter_id, host_restart_seq=parsed.host_restart_seq
+            )
 
     @staticmethod
-    def _subject_for(parsed: object, occurred_at: datetime) -> dict[str, object]:
+    def _subject_for(
+        parsed: object, occurred_at: datetime, fold: CrashFoldResult | None
+    ) -> dict[str, object]:
         ts = occurred_at.isoformat()
         if isinstance(parsed, AdapterUpNotification):
-            return {"adapter_id": parsed.adapter_id, "epoch": parsed.epoch, "occurred_at": ts}
+            return {
+                "adapter_id": parsed.adapter_id,
+                "epoch": parsed.epoch,
+                "occurred_at": ts,
+                # SEC-01 (#288): record the incarnation being STARTED.
+                "host_restart_seq": parsed.host_restart_seq,
+            }
         if isinstance(parsed, AdapterDownNotification):
             return {"adapter_id": parsed.adapter_id, "reason": parsed.reason, "occurred_at": ts}
         if isinstance(parsed, AdapterCrashedNotification):
+            # The crashed accept ALWAYS folds first (see _accept), so a non-None fold is
+            # a structural invariant here — assert it loud rather than silently emit a
+            # row missing the dedup keys.
+            assert fold is not None  # noqa: S101 - structural invariant, not input validation
             # The wire ``detail`` is RE-SCRUBBED before it lands as detail_redacted;
             # the raw field is never persisted (mirrors the in-child CrashedNotification
             # handling at handlers.py:338). REDACT FIRST, then bound the length — NOT
@@ -291,6 +331,15 @@ class AdapterStatusObserver:
                 "error_class": parsed.error_class,
                 "detail_redacted": redact_secret_shapes(parsed.detail)[:_MAX_CRASH_DETAIL_LEN],
                 "occurred_at": ts,
+                # G6-2b-2b (#288): the crash-dedup join key + incident handle/source +
+                # the TE-2 duplicate marker (a replayed crash is FLAGGED, still audited).
+                # Stamp the fold's seq (the reconciler is the single source of truth for
+                # the incarnation the incident is keyed on; equal to parsed.host_restart_seq
+                # on the gateway arm, but reading it from the fold keeps one authority).
+                "host_restart_seq": fold.host_restart_seq,
+                "crash_incident_id": fold.crash_incident_id,
+                "crash_signal_source": fold.crash_signal_source,
+                "duplicate": fold.duplicate,
             }
         if isinstance(parsed, AdapterBreakerOpenNotification):
             return {
