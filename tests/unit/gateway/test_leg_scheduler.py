@@ -42,6 +42,7 @@ class _RecordingCoreLink:
 
     def __init__(self) -> None:
         self.writes: list[tuple[str, bytes, int, int]] = []
+        self.escalations: list[tuple[str, bool]] = []
         self._ack = 0
         self._gate = asyncio.Event()
         self._gate.set()
@@ -49,6 +50,7 @@ class _RecordingCoreLink:
     def core_cumulative_ack(self) -> int:
         return self._ack
 
+    @property
     def replay_pending_gate(self) -> asyncio.Event:
         return self._gate
 
@@ -57,6 +59,11 @@ class _RecordingCoreLink:
 
     def set_gate(self) -> None:
         self._gate.set()
+
+    async def escalate_if_breaker_tripped(self, leg: GatewayLeg) -> None:
+        # Record (adapter_id, breaker_tripped) per drain so a test can assert the scheduler
+        # invokes the core-link breaker seam AFTER record_for_send, before write_leg_unit.
+        self.escalations.append((leg.adapter_id, leg.breaker_tripped))
 
     async def write_leg_unit(self, adapter_id: str, payload: bytes, *, seq: int, ack: int) -> None:
         self.writes.append((adapter_id, payload, seq, ack))
@@ -290,6 +297,57 @@ async def test_pump_parks_while_replay_gate_is_clear_then_drains_when_set() -> N
         assert await _drain_until(lambda: len(core.writes) == 1)
         pump.cancel()
     assert core.writes[0] == ("a", b"fresh", 0, 0)
+
+
+async def test_drain_invokes_breaker_escalation_after_record_for_send() -> None:
+    # Spec B G6-4 Task 7 (architect breaker-feed ruling): the scheduler calls the core-link
+    # escalate_if_breaker_tripped(leg) seam after a SUCCESSFUL record_for_send and before
+    # write_leg_unit, so a soft-cap breach at DRAIN time still escalates the link (the
+    # breaker feed moved out of submit_tui_unit into the leg-agnostic drain path).
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+    core = _RecordingCoreLink()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
+    clock = _FakeClock()
+    leg = GatewayLeg(
+        adapter_id="a",
+        buffer=ReplayBuffer(max_frames=1, max_bytes=1_000_000, ttl_seconds=30.0),
+        ingress_gate=PerAdapterIngressGate(
+            "a",
+            sustained_rate_per_s=1000.0,
+            burst=1000,
+            max_inflight=1000,
+            ttl_seconds=30.0,
+            max_frame_bytes=1_000_000,
+            now=clock,
+        ),
+        global_cap=cap,
+        now=clock,
+    )
+    sched.register_leg(leg)
+    sched.enqueue("a", b"one")  # depth 1 — under the max_frames=1 soft cap, no trip
+    sched.enqueue("a", b"two")  # depth 2 > 1 — breaches at drain -> breaker latches
+    async with asyncio.TaskGroup() as tg:
+        pump = tg.create_task(sched.run())
+        await _drain_until(lambda: len(core.writes) == 2)
+        pump.cancel()
+    # Escalation invoked once per drained frame; the second drain saw the latched breaker.
+    assert core.escalations == [("a", False), ("a", True)]
+
+
+async def test_isolated_leg_does_not_invoke_breaker_escalation() -> None:
+    # A leg whose record_for_send raises is torn down BEFORE the escalation/write — the
+    # escalation is only invoked on the SUCCESS path (after a real record_for_send).
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+    core = _RecordingCoreLink()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
+    faulter = _make_leg("bad", cap, cls=_RaisingLeg)
+    sched.register_leg(faulter)
+    sched.enqueue("bad", b"boom")
+    async with asyncio.TaskGroup() as tg:
+        pump = tg.create_task(sched.run())
+        await _drain_until(lambda: "bad" not in sched.registered_adapters)
+        pump.cancel()
+    assert core.escalations == []  # never escalated for the faulting (torn-down) leg
 
 
 async def test_replay_precedes_fresh_input_across_the_gate() -> None:

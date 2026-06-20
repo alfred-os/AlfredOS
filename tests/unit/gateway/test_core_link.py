@@ -40,7 +40,10 @@ from alfred.gateway.core_link import (
 )
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
-from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.ingress_audit import IngressRefusalReason
+from alfred.gateway.ingress_gate import IngressDecision, PerAdapterIngressGate
+from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
@@ -971,6 +974,11 @@ def _run_link(
     resolved_monotonic: Callable[[], float] = (
         monotonic if monotonic is not None else time.monotonic  # type: ignore[assignment]
     )
+    # G6-4a (#288): wrap the requested buffer in the TUI leg (the leg owns it now); ``None``
+    # leaves the link leg-less (buffering off), unchanged. The leg's ``now`` is the SAME
+    # monotonic the link uses (the evict loop reads the leg's clock) — mirroring the
+    # production ``now=self._monotonic`` wiring.
+    tui_leg = _tui_leg(replay_buffer, now=resolved_monotonic) if replay_buffer is not None else None
     link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
         machine=machine,
@@ -980,14 +988,19 @@ def _run_link(
         shutdown_event=shutdown_event,
         monotonic=resolved_monotonic,
         payload_relay=payload_relay,  # type: ignore[arg-type]
-        # G6-4a (#288): wrap the requested buffer in the TUI leg (the leg owns it now);
-        # ``None`` leaves the link leg-less (buffering off), unchanged. The leg's ``now`` is
-        # the SAME monotonic the link uses (the evict loop reads the leg's clock) — mirroring
-        # the production ``now=self._monotonic`` wiring.
-        tui_leg=(
-            _tui_leg(replay_buffer, now=resolved_monotonic) if replay_buffer is not None else None
-        ),
+        tui_leg=tui_leg,
     )
+    if tui_leg is not None:
+        # Spec B G6-4 Task 7 (#288, Option A): a leg-wired ``run`` link gets the FULL
+        # client->core scheduler path so a seeding ``_submit_and_drain`` reproduces the old
+        # inline-submit observable on a running pump. ``link.run()`` drives only the core-leg
+        # read pump; the scheduler's own ``run`` is NOT started here — the buffer-seeding
+        # tests drain it explicitly via ``_submit_and_drain`` (which reaches
+        # ``_scheduler_for_test``), exactly as the non-``run`` helper does.
+        scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
+        scheduler.register_leg(tui_leg)
+        link._leg_router = LegRouter(scheduler)
+        link._scheduler_for_test = scheduler  # type: ignore[attr-defined]  # drain handle for tests
     return link, recorder
 
 
@@ -1713,7 +1726,7 @@ async def test_relay_to_core_sends_payload_with_cumulative_ack() -> None:
     for seq in (0, 1, 2):
         link._core_tracker.observe(seq)
 
-    await link.submit_tui_unit(b'{"id":1,"result":{}}')
+    await _submit_and_drain(link, b'{"id":1,"result":{}}')
 
     # First relay call on a fresh leg mints seq 0; ack is the cumulative 2.
     assert transport.sent_units == [(b'{"id":1,"result":{}}', 0, 2)]
@@ -1733,8 +1746,8 @@ async def test_relay_to_core_mints_contiguous_seq_and_passes_it_explicitly() -> 
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.submit_tui_unit(b"one")
-    await link.submit_tui_unit(b"two")
+    await _submit_and_drain(link, b"one")
+    await _submit_and_drain(link, b"two")
 
     assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"one", 0), (b"two", 1)]
 
@@ -1756,28 +1769,49 @@ async def test_relay_to_core_loud_drop_still_advances_the_send_seq() -> None:
 
     transport.send_unit_error = BrokenPipeError()
     with structlog.testing.capture_logs():
-        await link.submit_tui_unit(b"dropped")  # loud drop — consumes seq 0
+        await _submit_and_drain(link, b"dropped")  # loud drop — consumes seq 0
     assert transport.sent_units == []  # nothing reached the wire
 
     transport.send_unit_error = None
-    await link.submit_tui_unit(b"after")  # succeeds on the live leg
+    await _submit_and_drain(link, b"after")  # succeeds on the live leg
     # seq CONTINUED at 1 — the dropped frame consumed seq 0 and did not free it.
     assert transport.sent_units == [(b"after", 1, 0)]
 
 
 @pytest.mark.asyncio
-async def test_relay_to_core_none_transport_drop_does_not_consume_a_seq() -> None:
-    """A no-transport loud drop happens BEFORE the mint, so it does NOT consume a seq —
-    the next real send on a live leg still starts at 0 (design §3.2)."""
-    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
+async def test_relay_to_core_none_transport_drop_re_sequences_from_zero_after_reset() -> None:
+    """G6-4 Task 7 (#288, Option A) re-expression: a frame drained while the transport is
+    ``None`` IS ``record_for_send``-d at drain (it appends + mints a leg seq), but
+    ``write_leg_unit`` LOUD-DROPS it on the wire — it STAYS buffered (append-before-send).
+
+    The OLD "None -> no mint, no append" property (a pre-mint None-check) is RETIRED: the
+    sole transport None-guard now lives in ``write_leg_unit`` AFTER the mint. The
+    "no permanent leg seq burned" guarantee is now the per-connection RESET, not a pre-mint
+    skip: after ``reset_for_new_epoch`` (a fresh handshake) the next real send on a live leg
+    re-sequences from 0 (design §3.2). Mutation guard: moving the None-check ahead of the
+    mint would make the dropped frame NOT buffered and break the append-before-send replay.
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     link._current_core_transport = None
 
-    with structlog.testing.capture_logs():
-        await link.submit_tui_unit(b"dropped")  # no transport -> loud drop, no mint
+    with structlog.testing.capture_logs() as captured:
+        await _submit_and_drain(link, b"dropped")  # None transport -> append + mint, wire loud-drop
 
-    transport = _FakeCoreTransport([])
+    # Drained: record_for_send appended + minted seq 0; the wire write loud-dropped.
+    assert buf.depth_frames == 1  # append-before-send: stays buffered for replay
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+
+    # A fresh handshake resets the per-connection seq floor; the next real send re-sequences
+    # from 0 — no permanent leg seq burned across the reset (the reset is the guarantee).
+    transport = _FakeCoreTransport(
+        [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
+    )
+    with structlog.testing.capture_logs():
+        await link._peer_handshake(transport)
     link._current_core_transport = transport
-    await link.submit_tui_unit(b"first-real")
+    await _submit_and_drain(link, b"first-real")
 
     assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"first-real", 0)]
 
@@ -1788,14 +1822,14 @@ async def test_peer_handshake_resets_the_client_to_core_seq() -> None:
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.submit_tui_unit(b"a")
-    await link.submit_tui_unit(b"b")  # _client_to_core_seq now at 2
+    await _submit_and_drain(link, b"a")
+    await _submit_and_drain(link, b"b")  # _client_to_core_seq now at 2
 
     epoch = uuid4().hex
     transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
     await link._peer_handshake(transport2)  # fresh leg resets the seq space
     link._current_core_transport = transport2
-    await link.submit_tui_unit(b"c")
+    await _submit_and_drain(link, b"c")
 
     assert transport2.sent_units[-1][1] == 0  # reset to 0 on the new leg
 
@@ -1814,7 +1848,7 @@ def test_minted_core_seqs_are_contiguous_within_a_leg(payloads: list[bytes]) -> 
         transport = _FakeCoreTransport([])
         link._current_core_transport = transport
         for p in payloads:
-            await link.submit_tui_unit(p)
+            await _submit_and_drain(link, p)
         return [s for (_p, s, _a) in transport.sent_units]
 
     assert asyncio.run(_drive()) == list(range(len(payloads)))
@@ -1830,7 +1864,7 @@ async def test_relay_to_core_drops_loud_on_broken_pipe() -> None:
     link._core_tracker.observe(0)
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"payload")  # must NOT raise
+        await _submit_and_drain(link, b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -1847,22 +1881,46 @@ async def test_relay_to_core_drops_loud_on_broken_pipe() -> None:
 
 
 def _link_with_relay_and_buffer(
-    *, buffer: ReplayBuffer
+    *, buffer: ReplayBuffer, leg: GatewayLeg | None = None
 ) -> tuple[GatewayCoreLink, _RecordingClientListener, _RelaySink]:
-    """A relay-wired core link with the TUI leg wrapping ``buffer`` (G6-4a, #288).
+    """A relay-wired core link with the TUI leg wrapping ``buffer`` (Spec B G6-4 Task 7).
 
-    Construction-shape migration: the leg wraps the SAME ``ReplayBuffer`` the buffer-keyed
-    tests assert on, so every depth/zeroing/breaker assertion stays valid — only the
-    OWNER changed (link -> leg). Mechanical-not-behavioral.
+    Wires the FULL Task-7 client->core path: a real :class:`GatewayLegScheduler` +
+    :class:`LegRouter` over the link, with the TUI leg registered. ``submit_tui_unit`` now
+    ADMITS + ENQUEUES onto the scheduler; the seq mint + buffer append + breaker escalation +
+    physical write happen at DRAIN time. Tests that need the synchronous observable (the old
+    submit semantics) call :func:`_submit_and_drain` (enqueue + one scheduler round). The leg
+    wraps the SAME ``ReplayBuffer`` the buffer-keyed tests assert on, so every depth/zeroing/
+    breaker assertion stays valid — only the DRAINER changed (inline -> scheduler).
+
+    Pass a custom ``leg`` (e.g. a BINDING ingress gate) to exercise the refusal path.
     """
     recorder = _RecordingClientListener()
     sink = _RelaySink()
+    tui_leg = leg if leg is not None else _tui_leg(buffer)
     link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
         payload_relay=sink,  # type: ignore[arg-type]
-        tui_leg=_tui_leg(buffer),
+        tui_leg=tui_leg,
     )
+    scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
+    scheduler.register_leg(tui_leg)
+    link._leg_router = LegRouter(scheduler)
+    link._scheduler_for_test = scheduler  # type: ignore[attr-defined]  # drain handle for tests
     return link, recorder, sink
+
+
+async def _submit_and_drain(link: GatewayCoreLink, payload: bytes, *, rounds: int = 1) -> None:
+    """Enqueue ``payload`` via ``submit_tui_unit`` then drain the scheduler synchronously.
+
+    Reproduces the old inline-submit observable (mint + append + escalate + write) for the
+    buffer-keyed tests: ``submit_tui_unit`` admits + enqueues; this then runs the scheduler's
+    drain rounds in-line so the write/append are observable on return. Honours the
+    replay-pending gate (a cleared gate parks the drain, exactly as production)."""
+    await link.submit_tui_unit(payload)
+    scheduler: GatewayLegScheduler = link._scheduler_for_test  # type: ignore[attr-defined]
+    for _ in range(rounds):
+        await scheduler._drain_one_round()
 
 
 @pytest.mark.asyncio
@@ -1877,7 +1935,7 @@ async def test_relay_to_core_appends_inbound_frame_keyed_on_wire_seq() -> None:
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.submit_tui_unit(b"x")
+    await _submit_and_drain(link, b"x")
 
     assert buf.depth_frames == 1
     # The seq passed to the transport equals the buffered seq (0).
@@ -1900,7 +1958,7 @@ async def test_relay_to_core_loud_drop_still_leaves_frame_buffered() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs():
-        await link.submit_tui_unit(b"x")  # send loud-drops; append already happened
+        await _submit_and_drain(link, b"x")  # send loud-drops; append already happened
 
     assert transport.sent_units == []  # nothing reached the wire
     assert buf.depth_frames == 1  # the frame is still durably held
@@ -1917,8 +1975,8 @@ async def test_submit_tui_unit_advances_the_leg_seq() -> None:
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.submit_tui_unit(b"one")
-    await link.submit_tui_unit(b"two")
+    await _submit_and_drain(link, b"one")
+    await _submit_and_drain(link, b"two")
 
     assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"one", 0), (b"two", 1)]
 
@@ -1926,13 +1984,13 @@ async def test_submit_tui_unit_advances_the_leg_seq() -> None:
 @pytest.mark.asyncio
 async def test_relay_to_core_drops_loud_on_none_transport() -> None:
     """A None current transport (the reconnect-race write window — architect M3) is a
-    loud drop, never a raise.
+    loud drop at DRAIN, never a raise (the None-guard now lives in ``write_leg_unit``).
     """
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     link._current_core_transport = None
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"payload")  # must NOT raise
+        await _submit_and_drain(link, b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -1942,14 +2000,17 @@ async def test_relay_to_core_drops_loud_on_none_transport() -> None:
 @pytest.mark.asyncio
 async def test_reconnect_closing_clears_current_transport_before_close() -> None:
     """``_reconnect_closing`` drops ``_current_core_transport`` to ``None`` BEFORE closing
-    the gapped leg (architect M3), so a concurrent ``relay_to_core`` racing the gap snapshots
-    ``None`` (the clean None-drop) instead of the closing transport.
+    the gapped leg (architect M3), so a concurrent physical ``write_leg_unit`` racing the gap
+    snapshots ``None`` (the clean None-drop) instead of the closing transport.
 
     The stale transport's ``close()`` BLOCKS on an event the test controls; while it is
-    blocked we assert ``_current_core_transport`` is already ``None`` and a ``relay_to_core``
-    issued in that window loud-drops via the None path (``reason="no_core_transport"``),
-    NOT via a write into the half-closed leg. Moving the clear to AFTER ``stale.close()``
-    would let the snapshot see the closing transport and this assertion would FAIL.
+    blocked we assert ``_current_core_transport`` is already ``None`` and a ``write_leg_unit``
+    (the SOLE physical writer the scheduler drains onto — G6-4 Task 7) issued in that window
+    loud-drops via the None path (``reason="no_core_transport"``), NOT via a write into the
+    half-closed leg. Moving the clear to AFTER ``stale.close()`` would let the snapshot see
+    the closing transport and this assertion would FAIL. Driven through ``write_leg_unit``
+    directly (not ``submit_tui_unit``) because this link is leg-less — the None-snapshot race
+    lives in the physical writer, which is exactly what a mid-reconnect scheduler drain hits.
     """
     close_entered = asyncio.Event()
     close_release = asyncio.Event()
@@ -1979,10 +2040,10 @@ async def test_reconnect_closing_clears_current_transport_before_close() -> None
     reconnect_task = asyncio.ensure_future(link._reconnect_closing(stale))
     await asyncio.wait_for(close_entered.wait(), timeout=1.0)
 
-    # The clear already happened (before the blocking close): a racing relay snapshots None.
+    # The clear already happened (before the blocking close): a racing write snapshots None.
     assert link._current_core_transport is None
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"payload")  # races the in-flight close
+        await link.write_leg_unit("tui", b"payload", seq=0, ack=0)  # races the in-flight close
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
     assert dropped[0].get("reason") == "no_core_transport"
@@ -2004,7 +2065,7 @@ async def test_relay_to_core_drops_loud_on_connection_reset() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"payload")
+        await _submit_and_drain(link, b"payload")
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -2022,7 +2083,7 @@ async def test_relay_to_core_drops_loud_on_closed_transport_runtime_error() -> N
     link._core_tracker.observe(0)
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"payload")  # must NOT raise
+        await _submit_and_drain(link, b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -2041,7 +2102,7 @@ async def test_relay_to_core_drops_loud_on_encode_value_error() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"payload")  # must NOT raise
+        await _submit_and_drain(link, b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -2059,7 +2120,7 @@ async def test_relay_to_core_drops_loud_on_over_bound_reframe() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"payload")  # must NOT raise
+        await _submit_and_drain(link, b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -2326,8 +2387,8 @@ async def test_peer_handshake_captures_unacked_and_clears_gate_on_reconnect() ->
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.submit_tui_unit(b"a")  # buffered seq 0
-    await link.submit_tui_unit(b"b")  # buffered seq 1
+    await _submit_and_drain(link, b"a")  # buffered seq 0
+    await _submit_and_drain(link, b"b")  # buffered seq 1
     assert buf.depth_frames == 2
 
     epoch = uuid4().hex
@@ -2348,7 +2409,7 @@ async def test_peer_handshake_captures_unacked_and_clears_gate_on_reconnect() ->
 
     # Epoch B: the send-seq restarted at 0, and the buffer floor reset accepts it.
     link._current_core_transport = transport2
-    await link.submit_tui_unit(b"fresh")  # must NOT raise the strict-increase guard
+    await _submit_and_drain(link, b"fresh")  # must NOT raise the strict-increase guard
     assert buf.depth_frames == 1
     assert buf.unacked_frames()[0].seq == 0
 
@@ -2373,7 +2434,7 @@ async def test_peer_handshake_prepends_deferred_remainder_ahead_of_fresh_capture
     # One fresh un-acked frame appended to the buffer via the REAL relay path.
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.submit_tui_unit(b"fresh0")  # buffered seq 0
+    await _submit_and_drain(link, b"fresh0")  # buffered seq 0
     assert buf.depth_frames == 1
 
     epoch = uuid4().hex
@@ -2400,7 +2461,7 @@ async def test_peer_handshake_no_deferred_remainder_captures_fresh_only() -> Non
     assert link._pending_replay == ()  # no prior defer
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.submit_tui_unit(b"only0")  # buffered seq 0
+    await _submit_and_drain(link, b"only0")  # buffered seq 0
 
     epoch = uuid4().hex
     transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
@@ -2424,15 +2485,15 @@ async def test_peer_handshake_reset_prevents_cross_epoch_trim() -> None:
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     epoch_a_transport = _FakeCoreTransport([])
     link._current_core_transport = epoch_a_transport
-    await link.submit_tui_unit(b"a")  # epoch-A seq 0
-    await link.submit_tui_unit(b"b")  # epoch-A seq 1
+    await _submit_and_drain(link, b"a")  # epoch-A seq 0
+    await _submit_and_drain(link, b"b")  # epoch-A seq 1
 
     epoch = uuid4().hex
     transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
     with structlog.testing.capture_logs():
         await link._peer_handshake(transport2)  # drop epoch-A frames + reset
     link._current_core_transport = transport2
-    await link.submit_tui_unit(b"fresh")  # epoch-B seq 0
+    await _submit_and_drain(link, b"fresh")  # epoch-B seq 0
     assert buf.depth_frames == 1  # only the epoch-B frame
 
     # An ack carrying a cumulative_ack >= the old epoch-A high-water (1). It can only
@@ -2485,8 +2546,8 @@ async def test_peer_handshake_fully_acked_reconnect_resets_floor_no_crash() -> N
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.submit_tui_unit(b"a")  # buffered seq 0
-    await link.submit_tui_unit(b"b")  # buffered seq 1
+    await _submit_and_drain(link, b"a")  # buffered seq 0
+    await _submit_and_drain(link, b"b")  # buffered seq 1
     # The daemon durably acks EVERYTHING — the buffer drains but _last_seq stays high (1).
     buf.trim_to_ack(1)
     assert buf.depth_frames == 0
@@ -2506,7 +2567,7 @@ async def test_peer_handshake_fully_acked_reconnect_resets_floor_no_crash() -> N
     # crash that would otherwise escape the relay pump and tear the gateway down.
     link._current_core_transport = transport2
     # must NOT raise ReplayBufferError("seq must strictly increase")
-    await link.submit_tui_unit(b"x")
+    await _submit_and_drain(link, b"x")
     assert buf.depth_frames == 1
     assert buf.unacked_frames()[0].seq == 0
 
@@ -2557,10 +2618,10 @@ async def test_relay_to_core_breaker_trip_escalates_link_unavailable_once() -> N
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"one")  # depth 1 — no trip, no escalation
+        await _submit_and_drain(link, b"one")  # depth 1 — no trip, no escalation
         assert not buf.breaker_tripped
         assert recorder.controls == []
-        await link.submit_tui_unit(b"two")  # depth 2 > 1 — trips + escalates
+        await _submit_and_drain(link, b"two")  # depth 2 > 1 — trips + escalates
 
     assert buf.breaker_tripped
     # The client received exactly ONE link.unavailable control frame (listener spy).
@@ -2590,10 +2651,10 @@ async def test_relay_to_core_breaker_idempotent_refeed_no_second_escalation() ->
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"a")  # depth 1
-        await link.submit_tui_unit(b"b")  # depth 2 — at cap, no trip
-        await link.submit_tui_unit(b"c")  # depth 3 > 2 — trips + escalates ONCE
-        await link.submit_tui_unit(b"d")  # depth 4 > 2 — latch held, idempotent re-feed
+        await _submit_and_drain(link, b"a")  # depth 1
+        await _submit_and_drain(link, b"b")  # depth 2 — at cap, no trip
+        await _submit_and_drain(link, b"c")  # depth 3 > 2 — trips + escalates ONCE
+        await _submit_and_drain(link, b"d")  # depth 4 > 2 — latch held, idempotent re-feed
 
     assert buf.breaker_tripped
     assert buf.depth_frames == 4  # all four held; hard ceiling (4) NOT breached
@@ -2612,7 +2673,7 @@ async def test_relay_to_core_under_cap_no_breaker_escalation() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"x")
+        await _submit_and_drain(link, b"x")
 
     assert not buf.breaker_tripped
     assert recorder.controls == []  # no escalation
@@ -2633,7 +2694,7 @@ async def test_submit_tui_unit_under_cap_never_references_breaker() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"one")
+        await _submit_and_drain(link, b"one")
 
     assert recorder.controls == []  # an un-tripped leg never escalates
     rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
@@ -2677,9 +2738,9 @@ async def test_replay_buffer_tripped_is_true_after_breaker_latches() -> None:
 
     assert link.replay_buffer_tripped is False
     with structlog.testing.capture_logs():
-        await link.submit_tui_unit(b"one")  # depth 1 — no trip
+        await _submit_and_drain(link, b"one")  # depth 1 — no trip
         assert link.replay_buffer_tripped is False
-        await link.submit_tui_unit(b"two")  # depth 2 > 1 — trips
+        await _submit_and_drain(link, b"two")  # depth 2 > 1 — trips
 
     assert buf.breaker_tripped is True
     assert link.replay_buffer_tripped is True
@@ -2995,7 +3056,7 @@ async def test_refresh_buffer_metrics_tracks_append_trim_and_reset() -> None:
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.submit_tui_unit(b"abc")  # append seq 0 (3 bytes)
+    await _submit_and_drain(link, b"abc")  # append seq 0 (3 bytes)
     assert BUFFER_DEPTH_FRAMES._value.get() == 1
     assert BUFFER_DEPTH_BYTES._value.get() == 3
 
@@ -3006,7 +3067,7 @@ async def test_refresh_buffer_metrics_tracks_append_trim_and_reset() -> None:
     assert BUFFER_DEPTH_BYTES._value.get() == 0
 
     # Re-load, then a reconnect handshake resets the buffer -> the gauges zero again.
-    await link.submit_tui_unit(b"defgh")  # append seq 1 (5 bytes)
+    await _submit_and_drain(link, b"defgh")  # append seq 1 (5 bytes)
     assert BUFFER_DEPTH_FRAMES._value.get() == 1
     assert BUFFER_DEPTH_BYTES._value.get() == 5
     handshake = _FakeCoreTransport(
@@ -3029,7 +3090,7 @@ async def test_refresh_buffer_metrics_sets_breaker_gauge_on_trip() -> None:
 
     with structlog.testing.capture_logs():
         for _ in range(3):  # third append breaches the 2-frame soft cap
-            await link.submit_tui_unit(b"x")
+            await _submit_and_drain(link, b"x")
 
     assert buf.breaker_tripped is True
     assert CIRCUIT_BREAKER_OPEN._value.get() == 1
@@ -3058,15 +3119,16 @@ def test_refresh_buffer_metrics_is_a_noop_with_no_buffer() -> None:
 async def _capture_replay(link: GatewayCoreLink, payloads: list[bytes]) -> None:
     """Relay ``payloads`` on a throwaway leg, then handshake a fresh leg to CAPTURE them.
 
-    Drives the REAL relay + capture path (Task 2): each ``relay_to_core`` appends to the
-    buffer keyed on its wire seq, then the fresh ``_peer_handshake`` stashes the un-acked
-    remainder into ``_pending_replay`` (clearing the gate) and resets the buffer floor —
-    leaving the link in the exact pre-flush state ``run`` reaches after a reconnect binds.
+    Drives the REAL submit + drain + capture path (G6-4 Task 7): each ``_submit_and_drain``
+    appends to the buffer keyed on its wire seq via the scheduler drain, then the fresh
+    ``_peer_handshake`` stashes the un-acked remainder into ``_pending_replay`` (clearing the
+    gate) and resets the buffer floor — leaving the link in the exact pre-flush state ``run``
+    reaches after a reconnect binds.
     """
     leg1 = _FakeCoreTransport([])
     link._current_core_transport = leg1
     for payload in payloads:
-        await link.submit_tui_unit(payload)
+        await _submit_and_drain(link, payload)
     handshake = _FakeCoreTransport(
         [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
     )
@@ -3337,7 +3399,7 @@ async def test_run_reconnect_flushes_replay_before_pump_resumes() -> None:
         if first.sent:
             break
     # Relay one client->core frame onto the live first leg -> buffered un-acked seq 0.
-    await link.submit_tui_unit(b"buffered")
+    await _submit_and_drain(link, b"buffered")
     assert buf.depth_frames == 1
     # Release the first leg's read -> EOF -> reconnect to leg 2 (capture + flush).
     first_eof.set()
@@ -3386,7 +3448,7 @@ async def test_run_discards_replay_buffer_on_terminal_exit_zeroing_pre_dlp_bytes
             break
     # Append one un-acked PRE-DLP frame onto the live leg so the buffer is non-empty at the
     # terminal exit (this is the residency the fix must scrub).
-    await link.submit_tui_unit(b"pre-dlp-secret")
+    await _submit_and_drain(link, b"pre-dlp-secret")
     assert buf.depth_frames == 1
     # White-box: hold the retained bytearray so we can assert it was zeroed IN PLACE (the
     # mutable copy the buffer owns precisely so it CAN be scrubbed), mirroring the buffer's
@@ -3422,7 +3484,7 @@ async def test_submit_tui_unit_sends_via_write_leg_unit_with_cumulative_ack() ->
     for seq in (0, 1, 2):
         link._core_tracker.observe(seq)
 
-    await link.submit_tui_unit(b'{"id":1,"result":{}}')
+    await _submit_and_drain(link, b'{"id":1,"result":{}}')
 
     assert transport.sent_units == [(b'{"id":1,"result":{}}', 0, 2)]
     assert buf.depth_frames == 1  # append-before-send via the leg
@@ -3450,37 +3512,50 @@ async def test_write_leg_unit_none_transport_is_a_loud_drop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_tui_unit_none_transport_drop_does_not_consume_a_leg_seq() -> None:
-    """PR5: a None-transport drop happens BEFORE ``record_for_send`` — no leg seq minted.
+async def test_submit_tui_unit_none_transport_drain_buffers_and_resets_from_zero() -> None:
+    """G6-4 Task 7 (#288, Option A) re-expression of the retired PR5 None-pre-mint property.
 
-    The next real send on a live leg still starts at seq 0 (the dead-leg None-check stays
-    STRICTLY AHEAD of the mint, so a drop on a dead leg cannot burn a leg seq).
+    A frame drained while the transport is ``None`` IS ``record_for_send``-d (it appends +
+    mints a leg seq) — the sole transport None-guard now lives in ``write_leg_unit`` AFTER
+    the mint, so the wire write LOUD-DROPS but the frame STAYS buffered (append-before-send,
+    so it replays once the leg returns). The "no permanent leg seq burned" guarantee is the
+    per-connection RESET, not a pre-mint skip: after ``reset_for_new_epoch`` (a fresh
+    handshake) the next real send re-sequences from 0 (design §3.2).
     """
     buf = ReplayBuffer()
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     link._current_core_transport = None
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"dropped")  # no transport -> loud drop, no mint
+        await _submit_and_drain(link, b"dropped")  # None transport -> append + mint, wire loud-drop
 
-    assert buf.depth_frames == 0  # nothing appended (no seq consumed)
+    assert buf.depth_frames == 1  # append-before-send: buffered for replay, NOT lost
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
 
+    # The per-connection reset rebinds the seq floor; the next real send restarts at 0.
+    handshake = _FakeCoreTransport(
+        [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
+    )
+    with structlog.testing.capture_logs():
+        await link._peer_handshake(handshake)
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
-    await link.submit_tui_unit(b"first-real")
+    await _submit_and_drain(link, b"first-real")
     assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"first-real", 0)]
 
 
 @pytest.mark.asyncio
 async def test_submit_tui_unit_breaker_feeds_unavailable_exactly_once() -> None:
-    """PR8: direct ``submit_tui_unit`` appends breaching the soft cap feed BREAKER_TRIPPED once.
+    """G6-4 Task 7 (#288): a drain whose ``record_for_send`` breaches the soft cap feeds
+    BREAKER_TRIPPED exactly once via ``escalate_if_breaker_tripped``.
 
-    Drive ``submit_tui_unit`` DIRECTLY (not via the flood harness): ``max_frames=1`` -> the
-    second append trips the breaker; the gateway feeds BREAKER_TRIPPED -> machine escalates
-    UP -> UNAVAILABLE emitting EXACTLY one ``link.unavailable`` + EXACTLY one
-    ``gateway.comms.breaker_tripped`` row (JC-2: the link owns the once-only escalation edge).
+    The breaker escalation MOVED from the retired inline ``submit_tui_unit`` to the scheduler
+    drain (``escalate_if_breaker_tripped``, called AFTER ``record_for_send`` and BEFORE the
+    write). Drive submit + drain: ``max_frames=1`` -> the second drained append trips the
+    breaker; the gateway feeds BREAKER_TRIPPED -> machine escalates UP -> UNAVAILABLE emitting
+    EXACTLY one ``link.unavailable`` + EXACTLY one ``gateway.comms.breaker_tripped`` row (JC-2:
+    the link owns the once-only escalation edge across every drain caller).
     """
     buf = ReplayBuffer(max_frames=1)
     link, recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
@@ -3488,9 +3563,9 @@ async def test_submit_tui_unit_breaker_feeds_unavailable_exactly_once() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.submit_tui_unit(b"one")  # depth 1 — no trip
+        await _submit_and_drain(link, b"one")  # depth 1 — no trip
         assert recorder.controls == []
-        await link.submit_tui_unit(b"two")  # depth 2 > 1 — trips + escalates ONCE
+        await _submit_and_drain(link, b"two")  # depth 2 > 1 — trips + escalates ONCE
 
     assert buf.breaker_tripped
     assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
@@ -3498,3 +3573,252 @@ async def test_submit_tui_unit_breaker_feeds_unavailable_exactly_once() -> None:
     assert len(rows) == 1
     assert rows[0].get("depth_frames") == buf.depth_frames
     assert rows[0].get("depth_bytes") == buf.depth_bytes
+
+
+# ---------------------------------------------------------------------------
+# Spec B G6-4 Task 7 (#288, architect Option A): ``submit_tui_unit`` now ADMITS through
+# the leg's payload-blind ingress gate + ENQUEUES (the seq mint + append + escalate +
+# write moved to the scheduler drain). A NON-ADMITTED decision is back-pressured: the
+# ``_record_ingress_refusal`` K6 sink writes the closed-vocab ``gateway.ingress.refused``
+# row and the frame is NEVER enqueued / written (hard rule #7 — never a silent drop). The
+# breaker escalation moved to ``escalate_if_breaker_tripped`` (drain-time); a flush re-send
+# into a freshly-reset (un-tripped) buffer never re-escalates.
+# ---------------------------------------------------------------------------
+
+
+def _binding_leg(
+    buf: ReplayBuffer,
+    *,
+    max_frame_bytes: int = 1 << 30,
+    burst: int = 10**9,
+    max_inflight: int = 10**9,
+) -> GatewayLeg:
+    """A TUI leg whose ingress gate can be made BINDING on one tier (K3/K6 refusal path).
+
+    Mirrors :func:`_tui_leg` but exposes the gate knobs a refusal test tightens: a tiny
+    ``max_frame_bytes`` (OVERSIZED), an exhaustible ``burst`` (THROTTLED_RATE once drained),
+    or a small ``max_inflight`` (THROTTLED_INFLIGHT once filled). The ``GlobalReplayCap``
+    ceiling stays strictly above the buffer hard ceiling (non-binding), so only the gate tier
+    under test refuses.
+    """
+    cap = GlobalReplayCap(max_total_bytes=buf._max_bytes * 4)
+    gate = PerAdapterIngressGate(
+        "tui",
+        sustained_rate_per_s=1e-9,  # negligible refill: a drained bucket stays drained
+        burst=burst,
+        max_inflight=max_inflight,
+        ttl_seconds=1e9,
+        max_frame_bytes=max_frame_bytes,
+        now=lambda: 0.0,
+    )
+    return GatewayLeg(
+        adapter_id="tui", buffer=buf, ingress_gate=gate, global_cap=cap, now=lambda: 0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_tui_unit_oversized_refusal_back_pressures_no_enqueue_no_write() -> None:
+    """An OVERSIZED frame is REFUSED at the gate: a closed-vocab ``gateway.ingress.refused``
+    row, NO enqueue (the scheduler queue stays empty), and NOTHING reaches the wire.
+
+    Drives the ``submit_tui_unit`` non-ADMITTED branch (the K6 back-pressure arm — ruling
+    #6): a leg with ``max_frame_bytes=1`` refuses any 2+ byte payload as OVERSIZED. The
+    refusal sink fires once with the OVERSIZED reason; the frame is never routed (a drain
+    finds an empty queue) and never written (the transport is live but unused).
+    """
+    buf = ReplayBuffer()
+    leg = _binding_leg(buf, max_frame_bytes=1)
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf, leg=leg)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await _submit_and_drain(link, b"too-big")  # 7 bytes > max_frame_bytes=1 -> OVERSIZED
+
+    # The frame was REFUSED: nothing enqueued, nothing appended, nothing on the wire.
+    assert buf.depth_frames == 0
+    assert transport.sent_units == []
+    # Exactly ONE closed-vocab refusal row, carrying the OVERSIZED reason (payload-blind).
+    refused = [c for c in captured if c.get("event") == "gateway.ingress.refused"]
+    assert len(refused) == 1
+    assert refused[0].get("reason") == IngressRefusalReason.OVERSIZED.value
+    assert refused[0].get("adapter_id") == "tui"
+    assert refused[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_submit_tui_unit_throttled_inflight_refusal_back_pressures() -> None:
+    """A THROTTLED_INFLIGHT decision (the in-flight cap is full) is back-pressured + audited.
+
+    Fill the single in-flight slot (``max_inflight=1``) WITHOUT releasing it, so the next
+    ``submit_tui_unit`` sees the slot held and the gate returns THROTTLED_INFLIGHT — the
+    K6 refusal arm with a DIFFERENT closed-vocab reason than OVERSIZED.
+    """
+    buf = ReplayBuffer()
+    leg = _binding_leg(buf, max_inflight=1)
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf, leg=leg)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    # Hold the only in-flight slot (admit without releasing) so the gate is at its cap.
+    held = leg.try_admit(frame_bytes=1)
+    assert held.decision is IngressDecision.ADMITTED
+
+    with structlog.testing.capture_logs() as captured:
+        await _submit_and_drain(link, b"x")  # in-flight cap full -> THROTTLED_INFLIGHT
+
+    assert buf.depth_frames == 0  # refused -> not enqueued / appended
+    assert transport.sent_units == []
+    refused = [c for c in captured if c.get("event") == "gateway.ingress.refused"]
+    assert len(refused) == 1
+    assert refused[0].get("reason") == IngressRefusalReason.THROTTLED_INFLIGHT.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "expected_reason"),
+    [
+        (IngressDecision.OVERSIZED, IngressRefusalReason.OVERSIZED),
+        (IngressDecision.THROTTLED_RATE, IngressRefusalReason.THROTTLED_RATE),
+        (IngressDecision.THROTTLED_INFLIGHT, IngressRefusalReason.THROTTLED_INFLIGHT),
+    ],
+)
+async def test_record_ingress_refusal_maps_each_decision_to_its_closed_vocab_reason(
+    decision: IngressDecision, expected_reason: IngressRefusalReason
+) -> None:
+    """``_record_ingress_refusal`` maps EACH reachable decision onto its OWN K6 reason.
+
+    The ``_INGRESS_REFUSAL_REASON`` map must not collapse tiers (OVERSIZED is NOT
+    THROTTLED_RATE): each non-ADMITTED decision routes to its own closed-vocab reason in the
+    field-allowlisted ``gateway.ingress.refused`` row. Driven directly so every map entry is
+    exercised (the ``submit_tui_unit`` arm only reaches whichever tier its gate binds on).
+    """
+    buf = ReplayBuffer()
+    leg = _tui_leg(buf)
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf, leg=leg)
+
+    with structlog.testing.capture_logs() as captured:
+        link._record_ingress_refusal(leg, decision)
+
+    refused = [c for c in captured if c.get("event") == "gateway.ingress.refused"]
+    assert len(refused) == 1
+    assert refused[0].get("reason") == expected_reason.value
+    assert refused[0].get("adapter_id") == "tui"
+    # Payload-blind: only the field-allowlisted scalars + the closed-vocab reason are present.
+    assert refused[0].get("depth_frames") == leg.depth_frames
+    assert refused[0].get("inflight") == leg.inflight_count
+
+
+@pytest.mark.asyncio
+async def test_escalate_if_breaker_tripped_early_returns_when_not_tripped() -> None:
+    """``escalate_if_breaker_tripped`` is a no-op (no feed, no row, no escalation) when the
+    leg's breaker has NOT latched — the early-return guard the scheduler relies on for an
+    under-cap drain.
+    """
+    buf = ReplayBuffer(max_frames=8)
+    leg = _tui_leg(buf)
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=buf, leg=leg)
+    assert leg.breaker_tripped is False
+
+    with structlog.testing.capture_logs() as captured:
+        await link.escalate_if_breaker_tripped(leg)  # not tripped -> early return
+
+    assert recorder.controls == []  # no link.unavailable escalation
+    assert link._machine.state is GatewayLinkState.UP  # machine untouched
+    rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_escalate_if_breaker_tripped_non_tui_leg_skips_unlabelled_gauge() -> None:
+    """A NON-TUI leg that trips STILL escalates (feed + row), but does NOT touch the
+    UNLABELLED single-TUI JC-1 gauges (PR13: never refresh the unlabelled shim for a
+    non-TUI leg — those gauges track ONLY the TUI leg's buffer).
+
+    The link's ``_tui_leg`` is the under-cap TUI leg; a SEPARATE tripped ``other`` leg is
+    handed to ``escalate_if_breaker_tripped``. The escalation + audit row fire (every leg's
+    breaker must escalate), but ``CIRCUIT_BREAKER_OPEN`` stays at its pre-call value because
+    the ``leg is self._tui_leg`` guard skips the unlabelled refresh — covers the guard's
+    FALSE branch.
+    """
+    _reset_buffer_gauges()
+    tui_buf = ReplayBuffer()
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=tui_buf)
+    # A distinct non-TUI leg with a latched breaker (max_frames=1 -> 2nd append trips).
+    other_buf = ReplayBuffer(max_frames=1)
+    other = GatewayLeg(
+        adapter_id="discord",
+        buffer=other_buf,
+        ingress_gate=PerAdapterIngressGate(
+            "discord",
+            sustained_rate_per_s=1e9,
+            burst=10**9,
+            max_inflight=10**9,
+            ttl_seconds=1e9,
+            max_frame_bytes=1 << 30,
+            now=lambda: 0.0,
+        ),
+        global_cap=GlobalReplayCap(max_total_bytes=other_buf._max_bytes * 4),
+        now=lambda: 0.0,
+    )
+    other.record_for_send(b"a")
+    other.record_for_send(b"b")  # depth 2 > 1 -> breaker latches
+    assert other.breaker_tripped is True
+    assert other is not link._tui_leg
+
+    with structlog.testing.capture_logs() as captured:
+        await link.escalate_if_breaker_tripped(other)
+
+    # The non-TUI leg STILL escalates once (feed + row) — every leg's breaker must page.
+    assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
+    rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert len(rows) == 1
+    # …but the UNLABELLED single-TUI JC-1 breaker gauge was NOT flipped (the under-cap TUI
+    # leg is untouched, so the guard's FALSE branch skipped the refresh).
+    assert CIRCUIT_BREAKER_OPEN._value.get() == 0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_flush_does_not_emit_a_second_link_unavailable() -> None:
+    """RULING #5: the reconnect-replay flush is escalation-free BY CONSTRUCTION.
+
+    A drain breaches the soft cap -> ONE ``link.unavailable`` escalates (drain-time, via
+    ``escalate_if_breaker_tripped``). A reconnect handshake then CAPTURES the un-acked
+    remainder and ``reset_for_new_epoch`` CLEARS the breaker latch, so
+    ``_flush_pending_replay`` re-sends the captured frames into a fresh, un-tripped buffer.
+    The flush does NOT call ``escalate_if_breaker_tripped`` (it re-appends via
+    ``record_for_send`` + the single ``write_leg_unit`` writer ONLY) — so across the trip
+    AND the full reconnect+flush the client sees EXACTLY ONE ``LinkUnavailableNotification``,
+    never a spurious second one during recovery.
+    """
+    buf = ReplayBuffer(max_frames=1)  # the 2nd drained append trips the breaker
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport1 = _FakeCoreTransport([])
+    link._current_core_transport = transport1
+
+    with structlog.testing.capture_logs():
+        await _submit_and_drain(link, b"one")  # depth 1 — no trip
+        await _submit_and_drain(link, b"two")  # depth 2 > 1 — trips + escalates ONCE
+    # Read through ``bool(...)`` so mypy does not literal-narrow the stateful property (the
+    # reset below genuinely flips it; an ``is True`` / ``is False`` pair would mark the
+    # post-reset code unreachable).
+    assert bool(buf.breaker_tripped) is True
+    assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
+
+    # Reconnect: a fresh handshake captures the remainder + resets (clears the latch).
+    epoch = uuid4().hex
+    transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
+    with structlog.testing.capture_logs():
+        await link._peer_handshake(transport2)
+    assert bool(buf.breaker_tripped) is False  # the reset cleared the breaker
+
+    # The flush re-sends the captured frames into the un-tripped buffer — no re-escalation.
+    link._current_core_transport = transport2
+    with structlog.testing.capture_logs() as flush_logs:
+        await link._flush_pending_replay()
+
+    # EXACTLY ONE link.unavailable across the trip + reconnect + flush (no spurious second).
+    assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
+    # The flush itself escalated nothing (no breaker_tripped row emitted during recovery).
+    flush_rows = [c for c in flush_logs if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert flush_rows == []

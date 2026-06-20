@@ -28,8 +28,12 @@ def _throttled(adapter: str) -> float:
     return float(value)
 
 
-def test_reason_set_is_exactly_the_four_closed_vocab_values() -> None:
+def test_reason_set_is_exactly_the_closed_vocab_values() -> None:
+    # Spec B G6-4 Task 7 (#288): ``oversized`` (the K3 size-tier refusal) joins the closed
+    # vocab — declared once here (K6) so a future G6-5 wiring of a binding leg cannot drift
+    # the reason. The TUI leg's gate is non-binding so it never fires live in G6-4.
     assert {r.value for r in IngressRefusalReason} == {
+        "oversized",
         "throttled_rate",
         "throttled_inflight",
         "global_cap_refused",

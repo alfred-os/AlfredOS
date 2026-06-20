@@ -40,10 +40,14 @@ class IngressRefusalReason(enum.Enum):
     forged-envelope router) draws from the same set — no free-form reason strings.
     """
 
+    OVERSIZED = "oversized"
     THROTTLED_RATE = "throttled_rate"
     THROTTLED_INFLIGHT = "throttled_inflight"
     GLOBAL_CAP_REFUSED = "global_cap_refused"
     UNKNOWN_ADAPTER = "unknown_adapter"
+    # NB: OVERSIZED is the size-tier refusal (K3 max_frame_bytes). The TUI leg's gate is
+    # NON-BINDING in G6-4 so it never fires live; a real adapter leg (G6-5) can. Declared
+    # here (the single closed-vocab home, K6) so the reason cannot drift when G6-5 wires it.
 
 
 # The EXACT field allowlist for every ingress-refusal audit row. NO body/body-hash/
