@@ -849,6 +849,69 @@ GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# G6-3 credential round-trip family (Spec B G6-3 / #288 / ADR-0036)
+# ---------------------------------------------------------------------------
+#
+# The real core-injects-at-spawn credential path. NONE of these rows carries the
+# credential — ``credential_material`` is structurally absent from every field-set
+# here (maintainer C1 / SEC-1): the credential crosses ONLY the trusted leg + fd 3,
+# never an audit row. ``result`` is the closed-vocab outcome (granted / refused);
+# the resolver writes the grant row, the gateway writes the awaiting-core +
+# spawn-aborted rows. The gateway holds no signing key, so its rows reconcile into
+# the CORE signed log the way the G6-2b-2a observer rows do (gateway-local audit is
+# a tracked ADR-0036 follow-up — Spec C closes it).
+
+# Resolver-side: gateway -> core spawn_request the core observed (granted/refused).
+GATEWAY_ADAPTER_SPAWN_REQUEST_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "host_restart_seq",
+        "epoch",
+        "occurred_at",
+        # Closed-vocab outcome: granted | refused (NO credential).
+        "result",
+    }
+)
+
+# Resolver-side: core -> gateway spawn_grant the resolver minted. ``duplicate`` is
+# True on a true replay (all three of (adapter_id, host_restart_seq, epoch) matched
+# an outstanding grant) — the replay is FLAGGED + still audited, never suppressed
+# (hard rule #7), and the broker is NOT re-decrypted (correction H4).
+CORE_ADAPTER_SPAWN_GRANT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "host_restart_seq",
+        "epoch",
+        "occurred_at",
+        "result",
+        "duplicate",
+    }
+)
+
+# Gateway-side: the adapter parked in AWAITING_CORE because the credential leg was
+# down (a non-spin bounded-backoff wait — Task 4). One row per awaiting-core entry.
+GATEWAY_ADAPTER_AWAITING_CORE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "host_restart_seq",
+        "reason",
+        "occurred_at",
+    }
+)
+
+# Gateway-side: a fail-closed spawn abort (grant-refusal / launcher-fail /
+# fd-3-write-fail). ``reason`` is the closed-vocab audit string (mirrors
+# quarantine_child_io's reason vocabulary); NO credential, NO raw frame field.
+GATEWAY_ADAPTER_SPAWN_ABORTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "host_restart_seq",
+        "reason",
+        "occurred_at",
+    }
+)
+
+# ---------------------------------------------------------------------------
 # state.proposal.dispatch_failure family (DLP-into-failure_detail; #173)
 # ---------------------------------------------------------------------------
 
@@ -1252,4 +1315,9 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "GATEWAY_ADAPTER_CRASHED_FIELDS",
     "GATEWAY_ADAPTER_BREAKER_OPEN_FIELDS",
     "GATEWAY_ADAPTER_STATUS_REJECTED_FIELDS",
+    # Spec B (#288) G6-3 credential round-trip family (NO credential in any row).
+    "GATEWAY_ADAPTER_SPAWN_REQUEST_FIELDS",
+    "CORE_ADAPTER_SPAWN_GRANT_FIELDS",
+    "GATEWAY_ADAPTER_AWAITING_CORE_FIELDS",
+    "GATEWAY_ADAPTER_SPAWN_ABORTED_FIELDS",
 )
