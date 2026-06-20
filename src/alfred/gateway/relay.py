@@ -12,9 +12,10 @@ opaque payload flows end-to-end byte-for-byte in BOTH directions:
   control frame) is written down to the client. The reconnect/backoff/lifecycle-signal
   machinery all lives in the core-link — the relay rides it.
 * **client -> core** is :meth:`_client_to_core_pump`: a second pump that reads the
-  client transport's raw units and calls :meth:`GatewayCoreLink.relay_to_core`, doing
-  ZERO body parse on that leg (a PURE opaque forward — security H3; the client leg never
-  inspects the payload, the core re-parses).
+  client transport's raw units and calls :meth:`GatewayCoreLink.submit_tui_unit` (the
+  leg-routed send: the TUI is the first ``GatewayLeg``, so its ``record_for_send`` +
+  ``write_leg_unit`` carry the frame), doing ZERO body parse on that leg (a PURE opaque
+  forward — security H3; the client leg never inspects the payload, the core re-parses).
 
 **Production wire (the leg asymmetry).** The core leg is seq/ack-ENABLED (the daemon's
 ``CommsPluginRunner`` negotiates ``AlfredSeqAck/1`` in the handshake); the client (TUI)
@@ -36,9 +37,11 @@ inside that opaque run and survives end-to-end.
 **Loud drops, no buffering (CLAUDE.md hard rule #7; G4 owns buffering).** A dead client
 (broken pipe) on the core->client sink is a LOUD drop that does NOT raise into the core
 pump (the client hung up — the core leg keeps running). A gapped core on the client->core
-leg is a LOUD drop in :meth:`GatewayCoreLink.relay_to_core` (never buffered). The dropped
-unit is the peer's to re-request once the leg is back — a G4 ReplayBuffer concern, not
-this carrier's to hold.
+leg is a LOUD drop in :meth:`GatewayCoreLink.write_leg_unit` (the single physical writer
+``submit_tui_unit`` drains onto) — the frame is appended to the TUI leg's ReplayBuffer
+BEFORE the best-effort send (G6-4a), so a loud-dropped send still leaves it buffered for
+the reconnect replay. The dropped wire SEND is never re-raised; the resume layer re-sends
+the buffered frame once the leg is back.
 """
 
 from __future__ import annotations
@@ -141,7 +144,7 @@ class GatewayRelay:
         reframe), or a write to a client transport ``close()``d mid-reconnect-swap
         (:class:`RuntimeError` "unable to perform operation on closed transport").
 
-        The seq-enabled ack is FLOORED to ``0`` (mirroring :meth:`GatewayCoreLink.relay_to_core`):
+        The seq-enabled ack is FLOORED to ``0`` (as :meth:`GatewayCoreLink.core_cumulative_ack`):
         the client tracker's ``-1`` ("nothing acked yet") is the wire's ``a=0`` placeholder,
         and an un-floored ``-1`` would crash :func:`encode_seq_frame` on the first
         core->client unit sent before the client leg has delivered a seq.
@@ -170,8 +173,9 @@ class GatewayRelay:
         ``None`` read is a clean client EOF that returns the pump. Otherwise: if the
         client leg is seq-enabled and the unit carries a ``seq``, advance the client
         receive tracker (so the client-leg ack the relay emits stays current); then
-        forward the OPAQUE payload to :meth:`GatewayCoreLink.relay_to_core` — which
-        carries the core-leg cumulative ack and loud-drops on a gapped core.
+        forward the OPAQUE payload to :meth:`GatewayCoreLink.submit_tui_unit` — which routes
+        it through the TUI leg (``record_for_send``) onto the single ``write_leg_unit`` writer,
+        carrying the core-leg cumulative ack and loud-dropping on a gapped core.
 
         **Pure opaque forward (security H3 / CLAUDE.md hard rule #5).** This leg NEVER
         ``json.loads`` the payload: the gateway is a T1 carrier and the client->core body

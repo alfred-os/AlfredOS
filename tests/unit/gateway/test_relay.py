@@ -6,8 +6,9 @@ The relay binds two pumps:
   ``payload_relay`` sink the relay wires to :meth:`GatewayRelay._send_to_client` — so a
   payload the core leg forwards is written to the client transport.
 * **client->core** is the relay's own :meth:`GatewayRelay._client_to_core_pump`: it
-  reads the client transport's raw units and calls :meth:`GatewayCoreLink.relay_to_core`,
-  doing ZERO body parse on that leg (pure opaque forward; security H3).
+  reads the client transport's raw units and calls :meth:`GatewayCoreLink.submit_tui_unit`
+  (the leg-routed send — G6-4a), doing ZERO body parse on that leg (pure opaque forward;
+  security H3).
 
 The PRIMARY suite is the PRODUCTION shape: the core leg is seq/ack-ENABLED, the client
 (TUI) leg is PLAIN. A SECONDARY suite drives seq-enabled-BOTH (forward-looking, G4/G5),

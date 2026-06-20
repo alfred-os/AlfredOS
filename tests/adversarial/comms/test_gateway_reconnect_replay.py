@@ -169,8 +169,8 @@ async def test_reconnect_replays_unacked_frames_round_trip() -> None:
     un-acked, then drained by the new core's ack.
 
     Mutation note: commenting out ``_flush_pending_replay``'s send loop (the
-    ``await self.relay_to_core(frame.payload)`` line) loses the frames — the fresh leg
-    receives nothing and the buffer stays empty, so this test FAILS. Pins the flush.
+    ``record_for_send`` + ``write_leg_unit`` re-send — G6-4a) loses the frames — the fresh
+    leg receives nothing and the buffer stays empty, so this test FAILS. Pins the flush.
     """
     _reset_gauges()
     buf = ReplayBuffer()
