@@ -219,6 +219,52 @@ async def test_leg_down_during_roundtrip_routes_to_awaiting_core() -> None:
     await task
 
 
+# --- Task 4: recovery within the awaiting-core ceiling -> spawn proceeds -------
+
+
+async def test_awaiting_core_recovers_within_ceiling_then_spawns() -> None:
+    factory = _PipeChildFactory()
+    client = _RecordingCredentialClient()
+    sink = _RecordingSink()
+    # The leg is down for the first two probes, then comes back (within the ceiling).
+    states = iter([False, False, True, True, True, True])
+    sup = _make_supervisor(
+        factory=factory,
+        client=client,
+        sink=sink,
+        epoch_source=lambda: _EPOCH,
+        cred_available=lambda: next(states, True),
+    )
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A)
+    # The adapter recovered + spawned after the leg came back (no breaker trip).
+    assert "gateway.adapter.breaker_open" not in sink.methods()
+
+    await sup.request_stop(_A)
+    await task
+
+
+async def test_awaiting_core_ceiling_exceeded_trips_breaker_distinct_alert() -> None:
+    factory = _PipeChildFactory()
+    client = _RecordingCredentialClient()
+    sink = _RecordingSink()
+    # The leg never comes back: the awaiting-core re-probe ceiling must trip the
+    # breaker (the distinct terminal alert) rather than park silently forever.
+    sup = _make_supervisor(
+        factory=factory,
+        client=client,
+        sink=sink,
+        epoch_source=lambda: _EPOCH,
+        cred_available=lambda: False,
+    )
+
+    await asyncio.wait_for(sup.supervise_one(_A), timeout=2.0)
+    # The distinct terminal alert fired (no quiet-dark); no false ``up``.
+    assert "gateway.adapter.breaker_open" in sink.methods()
+    assert "gateway.adapter.up" not in sink.methods()
+
+
 # --- Task 5b: credential refusal -> fail-closed spawn abort, NO up frame -------
 
 
