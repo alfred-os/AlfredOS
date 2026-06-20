@@ -63,10 +63,31 @@ ADAPTER_AWAITING_CORE: Final[Gauge] = Gauge(
     labelnames=[_ADAPTER_LABEL],
 )
 
+# Spec B G6-4 (#288): per-adapter ReplayBuffer depth. The Spec-A
+# ``gateway_buffer_depth_{frames,bytes}`` gauges (:mod:`alfred.gateway.metrics`) are
+# UNLABELLED single-buffer gauges from the one-leg G5 era; G6-4 multiplexes N legs, each
+# with its OWN buffer, so these per-adapter gauges let an operator see which leg is full.
+# Refreshed AFTER each per-leg buffer mutation, touching ONLY the mutated leg's series
+# (perf-H3 — never an O(N) sweep over all legs). Sole label ``adapter`` (cardinality-safe,
+# gateway-chosen id; see the module docstring).
+ADAPTER_BUFFER_DEPTH_FRAMES: Final[Gauge] = Gauge(
+    "gateway_adapter_buffer_depth_frames",
+    "Un-acked inbound frames currently retained in this adapter leg's ReplayBuffer.",
+    labelnames=[_ADAPTER_LABEL],
+)
+
+ADAPTER_BUFFER_DEPTH_BYTES: Final[Gauge] = Gauge(
+    "gateway_adapter_buffer_depth_bytes",
+    "Sum of retained un-acked inbound payload bytes in this adapter leg's ReplayBuffer.",
+    labelnames=[_ADAPTER_LABEL],
+)
+
 
 __all__ = [
     "ADAPTER_AWAITING_CORE",
     "ADAPTER_BREAKER_OPEN",
+    "ADAPTER_BUFFER_DEPTH_BYTES",
+    "ADAPTER_BUFFER_DEPTH_FRAMES",
     "ADAPTER_INFLIGHT",
     "ADAPTER_RESTARTS",
     "ADAPTER_UP",
