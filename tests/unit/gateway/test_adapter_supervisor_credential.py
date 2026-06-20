@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pytest
+import structlog.testing
 
 from alfred.comms_mcp.adapter_credential_resolver import AdapterCredentialError
 from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
@@ -265,6 +266,35 @@ async def test_awaiting_core_ceiling_exceeded_trips_breaker_distinct_alert() -> 
     assert "gateway.adapter.up" not in sink.methods()
 
 
+# --- H1/Task 4: a None live epoch at spawn time -> AWAITING_CORE ---------------
+
+
+async def test_none_epoch_at_spawn_routes_to_awaiting_core_then_recovers() -> None:
+    factory = _PipeChildFactory()
+    client = _RecordingCredentialClient()
+    sink = _RecordingSink()
+    # The cheap probe says available, but the LIVE epoch is None for the first spawn (a
+    # leg that lost its handshake between the probe and the spawn) ->
+    # CredentialLegDownError -> AWAITING_CORE; then the epoch comes back -> the awaiting
+    # wait recovers (returns False) -> ``continue`` -> the retry spawns + reaches up.
+    epochs = iter([None, _EPOCH, _EPOCH, _EPOCH])
+    sup = _make_supervisor(
+        factory=factory,
+        client=client,
+        sink=sink,
+        epoch_source=lambda: next(epochs),
+        cred_available=lambda: True,
+    )
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A)
+    # The first attempt parked in AWAITING_CORE (None epoch), then recovered + spawned.
+    assert factory.spawn_epochs == [_EPOCH]
+
+    await sup.request_stop(_A)
+    await task
+
+
 # --- Task 5b: credential refusal -> fail-closed spawn abort, NO up frame -------
 
 
@@ -283,6 +313,99 @@ async def test_credential_refusal_aborts_spawn_loud_no_up() -> None:
     assert "gateway.adapter.up" not in sink.methods()
     # A ``crashed`` frame WAS emitted (the spawn-abort feeds the crash arm).
     assert "gateway.adapter.crashed" in sink.methods()
+
+
+# --- the spawn_aborted row carries the DISTINCT credential reason -------------
+
+
+def _spawn_aborted_reasons(logs: list[dict[str, object]]) -> list[object]:
+    return [e["reason"] for e in logs if e.get("event") == "gateway.adapter.spawn_aborted"]
+
+
+@pytest.mark.parametrize("reason", ["grant_mismatch", "delivery_failed", "missing_secret"])
+async def test_spawn_aborted_carries_distinct_credential_reason(reason: str) -> None:
+    # The spawn-aborted audit row must preserve the AdapterCredentialError's distinct
+    # closed-vocab reason (the G6-3 failure-path contract), NOT collapse every credential
+    # failure to the generic ``credential_refused``.
+    factory = _PipeChildFactory()
+    client = _RecordingCredentialClient(
+        raise_factory=lambda: AdapterCredentialError(adapter_id=_A, reason=reason)
+    )
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, client=client, sink=sink, epoch_source=lambda: _EPOCH)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(GatewayAdapterSpawnError),
+    ):
+        await sup.supervise_one(_A)
+
+    assert _spawn_aborted_reasons(logs) == [reason]
+
+
+# --- Persistent credential refusal crash-loops to the breaker (child is None) -
+
+
+async def test_first_attempt_credential_refusal_is_boot_refusal() -> None:
+    factory = _PipeChildFactory()
+    # The credential is refused on the FIRST attempt: fail-closed boot refusal (re-raised
+    # as GatewayAdapterSpawnError so a boot can refuse the adapter), NO up frame.
+    client = _RecordingCredentialClient(
+        raise_factory=lambda: AdapterCredentialError(adapter_id=_A, reason="missing_secret")
+    )
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, client=client, sink=sink, epoch_source=lambda: _EPOCH)
+
+    with pytest.raises(GatewayAdapterSpawnError):
+        await sup.supervise_one(_A)
+    assert "gateway.adapter.up" not in sink.methods()
+    assert "gateway.adapter.crashed" in sink.methods()
+
+
+class _CrashThenRefuseClient:
+    """Succeeds the first delivery, then refuses every subsequent one (G6-3).
+
+    Drives the NON-first-attempt credential-abort -> crash-arm -> breaker path: the
+    first incarnation comes up + crashes (a process exit), then the restart's
+    credential is refused on every retry until the breaker trips and
+    ``_spawn_or_terminal`` returns None (the ``child is None`` terminal in
+    ``supervise_one``).
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def acquire_and_deliver(
+        self, *, adapter_id: str, host_restart_seq: int, write_fd: int, epoch: str
+    ) -> None:
+        self.calls += 1
+        os.close(write_fd)
+        if self.calls > 1:
+            raise AdapterCredentialError(adapter_id=adapter_id, reason="missing_secret")
+        # First call: deliver the sentinel so the first incarnation reaches up.
+        # (write_fd already closed; the fake child does not read it.)
+
+
+async def test_restart_credential_refusal_routes_through_breaker() -> None:
+    factory = _PipeChildFactory()
+    client = _CrashThenRefuseClient()
+    sink = _RecordingSink()
+    sup = _make_supervisor(
+        factory=factory,
+        client=client,  # type: ignore[arg-type]
+        sink=sink,
+        epoch_source=lambda: _EPOCH,
+    )
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A, incarnation=1)
+    # Crash the first incarnation (a process exit) -> restart spawns, whose credential
+    # is now refused on every retry -> crash-loop -> breaker -> _spawn_or_terminal None.
+    factory.children[0].exit_future.set_result(("BrokenPipeError", "first crash"))
+    await sup.wait_until_breaker_open(_A)
+    await task  # returns cleanly via the ``child is None`` terminal break
+
+    assert "gateway.adapter.breaker_open" in sink.methods()
 
 
 # --- Adversarial (a) in-process analog: per-spawn fd isolation ----------------

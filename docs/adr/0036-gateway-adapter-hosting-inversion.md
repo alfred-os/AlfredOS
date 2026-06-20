@@ -145,6 +145,46 @@ zero credential movement**, not satisfying the invariant. Mechanism:
   B's spawn contract is shaped so this is a drop-in swap (same fd-3 child-read
   path; only the *writer* moves from gateway to core).
 
+### Credential contract realized (G6-3 annotation, #288)
+
+G6-3 implements the decision-4 contract above. Three facts the original decision did
+not pin down, recorded here so they cannot drift:
+
+- **A third frame class on the ADR-0031 leg.** The gateway↔core leg was a
+  fire-and-forget notification pump (opaque T3 payload units + `gateway.adapter.*`
+  status notifications). G6-3 adds the **FIRST request/response pair** on that leg:
+  `gateway.adapter.spawn_request{request_id, adapter_id, host_restart_seq, epoch}`
+  (gateway→core) and `core.adapter.spawn_grant{request_id, …, credential_material}`
+  (core→gateway — the first core→gateway *response* frame). A new id-correlation
+  primitive on `GatewayCoreLink` (`request_spawn_grant` + a `_pending_grants` waiter
+  registry; `_consume_frame`/`_route_unit` route the grant to its waiter) carries it.
+  The grant is a **response to a gateway-initiated request** (a precondition the
+  gateway consumes), NOT a core directive — the gateway decides whether/when to spawn.
+- **Bounded-await, two distinct fail-closed arms.** await-core (decision 4) covers
+  the link **down**. G6-3 adds a **bounded `wait_for` on the reply** so an UP leg
+  whose grant is dropped/unrouted fails closed loudly (`CredentialReplyTimeoutError`)
+  instead of hanging — distinct from `CredentialLegDownError` (link down → the
+  supervisor's AWAITING_CORE). The epoch is sourced **live** per spawn from
+  `current_core_epoch()` (a stale construction-time snapshot would DoS every spawn
+  after a core bounce or accept a wrong-epoch grant). Dedup/replay key is canonical
+  `(adapter_id, host_restart_seq, epoch)`; the resolver calls the broker **exactly
+  once** on a true replay; the gateway **never caches** (it verifies the grant matches
+  its outstanding request, else discards); an unsolicited/forged grant is refused.
+- **Honest str-residency residual (maintainer C1, option (a)).** The credential is
+  carried as a Python `str` end-to-end (matching `SecretBroker.get() -> str` and the
+  shipped quarantine fd-3 path). An immutable `str` cannot be zeroed; the ONLY
+  verifiably-zeroed object is the ephemeral `writev` `bytearray` *inside* the reused
+  `supervisor/fd3_key_delivery.deliver_provider_key_via_fd3`. The brief
+  broker-read→fd-3-write window is mitigated (not eliminated) the same way the
+  quarantine path is. A cross-cutting `SecretBroker.get_bytes` + bytes-end-to-end that
+  upgrades **both** the quarantine and adapter cred paths together is a **separate
+  future hardening** (NOT in G6-3) — it keeps the two credential paths consistent. The
+  credential is, however, **structurally un-loggable** in B: `SpawnGrant.credential_material`
+  is `repr=False` with overridden `__repr__`/`__str__`, and `AdapterCredentialError`
+  is built from `adapter_id` + a closed-vocab reason only (never from a `ValidationError`
+  carrying raw input), so a value-sentinel sweep confirms the credential appears only on
+  the fd-3 sink — never in an audit row, log line, frame repr, or exception.
+
 ### Ingress gate (decision 5)
 
 The gateway enforces a **coarse two-tier per-adapter, payload-blind** gate: a

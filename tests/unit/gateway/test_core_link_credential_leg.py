@@ -170,6 +170,40 @@ async def test_request_times_out_loud_when_reply_dropped() -> None:
     assert link._pending_grants == {}
 
 
+# --- Send-fault mid-request -> link-down (the supervisor awaits-core) ----------
+
+
+async def test_request_send_fault_raises_leg_down() -> None:
+    link, transport = _link_with_transport()
+
+    async def _raise_broken(frame: Mapping[str, object]) -> None:
+        raise BrokenPipeError("leg tore mid-send")
+
+    transport.send = _raise_broken  # type: ignore[method-assign]
+    with pytest.raises(CredentialLegDownError):
+        await link.request_spawn_grant(_request(), timeout=2.0)
+    assert link._pending_grants == {}  # waiter cleaned up
+
+
+# --- A grant arriving for an ALREADY-RESOLVED waiter is dropped (idempotent) ---
+
+
+async def test_grant_for_already_resolved_waiter_is_dropped() -> None:
+    link, _transport = _link_with_transport()
+
+    async def _deliver_twice() -> None:
+        await asyncio.sleep(0)
+        await link._consume_frame(_grant_frame())
+        # A SECOND grant for the same (now-resolved/removed) request is a loud drop.
+        await link._consume_frame(_grant_frame())
+
+    task = asyncio.ensure_future(link.request_spawn_grant(_request(), timeout=2.0))
+    await _deliver_twice()
+    grant = await task
+    assert grant.credential_material == _SENTINEL_CRED
+    assert link._pending_grants == {}
+
+
 # --- Link-DOWN: no live transport (Task 4 consumes this) ----------------------
 
 
@@ -188,6 +222,16 @@ async def test_unsolicited_grant_is_dropped() -> None:
     link, _transport = _link_with_transport()
     # No outstanding request: a grant frame is dropped (loud), never crashes.
     await link._consume_frame(_grant_frame())
+    assert link._pending_grants == {}
+
+
+async def test_malformed_grant_is_dropped() -> None:
+    link, _transport = _link_with_transport()
+    # A grant frame whose params fail Pydantic validation is a loud drop, never a crash
+    # and never a fed waiter (adversarial e — a forged response cannot unwind the pump).
+    await link._consume_frame(
+        {"jsonrpc": "2.0", "method": CORE_ADAPTER_SPAWN_GRANT, "params": {"bogus": "x"}}
+    )
     assert link._pending_grants == {}
 
 
