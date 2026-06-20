@@ -122,6 +122,7 @@ if TYPE_CHECKING:
 
     from alfred.audit.log import AuditWriter
     from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
+    from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
     from alfred.comms_mcp.daemon_runtime import (
         CommsInboundOrchestratorAdapter,
         OutboundSenderLike,
@@ -613,6 +614,15 @@ class _CommsBootGraph:
     # core-side. Holds no resource to reap (pure validator + in-memory snapshot map),
     # so ``aclose`` does not touch it.
     status_observer: AdapterStatusObserver
+    # Spec B G6-2b-2b (#288): the SHARED crash-dedup reconciler. Built ONCE here and
+    # injected into BOTH the status observer (gateway-crash arm) AND every per-adapter
+    # AdapterCrashHandler (in-child arm) so the two coexisting crash signals fold into
+    # one incident. In-memory only (per gateway<->core link lifetime); the durable
+    # trail is the signed audit log; NOT reachable from the ``alfred status`` CLI today
+    # (the CLI does not dial the daemon — see the crash_incident_reconciler module
+    # docstring's snapshot-reachability decision; 2b-2c owns the query seam). Holds no
+    # resource to reap, so ``aclose`` does not touch it.
+    crash_incident_reconciler: CrashIncidentReconciler
 
     async def aclose(self) -> None:
         """Reap the LIVE bwrap quarantined child + the daemon-owned ContentStore.
@@ -754,6 +764,7 @@ async def _build_comms_boot_graph(
         # threaded into the runner's ``lifecycle.start`` handshake, so a genuine live
         # ``up`` matches and a forged/stale epoch is refused (the false-liveness defense).
         from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
+        from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
 
         def _expected_epoch() -> str:
             epoch = current_boot_epoch()
@@ -761,10 +772,14 @@ async def _build_comms_boot_graph(
                 raise RuntimeError("boot epoch unset when building the status observer")
             return epoch
 
+        # ONE reconciler shared by the observer (gateway-crash arm) AND every per-adapter
+        # crash handler (in-child arm) — the crash-dedup join (G6-2b-2b / #288).
+        crash_incident_reconciler = CrashIncidentReconciler()
         status_observer = AdapterStatusObserver(
             audit=audit,
             expected_epoch=_expected_epoch,
             now=lambda: datetime.now(UTC),
+            reconciler=crash_incident_reconciler,
         )
         return _CommsBootGraph(
             secret_broker=secret_broker,
@@ -777,6 +792,7 @@ async def _build_comms_boot_graph(
             content_store=content_store,
             idempotency_store=idempotency_store,
             status_observer=status_observer,
+            crash_incident_reconciler=crash_incident_reconciler,
         )
     except Exception:
         # Reap BOTH the live bwrap child (via the transport) and the ContentStore's
@@ -910,7 +926,14 @@ async def _build_comms_adapter_wiring(
         breaker_tripper=breaker_tripper,
         audit_writer=audit,  # type: ignore[arg-type]
     )
-    crash_handler = AdapterCrashHandler(audit_writer=audit, hook_invoker=hook_invoker)  # type: ignore[arg-type]
+    crash_handler = AdapterCrashHandler(
+        audit_writer=audit,  # type: ignore[arg-type]
+        hook_invoker=hook_invoker,  # type: ignore[arg-type]
+        # The SAME reconciler the boot graph injected into the status observer, so a
+        # gateway crash and this in-child crash for one physical crash fold into one
+        # incident (G6-2b-2b / #288).
+        reconciler=graph.crash_incident_reconciler,
+    )
 
     session = await AlfredPluginSession.for_comms_adapter(
         adapter_id=wire.adapter_kind,
