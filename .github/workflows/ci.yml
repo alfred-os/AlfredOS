@@ -201,6 +201,22 @@ jobs:
           uv run coverage report \
             --include='src/alfred/security/quarantine_child_io.py' \
             --fail-under=100
+      - name: Daemon control-plane trust-boundary 100% line+branch coverage
+        # G6-2b-2c (#288, ADR-0038): the daemon control plane — a 0600 local-socket
+        # request/response introspection RPC. ``_local_socket.py`` is the EXTRACTED
+        # shared socket-security primitive (peer-uid auth, owner-only bind); the
+        # control server/client/protocol are the new IPC surface the CLI dials. All
+        # four are trust-boundary code (a coverage hole could ship an un-exercised
+        # auth/bind/error-mapping branch). Fully covered by the unit tier
+        # (``tests/unit/plugins/test_local_socket.py`` +
+        # ``tests/unit/cli/daemon/test_daemon_control_*.py``), so gating on unit-only
+        # ``.coverage`` data is sound. The combined ``coverage-gates`` job names them
+        # too (the two-gates pattern — keep BOTH in sync when this file changes).
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/_local_socket.py') != '' && hashFiles('src/alfred/cli/daemon/_daemon_control_server.py') != '' && hashFiles('src/alfred/cli/daemon/_daemon_control_client.py') != '' && hashFiles('src/alfred/cli/daemon/_daemon_control_protocol.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/plugins/_local_socket.py,src/alfred/cli/daemon/_daemon_control_server.py,src/alfred/cli/daemon/_daemon_control_client.py,src/alfred/cli/daemon/_daemon_control_protocol.py' \
+            --fail-under=100
       - name: Gateway kernel trust-boundary 100% line+branch coverage
         # Spec A G3-3a (#237, ADR-0032): ``src/alfred/gateway/`` is the
         # always-up gateway's stable kernel — the client-facing T1 carrier.
@@ -1281,6 +1297,18 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/gateway/link_state.py,src/alfred/gateway/client_listener.py,src/alfred/gateway/core_link.py,src/alfred/gateway/metrics.py,src/alfred/gateway/_control_frames.py,src/alfred/gateway/relay.py,src/alfred/gateway/_seq_tracker.py,src/alfred/gateway/process.py,src/alfred/gateway/client_link.py,src/alfred/gateway/replay_buffer.py,src/alfred/gateway/adapter_lifecycle.py,src/alfred/gateway/adapter_metrics.py,src/alfred/gateway/adapter_status_emitter.py,src/alfred/gateway/adapter_supervisor.py,src/alfred/gateway/status_leg.py' \
+            --fail-under=100
+      - name: Daemon control-plane trust-boundary 100% line+branch coverage (combined)
+        # G6-2b-2c (#288, ADR-0038): the daemon control plane — the EXTRACTED shared
+        # socket-security primitive (``_local_socket.py``) + the control
+        # server/client/protocol IPC surface. All trust-boundary; a coverage hole
+        # could ship an un-exercised auth/bind/error-mapping branch. Named here too
+        # (the two-gates pattern — mirrors the python-job ``Daemon control-plane``
+        # gate; keep BOTH in sync when this file changes).
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/_local_socket.py') != '' && hashFiles('src/alfred/cli/daemon/_daemon_control_server.py') != '' && hashFiles('src/alfred/cli/daemon/_daemon_control_client.py') != '' && hashFiles('src/alfred/cli/daemon/_daemon_control_protocol.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/plugins/_local_socket.py,src/alfred/cli/daemon/_daemon_control_server.py,src/alfred/cli/daemon/_daemon_control_client.py,src/alfred/cli/daemon/_daemon_control_protocol.py' \
             --fail-under=100
       - name: Supervisor subsystem 100% line+branch coverage (combined)
         # Slice-3 PR-S3-3b's ``src/alfred/supervisor/`` is the supervisor
