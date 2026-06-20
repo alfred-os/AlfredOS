@@ -57,6 +57,8 @@ from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
 from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.metrics import CIRCUIT_BREAKER_OPEN, CORE_LINK_UP
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
@@ -142,7 +144,29 @@ def _link_with_buffer(buf: ReplayBuffer) -> tuple[GatewayCoreLink, _RecordingCli
         return None
 
     link._payload_relay = _sink
+
+    # G6-4 Task 7 (#288, Option A): ``submit_tui_unit`` ADMITS+ENQUEUES; the seq mint +
+    # buffer append + write happen at scheduler DRAIN time. Wire the real client->core
+    # scheduler path (mirroring tests/unit/gateway/test_core_link.py) so a seeding
+    # ``_submit_and_drain`` reproduces the old inline-submit observable.
+    scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
+    scheduler.register_leg(leg)
+    link._leg_router = LegRouter(scheduler)
+    link._scheduler_for_test = scheduler  # type: ignore[attr-defined]  # drain handle for tests
     return link, recorder
+
+
+async def _submit_and_drain(link: GatewayCoreLink, payload: bytes, *, rounds: int = 1) -> None:
+    """Enqueue ``payload`` via ``submit_tui_unit`` then drain the scheduler synchronously.
+
+    Post-G6-4-Task-7 ``submit_tui_unit`` only admits + enqueues; the mint + append + write
+    happen at drain. This reproduces the old inline-submit observable for the buffer-keyed
+    reconnect/flood assertions. Honours the replay-pending gate (a cleared gate parks the
+    drain, exactly as production)."""
+    await link.submit_tui_unit(payload)
+    scheduler: GatewayLegScheduler = link._scheduler_for_test  # type: ignore[attr-defined]
+    for _ in range(rounds):
+        await scheduler._drain_one_round()
 
 
 async def _bounce_to_fresh_leg(link: GatewayCoreLink, fresh_core: _RecordingCoreTransport) -> None:
@@ -182,7 +206,7 @@ async def test_reconnect_replays_unacked_frames_round_trip() -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     bodies = [f'{{"inbound_id":"m{i}"}}'.encode() for i in range(_N)]
     for body in bodies:
-        await link.submit_tui_unit(body)
+        await _submit_and_drain(link, body)
     assert [f.seq for f in buf.unacked_frames()] == list(range(_N))  # 0..N-1 held
     assert [p for (p, _s, _a) in leg_a.sent_units] == bodies
 
@@ -230,7 +254,7 @@ async def test_replay_precedes_fresh_input_fifo_barrier() -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     replay_bodies = [f'{{"inbound_id":"r{i}"}}'.encode() for i in range(_N)]
     for body in replay_bodies:
-        await link.submit_tui_unit(body)
+        await _submit_and_drain(link, body)
 
     # Capture (clears the gate) — but DO NOT flush yet. The fresh leg is the same
     # recording transport the pump's relay_to_core will also send onto.
@@ -245,8 +269,12 @@ async def test_replay_precedes_fresh_input_fifo_barrier() -> None:
     relay = GatewayRelay(core_link=link, client_transport=client, client_seq_enabled=False)
 
     # Start the client->core pump. It must PARK on the cleared gate — the fresh unit is
-    # NOT forwarded while the replay is pending.
+    # NOT forwarded while the replay is pending. G6-4 Task 7 (#288): the pump ENQUEUES via
+    # ``submit_tui_unit``; the SCHEDULER drains onto the leg, so co-run the scheduler's drain
+    # pump (production runs both under the relay's TaskGroup).
+    scheduler: GatewayLegScheduler = link._scheduler_for_test  # type: ignore[attr-defined]
     pump = asyncio.ensure_future(relay._client_to_core_pump())
+    drain = asyncio.ensure_future(scheduler.run())
     for _ in range(20):
         await asyncio.sleep(0)
     assert not pump.done()
@@ -259,9 +287,10 @@ async def test_replay_precedes_fresh_input_fifo_barrier() -> None:
         if len(leg_b.sent_units) > _N:
             break
 
-    pump.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pump
+    for task in (pump, drain):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     # SEQ-ORDER BARRIER: the replayed frames hold seqs 0..N-1; the fresh frame got seq N.
     by_seq = sorted(leg_b.sent_units, key=lambda u: u[1])
@@ -303,7 +332,7 @@ async def test_forged_ready_does_not_trigger_flush() -> None:
     link._core_epoch = captured_epoch
     leg = _RecordingCoreTransport()
     link._current_core_transport = leg  # type: ignore[assignment]
-    await link.submit_tui_unit(b'{"inbound_id":"pinned"}')
+    await _submit_and_drain(link, b'{"inbound_id":"pinned"}')
     link._pending_replay = buf.unacked_frames()
     link._replay_pending.clear()
     stash_before = link._pending_replay
@@ -361,7 +390,7 @@ async def test_replay_is_payload_blind(monkeypatch: pytest.MonkeyPatch) -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     bodies = [f'{{"inbound_id":"b{i}"}}'.encode() for i in range(_N)]
     for body in bodies:
-        await link.submit_tui_unit(body)
+        await _submit_and_drain(link, body)
 
     leg_b = _RecordingCoreTransport()
     await _bounce_to_fresh_leg(link, leg_b)
@@ -388,7 +417,7 @@ async def test_complete_flush_leaves_no_lingering_stash() -> None:
     leg_a = _RecordingCoreTransport()
     link._current_core_transport = leg_a  # type: ignore[assignment]
     for i in range(_N):
-        await link.submit_tui_unit(f'{{"inbound_id":"s{i}"}}'.encode())
+        await _submit_and_drain(link, f'{{"inbound_id":"s{i}"}}'.encode())
 
     leg_b = _RecordingCoreTransport()
     await _bounce_to_fresh_leg(link, leg_b)
@@ -416,7 +445,7 @@ async def test_none_transport_defer_is_loud_not_silent() -> None:
     leg_a = _RecordingCoreTransport()
     link._current_core_transport = leg_a  # type: ignore[assignment]
     for i in range(_N):
-        await link.submit_tui_unit(f'{{"inbound_id":"d{i}"}}'.encode())
+        await _submit_and_drain(link, f'{{"inbound_id":"d{i}"}}'.encode())
 
     # Capture (clears the gate), then the fresh leg vanishes BEFORE the flush sends.
     handshake = _FakeTransport(frames=[_start_frame(uuid4().hex, seq_ack=True)])
@@ -459,7 +488,7 @@ async def test_trim_mid_flush_is_benign() -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     bodies = [f'{{"inbound_id":"t{i}"}}'.encode() for i in range(_N)]
     for body in bodies:
-        await link.submit_tui_unit(body)
+        await _submit_and_drain(link, body)
 
     handshake = _FakeTransport(frames=[_start_frame(uuid4().hex, seq_ack=True)])
     await link._peer_handshake(handshake)  # type: ignore[arg-type]

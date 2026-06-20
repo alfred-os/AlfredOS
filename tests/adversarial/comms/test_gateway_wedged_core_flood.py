@@ -61,6 +61,8 @@ from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
 from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.metrics import CIRCUIT_BREAKER_OPEN, CORE_LINK_UP
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
@@ -130,6 +132,16 @@ def _flood_client(read_calls: list[int]) -> _FakeTransport:
     original = transport.read_payload_unit
 
     async def _counting_read() -> SeqFrame | None:
+        # G6-4 Task 7 (#288): the pump ENQUEUES via ``submit_tui_unit``; the breaker-tripping
+        # buffer append happens at scheduler DRAIN time. Drain ONE round per client read so the
+        # prior enqueue is appended (and the soft-cap breaker latches) BEFORE the pump reads the
+        # next unit — the single-physical-writer lockstep production drains at (≤1 frame in
+        # flight). This keeps "the read-halt is the bound" exact: the breaker trips at the 5th
+        # append, so the pump's loop-top halt fires before it reads past soft-cap + 1.
+        # ``_drain_round`` is installed by ``_wedged_relay`` once the scheduler exists.
+        drain = getattr(transport, "_drain_round", None)
+        if drain is not None:
+            await drain()
         read_calls.append(1)
         return await original()
 
@@ -170,16 +182,33 @@ def _wedged_relay(
     # Simulate a live UP core leg WITHOUT running the dial/handshake pump: bind the
     # current transport directly so ``submit_tui_unit`` sends succeed (the wedge accepts).
     link._current_core_transport = wedged  # type: ignore[assignment]
+    # G6-4 Task 7 (#288, Option A): ``submit_tui_unit`` ADMITS+ENQUEUES; the seq mint +
+    # buffer append (the breaker-tripping append under test) + write happen at scheduler
+    # DRAIN time. Wire the real client->core scheduler path + co-run it on the relay so the
+    # flood actually reaches the buffer (mirrors production: relay.run co-runs the drain pump).
+    scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
+    scheduler.register_leg(leg)
+    link._leg_router = LegRouter(scheduler)
+    # Lockstep drain hook: the flood client drains one scheduler round per read (see
+    # ``_flood_client``) so the breaker latches before the pump out-runs the single writer.
+    client._drain_round = scheduler._drain_one_round  # type: ignore[attr-defined]
     relay = GatewayRelay(
         core_link=link,
         client_transport=client,  # type: ignore[arg-type]
         client_seq_enabled=False,  # production shape: the TUI leg is plain.
+        scheduler=scheduler,
     )
     return relay, link, recorder, wedged
 
 
 async def _drive_until_halted(task: asyncio.Task[None], buf: ReplayBuffer) -> None:
-    """Step the loop until the pump has tripped the breaker and parked at the halt."""
+    """Step the loop until the pump has tripped the breaker and parked at the halt.
+
+    G6-4 Task 7 (#288): the pump ENQUEUES via ``submit_tui_unit``; the breaker-tripping buffer
+    append happens at scheduler DRAIN time. The flood client drains one scheduler round per
+    read (``_flood_client``'s ``_drain_round`` hook), so the append/breaker latch in lockstep
+    with the pump's reads — no separate drain is stepped here.
+    """
     for _ in range(200):
         await asyncio.sleep(0)
         if buf.breaker_tripped and not task.done():
