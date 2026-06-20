@@ -36,15 +36,16 @@ import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import Final
 
 import structlog
 
+from alfred.gateway.adapter_credential_client import GatewayAdapterCredentialClient
 from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
 from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
     GatewayAdapterSupervisor,
     _AdapterChildLike,
+    _DeliverCredential,
 )
 from alfred.gateway.client_link import client_handshake
 from alfred.gateway.client_listener import GatewayClientListener
@@ -56,11 +57,6 @@ from alfred.gateway.status_leg import GatewayCoreLinkStatusSink
 
 log = structlog.get_logger(__name__)
 
-# 2b-2a empty-set placeholder epoch: no ``up`` is emitted on the empty adapter set, so
-# this 32-hex placeholder is NEVER put on the wire. G6-3 reads the live captured epoch
-# via ``core_link.current_core_epoch()`` per spawn instead of this snapshot.
-_PLACEHOLDER_EPOCH: Final[str] = "0" * 32
-
 
 class _UnspawnedAdapterChildFactory:
     """G6-2b-2a placeholder: refuses to spawn (no real launcher until G6-3).
@@ -71,25 +67,37 @@ class _UnspawnedAdapterChildFactory:
     audibly instead of running a credential-less / child-less adapter.
     """
 
-    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _AdapterChildLike:
-        # ``epoch`` is part of the factory Protocol (G6-3 stamps it onto the spawned
-        # child); this placeholder never spawns, so it is referenced only in the
-        # fail-closed error for forensic context. The ``_AdapterChildLike`` return type
-        # satisfies the factory Protocol; the method always raises, so it never returns.
+    async def spawn_and_handshake(
+        self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
+    ) -> _AdapterChildLike:
+        # ``epoch`` + ``deliver_credential`` are part of the factory Protocol (G6-3
+        # delivers the credential over fd 3); this placeholder never spawns, so they are
+        # referenced only in the fail-closed error for forensic context. The
+        # ``_AdapterChildLike`` return type satisfies the Protocol; it always raises.
+        del deliver_credential
         raise GatewayAdapterSpawnError(
             f"adapter child spawn is not wired until G6-3 "
             f"(adapter_id={adapter_id!r}, epoch={epoch!r})"
         )
 
 
-class _UnavailableCredSeam:
-    """G6-2b-2a placeholder cred seam: always unavailable (real cred is G6-3)."""
+class _CoreEpochCredSeam:
+    """G6-3 pre-spawn liveness probe: the credential leg is up iff the core epoch is set.
+
+    The CHEAP local link-state check (correction H2 part i): a credential round-trip is
+    only possible once the gateway has handshaked the core leg and captured the per-boot
+    epoch (``GatewayCoreLink.current_core_epoch() is not None``). This is NOT a full
+    ``spawn_request`` (no core decrypt) — the real credential is acquired at spawn time
+    by the :class:`GatewayAdapterCredentialClient`. A ``None`` epoch routes the adapter
+    to AWAITING_CORE rather than spawning against a dead leg.
+    """
+
+    def __init__(self, *, core_link: GatewayCoreLink) -> None:
+        self._core_link = core_link
 
     async def is_available(self, *, adapter_id: str) -> bool:
-        # ``adapter_id`` is part of the cred Protocol; this placeholder is uniformly
-        # unavailable (real per-adapter credential lookup is G6-3), so it is unused here.
-        del adapter_id
-        return False
+        del adapter_id  # the probe is per-leg, not per-adapter (the leg carries all)
+        return self._core_link.current_core_epoch() is not None
 
 
 class GatewayProcess:
@@ -165,13 +173,19 @@ class GatewayProcess:
         """
         sink = GatewayCoreLinkStatusSink(core_link=core_link)
         emitter = AdapterStatusEmitter(sink=sink)
+        # G6-3 (#288): the REAL credential client holds the core leg (the credential
+        # round-trip's gateway half). The cred seam is the cheap live-epoch liveness
+        # probe; the epoch is sourced LIVE per spawn from the core link (H1). The adapter
+        # set is EMPTY in 2b-2a (gap b) — the plumbing is live but no child is spawned
+        # until a real adapter id + child factory land (the real Discord factory is the
+        # privileged-lane G6-3 Task 9; an unspawned-factory placeholder fails loud).
+        credential_client = GatewayAdapterCredentialClient(core_link=core_link)
         return GatewayAdapterSupervisor(
             child_factory=_UnspawnedAdapterChildFactory(),
-            cred_seam=_UnavailableCredSeam(),
+            cred_seam=_CoreEpochCredSeam(core_link=core_link),
+            credential_client=credential_client,
             emitter=emitter,
-            # Empty-set boot: no ``up`` emits, so this placeholder epoch is never put on
-            # the wire. G6-3 reads the live ``core_link.current_core_epoch()`` per spawn.
-            epoch=core_link.current_core_epoch() or _PLACEHOLDER_EPOCH,
+            epoch_source=core_link.current_core_epoch,
             sleep=self._sleep,
         )
 
@@ -318,6 +332,6 @@ class GatewayProcess:
 
 __all__ = [
     "GatewayProcess",
-    "_UnavailableCredSeam",
+    "_CoreEpochCredSeam",
     "_UnspawnedAdapterChildFactory",
 ]

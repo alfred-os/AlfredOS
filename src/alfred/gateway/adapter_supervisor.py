@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+from alfred.comms_mcp.adapter_credential_resolver import AdapterCredentialError
 from alfred.comms_mcp.protocol import AdapterDownReason
 from alfred.errors import AlfredError
 from alfred.gateway.adapter_lifecycle import (
@@ -67,6 +68,7 @@ from alfred.gateway.adapter_metrics import (
     ADAPTER_RESTARTS,
     ADAPTER_UP,
 )
+from alfred.gateway.core_link import CredentialLegDownError
 
 if TYPE_CHECKING:
     from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
@@ -120,28 +122,67 @@ class _AdapterChildLike(Protocol):
         ...
 
 
-class _AdapterChildFactoryLike(Protocol):
-    """Spawns + handshakes one adapter child (FAKE in 2b-1; real launcher in G6-3).
+# The credential-delivery callback the supervisor hands the factory (G6-3 / Task 5a).
+# The factory invokes it with the child's fd-3 WRITE END at the right moment in the
+# spawn — AFTER the synchronous fd-3-clobber window has closed, BEFORE the handshake
+# (the child blocks on ``os.read(3)`` until the credential arrives). The callback runs
+# the ``spawn_request -> spawn_grant`` round-trip + the atomic ``writev`` delivery
+# (which closes the write end itself). A failure raises loud (the factory lets it
+# propagate as a spawn failure — fail-closed, no child without its credential).
+_DeliverCredential = Callable[[int], Awaitable[None]]
 
-    The real implementation (2b-2/G6-3) constructs a per-adapter
-    :class:`CommsPluginRunner` + :class:`CommsStdioTransport` (share-in-place reuse)
-    and runs ``start_and_handshake``. 2b-1's tests inject a fake. A spawn / handshake
-    failure MUST raise :class:`GatewayAdapterSpawnError` (fail-closed) — never
-    log-and-continue.
+
+class _AdapterChildFactoryLike(Protocol):
+    """Spawns + handshakes one adapter child, delivering the credential over fd 3 (G6-3).
+
+    The real implementation (G6-3 / Task 9) constructs a per-adapter
+    :class:`CommsPluginRunner` + :class:`CommsStdioTransport`, OWNS the fd-3 pipe
+    (``os.pipe()`` — read-end onto the child's literal fd 3, write-end handed to
+    ``deliver_credential``), spawns SYNCHRONOUSLY inside the dup2->Popen->restore
+    window (the "no ``await`` while fd 3 is clobbered" discipline — see
+    :mod:`alfred.security.quarantine_child_io`), then invokes ``deliver_credential``
+    with the write end (after the window closes, before the handshake). 2b-1's tests
+    inject a fake. A spawn / handshake / credential-delivery failure MUST raise
+    :class:`GatewayAdapterSpawnError` (fail-closed) — never log-and-continue.
+
+    ``deliver_credential`` is the supervisor's at-spawn credential hook (Task 5b): the
+    factory MUST call it (with the fd-3 write end) on the success path so the child
+    receives its credential out-of-band; a raise from it aborts the spawn.
     """
 
-    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _AdapterChildLike: ...
+    async def spawn_and_handshake(
+        self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
+    ) -> _AdapterChildLike: ...
 
 
 class _CredSeamLike(Protocol):
-    """The (FAKE, in 2b-1) credential gate consulted BEFORE a spawn.
+    """The CHEAP pre-spawn credential-availability probe (correction H2 part i).
 
-    Real credential ``spawn_request`` / ``spawn_grant`` / fd-3 delivery is G6-3; 2b-1
-    uses this stand-in. ``is_available`` False routes the machine to ``AWAITING_CORE``
-    rather than spawning credential-less.
+    A LOCAL link-state liveness check — NOT a full ``spawn_request`` + core decrypt
+    (that would be wasteful + a minor harvest-amplification surface). The real
+    implementation reads ``GatewayCoreLink.current_core_epoch() is not None`` (the leg
+    is up + handshaked). ``is_available`` False routes the machine to ``AWAITING_CORE``
+    rather than spawning toward a down leg; the actual credential is acquired at spawn
+    time by the :class:`_DeliverCredential` hook (Task 5b).
     """
 
     async def is_available(self, *, adapter_id: str) -> bool: ...
+
+
+class _CredentialClientLike(Protocol):
+    """The at-spawn credential acquirer the supervisor drives (G6-3 / Task 5b).
+
+    Satisfied by :class:`alfred.gateway.adapter_credential_client.GatewayAdapterCredentialClient`.
+    ``acquire_and_deliver`` runs the ``spawn_request -> spawn_grant`` round-trip over
+    the core leg, verifies the grant, and delivers the credential to ``write_fd`` (the
+    child's fd-3 write end). It raises ``CredentialLegDownError`` on a down leg (the
+    supervisor routes to AWAITING_CORE) and ``AdapterCredentialError`` on a refusal /
+    delivery fault (fail-closed spawn abort). It closes ``write_fd`` on every path.
+    """
+
+    async def acquire_and_deliver(
+        self, *, adapter_id: str, host_restart_seq: int, write_fd: int, epoch: str
+    ) -> None: ...
 
 
 class _AdapterRun:
@@ -169,6 +210,11 @@ class _AdapterRun:
         # The most recent process-exit ``(error_class, detail)`` awaiting the crash
         # arm's EMIT_CRASHED (set by :meth:`_await_exit_or_stop`).
         self.pending_crash: tuple[str, str] = ("AdapterChildExited", "")
+        # H1 (G6-3 / #288): the epoch this incarnation was SPAWNED under, captured live
+        # in ``_spawn_or_terminal`` and stamped onto the ``up`` frame so a core bounce
+        # mid-life cannot make the ``up`` epoch drift from the spawn/grant epoch. ``None``
+        # before the first spawn (no ``up`` is emitted then).
+        self.spawn_epoch: str | None = None
 
 
 class GatewayAdapterSupervisor:
@@ -185,8 +231,9 @@ class GatewayAdapterSupervisor:
         *,
         child_factory: _AdapterChildFactoryLike,
         cred_seam: _CredSeamLike,
+        credential_client: _CredentialClientLike,
         emitter: AdapterStatusEmitter,
-        epoch: str,
+        epoch_source: Callable[[], str | None],
         # ``Awaitable`` (not the narrower ``Coroutine``): the supervisor only ``await``s
         # the result, so any awaitable-returning sleep seam (the production
         # ``asyncio.sleep``, a test's plain ``async def`` fake, or ``GatewayProcess._sleep``)
@@ -203,8 +250,18 @@ class GatewayAdapterSupervisor:
             raise ValueError(f"max_concurrent_boots must be >= 1, got {max_concurrent_boots!r}")
         self._factory = child_factory
         self._cred = cred_seam
+        # G6-3 (#288): the real credential acquirer. The supervisor hands the factory a
+        # ``deliver_credential`` closure that runs ``acquire_and_deliver`` over the fd-3
+        # write end the factory creates. A ``CredentialLegDownError`` from it routes the
+        # adapter to AWAITING_CORE (Task 4); any other AdapterCredentialError aborts the
+        # spawn fail-closed.
+        self._credential_client = credential_client
         self._emitter = emitter
-        self._epoch = epoch
+        # H1 (correction): the epoch is sourced LIVE at spawn time from the core link,
+        # NOT a construction-time snapshot — a core bounce mints a new epoch, and a
+        # stale snapshot would either DoS every spawn (refused epoch) or accept a
+        # wrong-epoch grant. ``None`` means the leg is not yet handshaked (link-down).
+        self._epoch_source = epoch_source
         self._sleep = sleep
         # Decorrelated jitter: every adapter draws its backoff from this ONE shared RNG
         # stream. The anti-stampede property does NOT require a per-adapter stream — it
@@ -296,14 +353,25 @@ class GatewayAdapterSupervisor:
                 if run.stop_event.is_set():
                     await self._stop(run)
                     break
-                # Cred gate BEFORE spawn — a cred-down parks in AWAITING_CORE.
+                # CHEAP pre-spawn liveness probe (correction H2 part i): a LOCAL
+                # link-state check (the leg is up + handshaked), NOT a full spawn_request
+                # + core decrypt. A cred-down parks in AWAITING_CORE.
                 if not await self._cred.is_available(adapter_id=adapter_id):
                     await self._enter_awaiting_core(run)
                     if await self._wait_cred_or_stop(run):
                         break
                     continue
 
-                child = await self._spawn_or_terminal(run)
+                try:
+                    child = await self._spawn_or_terminal(run)
+                except CredentialLegDownError:
+                    # The leg dropped DURING the at-spawn credential round-trip (Task 4):
+                    # NOT a crash. Park in AWAITING_CORE (non-spin bounded wait) instead
+                    # of crash-looping a dead leg — loud + audited inside.
+                    await self._enter_awaiting_core(run, reason="credential_leg_down")
+                    if await self._wait_cred_or_stop(run):
+                        break
+                    continue
                 if child is None:
                     break  # the spawn failure tripped the breaker (terminal)
 
@@ -335,27 +403,84 @@ class GatewayAdapterSupervisor:
         FIRST spawn attempt of the adapter (no prior crash), the error is re-raised
         fail-closed so a boot can refuse the adapter (Task 4).
         """
+        # H1 (correction): source the epoch LIVE per spawn — a core bounce mints a new
+        # epoch and a stale construction-time snapshot would DoS every spawn (refused
+        # epoch) or accept a wrong-epoch grant. ``None`` means the leg is not handshaked
+        # yet (link-down) — route to AWAITING_CORE, never spawn against a dead leg.
+        epoch = self._epoch_source()
+        if epoch is None:
+            raise CredentialLegDownError(
+                f"core leg has no epoch; cannot spawn (adapter_id={run.adapter_id!r})"
+            )
+        # Stamp the spawn epoch so the eventual ``up`` frame carries the SAME epoch the
+        # credential grant was bound to (H1) — not a later-bounced core's epoch.
+        run.spawn_epoch = epoch
         run.machine.state = AdapterLifecycleState.SPAWNING
         await self._apply(run, AdapterLifecycleEvent.SPAWN_STARTED)  # -> HANDSHAKING
         ADAPTER_INFLIGHT.labels(adapter=run.adapter_id).set(1)
+        # The at-spawn credential delivery hook (Task 5b): the factory invokes this with
+        # the child's fd-3 write end (after the sync spawn window closes, before the
+        # handshake). It runs the round-trip + the atomic writev (which closes the write
+        # end). A ``CredentialLegDownError`` propagates so this method routes to
+        # AWAITING_CORE; an ``AdapterCredentialError`` (refusal / delivery fault) is a
+        # fail-closed spawn abort. The epoch + host_restart_seq are captured per spawn.
+        host_restart_seq = run.restart_count
+
+        async def _deliver(write_fd: int) -> None:
+            await self._credential_client.acquire_and_deliver(
+                adapter_id=run.adapter_id,
+                host_restart_seq=host_restart_seq,
+                write_fd=write_fd,
+                epoch=epoch,
+            )
+
         try:
             child = await self._factory.spawn_and_handshake(
-                adapter_id=run.adapter_id, epoch=self._epoch
+                adapter_id=run.adapter_id, epoch=epoch, deliver_credential=_deliver
             )
-        except GatewayAdapterSpawnError as exc:
+        except CredentialLegDownError:
+            # Link-down during the credential round-trip: NOT a crash. Roll back the
+            # in-flight gauge + machine to RESTARTING and re-raise so ``supervise_one``
+            # parks in AWAITING_CORE (Task 4) rather than crash-looping a dead leg.
             ADAPTER_INFLIGHT.labels(adapter=run.adapter_id).set(0)
+            run.machine.state = AdapterLifecycleState.RESTARTING
+            raise
+        except (GatewayAdapterSpawnError, AdapterCredentialError) as exc:
+            # A fail-closed spawn / credential abort (launcher fail, grant refusal /
+            # mismatch, fd-3 fault): NEVER log-and-continue. A credential abort ALSO
+            # emits the distinct spawn-aborted audit row before joining the shared crash
+            # arm, so the breaker/backoff applies on a persistent credential failure
+            # exactly as on a launcher crash-loop.
+            ADAPTER_INFLIGHT.labels(adapter=run.adapter_id).set(0)
+            if isinstance(exc, AdapterCredentialError):
+                # The distinct fail-closed spawn-abort audit row (closed-vocab reason).
+                # The credential is structurally absent from the row (maintainer C1). The
+                # error is WRAPPED as GatewayAdapterSpawnError (L1 hierarchy) so the
+                # supervisor's existing crash/breaker arm + the boot-refusal re-raise
+                # treat it uniformly with a launcher spawn failure.
+                await self._audit_spawn_aborted(run, reason="credential_refused")
+                spawn_error: GatewayAdapterSpawnError = GatewayAdapterSpawnError(
+                    f"credential pipeline aborted the spawn (adapter_id={run.adapter_id!r}, "
+                    f"reason={exc.reason!r})"
+                )
+            else:
+                spawn_error = exc
             first_attempt = run.restart_count == 0 and not run.recent_crashes
             await self._apply(
                 run,
                 AdapterLifecycleEvent.HANDSHAKE_FAILED,
-                error_class=type(exc).__name__,
-                detail=str(exc),
+                error_class=type(spawn_error).__name__,
+                detail=str(spawn_error),
             )  # -> CRASHED, EMIT_CRASHED
             if first_attempt:
                 # Fail-closed: the very first spawn failed; surface it so the boot can
                 # refuse this adapter (never log-and-continue). Record nothing toward
-                # the breaker — the boot is aborting this adapter.
-                raise
+                # the breaker — the boot is aborting this adapter. A credential abort is
+                # raised as GatewayAdapterSpawnError ``from`` the original so the cause
+                # chain is preserved while the boot sees one uniform spawn-failure type.
+                if spawn_error is exc:
+                    raise
+                raise spawn_error from exc
             if await self._handle_crash(run):
                 return None  # breaker tripped
             if run.stop_event.is_set():
@@ -379,11 +504,45 @@ class GatewayAdapterSupervisor:
         # A fresh, healthy incarnation: reset the backoff ramp.
         run.backoff_base = _INITIAL_BACKOFF_SECONDS
 
-    async def _enter_awaiting_core(self, run: _AdapterRun) -> None:
+    async def _enter_awaiting_core(
+        self, run: _AdapterRun, *, reason: str = "credential_unavailable"
+    ) -> None:
         run.machine.state = AdapterLifecycleState.RESTARTING
         await self._apply(run, AdapterLifecycleEvent.CRED_UNAVAILABLE)  # -> AWAITING_CORE
         ADAPTER_AWAITING_CORE.labels(adapter=run.adapter_id).set(1)
         run.awaiting_core_event.set()
+        self._audit_awaiting_core(run, reason=reason)
+
+    def _audit_awaiting_core(self, run: _AdapterRun, *, reason: str) -> None:
+        """Write the honest gateway-side awaiting-core audit row (Task 4).
+
+        The gateway holds NO signing key (the comms-adapter contract: stateless
+        beyond a connection buffer), so its audit is a LOUD structlog row keyed on
+        ``GATEWAY_ADAPTER_AWAITING_CORE_FIELDS`` (mirrors ``core_link``'s honest
+        back-pressure audit). The signed-log reconcile into the CORE log over the
+        status leg is a tracked ADR-0036 follow-up. No credential is in the row.
+        """
+        log.warning(
+            "gateway.adapter.awaiting_core",
+            adapter_id=run.adapter_id,
+            host_restart_seq=run.restart_count,
+            reason=reason,
+        )
+
+    async def _audit_spawn_aborted(self, run: _AdapterRun, *, reason: str) -> None:
+        """Write the honest gateway-side fail-closed spawn-abort audit row (Task 5b).
+
+        A distinct LOUD row for a credential-pipeline spawn abort (grant refusal /
+        mismatch / fd-3 fault) — keyed on ``GATEWAY_ADAPTER_SPAWN_ABORTED_FIELDS``,
+        closed-vocab ``reason``, NO credential (maintainer C1). Same gateway-has-no-DB
+        honest-structlog posture as :meth:`_audit_awaiting_core`.
+        """
+        log.warning(
+            "gateway.adapter.spawn_aborted",
+            adapter_id=run.adapter_id,
+            host_restart_seq=run.restart_count,
+            reason=reason,
+        )
 
     async def _await_exit_or_stop(self, run: _AdapterRun, child: _AdapterChildLike) -> bool:
         """Race the child's process exit against a planned stop.
@@ -540,8 +699,17 @@ class GatewayAdapterSupervisor:
                 # crash+restart -> 1, since ``_handle_crash`` did ``restart_count += 1``
                 # before looping back). The core reconciler advances its current
                 # incarnation to this on the accepted up.
+                # H1 (#288): stamp the epoch this incarnation was SPAWNED under (captured
+                # live in ``_spawn_or_terminal``), so a core bounce mid-life cannot drift
+                # the ``up`` epoch from the credential-grant epoch. ``spawn_epoch`` is set
+                # before any HANDSHAKE_OK can feed EMIT_UP, so it is non-None here.
+                spawn_epoch = run.spawn_epoch
+                if spawn_epoch is None:  # pragma: no cover - EMIT_UP follows a spawn
+                    raise AdapterLifecycleStateError(
+                        f"EMIT_UP without a captured spawn epoch (adapter_id={adapter_id!r})"
+                    )
                 await self._emitter.emit_up(
-                    adapter_id=adapter_id, epoch=self._epoch, host_restart_seq=run.restart_count
+                    adapter_id=adapter_id, epoch=spawn_epoch, host_restart_seq=run.restart_count
                 )
                 ADAPTER_UP.labels(adapter=adapter_id).set(1)
             case AdapterControl.EMIT_DOWN:
