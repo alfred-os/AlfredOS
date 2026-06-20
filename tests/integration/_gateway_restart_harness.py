@@ -45,7 +45,7 @@ import contextlib
 import json
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -82,6 +82,14 @@ _GATEWAY_ADAPTER_ID = "gateway"
 # test loudly instead of hanging (vs a fixed wall-clock timeout, which is the flake
 # vector this loop replaces).
 _SETTLE_TICKS = 200
+
+# How many cooperative-yield ticks a STABILITY assertion (:func:`stays`) holds an invariant
+# over before declaring it stable. Generous enough that any erroneous out-of-order delivery
+# the gateway could make on a parked (half-booted) leg would land within the window and fail
+# the assertion LOUD, yet bounded so a genuinely-stable invariant resolves promptly. This is
+# the negative half of the two-phase barrier (replay STAYS refused pre-``ready``); the
+# positive half (:func:`settle`) proves it is then ACCEPTED after ``release_ready``.
+_STABILITY_TICKS = 50
 
 # Wall-clock bound on the post-cancellation drain. Tasks are already cancelled by the
 # time we gather them, so this should resolve near-instantly; a task that refuses to
@@ -120,8 +128,11 @@ class _GoDownCoreTransport(_ScriptedCoreTransport):
 
     _EOF = object()  # the clean-EOF sentinel pushed onto the relay queue.
 
-    def __init__(self, epoch: str) -> None:
-        super().__init__([start_frame(epoch)])
+    def __init__(self, epoch: str, *, handshake_script: list[object] | None = None) -> None:
+        # ``handshake_script`` lets a subclass PARK the handshake read (the two-phase
+        # barrier, :class:`_HalfBootedCoreTransport`); the default is the plain
+        # send-``start``-first handshake every Spec-A restart test uses.
+        super().__init__(handshake_script if handshake_script is not None else [start_frame(epoch)])
         self._relay_q: asyncio.Queue[object] = asyncio.Queue()
 
     def deliver_ack(self, cumulative_ack: int, *, seq: int) -> None:
@@ -139,6 +150,119 @@ class _GoDownCoreTransport(_ScriptedCoreTransport):
             return None
         assert isinstance(entry, SeqFrame)
         return entry
+
+
+class _HalfBootedCoreTransport(_GoDownCoreTransport):
+    """The reconnect-target core that stays PRE-``ready`` until :meth:`release_ready` (K7).
+
+    The two-phase determinism barrier. A real new core boot is not instantly able to
+    accept resumed traffic: it must finish booting before it sends its ``lifecycle.start``
+    and the gateway can complete the peer handshake + flush the replay. This transport
+    models that gap as an OBSERVABLE seam (NOT a sleep): the handshake read PARKS on a
+    ``release_ready`` :class:`asyncio.Event` and only THEN yields ``lifecycle.start``.
+
+    So across the bounce: the gateway dials the fresh leg, then BLOCKS in
+    :meth:`alfred.gateway.core_link.GatewayCoreLink._peer_handshake` reading the start
+    frame — :meth:`_flush_pending_replay` cannot run, so the captured remainder STAYS
+    refused (zero received on this leg). Calling :meth:`release_ready` lets the start
+    frame through, the handshake completes, and the flush re-sends the remainder — replay
+    ACCEPTED. The test asserts the refused-then-accepted edge with :func:`stays`, never a
+    timed sleep.
+    """
+
+    def __init__(self, epoch: str) -> None:
+        # Empty handshake script: this subclass OWNS the handshake read (it parks then
+        # yields the start frame itself), so the base script must NOT also queue a frame.
+        super().__init__(epoch, handshake_script=[])
+        self._epoch = epoch
+        self._ready = asyncio.Event()
+
+    def release_ready(self) -> None:
+        """Unpark the parked handshake read so this core boots to ``ready`` (K7 barrier)."""
+        self._ready.set()
+
+    async def read_frame(self) -> Mapping[str, object] | None:
+        """Park the handshake read until :meth:`release_ready`, THEN yield ``lifecycle.start``.
+
+        The base ``_ScriptedCoreTransport`` treats an ``asyncio.Event`` script entry as
+        "park then EOF", which would FAIL the handshake (a clean EOF before ``start`` is a
+        loud :class:`GatewayCoreLinkError`). The barrier we want is "park then ACCEPT", so
+        this override awaits ``release_ready`` and only then returns the real start frame —
+        the gateway's peer handshake stays BLOCKED (no flush) until the core boots to ready.
+        """
+        await self._ready.wait()
+        return start_frame(self._epoch)
+
+
+def _payload_inbound_identity(payload: bytes) -> tuple[str, str]:
+    """The ``(adapter_id, inbound_id)`` composite G0 key inside a relayed payload.
+
+    The opaque client->core unit the gateway relays is an ``inbound.message`` JSON-RPC
+    frame; the core derives the durable accept-once key from its body — exactly as the
+    real :class:`alfred.memory.inbound_idempotency.InboundIdempotencyStore` keys on
+    ``(adapter_id, inbound_id)`` (the gateway stays payload-blind; the CORE parses, per
+    arch-M3 / :class:`alfred.gateway.leg_router.LegRouter`). The fake core's G0 model uses
+    this to dedup a GENUINE double-delivery to exactly one commit.
+    """
+    frame = json.loads(payload)
+    params = frame["params"]
+    adapter_id = params["adapter_id"]
+    inbound_id = params["inbound_id"]
+    assert isinstance(adapter_id, str)
+    assert isinstance(inbound_id, str)
+    return adapter_id, inbound_id
+
+
+class _GatewayCoreG0Model:
+    """A FAITHFUL core-side G0 ``commit_once`` model keyed on ``(adapter_id, inbound_id)``.
+
+    K7's exactly-once proof needs a core that genuinely DEDUPS a double-delivered inbound,
+    not a transport that merely records arrivals. This models the durable accept-once
+    store the real core runs BEFORE any side effect
+    (:class:`alfred.memory.inbound_idempotency.PostgresInboundIdempotencyStore`):
+
+    * :meth:`commit_once` records the COMPOSITE ``(adapter_id, inbound_id)`` once and
+      returns whether THIS delivery won the insert (a fresh commit) — a second delivery
+      of the same key loses (``False``) and is counted as a replay-observed DROP, mirroring
+      :func:`alfred.comms_mcp.inbound._emit_idempotency_replay_observed`.
+    * the COMPOSITE key isolates each adapter's free-form id namespace: two DIFFERENT
+      ``adapter_id``s sending the SAME ``inbound_id`` BOTH commit (the cross-leg-isolation
+      property — adapter-minted ids are not globally unique).
+
+    It is the same model whether driven by a relayed wire payload (:meth:`observe_payload`)
+    or directly by ``(adapter_id, inbound_id)`` pairs (:meth:`commit_once`) — the
+    cross-leg-isolation test drives two distinct adapter ids through the one composite store.
+    """
+
+    def __init__(self) -> None:
+        self._committed: set[tuple[str, str]] = set()
+        self.commits: list[tuple[str, str]] = []
+        self.replays_observed: list[tuple[str, str]] = []
+
+    def commit_once(self, adapter_id: str, inbound_id: str) -> bool:
+        """Accept-once on the composite key; ``True`` on a fresh commit, ``False`` on replay."""
+        key = (adapter_id, inbound_id)
+        if key in self._committed:
+            self.replays_observed.append(key)
+            return False
+        self._committed.add(key)
+        self.commits.append(key)
+        return True
+
+    def observe_payload(self, adapter_id: str, payload: bytes) -> bool:
+        """Run :meth:`commit_once` for a relayed wire payload (parsing the in-body key)."""
+        _adapter_in_body, inbound_id = _payload_inbound_identity(payload)
+        # The CORE keys on the in-body ``adapter_id`` (arch-M3); the gateway-side leg
+        # ``adapter_id`` is a local routing key only. They coincide for the TUI leg.
+        return self.commit_once(adapter_id, inbound_id)
+
+    def commits_for(self, adapter_id: str, inbound_id: str) -> int:
+        """Number of FRESH commits recorded for one composite key (exactly-once oracle)."""
+        return self.commits.count((adapter_id, inbound_id))
+
+    def replays_for(self, adapter_id: str, inbound_id: str) -> int:
+        """Number of replay-observed DROPs recorded for one composite key (G0 dedup oracle)."""
+        return self.replays_observed.count((adapter_id, inbound_id))
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +359,25 @@ async def settle(predicate: Callable[[], bool]) -> bool:
     for _ in range(_SETTLE_TICKS):
         if predicate():
             return True
+        await asyncio.sleep(0)
+    return predicate()
+
+
+async def stays(predicate: Callable[[], bool], *, ticks: int = _STABILITY_TICKS) -> bool:
+    """Return whether ``predicate`` holds across EVERY one of ``ticks`` cooperative yields.
+
+    The STABILITY dual of :func:`settle` (K7's two-phase barrier). Where ``settle`` proves a
+    property EVENTUALLY becomes true, ``stays`` proves a property holds the WHOLE time — used
+    to assert replay STAYS refused (zero received on the new core) while it is half-booted
+    (pre-``ready``). It yields ``ticks`` times so any out-of-order delivery the gateway could
+    make on the parked leg gets a real chance to land; ``False`` the instant the invariant is
+    violated. This is an OBSERVABLE-seam barrier (the parked
+    :meth:`_HalfBootedCoreTransport.release_ready` handshake), NEVER an ``asyncio.sleep``
+    used as the synchronisation primitive — the yields only pump the loop.
+    """
+    for _ in range(ticks):
+        if not predicate():
+            return False
         await asyncio.sleep(0)
     return predicate()
 
