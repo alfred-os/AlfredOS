@@ -2392,3 +2392,96 @@ def status_daemon() -> None:
             last_boot_at=info.started_at,
         )
     )
+    _render_live_adapter_status()
+
+
+# G6-2b-2c (#288 / ADR-0038): the render-layer map from a wire ``RenderedAdapterState`` to
+# its localized ``daemon.status.state.*`` catalog key (the state token is localized, not
+# raw-interpolated — i18n hard rule). A render-layer concern, so it lives here.
+_ADAPTER_STATE_KEYS: Mapping[str, str] = {
+    "up": "daemon.status.state.up",
+    "down": "daemon.status.state.down",
+    "crashed": "daemon.status.state.crashed",
+    "breaker_open": "daemon.status.state.breaker_open",
+    "unknown": "daemon.status.state.unknown",
+}
+
+
+def _render_live_adapter_status() -> None:
+    """Dial the daemon control plane + render the live per-adapter status (#288, ADR-0038).
+
+    Read-only, best-effort: a daemon-absent dial is silently the not-running-already-said
+    path; a protocol/auth fault degrades to "no adapter section" (the signed audit log is
+    authoritative). The response is LIVE (no snapshot/staleness/boot_id).
+    """
+    from alfred.cli.daemon import _daemon_control_client
+    from alfred.cli.daemon._daemon_control_client import (
+        DaemonControlError,
+        DaemonControlUnavailableError,
+    )
+    from alfred.cli.daemon._daemon_control_protocol import (
+        STATUS_QUERY_METHOD,
+        DaemonStatusResult,
+    )
+
+    try:
+        # Resolve via the module (not the name bound at import) so a test that
+        # monkeypatches ``_daemon_control_client.query_daemon_control`` is honoured.
+        response = asyncio.run(_daemon_control_client.query_daemon_control(STATUS_QUERY_METHOD))
+    except DaemonControlUnavailableError:
+        # The daemon is not running / the control socket is not reachable. The pidfile
+        # subset already rendered; an "unavailable" breadcrumb here would be noise on the
+        # already-said not-running posture, so stay silent (the existing contract).
+        return
+    except DaemonControlError as exc:
+        # An auth / protocol fault (NOT daemon-absent): the control plane answered but the
+        # answer was unusable. Degrade LOUDLY-but-best-effort — render the "status
+        # unavailable" line (distinguishable from a healthy zero-adapter daemon) + a
+        # breadcrumb, never crash the read-only status command (CLAUDE.md hard rule #7:
+        # the signed audit log is authoritative; this is the operator-UX surface).
+        typer.echo(t("daemon.status.adapters_unavailable"))
+        log.warning("daemon.status.control_query_failed", error=type(exc).__name__)
+        return
+    if response.error is not None or response.result is None:
+        # The daemon returned a structured error (or an empty result). DISTINGUISHABLE
+        # from a healthy zero-adapter daemon (which renders ``adapters_none``): render the
+        # "status unavailable" line + the same breadcrumb rather than silently returning.
+        typer.echo(t("daemon.status.adapters_unavailable"))
+        log.warning("daemon.status.control_query_failed", error="control_response_error")
+        return
+    try:
+        result = DaemonStatusResult.model_validate(response.result)
+    except ValueError as exc:
+        # A malformed ``response.result`` (a wire/version skew, a future field the
+        # local models don't know) raises pydantic ``ValidationError`` (a ``ValueError``
+        # subclass). UNCAUGHT it would crash the read-only ``alfred daemon status`` — so
+        # degrade EXACTLY like the other control faults: render the "unavailable" line +
+        # a breadcrumb, never a traceback (CR T1; CLAUDE.md hard rule #7).
+        typer.echo(t("daemon.status.adapters_unavailable"))
+        log.warning("daemon.status.control_query_failed", error=type(exc).__name__)
+        return
+    if not result.adapters:
+        typer.echo(t("daemon.status.adapters_none"))
+        return
+    typer.echo(t("daemon.status.adapters_header"))
+    for adapter_id in sorted(result.adapters):
+        line = result.adapters[adapter_id]
+        latest = (
+            t(
+                "daemon.status.adapter_latest_crash",
+                seq=line.latest_crash.host_restart_seq,
+                source=line.latest_crash.crash_signal_source,
+            )
+            if line.latest_crash is not None
+            else ""
+        )
+        typer.echo(
+            t(
+                "daemon.status.adapter_line",
+                adapter_id=line.adapter_id,
+                state=t(_ADAPTER_STATE_KEYS[line.state]),
+                incarnation=line.current_incarnation,
+                crashes=line.crash_incident_count,
+                latest_crash=latest,
+            )
+        )
