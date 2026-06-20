@@ -45,6 +45,13 @@ class IngressRefusalReason(enum.Enum):
     THROTTLED_INFLIGHT = "throttled_inflight"
     GLOBAL_CAP_REFUSED = "global_cap_refused"
     UNKNOWN_ADAPTER = "unknown_adapter"
+    QUEUE_FULL = "queue_full"
+    # NB: QUEUE_FULL is the per-leg SEND-QUEUE back-pressure refusal (H2, Spec B G6-4 #288):
+    # the scheduler's bounded pre-append working-memory queue (``max_per_leg_queue_bytes``,
+    # K3/perf-M3) is full, so ``submit_tui_unit`` drops the frame LOUD rather than let the
+    # ``LegQueueFullError`` escape + crash the relay TaskGroup. Distinct from the buffer/cap
+    # tiers above: this bounds the queue BEFORE the leg buffer, never reached on the
+    # non-binding TUI leg unless a producer outruns the single writer.
     # NB: OVERSIZED is the size-tier refusal (K3 max_frame_bytes). The TUI leg's gate is
     # NON-BINDING in G6-4 so it never fires live; a real adapter leg (G6-5) can. Declared
     # here (the single closed-vocab home, K6) so the reason cannot drift when G6-5 wires it.

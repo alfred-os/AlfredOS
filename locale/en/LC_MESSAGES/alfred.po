@@ -1831,6 +1831,10 @@ msgstr "ingress refused: the shared replay-buffer budget is full"
 msgid "gateway.ingress.refused.unknown_adapter"
 msgstr "ingress refused: frame names an unregistered adapter"
 
+#: src/alfred/i18n/_spec_b_reserve.py:54
+msgid "gateway.ingress.refused.queue_full"
+msgstr "ingress refused: adapter send-queue is full (back-pressure)"
+
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
 # Only keys with live call-sites are retained; help-text long forms and
