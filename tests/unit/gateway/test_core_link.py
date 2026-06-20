@@ -38,6 +38,9 @@ from alfred.gateway.core_link import (
     GatewayCoreLink,
     GatewayCoreLinkError,
 )
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
@@ -82,6 +85,30 @@ def _link_with_epoch(epoch: str) -> tuple[GatewayCoreLink, _RecordingClientListe
 
 def _events_of(captured: list[dict[str, object]]) -> list[object]:
     return [c.get("event") for c in captured]
+
+
+def _tui_leg(buf: ReplayBuffer) -> GatewayLeg:
+    """Build the single proving TUI leg wrapping ``buf`` (G6-4a, #288).
+
+    The TUI leg is constructed with a NON-BINDING ingress gate (unbounded tokens /
+    in-flight / size) so the TUI is NOT throttled — behavior-preserving for G5, mirroring
+    the non-binding-cap treatment (PR2). G6-4's real adapter legs + the TUI's priority-credit
+    config land when the scheduler is wired. The ``GlobalReplayCap`` ceiling is set STRICTLY
+    ABOVE the buffer hard ceiling (``_max_bytes * 4`` > the buffer's ``* 2`` hard cap) so the
+    buffer's OWN hard-ceiling raise ALWAYS fires first (PR2) — the cap never refuses on this
+    single leg. ``now=lambda: 0.0`` matches the buffer's monotonic precondition for unit tests.
+    """
+    cap = GlobalReplayCap(max_total_bytes=buf._max_bytes * 4)
+    gate = PerAdapterIngressGate(
+        "tui",
+        sustained_rate_per_s=1e9,
+        burst=10**9,
+        max_inflight=10**9,
+        ttl_seconds=1e9,
+        max_frame_bytes=1 << 30,
+        now=lambda: 0.0,
+    )
+    return GatewayLeg(adapter_id="tui", buffer=buf, ingress_gate=gate, global_cap=cap, now=lambda: 0.0)
 
 
 class _FakeCoreTransport:
@@ -3248,3 +3275,18 @@ async def test_run_discards_replay_buffer_on_terminal_exit_zeroing_pre_dlp_bytes
     assert buf.depth_frames == 0
     assert retained_body == bytearray(len(b"pre-dlp-secret"))
     assert transport.closed is True
+
+
+# ---------------------------------------------------------------------------
+# Spec B G6-4a (#288): the TUI dial-in becomes the FIRST GatewayLeg. The leg OWNS the
+# buffer + per-leg seq + breaker latch + cap accounting; ``submit_tui_unit`` routes the
+# leg's ``record_for_send`` through the single ``write_leg_unit`` physical writer.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tui_leg_injection_is_accepted_and_exposed() -> None:
+    """A ``GatewayLeg`` injected as ``tui_leg`` is held and exposed read-only."""
+    leg = _tui_leg(ReplayBuffer())
+    link = GatewayCoreLink(client_listener=_RecordingClientListener(), tui_leg=leg)  # type: ignore[arg-type]
+    assert link._tui_leg is leg

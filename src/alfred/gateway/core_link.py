@@ -55,6 +55,7 @@ from alfred.errors import AlfredError
 from alfred.gateway._control_frames import control_notification
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.gateway.client_listener import GatewayClientListener
+from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
@@ -241,6 +242,7 @@ class GatewayCoreLink:
         monotonic: Callable[[], float] = time.monotonic,
         payload_relay: Callable[[bytes], Awaitable[None]] | None = None,
         replay_buffer: ReplayBuffer | None = None,
+        tui_leg: GatewayLeg | None = None,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
         self._client_listener = client_listener
@@ -316,6 +318,12 @@ class GatewayCoreLink:
         # buffering OFF — the merged G3 relay tests construct unchanged — so this
         # foundation cut wires only the injection; the append/trim lands in a later task.
         self._replay_buffer = replay_buffer
+        # Spec B G6-4a (#288): the TUI dial-in is the FIRST GatewayLeg. When injected it
+        # OWNS the buffer + per-leg client->core seq + breaker latch + cap accounting; the
+        # leg-routed ``submit_tui_unit`` drives ``record_for_send`` then the single physical
+        # ``write_leg_unit`` writer. The legacy ``replay_buffer`` slot is retired once every
+        # path reads the leg (the G5 single-TUI-leg ``relay_to_core`` path is replaced).
+        self._tui_leg = tui_leg
         # Spec A G4b-2b (#237): the reconnect-replay seams. ``_pending_replay`` holds the
         # un-acked frames captured before a reconnect reset, awaiting re-send on the fresh
         # leg. ``_replay_pending`` is a gate the relay's client->core pump awaits: SET = the
