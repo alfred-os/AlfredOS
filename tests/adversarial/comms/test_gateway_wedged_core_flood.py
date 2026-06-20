@@ -58,6 +58,9 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.gateway.client_listener import LinkControlNotification
 from alfred.gateway.core_link import GatewayCoreLink
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.metrics import CIRCUIT_BREAKER_OPEN, CORE_LINK_UP
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
@@ -140,13 +143,32 @@ def _wedged_relay(
     """Wire a real link (with ``buf``) + relay over a wedged core that accepts-not-acks."""
     recorder = _RecordingClientListener()
     wedged = _WedgedCoreTransport()
+    # G6-4a (#288): the TUI is the FIRST GatewayLeg wrapping ``buf`` (non-binding gate +
+    # a cap ceiling strictly above the buffer hard ceiling, PR2 — the buffer's own
+    # soft-cap breaker is the bound under test, not the cap).
+    gate = PerAdapterIngressGate(
+        "tui",
+        sustained_rate_per_s=1e9,
+        burst=10**9,
+        max_inflight=10**9,
+        ttl_seconds=1e9,
+        max_frame_bytes=1 << 30,
+        now=lambda: 0.0,
+    )
+    leg = GatewayLeg(
+        adapter_id="tui",
+        buffer=buf,
+        ingress_gate=gate,
+        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        now=lambda: 0.0,
+    )
     link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
         shutdown_event=shutdown,
-        replay_buffer=buf,
+        tui_leg=leg,
     )
     # Simulate a live UP core leg WITHOUT running the dial/handshake pump: bind the
-    # current transport directly so ``relay_to_core`` sends succeed (the wedge accepts).
+    # current transport directly so ``submit_tui_unit`` sends succeed (the wedge accepts).
     link._current_core_transport = wedged  # type: ignore[assignment]
     relay = GatewayRelay(
         core_link=link,

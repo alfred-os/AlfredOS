@@ -236,7 +236,7 @@ class GatewayRelay:
                 # fault does not crash the core pump's TaskGroup.
                 log.warning("gateway.relay.client_read_failed", error=repr(exc))
                 return
-            await self._core_link.relay_to_core(frame.payload)
+            await self._core_link.submit_tui_unit(frame.payload)
 
 
 __all__ = ["GatewayRelay"]

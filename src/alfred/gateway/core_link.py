@@ -71,7 +71,7 @@ from alfred.gateway.metrics import (
     CORE_UNAVAILABLE_SECONDS,
     RECONNECT_ATTEMPTS,
 )
-from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError, ReplayFrame
+from alfred.gateway.replay_buffer import ReplayBufferError, ReplayFrame
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, SeqFrame
 from alfred.plugins.comms_wire import CommsProtocolError
 
@@ -241,7 +241,6 @@ class GatewayCoreLink:
         shutdown_event: asyncio.Event | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         payload_relay: Callable[[bytes], Awaitable[None]] | None = None,
-        replay_buffer: ReplayBuffer | None = None,
         tui_leg: GatewayLeg | None = None,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
@@ -303,26 +302,18 @@ class GatewayCoreLink:
         # so an always-up gateway cannot be memory-DoS'd by an every-other-seq stream.
         self._core_tracker = BoundedSeqAckTracker()
         # The CURRENT live core transport, bound at the SAME points ``run`` binds its
-        # local ``transport`` (only AFTER a successful handshake). ``relay_to_core``
+        # local ``transport`` (only AFTER a successful handshake). ``write_leg_unit``
         # snapshots this into a local so a reconnect swap is atomic w.r.t. the send;
         # ``None`` outside an UP leg (the reconnect-race write window — architect M3).
         self._current_core_transport: _CommsTransportLike | None = None
-        # Spec A G4b-2-pre (#237): the gateway OWNS the client->core send-seq (so a
-        # G4b-2a buffered frame's wire seq equals its ReplayBuffer key even across a
-        # loud-dropped send). Per-connection: reset to 0 each ``_peer_handshake``, like
-        # the receive tracker — a fresh core leg is a fresh seq space (design §3.2).
-        self._client_to_core_seq = 0
-        # Spec A G4b-2a (#237): the optional un-acked-inbound retention buffer. The
-        # client->core seqs the gateway mints get appended here so a core BOUNCE can
-        # replay the un-acked remainder (spec §5). ``None`` (the default) leaves
-        # buffering OFF — the merged G3 relay tests construct unchanged — so this
-        # foundation cut wires only the injection; the append/trim lands in a later task.
-        self._replay_buffer = replay_buffer
         # Spec B G6-4a (#288): the TUI dial-in is the FIRST GatewayLeg. When injected it
-        # OWNS the buffer + per-leg client->core seq + breaker latch + cap accounting; the
-        # leg-routed ``submit_tui_unit`` drives ``record_for_send`` then the single physical
-        # ``write_leg_unit`` writer. The legacy ``replay_buffer`` slot is retired once every
-        # path reads the leg (the G5 single-TUI-leg ``relay_to_core`` path is replaced).
+        # OWNS its ReplayBuffer + the per-leg client->core send-seq (per-connection: reset
+        # to 0 each ``_peer_handshake`` via ``reset_for_new_epoch``, so a fresh core leg is
+        # a fresh seq space — design §3.2) + the breaker latch + the global-cap accounting.
+        # The leg-routed ``submit_tui_unit`` drives ``record_for_send`` (seq mint + buffer
+        # append + cap reserve) then the SINGLE physical ``write_leg_unit`` writer — there
+        # is exactly one serialization point. ``None`` leaves buffering OFF (the merged G3
+        # relay tests construct without a leg).
         self._tui_leg = tui_leg
         # Spec A G4b-2b (#237): the reconnect-replay seams. ``_pending_replay`` holds the
         # un-acked frames captured before a reconnect reset, awaiting re-send on the fresh
@@ -355,9 +346,10 @@ class GatewayCoreLink:
         """``True`` iff the injected ReplayBuffer's back-pressure breaker has latched.
 
         The relay's client->core pump polls this to halt the client read (Spec A
-        G4b-2a back-pressure / R4); ``False`` when no buffer is injected (buffering off).
+        G4b-2a back-pressure / R4); ``False`` when no leg is injected (buffering off).
+        G6-4a (#288): reads the TUI leg's breaker latch (the leg owns the buffer).
         """
-        return self._replay_buffer.breaker_tripped if self._replay_buffer is not None else False
+        return self._tui_leg.breaker_tripped if self._tui_leg is not None else False
 
     def current_core_epoch(self) -> str | None:
         """The most recently captured core boot epoch (32-hex), or ``None``.
@@ -383,33 +375,39 @@ class GatewayCoreLink:
             await asyncio.Event().wait()  # no event wired: block until cancelled
 
     def _refresh_buffer_metrics(self) -> None:
-        """Push the current ReplayBuffer depth/cap/breaker state onto the gauges.
+        """Push the TUI leg's depth/cap/breaker state onto the UNLABELLED gauges (JC-1 A).
 
-        Called after every buffer mutation (append, trim, reset, evict) so the gauges
-        track the live buffer. A no-op when no buffer is injected (buffering off).
+        Called after every buffer mutation (append, trim, reset, evict) so the gauges track
+        the live leg buffer. A no-op when no leg is injected (buffering off). G6-4a (#288):
+        reads ``self._tui_leg`` (the leg wraps the same ``ReplayBuffer``); the leg ALSO
+        refreshes its OWN per-adapter ``{adapter}``-labelled gauges inside ``record_for_send``
+        (harmless — JC-1 keeps the G5 unlabelled series the live dashboards key on). PR13: this
+        unlabelled shim is single-TUI-leg ONLY — G6-4 must NOT call it per-non-TUI-leg drain
+        (only the leg's own labelled refresh scales; keep it O(1)-per-frame, never O(N)-legs).
         """
-        if self._replay_buffer is None:
+        if self._tui_leg is None:
             return
-        BUFFER_DEPTH_FRAMES.set(self._replay_buffer.depth_frames)
-        BUFFER_DEPTH_BYTES.set(self._replay_buffer.depth_bytes)
-        BUFFER_CAP_RATIO.set(self._replay_buffer.cap_ratio)
-        CIRCUIT_BREAKER_OPEN.set(1 if self._replay_buffer.breaker_tripped else 0)
+        BUFFER_DEPTH_FRAMES.set(self._tui_leg.depth_frames)
+        BUFFER_DEPTH_BYTES.set(self._tui_leg.depth_bytes)
+        BUFFER_CAP_RATIO.set(self._tui_leg.cap_ratio)
+        CIRCUIT_BREAKER_OPEN.set(1 if self._tui_leg.breaker_tripped else 0)
 
     async def _buffer_evict_loop(self) -> None:
         """Periodically evict TTL-expired un-acked frames; audit each as input-loss.
 
         A supervised background task spawned by :meth:`run` (reaped in its ``finally``).
-        Runs only when a buffer is injected. Each sweep evicts frames older than the
-        buffer's TTL — deliberate security-over-liveness loss (pre-DLP input cannot be
-        pinned across an unbounded crash-loop, spec §6), so every dropped seq gets a LOUD
-        audit row (CLAUDE.md hard rule #7). The monotonic clock keeps ``evict_expired``'s
-        non-regression precondition; the injected ``_sleep`` makes the interval testable.
+        Runs only when a leg is injected. Each sweep evicts frames older than the buffer's
+        TTL — deliberate security-over-liveness loss (pre-DLP input cannot be pinned across
+        an unbounded crash-loop, spec §6), so every dropped seq gets a LOUD audit row
+        (CLAUDE.md hard rule #7). G6-4a (#288): ``leg.evict_expired`` uses the leg's injected
+        ``now`` (wired to the same monotonic seam in ``process.py``) and releases the freed
+        bytes back to the global cap (K2); the injected ``_sleep`` makes the interval testable.
         """
-        assert self._replay_buffer is not None  # spawned only when a buffer is present
+        assert self._tui_leg is not None  # spawned only when a leg is present
         while True:
             await self._sleep(_BUFFER_EVICT_INTERVAL_SECONDS)
             try:
-                evicted = self._replay_buffer.evict_expired(now=self._monotonic())
+                evicted = self._tui_leg.evict_expired()
             except ReplayBufferError:
                 # The TTL bound is a security property (spec §6) — a sweep that raises
                 # (e.g. a regressed monotonic read) must be LOUD (hard rule #7), never a
@@ -468,9 +466,9 @@ class GatewayCoreLink:
             transport = await self._initial_connect()
             self._current_core_transport = transport
             await self._flush_pending_replay()
-            if self._replay_buffer is not None:
+            if self._tui_leg is not None:
                 # Spec A G4b-2a (#237): the supervised TTL-eviction sweep runs only when a
-                # buffer is injected. Spawned AFTER the initial connect (so a shutdown
+                # leg is injected. Spawned AFTER the initial connect (so a shutdown
                 # DURING the initial connect never leaves an orphaned timer) and reaped in
                 # the ``finally`` on every exit path.
                 evict_task = asyncio.create_task(self._buffer_evict_loop())
@@ -524,10 +522,13 @@ class GatewayCoreLink:
             # discard() preserves the seq floor (correct for a terminal exit, unlike the
             # per-connection reset_for_new_epoch); the IMMUTABLE bytes in ``_pending_replay``
             # cannot be zeroed in place, so they are left to GC (the existing security model).
-            if self._replay_buffer is not None:
-                self._replay_buffer.discard()
+            # G6-4a (#288): ``leg.discard()`` zeros + empties the buffer AND releases its
+            # bytes to the global cap (K2); it does NOT reset the seq floor (PR9 — only
+            # ``reset_for_new_epoch`` does, the per-connection path).
+            if self._tui_leg is not None:
+                self._tui_leg.discard()
             # Drop the relay's transport reference BEFORE closing so a concurrent
-            # ``relay_to_core`` snapshots ``None`` (a loud drop) rather than a
+            # ``submit_tui_unit`` snapshots ``None`` (a loud drop) rather than a
             # mid-close transport (CLAUDE.md hard rule #7 — no silent send-into-a-corpse).
             self._current_core_transport = None
             if transport is not None:
@@ -537,24 +538,38 @@ class GatewayCoreLink:
         """Re-send the captured un-acked remainder on the freshly-bound leg (G4b-2b).
 
         Called from ``run`` after a (re)connect binds ``_current_core_transport`` and the
-        link is UP, BEFORE the pump resumes. Each stashed payload is re-sent via
-        ``relay_to_core`` (append-before-send, fresh per-connection seq 0,1,…) so the core
-        G0-dedups on the in-payload ``inbound_id`` (ADR-0032 §6.2), then the replay-pending
-        gate is SET so the held client->core pump resumes — replayed frames have taken the
-        lowest seqs, so fresh input follows in FIFO order. Idempotent: clears the stash at
-        entry so a re-entrant call cannot double-replay.
+        link is UP, BEFORE the pump resumes. Each stashed payload is re-sent through the TUI
+        leg's ``record_for_send`` (append-before-send, fresh per-connection seq 0,1,…) then the
+        single ``write_leg_unit`` writer, so the core G0-dedups on the in-payload ``inbound_id``
+        (ADR-0032 §6.2); then the replay-pending gate is SET so the held client->core pump
+        resumes — replayed frames have taken the lowest seqs, so fresh input follows in FIFO
+        order. Idempotent: clears the stash at entry so a re-entrant call cannot double-replay.
 
         **No silent loss (R1, hard rule #7).** If the leg vanished mid-flush
         (``_current_core_transport is None`` — a reconnect race), the un-sent remainder is
         RE-STASHED and a loud ``buffer_replay_deferred`` row is written; the gate stays
         CLEARED so the next bind's flush retries (the client pump stays parked — the leg is
-        unusable). ``buffer_replayed`` is emitted ONLY for a frame actually handed to
-        ``relay_to_core``. A broken-pipe mid-replay (transport non-None, send raises inside
-        ``relay_to_core``) is SELF-HEALING — ``relay_to_core`` appended the frame before the
-        send, so it stays buffered and replays next reconnect; only the None case re-stashes.
+        unusable). ``buffer_replayed`` is emitted ONLY for a frame actually handed to the leg.
+        A broken-pipe mid-replay (transport non-None, ``write_leg_unit`` loud-drops) is
+        SELF-HEALING — ``record_for_send`` appended the frame BEFORE the send, so it stays
+        buffered and replays next reconnect; only the None case re-stashes.
+
+        **Never-raise contract preserved (PR3, CRITICAL).** ``record_for_send`` CAN raise
+        ``ReplayBufferError`` (cap-refusal or buffer hard-ceiling). The old ``relay_to_core``
+        never raised in the flush (loud-drop only), and an uncaught raise here would escape
+        into ``run``'s reconnect path. The single-leg invariant makes this safe WITHOUT a
+        guard: (1) PR2 sets the leg's ``GlobalReplayCap`` ceiling strictly above the buffer
+        hard ceiling, so the cap never refuses on this single leg; (2) the frames being
+        flushed are the JUST-CAPTURED remainder, which fit in the buffer (post-reset, an
+        empty buffer) — re-appending the same N frames cannot exceed the buffer ceiling
+        they just fit in. So ``record_for_send`` does not raise on the flush path; the only
+        loud-fail is the writer's loud-drop, which never raises. ``write_leg_unit`` is the
+        SOLE physical writer (PR5: the None-check stays STRICTLY AHEAD of ``record_for_send``
+        so a None-transport defer does NOT consume a leg seq).
         """
         frames = self._pending_replay
         self._pending_replay = ()
+        leg = self._tui_leg
         try:
             for index, frame in enumerate(frames):
                 if self._current_core_transport is None:
@@ -565,10 +580,17 @@ class GatewayCoreLink:
                         reason="transport_lost_mid_replay",
                     )
                     return
+                # PR5: ``record_for_send`` runs STRICTLY past the None-check above — a
+                # None-transport defer must NOT consume a leg seq. ``frames`` is non-empty
+                # only when a capture happened, which only happens on a leg-wired link.
+                assert leg is not None
                 log.warning(
                     "gateway.comms.buffer_replayed", seq=frame.seq, reason="reconnect_resume"
                 )
-                await self.relay_to_core(frame.payload)
+                seq = leg.record_for_send(frame.payload)
+                await self.write_leg_unit(
+                    leg.adapter_id, frame.payload, seq=seq, ack=self.core_cumulative_ack()
+                )
         finally:
             # Release the held pump ONLY on a COMPLETE flush. A defer (R1) leaves
             # _pending_replay non-empty -> gate stays clear; a complete/empty flush -> gate
@@ -866,11 +888,13 @@ class GatewayCoreLink:
         # already-empty tracker), so a reconnect always rebinds the ack to the fresh
         # boot's seq space.
         self._core_tracker = BoundedSeqAckTracker()
-        # Spec A G4b-2-pre (#237): reset the OWNED client->core send-seq alongside the
-        # receive tracker — a fresh core leg is a fresh per-connection seq space, so the
-        # first relay_to_core on the new leg sends wire seq 0 (resume correctness).
-        self._client_to_core_seq = 0
-        if self._replay_buffer is not None:
+        # Spec A G4b-2-pre (#237): the per-connection client->core send-seq is reset
+        # alongside the receive tracker — a fresh core leg is a fresh per-connection seq
+        # space, so the first leg send on the new leg carries wire seq 0 (resume
+        # correctness). G6-4a (#288): the seq now lives in the leg; ``reset_for_new_epoch``
+        # below rebinds it to 0.
+        if self._tui_leg is not None:
+            leg = self._tui_leg
             # Spec A G4b-2b (#237): CAPTURE the un-acked remainder BEFORE the floor-reset so
             # it can be replayed on the fresh leg (the bodies are independent copies that
             # survive the reset's zeroing) — replacing the G4b-2a loud-loss drop. Clear the
@@ -882,15 +906,20 @@ class GatewayCoreLink:
             # CORE_READY and the flush. An empty buffer (first connect / fully-acked
             # reconnect) is a no-op: nothing to replay, gate stays set. The unconditional
             # reset_for_new_epoch (the comms-1 fix) stays.
-            # FIFO-MERGE (review): PREPEND any deferred remainder from a prior None-transport
+            # FIFO-MERGE (PR4): PREPEND any deferred remainder from a prior None-transport
             # flush (R1) ahead of this epoch's capture, rather than overwriting it — else the
             # deferred frames (which are NOT in the buffer) are silently lost, breaking the R1
-            # no-silent-loss guarantee. Deferred frames are older in the stream, so they replay
-            # first; the core dedups any already-committed re-send on the in-payload inbound_id.
-            self._pending_replay = self._pending_replay + self._replay_buffer.unacked_frames()
+            # no-silent-loss guarantee. ``_pending_replay`` MUST be the LEFT operand: deferred
+            # frames are older in the stream, so they replay first; the core dedups any
+            # already-committed re-send on the in-payload inbound_id. G6-4a (#288): the leg's
+            # ``unacked_frames()`` returns ``(seq, payload)`` pairs — wrap them in
+            # ``ReplayFrame`` so ``_pending_replay`` stays ``tuple[ReplayFrame, ...]``.
+            self._pending_replay = self._pending_replay + tuple(
+                ReplayFrame(seq=s, payload=p) for (s, p) in leg.unacked_frames()
+            )
             if self._pending_replay:
                 self._replay_pending.clear()
-            self._replay_buffer.reset_for_new_epoch()
+            leg.reset_for_new_epoch()
             # Spec A G4b-2a (#237): the reset emptied the buffer — zero the gauges.
             self._refresh_buffer_metrics()
 
@@ -985,11 +1014,13 @@ class GatewayCoreLink:
             # the security precondition the ReplayBuffer.trim_to_ack docstring names.
             # Payload-blind robustness: a missing/malformed cumulative_ack is still
             # CONSUMED (never relayed, never crashes), it just does not trim.
-            if self._replay_buffer is not None:
+            if self._tui_leg is not None:
                 params = parsed.get("params") if isinstance(parsed, Mapping) else None
                 ack = params.get("cumulative_ack") if isinstance(params, Mapping) else None
                 if isinstance(ack, int) and not isinstance(ack, bool) and ack >= 0:
-                    self._replay_buffer.trim_to_ack(ack)
+                    # G6-4a (#288): the leg's ``trim_to_ack`` removes durably-acked frames
+                    # AND releases their bytes to the global cap (K2).
+                    self._tui_leg.trim_to_ack(ack)
                     # Spec A G4b-2a (#237): the trim shrank the buffer — refresh the
                     # depth/cap gauges to the post-trim state.
                     self._refresh_buffer_metrics()
@@ -1016,86 +1047,49 @@ class GatewayCoreLink:
         # An opaque payload (incl. a no-``method`` response): forward the ORIGINAL bytes.
         await self._payload_relay(frame.payload)
 
-    async def relay_to_core(self, payload: bytes) -> None:
-        """Forward an opaque client payload to the core leg, carrying the real ack.
+    async def submit_tui_unit(self, payload: bytes) -> None:
+        """Forward an opaque TUI client payload through the TUI leg + single writer (G6-4a).
 
-        The send-half of the relay (Spec A G3-3b-2 / ADR-0032). Snapshots the CURRENT
-        core transport into a local FIRST (so a concurrent reconnect swap is atomic
-        w.r.t. this send — architect M3), then writes the opaque ``payload`` with the
-        receive tracker's :meth:`BoundedSeqAckTracker.cumulative_ack` as the ``ack``,
-        FLOORED to ``0``: the tracker's ``-1`` ("no contiguous run acked yet") maps to
-        the wire's ``a=0`` placeholder. Without the floor the FIRST client->core unit —
-        sent before the core leg has yet delivered a single seq — would carry ``ack=-1``,
-        which :func:`encode_seq_frame` rejects (non-negative counters), crashing the
-        client->core pump on a seq-enabled core leg. The real loopback wire-contract test
-        (``test_relay_wire_contract``) is what surfaces this; the in-process fakes do not
-        encode, so they cannot.
+        The leg-routed replacement for the retired ``relay_to_core`` (Spec B G6-4 / #288).
+        Snapshots the core transport FIRST: a ``None`` snapshot (the reconnect-race / gap
+        window) is a loud drop that mints NO seq — preserving the G5 none-transport-no-mint
+        semantics (PR5 — the None-check stays STRICTLY AHEAD of ``record_for_send`` so a dead
+        leg never burns a leg seq). Then the LEG mints the per-leg seq + appends to its buffer
+        (append-before-send) + reserves the global cap inside ``record_for_send``; the breaker
+        escalation is fed HERE (JC-2: the link owns the ``LinkStateMachine``), reading
+        ``leg.breaker_tripped`` after the append. The pre-sequenced unit is handed to
+        :meth:`write_leg_unit` — the SOLE physical writer. Loud-drop, never raise, never
+        buffer beyond the leg.
 
-        **Loud drop, NO buffering (CLAUDE.md hard rule #7; G4 owns buffering).** Any
-        send-path fault — transport-died (:class:`BrokenPipeError` /
-        :class:`ConnectionResetError`), encode-failed (:class:`ValueError` from
-        :func:`encode_seq_frame` send-seq decimal-width exhaustion, or
-        :class:`CommsProtocolError` from an over-bound reframe), or a write to a
-        transport ``close()``d mid-reconnect-swap (:class:`RuntimeError` "unable to
-        perform operation on closed transport") — is a LOUD drop: never raised, never
-        buffered. A ``None`` current transport (the reconnect-race write window) is the
-        same loud drop. The client side keeps running; the dropped unit is the core's to
-        re-request once the leg is back (a G4 ReplayBuffer concern), not this carrier's
-        to hold. Letting any of these escape would crash the relay TaskGroup on an
-        OPERATIONAL edge (a dead/swapping leg is expected), or gap the WRONG leg.
+        **Single-leg cap is non-binding (PR2).** The TUI leg's ``GlobalReplayCap`` ceiling is
+        set strictly above the buffer hard ceiling, so ``record_for_send`` never raises a
+        cap-refusal on this single leg — the only loud-fail path is the buffer's OWN
+        hard-ceiling raise (the G5 behavior), which fires first. Payload-blind (#5): the leg /
+        writer never parse the body; ``adapter_id`` is the only routing key.
         """
-        local = self._current_core_transport
-        if local is None:
-            log.warning(
-                "gateway.relay.core_send_dropped",
-                reason="no_core_transport",
-            )
+        if self._current_core_transport is None:
+            log.warning("gateway.relay.core_send_dropped", reason="no_core_transport")
             return
-        ack = max(self._core_tracker.cumulative_ack(), 0)
-        # Spec A G4b-2-pre (#237): mint the OWNED client->core seq AFTER the None-check
-        # (a no-transport drop must NOT consume a seq) and pass it EXPLICITLY — the
-        # counter advances per relay_to_core call regardless of whether the send then
-        # loud-drops, so a G4b-2a buffer-append-per-call keys on the exact wire seq.
-        seq = self._client_to_core_seq
-        self._client_to_core_seq += 1
-        if self._replay_buffer is not None:
-            # append-before-send (design §3.3): the buffer is the durable no-loss
-            # record; the send below is best-effort and may loud-drop. Keyed on the
-            # exact wire seq (G4b-2-pre) so a buffered frame's seq == its wire seq even
-            # across a loud-dropped send. The buffer's hard-ceiling raise is the
-            # fail-closed backstop if G4b's read-halt is buggy.
-            self._replay_buffer.append(seq, payload, now=self._monotonic())
-        if self._replay_buffer is not None and self._replay_buffer.breaker_tripped:
-            # Spec A G4b-2a (#237 / R3): a soft-cap breach latched the breaker. Feed
-            # BREAKER_TRIPPED UNCONDITIONALLY — the link-state machine (not a gateway
-            # flag) absorbs repeats (link_state.py: UNAVAILABLE is absorbing), emitting
-            # LinkControl.UNAVAILABLE exactly ONCE. On that once-only escalation edge,
-            # write the single loud audit row (CLAUDE.md hard rule #7 — back-pressure is
-            # never silent). Task 6 then halts the client read. The structlog row is the
-            # gateway's honest audit (it has no DB; the signed-log reconcile is a tracked
-            # 2b/design-§6 follow-up).
+        # PR5: the leg mints the seq ONLY past the None-check above — a None-transport drop
+        # must NOT consume a leg seq (G5 mints AFTER the None-check). Do NOT hoist this above
+        # the None-check for "efficiency": it would burn seqs on a dead leg and corrupt the
+        # per-leg seq space the resume contract keys on.
+        assert self._tui_leg is not None  # submit path is only reached on a leg-wired link
+        ack = self.core_cumulative_ack()
+        seq = self._tui_leg.record_for_send(payload)
+        if self._tui_leg.breaker_tripped:
+            # JC-2 (#237 / R3): a soft-cap breach latched the breaker. Feed BREAKER_TRIPPED
+            # UNCONDITIONALLY — the absorbing machine emits LinkControl.UNAVAILABLE exactly
+            # once; on that once-only edge write the single loud audit row (hard rule #7).
             control = await self._feed(GatewayLinkEvent.BREAKER_TRIPPED)
             if control is LinkControl.UNAVAILABLE:
                 log.warning(
                     "gateway.comms.breaker_tripped",
-                    depth_frames=self._replay_buffer.depth_frames,
-                    depth_bytes=self._replay_buffer.depth_bytes,
+                    depth_frames=self._tui_leg.depth_frames,
+                    depth_bytes=self._tui_leg.depth_bytes,
                 )
-        if self._replay_buffer is not None:
-            # Spec A G4b-2a (#237): push the post-append (+ post-trip) buffer state onto
-            # the observability gauges. After the breaker feed so a trip reflects on the
-            # CIRCUIT_BREAKER_OPEN gauge in the same refresh.
-            self._refresh_buffer_metrics()
-        try:
-            await local.send_payload_unit(payload, seq=seq, ack=ack)
-        except (
-            BrokenPipeError,
-            ConnectionResetError,
-            RuntimeError,
-            ValueError,
-            CommsProtocolError,
-        ) as exc:
-            log.warning("gateway.relay.core_send_dropped", error=repr(exc))
+        self._refresh_buffer_metrics()
+        await self.write_leg_unit(self._tui_leg.adapter_id, payload, seq=seq, ack=ack)
 
     def core_cumulative_ack(self) -> int:
         """The core-leg receive tracker's contiguous ack, FLOORED to ``0`` (G6-4 / K1).

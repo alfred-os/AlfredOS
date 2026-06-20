@@ -14,7 +14,7 @@ import asyncio
 import collections
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from uuid import uuid4
 
 import pytest
@@ -87,7 +87,7 @@ def _events_of(captured: list[dict[str, object]]) -> list[object]:
     return [c.get("event") for c in captured]
 
 
-def _tui_leg(buf: ReplayBuffer) -> GatewayLeg:
+def _tui_leg(buf: ReplayBuffer, *, now: Callable[[], float] | None = None) -> GatewayLeg:
     """Build the single proving TUI leg wrapping ``buf`` (G6-4a, #288).
 
     The TUI leg is constructed with a NON-BINDING ingress gate (unbounded tokens /
@@ -96,8 +96,11 @@ def _tui_leg(buf: ReplayBuffer) -> GatewayLeg:
     config land when the scheduler is wired. The ``GlobalReplayCap`` ceiling is set STRICTLY
     ABOVE the buffer hard ceiling (``_max_bytes * 4`` > the buffer's ``* 2`` hard cap) so the
     buffer's OWN hard-ceiling raise ALWAYS fires first (PR2) — the cap never refuses on this
-    single leg. ``now=lambda: 0.0`` matches the buffer's monotonic precondition for unit tests.
+    single leg. ``now`` defaults to a constant ``0.0`` (the buffer's monotonic precondition
+    holds trivially for the seq/append-only tests); the evict-loop tests pass the SAME injected
+    monotonic the link uses, mirroring the production ``now=self._monotonic`` wiring.
     """
+    leg_now = now if now is not None else (lambda: 0.0)
     cap = GlobalReplayCap(max_total_bytes=buf._max_bytes * 4)
     gate = PerAdapterIngressGate(
         "tui",
@@ -106,9 +109,23 @@ def _tui_leg(buf: ReplayBuffer) -> GatewayLeg:
         max_inflight=10**9,
         ttl_seconds=1e9,
         max_frame_bytes=1 << 30,
-        now=lambda: 0.0,
+        now=leg_now,
     )
-    return GatewayLeg(adapter_id="tui", buffer=buf, ingress_gate=gate, global_cap=cap, now=lambda: 0.0)
+    return GatewayLeg(adapter_id="tui", buffer=buf, ingress_gate=gate, global_cap=cap, now=leg_now)
+
+
+def _preload(leg: GatewayLeg, buf: ReplayBuffer, seq: int, payload: bytes, *, now: float) -> None:
+    """Append directly to ``buf`` with a controlled ``now`` AND reserve the leg's cap (G6-4a).
+
+    Some tests pre-load frames with PER-FRAME ``enqueued_at`` timestamps (the TTL-evict
+    tests) that ``record_for_send`` (which stamps with the leg's single clock) cannot
+    reproduce. Appending directly to the buffer would leave the leg's ``GlobalReplayCap``
+    un-reserved, so a later leg-routed trim/evict/discard would over-release and raise
+    (K2 invariant). This helper keeps the cap accounting balanced by reserving the bytes
+    the direct append admits — mechanical construction-shape, not behavioral.
+    """
+    assert leg._global_cap.reserve(leg.adapter_id, len(payload))  # non-binding on the single leg
+    buf.append(seq, payload, now=now)
 
 
 class _FakeCoreTransport:
@@ -951,6 +968,9 @@ def _run_link(
     async def _instant_sleep(_delay: float) -> None:
         return None
 
+    resolved_monotonic: Callable[[], float] = (
+        monotonic if monotonic is not None else time.monotonic  # type: ignore[assignment]
+    )
     link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
         machine=machine,
@@ -958,9 +978,15 @@ def _run_link(
         sleep=sleep if sleep is not None else _instant_sleep,  # type: ignore[arg-type]
         jitter=lambda hi: hi,
         shutdown_event=shutdown_event,
-        monotonic=monotonic if monotonic is not None else time.monotonic,  # type: ignore[arg-type]
+        monotonic=resolved_monotonic,
         payload_relay=payload_relay,  # type: ignore[arg-type]
-        replay_buffer=replay_buffer,
+        # G6-4a (#288): wrap the requested buffer in the TUI leg (the leg owns it now);
+        # ``None`` leaves the link leg-less (buffering off), unchanged. The leg's ``now`` is
+        # the SAME monotonic the link uses (the evict loop reads the leg's clock) — mirroring
+        # the production ``now=self._monotonic`` wiring.
+        tui_leg=(
+            _tui_leg(replay_buffer, now=resolved_monotonic) if replay_buffer is not None else None
+        ),
     )
     return link, recorder
 
@@ -1515,9 +1541,10 @@ async def test_route_unit_daemon_comms_ack_trims_the_replay_buffer() -> None:
     """
     epoch = uuid4().hex
     buf = ReplayBuffer()
-    for seq in (0, 1, 2, 3):
-        buf.append(seq, b"x", now=float(seq))
     link, _recorder, sink = _link_with_relay_and_buffer(buffer=buf)
+    assert link._tui_leg is not None
+    for seq in (0, 1, 2, 3):
+        _preload(link._tui_leg, buf, seq, b"x", now=float(seq))
     link._core_epoch = epoch
     body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {"cumulative_ack": 2}}).encode()
 
@@ -1544,9 +1571,10 @@ async def test_route_unit_daemon_comms_ack_malformed_does_not_trim(
     """A malformed/missing ``cumulative_ack`` is CONSUMED, never trims, never raises."""
     epoch = uuid4().hex
     buf = ReplayBuffer()
-    for seq in (0, 1, 2):
-        buf.append(seq, b"x", now=float(seq))
     link, _recorder, sink = _link_with_relay_and_buffer(buffer=buf)
+    assert link._tui_leg is not None
+    for seq in (0, 1, 2):
+        _preload(link._tui_leg, buf, seq, b"x", now=float(seq))
     link._core_epoch = epoch
     body = json.dumps({"method": DAEMON_COMMS_ACK, "params": params}).encode()
 
@@ -1567,7 +1595,7 @@ async def test_route_unit_daemon_comms_ack_no_buffer_is_noop() -> None:
     """With NO buffer injected, the ack consume is the existing no-op (not relayed)."""
     epoch = uuid4().hex
     link, _recorder, sink = _link_with_relay(epoch=epoch)  # default replay_buffer=None
-    assert link._replay_buffer is None
+    assert link._tui_leg is None
     body = json.dumps({"method": DAEMON_COMMS_ACK, "params": {"cumulative_ack": 4}}).encode()
 
     await link._route_unit(_payload_unit(body))  # no crash
@@ -1678,14 +1706,14 @@ async def test_relay_to_core_sends_payload_with_cumulative_ack() -> None:
     """``relay_to_core`` writes the opaque payload to the core leg with the receive
     tracker's cumulative ack.
     """
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
     # Feed the core-leg tracker a contiguous 0,1,2 run -> cumulative ack 2.
     for seq in (0, 1, 2):
         link._core_tracker.observe(seq)
 
-    await link.relay_to_core(b'{"id":1,"result":{}}')
+    await link.submit_tui_unit(b'{"id":1,"result":{}}')
 
     # First relay call on a fresh leg mints seq 0; ack is the cumulative 2.
     assert transport.sent_units == [(b'{"id":1,"result":{}}', 0, 2)]
@@ -1701,12 +1729,12 @@ async def test_relay_to_core_sends_payload_with_cumulative_ack() -> None:
 @pytest.mark.asyncio
 async def test_relay_to_core_mints_contiguous_seq_and_passes_it_explicitly() -> None:
     """``relay_to_core`` mints 0,1,2,... and passes each as the explicit send seq."""
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.relay_to_core(b"one")
-    await link.relay_to_core(b"two")
+    await link.submit_tui_unit(b"one")
+    await link.submit_tui_unit(b"two")
 
     assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"one", 0), (b"two", 1)]
 
@@ -1722,17 +1750,17 @@ async def test_relay_to_core_loud_drop_still_advances_the_send_seq() -> None:
     seq from the future ReplayBuffer key — this pins against exactly that regression,
     which branch coverage alone cannot catch (the post-increment runs unconditionally).
     """
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
     transport.send_unit_error = BrokenPipeError()
     with structlog.testing.capture_logs():
-        await link.relay_to_core(b"dropped")  # loud drop — consumes seq 0
+        await link.submit_tui_unit(b"dropped")  # loud drop — consumes seq 0
     assert transport.sent_units == []  # nothing reached the wire
 
     transport.send_unit_error = None
-    await link.relay_to_core(b"after")  # succeeds on the live leg
+    await link.submit_tui_unit(b"after")  # succeeds on the live leg
     # seq CONTINUED at 1 — the dropped frame consumed seq 0 and did not free it.
     assert transport.sent_units == [(b"after", 1, 0)]
 
@@ -1741,15 +1769,15 @@ async def test_relay_to_core_loud_drop_still_advances_the_send_seq() -> None:
 async def test_relay_to_core_none_transport_drop_does_not_consume_a_seq() -> None:
     """A no-transport loud drop happens BEFORE the mint, so it does NOT consume a seq —
     the next real send on a live leg still starts at 0 (design §3.2)."""
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     link._current_core_transport = None
 
     with structlog.testing.capture_logs():
-        await link.relay_to_core(b"dropped")  # no transport -> loud drop, no mint
+        await link.submit_tui_unit(b"dropped")  # no transport -> loud drop, no mint
 
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
-    await link.relay_to_core(b"first-real")
+    await link.submit_tui_unit(b"first-real")
 
     assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"first-real", 0)]
 
@@ -1757,17 +1785,17 @@ async def test_relay_to_core_none_transport_drop_does_not_consume_a_seq() -> Non
 @pytest.mark.asyncio
 async def test_peer_handshake_resets_the_client_to_core_seq() -> None:
     """A fresh handshake (new core leg) resets the send-seq to 0 — per-connection space."""
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.relay_to_core(b"a")
-    await link.relay_to_core(b"b")  # _client_to_core_seq now at 2
+    await link.submit_tui_unit(b"a")
+    await link.submit_tui_unit(b"b")  # _client_to_core_seq now at 2
 
     epoch = uuid4().hex
     transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
     await link._peer_handshake(transport2)  # fresh leg resets the seq space
     link._current_core_transport = transport2
-    await link.relay_to_core(b"c")
+    await link.submit_tui_unit(b"c")
 
     assert transport2.sent_units[-1][1] == 0  # reset to 0 on the new leg
 
@@ -1782,11 +1810,11 @@ def test_minted_core_seqs_are_contiguous_within_a_leg(payloads: list[bytes]) -> 
     """
 
     async def _drive() -> list[int]:
-        link, _recorder, _sink = _link_with_relay()
+        link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
         transport = _FakeCoreTransport([])
         link._current_core_transport = transport
         for p in payloads:
-            await link.relay_to_core(p)
+            await link.submit_tui_unit(p)
         return [s for (_p, s, _a) in transport.sent_units]
 
     assert asyncio.run(_drive()) == list(range(len(payloads)))
@@ -1795,14 +1823,14 @@ def test_minted_core_seqs_are_contiguous_within_a_leg(payloads: list[bytes]) -> 
 @pytest.mark.asyncio
 async def test_relay_to_core_drops_loud_on_broken_pipe() -> None:
     """A ``BrokenPipeError`` mid-write is a LOUD drop — no raise, no buffering."""
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     transport.send_unit_error = BrokenPipeError()
     link._current_core_transport = transport
     link._core_tracker.observe(0)
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"payload")  # must NOT raise
+        await link.submit_tui_unit(b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -1821,13 +1849,18 @@ async def test_relay_to_core_drops_loud_on_broken_pipe() -> None:
 def _link_with_relay_and_buffer(
     *, buffer: ReplayBuffer
 ) -> tuple[GatewayCoreLink, _RecordingClientListener, _RelaySink]:
-    """A relay-wired core link with an injected :class:`ReplayBuffer`."""
+    """A relay-wired core link with the TUI leg wrapping ``buffer`` (G6-4a, #288).
+
+    Construction-shape migration: the leg wraps the SAME ``ReplayBuffer`` the buffer-keyed
+    tests assert on, so every depth/zeroing/breaker assertion stays valid — only the
+    OWNER changed (link -> leg). Mechanical-not-behavioral.
+    """
     recorder = _RecordingClientListener()
     sink = _RelaySink()
     link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
         payload_relay=sink,  # type: ignore[arg-type]
-        replay_buffer=buffer,
+        tui_leg=_tui_leg(buffer),
     )
     return link, recorder, sink
 
@@ -1844,7 +1877,7 @@ async def test_relay_to_core_appends_inbound_frame_keyed_on_wire_seq() -> None:
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.relay_to_core(b"x")
+    await link.submit_tui_unit(b"x")
 
     assert buf.depth_frames == 1
     # The seq passed to the transport equals the buffered seq (0).
@@ -1867,26 +1900,25 @@ async def test_relay_to_core_loud_drop_still_leaves_frame_buffered() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs():
-        await link.relay_to_core(b"x")  # send loud-drops; append already happened
+        await link.submit_tui_unit(b"x")  # send loud-drops; append already happened
 
     assert transport.sent_units == []  # nothing reached the wire
     assert buf.depth_frames == 1  # the frame is still durably held
 
 
 @pytest.mark.asyncio
-async def test_relay_to_core_no_buffer_still_advances_seq() -> None:
-    """With NO buffer (default ``None``), ``relay_to_core`` behaves exactly as before.
+async def test_submit_tui_unit_advances_the_leg_seq() -> None:
+    """The TUI leg mints a contiguous send-seq: the second ``submit_tui_unit`` mints seq 1.
 
-    No crash on a buffer-less link, and the send-seq still advances: a second call
-    mints seq 1.
+    G6-4a (#288): the seq now lives in the leg's ``record_for_send`` (the leg-less path the
+    G5 ``relay_to_core`` allowed is retired — the TUI is always a leg).
     """
-    link, _recorder, _sink = _link_with_relay()  # default replay_buffer=None
-    assert link._replay_buffer is None
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.relay_to_core(b"one")
-    await link.relay_to_core(b"two")
+    await link.submit_tui_unit(b"one")
+    await link.submit_tui_unit(b"two")
 
     assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"one", 0), (b"two", 1)]
 
@@ -1896,11 +1928,11 @@ async def test_relay_to_core_drops_loud_on_none_transport() -> None:
     """A None current transport (the reconnect-race write window — architect M3) is a
     loud drop, never a raise.
     """
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     link._current_core_transport = None
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"payload")  # must NOT raise
+        await link.submit_tui_unit(b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -1950,7 +1982,7 @@ async def test_reconnect_closing_clears_current_transport_before_close() -> None
     # The clear already happened (before the blocking close): a racing relay snapshots None.
     assert link._current_core_transport is None
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"payload")  # races the in-flight close
+        await link.submit_tui_unit(b"payload")  # races the in-flight close
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
     assert dropped[0].get("reason") == "no_core_transport"
@@ -1966,13 +1998,13 @@ async def test_reconnect_closing_clears_current_transport_before_close() -> None
 @pytest.mark.asyncio
 async def test_relay_to_core_drops_loud_on_connection_reset() -> None:
     """A ``ConnectionResetError`` mid-write is also a loud drop (no raise)."""
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     transport.send_unit_error = ConnectionResetError()
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"payload")
+        await link.submit_tui_unit(b"payload")
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -1983,14 +2015,14 @@ async def test_relay_to_core_drops_loud_on_closed_transport_runtime_error() -> N
     """A ``RuntimeError`` from a write to a transport ``close()``d mid-reconnect-swap is
     a LOUD drop — never a raw TaskGroup crash, never a disturbed receive tracker.
     """
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     transport.send_unit_error = RuntimeError("unable to perform operation on closed transport")
     link._current_core_transport = transport
     link._core_tracker.observe(0)
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"payload")  # must NOT raise
+        await link.submit_tui_unit(b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -2003,13 +2035,13 @@ async def test_relay_to_core_drops_loud_on_encode_value_error() -> None:
     """A ``ValueError`` (``encode_seq_frame`` send-seq decimal-width exhaustion) is a
     LOUD drop — never a raw TaskGroup crash.
     """
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     transport.send_unit_error = ValueError("send seq exceeds the encodable decimal width")
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"payload")  # must NOT raise
+        await link.submit_tui_unit(b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -2021,13 +2053,13 @@ async def test_relay_to_core_drops_loud_on_over_bound_reframe() -> None:
     """A ``CommsProtocolError`` (over-bound reframe) is a LOUD drop — never a raw
     TaskGroup crash.
     """
-    link, _recorder, _sink = _link_with_relay()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     transport.send_unit_error = CommsProtocolError("reframed unit exceeds the bound")
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"payload")  # must NOT raise
+        await link.submit_tui_unit(b"payload")  # must NOT raise
 
     dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
     assert len(dropped) == 1
@@ -2226,15 +2258,16 @@ async def test_run_relay_pump_unit_without_seq_skips_tracker() -> None:
     assert recorder.controls == []
 
 
-def test_init_stores_injected_replay_buffer() -> None:
-    """Spec A G4b-2a (#237): an injected ``ReplayBuffer`` is stored on the link.
+def test_init_stores_injected_tui_leg() -> None:
+    """Spec B G6-4a (#288): an injected ``GatewayLeg`` is stored on the link.
 
-    The first foundation step: the (already-merged, pure) un-acked-inbound retention
-    buffer is constructor-injected so later G4b-2a tasks can append/trim against it.
+    The TUI dial-in is the FIRST GatewayLeg — it OWNS the buffer + per-leg seq + breaker
+    latch + cap accounting (replacing the G5 ``replay_buffer`` injection). The leg-routed
+    ``submit_tui_unit`` + the reconnect capture/flush read this leg.
     """
-    buf = ReplayBuffer()
-    link = GatewayCoreLink(client_listener=_RecordingClientListener(), replay_buffer=buf)  # type: ignore[arg-type]
-    assert link._replay_buffer is buf
+    leg = _tui_leg(ReplayBuffer())
+    link = GatewayCoreLink(client_listener=_RecordingClientListener(), tui_leg=leg)  # type: ignore[arg-type]
+    assert link._tui_leg is leg
 
 
 def test_init_replay_buffer_defaults_to_none() -> None:
@@ -2242,7 +2275,7 @@ def test_init_replay_buffer_defaults_to_none() -> None:
     construct unchanged (``None`` is the default, so no behaviour shifts).
     """
     link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
-    assert link._replay_buffer is None
+    assert link._tui_leg is None
 
 
 def test_init_pending_replay_starts_empty() -> None:
@@ -2293,8 +2326,8 @@ async def test_peer_handshake_captures_unacked_and_clears_gate_on_reconnect() ->
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.relay_to_core(b"a")  # buffered seq 0
-    await link.relay_to_core(b"b")  # buffered seq 1
+    await link.submit_tui_unit(b"a")  # buffered seq 0
+    await link.submit_tui_unit(b"b")  # buffered seq 1
     assert buf.depth_frames == 2
 
     epoch = uuid4().hex
@@ -2315,7 +2348,7 @@ async def test_peer_handshake_captures_unacked_and_clears_gate_on_reconnect() ->
 
     # Epoch B: the send-seq restarted at 0, and the buffer floor reset accepts it.
     link._current_core_transport = transport2
-    await link.relay_to_core(b"fresh")  # must NOT raise the strict-increase guard
+    await link.submit_tui_unit(b"fresh")  # must NOT raise the strict-increase guard
     assert buf.depth_frames == 1
     assert buf.unacked_frames()[0].seq == 0
 
@@ -2340,7 +2373,7 @@ async def test_peer_handshake_prepends_deferred_remainder_ahead_of_fresh_capture
     # One fresh un-acked frame appended to the buffer via the REAL relay path.
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.relay_to_core(b"fresh0")  # buffered seq 0
+    await link.submit_tui_unit(b"fresh0")  # buffered seq 0
     assert buf.depth_frames == 1
 
     epoch = uuid4().hex
@@ -2367,7 +2400,7 @@ async def test_peer_handshake_no_deferred_remainder_captures_fresh_only() -> Non
     assert link._pending_replay == ()  # no prior defer
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.relay_to_core(b"only0")  # buffered seq 0
+    await link.submit_tui_unit(b"only0")  # buffered seq 0
 
     epoch = uuid4().hex
     transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
@@ -2391,15 +2424,15 @@ async def test_peer_handshake_reset_prevents_cross_epoch_trim() -> None:
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     epoch_a_transport = _FakeCoreTransport([])
     link._current_core_transport = epoch_a_transport
-    await link.relay_to_core(b"a")  # epoch-A seq 0
-    await link.relay_to_core(b"b")  # epoch-A seq 1
+    await link.submit_tui_unit(b"a")  # epoch-A seq 0
+    await link.submit_tui_unit(b"b")  # epoch-A seq 1
 
     epoch = uuid4().hex
     transport2 = _FakeCoreTransport([_start_frame(epoch=epoch, seq_ack={"version": SEQ_VERSION})])
     with structlog.testing.capture_logs():
         await link._peer_handshake(transport2)  # drop epoch-A frames + reset
     link._current_core_transport = transport2
-    await link.relay_to_core(b"fresh")  # epoch-B seq 0
+    await link.submit_tui_unit(b"fresh")  # epoch-B seq 0
     assert buf.depth_frames == 1  # only the epoch-B frame
 
     # An ack carrying a cumulative_ack >= the old epoch-A high-water (1). It can only
@@ -2452,8 +2485,8 @@ async def test_peer_handshake_fully_acked_reconnect_resets_floor_no_crash() -> N
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
     transport1 = _FakeCoreTransport([])
     link._current_core_transport = transport1
-    await link.relay_to_core(b"a")  # buffered seq 0
-    await link.relay_to_core(b"b")  # buffered seq 1
+    await link.submit_tui_unit(b"a")  # buffered seq 0
+    await link.submit_tui_unit(b"b")  # buffered seq 1
     # The daemon durably acks EVERYTHING — the buffer drains but _last_seq stays high (1).
     buf.trim_to_ack(1)
     assert buf.depth_frames == 0
@@ -2472,7 +2505,8 @@ async def test_peer_handshake_fully_acked_reconnect_resets_floor_no_crash() -> N
     # Epoch B: the floor reset accepts a fresh seq-0 append WITHOUT the strict-increase
     # crash that would otherwise escape the relay pump and tear the gateway down.
     link._current_core_transport = transport2
-    await link.relay_to_core(b"x")  # must NOT raise ReplayBufferError("seq must strictly increase")
+    # must NOT raise ReplayBufferError("seq must strictly increase")
+    await link.submit_tui_unit(b"x")
     assert buf.depth_frames == 1
     assert buf.unacked_frames()[0].seq == 0
 
@@ -2481,7 +2515,7 @@ async def test_peer_handshake_fully_acked_reconnect_resets_floor_no_crash() -> N
 async def test_peer_handshake_no_buffer_injected_does_not_crash() -> None:
     """A link with ``replay_buffer=None`` handshakes normally — no buffer touched."""
     link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
-    assert link._replay_buffer is None
+    assert link._tui_leg is None
     transport = _FakeCoreTransport(
         [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
     )
@@ -2523,10 +2557,10 @@ async def test_relay_to_core_breaker_trip_escalates_link_unavailable_once() -> N
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"one")  # depth 1 — no trip, no escalation
+        await link.submit_tui_unit(b"one")  # depth 1 — no trip, no escalation
         assert not buf.breaker_tripped
         assert recorder.controls == []
-        await link.relay_to_core(b"two")  # depth 2 > 1 — trips + escalates
+        await link.submit_tui_unit(b"two")  # depth 2 > 1 — trips + escalates
 
     assert buf.breaker_tripped
     # The client received exactly ONE link.unavailable control frame (listener spy).
@@ -2556,10 +2590,10 @@ async def test_relay_to_core_breaker_idempotent_refeed_no_second_escalation() ->
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"a")  # depth 1
-        await link.relay_to_core(b"b")  # depth 2 — at cap, no trip
-        await link.relay_to_core(b"c")  # depth 3 > 2 — trips + escalates ONCE
-        await link.relay_to_core(b"d")  # depth 4 > 2 — latch held, idempotent re-feed
+        await link.submit_tui_unit(b"a")  # depth 1
+        await link.submit_tui_unit(b"b")  # depth 2 — at cap, no trip
+        await link.submit_tui_unit(b"c")  # depth 3 > 2 — trips + escalates ONCE
+        await link.submit_tui_unit(b"d")  # depth 4 > 2 — latch held, idempotent re-feed
 
     assert buf.breaker_tripped
     assert buf.depth_frames == 4  # all four held; hard ceiling (4) NOT breached
@@ -2578,7 +2612,7 @@ async def test_relay_to_core_under_cap_no_breaker_escalation() -> None:
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"x")
+        await link.submit_tui_unit(b"x")
 
     assert not buf.breaker_tripped
     assert recorder.controls == []  # no escalation
@@ -2588,17 +2622,20 @@ async def test_relay_to_core_under_cap_no_breaker_escalation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_relay_to_core_no_buffer_never_references_breaker() -> None:
-    """With ``replay_buffer=None`` the breaker branch is never entered (no escalation)."""
-    link, recorder, _sink = _link_with_relay()  # default replay_buffer=None
-    assert link._replay_buffer is None
+async def test_submit_tui_unit_under_cap_never_references_breaker() -> None:
+    """An un-tripped leg never feeds the breaker (no escalation, no row).
+
+    G6-4a (#288): the breaker branch is reached only when ``leg.breaker_tripped`` is set;
+    a single under-cap append leaves it clear, so no ``link.unavailable`` + no audit row.
+    """
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
     with structlog.testing.capture_logs() as captured:
-        await link.relay_to_core(b"one")
+        await link.submit_tui_unit(b"one")
 
-    assert recorder.controls == []  # buffer-less link never escalates
+    assert recorder.controls == []  # an un-tripped leg never escalates
     rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
     assert rows == []
 
@@ -2614,14 +2651,14 @@ async def test_relay_to_core_no_buffer_never_references_breaker() -> None:
 def test_replay_buffer_tripped_is_false_with_no_buffer() -> None:
     """No buffer injected -> the property is ``False`` (buffering off)."""
     link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
-    assert link._replay_buffer is None
+    assert link._tui_leg is None
     assert link.replay_buffer_tripped is False
 
 
 def test_replay_buffer_tripped_is_false_with_untripped_buffer() -> None:
-    """An injected but un-latched buffer -> ``False``."""
+    """An injected but un-latched leg -> ``False``."""
     buf = ReplayBuffer()
-    link = GatewayCoreLink(client_listener=_RecordingClientListener(), replay_buffer=buf)  # type: ignore[arg-type]
+    link = GatewayCoreLink(client_listener=_RecordingClientListener(), tui_leg=_tui_leg(buf))  # type: ignore[arg-type]
     assert buf.breaker_tripped is False
     assert link.replay_buffer_tripped is False
 
@@ -2640,9 +2677,9 @@ async def test_replay_buffer_tripped_is_true_after_breaker_latches() -> None:
 
     assert link.replay_buffer_tripped is False
     with structlog.testing.capture_logs():
-        await link.relay_to_core(b"one")  # depth 1 — no trip
+        await link.submit_tui_unit(b"one")  # depth 1 — no trip
         assert link.replay_buffer_tripped is False
-        await link.relay_to_core(b"two")  # depth 2 > 1 — trips
+        await link.submit_tui_unit(b"two")  # depth 2 > 1 — trips
 
     assert buf.breaker_tripped is True
     assert link.replay_buffer_tripped is True
@@ -2706,8 +2743,6 @@ async def test_buffer_evict_loop_audits_each_dropped_seq_and_refreshes_gauges() 
     """
     _reset_buffer_gauges()
     buf = ReplayBuffer(max_frames=8, max_bytes=1024, ttl_seconds=30.0)
-    for seq in range(3):
-        buf.append(seq, b"x", now=float(seq))
 
     clock = {"now": 100.0}  # 100 > 2 (last enqueue) + 30 (ttl) -> all three expired
 
@@ -2728,6 +2763,9 @@ async def test_buffer_evict_loop_audits_each_dropped_seq_and_refreshes_gauges() 
         monotonic=lambda: clock["now"],
         replay_buffer=buf,
     )
+    assert link._tui_leg is not None
+    for seq in range(3):  # pre-load with per-frame timestamps via the leg's cap (G6-4a)
+        _preload(link._tui_leg, buf, seq, b"x", now=float(seq))
 
     with structlog.testing.capture_logs() as captured:
         task = asyncio.ensure_future(link._buffer_evict_loop())
@@ -2799,19 +2837,7 @@ async def test_buffer_evict_loop_is_loud_and_continues_when_a_sweep_raises() -> 
     """
     _reset_buffer_gauges()
     buf = ReplayBuffer(max_frames=8, max_bytes=1024, ttl_seconds=30.0)
-    buf.append(0, b"x", now=0.0)
     clock = {"now": 100.0}  # 100 > 0 + 30 ttl -> seq 0 is expired on the real sweep
-
-    real_evict = buf.evict_expired
-    calls = {"n": 0}
-
-    def _evict_once_raises(*, now: float) -> tuple[int, ...]:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ReplayBufferError("simulated regressed-clock sweep fault")
-        return real_evict(now=now)
-
-    buf.evict_expired = _evict_once_raises  # type: ignore[method-assign]
 
     sweeps = {"n": 0}
 
@@ -2828,6 +2854,19 @@ async def test_buffer_evict_loop_is_loud_and_continues_when_a_sweep_raises() -> 
         monotonic=lambda: clock["now"],
         replay_buffer=buf,
     )
+    assert link._tui_leg is not None
+    _preload(link._tui_leg, buf, 0, b"x", now=0.0)
+
+    real_evict = buf.evict_expired
+    calls = {"n": 0}
+
+    def _evict_once_raises(*, now: float) -> tuple[int, ...]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ReplayBufferError("simulated regressed-clock sweep fault")
+        return real_evict(now=now)
+
+    buf.evict_expired = _evict_once_raises  # type: ignore[method-assign]
 
     with structlog.testing.capture_logs() as captured:
         task = asyncio.ensure_future(link._buffer_evict_loop())
@@ -2932,7 +2971,7 @@ async def test_run_does_not_spawn_evict_task_with_no_buffer() -> None:
     transport = _ScriptedCoreTransport([_start_only(epoch), blocked])
     dial = _DialRecorder([lambda: transport])
     link, _recorder = _run_link(dial=dial, shutdown_event=shutdown)  # replay_buffer=None
-    assert link._replay_buffer is None
+    assert link._tui_leg is None
 
     task = asyncio.ensure_future(link.run())
     for _ in range(50):
@@ -2956,7 +2995,7 @@ async def test_refresh_buffer_metrics_tracks_append_trim_and_reset() -> None:
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
-    await link.relay_to_core(b"abc")  # append seq 0 (3 bytes)
+    await link.submit_tui_unit(b"abc")  # append seq 0 (3 bytes)
     assert BUFFER_DEPTH_FRAMES._value.get() == 1
     assert BUFFER_DEPTH_BYTES._value.get() == 3
 
@@ -2967,7 +3006,7 @@ async def test_refresh_buffer_metrics_tracks_append_trim_and_reset() -> None:
     assert BUFFER_DEPTH_BYTES._value.get() == 0
 
     # Re-load, then a reconnect handshake resets the buffer -> the gauges zero again.
-    await link.relay_to_core(b"defgh")  # append seq 1 (5 bytes)
+    await link.submit_tui_unit(b"defgh")  # append seq 1 (5 bytes)
     assert BUFFER_DEPTH_FRAMES._value.get() == 1
     assert BUFFER_DEPTH_BYTES._value.get() == 5
     handshake = _FakeCoreTransport(
@@ -2990,7 +3029,7 @@ async def test_refresh_buffer_metrics_sets_breaker_gauge_on_trip() -> None:
 
     with structlog.testing.capture_logs():
         for _ in range(3):  # third append breaches the 2-frame soft cap
-            await link.relay_to_core(b"x")
+            await link.submit_tui_unit(b"x")
 
     assert buf.breaker_tripped is True
     assert CIRCUIT_BREAKER_OPEN._value.get() == 1
@@ -3000,7 +3039,7 @@ async def test_refresh_buffer_metrics_sets_breaker_gauge_on_trip() -> None:
 def test_refresh_buffer_metrics_is_a_noop_with_no_buffer() -> None:
     """``_refresh_buffer_metrics`` on a buffer-less link is a no-op (the None branch)."""
     link = GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
-    assert link._replay_buffer is None
+    assert link._tui_leg is None
     link._refresh_buffer_metrics()  # must not crash
 
 
@@ -3027,7 +3066,7 @@ async def _capture_replay(link: GatewayCoreLink, payloads: list[bytes]) -> None:
     leg1 = _FakeCoreTransport([])
     link._current_core_transport = leg1
     for payload in payloads:
-        await link.relay_to_core(payload)
+        await link.submit_tui_unit(payload)
     handshake = _FakeCoreTransport(
         [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
     )
@@ -3140,13 +3179,15 @@ async def test_flush_pending_replay_partial_defer_on_mid_flush_loss() -> None:
 
 
 @pytest.mark.asyncio
-async def test_flush_pending_replay_relay_raise_still_sets_gate() -> None:
-    """S5 fail-safe: a ``relay_to_core`` that RAISES mid-flush still SETS the gate.
+async def test_flush_pending_replay_write_leg_unit_raise_still_sets_gate() -> None:
+    """S5 fail-safe: a ``write_leg_unit`` that RAISES mid-flush still SETS the gate (PR6).
 
-    Production ``relay_to_core`` never raises (it loud-drops), but a stray raise must not
-    wedge the client->core pump: the ``finally`` sets the gate on a complete-or-empty
-    stash even as the exception propagates. (Here the stash IS emptied at entry, so the
-    finally's ``not self._pending_replay`` is True -> gate set.)
+    The flush re-send moved from ``relay_to_core`` to ``record_for_send`` + the single
+    ``write_leg_unit`` writer (G6-4a). Production ``write_leg_unit`` never raises (it
+    loud-drops), but a stray raise from the PHYSICAL-WRITE point must not wedge the
+    client->core pump: the ``finally`` sets the gate on a complete-or-empty stash even as
+    the exception propagates. (Here the stash IS emptied at entry, so the finally's ``not
+    self._pending_replay`` is True -> gate set.)
     """
     buf = ReplayBuffer()
     link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
@@ -3154,11 +3195,38 @@ async def test_flush_pending_replay_relay_raise_still_sets_gate() -> None:
     fresh = _FakeCoreTransport([])
     link._current_core_transport = fresh
 
-    async def _boom(_payload: bytes) -> None:
-        raise RuntimeError("relay blew up")
+    async def _boom(_adapter_id: str, _payload: bytes, *, seq: int, ack: int) -> None:
+        raise RuntimeError("writer blew up")
 
-    link.relay_to_core = _boom  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="relay blew up"):
+    link.write_leg_unit = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="writer blew up"):
+        await link._flush_pending_replay()
+
+    assert link.replay_pending_gate.is_set() is True  # no wedge
+
+
+@pytest.mark.asyncio
+async def test_flush_pending_replay_record_for_send_raise_still_sets_gate() -> None:
+    """S5 fail-safe: a ``record_for_send`` that RAISES mid-flush still SETS the gate (PR6).
+
+    The OTHER raise-point in the flush loop is the leg's ``record_for_send`` (seq mint +
+    cap reserve + buffer append). Production never raises on the single-leg flush (PR2/PR3
+    invariant), but a stray raise from the leg-record point must hit the SAME ``finally``
+    gate-set as the writer raise — both raise-points are covered, not just one (avoids the
+    100%-branch-gate gap + the test passing vacuously).
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    await _capture_replay(link, [b"a"])
+    fresh = _FakeCoreTransport([])
+    link._current_core_transport = fresh
+    assert link._tui_leg is not None
+
+    def _boom(_payload: bytes) -> int:
+        raise RuntimeError("record blew up")
+
+    link._tui_leg.record_for_send = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="record blew up"):
         await link._flush_pending_replay()
 
     assert link.replay_pending_gate.is_set() is True  # no wedge
@@ -3211,7 +3279,7 @@ async def test_run_reconnect_flushes_replay_before_pump_resumes() -> None:
         if first.sent:
             break
     # Relay one client->core frame onto the live first leg -> buffered un-acked seq 0.
-    await link.relay_to_core(b"buffered")
+    await link.submit_tui_unit(b"buffered")
     assert buf.depth_frames == 1
     # Release the first leg's read -> EOF -> reconnect to leg 2 (capture + flush).
     first_eof.set()
@@ -3260,7 +3328,7 @@ async def test_run_discards_replay_buffer_on_terminal_exit_zeroing_pre_dlp_bytes
             break
     # Append one un-acked PRE-DLP frame onto the live leg so the buffer is non-empty at the
     # terminal exit (this is the residency the fix must scrub).
-    await link.relay_to_core(b"pre-dlp-secret")
+    await link.submit_tui_unit(b"pre-dlp-secret")
     assert buf.depth_frames == 1
     # White-box: hold the retained bytearray so we can assert it was zeroed IN PLACE (the
     # mutable copy the buffer owns precisely so it CAN be scrubbed), mirroring the buffer's
@@ -3280,13 +3348,95 @@ async def test_run_discards_replay_buffer_on_terminal_exit_zeroing_pre_dlp_bytes
 # ---------------------------------------------------------------------------
 # Spec B G6-4a (#288): the TUI dial-in becomes the FIRST GatewayLeg. The leg OWNS the
 # buffer + per-leg seq + breaker latch + cap accounting; ``submit_tui_unit`` routes the
-# leg's ``record_for_send`` through the single ``write_leg_unit`` physical writer.
+# leg's ``record_for_send`` through the single ``write_leg_unit`` physical writer. Direct
+# branch tests for ``submit_tui_unit`` (PR8): the breaker once-only edge, the
+# ``assert _tui_leg is not None`` branch, and the None-drop branch (PR5).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_tui_leg_injection_is_accepted_and_exposed() -> None:
-    """A ``GatewayLeg`` injected as ``tui_leg`` is held and exposed read-only."""
-    leg = _tui_leg(ReplayBuffer())
-    link = GatewayCoreLink(client_listener=_RecordingClientListener(), tui_leg=leg)  # type: ignore[arg-type]
-    assert link._tui_leg is leg
+async def test_submit_tui_unit_sends_via_write_leg_unit_with_cumulative_ack() -> None:
+    """``submit_tui_unit`` routes the leg through ``write_leg_unit`` with the cumulative ack."""
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+    for seq in (0, 1, 2):
+        link._core_tracker.observe(seq)
+
+    await link.submit_tui_unit(b'{"id":1,"result":{}}')
+
+    assert transport.sent_units == [(b'{"id":1,"result":{}}', 0, 2)]
+    assert buf.depth_frames == 1  # append-before-send via the leg
+
+
+@pytest.mark.asyncio
+async def test_write_leg_unit_none_transport_is_a_loud_drop() -> None:
+    """``write_leg_unit`` (the SOLE physical writer) loud-drops on a ``None`` snapshot.
+
+    The single-writer None-arm (architect M3): a ``None`` ``_current_core_transport`` (the
+    reconnect-race / gap window) is a LOUD drop carrying the ``adapter_id`` breadcrumb, never
+    a raise into the scheduler pump. Covered directly because the leg-routed ``submit_tui_unit``
+    + the flush both None-check ahead of the writer, so only a direct call reaches this arm.
+    """
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=ReplayBuffer())
+    link._current_core_transport = None
+
+    with structlog.testing.capture_logs() as captured:
+        await link.write_leg_unit("tui", b"x", seq=0, ack=0)  # must NOT raise
+
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].get("reason") == "no_core_transport"
+    assert dropped[0].get("adapter_id") == "tui"
+
+
+@pytest.mark.asyncio
+async def test_submit_tui_unit_none_transport_drop_does_not_consume_a_leg_seq() -> None:
+    """PR5: a None-transport drop happens BEFORE ``record_for_send`` — no leg seq minted.
+
+    The next real send on a live leg still starts at seq 0 (the dead-leg None-check stays
+    STRICTLY AHEAD of the mint, so a drop on a dead leg cannot burn a leg seq).
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    link._current_core_transport = None
+
+    with structlog.testing.capture_logs() as captured:
+        await link.submit_tui_unit(b"dropped")  # no transport -> loud drop, no mint
+
+    assert buf.depth_frames == 0  # nothing appended (no seq consumed)
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 1
+
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+    await link.submit_tui_unit(b"first-real")
+    assert [(p, s) for (p, s, _a) in transport.sent_units] == [(b"first-real", 0)]
+
+
+@pytest.mark.asyncio
+async def test_submit_tui_unit_breaker_feeds_unavailable_exactly_once() -> None:
+    """PR8: direct ``submit_tui_unit`` appends breaching the soft cap feed BREAKER_TRIPPED once.
+
+    Drive ``submit_tui_unit`` DIRECTLY (not via the flood harness): ``max_frames=1`` -> the
+    second append trips the breaker; the gateway feeds BREAKER_TRIPPED -> machine escalates
+    UP -> UNAVAILABLE emitting EXACTLY one ``link.unavailable`` + EXACTLY one
+    ``gateway.comms.breaker_tripped`` row (JC-2: the link owns the once-only escalation edge).
+    """
+    buf = ReplayBuffer(max_frames=1)
+    link, recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    with structlog.testing.capture_logs() as captured:
+        await link.submit_tui_unit(b"one")  # depth 1 — no trip
+        assert recorder.controls == []
+        await link.submit_tui_unit(b"two")  # depth 2 > 1 — trips + escalates ONCE
+
+    assert buf.breaker_tripped
+    assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
+    rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
+    assert len(rows) == 1
+    assert rows[0].get("depth_frames") == buf.depth_frames
+    assert rows[0].get("depth_bytes") == buf.depth_bytes

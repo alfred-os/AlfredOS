@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +44,11 @@ from alfred.comms_mcp.protocol import (
 )
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.relay import GatewayRelay
+from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
 from alfred.plugins.comms_socket_transport import (
     CommsSocketListener,
@@ -130,7 +135,30 @@ async def _build_harness(
     # The core HOST accepts the gateway's dial concurrently with the gateway dialing it.
     core_host_task = asyncio.create_task(_accept_core_host(core_listener, epoch=epoch))
 
-    core_link = GatewayCoreLink(client_listener=client_listener, shutdown_event=shutdown)
+    # G6-4a (#288): the TUI is the FIRST GatewayLeg; the relay's client->core pump routes
+    # through ``submit_tui_unit`` -> ``record_for_send`` -> ``write_leg_unit``, so the real
+    # core-link needs a leg wired. Non-binding gate + a cap ceiling strictly above the buffer
+    # hard ceiling (PR2); the real ``asyncio.sleep`` default keeps the TTL-evict sweep at 30s
+    # (no busy-spin), so this loopback contract test completes long before a sweep fires.
+    _buf = ReplayBuffer()
+    _tui_leg = GatewayLeg(
+        adapter_id="tui",
+        buffer=_buf,
+        ingress_gate=PerAdapterIngressGate(
+            "tui",
+            sustained_rate_per_s=1e9,
+            burst=10**9,
+            max_inflight=10**9,
+            ttl_seconds=1e9,
+            max_frame_bytes=1 << 30,
+            now=time.monotonic,
+        ),
+        global_cap=GlobalReplayCap(max_total_bytes=_buf._max_bytes * 4),
+        now=time.monotonic,
+    )
+    core_link = GatewayCoreLink(
+        client_listener=client_listener, shutdown_event=shutdown, tui_leg=_tui_leg
+    )
 
     # The client dials the gateway's client socket; the gateway accepts it. The relay's
     # client transport is the ACCEPTED gateway-side end — build the relay around it once
