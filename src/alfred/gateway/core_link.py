@@ -38,6 +38,12 @@ from typing import Final, Protocol, runtime_checkable
 import structlog
 from pydantic import ValidationError
 
+from alfred.comms_mcp.adapter_credential_protocol import (
+    CORE_ADAPTER_SPAWN_GRANT,
+    GATEWAY_ADAPTER_SPAWN_REQUEST,
+    SpawnGrant,
+    SpawnRequest,
+)
 from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
     DAEMON_LIFECYCLE_GOING_DOWN,
@@ -138,6 +144,33 @@ class GatewayCoreLinkError(AlfredError):
     hex). Mirrors the host runner's :class:`PluginError` handshake-failure arm —
     an unusable core handshake is never a silent no-op.
     """
+
+
+class CredentialLegDownError(AlfredError):
+    """A ``spawn_request`` was issued while the core leg was DOWN (G6-3, #288).
+
+    The link-DOWN arm of the credential round-trip: there is no live transport to
+    send the request on. DISTINCT from :class:`CredentialReplyTimeoutError` (the
+    link was UP but the reply never came — correction A-C2). The supervisor's
+    AWAITING_CORE state consumes this loud signal (Task 4) rather than spawning a
+    credential-less adapter (fail-closed, CLAUDE.md hard rule #7).
+    """
+
+
+class CredentialReplyTimeoutError(AlfredError):
+    """A ``spawn_request`` was sent but no ``spawn_grant`` came back in time (G6-3).
+
+    The bounded-await fail-closed arm (correction A-C2): the leg is nominally UP
+    but the reply was dropped / unrouted (the leg silently drops unknown inbound
+    methods, so a spawn could otherwise hang). A typed LOUD abort, never a hang —
+    the gateway refuses the spawn rather than block forever.
+    """
+
+
+# Bounded await for a ``spawn_grant`` reply on an UP leg (correction A-C2). Mirrors
+# the host runner's ``_SEND_REQUEST_TIMEOUT_SECONDS`` discipline: a reply that does
+# not arrive in this window is a loud fail-closed abort, not a hang.
+_SPAWN_GRANT_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 # The errors a FAILED INITIAL dial/handshake can raise. A first-attempt failure is
@@ -292,6 +325,15 @@ class GatewayCoreLink:
         self._pending_replay: tuple[ReplayFrame, ...] = ()
         self._replay_pending: asyncio.Event = asyncio.Event()
         self._replay_pending.set()
+        # Spec B G6-3 (#288): the credential request/response correlation registry.
+        # ``request_spawn_grant`` registers a Future keyed on the request's
+        # ``request_id``; an inbound ``core.adapter.spawn_grant`` (routed through
+        # ``_consume_frame`` / ``_route_unit``) resolves the matching waiter. This is
+        # the FIRST request/response shape on the otherwise fire-and-forget leg — an
+        # unsolicited / mismatched grant (no pending waiter) is a loud drop, never a
+        # crash (adversarial e). The credential lives in the Future's result only for
+        # the brief window the awaiter consumes it; it is never stashed on ``self``.
+        self._pending_grants: dict[str, asyncio.Future[SpawnGrant]] = {}
 
     @property
     def replay_pending_gate(self) -> asyncio.Event:
@@ -954,6 +996,15 @@ class GatewayCoreLink:
             # raw path is rejected exactly as on the parsed pump.
             await self._consume_frame(parsed)
             return
+        if method == CORE_ADAPTER_SPAWN_GRANT:
+            # Spec B G6-3 (#288): the credential RESPONSE on the seq-enabled wire. The
+            # method-peek classifies it as a control frame to CONSUME (route to its
+            # pending waiter), NEVER forwarded byte-for-byte to the client relay — a
+            # leaked credential frame would be a CRITICAL trust-boundary break. An
+            # unsolicited/forged grant is a loud drop inside ``_route_spawn_grant``.
+            params = parsed.get("params") if isinstance(parsed, Mapping) else None
+            self._route_spawn_grant(params)
+            return
         # An opaque payload (incl. a no-``method`` response): forward the ORIGINAL bytes.
         await self._payload_relay(frame.payload)
 
@@ -1066,6 +1117,96 @@ class GatewayCoreLink:
         except (BrokenPipeError, ConnectionResetError, RuntimeError, CommsProtocolError) as exc:
             log.warning("gateway.status.send_dropped", error=repr(exc), method=method)
 
+    async def request_spawn_grant(
+        self, request: SpawnRequest, *, timeout: float = _SPAWN_GRANT_TIMEOUT_SECONDS
+    ) -> SpawnGrant:
+        """Send ``gateway.adapter.spawn_request`` and await its correlated grant (G6-3).
+
+        The credential round-trip's gateway half (Task 2.5). Snapshots the current
+        core transport, registers a pending Future keyed on ``request.request_id``,
+        sends the request on the method-bearing ``send`` channel (the SAME primitive
+        the status frames + handshake ack use — NOT the opaque ``send_payload_unit``
+        relay), then awaits the matching :class:`SpawnGrant` the pump routes back via
+        :meth:`_consume_frame` / :meth:`_route_unit`.
+
+        **Fail-closed, two distinct arms (corrections A-C1/A-C2).**
+        * Link-DOWN (no live transport, or the send raises a transport fault):
+          :class:`CredentialLegDownError` — the supervisor's AWAITING_CORE consumes it.
+        * Link-UP but the reply is dropped/unrouted: a bounded ``wait_for`` raises
+          :class:`CredentialReplyTimeoutError` — a loud abort, never a hang.
+
+        The pending Future is ALWAYS cleaned up (popped) on every exit path so a late
+        grant cannot resolve a Future no one awaits, and the credential never lingers
+        in the registry.
+        """
+        transport = self._current_core_transport
+        if transport is None:
+            raise CredentialLegDownError(
+                f"core leg down; cannot request spawn grant (request_id={request.request_id!r})"
+            )
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[SpawnGrant] = loop.create_future()
+        # Register the waiter BEFORE the send so a response that races back is
+        # correlated (mirrors the host runner's send_request ordering).
+        self._pending_grants[request.request_id] = future
+        try:
+            try:
+                await transport.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": GATEWAY_ADAPTER_SPAWN_REQUEST,
+                        "params": request.model_dump(),
+                    }
+                )
+            except (BrokenPipeError, ConnectionResetError, RuntimeError, CommsProtocolError) as exc:
+                # The leg tore mid-send: treat as link-DOWN (the supervisor awaits-core),
+                # NOT a reply-timeout. Loud + typed (CLAUDE.md hard rule #7).
+                raise CredentialLegDownError(
+                    f"core leg send failed (request_id={request.request_id!r})"
+                ) from exc
+            try:
+                return await asyncio.wait_for(future, timeout)
+            except TimeoutError as exc:
+                log.error(
+                    "gateway.core_link.spawn_grant_timeout",
+                    request_id=request.request_id,
+                )
+                raise CredentialReplyTimeoutError(
+                    f"no spawn grant within {timeout}s (request_id={request.request_id!r})"
+                ) from exc
+        finally:
+            # Drop the waiter on EVERY exit (resolved, timed out, or send-failed) so a
+            # late grant resolves nothing and the credential never lingers (security).
+            self._pending_grants.pop(request.request_id, None)
+
+    def _route_spawn_grant(self, params: object) -> None:
+        """Resolve a pending credential waiter from an inbound grant frame's params.
+
+        Always CONSUMES a ``core.adapter.spawn_grant`` frame: the params are validated
+        + routed to a waiter, OR loud-dropped (an unsolicited / mismatched / malformed
+        grant). The two call sites already route this method ONLY for the
+        ``core.adapter.spawn_grant`` method, so it never needs to signal "not mine" — it
+        returns ``None``. A malformed grant or one with no matching pending waiter is a
+        LOUD drop, never a crash (adversarial e): the carrier cannot be hung or unwound
+        by a forged response frame.
+        """
+        raw = params if isinstance(params, Mapping) else {}
+        try:
+            grant = SpawnGrant.model_validate(raw)
+        except ValidationError:
+            # A malformed grant — no exc detail logged (it could echo the raw wire +
+            # the credential field). Loud + drop; never feed a waiter (hard rule #7).
+            log.warning("gateway.core_link.spawn_grant_malformed")
+            return
+        future = self._pending_grants.get(grant.request_id)
+        if future is None or future.done():
+            # No outstanding request (unsolicited grant) or already-resolved: drop loud
+            # (adversarial e). NEVER log the grant object (its credential is repr-safe,
+            # but log only the routing id) and NEVER crash the pump.
+            log.warning("gateway.core_link.spawn_grant_unsolicited", request_id=grant.request_id)
+            return
+        future.set_result(grant)
+
     async def _consume_frame(self, frame: Mapping[str, object]) -> None:
         """Route ONE post-handshake core-leg frame: consume lifecycle, drop payload.
 
@@ -1086,6 +1227,12 @@ class GatewayCoreLink:
             await self._consume_going_down(frame)
         elif method == DAEMON_LIFECYCLE_READY:
             await self._consume_ready(frame)
+        elif method == CORE_ADAPTER_SPAWN_GRANT:
+            # Spec B G6-3 (#288): the FIRST core->gateway RESPONSE frame on this leg.
+            # Route it to its pending credential waiter (the request/response
+            # correlation primitive) — NEVER relayed to the client, NEVER fed to the
+            # link-state machine. An unsolicited/forged grant is a loud drop inside.
+            self._route_spawn_grant(frame.get("params"))
         else:
             # A payload frame the relay (G3-3b-2) will forward, or a JSON-RPC response
             # (``None`` method). Drop + count for now — never fed, never acted on.
