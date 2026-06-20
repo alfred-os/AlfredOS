@@ -66,6 +66,26 @@ async def test_unspawned_child_factory_fails_closed() -> None:
         )
 
 
+def test_process_builds_supervisor_with_real_credential_client() -> None:
+    """G6-3 (#288): the process wires the supervisor with the REAL credential client.
+
+    The supervisor's at-spawn credential acquirer is a live
+    GatewayAdapterCredentialClient holding the core link (the credential round-trip's
+    gateway half), the cred seam is the cheap live-epoch probe, and the epoch is
+    sourced LIVE from the core link (H1) — never a construction-time snapshot.
+    """
+    from alfred.gateway.adapter_credential_client import GatewayAdapterCredentialClient
+
+    process = GatewayProcess(shutdown_event=asyncio.Event())
+    core_link = _make_core_link()
+    supervisor = process._build_adapter_supervisor(core_link)
+    # The supervisor holds the real client + the live epoch source (not a snapshot).
+    assert isinstance(supervisor._credential_client, GatewayAdapterCredentialClient)
+    assert isinstance(supervisor._cred, _CoreEpochCredSeam)
+    # The epoch source is the core link's LIVE accessor (H1).
+    assert supervisor._epoch_source == core_link.current_core_epoch
+
+
 async def test_core_epoch_cred_seam_tracks_link_liveness() -> None:
     """The cheap pre-spawn probe is available iff the core link has captured an epoch.
 
