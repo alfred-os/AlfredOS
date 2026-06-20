@@ -447,10 +447,22 @@ class AdapterUpNotification(_WireModel):
     only status frame that asserts liveness, so it is the only one epoch-bound
     (Spec B §3); the carrier (Spec A ``0600`` + ``SO_PEERCRED`` + per-boot-epoch
     envelope) covers origin-auth + cross-boot replay for the non-``up`` frames.
+
+    ADDITIVE (G6-2b-2b / SEC-01 / #288): ``host_restart_seq`` is the gateway's
+    per-adapter ``restart_count`` for the INCARNATION being STARTED (the Nth
+    (re)spawn since the gateway last started this adapter). The core's
+    CrashIncidentReconciler ADVANCES its ``current_incarnation`` on an accepted
+    ``up`` so a later in-child ``CrashedNotification`` — which carries no seq and
+    fires as the child dies, BEFORE the gateway observes the exit and emits its
+    seq-bearing ``crashed`` frame — is tagged to the run that was actually serving.
+    Without this the common child-before-gateway order would split one physical
+    crash into two incidents. Defaulted to 0 so every pre-2b-2b producer validates
+    unchanged; ``ge=0`` refuses a forged negative at the wire.
     """
 
     adapter_id: AdapterId
     epoch: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
+    host_restart_seq: int = Field(default=0, ge=0)
 
 
 class AdapterDownNotification(_WireModel):
@@ -480,21 +492,28 @@ class AdapterCrashedNotification(_WireModel):
     NOT epoch-bound (spec-faithful — only ``up`` asserts liveness; carrier-auth
     covers origin + replay for this frame).
 
-    CRASH DE-DUP (Spec B §3) — DEFERRED TO G6-2b: the core must de-dup the two
+    CRASH DE-DUP (Spec B §3) — IMPLEMENTED IN G6-2b-2b: the core de-dups the two
     coexisting crash signals (this gateway frame vs the in-child
-    ``CrashedNotification``) by correlating on ``adapter_id`` + a host-restart
-    sequence. That core-side join is owned by G6-2b — the in-child frame arrives
-    via the relay/session, this gateway frame via the status leg, and the
-    host-restart sequence is the 2b supervisor's per-adapter restart counter
-    (none of which exist in 2a). Because 2a ships NO producer, this frozen model
-    can be extended ADDITIVELY in 2b (e.g. a ``host_restart_seq``/incarnation
-    field) with zero live-contract risk if the join needs it — the freeze here is
-    not a permanent omission.
+    ``CrashedNotification``) by correlating on ``adapter_id`` + ``host_restart_seq``.
+    That core-side join is owned by
+    :class:`alfred.comms_mcp.crash_incident_reconciler.CrashIncidentReconciler` —
+    the in-child frame arrives via the relay/session, this gateway frame via the
+    status leg, and the host-restart sequence is the 2b supervisor's per-adapter
+    ``restart_count`` (which now exists, ``adapter_supervisor.py``).
+
+    ``host_restart_seq`` (G6-2b-2b / #288) is which INCARNATION exited — the
+    supervisor's PRE-increment ``restart_count`` at crash time (first crash ->
+    seq 0). The IN-CHILD ``CrashedNotification`` carries NO seq (the child cannot
+    know the gateway counter); core-side it is tagged to the adapter's current
+    incarnation. Defaulted to 0 so every pre-2b-2b producer/consumer validates
+    unchanged (the docstring's pre-sanctioned additive extension); ``ge=0`` refuses
+    a forged negative at the wire.
     """
 
     adapter_id: AdapterId
     error_class: str = Field(min_length=1)
     detail: str
+    host_restart_seq: int = Field(default=0, ge=0)
 
 
 class AdapterBreakerOpenNotification(_WireModel):
