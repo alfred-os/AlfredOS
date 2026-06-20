@@ -536,3 +536,71 @@ Key properties (see ADR-0038 for the full reasoning):
 - **The G6-5 substrate.** The method router takes `gateway.adapters` next; `alfred gateway
   adapters --wait-ready` is a live-ness consumer that reuses this exact channel (a client-side
   poll over repeated `status.query` keeps the server stateless — ADR-0038).
+
+### Spec B G6-4: the per-adapter ingress gate, fair leg scheduler, and per-leg replay (global cap)
+
+G6-4 makes the single gateway↔core link safe for **N hosted adapter legs plus the
+foreground TUI leg** ([ADR-0036](../adr/0036-gateway-adapter-hosting-inversion.md)). Three
+collaborators sit in the gateway process (never the core), all keyed only on the
+gateway-known `adapter_id` — the gateway stays **payload-blind** for T3 bodies:
+
+- **`PerAdapterIngressGate`** (`src/alfred/gateway/ingress_gate.py`) — a payload-blind,
+  per-leg admission control: a two-tier token bucket (sustained rate, capped at a burst) plus
+  an in-flight concurrency cap, plus a `max_frame_bytes` size tier. A trip back-pressures the
+  leg (no silent drop), increments `gateway_ingress_throttled_total{adapter}`, and writes a
+  closed-vocab ingress-refusal audit row. A held in-flight slot older than the TTL is reclaimed
+  by an active per-gate sweeper so a stalled leg cannot wedge.
+- **`GatewayLegScheduler`** (`src/alfred/gateway/leg_scheduler.py`) — fair round-robin egress
+  of the registered legs over the single `core_link` writer, with a bounded per-leg send queue
+  (in bytes). A chatty or large-payload leg cannot starve another adapter or the live TUI; the
+  TUI leg gets a reserved minimum credit so interactive latency has a floor in N.
+- **`GlobalReplayCap`** (`src/alfred/gateway/global_replay_cap.py`) — bounds the **sum** of all
+  legs' `ReplayBuffer` resident bytes, so total pre-DLP T1 in the always-up SETUID process is
+  bounded regardless of N. A reserve that would exceed the cap is refused (back-pressure, not a
+  drop); every byte-reclaim path (`trim_to_ack`, `evict_expired`, `discard`,
+  `reset_for_new_epoch`, hard-ceiling rollback) releases the cap.
+
+A forged or unknown out-of-band `adapter_id` is **refused** by `leg_router.py` (loud
+`unknown_adapter` audit row); it is never default-routed and never used as a metric label
+value (a single `<unknown>` sentinel series absorbs the count, so a flood of distinct forged
+ids cannot blow up metric cardinality).
+
+#### Per-adapter metrics (`src/alfred/gateway/adapter_metrics.py`, `ingress_audit.py`)
+
+Every series below carries **exactly** the label set `{adapter}` and is materialised at leg
+construction (so a scrape sees the leg at 0 before its first event). They complement — and do
+not replace — the unlabelled single-buffer Spec-A gauges (`gateway_core_link_up`,
+`gateway_buffer_depth_{frames,bytes}`) from the one-leg era.
+
+| Series | Type | Meaning |
+| --- | --- | --- |
+| `gateway_adapter_up{adapter}` | gauge | `1` while the leg is live, `0` while down. |
+| `gateway_adapter_inflight{adapter}` | gauge | In-flight (admitted, not-yet-released) units for the leg. |
+| `gateway_adapter_buffer_depth_frames{adapter}` | gauge | The leg's `ReplayBuffer` depth in frames. |
+| `gateway_adapter_buffer_depth_bytes{adapter}` | gauge | The leg's `ReplayBuffer` depth in bytes. |
+| `gateway_ingress_throttled_total{adapter}` | counter | Per-adapter ingress refusals (rate / in-flight / oversized / global-cap / unknown-adapter). |
+
+The audit-row field set is allowlisted to `adapter_id`, the closed-vocab `reason`, and scalar
+counters (`depth_frames`, `depth_bytes`, `inflight`, `cap_ratio`) — **never** a body,
+body-hash, body-sample, or platform-id (hard rule #5). The closed-vocab reason set lives in
+one place (`IngressRefusalReason`): `oversized`, `throttled_rate`, `throttled_inflight`,
+`global_cap_refused`, `unknown_adapter`.
+
+#### Sensible defaults
+
+These bound a **real** hosted adapter leg (G6-5). In G6-4 the only live leg is the TUI dial-in,
+whose gate is deliberately **non-binding** (the interactive path is never throttled) — the
+values below are the recommended starting point an operator tunes per adapter once real legs
+land.
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| Ingress sustained rate | 5 / s per adapter | The token-bucket refill rate; the core's `_PreResolutionLimiter` (60 / min per platform-id) remains as additive per-id defence-in-depth. |
+| Ingress burst | 20 | Token-bucket ceiling (a short spike is absorbed, then the sustained rate binds). |
+| In-flight cap | 8 | Max concurrently-admitted units before back-pressure. |
+| In-flight TTL | 30 s | A slot held longer is reclaimed by the sweeper (the wedge bound). |
+| Ingress sweep interval | 30 s | How often the active per-gate sweep reclaims stalled slots. |
+| `max_frame_bytes` | 1 MiB | Oversized frames are refused at admission (size is not content — payload-blind preserved). |
+| Per-leg send-queue bytes | 1 MiB | Bounds pre-append working memory the `GlobalReplayCap` does not see. |
+| Per-leg `ReplayBuffer` | 4096 frames / 8 MiB / 300 s TTL | The unchanged Spec-A buffer hard ceilings (one instance per leg). |
+| Global replay cap | ≥ the per-leg buffer hard ceiling × N | The aggregate-across-legs bound; set strictly above one leg's hard ceiling so the buffer's own hard-cap fires first. |

@@ -9,6 +9,10 @@
     {"id": 3, "title": "ReplayBuffer depth (frames)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}, "targets": [{"expr": "gateway_buffer_depth_frames"}]},
     {"id": 4, "title": "ReplayBuffer cap ratio", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}, "targets": [{"expr": "gateway_buffer_cap_ratio"}]},
     {"id": 5, "title": "Reconnect attempts (rate)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}, "targets": [{"expr": "rate(gateway_reconnect_attempts_total[5m])"}]},
-    {"id": 6, "title": "Core unavailable seconds (rate)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}, "targets": [{"expr": "rate(gateway_core_unavailable_seconds_total[5m])"}]}
+    {"id": 6, "title": "Core unavailable seconds (rate)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}, "targets": [{"expr": "rate(gateway_core_unavailable_seconds_total[5m])"}]},
+    {"id": 7, "title": "Adapter leg up (per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}, "targets": [{"expr": "gateway_adapter_up", "legendFormat": "{{adapter}}"}]},
+    {"id": 8, "title": "Adapter in-flight (per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}, "targets": [{"expr": "gateway_adapter_inflight", "legendFormat": "{{adapter}}"}]},
+    {"id": 9, "title": "Adapter replay-buffer depth (bytes, per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28}, "targets": [{"expr": "gateway_adapter_buffer_depth_bytes", "legendFormat": "{{adapter}}"}]},
+    {"id": 10, "title": "Ingress throttled (rate, per adapter)", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28}, "targets": [{"expr": "rate(gateway_ingress_throttled_total[5m])", "legendFormat": "{{adapter}}"}]}
   ]
 }
