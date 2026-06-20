@@ -123,6 +123,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from alfred.audit.log import AuditWriter
+    from alfred.comms_mcp.adapter_credential_resolver import CoreAdapterCredentialResolver
     from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
     from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
     from alfred.comms_mcp.daemon_runtime import (
@@ -616,6 +617,12 @@ class _CommsBootGraph:
     # core-side. Holds no resource to reap (pure validator + in-memory snapshot map),
     # so ``aclose`` does not touch it.
     status_observer: AdapterStatusObserver
+    # Spec B G6-3 (#288): the core-side credential resolver (the ONLY decryptor). Built
+    # ONCE here, injected into the gateway-leg runner so a ``gateway.adapter.spawn_request``
+    # resolves to a ``core.adapter.spawn_grant`` over the trusted leg. Holds the secret
+    # broker + an in-memory dedup cache (per gateway<->core link lifetime); no resource to
+    # reap, so ``aclose`` does not touch it.
+    credential_resolver: CoreAdapterCredentialResolver
     # Spec B G6-2b-2b (#288): the SHARED crash-dedup reconciler. Built ONCE here and
     # injected into BOTH the status observer (gateway-crash arm) AND every per-adapter
     # AdapterCrashHandler (in-child arm) so the two coexisting crash signals fold into
@@ -765,8 +772,18 @@ async def _build_comms_boot_graph(
         # mypy-strict on the ``str | None`` return). The epoch is the SAME value
         # threaded into the runner's ``lifecycle.start`` handshake, so a genuine live
         # ``up`` matches and a forged/stale epoch is refused (the false-liveness defense).
+        from alfred.comms_mcp.adapter_credential_resolver import CoreAdapterCredentialResolver
         from alfred.comms_mcp.adapter_status_observer import AdapterStatusObserver
         from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
+
+        # Spec B G6-3 (#288): the core-side credential resolver — the ONLY decryptor.
+        # Holds the SAME secret broker the rest of the boot graph uses; resolves the
+        # platform credential for a gateway adapter (re)spawn over the trusted leg.
+        credential_resolver = CoreAdapterCredentialResolver(
+            broker=secret_broker,
+            audit=audit,
+            now=lambda: datetime.now(UTC),
+        )
 
         def _expected_epoch() -> str:
             epoch = current_boot_epoch()
@@ -794,6 +811,7 @@ async def _build_comms_boot_graph(
             content_store=content_store,
             idempotency_store=idempotency_store,
             status_observer=status_observer,
+            credential_resolver=credential_resolver,
             crash_incident_reconciler=crash_incident_reconciler,
         )
     except Exception:
@@ -962,12 +980,18 @@ def _build_comms_runner(
     supervisor: _SupervisorType,
     settings: Settings,
     graph: _CommsBootGraph,
+    with_credential_resolver: bool = False,
 ) -> CommsPluginRunner:
     """Construct the runner over an established transport + bind the outbound sender.
 
-    Shared by the stdio (pipe) and socket (TUI) branches — only the ``transport``
+    Shared by the stdio (pipe) and socket (gateway) branches — only the ``transport``
     differs. Binds the inbound orchestrator's outbound sender to THIS runner so the
     dispatch ack flows back over the same wire.
+
+    ``with_credential_resolver`` (Spec B G6-3 / #288) wires the credential
+    request/response routing ONLY on the SOCKET (gateway) leg — the leg the gateway
+    dials to request adapter credentials. The stdio (daemon-spawned) legs carry no
+    credential request, so they leave it OFF (the resolver is never reached on them).
     """
     runner = CommsPluginRunner(
         session=session,  # type: ignore[arg-type]
@@ -986,6 +1010,9 @@ def _build_comms_runner(
         # reaches zero senders). ``current_boot_epoch()`` is ``None`` only before
         # ``mint_boot_epoch`` runs at boot — by the time a runner is built it is set.
         boot_epoch=current_boot_epoch(),
+        # Spec B G6-3 (#288): only the gateway (socket) leg carries the credential
+        # round-trip; the resolver routes spawn_request -> spawn_grant on this runner.
+        credential_resolver=graph.credential_resolver if with_credential_resolver else None,
     )
     sender: OutboundSenderLike = _RunnerOutboundSender(runner=runner)
     graph.inbound_orchestrator.bind_outbound_sender(sender)
@@ -1244,6 +1271,8 @@ async def _listen_socket_comms_adapter(
             supervisor=supervisor,
             settings=settings,
             graph=graph,
+            # The SOCKET carrier IS the gateway leg — wire the credential round-trip.
+            with_credential_resolver=True,
         )
         # Spec A G3-2 (#237): split ``run`` into ``start_and_handshake`` + ``pump``
         # so the socket-carrier runner's id-less ``send_notification`` is registered

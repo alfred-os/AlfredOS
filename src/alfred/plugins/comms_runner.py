@@ -52,7 +52,18 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import structlog
+from pydantic import ValidationError
 
+from alfred.comms_mcp.adapter_credential_protocol import (
+    CORE_ADAPTER_SPAWN_GRANT,
+    GATEWAY_ADAPTER_SPAWN_REQUEST,
+    SpawnGrant,
+    SpawnRequest,
+)
+from alfred.comms_mcp.adapter_credential_resolver import (
+    AdapterCredentialAuditWriteError,
+    AdapterCredentialError,
+)
 from alfred.comms_mcp.adapter_status_observer import AdapterStatusAuditWriteError
 from alfred.i18n import t
 from alfred.plugins.comms_seq_codec import SEQ_VERSION, WIRE_SEQ_FRAME_KEY
@@ -99,6 +110,11 @@ _MALFORMED_FRAME_RESTART_REASON: Final[str] = "malformed_frame"
 # Closed-vocab restart reason for a failed signed-audit write while recording a
 # ``gateway.adapter.*`` status transition (SEC-1, Spec B G6-2b-2a / #288).
 _STATUS_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "status_audit_unwritable"
+
+# Closed-vocab restart reason for a failed signed-audit write while recording a
+# credential GRANT/refusal on the spawn-request path (ERR-G63-01, Spec B G6-3 / #288).
+# A failed audit of "a real platform credential was released" is non-skippable.
+_CREDENTIAL_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "credential_audit_unwritable"
 
 # The transport-crash exception family the pump's read arm already handles. When
 # a shutdown wins the race against an in-flight ``read_frame`` (PR-S4-11b DEFECT
@@ -164,6 +180,20 @@ class _CommsTransportLike(Protocol):
     def enable_seq_ack(self) -> None: ...
 
 
+@runtime_checkable
+class _CredentialResolverLike(Protocol):
+    """Structural seam for the core-side credential resolver (Spec B G6-3 / #288).
+
+    The concrete type is
+    :class:`alfred.comms_mcp.adapter_credential_resolver.CoreAdapterCredentialResolver`;
+    the runner binds to this Protocol so it stays free of the comms-MCP resolver's
+    construction deps. ``resolve`` raises ``AdapterCredentialError`` on a fail-closed
+    refusal (which the runner drops loud — NO grant sent).
+    """
+
+    async def resolve(self, request: SpawnRequest) -> object: ...
+
+
 class CommsPluginRunner:
     """Owns ``(session, transport, adapter_id)`` and drives one comms plugin.
 
@@ -182,10 +212,19 @@ class CommsPluginRunner:
         shutdown_event: asyncio.Event | None = None,
         max_in_flight_notifications: int = _DEFAULT_MAX_IN_FLIGHT_NOTIFICATIONS,
         boot_epoch: str | None = None,
+        credential_resolver: _CredentialResolverLike | None = None,
     ) -> None:
         self._session = session
         self._transport = transport
         self._adapter_id = adapter_id
+        # Spec B G6-3 (#288): the core-side credential resolver. The runner owns the
+        # transport + ``send_notification`` (the session does not), so the
+        # ``gateway.adapter.spawn_request`` -> ``core.adapter.spawn_grant`` round-trip is
+        # routed HERE — intercepted BEFORE the session dispatch (a ``gateway.adapter.*``
+        # method would otherwise hit the status observer's ``unknown_method`` refusal).
+        # ``None`` (the stdio / non-gateway legs) leaves the routing OFF — those legs
+        # carry no credential request, so the frame falls through to the session.
+        self._credential_resolver = credential_resolver
         # Spec A G3-2 (#237) — architect H-2: the non-secret per-boot epoch the
         # runner threads into the ``lifecycle.start`` handshake params alongside
         # ``seq_ack``. The G3-3 gateway reconciles core-liveness from the HANDSHAKE
@@ -773,6 +812,14 @@ class CommsPluginRunner:
         ``model_validate`` bound to its own frame (F1); ``None`` for stdio.
         """
         params_mapping = params if isinstance(params, Mapping) else None
+        # Spec B G6-3 (#288): intercept the credential request BEFORE the session
+        # dispatch — a ``gateway.adapter.spawn_request`` is a request/response on the
+        # leg the runner owns (the session has no send-back). Routed to the resolver +
+        # the grant sent on this transport; never falls into the status-observer prefix
+        # catch (which would refuse it as unknown_method). Only when a resolver is wired.
+        if method == GATEWAY_ADAPTER_SPAWN_REQUEST and self._credential_resolver is not None:
+            await self._route_spawn_request(params_mapping)
+            return
         try:
             await self._session._on_post_handshake_method(method, params_mapping, wire_seq=wire_seq)
         except AdapterStatusAuditWriteError:
@@ -814,6 +861,93 @@ class CommsPluginRunner:
                 "comms.runner.handler_failed_continuing",
                 adapter_id=self._adapter_id,
                 notification_method=method,
+            )
+
+    async def _route_spawn_request(self, params: Mapping[str, object] | None) -> None:
+        """Resolve a ``gateway.adapter.spawn_request`` + send back the grant (G6-3).
+
+        The credential round-trip's core half. Validates the request frame, calls the
+        resolver (the ONLY decryptor), and sends ``core.adapter.spawn_grant`` back on
+        this transport (the runner owns the leg; the session does not). Runs
+        fire-and-forget like every ``_route_notification`` body, so it NEVER raises:
+
+        * a malformed request -> loud drop, NO grant (the gateway's bounded await times
+          out fail-closed);
+        * a fail-closed ``AdapterCredentialError`` -> loud drop, NO grant (the resolver
+          already audited the refusal);
+        * a FAILED signed-audit write (``AdapterCredentialAuditWriteError``) ->
+          ESCALATE loud (``log.error`` + a restart request), NEVER a silent swallow
+          (ERR-G63-01 / hard rule #7) — the SAME SEC-1 arm the status path uses;
+        * a send fault -> loud drop (the leg is gapped; the gateway re-requests).
+
+        The grant frame carries the plaintext credential over the trusted leg only; the
+        :class:`SpawnGrant` model is repr-safe, so the loud-drop logs never leak it.
+        """
+        assert self._credential_resolver is not None  # routed only when wired
+        try:
+            request = SpawnRequest.model_validate(params or {})
+        except ValidationError:
+            # No exc detail logged (it could echo the raw wire). Loud drop (hard rule #7).
+            log.warning("comms.runner.spawn_request_malformed", adapter_id=self._adapter_id)
+            return
+        try:
+            grant = await self._credential_resolver.resolve(request)
+        except AdapterCredentialAuditWriteError:
+            # ERR-G63-01 (#288): a FAILED signed-audit write while recording that a real
+            # platform credential was RELEASED (or a refusal) is NOT an ordinary
+            # fail-closed refusal — it is a non-skippable security event (CLAUDE.md hard
+            # rules #5/#7). It MUST NOT be swallowed into the fire-and-forget dispatch
+            # task as a GC-time "Task exception never retrieved" warning. The LOUD
+            # escalation (a ``log.error`` row + a restart request) IS the teardown,
+            # mirroring ``_route_notification``'s status-observer SEC-1 arm. We do NOT
+            # re-raise (this body runs fire-and-forget; a re-raise reaches no awaiter and
+            # merely leaks an unretrieved-task-exception warning). The reason vocabulary
+            # is closed; the credential is NEVER in the marker (cause is the bare backend
+            # error) so nothing leaks. No grant is sent.
+            log.error(
+                "comms.runner.credential_audit_unwritable",
+                adapter_id=self._adapter_id,
+                request_id=request.request_id,
+            )
+            try:
+                await self._request_restart(reason=_CREDENTIAL_AUDIT_UNWRITABLE_RESTART_REASON)
+            except Exception:
+                # The audit-write failure is ALREADY escalated loudly (the log.error
+                # above). If the restart REQUEST itself raises, log + swallow — this body
+                # runs fire-and-forget, so propagating only leaks an
+                # unretrieved-task-exception warning (it reaches no awaiter). The loud
+                # security signal stands; we never go silent.
+                log.error(
+                    "comms.runner.credential_audit_restart_request_failed",
+                    adapter_id=self._adapter_id,
+                    request_id=request.request_id,
+                )
+            return
+        except AdapterCredentialError as exc:
+            # The resolver already wrote the loud audited refusal; the runner just does
+            # NOT send a grant (the gateway's bounded await fails closed). Log the
+            # closed-vocab reason only — never the request/credential.
+            log.warning(
+                "comms.runner.spawn_request_refused",
+                adapter_id=self._adapter_id,
+                reason=exc.reason,
+            )
+            return
+        if not isinstance(grant, SpawnGrant):  # pragma: no cover - resolver contract
+            log.error("comms.runner.spawn_grant_type_invalid", adapter_id=self._adapter_id)
+            return
+        try:
+            await self.send_notification(CORE_ADAPTER_SPAWN_GRANT, grant.model_dump())
+        except (OSError, CommsProtocolError):
+            # A send fault on a gapped leg: loud drop (the gateway re-requests on
+            # reconnect). NEVER log the grant (repr-safe anyway) — only the routing id.
+            # Narrowed to the known transport-fault family (broken pipe / reset are
+            # ``OSError`` subclasses; a reframe-ceiling violation is ``CommsProtocolError``)
+            # so a future logic bug is NOT absorbed as a benign send-drop (hard rule #7).
+            log.warning(
+                "comms.runner.spawn_grant_send_failed",
+                adapter_id=self._adapter_id,
+                request_id=request.request_id,
             )
 
     async def _route_transport_crash(self) -> None:

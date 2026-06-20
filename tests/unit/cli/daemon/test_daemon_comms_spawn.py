@@ -96,6 +96,7 @@ class _FakeRunner:
         shutdown_event: Any = None,
         max_in_flight_notifications: int = 32,
         boot_epoch: str | None = None,
+        credential_resolver: Any = None,
     ) -> None:
         self.session = session
         self.transport = transport
@@ -103,6 +104,9 @@ class _FakeRunner:
         # Spec A G3-2 (#237): the boot path now threads the per-boot epoch into the
         # runner so it rides the handshake (architect H-2). Record it for assertions.
         self.boot_epoch = boot_epoch
+        # Spec B G6-3 (#288): the boot path wires the credential resolver on the SOCKET
+        # (gateway) leg; record it so a test can assert the per-carrier wiring.
+        self.credential_resolver = credential_resolver
         # PR-S4-11b DEFECT 1: the boot path now injects the supervisor's
         # graceful-drain signal; record it so a test can assert the wiring.
         self.shutdown_event = shutdown_event
@@ -227,6 +231,10 @@ def test_enabled_adapter_spawns_and_registers(
     # PR-S4-11b DEFECT 1: the runner is wired with the supervisor's graceful-drain
     # signal (the SAME event object) so its pump exits promptly on stop.
     assert runner.shutdown_event is sup.shutdown_event
+    # Spec B G6-3 (#288): the STDIO (daemon-spawned) carrier carries NO credential
+    # round-trip — the resolver is wired ONLY on the socket (gateway) leg. So a
+    # stdio-spawned adapter's runner gets credential_resolver=None.
+    assert runner.credential_resolver is None
     # PR-S4-11b deadlock fix: the runner's in-flight dispatch-task cap is wired
     # from the SAME Settings field as the session's dispatch semaphore so the two
     # backpressure bounds match. The boot env here leaves the field at its default.
