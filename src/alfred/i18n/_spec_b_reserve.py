@@ -33,3 +33,13 @@ def _register() -> None:
     t("daemon.status.state.crashed")
     t("daemon.status.state.breaker_open")
     t("daemon.status.state.unknown")
+    # G6-3 credential round-trip reasons (#288 / ADR-0036). ONLY the two reasons the
+    # resolver renders to an operator via :func:`alfred.i18n.t` (an unknown-adapter /
+    # missing-secret refusal message) are reserved — they are dict-dereferenced via the
+    # closed-vocab ``_REASON_KEY`` map, so the literal is invisible to pybabel at the
+    # call site. The other credential reasons (grant_mismatch / delivery_failed /
+    # awaiting_core / spawn_aborted) are structlog ``reason=`` fields ONLY — never
+    # rendered to an operator — so they carry NO catalog key (a dead reservation would
+    # be an orphan the bidirectional drift gate rejects).
+    t("gateway.adapter.credential.refused.unknown_adapter")
+    t("gateway.adapter.credential.refused.missing_secret")
