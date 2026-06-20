@@ -26,3 +26,20 @@ groups:
         annotations:
           summary: "AlfredOS gateway back-pressure breaker is latched"
           description: "gateway_circuit_breaker_open == 1; the gateway has stopped draining the client (buffer past cap). Operator input is held, not dropped."
+      # Spec B G6-4 (#288, ADR-0036): per-adapter ingress / leg signals (label set {adapter}).
+      - alert: GatewayAdapterIngressThrottling
+        expr: rate(gateway_ingress_throttled_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AlfredOS gateway is throttling an adapter leg's ingress"
+          description: "gateway_ingress_throttled_total{adapter} is increasing for 5m; the leg's rate / in-flight / size gate is back-pressuring (input is held, not dropped). Inspect the leg's volume or raise its caps."
+      - alert: GatewayAdapterBufferGrowing
+        expr: gateway_adapter_buffer_depth_bytes > 6291456
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AlfredOS gateway adapter replay-buffer is near its per-leg cap"
+          description: "gateway_adapter_buffer_depth_bytes{adapter} > 6 MiB for 2m (the 8 MiB per-leg hard ceiling is approaching); the leg's un-acked backlog is growing — check core reachability for that leg."
