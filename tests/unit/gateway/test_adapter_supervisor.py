@@ -19,6 +19,7 @@ invariant (correction #2).
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 from collections import Counter as MultiCounter
 from collections.abc import Awaitable, Callable
@@ -32,6 +33,7 @@ from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
     GatewayAdapterSupervisor,
     _AdapterRun,
+    _DeliverCredential,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -103,16 +105,34 @@ class _FakeChildFactory:
         self.outcomes: dict[str, list[str]] = {}
         self.children: list[_FakeChild] = []
         self.spawn_count: MultiCounter[str] = MultiCounter()
+        # The epoch passed to each spawn (H1: the supervisor sources it LIVE per spawn).
+        self.spawn_epochs: list[str] = []
 
     def script(self, adapter_id: str, outcomes: list[str]) -> None:
         self.outcomes[adapter_id] = list(outcomes)
 
-    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _FakeChild:
+    async def spawn_and_handshake(
+        self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
+    ) -> _FakeChild:
         self.spawn_count[adapter_id] += 1
+        self.spawn_epochs.append(epoch)
         queue = self.outcomes.get(adapter_id) or ["ok"]
         outcome = queue.pop(0) if queue else "ok"
         if outcome == "spawn_error":
             raise GatewayAdapterSpawnError(f"fake launcher spawn refused for {adapter_id!r}")
+        # The real factory owns the fd-3 pipe + the sync spawn; the fake creates a real
+        # pipe and invokes the credential hook (after the "spawn") so the credential
+        # round-trip + fd-3 delivery are exercised. A CredentialLegDownError /
+        # AdapterCredentialError from the hook propagates (the factory does NOT swallow
+        # it) so the supervisor can route link-down -> AWAITING_CORE or abort fail-closed.
+        read_fd, write_fd = os.pipe()
+        try:
+            await deliver_credential(write_fd)
+        finally:
+            # The credential delivery closes write_fd; the fake just drains + closes the
+            # read end so the pipe does not leak. (On a hook raise, write_fd may already
+            # be closed by the client's fail-closed path — close read end regardless.)
+            os.close(read_fd)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[tuple[str, str]] = loop.create_future()
         child = _FakeChild(
@@ -138,6 +158,29 @@ class _FakeCredSeam:
 
     async def is_available(self, *, adapter_id: str) -> bool:
         return self.available
+
+
+class _FakeCredentialClient:
+    """A fake at-spawn credential client (G6-3): drains + closes the fd-3 write end.
+
+    The default succeeds (delivers a sentinel credential, closing write_fd like the
+    real fn). ``raise_with`` injects a CredentialLegDownError / AdapterCredentialError
+    so a test can drive the link-down -> AWAITING_CORE and the fail-closed spawn-abort
+    arms WITHOUT a real core leg.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, str]] = []
+        self.raise_with: BaseException | None = None
+
+    async def acquire_and_deliver(
+        self, *, adapter_id: str, host_restart_seq: int, write_fd: int, epoch: str
+    ) -> None:
+        self.calls.append((adapter_id, host_restart_seq, epoch))
+        # Mirror the real client/lib: close write_fd on EVERY path (success + refusal).
+        os.close(write_fd)
+        if self.raise_with is not None:
+            raise self.raise_with
 
 
 class _RecordingSleep:
@@ -176,18 +219,22 @@ def _make_supervisor(
     factory: _FakeChildFactory,
     cred: _FakeCredSeam,
     sink: _RecordingSink,
+    credential_client: _FakeCredentialClient | None = None,
+    epoch_source: Callable[[], str | None] | None = None,
     rng_seed: int = 1,
     monotonic: Callable[[], float] | None = None,
     sleep: Callable[[float], object] | None = None,
 ) -> GatewayAdapterSupervisor:
     emitter = AdapterStatusEmitter(sink=sink)
     # Deterministic seams: a no-op (or recording) sleep, a seeded RNG for
-    # decorrelated jitter, and a synthetic clock.
+    # decorrelated jitter, and a synthetic clock. The epoch is sourced LIVE (H1) — the
+    # default returns the fixed test epoch (a stable live leg).
     return GatewayAdapterSupervisor(
         child_factory=factory,
         cred_seam=cred,
+        credential_client=credential_client or _FakeCredentialClient(),
         emitter=emitter,
-        epoch=_EPOCH,
+        epoch_source=epoch_source or (lambda: _EPOCH),
         sleep=sleep or _instant_sleep,  # type: ignore[arg-type]
         rng=random.Random(rng_seed),  # noqa: S311 — deterministic test jitter, not a crypto primitive
         monotonic=monotonic or _FakeClock().monotonic,
@@ -481,12 +528,19 @@ class _BarrierChildFactory:
         self.start_order: list[str] = []
         self.children: dict[str, _FakeChild] = {}
 
-    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _FakeChild:
+    async def spawn_and_handshake(
+        self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
+    ) -> _FakeChild:
         self.start_order.append(adapter_id)
         self._started += 1
         if self._started >= self._parties:
             self._all_started.set()
         await self._all_started.wait()  # rendezvous: deadlocks if boots serialise
+        read_fd, write_fd = os.pipe()
+        try:
+            await deliver_credential(write_fd)
+        finally:
+            os.close(read_fd)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[tuple[str, str]] = loop.create_future()
         child = _FakeChild(adapter_id=adapter_id, spawned_at=0.0, exit_future=fut)
@@ -535,11 +589,18 @@ class _OneFailsFactory:
         if self._siblings_up >= self._sibling_count:
             self._siblings_done.set()
 
-    async def spawn_and_handshake(self, *, adapter_id: str, epoch: str) -> _FakeChild:
+    async def spawn_and_handshake(
+        self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
+    ) -> _FakeChild:
         if adapter_id == self._failing_id:
             # Wait until the siblings are up, THEN fail closed.
             await self._siblings_done.wait()
             raise GatewayAdapterSpawnError(f"fake spawn refused for {adapter_id!r}")
+        read_fd, write_fd = os.pipe()
+        try:
+            await deliver_credential(write_fd)
+        finally:
+            os.close(read_fd)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[tuple[str, str]] = loop.create_future()
         child = _FakeChild(adapter_id=adapter_id, spawned_at=0.0, exit_future=fut)
@@ -791,8 +852,9 @@ async def test_two_adapters_one_supervisor_shared_rng_distinct_backoffs() -> Non
     sup = GatewayAdapterSupervisor(
         child_factory=factory,
         cred_seam=cred,
+        credential_client=_FakeCredentialClient(),
         emitter=AdapterStatusEmitter(sink=sink),
-        epoch=_EPOCH,
+        epoch_source=lambda: _EPOCH,
         sleep=_instant_sleep,  # type: ignore[arg-type]
         rng=random.Random(1234),  # noqa: S311 — deterministic test jitter, not a crypto primitive
         monotonic=_FakeClock().monotonic,
@@ -852,8 +914,9 @@ async def test_default_monotonic_seam_is_real_clock() -> None:
     sup = GatewayAdapterSupervisor(
         child_factory=factory,
         cred_seam=cred,
+        credential_client=_FakeCredentialClient(),
         emitter=AdapterStatusEmitter(sink=sink),
-        epoch=_EPOCH,
+        epoch_source=lambda: _EPOCH,
         sleep=_instant_sleep,  # type: ignore[arg-type]
         rng=random.Random(7),  # noqa: S311 — deterministic test jitter, not a crypto primitive
     )
@@ -1002,8 +1065,9 @@ async def test_non_positive_max_concurrent_boots_rejected(bad_value: int) -> Non
         GatewayAdapterSupervisor(
             child_factory=factory,
             cred_seam=_FakeCredSeam(available=True),
+            credential_client=_FakeCredentialClient(),
             emitter=AdapterStatusEmitter(sink=_RecordingSink()),
-            epoch=_EPOCH,
+            epoch_source=lambda: _EPOCH,
             max_concurrent_boots=bad_value,
         )
 

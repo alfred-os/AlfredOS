@@ -19,7 +19,7 @@ from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.process import (
     GatewayProcess,
-    _UnavailableCredSeam,
+    _CoreEpochCredSeam,
     _UnspawnedAdapterChildFactory,
 )
 
@@ -52,17 +52,31 @@ async def test_unspawned_child_factory_fails_closed() -> None:
     """The placeholder child factory raises GatewayAdapterSpawnError (fail-closed, gap b).
 
     With the empty adapter set it is never called; if a future non-empty set is passed
-    before G6-3, the spawn fails LOUD rather than running a credential-less adapter.
+    before the real factory lands, the spawn fails LOUD rather than running a
+    credential-less adapter.
     """
+
+    async def _noop_deliver(_write_fd: int) -> None:  # pragma: no cover - never reached
+        pass
+
     factory = _UnspawnedAdapterChildFactory()
     with __import__("pytest").raises(GatewayAdapterSpawnError):
-        await factory.spawn_and_handshake(adapter_id="discord", epoch="a" * 32)
+        await factory.spawn_and_handshake(
+            adapter_id="discord", epoch="a" * 32, deliver_credential=_noop_deliver
+        )
 
 
-async def test_unavailable_cred_seam_is_always_unavailable() -> None:
-    """The placeholder cred seam reports unavailable (real cred is G6-3)."""
-    seam = _UnavailableCredSeam()
+async def test_core_epoch_cred_seam_tracks_link_liveness() -> None:
+    """The cheap pre-spawn probe is available iff the core link has captured an epoch.
+
+    A fresh core link has no epoch (link not handshaked) -> unavailable -> AWAITING_CORE.
+    Once the link captures a 32-hex epoch the probe reports available (G6-3 / H2 part i).
+    """
+    core_link = _make_core_link()
+    seam = _CoreEpochCredSeam(core_link=core_link)
     assert await seam.is_available(adapter_id="discord") is False
+    core_link._core_epoch = "0123456789abcdef0123456789abcdef"
+    assert await seam.is_available(adapter_id="discord") is True
 
 
 async def test_supervisor_task_is_cancelled_on_shutdown() -> None:
