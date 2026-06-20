@@ -119,3 +119,21 @@ def test_incidents_read_surface_returns_views_for_in_process_reader() -> None:
     assert views[0].adapter_id == "discord"
     assert views[0].crash_signal_source in {"gateway", "child", "both"}
     assert reconciler.incidents("unknown-adapter") == ()
+
+
+def test_adapter_ids_and_current_incarnation_enumerate_state() -> None:
+    # The additive enumeration read surfaces the 2b-2c snapshot builder polls
+    # (G6-2b-2c / #288). Pure reads: never invent state for an unseen adapter.
+    reconciler = CrashIncidentReconciler()
+    assert reconciler.adapter_ids() == ()
+    assert reconciler.current_incarnation("discord") == 0  # unseen -> 0, no state invented
+    reconciler.note_incarnation(adapter_id="discord", host_restart_seq=2)
+    reconciler.observe_gateway_crash(adapter_id="telegram", host_restart_seq=0)
+    # correction #4: assert against a sorted literal (not the tautology
+    # `adapter_ids() == adapter_ids()`).
+    assert sorted(reconciler.adapter_ids()) == ["discord", "telegram"]
+    assert reconciler.current_incarnation("discord") == 2
+    # current_incarnation never CREATES an _AdapterState for an unseen adapter
+    # (read-only): probing a fresh id leaves the enumeration unchanged.
+    assert reconciler.current_incarnation("never-seen") == 0
+    assert sorted(reconciler.adapter_ids()) == ["discord", "telegram"]

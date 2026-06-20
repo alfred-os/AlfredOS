@@ -167,6 +167,19 @@ class CrashIncidentReconciler:
             for inc in state.incidents.values()
         )
 
+    def adapter_ids(self) -> tuple[str, ...]:
+        """Every adapter the reconciler has observed (in-process read for 2b-2c / #288)."""
+        return tuple(self._adapters)
+
+    def current_incarnation(self, adapter_id: str) -> int:
+        """The latest incarnation seen for ``adapter_id`` (0 if unseen; never invents state).
+
+        Uses ``.get`` so a probe for an unseen adapter does NOT create an
+        ``_AdapterState`` — a pure read with no enumeration side effect.
+        """
+        state = self._adapters.get(adapter_id)
+        return 0 if state is None else state.current_incarnation
+
     def _open(self, state: _AdapterState, seq: int) -> _Incident:
         incident = _Incident(crash_incident_id=uuid.uuid4().hex, host_restart_seq=seq)
         state.incidents[seq] = incident

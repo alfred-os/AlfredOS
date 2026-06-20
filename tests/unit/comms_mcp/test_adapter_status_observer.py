@@ -468,3 +468,23 @@ async def test_refusal_leaves_an_existing_snapshot_untouched() -> None:
     # ...and the prior accepted snapshot still stands (no downgrade-by-forgery).
     snap = obs.latest("discord")
     assert snap is not None and snap.state == "up"
+
+
+@pytest.mark.asyncio
+async def test_all_latest_enumerates_every_observed_adapter() -> None:
+    # The additive read surface the 2b-2c snapshot publisher polls (G6-2b-2c /
+    # #288): a read-only view of the latest accepted status for every adapter.
+    audit = _FakeAudit()
+    observer = _make_observer(audit)
+    assert dict(observer.all_latest()) == {}
+    await observer.observe(
+        "gateway.adapter.up",
+        {"adapter_id": "discord", "epoch": _EPOCH, "host_restart_seq": 0},
+    )
+    snap = observer.all_latest()
+    assert set(snap) == {"discord"}
+    assert snap["discord"].state == "up"
+    # The returned mapping is a read-only view: a consumer cannot mutate the
+    # observer's internal map through it.
+    with pytest.raises(TypeError):
+        snap["discord"] = snap["discord"]  # type: ignore[index]
