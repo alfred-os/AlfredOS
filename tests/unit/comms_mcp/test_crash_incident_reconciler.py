@@ -119,3 +119,34 @@ def test_incidents_read_surface_returns_views_for_in_process_reader() -> None:
     assert views[0].adapter_id == "discord"
     assert views[0].crash_signal_source in {"gateway", "child", "both"}
     assert reconciler.incidents("unknown-adapter") == ()
+
+
+def test_adapter_ids_enumerates_every_observed_adapter() -> None:
+    # G6-2b-2c (#288): the additive enumeration read the daemon control plane folds
+    # into the live status result. Assert against a SORTED LITERAL (not x == x) so a
+    # silent omission fails.
+    reconciler = CrashIncidentReconciler()
+    reconciler.observe_gateway_crash(adapter_id="tui", host_restart_seq=0)
+    reconciler.note_incarnation(adapter_id="discord", host_restart_seq=2)
+    assert sorted(reconciler.adapter_ids()) == ["discord", "tui"]
+
+
+def test_adapter_ids_empty_before_any_observation() -> None:
+    assert CrashIncidentReconciler().adapter_ids() == ()
+
+
+def test_current_incarnation_reports_latest_seq_seen() -> None:
+    reconciler = CrashIncidentReconciler()
+    reconciler.note_incarnation(adapter_id="discord", host_restart_seq=3)
+    assert reconciler.current_incarnation("discord") == 3
+    # A later gateway crash at a higher seq advances it.
+    reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=5)
+    assert reconciler.current_incarnation("discord") == 5
+
+
+def test_current_incarnation_is_zero_for_unseen_adapter() -> None:
+    # ``.get`` -> no state-invention: an unseen adapter reports 0, and querying it
+    # does NOT register it (the read never mutates).
+    reconciler = CrashIncidentReconciler()
+    assert reconciler.current_incarnation("never-seen") == 0
+    assert reconciler.adapter_ids() == ()
