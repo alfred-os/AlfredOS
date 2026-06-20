@@ -15,6 +15,9 @@ def test_gateway_crash_opens_one_incident() -> None:
     assert len(incidents) == 1
     assert incidents[0].host_restart_seq == 0
     assert incidents[0].crash_signal_source == "gateway"
+    # An adapter with no observed crash has no incidents (the read surface never
+    # invents state; trust-boundary read).
+    assert reconciler.incidents("never-seen") == ()
 
 
 def test_child_before_gateway_common_order_folds_to_one_incident() -> None:
@@ -58,3 +61,48 @@ def test_distinct_incarnations_are_distinct_incidents() -> None:
     second = reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=1)
     assert first.crash_incident_id != second.crash_incident_id
     assert len(reconciler.incidents("discord")) == 2
+
+
+def test_duplicate_gateway_crash_is_marked_not_dropped() -> None:
+    reconciler = CrashIncidentReconciler()
+    first = reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=0)
+    second = reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=0)
+    assert first.duplicate is False
+    # A replayed/forged gateway crash for the SAME incarnation folds (no new
+    # incident) but is FLAGGED duplicate so the caller STILL audits it loudly.
+    assert second.duplicate is True
+    assert second.crash_incident_id == first.crash_incident_id
+    assert len(reconciler.incidents("discord")) == 1
+
+
+def test_duplicate_child_crash_is_marked_not_dropped() -> None:
+    # TE-1/TE-3 (branch coverage): a second in-child crash for the same incarnation
+    # folds + is flagged duplicate, never dropped (hard rule #7).
+    reconciler = CrashIncidentReconciler()
+    first = reconciler.observe_child_crash(adapter_id="discord")
+    second = reconciler.observe_child_crash(adapter_id="discord")
+    assert first.duplicate is False
+    assert second.duplicate is True
+    assert second.crash_incident_id == first.crash_incident_id
+    assert len(reconciler.incidents("discord")) == 1
+
+
+def test_forged_child_crash_cannot_mask_a_later_real_gateway_crash() -> None:
+    reconciler = CrashIncidentReconciler()
+    # A forged in-child crash with no prior incarnation -> a child-only incident at 0.
+    forged = reconciler.observe_child_crash(adapter_id="discord")
+    assert forged.crash_signal_source == "child"
+    # A genuine gateway crash for a LATER incarnation opens its OWN incident.
+    reconciler.note_incarnation(adapter_id="discord", host_restart_seq=2)
+    real = reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=2)
+    assert real.crash_incident_id != forged.crash_incident_id
+    assert real.crash_signal_source == "gateway"
+    assert len(reconciler.incidents("discord")) == 2
+
+
+def test_incident_history_is_bounded() -> None:
+    reconciler = CrashIncidentReconciler()
+    for seq in range(200):
+        reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=seq)
+    # Bounded so a crash-loop cannot grow the map unboundedly (audit log is durable).
+    assert len(reconciler.incidents("discord")) <= 64
