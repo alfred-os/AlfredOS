@@ -206,6 +206,38 @@ def test_reset_for_new_epoch_releases_global_cap() -> None:
     assert leg.depth_bytes == 0
 
 
+def test_discard_zeros_bodies_but_preserves_seq_floor() -> None:
+    """PR9: ``discard`` empties + releases bytes but PRESERVES the seq floor; reset does not.
+
+    The discard != reset distinction is load-bearing for resume after a terminal scrub:
+    ``discard`` zeros + empties the buffer and releases the global cap, but the per-leg seq
+    counter MUST keep advancing (the next mint continues the sequence) — only the
+    per-connection ``reset_for_new_epoch`` rebinds the floor to 0. A regression folding
+    ``discard`` into ``reset`` would silently restart the wire seq at 0 after a scrub and
+    corrupt the core's G0-dedup keying, yet pass every other test. Pin BOTH halves so the
+    distinction cannot regress.
+    """
+    leg, cap, _ = _leg(adapter_id="a")
+    leg.record_for_send(b"aaaa")  # seq 0
+    leg.record_for_send(b"bb")  # seq 1
+    assert leg.last_seq == 1
+    assert cap.total_bytes == 6
+
+    # discard: bodies + bytes gone, global cap released — but the seq floor is UNCHANGED.
+    leg.discard()
+    assert leg.depth_frames == 0
+    assert leg.depth_bytes == 0
+    assert cap.total_bytes == 0
+    assert cap.leg_bytes("a") == 0
+    assert leg.last_seq == 1  # seq floor preserved across the scrub
+    assert leg.record_for_send(b"c") == 2  # the next mint CONTINUES the sequence, not 0
+
+    # reset_for_new_epoch: the per-connection path DOES rebind the floor to 0.
+    leg.reset_for_new_epoch()
+    assert leg.last_seq == -1  # floor reset (nothing minted on the fresh connection)
+    assert leg.record_for_send(b"d") == 0  # the next mint RESTARTS the sequence
+
+
 def test_hard_ceiling_raise_rolls_back_global_reserve() -> None:
     # K2 (a): a ReplayBufferError between reserve and a completed append must release the
     # reservation. Drive the buffer to its hard ceiling so append raises AFTER the leg
