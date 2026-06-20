@@ -1089,6 +1089,59 @@ class GatewayCoreLink:
         ) as exc:
             log.warning("gateway.relay.core_send_dropped", error=repr(exc))
 
+    def core_cumulative_ack(self) -> int:
+        """The core-leg receive tracker's contiguous ack, FLOORED to ``0`` (G6-4 / K1).
+
+        The leg-agnostic ack a :class:`alfred.gateway.gateway_leg.GatewayLeg` stamps on a
+        drained frame (the scheduler reads it before :meth:`write_leg_unit`). The tracker's
+        ``-1`` ("nothing acked yet") maps to the wire's ``a=0`` placeholder, exactly as
+        :meth:`relay_to_core` floors it — without the floor :func:`encode_seq_frame` would
+        reject the first client->core unit (non-negative counters).
+        """
+        return max(self._core_tracker.cumulative_ack(), 0)
+
+    async def write_leg_unit(self, adapter_id: str, payload: bytes, *, seq: int, ack: int) -> None:
+        """Physically send ONE pre-sequenced leg frame onto the single core writer (K1).
+
+        The leg-agnostic write primitive the
+        :class:`alfred.gateway.leg_scheduler.GatewayLegScheduler` drains every leg onto.
+        UNLIKE :meth:`relay_to_core` (the G5 single-TUI-leg path,
+        which mints the seq + appends to its own buffer inline), this takes ``seq`` + ``ack``
+        EXPLICITLY: the per-leg seq mint + ``ReplayBuffer.append`` + global-cap reserve all
+        live in :class:`GatewayLeg` (moved out of ``relay_to_core`` per K1), and the
+        scheduler hands the already-sequenced unit here for the physical write only.
+
+        **Snapshot atomicity preserved (architect M3).** ``_current_core_transport`` is
+        snapshotted into a local FIRST so a concurrent reconnect swap is atomic w.r.t. this
+        send; a ``None`` snapshot (the reconnect-race / gap window) is a loud drop. The
+        single physical writer is preserved — the scheduler serialises all legs onto this
+        one coroutine; it never reaches into the transport itself.
+
+        **Loud drop, never raise (CLAUDE.md hard rule #7).** Any send-path fault — a torn
+        transport, an encode failure, or a write to a closed-mid-swap transport — is a LOUD
+        drop, never raised into the scheduler pump (a dead/swapping leg is an OPERATIONAL
+        edge; the frame stays in the leg's buffer for replay). ``adapter_id`` is carried for
+        the audit breadcrumb only — payload-blind, no body parse.
+        """
+        local = self._current_core_transport
+        if local is None:
+            log.warning(
+                "gateway.relay.core_send_dropped",
+                reason="no_core_transport",
+                adapter_id=adapter_id,
+            )
+            return
+        try:
+            await local.send_payload_unit(payload, seq=seq, ack=ack)
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            RuntimeError,
+            ValueError,
+            CommsProtocolError,
+        ) as exc:
+            log.warning("gateway.relay.core_send_dropped", error=repr(exc), adapter_id=adapter_id)
+
     async def send_status_frame(self, method: str, params: Mapping[str, object]) -> None:
         """Send a ``gateway.adapter.*`` status frame over the SEPARATE status channel.
 
