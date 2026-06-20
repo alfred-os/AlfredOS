@@ -1256,6 +1256,25 @@ jobs:
           uv run coverage report \
             --include='src/alfred/comms_mcp/protocol.py,src/alfred/comms_mcp/inbound.py,src/alfred/comms_mcp/inbound_scanner.py,src/alfred/comms_mcp/classifier_registry.py,src/alfred/comms_mcp/handlers.py,src/alfred/comms_mcp/bootstrap.py,src/alfred/comms_mcp/observability.py,src/alfred/comms_mcp/errors.py,src/alfred/orchestrator/burst_limiter.py,src/alfred/comms_mcp/sub_payload_promotion.py,src/alfred/comms_mcp/audit_hash.py,src/alfred/comms_mcp/outbound_queue.py,src/alfred/comms_mcp/discord_hookpoints.py,src/alfred/comms_mcp/classifiers/discord.py,src/alfred/comms_mcp/addressing_drift.py,src/alfred/comms_mcp/thread_conversation_ledger.py,src/alfred/comms_mcp/daemon_runtime.py,src/alfred/comms_mcp/adapter_status_observer.py,src/alfred/comms_mcp/crash_incident_reconciler.py' \
             --fail-under=100
+      - name: Daemon status-snapshot trust-boundary 100% line+branch coverage (combined)
+        # Spec B G6-2b-2c (#288): the daemon-status snapshot file IO + publisher.
+        # ``_daemon_status_snapshot.py`` does trust-sensitive file IO
+        # (O_NOFOLLOW/O_NONBLOCK + fstat regular-file/mode/owner validation,
+        # O_EXCL-temp+rename atomic write) — the same discipline the
+        # ``quarantine_transport.py`` / pidfile precedent warrant a dedicated 100%
+        # gate for; ``_daemon_status_publisher.py`` is the supervised, self-healing
+        # publisher whose every loud-but-non-fatal branch must be proven. A
+        # dedicated per-file gate (NOT relying on the overall-suite gate, which can
+        # hide a regression if other files over-cover) makes the contract AUDITABLY
+        # named. There is NO pre-existing ``cli/daemon`` per-file gate (the
+        # ``_daemon_pidfile.py`` mention elsewhere is a comment, not a gate), so this
+        # is a NEW gate. Chained ``&&`` hashFiles guard per the precedent so the
+        # gate no-ops cleanly on a branch where these files do not exist yet.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/cli/daemon/_daemon_status_snapshot.py') != '' && hashFiles('src/alfred/cli/daemon/_daemon_status_publisher.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/cli/daemon/_daemon_status_snapshot.py,src/alfred/cli/daemon/_daemon_status_publisher.py' \
+            --fail-under=100
       - name: Gateway kernel trust-boundary 100% line+branch coverage (combined)
         # Spec A G3-3a (#237, ADR-0032): the gateway's stable kernel — the pure
         # link-state machine (``link_state.py``) + the client-facing socket /
