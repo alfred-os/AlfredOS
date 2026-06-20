@@ -77,6 +77,30 @@ def test_breaker_open_requires_nonnegative_retry() -> None:
         AdapterBreakerOpenNotification(adapter_id="discord", retry_after_seconds=-1)
 
 
+def test_crash_field_sets_carry_dedup_join_keys() -> None:
+    from alfred.audit.audit_row_schemas import (
+        COMMS_ADAPTER_CRASHED_FIELDS,
+        GATEWAY_ADAPTER_CRASHED_FIELDS,
+        GATEWAY_ADAPTER_UP_FIELDS,
+    )
+
+    # The gateway crash row carries the seq it joins on + the incident handle/source
+    # + the duplicate marker (TE-2: a replay must be VISIBLE in the audit log).
+    assert {
+        "host_restart_seq",
+        "crash_incident_id",
+        "crash_signal_source",
+        "duplicate",
+    } <= GATEWAY_ADAPTER_CRASHED_FIELDS
+    # The in-child crash row carries the incident handle/source + duplicate marker
+    # (it has no seq of its own — it is tagged to the current incarnation core-side).
+    assert {"crash_incident_id", "crash_signal_source", "duplicate"} <= COMMS_ADAPTER_CRASHED_FIELDS
+    assert "host_restart_seq" not in COMMS_ADAPTER_CRASHED_FIELDS
+    # SEC-01: the up row carries the incarnation being STARTED so the audit log
+    # records the seq the reconciler advanced its current incarnation to.
+    assert "host_restart_seq" in GATEWAY_ADAPTER_UP_FIELDS
+
+
 def test_crashed_carries_host_restart_seq_additive_default() -> None:
     # Existing producers omit the field -> defaults to 0 (back-compat, frozen-safe).
     default = AdapterCrashedNotification(adapter_id="discord", error_class="RuntimeError", detail="")
@@ -131,13 +155,30 @@ def test_status_audit_field_sets_exist_and_carry_join_keys() -> None:
         assert "adapter_id" in fields
         assert "occurred_at" in fields
 
-    assert frozenset({"adapter_id", "epoch", "occurred_at"}) == GATEWAY_ADAPTER_UP_FIELDS
+    # SEC-01 (G6-2b-2b / #288): the up row gained ``host_restart_seq`` — the
+    # incarnation being STARTED, which the reconciler advances to on an accepted up.
+    assert (
+        frozenset({"adapter_id", "epoch", "occurred_at", "host_restart_seq"})
+        == GATEWAY_ADAPTER_UP_FIELDS
+    )
     assert frozenset({"adapter_id", "reason", "occurred_at"}) == GATEWAY_ADAPTER_DOWN_FIELDS
     # ``detail_redacted`` matches the existing COMMS_ADAPTER_CRASHED_FIELDS
     # convention (correction #2): the scrubbed crash detail field name is
-    # ``detail_redacted`` repo-wide.
+    # ``detail_redacted`` repo-wide. G6-2b-2b (#288) adds the crash-dedup join keys
+    # (host_restart_seq + the incident handle/source) + the TE-2 duplicate marker.
     assert (
-        frozenset({"adapter_id", "error_class", "detail_redacted", "occurred_at"})
+        frozenset(
+            {
+                "adapter_id",
+                "error_class",
+                "detail_redacted",
+                "occurred_at",
+                "host_restart_seq",
+                "crash_incident_id",
+                "crash_signal_source",
+                "duplicate",
+            }
+        )
         == GATEWAY_ADAPTER_CRASHED_FIELDS
     )
     assert (
