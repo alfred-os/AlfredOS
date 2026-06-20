@@ -47,8 +47,17 @@ class _RecordingSink:
 
 async def test_emit_up_maps_adapter_and_epoch() -> None:
     sink = _RecordingSink()
-    await AdapterStatusEmitter(sink=sink).emit_up(adapter_id=_A, epoch=_EPOCH)
-    assert sink.frames == [("gateway.adapter.up", {"adapter_id": _A, "epoch": _EPOCH})]
+    await AdapterStatusEmitter(sink=sink).emit_up(adapter_id=_A, epoch=_EPOCH, host_restart_seq=0)
+    # SEC-01 (#288): the up frame carries the incarnation being STARTED.
+    assert sink.frames == [
+        ("gateway.adapter.up", {"adapter_id": _A, "epoch": _EPOCH, "host_restart_seq": 0})
+    ]
+
+
+async def test_emit_up_threads_host_restart_seq() -> None:
+    sink = _RecordingSink()
+    await AdapterStatusEmitter(sink=sink).emit_up(adapter_id=_A, epoch=_EPOCH, host_restart_seq=2)
+    assert sink.frames[0][1]["host_restart_seq"] == 2
 
 
 async def test_emit_down_maps_closed_vocab_reason() -> None:
@@ -68,13 +77,31 @@ async def test_emit_breaker_open_maps_retry_after_seconds() -> None:
 async def test_emit_crashed_maps_error_class_and_redacted_detail() -> None:
     sink = _RecordingSink()
     await AdapterStatusEmitter(sink=sink).emit_crashed(
-        adapter_id=_A, error_class="BrokenPipeError", detail="plain crash detail"
+        adapter_id=_A, error_class="BrokenPipeError", detail="plain crash detail", host_restart_seq=0
     )
     method, params = sink.frames[0]
     assert method == "gateway.adapter.crashed"
     assert params["adapter_id"] == _A
     assert params["error_class"] == "BrokenPipeError"
     assert params["detail"] == "plain crash detail"
+
+
+async def test_emit_crashed_threads_host_restart_seq() -> None:
+    sink = _RecordingSink()
+    await AdapterStatusEmitter(sink=sink).emit_crashed(
+        adapter_id=_A, error_class="BrokenPipeError", detail="x", host_restart_seq=4
+    )
+    method, params = sink.frames[0]
+    assert method == "gateway.adapter.crashed"
+    assert params["host_restart_seq"] == 4
+
+
+async def test_emit_crashed_defaults_host_restart_seq_to_zero() -> None:
+    sink = _RecordingSink()
+    await AdapterStatusEmitter(sink=sink).emit_crashed(
+        adapter_id=_A, error_class="BrokenPipeError", detail="x", host_restart_seq=0
+    )
+    assert sink.frames[0][1]["host_restart_seq"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +113,9 @@ async def test_malformed_epoch_raises_at_producer_before_sink() -> None:
     """A non-32-hex epoch is a ValidationError at the PRODUCER — never reaches sink."""
     sink = _RecordingSink()
     with pytest.raises(ValidationError):
-        await AdapterStatusEmitter(sink=sink).emit_up(adapter_id=_A, epoch="too-short")
+        await AdapterStatusEmitter(sink=sink).emit_up(
+            adapter_id=_A, epoch="too-short", host_restart_seq=0
+        )
     assert sink.frames == []
 
 
@@ -94,7 +123,9 @@ async def test_unknown_adapter_kind_raises_at_producer() -> None:
     """An adapter_id outside the closed adapter_kind set is refused at the producer."""
     sink = _RecordingSink()
     with pytest.raises(ValidationError):
-        await AdapterStatusEmitter(sink=sink).emit_up(adapter_id="not-a-kind", epoch=_EPOCH)
+        await AdapterStatusEmitter(sink=sink).emit_up(
+            adapter_id="not-a-kind", epoch=_EPOCH, host_restart_seq=0
+        )
     assert sink.frames == []
 
 
@@ -103,7 +134,7 @@ async def test_empty_error_class_raises_at_producer() -> None:
     sink = _RecordingSink()
     with pytest.raises(ValidationError):
         await AdapterStatusEmitter(sink=sink).emit_crashed(
-            adapter_id=_A, error_class="", detail="x"
+            adapter_id=_A, error_class="", detail="x", host_restart_seq=0
         )
     assert sink.frames == []
 
@@ -132,7 +163,7 @@ async def test_crashed_detail_redacted_then_bound_no_secret_leak() -> None:
     sink = _RecordingSink()
     detail = _boundary_straddling_detail()
     await AdapterStatusEmitter(sink=sink).emit_crashed(
-        adapter_id=_A, error_class="BrokenPipeError", detail=detail
+        adapter_id=_A, error_class="BrokenPipeError", detail=detail, host_restart_seq=0
     )
     on_wire = sink.frames[0][1]["detail"]
     assert isinstance(on_wire, str)

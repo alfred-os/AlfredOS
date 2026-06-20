@@ -534,15 +534,30 @@ class GatewayAdapterSupervisor:
         adapter_id = run.adapter_id
         match control:
             case AdapterControl.EMIT_UP:
-                await self._emitter.emit_up(adapter_id=adapter_id, epoch=self._epoch)
+                # SEC-01 (#288): stamp the incarnation being STARTED. At HANDSHAKE_OK
+                # time ``restart_count`` is the count of prior restarts, i.e. the
+                # serving incarnation index (first up -> 0; the up after one
+                # crash+restart -> 1, since ``_handle_crash`` did ``restart_count += 1``
+                # before looping back). The core reconciler advances its current
+                # incarnation to this on the accepted up.
+                await self._emitter.emit_up(
+                    adapter_id=adapter_id, epoch=self._epoch, host_restart_seq=run.restart_count
+                )
                 ADAPTER_UP.labels(adapter=adapter_id).set(1)
             case AdapterControl.EMIT_DOWN:
                 await self._emitter.emit_down(adapter_id=adapter_id, reason=reason)
             case AdapterControl.EMIT_CRASHED:
+                # LOAD-BEARING ORDERING (#288): EMIT_CRASHED runs BEFORE
+                # ``run.restart_count += 1`` (in ``_handle_crash``), so ``restart_count``
+                # here is the PRE-increment value = the incarnation that EXITED (first
+                # crash -> 0). This aligns crashed(N) with up(N) on the same incarnation
+                # so the core reconciler folds them into one incident. Do NOT move the
+                # increment before this emit.
                 await self._emitter.emit_crashed(
                     adapter_id=adapter_id,
                     error_class=error_class or "AdapterChildExited",
                     detail=detail,
+                    host_restart_seq=run.restart_count,
                 )
             case AdapterControl.EMIT_BREAKER_OPEN:
                 await self._emitter.emit_breaker_open(
