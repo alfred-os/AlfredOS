@@ -43,3 +43,10 @@ def _register() -> None:
     # be an orphan the bidirectional drift gate rejects).
     t("gateway.adapter.credential.refused.unknown_adapter")
     t("gateway.adapter.credential.refused.missing_secret")
+    # G6-4 per-adapter ingress-refusal reasons (#288 / ADR-0036). The closed-vocab set
+    # an operator-facing renderer dereferences via ``reason_i18n_key`` (so the literal is
+    # invisible to pybabel at the call site). All four are operator-renderable.
+    t("gateway.ingress.refused.throttled_rate")
+    t("gateway.ingress.refused.throttled_inflight")
+    t("gateway.ingress.refused.global_cap_refused")
+    t("gateway.ingress.refused.unknown_adapter")
