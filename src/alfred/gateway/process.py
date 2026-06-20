@@ -36,6 +36,7 @@ import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
+from typing import Final
 
 import structlog
 
@@ -50,10 +51,28 @@ from alfred.gateway.adapter_supervisor import (
 from alfred.gateway.client_link import client_handshake
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink, _CommsTransportLike
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.metrics import PEER_AUTH_REJECTED
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.gateway.status_leg import GatewayCoreLinkStatusSink
+
+# Spec B G6-4a (#288): the TUI dial-in is the FIRST GatewayLeg. With a SINGLE leg there is
+# no aggregate-across-legs constraint, so the per-leg ReplayBuffer's OWN hard ceiling is the
+# binding back-pressure bound; the GlobalReplayCap becomes binding only when G6-4 adds a 2nd
+# leg. Its ceiling is set STRICTLY ABOVE the buffer hard ceiling (PR2) — the buffer's own
+# hard-ceiling raise ALWAYS fires first, so the cap never refuses on the single TUI leg
+# (behavior-preserving for G5). The ingress gate is NON-BINDING (unbounded tokens / in-flight
+# / size) so the TUI is NOT throttled — G6-4's real adapter legs + the TUI's priority-credit
+# config land when the scheduler is wired.
+_TUI_LEG_ADAPTER_ID: Final[str] = "tui"
+_TUI_GLOBAL_CAP_MULTIPLIER: Final[int] = 4  # ceiling = buffer max_bytes * 4 (> the * 2 hard cap)
+_NON_BINDING_RATE_PER_S: Final[float] = 1e9
+_NON_BINDING_COUNT: Final[int] = 10**9
+_NON_BINDING_TTL_SECONDS: Final[float] = 1e9
+_NON_BINDING_MAX_FRAME_BYTES: Final[int] = 1 << 30
 
 log = structlog.get_logger(__name__)
 
@@ -142,6 +161,36 @@ class GatewayProcess:
         self._sleep = sleep
         self._jitter = jitter
         self._monotonic = monotonic
+
+    def _build_tui_leg(self) -> GatewayLeg:
+        """Build the single proving TUI leg for this accepted client (G6-4a, #288).
+
+        Wraps a fresh per-client ``ReplayBuffer`` (at its own SECURITY caps) in the FIRST
+        ``GatewayLeg`` (``adapter_id="tui"``). The leg's ``now`` is wired to the SAME
+        ``self._monotonic`` the evict loop reads (the buffer's monotonic precondition). The
+        ``GlobalReplayCap`` ceiling is strictly above the buffer hard ceiling (PR2 — the
+        buffer's own hard-ceiling raise fires first), and the ``PerAdapterIngressGate`` is
+        NON-BINDING (the TUI is not throttled; G6-4's scheduler wires the real fairness +
+        priority credit). One leg only — NO scheduler / fair-share here.
+        """
+        buffer = self._replay_buffer_factory()
+        cap = GlobalReplayCap(max_total_bytes=buffer._max_bytes * _TUI_GLOBAL_CAP_MULTIPLIER)
+        gate = PerAdapterIngressGate(
+            _TUI_LEG_ADAPTER_ID,
+            sustained_rate_per_s=_NON_BINDING_RATE_PER_S,
+            burst=_NON_BINDING_COUNT,
+            max_inflight=_NON_BINDING_COUNT,
+            ttl_seconds=_NON_BINDING_TTL_SECONDS,
+            max_frame_bytes=_NON_BINDING_MAX_FRAME_BYTES,
+            now=self._monotonic,
+        )
+        return GatewayLeg(
+            adapter_id=_TUI_LEG_ADAPTER_ID,
+            buffer=buffer,
+            ingress_gate=gate,
+            global_cap=cap,
+            now=self._monotonic,
+        )
 
     async def _on_peer_rejected(self, peer_uid: int | None) -> None:
         """The client-leg peer-auth reject seam: increment the metric + emit the loud row.
@@ -273,7 +322,7 @@ class GatewayProcess:
                 shutdown_event=self._shutdown_event,
                 dial_adapter_id=self._dial_adapter_id,
                 dial=self._core_dial,
-                replay_buffer=self._replay_buffer_factory(),
+                tui_leg=self._build_tui_leg(),
                 sleep=self._sleep,
                 jitter=self._jitter,
                 monotonic=self._monotonic,

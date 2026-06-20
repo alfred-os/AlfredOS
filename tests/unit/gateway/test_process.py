@@ -537,10 +537,10 @@ async def test_default_process_activates_resume_buffer(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The DEFAULT ``GatewayProcess(shutdown_event=...)`` build path constructs a
-    ``GatewayCoreLink`` with a NON-None ``replay_buffer`` — the resume is ACTIVE in prod.
+    ``GatewayCoreLink`` with a NON-None ``tui_leg`` — the resume is ACTIVE in prod.
 
-    Pre-change (``replay_buffer=None`` in ``run()``) this FAILS: the built core-link has
-    ``_replay_buffer is None``. The drive is the happy-path harness up to the first turn.
+    G6-4a (#288): the TUI is the FIRST GatewayLeg (it OWNS the buffer); the production
+    default threads a real leg in. The drive is the happy-path harness up to the first turn.
     """
     epoch = uuid4().hex
     shutdown = asyncio.Event()
@@ -557,8 +557,8 @@ async def test_default_process_activates_resume_buffer(
         core_host = await asyncio.wait_for(core_host_task, timeout=3.0)
         try:
             assert len(built) == 1
-            # The resume is ACTIVE: the production default threaded a real ReplayBuffer in.
-            assert built[0]._replay_buffer is not None
+            # The resume is ACTIVE: the production default threaded a real TUI leg in.
+            assert built[0]._tui_leg is not None
             shutdown.set()
             with structlog.testing.capture_logs():
                 await asyncio.wait_for(run_task, timeout=3.0)
@@ -577,7 +577,11 @@ async def test_injected_seams_thread_through_to_core_link(
     runtime_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An injected ``replay_buffer_factory`` is called EXACTLY ONCE and its buffer reaches
-    the core-link; the injected ``sleep``/``jitter``/``monotonic`` are threaded through too.
+    the core-link's TUI leg; the injected ``sleep``/``jitter``/``monotonic`` are threaded too.
+
+    G6-4a (#288): the factory's buffer is wrapped in the FIRST GatewayLeg (``adapter_id="tui"``),
+    so the assertion reads through ``link._tui_leg._buffer`` rather than the retired
+    ``link._replay_buffer`` slot.
     """
     from alfred.gateway.replay_buffer import ReplayBuffer
 
@@ -626,7 +630,8 @@ async def test_injected_seams_thread_through_to_core_link(
             assert len(built) == 1
             link = built[0]
             assert factory_calls == 1
-            assert link._replay_buffer is spy_buffer
+            assert link._tui_leg is not None
+            assert link._tui_leg._buffer is spy_buffer  # the leg wraps the factory's buffer
             assert link._sleep is _sleep
             assert link._jitter is _jitter
             assert link._monotonic is _monotonic

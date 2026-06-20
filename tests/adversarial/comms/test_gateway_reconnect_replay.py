@@ -54,6 +54,9 @@ import structlog.testing
 from alfred.comms_mcp.protocol import DAEMON_COMMS_ACK, DAEMON_LIFECYCLE_READY
 from alfred.gateway.client_listener import LinkControlNotification
 from alfred.gateway.core_link import GatewayCoreLink
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.metrics import CIRCUIT_BREAKER_OPEN, CORE_LINK_UP
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
@@ -109,12 +112,30 @@ def _link_with_buffer(buf: ReplayBuffer) -> tuple[GatewayCoreLink, _RecordingCli
 
     Binds a no-op ``_payload_relay`` so the relay-ON ``_route_unit`` path (the one that
     consumes ``daemon.comms.ack`` and drives ``trim_to_ack``) is active — exactly the
-    shape ``relay_to_core`` + the reconnect flush run in.
+    shape ``submit_tui_unit`` + the reconnect flush run in. G6-4a (#288): the TUI is the
+    FIRST GatewayLeg wrapping ``buf`` (non-binding gate + a cap ceiling strictly above the
+    buffer hard ceiling, PR2).
     """
     recorder = _RecordingClientListener()
+    gate = PerAdapterIngressGate(
+        "tui",
+        sustained_rate_per_s=1e9,
+        burst=10**9,
+        max_inflight=10**9,
+        ttl_seconds=1e9,
+        max_frame_bytes=1 << 30,
+        now=lambda: 0.0,
+    )
+    leg = GatewayLeg(
+        adapter_id="tui",
+        buffer=buf,
+        ingress_gate=gate,
+        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        now=lambda: 0.0,
+    )
     link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
-        replay_buffer=buf,
+        tui_leg=leg,
     )
 
     async def _sink(_payload: bytes) -> None:
@@ -161,7 +182,7 @@ async def test_reconnect_replays_unacked_frames_round_trip() -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     bodies = [f'{{"inbound_id":"m{i}"}}'.encode() for i in range(_N)]
     for body in bodies:
-        await link.relay_to_core(body)
+        await link.submit_tui_unit(body)
     assert [f.seq for f in buf.unacked_frames()] == list(range(_N))  # 0..N-1 held
     assert [p for (p, _s, _a) in leg_a.sent_units] == bodies
 
@@ -209,7 +230,7 @@ async def test_replay_precedes_fresh_input_fifo_barrier() -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     replay_bodies = [f'{{"inbound_id":"r{i}"}}'.encode() for i in range(_N)]
     for body in replay_bodies:
-        await link.relay_to_core(body)
+        await link.submit_tui_unit(body)
 
     # Capture (clears the gate) — but DO NOT flush yet. The fresh leg is the same
     # recording transport the pump's relay_to_core will also send onto.
@@ -282,7 +303,7 @@ async def test_forged_ready_does_not_trigger_flush() -> None:
     link._core_epoch = captured_epoch
     leg = _RecordingCoreTransport()
     link._current_core_transport = leg  # type: ignore[assignment]
-    await link.relay_to_core(b'{"inbound_id":"pinned"}')
+    await link.submit_tui_unit(b'{"inbound_id":"pinned"}')
     link._pending_replay = buf.unacked_frames()
     link._replay_pending.clear()
     stash_before = link._pending_replay
@@ -340,7 +361,7 @@ async def test_replay_is_payload_blind(monkeypatch: pytest.MonkeyPatch) -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     bodies = [f'{{"inbound_id":"b{i}"}}'.encode() for i in range(_N)]
     for body in bodies:
-        await link.relay_to_core(body)
+        await link.submit_tui_unit(body)
 
     leg_b = _RecordingCoreTransport()
     await _bounce_to_fresh_leg(link, leg_b)
@@ -367,7 +388,7 @@ async def test_complete_flush_leaves_no_lingering_stash() -> None:
     leg_a = _RecordingCoreTransport()
     link._current_core_transport = leg_a  # type: ignore[assignment]
     for i in range(_N):
-        await link.relay_to_core(f'{{"inbound_id":"s{i}"}}'.encode())
+        await link.submit_tui_unit(f'{{"inbound_id":"s{i}"}}'.encode())
 
     leg_b = _RecordingCoreTransport()
     await _bounce_to_fresh_leg(link, leg_b)
@@ -395,7 +416,7 @@ async def test_none_transport_defer_is_loud_not_silent() -> None:
     leg_a = _RecordingCoreTransport()
     link._current_core_transport = leg_a  # type: ignore[assignment]
     for i in range(_N):
-        await link.relay_to_core(f'{{"inbound_id":"d{i}"}}'.encode())
+        await link.submit_tui_unit(f'{{"inbound_id":"d{i}"}}'.encode())
 
     # Capture (clears the gate), then the fresh leg vanishes BEFORE the flush sends.
     handshake = _FakeTransport(frames=[_start_frame(uuid4().hex, seq_ack=True)])
@@ -438,7 +459,7 @@ async def test_trim_mid_flush_is_benign() -> None:
     link._current_core_transport = leg_a  # type: ignore[assignment]
     bodies = [f'{{"inbound_id":"t{i}"}}'.encode() for i in range(_N)]
     for body in bodies:
-        await link.relay_to_core(body)
+        await link.submit_tui_unit(body)
 
     handshake = _FakeTransport(frames=[_start_frame(uuid4().hex, seq_ack=True)])
     await link._peer_handshake(handshake)  # type: ignore[arg-type]

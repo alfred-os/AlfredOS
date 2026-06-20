@@ -36,8 +36,12 @@ from alfred.comms_mcp.protocol import (
     LinkRestoredNotification,
 )
 from alfred.gateway.client_listener import LinkControlNotification
-from alfred.gateway.core_link import GatewayCoreLink
+from alfred.gateway.core_link import _BUFFER_EVICT_INTERVAL_SECONDS, GatewayCoreLink
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.relay import GatewayRelay
+from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SeqFrame
 from alfred.plugins.comms_wire import CommsProtocolError
 
@@ -134,6 +138,32 @@ def _unit(body: bytes, *, seq: int | None = None) -> SeqFrame:
     return SeqFrame(seq=seq, ack=0, payload=body)
 
 
+def _make_tui_leg() -> GatewayLeg:
+    """A non-binding TUI leg for the relay tests (G6-4a, #288).
+
+    The relay's client->core pump routes through ``submit_tui_unit`` -> ``record_for_send``
+    -> ``write_leg_unit``, so a real core-link needs a leg wired. Non-binding ingress gate +
+    a GlobalReplayCap ceiling strictly above the buffer hard ceiling (PR2) — behavior-preserving.
+    """
+    buf = ReplayBuffer()
+    gate = PerAdapterIngressGate(
+        "tui",
+        sustained_rate_per_s=1e9,
+        burst=10**9,
+        max_inflight=10**9,
+        ttl_seconds=1e9,
+        max_frame_bytes=1 << 30,
+        now=lambda: 0.0,
+    )
+    return GatewayLeg(
+        adapter_id="tui",
+        buffer=buf,
+        ingress_gate=gate,
+        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        now=lambda: 0.0,
+    )
+
+
 def _build_relay(
     *,
     core: _FakeTransport,
@@ -147,8 +177,14 @@ def _build_relay(
     async def _dial() -> _FakeTransport:
         return core
 
-    async def _instant_sleep(_delay: float) -> None:
-        return None
+    async def _instant_sleep(delay: float) -> None:
+        # G6-4a (#288): the leg-wired core-link now spawns the TTL-evict sweep (the leg owns
+        # a buffer). PARK the (30s) evict-interval sweep so it does not busy-spin under the
+        # instant-sleep seam; the sub-second reconnect backoff stays instant. Mirrors
+        # ``test_core_link``'s run-driving ``_sleep``.
+        if delay >= _BUFFER_EVICT_INTERVAL_SECONDS:
+            await asyncio.Event().wait()
+        return
 
     core_link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
@@ -156,6 +192,7 @@ def _build_relay(
         sleep=_instant_sleep,
         jitter=lambda hi: hi,
         shutdown_event=shutdown,
+        tui_leg=_make_tui_leg(),
     )
     relay = GatewayRelay(
         core_link=core_link,
@@ -543,8 +580,14 @@ async def test_core_going_down_consumed_emits_reconnecting_not_relayed() -> None
     async def _dial() -> _FakeTransport:
         return cores.popleft()
 
-    async def _instant_sleep(_delay: float) -> None:
-        return None
+    async def _instant_sleep(delay: float) -> None:
+        # G6-4a (#288): the leg-wired core-link now spawns the TTL-evict sweep (the leg owns
+        # a buffer). PARK the (30s) evict-interval sweep so it does not busy-spin under the
+        # instant-sleep seam; the sub-second reconnect backoff stays instant. Mirrors
+        # ``test_core_link``'s run-driving ``_sleep``.
+        if delay >= _BUFFER_EVICT_INTERVAL_SECONDS:
+            await asyncio.Event().wait()
+        return
 
     core_link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
@@ -552,6 +595,7 @@ async def test_core_going_down_consumed_emits_reconnecting_not_relayed() -> None
         sleep=_instant_sleep,
         jitter=lambda hi: hi,
         shutdown_event=shutdown,
+        tui_leg=_make_tui_leg(),
     )
     relay = GatewayRelay(
         core_link=core_link,
@@ -678,7 +722,7 @@ class _HaltStubCoreLink:
 
     ``replay_buffer_tripped`` is the controllable latch the pump polls;
     ``wait_for_shutdown`` parks on a test-controlled event so a test can release the
-    halt deterministically. ``relay_to_core`` records forwards (asserted untouched while
+    halt deterministically. ``submit_tui_unit`` records forwards (asserted untouched while
     tripped). ``_payload_relay`` is the sink slot the relay binds at construction.
     """
 
@@ -705,7 +749,7 @@ class _HaltStubCoreLink:
     def release(self) -> None:
         self._release.set()
 
-    async def relay_to_core(self, payload: bytes) -> None:
+    async def submit_tui_unit(self, payload: bytes) -> None:
         self.forwarded.append(payload)
 
 
