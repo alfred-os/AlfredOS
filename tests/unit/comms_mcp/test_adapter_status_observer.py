@@ -28,6 +28,7 @@ from alfred.comms_mcp.adapter_status_observer import (
     AdapterStatusObserver,
     AdapterStatusSnapshot,
 )
+from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
 
 _EPOCH = "a" * 32
 _OTHER_EPOCH = "b" * 32
@@ -44,11 +45,14 @@ class _FakeAudit:
         self.rows.append(dict(kwargs))
 
 
-def _make_observer(audit: _FakeAudit) -> AdapterStatusObserver:
+def _make_observer(
+    audit: _FakeAudit, *, reconciler: CrashIncidentReconciler | None = None
+) -> AdapterStatusObserver:
     return AdapterStatusObserver(
         audit=audit,  # structural _AuditWriterLike
         expected_epoch=lambda: _EPOCH,
         now=lambda: _FIXED_NOW,
+        reconciler=reconciler if reconciler is not None else CrashIncidentReconciler(),
     )
 
 
@@ -72,6 +76,9 @@ async def test_up_with_matching_epoch_is_accepted_and_audited() -> None:
         "adapter_id": "discord",
         "epoch": _EPOCH,
         "occurred_at": _FIXED_NOW.isoformat(),
+        # SEC-01 (#288): the up subject records the incarnation being STARTED
+        # (defaulted to 0 here — this frame omits the field).
+        "host_restart_seq": 0,
     }
     snap = obs.latest("discord")
     assert isinstance(snap, AdapterStatusSnapshot)
@@ -104,6 +111,85 @@ async def test_down_crashed_breaker_open_each_audit_their_family() -> None:
     assert "detail" not in crashed  # raw wire field never persisted
     assert "detail_redacted" in crashed  # correction #2: detail_redacted, not redacted_detail
     assert obs.latest("discord").state == "breaker_open"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_crashed_subject_carries_host_restart_seq_and_incident_fields() -> None:
+    audit = _FakeAudit()
+    reconciler = CrashIncidentReconciler()
+    obs = _make_observer(audit, reconciler=reconciler)
+    await obs.observe(
+        "gateway.adapter.crashed",
+        {
+            "adapter_id": "discord",
+            "error_class": "RuntimeError",
+            "detail": "boom",
+            "host_restart_seq": 2,
+        },
+    )
+    subject = audit.rows[-1]["subject"]
+    assert isinstance(subject, dict)
+    assert audit.rows[-1]["event"] == "gateway.adapter.crashed"
+    assert subject["host_restart_seq"] == 2
+    assert subject["crash_signal_source"] == "gateway"
+    assert subject["crash_incident_id"]
+    assert subject["duplicate"] is False
+    # The reconciler now holds one incident at incarnation 2.
+    assert len(reconciler.incidents("discord")) == 1
+    assert reconciler.incidents("discord")[0].host_restart_seq == 2
+
+
+@pytest.mark.asyncio
+async def test_up_advances_incarnation_for_later_child_crash() -> None:
+    audit = _FakeAudit()
+    reconciler = CrashIncidentReconciler()
+    obs = _make_observer(audit, reconciler=reconciler)
+    # An accepted up at incarnation 1 (epoch matches) advances the reconciler — so a
+    # subsequent in-child crash (wired in Task 8) would tag to incarnation 1, not 0.
+    await obs.observe(
+        "gateway.adapter.up",
+        {"adapter_id": "discord", "epoch": _EPOCH, "host_restart_seq": 1},
+    )
+    # No crash yet -> no incidents, but the reconciler's current incarnation advanced:
+    # a child crash now folds at seq 1.
+    assert reconciler.incidents("discord") == ()
+    child = reconciler.observe_child_crash(adapter_id="discord")
+    assert child.host_restart_seq == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_gateway_crash_through_observer_still_writes_a_second_row() -> None:
+    """TE-1 (HIGH): a DUPLICATE gateway crash through the REAL wired observer STILL audits.
+
+    The reconciler flags the second crash ``duplicate=True`` (one incident), but the
+    observer writes a SECOND audit row regardless — hard rule #7: a replayed signal is
+    NEVER suppressed, it is marked. A regression that gated the write on
+    ``not fold.duplicate`` would silently drop this row and this test would catch it.
+    """
+    audit = _FakeAudit()
+    reconciler = CrashIncidentReconciler()
+    obs = _make_observer(audit, reconciler=reconciler)
+    frame = {
+        "adapter_id": "discord",
+        "error_class": "RuntimeError",
+        "detail": "boom",
+        "host_restart_seq": 0,
+    }
+    await obs.observe("gateway.adapter.crashed", frame)
+    await obs.observe("gateway.adapter.crashed", frame)
+
+    crash_rows = [r for r in audit.rows if r["event"] == "gateway.adapter.crashed"]
+    # TWO loud rows (never dropped) ...
+    assert len(crash_rows) == 2
+    # ... but ONE incident, and the second row is FLAGGED as the replay.
+    first_subject = crash_rows[0]["subject"]
+    second_subject = crash_rows[1]["subject"]
+    assert isinstance(first_subject, dict)
+    assert isinstance(second_subject, dict)
+    assert first_subject["duplicate"] is False
+    assert second_subject["duplicate"] is True
+    assert first_subject["crash_incident_id"] == second_subject["crash_incident_id"]
+    assert len(reconciler.incidents("discord")) == 1
 
 
 @pytest.mark.asyncio
@@ -339,6 +425,7 @@ def _observer_with_raising_audit() -> AdapterStatusObserver:
         audit=_RaisingAudit(),  # structural _AuditWriterLike
         expected_epoch=lambda: _EPOCH,
         now=lambda: _FIXED_NOW,
+        reconciler=CrashIncidentReconciler(),
     )
 
 
