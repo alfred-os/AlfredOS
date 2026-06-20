@@ -37,16 +37,14 @@ real gateway incident to ``both``. Downstream readers (2b-2c) MUST NOT treat
 ``both`` as security-meaningful corroboration — it is a diagnostic-coverage hint
 only.
 
-Read surface (2b-2c): the in-process :meth:`incidents` (per-adapter incident
-views) + the observer's ``latest(adapter_id)`` snapshot are the read surfaces a
-future ``alfred status`` render (2b-2c) consumes. **The ``alfred status`` /
-``alfred daemon status`` CLI commands do NOT dial the daemon today** (they read
-Settings / the pidfile only — ``src/alfred/cli/main.py`` /
-``cli/daemon/_commands.py``), so they cannot reach this in-process reconciler.
-2b-2c must therefore EITHER add a daemon query seam (the status CLI dials the
-daemon over the existing 0600 socket) OR relocate the render in-daemon. 2b-2b
-deliberately builds NO RPC (YAGNI — no consumer until 2b-2c) and only guarantees
-the data is correct + in-process readable.
+Read surface: the in-process :meth:`incidents` / :meth:`adapter_ids` /
+:meth:`current_incarnation` (+ the observer's ``all_latest()`` snapshot map) are the
+read surfaces the daemon control plane folds into the live status result. 2b-2c
+SHIPPED the daemon control-plane query RPC (``_daemon_control_*`` / ADR-0038): a
+``0600`` request/response unix socket at ``~/.run/alfred/control.sock`` that
+``alfred daemon status`` dials and answers LIVE from this reconciler + the observer —
+no snapshot, no staleness, no ``boot_id``. The withdrawn file-snapshot approach
+(PR #299) is retired.
 
 In-memory only (per gateway<->core link lifetime); the gateway is "stateless
 beyond a small connection buffer" and the durable record is the signed audit log.

@@ -467,16 +467,34 @@ crash. G6-2b-2b correlates them into **one incident per physical crash** —
   a real gateway incident to `both`. Treat `both` as a diagnostic-coverage hint,
   not a security attestation.
 
-### Snapshot reachability — the 2b-2c seam (deliberate YAGNI in 2b-2b)
+### The daemon control plane — the live query seam (G6-2b-2c / ADR-0038)
 
-The reconciler exposes an in-process `incidents(adapter_id)` read surface (and the
-observer keeps `latest(adapter_id)`) — both live **inside the daemon process**
-(`_CommsBootGraph`). The `alfred status` / `alfred daemon status` CLI commands
-**do not dial the daemon today** (they read Settings / the pidfile only —
-`src/alfred/cli/main.py`, `cli/daemon/_commands.py`), so they **cannot reach this
-in-process reconciler**. 2b-2b deliberately builds **no RPC/query endpoint**
-(YAGNI — there is no consumer until the 2b-2c render). 2b-2c must therefore choose
-**either** a daemon query seam (the status CLI dials the daemon over the existing
-`0600` socket) **or** relocate the render in-daemon. 2b-2b only guarantees the
-incident data is correct and in-process readable; the render shape and the query
-seam are 2b-2c's to design.
+The observer + reconciler live **inside the daemon process** (`_CommsBootGraph`), so the
+CLI cannot read them directly. G6-2b-2c closes that gap with a **daemon control plane**: a
+dedicated `0600` request/response unix socket at `~/.run/alfred/control.sock`
+([ADR-0038](../adr/0038-daemon-control-socket.md)), separate from the comms wire
+([ADR-0031](../adr/0031-comms-socket-transport-for-the-foreground-tui.md)).
+
+`alfred daemon status` dials the control socket and sends one `status.query` request; the
+daemon answers **live** from the observer (`all_latest()`) + reconciler
+(`adapter_ids()` / `current_incarnation()` / `incidents()`), folded by
+`build_daemon_status_result` into a `DaemonStatusResult`. The response is computed at query
+time — there is **no snapshot, no staleness window, no `boot_id`**: the daemon answering the
+`0600` + `SO_PEERCRED` socket is, by construction, the live daemon. The withdrawn
+file-snapshot approach (PR #299) is retired.
+
+Key properties (see ADR-0038 for the full reasoning):
+
+- **Same security as the comms wire, shared not forked.** Peer-uid auth, owner-only bind,
+  and call-time runtime-dir resolution live in `alfred.plugins._local_socket` and are reused
+  by both sockets. A refused different-uid dial writes a loud `daemon.control.peer_uid_rejected`
+  audit row (the control plane is daemon-global, so the row carries no `adapter_id`); a
+  read-only `status.query` writes no audit row.
+- **No secret/T3 on the wire.** The result carries only non-sensitive operational metadata
+  (adapter_id, state, occurred_at, incarnation, incident count + the latest incident's
+  seq/source/id). The field set is `extra="forbid"` and structurally locked.
+- **SEC-02 unchanged.** `crash_signal_source == "both"` is rendered as informational origin
+  only — a diagnostic-coverage hint, **not** authenticated corroboration.
+- **The G6-5 substrate.** The method router takes `gateway.adapters` next; `alfred gateway
+  adapters --wait-ready` is a live-ness consumer that reuses this exact channel (a client-side
+  poll over repeated `status.query` keeps the server stateless — ADR-0038).
