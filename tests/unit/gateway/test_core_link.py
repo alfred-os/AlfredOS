@@ -3353,6 +3353,53 @@ async def test_flush_pending_replay_broken_pipe_re_buffers_and_replays_once() ->
 
 
 @pytest.mark.asyncio
+async def test_flush_pending_replay_hard_ceiling_breach_is_loud_not_raised() -> None:
+    """H1 (Spec B G6-4, #288): a deferred+capture merge over the hard ceiling stays self-healing.
+
+    REPRODUCES the never-raise hole: the FIFO merge in ``_peer_handshake``
+    (``_pending_replay`` from a prior None-transport defer PREPENDED to this epoch's
+    ``leg.unacked_frames()`` capture) can build a COMBINED set whose count exceeds the
+    buffer HARD ceiling. The flush then re-appends that combined set into the
+    freshly-``reset_for_new_epoch``-ed (empty) buffer via ``record_for_send``, which raises
+    :class:`ReplayBufferError` at the hard ceiling. The old code called ``record_for_send``
+    OUTSIDE any ``ReplayBufferError`` guard, so the raise escaped ``_flush_pending_replay``
+    into ``run``'s reconnect arm and crashed the always-up core-link task.
+
+    PRE-FIX: ``_flush_pending_replay`` propagates ``ReplayBufferError``. POST-FIX: the
+    per-frame record/write is guarded — the over-ceiling frame is loud-dropped
+    (``gateway.comms.buffer_replay_ceiling_dropped``) and the flush STAYS self-healing:
+    no raise escapes, a loud row is emitted, the resume gate ends SET, and the frames that
+    DO fit are still re-sent so resume converges.
+    """
+    # max_frames=2 -> hard ceiling = 4 frames. Stage 5 frames in _pending_replay so the
+    # 5th record_for_send append breaches the hard ceiling of the (empty, just-reset) buffer.
+    buf = ReplayBuffer(max_frames=2)
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    assert link._tui_leg is not None
+    link._tui_leg.reset_for_new_epoch()  # the post-handshake state the flush runs against
+    link._pending_replay = tuple(ReplayFrame(seq=i, payload=bytes([i])) for i in range(5))
+    link._replay_pending.clear()  # a capture cleared the gate (the pre-flush state)
+
+    fresh = _FakeCoreTransport([])
+    link._current_core_transport = fresh
+
+    with structlog.testing.capture_logs() as captured:
+        # No raise must escape into run() — the always-up gateway stays self-healing.
+        await link._flush_pending_replay()
+
+    # The 4 frames that fit were re-sent (fresh seqs 0..3); the 5th was loud-dropped.
+    assert [seq for _payload, seq, _ack in fresh.sent_units] == [0, 1, 2, 3]
+    ceiling_dropped = [
+        c for c in captured if c.get("event") == "gateway.comms.buffer_replay_ceiling_dropped"
+    ]
+    assert len(ceiling_dropped) == 1
+    assert ceiling_dropped[0].get("log_level") in {"warning", "error"}
+    # The stash is drained and the gate is SET — the client->core pump resumes (no wedge).
+    assert link._pending_replay == ()
+    assert link.replay_pending_gate.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_run_reconnect_flushes_replay_before_pump_resumes() -> None:
     """run() through a reconnect: the captured frames replay on the NEW leg, gate ends SET.
 
@@ -3642,6 +3689,53 @@ async def test_submit_tui_unit_oversized_refusal_back_pressures_no_enqueue_no_wr
     refused = [c for c in captured if c.get("event") == "gateway.ingress.refused"]
     assert len(refused) == 1
     assert refused[0].get("reason") == IngressRefusalReason.OVERSIZED.value
+    assert refused[0].get("adapter_id") == "tui"
+    assert refused[0].get("log_level") == "warning"
+
+
+@pytest.mark.asyncio
+async def test_submit_tui_unit_leg_queue_full_back_pressures_not_raises() -> None:
+    """H2 (Spec B G6-4, #288): a full leg send-queue back-pressures — it NEVER escapes.
+
+    REPRODUCES the crash: ``submit_tui_unit`` admits the frame (the TUI gate is
+    non-binding) then ``self._leg_router.route`` → ``scheduler.enqueue`` →
+    ``_LegQueue.offer``, which raises :class:`LegQueueFullError` for a registered leg whose
+    bounded byte budget is exceeded. That raise was OUTSIDE the relay pump's read
+    ``try/except`` (it lives after the read), so it escaped ``submit_tui_unit`` →
+    ``_client_to_core_pump`` and crashed the always-up gateway's relay TaskGroup — the exact
+    OPPOSITE of the docstring's promised "read back-pressure".
+
+    PRE-FIX: ``submit_tui_unit`` propagates ``LegQueueFullError``. POST-FIX: the full queue
+    is handled at the submit boundary — a LOUD closed-vocab back-pressure row
+    (``gateway.ingress.refused`` reason ``queue_full``) + the per-adapter back-pressure
+    counter, the frame dropped-loud, NEVER a raise / TaskGroup crash.
+    """
+    buf = ReplayBuffer()
+    tui_leg = _tui_leg(buf)
+    recorder = _RecordingClientListener()
+    sink = _RelaySink()
+    link = GatewayCoreLink(
+        client_listener=recorder,  # type: ignore[arg-type]
+        payload_relay=sink,  # type: ignore[arg-type]
+        tui_leg=tui_leg,
+    )
+    # A tiny per-leg send-queue budget: the FIRST enqueue fits, the SECOND overflows it.
+    scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=4)
+    scheduler.register_leg(tui_leg)
+    link._leg_router = LegRouter(scheduler)
+    transport = _FakeCoreTransport([])
+    link._current_core_transport = transport
+
+    # Fill the queue WITHOUT draining (4 bytes == the whole budget).
+    await link.submit_tui_unit(b"aaaa")
+
+    with structlog.testing.capture_logs() as captured:
+        # The second frame overflows the leg queue. It must NOT raise out (back-pressure).
+        await link.submit_tui_unit(b"bbbb")
+
+    refused = [c for c in captured if c.get("event") == "gateway.ingress.refused"]
+    assert len(refused) == 1
+    assert refused[0].get("reason") == IngressRefusalReason.QUEUE_FULL.value
     assert refused[0].get("adapter_id") == "tui"
     assert refused[0].get("log_level") == "warning"
 
