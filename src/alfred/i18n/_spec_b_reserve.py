@@ -24,3 +24,12 @@ def _register() -> None:
     t("gateway.adapter.status_rejected.malformed_frame")
     t("gateway.adapter.status_rejected.epoch_mismatch")
     t("gateway.adapter.status_rejected.unknown_method")
+    # Per-state render tokens for ``alfred daemon status`` (G6-2b-2c / #288 / ADR-0038).
+    # DICT-dereferenced at the render call site (``_ADAPTER_STATE_KEYS[line.state]``), so
+    # pybabel cannot see the literal there — reserve them here so they are not marked
+    # obsolete on the next ``pybabel update`` (the catalog-drift gate).
+    t("daemon.status.state.up")
+    t("daemon.status.state.down")
+    t("daemon.status.state.crashed")
+    t("daemon.status.state.breaker_open")
+    t("daemon.status.state.unknown")
