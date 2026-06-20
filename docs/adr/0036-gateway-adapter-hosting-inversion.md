@@ -357,3 +357,40 @@ in-process.
   defense).
 - `tests/unit/test_compose_invariants.py` — the `devops-010` compose invariants
   reconciled by this ADR.
+
+### Per-adapter ingress + fair leg multiplex realized (G6-4 annotation, #288)
+
+> **G6-4 annotation (#288):** decision 5 (the per-adapter ingress gate + per-leg
+> resume under a global aggregate cap) is now wired; this records the facts the
+> decision-5 prose left open so they cannot drift.
+>
+> **K1 — leg ownership.** A per-leg `GatewayLeg` (`src/alfred/gateway/gateway_leg.py`)
+> owns each leg's `ReplayBuffer`, per-leg seq counter, breaker latch, ingress gate,
+> and bounded send queue. The foreground **TUI is the canonical FIRST `GatewayLeg`** —
+> one `GatewayLeg` instance on the same code path as every future hosted adapter leg,
+> not a special case (**one code path**). The `GatewayLegScheduler` is the **sole
+> drainer**: it mints the wire seq + appends to the per-leg buffer at DRAIN time and is
+> the only caller of `core_link.write_leg_unit` on the steady path. Temporal mutual
+> exclusion with reconnect is enforced by the scheduler awaiting the **replay-pending
+> gate** before each drain round; while replay is pending, `_flush_pending_replay` is
+> the single sanctioned reconnect-internal direct `write_leg_unit` caller (the scheduler
+> is parked, so there is never a second concurrent physical writer). The breaker feed
+> moved from `relay_to_core` to a **drain-time seam** in the leg/scheduler.
+>
+> **K2/K3 — cap precedence.** Two distinct ceilings bind in order: the per-leg
+> `ReplayBuffer` **hard ceiling** (4096 frames / 8 MiB / 2× hard cap) binds FIRST for a
+> single leg; the `GlobalReplayCap` (`global_replay_cap.py`) is the **aggregate-across-
+> legs** bound on the SUM of all legs' resident pre-DLP T1 bytes, set strictly above one
+> leg's hard ceiling so the per-leg cap fires before the global one. The global cap is
+> released on every byte-reclaim path (trim / evict / discard / reset / hard-ceiling
+> rollback). `max_frame_bytes` at ingress admission bounds the fairness unit (round-robin
+> by-frame over the single physical writer); the residual head-of-line delay is honestly
+> bounded by `max_frame_bytes`, and the TUI leg holds a reserved minimum credit so
+> interactive latency has a floor in N.
+>
+> **comms-F2 overturn realized.** The gateway ingress gate is **additive volumetric**
+> back-pressure keyed only on `adapter_id` (payload-blind; no per-platform-id keying at
+> the gateway). The core's `_PreResolutionLimiter` (per-`(adapter_id,
+> platform_user_id_hash)`) is NOT touched, duplicated, or weakened — it remains as per-id
+> defense-in-depth. The two layers are complementary: the gateway volumetric gate does
+> NOT subsume the core's per-id limiter (the comms-F2 overturn, now realized in code).
