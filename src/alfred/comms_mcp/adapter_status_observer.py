@@ -317,7 +317,7 @@ class AdapterStatusObserver:
             # The crashed accept ALWAYS folds first (see _accept), so a non-None fold is
             # a structural invariant here — assert it loud rather than silently emit a
             # row missing the dedup keys.
-            assert fold is not None  # noqa: S101 - structural invariant, not input validation
+            assert fold is not None  # structural invariant: the crashed accept folds first
             # The wire ``detail`` is RE-SCRUBBED before it lands as detail_redacted;
             # the raw field is never persisted (mirrors the in-child CrashedNotification
             # handling at handlers.py:338). REDACT FIRST, then bound the length — NOT

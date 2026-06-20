@@ -103,7 +103,9 @@ def test_crash_field_sets_carry_dedup_join_keys() -> None:
 
 def test_crashed_carries_host_restart_seq_additive_default() -> None:
     # Existing producers omit the field -> defaults to 0 (back-compat, frozen-safe).
-    default = AdapterCrashedNotification(adapter_id="discord", error_class="RuntimeError", detail="")
+    default = AdapterCrashedNotification(
+        adapter_id="discord", error_class="RuntimeError", detail=""
+    )
     assert default.host_restart_seq == 0
     # A real producer stamps the gateway's per-adapter restart sequence.
     stamped = AdapterCrashedNotification(
@@ -118,7 +120,10 @@ def test_crashed_carries_host_restart_seq_additive_default() -> None:
     # extra="forbid" still holds for genuinely unknown fields.
     with pytest.raises(ValidationError):
         AdapterCrashedNotification(
-            adapter_id="discord", error_class="RuntimeError", detail="", bogus="x"  # type: ignore[call-arg]
+            adapter_id="discord",
+            error_class="RuntimeError",
+            detail="",
+            bogus="x",  # type: ignore[call-arg]
         )
 
 

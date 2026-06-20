@@ -928,7 +928,7 @@ async def _build_comms_adapter_wiring(
     )
     crash_handler = AdapterCrashHandler(
         audit_writer=audit,  # type: ignore[arg-type]
-        hook_invoker=hook_invoker,  # type: ignore[arg-type]
+        hook_invoker=hook_invoker,
         # The SAME reconciler the boot graph injected into the status observer, so a
         # gateway crash and this in-child crash for one physical crash fold into one
         # incident (G6-2b-2b / #288).
