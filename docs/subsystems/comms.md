@@ -467,16 +467,55 @@ crash. G6-2b-2b correlates them into **one incident per physical crash** —
   a real gateway incident to `both`. Treat `both` as a diagnostic-coverage hint,
   not a security attestation.
 
-### Snapshot reachability — the 2b-2c seam (deliberate YAGNI in 2b-2b)
+### Snapshot reachability — the daemon-status snapshot file (G6-2b-2c / #288)
 
-The reconciler exposes an in-process `incidents(adapter_id)` read surface (and the
-observer keeps `latest(adapter_id)`) — both live **inside the daemon process**
+The reconciler exposes in-process `incidents(adapter_id)` / `adapter_ids()` /
+`current_incarnation(adapter_id)` read surfaces, and the observer keeps
+`latest(adapter_id)` / `all_latest()` — all live **inside the daemon process**
 (`_CommsBootGraph`). The `alfred status` / `alfred daemon status` CLI commands
-**do not dial the daemon today** (they read Settings / the pidfile only —
-`src/alfred/cli/main.py`, `cli/daemon/_commands.py`), so they **cannot reach this
-in-process reconciler**. 2b-2b deliberately builds **no RPC/query endpoint**
-(YAGNI — there is no consumer until the 2b-2c render). 2b-2c must therefore choose
-**either** a daemon query seam (the status CLI dials the daemon over the existing
-`0600` socket) **or** relocate the render in-daemon. 2b-2b only guarantees the
-incident data is correct and in-process readable; the render shape and the query
-seam are 2b-2c's to design.
+**do not dial the daemon** (they read Settings / the pidfile only —
+`src/alfred/cli/main.py`, `cli/daemon/_commands.py`), so they cannot reach this
+in-process reconciler directly.
+
+**2b-2c shipped the in-daemon snapshot file** (NOT a socket RPC — YAGNI; there is
+no real-time consumer). A supervised publisher
+(`DaemonStatusSnapshotPublisher`) periodically polls the observer + reconciler,
+builds a non-secret `DaemonStatusSnapshot`, and writes it
+**write-if-changed** to `~/.run/alfred/daemon-status.json` —
+**`0600`, owner-only, `boot_id`-tied**, written with the exact
+`O_EXCL`-temp+rename / `O_NOFOLLOW` / `fstat` discipline the pidfile uses, and
+**reaped on every shutdown path**. `alfred daemon status` loads the file,
+cross-checks its `boot_id` against the live pidfile (stale → ignored), and renders
+one line per adapter: state + incarnation + crash-incident count + the latest
+crash's seq/source. The loader/builder/render helper
+(`src/alfred/cli/daemon/_daemon_status_snapshot.py`) is **transport-agnostic** and
+is reused by `alfred status` / `alfred gateway adapters` in G6-4/G6-5.
+
+- **No secret crosses the file.** Only non-sensitive operational metadata:
+  `adapter_id`, `state`, `occurred_at`, `current_incarnation`, the per-adapter
+  crash-incident **count**, and the latest incident's
+  `host_restart_seq` / `crash_signal_source` / `crash_incident_id`. The raw crash
+  `detail` lives **only** in the signed audit log; the model's field set is
+  locked by a structural test so no T3/secret field can be added without review.
+- **Rendered adapter states.** `up` / `down` / `crashed` / `breaker_open` mirror
+  the observed gateway transition, plus **`unknown`** — the reconciler has seen a
+  crash incident for the adapter but the observer holds **no accepted gateway
+  state** for it yet (e.g. a child-only crash before any accepted `up`). Each
+  state token is rendered through its own `t()` catalog key
+  (`daemon.status.state.*`), so the displayed label is localizable.
+- **Anti-stale is NOT anti-forgery.** The `boot_id` cross-check rejects a **stale**
+  snapshot left by a prior daemon incarnation (the file is reaped on clean
+  shutdown; this guards a crash). It is **not** an authenticity guarantee:
+  `boot_id` is non-secret, so a same-uid process — already **inside** the daemon
+  trust domain — could forge a snapshot carrying the current `boot_id`. We
+  deliberately add **no HMAC** (it would only defend against an attacker who has
+  already defeated the trust boundary, and would impose a secret-on-disk
+  obligation this slice rightly avoids). The signed audit log is authoritative;
+  this snapshot is best-effort operator convenience.
+- **`crash_signal_source == "both"` is a diagnostic-origin hint** (SEC-02), not
+  authenticated corroboration — the render frames the latest-crash line as
+  "reported by {source}", never as a verified double-confirmation.
+- **Fail-loud-but-non-fatal.** A snapshot **write** failure is daemon-internal
+  observability: it is logged loud (a structured warning, never silent) but does
+  **not** crash the daemon, and the supervised publisher loop self-heals on the
+  next tick. This is distinct from the hard-rule-#7 security paths, which escalate.

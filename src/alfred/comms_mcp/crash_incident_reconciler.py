@@ -37,16 +37,20 @@ real gateway incident to ``both``. Downstream readers (2b-2c) MUST NOT treat
 ``both`` as security-meaningful corroboration — it is a diagnostic-coverage hint
 only.
 
-Read surface (2b-2c): the in-process :meth:`incidents` (per-adapter incident
-views) + the observer's ``latest(adapter_id)`` snapshot are the read surfaces a
-future ``alfred status`` render (2b-2c) consumes. **The ``alfred status`` /
-``alfred daemon status`` CLI commands do NOT dial the daemon today** (they read
-Settings / the pidfile only — ``src/alfred/cli/main.py`` /
-``cli/daemon/_commands.py``), so they cannot reach this in-process reconciler.
-2b-2c must therefore EITHER add a daemon query seam (the status CLI dials the
-daemon over the existing 0600 socket) OR relocate the render in-daemon. 2b-2b
-deliberately builds NO RPC (YAGNI — no consumer until 2b-2c) and only guarantees
-the data is correct + in-process readable.
+Read surface (2b-2c, SHIPPED): the in-process :meth:`incidents` /
+:meth:`adapter_ids` / :meth:`current_incarnation` (per-adapter incident views +
+enumeration) + the observer's ``latest`` / ``all_latest`` snapshot are the read
+surfaces the ``alfred daemon status`` render consumes. **The ``alfred status`` /
+``alfred daemon status`` CLI commands do NOT dial the daemon** (they read Settings
+/ the pidfile only — ``src/alfred/cli/main.py`` / ``cli/daemon/_commands.py``), so
+they cannot reach this in-process reconciler directly. 2b-2c SHIPPED the in-daemon
+**snapshot file** option (NOT a socket RPC — YAGNI): the daemon periodically
+serialises a non-secret, ``boot_id``-tied 0600 JSON snapshot of this reconciler +
+the observer's per-adapter state to ``~/.run/alfred/daemon-status.json``
+(``alfred.cli.daemon._daemon_status_snapshot``), reaped on every shutdown path, and
+``alfred daemon status`` loads + ``boot_id``-cross-checks + renders it. The
+loader/builder/render helper is transport-agnostic and is reused by ``alfred
+status`` / ``alfred gateway adapters`` in G6-4/G6-5.
 
 In-memory only (per gateway<->core link lifetime); the gateway is "stateless
 beyond a small connection buffer" and the durable record is the signed audit log.

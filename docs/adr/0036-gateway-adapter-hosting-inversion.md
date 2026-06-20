@@ -243,6 +243,26 @@ validation (validate-on-produce + epoch reconcile) in isolation.
 > masking the genuine gateway incident. The release-blocking forged/duplicate-crash
 > adversarial entry is deferred to G6-6 (the in-process unit-level guards ship in 2b-2b).
 
+> **G6-2b-2c annotation (status-snapshot materialisation):** the `alfred status`
+> snapshot named above (decision 2 / §6) is **materialised as a `0600`,
+> `boot_id`-tied, runtime-dir JSON file** (`~/.run/alfred/daemon-status.json`,
+> `src/alfred/cli/daemon/_daemon_status_snapshot.py`) — **NOT a socket RPC** (YAGNI;
+> no real-time consumer until one appears). A supervised
+> `DaemonStatusSnapshotPublisher` polls the in-process `AdapterStatusObserver` +
+> `CrashIncidentReconciler` and write-if-changes the snapshot; the daemon reaps it on
+> every shutdown path; `alfred daemon status` loads + `boot_id`-cross-checks + renders
+> it. The file mirrors the pidfile's `O_EXCL`-temp+rename / `O_NOFOLLOW` / `fstat`
+> discipline and carries **no secret / raw error text** (the model's field set is
+> locked by a structural test). **SEC-02** carries forward (the latest-crash
+> `crash_signal_source` is a diagnostic-origin hint, not authenticated). **Anti-stale
+> ≠ anti-forgery:** the `boot_id` check rejects a snapshot from a prior incarnation,
+> but `boot_id` is non-secret and a same-uid in-domain process could forge a current
+> snapshot — the **signed audit log is authoritative**; no HMAC is added (it would
+> only defend past an already-breached trust boundary, and impose a secret-on-disk
+> obligation). The transport-agnostic loader/builder/render helper is reused by
+> `alfred status` / `alfred gateway adapters` in G6-4/G6-5. No NEW ADR is needed: no
+> PRD §5 invariant, datastore, or wire-protocol changes.
+
 ### Adversarial corpus (before ship, §6)
 
 - **(a)** cross-adapter credential read attempt → refused + audited.
