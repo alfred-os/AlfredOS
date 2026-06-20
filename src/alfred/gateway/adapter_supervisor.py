@@ -97,6 +97,14 @@ _BREAKER_WINDOW_SECONDS: Final[float] = 300.0
 # fan out unboundedly.
 _DEFAULT_MAX_CONCURRENT_BOOTS: Final[int] = 8
 
+# Awaiting-core terminal ceiling (G6-3 / Task 4): the number of consecutive non-spin
+# bounded-backoff re-probes the supervisor will wait for the credential leg to recover
+# before declaring the adapter DURABLY down (tripping the breaker — the distinct loud
+# terminal alert, NEVER a silent forever-park). The re-probe is non-spin (each wait is
+# a bounded backoff), so the ceiling bounds the dark window, not the probe rate. An
+# explicit cred-event signal (an operator/test re-arm) short-circuits the wait.
+_AWAITING_CORE_CEILING: Final[int] = 12
+
 
 class GatewayAdapterSpawnError(AlfredError):
     """A launcher-spawn / handshake failure for one adapter (fail-closed).
@@ -142,12 +150,23 @@ class _AdapterChildFactoryLike(Protocol):
     window (the "no ``await`` while fd 3 is clobbered" discipline — see
     :mod:`alfred.security.quarantine_child_io`), then invokes ``deliver_credential``
     with the write end (after the window closes, before the handshake). 2b-1's tests
-    inject a fake. A spawn / handshake / credential-delivery failure MUST raise
+    inject a fake. A spawn / handshake failure MUST raise
     :class:`GatewayAdapterSpawnError` (fail-closed) — never log-and-continue.
 
     ``deliver_credential`` is the supervisor's at-spawn credential hook (Task 5b): the
     factory MUST call it (with the fd-3 write end) on the success path so the child
     receives its credential out-of-band; a raise from it aborts the spawn.
+
+    **G6-5 implementer contract — do NOT wrap the credential exceptions.** A
+    :class:`alfred.gateway.core_link.CredentialLegDownError` or an
+    :class:`alfred.comms_mcp.adapter_credential_resolver.AdapterCredentialError` raised
+    by ``deliver_credential`` MUST propagate UNWRAPPED out of ``spawn_and_handshake``.
+    The supervisor's spawn arm (:meth:`_spawn_one`) catches each distinctly:
+    ``CredentialLegDownError`` parks the machine in AWAITING_CORE (a down leg is NOT a
+    crash), while ``AdapterCredentialError`` joins the crash/breaker arm with a distinct
+    spawn-aborted audit row. Re-wrapping either as ``GatewayAdapterSpawnError`` would
+    DEFEAT the AWAITING_CORE arm (a leg-down would crash-loop a dead leg) — so wrap ONLY
+    a genuine spawn/handshake fault, never the credential exceptions.
     """
 
     async def spawn_and_handshake(
@@ -457,8 +476,11 @@ class GatewayAdapterSupervisor:
                 # The credential is structurally absent from the row (maintainer C1). The
                 # error is WRAPPED as GatewayAdapterSpawnError (L1 hierarchy) so the
                 # supervisor's existing crash/breaker arm + the boot-refusal re-raise
-                # treat it uniformly with a launcher spawn failure.
-                await self._audit_spawn_aborted(run, reason="credential_refused")
+                # treat it uniformly with a launcher spawn failure. The audit row carries
+                # the error's DISTINCT closed-vocab reason (grant_mismatch / delivery_failed
+                # / missing_secret / ...) — the G6-3 failure-path contract — never collapsed
+                # to the generic ``credential_refused``.
+                await self._audit_spawn_aborted(run, reason=exc.reason)
                 spawn_error: GatewayAdapterSpawnError = GatewayAdapterSpawnError(
                     f"credential pipeline aborted the spawn (adapter_id={run.adapter_id!r}, "
                     f"reason={exc.reason!r})"
@@ -635,33 +657,70 @@ class GatewayAdapterSupervisor:
         )
 
     async def _wait_cred_or_stop(self, run: _AdapterRun) -> bool:
-        """Park in AWAITING_CORE until cred returns or a stop arrives.
+        """Park in AWAITING_CORE with a non-spin bounded re-probe + terminal ceiling.
 
-        Returns True if a stop won (-> DOWN, terminal); False if the cred came back
-        (caller loops to retry the spawn). On cred-return, feed ``CRED_AVAILABLE``.
+        The await-core wait (Task 4): NON-spin (each iteration is a bounded backoff
+        sleep racing the stop/cred events), bounded (re-probes the cheap link-state
+        availability after each backoff), and TERMINAL-CEILINGED — after
+        :data:`_AWAITING_CORE_CEILING` consecutive failed re-probes the adapter is
+        declared DURABLY down via the breaker (the distinct loud terminal alert, NEVER a
+        silent forever-park — spec §6(c) no-quiet-dark, CLAUDE.md hard rule #7).
+
+        Returns True if the wait ended TERMINALLY (a stop -> DOWN, or the ceiling ->
+        BREAKER_OPEN) so ``supervise_one`` breaks; False if the leg recovered (caller
+        loops to retry the spawn), feeding ``CRED_AVAILABLE``. An explicit ``cred_event``
+        (operator/test re-arm) short-circuits a backoff wait.
         """
+        for _attempt in range(_AWAITING_CORE_CEILING):
+            stopped = await self._await_core_backoff_or_stop(run)
+            if stopped:
+                ADAPTER_AWAITING_CORE.labels(adapter=run.adapter_id).set(0)
+                run.awaiting_core_event.clear()
+                await self._stop(run)
+                return True
+            # Re-probe the cheap link-state liveness after the bounded wait. The leg back
+            # up -> resume the spawn; still down -> loop (counting toward the ceiling).
+            if run.cred_event.is_set() or await self._cred.is_available(adapter_id=run.adapter_id):
+                run.cred_event.clear()
+                ADAPTER_AWAITING_CORE.labels(adapter=run.adapter_id).set(0)
+                run.awaiting_core_event.clear()
+                await self._apply(run, AdapterLifecycleEvent.CRED_AVAILABLE)  # -> RESTARTING
+                return False
+            self._audit_awaiting_core(run, reason="awaiting_core_reprobe")
+        # Ceiling exceeded: the leg never came back. Declare the adapter durably down via
+        # the breaker (the distinct terminal alert) rather than park dark forever.
+        ADAPTER_AWAITING_CORE.labels(adapter=run.adapter_id).set(0)
+        run.awaiting_core_event.clear()
+        log.warning(
+            "gateway.adapter.awaiting_core_ceiling_exceeded",
+            adapter_id=run.adapter_id,
+            ceiling=_AWAITING_CORE_CEILING,
+        )
+        await self._trip_breaker(run)
+        return True
+
+    async def _await_core_backoff_or_stop(self, run: _AdapterRun) -> bool:
+        """One non-spin awaiting-core wait: a bounded backoff racing stop/cred.
+
+        Returns True iff a stop won (the caller takes the terminal DOWN). The sleep is
+        a bounded decorrelated-jitter backoff (the same ramp the crash arm uses) so the
+        re-probe is non-spin; an explicit ``cred_event`` or ``stop_event`` ends the wait
+        early. The losing tasks are cancelled so neither leaks.
+        """
+        delay = self._next_backoff(run)
+        sleep_task = asyncio.ensure_future(self._sleep(delay))
         cred_task = asyncio.ensure_future(run.cred_event.wait())
         stop_task = asyncio.ensure_future(run.stop_event.wait())
         try:
-            done, _pending = await asyncio.wait(
-                {cred_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            await asyncio.wait(
+                {sleep_task, cred_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
             )
-        except asyncio.CancelledError:
-            cred_task.cancel()
-            stop_task.cancel()
-            raise
-        if stop_task in done:
-            cred_task.cancel()
-            ADAPTER_AWAITING_CORE.labels(adapter=run.adapter_id).set(0)
-            run.awaiting_core_event.clear()
-            await self._stop(run)
-            return True
-        stop_task.cancel()
-        run.cred_event.clear()
-        ADAPTER_AWAITING_CORE.labels(adapter=run.adapter_id).set(0)
-        run.awaiting_core_event.clear()
-        await self._apply(run, AdapterLifecycleEvent.CRED_AVAILABLE)  # -> RESTARTING
-        return False
+        finally:
+            for task in (sleep_task, cred_task, stop_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleep_task, cred_task, stop_task, return_exceptions=True)
+        return run.stop_event.is_set()
 
     # ------------------------------------------------------------------
     # The single transition applicator — emission BY CONSTRUCTION (correction #2)
