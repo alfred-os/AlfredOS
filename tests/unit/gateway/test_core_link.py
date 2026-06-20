@@ -3233,6 +3233,64 @@ async def test_flush_pending_replay_record_for_send_raise_still_sets_gate() -> N
 
 
 @pytest.mark.asyncio
+async def test_flush_pending_replay_broken_pipe_re_buffers_and_replays_once() -> None:
+    """PR3: a broken-pipe LOUD-DROP during the flush self-heals — frames replay EXACTLY once.
+
+    The existing flush suite covers the None-transport defer and a stray ``write_leg_unit``
+    RAISE, but NOT the actual production broken-pipe behavior: ``write_leg_unit`` LOUD-DROPS
+    (it catches ``BrokenPipeError`` and warns, never raises). ``record_for_send`` appends to
+    the buffer BEFORE the best-effort send, so a broken pipe mid-flush must leave every frame
+    buffered for the NEXT epoch's replay (append-before-send self-heal) — not lose it.
+
+    First flush: a transport whose ``send_payload_unit`` loud-drops via ``BrokenPipeError``.
+    Nothing reaches the wire, all N frames stay buffered (``depth_frames == N``), and the
+    gate ends SET (a complete flush — the loud-drop is not a defer). Then a fresh handshake
+    re-captures the un-acked remainder (resetting the leg seq floor) and a SUBSEQUENT healthy
+    flush delivers each frame EXACTLY once with fresh per-connection seqs 0..N-1 — proving
+    self-healing + exactly-once, not "send once, see once".
+    """
+    buf = ReplayBuffer()
+    link, _recorder, _sink = _link_with_relay_and_buffer(buffer=buf)
+    await _capture_replay(link, [b"a", b"b"])  # N=2 captured into _pending_replay
+
+    # First (re)connect: the physical send loud-drops via a broken pipe for every frame.
+    broken = _FakeCoreTransport([])
+    broken.send_unit_error = BrokenPipeError()
+    link._current_core_transport = broken
+    with structlog.testing.capture_logs() as captured:
+        await link._flush_pending_replay()
+
+    # Nothing reached the wire, but append-before-send left BOTH frames buffered (self-heal),
+    # one loud ``core_send_dropped`` per frame, and the flush COMPLETED so the gate is SET.
+    assert broken.sent_units == []  # loud-dropped — never on the wire
+    assert buf.depth_frames == 2  # re-appended / NOT lost
+    dropped = [c for c in captured if c.get("event") == "gateway.relay.core_send_dropped"]
+    assert len(dropped) == 2
+    assert all(c.get("log_level") == "warning" for c in dropped)
+    assert link._pending_replay == ()
+    assert link.replay_pending_gate.is_set() is True
+
+    # A fresh reconnect re-captures the un-acked remainder (and resets the leg seq floor)…
+    handshake = _FakeCoreTransport(
+        [_start_frame(epoch=uuid4().hex, seq_ack={"version": SEQ_VERSION})]
+    )
+    with structlog.testing.capture_logs():
+        await link._peer_handshake(handshake)
+    assert [f.payload for f in link._pending_replay] == [b"a", b"b"]
+    assert link.replay_pending_gate.is_set() is False  # capture cleared it
+
+    # …and a SUBSEQUENT healthy flush delivers each frame EXACTLY once, fresh seqs 0..N-1.
+    healthy = _FakeCoreTransport([])
+    link._current_core_transport = healthy
+    with structlog.testing.capture_logs():
+        await link._flush_pending_replay()
+
+    assert healthy.sent_units == [(b"a", 0, 0), (b"b", 1, 0)]  # exactly once, fresh seqs
+    assert link._pending_replay == ()
+    assert link.replay_pending_gate.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_run_reconnect_flushes_replay_before_pump_resumes() -> None:
     """run() through a reconnect: the captured frames replay on the NEW leg, gate ends SET.
 
