@@ -74,3 +74,44 @@ def test_enabled_adapter_wires_status_observer(
     assert isinstance(observer, AdapterStatusObserver)
     # The observer's expected_epoch reads the daemon's live per-boot epoch.
     assert observer._expected_epoch() == current_boot_epoch()
+
+
+def test_observer_and_crash_handler_share_one_reconciler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """The status observer + the per-adapter crash handler share ONE reconciler.
+
+    So an in-child crash (the crash-handler arm) and a gateway crash (the observer
+    arm) for one physical crash fold into one incident (G6-2b-2b / #288).
+    """
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    captured: list[dict[str, Any]] = []
+    original = AlfredPluginSession.for_comms_adapter.__func__  # type: ignore[attr-defined]
+
+    async def _spy_for_comms_adapter(cls: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs)
+        return await original(cls, **kwargs)
+
+    monkeypatch.setattr(
+        AlfredPluginSession,
+        "for_comms_adapter",
+        classmethod(_spy_for_comms_adapter),
+    )
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_ENABLED_ADAPTER}"]')
+    _patch_comms_seams(monkeypatch)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 0, result.output
+
+    assert len(captured) == 1
+    observer = captured[0]["status_observer"]
+    crash_handler = captured[0]["crash_handler"]
+    assert isinstance(observer, AdapterStatusObserver)
+    # The SAME reconciler instance is injected into both arms.
+    assert observer._reconciler is crash_handler._reconciler
