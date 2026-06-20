@@ -77,6 +77,41 @@ def test_breaker_open_requires_nonnegative_retry() -> None:
         AdapterBreakerOpenNotification(adapter_id="discord", retry_after_seconds=-1)
 
 
+def test_crashed_carries_host_restart_seq_additive_default() -> None:
+    # Existing producers omit the field -> defaults to 0 (back-compat, frozen-safe).
+    default = AdapterCrashedNotification(adapter_id="discord", error_class="RuntimeError", detail="")
+    assert default.host_restart_seq == 0
+    # A real producer stamps the gateway's per-adapter restart sequence.
+    stamped = AdapterCrashedNotification(
+        adapter_id="discord", error_class="RuntimeError", detail="", host_restart_seq=3
+    )
+    assert stamped.host_restart_seq == 3
+    # Negative is refused at the wire (ge=0) — a forged negative seq cannot reach the join.
+    with pytest.raises(ValidationError):
+        AdapterCrashedNotification(
+            adapter_id="discord", error_class="RuntimeError", detail="", host_restart_seq=-1
+        )
+    # extra="forbid" still holds for genuinely unknown fields.
+    with pytest.raises(ValidationError):
+        AdapterCrashedNotification(
+            adapter_id="discord", error_class="RuntimeError", detail="", bogus="x"  # type: ignore[call-arg]
+        )
+
+
+def test_up_carries_host_restart_seq_additive_default() -> None:
+    # SEC-01 (correction #1): the ``up`` frame ALSO carries the incarnation being
+    # STARTED, so the reconciler advances ``current_incarnation`` on ``up`` —
+    # closing the common-order double-count (the in-child crash fires before the
+    # gateway observes the exit, so without this the child folds into a stale
+    # incarnation). Additive + defaulted = back-compat with every pre-2b-2b producer.
+    default = AdapterUpNotification(adapter_id="discord", epoch=_EPOCH)
+    assert default.host_restart_seq == 0
+    stamped = AdapterUpNotification(adapter_id="discord", epoch=_EPOCH, host_restart_seq=2)
+    assert stamped.host_restart_seq == 2
+    with pytest.raises(ValidationError):
+        AdapterUpNotification(adapter_id="discord", epoch=_EPOCH, host_restart_seq=-1)
+
+
 def test_status_audit_field_sets_exist_and_carry_join_keys() -> None:
     from alfred.audit.audit_row_schemas import (
         GATEWAY_ADAPTER_BREAKER_OPEN_FIELDS,
