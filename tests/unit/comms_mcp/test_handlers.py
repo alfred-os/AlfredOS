@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
 from alfred.comms_mcp.handlers import (
     AdapterCrashHandler,
     BindingHandler,
@@ -193,11 +194,24 @@ class _SpyHookInvoker:
         self.fired.append(adapter_id)
 
 
+def _make_crash_handler(
+    audit: SpyAuditWriter,
+    invoker: _SpyHookInvoker,
+    *,
+    reconciler: CrashIncidentReconciler | None = None,
+) -> AdapterCrashHandler:
+    return AdapterCrashHandler(
+        audit_writer=audit,
+        hook_invoker=invoker,
+        reconciler=reconciler if reconciler is not None else CrashIncidentReconciler(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_crash_handler_emits_audit_and_fires_hookpoint() -> None:
     audit = SpyAuditWriter()
     invoker = _SpyHookInvoker()
-    handler = AdapterCrashHandler(audit_writer=audit, hook_invoker=invoker)
+    handler = _make_crash_handler(audit, invoker)
     assert isinstance(handler, CrashHandler)
     notification = CrashedNotification(
         adapter_id="alfred_comms_test",
@@ -216,6 +230,41 @@ async def test_crash_handler_emits_audit_and_fires_hookpoint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_child_crash_folds_and_carries_incident_fields() -> None:
+    audit = SpyAuditWriter()
+    reconciler = CrashIncidentReconciler()
+    handler = _make_crash_handler(audit, _SpyHookInvoker(), reconciler=reconciler)
+    await handler.process(
+        CrashedNotification(adapter_id="discord", error_class="ValueError", detail="boom")
+    )
+    row = audit.rows_with_schema("COMMS_ADAPTER_CRASHED_FIELDS")[0]
+    assert row["event"] == "comms.adapter.crashed"
+    assert row["crash_signal_source"] == "child"
+    assert row["crash_incident_id"]
+    assert row["duplicate"] is False
+    assert "host_restart_seq" not in row  # in-child row carries no seq
+    assert len(reconciler.incidents("discord")) == 1
+
+
+@pytest.mark.asyncio
+async def test_in_child_duplicate_crash_still_audited_and_flagged() -> None:
+    # TE-1/TE-3: a SECOND in-child crash for the same incarnation is folded (one
+    # incident) but STILL audited, flagged duplicate (hard rule #7 at the handler).
+    audit = SpyAuditWriter()
+    reconciler = CrashIncidentReconciler()
+    handler = _make_crash_handler(audit, _SpyHookInvoker(), reconciler=reconciler)
+    note = CrashedNotification(adapter_id="discord", error_class="ValueError", detail="boom")
+    await handler.process(note)
+    await handler.process(note)
+    rows = audit.rows_with_schema("COMMS_ADAPTER_CRASHED_FIELDS")
+    assert len(rows) == 2  # both loud, neither dropped
+    assert rows[0]["duplicate"] is False
+    assert rows[1]["duplicate"] is True
+    assert rows[0]["crash_incident_id"] == rows[1]["crash_incident_id"]
+    assert len(reconciler.incidents("discord")) == 1
+
+
+@pytest.mark.asyncio
 async def test_crash_handler_rescrubs_secret_shaped_detail() -> None:
     """M1 canary: the host re-scrubs the UNTRUSTED plugin's crash detail.
 
@@ -224,7 +273,7 @@ async def test_crash_handler_rescrubs_secret_shaped_detail() -> None:
     ``sk-…``-shaped token must NOT survive into the crashed audit row.
     """
     audit = SpyAuditWriter()
-    handler = AdapterCrashHandler(audit_writer=audit, hook_invoker=_SpyHookInvoker())
+    handler = _make_crash_handler(audit, _SpyHookInvoker())
     # Synthetic API-key-shaped canary (24 alnum bytes); not a real secret.
     canary_token = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"  # noqa: S105
     notification = CrashedNotification(

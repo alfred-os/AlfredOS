@@ -44,6 +44,7 @@ import structlog
 
 from alfred.audit import audit_row_schemas
 from alfred.comms_mcp import audit_hash
+from alfred.comms_mcp.crash_incident_reconciler import CrashIncidentReconciler
 from alfred.comms_mcp.inbound import (
     _AckTrackerLike,
     _AuditWriterLike,
@@ -315,11 +316,27 @@ class PlatformRateLimitHandler:
 class AdapterCrashHandler:
     """Emits ``COMMS_ADAPTER_CRASHED_FIELDS`` + fires ``comms.adapter.crashed``."""
 
-    def __init__(self, *, audit_writer: _AuditWriterLike, hook_invoker: _HookInvokerLike) -> None:
+    def __init__(
+        self,
+        *,
+        audit_writer: _AuditWriterLike,
+        hook_invoker: _HookInvokerLike,
+        reconciler: CrashIncidentReconciler,
+    ) -> None:
         self._audit_writer = audit_writer
         self._hook_invoker = hook_invoker
+        # The SHARED crash-dedup reconciler (G6-2b-2b / #288) — the SAME instance the
+        # daemon injects into the gateway-fed AdapterStatusObserver, so this in-child
+        # crash and a gateway crash for one physical crash fold into one incident.
+        self._reconciler = reconciler
 
     async def process(self, notification: CrashedNotification) -> None:
+        # Fold the IN-CHILD crash into the shared incident BEFORE the audit write, so
+        # the row carries the incident handle/source. The child frame carries NO seq —
+        # the reconciler tags it to the adapter's CURRENT incarnation (advanced by the
+        # gateway up/crashed arm). A replayed in-child crash is FLAGGED duplicate and
+        # STILL audited (hard rule #7 — never suppressed).
+        fold = self._reconciler.observe_child_crash(adapter_id=notification.adapter_id)
         await self._audit_writer.append_schema(
             fields=audit_row_schemas.COMMS_ADAPTER_CRASHED_FIELDS,
             schema_name="COMMS_ADAPTER_CRASHED_FIELDS",
@@ -339,6 +356,13 @@ class AdapterCrashHandler:
                     :_MAX_CRASH_DETAIL_LEN
                 ],
                 "crashed_at": datetime.now(UTC).isoformat(),
+                # G6-2b-2b (#288): the crash-dedup incident handle this in-child crash
+                # folds into + which signal(s) corroborate it + the TE-2 duplicate
+                # marker. No host_restart_seq — the in-child frame is tagged to the
+                # current incarnation core-side.
+                "crash_incident_id": fold.crash_incident_id,
+                "crash_signal_source": fold.crash_signal_source,
+                "duplicate": fold.duplicate,
             },
             # Provenance (PRD §7.1): the row is TRIGGERED by an UNTRUSTED plugin
             # self-reporting a crash, so the trigger tier is T3 — same as the
