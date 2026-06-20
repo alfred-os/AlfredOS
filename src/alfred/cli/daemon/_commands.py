@@ -62,17 +62,17 @@ from alfred.cli.daemon._daemon_pidfile import (
     load_pidfile,
     write_pidfile,
 )
-from alfred.cli.daemon._daemon_status_publisher import DaemonStatusSnapshotPublisher
-from alfred.cli.daemon._daemon_status_snapshot import (
-    DaemonStatusSnapshotFileError,
-    default_status_snapshot_path,
-    load_status_snapshot,
-)
 from alfred.cli.daemon._daemon_probes import (
     _truthy_env,
     probe_capability_gate_handshake,
     probe_launcher_policy_resolving,
     probe_snapshot_ref_init,
+)
+from alfred.cli.daemon._daemon_status_publisher import DaemonStatusSnapshotPublisher
+from alfred.cli.daemon._daemon_status_snapshot import (
+    DaemonStatusSnapshotFileError,
+    default_status_snapshot_path,
+    load_status_snapshot,
 )
 from alfred.cli.daemon._failures import (
     BootInfraInstallFailedFailure,
@@ -2361,3 +2361,66 @@ def status_daemon() -> None:
             last_boot_at=info.started_at,
         )
     )
+    _render_adapter_status_section(info.boot_id)
+
+
+# Spec B G6-2b-2c (#288): map each rendered adapter state to its OWN catalog key so
+# the state token is localized, NOT a hardcoded-English enum interpolated into the
+# template (HARD i18n rule #1 / correction #11). "unknown" = the reconciler saw a
+# crash incident but the observer holds no accepted gateway state for the adapter yet.
+_ADAPTER_STATE_KEYS: Final[Mapping[str, str]] = {
+    "up": "daemon.status.state.up",
+    "down": "daemon.status.state.down",
+    "crashed": "daemon.status.state.crashed",
+    "breaker_open": "daemon.status.state.breaker_open",
+    "unknown": "daemon.status.state.unknown",
+}
+
+
+def _render_adapter_status_section(live_boot_id: str) -> None:
+    """Render the per-adapter status snapshot the daemon publishes (read-only).
+
+    Best-effort (Spec B G6-2b-2c / #288): a missing / malformed / boot_id-mismatched
+    snapshot is silently skipped (back-compat with a daemon that predates the snapshot
+    or has no comms adapters). The ``boot_id`` cross-check rejects a STALE snapshot
+    left by a prior daemon incarnation (the file is reaped on clean shutdown; this
+    guards a crash) — it is an anti-STALE check, NOT an authenticity guarantee
+    (``boot_id`` is non-secret; the signed audit log is authoritative — SEC-02 /
+    correction #12).
+    """
+    try:
+        snapshot = load_status_snapshot(default_status_snapshot_path())
+    except DaemonStatusSnapshotFileError:
+        return
+    if snapshot.boot_id != live_boot_id:
+        return
+    if not snapshot.adapters:
+        typer.echo(t("daemon.status.adapters_none"))
+        return
+    typer.echo(t("daemon.status.adapters_header"))
+    for adapter_id in sorted(snapshot.adapters):
+        line = snapshot.adapters[adapter_id]
+        state_token = t(_ADAPTER_STATE_KEYS.get(line.state, "daemon.status.state.unknown"))
+        # SEC-02 (correction #11): the latest-crash line is framed as diagnostic
+        # ORIGIN ("reported by {source}"), NOT authenticated corroboration — the
+        # in-child crash signal has no anti-forgery binding, so ``both`` must not
+        # read as a verified double-confirmation.
+        latest_crash = (
+            t(
+                "daemon.status.adapter_latest_crash",
+                seq=line.latest_crash.host_restart_seq,
+                source=line.latest_crash.crash_signal_source,
+            )
+            if line.latest_crash is not None
+            else ""
+        )
+        typer.echo(
+            t(
+                "daemon.status.adapter_line",
+                adapter_id=line.adapter_id,
+                state=state_token,
+                incarnation=line.current_incarnation,
+                crashes=line.crash_incident_count,
+                latest_crash=latest_crash,
+            )
+        )
