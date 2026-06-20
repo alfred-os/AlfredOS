@@ -51,3 +51,4 @@ def _register() -> None:
     t("gateway.ingress.refused.throttled_inflight")
     t("gateway.ingress.refused.global_cap_refused")
     t("gateway.ingress.refused.unknown_adapter")
+    t("gateway.ingress.refused.queue_full")
