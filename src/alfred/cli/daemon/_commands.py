@@ -41,6 +41,7 @@ from alfred.audit.audit_row_schemas import (
     DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS,
     DAEMON_BOOT_FAILED_FIELDS,
     DAEMON_BOOT_FIELDS,
+    DAEMON_CONTROL_PEER_REJECTED_FIELDS,
     DAEMON_LIFECYCLE_FIELDS,
 )
 
@@ -54,6 +55,7 @@ from alfred.bootstrap.nonce_factory import (
     create_and_register_t3_nonce,
 )
 from alfred.cli.daemon._audit_fallback import build_boot_audit_writer
+from alfred.cli.daemon._daemon_control_server import DaemonControlServer
 from alfred.cli.daemon._daemon_pidfile import (
     DaemonPidFileError,
     default_pidfile_path,
@@ -1296,6 +1298,40 @@ async def _listen_socket_comms_adapter(
     return listener
 
 
+def _make_control_reject_auditor(
+    audit: AuditWriter,
+) -> Callable[[int | None], Awaitable[None]]:
+    """Build the ``DaemonControlServer.on_peer_rejected`` callback (G6-2b-2c / ADR-0038).
+
+    Fired by the control server at the reject point when a mismatched-uid peer dials the
+    0600 control socket. The control plane is daemon-GLOBAL, so the row carries NO
+    ``adapter_id`` (arch-M1) — it uses the dedicated ``DAEMON_CONTROL_PEER_REJECTED_FIELDS``
+    schema. A rejection is an EXPECTED adversarial event (a same-uid race / wider-perm
+    misconfig), so it does NOT refuse the boot: a loud audit row + ``result="refused"``,
+    then the server keeps serving. If the audit WRITE itself fails, ``_emit_or_quarantine``
+    raises; the server's ``_reject_peer`` escalates that LOUD (it does not fold into the
+    resilient-connection swallow — hard rule #7).
+    """
+
+    async def _on_control_peer_rejected(peer_uid: int | None) -> None:
+        import os
+
+        await _emit_or_quarantine(
+            audit,
+            fields=DAEMON_CONTROL_PEER_REJECTED_FIELDS,
+            schema_name="DAEMON_CONTROL_PEER_REJECTED_FIELDS",
+            event="daemon.control.peer_uid_rejected",
+            subject={
+                "peer_uid": "" if peer_uid is None else str(peer_uid),
+                "expected_uid": str(os.getuid()),
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+            result="refused",
+        )
+
+    return _on_control_peer_rejected
+
+
 def _comms_adapter_failure(adapter_id: str) -> CommsAdapterSpawnFailedFailure:
     """A loud boot-failure carrier for a comms-adapter spawn/handshake refusal."""
     return CommsAdapterSpawnFailedFailure(adapter_id=adapter_id)
@@ -2028,6 +2064,11 @@ async def _start_async() -> None:
     # listener-analog of the bwrap child the comms graph reaps. Collected here so the
     # ``finally`` can ``aclose`` each one regardless of which boot step exits.
     socket_listeners: list[CommsSocketListener] = []
+    # G6-2b-2c (#288 / ADR-0038): the daemon control plane — a 0600 request/response
+    # socket the CLI dials for the live per-adapter status. Declared HERE, before the
+    # supervisor ``try``, so the drain ``finally`` can never ``NameError`` on it and the
+    # socket is reaped on EVERY exit path (test-M6 — the architect's hoist note from #299).
+    control_server: DaemonControlServer | None = None
     # Spec A G3-2 (#237): the boot-LOCAL lifecycle-frame fan-out (architect M-1 — NOT
     # a field on the frozen ``_CommsBootGraph``). The socket-carrier runner registers
     # its id-less sender here post-handshake; ``_emit_ready`` / ``_emit_going_down``
@@ -2161,6 +2202,24 @@ async def _start_async() -> None:
                         environment_source=source,
                     )
 
+        # G6-2b-2c (#288 / ADR-0038): bind + start the daemon control plane
+        # UNCONDITIONALLY — it is a DAEMON control plane, not an adapter-specific one
+        # (CR T0). A zero-adapter daemon still binds the socket so ``alfred daemon
+        # status`` reports ``adapters_none`` (a healthy empty set), not "unavailable".
+        # When the comms graph exists, the control plane reads the LIVE observer +
+        # reconciler; otherwise it answers an empty adapter map (the server tolerates
+        # None/None). Bound here, after any adapters, so a control dial reaches a
+        # fully-wired status surface; reaped in the drain ``finally`` (every exit path).
+        # A refused different-uid dial writes a loud audit row via the reject auditor
+        # (the control plane is daemon-global — no adapter_id); the auditor uses the
+        # audit writer, which is available regardless of the comms graph.
+        control_server = DaemonControlServer(
+            observer=comms_graph.status_observer if comms_graph is not None else None,
+            reconciler=(comms_graph.crash_incident_reconciler if comms_graph is not None else None),
+            on_peer_rejected=_make_control_reject_auditor(audit),
+        )
+        await control_server.start()
+
         # All enabled adapters spawned + handshaked (or there were none): NOW the
         # daemon is genuinely up, so emit the completion row, invoke the
         # hookpoint, and echo "started".
@@ -2245,6 +2304,13 @@ async def _start_async() -> None:
                 for listener in socket_listeners:
                     with suppress(Exception):
                         await listener.aclose()
+                # G6-2b-2c (#288 / ADR-0038): reap the control server (close the asyncio
+                # server + unlink the socket file) on EVERY exit path — the same
+                # leak-discipline as the socket listeners above. Suppressed so a failing
+                # reap never masks the real exit or skips the pidfile delete.
+                if control_server is not None:
+                    with suppress(Exception):
+                        await control_server.aclose()
                 if pidfile_path is not None:
                     delete_pidfile(pidfile_path)
 

@@ -748,6 +748,23 @@ COMMS_SOCKET_PEER_REJECTED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# G6-2b-2c (#288 / ADR-0038), arch-M1: the daemon-side audit row the
+# ``DaemonControlServer.on_peer_rejected`` callback writes when a mismatched-uid peer is
+# refused on the 0600 CONTROL socket. The control plane is daemon-GLOBAL (not
+# adapter-keyed), so it does NOT reuse COMMS_SOCKET_PEER_REJECTED_FIELDS — there is no
+# ``adapter_id`` to record. Like the comms-socket reject, a rejection is an EXPECTED
+# adversarial event (a same-uid race / wider-perm misconfig): a loud audit row +
+# ``result="refused"``, then the server keeps serving. ``peer_uid`` is the rejected
+# connector's reported uid (``None`` → "" on the wire); ``expected_uid`` is the daemon's
+# own uid. Both are non-secret integers — no T3 content.
+DAEMON_CONTROL_PEER_REJECTED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "peer_uid",
+        "expected_uid",
+        "occurred_at",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # gateway.adapter.* status family (Spec B G6-2a / #288 / ADR-0036)
 # ---------------------------------------------------------------------------
@@ -1201,6 +1218,7 @@ SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS: Final[frozenset[str]] = frozenset(
 # live past the marker.
 AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "COMMS_SOCKET_PEER_REJECTED_FIELDS",
+    "DAEMON_CONTROL_PEER_REJECTED_FIELDS",
     "DAEMON_BOOT_FIELDS",
     "DAEMON_BOOT_FAILED_FIELDS",
     "DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS",

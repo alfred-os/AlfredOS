@@ -30,7 +30,7 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 32 entries (post-marker field-set surface).
+    """Roster must contain exactly 33 entries (post-marker field-set surface).
 
     Adding a new post-marker ``*_FIELDS`` constant requires bumping this
     assertion AND extending ``AUDIT_FIELDSET_ROSTER`` in the same commit. The
@@ -40,10 +40,12 @@ def test_slice_4_fieldset_names_count() -> None:
     G1 (Spec A) added ``DAEMON_LIFECYCLE_FIELDS`` — the 26th;
     G3-2 (Spec A) added ``COMMS_SOCKET_PEER_REJECTED_FIELDS`` — the 27th;
     G6-2a (Spec B / #288) added the five ``GATEWAY_ADAPTER_*`` status field-sets
-    — the 28th-32nd (these are Spec B, not Slice-4, but ride the same AST guard
-    because they live past the Slice-4 section marker — see the roster header).
+    — the 28th-32nd; G6-2b-2c (Spec B / #288 / ADR-0038) added
+    ``DAEMON_CONTROL_PEER_REJECTED_FIELDS`` — the 33rd (Spec B, not Slice-4, but
+    rides the same AST guard because it lives past the Slice-4 section marker —
+    see the roster header).
     """
-    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 32
+    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 33
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
