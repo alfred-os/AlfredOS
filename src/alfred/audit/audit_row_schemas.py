@@ -775,6 +775,12 @@ GATEWAY_ADAPTER_UP_FIELDS: Final[frozenset[str]] = frozenset(
         "adapter_id",
         "epoch",
         "occurred_at",
+        # G6-2b-2b (#288 / SEC-01): the incarnation being STARTED — the gateway's
+        # per-adapter restart_count for this run. The reconciler advances its
+        # current_incarnation to this on an accepted up so a later in-child crash
+        # tags to the run that was actually serving (closing the common-order
+        # double-count).
+        "host_restart_seq",
     }
 )
 
@@ -792,6 +798,15 @@ GATEWAY_ADAPTER_CRASHED_FIELDS: Final[frozenset[str]] = frozenset(
         "error_class",
         "detail_redacted",
         "occurred_at",
+        # G6-2b-2b (#288): the gateway's per-adapter incarnation this crash belongs to,
+        # and the crash-dedup incident handle + which signal(s) corroborate it.
+        "host_restart_seq",
+        "crash_incident_id",
+        "crash_signal_source",
+        # TE-2: a replayed/duplicate gateway crash for an already-seen incarnation is
+        # folded (no new incident) but STILL audited — this marker makes the replay
+        # VISIBLE in the log (hard rule #7: never silently dropped).
+        "duplicate",
     }
 )
 
@@ -1069,6 +1084,13 @@ COMMS_ADAPTER_CRASHED_FIELDS: Final[frozenset[str]] = frozenset(
         "reason",
         "detail_redacted",
         "crashed_at",
+        # G6-2b-2b (#288): the crash-dedup incident handle this in-child crash folds
+        # into + which signal(s) corroborate it. No host_restart_seq here — the
+        # in-child frame is tagged to the current incarnation core-side. ``duplicate``
+        # (TE-2) makes a replayed in-child crash visible in the log.
+        "crash_incident_id",
+        "crash_signal_source",
+        "duplicate",
     }
 )
 
