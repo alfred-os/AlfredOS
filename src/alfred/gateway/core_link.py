@@ -59,6 +59,7 @@ from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.ingress_audit import IngressRefusalReason, record_ingress_refusal
 from alfred.gateway.ingress_gate import IngressDecision
 from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_scheduler import LegQueueFullError
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
@@ -575,18 +576,21 @@ class GatewayCoreLink:
         SELF-HEALING — ``record_for_send`` appended the frame BEFORE the send, so it stays
         buffered and replays next reconnect; only the None case re-stashes.
 
-        **Never-raise contract preserved (PR3, CRITICAL).** ``record_for_send`` CAN raise
-        ``ReplayBufferError`` (cap-refusal or buffer hard-ceiling). The old ``relay_to_core``
-        never raised in the flush (loud-drop only), and an uncaught raise here would escape
-        into ``run``'s reconnect path. The single-leg invariant makes this safe WITHOUT a
-        guard: (1) PR2 sets the leg's ``GlobalReplayCap`` ceiling strictly above the buffer
-        hard ceiling, so the cap never refuses on this single leg; (2) the frames being
-        flushed are the JUST-CAPTURED remainder, which fit in the buffer (post-reset, an
-        empty buffer) — re-appending the same N frames cannot exceed the buffer ceiling
-        they just fit in. So ``record_for_send`` does not raise on the flush path; the only
-        loud-fail is the writer's loud-drop, which never raises. ``write_leg_unit`` is the
-        SOLE physical writer (PR5: the None-check stays STRICTLY AHEAD of ``record_for_send``
-        so a None-transport defer does NOT consume a leg seq).
+        **Never-raise contract (H1, Spec B G6-4 #288 — CRITICAL).** ``record_for_send`` CAN
+        raise ``ReplayBufferError`` on a hard-ceiling breach, and an uncaught raise here would
+        escape into ``run``'s reconnect path and crash the always-up core-link task. The PR3
+        single-leg invariant ("the captured remainder fits in the buffer it just fit in") DOES
+        NOT hold across the FIFO merge: a deferred remainder from a prior None-transport flush
+        (R1) PREPENDED to this epoch's capture (in :meth:`_peer_handshake`) can build a
+        COMBINED set that exceeds the hard ceiling of the freshly-reset (empty) buffer. So the
+        per-frame ``record_for_send`` is wrapped in ``try/except ReplayBufferError``: a breach
+        is a LOUD drop of THAT frame (``gateway.comms.buffer_replay_ceiling_dropped`` —
+        closed-vocab, payload-blind: ``adapter_id`` + seq only, never a body) and the flush
+        CONTINUES self-healing the frames that DO fit. It NEVER re-raises into ``run`` (CLAUDE.md
+        hard rule #7: loud, never silent, never a core crash). ``write_leg_unit`` stays the SOLE
+        physical writer (PR5: the None-check stays STRICTLY AHEAD of ``record_for_send`` so a
+        None-transport defer does NOT consume a leg seq); its own faults are an internal
+        loud-drop that never raises.
         """
         frames = self._pending_replay
         self._pending_replay = ()
@@ -605,10 +609,33 @@ class GatewayCoreLink:
                 # None-transport defer must NOT consume a leg seq. ``frames`` is non-empty
                 # only when a capture happened, which only happens on a leg-wired link.
                 assert leg is not None
+                # H1 (Spec B G6-4, #288): ``record_for_send`` CAN raise ``ReplayBufferError``
+                # on a hard-ceiling breach. The PR3 invariant ("the captured remainder fits in
+                # the buffer it just fit in") DOES NOT hold across the FIFO merge: a deferred
+                # remainder from a prior None-transport flush (R1) PREPENDED to this epoch's
+                # capture builds a COMBINED set that can exceed the hard ceiling of the
+                # freshly-reset (empty) buffer. An uncaught raise here would escape into
+                # ``run``'s reconnect arm and crash the always-up core-link task. Guard the
+                # per-frame record/write: a hard-ceiling breach is a LOUD drop of THAT frame
+                # (closed-vocab, payload-blind — ``adapter_id`` + seq only, never a body), and
+                # the flush stays self-healing — the frames that DO fit are still re-sent so
+                # resume converges (the dropped frame is deliberate security-over-liveness
+                # loss, the same posture as TTL eviction, spec §6). NEVER re-raises into
+                # ``run`` (CLAUDE.md hard rule #7: loud, not silent, but never a core crash).
+                try:
+                    seq = leg.record_for_send(frame.payload)
+                except ReplayBufferError as exc:
+                    log.warning(
+                        "gateway.comms.buffer_replay_ceiling_dropped",
+                        adapter_id=leg.adapter_id,
+                        seq=frame.seq,
+                        reason="hard_ceiling",
+                        error=repr(exc),
+                    )
+                    continue
                 log.warning(
                     "gateway.comms.buffer_replayed", seq=frame.seq, reason="reconnect_resume"
                 )
-                seq = leg.record_for_send(frame.payload)
                 await self.write_leg_unit(
                     leg.adapter_id, frame.payload, seq=seq, ack=self.core_cumulative_ack()
                 )
@@ -1107,7 +1134,20 @@ class GatewayCoreLink:
         # owns the durable retention (the buffer), so the ingress slot's job (volumetric
         # admission) is done once the frame is queued for the single writer.
         self._tui_leg.release_admit(admit.token)  # type: ignore[arg-type]  # ADMITTED -> token set
-        self._leg_router.route(self._tui_leg.adapter_id, payload)
+        # H2 (Spec B G6-4, #288): a registered leg whose bounded send-queue is full raises
+        # ``LegQueueFullError`` from ``scheduler.enqueue`` (via the router). That raise was
+        # OUTSIDE the relay read pump's try/except, so it escaped this method →
+        # ``_client_to_core_pump`` → and crashed the always-up gateway's relay TaskGroup —
+        # the OPPOSITE of this method's promised "read back-pressure". Handle it HERE at the
+        # submit boundary: a full queue is the leg already saturated (the single writer cannot
+        # keep up), so the frame is DROPPED-LOUD as a closed-vocab back-pressure refusal
+        # (``queue_full``) + the per-adapter back-pressure counter, matching the breaker /
+        # read-halt back-pressure posture — NEVER a crash (CLAUDE.md hard rule #7: loud, not
+        # silent, never a core-down). Payload-blind: ``adapter_id`` is the only routing key.
+        try:
+            self._leg_router.route(self._tui_leg.adapter_id, payload)
+        except LegQueueFullError:
+            self._record_queue_full_back_pressure(self._tui_leg)
 
     def _record_ingress_refusal(self, leg: GatewayLeg, decision: IngressDecision) -> None:
         """Back-pressure + metric + LOUD audit on an ingress trip (K6, never silent).
@@ -1122,6 +1162,25 @@ class GatewayCoreLink:
         record_ingress_refusal(
             leg.adapter_id,
             reason,
+            depth_frames=leg.depth_frames,
+            depth_bytes=leg.depth_bytes,
+            inflight=leg.inflight_count,
+            cap_ratio=leg.cap_ratio,
+        )
+
+    def _record_queue_full_back_pressure(self, leg: GatewayLeg) -> None:
+        """Back-pressure + metric + LOUD audit on a full leg send-queue (H2, never a crash).
+
+        The :class:`LegQueueFullError` boundary handler (Spec B G6-4 / #288). A full per-leg
+        send-queue means the bounded pre-append working memory is saturated (the single core
+        writer cannot keep up); the frame is dropped-loud through the SAME field-allowlisted K6
+        sink as the ingress-gate refusals, carrying the closed-vocab :attr:`QUEUE_FULL` reason.
+        Payload-blind by construction (the sink has nowhere to put a body). NEVER raises — a
+        producer outrunning the writer must back-pressure, not crash the always-up gateway.
+        """
+        record_ingress_refusal(
+            leg.adapter_id,
+            IngressRefusalReason.QUEUE_FULL,
             depth_frames=leg.depth_frames,
             depth_bytes=leg.depth_bytes,
             inflight=leg.inflight_count,
