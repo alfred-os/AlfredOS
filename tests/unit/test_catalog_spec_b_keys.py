@@ -23,6 +23,12 @@ SPEC_B_KEYS: tuple[str, ...] = (
     "gateway.adapter.status_rejected.malformed_frame",
     "gateway.adapter.status_rejected.epoch_mismatch",
     "gateway.adapter.status_rejected.unknown_method",
+    # G6-3 credential round-trip reasons (#288 / ADR-0036). ONLY the two
+    # operator-rendered refusal reasons carry a catalog key; grant_mismatch /
+    # delivery_failed / awaiting_core / spawn_aborted are structlog ``reason=`` fields
+    # only (never rendered via ``t()``) so they are NOT reserved (no dead catalog key).
+    "gateway.adapter.credential.refused.unknown_adapter",
+    "gateway.adapter.credential.refused.missing_secret",
 )
 
 # Every Spec-B operator-facing catalog key carries this prefix; the reverse-drift

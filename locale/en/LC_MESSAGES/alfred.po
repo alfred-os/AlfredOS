@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-20 11:22+0100\n"
+"POT-Creation-Date: 2026-06-20 17:46+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1101,38 +1101,38 @@ msgstr ""
 "unset (comms disabled), or provision bwrap + the plugin launcher and re-"
 "run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2239
+#: src/alfred/cli/daemon/_commands.py:2244
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:2347
+#: src/alfred/cli/daemon/_commands.py:2352
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:2350
 #: src/alfred/cli/daemon/_commands.py:2355
+#: src/alfred/cli/daemon/_commands.py:2360
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:2357
+#: src/alfred/cli/daemon/_commands.py:2362
 #: src/alfred/i18n/_slice_4_reserve.py:128
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:2372
+#: src/alfred/cli/daemon/_commands.py:2377
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2375
+#: src/alfred/cli/daemon/_commands.py:2380
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:2383
+#: src/alfred/cli/daemon/_commands.py:2388
 #: src/alfred/i18n/_slice_4_reserve.py:129
 msgid "daemon.status.template"
 msgstr ""
@@ -1141,24 +1141,25 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:2437
-#: src/alfred/cli/daemon/_commands.py:2444
+#: src/alfred/cli/daemon/_commands.py:2442
+#: src/alfred/cli/daemon/_commands.py:2449
+#: src/alfred/cli/daemon/_commands.py:2460
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:2449
+#: src/alfred/cli/daemon/_commands.py:2464
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:2451
+#: src/alfred/cli/daemon/_commands.py:2466
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:2456
+#: src/alfred/cli/daemon/_commands.py:2471
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:2465
+#: src/alfred/cli/daemon/_commands.py:2480
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "
@@ -1800,6 +1801,34 @@ msgstr "breaker open"
 msgid "daemon.status.state.unknown"
 msgstr "unknown"
 
+#: src/alfred/i18n/_spec_b_reserve.py:39
+msgid "gateway.adapter.credential.refused.unknown_adapter"
+msgstr ""
+"credential refused: no platform credential is configured for adapter "
+"{adapter_id}"
+
+#: src/alfred/i18n/_spec_b_reserve.py:40
+msgid "gateway.adapter.credential.refused.missing_secret"
+msgstr "credential refused: the secret for adapter {adapter_id} is not set"
+
+#: src/alfred/i18n/_spec_b_reserve.py:41
+msgid "gateway.adapter.credential.refused.grant_mismatch"
+msgstr ""
+"credential refused: the spawn grant did not match the outstanding request"
+" for adapter {adapter_id}"
+
+#: src/alfred/i18n/_spec_b_reserve.py:42
+msgid "gateway.adapter.credential.refused.delivery_failed"
+msgstr "credential refused: fd-3 delivery failed for adapter {adapter_id}"
+
+#: src/alfred/i18n/_spec_b_reserve.py:43
+msgid "gateway.adapter.credential.awaiting_core"
+msgstr "awaiting core: the credential leg is unavailable for adapter {adapter_id}"
+
+#: src/alfred/i18n/_spec_b_reserve.py:44
+msgid "gateway.adapter.credential.spawn_aborted"
+msgstr "spawn aborted: the credential pipeline failed for adapter {adapter_id}"
+
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
 # Only keys with live call-sites are retained; help-text long forms and
@@ -2250,17 +2279,17 @@ msgstr ""
 "Comms adapter {adapter_id} returned an error response to an outbound "
 "request; the request failed."
 
-#: src/alfred/plugins/comms_socket_transport.py:235
+#: src/alfred/plugins/comms_socket_transport.py:232
 msgid "comms.transport.dial_peer_uid_rejected"
 msgstr ""
 "Refusing the comms socket dial for adapter {adapter_id}: the connected "
 "peer's uid did not match this user (a stale-socket race or wider-"
 "permission misconfiguration); the connection was closed."
 
-#: src/alfred/plugins/comms_socket_transport.py:395
-#: src/alfred/plugins/comms_socket_transport.py:405
-#: src/alfred/plugins/comms_socket_transport.py:452
-#: src/alfred/plugins/comms_socket_transport.py:459
+#: src/alfred/plugins/comms_socket_transport.py:392
+#: src/alfred/plugins/comms_socket_transport.py:402
+#: src/alfred/plugins/comms_socket_transport.py:449
+#: src/alfred/plugins/comms_socket_transport.py:456
 #: src/alfred/plugins/comms_stdio_transport.py:241
 #: src/alfred/plugins/comms_stdio_transport.py:251
 #: src/alfred/plugins/comms_stdio_transport.py:270
