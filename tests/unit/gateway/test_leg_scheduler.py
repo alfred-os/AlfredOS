@@ -31,14 +31,32 @@ class _FakeClock:
 
 
 class _RecordingCoreLink:
-    """A fake core_link that records (adapter_id, payload) writes in order."""
+    """A fake core_link that records (adapter_id, payload) writes in order.
+
+    Exposes a controllable ``replay_pending_gate`` (Spec B G6-4 Task 7 / Option A): the
+    scheduler's drain pump awaits it before each round, so a CLEARED gate (a reconnect
+    replay in flight) parks the scheduler while the direct flush re-sends the captured
+    remainder. The gate starts SET (no replay pending) so every existing test drains as
+    before; a test that exercises the gate calls :meth:`clear_gate` / :meth:`set_gate`.
+    """
 
     def __init__(self) -> None:
         self.writes: list[tuple[str, bytes, int, int]] = []
         self._ack = 0
+        self._gate = asyncio.Event()
+        self._gate.set()
 
     def core_cumulative_ack(self) -> int:
         return self._ack
+
+    def replay_pending_gate(self) -> asyncio.Event:
+        return self._gate
+
+    def clear_gate(self) -> None:
+        self._gate.clear()
+
+    def set_gate(self) -> None:
+        self._gate.set()
 
     async def write_leg_unit(self, adapter_id: str, payload: bytes, *, seq: int, ack: int) -> None:
         self.writes.append((adapter_id, payload, seq, ack))
@@ -242,6 +260,64 @@ async def test_drain_records_via_leg_and_writes_with_seq_and_ack() -> None:
     assert core.writes[1] == ("a", b"second", 1, 7)
     # The frames were appended to the leg's buffer (durable for replay).
     assert leg.depth_frames == 2
+
+
+# --------------------------------------------------------------------------- #
+# Replay-pending gate (Spec B G6-4 Task 7 / Option A — resume-oracle preserving) #
+# --------------------------------------------------------------------------- #
+
+
+async def test_pump_parks_while_replay_gate_is_clear_then_drains_when_set() -> None:
+    # The reconnect-replay window: while the gate is CLEAR the scheduler must NOT drain
+    # (record_for_send not called, nothing written) — the direct flush owns the writer; once
+    # the flush SETS the gate the queued fresh frame drains behind the replay.
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+    core = _RecordingCoreLink()
+    core.clear_gate()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
+    leg = _make_leg("a", cap)
+    sched.register_leg(leg)
+    sched.enqueue("a", b"fresh")
+    async with asyncio.TaskGroup() as tg:
+        pump = tg.create_task(sched.run())
+        # Spin several ticks: the gate is clear, so NOTHING may drain (no seq minted).
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert core.writes == []
+        assert leg.depth_frames == 0  # record_for_send never ran while parked
+        # The flush sets the gate -> the scheduler resumes and drains the fresh frame.
+        core.set_gate()
+        assert await _drain_until(lambda: len(core.writes) == 1)
+        pump.cancel()
+    assert core.writes[0] == ("a", b"fresh", 0, 0)
+
+
+async def test_replay_precedes_fresh_input_across_the_gate() -> None:
+    # The resume-ordering oracle in miniature: while the gate is CLEAR a direct flush writes
+    # the replayed frames (seqs 0,1 minted on the leg), THEN sets the gate; the pre-queued
+    # fresh frame drains AFTER, taking the next fresh seq (2). Physical write order [0,1,2].
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+    core = _RecordingCoreLink()
+    core.clear_gate()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
+    leg = _make_leg("a", cap)
+    sched.register_leg(leg)
+    sched.enqueue("a", b"post")  # a fresh frame queued during the gap
+    async with asyncio.TaskGroup() as tg:
+        pump = tg.create_task(sched.run())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert core.writes == []  # parked: the fresh frame is held behind the replay
+        # The direct flush re-sends the captured remainder (seqs 0,1) — the sanctioned
+        # reconnect-internal writer, exactly as core_link._flush_pending_replay does.
+        for payload in (b"replay-0", b"replay-1"):
+            seq = leg.record_for_send(payload)
+            await core.write_leg_unit("a", payload, seq=seq, ack=core.core_cumulative_ack())
+        core.set_gate()
+        assert await _drain_until(lambda: len(core.writes) == 3)
+        pump.cancel()
+    assert [seq for _a, _p, seq, _ack in core.writes] == [0, 1, 2]
+    assert [p for _a, p, _s, _ack in core.writes] == [b"replay-0", b"replay-1", b"post"]
 
 
 # --------------------------------------------------------------------------- #

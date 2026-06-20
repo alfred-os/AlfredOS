@@ -64,9 +64,21 @@ class LegQueueFullError(AlfredError):
 
 
 class _CoreWriterLike(Protocol):
-    """The minimal core-link surface the scheduler drains onto (the single writer)."""
+    """The minimal core-link surface the scheduler drains onto (the single writer).
+
+    Includes the :meth:`replay_pending_gate` seam (Spec B G6-4 Task 7 / Option A): the
+    drain pump awaits this :class:`asyncio.Event` before each round so a CLEARED gate (a
+    reconnect-replay in flight) PARKS the scheduler while
+    :meth:`alfred.gateway.core_link.GatewayCoreLink._flush_pending_replay` re-sends the
+    captured remainder directly (the sanctioned reconnect-internal writer). The flush sets
+    the gate on completion, so fresh frames drain BEHIND the replayed ones — preserving the
+    resume oracle (replay-precedes-fresh, per-leg seq monotonicity). On a link with no
+    buffer the gate is permanently set, so the await is a zero-cost immediate return.
+    """
 
     def core_cumulative_ack(self) -> int: ...
+
+    def replay_pending_gate(self) -> asyncio.Event: ...
 
     async def write_leg_unit(
         self, adapter_id: str, payload: bytes, *, seq: int, ack: int
@@ -153,8 +165,17 @@ class GatewayLegScheduler:
         every queue is empty the pump parks on the wakeup event (cleared each idle pass) so
         it does not busy-spin; an :meth:`enqueue` sets it. Cancellation-safe: the park and
         the writes are interruptible, so a shutdown cancel ends the pump cleanly.
+
+        **Replay gate (Spec B G6-4 Task 7 / Option A).** Each round AWAITS the core-link's
+        replay-pending gate FIRST: while it is CLEAR (a reconnect-replay in flight), the
+        scheduler parks so :meth:`GatewayCoreLink._flush_pending_replay` is the sole writer
+        of the captured remainder (seqs 0..N-1, in FIFO at the lowest seqs). The flush sets
+        the gate on completion, so the scheduler then drains fresh frames behind the
+        replayed ones — the resume oracle (replay-precedes-fresh, per-leg monotonicity) is
+        preserved. On a no-buffer link the gate is permanently set (zero-cost return).
         """
         while True:
+            await self._core_link.replay_pending_gate().wait()
             drained = await self._drain_one_round()
             if not drained:
                 # ``not drained`` means every leg's queue was empty this round (a round
