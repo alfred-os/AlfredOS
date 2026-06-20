@@ -77,7 +77,10 @@ async def test_emit_breaker_open_maps_retry_after_seconds() -> None:
 async def test_emit_crashed_maps_error_class_and_redacted_detail() -> None:
     sink = _RecordingSink()
     await AdapterStatusEmitter(sink=sink).emit_crashed(
-        adapter_id=_A, error_class="BrokenPipeError", detail="plain crash detail", host_restart_seq=0
+        adapter_id=_A,
+        error_class="BrokenPipeError",
+        detail="plain crash detail",
+        host_restart_seq=0,
     )
     method, params = sink.frames[0]
     assert method == "gateway.adapter.crashed"

@@ -330,6 +330,9 @@ async def test_child_exit_emits_crashed_with_redacted_bounded_detail_then_restar
     assert 0.05 <= sleep.delays[0] <= 30.0
     assert _restarts_total(_A) == restarts_before + 1.0
 
+    await sup.request_stop(_A)
+    await task
+
 
 async def test_status_frames_carry_aligned_host_restart_seq() -> None:
     """SEC-01 (#288): up(N) and crashed(N) align to the SAME incarnation.
@@ -363,9 +366,6 @@ async def test_status_frames_carry_aligned_host_restart_seq() -> None:
     assert up_seqs == [0, 1, 2]
     # Two crashes: the 0th and 1st incarnations exited (PRE-increment restart_count).
     assert crashed_seqs == [0, 1]
-
-    await sup.request_stop(_A)
-    await task
 
 
 async def test_backoff_is_decorrelated_per_adapter() -> None:

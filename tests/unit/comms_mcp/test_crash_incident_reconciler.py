@@ -105,7 +105,9 @@ def test_incident_history_is_bounded() -> None:
     for seq in range(200):
         reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=seq)
     # Bounded so a crash-loop cannot grow the map unboundedly (audit log is durable).
-    assert len(reconciler.incidents("discord")) <= 64
+    # 200 distinct incarnations crashed but exactly _MAX_INCIDENTS_PER_ADAPTER are
+    # retained — assert the exact cap so a retention regression BELOW it also fails.
+    assert len(reconciler.incidents("discord")) == 64
 
 
 def test_incidents_read_surface_returns_views_for_in_process_reader() -> None:
