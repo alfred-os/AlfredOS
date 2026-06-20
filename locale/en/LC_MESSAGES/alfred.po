@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-20 19:01+0100\n"
+"POT-Creation-Date: 2026-06-20 20:49+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1810,6 +1810,22 @@ msgstr ""
 #: src/alfred/i18n/_spec_b_reserve.py:45
 msgid "gateway.adapter.credential.refused.missing_secret"
 msgstr "credential refused: the secret for adapter {adapter_id} is not set"
+
+#: src/alfred/i18n/_spec_b_reserve.py:49
+msgid "gateway.ingress.refused.throttled_rate"
+msgstr "ingress refused: adapter is over its sustained message rate"
+
+#: src/alfred/i18n/_spec_b_reserve.py:50
+msgid "gateway.ingress.refused.throttled_inflight"
+msgstr "ingress refused: adapter has too many in-flight messages"
+
+#: src/alfred/i18n/_spec_b_reserve.py:51
+msgid "gateway.ingress.refused.global_cap_refused"
+msgstr "ingress refused: the shared replay-buffer budget is full"
+
+#: src/alfred/i18n/_spec_b_reserve.py:52
+msgid "gateway.ingress.refused.unknown_adapter"
+msgstr "ingress refused: frame names an unregistered adapter"
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
