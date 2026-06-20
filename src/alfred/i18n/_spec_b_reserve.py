@@ -24,3 +24,14 @@ def _register() -> None:
     t("gateway.adapter.status_rejected.malformed_frame")
     t("gateway.adapter.status_rejected.epoch_mismatch")
     t("gateway.adapter.status_rejected.unknown_method")
+    # G6-2b-2c (#288) localized per-adapter status tokens for the `alfred daemon
+    # status` snapshot render. The render dereferences these via a dict
+    # (``_ADAPTER_STATE_KEYS``) keyed on the runtime state, so pybabel cannot see
+    # the literal at the call site — reserve them here (correction #11). "unknown" =
+    # the reconciler saw a crash incident but the observer holds no accepted gateway
+    # state for the adapter yet.
+    t("daemon.status.state.up")
+    t("daemon.status.state.down")
+    t("daemon.status.state.crashed")
+    t("daemon.status.state.breaker_open")
+    t("daemon.status.state.unknown")

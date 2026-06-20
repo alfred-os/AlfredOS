@@ -149,6 +149,20 @@ SLICE_4_KEYS: tuple[str, ...] = (
     "daemon.help.start",
     "daemon.help.stop",
     "daemon.status.help",
+    # Spec B G6-2b-2c (#288): the `alfred daemon status` per-adapter snapshot
+    # render. Enumerated here because the reverse-drift scan owns the broad
+    # ``daemon.`` prefix (the same way the Spec-A ``daemon.lifecycle.*`` keys
+    # above are listed despite being a later spec); the per-state tokens are
+    # ALSO reserved in alfred.i18n._spec_b_reserve so pybabel extracts them.
+    "daemon.status.adapters_header",
+    "daemon.status.adapters_none",
+    "daemon.status.adapter_line",
+    "daemon.status.adapter_latest_crash",
+    "daemon.status.state.up",
+    "daemon.status.state.down",
+    "daemon.status.state.crashed",
+    "daemon.status.state.breaker_open",
+    "daemon.status.state.unknown",
     # Sandbox refusal reasons (6 + PR-S4-6 launcher/handshake additions).
     "supervisor.sandbox.refused.policy_ref_missing",
     "supervisor.sandbox.refused.policy_ref_os_mismatch",
