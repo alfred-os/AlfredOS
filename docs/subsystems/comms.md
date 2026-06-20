@@ -427,3 +427,56 @@ acceptance criterion #13 (i18n-3) and its §6 "Rendering guidance", PR-S4-10's T
 formatting test(s) assert locale-correct rendering of `received_at` / `recorded_at`
 (via `format_datetime`) and `retry_after_seconds` (via `format_decimal`). Those
 TUI tests are the concrete check that closes this dependency.
+
+## Crash de-dup + status snapshot (G6-2b-2b / #288)
+
+Two adapter-crash signals coexist (Spec B §3): the gateway's process-level
+`gateway.adapter.crashed` (authoritative for host-supervision/audit) and the
+in-child `adapter.crashed` (a finer code-level diagnostic). A single physical
+crash can produce **both**, which historically wrote two audit rows for one
+crash. G6-2b-2b correlates them into **one incident per physical crash** —
+**without dropping either loud signal** (hard rule #7).
+
+- **The join.** A core-side `CrashIncidentReconciler`
+  (`src/alfred/comms_mcp/crash_incident_reconciler.py`) is built **once** by the
+  daemon's `_CommsBootGraph` and shared by **both** the gateway-fed
+  `AdapterStatusObserver` (gateway arm) and every per-adapter `AdapterCrashHandler`
+  (in-child arm) — they already meet in the same `AlfredPluginSession`, so no new
+  cross-process plumbing is needed. Both arms still write their own audit row; the
+  reconciler stamps each row with a stable `crash_incident_id` + a
+  `crash_signal_source` (`gateway` / `child` / `both`), so a downstream reader
+  counts one incident by distinct `crash_incident_id`.
+- **Correlation key.** `adapter_id` + the gateway's `host_restart_seq` (the
+  supervisor's per-adapter `restart_count` = which **incarnation** exited). The
+  gateway frame carries the seq and is authoritative; the in-child frame carries
+  no seq (the child cannot know the gateway counter) and is tagged to the
+  adapter's **current incarnation**. The gateway `up` frame **advances** the
+  current incarnation (it carries the incarnation being started), so the common
+  order — the in-child crash fires as the child dies, *before* the gateway
+  observes the exit — still folds onto the right incarnation rather than splitting
+  one crash into two incidents.
+- **Trust boundary.** Folding **never** elides an audit row. A duplicate/replayed
+  crash for an already-seen incarnation is flagged `duplicate=true` and **still
+  audited**, so a replay is visible, not silently dropped. A forged in-child crash
+  opens a `child`-only incident (still loud) and cannot mask a later genuine
+  gateway crash, which opens its own incident at its own seq.
+- **`crash_signal_source == "both"` is NOT authenticated corroboration.** The
+  in-child `CrashedNotification` has no epoch / anti-forgery binding (only the
+  gateway frame is carrier-authenticated via the live leg's `0600` +
+  `SO_PEERCRED` + per-boot-epoch envelope), so a forged in-child crash can upgrade
+  a real gateway incident to `both`. Treat `both` as a diagnostic-coverage hint,
+  not a security attestation.
+
+### Snapshot reachability — the 2b-2c seam (deliberate YAGNI in 2b-2b)
+
+The reconciler exposes an in-process `incidents(adapter_id)` read surface (and the
+observer keeps `latest(adapter_id)`) — both live **inside the daemon process**
+(`_CommsBootGraph`). The `alfred status` / `alfred daemon status` CLI commands
+**do not dial the daemon today** (they read Settings / the pidfile only —
+`src/alfred/cli/main.py`, `cli/daemon/_commands.py`), so they **cannot reach this
+in-process reconciler**. 2b-2b deliberately builds **no RPC/query endpoint**
+(YAGNI — there is no consumer until the 2b-2c render). 2b-2c must therefore choose
+**either** a daemon query seam (the status CLI dials the daemon over the existing
+`0600` socket) **or** relocate the render in-daemon. 2b-2b only guarantees the
+incident data is correct and in-process readable; the render shape and the query
+seam are 2b-2c's to design.

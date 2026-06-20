@@ -106,3 +106,14 @@ def test_incident_history_is_bounded() -> None:
         reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=seq)
     # Bounded so a crash-loop cannot grow the map unboundedly (audit log is durable).
     assert len(reconciler.incidents("discord")) <= 64
+
+
+def test_incidents_read_surface_returns_views_for_in_process_reader() -> None:
+    # 2b-2c reads the per-adapter incident view IN-PROCESS (the daemon holds the
+    # reconciler). This asserts the read surface contract the render will consume.
+    reconciler = CrashIncidentReconciler()
+    reconciler.observe_gateway_crash(adapter_id="discord", host_restart_seq=0)
+    views = reconciler.incidents("discord")
+    assert views[0].adapter_id == "discord"
+    assert views[0].crash_signal_source in {"gateway", "child", "both"}
+    assert reconciler.incidents("unknown-adapter") == ()

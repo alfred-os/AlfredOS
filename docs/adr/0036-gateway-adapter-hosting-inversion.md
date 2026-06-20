@@ -229,6 +229,20 @@ validation (validate-on-produce + epoch reconcile) in isolation.
 > audit log) — which is spec-faithful (the signed reconcile target IS the core log).
 > The gateway-LOCAL signed reconcile is a later-slice component, not a Spec A reuse.
 
+> **G6-2b-2b annotation (crash de-dup correlation):** the two coexisting crash
+> signals — the gateway's process-level `gateway.adapter.crashed` (carrier-auth'd,
+> authoritative) and the in-child `adapter.crashed` (a finer diagnostic, NOT
+> epoch/anti-forgery bound) — are correlated core-side into ONE audited incident per
+> `(adapter_id, host_restart_seq)` by `src/alfred/comms_mcp/crash_incident_reconciler.py`
+> (`CrashIncidentReconciler`), shared by the observer (gateway arm) and every
+> per-adapter `AdapterCrashHandler` (in-child arm). Folding NEVER elides a row
+> (hard rule #7): both arms still audit, a replayed crash is flagged `duplicate=true`
+> and still written. **SEC-02:** `crash_signal_source == "both"` is a diagnostic hint,
+> NOT authenticated corroboration — only the gateway frame is carrier-authenticated, so
+> a forged in-child crash can upgrade a real incident's source label to `both` without
+> masking the genuine gateway incident. The release-blocking forged/duplicate-crash
+> adversarial entry is deferred to G6-6 (the in-process unit-level guards ship in 2b-2b).
+
 ### Adversarial corpus (before ship, §6)
 
 - **(a)** cross-adapter credential read attempt → refused + audited.
