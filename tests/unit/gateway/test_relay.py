@@ -41,6 +41,8 @@ from alfred.gateway.core_link import _BUFFER_EVICT_INTERVAL_SECONDS, GatewayCore
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
 from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SeqFrame
@@ -187,18 +189,26 @@ def _build_relay(
             await asyncio.Event().wait()
         return
 
+    tui_leg = _make_tui_leg()
     core_link = GatewayCoreLink(
         client_listener=recorder,  # type: ignore[arg-type]
         dial=_dial,  # type: ignore[arg-type]
         sleep=_instant_sleep,
         jitter=lambda hi: hi,
         shutdown_event=shutdown,
-        tui_leg=_make_tui_leg(),
+        tui_leg=tui_leg,
     )
+    # Spec B G6-4 Task 7 (#288): wire the leg scheduler + router so ``submit_tui_unit``
+    # ENQUEUES; the relay co-runs the scheduler drain pump under its TaskGroup, so the
+    # client->core forward still reaches the core leg (now via the single drain writer).
+    scheduler = GatewayLegScheduler(core_link, max_per_leg_queue_bytes=1 << 30)
+    scheduler.register_leg(tui_leg)
+    core_link._leg_router = LegRouter(scheduler)
     relay = GatewayRelay(
         core_link=core_link,
         client_transport=client,  # type: ignore[arg-type]
         client_seq_enabled=client_seq_enabled,
+        scheduler=scheduler,
     )
     return relay, core_link, recorder
 

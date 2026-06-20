@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import json  # noqa: F401 — imported so the H3 zero-parse test can spy on this module's json.loads
+from typing import Protocol
 
 import structlog
 
@@ -56,6 +57,18 @@ from alfred.gateway.core_link import GatewayCoreLink, _CommsTransportLike
 from alfred.plugins.comms_wire import CommsProtocolError
 
 log = structlog.get_logger(__name__)
+
+
+class _SchedulerPumpLike(Protocol):
+    """The minimal leg-scheduler surface the relay co-runs (the drain pump).
+
+    The relay owns the client->core ENQUEUE (``submit_tui_unit``); the scheduler owns the
+    DRAIN onto the single core writer. They share the relay's lifetime, so the relay runs
+    this pump as a TaskGroup child (Spec B G6-4 Task 7). Declared structurally so the relay
+    does not import the concrete :class:`alfred.gateway.leg_scheduler.GatewayLegScheduler`.
+    """
+
+    async def run(self) -> None: ...
 
 
 class GatewayRelay:
@@ -71,9 +84,17 @@ class GatewayRelay:
         core_link: GatewayCoreLink,
         client_transport: _CommsTransportLike,
         client_seq_enabled: bool,
+        scheduler: _SchedulerPumpLike | None = None,
     ) -> None:
         self._core_link = core_link
         self._client_transport = client_transport
+        # Spec B G6-4 Task 7 (#288): the leg scheduler's drain pump (the SINGLE steady-state
+        # writer). The client->core pump ENQUEUES via ``submit_tui_unit``; this pump DRAINS
+        # the leg queues onto the single ``write_leg_unit`` writer. They share the relay's
+        # lifetime (one accepted client -> one relay -> one scheduler), so the relay co-runs
+        # the drain pump under its TaskGroup and reaps it with the client pump on shutdown.
+        # ``None`` in the merged G3 relay tests that never enqueue (no leg wired).
+        self._scheduler = scheduler
         # Whether the client leg negotiated seq/ack at its handshake. PRODUCTION is
         # FALSE (the real TUI is a plain ADR-0025 peer); a seq-enabled client is the
         # forward-looking G4/G5 variant. When FALSE the client-send carries ack=0 and
@@ -115,16 +136,31 @@ class GatewayRelay:
           the TaskGroup awaits its cancellation. The cancel is clean — the client pump's
           read is interruptible.
 
-        Reaping is the TaskGroup's job (it awaits both children) plus each pump's own
+        The leg scheduler's DRAIN pump (Spec B G6-4 Task 7), when wired, runs as a THIRD
+        child of the same group: the client pump enqueues, the scheduler pump drains onto the
+        single ``write_leg_unit`` writer. It is cancelled alongside the client pump when the
+        core pump returns (it parks on its wakeup / replay gate when idle, never completing on
+        its own), so a shutdown reaps it cleanly.
+
+        Reaping is the TaskGroup's job (it awaits every child) plus each pump's own
         ``finally``; the core-link closes its transport in ``run``'s finally.
         """
         async with asyncio.TaskGroup() as group:
             core_task = group.create_task(self._core_link.run())
             client_task = group.create_task(self._client_to_core_pump())
-            # When the core pump returns (shutdown), cancel the client pump so a client
-            # read blocked forever on shutdown does not wedge the group. A client pump
-            # that already returned (client EOF) makes this cancel a harmless no-op.
-            core_task.add_done_callback(lambda _t: client_task.cancel())
+            drain_task = (
+                group.create_task(self._scheduler.run()) if self._scheduler is not None else None
+            )
+
+            def _reap_peers(_t: object) -> None:
+                # When the core pump returns (shutdown), cancel the client pump AND the
+                # scheduler drain pump so neither (a client read / an idle park) wedges the
+                # group. A pump that already returned makes its cancel a harmless no-op.
+                client_task.cancel()
+                if drain_task is not None:
+                    drain_task.cancel()
+
+            core_task.add_done_callback(_reap_peers)
 
     async def _send_to_client(self, payload: bytes) -> None:
         """Write an opaque core-originated payload down to the client; loud-drop a hangup.
