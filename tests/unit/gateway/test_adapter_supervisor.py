@@ -244,7 +244,7 @@ async def test_spawn_handshake_reaches_up_and_emits_single_up_with_epoch() -> No
     # Exactly one ``up`` frame, carrying the supervisor's epoch.
     up_frames = [(m, p) for m, p in sink.frames if m == "gateway.adapter.up"]
     assert len(up_frames) == 1
-    assert up_frames[0][1] == {"adapter_id": _A, "epoch": _EPOCH}
+    assert up_frames[0][1] == {"adapter_id": _A, "epoch": _EPOCH, "host_restart_seq": 0}
     assert REGISTRY.get_sample_value("gateway_adapter_up", {"adapter": _A}) == 1.0
 
     await sup.request_stop(_A)
@@ -329,6 +329,40 @@ async def test_child_exit_emits_crashed_with_redacted_bounded_detail_then_restar
     assert len(sleep.delays) == 1
     assert 0.05 <= sleep.delays[0] <= 30.0
     assert _restarts_total(_A) == restarts_before + 1.0
+
+
+async def test_status_frames_carry_aligned_host_restart_seq() -> None:
+    """SEC-01 (#288): up(N) and crashed(N) align to the SAME incarnation.
+
+    The first crash emits ``host_restart_seq=0`` (the crashed frame is emitted
+    BEFORE ``restart_count += 1``, so it carries the PRE-increment value = the
+    incarnation that exited). The matching up frame for that incarnation also
+    carries 0; the second up (after one restart) carries 1, and a second crash
+    carries 1 — so the reconciler can fold up(N)+crashed(N) onto one incarnation.
+    """
+    factory = _FakeChildFactory()
+    factory.script(_A, ["ok", "ok", "ok"])  # crash twice, then steady
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sleep = _RecordingSleep()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink, sleep=sleep)
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A, incarnation=1)
+    factory.children[0].exit_future.set_result(("BrokenPipeError", "boom"))
+    await sup.wait_until_up(_A, incarnation=2)
+    factory.children[1].exit_future.set_result(("BrokenPipeError", "boom"))
+    await sup.wait_until_up(_A, incarnation=3)
+
+    await sup.request_stop(_A)
+    await task
+
+    up_seqs = [p["host_restart_seq"] for m, p in sink.frames if m == "gateway.adapter.up"]
+    crashed_seqs = [p["host_restart_seq"] for m, p in sink.frames if m == "gateway.adapter.crashed"]
+    # Three serving incarnations: 0, 1, 2 (restart_count at HANDSHAKE_OK time).
+    assert up_seqs == [0, 1, 2]
+    # Two crashes: the 0th and 1st incarnations exited (PRE-increment restart_count).
+    assert crashed_seqs == [0, 1]
 
     await sup.request_stop(_A)
     await task
@@ -621,7 +655,7 @@ async def test_awaiting_core_recovers_to_up_when_cred_becomes_available() -> Non
     assert factory.spawn_count[_A] == 1  # spawned exactly once, AFTER the cred returned
     up_frames = [(m, p) for m, p in sink.frames if m == "gateway.adapter.up"]
     assert len(up_frames) == 1
-    assert up_frames[0][1] == {"adapter_id": _A, "epoch": _EPOCH}
+    assert up_frames[0][1] == {"adapter_id": _A, "epoch": _EPOCH, "host_restart_seq": 0}
     # The awaiting_core gauge cleared on the recovery.
     assert REGISTRY.get_sample_value("gateway_adapter_awaiting_core", {"adapter": _A}) == 0.0
 

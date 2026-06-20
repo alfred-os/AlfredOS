@@ -71,9 +71,17 @@ class AdapterStatusEmitter:
     def __init__(self, *, sink: _AdapterStatusSink) -> None:
         self._sink = sink
 
-    async def emit_up(self, *, adapter_id: str, epoch: str) -> None:
-        """``gateway.adapter.up`` — the only liveness-asserting frame (epoch-bound)."""
-        frame = AdapterUpNotification(adapter_id=adapter_id, epoch=epoch)
+    async def emit_up(self, *, adapter_id: str, epoch: str, host_restart_seq: int) -> None:
+        """``gateway.adapter.up`` — the only liveness-asserting frame (epoch-bound).
+
+        ``host_restart_seq`` (SEC-01 / #288) is the supervisor's per-adapter
+        ``restart_count`` for the incarnation being STARTED. The core's
+        CrashIncidentReconciler advances its current incarnation to this on an
+        accepted ``up`` so a later in-child crash tags to the run that was serving.
+        """
+        frame = AdapterUpNotification(
+            adapter_id=adapter_id, epoch=epoch, host_restart_seq=host_restart_seq
+        )
         await self._sink.emit(GATEWAY_ADAPTER_UP, frame.model_dump())
 
     async def emit_down(self, *, adapter_id: str, reason: AdapterDownReason) -> None:
@@ -81,18 +89,27 @@ class AdapterStatusEmitter:
         frame = AdapterDownNotification(adapter_id=adapter_id, reason=reason)
         await self._sink.emit(GATEWAY_ADAPTER_DOWN, frame.model_dump())
 
-    async def emit_crashed(self, *, adapter_id: str, error_class: str, detail: str) -> None:
+    async def emit_crashed(
+        self, *, adapter_id: str, error_class: str, detail: str, host_restart_seq: int
+    ) -> None:
         """``gateway.adapter.crashed`` — the process-level crash signal.
 
-        ``detail`` is REDACTED then BOUND (correction #1) before it crosses to the
-        sink: ``redact_secret_shapes(detail)[:_MAX_CRASH_DETAIL_LEN]``. Redacting the
+        ``host_restart_seq`` (G6-2b-2b / #288) is the supervisor's per-adapter
+        ``restart_count`` — the INCARNATION that exited. The core's
+        CrashIncidentReconciler keys the crash-dedup join on
+        ``(adapter_id, host_restart_seq)``. ``detail`` is REDACTED then BOUND
+        (correction #1) before it crosses to the sink:
+        ``redact_secret_shapes(detail)[:_MAX_CRASH_DETAIL_LEN]``. Redacting the
         full string first guarantees the subsequent truncation can only cut
         already-safe text, so a secret straddling the cap cannot leak an unredacted
         prefix.
         """
         redacted_detail = redact_secret_shapes(detail)[:_MAX_CRASH_DETAIL_LEN]
         frame = AdapterCrashedNotification(
-            adapter_id=adapter_id, error_class=error_class, detail=redacted_detail
+            adapter_id=adapter_id,
+            error_class=error_class,
+            detail=redacted_detail,
+            host_restart_seq=host_restart_seq,
         )
         await self._sink.emit(GATEWAY_ADAPTER_CRASHED, frame.model_dump())
 
