@@ -58,7 +58,8 @@ INGRESS_REFUSAL_AUDIT_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 # The i18n key prefix for operator-rendered refusal reasons (reserved in
-# ``alfred.i18n._spec_b_reserve``). A reason is rendered via ``t(f"{_REASON_KEY_PREFIX}{reason.value}")``.
+# ``alfred.i18n._spec_b_reserve``). A reason is rendered via
+# ``t(f"{_REASON_KEY_PREFIX}{reason.value}")``.
 _REASON_KEY_PREFIX: Final[str] = "gateway.ingress.refused."
 
 # The FIXED metric label for a forged/unknown-adapter refusal (K4). The forged id is NEVER

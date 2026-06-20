@@ -47,6 +47,8 @@ from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
 from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
 from alfred.plugins.comms_seq_codec import SEQ_VERSION
@@ -159,6 +161,11 @@ async def _build_harness(
     core_link = GatewayCoreLink(
         client_listener=client_listener, shutdown_event=shutdown, tui_leg=_tui_leg
     )
+    # Spec B G6-4 Task 7 (#288): wire the leg scheduler + router so ``submit_tui_unit``
+    # ENQUEUES and the relay co-runs the drain pump onto the single core writer.
+    scheduler = GatewayLegScheduler(core_link, max_per_leg_queue_bytes=1 << 30)
+    scheduler.register_leg(_tui_leg)
+    core_link._leg_router = LegRouter(scheduler)
 
     # The client dials the gateway's client socket; the gateway accepts it. The relay's
     # client transport is the ACCEPTED gateway-side end — build the relay around it once
@@ -177,6 +184,7 @@ async def _build_harness(
         core_link=core_link,
         client_transport=accepted_client,
         client_seq_enabled=client_seq_enabled,
+        scheduler=scheduler,
     )
     relay_task = asyncio.ensure_future(relay.run())
     core_host = await asyncio.wait_for(core_host_task, timeout=2.0)

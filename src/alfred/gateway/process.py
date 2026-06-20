@@ -54,6 +54,8 @@ from alfred.gateway.core_link import GatewayCoreLink, _CommsTransportLike
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
 from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.metrics import PEER_AUTH_REJECTED
 from alfred.gateway.relay import GatewayRelay
 from alfred.gateway.replay_buffer import ReplayBuffer
@@ -73,6 +75,21 @@ _NON_BINDING_RATE_PER_S: Final[float] = 1e9
 _NON_BINDING_COUNT: Final[int] = 10**9
 _NON_BINDING_TTL_SECONDS: Final[float] = 1e9
 _NON_BINDING_MAX_FRAME_BYTES: Final[int] = 1 << 30
+
+# Spec B G6-4 Task 7 (#288): the per-leg scheduler send-queue byte bound (perf-M3). This is
+# pre-append working memory the GlobalReplayCap does not see, so it is bounded independently;
+# the TUI leg is interactive (one turn at a time), so a generous-but-finite ceiling never
+# back-pressures a real operator yet caps a runaway producer. A real adapter leg (G6-5) sets
+# its own from its manifest.
+_LEG_SEND_QUEUE_BYTES: Final[int] = 1 << 20
+
+# Spec B G6-4 Task 7 / K5: the cadence of the per-gate in-flight TTL sweep. The ingress
+# gate's TTL is the real wedge bound; this is just how often the active sweeper reclaims a
+# slot a stalled-IDLE leg holds (a leg that admitted a frame that never completed AND has no
+# new admits to trigger an on-admit eviction). 30s mirrors the buffer-evict cadence — small
+# relative to a sensible TTL without busy-sweeping. The TUI gate is non-binding (TTL 1e9) so
+# the sweep is a no-op there; it is wired + reaped so a future binding adapter leg is covered.
+_INGRESS_SWEEP_INTERVAL_SECONDS: Final[float] = 30.0
 
 log = structlog.get_logger(__name__)
 
@@ -238,53 +255,97 @@ class GatewayProcess:
             sleep=self._sleep,
         )
 
-    async def _run_relay_and_supervisor(
-        self, relay: GatewayRelay, supervisor: GatewayAdapterSupervisor
+    async def _ingress_sweep_loop(self, scheduler: GatewayLegScheduler) -> None:
+        """K5: periodically reclaim ingress in-flight slots held past the gate TTL.
+
+        A supervised background task (reaped in :meth:`_run_relay_and_scheduler`'s
+        ``finally``). The gate's :meth:`PerAdapterIngressGate.evict_stalled` only fires when
+        called; a leg that admitted a frame which never completed AND has no fresh admits to
+        trigger an on-admit eviction would otherwise hold that slot forever (the wedge). This
+        sleep-driven sweep (NOT busy-wait, NOT on-admit-only) reclaims such slots for EVERY
+        registered leg every :data:`_INGRESS_SWEEP_INTERVAL_SECONDS`. Each reclaimed slot is
+        a LOUD audit breadcrumb (CLAUDE.md hard rule #7 — the wedge guard is observable). The
+        TUI gate is non-binding (TTL 1e9) so this is a no-op there; it is wired so a future
+        binding adapter leg (G6-5) is covered with zero new wiring.
+        """
+        while True:
+            await self._sleep(_INGRESS_SWEEP_INTERVAL_SECONDS)
+            for adapter_id in tuple(scheduler.adapter_ids()):
+                leg = scheduler.leg(adapter_id)
+                for token in leg.evict_stalled_admits():
+                    log.warning(
+                        "gateway.ingress.slot_evicted",
+                        adapter_id=adapter_id,
+                        token=token,
+                        reason="ttl_expired",
+                    )
+
+    async def _run_relay_and_scheduler(
+        self,
+        relay: GatewayRelay,
+        supervisor: GatewayAdapterSupervisor,
+        scheduler: GatewayLegScheduler,
     ) -> None:
-        """Run the relay (the serving lifetime) + supervised adapter supervisor.
+        """Run the relay (serving lifetime) + supervisor + leg scheduler + K5 ingress sweep.
 
         The RELAY's lifetime is the process's serving lifetime — it returns on a clean
-        shutdown. The supervisor runs CONCURRENTLY; correction #5: it is CANCELLED +
-        reaped when the relay returns rather than awaited to its own completion.
-        ``supervise_all([])`` returns immediately today (empty set), but a future
-        NON-empty set (G6-3) would otherwise park forever (an adapter in AWAITING_CORE /
-        steady state never returns on its own), so leaving it un-reaped would hang the
-        gateway shutdown.
+        shutdown. The relay co-runs the leg scheduler's DRAIN pump under its own TaskGroup
+        (Task 7 — the single steady-state writer shares the relay lifetime). The supervisor
+        (correction #5) and the K5 ingress TTL sweeper run CONCURRENTLY here and are CANCELLED
+        + reaped when the relay returns (or a raise unwinds), so neither outlives the process
+        (CLAUDE.md hard rule #7 — no leaked task). The sweeper parks on its sleep and never
+        completes on its own — the relay is the sole completion anchor.
 
-        A supervisor that RAISES a fail-closed :class:`GatewayAdapterSpawnError` BEFORE
-        the relay returns is surfaced loudly (it aborts the relay too) so a real spawn
-        failure is never swallowed; a supervisor that simply returns (empty-set no-op) is
-        ignored — the relay keeps serving. The relay is the sole completion anchor.
+        A supervisor that RAISES a fail-closed :class:`GatewayAdapterSpawnError` BEFORE the
+        relay returns is surfaced loudly (it aborts the relay too) so a real spawn failure is
+        never swallowed; a supervisor empty-set no-op return is ignored. The sweeper is a
+        background task: a non-cancelled exception escaping it is surfaced via
+        :meth:`asyncio.gather` (return_exceptions) loud, never silently dropped.
+
+        **Reap on EVERY exit (perf-M4 / security).** The ``finally`` cancels + reaps all
+        tasks, then ``scheduler.aclose()`` tears down EVERY registered leg — discarding its
+        ReplayBuffer (zeroing the pre-DLP T1 bytes) and releasing its global-cap budget — on
+        the shutdown path AND on any assembly/boot raise that unwinds through here. The core
+        link's own ``run`` ``finally`` ALSO discards the (shared) TUI leg buffer; both are
+        idempotent (discard zeroes+empties; teardown removes the cap entry).
         """
         relay_task: asyncio.Task[None] = asyncio.ensure_future(relay.run())
         supervisor_task: asyncio.Task[None] = asyncio.ensure_future(
             supervisor.supervise_all(self._adapter_ids)
         )
+        sweep_task: asyncio.Task[None] = asyncio.ensure_future(self._ingress_sweep_loop(scheduler))
+        background = (supervisor_task, sweep_task)
         try:
             done, _pending = await asyncio.wait(
-                {relay_task, supervisor_task}, return_when=asyncio.FIRST_COMPLETED
+                {relay_task, *background}, return_when=asyncio.FIRST_COMPLETED
             )
             if supervisor_task in done:
                 # The supervisor finished first. A fail-closed spawn error must surface
-                # (``.result()`` re-raises it, and the ``finally`` then cancels the relay);
-                # a clean empty-set no-op return is ignored — keep serving until the relay
-                # itself ends below.
+                # (``.result()`` re-raises it, and the ``finally`` cancels the rest); a clean
+                # empty-set no-op return is ignored — keep serving until the relay ends.
                 supervisor_task.result()
+            # The sweeper never completes on its own; if it DID finish first it can only be a
+            # raise — surface it loud so a background crash is never swallowed (hard rule #7).
+            if sweep_task in done:
+                sweep_task.result()
             if relay_task not in done:
                 # The relay is the serving-lifetime anchor: wait for IT to end (shutdown)
-                # even after the empty-set supervisor returned.
+                # even after a background task returned/was-handled above.
                 await relay_task
-            # ``.result()`` re-raises a genuine relay error (the prior bare-await
-            # behaviour) once the relay has completed.
+            # ``.result()`` re-raises a genuine relay error once the relay has completed.
             relay_task.result()
         finally:
-            # Cancel + reap both on EVERY exit (the relay returned, or a raise is
-            # unwinding): never leave a parked supervisor/relay task outliving the process.
-            if not supervisor_task.done():
-                supervisor_task.cancel()
-            if not relay_task.done():
-                relay_task.cancel()
-            await asyncio.gather(relay_task, supervisor_task, return_exceptions=True)
+            # Cancel + reap ALL on EVERY exit (the relay returned, or a raise is unwinding):
+            # never leave a parked supervisor / sweeper outliving the process. Then tear down
+            # every leg (discard buffer -> zero pre-DLP bytes + release the global-cap budget)
+            # — the perf-M4 / security reap. The relay already reaped its co-run scheduler
+            # drain pump; ``aclose`` is the leg-teardown half (idempotent w.r.t. the core
+            # link's own buffer discard).
+            for task in (relay_task, *background):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(relay_task, *background, return_exceptions=True)
+            scheduler.aclose()
 
     async def run(self) -> None:
         """Bind, accept ONE client (racing shutdown), handshake, supervise the relay, reap.
@@ -317,27 +378,46 @@ class GatewayProcess:
             # bound the pre-DLP operator-input exposure the retention introduces. Passing
             # ``self._jitter`` (default ``None``) preserves production behaviour:
             # ``GatewayCoreLink`` maps ``None`` to its own full-jitter default.
+            # Spec B G6-4 Task 7 (#288): build the TUI leg ONCE and share it between the
+            # core link (which owns the buffer lifecycle + the breaker escalation) and the
+            # leg scheduler (the SINGLE steady-state drainer). The scheduler is constructed
+            # OVER the core link (it drains onto ``write_leg_unit`` + reads
+            # ``replay_pending_gate``); the router (the K4 forged-adapter refusal) is built
+            # over the scheduler and attached to the link so ``submit_tui_unit`` enqueues
+            # through it. The leg is registered with the scheduler; the scheduler ``run()``
+            # pump + the K5 ingress TTL sweeper are spawned + reaped in
+            # :meth:`_run_relay_and_scheduler`.
+            tui_leg = self._build_tui_leg()
             core_link = GatewayCoreLink(
                 client_listener=listener,
                 shutdown_event=self._shutdown_event,
                 dial_adapter_id=self._dial_adapter_id,
                 dial=self._core_dial,
-                tui_leg=self._build_tui_leg(),
+                tui_leg=tui_leg,
                 sleep=self._sleep,
                 jitter=self._jitter,
                 monotonic=self._monotonic,
             )
+            scheduler = GatewayLegScheduler(
+                core_link, max_per_leg_queue_bytes=_LEG_SEND_QUEUE_BYTES
+            )
+            scheduler.register_leg(tui_leg)
+            # Attach the router post-construction (the same late-binding pattern the relay
+            # uses for ``core_link._payload_relay``): the core link stays leg-agnostic and
+            # the gateway process is the one place that knows the leg<->scheduler topology.
+            core_link._leg_router = LegRouter(scheduler)
             relay = GatewayRelay(
                 core_link=core_link,
                 client_transport=client_transport,
                 client_seq_enabled=client_seq_enabled,
+                scheduler=scheduler,
             )
             # Spec B G6-2b-2a (#288): the adapter supervisor is wired LIVE (its status
             # emitter bound to ``core_link.send_status_frame``) alongside the relay, with
             # an EMPTY configured set (spawns nothing until G6-3). It is cancelled/reaped
             # on shutdown (correction #5) so a future non-empty set cannot block the stop.
             supervisor = self._build_adapter_supervisor(core_link)
-            await self._run_relay_and_supervisor(relay, supervisor)
+            await self._run_relay_and_scheduler(relay, supervisor, scheduler)
         finally:
             # Reap the accepted transport + the socket file on EVERY exit path, including a
             # cancel/KeyboardInterrupt unwind (security M2 — no leaked inode on shutdown).

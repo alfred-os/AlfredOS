@@ -10,6 +10,11 @@ supervised supervisor task is cancelled/reaped on gateway-process shutdown (corr
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable
+
+import pytest
+import structlog.testing
 
 from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
@@ -17,15 +22,51 @@ from alfred.gateway.adapter_supervisor import (
 )
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.process import (
     GatewayProcess,
     _CoreEpochCredSeam,
     _UnspawnedAdapterChildFactory,
 )
+from alfred.gateway.replay_buffer import ReplayBuffer
+
+
+def _instant_then_park_sleep() -> Callable[[float], Awaitable[None]]:
+    """A sleep that returns once (instant) then PARKS — drives a single sweep iteration.
+
+    The K5 sweep loop is ``while True: await sleep(interval); sweep()``. This makes the FIRST
+    sleep instant (so one sweep runs) and every subsequent sleep park on a never-set event,
+    so the loop does not busy-spin under the test (mirrors the harness parking-sleep).
+    """
+    park = asyncio.Event()
+    fired = False
+
+    async def _sleep(delay: float) -> None:
+        nonlocal fired
+        del delay
+        if not fired:
+            fired = True
+            return
+        await park.wait()
+
+    return _sleep
 
 
 def _make_core_link() -> GatewayCoreLink:
     return GatewayCoreLink(client_listener=GatewayClientListener())
+
+
+def _make_scheduler(core_link: GatewayCoreLink) -> GatewayLegScheduler:
+    """An empty leg scheduler over ``core_link`` (Spec B G6-4 Task 7).
+
+    ``_run_relay_and_scheduler`` reaps the supervisor + the K5 sweeper + tears the scheduler
+    down on exit. With no leg registered the sweeper is a no-op and ``aclose`` is a no-op —
+    these tests exercise the supervisor/relay reaping arms, not the leg lifecycle.
+    """
+    return GatewayLegScheduler(core_link, max_per_leg_queue_bytes=1 << 20)
 
 
 def test_process_builds_status_sink_and_supervisor_for_core_link() -> None:
@@ -112,6 +153,7 @@ async def test_supervisor_task_is_cancelled_on_shutdown() -> None:
     process = GatewayProcess(shutdown_event=shutdown, adapter_ids=["discord"])
     core_link = _make_core_link()
     supervisor = process._build_adapter_supervisor(core_link)
+    scheduler = _make_scheduler(core_link)
 
     class _FakeRelay:
         async def run(self) -> None:
@@ -124,10 +166,11 @@ async def test_supervisor_task_is_cancelled_on_shutdown() -> None:
 
     signal_task = asyncio.ensure_future(_signal_shutdown_soon())
     try:
-        # If the supervisor task were NOT cancelled on the relay's clean return, this
-        # would hang (the discord adapter parks in AWAITING_CORE forever) -> timeout.
+        # If the supervisor/sweeper tasks were NOT cancelled on the relay's clean return,
+        # this would hang (the discord adapter parks in AWAITING_CORE forever) -> timeout.
         await asyncio.wait_for(
-            process._run_relay_and_supervisor(_FakeRelay(), supervisor), timeout=2.0
+            process._run_relay_and_scheduler(_FakeRelay(), supervisor, scheduler),  # type: ignore[arg-type]
+            timeout=2.0,
         )
     finally:
         await signal_task
@@ -141,9 +184,8 @@ async def test_supervisor_spawn_failure_aborts_and_cancels_the_relay() -> None:
     still-running relay so it never outlives the aborted process (covers the relay-cancel
     arm).
     """
-    import pytest
-
     process = GatewayProcess(shutdown_event=asyncio.Event(), adapter_ids=["discord"])
+    scheduler = _make_scheduler(_make_core_link())
 
     class _RaisingSupervisor:
         async def supervise_all(self, adapter_ids: list[str]) -> None:
@@ -161,7 +203,114 @@ async def test_supervisor_spawn_failure_aborts_and_cancels_the_relay() -> None:
 
     with pytest.raises(GatewayAdapterSpawnError):
         await asyncio.wait_for(
-            process._run_relay_and_supervisor(_ForeverRelay(), _RaisingSupervisor()),  # type: ignore[arg-type]
+            process._run_relay_and_scheduler(_ForeverRelay(), _RaisingSupervisor(), scheduler),  # type: ignore[arg-type]
             timeout=2.0,
         )
     assert relay_cancelled.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Spec B G6-4 Task 7 / K5 — the active ingress TTL sweeper.
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """A hand-advanced monotonic seam for the ingress-gate TTL boundary."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _binding_leg(adapter_id: str, clock: _Clock, *, ttl_seconds: float) -> GatewayLeg:
+    """A leg with a FINITE-TTL ingress gate so a held in-flight slot can stall (K5)."""
+    buf = ReplayBuffer()
+    gate = PerAdapterIngressGate(
+        adapter_id,
+        sustained_rate_per_s=1e9,
+        burst=10**9,
+        max_inflight=10**9,
+        ttl_seconds=ttl_seconds,
+        max_frame_bytes=1 << 30,
+        now=clock,
+    )
+    return GatewayLeg(
+        adapter_id=adapter_id,
+        buffer=buf,
+        ingress_gate=gate,
+        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        now=clock,
+    )
+
+
+async def test_ingress_sweep_loop_reclaims_a_stalled_slot_loud() -> None:
+    """K5: the active sweeper reclaims an in-flight slot held past the gate TTL + audits it.
+
+    A leg admits a slot (held, never released) and the clock advances past the TTL with NO
+    fresh admit to trigger an on-admit eviction — exactly the IDLE-but-wedged case the active
+    sweep exists for. ONE sweep iteration evicts the slot and emits a loud
+    ``gateway.ingress.slot_evicted`` breadcrumb (hard rule #7), then the loop parks.
+    """
+    clock = _Clock()
+    leg = _binding_leg("discord", clock, ttl_seconds=30.0)
+    admit = leg.try_admit(frame_bytes=10)
+    assert admit.token is not None
+    assert leg.inflight_count == 1
+    clock.t = 31.0  # advance past the TTL (no fresh admit -> only the sweep can reclaim)
+
+    process = GatewayProcess(shutdown_event=asyncio.Event(), sleep=_instant_then_park_sleep())
+    scheduler = _make_scheduler(_make_core_link())
+    scheduler.register_leg(leg)
+
+    with structlog.testing.capture_logs() as captured:
+        sweep_task = asyncio.ensure_future(process._ingress_sweep_loop(scheduler))
+        # The first iteration sleeps (instant), sweeps (evicts the stalled slot), then the
+        # second iteration parks forever on the injected sleep.
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if leg.inflight_count == 0:
+                break
+        sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep_task
+
+    assert leg.inflight_count == 0  # the stalled slot was reclaimed by the sweep
+    evicted = [c for c in captured if c.get("event") == "gateway.ingress.slot_evicted"]
+    assert len(evicted) == 1
+    assert evicted[0].get("adapter_id") == "discord"
+    assert evicted[0].get("reason") == "ttl_expired"
+
+
+async def test_run_relay_and_scheduler_surfaces_a_sweeper_crash_loud() -> None:
+    """A sweeper that RAISES first is surfaced loud (the sweep_task.result() re-raise arm).
+
+    Guards the background-crash-never-swallowed branch (hard rule #7): if the K5 sweep loop
+    dies with a non-cancelled exception it must propagate out of the runner, not be silently
+    dropped. A relay that parks forever + a sweeper that raises immediately makes the sweeper
+    finish first WITH a raise; the runner re-raises it and the ``finally`` reaps the relay.
+    """
+    process = GatewayProcess(shutdown_event=asyncio.Event())
+    scheduler = _make_scheduler(_make_core_link())
+
+    class _ForeverRelay:
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+    class _NoopSupervisor:
+        async def supervise_all(self, adapter_ids: list[str]) -> None:
+            await asyncio.Event().wait()  # park (the empty-set no-op would also do)
+
+    boom = RuntimeError("sweeper boom")
+
+    async def _raising_sweep(_sched: object) -> None:
+        raise boom
+
+    process._ingress_sweep_loop = _raising_sweep  # type: ignore[method-assign,assignment]
+
+    with pytest.raises(RuntimeError, match="sweeper boom"):
+        await asyncio.wait_for(
+            process._run_relay_and_scheduler(_ForeverRelay(), _NoopSupervisor(), scheduler),  # type: ignore[arg-type]
+            timeout=2.0,
+        )
