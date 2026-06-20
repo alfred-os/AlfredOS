@@ -78,7 +78,10 @@ class _CoreWriterLike(Protocol):
 
     def core_cumulative_ack(self) -> int: ...
 
+    @property
     def replay_pending_gate(self) -> asyncio.Event: ...
+
+    async def escalate_if_breaker_tripped(self, leg: GatewayLeg) -> None: ...
 
     async def write_leg_unit(
         self, adapter_id: str, payload: bytes, *, seq: int, ack: int
@@ -175,7 +178,7 @@ class GatewayLegScheduler:
         preserved. On a no-buffer link the gate is permanently set (zero-cost return).
         """
         while True:
-            await self._core_link.replay_pending_gate().wait()
+            await self._core_link.replay_pending_gate.wait()
             drained = await self._drain_one_round()
             if not drained:
                 # ``not drained`` means every leg's queue was empty this round (a round
@@ -217,6 +220,15 @@ class GatewayLegScheduler:
         released) + deregistered, the frame dropped LOUD — the pump survives for every other
         leg. The physical write itself is the leg-agnostic ``write_leg_unit`` (loud-drops a
         gapped leg internally; never raises here).
+
+        **Breaker escalation (Spec B G6-4 Task 7).** AFTER a successful ``record_for_send``
+        (the append is what can breach the soft cap) and BEFORE the physical write, the
+        scheduler calls the leg-agnostic core-link seam
+        :meth:`GatewayCoreLink.escalate_if_breaker_tripped` — the breaker feed moved out of
+        the retired inline ``submit_tui_unit`` path into this drain context. The
+        ``LinkStateMachine`` the core-link owns absorbs a repeat feed, so the once-only
+        ``link.unavailable`` escalation + its audit row fire EXACTLY once across every
+        caller. Skipped on the isolation path (a torn-down leg never escalates).
         """
         payload = queue.pop()
         ack = self._core_link.core_cumulative_ack()
@@ -231,6 +243,7 @@ class GatewayLegScheduler:
             )
             self.deregister_leg(adapter_id)
             return
+        await self._core_link.escalate_if_breaker_tripped(queue.leg)
         await self._core_link.write_leg_unit(adapter_id, payload, seq=seq, ack=ack)
 
     def aclose(self) -> None:

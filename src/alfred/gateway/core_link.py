@@ -56,6 +56,9 @@ from alfred.gateway._control_frames import control_notification
 from alfred.gateway._seq_tracker import BoundedSeqAckTracker
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.ingress_audit import IngressRefusalReason, record_ingress_refusal
+from alfred.gateway.ingress_gate import IngressDecision
+from alfred.gateway.leg_router import LegRouter
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
     GatewayLinkState,
@@ -124,6 +127,16 @@ _TRANSPORT_CRASH_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
     EOFError,
     CommsProtocolError,
 )
+
+
+# Spec B G6-4 Task 7 (#288): map the gate's payload-blind admission decision onto the K6
+# closed-vocab audit reason. ADMITTED is never mapped (the caller guards it). Declared once
+# so the ingress-refusal reason set cannot drift between the gate and the audit sink.
+_INGRESS_REFUSAL_REASON: Final[Mapping[IngressDecision, IngressRefusalReason]] = {
+    IngressDecision.OVERSIZED: IngressRefusalReason.OVERSIZED,
+    IngressDecision.THROTTLED_RATE: IngressRefusalReason.THROTTLED_RATE,
+    IngressDecision.THROTTLED_INFLIGHT: IngressRefusalReason.THROTTLED_INFLIGHT,
+}
 
 
 class _Shutdown(Exception):  # noqa: N818 — internal control signal, not an error
@@ -242,6 +255,7 @@ class GatewayCoreLink:
         monotonic: Callable[[], float] = time.monotonic,
         payload_relay: Callable[[bytes], Awaitable[None]] | None = None,
         tui_leg: GatewayLeg | None = None,
+        leg_router: LegRouter | None = None,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
         self._client_listener = client_listener
@@ -315,6 +329,13 @@ class GatewayCoreLink:
         # is exactly one serialization point. ``None`` leaves buffering OFF (the merged G3
         # relay tests construct without a leg).
         self._tui_leg = tui_leg
+        # Spec B G6-4 Task 7 (#288): the leg scheduler/router (the SINGLE steady-state
+        # drainer). ``submit_tui_unit`` admits + ENQUEUES onto the TUI leg's scheduler queue
+        # through this router (the K4 forged-adapter refusal lives in the router); the
+        # scheduler's drain pump then mints the seq + appends + escalates + writes. ``None``
+        # leaves the leg-routed submit path unwired (the merged G3 relay tests that construct
+        # without a leg never call ``submit_tui_unit``).
+        self._leg_router = leg_router
         # Spec A G4b-2b (#237): the reconnect-replay seams. ``_pending_replay`` holds the
         # un-acked frames captured before a reconnect reset, awaiting re-send on the fresh
         # leg. ``_replay_pending`` is a gate the relay's client->core pump awaits: SET = the
@@ -1048,48 +1069,97 @@ class GatewayCoreLink:
         await self._payload_relay(frame.payload)
 
     async def submit_tui_unit(self, payload: bytes) -> None:
-        """Forward an opaque TUI client payload through the TUI leg + single writer (G6-4a).
+        """Admit + ENQUEUE an opaque TUI client payload onto the leg scheduler (G6-4 Task 7).
 
-        The leg-routed replacement for the retired ``relay_to_core`` (Spec B G6-4 / #288).
-        Snapshots the core transport FIRST: a ``None`` snapshot (the reconnect-race / gap
-        window) is a loud drop that mints NO seq — preserving the G5 none-transport-no-mint
-        semantics (PR5 — the None-check stays STRICTLY AHEAD of ``record_for_send`` so a dead
-        leg never burns a leg seq). Then the LEG mints the per-leg seq + appends to its buffer
-        (append-before-send) + reserves the global cap inside ``record_for_send``; the breaker
-        escalation is fed HERE (JC-2: the link owns the ``LinkStateMachine``), reading
-        ``leg.breaker_tripped`` after the append. The pre-sequenced unit is handed to
-        :meth:`write_leg_unit` — the SOLE physical writer. Loud-drop, never raise, never
-        buffer beyond the leg.
+        The relay's stable client->core entry point (relay.py:243). Under Spec B G6-4 Task 7
+        (architect Option A) the steady-state drainer is the
+        :class:`alfred.gateway.leg_scheduler.GatewayLegScheduler`: this method ADMITS the
+        frame through the TUI leg's payload-blind ingress gate and ENQUEUES it on the leg's
+        bounded scheduler queue (via the :class:`alfred.gateway.leg_router.LegRouter`). The
+        seq mint + buffer append (append-before-send) + breaker escalation + the single
+        physical :meth:`write_leg_unit` ALL happen at DRAIN time, serialized BEHIND any
+        in-flight reconnect-replay by :attr:`replay_pending_gate` (the scheduler awaits it).
 
-        **Single-leg cap is non-binding (PR2).** The TUI leg's ``GlobalReplayCap`` ceiling is
-        set strictly above the buffer hard ceiling, so ``record_for_send`` never raises a
-        cap-refusal on this single leg — the only loud-fail path is the buffer's OWN
-        hard-ceiling raise (the G5 behavior), which fires first. Payload-blind (#5): the leg /
-        writer never parse the body; ``adapter_id`` is the only routing key.
+        **No inline None-check / mint (PR5 re-expressed).** The seq is minted at drain, not
+        here; the sole transport None-guard now lives in :meth:`write_leg_unit` (the physical
+        writer guards the physical transport). A frame enqueued during a gap is
+        ``record_for_send``-d at drain even if the transport is then ``None`` — it is
+        loud-dropped on the wire but STAYS buffered (append-before-send) and re-sequences
+        from 0 after the next ``reset_for_new_epoch``, so no permanent leg seq is burned.
+
+        **Ingress admission (Spec B G6-4 / K3/K6).** ``try_admit`` is payload-blind (size /
+        rate / in-flight only — never the body). The TUI leg's gate is NON-BINDING (the
+        interactive path is never throttled), so admission always succeeds here; a real
+        adapter leg (G6-5) that trips is back-pressured + audited (closed-vocab reason) and
+        NOT enqueued — never a silent drop (hard rule #7). A full per-leg queue raises
+        :class:`LegQueueFullError` which the relay pump turns into read back-pressure.
+        Payload-blind (#5): ``adapter_id`` is the only routing key.
         """
-        if self._current_core_transport is None:
-            log.warning("gateway.relay.core_send_dropped", reason="no_core_transport")
-            return
-        # PR5: the leg mints the seq ONLY past the None-check above — a None-transport drop
-        # must NOT consume a leg seq (G5 mints AFTER the None-check). Do NOT hoist this above
-        # the None-check for "efficiency": it would burn seqs on a dead leg and corrupt the
-        # per-leg seq space the resume contract keys on.
         assert self._tui_leg is not None  # submit path is only reached on a leg-wired link
-        ack = self.core_cumulative_ack()
-        seq = self._tui_leg.record_for_send(payload)
-        if self._tui_leg.breaker_tripped:
-            # JC-2 (#237 / R3): a soft-cap breach latched the breaker. Feed BREAKER_TRIPPED
-            # UNCONDITIONALLY — the absorbing machine emits LinkControl.UNAVAILABLE exactly
-            # once; on that once-only edge write the single loud audit row (hard rule #7).
-            control = await self._feed(GatewayLinkEvent.BREAKER_TRIPPED)
-            if control is LinkControl.UNAVAILABLE:
-                log.warning(
-                    "gateway.comms.breaker_tripped",
-                    depth_frames=self._tui_leg.depth_frames,
-                    depth_bytes=self._tui_leg.depth_bytes,
-                )
-        self._refresh_buffer_metrics()
-        await self.write_leg_unit(self._tui_leg.adapter_id, payload, seq=seq, ack=ack)
+        assert self._leg_router is not None  # the scheduler/router is wired alongside the leg
+        admit = self._tui_leg.try_admit(frame_bytes=len(payload))
+        if admit.decision is not IngressDecision.ADMITTED:
+            self._record_ingress_refusal(self._tui_leg, admit.decision)
+            return
+        # The in-flight slot is released as the frame leaves the gateway (the drain's write).
+        # For the NON-BINDING TUI gate this is bookkeeping only; for a real adapter leg it is
+        # what keeps the in-flight cap honest. We release immediately after enqueue: the leg
+        # owns the durable retention (the buffer), so the ingress slot's job (volumetric
+        # admission) is done once the frame is queued for the single writer.
+        self._tui_leg.release_admit(admit.token)  # type: ignore[arg-type]  # ADMITTED -> token set
+        self._leg_router.route(self._tui_leg.adapter_id, payload)
+
+    def _record_ingress_refusal(self, leg: GatewayLeg, decision: IngressDecision) -> None:
+        """Back-pressure + metric + LOUD audit on an ingress trip (K6, never silent).
+
+        Maps the gate's :class:`IngressDecision` onto the closed-vocab
+        :class:`IngressRefusalReason` and writes the field-allowlisted refusal row
+        (``adapter_id`` + reason + scalar counters only — no body / hash / platform-id).
+        OVERSIZED and THROTTLED_RATE collapse onto ``THROTTLED_RATE`` is WRONG — each has its
+        own reason; ``ADMITTED`` never reaches here (the caller guards it).
+        """
+        reason = _INGRESS_REFUSAL_REASON[decision]
+        record_ingress_refusal(
+            leg.adapter_id,
+            reason,
+            depth_frames=leg.depth_frames,
+            depth_bytes=leg.depth_bytes,
+            inflight=leg.inflight_count,
+            cap_ratio=leg.cap_ratio,
+        )
+
+    async def escalate_if_breaker_tripped(self, leg: GatewayLeg) -> None:
+        """Feed BREAKER_TRIPPED iff ``leg``'s soft cap latched; once-only UNAVAILABLE (JC-2).
+
+        The drain-time breaker seam (Spec B G6-4 Task 7 / architect ruling). The scheduler
+        calls this AFTER a successful ``record_for_send`` (the append is what can breach the
+        soft cap) and BEFORE the physical write. The breaker feed MOVED here from the retired
+        inline ``submit_tui_unit`` path; the ``LinkStateMachine`` + ``_feed`` + the audit row
+        stay owned by the link (the scheduler stays leg-agnostic — it passes the opaque
+        :class:`GatewayLeg`). The absorbing machine emits ``LinkControl.UNAVAILABLE`` EXACTLY
+        once, so the loud audit row fires once across every caller (scheduler-fresh AND any
+        future replay). Payload-blind: ``adapter_id`` / scalar depths only.
+
+        The reconnect flush (:meth:`_flush_pending_replay`) does NOT call this: the captured
+        remainder re-appends into a freshly-``reset_for_new_epoch``-ed (un-tripped) buffer
+        and cannot breach, and escalating during a recovery replay would fight the reconnect.
+        """
+        if not leg.breaker_tripped:
+            return
+        control = await self._feed(GatewayLinkEvent.BREAKER_TRIPPED)
+        if control is LinkControl.UNAVAILABLE:
+            log.warning(
+                "gateway.comms.breaker_tripped",
+                depth_frames=leg.depth_frames,
+                depth_bytes=leg.depth_bytes,
+            )
+            # G6-4 Task 7 (#288): the breaker just latched at DRAIN — flip the UNLABELLED
+            # JC-1 ``gateway_circuit_breaker_open`` gauge (the once-only escalation edge is
+            # the right place; the ``ops/`` page-severity alert + Grafana panel key on the
+            # unlabelled series). Single-TUI-leg ONLY — PR13: never per-non-TUI-leg drain, so
+            # refresh the unlabelled shim only when the escalating leg IS the TUI leg.
+            if leg is self._tui_leg:
+                self._refresh_buffer_metrics()
 
     def core_cumulative_ack(self) -> int:
         """The core-leg receive tracker's contiguous ack, FLOORED to ``0`` (G6-4 / K1).
@@ -1124,7 +1194,18 @@ class GatewayCoreLink:
         drop, never raised into the scheduler pump (a dead/swapping leg is an OPERATIONAL
         edge; the frame stays in the leg's buffer for replay). ``adapter_id`` is carried for
         the audit breadcrumb only — payload-blind, no body parse.
+
+        **Unlabelled JC-1 gauges (G6-4 Task 7 / #288).** The scheduler-owned
+        ``record_for_send`` ran (and APPENDED) before this writer; under Option A this single
+        link-owned per-drain writer is the seam that refreshes the UNLABELLED
+        ``gateway_buffer_depth_*`` / ``gateway_buffer_cap_ratio`` series the ``ops/`` Grafana
+        panels + alerts key on (the inline G5 path used to refresh them per-append). Done
+        UNCONDITIONALLY of the wire outcome (the append is durable even on a loud drop), but
+        ONLY for the TUI leg — PR13: never per-non-TUI-leg drain. The breaker-open gauge is
+        refreshed on its once-only trip edge in :meth:`escalate_if_breaker_tripped`.
         """
+        if self._tui_leg is not None and adapter_id == self._tui_leg.adapter_id:
+            self._refresh_buffer_metrics()
         local = self._current_core_transport
         if local is None:
             log.warning(
