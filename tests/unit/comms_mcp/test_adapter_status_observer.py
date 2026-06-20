@@ -468,3 +468,30 @@ async def test_refusal_leaves_an_existing_snapshot_untouched() -> None:
     # ...and the prior accepted snapshot still stands (no downgrade-by-forgery).
     snap = obs.latest("discord")
     assert snap is not None and snap.state == "up"
+
+
+@pytest.mark.asyncio
+async def test_all_latest_is_an_immutable_view_of_every_observed_adapter() -> None:
+    """G6-2b-2c (#288): ``all_latest`` enumerates every adapter as a read-only view.
+
+    The additive enumeration read the daemon control plane folds into the live
+    status result. It must be a ``MappingProxyType`` (item-set raises) so a caller
+    cannot mutate the observer's internal map through the read surface.
+    """
+    audit = _FakeAudit()
+    obs = _make_observer(audit)
+    await obs.observe("gateway.adapter.up", {"adapter_id": "discord", "epoch": _EPOCH})
+    await obs.observe("gateway.adapter.down", {"adapter_id": "tui", "reason": "shutdown"})
+
+    latest = obs.all_latest()
+    assert set(latest) == {"discord", "tui"}
+    assert latest["discord"].state == "up"
+    assert latest["tui"].state == "down"
+    with pytest.raises(TypeError):
+        latest["discord"] = latest["tui"]  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_all_latest_is_empty_before_any_frame() -> None:
+    obs = _make_observer(_FakeAudit())
+    assert dict(obs.all_latest()) == {}

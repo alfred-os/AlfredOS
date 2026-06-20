@@ -33,6 +33,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
 import structlog
@@ -179,6 +180,16 @@ class AdapterStatusObserver:
     def latest(self, adapter_id: str) -> AdapterStatusSnapshot | None:
         """The most recent ACCEPTED status for ``adapter_id``, or None."""
         return self._latest.get(adapter_id)
+
+    def all_latest(self) -> Mapping[str, AdapterStatusSnapshot]:
+        """Read-only view of the latest accepted status for EVERY observed adapter (#288).
+
+        The additive enumeration read the daemon control plane (G6-2b-2c / ADR-0038)
+        folds into the live status result. A ``MappingProxyType`` so a caller cannot
+        mutate the observer's internal map through the read surface — touches NO
+        existing behaviour (the constructor signature is unchanged).
+        """
+        return MappingProxyType(self._latest)
 
     async def observe(self, method: object, params: object) -> None:
         """Consume one gateway adapter-status frame: validate -> reconcile -> audit.

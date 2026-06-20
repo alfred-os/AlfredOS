@@ -152,6 +152,24 @@ class CrashIncidentReconciler:
         state = self._state(adapter_id)
         state.current_incarnation = max(state.current_incarnation, host_restart_seq)
 
+    def adapter_ids(self) -> tuple[str, ...]:
+        """Every adapter the reconciler has observed (additive in-process read for 2b-2c).
+
+        The daemon control plane (G6-2b-2c / ADR-0038) folds this with the observer's
+        ``all_latest`` to enumerate the full adapter set for the live status result.
+        Touches no existing behaviour.
+        """
+        return tuple(self._adapters)
+
+    def current_incarnation(self, adapter_id: str) -> int:
+        """Latest incarnation seen for ``adapter_id`` (0 if unseen; ``.get`` -> no invention).
+
+        Reads the current incarnation WITHOUT registering the adapter — an unseen
+        adapter reports 0 and stays unregistered (the read never mutates state).
+        """
+        state = self._adapters.get(adapter_id)
+        return 0 if state is None else state.current_incarnation
+
     def incidents(self, adapter_id: str) -> tuple[CrashIncidentView, ...]:
         """The correlated incidents for ``adapter_id`` (in-process read for 2b-2c)."""
         state = self._adapters.get(adapter_id)
