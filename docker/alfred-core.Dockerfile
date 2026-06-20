@@ -57,7 +57,7 @@ RUN apt-get update -qq \
 # release is latest at build time (tracked as the #254 pin-proto-install
 # follow-up). Bump deliberately. The relocation glob stays patch-tolerant so a
 # pin bump needs only this one line.
-ARG ALFRED_PYTHON_VERSION=3.14.0
+ARG ALFRED_PYTHON_VERSION=3.14.6
 # DL4006 / CodeRabbit (#290): pipefail so a mid-stream `curl` failure fails the build
 # rather than letting `bash` exit 0 on a truncated proto installer.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
