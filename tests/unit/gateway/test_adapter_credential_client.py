@@ -15,6 +15,7 @@ isolation: a fresh buffer per call, no ``self``-scoped credential field.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -117,19 +118,25 @@ async def test_client_holds_no_credential_attribute_after_call() -> None:
 
 async def test_mismatched_epoch_grant_is_refused() -> None:
     link = _FakeLink()
-    # The core (or an attacker) returns a grant echoing a DIFFERENT epoch.
-    forged = SpawnGrant(
-        request_id="00000000000000000000000000000000",  # set per-request below
-        adapter_id="discord",
-        host_restart_seq=0,
-        epoch="fedcba9876543210fedcba9876543210",
-        credential_material=_SENTINEL_CRED,
-    )
     client = _client(link)
     read_fd, write_fd = os.pipe()
+
+    # The grant echoes the request's request_id / adapter_id / host_restart_seq EXACTLY
+    # and forges ONLY the epoch. This isolates the epoch check: the refusal can fire for
+    # no reason BUT the epoch mismatch (a request_id-keyed forgery would mask an
+    # epoch-matching regression — the false-green this test used to have).
+    async def _forge_epoch(request: SpawnRequest, *, timeout: float = 10.0) -> SpawnGrant:
+        assert request.epoch == _EPOCH  # the request carried the live epoch
+        return SpawnGrant(
+            request_id=request.request_id,
+            adapter_id=request.adapter_id,
+            host_restart_seq=request.host_restart_seq,
+            epoch="fedcba9876543210fedcba9876543210",  # forged: the ONLY mismatched field
+            credential_material=_SENTINEL_CRED,
+        )
+
+    link.request_spawn_grant = _forge_epoch  # type: ignore[method-assign]
     try:
-        # request_id will not match the forged grant; verify the refusal fires.
-        link.force_grant(forged)
         with pytest.raises(AdapterCredentialError):
             await client.acquire_and_deliver(
                 adapter_id="discord", host_restart_seq=0, write_fd=write_fd, epoch=_EPOCH
@@ -183,6 +190,24 @@ async def test_leg_down_propagates() -> None:
             os.fstat(write_fd)
 
 
+async def test_roundtrip_adapter_credential_error_propagates_and_closes_fd() -> None:
+    # Defensive: if the leg itself surfaces an AdapterCredentialError (a future leg
+    # impl that pre-validates), the client propagates it UNWRAPPED + closes write_fd.
+    link = _FakeLink()
+    link.raise_with = AdapterCredentialError(adapter_id="discord", reason="missing_secret")
+    client = _client(link)
+    read_fd, write_fd = os.pipe()
+    try:
+        with pytest.raises(AdapterCredentialError):
+            await client.acquire_and_deliver(
+                adapter_id="discord", host_restart_seq=0, write_fd=write_fd, epoch=_EPOCH
+            )
+    finally:
+        os.close(read_fd)
+        with pytest.raises(OSError):
+            os.fstat(write_fd)
+
+
 async def test_reply_timeout_is_wrapped_loud() -> None:
     link = _FakeLink()
     link.raise_with = CredentialReplyTimeoutError("timeout")
@@ -227,6 +252,75 @@ async def test_fd3_delivery_failure_aborts_loud() -> None:
         # The credential REACHED the delivery sink (so the round-trip succeeded) — the
         # failure is in the write, not the resolution.
         assert delivered == [_SENTINEL_CRED]
+    finally:
+        os.close(read_fd)
+
+
+# --- fd is closed on a SpawnRequest construction failure (no leak) ------------
+
+
+async def test_request_construction_failure_closes_fd(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A validation error while constructing the SpawnRequest (e.g. a future field
+    # tightening, or a forced fault here) must NOT leak write_fd: the construction lives
+    # INSIDE the try that owns the _close_fd cleanup. The round-trip is never reached;
+    # the fault surfaces as a loud fail-closed AdapterCredentialError abort.
+    link = _FakeLink()
+    client = _client(link)
+
+    class _BoomError(Exception):
+        pass
+
+    def _explode(**_kwargs: object) -> SpawnRequest:
+        raise _BoomError("forced construction failure")
+
+    monkeypatch.setattr("alfred.gateway.adapter_credential_client.SpawnRequest", _explode)
+    read_fd, write_fd = os.pipe()
+    try:
+        with pytest.raises(AdapterCredentialError):
+            await client.acquire_and_deliver(
+                adapter_id="discord", host_restart_seq=0, write_fd=write_fd, epoch=_EPOCH
+            )
+        # The leg was never called (we failed before the round-trip).
+        assert link.requests == []
+        # write_fd was closed by the client (no leaked descriptor).
+        with pytest.raises(OSError):
+            os.fstat(write_fd)
+    finally:
+        os.close(read_fd)
+
+
+# --- a cancellation mid-await propagates AND closes the fd (no leak) -----------
+
+
+async def test_cancelled_during_roundtrip_propagates_and_closes_fd() -> None:
+    # A CancelledError during the core-grant await (request_spawn_grant) must propagate
+    # (cancellation is not swallowed) AND close write_fd (no leaked descriptor): the
+    # except-CancelledError arm closes then re-raises.
+    started = asyncio.Event()
+
+    class _BlockingLink:
+        async def request_spawn_grant(
+            self, request: SpawnRequest, *, timeout: float = 10.0
+        ) -> SpawnGrant:
+            started.set()
+            await asyncio.Event().wait()  # block forever until cancelled
+            raise AssertionError("unreachable")  # pragma: no cover
+
+    client = GatewayAdapterCredentialClient(core_link=_BlockingLink())  # type: ignore[arg-type]
+    read_fd, write_fd = os.pipe()
+    try:
+        task = asyncio.ensure_future(
+            client.acquire_and_deliver(
+                adapter_id="discord", host_restart_seq=0, write_fd=write_fd, epoch=_EPOCH
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The cancellation closed write_fd before propagating.
+        with pytest.raises(OSError):
+            os.fstat(write_fd)
     finally:
         os.close(read_fd)
 

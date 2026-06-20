@@ -405,6 +405,44 @@ the 2b echo child reads, scrubs, and discards it without a provider call.
 PR-S4-11c-2c flips the unset path to refuse-boot once the child makes a real
 provider call.
 
+### Spec B G6-3: the gateway adapter credential path (core-injects-at-spawn)
+
+The always-up gateway hosts the comms adapter children (ADR-0036 inversion); the
+core only observes. An adapter child needs its platform credential (e.g. the Discord
+bot token) but the gateway holds **no vault key** — so the credential is
+**core-injects-at-spawn over fd 3**, never the child's environment.
+
+On each (re)spawn the gateway's `GatewayAdapterCredentialClient`
+(`src/alfred/gateway/adapter_credential_client.py`) runs a request/response
+round-trip over the trusted ADR-0031 core leg: it sends
+`gateway.adapter.spawn_request` and awaits the matching `core.adapter.spawn_grant`
+(the **first** core→gateway response frame on that leg — a new id-correlation
+primitive on `GatewayCoreLink`). The core's `CoreAdapterCredentialResolver`
+(`src/alfred/comms_mcp/adapter_credential_resolver.py`) is the **only** component
+that decrypts a platform credential: it maps `adapter_id → secret_id` via a CLOSED
+allowlist (`discord → discord_bot_token`; an unknown id is a typed refusal, never a
+`broker.get(adapter_id)` passthrough), reads the broker, dedups on
+`(adapter_id, host_restart_seq, epoch)` (a true replay decrypts **once**), and
+returns the grant. The gateway verifies the grant echoes its outstanding request
+`(request_id, adapter_id, host_restart_seq, epoch)` — a forged/stale grant is
+refused (adversarial e) — then delivers the plaintext to the child's fd-3 write end
+via the reused `supervisor/fd3_key_delivery.deliver_provider_key_via_fd3` (the lib
+builds + zeroes its own buffer). The wire frames live in
+`src/alfred/comms_mcp/adapter_credential_protocol.py`; the daemon wires the resolver
+into the runner on the SOCKET (gateway) leg only.
+
+Fail-closed everywhere: a link drop during the round-trip → `CredentialLegDownError`
+→ the supervisor's **AWAITING_CORE** (a non-spin bounded-backoff re-probe with a
+terminal ceiling that trips the breaker rather than parking dark forever); a grant
+refusal / mismatch / fd-3 fault → a loud audited spawn-abort (no `up` frame). The
+epoch is sourced **live** per spawn from `current_core_epoch()` so a core bounce
+mints a fresh epoch. The credential is **structurally un-loggable** —
+`SpawnGrant.credential_material` is `repr=False` with overridden `__repr__`/`__str__`
+— and appears only on the fd-3 sink, never in an audit row, log line, frame repr, or
+exception. See ADR-0036 "Credential contract realized (G6-3 annotation)". The
+honest str-residency window (the credential is a `str`, not zeroable) and the
+deferred `SecretBroker.get_bytes` hardening are recorded in that annotation.
+
 ### Rendering guidance for operator-facing audit rows (i18n-3)
 
 When a comms audit row renders to an operator surface (CLI / TUI / dashboard),
