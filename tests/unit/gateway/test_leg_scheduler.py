@@ -269,6 +269,80 @@ async def test_drain_records_via_leg_and_writes_with_seq_and_ack() -> None:
     assert leg.depth_frames == 2
 
 
+async def test_drain_skips_stale_write_after_mid_drain_epoch_reset() -> None:
+    """H3 (Spec B G6-4, #288): a frame whose leg reset mid-drain is NOT physically written.
+
+    REPRODUCES the single-writer seq race / wire-seq corruption. ``record_for_send`` mints
+    the seq SYNCHRONOUSLY, but there is an ``await`` (``escalate_if_breaker_tripped``) BEFORE
+    ``write_leg_unit``. A concurrent reconnect can, during that await, capture the leg's
+    un-acked frames into ``_pending_replay``, ``reset_for_new_epoch`` the leg (seq → 0), and
+    ``_flush_pending_replay`` re-send the SAME frame at the fresh seq 0. When the drain then
+    resumes its ``write_leg_unit`` it would write the SAME payload AGAIN at the STALE seq N on
+    the fresh transport — a double-write + a forward-seq-jump that corrupts the wire-seq
+    contiguity the ack/resume keys on.
+
+    Driven deterministically: the fake core-link's ``escalate_if_breaker_tripped`` (the await
+    point between mint and write) performs the ``reset_for_new_epoch`` — exactly the leg-state
+    mutation a concurrent reconnect makes during that window. PRE-FIX the drain writes the
+    stale seq N; POST-FIX it generation-compares the leg before the write, finds the
+    generation bumped, SKIPS the stale physical write (the frame is already captured + re-flushed
+    at the fresh seq, so it is NOT lost), and emits a loud ``gateway.scheduler.*`` row.
+    """
+    import structlog.testing
+
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+    leg = _make_leg("a", cap)
+
+    class _ResettingCoreLink(_RecordingCoreLink):
+        async def escalate_if_breaker_tripped(self, esc_leg: GatewayLeg) -> None:
+            await super().escalate_if_breaker_tripped(esc_leg)
+            # Simulate the concurrent reconnect landing during the mint->write await window:
+            # the un-acked frame is captured + the leg reset (generation bump, seq->0) + the
+            # frame re-flushed at the fresh seq elsewhere. The pending write is now STALE.
+            esc_leg.reset_for_new_epoch()
+
+    core = _ResettingCoreLink()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
+    sched.register_leg(leg)
+    sched.enqueue("a", b"in-flight")
+
+    with structlog.testing.capture_logs() as captured:
+        async with asyncio.TaskGroup() as tg:
+            pump = tg.create_task(sched.run())
+            await _drain_until(lambda: bool(core.escalations))
+            # Give the drain a few ticks to (attempt to) reach write_leg_unit.
+            for _ in range(20):
+                await asyncio.sleep(0)
+            pump.cancel()
+
+    # The stale physical write was SKIPPED — nothing reached the transport at the stale seq.
+    assert core.writes == []
+    skipped = [c for c in captured if c.get("event") == "gateway.scheduler.stale_write_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0].get("adapter_id") == "a"
+    assert skipped[0].get("log_level") in {"warning", "error"}
+
+
+async def test_drain_writes_when_generation_unchanged() -> None:
+    """H3 guard: a normal drain (no mid-drain reset) still writes — the guard is not over-eager.
+
+    Mutation guard for the generation-compare: with the generation UNCHANGED across the
+    mint->write window the frame is written exactly as before (the common path is not broken
+    by the stale-write guard).
+    """
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+    core = _RecordingCoreLink()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
+    leg = _make_leg("a", cap)
+    sched.register_leg(leg)
+    sched.enqueue("a", b"normal")
+    async with asyncio.TaskGroup() as tg:
+        pump = tg.create_task(sched.run())
+        await _drain_until(lambda: len(core.writes) == 1)
+        pump.cancel()
+    assert core.writes == [("a", b"normal", 0, 0)]
+
+
 # --------------------------------------------------------------------------- #
 # Replay-pending gate (Spec B G6-4 Task 7 / Option A — resume-oracle preserving) #
 # --------------------------------------------------------------------------- #

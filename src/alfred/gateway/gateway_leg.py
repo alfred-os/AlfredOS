@@ -70,6 +70,14 @@ class GatewayLeg:
         # The per-leg client->core send seq. Per-connection: reset to 0 each epoch so the
         # first relayed frame on a fresh core leg carries wire seq 0 (resume correctness).
         self._send_seq = 0
+        # H3 (Spec B G6-4, #288): a monotonic per-connection GENERATION counter bumped on every
+        # ``reset_for_new_epoch`` (a fresh core leg). The scheduler snapshots it when it mints a
+        # frame's seq and re-reads it before the physical write: if a concurrent reconnect reset
+        # the leg DURING the mint->write await (capturing + re-flushing the frame at the fresh
+        # seq), the generation changed and the in-flight write is STALE — the scheduler skips the
+        # physical write so the same frame is not written twice (once stale-seq from the drain,
+        # once fresh-seq from the flush), preserving wire-seq contiguity + exactly-once.
+        self._generation = 0
         # Materialise the per-adapter series at construction (F8) so a scrape sees the leg
         # at 0 before its first frame — both the buffer-depth gauges and the throttle counter.
         self._refresh_buffer_metrics()
@@ -109,6 +117,17 @@ class GatewayLeg:
     def last_seq(self) -> int:
         """The highest per-leg send seq minted so far (``-1`` before the first)."""
         return self._send_seq - 1
+
+    @property
+    def generation(self) -> int:
+        """The per-connection epoch generation (bumped on each :meth:`reset_for_new_epoch`).
+
+        H3 (Spec B G6-4, #288): the scheduler snapshots this at seq-mint and re-reads it
+        before the physical write to detect a reconnect that reset the leg mid-drain — a
+        changed generation means the in-flight write is STALE (the frame was re-flushed at the
+        fresh seq) and must be skipped to keep the wire seq contiguous + delivery exactly-once.
+        """
+        return self._generation
 
     def try_admit(self, *, frame_bytes: int) -> AdmitResult:
         """Delegate admission to this leg's ingress gate (payload-blind, size only)."""
@@ -177,6 +196,9 @@ class GatewayLeg:
         def _op() -> None:
             self._buffer.reset_for_new_epoch()
             self._send_seq = 0
+            # H3 (Spec B G6-4, #288): bump the generation so any frame minted on the PREVIOUS
+            # connection but not yet physically written is detectable as stale by the scheduler.
+            self._generation += 1
 
         self._reclaim(_op)
 
