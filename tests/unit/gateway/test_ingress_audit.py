@@ -16,6 +16,7 @@ from alfred.gateway.ingress_audit import (
     IngressRefusalReason,
     reason_i18n_key,
     record_ingress_refusal,
+    record_unknown_adapter_refusal,
     touch_ingress_series,
 )
 
@@ -102,6 +103,38 @@ def test_no_body_or_platform_id_field_ever_present() -> None:
         assert forbidden.isdisjoint(row), f"forbidden field on row: {forbidden & set(row)}"
         serialized = repr(row).encode()
         assert _SENTINEL_BODY not in serialized
+
+
+def test_unknown_adapter_row_stays_within_the_allowlist() -> None:
+    # K6 totality (Spec B G6-4 #288): the forged/unknown-adapter sink emits a
+    # ``gateway.ingress.refused`` row carrying ``forged_adapter_id`` — that field MUST be in
+    # the allowlist so the K6 field-allowlist guarantee covers BOTH refusal sinks, not just
+    # the scalar-counter one. A high-entropy forged id (longer than the truncation bound)
+    # exercises the bound + proves no body leaks alongside it.
+    forged = "FORGED-" + "z" * 200
+    cap = structlog.testing.LogCapture()
+    structlog.configure(processors=[cap])
+    try:
+        before = _throttled("<unknown>")
+        record_unknown_adapter_refusal(forged)
+    finally:
+        structlog.reset_defaults()
+    # Cardinality guard: the sentinel series absorbs it, never the forged id.
+    assert _throttled("<unknown>") == before + 1.0
+    assert len(cap.entries) == 1
+    row = cap.entries[0]
+    assert row["adapter_id"] == "<unknown>"
+    assert row["reason"] == "unknown_adapter"
+    # The forged id is BOUNDED on the row (audit-injection defence) and resolves within the
+    # allowlist (plus structlog's own keys).
+    assert len(row["forged_adapter_id"]) <= 64
+    allowed = INGRESS_REFUSAL_AUDIT_FIELDS | {"event", "log_level"}
+    assert set(row) <= allowed, f"unexpected fields on unknown-adapter row: {set(row) - allowed}"
+
+
+def test_audit_fields_constant_includes_forged_adapter_id() -> None:
+    # The forged-id forensic field is part of the closed allowlist (K6 totality).
+    assert "forged_adapter_id" in INGRESS_REFUSAL_AUDIT_FIELDS
 
 
 def test_audit_fields_constant_excludes_body_keys() -> None:
