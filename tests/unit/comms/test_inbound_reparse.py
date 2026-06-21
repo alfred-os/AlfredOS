@@ -186,6 +186,29 @@ def test_malformed_message_carries_leak_safe_structural_detail() -> None:
     assert sentinel not in message  # the smuggled body value never appears
 
 
+def test_structural_summary_redacts_extra_forbidden_key_name() -> None:
+    """An attacker-controlled extra key NAME must never reach the error string.
+
+    G6-7-2 carry-item (UAT on #311): ``extra_forbidden@<key>`` surfaced the body's
+    top-level key name. Redact the loc for ``extra_forbidden`` (the key is T3-derived)
+    while keeping schema-known field paths for every other error type (spec §3.3).
+    """
+    body = (
+        b'{"adapter_id":"discord","s3cr3t_smuggled_key":"leak",'
+        b'"inbound_id":"i1","platform_user_id":"u1"}'
+    )
+    envelope = GatewayAdapterInboundEnvelope(adapter_id="discord", body=body)
+
+    with pytest.raises(InboundBodyMalformedError) as excinfo:
+        reparse_forwarded_inbound(envelope)
+
+    message = str(excinfo.value)
+    assert "s3cr3t_smuggled_key" not in message  # attacker key NAME redacted
+    assert "extra_forbidden" in message  # the TYPE still surfaces (debug aid)
+    assert "<redacted>" in message  # explicit redaction marker
+    assert "missing@" in message  # a schema-known path is still surfaced
+
+
 def test_str_body_reparses_identically_to_bytes_body() -> None:
     # The envelope accepts str or bytes; both decode to the same notification.
     body_bytes = _valid_body("discord")
