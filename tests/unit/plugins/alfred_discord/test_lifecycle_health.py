@@ -1,12 +1,14 @@
 """``lifecycle.start`` / ``lifecycle.stop`` / ``adapter.health`` handlers (Task C2).
 
-The lifecycle handlers authenticate via ``SecretBroker.get("discord_bot_token")``
-(never reading the token from env directly), open the Discord WSS through an
-injected gateway seam (mocked here; the real ``discord.Client`` wiring lands in
-Wave 3's ``discord_gateway.py``), and report the ADR-0024 protocol-model results.
+The lifecycle handlers authenticate by reading ``discord_bot_token`` from LITERAL
+fd 3 — the core injects the token at child spawn (Spec B G6-5, #288), the exact
+peer of ``deliver_provider_key_via_fd3``'s framing. The adapter no longer
+self-brokers the token; it opens the Discord WSS through an injected gateway seam
+(mocked here; the real ``discord.Client`` wiring lands in Wave 3's
+``discord_gateway.py``), and reports the ADR-0024 protocol-model results.
 
 The token is NEVER logged: a dedicated test asserts no structlog event carries
-the secret bytes.
+the secret bytes (C3 — preserved against the fd-3 source).
 """
 
 from __future__ import annotations
@@ -43,25 +45,27 @@ class _FakeGateway:
         return 3
 
 
-class _FakeBroker:
+class _FakeTokenSource:
+    """Injected fd-3 token source double: returns a pre-staged token string."""
+
     def __init__(self, token: str = "tok-secret-123") -> None:  # noqa: S107 -- fabricated test token, not a credential
         self._token = token
-        self.get_calls: list[str] = []
+        self.read_calls = 0
 
-    def get(self, name: str) -> str:
-        self.get_calls.append(name)
+    def read(self) -> str:
+        self.read_calls += 1
         return self._token
 
 
 @pytest.mark.asyncio
-async def test_start_authenticates_via_broker_and_opens_gateway() -> None:
+async def test_start_reads_token_from_fd3_and_opens_gateway() -> None:
     gateway = _FakeGateway()
-    broker = _FakeBroker(token="tok-abc")  # noqa: S106 -- fabricated test token, not a credential
-    lifecycle = DiscordLifecycle(broker=broker, gateway=gateway)
+    source = _FakeTokenSource(token="tok-abc")  # noqa: S106 -- fabricated test token, not a credential
+    lifecycle = DiscordLifecycle(token_source=source, gateway=gateway)
 
     result = await lifecycle.start()
 
-    assert broker.get_calls == ["discord_bot_token"]
+    assert source.read_calls == 1
     assert gateway.connected_with == "tok-abc"
     assert isinstance(result, LifecycleStartResult)
     assert result.ok is True
@@ -71,7 +75,7 @@ async def test_start_authenticates_via_broker_and_opens_gateway() -> None:
 @pytest.mark.asyncio
 async def test_start_is_idempotent() -> None:
     gateway = _FakeGateway()
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=gateway)
 
     await lifecycle.start()
     gateway.connected_with = None  # detect a second connect
@@ -85,7 +89,7 @@ async def test_start_is_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_start_failure_returns_not_ok() -> None:
     gateway = _FakeGateway(fail_connect=True)
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=gateway)
 
     result = await lifecycle.start()
 
@@ -96,7 +100,7 @@ async def test_start_failure_returns_not_ok() -> None:
 @pytest.mark.asyncio
 async def test_stop_closes_gateway_and_reports_flushed() -> None:
     gateway = _FakeGateway()
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=gateway)
     await lifecycle.start()
 
     result = await lifecycle.stop()
@@ -110,7 +114,7 @@ async def test_stop_closes_gateway_and_reports_flushed() -> None:
 @pytest.mark.asyncio
 async def test_health_reports_running_and_queue_depth() -> None:
     gateway = _FakeGateway()
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=gateway)
     await lifecycle.start()
 
     report = lifecycle.health()
@@ -124,7 +128,7 @@ async def test_health_reports_running_and_queue_depth() -> None:
 
 @pytest.mark.asyncio
 async def test_health_not_ok_before_start() -> None:
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=_FakeGateway())
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=_FakeGateway())
     report = lifecycle.health()
     assert report.ok is False
 
@@ -133,7 +137,7 @@ async def test_health_not_ok_before_start() -> None:
 async def test_token_never_logged(capsys: pytest.CaptureFixture[str]) -> None:
     secret = "tok-super-secret-xyz"  # noqa: S105 -- fabricated leak marker, not a credential
     gateway = _FakeGateway(fail_connect=True)
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(token=secret), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(token=secret), gateway=gateway)
 
     await lifecycle.start()
 
@@ -152,7 +156,7 @@ async def test_token_absent_from_captured_log_records() -> None:
     """
     secret = "tok-super-secret-xyz"  # noqa: S105 -- fabricated leak marker, not a credential
     gateway = _FakeGateway(fail_connect=True)
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(token=secret), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(token=secret), gateway=gateway)
 
     with capture_logs() as logs:
         await lifecycle.start()
@@ -163,13 +167,13 @@ async def test_token_absent_from_captured_log_records() -> None:
             assert secret not in str(value)
 
 
-class _RaisingBroker:
-    """A broker whose ``get`` raises a non-Gateway operational error."""
+class _RaisingTokenSource:
+    """A token source whose ``read`` raises (a torn / mis-framed fd-3 read)."""
 
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    def get(self, name: str) -> str:
+    def read(self) -> str:
         raise self._exc
 
 
@@ -191,12 +195,12 @@ class _OddGateway:
 
 
 @pytest.mark.asyncio
-async def test_broker_failure_is_wire_safe_not_ok() -> None:
-    # A missing broker secret (or any broker error) must NOT escape the RPC
-    # boundary as a raised exception — the contract is ``ok=False``.
-    secret_marker = "tok-leak-in-broker-error"  # noqa: S105 -- fabricated, not a credential
+async def test_fd3_read_failure_is_wire_safe_not_ok() -> None:
+    # A torn / mis-framed fd-3 read (or any source error) must NOT escape the RPC
+    # boundary as a raised exception — the contract is ``ok=False`` (M3).
+    secret_marker = "tok-leak-in-source-error"  # noqa: S105 -- fabricated, not a credential
     lifecycle = DiscordLifecycle(
-        broker=_RaisingBroker(RuntimeError(secret_marker)),
+        token_source=_RaisingTokenSource(RuntimeError(secret_marker)),
         gateway=_FakeGateway(),
     )
 
@@ -204,7 +208,8 @@ async def test_broker_failure_is_wire_safe_not_ok() -> None:
         result = await lifecycle.start()
 
     assert result.ok is False
-    # The broker error's message (which could embed the token) must not be logged.
+    # The source error's message (which could embed partial token bytes) must not
+    # be logged.
     for event in logs:
         for value in event.values():
             assert secret_marker not in str(value)
@@ -215,7 +220,7 @@ async def test_non_gateway_transport_error_is_wire_safe_not_ok() -> None:
     # A non-``GatewayError`` raised during connect (a transport/operational error)
     # must also map to ``ok=False`` rather than crashing across the wire.
     lifecycle = DiscordLifecycle(
-        broker=_FakeBroker(),
+        token_source=_FakeTokenSource(),
         gateway=_OddGateway(OSError("transport down")),
     )
 
@@ -239,7 +244,7 @@ async def test_concurrent_start_does_not_open_gateway_twice() -> None:
             await super().connect(token)
 
     gateway = _CountingGateway()
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=gateway)
 
     results = await asyncio.gather(lifecycle.start(), lifecycle.start())
 
@@ -252,7 +257,7 @@ async def test_concurrent_start_does_not_open_gateway_twice() -> None:
 async def test_concurrent_start_and_stop_do_not_interleave() -> None:
     """A start and a stop racing must not leave an inconsistent running state."""
     gateway = _FakeGateway()
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=gateway)
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=gateway)
     await lifecycle.start()
 
     # Race a fresh start against a stop; the lock serialises them so the final
