@@ -55,7 +55,7 @@ _CREDENTIAL_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "credential_audit_unwr
 
 
 @runtime_checkable
-class _CredentialResolverLike(Protocol):
+class CredentialResolverLike(Protocol):
     """Structural seam for the core-side credential resolver (Spec B G6-3 / #288).
 
     The concrete type is
@@ -123,7 +123,7 @@ class SessionDispatchDisposition:
         self,
         *,
         session: AlfredPluginSession,
-        credential_resolver: _CredentialResolverLike | None,
+        credential_resolver: CredentialResolverLike | None,
         adapter_id: str,
         send_notification: _SendNotification,
         request_restart: _RequestRestart,
@@ -297,6 +297,7 @@ class SessionDispatchDisposition:
 
 
 __all__ = [
+    "CredentialResolverLike",
     "InboundDisposition",
     "SessionDispatchDisposition",
 ]
