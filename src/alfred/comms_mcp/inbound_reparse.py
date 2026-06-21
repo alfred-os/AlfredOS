@@ -77,4 +77,14 @@ def reparse_forwarded_inbound(
             f"body adapter_id {notification.adapter_id!r}"
         )
 
-    return notification
+    # ``wire_seq`` is HOST-AUTHORITATIVE leg-carrier metadata (ADR-0032), NEVER
+    # payload-derived. It is a declared field, so ``extra="forbid"`` does NOT block
+    # a value smuggled into the untrusted T3 body; mirror the production parse
+    # (session.py sets ``wire_seq`` host-side) by scrubbing any body-derived value.
+    # G6-7-3/-4 rebinds the real leg-carrier seq out-of-band; the re-parse never
+    # trusts a body-derived ``wire_seq`` (a forged value could corrupt the
+    # BoundedSeqAckTracker contiguous high-water the ack/replay semantics rest on).
+    # ``model_copy`` is frozen-safe: it constructs a new instance with the same
+    # validated fields and ``wire_seq=None`` (a valid value), bypassing the frozen
+    # setattr guard without re-running validation on the trusted re-parse.
+    return notification.model_copy(update={"wire_seq": None})

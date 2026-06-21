@@ -58,6 +58,22 @@ def test_happy_body_reparses_to_exact_inbound_notification() -> None:
     assert result.wire_seq is None
 
 
+def test_body_smuggled_wire_seq_is_scrubbed() -> None:
+    # wire_seq is HOST-AUTHORITATIVE leg-carrier metadata (ADR-0032), never
+    # payload-derived. A malicious adapter child could smuggle a wire_seq inside
+    # the untrusted T3 body (it is a declared field, so extra="forbid" does NOT
+    # block it). The re-parse MUST scrub it: a forged wire_seq surviving onto the
+    # notification could corrupt the BoundedSeqAckTracker high-water (G6-7-4).
+    raw = json.loads(_valid_body("discord"))
+    raw["wire_seq"] = 999
+    body = json.dumps(raw).encode("utf-8")
+    env = GatewayAdapterInboundEnvelope(adapter_id="discord", body=body)
+
+    result = reparse_forwarded_inbound(env)
+
+    assert result.wire_seq is None
+
+
 def test_envelope_equals_body_adapter_id_passes() -> None:
     body = _valid_body("tui")
     env = GatewayAdapterInboundEnvelope(adapter_id="tui", body=body)
