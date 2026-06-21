@@ -620,14 +620,15 @@ class GatewayAdapterSupervisor:
         shutdown (the flagged H1 gap). :meth:`_AdapterChildLike.aclose` is idempotent.
 
         Best-effort + fail-LOUD (CLAUDE.md hard rule #7): a reap fault is logged on the
-        distinct ``gateway.adapter.reap_failed`` row — NEVER silently swallowed — and
-        then absorbed so a single bad reap cannot wedge the restart loop (which would
-        leave the adapter dark forever) nor block shutdown.
+        distinct ``gateway.adapter.reap_failed`` row at ERROR — a failed reap means a
+        possibly-LEAKED sandbox (bwrap) child, which is operator-actionable, NOT routine
+        back-pressure — then absorbed so a single bad reap cannot wedge the restart loop
+        (which would leave the adapter dark forever) nor block shutdown.
         """
         try:
             await child.aclose()
         except Exception as exc:
-            log.warning(
+            log.error(
                 "gateway.adapter.reap_failed",
                 adapter_id=run.adapter_id,
                 error_class=type(exc).__name__,
