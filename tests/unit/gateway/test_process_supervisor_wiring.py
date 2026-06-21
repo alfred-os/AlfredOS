@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 import structlog.testing
 
+from alfred.gateway.adapter_child_factory import GatewayAdapterChildFactory
 from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
     GatewayAdapterSupervisor,
@@ -29,7 +30,6 @@ from alfred.gateway.leg_scheduler import GatewayLegScheduler
 from alfred.gateway.process import (
     GatewayProcess,
     _CoreEpochCredSeam,
-    _UnspawnedAdapterChildFactory,
 )
 from alfred.gateway.replay_buffer import ReplayBuffer
 
@@ -89,22 +89,41 @@ async def test_supervise_empty_set_is_a_clean_noop() -> None:
     await asyncio.wait_for(supervisor.supervise_all(process._adapter_ids), timeout=1.0)
 
 
-async def test_unspawned_child_factory_fails_closed() -> None:
-    """The placeholder child factory raises GatewayAdapterSpawnError (fail-closed, gap b).
+def test_supervisor_is_built_with_the_real_child_factory() -> None:
+    """G6-5 Task 5 (#288): the supervisor hosts the REAL GatewayAdapterChildFactory.
 
-    With the empty adapter set it is never called; if a future non-empty set is passed
-    before the real factory lands, the spawn fails LOUD rather than running a
-    credential-less adapter.
+    The G6-2b-2a ``_UnspawnedAdapterChildFactory`` placeholder is retired: the process
+    now constructs the real bwrap adapter-child factory, so a non-empty ``adapter_ids``
+    no longer fails loud at a placeholder — it spawns a real sandboxed child.
     """
+    process = GatewayProcess(shutdown_event=asyncio.Event(), adapter_ids=["discord"])
+    core_link = _make_core_link()
+    supervisor = process._build_adapter_supervisor(core_link)
+    assert isinstance(supervisor._factory, GatewayAdapterChildFactory)
 
-    async def _noop_deliver(_write_fd: int) -> None:  # pragma: no cover - never reached
-        pass
 
-    factory = _UnspawnedAdapterChildFactory()
-    with __import__("pytest").raises(GatewayAdapterSpawnError):
-        await factory.spawn_and_handshake(
-            adapter_id="discord", epoch="a" * 32, deliver_credential=_noop_deliver
-        )
+def test_unspawned_placeholder_is_gone_from_the_module() -> None:
+    """The placeholder factory is DELETED — neither the symbol nor its ``__all__`` entry remain."""
+    import alfred.gateway.process as process_module
+
+    assert not hasattr(process_module, "_UnspawnedAdapterChildFactory")
+    assert "_UnspawnedAdapterChildFactory" not in process_module.__all__
+
+
+async def test_default_runner_factory_refuses_loud_without_a_session_runner() -> None:
+    """The default ``adapter_runner_factory`` fails LOUD (the daemon-collaborator gap, H1/#7).
+
+    The standalone gateway process does NOT build the daemon boot-graph session a real
+    ``CommsPluginRunner`` needs, so the default runner factory refuses rather than
+    handshaking a session-less runner. A production host that spawns a real adapter
+    injects ``GatewayProcess(adapter_runner_factory=...)``.
+    """
+    from alfred.gateway.adapter_stdio_transport import GatewayAdapterStdioTransport
+    from alfred.gateway.process import _unwired_runner_factory
+
+    transport = object.__new__(GatewayAdapterStdioTransport)
+    with pytest.raises(GatewayAdapterSpawnError, match="no adapter runner factory wired"):
+        _unwired_runner_factory(transport=transport, adapter_id="discord")
 
 
 def test_process_builds_supervisor_with_real_credential_client() -> None:
