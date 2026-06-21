@@ -229,6 +229,13 @@ class GatewayLegScheduler:
         ``LinkStateMachine`` the core-link owns absorbs a repeat feed, so the once-only
         ``link.unavailable`` escalation + its audit row fire EXACTLY once across every
         caller. Skipped on the isolation path (a torn-down leg never escalates).
+
+        **Stale-write guard (H3, Spec B G6-4 / #288).** The seq is minted synchronously, but
+        the escalate + write ``await``. A concurrent reconnect that resets the leg during that
+        window (capturing + re-flushing this frame at the fresh seq) bumps the leg generation;
+        the drain snapshots the generation at mint and SKIPS the physical write if it changed —
+        the frame is already re-sent at the fresh seq, so skipping the stale write preserves
+        wire-seq contiguity + exactly-once delivery (the frame is NOT lost).
         """
         payload = queue.pop()
         ack = self._core_link.core_cumulative_ack()
@@ -243,7 +250,29 @@ class GatewayLegScheduler:
             )
             self.deregister_leg(adapter_id)
             return
+        # H3 (Spec B G6-4, #288): snapshot the leg GENERATION right after the seq mint. The
+        # mint is synchronous, but the escalate + write below ``await`` — a concurrent reconnect
+        # can, during those awaits, capture this leg's un-acked frames, ``reset_for_new_epoch``
+        # it (generation bump, seq->0), and re-flush THIS frame at the fresh seq. If that
+        # happened, the in-flight ``write_leg_unit`` below would write the SAME frame a SECOND
+        # time at the now-STALE seq on the fresh transport — a forward-seq-jump that corrupts
+        # the wire-seq contiguity the ack/resume keys on. The generation snapshot lets us detect
+        # it before the physical write (re-awaiting the gate alone is a TOCTOU — the
+        # generation-compare-before-write is the robust fix).
+        generation = queue.leg.generation
         await self._core_link.escalate_if_breaker_tripped(queue.leg)
+        if queue.leg.generation != generation:
+            # A reconnect reset the leg DURING the mint->write await: this physical write is
+            # STALE. SKIP it — the frame was captured into ``_pending_replay`` and re-flushed at
+            # the fresh seq, so it is NOT lost (exactly-once preserved). Loud (CLAUDE.md hard
+            # rule #7), payload-blind (``adapter_id`` + the stale seq only).
+            log.warning(
+                "gateway.scheduler.stale_write_skipped",
+                adapter_id=adapter_id,
+                seq=seq,
+                reason="leg_reset_mid_drain",
+            )
+            return
         await self._core_link.write_leg_unit(adapter_id, payload, seq=seq, ack=ack)
 
     def aclose(self) -> None:
