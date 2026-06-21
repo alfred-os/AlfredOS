@@ -163,6 +163,47 @@ async def test_closed_without_data_fd3_maps_to_not_ok() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fd3_not_a_pipe_maps_to_not_ok_fast_no_hang() -> None:
+    """The foreground ``alfred discord`` path: no fd-3 writer → ``ok=False`` fast, no hang.
+
+    The still-present foreground path (``discord_cmd.py``, retirement deferred to #309)
+    spawns the same entrypoint with NO fd-3 token writer. If fd 3 is NOT a readable pipe
+    (e.g. a regular file inherited at fd 3), a blocking ``os.read(3)`` could hang inside
+    ``_transition_lock`` forever. The source must fail-fast (``ok=False``) when fd 3 is not
+    a pipe — never block. A regular-file fd stands in for "not a connected inbound pipe".
+    """
+    from plugins.alfred_discord.lifecycle import Fd3TokenSource
+
+    # A regular file opened read-only: a valid fd that is NOT a pipe. ``/dev/null`` is a
+    # character device, also not a FIFO — either proves the not-a-pipe guard.
+    not_a_pipe_fd = os.open(os.devnull, os.O_RDONLY)
+    try:
+        gateway = _FakeGateway()
+        lifecycle = DiscordLifecycle(token_source=Fd3TokenSource(fd=not_a_pipe_fd), gateway=gateway)
+        # If the guard is absent, ``os.read`` on /dev/null returns b"" (EOF) → a torn
+        # frame (already ok=False) — but an inherited BLOCKING fifo with no writer would
+        # hang. The guard makes "not a pipe" deterministically ok=False without reading.
+        result = await lifecycle.start()
+        assert result.ok is False
+        assert gateway.connected_with is None
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(not_a_pipe_fd)
+
+
+def test_fd3_source_read_on_closed_fd_fails_fast_not_ok() -> None:
+    """A closed / never-opened fd 3 (EBADF) fails fast — the read raises, not hangs."""
+    from plugins.alfred_discord.lifecycle import Fd3TokenSource
+
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    os.close(write_fd)
+    # The fd is now closed: fstat / read raises EBADF promptly (never blocks).
+    with pytest.raises((OSError, EOFError, struct.error)):
+        Fd3TokenSource(fd=read_fd).read()
+
+
+@pytest.mark.asyncio
 async def test_token_never_appears_in_capture_logs() -> None:
     """C3: the token must not surface in the structured log records (new source)."""
     secret = "tok-super-secret-fd3"  # noqa: S105 -- fabricated leak marker, not a credential
