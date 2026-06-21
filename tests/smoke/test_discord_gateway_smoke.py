@@ -6,19 +6,25 @@ a private Discord application the operator/CI owns. Without it the test
 reports ``SKIPPED`` rather than ``ERROR`` or ``PASSED`` — same skip-vs-pass
 discipline as the rest of the smoke layer.
 
-G6-5 flag-day re-point (#288)
------------------------------
+G6-5 substrate re-point (#288)
+------------------------------
 
-PRE-G6-5 this smoke drove the now-retired standalone ``alfred discord
-verify`` subprocess (a self-contained 30s gateway probe). Under the
-flag-day, Discord is GATEWAY-HOSTED: the ``alfred-gateway`` process
-bwrap-spawns the Discord adapter child, delivers its bot token over fd-3
-from the core vault, and REPORTS each lifecycle transition to the core
-(ADR-0036 inversion). The operator-facing readiness probe is therefore the
-Task-8 command ``alfred gateway adapters --wait-ready discord``, which polls
-the daemon-control ``status.query`` until the gateway reports Discord ``up``
-(exit 0) or a bounded ``--timeout`` elapses (loud non-zero). This smoke
-invokes THAT command, not the deleted verify path.
+G6-5 ships the gateway adapter-hosting SPAWN SUBSTRATE only; the Discord
+flag-day (deleting the daemon-spawn path, deleting the ``alfred-discord``
+Compose service, cutting the secret source over to the gateway) is deferred to
+epic #309. The standalone ``alfred discord verify`` subcommand STILL EXISTS on
+this branch; the hosted-adapter inbound→core bridge is an injectable fail-loud
+seam that raises until #309 wires it. So Discord is not yet live-hosted by the
+gateway here.
+
+This smoke is the SUBSTRATE readiness probe: it exercises the Task-8 operator
+command ``alfred gateway adapters --wait-ready discord``, which polls the
+daemon-control ``status.query`` until the gateway reports Discord ``up`` (exit
+0) or a bounded ``--timeout`` elapses (loud non-zero). When #309 lands the
+flag-day, the same command becomes the live readiness probe (the gateway
+bwrap-spawns the adapter child, delivers its bot token over fd-3, and REPORTS
+each lifecycle transition to the core per the ADR-0036 inversion). The smoke
+targets that command, not the still-present ``alfred discord verify``.
 
 What the test asserts
 ---------------------

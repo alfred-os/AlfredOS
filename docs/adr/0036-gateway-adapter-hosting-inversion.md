@@ -430,3 +430,14 @@ in-process.
 > **documented injectable fail-loud seam** that raises on use until #309 wires the inbound
 > relay. This PR is therefore purely additive: the substrate exists and is sandbox-tested,
 > but nothing on the live Discord path changed.
+>
+> **Correction (append-only) — one source DID change, behavior-neutrally.** The "no secret
+> was rewired" / "nothing on the live Discord path changed" wording above understates one
+> diff: the Discord adapter's credential SOURCE was rewired from `_EnvBroker` to
+> `Fd3TokenSource` (`plugins/alfred_discord/lifecycle.py`) — the child now reads its bot
+> token from fd-3 rather than the environment. This is behavior-neutral **today** because
+> the launcher-spawn path already hands the child a scrubbed env with no fd-3 writer, so
+> NEITHER source authenticated on the live daemon-spawn path (the credential cut-over
+> itself is #309). So no LIVE flow changed, but the credential source is no longer
+> untouched — the accurate framing is: the Discord credential SOURCE was rewired to fd-3;
+> no live flow changed (the daemon-spawn path was already scrubbed-env).

@@ -626,3 +626,11 @@ the **Discord flag-day** (deleting the daemon-spawn path, deleting the
 are tracked in epic **#309**. Discord still runs via the daemon-spawn path today; the
 bridge seam is `GatewayProcess._unwired_runner_factory`, a documented injectable
 fail-loud seam that #309 will wire. Nothing on the live Discord path changed here.
+
+**Correction (append-only):** the diff DID rewire the Discord credential SOURCE from
+`_EnvBroker` to `Fd3TokenSource` (`plugins/alfred_discord/lifecycle.py`) — the child now
+reads its bot token from fd-3, not the environment. This is behavior-neutral today: the
+launcher-spawn path already hands the child a scrubbed env with no fd-3 writer, so neither
+source authenticated on the live daemon-spawn path (the credential cut-over is #309). The
+accurate framing is: the Discord credential SOURCE was rewired to fd-3; no live flow
+changed (the daemon-spawn path was already scrubbed-env).
