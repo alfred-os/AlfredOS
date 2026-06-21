@@ -90,15 +90,19 @@ def test_envelope_body_adapter_id_mismatch_raises_loud() -> None:
 
 def test_non_json_body_raises_malformed() -> None:
     env = GatewayAdapterInboundEnvelope(adapter_id="discord", body=b"\xff\xfenot json")
-    with pytest.raises(InboundBodyMalformedError):
+    with pytest.raises(InboundBodyMalformedError) as exc_info:
         reparse_forwarded_inbound(env)
+    # ``from None`` no-leak contract: the ValidationError (which echoes the raw T3
+    # body) must not survive on the raised error's ``__cause__``.
+    assert exc_info.value.__cause__ is None
 
 
 def test_json_but_invalid_notification_raises_malformed() -> None:
     # Valid JSON object, but missing required InboundMessageNotification fields.
     env = GatewayAdapterInboundEnvelope(adapter_id="discord", body=b'{"adapter_id": "discord"}')
-    with pytest.raises(InboundBodyMalformedError):
+    with pytest.raises(InboundBodyMalformedError) as exc_info:
         reparse_forwarded_inbound(env)
+    assert exc_info.value.__cause__ is None
 
 
 def test_non_object_top_level_json_raises_malformed() -> None:
