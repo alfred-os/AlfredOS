@@ -264,18 +264,27 @@ class GatewayAdapterChildFactory:
             raise
 
         transport = GatewayAdapterStdioTransport(process=process, adapter_id=adapter_id)
-        runner = self._runner_factory(transport=transport, adapter_id=adapter_id)
         try:
+            # Build the runner INSIDE the reap-wrapped block (H1a / credential-leak fix):
+            # the child has ALREADY spawned + received its credential over fd 3 by now, so
+            # ANY runner_factory failure — the fail-loud ``_unwired_runner_factory`` default,
+            # or a genuine runner-construction fault — must terminate-and-reap the live
+            # credentialed child before propagating, exactly like a handshake fault. Were
+            # this OUTSIDE the try, a runner_factory raise would leak a running sandbox child
+            # holding its delivered credential (CLAUDE.md hard rules #6/#7).
+            runner = self._runner_factory(transport=transport, adapter_id=adapter_id)
             await runner.start_and_handshake()
         except GatewayAdapterSpawnError:
-            # Already the typed fail-closed error — reap + re-raise (do not double-wrap).
+            # Already the typed fail-closed error (incl. the unwired-runner default) — reap +
+            # re-raise (do not double-wrap).
             await _terminate_and_reap(process)
             raise
         except BaseException as exc:
-            # A genuine handshake fault (PluginError, a torn wire, cancellation): reap the
-            # child (the runner closed the transport on its own failure path; reaping is
-            # idempotent) and raise the typed fail-closed error (H1a). The cause chain is
-            # preserved; no payload/credential is carried into the message (#5/#6).
+            # A genuine runner-construction / handshake fault (PluginError, a torn wire,
+            # cancellation): reap the child (the runner closed the transport on its own
+            # failure path; reaping is idempotent) and raise the typed fail-closed error
+            # (H1a). The cause chain is preserved; no payload/credential is carried into the
+            # message (#5/#6).
             await _terminate_and_reap(process)
             raise GatewayAdapterSpawnError(
                 f"adapter handshake failed (adapter_id={adapter_id!r})"

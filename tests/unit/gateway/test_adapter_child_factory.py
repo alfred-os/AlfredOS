@@ -405,6 +405,84 @@ async def test_handshake_fault_raises_spawn_error_and_reaps_child() -> None:
     assert proc.wait_calls == 1
 
 
+class _RaisingRunnerFactory:
+    """A ``runner_factory`` that raises AFTER the child spawned + the credential delivered.
+
+    Models the unwired default (and any runner-construction fault): the child is already
+    a live sandbox holding its delivered credential, so a raise here MUST still
+    terminate-and-reap it (no leaked credentialed child) — the CR #3 reap gap.
+    """
+
+    def __init__(self, *, raises: Exception) -> None:
+        self._raises = raises
+        self.calls = 0
+
+    def __call__(self, *, transport: GatewayAdapterStdioTransport, adapter_id: str) -> _FakeRunner:
+        self.calls += 1
+        raise self._raises
+
+
+async def test_runner_factory_fault_reaps_spawned_child() -> None:
+    """A ``runner_factory`` raise AFTER spawn+deliver terminate-and-reaps the child (CR #3).
+
+    The credential was delivered to the live sandbox child over fd 3 BEFORE the runner is
+    built. If building the runner raises, the child keeps running with its delivered
+    credential unless it is reaped — a credential-leak gap. The factory must reap the
+    spawned child (and propagate the error) just like the handshake-fault path.
+    """
+    proc = _FakePopen()
+    popen_factory = _PopenFactory(proc=proc)
+    original = RuntimeError("runner construction blew up")
+    runner_factory = _RaisingRunnerFactory(raises=original)
+    deliver = _DeliverRecorder()
+    factory = GatewayAdapterChildFactory(
+        runner_factory=cast("Any", runner_factory),
+        popen_factory=cast("Any", popen_factory),
+    )
+
+    # A generic runner-construction fault is wrapped fail-closed (same contract as a
+    # handshake fault) but the original cause is preserved.
+    with pytest.raises(GatewayAdapterSpawnError) as caught:
+        await factory.spawn_and_handshake(
+            adapter_id="discord", epoch="e1", deliver_credential=deliver
+        )
+    assert caught.value.__cause__ is original
+    # The credential WAS delivered (the hook ran before the runner build)...
+    assert deliver.calls == 1
+    assert runner_factory.calls == 1
+    # ...but the runner build raised, so the spawned child is terminate-and-reaped (no
+    # leaked credentialed child) — the CR #3 fix.
+    assert proc.terminate_calls == 1
+    assert proc.wait_calls == 1
+
+
+async def test_unwired_runner_factory_default_reaps_spawned_child() -> None:
+    """The production ``_unwired_runner_factory`` default also reaps the spawned child.
+
+    With a non-empty adapter set but no real runner wired, the default factory raises a
+    ``GatewayAdapterSpawnError`` AFTER the spawn+deliver — the same leak shape. The child
+    must be reaped before the loud raise.
+    """
+    from alfred.gateway.process import _unwired_runner_factory
+
+    proc = _FakePopen()
+    popen_factory = _PopenFactory(proc=proc)
+    deliver = _DeliverRecorder()
+    factory = GatewayAdapterChildFactory(
+        runner_factory=_unwired_runner_factory,
+        popen_factory=cast("Any", popen_factory),
+    )
+
+    with pytest.raises(GatewayAdapterSpawnError):
+        await factory.spawn_and_handshake(
+            adapter_id="discord", epoch="e1", deliver_credential=deliver
+        )
+    assert deliver.calls == 1
+    # The unwired default raised after spawn+deliver — the live child is reaped.
+    assert proc.terminate_calls == 1
+    assert proc.wait_calls == 1
+
+
 async def test_handshake_already_typed_spawn_error_is_not_double_wrapped() -> None:
     """A runner ``GatewayAdapterSpawnError`` propagates AS-IS (reaped, not re-wrapped)."""
     proc = _FakePopen()
