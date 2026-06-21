@@ -40,7 +40,7 @@ from plugins.alfred_discord.crash_emitter import CrashEmitter
 from plugins.alfred_discord.discord_gateway import AlfredDiscordBot
 from plugins.alfred_discord.gateway_adapter import DiscordGatewayAdapter
 from plugins.alfred_discord.idempotency_store import IdempotencyStore
-from plugins.alfred_discord.lifecycle import DiscordLifecycle
+from plugins.alfred_discord.lifecycle import DiscordLifecycle, Fd3TokenSource
 from plugins.alfred_discord.notifications import StdoutNotificationSink
 from plugins.alfred_discord.outbound_dispatcher import OutboundDispatcher
 from plugins.alfred_discord.outbound_handler import OutboundHandler
@@ -191,7 +191,6 @@ async def _serve_stdin_stdout(server: DiscordServer) -> None:  # pragma: no cove
 
 
 _ADAPTER_ID: Final[str] = "discord"
-_BROKER_KEY: Final[str] = "discord_bot_token"
 
 
 # The bwrap sandbox's ONLY writable mount (M1). The Discord-adapter policy
@@ -225,20 +224,6 @@ def idempotency_db_path() -> Path:
     fallback.mkdir(parents=True, exist_ok=True)
     fallback.chmod(0o700)
     return fallback / "idempotency.db"
-
-
-class _EnvBroker:
-    """Broker proxy: the host substitutes the resolved secret at the dispatch
-    boundary (spec §7.8), so the adapter reads the resolved value by name. The
-    plugin never holds a hardcoded credential.
-    """
-
-    def get(self, name: str) -> str:  # pragma: no cover - production secret path
-        value = os.environ.get(name)
-        if value is None:
-            msg = f"secret {name!r} not provided by the broker"
-            raise RuntimeError(msg)
-        return value
 
 
 class _BotTargetResolver:  # pragma: no cover - requires a live discord.py client
@@ -277,7 +262,11 @@ def _build_server(
         channel_listen_set=frozenset(),
     )
     gateway = DiscordGatewayAdapter(bot=bot)
-    lifecycle = DiscordLifecycle(broker=_EnvBroker(), gateway=gateway)
+    # The core injects the bot token over LITERAL fd 3 at child spawn (Spec B
+    # G6-5, #288) — the adapter no longer self-brokers it. ``Fd3TokenSource``
+    # reads the length-prefixed frame (the exact peer of
+    # ``deliver_provider_key_via_fd3``) at ``lifecycle.start``.
+    lifecycle = DiscordLifecycle(token_source=Fd3TokenSource(), gateway=gateway)
 
     store = IdempotencyStore(db_path=idempotency_db_path())
     handler = OutboundHandler(resolver=_BotTargetResolver(bot), store=store)
