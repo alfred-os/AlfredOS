@@ -40,13 +40,13 @@ from typing import Final
 
 import structlog
 
+from alfred.gateway.adapter_child_factory import GatewayAdapterChildFactory, _RunnerLike
 from alfred.gateway.adapter_credential_client import GatewayAdapterCredentialClient
 from alfred.gateway.adapter_status_emitter import AdapterStatusEmitter
+from alfred.gateway.adapter_stdio_transport import GatewayAdapterStdioTransport
 from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
     GatewayAdapterSupervisor,
-    _AdapterChildLike,
-    _DeliverCredential,
 )
 from alfred.gateway.client_link import client_handshake
 from alfred.gateway.client_listener import GatewayClientListener
@@ -150,27 +150,26 @@ def wire_leg_scheduler(core_link: GatewayCoreLink, tui_leg: GatewayLeg) -> Gatew
     return scheduler
 
 
-class _UnspawnedAdapterChildFactory:
-    """G6-2b-2a placeholder: refuses to spawn (no real launcher until G6-3).
+def _unwired_runner_factory(
+    *, transport: GatewayAdapterStdioTransport, adapter_id: str
+) -> _RunnerLike:
+    """Fail-loud default ``runner_factory`` for :class:`GatewayAdapterChildFactory` (G6-5).
 
-    With the 2b-2a empty adapter set this is NEVER called. It raises
-    :class:`GatewayAdapterSpawnError` loud (fail-closed, CLAUDE.md hard rule #7)
-    rather than fabricating a child, so a premature non-empty adapter set fails
-    audibly instead of running a credential-less / child-less adapter.
+    The real session-bearing :class:`alfred.plugins.comms_runner.CommsPluginRunner`
+    needs the daemon boot graph (a full ``AlfredPluginSession`` + the inbound / binding /
+    crash / rate-limit handlers + the credential resolver), which the standalone
+    ``alfred-gateway`` process does NOT build (those are daemon-side collaborators —
+    see the G6-5 Task-5 collaborator flag). So the production process passes its own
+    ``adapter_runner_factory`` in; if a non-empty ``adapter_ids`` is configured without
+    one, the spawn refuses LOUD (CLAUDE.md hard rule #7) rather than handshaking against
+    a session-less runner. ``transport`` is accepted to satisfy the factory's
+    ``runner_factory`` signature; it is never used on this fail-closed path.
     """
-
-    async def spawn_and_handshake(
-        self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
-    ) -> _AdapterChildLike:
-        # ``epoch`` + ``deliver_credential`` are part of the factory Protocol (G6-3
-        # delivers the credential over fd 3); this placeholder never spawns, so they are
-        # referenced only in the fail-closed error for forensic context. The
-        # ``_AdapterChildLike`` return type satisfies the Protocol; it always raises.
-        del deliver_credential
-        raise GatewayAdapterSpawnError(
-            f"adapter child spawn is not wired until G6-3 "
-            f"(adapter_id={adapter_id!r}, epoch={epoch!r})"
-        )
+    del transport
+    raise GatewayAdapterSpawnError(
+        f"no adapter runner factory wired for adapter_id={adapter_id!r}; "
+        "GatewayProcess(adapter_runner_factory=...) must supply the session-bearing runner"
+    )
 
 
 class _CoreEpochCredSeam:
@@ -212,9 +211,17 @@ class GatewayProcess:
         jitter: Callable[[float], float] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         adapter_ids: list[str] | None = None,
+        adapter_runner_factory: Callable[..., _RunnerLike] = _unwired_runner_factory,
     ) -> None:
         self._shutdown_event = shutdown_event
         self._dial_adapter_id = dial_adapter_id
+        # G6-5 (#288): the session-bearing runner factory the real
+        # ``GatewayAdapterChildFactory`` drives over each spawned child. Defaults to the
+        # fail-loud :func:`_unwired_runner_factory` — the daemon-side boot-graph
+        # collaborators it needs are not built by the standalone gateway process (the
+        # Task-5 collaborator flag), so a production deployment that hosts a real adapter
+        # injects the session-bearing factory here.
+        self._adapter_runner_factory = adapter_runner_factory
         # The configured comms-adapter set the gateway supervises (Spec B G6-2b-2a / #288).
         # EMPTY in 2b-2a (gap b): the supervisor is wired LIVE but spawns nothing —
         # ``supervise_all([])`` is a clean no-op. G6-3 supplies the real ids (Discord) +
@@ -284,8 +291,17 @@ class GatewayProcess:
         # until a real adapter id + child factory land (the real Discord factory is the
         # privileged-lane G6-3 Task 9; an unspawned-factory placeholder fails loud).
         credential_client = GatewayAdapterCredentialClient(core_link=core_link)
+        # G6-5 (#288): the REAL bwrap adapter-child factory replaces the retired
+        # ``_UnspawnedAdapterChildFactory`` placeholder. It owns the fd-3 pipe + the
+        # synchronous dup2->Popen->restore spawn window + the launcher exec; the
+        # credential never passes through it (the supervisor's ``deliver_credential``
+        # hook over the credential client owns that). The session-bearing runner is
+        # built by ``self._adapter_runner_factory`` (the daemon-collaborator seam).
+        child_factory = GatewayAdapterChildFactory(
+            runner_factory=self._adapter_runner_factory,
+        )
         return GatewayAdapterSupervisor(
-            child_factory=_UnspawnedAdapterChildFactory(),
+            child_factory=child_factory,
             cred_seam=_CoreEpochCredSeam(core_link=core_link),
             credential_client=credential_client,
             emitter=emitter,
@@ -516,7 +532,6 @@ class GatewayProcess:
 __all__ = [
     "GatewayProcess",
     "_CoreEpochCredSeam",
-    "_UnspawnedAdapterChildFactory",
     "build_tui_leg",
     "wire_leg_scheduler",
 ]

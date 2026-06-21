@@ -129,6 +129,17 @@ class _AdapterChildLike(Protocol):
         """
         ...
 
+    async def aclose(self) -> None:
+        """Terminate + reap the child (H1, Spec B G6-5 / #288).
+
+        The supervisor calls this on the crash/restart AND planned-stop paths so a
+        still-live sandbox child is terminate-and-reaped BEFORE a restart spawns a new
+        one and on shutdown — never leaked across a crash-loop. Idempotent (a second
+        call is a no-op). The real :class:`alfred.gateway.adapter_child_factory.
+        _GatewayAdapterChild` SIGTERMs the bwrap Popen + closes the transport here.
+        """
+        ...
+
 
 # The credential-delivery callback the supervisor hands the factory (G6-3 / Task 5a).
 # The factory invokes it with the child's fd-3 WRITE END at the right moment in the
@@ -399,7 +410,12 @@ class GatewayAdapterSupervisor:
 
                 # Steady state: race the child's exit against a planned stop.
                 if await self._await_exit_or_stop(run, child):
-                    break  # planned stop -> DOWN
+                    break  # planned stop -> DOWN (the live child reaped inside)
+
+                # H1 (Spec B G6-5 / #288): the child exited (crash). Terminate-and-reap it
+                # BEFORE the restart spawns a new one — a sandbox child that exited its main
+                # loop can leave a live bwrap wrapper, so reap on the restart path too.
+                await self._reap_child(run, child)
 
                 # The child crashed -> backoff / breaker decision.
                 if await self._handle_crash(run):
@@ -585,11 +601,37 @@ class GatewayAdapterSupervisor:
             raise
         if stop_task in done:
             exit_task.cancel()
+            # H1 (Spec B G6-5 / #288): a planned stop reaps the LIVE child (it may still be
+            # running — the stop won the race, the child never exited). Reap before the
+            # terminal ``down`` so a bwrap child is not leaked on shutdown.
+            await self._reap_child(run, child)
             await self._stop(run)
             return True
         stop_task.cancel()
         run.pending_crash = exit_task.result()
         return False
+
+    async def _reap_child(self, run: _AdapterRun, child: _AdapterChildLike) -> None:
+        """Terminate + reap a child on the crash/restart/stop path (H1, fail-loud).
+
+        The supervisor cancels :meth:`_AdapterChildLike.wait_until_exit` on a stop /
+        re-spawn, but cancelling the wait does NOT terminate the underlying sandbox
+        process — without this, a still-live bwrap child leaks across a crash-loop or
+        shutdown (the flagged H1 gap). :meth:`_AdapterChildLike.aclose` is idempotent.
+
+        Best-effort + fail-LOUD (CLAUDE.md hard rule #7): a reap fault is logged on the
+        distinct ``gateway.adapter.reap_failed`` row — NEVER silently swallowed — and
+        then absorbed so a single bad reap cannot wedge the restart loop (which would
+        leave the adapter dark forever) nor block shutdown.
+        """
+        try:
+            await child.aclose()
+        except Exception as exc:
+            log.warning(
+                "gateway.adapter.reap_failed",
+                adapter_id=run.adapter_id,
+                error_class=type(exc).__name__,
+            )
 
     async def _stop(self, run: _AdapterRun) -> None:
         ADAPTER_UP.labels(adapter=run.adapter_id).set(0)

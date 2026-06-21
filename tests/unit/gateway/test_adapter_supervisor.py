@@ -82,14 +82,26 @@ class _FakeChild:
 
     ``exit_future`` resolves with an (error_class, detail) crash tuple when the test
     wants to simulate a process exit, or stays pending for a healthy child.
+
+    H1 (Spec B G6-5 / #288): ``aclose`` is the supervisor's restart/crash/stop reap
+    hook — the real :class:`_GatewayAdapterChild` terminate-and-reaps the bwrap Popen
+    here so a live child does not leak across a restart. ``aclose_calls`` records each
+    call so a test can assert the prior child was reaped BEFORE a re-spawn / on stop.
     """
 
     adapter_id: str
     spawned_at: float
     exit_future: asyncio.Future[tuple[str, str]]
+    aclose_calls: int = 0
+    aclose_raises: BaseException | None = None
 
     async def wait_until_exit(self) -> tuple[str, str]:
         return await self.exit_future
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+        if self.aclose_raises is not None:
+            raise self.aclose_raises
 
 
 class _FakeChildFactory:
@@ -1078,3 +1090,87 @@ async def test_default_max_concurrent_boots_is_accepted() -> None:
         factory=_FakeChildFactory(), cred=_FakeCredSeam(available=True), sink=_RecordingSink()
     )
     assert sup is not None
+
+
+# ---------------------------------------------------------------------------
+# H1 (Spec B G6-5 / #288) — the supervisor reaps the child on crash/restart/stop
+# ---------------------------------------------------------------------------
+
+
+async def test_crashed_child_is_reaped_before_respawn() -> None:
+    """On a crash-restart the prior child's ``aclose`` runs BEFORE the next spawn (H1b).
+
+    The bwrap child does NOT self-reap on a crash-loop today — the supervisor cancels
+    ``wait_until_exit`` but never terminates the (possibly still-live) process. H1 wires
+    ``await child.aclose()`` into the crash/restart path so a still-live child is
+    terminate-and-reaped before a restart spawns a new one (no leaked bwrap child).
+    """
+    factory = _FakeChildFactory()
+    factory.script(_A, ["ok", "ok"])  # first crashes, second is the restart
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink, sleep=_RecordingSleep())
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A, incarnation=1)
+    first_child = factory.children[0]
+    first_child.exit_future.set_result(("BrokenPipeError", "boom"))
+    await sup.wait_until_up(_A, incarnation=2)
+
+    # The crashed child was reaped exactly once on the restart path.
+    assert first_child.aclose_calls == 1
+
+    await sup.request_stop(_A)
+    await task
+
+
+async def test_live_child_is_reaped_on_planned_stop() -> None:
+    """A planned stop terminate-and-reaps the live child (H1b) — no leaked bwrap child."""
+    factory = _FakeChildFactory()
+    factory.script(_A, ["ok"])
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink)
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A)
+    live_child = factory.children[0]
+
+    await sup.request_stop(_A)
+    await task
+
+    assert live_child.aclose_calls == 1
+
+
+async def test_reap_error_is_logged_and_does_not_wedge_the_loop() -> None:
+    """A reap fault is LOUD (logged) but never wedges the restart loop (H1, fail-loud).
+
+    The reap is best-effort: a child whose ``aclose`` raises must be logged loudly
+    (CLAUDE.md hard rule #7 — never silently swallowed) yet the supervisor must still
+    proceed to the next spawn so a single bad reap cannot dark the adapter forever.
+    """
+    factory = _FakeChildFactory()
+    factory.script(_A, ["ok", "ok"])
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink, sleep=_RecordingSleep())
+
+    import structlog.testing
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A, incarnation=1)
+    first_child = factory.children[0]
+    first_child.aclose_raises = RuntimeError("reap boom")
+
+    with structlog.testing.capture_logs() as captured:
+        first_child.exit_future.set_result(("BrokenPipeError", "boom"))
+        # The loop must NOT wedge on the reap fault — it proceeds to the restart.
+        await sup.wait_until_up(_A, incarnation=2)
+
+    assert first_child.aclose_calls == 1
+    reap_errors = [c for c in captured if c.get("event") == "gateway.adapter.reap_failed"]
+    assert len(reap_errors) == 1
+    assert reap_errors[0].get("adapter_id") == _A
+
+    await sup.request_stop(_A)
+    await task
