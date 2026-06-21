@@ -300,6 +300,16 @@ async def test_per_adapter_metrics_track_the_leg_across_the_bounce(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason=(
+        "K7 lane canary: this assertion proves the proof RUNS in the required NON-root "
+        "integration lane. The privileged (root) lane ALSO collects tests/integration, so "
+        "skip there — the canary's anti-#245 intent is preserved because it still RUNS + "
+        "asserts in the non-root lane (a future relocation of this module behind a "
+        "root/bwrap skip would turn THAT non-root run from a pass into a skip, loud)."
+    ),
+)
 def test_k7_lane_canary_collected_and_run_in_non_root_integration() -> None:
     """This release-blocking module is COLLECTED AND RUN in the required non-root lane (K7).
 
@@ -310,15 +320,18 @@ def test_k7_lane_canary_collected_and_run_in_non_root_integration() -> None:
 
     * it carries ONLY ``pytest.mark.integration`` (asserted on this module's marker) — so
       ``uv run pytest tests/integration`` collects it with no root gate;
-    * it is RUNNING as a NON-root, NON-privileged process — if a future skip ever relocated
-      the suite to ``sudo``/privileged execution, this assertion would catch the drift.
+    * it is RUNNING as a NON-root, NON-privileged process — the ``skipif(geteuid()==0)`` above
+      means this canary is SKIPPED in the privileged (root) lane that ALSO collects
+      ``tests/integration`` and RUN (asserting non-root) in the required non-root lane.
 
-    Because it is an ordinary collected test with NO skip of its own, a future edit that adds a
-    ``skipif`` to this module turns this canary from a PASS into a SKIP — a loud, visible lane
-    regression, exactly the signal the #245 lesson demands.
+    The OTHER K7 proofs in this module carry NO skip of their own, so they run in BOTH lanes;
+    a future edit that adds a ``skipif(root/bwrap/Linux)`` to the MODULE would turn this
+    canary's non-root run from a PASS into a SKIP — a loud, visible lane regression, exactly
+    the signal the #245 lesson demands. (The canary's OWN ``skipif`` is scoped strictly to
+    ``geteuid()==0`` so it never masks a module-wide relocation in the non-root lane.)
     """
     marks = {m.name for m in pytestmark} if isinstance(pytestmark, list) else {pytestmark.name}
     assert marks == {"integration"}, f"K7 module must carry ONLY the integration marker: {marks}"
-    # The required lane runs unprivileged; geteuid()==0 would mean the suite was relocated to a
-    # root/privileged runner (the lane the K7 lesson forbids for this proof).
+    # Reached only in the non-root lane (the skipif guards the root lane). geteuid()==0 here
+    # would mean the skip was bypassed — the lane the K7 lesson forbids for this proof.
     assert os.geteuid() != 0, "the K7 restart-survival proof must run in the NON-root lane"
