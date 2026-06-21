@@ -76,6 +76,25 @@ _NON_BINDING_COUNT: Final[int] = 10**9
 _NON_BINDING_TTL_SECONDS: Final[float] = 1e9
 _NON_BINDING_MAX_FRAME_BYTES: Final[int] = 1 << 30
 
+# Spec B G6-5 Task 6 / L1 (#288): the BINDING ingress config for a hosted adapter leg
+# (Discord). Unlike the interactive TUI leg, an external adapter is adversary-exposed,
+# so its leg gets a FINITE volumetric bound (rate / burst / in-flight / size) that the
+# non-binding TUI sentinels above intentionally lack. The Discord manifest declares NO
+# rate fields today, so these are explicit module-level constants with sensible
+# first-party defaults; sourcing the caps from the adapter manifest is a deferred
+# follow-up (L1). Values bound a chatty/large-payload adapter from exhausting the shared
+# core link or the bounded pre-DLP retention budget, while staying generous enough that a
+# normal conversational adapter is never throttled.
+_ADAPTER_LEG_RATE_PER_S: Final[float] = 50.0  # sustained admits/s (refilled lazily)
+# Burst >= max-inflight so the in-flight cap is the binding concurrency bound (a smaller
+# burst would make the rate tier refuse before the in-flight cap is ever reachable —
+# leaving the in-flight cap dead config).
+_ADAPTER_LEG_BURST: Final[int] = 256  # token-bucket ceiling (a short burst)
+_ADAPTER_LEG_MAX_INFLIGHT: Final[int] = 256  # concurrent un-completed admits
+_ADAPTER_LEG_TTL_SECONDS: Final[float] = 300.0  # in-flight slot TTL (wedge guard / sweep)
+_ADAPTER_LEG_MAX_FRAME_BYTES: Final[int] = 1 << 20  # 1 MiB per inbound frame
+_ADAPTER_GLOBAL_CAP_MULTIPLIER: Final[int] = 4  # ceiling = buffer max_bytes * 4 (> hard cap)
+
 # Spec B G6-4 Task 7 (#288): the per-leg scheduler send-queue byte bound (perf-M3). This is
 # pre-append working memory the GlobalReplayCap does not see, so it is bounded independently;
 # the TUI leg is interactive (one turn at a time), so a generous-but-finite ceiling never
@@ -123,6 +142,43 @@ def build_tui_leg(
     )
     return GatewayLeg(
         adapter_id=_TUI_LEG_ADAPTER_ID,
+        buffer=buffer,
+        ingress_gate=gate,
+        global_cap=cap,
+        now=monotonic,
+    )
+
+
+def build_adapter_leg(
+    adapter_id: str,
+    *,
+    replay_buffer_factory: Callable[[], ReplayBuffer] = ReplayBuffer,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> GatewayLeg:
+    """Build a BINDING ``GatewayLeg`` for one hosted adapter (Spec B G6-5 Task 6 / L1, #288).
+
+    Mirrors :func:`build_tui_leg` but with a BINDING :class:`PerAdapterIngressGate`: an
+    external adapter (Discord) is adversary-exposed, so its leg enforces a FINITE
+    volumetric bound (the ``_ADAPTER_LEG_*`` ``Final`` constants — rate / burst /
+    in-flight / TTL / max-frame-bytes) where the interactive TUI leg is intentionally
+    non-binding. The per-leg ``ReplayBuffer`` (retention / zeroing / caps) and the
+    ``GlobalReplayCap`` (ceiling strictly above the buffer hard cap) are wired exactly as
+    the TUI leg's, so this leg reaps + accounts identically. The leg's ``now`` is the SAME
+    ``monotonic`` the gate + evict loop read.
+    """
+    buffer = replay_buffer_factory()
+    cap = GlobalReplayCap(max_total_bytes=buffer.max_bytes * _ADAPTER_GLOBAL_CAP_MULTIPLIER)
+    gate = PerAdapterIngressGate(
+        adapter_id,
+        sustained_rate_per_s=_ADAPTER_LEG_RATE_PER_S,
+        burst=_ADAPTER_LEG_BURST,
+        max_inflight=_ADAPTER_LEG_MAX_INFLIGHT,
+        ttl_seconds=_ADAPTER_LEG_TTL_SECONDS,
+        max_frame_bytes=_ADAPTER_LEG_MAX_FRAME_BYTES,
+        now=monotonic,
+    )
+    return GatewayLeg(
+        adapter_id=adapter_id,
         buffer=buffer,
         ingress_gate=gate,
         global_cap=cap,
@@ -253,6 +309,27 @@ class GatewayProcess:
         return build_tui_leg(
             replay_buffer_factory=self._replay_buffer_factory, monotonic=self._monotonic
         )
+
+    def _register_adapter_legs(self, scheduler: GatewayLegScheduler) -> None:
+        """Build + register one BINDING leg per configured adapter id (G6-5 Task 6, #288).
+
+        Mirrors the single TUI-leg registration but for each hosted adapter: a
+        :func:`build_adapter_leg` BINDING leg (finite ingress caps, L1) is registered
+        with the scheduler so the multi-leg router (the K4 forged-id refusal) routes a
+        Discord frame to its own buffer + the fair scheduler drains it onto the single
+        core writer. EMPTY ``_adapter_ids`` registers nothing — only the TUI leg remains
+        (behaviour-preserving for G5). Each registered leg is reaped on exit by the
+        scheduler's :meth:`GatewayLegScheduler.aclose` (the same reap the TUI leg gets),
+        which :meth:`_run_relay_and_scheduler`'s ``finally`` calls on EVERY exit path.
+        """
+        for adapter_id in self._adapter_ids:
+            scheduler.register_leg(
+                build_adapter_leg(
+                    adapter_id,
+                    replay_buffer_factory=self._replay_buffer_factory,
+                    monotonic=self._monotonic,
+                )
+            )
 
     async def _on_peer_rejected(self, peer_uid: int | None) -> None:
         """The client-leg peer-auth reject seam: increment the metric + emit the loud row.
@@ -476,6 +553,11 @@ class GatewayProcess:
             # the core link stays leg-agnostic; this process is the one place that knows the
             # leg<->scheduler topology.
             scheduler = wire_leg_scheduler(core_link, tui_leg)
+            # Spec B G6-5 Task 6 (#288): register one BINDING leg per configured hosted
+            # adapter alongside the non-binding TUI leg, so a real Discord frame routes to
+            # its own per-leg buffer + ingress gate. Each is reaped by ``scheduler.aclose``
+            # in ``_run_relay_and_scheduler``'s ``finally`` (the same reap the TUI leg gets).
+            self._register_adapter_legs(scheduler)
             relay = GatewayRelay(
                 core_link=core_link,
                 client_transport=client_transport,
@@ -532,6 +614,7 @@ class GatewayProcess:
 __all__ = [
     "GatewayProcess",
     "_CoreEpochCredSeam",
+    "build_adapter_leg",
     "build_tui_leg",
     "wire_leg_scheduler",
 ]
