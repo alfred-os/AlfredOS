@@ -595,12 +595,12 @@ land.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Ingress sustained rate | 5 / s per adapter | The token-bucket refill rate; the core's `_PreResolutionLimiter` (60 / min per platform-id) remains as additive per-id defence-in-depth. |
+| Ingress sustained rate | 5 / s per adapter | The token-bucket refill rate; the core's `_PreResolutionLimiter` (50 / min per platform-id, `_PRE_RESOLUTION_LIMIT_PER_MINUTE`) remains as additive per-id defence-in-depth. |
 | Ingress burst | 20 | Token-bucket ceiling (a short spike is absorbed, then the sustained rate binds). |
 | In-flight cap | 8 | Max concurrently-admitted units before back-pressure. |
 | In-flight TTL | 30 s | A slot held longer is reclaimed by the sweeper (the wedge bound). |
 | Ingress sweep interval | 30 s | How often the active per-gate sweep reclaims stalled slots. |
 | `max_frame_bytes` | 1 MiB | Oversized frames are refused at admission (size is not content — payload-blind preserved). |
 | Per-leg send-queue bytes | 1 MiB | Bounds pre-append working memory the `GlobalReplayCap` does not see. |
-| Per-leg `ReplayBuffer` | 4096 frames / 8 MiB / 300 s TTL | The unchanged Spec-A buffer hard ceilings (one instance per leg). |
-| Global replay cap | ≥ the per-leg buffer hard ceiling × N | The aggregate-across-legs bound; set strictly above one leg's hard ceiling so the buffer's own hard-cap fires first. |
+| Per-leg `ReplayBuffer` | soft cap 4096 frames / 8 MiB / 300 s TTL | The unchanged Spec-A buffer SOFT caps (one instance per leg); a breach trips the breaker but keeps the frame (no silent drop). The HARD ceiling is `_HARD_CAP_MULTIPLIER` (2×) the soft cap — 8192 frames / 16 MiB — a fail-closed OOM backstop that raises. |
+| Global replay cap | ≥ the per-leg buffer hard ceiling × N | The aggregate-across-legs bound; set strictly above one leg's hard ceiling (16 MiB) so the per-leg buffer's own hard-cap fires first. Precedence: per-leg before global. |
