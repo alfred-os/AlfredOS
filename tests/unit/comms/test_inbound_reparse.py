@@ -126,6 +126,62 @@ def test_reparse_is_deterministic_on_identical_bytes() -> None:
     assert first.inbound_id == second.inbound_id == "platform-msg-7"
 
 
+def _walk_exception_chain(exc: BaseException) -> list[BaseException]:
+    """Every exception reachable from ``exc`` via ``__cause__`` / ``__context__``."""
+    seen: list[BaseException] = []
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or current in seen:
+            continue
+        seen.append(current)
+        stack.append(current.__cause__)
+        stack.append(current.__context__)
+    return seen
+
+
+def test_malformed_body_leaks_no_secret_through_exception_chain() -> None:
+    # T3-leak canary (#1): a malformed body carrying a secret-shaped sentinel must
+    # not surface that sentinel anywhere on the raised exception. ``from None``
+    # alone is NOT enough — pydantic's ValidationError echoes ``input_value`` (the
+    # raw T3 body), and it survives on ``__context__`` unless the raise happens
+    # OUTSIDE the ``except`` block. Both ``__cause__`` and ``__context__`` must be
+    # None, and the sentinel must appear in no message across the whole chain.
+    sentinel = "sk-LEAKED-SECRET-CANARY-9f3a2b"
+    # Valid JSON object so we reach the ValidationError path (missing fields),
+    # with the sentinel smuggled into a value pydantic would echo as input_value.
+    body = json.dumps({"adapter_id": "discord", "platform_user_id": sentinel}).encode("utf-8")
+    env = GatewayAdapterInboundEnvelope(adapter_id="discord", body=body)
+
+    with pytest.raises(InboundBodyMalformedError) as exc_info:
+        reparse_forwarded_inbound(env)
+    err = exc_info.value
+
+    assert err.__cause__ is None
+    assert err.__context__ is None
+    for link in _walk_exception_chain(err):
+        assert sentinel not in str(link)
+        assert sentinel not in repr(link)
+
+
+def test_malformed_message_carries_leak_safe_structural_detail() -> None:
+    # Structural detail (#2): the malformed message must be a debug aid — it carries
+    # the safe adapter_id and structural info (error-type codes and/or loc paths)
+    # derived ONLY from exc.errors() type+loc, never the raw input/ctx values.
+    sentinel = "sk-LEAKED-SECRET-CANARY-7c1d"
+    body = json.dumps({"adapter_id": "discord", "platform_user_id": sentinel}).encode("utf-8")
+    env = GatewayAdapterInboundEnvelope(adapter_id="discord", body=body)
+
+    with pytest.raises(InboundBodyMalformedError) as exc_info:
+        reparse_forwarded_inbound(env)
+    message = str(exc_info.value)
+
+    assert "discord" in message  # safe closed-vocab adapter_id for audit attribution
+    assert "missing" in message  # an error-type code from a required-field omission
+    assert "inbound_id" in message  # a loc field-path of one missing field
+    assert sentinel not in message  # the smuggled body value never appears
+
+
 def test_str_body_reparses_identically_to_bytes_body() -> None:
     # The envelope accepts str or bytes; both decode to the same notification.
     body_bytes = _valid_body("discord")
