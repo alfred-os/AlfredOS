@@ -49,6 +49,14 @@ _EXIT_BIND_FAILED = 4
 # a torn / malformed client leg is scriptable apart from the bind / core-dial refusals.
 _EXIT_HANDSHAKE_FAILED = 5
 
+# A friendly "the hosted-adapter config could not be resolved" refusal. The adapter-id
+# resolution does manifest I/O, so an unreadable / missing manifest (an ``OSError``) or a
+# malformed manifest (a :class:`ManifestError`) is a CONFIG fault — a distinct non-zero so
+# an operator script (and the operator) sees a config-fault remediation, NOT the socket
+# ``bind_failed`` line (which mislabels the cause). Resolved BEFORE the socket bind so a
+# config fault can never be swallowed by the bind ``except OSError`` (CLAUDE.md hard #7).
+_EXIT_CONFIG_FAILED = 6
+
 # The adapter id the gateway dials on the core (the core binds ``comms-{adapter_kind}.sock``;
 # the socket-backed ``alfred_tui`` adapter has manifest ``adapter_kind="tui"``). Operator-
 # overridable via the env so the dial target is not a hidden constant (Spec B G6-0b / #288).
@@ -134,8 +142,22 @@ def start_gateway() -> None:
     from alfred.comms_mcp.errors import DaemonUnavailableError
     from alfred.gateway.client_link import GatewayHandshakeError
     from alfred.gateway.process import GatewayProcess
+    from alfred.plugins.errors import ManifestError
 
     typer.echo(t("gateway.start.starting"))
+
+    # Resolve the hosted-adapter ids BEFORE any socket work (CR / hard rule #7). This does
+    # manifest I/O, so an unreadable manifest (``OSError``) or a malformed one
+    # (:class:`ManifestError`) is a CONFIG fault — reported with the config-fault
+    # remediation, NOT mislabelled as a socket ``bind_failed`` (which it would be if the
+    # resolution ran inside the bind ``try``'s ``except OSError``). A config fault refuses
+    # the start LOUD before the process is ever constructed.
+    try:
+        hosted_adapter_ids = _resolve_hosted_adapter_ids()
+    except (OSError, ManifestError) as exc:
+        log.warning("gateway.cli.config_failed", error=repr(exc))
+        typer.echo(t("gateway.start.config_failed"))
+        raise typer.Exit(code=_EXIT_CONFIG_FAILED) from exc
 
     # G6-0: stand up the Prometheus exposition before the relay so a scrape can read
     # gateway_* series. Loud-and-continue on a bind failure; the healthcheck surfaces
@@ -168,7 +190,9 @@ def start_gateway() -> None:
         await GatewayProcess(
             shutdown_event=shutdown_event,
             dial_adapter_id=dial_adapter_id,
-            adapter_ids=_resolve_hosted_adapter_ids(),
+            # Resolved BEFORE the bind (above) so a manifest/config fault is a config
+            # refusal, never swallowed by the bind ``except OSError`` as ``bind_failed``.
+            adapter_ids=hosted_adapter_ids,
         ).run()
 
     try:
