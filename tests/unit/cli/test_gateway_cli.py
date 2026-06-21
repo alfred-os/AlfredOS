@@ -200,6 +200,42 @@ def test_start_handshake_error_is_friendly_not_traceback(
     assert t("gateway.start.unavailable") not in result.stdout
 
 
+def test_start_manifest_oserror_is_config_fault_not_bind_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manifest ``OSError`` during adapter-id resolution is a CONFIG fault, not a bind fault.
+
+    ``_resolve_hosted_adapter_ids`` does manifest I/O. If it raises ``OSError`` (an
+    unreadable / vanished manifest), the failure is a config fault and MUST surface the
+    config-fault line — never the socket-``bind_failed`` line, which mislabels the cause
+    and points the operator at the wrong remediation (CLAUDE.md hard rule #7).
+    """
+
+    def _boom() -> list[str]:
+        raise OSError("manifest.toml is unreadable")
+
+    monkeypatch.setattr("alfred.cli.gateway._commands._resolve_hosted_adapter_ids", _boom)
+
+    # The process must never be constructed — the config fault refuses before any
+    # socket work.
+    class _FakeProcess:
+        def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
+            raise AssertionError("GatewayProcess built despite a config-resolution fault")
+
+        async def run(self) -> None:  # pragma: no cover - never reached
+            raise AssertionError("run() reached despite a config-resolution fault")
+
+    monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+
+    result = CliRunner().invoke(gateway_app, ["start"])
+
+    assert result.exit_code != 0
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    # The config-fault line renders — NOT the bind-failed line (the mislabel CR flagged).
+    assert t("gateway.start.config_failed") in result.stdout
+    assert t("gateway.start.bind_failed") not in result.stdout
+
+
 def test_start_programming_bug_still_surfaces_loud(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

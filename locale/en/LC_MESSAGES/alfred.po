@@ -1210,108 +1210,116 @@ msgstr ""
 msgid "gateway.help.adapters_timeout"
 msgstr "Seconds to wait for readiness before giving up (default 30)."
 
-#: src/alfred/cli/gateway/_adapters.py:150
+#: src/alfred/cli/gateway/_adapters.py:159
 msgid "gateway.adapters.line"
 msgstr "  {adapter}: {state}"
 
-#: src/alfred/cli/gateway/_adapters.py:160
-#: src/alfred/cli/gateway/_adapters.py:191
+#: src/alfred/cli/gateway/_adapters.py:169
+#: src/alfred/cli/gateway/_adapters.py:200
 msgid "gateway.adapters.unknown_adapter"
 msgstr ""
 "Unknown adapter '{adapter}' — it is not reported by the gateway. Check "
 "the name and that it is listed in ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/gateway/_adapters.py:164
+#: src/alfred/cli/gateway/_adapters.py:173
 msgid "gateway.adapters.none"
 msgstr "No gateway-hosted adapters are reported."
 
-#: src/alfred/cli/gateway/_adapters.py:166
+#: src/alfred/cli/gateway/_adapters.py:175
 msgid "gateway.adapters.header"
 msgstr "Gateway adapters:"
 
-#: src/alfred/cli/gateway/_adapters.py:199
-#: src/alfred/cli/gateway/_adapters.py:247
+#: src/alfred/cli/gateway/_adapters.py:208
+#: src/alfred/cli/gateway/_adapters.py:256
 msgid "gateway.adapters.unavailable"
 msgstr ""
 "Cannot read adapter status — the AlfredOS daemon is not reachable. Start "
 "it with `alfred daemon start`, then re-run this command."
 
-#: src/alfred/cli/gateway/_adapters.py:204
+#: src/alfred/cli/gateway/_adapters.py:213
 msgid "gateway.adapters.wait_ready.ready"
 msgstr "Adapter '{adapter}' is ready (up)."
 
-#: src/alfred/cli/gateway/_adapters.py:209
+#: src/alfred/cli/gateway/_adapters.py:218
 msgid "gateway.adapters.wait_ready.timeout"
 msgstr ""
 "Adapter '{adapter}' was not ready within {timeout}s. It may still be "
 "starting — check `alfred daemon status` and the gateway logs."
 
-#: src/alfred/cli/gateway/_adapters.py:211
+#: src/alfred/cli/gateway/_adapters.py:220
 msgid "gateway.adapters.wait_ready.waiting"
 msgstr "Waiting for adapter '{adapter}' to become ready…"
 
-#: src/alfred/cli/gateway/_adapters.py:235
+#: src/alfred/cli/gateway/_adapters.py:244
 msgid "gateway.adapters.wait_ready.needs_adapter"
 msgstr ""
 "--wait-ready needs an adapter to wait for, e.g. `alfred gateway adapters "
 "--wait-ready discord`."
 
-#: src/alfred/cli/gateway/_commands.py:101
+#: src/alfred/cli/gateway/_commands.py:109
 msgid "gateway.adapters.no_adapter_kind"
 msgstr ""
 "Comms adapter plugin '{plugin}' declares no [comms_mcp] adapter_kind in "
 "its manifest — the gateway cannot resolve its canonical adapter id. Fix "
 "the plugin manifest."
 
-#: src/alfred/cli/gateway/_commands.py:138
+#: src/alfred/cli/gateway/_commands.py:147
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:180
+#: src/alfred/cli/gateway/_commands.py:159
+msgid "gateway.start.config_failed"
+msgstr ""
+"The gateway could not resolve its hosted-adapter configuration — a comms "
+"adapter manifest is missing, unreadable, or malformed. Check "
+"ALFRED_COMMS_ENABLED_ADAPTERS and the named plugin manifests, then re-run"
+" `alfred gateway start`."
+
+#: src/alfred/cli/gateway/_commands.py:204
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:187
+#: src/alfred/cli/gateway/_commands.py:211
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:196
+#: src/alfred/cli/gateway/_commands.py:220
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:198
+#: src/alfred/cli/gateway/_commands.py:222
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:219
-#: src/alfred/cli/gateway/_commands.py:233
+#: src/alfred/cli/gateway/_commands.py:243
+#: src/alfred/cli/gateway/_commands.py:257
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:237
+#: src/alfred/cli/gateway/_commands.py:261
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:309
-#: src/alfred/cli/gateway/_commands.py:315
+#: src/alfred/cli/gateway/_commands.py:333
+#: src/alfred/cli/gateway/_commands.py:339
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:319
+#: src/alfred/cli/gateway/_commands.py:343
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
