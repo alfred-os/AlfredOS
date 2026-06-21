@@ -113,6 +113,36 @@ def test_comms_mcp_module_non_string_rejected() -> None:
         parse_manifest(bad)
 
 
+def test_comms_mcp_adapter_kind_key_parses() -> None:
+    # G6-5 Task 10 (#288): the canonical wire ``adapter_id`` the gateway-hosting
+    # resolve seam reads to reconcile the plugin-package id (dir name) to the id the
+    # factory / credential allowlist / legs key on.
+    manifest = parse_manifest(_COMMS_MANIFEST_TOML)
+    assert manifest.comms_mcp_adapter_kind == "alfred_comms_test"
+
+
+def test_comms_mcp_adapter_kind_absent_stays_back_compat() -> None:
+    # A manifest with no [comms_mcp] block parses with adapter_kind None — additive.
+    manifest = parse_manifest(VALID_MANIFEST_TOML)
+    assert manifest.comms_mcp_adapter_kind is None
+
+
+def test_comms_mcp_block_without_adapter_kind_stays_back_compat() -> None:
+    # A [comms_mcp] block carrying ``module`` but no ``adapter_kind`` parses with
+    # adapter_kind None — the two keys are independently optional.
+    no_kind = _COMMS_MANIFEST_TOML.replace('adapter_kind = "alfred_comms_test"\n', "")
+    manifest = parse_manifest(no_kind)
+    assert manifest.comms_mcp_adapter_kind is None
+
+
+def test_comms_mcp_adapter_kind_non_string_rejected() -> None:
+    # A present-but-non-string adapter_kind is a malformed manifest (typed
+    # ManifestError via the per-key error map), not a silent None.
+    bad = _COMMS_MANIFEST_TOML.replace('adapter_kind = "alfred_comms_test"', "adapter_kind = 7")
+    with pytest.raises(ManifestError):
+        parse_manifest(bad)
+
+
 def test_comms_mcp_non_table_block_rejected() -> None:
     # FIX 5 (PR-S4-11b review): a present-but-non-table [comms_mcp] (e.g.
     # ``comms_mcp = "oops"``) is a malformed manifest, NOT "no module". It must
@@ -376,6 +406,15 @@ def test_direct_construction_unknown_subscriber_tier_refused() -> None:
                 "Plugin manifest [plugin] platform",
             ),
             id="non_string_platform",
+        ),
+        pytest.param(
+            (
+                _COMMS_MANIFEST_TOML.replace(
+                    'adapter_kind = "alfred_comms_test"', "adapter_kind = 7"
+                ),
+                "Plugin manifest [comms_mcp] adapter_kind",
+            ),
+            id="non_string_adapter_kind",
         ),
     ],
 )

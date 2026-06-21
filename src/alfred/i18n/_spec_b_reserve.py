@@ -65,3 +65,9 @@ def _register() -> None:
     t("gateway.adapters.state.crashed")
     t("gateway.adapters.state.breaker_open")
     t("gateway.adapters.state.unknown")
+    # G6-5 Task 10 (#288) manifest [comms_mcp] per-key malformed-type messages. Both are
+    # DICT-dereferenced via ``alfred.plugins.manifest._COMMS_MCP_KEY_TYPE_ERRORS[key]``,
+    # so the literal is invisible to pybabel at the call site — reserve them here so they
+    # keep a source reference and are not marked obsolete by the catalog-drift gate.
+    t("plugin.manifest_comms_mcp_module_type")
+    t("plugin.manifest_comms_mcp_adapter_kind_type")

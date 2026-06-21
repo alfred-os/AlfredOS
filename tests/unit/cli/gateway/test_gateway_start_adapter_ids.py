@@ -1,13 +1,18 @@
-"""G6-5 Task 7 (#288): ``alfred gateway start`` sources its hosted adapter set from settings.
+"""G6-5 Task 7/10 (#288): ``alfred gateway start`` sources its hosted adapter set from settings.
 
 The standalone gateway now spawns + supervises the comms adapters an operator opts in via
-``Settings.comms_enabled_adapters`` (env ``ALFRED_COMMS_ENABLED_ADAPTERS``) — EXCLUDING the
-``tui`` dial-in id (the TUI dials the gateway; it is not a spawned adapter). The CLI threads
-that subset into ``GatewayProcess(adapter_ids=...)``.
+``Settings.comms_enabled_adapters`` (env ``ALFRED_COMMS_ENABLED_ADAPTERS``, holding
+**plugin-package ids** — the ``plugins/<id>/`` dir name). The CLI maps each through the
+G6-5 Task-10 reconciliation seam to its canonical ``adapter_kind`` and EXCLUDES the TUI
+dial-in kind (the TUI dials the gateway; it is not a spawned adapter), then threads the
+canonical subset into ``GatewayProcess(adapter_ids=...)``.
 
-Every collaborator is faked: ``Settings`` is stubbed in the command module so the test does
-not couple to the manifest-existence validator, and ``GatewayProcess`` is replaced with a
-double that captures the ``adapter_ids`` kwarg and returns immediately.
+Settings is stubbed in the command module (so the test does not re-run the
+manifest-existence validator), but the stub holds the REAL plugin-package ids
+(``alfred_discord`` / ``alfred_tui``) — the seam reads their real in-repo manifests, so
+the captured ``adapter_ids`` are the canonical wire ids the factory + credential allowlist
+key on (``discord``), NOT a per-test fiction. ``GatewayProcess`` is replaced with a double
+that captures the ``adapter_ids`` kwarg and returns immediately.
 """
 
 from __future__ import annotations
@@ -42,9 +47,13 @@ def _patch_settings(monkeypatch: pytest.MonkeyPatch, enabled: tuple[str, ...]) -
 
 
 def test_start_threads_enabled_adapters_into_adapter_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``comms_enabled_adapters=("discord",)`` -> ``GatewayProcess(adapter_ids=["discord"])``."""
+    """``("alfred_discord",)`` -> ``GatewayProcess(adapter_ids=["discord"])`` (canonical).
+
+    The operator's plugin-package id resolves to the canonical ``adapter_kind`` the rest
+    of the spawn chain keys on, so the gateway is booted with ``discord`` — NOT the dir id.
+    """
     captured: dict[str, object] = {}
-    _patch_settings(monkeypatch, ("discord",))
+    _patch_settings(monkeypatch, ("alfred_discord",))
     _patch_process(monkeypatch, captured)
 
     result = CliRunner().invoke(gateway_app, ["start"])
@@ -55,9 +64,9 @@ def test_start_threads_enabled_adapters_into_adapter_ids(monkeypatch: pytest.Mon
 
 
 def test_start_excludes_the_tui_dial_in_from_adapter_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``tui``-only set yields an EMPTY spawned set — the TUI is the dial-in leg, not spawned."""
+    """An ``alfred_tui``-only set yields an EMPTY spawned set — the TUI is the dial-in leg."""
     captured: dict[str, object] = {}
-    _patch_settings(monkeypatch, ("tui",))
+    _patch_settings(monkeypatch, ("alfred_tui",))
     _patch_process(monkeypatch, captured)
 
     result = CliRunner().invoke(gateway_app, ["start"])
@@ -79,9 +88,9 @@ def test_start_empty_enabled_set_yields_empty_spawned_set(monkeypatch: pytest.Mo
 
 
 def test_start_keeps_a_mixed_set_minus_tui(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A mixed ``(tui, discord)`` set drops only the dial-in id, keeping the spawned adapters."""
+    """A mixed ``(alfred_tui, alfred_discord)`` set drops the dial-in, keeps the canonical id."""
     captured: dict[str, object] = {}
-    _patch_settings(monkeypatch, ("tui", "discord"))
+    _patch_settings(monkeypatch, ("alfred_tui", "alfred_discord"))
     _patch_process(monkeypatch, captured)
 
     result = CliRunner().invoke(gateway_app, ["start"])

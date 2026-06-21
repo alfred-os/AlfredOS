@@ -59,24 +59,66 @@ _DEFAULT_DIAL_ADAPTER_ID: Final[str] = "tui"
 # The TUI is the foreground DIAL-IN leg (it dials the gateway over the client socket),
 # NOT a gateway-SPAWNED adapter child. So it is excluded from the supervised
 # ``adapter_ids`` set even if an operator lists it in ``comms_enabled_adapters`` — the
-# gateway never bwrap-spawns the TUI.
+# gateway never bwrap-spawns the TUI. Compared against the CANONICAL ``adapter_kind``
+# (``tui``), not the plugin-package id (``alfred_tui``), so a TUI listed by either name
+# is excluded after the resolve seam below.
 _TUI_DIAL_IN_ADAPTER_ID: Final[str] = "tui"
 
 
+def _resolve_adapter_kind(plugin_package_id: str) -> str:
+    """Map one enabled plugin-package id to its canonical ``adapter_id`` (G6-5 Task 10, #288).
+
+    THE single adapter-id reconciliation seam. ``Settings.comms_enabled_adapters`` holds
+    the **plugin-package id** — the ``plugins/<id>/`` directory name (``alfred_discord``) —
+    because its validator probes ``plugins/<id>/manifest.toml``. But every collaborator in
+    the gateway-hosted spawn chain (the leg routing, the status observer, the credential
+    resolver allowlist
+    :data:`alfred.comms_mcp.adapter_credential_resolver._ADAPTER_SECRET_ALLOWLIST`, and the
+    child factory's
+    :data:`alfred.gateway.adapter_child_factory._ADAPTER_LAUNCH_TARGETS`) keys on the
+    **canonical ``adapter_id``** — the manifest ``[comms_mcp] adapter_kind``
+    (``discord``). Resolving the kind HERE, at the one seam where the configured set
+    becomes ``GatewayProcess(adapter_ids=...)``, is what keeps that whole chain
+    consistent (spec §8.3 id-triplet).
+
+    The canonical id comes from the manifest (the source of truth — the same field the
+    daemon's ``_resolve_comms_adapter_wire_spec`` reads), NOT a second hardcoded map that
+    could drift from the factory's launch-target keys. The ``comms_enabled_adapters``
+    validator already proved the manifest file exists; this reads its ``adapter_kind``.
+    A manifest with no ``[comms_mcp] adapter_kind`` is a misconfigured comms adapter:
+    the parser surfaces the typed :class:`alfred.plugins.errors.ManifestError`, which the
+    gateway boot maps to a loud refusal (CLAUDE.md hard rule #7 — never a silent
+    fall-through to the plugin-package id, which the factory would then reject anyway).
+    """
+    from alfred.cli._launcher_spawn import repo_root
+    from alfred.plugins.errors import ManifestError
+    from alfred.plugins.manifest import parse_manifest
+
+    manifest_path = repo_root() / "plugins" / plugin_package_id / "manifest.toml"
+    manifest = parse_manifest(manifest_path.read_text(encoding="utf-8"))
+    adapter_kind = manifest.comms_mcp_adapter_kind
+    if adapter_kind is None:
+        raise ManifestError(t("gateway.adapters.no_adapter_kind", plugin=plugin_package_id))
+    return adapter_kind
+
+
 def _resolve_hosted_adapter_ids() -> list[str]:
-    """The gateway-hosted (bwrap-spawned) adapter subset from settings (G6-5 Task 7, #288).
+    """The gateway-hosted (bwrap-spawned) adapter subset from settings (G6-5 Task 7/10, #288).
 
     Sources the configured comms-adapter allowlist from
     :attr:`alfred.config.settings.Settings.comms_enabled_adapters` (env
-    ``ALFRED_COMMS_ENABLED_ADAPTERS``) and EXCLUDES the TUI dial-in id — the TUI dials
-    the gateway, it is not a spawned adapter. The remaining ids are the children the
-    gateway supervises + spawns. An empty / TUI-only set yields ``[]`` so the supervisor
-    is a clean no-op (behaviour-preserving for G5).
+    ``ALFRED_COMMS_ENABLED_ADAPTERS``, holding plugin-package ids), maps each through the
+    :func:`_resolve_adapter_kind` reconciliation seam to its canonical ``adapter_id``, and
+    EXCLUDES the TUI dial-in kind — the TUI dials the gateway, it is not a spawned adapter.
+    The remaining canonical ids are the children the gateway supervises + spawns, and are
+    the SAME strings the factory + credential allowlist key on. An empty / TUI-only set
+    yields ``[]`` so the supervisor is a clean no-op (behaviour-preserving for G5).
     """
     from alfred.config.settings import Settings
 
     settings: Settings = Settings()  # type: ignore[no-untyped-call]  # BaseSettings __init__ is untyped
-    return [a for a in settings.comms_enabled_adapters if a != _TUI_DIAL_IN_ADAPTER_ID]
+    resolved = (_resolve_adapter_kind(a) for a in settings.comms_enabled_adapters)
+    return [kind for kind in resolved if kind != _TUI_DIAL_IN_ADAPTER_ID]
 
 
 def start_gateway() -> None:
