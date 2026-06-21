@@ -191,7 +191,7 @@ class GatewayProcess:
         priority credit). One leg only — NO scheduler / fair-share here.
         """
         buffer = self._replay_buffer_factory()
-        cap = GlobalReplayCap(max_total_bytes=buffer._max_bytes * _TUI_GLOBAL_CAP_MULTIPLIER)
+        cap = GlobalReplayCap(max_total_bytes=buffer.max_bytes * _TUI_GLOBAL_CAP_MULTIPLIER)
         gate = PerAdapterIngressGate(
             _TUI_LEG_ADAPTER_ID,
             sustained_rate_per_s=_NON_BINDING_RATE_PER_S,
@@ -405,7 +405,9 @@ class GatewayProcess:
             # Attach the router post-construction (the same late-binding pattern the relay
             # uses for ``core_link._payload_relay``): the core link stays leg-agnostic and
             # the gateway process is the one place that knows the leg<->scheduler topology.
-            core_link._leg_router = LegRouter(scheduler)
+            # L2 (#288): the public ``set_leg_router`` setter — the dead ctor param + private
+            # late-write were collapsed into one coherent wiring path.
+            core_link.set_leg_router(LegRouter(scheduler))
             relay = GatewayRelay(
                 core_link=core_link,
                 client_transport=client_transport,

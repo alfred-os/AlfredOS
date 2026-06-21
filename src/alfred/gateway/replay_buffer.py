@@ -149,6 +149,17 @@ class ReplayBuffer:
         self._breaker_tripped: bool = False
 
     @property
+    def max_bytes(self) -> int:
+        """The byte SOFT cap (the back-pressure breaker threshold), as a public accessor.
+
+        L1 (Spec B G6-4 #288): ``process.py`` sizes the per-leg :class:`GlobalReplayCap`
+        ceiling strictly above the buffer hard ceiling (PR2 invariant). It must read this
+        public accessor rather than the private ``_max_bytes`` so the ceiling invariant does
+        not depend on a private attribute. The HARD ceiling is ``_HARD_CAP_MULTIPLIER`` x this.
+        """
+        return self._max_bytes
+
+    @property
     def depth_frames(self) -> int:
         """Number of un-acked frames currently retained."""
         return len(self._retained)

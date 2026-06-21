@@ -162,7 +162,7 @@ def _make_tui_leg() -> GatewayLeg:
         adapter_id="tui",
         buffer=buf,
         ingress_gate=gate,
-        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        global_cap=GlobalReplayCap(max_total_bytes=buf.max_bytes * 4),
         now=lambda: 0.0,
     )
 
@@ -203,7 +203,7 @@ def _build_relay(
     # client->core forward still reaches the core leg (now via the single drain writer).
     scheduler = GatewayLegScheduler(core_link, max_per_leg_queue_bytes=1 << 30)
     scheduler.register_leg(tui_leg)
-    core_link._leg_router = LegRouter(scheduler)
+    core_link.set_leg_router(LegRouter(scheduler))
     relay = GatewayRelay(
         core_link=core_link,
         client_transport=client,  # type: ignore[arg-type]
