@@ -786,12 +786,30 @@ class CommsPluginRunner:
         on the runner so the pump (:meth:`_spawn_notification_dispatch`) keeps its
         byte-for-byte call site, and so the existing direct-call tests still drive
         the routing through the runner. The disposition owns the never-raise
-        (fire-and-forget) contract; the delegator simply forwards.
+        (fire-and-forget) contract; the delegator forwards.
+
+        Defense-in-depth (CLAUDE.md hard rule #7): the disposition is INJECTABLE (a
+        session-less gateway forward disposition lands in G6-7-3). A custom
+        implementation that breaks the never-raise contract would otherwise leak a
+        GC-time "Task exception was never retrieved" warning out of
+        :meth:`_spawn_notification_dispatch`'s fire-and-forget task — a SILENT failure
+        at this I/O boundary. The backstop turns a contract violation into a LOUD
+        audited row and lets the reader survive. Catches ``Exception`` (NOT
+        ``BaseException``) so a cancellation still tears the pump down. The default
+        ``SessionDispatchDisposition`` provably never raises, so this never trips on
+        the daemon path.
 
         ``wire_seq`` (Spec A G4b-2a-pre / ADR-0032) is THIS frame's out-of-band wire
         seq, threaded through to the disposition; ``None`` for stdio.
         """
-        await self._inbound_disposition.dispatch(method, params, wire_seq=wire_seq)
+        try:
+            await self._inbound_disposition.dispatch(method, params, wire_seq=wire_seq)
+        except Exception:
+            log.error(
+                "comms.runner.disposition_contract_violation",
+                adapter_id=self._adapter_id,
+                notification_method=method,
+            )
 
     async def _route_transport_crash(self) -> None:
         """Synthesize a closed-vocab ``adapter.crashed`` and route it to the session.
@@ -801,6 +819,13 @@ class CommsPluginRunner:
         audit row and the err-007 breaker counter advances. A handler failure on
         THIS path is swallowed too — the plugin is already crashing, so a failing
         crash handler must not mask the original crash.
+
+        Intentional asymmetry (G6-7-2 / #309): this routes SESSION-DIRECT and
+        deliberately bypasses the injectable inbound disposition. The crash is a
+        host-SYNTHESIZED lifecycle event (a transport-level crash the runner
+        observed), NOT a child-emitted notification off the wire, so it does not
+        belong on the per-notification disposition seam — do not "fix" it to route
+        through the disposition.
         """
         log.warning(
             "comms.runner.transport_crash",
