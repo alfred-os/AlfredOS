@@ -174,6 +174,21 @@ async def test_full_per_leg_queue_back_pressures_only_that_leg() -> None:
     assert sched.enqueue("b", b"bbbb") is None
 
 
+async def test_empty_frame_flood_is_bounded_by_minimum_per_frame_cost() -> None:
+    # CR (Spec B G6-4 #288): a zero-length payload charges 0 bytes to ``len()``, so without a
+    # minimum per-frame cost an empty-frame flood would append to the deque UNBOUNDED past the
+    # byte budget — silently breaking the "bounded queue" guarantee (hard rule #7). Each frame
+    # must cost >= 1 unit, so a 4-byte budget admits at most 4 empty frames, then refuses.
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+    core = _RecordingCoreLink()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=4)
+    sched.register_leg(_make_leg("a", cap))
+    for _ in range(4):
+        assert sched.enqueue("a", b"") is None  # 4 empty frames fill the 4-unit budget
+    with pytest.raises(LegQueueFullError):
+        sched.enqueue("a", b"")  # the 5th empty frame is refused (deque cannot grow unbounded)
+
+
 # --------------------------------------------------------------------------- #
 # Fair round-robin drain order (K3 — exact order, not set/count)               #
 # --------------------------------------------------------------------------- #
@@ -371,6 +386,49 @@ async def test_pump_parks_while_replay_gate_is_clear_then_drains_when_set() -> N
         assert await _drain_until(lambda: len(core.writes) == 1)
         pump.cancel()
     assert core.writes[0] == ("a", b"fresh", 0, 0)
+
+
+async def test_drain_round_bails_on_remaining_legs_when_gate_clears_mid_round() -> None:
+    # CR (Spec B G6-4 #288): a round drains one frame off EVERY non-empty leg, but if a
+    # reconnect-replay CLEARS the gate mid-round, the REMAINING legs must NOT write — the flush
+    # owns the single writer (single-writer + replay-precedes-fresh ACROSS legs). The first leg
+    # of the round always drains (run already awaited the gate at round start); a custom core
+    # clears the gate as a SIDE EFFECT of the first leg's write, then asserts leg two is skipped.
+    cap = GlobalReplayCap(max_total_bytes=1_000_000)
+
+    class _GateClearingOnFirstWrite(_RecordingCoreLink):
+        def __init__(self) -> None:
+            super().__init__()
+            self._cleared = False
+
+        async def write_leg_unit(
+            self, adapter_id: str, payload: bytes, *, seq: int, ack: int
+        ) -> None:
+            await super().write_leg_unit(adapter_id, payload, seq=seq, ack=ack)
+            if not self._cleared:
+                # Simulate a reconnect-replay opening DURING the round, right after leg one.
+                self.clear_gate()
+                self._cleared = True
+
+    core = _GateClearingOnFirstWrite()
+    sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
+    leg_tui = _make_leg("tui", cap)  # drained FIRST (reserved credit)
+    leg_b = _make_leg("b", cap)
+    sched.register_leg(leg_tui)
+    sched.register_leg(leg_b)
+    sched.enqueue("tui", b"tui0")
+    sched.enqueue("b", b"b0")
+
+    # Drive a SINGLE round directly: the first leg (tui) drains and clears the gate; the second
+    # leg (b) is then skipped because the gate is no longer set.
+    drained = await sched._drain_one_round()
+    assert drained is True
+    assert core.writes == [("tui", b"tui0", 0, 0)]  # ONLY the first leg wrote
+    assert leg_b.depth_frames == 0  # leg b's record_for_send never ran (bailed before drain)
+    # 'b0' is still queued (not lost) — a later round (gate re-set) drains it.
+    core.set_gate()
+    assert await sched._drain_one_round() is True
+    assert ("b", b"b0", 0, 0) in core.writes
 
 
 async def test_drain_invokes_breaker_escalation_after_record_for_send() -> None:

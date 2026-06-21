@@ -283,6 +283,40 @@ async def test_ingress_sweep_loop_reclaims_a_stalled_slot_loud() -> None:
     assert evicted[0].get("reason") == "ttl_expired"
 
 
+async def test_ingress_sweep_tolerates_a_leg_deregistered_mid_sweep() -> None:
+    """CR (Spec B G6-4 #288): a leg isolated between the id-snapshot and the per-leg lookup is
+    SKIPPED, not a sweeper crash.
+
+    The sweep snapshots ``scheduler.adapter_ids()`` then looks each up via ``scheduler.leg``.
+    Those two steps are not atomic: the perf-M4 isolation path can deregister a faulting leg in
+    between, so ``leg(stale_id)`` raises ``KeyError``. The sweeper must tolerate it (skip the
+    stale id) — crashing would silently end K5 enforcement (hard rule #7). A scheduler stub
+    yields one stale id whose ``leg`` raises; the sweep completes one clean iteration, evicts
+    nothing, and the loop parks (never raises).
+    """
+
+    class _StaleScheduler:
+        def adapter_ids(self) -> tuple[str, ...]:
+            return ("isolated-mid-sweep",)  # snapshot includes a now-gone leg
+
+        def leg(self, adapter_id: str) -> GatewayLeg:
+            raise KeyError(adapter_id)  # deregistered between snapshot and lookup
+
+    process = GatewayProcess(shutdown_event=asyncio.Event(), sleep=_instant_then_park_sleep())
+    with structlog.testing.capture_logs() as captured:
+        sweep_task = asyncio.ensure_future(
+            process._ingress_sweep_loop(_StaleScheduler())  # type: ignore[arg-type]
+        )
+        for _ in range(10):
+            await asyncio.sleep(0)  # let the one instant iteration run, then it parks
+        assert not sweep_task.done()  # parked, NOT crashed on the KeyError
+        sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweep_task
+    # The stale id was skipped — no eviction breadcrumb, no crash.
+    assert [c for c in captured if c.get("event") == "gateway.ingress.slot_evicted"] == []
+
+
 async def test_run_relay_and_scheduler_surfaces_a_sweeper_crash_loud() -> None:
     """A sweeper that RAISES first is surfaced loud (the sweep_task.result() re-raise arm).
 

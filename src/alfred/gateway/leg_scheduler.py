@@ -88,13 +88,28 @@ class _CoreWriterLike(Protocol):
     ) -> None: ...
 
 
+# The MINIMUM queue cost charged per frame (CR / Spec B G6-4 #288). A zero-length payload
+# would otherwise add 0 bytes to the accounting while still appending to the deque, so an
+# empty-frame flood could grow the deque UNBOUNDED past ``max_bytes`` (the "bounded queue"
+# guarantee silently broken — CLAUDE.md hard rule #7). Charging at least one unit per frame
+# makes the byte budget ALSO a frame-count cap: at most ``max_bytes`` queued frames.
+_MIN_FRAME_COST_BYTES: Final[int] = 1
+
+
 class _LegQueue:
-    """One leg's bounded FIFO send queue + its byte accounting."""
+    """One leg's bounded FIFO send queue + its byte accounting.
+
+    The accounting charges ``max(len(payload), _MIN_FRAME_COST_BYTES)`` per frame so a flood
+    of zero-length frames cannot bypass the byte bound and grow the deque without limit.
+    """
 
     def __init__(self, leg: GatewayLeg, *, max_bytes: int) -> None:
         self.leg = leg
         self._max_bytes = max_bytes
-        self._frames: deque[bytes] = deque()
+        # Each entry is ``(payload, charged_cost)`` so ``pop`` credits back the SAME cost the
+        # ``offer`` charged (never ``len(payload)``, which would under-credit an empty frame
+        # and slowly leak the budget).
+        self._frames: deque[tuple[bytes, int]] = deque()
         self._bytes = 0
 
     @property
@@ -102,18 +117,23 @@ class _LegQueue:
         return not self._frames
 
     def offer(self, payload: bytes) -> None:
-        """Append iff within the byte budget; else raise :class:`LegQueueFullError`."""
-        if self._bytes + len(payload) > self._max_bytes:
+        """Append iff within the byte budget; else raise :class:`LegQueueFullError`.
+
+        Charges ``max(len(payload), _MIN_FRAME_COST_BYTES)`` — a minimum of one unit per
+        frame — so an empty-frame flood cannot append unbounded (CR / Spec B G6-4 #288).
+        """
+        cost = max(len(payload), _MIN_FRAME_COST_BYTES)
+        if self._bytes + cost > self._max_bytes:
             raise LegQueueFullError(
                 f"leg {self.leg.adapter_id!r} send queue full "
-                f"({self._bytes} + {len(payload)} > {self._max_bytes} bytes)"
+                f"({self._bytes} + {cost} > {self._max_bytes} bytes)"
             )
-        self._frames.append(payload)
-        self._bytes += len(payload)
+        self._frames.append((payload, cost))
+        self._bytes += cost
 
     def pop(self) -> bytes:
-        payload = self._frames.popleft()
-        self._bytes -= len(payload)
+        payload, cost = self._frames.popleft()
+        self._bytes -= cost
         return payload
 
 
@@ -190,9 +210,35 @@ class GatewayLegScheduler:
                 await self._wakeup.wait()
 
     async def _drain_one_round(self) -> bool:
-        """Drain at most one frame per leg (TUI first); return whether anything was drained."""
+        """Drain at most one frame per leg (TUI first); return whether anything was drained.
+
+        **Per-frame replay-gate re-check (CR / Spec B G6-4 #288).** A round drains one frame
+        off EVERY non-empty leg, and each drain ``await``s a physical write. ``run`` gates the
+        START of the round on :attr:`replay_pending_gate`, but a reconnect can CLEAR that gate
+        AFTER an early leg's write — and then
+        :meth:`GatewayCoreLink._flush_pending_replay` becomes the sanctioned reconnect-internal
+        writer of the captured remainder. So BEFORE each per-leg drain we re-check the gate: if
+        it has been CLEARED mid-round (a reconnect-replay started), the round STOPS draining and
+        returns, yielding the writer to the flush. ``run`` re-awaits the gate at the top of the
+        NEXT round, so the remaining queued frames drain BEHIND the replayed ones — preserving
+        the single-writer invariant + replay-precedes-fresh ACROSS legs (the per-leg
+        generation-guard in :meth:`_drain_one_frame` only catches a leg that was itself RESET;
+        it does NOT stop an un-reset OTHER leg from writing during a peer leg's replay).
+
+        The check is a non-blocking ``is_set()`` (NOT an ``await``) and is skipped for the FIRST
+        leg of the round: ``run`` already awaited the gate at round start, so the first frame
+        always drains (a DIRECT caller driving a deliberate single post-handshake / pre-flush
+        drain — the unit-suite seam — must complete the frame it just enqueued, never deadlock).
+        The bail only skips the REMAINING legs once a replay has actually started mid-round. On
+        a no-buffer link the gate is permanently set (never bails).
+        """
         drained = False
-        for adapter_id in self._round_order():
+        for index, adapter_id in enumerate(self._round_order()):
+            if index > 0 and not self._core_link.replay_pending_gate.is_set():
+                # A reconnect-replay started mid-round (after >=1 leg drained): stop and yield
+                # the single writer to the flush. ``run`` re-awaits the gate before the next
+                # round, so the remaining queued frames drain BEHIND the replayed ones.
+                break
             queue = self._queues.get(adapter_id)
             if queue is None or queue.empty:
                 continue
