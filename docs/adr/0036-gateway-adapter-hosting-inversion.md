@@ -405,3 +405,28 @@ in-process.
 > platform_user_id_hash)`) is NOT touched, duplicated, or weakened — it remains as per-id
 > defense-in-depth. The two layers are complementary: the gateway volumetric gate does
 > NOT subsume the core's per-id limiter (the comms-F2 overturn, now realized in code).
+
+> **G6-5 annotation (#288):** the gateway adapter-hosting **SPAWN substrate** is now
+> shipped — the gateway can spawn, sandbox, and handshake a hosted adapter child. This
+> records what landed and what was deliberately held back so the boundary cannot drift.
+>
+> **What G6-5 shipped (additive, no flag-day).** The hosted adapter child reads its
+> credential from **fd-3** (the copied fd-3 spawn window, shared with the quarantine
+> child-launcher and pinned by a single shared property test — GAP-2); `GatewayAdapterStdioTransport`
+> (`src/alfred/gateway/adapter_stdio_transport.py`) is the `Popen`-backed stdio transport
+> for the hosted child; `GatewayAdapterChildFactory`
+> (`src/alfred/gateway/adapter_child_factory.py`) is the fd-3 credential spawn window plus
+> child-reaping; the `GatewayAdapterSupervisor` `aclose` reap hook reaps every spawned
+> child on shutdown; per-adapter **binding** ingress legs are wired; `adapter_ids` is read
+> from settings; `alfred gateway adapters --wait-ready` queries readiness via daemon-control
+> `status.query`; and the `discord` adapter-id namespace is reconciled end-to-end. Both new
+> trust-boundary modules are gated at 100% line+branch in CI (the L2 two-gates pattern).
+>
+> **What G6-5 deferred to epic #309.** The hosted-adapter **inbound→core bridge** and the
+> **Discord flag-day** (delete the daemon-spawn path, delete the `alfred-discord` Compose
+> service, cut the secret source over to the gateway) are NOT in this slice. Discord still
+> runs via the daemon-spawn path; the `alfred-discord` Compose service is un-deleted; no
+> secret was rewired. The bridge seam is `GatewayProcess._unwired_runner_factory` — a
+> **documented injectable fail-loud seam** that raises on use until #309 wires the inbound
+> relay. This PR is therefore purely additive: the substrate exists and is sandbox-tested,
+> but nothing on the live Discord path changed.
