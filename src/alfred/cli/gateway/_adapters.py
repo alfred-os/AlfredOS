@@ -54,6 +54,7 @@ import typer
 
 from alfred.cli.daemon._daemon_control_client import (
     DaemonControlError,
+    DaemonControlProtocolError,
     DaemonControlUnavailableError,
     query_daemon_control,
 )
@@ -141,7 +142,15 @@ async def _query_status() -> DaemonStatusResult:
     response = await query_daemon_control(STATUS_QUERY_METHOD)
     if response.error is not None or response.result is None:
         raise DaemonControlUnavailableError("control response error")
-    return DaemonStatusResult.model_validate(response.result)
+    try:
+        return DaemonStatusResult.model_validate(response.result)
+    except ValueError as exc:
+        # A response that DECODED (no transport / structured-error fault) but whose payload
+        # fails DaemonStatusResult validation is the unusable-answer contract.
+        # ``ValidationError`` is a ``ValueError`` subclass; map it to a control PROTOCOL
+        # fault (a ``DaemonControlError`` arm) so the caller's exit-2 handlers degrade it
+        # rather than letting a raw traceback escape (CLAUDE.md hard rule #7).
+        raise DaemonControlProtocolError("malformed status payload") from exc
 
 
 def _render_line(line_state: str, adapter_id: str) -> str:
