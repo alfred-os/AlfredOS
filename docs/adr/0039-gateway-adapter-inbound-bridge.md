@@ -1,6 +1,6 @@
 # ADR-0039 — Gateway-hosted-adapter inbound → core bridge (forward, don't dispatch; inbound-only)
 
-- **Status**: Proposed (DRAFT — awaiting `alfred-reviewer` + maintainer approval)
+- **Status**: Accepted
 - **Date**: 2026-06-21
 - **Slice**: Spec B inbound bridge (epic #309) —
   `docs/superpowers/specs/2026-06-21-gateway-adapter-inbound-bridge-design.md`
