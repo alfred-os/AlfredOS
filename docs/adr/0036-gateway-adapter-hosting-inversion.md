@@ -229,6 +229,16 @@ metric + an audit row; never a silent drop.
   signed core audit log (the gateway holds no signing key). A malformed / forged
   status frame is never silently dropped — it is refused, audited, and triggers
   link scrutiny.
+  > **G6-4 annotation (ingress-refusal sink is structlog-only this slice).** The
+  > per-adapter ingress-refusal audit (`ingress_audit.py` —
+  > `record_ingress_refusal` / `record_unknown_adapter_refusal`, the K6 closed-vocab
+  > field-allowlisted rows incl. the H2 `queue_full` back-pressure row) is a LOUD
+  > **structlog** breadcrumb + per-adapter counter for G6-4; it does NOT yet reconcile
+  > into the signed core audit log (the gateway holds no signing key — the same posture
+  > as the G6-2b status-leg local audit, see the 2b-2a annotation above). The
+  > durable signed-log reconcile is a tracked follow-up (design §6); "audit
+  > non-skippable" holds in the never-silent sense (every refusal is loud + counted),
+  > not yet in the signed-durable sense for the ingress sink.
 
 ### Status-leg carrier-auth posture (G6-2a / G6-2b-1 follow-up annotation)
 
@@ -378,10 +388,11 @@ in-process.
 > moved from `relay_to_core` to a **drain-time seam** in the leg/scheduler.
 >
 > **K2/K3 — cap precedence.** Two distinct ceilings bind in order: the per-leg
-> `ReplayBuffer` **hard ceiling** (4096 frames / 8 MiB / 2× hard cap) binds FIRST for a
-> single leg; the `GlobalReplayCap` (`global_replay_cap.py`) is the **aggregate-across-
-> legs** bound on the SUM of all legs' resident pre-DLP T1 bytes, set strictly above one
-> leg's hard ceiling so the per-leg cap fires before the global one. The global cap is
+> `ReplayBuffer` **hard ceiling** (8192 frames / 16 MiB — `_HARD_CAP_MULTIPLIER` 2× the
+> **soft** cap of 4096 frames / 8 MiB, which trips the breaker but keeps the frame) binds
+> FIRST for a single leg; the `GlobalReplayCap` (`global_replay_cap.py`) is the
+> **aggregate-across-legs** bound on the SUM of all legs' resident pre-DLP T1 bytes, set
+> strictly above one leg's hard ceiling so the per-leg cap fires before the global one. The global cap is
 > released on every byte-reclaim path (trim / evict / discard / reset / hard-ceiling
 > rollback). `max_frame_bytes` at ingress admission bounds the fairness unit (round-robin
 > by-frame over the single physical writer); the residual head-of-line delay is honestly

@@ -42,4 +42,4 @@ groups:
           severity: warning
         annotations:
           summary: "AlfredOS gateway adapter replay-buffer is near its per-leg cap"
-          description: "gateway_adapter_buffer_depth_bytes{adapter} > 6 MiB for 2m (the 8 MiB per-leg hard ceiling is approaching); the leg's un-acked backlog is growing — check core reachability for that leg."
+          description: "gateway_adapter_buffer_depth_bytes{adapter} > 6 MiB for 2m (the 8 MiB per-leg soft/breaker cap is approaching; the hard ceiling is 16 MiB); the leg's un-acked backlog is growing — check core reachability for that leg."
