@@ -34,13 +34,13 @@ class _FakeGateway:
         return 0
 
 
-class _FakeBroker:
-    def get(self, name: str) -> str:
+class _FakeTokenSource:
+    def read(self) -> str:
         return "tok"
 
 
 def _server() -> DiscordServer:
-    lifecycle = DiscordLifecycle(broker=_FakeBroker(), gateway=_FakeGateway())
+    lifecycle = DiscordLifecycle(token_source=_FakeTokenSource(), gateway=_FakeGateway())
     return DiscordServer(lifecycle=lifecycle)
 
 
