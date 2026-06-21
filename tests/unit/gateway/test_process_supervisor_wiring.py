@@ -296,19 +296,28 @@ async def test_ingress_sweep_tolerates_a_leg_deregistered_mid_sweep() -> None:
     """
 
     class _StaleScheduler:
+        def __init__(self) -> None:
+            self.lookups: list[str] = []
+
         def adapter_ids(self) -> tuple[str, ...]:
             return ("isolated-mid-sweep",)  # snapshot includes a now-gone leg
 
         def leg(self, adapter_id: str) -> GatewayLeg:
+            self.lookups.append(adapter_id)
             raise KeyError(adapter_id)  # deregistered between snapshot and lookup
 
+    scheduler = _StaleScheduler()
     process = GatewayProcess(shutdown_event=asyncio.Event(), sleep=_instant_then_park_sleep())
     with structlog.testing.capture_logs() as captured:
         sweep_task = asyncio.ensure_future(
-            process._ingress_sweep_loop(_StaleScheduler())  # type: ignore[arg-type]
+            process._ingress_sweep_loop(scheduler)  # type: ignore[arg-type]
         )
         for _ in range(10):
             await asyncio.sleep(0)  # let the one instant iteration run, then it parks
+        # The stale-leg lookup actually executed (the KeyError branch ran) — without this the
+        # "parked + no eviction" assertions below would pass vacuously if the sweep never
+        # reached adapter_ids()/leg() at all.
+        assert scheduler.lookups == ["isolated-mid-sweep"]
         assert not sweep_task.done()  # parked, NOT crashed on the KeyError
         sweep_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
