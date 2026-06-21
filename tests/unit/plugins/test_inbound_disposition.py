@@ -15,8 +15,10 @@ behaviour is pinned identically to the pre-refactor runner.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -579,4 +581,70 @@ async def test_injected_disposition_receives_pump_notification() -> None:
     assert isinstance(params, Mapping)
     assert wire_seq is None
     assert inbound_handler.processed == []
+    assert transport.closed is True
+
+
+class _RaisingDisposition:
+    """A disposition that BREAKS the never-raise contract on every dispatch."""
+
+    async def dispatch(self, method: str, params: object, *, wire_seq: int | None = None) -> None:
+        raise RuntimeError("contract violation")
+
+
+async def test_injected_disposition_contract_violation_is_loud_not_silent() -> None:
+    """A disposition that violates the never-raise contract is caught + audited loud.
+
+    ``_route_notification`` is now a bare ``await self._inbound_disposition.dispatch(...)``
+    on an INJECTABLE seam. The default ``SessionDispatchDisposition`` provably never
+    raises, but a future G6-7-3 forward-runner disposition that breaks the contract
+    would otherwise leak its exception into the fire-and-forget dispatch task as a
+    GC-time "Task exception was never retrieved" warning — a SILENT failure at this
+    I/O boundary (CLAUDE.md hard rule #7). The runner's backstop turns it into a LOUD
+    audited row and lets the pump SURVIVE.
+    """
+    transport = _RunnerFakeTransport([dict(_HANDSHAKE_OK), _inbound_frame()])
+    inbound_handler = _RecordingHandler()
+    session = await _make_runner_session(transport, inbound_handler)
+    runner = CommsPluginRunner(
+        session=session,
+        transport=transport,
+        adapter_id=_RUNNER_ADAPTER_ID,
+        inbound_disposition=_RaisingDisposition(),
+    )
+
+    # Track every fire-and-forget task the pump spawns so we can assert NONE retained
+    # an unretrieved exception (mirrors test_comms_runner's no-leak pattern).
+    spawned: list[asyncio.Task[object]] = []
+    real_ensure_future = asyncio.ensure_future
+
+    def _tracking_ensure_future(coro: Any, **kwargs: Any) -> asyncio.Task[object]:
+        task = real_ensure_future(coro, **kwargs)
+        spawned.append(task)
+        return task
+
+    with (
+        mock.patch.object(asyncio, "ensure_future", _tracking_ensure_future),
+        structlog.testing.capture_logs() as log_records,
+    ):
+        # The pump must SURVIVE the contract violation: run() completes, no raise.
+        await runner.run()
+
+    # (b) the contract violation was audited LOUD with adapter_id + notification_method.
+    assert any(
+        rec.get("event") == "comms.runner.disposition_contract_violation"
+        and rec.get("log_level") == "error"
+        and rec.get("adapter_id") == _RUNNER_ADAPTER_ID
+        and rec.get("notification_method") == "inbound.message"
+        for rec in log_records
+    ), log_records
+
+    # (c) the dispatch task(s) completed WITHOUT a leaked, unretrieved exception:
+    # the backstop swallowed-and-audited rather than re-raising, so no task carries
+    # an exception that would warn at GC time.
+    dispatch_tasks = [t for t in spawned if t.done() and not t.cancelled()]
+    assert dispatch_tasks, "expected at least one fire-and-forget dispatch task"
+    for task in dispatch_tasks:
+        assert task.exception() is None, task
+
+    # (a) the pump survived to clean EOF and tore the transport down.
     assert transport.closed is True
