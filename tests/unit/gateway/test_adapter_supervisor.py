@@ -1171,6 +1171,9 @@ async def test_reap_error_is_logged_and_does_not_wedge_the_loop() -> None:
     reap_errors = [c for c in captured if c.get("event") == "gateway.adapter.reap_failed"]
     assert len(reap_errors) == 1
     assert reap_errors[0].get("adapter_id") == _A
+    # A leaked sandbox child is operator-actionable — logged at ERROR, not the WARNING
+    # routine back-pressure uses, so it is distinguishable in an operator's log triage.
+    assert reap_errors[0].get("log_level") == "error"
 
     await sup.request_stop(_A)
     await task
