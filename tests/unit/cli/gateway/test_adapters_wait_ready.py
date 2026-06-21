@@ -140,12 +140,103 @@ def test_unavailable_exits_two(monkeypatch: pytest.MonkeyPatch) -> None:
     assert t("gateway.adapters.unavailable") in result.output
 
 
+def _patch_known(monkeypatch: pytest.MonkeyPatch, known: list[str]) -> None:
+    """Pin the closed configured/hosted adapter set the up-front validation reads.
+
+    The real resolution reads Settings + manifests; faking it keeps these unit
+    tests from constructing Settings / touching the filesystem.
+    """
+    from alfred.cli.gateway import _adapters
+
+    monkeypatch.setattr(_adapters, "_resolve_known_adapter_ids", lambda: set(known))
+
+
 def test_unknown_adapter_exits_three(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GENUINELY-unknown id (absent from the configured set) → exit-3 immediately."""
     fake = _SeqQuery([_response({"discord": "up"})])
     _patch_query(monkeypatch, fake)
+    _patch_known(monkeypatch, ["discord"])
     result = CliRunner().invoke(gateway_app, ["adapters", "--wait-ready", "telegram"])
     assert result.exit_code == 3, result.output
     assert t("gateway.adapters.unknown_adapter", adapter="telegram") in result.output
+    # An unknown id is resolved up front: it never reaches the poll loop.
+    assert fake.calls == 0
+
+
+def test_known_but_not_yet_reported_adapter_waits_then_times_out(
+    monkeypatch: pytest.MonkeyPatch, _no_real_sleep: list[float]
+) -> None:
+    """A KNOWN adapter still BOOTING (absent from the observer map) waits, then exit-1.
+
+    The observer omits a not-yet-reported adapter; that absence must be treated as
+    NOT-READY (fall through to the deadline → loud exit-1 on timeout), NOT the
+    instant exit-3 a genuinely-unknown id gets.
+    """
+    # The status map NEVER lists ``discord`` (still booting), but it IS configured.
+    fake = _SeqQuery([_response({"tui": "up"})])
+    _patch_query(monkeypatch, fake)
+    _patch_known(monkeypatch, ["discord", "tui"])
+    result = CliRunner().invoke(
+        gateway_app, ["adapters", "--wait-ready", "discord", "--timeout", "0"]
+    )
+    assert result.exit_code == 1, result.output
+    assert t("gateway.adapters.wait_ready.timeout", adapter="discord", timeout=0) in result.output
+    # It POLLED (did not short-circuit to exit-3): the loop ran at least once.
+    assert fake.calls >= 1
+
+
+def test_resolve_known_adapter_ids_returns_configured_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real resolver returns the configured/hosted set from the boot seam."""
+    from alfred.cli.gateway import _adapters, _commands
+
+    monkeypatch.setattr(_commands, "_resolve_hosted_adapter_ids", lambda: ["discord"])
+    assert _adapters._resolve_known_adapter_ids() == {"discord"}
+
+
+def test_resolve_known_adapter_ids_empty_set_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty configured set resolves to ``None`` (skip validation; nothing to reject)."""
+    from alfred.cli.gateway import _adapters, _commands
+
+    monkeypatch.setattr(_commands, "_resolve_hosted_adapter_ids", list)
+    assert _adapters._resolve_known_adapter_ids() is None
+
+
+def test_resolve_known_adapter_ids_degrades_to_none_on_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resolution fault degrades to ``None`` (fail-safe; never a false refusal)."""
+    from alfred.cli.gateway import _adapters, _commands
+
+    def _boom() -> list[str]:
+        raise RuntimeError("settings unreadable")
+
+    monkeypatch.setattr(_commands, "_resolve_hosted_adapter_ids", _boom)
+    assert _adapters._resolve_known_adapter_ids() is None
+
+
+def test_known_but_booting_then_reports_up_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, _no_real_sleep: list[float]
+) -> None:
+    """A KNOWN adapter absent on the first poll then reported ``up`` → exit-0.
+
+    Proves in-loop absence is NOT-READY (keep waiting), not a terminal unknown.
+    """
+    fake = _SeqQuery(
+        [
+            _response({"tui": "up"}),  # discord not yet reported
+            _response({"discord": "up", "tui": "up"}),  # now booted
+        ]
+    )
+    _patch_query(monkeypatch, fake)
+    _patch_known(monkeypatch, ["discord", "tui"])
+    result = CliRunner().invoke(
+        gateway_app, ["adapters", "--wait-ready", "discord", "--timeout", "30"]
+    )
+    assert result.exit_code == 0, result.output
+    assert t("gateway.adapters.wait_ready.ready", adapter="discord") in result.output
+    assert fake.calls == 2
 
 
 def test_one_shot_renders_status(monkeypatch: pytest.MonkeyPatch) -> None:
