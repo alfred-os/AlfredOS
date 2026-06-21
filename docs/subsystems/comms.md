@@ -604,3 +604,25 @@ land.
 | Per-leg send-queue bytes | 1 MiB | Bounds pre-append working memory the `GlobalReplayCap` does not see. |
 | Per-leg `ReplayBuffer` | soft cap 4096 frames / 8 MiB / 300 s TTL | The unchanged Spec-A buffer SOFT caps (one instance per leg); a breach trips the breaker but keeps the frame (no silent drop). The HARD ceiling is `_HARD_CAP_MULTIPLIER` (2×) the soft cap — 8192 frames / 16 MiB — a fail-closed OOM backstop that raises. |
 | Global replay cap | ≥ the per-leg buffer hard ceiling × N | The aggregate-across-legs bound; set strictly above one leg's hard ceiling (16 MiB) so the per-leg buffer's own hard-cap fires first. Precedence: per-leg before global. |
+
+### Spec B G6-5: the gateway adapter-hosting spawn substrate (#288)
+
+The always-up gateway can now **spawn, sandbox, and handshake a hosted adapter
+child** — the substrate the ADR-0036 inversion needs before any adapter moves off
+the daemon-spawn path. The hosted child reads its credential from **fd-3** (the
+copied fd-3 spawn window, pinned alongside the quarantine child-launcher by a single
+shared property test); `GatewayAdapterStdioTransport`
+(`src/alfred/gateway/adapter_stdio_transport.py`) is the `Popen`-backed stdio
+transport for the child; `GatewayAdapterChildFactory`
+(`src/alfred/gateway/adapter_child_factory.py`) owns the spawn window plus
+child-reaping; and the `GatewayAdapterSupervisor` `aclose` reap hook reaps every
+spawned child on shutdown. Per-adapter binding ingress legs are wired, `adapter_ids`
+is read from settings, and `alfred gateway adapters --wait-ready` reports readiness
+via the daemon-control `status.query` seam.
+
+This slice is **purely additive**. The hosted-adapter **inbound→core bridge** and
+the **Discord flag-day** (deleting the daemon-spawn path, deleting the
+`alfred-discord` Compose service, and cutting the secret source over to the gateway)
+are tracked in epic **#309**. Discord still runs via the daemon-spawn path today; the
+bridge seam is `GatewayProcess._unwired_runner_factory`, a documented injectable
+fail-loud seam that #309 will wire. Nothing on the live Discord path changed here.
