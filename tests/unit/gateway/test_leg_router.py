@@ -12,7 +12,11 @@ import structlog
 
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
-from alfred.gateway.ingress_audit import _UNKNOWN_ADAPTER_LABEL, INGRESS_THROTTLED_TOTAL
+from alfred.gateway.ingress_audit import (
+    _FORGED_ID_MAX_LEN,
+    _UNKNOWN_ADAPTER_LABEL,
+    INGRESS_THROTTLED_TOTAL,
+)
 from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.leg_router import LegRouter, RouteOutcome
 from alfred.gateway.leg_scheduler import GatewayLegScheduler
@@ -115,6 +119,31 @@ def test_unknown_adapter_emits_loud_audit_without_leaking_the_body() -> None:
         assert _SENTINEL_BODY not in repr(row).encode()
         assert "payload" not in row
         assert "body" not in row
+
+
+def test_unknown_adapter_id_is_truncated_on_the_audit_row() -> None:
+    """L5 (Spec B G6-4, #288): a giant forged adapter_id is truncated to _FORGED_ID_MAX_LEN.
+
+    The forged id is recorded only as a BOUNDED structlog field (audit-injection defence: a
+    giant id must not bloat the log line). Route a forged id LONGER than the bound and assert
+    the audited ``forged_adapter_id`` field is exactly ``_FORGED_ID_MAX_LEN`` chars (a prefix
+    of the input) — the truncation property is otherwise untested.
+    """
+    sched, _ = _make_sched_with_leg("discord")
+    router = LegRouter(sched)
+    giant = "F" * (_FORGED_ID_MAX_LEN + 50)
+    cap = structlog.testing.LogCapture()
+    structlog.configure(processors=[cap])
+    try:
+        outcome = router.route(giant, b"x")
+    finally:
+        structlog.reset_defaults()
+    assert outcome is RouteOutcome.REFUSED_UNKNOWN_ADAPTER
+    refused = [r for r in cap.entries if r.get("event") == "gateway.ingress.refused"]
+    assert len(refused) == 1
+    truncated = refused[0]["forged_adapter_id"]
+    assert truncated == giant[:_FORGED_ID_MAX_LEN]
+    assert len(truncated) == _FORGED_ID_MAX_LEN
 
 
 def test_unknown_adapter_body_never_reaches_a_leg_buffer() -> None:
