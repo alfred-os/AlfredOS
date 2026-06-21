@@ -1915,8 +1915,21 @@ async def _submit_and_drain(link: GatewayCoreLink, payload: bytes, *, rounds: in
 
     Reproduces the old inline-submit observable (mint + append + escalate + write) for the
     buffer-keyed tests: ``submit_tui_unit`` admits + enqueues; this then runs the scheduler's
-    drain rounds in-line so the write/append are observable on return. Honours the
-    replay-pending gate (a cleared gate parks the drain, exactly as production)."""
+    drain rounds in-line so the write/append are observable on return.
+
+    **Replay-pending gate contract (CR / Spec B G6-4 #288).** Production's
+    :meth:`GatewayLegScheduler.run` AWAITS ``replay_pending_gate`` BEFORE each
+    ``_drain_one_round`` (the round-start park), and ``_drain_one_round`` itself BAILS out of
+    the remaining legs if the gate clears mid-round (the cross-leg single-writer guard) — so a
+    reconnect-replay always precedes fresh input. This helper deliberately drives a SINGLE
+    synchronous post-enqueue drain (the old inline-submit observable the buffer-keyed tests
+    assert on): several of those tests intentionally drain in the post-handshake / pre-flush
+    window (gate CLEAR by design) to verify the leg's record/append/seq behaviour, so the
+    helper must NOT block on the gate — that would deadlock those tests. The production
+    round-start park + mid-round bail are unit-covered directly in
+    ``tests/unit/gateway/test_leg_scheduler.py`` (``test_pump_parks_while_replay_gate_is_clear_…``
+    drives the REAL ``run`` pump), which is where the gate contract belongs.
+    """
     await link.submit_tui_unit(payload)
     scheduler: GatewayLegScheduler = link._scheduler_for_test  # type: ignore[attr-defined]
     for _ in range(rounds):
@@ -3867,6 +3880,9 @@ async def test_escalate_if_breaker_tripped_non_tui_leg_skips_unlabelled_gauge() 
     assert [type(c) for c in recorder.controls] == [LinkUnavailableNotification]
     rows = [c for c in captured if c.get("event") == "gateway.comms.breaker_tripped"]
     assert len(rows) == 1
+    # CR (Spec B G6-4 #288): the row carries the tripping leg's id so a multi-leg incident
+    # keeps the routing key needed to triage WHICH adapter tripped (hard rule #7).
+    assert rows[0]["adapter_id"] == "discord"
     # …but the UNLABELLED single-TUI JC-1 breaker gauge was NOT flipped (the under-cap TUI
     # leg is untouched, so the guard's FALSE branch skipped the refresh).
     assert CIRCUIT_BREAKER_OPEN._value.get() == 0

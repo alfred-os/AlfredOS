@@ -57,11 +57,24 @@ class IngressRefusalReason(enum.Enum):
     # here (the single closed-vocab home, K6) so the reason cannot drift when G6-5 wires it.
 
 
-# The EXACT field allowlist for every ingress-refusal audit row. NO body/body-hash/
-# body-sample/platform-id may ever appear — the K6 field-allowlist test asserts a row's
-# keys are a subset of this (plus structlog's own ``event``/``log_level``).
+# The EXACT field allowlist for every ``gateway.ingress.refused`` audit row (BOTH sinks:
+# the scalar-counter ingress/cap refusals AND the forged/unknown-adapter refusal). NO
+# body/body-hash/body-sample/platform-id may ever appear — the K6 field-allowlist test
+# asserts a row's keys are a subset of this (plus structlog's own ``event``/``log_level``).
+# ``forged_adapter_id`` is the K4 unknown-adapter sink's BOUNDED forensic field (truncated
+# to :data:`_FORGED_ID_MAX_LEN`, never a label value): it is gateway-observed envelope
+# metadata, NOT operator payload, so it belongs in the allowlist explicitly — keeping the
+# K6 guarantee TOTAL (every refused row's fields are accounted for) rather than partial.
 INGRESS_REFUSAL_AUDIT_FIELDS: Final[frozenset[str]] = frozenset(
-    {"adapter_id", "reason", "depth_frames", "depth_bytes", "inflight", "cap_ratio"}
+    {
+        "adapter_id",
+        "reason",
+        "depth_frames",
+        "depth_bytes",
+        "inflight",
+        "cap_ratio",
+        "forged_adapter_id",
+    }
 )
 
 # The i18n key prefix for operator-rendered refusal reasons (reserved in

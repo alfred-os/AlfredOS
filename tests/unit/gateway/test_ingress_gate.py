@@ -161,6 +161,51 @@ def test_zero_elapsed_refill_is_noop() -> None:
     assert gate.try_admit(frame_bytes=1).decision is IngressDecision.THROTTLED_RATE
 
 
+class _RegressableClock:
+    """A clock that can be moved BACKWARD — to exercise the monotone-floor guard."""
+
+    def __init__(self, start: float = 100.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def set(self, value: float) -> None:
+        self._now = value
+
+
+def test_backward_clock_does_not_refill_then_does_not_over_refill() -> None:
+    # CR (Spec B G6-4 #288): a clock that returns a value < _last_refill must NEVER move the
+    # high-water mark backward — else a later forward move would credit time for the regressed
+    # interval, over-refilling the bucket and weakening the sustained-rate cap (a
+    # back-pressure bypass).
+    clock = _RegressableClock(start=100.0)
+    # The shared ``_gate`` helper's clock is forward-only; build directly over the regressable
+    # clock to drive the backward branch.
+    gate = PerAdapterIngressGate(
+        "tui",
+        sustained_rate_per_s=1.0,
+        burst=2,
+        max_inflight=99,
+        ttl_seconds=30.0,
+        max_frame_bytes=1024,
+        now=clock,
+    )
+    # Drain the burst (2 tokens) at t=100.
+    assert gate.try_admit(frame_bytes=1).decision is IngressDecision.ADMITTED
+    assert gate.try_admit(frame_bytes=1).decision is IngressDecision.ADMITTED
+    assert gate.try_admit(frame_bytes=1).decision is IngressDecision.THROTTLED_RATE
+    # Regress the clock far into the past: the refill is a no-op AND the high-water mark is
+    # held at 100 (not lowered to 10).
+    clock.set(10.0)
+    assert gate.try_admit(frame_bytes=1).decision is IngressDecision.THROTTLED_RATE
+    # Now advance to t=101 — only 1s of REAL forward time since the t=100 high-water mark, so
+    # exactly 1 token refills (not 91 tokens for the 10->101 span). One admit, then throttled.
+    clock.set(101.0)
+    assert gate.try_admit(frame_bytes=1).decision is IngressDecision.ADMITTED
+    assert gate.try_admit(frame_bytes=1).decision is IngressDecision.THROTTLED_RATE
+
+
 # --------------------------------------------------------------------------- #
 # In-flight cap (concurrency tier)                                             #
 # --------------------------------------------------------------------------- #
@@ -252,6 +297,17 @@ def test_oversized_frame_refused() -> None:
     result = gate.try_admit(frame_bytes=17)
     assert result.decision is IngressDecision.OVERSIZED
     assert result.token is None
+
+
+def test_negative_frame_bytes_is_loud() -> None:
+    # CR (Spec B G6-4 #288): a negative byte count is a wiring bug — it must fail LOUD before
+    # the size/rate/in-flight machinery, never slip past the size tier (``-1 > max`` is False)
+    # and silently consume a token + in-flight slot.
+    gate, _ = _gate(burst=99, max_inflight=99)
+    with pytest.raises(ValueError, match="non-negative"):
+        gate.try_admit(frame_bytes=-1)
+    # No token / slot was consumed by the rejected call.
+    assert gate.inflight_count == 0
 
 
 def test_exact_max_frame_bytes_admitted() -> None:

@@ -1223,6 +1223,11 @@ class GatewayCoreLink:
         if control is LinkControl.UNAVAILABLE:
             log.warning(
                 "gateway.comms.breaker_tripped",
+                # CR (Spec B G6-4 #288): include the leg id so a MULTI-leg incident keeps the
+                # routing key needed to triage WHICH adapter tripped (CLAUDE.md hard rule #7 —
+                # a loud row must carry enough context to act). Payload-blind: ``adapter_id``
+                # is the gateway-chosen leg key, never a body / platform-id.
+                adapter_id=leg.adapter_id,
                 depth_frames=leg.depth_frames,
                 depth_bytes=leg.depth_bytes,
             )

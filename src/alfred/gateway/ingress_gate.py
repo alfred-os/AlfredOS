@@ -139,7 +139,14 @@ class PerAdapterIngressGate:
         resource than the tier that refused. On admit a token is minted, a slot is
         reserved, and the bucket is debited; the caller MUST :meth:`release` the token
         when the frame completes (or it is reclaimed by the TTL sweep).
+
+        A negative ``frame_bytes`` is a wiring bug — a byte count cannot be negative — so
+        it fails LOUD (``ValueError``, CLAUDE.md hard rule #7) BEFORE the size/rate/in-flight
+        machinery: it must never slip past the size tier (``-1 > max_frame_bytes`` is False)
+        and silently consume a token + an in-flight slot.
         """
+        if frame_bytes < 0:
+            raise ValueError(f"frame_bytes must be non-negative: {frame_bytes}")
         if frame_bytes > self._max_frame_bytes:
             return AdmitResult(IngressDecision.OVERSIZED)
         self._refill()
@@ -198,12 +205,23 @@ class PerAdapterIngressGate:
         No timer — the elapsed time since the last refill is read from the injected clock
         and converted to tokens on demand. The ``min`` clamp is the no-over-accrual guard:
         an arbitrarily long idle still tops the bucket out at ``burst``, never higher.
+
+        **Monotone clock floor (CLAUDE.md hard rule #7).** ``_last_refill`` is NEVER moved
+        backward. If the injected clock returns ``now <= _last_refill`` (a non-advancing or
+        regressed reading — a wall-clock injected by a careless caller, or coincident calls
+        on the same tick), the bucket is left untouched AND ``_last_refill`` is held: a later
+        forward move then measures elapsed from the HIGH-WATER reading, never crediting time
+        for the regressed interval (which would over-refill and weaken the sustained-rate cap
+        — a back-pressure-bypass). ``min(burst, ...)`` bounds an over-accrual; this floor
+        prevents a clock regression from manufacturing one.
         """
         now = self._now()
+        if now <= self._last_refill:
+            # Non-advancing / regressed clock: do not move the high-water mark backward and
+            # do not refill for a non-positive interval.
+            return
         elapsed = now - self._last_refill
         self._last_refill = now
-        if elapsed <= 0:
-            return
         self._tokens = min(float(self._burst), self._tokens + elapsed * self._rate)
 
 
