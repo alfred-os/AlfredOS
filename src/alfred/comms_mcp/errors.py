@@ -73,11 +73,49 @@ class PromoterRequiredError(CommsMcpError):
     """
 
 
+class InboundReparseError(CommsMcpError):
+    """A gateway-forwarded inbound failed the core-side re-parse (G6-7-1, #309).
+
+    Base for the two loud refusals
+    :func:`alfred.comms_mcp.inbound_reparse.reparse_forwarded_inbound` raises. Both
+    are FAIL-LOUD (hard rule #7) — never a silent drop. The disposition the core
+    attaches to each (the §3.3 K4-style forge refusal vs the §3.3/ARCH-309-3
+    ack-to-drain on a malformed body) is wired in the receive slice (G6-7-4); this
+    typed hierarchy is the data-layer contract those dispositions discriminate on.
+    Carries NO raw T3 body on the exception (spec §5.6 — no payload in error attrs).
+    """
+
+
+class InboundEnvelopeBodyMismatchError(InboundReparseError):
+    """The envelope ``adapter_id`` did not equal the body-derived ``adapter_id``.
+
+    The F3 forgery mitigation's data-layer half (spec §3.3): the body stays the
+    sole G0 authority, and an envelope whose routing id disagrees with the body it
+    wraps is a forged-body/valid-leg mismatch — refused loud (the core maps this to
+    a K4-style refusal + signed audit row in G6-7-4), never default-routed. Carries
+    only the two closed-vocab adapter_id KINDS, never the body.
+    """
+
+
+class InboundBodyMalformedError(InboundReparseError):
+    """The opaque forwarded body could not be re-parsed into an inbound.
+
+    The core re-parses a body the gateway never validated; a decode failure
+    (non-UTF-8 / non-JSON / not a top-level object) or an
+    :class:`InboundMessageNotification` validation failure raises this. In G6-7-4
+    the core maps it to a loud bounded-field audit drop that ACKs the leg frame to
+    drain it (ARCH-309-3 — no infinite replay). Carries NO raw body (spec §5.6).
+    """
+
+
 __all__ = [
     "CommsHandlerFailedError",
     "CommsMcpError",
     "DaemonUnavailableError",
+    "InboundBodyMalformedError",
     "InboundBurstDroppedError",
+    "InboundEnvelopeBodyMismatchError",
+    "InboundReparseError",
     "PromoterRequiredError",
     "UnknownAdapterKindError",
 ]
