@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import stat
 import struct
 from typing import Final, Protocol
 
@@ -101,6 +102,21 @@ class Fd3TokenSource:
     channel does not linger open in the child. A short / torn / mis-framed read
     raises (``EOFError`` / ``struct.error`` / ``OSError``); :meth:`Lifecycle.start`
     maps that to ``ok=False`` without ever logging the (possibly partial) bytes.
+
+    **Fail-fast on a missing token writer (Spec B G6-5, #288).** The still-present
+    foreground ``alfred discord`` path (``cli/discord_cmd.py``, retirement deferred to
+    #309) spawns this entrypoint with NO fd-3 token writer. Before the blocking read,
+    :meth:`read` ``fstat``s fd 3 and refuses fast (``OSError``) if it is absent (EBADF)
+    or NOT a pipe/FIFO — so a foreground spawn maps to ``ok=False`` PROMPTLY rather than
+    blocking ``os.read(3)`` forever inside ``DiscordLifecycle._transition_lock``.
+
+    **Residual degraded mode (tracked, #309).** The guard cannot distinguish a
+    legitimate gateway-hosted pipe whose writer is about to deliver (the credential is
+    written AFTER the spawn window, BEFORE the handshake — the child correctly blocks
+    waiting) from a pipe held open with no writer that never writes. A non-blocking probe
+    would falsely fail the legitimate gateway path, so it is deliberately NOT used. A
+    blocking-pipe-with-no-writer is the gateway's delivery contract; the foreground
+    no-writer case it guards is the common one, fixed deterministically here.
     """
 
     def __init__(self, *, fd: int = _PROVIDER_KEY_FD) -> None:
@@ -108,6 +124,7 @@ class Fd3TokenSource:
 
     def read(self) -> str:
         try:
+            self._require_pipe()
             header = _read_exactly(self._fd, _LENGTH_HEADER_BYTES)
             (length,) = _LENGTH_PREFIX.unpack(header)
             body = _read_exactly(self._fd, length)
@@ -117,6 +134,19 @@ class Fd3TokenSource:
             with contextlib.suppress(OSError):
                 os.close(self._fd)
         return body.decode("utf-8")
+
+    def _require_pipe(self) -> None:
+        """Fail-fast if fd 3 is absent or not a pipe — never block on a missing writer.
+
+        ``os.fstat`` raises ``OSError`` (EBADF) if fd 3 is closed / never opened (the
+        common foreground-spawn case). If it is open but NOT a FIFO/pipe (an inherited
+        regular file / tty / device), refuse with ``OSError`` rather than risk a blocking
+        ``os.read`` that the caller maps to ``ok=False`` only after a hang. A genuine
+        gateway-delivered pipe passes this check and the blocking read proceeds.
+        """
+        mode = os.fstat(self._fd).st_mode  # OSError (EBADF) if fd 3 is not open
+        if not stat.S_ISFIFO(mode):
+            raise OSError(f"fd {self._fd} is not a pipe; no token writer present")
 
 
 class GatewayProtocol(Protocol):
