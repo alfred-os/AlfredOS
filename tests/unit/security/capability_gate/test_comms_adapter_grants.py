@@ -18,6 +18,32 @@ ROW the gate then evaluates normally. The gate is NEVER special-cased to
 Driver-free unit tier: the builder is a PURE ``Settings -> tuple[GrantRow]``
 transform reading source-controlled manifests off disk; no Postgres, no
 gate.
+
+G6-5 Task 10 / H2 disposition (#288) — RETAINED-alongside, NOT rewritten
+-----------------------------------------------------------------------
+This is the SOLE unit driver for
+``src/alfred/security/capability_gate/_comms_adapter_grants.py`` (a per-file
+100% line+branch gate named in BOTH ci.yml gate sites). The builder is
+gateway-agnostic: it seeds ONE plugin-LOAD grant per entry in
+``Settings.comms_enabled_adapters`` regardless of WHO spawns the adapter.
+
+Under G6-5 the GATEWAY gains its own bwrap-spawned Discord path, but the
+flag-day daemon-spawn + Compose deletion are Tasks 11/12 — NOT yet on this
+branch. The daemon still spawns a daemon-side stdio child for any non-socket
+adapter listed in ``comms_enabled_adapters`` (``_commands.py`` carrier loop),
+so Discord's ADR-0027 daemon LOAD-grant is STILL load-bearing: without it a
+daemon-side ``check_plugin_load`` fail-closes (``plugin_load_refused_gate``).
+The discord LOAD-grant is therefore RETAINED-alongside the reference adapter's,
+NOT removed. (Distinct from ``_ADAPTER_SECRET_ALLOWLIST`` in the credential
+*resolver* — the G6-3 gateway credential path — which is unrelated to this
+LOAD-grant model and unchanged.)
+
+Coverage anchor: the builder's branches (empty set -> ``()``; one enabled ->
+one grant; multiple -> order-preserved; ``system``-tier -> refuse;
+unparseable / missing manifest -> raise) are exercised primarily on the
+SURVIVING reference adapter ``alfred_comms_test`` so the module stays 100%
+independent of any Discord-spawn relocation; the one multi-adapter case below
+pins that the SAME generic seed applies to ``alfred_discord`` too.
 """
 
 from __future__ import annotations
@@ -109,11 +135,16 @@ def test_builder_uses_distinct_bootstrap_sentinel_branch() -> None:
 def test_builder_preserves_enabled_order_for_multiple_adapters() -> None:
     """Two enabled adapters -> one grant each, in enumeration order.
 
-    Enabling the same reference adapter twice would be rejected by the
-    Settings validator? No — the validator allows repeats; but the daemon
-    enables a SET of distinct ids. We pin that each enabled id maps to its
-    own grant by enumerating the reference adapter alongside the discord
-    adapter, both first-party in-repo.
+    The daemon enables a SET of distinct plugin-package ids; each maps to its own
+    grant carrying the MANIFEST ``[plugin] id`` (not the dir id). We enumerate the
+    reference adapter (``alfred_comms_test`` -> ``alfred.comms-test``) alongside the
+    Discord adapter (``alfred_discord`` -> ``alfred.discord``), both first-party
+    in-repo, in order.
+
+    G6-5 H2: the Discord case is RETAINED here (not dropped) — the daemon still spawns
+    a daemon-side Discord stdio child for an enabled ``alfred_discord`` (the flag-day
+    daemon-spawn deletion is Task 11/12), so its ADR-0027 LOAD-grant is still seeded
+    by this generic builder, exactly as the reference adapter's is.
     """
     settings = _settings_with_adapters(_ENABLED_ADAPTER, "alfred_discord")
 
