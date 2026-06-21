@@ -52,3 +52,16 @@ def _register() -> None:
     t("gateway.ingress.refused.global_cap_refused")
     t("gateway.ingress.refused.unknown_adapter")
     t("gateway.ingress.refused.queue_full")
+    # G6-5 ``alfred gateway adapters`` per-state render tokens (#288 / ADR-0038). The
+    # verify command DICT-dereferences these via ``_STATE_KEYS[line.state]``
+    # (``alfred.cli.gateway._adapters``), so the literal is invisible to pybabel at the
+    # call site — reserve them here so they are not marked obsolete on the next
+    # ``pybabel update`` (the catalog-drift gate). The other ``gateway.adapters.*`` keys
+    # (header/none/line/unavailable/unknown_adapter + the wait_ready.* family + the
+    # help.adapters* strings) are referenced literally in the command / Typer source, so
+    # pybabel extracts them directly and they need NO reservation here.
+    t("gateway.adapters.state.up")
+    t("gateway.adapters.state.down")
+    t("gateway.adapters.state.crashed")
+    t("gateway.adapters.state.breaker_open")
+    t("gateway.adapters.state.unknown")

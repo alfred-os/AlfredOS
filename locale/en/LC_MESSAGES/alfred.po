@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-21 00:01+0100\n"
+"POT-Creation-Date: 2026-06-21 12:08+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1188,55 +1188,123 @@ msgstr ""
 "Two-tier liveness/readiness probe for Docker HEALTHCHECK (exit 0 healthy,"
 " 1 unhealthy)."
 
-#: src/alfred/cli/gateway/_commands.py:74
+#: src/alfred/cli/gateway/__init__.py:49
+msgid "gateway.help.adapters"
+msgstr ""
+"Show or wait on the status of the gateway-hosted comms adapters (reads the "
+"live daemon control plane; does not dial the gateway directly)."
+
+#: src/alfred/cli/gateway/__init__.py:51
+msgid "gateway.help.adapters_arg"
+msgstr ""
+"The adapter to show or wait on (e.g. discord). Omit to show every reported "
+"adapter."
+
+#: src/alfred/cli/gateway/__init__.py:53
+msgid "gateway.help.adapters_wait"
+msgstr ""
+"Poll until the named adapter is ready (up) or the timeout elapses; exit 0 "
+"ready, 1 not-ready, 2 unavailable, 3 unknown adapter."
+
+#: src/alfred/cli/gateway/__init__.py:54
+msgid "gateway.help.adapters_timeout"
+msgstr "Seconds to wait for readiness before giving up (default 30)."
+
+#: src/alfred/cli/gateway/_adapters.py:118
+msgid "gateway.adapters.line"
+msgstr "  {adapter}: {state}"
+
+#: src/alfred/cli/gateway/_adapters.py:128
+#: src/alfred/cli/gateway/_adapters.py:157
+msgid "gateway.adapters.unknown_adapter"
+msgstr ""
+"Unknown adapter '{adapter}' — it is not reported by the gateway. Check the "
+"name and that it is listed in ALFRED_COMMS_ENABLED_ADAPTERS."
+
+#: src/alfred/cli/gateway/_adapters.py:132
+msgid "gateway.adapters.none"
+msgstr "No gateway-hosted adapters are reported."
+
+#: src/alfred/cli/gateway/_adapters.py:134
+msgid "gateway.adapters.header"
+msgstr "Gateway adapters:"
+
+#: src/alfred/cli/gateway/_adapters.py:154
+#: src/alfred/cli/gateway/_adapters.py:197
+msgid "gateway.adapters.unavailable"
+msgstr ""
+"Cannot read adapter status — the AlfredOS daemon is not reachable. Start it "
+"with `alfred daemon start`, then re-run this command."
+
+#: src/alfred/cli/gateway/_adapters.py:160
+msgid "gateway.adapters.wait_ready.ready"
+msgstr "Adapter '{adapter}' is ready (up)."
+
+#: src/alfred/cli/gateway/_adapters.py:165
+msgid "gateway.adapters.wait_ready.timeout"
+msgstr ""
+"Adapter '{adapter}' was not ready within {timeout}s. It may still be "
+"starting — check `alfred daemon status` and the gateway logs."
+
+#: src/alfred/cli/gateway/_adapters.py:167
+msgid "gateway.adapters.wait_ready.waiting"
+msgstr "Waiting for adapter '{adapter}' to become ready…"
+
+#: src/alfred/cli/gateway/_adapters.py:185
+msgid "gateway.adapters.wait_ready.needs_adapter"
+msgstr ""
+"--wait-ready needs an adapter to wait for, e.g. `alfred gateway adapters "
+"--wait-ready discord`."
+
+#: src/alfred/cli/gateway/_commands.py:96
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:115
+#: src/alfred/cli/gateway/_commands.py:138
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:122
+#: src/alfred/cli/gateway/_commands.py:145
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:131
+#: src/alfred/cli/gateway/_commands.py:154
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:133
+#: src/alfred/cli/gateway/_commands.py:156
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:154
-#: src/alfred/cli/gateway/_commands.py:168
+#: src/alfred/cli/gateway/_commands.py:177
+#: src/alfred/cli/gateway/_commands.py:191
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:172
+#: src/alfred/cli/gateway/_commands.py:195
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:244
-#: src/alfred/cli/gateway/_commands.py:250
+#: src/alfred/cli/gateway/_commands.py:267
+#: src/alfred/cli/gateway/_commands.py:273
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:254
+#: src/alfred/cli/gateway/_commands.py:277
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
@@ -1261,6 +1329,24 @@ msgstr "Comms dispatch ingest result is missing a required key; refusing to send
 #: src/alfred/comms_mcp/daemon_runtime.py:236
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
+
+#: src/alfred/gateway/adapter_stdio_transport.py:146
+#: src/alfred/gateway/adapter_stdio_transport.py:173
+#: src/alfred/gateway/adapter_stdio_transport.py:185
+#: src/alfred/gateway/adapter_stdio_transport.py:192
+#: src/alfred/gateway/adapter_stdio_transport.py:199
+#: src/alfred/plugins/comms_socket_transport.py:392
+#: src/alfred/plugins/comms_socket_transport.py:402
+#: src/alfred/plugins/comms_socket_transport.py:449
+#: src/alfred/plugins/comms_socket_transport.py:456
+#: src/alfred/plugins/comms_stdio_transport.py:241
+#: src/alfred/plugins/comms_stdio_transport.py:251
+#: src/alfred/plugins/comms_stdio_transport.py:270
+#: src/alfred/plugins/comms_stdio_transport.py:277
+msgid "comms.transport.malformed_frame"
+msgstr ""
+"Comms adapter {adapter_id} sent a malformed or oversized frame; the wire "
+"frame was refused."
 
 #: src/alfred/hooks/errors.py:108
 msgid "hooks.refusal"
@@ -1835,6 +1921,26 @@ msgstr "ingress refused: frame names an unregistered adapter"
 msgid "gateway.ingress.refused.queue_full"
 msgstr "ingress refused: adapter send-queue is full (back-pressure)"
 
+#: src/alfred/i18n/_spec_b_reserve.py:63
+msgid "gateway.adapters.state.up"
+msgstr "ready"
+
+#: src/alfred/i18n/_spec_b_reserve.py:64
+msgid "gateway.adapters.state.down"
+msgstr "down"
+
+#: src/alfred/i18n/_spec_b_reserve.py:65
+msgid "gateway.adapters.state.crashed"
+msgstr "crashed"
+
+#: src/alfred/i18n/_spec_b_reserve.py:66
+msgid "gateway.adapters.state.breaker_open"
+msgstr "breaker open"
+
+#: src/alfred/i18n/_spec_b_reserve.py:67
+msgid "gateway.adapters.state.unknown"
+msgstr "unknown"
+
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
 # Only keys with live call-sites are retained; help-text long forms and
@@ -2291,19 +2397,6 @@ msgstr ""
 "Refusing the comms socket dial for adapter {adapter_id}: the connected "
 "peer's uid did not match this user (a stale-socket race or wider-"
 "permission misconfiguration); the connection was closed."
-
-#: src/alfred/plugins/comms_socket_transport.py:392
-#: src/alfred/plugins/comms_socket_transport.py:402
-#: src/alfred/plugins/comms_socket_transport.py:449
-#: src/alfred/plugins/comms_socket_transport.py:456
-#: src/alfred/plugins/comms_stdio_transport.py:241
-#: src/alfred/plugins/comms_stdio_transport.py:251
-#: src/alfred/plugins/comms_stdio_transport.py:270
-#: src/alfred/plugins/comms_stdio_transport.py:277
-msgid "comms.transport.malformed_frame"
-msgstr ""
-"Comms adapter {adapter_id} sent a malformed or oversized frame; the wire "
-"frame was refused."
 
 #: src/alfred/plugins/content_store_base.py:153
 msgid "plugin.content_store.inmemory_not_production_safe"
