@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-21 12:08+0100\n"
+"POT-Creation-Date: 2026-06-21 12:24+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1191,20 +1191,20 @@ msgstr ""
 #: src/alfred/cli/gateway/__init__.py:49
 msgid "gateway.help.adapters"
 msgstr ""
-"Show or wait on the status of the gateway-hosted comms adapters (reads the "
-"live daemon control plane; does not dial the gateway directly)."
+"Show or wait on the status of the gateway-hosted comms adapters (reads "
+"the live daemon control plane; does not dial the gateway directly)."
 
 #: src/alfred/cli/gateway/__init__.py:51
 msgid "gateway.help.adapters_arg"
 msgstr ""
-"The adapter to show or wait on (e.g. discord). Omit to show every reported "
-"adapter."
+"The adapter to show or wait on (e.g. discord). Omit to show every "
+"reported adapter."
 
 #: src/alfred/cli/gateway/__init__.py:53
 msgid "gateway.help.adapters_wait"
 msgstr ""
-"Poll until the named adapter is ready (up) or the timeout elapses; exit 0 "
-"ready, 1 not-ready, 2 unavailable, 3 unknown adapter."
+"Poll until the named adapter is ready (up) or the timeout elapses; exit 0"
+" ready, 1 not-ready, 2 unavailable, 3 unknown adapter."
 
 #: src/alfred/cli/gateway/__init__.py:54
 msgid "gateway.help.adapters_timeout"
@@ -1218,8 +1218,8 @@ msgstr "  {adapter}: {state}"
 #: src/alfred/cli/gateway/_adapters.py:157
 msgid "gateway.adapters.unknown_adapter"
 msgstr ""
-"Unknown adapter '{adapter}' — it is not reported by the gateway. Check the "
-"name and that it is listed in ALFRED_COMMS_ENABLED_ADAPTERS."
+"Unknown adapter '{adapter}' — it is not reported by the gateway. Check "
+"the name and that it is listed in ALFRED_COMMS_ENABLED_ADAPTERS."
 
 #: src/alfred/cli/gateway/_adapters.py:132
 msgid "gateway.adapters.none"
@@ -1233,8 +1233,8 @@ msgstr "Gateway adapters:"
 #: src/alfred/cli/gateway/_adapters.py:197
 msgid "gateway.adapters.unavailable"
 msgstr ""
-"Cannot read adapter status — the AlfredOS daemon is not reachable. Start it "
-"with `alfred daemon start`, then re-run this command."
+"Cannot read adapter status — the AlfredOS daemon is not reachable. Start "
+"it with `alfred daemon start`, then re-run this command."
 
 #: src/alfred/cli/gateway/_adapters.py:160
 msgid "gateway.adapters.wait_ready.ready"
@@ -1256,55 +1256,62 @@ msgstr ""
 "--wait-ready needs an adapter to wait for, e.g. `alfred gateway adapters "
 "--wait-ready discord`."
 
-#: src/alfred/cli/gateway/_commands.py:96
+#: src/alfred/cli/gateway/_commands.py:101
+msgid "gateway.adapters.no_adapter_kind"
+msgstr ""
+"Comms adapter plugin '{plugin}' declares no [comms_mcp] adapter_kind in "
+"its manifest — the gateway cannot resolve its canonical adapter id. Fix "
+"the plugin manifest."
+
+#: src/alfred/cli/gateway/_commands.py:138
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:138
+#: src/alfred/cli/gateway/_commands.py:180
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:145
+#: src/alfred/cli/gateway/_commands.py:187
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:154
+#: src/alfred/cli/gateway/_commands.py:196
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:156
+#: src/alfred/cli/gateway/_commands.py:198
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:177
-#: src/alfred/cli/gateway/_commands.py:191
+#: src/alfred/cli/gateway/_commands.py:219
+#: src/alfred/cli/gateway/_commands.py:233
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:195
+#: src/alfred/cli/gateway/_commands.py:237
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:267
-#: src/alfred/cli/gateway/_commands.py:273
+#: src/alfred/cli/gateway/_commands.py:309
+#: src/alfred/cli/gateway/_commands.py:315
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:277
+#: src/alfred/cli/gateway/_commands.py:319
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
@@ -1941,6 +1948,14 @@ msgstr "breaker open"
 msgid "gateway.adapters.state.unknown"
 msgstr "unknown"
 
+#: src/alfred/i18n/_spec_b_reserve.py:72
+msgid "plugin.manifest_comms_mcp_module_type"
+msgstr "Plugin manifest [comms_mcp] module is not a string."
+
+#: src/alfred/i18n/_spec_b_reserve.py:73
+msgid "plugin.manifest_comms_mcp_adapter_kind_type"
+msgstr "Plugin manifest [comms_mcp] adapter_kind is not a string."
+
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
 # Only keys with live call-sites are retained; help-text long forms and
@@ -2461,13 +2476,13 @@ msgstr ""
 "Outbound DLP refused frame for plugin {plugin_id!r}: rule {rule!r} "
 "matched."
 
-#: src/alfred/plugins/manifest.py:85 src/alfred/plugins/manifest.py:289
+#: src/alfred/plugins/manifest.py:94 src/alfred/plugins/manifest.py:321
 msgid "plugin.manifest_sandbox_policy_refs_required"
 msgstr ""
 "Plugin manifest [sandbox] kind={kind} requires a non-empty policy_refs "
 "table."
 
-#: src/alfred/plugins/manifest.py:126 src/alfred/plugins/manifest.py:182
+#: src/alfred/plugins/manifest.py:145 src/alfred/plugins/manifest.py:201
 msgid "plugin.manifest_unknown_subscriber_tier"
 msgstr ""
 "Plugin manifest subscriber_tier {tier} is unknown; valid values: "
@@ -2476,53 +2491,49 @@ msgstr ""
 # Slice-3 retrospective fix DEVEX-002 — manifest parser raises that
 # previously bypassed t(). Each reason carries a distinct key so callers
 # can branch on the specific manifest defect (CLI rendering, audit row).
-#: src/alfred/plugins/manifest.py:150
+#: src/alfred/plugins/manifest.py:169
 msgid "plugin.manifest_invalid_toml"
 msgstr "Plugin manifest is not valid TOML: {detail}."
 
-#: src/alfred/plugins/manifest.py:164
+#: src/alfred/plugins/manifest.py:183
 msgid "plugin.manifest_missing_plugin_section"
 msgstr "Plugin manifest is missing the required [plugin] table."
 
-#: src/alfred/plugins/manifest.py:168
+#: src/alfred/plugins/manifest.py:187
 msgid "plugin.manifest_invalid_plugin_id"
 msgstr "Plugin manifest [plugin] id is missing or not a non-empty string."
 
-#: src/alfred/plugins/manifest.py:172
+#: src/alfred/plugins/manifest.py:191
 msgid "plugin.manifest_invalid_subscriber_tier_type"
 msgstr "Plugin manifest [plugin] subscriber_tier is missing or not a string."
 
-#: src/alfred/plugins/manifest.py:190
+#: src/alfred/plugins/manifest.py:209
 msgid "plugin.manifest_invalid_sandbox_profile_type"
 msgstr "Plugin manifest [plugin] sandbox_profile is not a string."
 
-#: src/alfred/plugins/manifest.py:194
+#: src/alfred/plugins/manifest.py:213
 msgid "plugin.manifest_invalid_platform_type"
 msgstr "Plugin manifest [plugin] platform is not a string."
 
-#: src/alfred/plugins/manifest.py:231
+#: src/alfred/plugins/manifest.py:248
 msgid "plugin.manifest_comms_mcp_not_table"
 msgstr "Plugin manifest [comms_mcp] must be a table."
 
-#: src/alfred/plugins/manifest.py:236
-msgid "plugin.manifest_comms_mcp_module_type"
-msgstr "Plugin manifest [comms_mcp] module is not a string."
-
-#: src/alfred/plugins/manifest.py:259
+#: src/alfred/plugins/manifest.py:291
 msgid "plugin.manifest_sandbox_kind_invalid"
 msgstr "Plugin manifest [sandbox] kind {got} is invalid (valid: {valid})."
 
-#: src/alfred/plugins/manifest.py:267
+#: src/alfred/plugins/manifest.py:299
 msgid "plugin.manifest_sandbox_policy_refs_type"
 msgstr "Plugin manifest [sandbox] policy_refs must be a table."
 
-#: src/alfred/plugins/manifest.py:272
+#: src/alfred/plugins/manifest.py:304
 msgid "plugin.manifest_sandbox_policy_refs_unknown_os"
 msgstr ""
 "Plugin manifest [sandbox] policy_refs has unknown OS key {got} (valid: "
 "{valid})."
 
-#: src/alfred/plugins/manifest.py:282
+#: src/alfred/plugins/manifest.py:314
 msgid "plugin.manifest_sandbox_policy_refs_value_type"
 msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
 

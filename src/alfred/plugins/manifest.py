@@ -48,6 +48,15 @@ from alfred.plugins.errors import (
 _VALID_SUBSCRIBER_TIERS: Final[frozenset[str]] = frozenset({"system", "operator", "user-plugin"})
 _CONTENT_TRUST_TIERS: Final[frozenset[str]] = frozenset({"T0", "T1", "T2", "T3"})
 
+# Per-key malformed-type catalog keys for the optional ``[comms_mcp]`` string keys
+# (``module`` / ``adapter_kind``). Dict-dereferenced in :func:`_parse_comms_mcp_str_key`
+# so the operator-facing message names the offending key; the ``adapter_kind`` entry is
+# reserved in ``_spec_b_reserve`` (the literal is invisible to pybabel here).
+_COMMS_MCP_KEY_TYPE_ERRORS: Final[Mapping[str, str]] = {
+    "module": "plugin.manifest_comms_mcp_module_type",
+    "adapter_kind": "plugin.manifest_comms_mcp_adapter_kind_type",
+}
+
 # Spec §7.1 (PR-S4-6): the OS-level isolation primitive a plugin declares.
 # Orthogonal to ``subscriber_tier`` (capability-gate posture) and the
 # legacy free-form ``sandbox_profile`` label — see manifest.py module
@@ -107,6 +116,16 @@ class PluginManifest(BaseModel):
     # with no ``[comms_mcp]`` block (or no ``module`` key) parses with this
     # ``None``, so every pre-11b manifest stays back-compat.
     comms_mcp_module: str | None = None
+    # G6-5 Task 10 (#288): the canonical wire ``adapter_id`` a comms adapter
+    # announces (``[comms_mcp] adapter_kind``, e.g. ``discord``). DISTINCT from the
+    # plugin-package id (the ``plugins/<id>/`` dir name) and the launcher
+    # ``[plugin] id`` (spec §8.3 id-triplet). Additive/optional — a manifest with no
+    # ``[comms_mcp]`` block (or no ``adapter_kind`` key) parses with this ``None``,
+    # so every non-comms manifest stays back-compat. The gateway-hosting resolve
+    # seam (:func:`alfred.cli.gateway._commands._resolve_adapter_kind`) reads it so
+    # ``comms_enabled_adapters`` (plugin-package ids) reconcile to the canonical
+    # ``adapter_id`` the factory / credential allowlist / legs key on.
+    comms_mcp_adapter_kind: str | None = None
 
     @field_validator("subscriber_tier")
     @classmethod
@@ -194,7 +213,9 @@ def parse_manifest(raw: str) -> PluginManifest:
         raise ManifestError(t("plugin.manifest_invalid_platform_type"))
 
     sandbox_block = _parse_sandbox_block(data, plugin_id=plugin_id)
-    comms_mcp_module = _parse_comms_mcp_module(data)
+    comms_section = _parse_comms_mcp_section(data)
+    comms_mcp_module = _parse_comms_mcp_str_key(comms_section, key="module")
+    comms_mcp_adapter_kind = _parse_comms_mcp_str_key(comms_section, key="adapter_kind")
 
     return PluginManifest(
         manifest_version=1,
@@ -204,37 +225,48 @@ def parse_manifest(raw: str) -> PluginManifest:
         sandbox=sandbox_block,
         platform=platform_raw,
         comms_mcp_module=comms_mcp_module,
+        comms_mcp_adapter_kind=comms_mcp_adapter_kind,
     )
 
 
-def _parse_comms_mcp_module(data: dict[str, Any]) -> str | None:
-    """Read the optional ``[comms_mcp] module`` key (PR-S4-11b, #237).
+def _parse_comms_mcp_section(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Read + shape-validate the optional ``[comms_mcp]`` block (PR-S4-11b, #237).
 
-    Returns ``None`` when the ``[comms_mcp]`` block is ABSENT or carries no
-    ``module`` key — every pre-11b manifest stays back-compat. The block's other
-    keys (``adapter_kind`` / ``classifiers_optional``) are tolerated and ignored
-    here (they are consumed elsewhere); only ``module``'s type is validated, so a
-    non-string ``module`` surfaces a typed :class:`ManifestError` rather than a
-    raw Pydantic ``ValidationError``.
+    Returns the block dict, or ``None`` when it is ABSENT — every pre-11b manifest
+    stays back-compat.
 
     FIX 5 (PR-S4-11b review): a PRESENT-but-non-table ``comms_mcp`` (e.g.
-    ``comms_mcp = "oops"``) is a MALFORMED manifest, not "no module". It is
-    rejected with :class:`ManifestError` rather than silently treated as absent
-    — the silent-absence shape masked a broken manifest the operator believes
-    declares a module (CLAUDE.md hard rule #7). A genuinely missing key still
-    returns ``None`` (the ``is None`` arm), preserving back-compat.
+    ``comms_mcp = "oops"``) is a MALFORMED manifest, not "no block". It is rejected
+    with :class:`ManifestError` rather than silently treated as absent — the
+    silent-absence shape masked a broken manifest the operator believes declares a
+    comms adapter (CLAUDE.md hard rule #7).
     """
     if "comms_mcp" not in data:
         return None
     comms_section = data["comms_mcp"]
     if not isinstance(comms_section, dict):
         raise ManifestError(t("plugin.manifest_comms_mcp_not_table"))
-    module = comms_section.get("module")
-    if module is None:
+    return comms_section
+
+
+def _parse_comms_mcp_str_key(comms_section: dict[str, Any] | None, *, key: str) -> str | None:
+    """Read one optional string key out of the ``[comms_mcp]`` block (PR-S4-11b / G6-5).
+
+    Returns ``None`` when the block is absent or carries no ``key`` — a manifest with
+    no ``[comms_mcp] <key>`` stays back-compat. A PRESENT-but-non-string value is a
+    MALFORMED manifest (typed :class:`ManifestError`, not a raw Pydantic
+    ``ValidationError``); the closed-vocab error key is per-field so the operator-facing
+    message names the offending key. Shared by ``module`` (PR-S4-11b) and ``adapter_kind``
+    (G6-5 Task 10) so both reads apply the SAME absent/malformed discipline.
+    """
+    if comms_section is None:
         return None
-    if not isinstance(module, str):
-        raise ManifestError(t("plugin.manifest_comms_mcp_module_type"))
-    return module
+    value = comms_section.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ManifestError(t(_COMMS_MCP_KEY_TYPE_ERRORS[key]))
+    return value
 
 
 def _parse_sandbox_block(data: dict[str, Any], *, plugin_id: str) -> SandboxBlock:
