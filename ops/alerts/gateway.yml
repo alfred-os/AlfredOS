@@ -34,7 +34,7 @@ groups:
           severity: warning
         annotations:
           summary: "AlfredOS gateway is throttling an adapter leg's ingress"
-          description: "gateway_ingress_throttled_total{adapter} is increasing for 5m; the leg's rate / in-flight / size gate is back-pressuring (input is held, not dropped). Inspect the leg's volume or raise its caps."
+          description: "gateway_ingress_throttled_total{adapter} is increasing for 5m; the leg's rate / in-flight / size gate is refusing ingress with loud back-pressure (the frame is NOT enqueued — refused, not retained). Inspect the leg's volume, downstream drain rate, or caps."
       - alert: GatewayAdapterBufferGrowing
         expr: gateway_adapter_buffer_depth_bytes > 6291456
         for: 2m

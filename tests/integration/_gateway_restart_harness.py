@@ -250,11 +250,22 @@ class _GatewayCoreG0Model:
         return True
 
     def observe_payload(self, adapter_id: str, payload: bytes) -> bool:
-        """Run :meth:`commit_once` for a relayed wire payload (parsing the in-body key)."""
-        _adapter_in_body, inbound_id = _payload_inbound_identity(payload)
-        # The CORE keys on the in-body ``adapter_id`` (arch-M3); the gateway-side leg
-        # ``adapter_id`` is a local routing key only. They coincide for the TUI leg.
-        return self.commit_once(adapter_id, inbound_id)
+        """Run :meth:`commit_once` for a relayed wire payload, keying on the IN-BODY id.
+
+        The CORE keys its accept-once ledger on the PAYLOAD body's
+        ``(adapter_id, inbound_id)`` (arch-M3 — the gateway stays payload-blind; the core
+        parses). So this model commits on the in-body adapter id, NOT the caller-supplied
+        ``adapter_id`` (a local routing key only). CR (Spec B G6-4 #288): keying off the
+        caller arg would mask a body/route mismatch in the release-blocking K7 proof; we
+        assert the two agree (they coincide for the TUI leg) so a genuine divergence fails
+        LOUD here rather than silently passing the dedup check on the wrong key.
+        """
+        adapter_in_body, inbound_id = _payload_inbound_identity(payload)
+        assert adapter_in_body == adapter_id, (
+            "K7 body/route mismatch: the in-body adapter_id "
+            f"{adapter_in_body!r} != the routing adapter_id {adapter_id!r}"
+        )
+        return self.commit_once(adapter_in_body, inbound_id)
 
     def commits_for(self, adapter_id: str, inbound_id: str) -> int:
         """Number of FRESH commits recorded for one composite key (exactly-once oracle)."""
