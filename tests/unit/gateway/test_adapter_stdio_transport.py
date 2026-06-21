@@ -247,7 +247,7 @@ class _RaisingStdout:
     typed :class:`CommsProtocolError`, never let the raw ``OSError`` escape.
     """
 
-    def readline(self) -> bytes:
+    def readline(self, size: int = -1) -> bytes:
         raise OSError("simulated read-side pipe failure")
 
 
@@ -257,6 +257,65 @@ async def test_read_frame_raises_protocol_error_on_broken_pipe() -> None:
     transport = _build(stub)
     with pytest.raises(CommsProtocolError):
         await transport.read_frame()
+
+
+class _NoTerminatorStdout:
+    """A stdout that emits unbounded bytes with NO ``\\n`` — a no-terminator flood.
+
+    Models the most adversary-exposed leg: an external ``kind=full`` child that
+    streams bytes forever without ever sending a frame terminator. A naive
+    ``readline()`` with no size arg would buffer the WHOLE stream before any bound
+    fires; the bounded read must refuse the INSTANT the cap is exceeded, so this
+    stub records the largest single ``size`` it was ever asked for to prove the
+    read is bounded (never an unbounded ``readline()``).
+    """
+
+    def __init__(self) -> None:
+        # The largest ``size`` argument the reader ever requested. A bounded reader
+        # caps each request at the remaining budget; an unbounded ``readline()``
+        # would pass ``-1`` (or omit the arg → the default ``-1``).
+        self.max_size_requested = 0
+        self.total_emitted = 0
+
+    def readline(self, size: int = -1) -> bytes:
+        # An unbounded request is the bug this test guards against — record it so the
+        # assertion below catches a regression to size-less ``readline()``.
+        self.max_size_requested = max(self.max_size_requested, size)
+        if size is None or size < 0:
+            # Unbounded: the no-terminator flood would buffer forever. Emit a large
+            # chunk so a naive reader over-buffers (the test then fails on the size
+            # assertion); a bounded reader never reaches this branch.
+            self.total_emitted += 1_000_000
+            return b"x" * 1_000_000
+        # Bounded request: return exactly ``size`` non-newline bytes (no terminator),
+        # so the reader keeps asking until its budget is exhausted.
+        chunk = b"x" * size
+        self.total_emitted += len(chunk)
+        return chunk
+
+
+async def test_read_frame_bounds_read_against_no_terminator_flood() -> None:
+    """A no-terminator flood is refused mid-stream WITHOUT buffering the whole thing.
+
+    The HIGH finding: a child emitting ``max_line_bytes+``-worth of bytes with NO
+    newline must raise :class:`CommsProtocolError` the instant the cap is exceeded,
+    never buffer the entire (unbounded) line first. The fake stdout proves the read
+    is bounded: it is never asked for more than ``max_line_bytes + 1`` bytes total,
+    and never via an unbounded (size ``< 0``) ``readline()``.
+    """
+    max_line_bytes = 64
+    flood = _NoTerminatorStdout()
+    stub = _StubPopen(stdin=None, stdout=cast("IO[bytes]", flood))
+    transport = _build(stub, max_line_bytes=max_line_bytes)
+    with pytest.raises(CommsProtocolError):
+        await transport.read_frame()
+    # The read was BOUNDED: never an unbounded ``readline()`` (size < 0) and never
+    # more than ``max_line_bytes + 1`` bytes pulled before the over-bound fired.
+    assert flood.max_size_requested >= 0, "reader must pass a positive size bound, not -1"
+    assert flood.total_emitted <= max_line_bytes + 1, (
+        f"reader over-buffered: pulled {flood.total_emitted} bytes for a "
+        f"{max_line_bytes}-byte cap before refusing"
+    )
 
 
 async def test_close_closes_pipes_without_reaping_process() -> None:

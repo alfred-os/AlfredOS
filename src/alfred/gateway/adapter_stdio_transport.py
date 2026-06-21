@@ -155,8 +155,11 @@ class GatewayAdapterStdioTransport:
         over-bound line, non-JSON bytes, or a non-object top-level value. The
         blocking ``readline`` runs in the default executor so a slow / wedged child
         never blocks the loop (the [Errno 22] footgun a ``StreamReader`` over a
-        ``Popen`` fd would invite is avoided). ``RuntimeError`` if the child exposes
-        no stdout (a programming error).
+        ``Popen`` fd would invite is avoided), and is BOUNDED to ``max_line_bytes + 1``
+        bytes so a child emitting bytes with NO terminator can never force unbounded
+        executor-thread buffering before the bound fires — the adversary-exposed
+        ``kind=full`` (external Discord) leg. ``RuntimeError`` if the child exposes no
+        stdout (a programming error).
         """
         stdout = self._process.stdout
         if stdout is None:
@@ -166,7 +169,9 @@ class GatewayAdapterStdioTransport:
             )
         loop = asyncio.get_running_loop()
         try:
-            line = await loop.run_in_executor(None, _blocking_readline, stdout)
+            line = await loop.run_in_executor(
+                None, _blocking_readline, stdout, self._max_line_bytes
+            )
         except (BrokenPipeError, ConnectionResetError, ValueError, OSError) as exc:
             log.warning("gateway.adapter_transport.read_broken_pipe", adapter_id=self._adapter_id)
             raise CommsProtocolError(
@@ -177,9 +182,12 @@ class GatewayAdapterStdioTransport:
             return None
         if len(line) > self._max_line_bytes:
             # An over-bound line is a DoS attempt / misbehaving child — refuse it
-            # rather than route an unbounded frame. ``readline`` on a raw pipe has
-            # no built-in limit, so this is the sole bound check (unlike the
-            # StreamReader-limit belt-and-braces in CommsStdioTransport).
+            # rather than route an unbounded frame. ``_blocking_readline`` reads at
+            # most ``max_line_bytes + 1`` bytes, so a no-terminator flood is refused
+            # the INSTANT the cap is exceeded — never buffered whole first. The bound
+            # is enforced in the reader (the StreamReader-limit peer in
+            # CommsStdioTransport); this check converts the over-bound read into the
+            # typed loud refusal.
             log.warning("gateway.adapter_transport.frame_too_large", adapter_id=self._adapter_id)
             raise CommsProtocolError(
                 t("comms.transport.malformed_frame", adapter_id=self._adapter_id)
@@ -225,13 +233,35 @@ def _blocking_write(stream: IO[bytes], payload: bytes) -> None:
     stream.flush()
 
 
-def _blocking_readline(stream: IO[bytes]) -> bytes:
-    """Read one ``\\n``-terminated line from a raw pipe (runs in an executor thread).
+def _blocking_readline(stream: IO[bytes], max_line_bytes: int) -> bytes:
+    """Read one ``\\n``-terminated line from a raw pipe, BOUNDED (executor thread).
+
+    Reads in chunks with a hard budget of ``max_line_bytes + 1`` bytes: a child
+    that streams bytes with NO terminator can never force unbounded buffering before
+    the over-bound check in :meth:`GatewayAdapterStdioTransport.read_frame` fires.
+    The ``+ 1`` lets the caller's ``len(line) > max_line_bytes`` test distinguish an
+    exactly-at-cap good line from an over-bound one — the one extra byte proves the
+    line did not terminate within the bound. ``readline(remaining)`` returns at most
+    ``remaining`` bytes, stopping early at a ``\\n`` if one appears within the span,
+    so a well-formed in-bound line still returns in one read.
 
     Returns ``b""`` on EOF (the peer to ``StreamReader.readline``'s clean-EOF
     contract). Runs OFF the event loop so a slow / wedged child does not block it.
     """
-    return stream.readline()
+    budget = max_line_bytes + 1
+    chunks: list[bytes] = []
+    collected = 0
+    while collected < budget:
+        chunk = stream.readline(budget - collected)
+        if not chunk:
+            # EOF before a terminator: return what we have (``b""`` if nothing).
+            break
+        chunks.append(chunk)
+        collected += len(chunk)
+        if chunk.endswith(_FRAME_TERMINATOR):
+            # A complete in-bound line — stop (do not block waiting for more).
+            break
+    return b"".join(chunks)
 
 
 __all__ = [
