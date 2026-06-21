@@ -46,4 +46,16 @@ def healthcheck() -> None:
     healthcheck_gateway()
 
 
+@gateway_app.command("adapters", help=t("gateway.help.adapters"))
+def adapters(
+    adapter: str | None = typer.Argument(default=None, help=t("gateway.help.adapters_arg")),
+    *,
+    wait_ready: bool = typer.Option(False, "--wait-ready", help=t("gateway.help.adapters_wait")),
+    timeout: int = typer.Option(30, "--timeout", help=t("gateway.help.adapters_timeout")),
+) -> None:
+    from alfred.cli.gateway._adapters import adapters_verify
+
+    adapters_verify(adapter, wait_ready=wait_ready, timeout=timeout)
+
+
 __all__ = ["gateway_app"]
