@@ -797,11 +797,15 @@ Critical path top-to-bottom:
     case above.
   - **Malformed-envelope:** a malformed forwarded body is a loud bounded-field audit drop that
     drains the leg frame (no infinite replay) and does not crash the reader.
-- **Coverage gates (TE strength + ask):** the new trust-boundary modules
-  (`inbound_forward_runner.py` and the core-side disposition + collaborator registry) MUST be
-  added to **all four** ci.yml per-file 100% edit points — the python-job `hashFiles` guard
-  AND the `coverage-gates --include=` list — mirroring every `gateway/*.py` (cf.
-  `_bootstrap_grants.py`).
+- **Coverage gates (TE strength + ask):** each new trust-boundary module gets a per-file 100%
+  gate **in the slice that ships it**, added to **all four** ci.yml per-file 100% edit points —
+  the python-job `hashFiles` guard AND the `coverage-gates --include=` list — mirroring every
+  `gateway/*.py` (cf. `_bootstrap_grants.py`).
+  - **G6-7-1 (this slice):** `src/alfred/comms_mcp/inbound_reparse.py` (the core's trusted
+    envelope→body re-parse) is gated at 100% line+branch.
+  - **FOLLOW-UP — G6-7-3/-4:** when `inbound_forward_runner.py` and the core-side disposition +
+    per-`adapter_id` collaborator registry land, each MUST be added to the same four edit points
+    in its own slice. They are not gated here because they are not shipped here.
 
 ---
 
