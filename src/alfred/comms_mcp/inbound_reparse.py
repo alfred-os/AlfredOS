@@ -57,7 +57,7 @@ def _structural_summary(exc: ValidationError) -> str:
     The ``loc`` of an ``extra_forbidden`` error ENDS in the unexpected key NAME, which
     is attacker-supplied T3 (G6-7-2 carry-item: UAT on #311 saw ``extra_forbidden@<key>``
     surface a body's top-level key name). That whole ``loc`` is redacted to
-    ``<redacted>``. Every OTHER pydantic error type carries a schema-known field path
+    ``<redacted-t3-key>``. Every OTHER pydantic error type carries a schema-known field path
     in ``loc`` (a field must be DECLARED to be validated), safe to surface as an
     actionable debug aid. ``InboundMessageNotification`` has no
     ``dict[str, ConstrainedType]`` field (``body`` accepts any object), so
@@ -69,7 +69,7 @@ def _structural_summary(exc: ValidationError) -> str:
     for error in errors:
         error_type = error["type"]
         if error_type == "extra_forbidden":
-            parts.append(f"{error_type}@<redacted>")
+            parts.append(f"{error_type}@<redacted-t3-key>")
         else:
             parts.append(f"{error_type}@{'.'.join(str(segment) for segment in error['loc'])}")
     return f"{len(errors)} error(s): {', '.join(parts)}"
@@ -94,7 +94,7 @@ def reparse_forwarded_inbound(
     summary (error-type codes + ``loc`` field-paths + the safe ``adapter_id`` KIND)
     but NEVER the raw T3 body (spec §3.3). An ``extra_forbidden`` error's ``loc`` ENDS
     in the attacker-supplied extra-key NAME (T3-derived), so its ``loc`` is redacted to
-    ``<redacted>``; every other error type keeps its schema-known ``loc`` field-path.
+    ``<redacted-t3-key>``; every other error type keeps its schema-known ``loc`` field-path.
     The malformed error is also raised with
     ``__context__`` cleared: the ``ValidationError`` (which echoes the body via
     ``input_value``) is captured and discarded inside the ``except`` and the

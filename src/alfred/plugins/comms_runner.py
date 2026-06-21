@@ -3,8 +3,9 @@
 PR-S4-11a Wave 1 (#237). The imperative shell that drives one comms-plugin
 subprocess end to end: spawn the transport, run the ``lifecycle.start`` handshake
 (which gates the capability check), then run the SINGLE-READER pump that fans
-every plugin -> host notification into the session dispatcher, and finally tear
-the transport down cleanly so a supervisor ``TaskGroup`` cancellation does not
+every plugin -> host notification into the injected inbound disposition (the
+daemon default being ``SessionDispatchDisposition``), and finally tear the
+transport down cleanly so a supervisor ``TaskGroup`` cancellation does not
 leak a subprocess.
 
 The session (:class:`alfred.plugins.session.AlfredPluginSession`) stays a pure
@@ -58,9 +59,9 @@ from alfred.plugins.comms_seq_codec import SEQ_VERSION, WIRE_SEQ_FRAME_KEY
 from alfred.plugins.comms_stdio_transport import CommsProtocolError
 from alfred.plugins.errors import PluginError
 from alfred.plugins.inbound_disposition import (
+    CredentialResolverLike,
     InboundDisposition,
     SessionDispatchDisposition,
-    _CredentialResolverLike,
 )
 
 if TYPE_CHECKING:
@@ -182,7 +183,7 @@ class CommsPluginRunner:
         shutdown_event: asyncio.Event | None = None,
         max_in_flight_notifications: int = _DEFAULT_MAX_IN_FLIGHT_NOTIFICATIONS,
         boot_epoch: str | None = None,
-        credential_resolver: _CredentialResolverLike | None = None,
+        credential_resolver: CredentialResolverLike | None = None,
         inbound_disposition: InboundDisposition | None = None,
     ) -> None:
         self._session = session

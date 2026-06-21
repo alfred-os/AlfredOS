@@ -205,7 +205,7 @@ def test_structural_summary_redacts_extra_forbidden_key_name() -> None:
     message = str(excinfo.value)
     assert "s3cr3t_smuggled_key" not in message  # attacker key NAME redacted
     assert "extra_forbidden" in message  # the TYPE still surfaces (debug aid)
-    assert "<redacted>" in message  # explicit redaction marker
+    assert "<redacted-t3-key>" in message  # explicit redaction marker
     assert "missing@" in message  # a schema-known path is still surfaced
 
 
