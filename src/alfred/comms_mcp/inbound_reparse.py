@@ -43,6 +43,24 @@ from alfred.comms_mcp.protocol import (
 __all__ = ["reparse_forwarded_inbound"]
 
 
+def _structural_summary(exc: ValidationError) -> str:
+    """A LEAK-SAFE one-line summary of why an inbound body failed validation.
+
+    Built from ONLY the closed structural shape of each pydantic error — the
+    error-type code and the ``loc`` field-path — plus the error count. The raw
+    ``input`` / ``msg`` / ``ctx`` values are DROPPED here on purpose: they echo the
+    untrusted T3 body (e.g. ``input_value=...``) and must never reach an exception
+    string the core might log (spec §3.3 — no payload in error attrs). The result
+    turns the opaque "validation failed" sentence into an actionable debug aid
+    (non-UTF-8 vs non-JSON vs missing-field) without leaking the body.
+    """
+    errors = exc.errors(include_url=False)
+    parts = [
+        f"{error['type']}@{'.'.join(str(segment) for segment in error['loc'])}" for error in errors
+    ]
+    return f"{len(errors)} error(s): {', '.join(parts)}"
+
+
 def reparse_forwarded_inbound(
     envelope: GatewayAdapterInboundEnvelope,
 ) -> InboundMessageNotification:
@@ -52,39 +70,66 @@ def reparse_forwarded_inbound(
     Raises :class:`InboundBodyMalformedError` if the body is not a valid
     notification, or :class:`InboundEnvelopeBodyMismatchError` if the body's
     ``adapter_id`` does not equal ``envelope.adapter_id``.
+
+    The body-supplied ``wire_seq`` is SCRUBBED to ``None``: ``wire_seq`` is
+    host-authoritative leg-carrier metadata (ADR-0032), not payload-derived, so a
+    value smuggled into the untrusted T3 body is dropped here. G6-7-3/-4 rebinds the
+    real leg-carrier seq out-of-band.
+
+    The :class:`InboundBodyMalformedError` message carries a LEAK-SAFE structural
+    summary (error-type codes + ``loc`` field-paths + the safe ``adapter_id`` KIND)
+    but NEVER the raw T3 body (spec §3.3). The malformed error is also raised with
+    ``__context__`` cleared: the ``ValidationError`` (which echoes the body via
+    ``input_value``) is captured and discarded inside the ``except`` and the
+    :class:`InboundBodyMalformedError` is raised OUTSIDE it, so no body fragment
+    survives on the exception chain even for a consumer that walks ``__context__``.
     """
     # The CORE is the trusted parser of the T3 body. ``model_validate_json``
-    # mirrors the production parse path (session.py:809's ``model_validate`` of the
-    # JSON-RPC ``params``), accepting the byte run the envelope carried verbatim
-    # (it takes ``str | bytes``). A decode failure (non-UTF-8 / non-JSON), a
-    # non-object top-level, and a missing/invalid field all surface as a
-    # ``ValidationError``.
+    # mirrors the production parse path (AlfredPluginSession's
+    # ``_route_comms_notification`` ``model_validate`` of the JSON-RPC ``params``),
+    # accepting the byte run the envelope carried verbatim (it takes ``str |
+    # bytes``). A decode failure (non-UTF-8 / non-JSON), a non-object top-level, and
+    # a missing/invalid field all surface as a ``ValidationError``.
+    #
+    # The ValidationError MUST NOT escape this function on any attribute: it echoes
+    # the raw T3 body via ``input_value`` (spec §3.3). ``from None`` clears
+    # ``__cause__`` but the in-flight exception still lands on ``__context__`` when
+    # we raise INSIDE the ``except``. So we capture only the leak-safe structural
+    # summary inside the handler and raise OUTSIDE it, where there is no active
+    # exception to attach — ``__context__`` is ``None``.
+    structural: str | None = None
     try:
         notification = InboundMessageNotification.model_validate_json(envelope.body)
-    except ValidationError:
-        # No raw body on the exception (spec §3.3); ``from None`` severs the
-        # ValidationError chain so a body fragment cannot leak via ``__cause__``.
-        raise InboundBodyMalformedError(
-            "forwarded inbound body failed InboundMessageNotification validation"
-        ) from None
+    except ValidationError as exc:
+        structural = _structural_summary(exc)
+    else:
+        if notification.adapter_id != envelope.adapter_id:
+            # F3 (spec §3.3): the body is authoritative; an envelope routing id
+            # that disagrees with the body it wraps is a forged-body/valid-leg
+            # mismatch. Only the two closed-vocab KINDS appear, never the body.
+            raise InboundEnvelopeBodyMismatchError(
+                f"envelope adapter_id {envelope.adapter_id!r} != "
+                f"body adapter_id {notification.adapter_id!r}"
+            )
+        # ``wire_seq`` is HOST-AUTHORITATIVE leg-carrier metadata (ADR-0032),
+        # NEVER payload-derived. It is a declared field, so ``extra="forbid"``
+        # does NOT block a value smuggled into the untrusted T3 body; mirror the
+        # host-authoritative ``wire_seq`` set in AlfredPluginSession's
+        # ``_route_comms_notification`` inbound parse by scrubbing any body-derived
+        # value. G6-7-3/-4 rebinds the real leg-carrier seq out-of-band; the
+        # re-parse never trusts a body-derived ``wire_seq`` (a forged value could
+        # corrupt the BoundedSeqAckTracker contiguous high-water the ack/replay
+        # semantics rest on). ``model_copy`` is frozen-safe: it constructs a new
+        # instance with the same validated fields and ``wire_seq=None`` (a valid
+        # value), bypassing the frozen setattr guard without re-running validation.
+        return notification.model_copy(update={"wire_seq": None})
 
-    if notification.adapter_id != envelope.adapter_id:
-        # F3 (spec §3.3): the body is authoritative; an envelope routing id that
-        # disagrees with the body it wraps is a forged-body/valid-leg mismatch.
-        # Only the two closed-vocab KINDS appear in the message, never the body.
-        raise InboundEnvelopeBodyMismatchError(
-            f"envelope adapter_id {envelope.adapter_id!r} != "
-            f"body adapter_id {notification.adapter_id!r}"
-        )
-
-    # ``wire_seq`` is HOST-AUTHORITATIVE leg-carrier metadata (ADR-0032), NEVER
-    # payload-derived. It is a declared field, so ``extra="forbid"`` does NOT block
-    # a value smuggled into the untrusted T3 body; mirror the production parse
-    # (session.py sets ``wire_seq`` host-side) by scrubbing any body-derived value.
-    # G6-7-3/-4 rebinds the real leg-carrier seq out-of-band; the re-parse never
-    # trusts a body-derived ``wire_seq`` (a forged value could corrupt the
-    # BoundedSeqAckTracker contiguous high-water the ack/replay semantics rest on).
-    # ``model_copy`` is frozen-safe: it constructs a new instance with the same
-    # validated fields and ``wire_seq=None`` (a valid value), bypassing the frozen
-    # setattr guard without re-running validation on the trusted re-parse.
-    return notification.model_copy(update={"wire_seq": None})
+    # Reached ONLY on a ValidationError. Raise OUTSIDE the ``except`` so there is no
+    # active exception for Python to attach to ``__context__`` — the discarded
+    # ValidationError (which echoes the raw T3 body via ``input_value``) cannot leak
+    # via the exception chain. The message carries only the leak-safe structural
+    # summary and the closed-vocab ``adapter_id``.
+    raise InboundBodyMalformedError(
+        "forwarded inbound body failed InboundMessageNotification validation "
+        f"(adapter_id={envelope.adapter_id!r}; {structural})"
+    )
