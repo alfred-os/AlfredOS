@@ -287,3 +287,45 @@ def test_control_fault_does_not_crash_render(monkeypatch: pytest.MonkeyPatch) ->
     assert result.exit_code == 2, result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert t("gateway.adapters.unavailable") in result.output
+
+
+def _malformed_status_response() -> ControlResponse:
+    """A control response whose ``result`` fails ``DaemonStatusResult`` validation.
+
+    The dial + transport succeeded (``error is None``, ``result is not None``), so the
+    ``query_daemon_control`` client raises nothing — but ``DaemonStatusResult`` cannot
+    validate the payload (``adapters`` must be a mapping of status lines, not a string),
+    so ``model_validate`` raises a ``pydantic.ValidationError``. That error is NOT a
+    ``DaemonControlError``, so the exit-2 arms must catch it at the decode site.
+    """
+    return ControlResponse(id="1", result={"adapters": "not-a-mapping"})
+
+
+def test_one_shot_malformed_status_payload_degrades_to_exit_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed ``status.query`` payload degrades to exit 2 + the loud line, no traceback.
+
+    A response that decodes but fails ``DaemonStatusResult`` validation must map to the
+    SAME control-unavailable exit-2 path as a ``DaemonControlError`` — never escape as a
+    raw ``ValidationError`` traceback (CLAUDE.md hard rule #7).
+    """
+    fake = _SeqQuery([_malformed_status_response()])
+    _patch_query(monkeypatch, fake)
+    result = CliRunner().invoke(gateway_app, ["adapters"])
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert t("gateway.adapters.unavailable") in result.output
+
+
+def test_wait_ready_malformed_status_payload_degrades_to_exit_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed payload on the wait-ready poll degrades to exit 2, never a traceback."""
+    fake = _SeqQuery([_malformed_status_response()])
+    _patch_query(monkeypatch, fake)
+    _patch_known(monkeypatch, ["discord"])
+    result = CliRunner().invoke(gateway_app, ["adapters", "--wait-ready", "discord"])
+    assert result.exit_code == 2, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert t("gateway.adapters.unavailable") in result.output
