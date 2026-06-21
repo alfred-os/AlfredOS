@@ -32,7 +32,11 @@ scripts can branch the same way):
 * 1 — not-ready-by-timeout (``--wait-ready`` only; LOUD)
 * 2 — daemon / control unavailable (a :class:`DaemonControlError` of ANY arm — CLAUDE.md
   hard rule #7: the render layer NEVER crashes on a control fault)
-* 3 — unknown adapter (the id is absent from the live status map)
+* 3 — the named adapter cannot be RESOLVED — dual meaning: either a genuinely-unknown
+  id (absent from the closed configured / hosted adapter set, validated up front) OR a
+  ``--wait-ready`` invocation with no adapter at all (a usage error). A known-but-still-
+  booting id (absent only from the live status map) is NOT exit-3 — it WAITS to the
+  deadline (exit-1 on timeout). The friendly stderr line disambiguates the two exit-3 cases.
 
 i18n: every operator string flows through :func:`alfred.i18n.t`; the localized state
 token is dict-dereferenced via :data:`_STATE_KEYS` (reserved in ``_spec_b_reserve``).
@@ -96,6 +100,32 @@ async def _poll_sleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+def _resolve_known_adapter_ids() -> set[str] | None:
+    """The CLOSED configured/hosted adapter-id set, for up-front ``--wait-ready`` validation.
+
+    Reuses the gateway-boot reconciliation seam
+    (:func:`alfred.cli.gateway._commands._resolve_hosted_adapter_ids`) so the set is the
+    SAME canonical ``adapter_id`` strings the gateway actually supervises. Used ONLY to
+    distinguish a genuinely-unknown id (refuse fast, exit-3) from a known-but-still-booting
+    id (the observer omits a not-yet-reported adapter — that must WAIT to the deadline,
+    not short-circuit to exit-3).
+
+    FAIL-SAFE (degrade to waiting, never to a false refusal): if the set cannot be resolved
+    — Settings cannot construct, a manifest is unreadable, or the resolved set is empty —
+    return ``None`` so the caller SKIPS up-front validation and falls through to the bounded
+    poll. A resolution fault must never turn a real, booting adapter into a spurious exit-3;
+    the poll's own timeout remains the bound (CLAUDE.md hard rule #7 — loud-and-continue).
+    """
+    try:
+        from alfred.cli.gateway._commands import _resolve_hosted_adapter_ids
+
+        resolved = set(_resolve_hosted_adapter_ids())
+    except Exception as exc:  # degrade to waiting — never a false refusal
+        log.warning("gateway.adapters.known_set_unresolved", error=type(exc).__name__)
+        return None
+    return resolved or None
+
+
 async def _query_status() -> DaemonStatusResult:
     """One ``status.query`` round-trip, validated into the typed result.
 
@@ -140,11 +170,24 @@ def _emit_status(result: DaemonStatusResult, adapter: str | None) -> int:
 async def _wait_ready(adapter: str, timeout: int) -> int:
     """Bounded poll loop: return the exit code once ready / timed-out / faulted.
 
+    UP-FRONT VALIDATION: a genuinely-unknown id (absent from the closed configured /
+    hosted adapter set) is resolved authoritatively to exit-3 BEFORE the loop, so an
+    operator typo fails fast. A KNOWN id that is merely still booting — the observer
+    omits a not-yet-reported adapter — is NOT unknown: its in-loop absence from the
+    status map is treated as NOT-READY (fall through to the deadline → loud exit-1 on
+    timeout), never the instant exit-3 a typo gets. When the configured set cannot be
+    resolved, validation is skipped (fail-safe — see :func:`_resolve_known_adapter_ids`).
+
     The deadline is a MONOTONIC-clock bound (immune to wall-clock steps). Each iteration
     is one ``status.query`` + (if not yet ready and time remains) one bounded
     ``_poll_sleep`` — so the loop can never busy-spin. A control fault on ANY poll
     degrades to the unavailable exit code (never a traceback — hard rule #7).
     """
+    known = _resolve_known_adapter_ids()
+    if known is not None and adapter not in known:
+        # Authoritatively unknown (a typo / un-configured id): refuse fast.
+        typer.echo(t("gateway.adapters.unknown_adapter", adapter=adapter))
+        return _EXIT_UNKNOWN_ADAPTER
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -153,10 +196,9 @@ async def _wait_ready(adapter: str, timeout: int) -> int:
             log.warning("gateway.adapters.control_query_failed", error=type(exc).__name__)
             typer.echo(t("gateway.adapters.unavailable"))
             return _EXIT_UNAVAILABLE
-        if adapter not in result.adapters:
-            typer.echo(t("gateway.adapters.unknown_adapter", adapter=adapter))
-            return _EXIT_UNKNOWN_ADAPTER
-        if result.adapters[adapter].state == _READY_STATE:
+        # A KNOWN adapter absent from the live status map is still BOOTING (the observer
+        # omits a not-yet-reported adapter), NOT unknown — fall through to the deadline.
+        if adapter in result.adapters and result.adapters[adapter].state == _READY_STATE:
             typer.echo(t("gateway.adapters.wait_ready.ready", adapter=adapter))
             return _EXIT_READY
         if time.monotonic() >= deadline:
@@ -182,6 +224,12 @@ def adapters_verify(
     a control-plane fault (CLAUDE.md hard rule #7).
     """
     if wait_ready and adapter is None:
+        # DUAL MEANING of exit-3 (documented): ``--wait-ready`` with NO adapter is a
+        # USAGE error (which adapter to wait for is unspecified). It shares the exit-3
+        # code with "unknown adapter" because both are "the named adapter cannot be
+        # resolved" — an unrunnable request, distinct from the runtime not-ready (1) /
+        # unavailable (2) outcomes. The friendly ``needs_adapter`` line disambiguates
+        # the two exit-3 cases for an operator reading stderr.
         typer.echo(t("gateway.adapters.wait_ready.needs_adapter"))
         raise typer.Exit(code=_EXIT_UNKNOWN_ADAPTER)
 
