@@ -82,7 +82,8 @@ _FORGED_ID_MAX_LEN: Final[int] = 64
 
 INGRESS_THROTTLED_TOTAL: Final[Counter] = Counter(
     "gateway_ingress_throttled",
-    "Count of gateway per-adapter ingress refusals (rate / in-flight / global-cap / unknown).",
+    "Count of gateway per-adapter ingress refusals "
+    "(oversized / rate / in-flight / global-cap / unknown-adapter / queue-full).",
     labelnames=["adapter"],
 )
 
