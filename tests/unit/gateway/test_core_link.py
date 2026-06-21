@@ -104,7 +104,7 @@ def _tui_leg(buf: ReplayBuffer, *, now: Callable[[], float] | None = None) -> Ga
     monotonic the link uses, mirroring the production ``now=self._monotonic`` wiring.
     """
     leg_now = now if now is not None else (lambda: 0.0)
-    cap = GlobalReplayCap(max_total_bytes=buf._max_bytes * 4)
+    cap = GlobalReplayCap(max_total_bytes=buf.max_bytes * 4)
     gate = PerAdapterIngressGate(
         "tui",
         sustained_rate_per_s=1e9,
@@ -999,7 +999,7 @@ def _run_link(
         # ``_scheduler_for_test``), exactly as the non-``run`` helper does.
         scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
         scheduler.register_leg(tui_leg)
-        link._leg_router = LegRouter(scheduler)
+        link.set_leg_router(LegRouter(scheduler))
         link._scheduler_for_test = scheduler  # type: ignore[attr-defined]  # drain handle for tests
     return link, recorder
 
@@ -1905,7 +1905,7 @@ def _link_with_relay_and_buffer(
     )
     scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
     scheduler.register_leg(tui_leg)
-    link._leg_router = LegRouter(scheduler)
+    link.set_leg_router(LegRouter(scheduler))
     link._scheduler_for_test = scheduler  # type: ignore[attr-defined]  # drain handle for tests
     return link, recorder, sink
 
@@ -3648,7 +3648,7 @@ def _binding_leg(
     ceiling stays strictly above the buffer hard ceiling (non-binding), so only the gate tier
     under test refuses.
     """
-    cap = GlobalReplayCap(max_total_bytes=buf._max_bytes * 4)
+    cap = GlobalReplayCap(max_total_bytes=buf.max_bytes * 4)
     gate = PerAdapterIngressGate(
         "tui",
         sustained_rate_per_s=1e-9,  # negligible refill: a drained bucket stays drained
@@ -3722,7 +3722,7 @@ async def test_submit_tui_unit_leg_queue_full_back_pressures_not_raises() -> Non
     # A tiny per-leg send-queue budget: the FIRST enqueue fits, the SECOND overflows it.
     scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=4)
     scheduler.register_leg(tui_leg)
-    link._leg_router = LegRouter(scheduler)
+    link.set_leg_router(LegRouter(scheduler))
     transport = _FakeCoreTransport([])
     link._current_core_transport = transport
 
@@ -3852,7 +3852,7 @@ async def test_escalate_if_breaker_tripped_non_tui_leg_skips_unlabelled_gauge() 
             max_frame_bytes=1 << 30,
             now=lambda: 0.0,
         ),
-        global_cap=GlobalReplayCap(max_total_bytes=other_buf._max_bytes * 4),
+        global_cap=GlobalReplayCap(max_total_bytes=other_buf.max_bytes * 4),
         now=lambda: 0.0,
     )
     other.record_for_send(b"a")

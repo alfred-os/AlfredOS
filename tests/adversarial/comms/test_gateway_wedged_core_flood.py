@@ -171,7 +171,7 @@ def _wedged_relay(
         adapter_id="tui",
         buffer=buf,
         ingress_gate=gate,
-        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        global_cap=GlobalReplayCap(max_total_bytes=buf.max_bytes * 4),
         now=lambda: 0.0,
     )
     link = GatewayCoreLink(
@@ -188,7 +188,7 @@ def _wedged_relay(
     # flood actually reaches the buffer (mirrors production: relay.run co-runs the drain pump).
     scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
     scheduler.register_leg(leg)
-    link._leg_router = LegRouter(scheduler)
+    link.set_leg_router(LegRouter(scheduler))
     # Lockstep drain hook: the flood client drains one scheduler round per read (see
     # ``_flood_client``) so the breaker latches before the pump out-runs the single writer.
     client._drain_round = scheduler._drain_one_round  # type: ignore[attr-defined]

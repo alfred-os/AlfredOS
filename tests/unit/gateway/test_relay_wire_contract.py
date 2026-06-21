@@ -155,7 +155,7 @@ async def _build_harness(
             max_frame_bytes=1 << 30,
             now=time.monotonic,
         ),
-        global_cap=GlobalReplayCap(max_total_bytes=_buf._max_bytes * 4),
+        global_cap=GlobalReplayCap(max_total_bytes=_buf.max_bytes * 4),
         now=time.monotonic,
     )
     core_link = GatewayCoreLink(
@@ -165,7 +165,7 @@ async def _build_harness(
     # ENQUEUES and the relay co-runs the drain pump onto the single core writer.
     scheduler = GatewayLegScheduler(core_link, max_per_leg_queue_bytes=1 << 30)
     scheduler.register_leg(_tui_leg)
-    core_link._leg_router = LegRouter(scheduler)
+    core_link.set_leg_router(LegRouter(scheduler))
 
     # The client dials the gateway's client socket; the gateway accepts it. The relay's
     # client transport is the ACCEPTED gateway-side end — build the relay around it once

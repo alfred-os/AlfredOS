@@ -256,7 +256,6 @@ class GatewayCoreLink:
         monotonic: Callable[[], float] = time.monotonic,
         payload_relay: Callable[[bytes], Awaitable[None]] | None = None,
         tui_leg: GatewayLeg | None = None,
-        leg_router: LegRouter | None = None,
     ) -> None:
         self._dial_adapter_id = dial_adapter_id
         self._client_listener = client_listener
@@ -335,8 +334,12 @@ class GatewayCoreLink:
         # through this router (the K4 forged-adapter refusal lives in the router); the
         # scheduler's drain pump then mints the seq + appends + escalates + writes. ``None``
         # leaves the leg-routed submit path unwired (the merged G3 relay tests that construct
-        # without a leg never call ``submit_tui_unit``).
-        self._leg_router = leg_router
+        # without a leg never call ``submit_tui_unit``). Wired AFTER construction via
+        # :meth:`set_leg_router`: the router is built over the scheduler, which is built over
+        # THIS link (a construction cycle), so the link cannot take it at ctor time — L2
+        # (#288) replaces the prior dead ctor param + private late-write with one coherent
+        # setter, mirroring the relay's post-construction ``_payload_relay`` binding.
+        self._leg_router: LegRouter | None = None
         # Spec A G4b-2b (#237): the reconnect-replay seams. ``_pending_replay`` holds the
         # un-acked frames captured before a reconnect reset, awaiting re-send on the fresh
         # leg. ``_replay_pending`` is a gate the relay's client->core pump awaits: SET = the
@@ -372,6 +375,17 @@ class GatewayCoreLink:
         G6-4a (#288): reads the TUI leg's breaker latch (the leg owns the buffer).
         """
         return self._tui_leg.breaker_tripped if self._tui_leg is not None else False
+
+    def set_leg_router(self, leg_router: LegRouter) -> None:
+        """Wire the leg scheduler/router AFTER construction (L2, Spec B G6-4 #288).
+
+        The router is built over the scheduler, which is built over THIS link (drains onto
+        ``write_leg_unit`` + reads ``replay_pending_gate``) — a construction cycle, so the link
+        cannot accept the router at ctor time. The gateway process (the one place that knows the
+        leg<->scheduler topology) calls this once after building both, exactly as the relay binds
+        ``_payload_relay`` post-construction. ``submit_tui_unit`` requires it to be set.
+        """
+        self._leg_router = leg_router
 
     def current_core_epoch(self) -> str | None:
         """The most recently captured core boot epoch (32-hex), or ``None``.

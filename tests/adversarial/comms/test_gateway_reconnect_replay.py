@@ -132,7 +132,7 @@ def _link_with_buffer(buf: ReplayBuffer) -> tuple[GatewayCoreLink, _RecordingCli
         adapter_id="tui",
         buffer=buf,
         ingress_gate=gate,
-        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        global_cap=GlobalReplayCap(max_total_bytes=buf.max_bytes * 4),
         now=lambda: 0.0,
     )
     link = GatewayCoreLink(
@@ -151,7 +151,7 @@ def _link_with_buffer(buf: ReplayBuffer) -> tuple[GatewayCoreLink, _RecordingCli
     # ``_submit_and_drain`` reproduces the old inline-submit observable.
     scheduler = GatewayLegScheduler(link, max_per_leg_queue_bytes=1 << 30)
     scheduler.register_leg(leg)
-    link._leg_router = LegRouter(scheduler)
+    link.set_leg_router(LegRouter(scheduler))
     link._scheduler_for_test = scheduler  # type: ignore[attr-defined]  # drain handle for tests
     return link, recorder
 

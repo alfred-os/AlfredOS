@@ -240,7 +240,7 @@ def _binding_leg(adapter_id: str, clock: _Clock, *, ttl_seconds: float) -> Gatew
         adapter_id=adapter_id,
         buffer=buf,
         ingress_gate=gate,
-        global_cap=GlobalReplayCap(max_total_bytes=buf._max_bytes * 4),
+        global_cap=GlobalReplayCap(max_total_bytes=buf.max_bytes * 4),
         now=clock,
     )
 
