@@ -1124,6 +1124,33 @@ async def test_crashed_child_is_reaped_before_respawn() -> None:
     await task
 
 
+async def test_live_child_is_reaped_on_supervisor_task_cancellation() -> None:
+    """Cancelling ``supervise_one`` while UP terminate-and-reaps the live child (H1 / #288).
+
+    Process shutdown CANCELS ``supervisor_task`` directly (a path distinct from a crash
+    or ``request_stop``). The live sandbox child must NOT leak on a shutdown-cancel: the
+    cancellation unwind reaps the live child exactly once before the ``CancelledError``
+    propagates (CLAUDE.md hard rule #7 — no leaked bwrap child on shutdown).
+    """
+    factory = _FakeChildFactory()
+    factory.script(_A, ["ok"])
+    cred = _FakeCredSeam(available=True)
+    sink = _RecordingSink()
+    sup = _make_supervisor(factory=factory, cred=cred, sink=sink)
+
+    task = asyncio.ensure_future(sup.supervise_one(_A))
+    await sup.wait_until_up(_A)
+    live_child = factory.children[0]
+
+    # The shutdown-cancellation path: cancel the supervisor task directly.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The live child was terminate-and-reaped exactly once on the cancellation unwind.
+    assert live_child.aclose_calls == 1
+
+
 async def test_live_child_is_reaped_on_planned_stop() -> None:
     """A planned stop terminate-and-reaps the live child (H1b) — no leaked bwrap child."""
     factory = _FakeChildFactory()

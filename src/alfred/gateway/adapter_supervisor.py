@@ -588,6 +588,12 @@ class GatewayAdapterSupervisor:
         Returns True if a stop won (-> DOWN, terminal); False if the child exited
         (caller runs the crash arm). The crash ``(error_class, detail)`` is stashed on
         the run for :meth:`_handle_crash` to emit.
+
+        H1 (Spec B G6-5 / #288): process shutdown CANCELS the supervisor task DIRECTLY
+        (distinct from a crash or ``request_stop`` — those reap on their own arms). The
+        steady-state UP wait is where that cancellation lands, so the cancellation unwind
+        MUST terminate-and-reap the LIVE child before re-raising — else a still-running
+        bwrap child leaks on shutdown (CLAUDE.md hard rule #7 — no leaked sandbox child).
         """
         exit_task = asyncio.ensure_future(child.wait_until_exit())
         stop_task = asyncio.ensure_future(run.stop_event.wait())
@@ -598,6 +604,11 @@ class GatewayAdapterSupervisor:
         except asyncio.CancelledError:
             exit_task.cancel()
             stop_task.cancel()
+            # Reap the LIVE child on the shutdown-cancellation path. ``_reap_child`` is
+            # best-effort + fail-loud (it never raises) and its ``aclose`` ->
+            # ``run_in_executor`` reap is cancellation-resilient, so the cleanup completes
+            # before the ``CancelledError`` propagates — no leaked sandbox child.
+            await self._reap_child(run, child)
             raise
         if stop_task in done:
             exit_task.cancel()
