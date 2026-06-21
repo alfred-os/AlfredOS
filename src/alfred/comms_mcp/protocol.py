@@ -429,6 +429,16 @@ GATEWAY_ADAPTER_DOWN: Final[str] = "gateway.adapter.down"
 GATEWAY_ADAPTER_CRASHED: Final[str] = "gateway.adapter.crashed"
 GATEWAY_ADAPTER_BREAKER_OPEN: Final[str] = "gateway.adapter.breaker_open"
 
+# The wire method for a gateway-forwarded hosted-adapter inbound (Spec B G6-7-1,
+# #309 / ADR-0039). The gateway wraps the opaque T3 body in this method-bearing
+# envelope so the core's _route_notification discriminates it from a directly
+# connected adapter's ``inbound.message`` by METHOD NAME (consistent with the
+# ``gateway.adapter.spawn_request`` / ``gateway.adapter.*`` status discriminators),
+# never by an adapter_id heuristic. The out-of-band ``adapter_id`` is gateway
+# spawn-binding metadata (SEC-309-1) — the routing key; the core re-parses the
+# opaque body for the authoritative G0 ``(adapter_id, inbound_id)``.
+GATEWAY_ADAPTER_INBOUND: Final[str] = "gateway.adapter.inbound"
+
 AdapterDownReason = Literal["operator", "supervisor", "config_reload", "shutdown"]
 """Closed vocabulary for a planned/observed adapter-down transition.
 
@@ -525,6 +535,36 @@ class AdapterBreakerOpenNotification(_WireModel):
 
     adapter_id: AdapterId
     retry_after_seconds: int = Field(ge=0)
+
+
+class GatewayAdapterInboundEnvelope(_WireModel):
+    """Gateway->core: a forwarded hosted-adapter inbound (Spec B G6-7-1, #309).
+
+    The thin method-bearing envelope (method :data:`GATEWAY_ADAPTER_INBOUND`) the
+    gateway wraps a hosted adapter child's ``inbound.message`` in so the opaque T3
+    body can ride the leg to the core for re-parse + dispatch, WITHOUT the gateway
+    parsing the body (hard rule #5).
+
+    BODY-OPAQUE BY CONSTRUCTION. ``body`` is the child's ``inbound.message``
+    ``params`` blob carried BYTE-FOR-BYTE (``bytes``) or verbatim (``str``); this
+    model NEVER ``json.loads`` it. Only the core's
+    :func:`alfred.comms_mcp.inbound_reparse.reparse_forwarded_inbound` reads it
+    (core-side, the trusted boundary). Keeping the byte run untouched is what makes
+    the embedded ``inbound_id`` stable across the leg's ReplayBuffer replay
+    (SEC-309-2) so G0 dedup on ``(adapter_id, inbound_id)`` is never a no-op.
+
+    ``adapter_id`` is the OUT-OF-BAND routing key the gateway supplies from its
+    per-child SPAWN BINDING (SEC-309-1) — NEVER read from the body. It is the
+    closed-vocab :data:`AdapterId` (``"discord"``/``"tui"``…), so a forged kind is
+    a loud ValidationError at the boundary. The core (G6-7-4) re-derives the
+    authoritative ``adapter_id`` from the re-parsed body and validates it EQUALS
+    this envelope value (the §3.3 F3 mitigation; the data-layer half is
+    :func:`reparse_forwarded_inbound`); equality alone is insufficient — the
+    spawn-binding origin of this id is the real anti-forgery defense (SEC-309-1).
+    """
+
+    adapter_id: AdapterId
+    body: bytes | str
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +709,7 @@ __all__ = [
     "GATEWAY_ADAPTER_BREAKER_OPEN",
     "GATEWAY_ADAPTER_CRASHED",
     "GATEWAY_ADAPTER_DOWN",
+    "GATEWAY_ADAPTER_INBOUND",
     "GATEWAY_ADAPTER_STATUS_PREFIX",
     "GATEWAY_ADAPTER_UP",
     "LIFECYCLE_REASON_SHUTDOWN",
@@ -685,6 +726,7 @@ __all__ = [
     "BindingRequestNotification",
     "ContentRef",
     "CrashedNotification",
+    "GatewayAdapterInboundEnvelope",
     "GoingDownNotification",
     "HealthReport",
     "InboundAddressingSignal",
