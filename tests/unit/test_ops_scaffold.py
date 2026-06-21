@@ -9,6 +9,7 @@ source — never hardcoded — so a new series (or a renamed one) is checked hon
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -18,23 +19,49 @@ import yaml
 ROOT = Path(__file__).parent.parent.parent
 OPS = ROOT / "ops"
 GATEWAY_SRC = ROOT / "src" / "alfred" / "gateway"
-# Every gateway module that DEFINES a Prometheus series. G6-4 (#288) split the
-# per-adapter ingress/leg series out of metrics.py into adapter_metrics.py and the
-# ingress-audit sink, so scanning metrics.py alone would miss them and the
-# dashboard/alert cross-check would falsely fail. The known-name set is derived from
-# EVERY ``Counter(``/``Gauge(``/``Histogram(``-bearing module so the scaffold validates
-# the panels/alerts against the REAL registered metric names.
-_METRIC_DEFINING_FILES = sorted(
-    path
-    for path in GATEWAY_SRC.glob("*.py")
-    if re.search(r"\b(?:Counter|Gauge|Histogram)\(", path.read_text())
-)
+# Prometheus series are registered exactly at their constructor calls. Deriving the
+# known-name set from the FIRST-ARG name literal of every ``Counter(``/``Gauge(``/
+# ``Histogram(`` call (via ``ast``) — not a blind ``gateway_*`` string regex — keeps the
+# "no silently-dead alerts" cross-check honest: a quoted metric name that isn't actually
+# a registered series can no longer whitelist an alert/panel that references it.
+_PROMETHEUS_CTORS = frozenset({"Counter", "Gauge", "Histogram"})
+_METRIC_REF_RE = re.compile(r"\bgateway_[a-z0-9_]*\b")
+
+
+def _call_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _metric_names_in(path: Path) -> set[str]:
+    names: set[str] = set()
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _call_name(node.func) not in _PROMETHEUS_CTORS:
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        metric_name = node.args[0].value
+        if isinstance(metric_name, str) and _METRIC_REF_RE.fullmatch(metric_name):
+            names.add(metric_name)
+    return names
+
+
+# Every gateway module under src/alfred/gateway/ is scanned for constructor-registered
+# series. G6-4 (#288) split the per-adapter ingress/leg series out of metrics.py into
+# adapter_metrics.py and the ingress-audit sink, so the known-name set is the union across
+# ALL modules — not metrics.py alone — to validate the panels/alerts against the REAL
+# registered metric names.
+_METRIC_DEFINING_FILES = sorted(GATEWAY_SRC.glob("*.py"))
 
 
 def _known_metric_bases() -> set[str]:
     names: set[str] = set()
     for path in _METRIC_DEFINING_FILES:
-        names |= set(re.findall(r'"(gateway_[a-z_]+)"', path.read_text()))
+        names |= _metric_names_in(path)
     return names | {f"{n}_total" for n in names}
 
 
