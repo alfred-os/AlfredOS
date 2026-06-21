@@ -183,6 +183,21 @@ jobs:
           uv run coverage report \
             --include='src/alfred/security/capability_gate/_comms_adapter_grants.py' \
             --fail-under=100
+      - name: Forwarded-inbound re-parse trust-boundary 100% line+branch coverage
+        # Spec B G6-7-1 (#309, ADR-0039): ``inbound_reparse.py`` is the core-side
+        # data-layer half of the gateway->core inbound bridge's F3 forgery
+        # mitigation — it re-parses an opaque body the gateway never validated and
+        # enforces the envelope==body adapter_id equality. A coverage hole could
+        # ship an un-exercised refusal branch (a forged-body mismatch or a
+        # malformed body that is NOT raised loud), so 100% line+branch is the bar.
+        # Fully covered by the unit tier (tests/unit/comms/test_inbound_reparse.py)
+        # — pure function, no root, no Postgres. Named explicitly (two-gates
+        # pattern) so a reviewer sees the boundary; keep the combined gate in sync.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/comms_mcp/inbound_reparse.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/comms_mcp/inbound_reparse.py' \
+            --fail-under=100
       - name: Quarantine transport trust-boundary 100% line+branch coverage
         # PR-S4-11c-2a (ADR-0029): ``quarantine_transport.py`` is the host-side
         # wire that carries a T3 inbound body to the quarantined LLM — the single-
@@ -1273,6 +1288,16 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/plugins/errors.py,src/alfred/plugins/transport.py,src/alfred/plugins/manifest.py,src/alfred/plugins/inbound_scanner.py,src/alfred/plugins/content_store_base.py,src/alfred/plugins/stdio_transport.py,src/alfred/plugins/session.py,src/alfred/plugins/manifest_reader.py,src/alfred/plugins/_observability.py,src/alfred/plugins/comms_stdio_transport.py,src/alfred/plugins/comms_socket_transport.py,src/alfred/plugins/comms_runner.py,src/alfred/plugins/_comms_child_env.py,src/alfred/plugins/comms_wire.py,src/alfred/plugins/comms_seq_codec.py' \
+            --fail-under=100
+      - name: Forwarded-inbound re-parse trust-boundary 100% line+branch coverage (combined)
+        # Combined twin of the python-job gate (two-gates pattern, Spec B G6-7-1,
+        # #309, ADR-0039). ``inbound_reparse.py`` is the core-side data-layer half
+        # of the gateway->core inbound bridge's F3 forgery mitigation; keep the
+        # --include in lockstep with the python-job step.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/inbound_reparse.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/comms_mcp/inbound_reparse.py' \
             --fail-under=100
       - name: Comms-MCP trust-boundary 100% line+branch coverage (combined)
         # PR-S4-8 (#152) host-side comms-MCP foundations (spec §8). Every file
