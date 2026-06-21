@@ -53,6 +53,9 @@ def test_happy_body_reparses_to_exact_inbound_notification() -> None:
     assert result.sub_payload_refs == ()
     assert result.addressing_signal == "dm"
     assert result.received_at == datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
+    # wire_seq is carrier-leg metadata, not body-derived -> None after re-parse.
+    # Pins all 8 InboundMessageNotification fields.
+    assert result.wire_seq is None
 
 
 def test_envelope_equals_body_adapter_id_passes() -> None:
@@ -89,12 +92,20 @@ def test_non_object_top_level_json_raises_malformed() -> None:
 
 
 def test_reparse_is_deterministic_on_identical_bytes() -> None:
-    # Byte-stability (SEC-309-2): same bytes -> equal model every time, so G0
-    # dedup on (adapter_id, inbound_id) can never be a silent no-op.
-    body = _valid_body("discord")
-    env = GatewayAdapterInboundEnvelope(adapter_id="discord", body=body)
-    first = reparse_forwarded_inbound(env)
-    second = reparse_forwarded_inbound(env)
+    # Byte-stability (SEC-309-2): byte-identical bodies -> equal model every time,
+    # so G0 dedup on (adapter_id, inbound_id) can never be a silent no-op. Two
+    # SEPARATELY-constructed envelopes carrying byte-identical bodies (not the same
+    # instance twice) make the determinism assertion exact across distinct inputs.
+    body_first = _valid_body("discord")
+    body_second = _valid_body("discord")
+    assert body_first == body_second
+    assert body_first is not body_second
+    first = reparse_forwarded_inbound(
+        GatewayAdapterInboundEnvelope(adapter_id="discord", body=body_first)
+    )
+    second = reparse_forwarded_inbound(
+        GatewayAdapterInboundEnvelope(adapter_id="discord", body=body_second)
+    )
     assert first == second
     assert first.inbound_id == second.inbound_id == "platform-msg-7"
 

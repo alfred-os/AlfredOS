@@ -19,7 +19,7 @@ FAIL-LOUD (hard rule #7). A body that does not decode/validate raises
 :class:`~alfred.comms_mcp.errors.InboundBodyMalformedError`; an envelope==body
 ``adapter_id`` mismatch raises
 :class:`~alfred.comms_mcp.errors.InboundEnvelopeBodyMismatchError`. Neither carries
-the raw T3 body on the exception (spec §5.6). The DISPOSITION (the K4-style forge
+the raw T3 body on the exception (spec §3.3). The DISPOSITION (the K4-style forge
 refusal vs the ARCH-309-3 ack-to-drain on a malformed body) is the core receive
 slice's job (G6-7-4); this function only raises the typed contract.
 
@@ -62,7 +62,7 @@ def reparse_forwarded_inbound(
     try:
         notification = InboundMessageNotification.model_validate_json(envelope.body)
     except ValidationError:
-        # No raw body on the exception (spec §5.6); ``from None`` severs the
+        # No raw body on the exception (spec §3.3); ``from None`` severs the
         # ValidationError chain so a body fragment cannot leak via ``__cause__``.
         raise InboundBodyMalformedError(
             "forwarded inbound body failed InboundMessageNotification validation"

@@ -82,7 +82,7 @@ class InboundReparseError(CommsMcpError):
     attaches to each (the §3.3 K4-style forge refusal vs the §3.3/ARCH-309-3
     ack-to-drain on a malformed body) is wired in the receive slice (G6-7-4); this
     typed hierarchy is the data-layer contract those dispositions discriminate on.
-    Carries NO raw T3 body on the exception (spec §5.6 — no payload in error attrs).
+    Carries NO raw T3 body on the exception (spec §3.3 — no payload in error attrs).
     """
 
 
@@ -104,7 +104,7 @@ class InboundBodyMalformedError(InboundReparseError):
     (non-UTF-8 / non-JSON / not a top-level object) or an
     :class:`InboundMessageNotification` validation failure raises this. In G6-7-4
     the core maps it to a loud bounded-field audit drop that ACKs the leg frame to
-    drain it (ARCH-309-3 — no infinite replay). Carries NO raw body (spec §5.6).
+    drain it (ARCH-309-3 — no infinite replay). Carries NO raw body (spec §3.3).
     """
 
 
