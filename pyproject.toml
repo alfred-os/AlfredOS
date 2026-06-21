@@ -245,6 +245,13 @@ ignore = ["S101"]
 # a uuid hex prefix + fixed literals) — same trusted-CLI rationale as the daemon
 # smokes above. No untrusted input reaches a subprocess.
 "tests/smoke/test_gateway_core_link_smoke.py" = ["S603", "S607"]
+# The G6-5 flag-day Discord smoke drives `alfred gateway adapters --wait-ready`
+# the operator-shell way: the trusted `sys.executable -m alfred ...` CLI with a
+# fixed-literal adapter id + a numeric timeout. S603 flags the now-variable argv
+# (adapter id / timeout) though no untrusted input reaches the subprocess — same
+# trusted-CLI rationale as the smokes above. (S105 stays active: the env-var name
+# is named-noqa'd, so secret-scanning catches any future hardcoded token.)
+"tests/smoke/test_discord_gateway_smoke.py" = ["S603"]
 # read_state_git_head_sha coverage exercises a real temp git repo via
 # trusted `git` invocations (partial path, fixed-literal args).
 "tests/unit/cli/daemon/test_daemon_internal_helpers.py" = ["S603", "S607"]
