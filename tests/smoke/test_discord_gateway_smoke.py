@@ -85,6 +85,19 @@ _HARNESS_SLACK_S = 15.0
 _DISCORD_ADAPTER_ID = "discord"
 
 
+def _redact_subprocess_output(output: str) -> str:
+    """Return a non-leaking, length-only summary of subprocess output (CR #4, #288).
+
+    This smoke runs against a REAL Discord bot token, so an assertion-failure message must
+    NEVER embed raw ``stdout`` / ``stderr`` — a regression that printed the token bytes
+    would leak them into CI logs, contradicting the module's never-log-token posture
+    (CLAUDE.md hard rule #6). Rather than try to scrub every token shape (a denylist is a
+    leak waiting to happen), collapse the output to its byte length only — a useful
+    diagnostic that can carry no secret. The returned summary is safe to embed verbatim.
+    """
+    return f"<redacted {len(output)} chars>"
+
+
 def _token_present() -> bool:
     # GitHub Actions resolves an unset / fork-PR-inaccessible
     # ``${{ secrets.X }}`` to the empty string, NOT undefined, so a plain
@@ -174,16 +187,21 @@ def test_discord_gateway_reports_ready(smoke_secrets_file: Path) -> None:
         check=False,
     )
 
+    # Never embed raw stdout/stderr — this smoke uses a REAL token, so a regression that
+    # printed sensitive bytes would leak them into CI logs (CLAUDE.md hard rule #6). The
+    # failure message carries the returncode + a length-only redacted summary.
     assert result.returncode == 0, (
         f"`gateway adapters --wait-ready {_DISCORD_ADAPTER_ID}` returned "
-        f"{result.returncode}; stdout={result.stdout!r} stderr={result.stderr!r}"
+        f"{result.returncode}; stdout={_redact_subprocess_output(result.stdout)} "
+        f"stderr={_redact_subprocess_output(result.stderr)}"
     )
 
     # The success surface is the localized ready line. Asserting on the rendered
     # t() string (not a raw English literal) catches a key-rename regression too.
     ready_line = t("gateway.adapters.wait_ready.ready", adapter=_DISCORD_ADAPTER_ID)
     assert ready_line in result.stdout, (
-        f"expected the ready line {ready_line!r} on stdout; got {result.stdout!r}"
+        f"expected the ready line {ready_line!r} on stdout; "
+        f"got {_redact_subprocess_output(result.stdout)}"
     )
 
 
