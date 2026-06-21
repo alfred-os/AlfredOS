@@ -56,6 +56,28 @@ _EXIT_HANDSHAKE_FAILED = 5
 _DIAL_ADAPTER_ID_ENV: Final[str] = "ALFRED_GATEWAY_DIAL_ADAPTER_ID"
 _DEFAULT_DIAL_ADAPTER_ID: Final[str] = "tui"
 
+# The TUI is the foreground DIAL-IN leg (it dials the gateway over the client socket),
+# NOT a gateway-SPAWNED adapter child. So it is excluded from the supervised
+# ``adapter_ids`` set even if an operator lists it in ``comms_enabled_adapters`` — the
+# gateway never bwrap-spawns the TUI.
+_TUI_DIAL_IN_ADAPTER_ID: Final[str] = "tui"
+
+
+def _resolve_hosted_adapter_ids() -> list[str]:
+    """The gateway-hosted (bwrap-spawned) adapter subset from settings (G6-5 Task 7, #288).
+
+    Sources the configured comms-adapter allowlist from
+    :attr:`alfred.config.settings.Settings.comms_enabled_adapters` (env
+    ``ALFRED_COMMS_ENABLED_ADAPTERS``) and EXCLUDES the TUI dial-in id — the TUI dials
+    the gateway, it is not a spawned adapter. The remaining ids are the children the
+    gateway supervises + spawns. An empty / TUI-only set yields ``[]`` so the supervisor
+    is a clean no-op (behaviour-preserving for G5).
+    """
+    from alfred.config.settings import Settings
+
+    settings: Settings = Settings()  # type: ignore[no-untyped-call]  # BaseSettings __init__ is untyped
+    return [a for a in settings.comms_enabled_adapters if a != _TUI_DIAL_IN_ADAPTER_ID]
+
 
 def start_gateway() -> None:
     """Run the long-running gateway process until SIGTERM / SIGINT (Spec A G3-3b-2b).
@@ -104,6 +126,7 @@ def start_gateway() -> None:
         await GatewayProcess(
             shutdown_event=shutdown_event,
             dial_adapter_id=dial_adapter_id,
+            adapter_ids=_resolve_hosted_adapter_ids(),
         ).run()
 
     try:
