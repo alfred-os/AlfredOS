@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-21 12:24+0100\n"
+"POT-Creation-Date: 2026-06-21 21:29+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2387,28 +2387,28 @@ msgstr ""
 "ALFRED_ENVIRONMENT env var ({env_value}) and /etc/alfred/environment "
 "({file_value}) disagree; the env var wins."
 
-#: src/alfred/plugins/comms_runner.py:308
-#: src/alfred/plugins/comms_runner.py:787
+#: src/alfred/plugins/comms_runner.py:295
+#: src/alfred/plugins/comms_runner.py:774
 msgid "comms.runner.request_aborted"
 msgstr ""
 "Comms adapter {adapter_id} closed its connection while an outbound "
 "request was in flight; the request was aborted."
 
-#: src/alfred/plugins/comms_runner.py:341
+#: src/alfred/plugins/comms_runner.py:328
 msgid "comms.runner.request_timeout"
 msgstr ""
 "Comms adapter {adapter_id} did not answer the {method} request before the"
 " deadline; the outbound request was abandoned."
 
-#: src/alfred/plugins/comms_runner.py:481
-#: src/alfred/plugins/comms_runner.py:490
+#: src/alfred/plugins/comms_runner.py:468
+#: src/alfred/plugins/comms_runner.py:477
 msgid "comms.runner.handshake_failed"
 msgstr ""
 "Comms adapter {adapter_id} failed its lifecycle.start handshake; the "
 "plugin closed its connection or did not acknowledge. The adapter was not "
 "loaded."
 
-#: src/alfred/plugins/comms_runner.py:760
+#: src/alfred/plugins/comms_runner.py:747
 msgid "comms.runner.response_error"
 msgstr ""
 "Comms adapter {adapter_id} returned an error response to an outbound "
