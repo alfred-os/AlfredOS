@@ -94,6 +94,62 @@ _INGRESS_SWEEP_INTERVAL_SECONDS: Final[float] = 30.0
 log = structlog.get_logger(__name__)
 
 
+def build_tui_leg(
+    *,
+    replay_buffer_factory: Callable[[], ReplayBuffer] = ReplayBuffer,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> GatewayLeg:
+    """Build the single proving TUI dial-in ``GatewayLeg`` (G6-4a, #288).
+
+    Factored out of :meth:`GatewayProcess._build_tui_leg` so the production process AND the
+    gateway-chain integration proofs construct the leg IDENTICALLY (same SECURITY caps,
+    non-binding ingress gate, monotonic seam). Wraps a fresh per-client ``ReplayBuffer`` (at
+    its own caps) in the FIRST ``GatewayLeg`` (``adapter_id="tui"``); the leg's ``now`` is
+    wired to the SAME ``monotonic`` the evict loop reads. The ``GlobalReplayCap`` ceiling is
+    strictly above the buffer hard ceiling (PR2 — the buffer's own hard-ceiling raise fires
+    first), and the ``PerAdapterIngressGate`` is NON-BINDING (the interactive path is never
+    throttled).
+    """
+    buffer = replay_buffer_factory()
+    cap = GlobalReplayCap(max_total_bytes=buffer.max_bytes * _TUI_GLOBAL_CAP_MULTIPLIER)
+    gate = PerAdapterIngressGate(
+        _TUI_LEG_ADAPTER_ID,
+        sustained_rate_per_s=_NON_BINDING_RATE_PER_S,
+        burst=_NON_BINDING_COUNT,
+        max_inflight=_NON_BINDING_COUNT,
+        ttl_seconds=_NON_BINDING_TTL_SECONDS,
+        max_frame_bytes=_NON_BINDING_MAX_FRAME_BYTES,
+        now=monotonic,
+    )
+    return GatewayLeg(
+        adapter_id=_TUI_LEG_ADAPTER_ID,
+        buffer=buffer,
+        ingress_gate=gate,
+        global_cap=cap,
+        now=monotonic,
+    )
+
+
+def wire_leg_scheduler(core_link: GatewayCoreLink, tui_leg: GatewayLeg) -> GatewayLegScheduler:
+    """Build + attach the K1 leg scheduler/router for ``core_link`` over ``tui_leg``.
+
+    The single coherent client->core routing path (Spec B G6-4 Task 7 / K1, #288), factored
+    out so the production :meth:`GatewayProcess.run` AND the gateway-chain integration proofs
+    wire it IDENTICALLY — a test that hand-builds the legs but forgets the scheduler/router
+    would leave ``submit_tui_unit`` with no drainer (the frame enqueues but never drains). The
+    scheduler drains onto ``core_link.write_leg_unit`` + reads ``core_link.replay_pending_gate``;
+    the :class:`LegRouter` (the K4 forged-adapter refusal) is built over the scheduler and
+    attached to the link via :meth:`GatewayCoreLink.set_leg_router` (the same post-construction
+    late-binding the relay uses for ``_payload_relay``). The leg is registered with the
+    scheduler. Returns the scheduler so the caller can pass it to :class:`GatewayRelay` (the
+    relay co-runs its drain pump) and reap it on exit.
+    """
+    scheduler = GatewayLegScheduler(core_link, max_per_leg_queue_bytes=_LEG_SEND_QUEUE_BYTES)
+    scheduler.register_leg(tui_leg)
+    core_link.set_leg_router(LegRouter(scheduler))
+    return scheduler
+
+
 class _UnspawnedAdapterChildFactory:
     """G6-2b-2a placeholder: refuses to spawn (no real launcher until G6-3).
 
@@ -182,31 +238,13 @@ class GatewayProcess:
     def _build_tui_leg(self) -> GatewayLeg:
         """Build the single proving TUI leg for this accepted client (G6-4a, #288).
 
-        Wraps a fresh per-client ``ReplayBuffer`` (at its own SECURITY caps) in the FIRST
-        ``GatewayLeg`` (``adapter_id="tui"``). The leg's ``now`` is wired to the SAME
-        ``self._monotonic`` the evict loop reads (the buffer's monotonic precondition). The
-        ``GlobalReplayCap`` ceiling is strictly above the buffer hard ceiling (PR2 — the
-        buffer's own hard-ceiling raise fires first), and the ``PerAdapterIngressGate`` is
-        NON-BINDING (the TUI is not throttled; G6-4's scheduler wires the real fairness +
-        priority credit). One leg only — NO scheduler / fair-share here.
+        Delegates to the module-level :func:`build_tui_leg` (shared with the integration
+        proofs) so the leg's SECURITY caps / non-binding gate / monotonic seam are wired
+        IDENTICALLY in production and under test. One leg only — the scheduler / fair-share
+        is wired separately via :func:`wire_leg_scheduler`.
         """
-        buffer = self._replay_buffer_factory()
-        cap = GlobalReplayCap(max_total_bytes=buffer.max_bytes * _TUI_GLOBAL_CAP_MULTIPLIER)
-        gate = PerAdapterIngressGate(
-            _TUI_LEG_ADAPTER_ID,
-            sustained_rate_per_s=_NON_BINDING_RATE_PER_S,
-            burst=_NON_BINDING_COUNT,
-            max_inflight=_NON_BINDING_COUNT,
-            ttl_seconds=_NON_BINDING_TTL_SECONDS,
-            max_frame_bytes=_NON_BINDING_MAX_FRAME_BYTES,
-            now=self._monotonic,
-        )
-        return GatewayLeg(
-            adapter_id=_TUI_LEG_ADAPTER_ID,
-            buffer=buffer,
-            ingress_gate=gate,
-            global_cap=cap,
-            now=self._monotonic,
+        return build_tui_leg(
+            replay_buffer_factory=self._replay_buffer_factory, monotonic=self._monotonic
         )
 
     async def _on_peer_rejected(self, peer_uid: int | None) -> None:
@@ -270,8 +308,16 @@ class GatewayProcess:
         """
         while True:
             await self._sleep(_INGRESS_SWEEP_INTERVAL_SECONDS)
+            # Iterate a SNAPSHOT of the adapter ids; the snapshot is not atomic with the
+            # per-leg lookup, so a leg the scheduler ISOLATED/deregistered (the perf-M4 fault
+            # path) between the snapshot and ``scheduler.leg(adapter_id)`` is gone. Tolerate
+            # the ``KeyError`` and SKIP it (CR / Spec B G6-4 #288) — a stale id is not a sweep
+            # failure, and crashing the sweeper would silently end K5 enforcement (hard #7).
             for adapter_id in tuple(scheduler.adapter_ids()):
-                leg = scheduler.leg(adapter_id)
+                try:
+                    leg = scheduler.leg(adapter_id)
+                except KeyError:
+                    continue
                 for token in leg.evict_stalled_admits():
                     log.warning(
                         "gateway.ingress.slot_evicted",
@@ -298,9 +344,19 @@ class GatewayProcess:
 
         A supervisor that RAISES a fail-closed :class:`GatewayAdapterSpawnError` BEFORE the
         relay returns is surfaced loudly (it aborts the relay too) so a real spawn failure is
-        never swallowed; a supervisor empty-set no-op return is ignored. The sweeper is a
-        background task: a non-cancelled exception escaping it is surfaced via
-        :meth:`asyncio.gather` (return_exceptions) loud, never silently dropped.
+        never swallowed; a supervisor empty-set no-op return is ignored. The sweeper never
+        completes on its own, so its completion can only be a raise.
+
+        **Keep monitoring the sweeper until the relay ends (CR / Spec B G6-4 #288).** With the
+        default EMPTY adapter set the supervisor's ``supervise_all([])`` no-op returns FIRST,
+        long before shutdown. We must NOT then await ONLY the relay — a later
+        :meth:`_ingress_sweep_loop` raise would be left for the ``finally``'s
+        ``gather(..., return_exceptions=True)``, which SWALLOWS it (K5 enforcement dies
+        silent — hard rule #7). Instead we loop on ``FIRST_COMPLETED`` over the
+        STILL-running tasks: each time a background task completes we call ``.result()`` (a
+        no-op return is ignored; a raise re-surfaces LOUD), and we keep looping until the
+        relay itself completes — so a sweeper crash AFTER the supervisor no-op is surfaced
+        promptly, not absorbed at teardown.
 
         **Reap on EVERY exit (perf-M4 / security).** The ``finally`` cancels + reaps all
         tasks, then ``scheduler.aclose()`` tears down EVERY registered leg — discarding its
@@ -316,22 +372,20 @@ class GatewayProcess:
         sweep_task: asyncio.Task[None] = asyncio.ensure_future(self._ingress_sweep_loop(scheduler))
         background = (supervisor_task, sweep_task)
         try:
-            done, _pending = await asyncio.wait(
-                {relay_task, *background}, return_when=asyncio.FIRST_COMPLETED
-            )
-            if supervisor_task in done:
-                # The supervisor finished first. A fail-closed spawn error must surface
-                # (``.result()`` re-raises it, and the ``finally`` cancels the rest); a clean
-                # empty-set no-op return is ignored — keep serving until the relay ends.
-                supervisor_task.result()
-            # The sweeper never completes on its own; if it DID finish first it can only be a
-            # raise — surface it loud so a background crash is never swallowed (hard rule #7).
-            if sweep_task in done:
-                sweep_task.result()
-            if relay_task not in done:
-                # The relay is the serving-lifetime anchor: wait for IT to end (shutdown)
-                # even after a background task returned/was-handled above.
-                await relay_task
+            # Loop until the relay (the serving-lifetime anchor) completes. Each round waits on
+            # whatever is still running; a completed BACKGROUND task is ``.result()``-ed so a
+            # raise (a fail-closed spawn error, or a sweeper crash AFTER the supervisor no-op)
+            # surfaces LOUD immediately, while a clean no-op return is ignored. This keeps the
+            # sweeper monitored for its whole life instead of awaiting only the relay after the
+            # supervisor returns (CR / hard rule #7).
+            pending: set[asyncio.Task[None]] = {relay_task, *background}
+            while not relay_task.done():
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task is not relay_task:
+                        # A background task completed: a no-op return is ignored; a raise
+                        # re-surfaces here (the ``finally`` then cancels the remaining tasks).
+                        task.result()
             # ``.result()`` re-raises a genuine relay error once the relay has completed.
             relay_task.result()
         finally:
@@ -398,16 +452,14 @@ class GatewayProcess:
                 jitter=self._jitter,
                 monotonic=self._monotonic,
             )
-            scheduler = GatewayLegScheduler(
-                core_link, max_per_leg_queue_bytes=_LEG_SEND_QUEUE_BYTES
-            )
-            scheduler.register_leg(tui_leg)
-            # Attach the router post-construction (the same late-binding pattern the relay
-            # uses for ``core_link._payload_relay``): the core link stays leg-agnostic and
-            # the gateway process is the one place that knows the leg<->scheduler topology.
-            # L2 (#288): the public ``set_leg_router`` setter — the dead ctor param + private
-            # late-write were collapsed into one coherent wiring path.
-            core_link.set_leg_router(LegRouter(scheduler))
+            # Build + attach the K1 leg scheduler/router over the link + leg (the same
+            # wiring the integration proofs reuse via :func:`wire_leg_scheduler`): the
+            # scheduler drains onto ``write_leg_unit`` + reads ``replay_pending_gate``, and
+            # the router (the K4 forged-adapter refusal) is attached post-construction (the
+            # same late-binding pattern the relay uses for ``core_link._payload_relay``) —
+            # the core link stays leg-agnostic; this process is the one place that knows the
+            # leg<->scheduler topology.
+            scheduler = wire_leg_scheduler(core_link, tui_leg)
             relay = GatewayRelay(
                 core_link=core_link,
                 client_transport=client_transport,
@@ -465,4 +517,6 @@ __all__ = [
     "GatewayProcess",
     "_CoreEpochCredSeam",
     "_UnspawnedAdapterChildFactory",
+    "build_tui_leg",
+    "wire_leg_scheduler",
 ]

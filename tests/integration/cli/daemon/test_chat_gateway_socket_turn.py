@@ -81,6 +81,7 @@ from alfred.gateway.client_link import client_handshake as _gateway_client_hands
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.link_state import GatewayLinkState
+from alfred.gateway.process import build_tui_leg, wire_leg_scheduler
 from alfred.gateway.relay import GatewayRelay
 from alfred.hooks.boot import install_boot_hook_registry
 from alfred.hooks.registry import get_registry, set_registry
@@ -456,13 +457,23 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
             gateway_client_listener = GatewayClientListener()
             await gateway_client_listener.bind()
 
+            # Spec B G6-4 Task 7 / K1 (#288): the client->core path now routes through the
+            # leg scheduler (``submit_tui_unit`` -> enqueue -> scheduler drain ->
+            # ``write_leg_unit``), NOT a direct write. Build the TUI leg + pass it to the
+            # core link, then wire the scheduler/router over the link — EXACTLY as the
+            # production ``GatewayProcess`` does (via the shared ``build_tui_leg`` /
+            # ``wire_leg_scheduler`` helpers). Without this the inbound enqueues but never
+            # drains (the regression this proof now guards).
+            tui_leg = build_tui_leg()
             core_link = GatewayCoreLink(
                 client_listener=gateway_client_listener,
                 dial_adapter_id="tui",  # dial the daemon's comms-tui.sock
                 sleep=_instant_sleep,  # M3 — deterministic reconnect
                 jitter=_no_jitter,  # M3 — read the bare (clamped) schedule
                 shutdown_event=gateway_shutdown,
+                tui_leg=tui_leg,
             )
+            gateway_scheduler = wire_leg_scheduler(core_link, tui_leg)
 
             # ---- Dial the gateway from the cohost (over comms-gateway.sock) ----
             # The cohost dials BEFORE the gateway accepts so the gateway's single
@@ -509,6 +520,7 @@ async def test_chat_turn_and_reconnect_banner_round_trip_through_gateway(
                 core_link=core_link,
                 client_transport=client_transport,
                 client_seq_enabled=client_seq_enabled,
+                scheduler=gateway_scheduler,  # K1: the relay co-runs the drain pump
             )
             relay_task = asyncio.ensure_future(relay.run())
 
