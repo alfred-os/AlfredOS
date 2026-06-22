@@ -161,6 +161,11 @@ class _InboundIdempotencyStoreLike(Protocol):
 
     async def commit_once(self, *, inbound_id: str, adapter_id: str) -> bool: ...
 
+    # Non-mutating read (Spec B G6-7-4 Task 1) — the dispatched-edge forwarded
+    # path consults it BEFORE dispatch to short-circuit a replay (a row already
+    # durable) without re-dispatching, then drains the seq tail.
+    async def has_committed(self, *, inbound_id: str, adapter_id: str) -> bool: ...
+
 
 @runtime_checkable
 class _AckTrackerLike(Protocol):
@@ -400,6 +405,42 @@ async def _emit_idempotency_replay_observed(
     )
 
 
+async def _emit_dispatch_failed(
+    notification: InboundMessageNotification,
+    *,
+    audit_writer: _AuditWriterLike,
+) -> None:
+    """Emit the content-free dispatch_failed row on the dispatched edge.
+
+    Spec B G6-7-4 / ADR-0039 item 4. A dispatch failure on the FORWARDED path is a
+    visible, recoverable event: the frame is deliberately left NOT committed and
+    NOT observed so the forwarding leg replays it. That decision is a SIGNED
+    audit-log fact — a distinct closed-vocab ``result="dispatch_failed"`` row
+    (never the ``"dropped"`` replay value, so the two are distinguishable in the
+    log). The row is content-free: ONLY the adapter id, the PEPPERED HASH of the
+    wire ``inbound_id`` (never the raw string — sec-010), and the observation time.
+    NO raw T3 body, no user text. An audit-write failure here PROPAGATES (the
+    caller does not swallow it).
+    """
+    await audit_writer.append_schema(
+        fields=audit_row_schemas.COMMS_INBOUND_DISPATCH_FAILED_FIELDS,
+        schema_name="COMMS_INBOUND_DISPATCH_FAILED_FIELDS",
+        event="comms.inbound.dispatch_failed",
+        actor_user_id=None,
+        subject={
+            "adapter_id": notification.adapter_id,
+            "inbound_id_hash": audit_hash.hash_inbound_id(notification.inbound_id),
+            "observed_at": datetime.now(UTC).isoformat(),
+        },
+        trust_tier_of_trigger="T3",
+        result="dispatch_failed",
+        cost_estimate_usd=0.0,
+        # sec-010: trace_id is a persisted, indexed column — peppered hash, never
+        # the raw wire inbound_id.
+        trace_id=audit_hash.hash_inbound_id(notification.inbound_id),
+    )
+
+
 async def process_inbound_message(
     notification: InboundMessageNotification,
     *,
@@ -412,6 +453,7 @@ async def process_inbound_message(
     sub_payload_promoter: _SubPayloadPromoterLike | None = None,
     idempotency_store: _InboundIdempotencyStoreLike | None = None,
     ack_tracker: _AckTrackerLike | None = None,
+    commit_at_dispatch_edge: bool = False,
 ) -> None:
     """Route one inbound comms notification through the trust boundary.
 
@@ -476,7 +518,33 @@ async def process_inbound_message(
     # never re-charges the coarse budget (which would defeat G0). ``None`` store =
     # pre-G0 unit callers; production always injects. A DB error in commit_once
     # PROPAGATES (the store fails loud — hard rule #7); it is not caught here.
-    if idempotency_store is not None:
+    #
+    # Spec B G6-7-4 (ADR-0039 item 4): the FORWARDED path
+    # (``commit_at_dispatch_edge=True``) does NOT commit/observe at receipt — that
+    # moves to AFTER a successful dispatch (the "dispatched edge"), so a dispatch
+    # failure leaves the seq un-observed and the leg replays it. At receipt the
+    # forwarded path only needs the replay short-circuit: a row already durable
+    # (``has_committed`` — Task 1's non-mutating read) is DRAINED here (advance the
+    # contiguous high-water so its dispatched tail can trim) and short-circuited
+    # WITHOUT re-dispatch. The DIRECT TUI/daemon path (``False``, the default) keeps
+    # the original receipt-time ``commit_once`` + ``observe`` UNCHANGED, lifted
+    # verbatim under the ``elif`` guard — its logic and the None-store fall-through
+    # are byte-for-byte the prior behaviour.
+    if commit_at_dispatch_edge:
+        if idempotency_store is not None and await idempotency_store.has_committed(
+            inbound_id=notification.inbound_id,
+            adapter_id=notification.adapter_id,
+        ):
+            audit_hash.set_broker(secret_broker)
+            await _emit_idempotency_replay_observed(notification, audit_writer=audit_writer)
+            if ack_tracker is not None and notification.wire_seq is not None:
+                ack_tracker.observe(notification.wire_seq)
+            _log.info(
+                "comms.inbound.idempotency.replay_short_circuit",
+                adapter_id=notification.adapter_id,
+            )
+            return
+    elif idempotency_store is not None:
         if not await idempotency_store.commit_once(
             inbound_id=notification.inbound_id,
             adapter_id=notification.adapter_id,
@@ -606,7 +674,31 @@ async def process_inbound_message(
         addressing_signal=notification.addressing_signal,
         language=resolved.language,
     )
-    await orchestrator.dispatch(ingested)
+    if commit_at_dispatch_edge:
+        # Dispatched edge (ADR-0039 item 4): commit + observe AFTER a successful
+        # dispatch, so a dispatch failure leaves the frame NOT committed / NOT
+        # observed and the forwarding leg replays it → the core re-dispatches.
+        try:
+            await orchestrator.dispatch(ingested)
+        except Exception:
+            # Fail-loud (hard rule #7): emit the distinct closed-vocab
+            # dispatch_failed row and re-raise. NOT committed, NOT observed. The
+            # bound on this replay (poison ceiling / dead-letter) is G6-7-5. An
+            # audit-write failure here PROPAGATES — it is not nested-swallowed.
+            # ``Exception`` (not ``BaseException``) so cancellation tears down
+            # cleanly rather than being audited as a dispatch fault.
+            audit_hash.set_broker(secret_broker)
+            await _emit_dispatch_failed(notification, audit_writer=audit_writer)
+            raise
+        if idempotency_store is not None:
+            await idempotency_store.commit_once(
+                inbound_id=notification.inbound_id,
+                adapter_id=notification.adapter_id,
+            )
+        if ack_tracker is not None and notification.wire_seq is not None:
+            ack_tracker.observe(notification.wire_seq)
+    else:
+        await orchestrator.dispatch(ingested)
 
 
 async def _emit_budget_capped_pre_resolution(
