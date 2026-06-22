@@ -1269,6 +1269,16 @@ COMMS_INBOUND_DISPATCH_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Emitted by process_inbound_message on the FORWARDED dispatched edge (Spec B
+# G6-7-5 / ADR-0039 item 4b) when (adapter_id, inbound_id) has failed the post-extract
+# region >= the ceiling N times. Terminal DEAD-LETTER: the frame is ack-to-drained and
+# never re-dispatched. Content-free: closed-vocab adapter_id, peppered inbound_id hash
+# (sec-010), the bounded attempt_count (a small int, non-secret), observed_at.
+# result="poisoned" (migration 0020). subject is JSONB → adding attempt_count needs no migration.
+COMMS_INBOUND_POISONED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"adapter_id", "inbound_id_hash", "attempt_count", "observed_at"}
+)
+
 # Emitted by the core-side GatewayForwardedInboundReceiver (Spec B G6-7-4 /
 # ADR-0039) on a TERMINAL DROP of a gateway-forwarded inbound — the receive trust
 # boundary's three refusal/drop dispositions. Content-free by construction: the
@@ -1349,6 +1359,7 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "COMMS_INBOUND_BUDGET_CAPPED_FIELDS",
     "COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS",
     "COMMS_INBOUND_DISPATCH_FAILED_FIELDS",
+    "COMMS_INBOUND_POISONED_FIELDS",
     "COMMS_FORWARDED_INBOUND_DROPPED_FIELDS",
     "SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS",
     # Spec B (#288) G6-2a gateway.adapter.* status family — listed here because
