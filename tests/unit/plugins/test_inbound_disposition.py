@@ -37,6 +37,7 @@ from alfred.comms_mcp.adapter_credential_resolver import (
 )
 from alfred.comms_mcp.adapter_status_observer import AdapterStatusAuditWriteError
 from alfred.comms_mcp.handlers import BindingHandler, CrashHandler, RateLimitHandler
+from alfred.comms_mcp.protocol import GATEWAY_ADAPTER_INBOUND
 from alfred.plugins.comms_runner import CommsPluginRunner
 from alfred.plugins.inbound_disposition import (
     InboundDisposition,
@@ -107,6 +108,7 @@ def _disposition(
     resolver: Any,
     send_notification: Any | None = None,
     request_restart: Any | None = None,
+    forwarded_inbound_receiver: Any | None = None,
 ) -> SessionDispatchDisposition:
     return SessionDispatchDisposition(
         session=session,
@@ -114,6 +116,7 @@ def _disposition(
         adapter_id=_ADAPTER_ID,
         send_notification=send_notification or AsyncMock(),
         request_restart=request_restart or AsyncMock(),
+        forwarded_inbound_receiver=forwarded_inbound_receiver,
     )
 
 
@@ -437,6 +440,166 @@ async def test_audit_write_failure_with_sqlalchemy_error_escalates_no_leak() -> 
     restart.assert_awaited_once()
     send.assert_not_awaited()
     assert _SENTINEL_CRED not in repr(log_records)
+
+
+# ---------------------------------------------------------------------------
+# (13) gateway.adapter.inbound + receiver -> receiver.receive, session NOT called
+# ---------------------------------------------------------------------------
+
+
+class _FakeForwardedReceiver:
+    """Records every ``receive(params, wire_seq)``; optionally raises a wired exc."""
+
+    def __init__(self, *, raise_with: BaseException | None = None) -> None:
+        self.calls: list[tuple[object, int | None]] = []
+        self._raise_with = raise_with
+
+    async def receive(self, *, params: object, wire_seq: int | None) -> None:
+        self.calls.append((params, wire_seq))
+        if self._raise_with is not None:
+            raise self._raise_with
+
+    def set_ack_tracker(self, ack_tracker: object) -> None:  # pragma: no cover - unused
+        return None
+
+
+async def test_forwarded_inbound_routes_to_receiver_not_session() -> None:
+    session = _recording_session()
+    receiver = _FakeForwardedReceiver()
+    disposition = _disposition(session=session, resolver=None, forwarded_inbound_receiver=receiver)
+    params = {"adapter_id": _ADAPTER_ID, "body": b"opaque-t3"}
+
+    result = await disposition.dispatch(GATEWAY_ADAPTER_INBOUND, params, wire_seq=7)
+
+    assert result is None
+    assert receiver.calls == [(params, 7)]
+    # Intercepted before the session: the gateway.adapter.* prefix never reached the
+    # AdapterStatusObserver unknown_method refusal.
+    session._on_post_handshake_method.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# (14) gateway.adapter.inbound + NO receiver -> falls through to the session
+# ---------------------------------------------------------------------------
+
+
+async def test_forwarded_inbound_without_receiver_falls_through_to_session() -> None:
+    # A daemon-spawned stdio leg (or a session lacking the gateway role) has no
+    # receiver: the frame is NOT silently special-cased away — it falls through to
+    # the session, which (on a comms session) hits the gateway.adapter.* prefix ->
+    # AdapterStatusObserver unknown_method LOUD refusal (fail-closed).
+    session = _recording_session()
+    disposition = _disposition(session=session, resolver=None)
+    params = {"adapter_id": _ADAPTER_ID, "body": b"opaque-t3"}
+
+    result = await disposition.dispatch(GATEWAY_ADAPTER_INBOUND, params, wire_seq=7)
+
+    assert result is None
+    session._on_post_handshake_method.assert_awaited_once_with(
+        GATEWAY_ADAPTER_INBOUND, params, wire_seq=7
+    )
+
+
+# ---------------------------------------------------------------------------
+# (15) receiver audit-write failure (SQLAlchemyError) -> LOUD escalation, no swallow
+# ---------------------------------------------------------------------------
+
+
+async def test_forwarded_inbound_audit_write_failure_escalates_restart() -> None:
+    session = _recording_session()
+    restart = AsyncMock()
+    receiver = _FakeForwardedReceiver(raise_with=SQLAlchemyError("audit db down"))
+    disposition = _disposition(
+        session=session,
+        resolver=None,
+        request_restart=restart,
+        forwarded_inbound_receiver=receiver,
+    )
+
+    with structlog.testing.capture_logs() as log_records:
+        result = await disposition.dispatch(
+            GATEWAY_ADAPTER_INBOUND,
+            {"adapter_id": _ADAPTER_ID, "body": b"opaque-t3"},
+            wire_seq=7,
+        )
+
+    assert result is None
+    restart.assert_awaited_once_with(reason="forwarded_inbound_audit_unwritable")
+    # The non-skippable failed-audit-write is LOUD (error), NEVER downgraded to the
+    # blanket catch-and-continue warning.
+    assert any(
+        rec.get("event") == "comms.runner.forwarded_inbound_audit_unwritable"
+        and rec.get("log_level") == "error"
+        for rec in log_records
+    ), log_records
+    assert not any(
+        rec.get("event") == "comms.runner.handler_failed_continuing" for rec in log_records
+    ), log_records
+
+
+# ---------------------------------------------------------------------------
+# (16) (15) + the restart request itself raises -> logged second loud row, no raise
+# ---------------------------------------------------------------------------
+
+
+async def test_forwarded_inbound_audit_restart_request_failure_stays_loud() -> None:
+    session = _recording_session()
+    restart = AsyncMock(side_effect=RuntimeError("restart bus down"))
+    receiver = _FakeForwardedReceiver(raise_with=SQLAlchemyError("audit db down"))
+    disposition = _disposition(
+        session=session,
+        resolver=None,
+        request_restart=restart,
+        forwarded_inbound_receiver=receiver,
+    )
+
+    with structlog.testing.capture_logs() as log_records:
+        result = await disposition.dispatch(
+            GATEWAY_ADAPTER_INBOUND,
+            {"adapter_id": _ADAPTER_ID, "body": b"opaque-t3"},
+            wire_seq=7,
+        )
+
+    assert result is None
+    events = {rec.get("event") for rec in log_records}
+    assert "comms.runner.forwarded_inbound_audit_unwritable" in events
+    assert any(
+        rec.get("event") == "comms.runner.forwarded_inbound_audit_restart_request_failed"
+        and rec.get("log_level") == "error"
+        for rec in log_records
+    ), log_records
+
+
+# ---------------------------------------------------------------------------
+# (17) receiver ordinary fault -> blanket catch-and-continue (NOT the loud arm)
+# ---------------------------------------------------------------------------
+
+
+async def test_forwarded_inbound_ordinary_fault_is_caught_and_continues() -> None:
+    session = _recording_session()
+    restart = AsyncMock()
+    receiver = _FakeForwardedReceiver(raise_with=RuntimeError("dispatch boom"))
+    disposition = _disposition(
+        session=session,
+        resolver=None,
+        request_restart=restart,
+        forwarded_inbound_receiver=receiver,
+    )
+
+    with structlog.testing.capture_logs() as log_records:
+        result = await disposition.dispatch(
+            GATEWAY_ADAPTER_INBOUND,
+            {"adapter_id": _ADAPTER_ID, "body": b"opaque-t3"},
+            wire_seq=7,
+        )
+
+    assert result is None
+    # An ordinary (non-audit-write) fault from the receive is NOT a non-skippable
+    # security event: it falls to the blanket catch-and-continue, no restart.
+    restart.assert_not_awaited()
+    assert any(
+        rec.get("event") == "comms.runner.handler_failed_continuing" for rec in log_records
+    ), log_records
 
 
 # ---------------------------------------------------------------------------

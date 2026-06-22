@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import structlog
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.comms_mcp.adapter_credential_protocol import (
     CORE_ADAPTER_SPAWN_GRANT,
@@ -37,6 +38,7 @@ from alfred.comms_mcp.adapter_credential_resolver import (
     AdapterCredentialError,
 )
 from alfred.comms_mcp.adapter_status_observer import AdapterStatusAuditWriteError
+from alfred.comms_mcp.protocol import GATEWAY_ADAPTER_INBOUND
 from alfred.plugins.comms_stdio_transport import CommsProtocolError
 
 if TYPE_CHECKING:
@@ -52,6 +54,16 @@ _STATUS_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "status_audit_unwritable"
 # credential GRANT/refusal on the spawn-request path (ERR-G63-01, Spec B G6-3 / #288).
 # A failed audit of "a real platform credential was released" is non-skippable.
 _CREDENTIAL_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "credential_audit_unwritable"
+
+# Closed-vocab restart reason for a failed signed-audit write inside the
+# gateway-forwarded inbound receiver (Spec B G6-7-4 / #309). The receiver's terminal-drop
+# + dispatched-edge audit rows propagate their write failure UNWRAPPED (it never wraps
+# them in a typed marker), so the raw backend error escapes ``receive`` as a
+# ``SQLAlchemyError``. A failed signed-audit write at this T3 trust seam is non-skippable
+# (CLAUDE.md hard rules #5/#7).
+_FORWARDED_INBOUND_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = (
+    "forwarded_inbound_audit_unwritable"
+)
 
 
 @runtime_checkable
@@ -93,6 +105,28 @@ class _RequestRestart(Protocol):
 
 
 @runtime_checkable
+class _ForwardedReceiverLike(Protocol):
+    """Structural seam for the gateway-forwarded inbound receiver (Spec B G6-7-4 / #309).
+
+    The concrete type is
+    :class:`alfred.comms_mcp.forwarded_inbound_receiver.GatewayForwardedInboundReceiver`;
+    the disposition binds to this Protocol so it stays free of the receiver's construction
+    deps and the one-directional import edge holds. The daemon's gateway-leg wiring (Task
+    5) injects the concrete receiver; a daemon-spawned stdio leg injects ``None``.
+
+    ``receive`` re-parses + dispatches one forwarded inbound. It never raises for a drop,
+    but it lets a signed-audit-write failure PROPAGATE (unwrapped — a ``SQLAlchemyError``)
+    so the disposition's loud audit-unwritable arm can escalate it. ``set_ack_tracker``
+    binds the per-connection durable-intake ack tracker post-handshake (the disposition
+    does not call it — the leg wiring does — but it is part of the receiver's surface).
+    """
+
+    async def receive(self, *, params: object, wire_seq: int | None) -> None: ...
+
+    def set_ack_tracker(self, ack_tracker: object) -> None: ...
+
+
+@runtime_checkable
 class InboundDisposition(Protocol):
     """Strategy that routes ONE child notification — the pump's injectable seam.
 
@@ -127,12 +161,14 @@ class SessionDispatchDisposition:
         adapter_id: str,
         send_notification: _SendNotification,
         request_restart: _RequestRestart,
+        forwarded_inbound_receiver: _ForwardedReceiverLike | None = None,
     ) -> None:
         self._session = session
         self._credential_resolver = credential_resolver
         self._adapter_id = adapter_id
         self._send_notification = send_notification
         self._request_restart = request_restart
+        self._forwarded_inbound_receiver = forwarded_inbound_receiver
 
     async def dispatch(self, method: str, params: object, *, wire_seq: int | None = None) -> None:
         """Fan one notification into the session; survive a single handler failure.
@@ -164,6 +200,18 @@ class SessionDispatchDisposition:
         # catch (which would refuse it as unknown_method). Only when a resolver is wired.
         if method == GATEWAY_ADAPTER_SPAWN_REQUEST and self._credential_resolver is not None:
             await self._route_spawn_request(params_mapping)
+            return
+        if method == GATEWAY_ADAPTER_INBOUND and self._forwarded_inbound_receiver is not None:
+            # Spec B G6-7-4 (#309): a gateway-forwarded hosted-adapter inbound. Intercept
+            # here (parallel to spawn_request) so it never reaches the session's
+            # ``gateway.adapter.*`` prefix -> AdapterStatusObserver unknown_method refusal.
+            # The receiver re-parses + dispatches on the trusted T3 seam. An audit-write
+            # failure inside it escalates LOUD via the audit-unwritable arm below (never
+            # the blanket catch-and-continue, which would downgrade a failed signed-audit
+            # write to a structlog warning = a lost security signal). Only when a receiver
+            # is wired (the gateway leg); a session without one falls through to the
+            # fail-closed unknown_method refusal.
+            await self._route_forwarded_inbound(params_mapping, wire_seq=wire_seq)
             return
         try:
             await self._session._on_post_handshake_method(method, params_mapping, wire_seq=wire_seq)
@@ -206,6 +254,64 @@ class SessionDispatchDisposition:
                 "comms.runner.handler_failed_continuing",
                 adapter_id=self._adapter_id,
                 notification_method=method,
+            )
+
+    async def _route_forwarded_inbound(
+        self, params: Mapping[str, object] | None, *, wire_seq: int | None
+    ) -> None:
+        """Delegate a ``gateway.adapter.inbound`` to the receiver; escalate audit faults.
+
+        Spec B G6-7-4 (#309). Runs fire-and-forget like every ``dispatch`` body, so it
+        NEVER raises. The receiver re-parses + dispatches the forwarded T3 inbound; it
+        owns its own terminal-drop dispositions (never raising for a drop). The TWO
+        failure modes here:
+
+        * a FAILED signed-audit write inside the receiver (its drop-disposition /
+          dispatched-edge audit rows propagate the write failure UNWRAPPED as a
+          ``SQLAlchemyError`` — the receiver never wraps it in a typed marker) ->
+          ESCALATE loud (``log.error`` + a restart request), the SAME mechanism the
+          status / credential arms use. This is non-skippable (CLAUDE.md hard rules
+          #5/#7); it MUST NOT fall into the blanket catch-and-continue (a downgrade of a
+          failed signed-audit write to a structlog warning = a lost security signal). We
+          do NOT re-raise — this body runs fire-and-forget (see the ``dispatch``
+          docstring), so a re-raise reaches no awaiter and merely leaks an
+          unretrieved-task-exception warning;
+        * any OTHER fault (an ordinary dispatch failure the leg replays, a re-parse bug)
+          -> catch-and-continue so a single bad frame does not silence the whole leg
+          (err-007 invariant), matching ``dispatch``'s session arm.
+        """
+        assert self._forwarded_inbound_receiver is not None  # routed only when wired
+        try:
+            await self._forwarded_inbound_receiver.receive(params=params, wire_seq=wire_seq)
+        except SQLAlchemyError:
+            # A failed signed-audit write at the T3 forwarded-inbound seam. Loud + a
+            # restart request — never the blanket swallow below.
+            log.error(
+                "comms.runner.forwarded_inbound_audit_unwritable",
+                adapter_id=self._adapter_id,
+            )
+            try:
+                await self._request_restart(
+                    reason=_FORWARDED_INBOUND_AUDIT_UNWRITABLE_RESTART_REASON
+                )
+            except Exception:
+                # The audit-write failure is ALREADY escalated loudly (the log.error
+                # above). If the restart REQUEST itself raises, log + swallow — this body
+                # runs fire-and-forget, so propagating only leaks an
+                # unretrieved-task-exception warning (it reaches no awaiter). The loud
+                # security signal stands; we never go silent.
+                log.error(
+                    "comms.runner.forwarded_inbound_audit_restart_request_failed",
+                    adapter_id=self._adapter_id,
+                )
+        except Exception:
+            # Catch-and-continue: an ordinary (non-audit-write) fault. The dispatched
+            # edge leaves the frame un-committed / un-observed so the forwarding leg
+            # replays it; the reader survives so one bad frame does not silence the leg.
+            log.warning(
+                "comms.runner.handler_failed_continuing",
+                adapter_id=self._adapter_id,
+                notification_method=GATEWAY_ADAPTER_INBOUND,
             )
 
     async def _route_spawn_request(self, params: Mapping[str, object] | None) -> None:
