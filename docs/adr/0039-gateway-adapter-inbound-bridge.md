@@ -303,6 +303,79 @@ two test-only posture facts:
 Item 4b does NOT bound replay cost today. Do not imply otherwise when describing the current
 system.
 
+### 2026-06-22 — G6-7-5: item-4b poison ceiling implemented; PERF-309-1 closed
+
+**Item 4b is now implemented.** The ceiling is **N=5**
+(`_FORWARDED_DISPATCH_ATTEMPT_CEILING` in `src/alfred/comms_mcp/inbound.py`). The durable
+counter is the new Postgres `forwarded_dispatch_attempts` table (composite primary key
+`(adapter_id, inbound_id)`), backed by `PostgresForwardedDispatchAttemptStore`
+(`src/alfred/memory/forwarded_dispatch_attempts.py`). The store is Postgres-backed —
+not in-memory — because forwarded-dispatch replay happens **across core restarts**; an
+in-memory counter resets exactly when the bound is needed. That alternative is explicitly
+rejected in the module docstring.
+
+**Mechanics (off-by-one stated honestly).** The increment fires AFTER `quarantined_extract`,
+at entry to the post-extract region. The ceiling check fires BEFORE `quarantined_extract`,
+reading the current count. This means:
+
+- Attempts 1 through N each call `quarantined_extract`, then increment the ledger.
+- On attempt N+1 (the 6th, at N=5) the pre-extract read returns N ≥ ceiling → the frame is
+  dead-lettered (`comms.inbound.poisoned` audit event, `result="poisoned"`, migration 0020)
+  and ack-to-drained without ever calling `quarantined_extract` again.
+
+The ceiling therefore bounds `quarantined_extract` to at most N=5 calls per
+`(adapter_id, inbound_id)`.
+
+**Coverage scope.** The increment is placed at post-extract entry, so any un-observed /
+non-draining downstream failure — T3-promotion emit, ingest, OR dispatch — is ceilinged.
+This is not "dispatch-only"; the count rises on every attempt that reaches the post-extract
+region, regardless of where the tail fails. This is the complete closure of PERF-309-1:
+the prior amendment marked item 4b as deferred and stated that a deterministically-failing
+forwarded frame replays unbounded. **PERF-309-1 is now closed.**
+
+**BudgetGuard clarification.** `BudgetGuard` (`src/alfred/budget/guard.py`) exists in the
+system. `quarantined_extract` is NOT wired into it here (it records only latency). The
+poison ceiling — not the budget mechanism — is the bound on re-extract cost. Wiring
+`quarantined_extract` into `BudgetGuard` is explicitly declined for this slice: the
+deterministic-echo child carries no provider cost until the real-LLM child lands behind
+issue #230; there is nothing to meter yet.
+
+**Deliberate sheds stay distinct from poison.** The burst-drop, budget-capped, and
+unbound-binding deterministic-refusal arms all DRAIN without calling `increment`. Only a
+frame that reaches post-extract entry charges the ledger. An attacker or system error that
+causes a deliberate shed on every replay can never accumulate a poison count; the audit
+vocabulary stays distinct (`budget_capped` / `dropped` / `binding_requested` vs `poisoned`).
+
+**"At least N" semantics.** The read and increment are not a single atomic operation, so
+under concurrent replay the ceiling fires after AT LEAST N attempts (never fewer). The
+atomic UPSERT increment and the idempotent `BoundedSeqAckTracker.observe` keep the count
+correct without locking — no lost increment, no double-effective-drain.
+
+**Head-of-line amplification (unchanged, disclosed).** Each of the N replays re-delivers and
+re-parses the dispatched tail behind the stalled seq (the tail re-dedups via G0 to
+`replay_observed`, not re-dispatched). Total bounded cost: N × extract + N × tail-reparse.
+This is a known, documented consequence of the contiguous-ack model.
+
+**Migration 0020 downgrade exception.** The downgrade path deletes `result='poisoned'` audit
+rows (with a loud `RAISE NOTICE`). This is a known append-only-audit exception, mirroring
+the same pattern in migration 0019. Operators who run a downgrade lose the dead-letter history
+for that window.
+
+**No TTL / sweeper (follow-up).** The `forwarded_dispatch_attempts` ledger has no GC sweep in
+this slice — it grows unboundedly, like the never-swept sibling `inbound_idempotency` table.
+A `last_failed_at` index exists for future GC. A sweep is a tracked follow-up, not a
+blocker.
+
+**Triage.** `alfred audit log` now has a `--reason` filter and renders the drop reason via
+`_row_reason`. For terminal receiver drops the reason comes from `subject.reason`; for the
+`comms.inbound.poisoned` dead-letter it comes from the `result="poisoned"` discriminator
+(the `poisoned` row carries no `subject.reason`). The render + filter logic shipped in G6-7-5;
+operator-visible value lands once PR-S3-7 wires the `_query_audit_log` backend (currently a
+stub that raises).
+
+The Decision body above is unchanged and remains authoritative. This amendment records what
+shipped in G6-7-5 and closes PERF-309-1.
+
 ## Resolved decisions (formerly open maintainer-steer flags)
 
 - **F1 (runner factoring):** the injectable inbound-disposition seam with the daemon dispatch
