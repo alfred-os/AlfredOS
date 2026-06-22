@@ -36,6 +36,7 @@ from alfred.comms_mcp.adapter_credential_resolver import (
     AdapterCredentialError,
 )
 from alfred.comms_mcp.adapter_status_observer import AdapterStatusAuditWriteError
+from alfred.comms_mcp.errors import ForwardedInboundAuditWriteError
 from alfred.comms_mcp.handlers import BindingHandler, CrashHandler, RateLimitHandler
 from alfred.comms_mcp.protocol import GATEWAY_ADAPTER_INBOUND
 from alfred.plugins.comms_runner import CommsPluginRunner
@@ -508,7 +509,9 @@ async def test_forwarded_inbound_without_receiver_falls_through_to_session() -> 
 async def test_forwarded_inbound_audit_write_failure_escalates_restart() -> None:
     session = _recording_session()
     restart = AsyncMock()
-    receiver = _FakeForwardedReceiver(raise_with=SQLAlchemyError("audit db down"))
+    receiver = _FakeForwardedReceiver(
+        raise_with=ForwardedInboundAuditWriteError("forwarded audit write failed")
+    )
     disposition = _disposition(
         session=session,
         resolver=None,
@@ -545,7 +548,9 @@ async def test_forwarded_inbound_audit_write_failure_escalates_restart() -> None
 async def test_forwarded_inbound_audit_restart_request_failure_stays_loud() -> None:
     session = _recording_session()
     restart = AsyncMock(side_effect=RuntimeError("restart bus down"))
-    receiver = _FakeForwardedReceiver(raise_with=SQLAlchemyError("audit db down"))
+    receiver = _FakeForwardedReceiver(
+        raise_with=ForwardedInboundAuditWriteError("forwarded audit write failed")
+    )
     disposition = _disposition(
         session=session,
         resolver=None,
@@ -599,6 +604,52 @@ async def test_forwarded_inbound_ordinary_fault_is_caught_and_continues() -> Non
     restart.assert_not_awaited()
     assert any(
         rec.get("event") == "comms.runner.handler_failed_continuing" for rec in log_records
+    ), log_records
+
+
+# ---------------------------------------------------------------------------
+# (18) receiver RAW SQLAlchemyError (non-audit DB fault) -> catch-and-continue, NO restart
+# ---------------------------------------------------------------------------
+
+
+async def test_forwarded_inbound_raw_sqlalchemy_error_replays_no_restart() -> None:
+    """A raw ``SQLAlchemyError`` from the receiver is a leg-replay fault, NOT a restart.
+
+    The plan-review defect: on the forwarded path a raw ``SQLAlchemyError`` also comes
+    from NON-audit sources (``has_committed`` / ``commit_once`` / ``orchestrator.dispatch``)
+    whose designed recovery is leg replay (catch-and-continue, ADR-0039 item 4), not the
+    audit-unwritable RESTART escalation. Only a signed-audit-write failure — wrapped in
+    the typed ``ForwardedInboundAuditWriteError`` marker AT THE WRITE SITE — escalates.
+    A raw ``SQLAlchemyError`` therefore falls to the blanket catch-and-continue: NO
+    restart (no restart-storm risk on a transient DB blip), and it is NOT mislabelled
+    "audit_unwritable".
+    """
+    session = _recording_session()
+    restart = AsyncMock()
+    receiver = _FakeForwardedReceiver(raise_with=SQLAlchemyError("transient db blip"))
+    disposition = _disposition(
+        session=session,
+        resolver=None,
+        request_restart=restart,
+        forwarded_inbound_receiver=receiver,
+    )
+
+    with structlog.testing.capture_logs() as log_records:
+        result = await disposition.dispatch(
+            GATEWAY_ADAPTER_INBOUND,
+            {"adapter_id": _ADAPTER_ID, "body": b"opaque-t3"},
+            wire_seq=7,
+        )
+
+    assert result is None
+    # A raw SQLAlchemyError is the leg-replay recovery, NOT the loud restart escalation.
+    restart.assert_not_awaited()
+    assert any(
+        rec.get("event") == "comms.runner.handler_failed_continuing" for rec in log_records
+    ), log_records
+    # And it is NEVER mislabelled as the audit-unwritable security event.
+    assert not any(
+        rec.get("event") == "comms.runner.forwarded_inbound_audit_unwritable" for rec in log_records
     ), log_records
 
 

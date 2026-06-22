@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import structlog
 from pydantic import ValidationError
-from sqlalchemy.exc import SQLAlchemyError
 
 from alfred.comms_mcp.adapter_credential_protocol import (
     CORE_ADAPTER_SPAWN_GRANT,
@@ -38,6 +37,7 @@ from alfred.comms_mcp.adapter_credential_resolver import (
     AdapterCredentialError,
 )
 from alfred.comms_mcp.adapter_status_observer import AdapterStatusAuditWriteError
+from alfred.comms_mcp.errors import ForwardedInboundAuditWriteError
 from alfred.comms_mcp.protocol import GATEWAY_ADAPTER_INBOUND
 from alfred.plugins.comms_stdio_transport import CommsProtocolError
 
@@ -56,11 +56,14 @@ _STATUS_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "status_audit_unwritable"
 _CREDENTIAL_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = "credential_audit_unwritable"
 
 # Closed-vocab restart reason for a failed signed-audit write inside the
-# gateway-forwarded inbound receiver (Spec B G6-7-4 / #309). The receiver's terminal-drop
-# + dispatched-edge audit rows propagate their write failure UNWRAPPED (it never wraps
-# them in a typed marker), so the raw backend error escapes ``receive`` as a
-# ``SQLAlchemyError``. A failed signed-audit write at this T3 trust seam is non-skippable
-# (CLAUDE.md hard rules #5/#7).
+# gateway-forwarded inbound receive path (Spec B G6-7-4 / #309). The receiver's
+# terminal-drop audit row AND the forwarded-path dispatched-edge audit emits (the
+# replay-observed + dispatch_failed rows in ``inbound.py``) wrap their write failure in
+# the TYPED :class:`ForwardedInboundAuditWriteError` marker AT THE WRITE SITE, so it
+# escapes ``receive`` discriminable from a raw ``SQLAlchemyError`` thrown by a non-audit
+# source (``has_committed`` / ``commit_once`` / ``orchestrator.dispatch``) whose recovery
+# is leg replay. A failed signed-audit write at this T3 trust seam is non-skippable
+# (CLAUDE.md hard rules #5/#7) — it escalates (restart), it never replays.
 _FORWARDED_INBOUND_AUDIT_UNWRITABLE_RESTART_REASON: Final[str] = (
     "forwarded_inbound_audit_unwritable"
 )
@@ -115,8 +118,10 @@ class _ForwardedReceiverLike(Protocol):
     5) injects the concrete receiver; a daemon-spawned stdio leg injects ``None``.
 
     ``receive`` re-parses + dispatches one forwarded inbound. It never raises for a drop,
-    but it lets a signed-audit-write failure PROPAGATE (unwrapped — a ``SQLAlchemyError``)
-    so the disposition's loud audit-unwritable arm can escalate it. ``set_ack_tracker``
+    but it lets a signed-audit-write failure PROPAGATE wrapped in the typed
+    :class:`~alfred.comms_mcp.errors.ForwardedInboundAuditWriteError` marker so the
+    disposition's loud audit-unwritable arm can escalate it (and discriminate it from a
+    raw ``SQLAlchemyError`` whose recovery is leg replay). ``set_ack_tracker``
     binds the per-connection durable-intake ack tracker post-handshake (the disposition
     does not call it — the leg wiring does — but it is part of the receiver's surface).
     """
@@ -266,26 +271,35 @@ class SessionDispatchDisposition:
         owns its own terminal-drop dispositions (never raising for a drop). The TWO
         failure modes here:
 
-        * a FAILED signed-audit write inside the receiver (its drop-disposition /
-          dispatched-edge audit rows propagate the write failure UNWRAPPED as a
-          ``SQLAlchemyError`` — the receiver never wraps it in a typed marker) ->
-          ESCALATE loud (``log.error`` + a restart request), the SAME mechanism the
-          status / credential arms use. This is non-skippable (CLAUDE.md hard rules
-          #5/#7); it MUST NOT fall into the blanket catch-and-continue (a downgrade of a
-          failed signed-audit write to a structlog warning = a lost security signal). We
-          do NOT re-raise — this body runs fire-and-forget (see the ``dispatch``
-          docstring), so a re-raise reaches no awaiter and merely leaks an
+        * a FAILED signed-audit write inside the receive path (the receiver's
+          drop-disposition row + the forwarded-path dispatched-edge audit emits wrap the
+          write failure in the typed ``ForwardedInboundAuditWriteError`` marker AT THE
+          WRITE SITE) -> ESCALATE loud (``log.error`` + a restart request), the SAME
+          mechanism the status / credential arms use. This is non-skippable (CLAUDE.md
+          hard rules #5/#7); it MUST NOT fall into the blanket catch-and-continue (a
+          downgrade of a failed signed-audit write to a structlog warning = a lost
+          security signal). We do NOT re-raise — this body runs fire-and-forget (see the
+          ``dispatch`` docstring), so a re-raise reaches no awaiter and merely leaks an
           unretrieved-task-exception warning;
-        * any OTHER fault (an ordinary dispatch failure the leg replays, a re-parse bug)
-          -> catch-and-continue so a single bad frame does not silence the whole leg
-          (err-007 invariant), matching ``dispatch``'s session arm.
+        * any OTHER fault — including a raw ``SQLAlchemyError`` from a NON-audit source
+          (``has_committed`` / ``commit_once`` / ``orchestrator.dispatch``), an ordinary
+          dispatch failure the leg replays, or a re-parse bug -> catch-and-continue so a
+          single bad frame does not silence the whole leg (err-007 invariant), matching
+          ``dispatch``'s session arm. This is the documented ADR-0039 item-4 recovery for
+          those DB faults: leave the frame un-committed / un-observed and let the leg
+          replay it — never escalate a restart on a transient DB blip.
         """
         assert self._forwarded_inbound_receiver is not None  # routed only when wired
         try:
             await self._forwarded_inbound_receiver.receive(params=params, wire_seq=wire_seq)
-        except SQLAlchemyError:
+        except ForwardedInboundAuditWriteError:
             # A failed signed-audit write at the T3 forwarded-inbound seam. Loud + a
-            # restart request — never the blanket swallow below.
+            # restart request — never the blanket swallow below. The receiver (and the
+            # forwarded-path emits in inbound.py) wrap the write failure in this TYPED
+            # marker AT THE WRITE SITE, so a raw ``SQLAlchemyError`` from a non-audit
+            # source (``has_committed`` / ``commit_once`` / ``orchestrator.dispatch``)
+            # is NOT caught here — it falls to the blanket catch-and-continue below, the
+            # leg-replay recovery (ADR-0039 item 4) those faults are designed for.
             log.error(
                 "comms.runner.forwarded_inbound_audit_unwritable",
                 adapter_id=self._adapter_id,
