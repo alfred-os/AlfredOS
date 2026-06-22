@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-22 18:39+0100\n"
+"POT-Creation-Date: 2026-06-22 21:41+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -135,44 +135,55 @@ msgstr ""
 msgid "cli.audit.help"
 msgstr "Inspect the audit log; filter the graph swimlane by trust tier."
 
-#: src/alfred/cli/audit.py:140
+#: src/alfred/cli/audit.py:177
 msgid "cli.audit.graph.since_invalid"
 msgstr ""
 "Invalid --since value: {value}. Expected a unit-suffixed duration like "
 "{example}."
 
-#: src/alfred/cli/audit.py:149
+#: src/alfred/cli/audit.py:186
 msgid "cli.audit.log.event_help"
 msgstr ""
 "Restrict to a single event name (e.g. plugin.lifecycle.crashed). Omit to "
 "show every event in the time window."
 
-#: src/alfred/cli/audit.py:153 src/alfred/cli/audit.py:192
+#: src/alfred/cli/audit.py:190 src/alfred/cli/audit.py:246
 msgid "cli.audit.graph.since_help"
 msgstr "Lookback window (unit-suffixed: 24h, 7d, 30m). Bare integers are rejected."
 
-#: src/alfred/cli/audit.py:168 src/alfred/cli/audit.py:219
+#: src/alfred/cli/audit.py:194
+msgid "cli.audit.log.reason_help"
+msgstr ""
+"Filter forwarded-inbound drops by reason (unknown_adapter, "
+"envelope_body_mismatch, body_malformed, receive_fault, or poisoned). Omit"
+" to show every row."
+
+#: src/alfred/cli/audit.py:209 src/alfred/cli/audit.py:273
 msgid "cli.audit.backend_unavailable"
 msgstr ""
 "alfred audit backend not yet wired (PR-S3-7). Until then the storage-"
 "layer SQL query is unimplemented; running ``alfred audit log`` / ``alfred"
 " audit graph`` cannot return rows. Track the unblock in PR-S3-7."
 
-#: src/alfred/cli/audit.py:173 src/alfred/cli/audit.py:224
+#: src/alfred/cli/audit.py:224
+msgid "cli.audit.log.reason_empty"
+msgstr "No audit rows with reason '{reason}' in the last {since}."
+
+#: src/alfred/cli/audit.py:226 src/alfred/cli/audit.py:278
 msgid "cli.audit.graph.empty"
 msgstr "No audit rows{tier} in the last {since}."
 
-#: src/alfred/cli/audit.py:188
+#: src/alfred/cli/audit.py:242
 msgid "cli.audit.graph.tier_help"
 msgstr ""
 "Filter to a single trust-tier swimlane (T0, T1, T2, or T3). Omit to show "
 "every tier."
 
-#: src/alfred/cli/audit.py:230
+#: src/alfred/cli/audit.py:284
 msgid "cli.audit.graph.tier_header"
 msgstr "Audit graph — swimlane {tier}"
 
-#: src/alfred/cli/audit.py:232
+#: src/alfred/cli/audit.py:286
 msgid "cli.audit.graph.header"
 msgstr "Audit graph — all tiers"
 
@@ -942,7 +953,7 @@ msgstr ""
 "For full instance health (providers, budget, gate), see: alfred status"
 
 #: src/alfred/cli/daemon/_commands.py:488
-#: src/alfred/cli/daemon/_commands.py:1014
+#: src/alfred/cli/daemon/_commands.py:1025
 msgid "daemon.boot.comms_adapter_spawn_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not be spawned (missing or malformed "
@@ -950,8 +961,8 @@ msgstr ""
 "and re-run `alfred daemon start`, or unset it from "
 "ALFRED_COMMS_ENABLED_ADAPTERS."
 
-#: src/alfred/cli/daemon/_commands.py:1051
-#: src/alfred/cli/daemon/_commands.py:2313
+#: src/alfred/cli/daemon/_commands.py:1062
+#: src/alfred/cli/daemon/_commands.py:2324
 msgid "daemon.boot.comms_promoter_misconfigured"
 msgstr ""
 "Comms adapter '{adapter_id}' requires host-side sub-payload promotion but"
@@ -960,18 +971,18 @@ msgstr ""
 "content reach the privileged orchestrator. This is an internal wiring "
 "defect; check `alfred audit log --since 5m` and report it."
 
-#: src/alfred/cli/daemon/_commands.py:1251
+#: src/alfred/cli/daemon/_commands.py:1262
 msgid "daemon.boot.comms_adapter_handshake_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' failed its readiness handshake. Refusing to "
 "boot. Check `alfred audit log --since 5m` for the adapter's load-refused "
 "/ crash row, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1265
+#: src/alfred/cli/daemon/_commands.py:1276
 msgid "daemon.comms.adapter_spawned"
 msgstr "Comms adapter '{adapter_id}' spawned and ready."
 
-#: src/alfred/cli/daemon/_commands.py:1358
+#: src/alfred/cli/daemon/_commands.py:1369
 msgid "daemon.boot.comms_socket_bind_failed"
 msgstr ""
 "Comms adapter '{adapter_id}' could not bind its local socket under "
@@ -979,7 +990,7 @@ msgstr ""
 "permissions (it must be owner-only, mode 0700), remove any stale "
 "`comms-*.sock`, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1435
+#: src/alfred/cli/daemon/_commands.py:1446
 msgid "gateway.adapter.forwarded_inbound.preview_unbounded"
 msgstr ""
 "PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
@@ -987,7 +998,7 @@ msgstr ""
 "replay without a poison ceiling (deferred to G6-7-5), and the path is not"
 " yet flag-day'd (G6-7-8). Do not depend on it for production inbound."
 
-#: src/alfred/cli/daemon/_commands.py:1495
+#: src/alfred/cli/daemon/_commands.py:1506
 msgid "daemon.comms.adapter_listening"
 msgstr ""
 "Comms adapter '{adapter_id}' listening; waiting for `alfred chat` to "
@@ -995,7 +1006,7 @@ msgstr ""
 
 # Daemon CLI surface keys added by PR-S4-1 (#174) beyond the PR-S4-0b
 # reserve. Operator-facing; all bodies ship real English copy.
-#: src/alfred/cli/daemon/_commands.py:1808
+#: src/alfred/cli/daemon/_commands.py:1819
 msgid "daemon.boot.audit_log_unwritable"
 msgstr ""
 "The audit log is unwritable, so the daemon refuses to boot — a boot with "
@@ -1003,17 +1014,17 @@ msgstr ""
 " (`docker compose ps` should show alfred-postgres healthy) and re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:1850
+#: src/alfred/cli/daemon/_commands.py:1861
 #: src/alfred/i18n/_slice_4_reserve.py:126
 msgid "daemon.lifecycle.ready"
 msgstr "Core lifecycle: ready (epoch {epoch})."
 
-#: src/alfred/cli/daemon/_commands.py:1889
+#: src/alfred/cli/daemon/_commands.py:1900
 #: src/alfred/i18n/_slice_4_reserve.py:127
 msgid "daemon.lifecycle.going_down"
 msgstr "Core lifecycle: going down (reason: {reason})."
 
-#: src/alfred/cli/daemon/_commands.py:2029
+#: src/alfred/cli/daemon/_commands.py:2040
 msgid "daemon.boot.environment_unrecognised"
 msgstr ""
 "ALFRED_ENVIRONMENT={value} is not a recognised environment. Refusing to "
@@ -1021,7 +1032,7 @@ msgstr ""
 " `alfred daemon start`."
 
 # Daemon boot refusals (PR-S4-1; includes round-2 sec-3 closures).
-#: src/alfred/cli/daemon/_commands.py:2032
+#: src/alfred/cli/daemon/_commands.py:2043
 #: src/alfred/i18n/_slice_4_reserve.py:115
 msgid "daemon.boot.environment_not_set"
 msgstr ""
@@ -1030,7 +1041,7 @@ msgstr ""
 "development, production, test (in your .env) and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:2083
+#: src/alfred/cli/daemon/_commands.py:2094
 #: src/alfred/i18n/_slice_4_reserve.py:116
 msgid "daemon.boot.unsandboxed_in_production"
 msgstr ""
@@ -1038,7 +1049,7 @@ msgstr ""
 "Refusing to boot. Unset the env var (or run in dev) and re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2094
+#: src/alfred/cli/daemon/_commands.py:2105
 #: src/alfred/i18n/_slice_4_reserve.py:117
 msgid "daemon.boot.launcher_not_policy_resolving"
 msgstr ""
@@ -1047,7 +1058,7 @@ msgstr ""
 "confirm with `bin/alfred-plugin-launcher.sh --self-test`, then re-run "
 "`alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2110
+#: src/alfred/cli/daemon/_commands.py:2121
 #: src/alfred/i18n/_slice_4_reserve.py:118
 msgid "daemon.boot.snapshot_ref_init_failed"
 msgstr ""
@@ -1055,7 +1066,7 @@ msgstr ""
 "Inspect config/policies.yaml for parse errors and re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:2124
+#: src/alfred/cli/daemon/_commands.py:2135
 #: src/alfred/i18n/_slice_4_reserve.py:119
 msgid "daemon.boot.capability_gate_handshake_failed"
 msgstr ""
@@ -1063,7 +1074,7 @@ msgstr ""
 "`alfred audit log --since 5m` for grant DB errors, then re-run `alfred "
 "daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2165
+#: src/alfred/cli/daemon/_commands.py:2176
 msgid "daemon.boot.boot_infra_install_failed"
 msgstr ""
 "Seeding the first-party capability gate or installing the boot hook "
@@ -1073,7 +1084,7 @@ msgstr ""
 "5m` for capability-gate seed or hook-registry errors, then re-run `alfred"
 " daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2178
+#: src/alfred/cli/daemon/_commands.py:2189
 msgid "daemon.boot.quarantine_grant_missing"
 msgstr ""
 "First-party DLP-subscriber grant is not live after boot. The quarantined-"
@@ -1081,7 +1092,7 @@ msgstr ""
 "refused. Check `alfred audit log --since 5m` for capability-gate seed or "
 "grant-load errors, then re-run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2206
+#: src/alfred/cli/daemon/_commands.py:2217
 msgid "daemon.boot.t3_nonce_registration_failed"
 msgstr ""
 "The per-process authorised T3 nonce could not be registered (the slot was"
@@ -1092,7 +1103,7 @@ msgstr ""
 " 5m`, ensure only one daemon is starting, then re-run `alfred daemon "
 "start`."
 
-#: src/alfred/cli/daemon/_commands.py:2247
+#: src/alfred/cli/daemon/_commands.py:2258
 msgid "daemon.boot.comms_multi_adapter_unsupported"
 msgstr ""
 "More than one comms adapter is enabled, which this release does not yet "
@@ -1100,7 +1111,7 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS to exactly one adapter and re-run `alfred "
 "daemon start`. Multi-adapter support lands in PR-S4-11c (see ADR-0027)."
 
-#: src/alfred/cli/daemon/_commands.py:2296
+#: src/alfred/cli/daemon/_commands.py:2307
 msgid "daemon.boot.quarantine_child_spawn_failed"
 msgstr ""
 "The quarantined child could not be spawned. Comms requires the bwrap-"
@@ -1110,38 +1121,38 @@ msgstr ""
 "unset (comms disabled), or provision bwrap + the plugin launcher and re-"
 "run `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2463
+#: src/alfred/cli/daemon/_commands.py:2474
 #: src/alfred/i18n/_slice_4_reserve.py:121
 msgid "daemon.boot.started"
 msgstr "AlfredOS daemon started ({boot_id})."
 
-#: src/alfred/cli/daemon/_commands.py:2571
+#: src/alfred/cli/daemon/_commands.py:2582
 msgid "daemon.stop.no_daemon"
 msgstr "No AlfredOS daemon is running (no PID file). Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:2574
-#: src/alfred/cli/daemon/_commands.py:2579
+#: src/alfred/cli/daemon/_commands.py:2585
+#: src/alfred/cli/daemon/_commands.py:2590
 msgid "daemon.stop.stale_pidfile"
 msgstr ""
 "The PID file points at a process that is no longer running (stale). "
 "Nothing to stop."
 
-#: src/alfred/cli/daemon/_commands.py:2581
+#: src/alfred/cli/daemon/_commands.py:2592
 #: src/alfred/i18n/_slice_4_reserve.py:128
 msgid "daemon.stop.confirmed"
 msgstr "AlfredOS daemon stopped (PID {pid})."
 
-#: src/alfred/cli/daemon/_commands.py:2596
+#: src/alfred/cli/daemon/_commands.py:2607
 msgid "daemon.status.not_running"
 msgstr "The AlfredOS daemon is not running. Start it with `alfred daemon start`."
 
-#: src/alfred/cli/daemon/_commands.py:2599
+#: src/alfred/cli/daemon/_commands.py:2610
 msgid "daemon.status.stale_pidfile"
 msgstr ""
 "A PID file exists for process {pid}, but that process is no longer "
 "running (stale pidfile). The daemon is not running."
 
-#: src/alfred/cli/daemon/_commands.py:2607
+#: src/alfred/cli/daemon/_commands.py:2618
 #: src/alfred/i18n/_slice_4_reserve.py:129
 msgid "daemon.status.template"
 msgstr ""
@@ -1150,25 +1161,25 @@ msgstr ""
 "Boot ID: {boot_id}\n"
 "Last boot completed: {last_boot_at}"
 
-#: src/alfred/cli/daemon/_commands.py:2661
-#: src/alfred/cli/daemon/_commands.py:2668
+#: src/alfred/cli/daemon/_commands.py:2672
 #: src/alfred/cli/daemon/_commands.py:2679
+#: src/alfred/cli/daemon/_commands.py:2690
 msgid "daemon.status.adapters_unavailable"
 msgstr "Adapters: status unavailable"
 
-#: src/alfred/cli/daemon/_commands.py:2683
+#: src/alfred/cli/daemon/_commands.py:2694
 msgid "daemon.status.adapters_none"
 msgstr "Adapters: none reported"
 
-#: src/alfred/cli/daemon/_commands.py:2685
+#: src/alfred/cli/daemon/_commands.py:2696
 msgid "daemon.status.adapters_header"
 msgstr "Adapters:"
 
-#: src/alfred/cli/daemon/_commands.py:2690
+#: src/alfred/cli/daemon/_commands.py:2701
 msgid "daemon.status.adapter_latest_crash"
 msgstr " — last crash: incarnation {seq}, reported by {source}"
 
-#: src/alfred/cli/daemon/_commands.py:2699
+#: src/alfred/cli/daemon/_commands.py:2710
 msgid "daemon.status.adapter_line"
 msgstr ""
 "  {adapter_id}: {state} (incarnation {incarnation}, {crashes} crash "

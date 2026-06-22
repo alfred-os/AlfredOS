@@ -44,6 +44,29 @@ class _TierChoice(StrEnum):
     T3 = "T3"
 
 
+class _ReasonChoice(StrEnum):
+    """Closed set of valid ``--reason`` values for ``alfred audit log``.
+
+    These are EXACTLY the discriminators :func:`_row_reason` can return
+    for the forwarded-drop triage. Accepting an arbitrary string would
+    silently render an empty result for a typo (e.g. ``--reason
+    poisned``) -- exactly the silent-failure pattern CLAUDE.md hard
+    rule #7 forbids. Typer maps the enum's values to a closed CLI choice
+    + raises :class:`typer.BadParameter` on miss, and self-documents the
+    valid values in ``--help``.
+
+    Mirrors :class:`_TierChoice`: :class:`enum.StrEnum` keeps each
+    member's ``str`` identity, so the filter boundary keeps its string
+    contract.
+    """
+
+    UNKNOWN_ADAPTER = "unknown_adapter"
+    ENVELOPE_BODY_MISMATCH = "envelope_body_mismatch"
+    BODY_MALFORMED = "body_malformed"
+    RECEIVE_FAULT = "receive_fault"
+    POISONED = "poisoned"
+
+
 class AuditBackendUnavailable(RuntimeError):  # noqa: N818
     """The audit-log backend is not yet wired into the CLI.
 
@@ -92,6 +115,20 @@ def _query_audit_log(
         "the SQL query is plumbed in PR-S3-7"
     )
     raise AuditBackendUnavailable(msg)
+
+
+def _row_reason(row: dict[str, object]) -> str:
+    """The drop reason for triage: subject.reason (receiver terminal drops) else the
+    poisoned discriminator (the poison dead-letter carries no subject.reason — its reason
+    IS the result). Empty string when the row has neither (non-drop rows)."""
+    subject = row.get("subject")
+    if isinstance(subject, dict):
+        reason = subject.get("reason")
+        if isinstance(reason, str):
+            return reason
+    if row.get("result") == "poisoned":
+        return "poisoned"
+    return ""
 
 
 def _parse_since(since: str) -> int:
@@ -152,6 +189,10 @@ def audit_log(
         str,
         typer.Option("--since", help=t("cli.audit.graph.since_help")),
     ] = "24h",
+    reason: Annotated[
+        _ReasonChoice | None,
+        typer.Option("--reason", help=t("cli.audit.log.reason_help")),
+    ] = None,
 ) -> None:
     """List audit log entries, optionally filtered by event name and time window.
 
@@ -169,14 +210,27 @@ def audit_log(
         raise typer.Exit(code=1) from exc
     if event:
         rows = [r for r in rows if r.get("event") == event]
+    # Collapse the enum to its string value at the filter boundary so
+    # ``_row_reason`` (which speaks raw strings) keeps its contract --
+    # mirrors how ``audit_graph`` handles ``_TierChoice``.
+    reason_value = reason.value if reason is not None else None
+    if reason_value:
+        rows = [r for r in rows if _row_reason(r) == reason_value]
     if not rows:
-        typer.echo(t("cli.audit.graph.empty", tier="", since=since))
+        if reason_value:
+            # devex MEDIUM: a filtered miss must read differently from a
+            # global empty -- name the reason so the operator can tell a
+            # no-match-for-this-reason apart from a no-rows-at-all.
+            typer.echo(t("cli.audit.log.reason_empty", reason=reason_value, since=since))
+        else:
+            typer.echo(t("cli.audit.graph.empty", tier="", since=since))
         return
     for row in rows:
         typer.echo(
             f"{row.get('timestamp', '')!s:<25}  "
             f"{row.get('event', '')!s:<40}  "
             f"{row.get('result', '')!s:<12}  "
+            f"{_row_reason(row)!s:<24}  "
             f"{row.get('actor_user_id', '')!s}"
         )
 
