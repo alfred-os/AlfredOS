@@ -769,3 +769,79 @@ async def test_audit_unwritable_on_drop_does_not_drain_and_propagates(
     assert ack.observed == []
     # ...and the audit write was attempted exactly once (it raised, short-circuiting).
     assert audit.append_schema_calls == 1
+
+
+# --------------------------------------------------------------------------- #
+# 9 — SEC-G674-1: an UNEXPECTED admission fault (off-vocab envelope adapter_id)
+#     is a SIGNED receive_fault drop + drain, NOT an escape to the blanket
+#     catch-and-continue (which would replay forever with no audit, no drain).
+# --------------------------------------------------------------------------- #
+
+
+async def test_off_vocab_envelope_receive_fault_audited_drained_no_raise() -> None:
+    """An off-vocab envelope ``adapter_id`` is caught and turned into a signed drop.
+
+    The wire envelope's ``adapter_id`` fails the closed ``AdapterId`` validator inside
+    ``model_validate`` (the admission region). Before SEC-G674-1 the ``ValidationError``
+    escaped ``receive()`` → the disposition's blanket catch-and-continue → NO signed row,
+    NO drain → an infinite, audit-less replay. Now it is a ``receive_fault`` terminal
+    drop: ONE signed content-free row under the ``<unparseable_envelope>`` sentinel, a
+    drain ``observe(wire_seq)`` so the leg's high-water advances, and NO raise.
+    """
+    audit = SpyAuditWriter()
+    ack = _SpyAckTracker()
+    receiver = _build_receiver(
+        audit_writer=audit, idempotency_store=_NeverCommittedStore(), ack_tracker=ack
+    )
+
+    # A forged off-vocab kind carrying a canary in the body — neither must leak.
+    await receiver.receive(
+        params=_inbound_params(adapter_id="forged-off-vocab-kind", body=_CANARY),
+        wire_seq=61,
+    )
+
+    rows = audit.rows_with_schema("COMMS_FORWARDED_INBOUND_DROPPED_FIELDS")
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "receive_fault"
+    assert rows[0]["result"] == "dropped"
+    assert rows[0]["adapter_id"] == "<unparseable_envelope>"
+    # No T3 / forged-kind / canary fragment on ANY field of the signed row (spec §3.3).
+    for value in rows[0].values():
+        assert _CANARY not in str(value)
+        assert "forged-off-vocab-kind" not in str(value)
+    # Drained: the leg's contiguous high-water advances → no infinite replay.
+    assert ack.observed == [61]
+
+
+async def test_off_vocab_envelope_via_real_disposition_no_restart_escalation() -> None:
+    """Driven through the REAL ``_route_forwarded_inbound`` disposition: NO restart.
+
+    A ``receive_fault`` is a clean terminal drop (the receiver handles it internally and
+    returns), so the disposition NEVER sees an exception — it must NOT escalate a restart
+    (that is reserved for a failed signed-audit write). Proves the off-vocab fault no
+    longer reaches the blanket catch-and-continue NOR the audit-unwritable escalation arm.
+    """
+    audit = SpyAuditWriter()
+    ack = _SpyAckTracker()
+    receiver = _build_receiver(
+        audit_writer=audit, idempotency_store=_NeverCommittedStore(), ack_tracker=ack
+    )
+    transport = _ScriptedTransport(
+        frames=[
+            _forwarded_frame(
+                params=_inbound_params(adapter_id="forged-off-vocab-kind", body=_CANARY),
+                wire_seq=62,
+            )
+        ]
+    )
+    runner = _gateway_leg_runner(transport=transport, receiver=receiver)
+
+    await runner.pump()
+
+    # The receive_fault drop wrote its signed row + drained — the disposition saw no
+    # exception, so it requested NO plugin restart (escalation is audit-write-only).
+    assert audit.rows_with_schema("COMMS_FORWARDED_INBOUND_DROPPED_FIELDS")[0]["reason"] == (
+        "receive_fault"
+    )
+    assert ack.observed == [62]
+    runner._session._supervisor.request_plugin_restart.assert_not_called()

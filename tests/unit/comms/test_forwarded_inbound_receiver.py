@@ -551,28 +551,95 @@ async def test_signed_audit_write_precedes_drain_observe() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Off-vocab envelope adapter_id → loud ValidationError at the wire
+# I receive_fault — off-vocab envelope adapter_id (SEC-G674-1)
+#
+# An off-vocab ``adapter_id`` makes ``model_validate`` raise a ValidationError. Before
+# FIX 2 that escaped to the disposition's blanket catch-and-continue → no signed row,
+# no drain → infinite replay. Now it is caught and turned into a signed receive_fault
+# DROP under a content-free sentinel adapter_id, then DRAINED, then returns (no raise).
 # --------------------------------------------------------------------------- #
 
 
-async def test_off_vocab_envelope_adapter_id_raises_validation_error() -> None:
-    """An ``adapter_id`` not in the closed ``adapter_kind`` vocab fails at the wire.
+async def test_off_vocab_envelope_adapter_id_drops_receive_fault_and_drains() -> None:
+    dispatch = _RecordingDispatch()
+    audit_writer = SpyAuditWriter()
+    ack = _SpyAckTracker()
+    receiver = _build_receiver(
+        dispatch=dispatch,
+        audit_writer=audit_writer,
+        pre_resolution_limiter=object(),
+        ack_tracker=ack,
+    )
 
-    ``GatewayAdapterInboundEnvelope.model_validate`` rejects an off-vocab kind, so a
-    forged kind is a loud ValidationError BEFORE any K4/registry logic — it never
-    reaches the receiver's own drop path.
+    # (a) off-vocab envelope adapter_id → one signed receive_fault row + observe + return.
+    await receiver.receive(
+        params=_envelope(adapter_id="not-a-real-kind", body=b"would-leak-if-on-row"),
+        wire_seq=51,
+    )
+
+    assert dispatch.calls == []
+    rows = audit_writer.rows_with_schema("COMMS_FORWARDED_INBOUND_DROPPED_FIELDS")
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "receive_fault"
+    assert rows[0]["result"] == "dropped"
+    assert rows[0]["trust_tier_of_trigger"] == "T3"
+    # Content-free sentinel adapter_id — never str(exc) / the raw params/body.
+    assert rows[0]["adapter_id"] == "<unparseable_envelope>"
+    for value in rows[0].values():
+        assert "would-leak-if-on-row" not in str(value)
+        assert "not-a-real-kind" not in str(value)
+    # Drained so the leg's contiguous high-water advances (no infinite replay).
+    assert ack.observed == [51]
+
+
+async def test_receive_fault_audit_write_failure_propagates() -> None:
+    """(b) A receive_fault whose OWN signed row fails to write still escalates loud.
+
+    The receive_fault drop routes through ``_audit_drop`` → ``ForwardedInboundAuditWriteError``
+    on a write failure; it must propagate (the disposition escalates a restart), never
+    be re-swallowed by the admission catch, and never drain.
     """
-    from pydantic import ValidationError
+    dispatch = _RecordingDispatch()
+    audit_writer = _RaisingAuditWriter()
+    ack = _SpyAckTracker()
+    receiver = _build_receiver(
+        dispatch=dispatch,
+        audit_writer=audit_writer,
+        pre_resolution_limiter=object(),
+        ack_tracker=ack,
+    )
+
+    with pytest.raises(ForwardedInboundAuditWriteError) as excinfo:
+        await receiver.receive(
+            params=_envelope(adapter_id="not-a-real-kind", body=b"x"), wire_seq=52
+        )
+
+    assert excinfo.value.__cause__ is _AUDIT_WRITE_FAILED
+    assert ack.observed == []
+    assert dispatch.calls == []
+
+
+async def test_audit_write_error_from_dispatch_pipeline_propagates() -> None:
+    """(b-companion) ``ForwardedInboundAuditWriteError`` from the DISPATCH propagates.
+
+    The dispatched-edge pipeline can raise the typed marker (a forwarded-path audit
+    emit failing). It must NOT be caught by the admission ``except Exception`` — it is
+    re-raised by the dedicated ``except ForwardedInboundAuditWriteError`` arm so the
+    disposition escalates a restart.
+    """
+
+    async def _raising_dispatch(notification: Any, **kwargs: Any) -> None:
+        raise ForwardedInboundAuditWriteError("forwarded-path emit failed")
 
     receiver = _build_receiver(
-        dispatch=_RecordingDispatch(),
+        dispatch=_raising_dispatch,
         audit_writer=SpyAuditWriter(),
         pre_resolution_limiter=object(),
     )
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ForwardedInboundAuditWriteError):
         await receiver.receive(
-            params=_envelope(adapter_id="not-a-real-kind", body=b"{}"), wire_seq=1
+            params=_envelope(adapter_id="discord", body=_discord_body()), wire_seq=1
         )
 
 

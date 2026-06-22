@@ -82,6 +82,8 @@ from alfred.comms_mcp.protocol import GatewayAdapterInboundEnvelope
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from alfred.comms_mcp.protocol import InboundMessageNotification
+
 _log = structlog.get_logger(__name__)
 
 # Closed-vocab reason discriminators for the three terminal drops. Bound to
@@ -89,6 +91,17 @@ _log = structlog.get_logger(__name__)
 _REASON_UNKNOWN_ADAPTER = "unknown_adapter"
 _REASON_ENVELOPE_BODY_MISMATCH = "envelope_body_mismatch"
 _REASON_BODY_MALFORMED = "body_malformed"
+# SEC-G674-1: the catch-all terminal drop for an UNEXPECTED fault in the
+# admission/re-parse region (a ``ValidationError`` from an off-vocab envelope
+# ``adapter_id``, or any other non-typed surprise). Without it such a fault escapes
+# to the disposition's blanket catch-and-continue → no signed row + no drain →
+# infinite replay (a hard-rule-#7 silent-loss + replay-storm hole).
+_REASON_RECEIVE_FAULT = "receive_fault"
+# SEC-G674-1: a content-free closed-vocab sentinel ``adapter_id`` for the signed
+# receive_fault row when NO envelope parsed (the ``model_validate`` failure sub-case
+# — there is no validated adapter_id to carry). NEVER ``str(exc)`` / the raw params
+# (spec §3.3); a leak-safe structural note goes to a structlog ``.warning`` only.
+_SENTINEL_UNPARSEABLE_ENVELOPE = "<unparseable_envelope>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,14 +161,84 @@ class GatewayForwardedInboundReceiver:
         """Admit, re-parse, rebind, and dispatch one forwarded inbound.
 
         On a terminal drop (unknown adapter / envelope-body mismatch / malformed
-        body) writes the signed audit row, drains the leg ``wire_seq``, and returns
-        — never raises for a drop. An audit-write failure on a drop PROPAGATES (the
-        frame is left un-drained so the drop is never un-recorded). A
-        ``ValidationError`` from the off-vocab envelope ``adapter_id`` surfaces loud
-        at the wire; :class:`PromoterRequiredError` from the dispatch propagates.
+        body / unexpected admission fault) writes the signed audit row, drains the
+        leg ``wire_seq``, and returns — never raises for a drop. An audit-write
+        failure on a drop (the typed :class:`ForwardedInboundAuditWriteError`)
+        PROPAGATES (the frame is left un-drained so the drop is never un-recorded, and
+        the disposition escalates it). :class:`PromoterRequiredError` from the DISPATCH
+        propagates (a boot/wiring fault, never caught by the admission catch).
+
+        SEC-G674-1: an UNEXPECTED exception from the ADMISSION/RE-PARSE region (an
+        off-vocab envelope ``adapter_id`` ``ValidationError``, the registry check, the
+        re-parse) is caught and turned into a ``receive_fault`` terminal drop — so it
+        gets a signed row + a drain rather than escaping to the disposition's blanket
+        catch-and-continue (which would replay it forever with NO audit, NO drain).
+        The catch wraps ONLY the admission region — NEVER the dispatch — so a
+        ``PromoterRequiredError`` and any genuine dispatch fault keep their
+        ADR-0039-item-4 leg-replay recovery untouched.
+        """
+        try:
+            prepared = await self._admit_and_reparse(params=params, wire_seq=wire_seq)
+        except ForwardedInboundAuditWriteError:
+            # A signed-audit write failed inside a drop disposition — non-skippable.
+            # Re-raise so the disposition escalates (restart); the frame is left
+            # un-drained so the drop is never silently un-recorded.
+            raise
+        except Exception as exc:
+            # SEC-G674-1: any OTHER admission/re-parse fault (most notably the off-vocab
+            # envelope ``adapter_id`` ``ValidationError`` whose ``model_validate`` left no
+            # parsed envelope) → one signed receive_fault row under a content-free
+            # sentinel adapter_id, then DRAIN, then return. NEVER ``str(exc)`` / params on
+            # the row (spec §3.3); only the leak-safe class name to a structlog warning.
+            _log.warning(
+                "comms.forwarded_inbound.receive_fault",
+                error_class=type(exc).__name__,
+            )
+            await self._audit_drop(
+                adapter_id=_SENTINEL_UNPARSEABLE_ENVELOPE,
+                reason=_REASON_RECEIVE_FAULT,
+                result="dropped",
+            )
+            self._drain(wire_seq)
+            return
+        if prepared is None:
+            # A terminal drop already wrote its signed row + drained inside
+            # ``_admit_and_reparse`` (unknown adapter / mismatch / malformed body).
+            return
+
+        notification, collab = prepared
+        # The DISPATCH is OUTSIDE the admission catch: a PromoterRequiredError (boot/
+        # wiring fault) and any genuine dispatch fault propagate to the disposition's
+        # ADR-0039-item-4 leg-replay recovery, never mislabelled a receive_fault drop.
+        await self._dispatch(
+            notification,
+            identity_resolver=collab.resolver_bridge,
+            orchestrator=collab.orchestrator,
+            burst_limiter=collab.burst_limiter,
+            audit_writer=self._audit_writer,
+            secret_broker=collab.secret_broker,
+            pre_resolution_limiter=collab.pre_resolution_limiter,
+            sub_payload_promoter=collab.sub_payload_promoter,
+            idempotency_store=self._idempotency_store,
+            ack_tracker=self._ack_tracker,
+            commit_at_dispatch_edge=True,
+        )
+
+    async def _admit_and_reparse(
+        self, *, params: object, wire_seq: int | None
+    ) -> tuple[InboundMessageNotification, _ForwardedCollaborators] | None:
+        """K4 admission + re-parse + wire_seq rebind (the dispatch's prologue).
+
+        Returns the ``(notification, collaborators)`` pair to dispatch, or ``None`` when
+        a terminal drop (unknown adapter / envelope-body mismatch / malformed body)
+        already wrote its signed row and drained the leg here. SEC-G674-1: this method
+        is wrapped by :meth:`receive`'s admission catch — any UNEXPECTED fault it raises
+        (e.g. the off-vocab envelope ``adapter_id`` ``ValidationError``) becomes a
+        ``receive_fault`` drop there, never an escape to the blanket catch-and-continue.
         """
         # The off-vocab envelope ``adapter_id`` fails the closed-vocab AdapterId
-        # validator HERE — a loud ValidationError at the wire, before any logic.
+        # validator HERE — a ValidationError caught by ``receive`` and turned into a
+        # signed receive_fault drop (SEC-G674-1), before any logic.
         envelope = GatewayAdapterInboundEnvelope.model_validate(params)
 
         # K4 admission. Route on the ENVELOPE ``adapter_id`` (the gateway
@@ -169,7 +252,7 @@ class GatewayForwardedInboundReceiver:
                 result="refused",
             )
             self._drain(wire_seq)
-            return
+            return None
 
         # The SOLE body parser is core-side. It enforces the §3.3 F3 equality check
         # (envelope==body adapter_id) and scrubs any body-smuggled wire_seq → None.
@@ -182,7 +265,7 @@ class GatewayForwardedInboundReceiver:
                 result="refused",
             )
             self._drain(wire_seq)
-            return
+            return None
         except InboundBodyMalformedError as exc:
             # The structural summary is LEAK-SAFE (closed structural shape, no T3 —
             # see inbound_reparse._structural_summary) so it may aid an operator in
@@ -198,27 +281,13 @@ class GatewayForwardedInboundReceiver:
                 result="dropped",
             )
             self._drain(wire_seq)
-            return
+            return None
 
         # Rebind the REAL leg-carrier wire_seq (the re-parse scrubbed the
         # body-derived value to None; ADR-0032 rebinds the host-authoritative seq
         # out-of-band here). model_copy is frozen-safe and re-runs no validation.
         notification = notification.model_copy(update={"wire_seq": wire_seq})
-
-        collab = self._registry[envelope.adapter_id]
-        await self._dispatch(
-            notification,
-            identity_resolver=collab.resolver_bridge,
-            orchestrator=collab.orchestrator,
-            burst_limiter=collab.burst_limiter,
-            audit_writer=self._audit_writer,
-            secret_broker=collab.secret_broker,
-            pre_resolution_limiter=collab.pre_resolution_limiter,
-            sub_payload_promoter=collab.sub_payload_promoter,
-            idempotency_store=self._idempotency_store,
-            ack_tracker=self._ack_tracker,
-            commit_at_dispatch_edge=True,
-        )
+        return notification, self._registry[envelope.adapter_id]
 
     def _drain(self, wire_seq: int | None) -> None:
         """ACK the leg ``wire_seq`` to drain a terminal drop (ARCH-309-3).

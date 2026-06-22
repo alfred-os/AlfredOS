@@ -1424,6 +1424,17 @@ async def _listen_socket_comms_adapter(
             with_credential_resolver=True,
             with_forwarded_inbound_receiver=True,
         )
+        # devex HIGH-1 (Spec B G6-7-4 / #309): ONE operator-facing preview-status
+        # warning at ARM-TIME (the socket listener is one-shot per boot, so this fires
+        # once per boot — never per-frame / per-connection). Names the G6-7
+        # inbound-bridge as PREVIEW: forwarded-inbound replay is currently UNBOUNDED
+        # (the poison ceiling / dead-letter is deferred to G6-7-5) and the path is NOT
+        # flag-day'd (G6-7-8). Operator-routed via ``t()`` (i18n hard rule #1).
+        log.warning(
+            "comms.gateway.forwarded_inbound_preview",
+            message=t("gateway.adapter.forwarded_inbound.preview_unbounded"),
+            adapter_id=wire.adapter_kind,
+        )
         # Spec A G3-2 (#237): split ``run`` into ``start_and_handshake`` + ``pump``
         # so the socket-carrier runner's id-less ``send_notification`` is registered
         # with the lifecycle broadcaster ONLY AFTER its handshake completes — the
@@ -2303,6 +2314,10 @@ async def _start_async() -> None:
                 boot_id=boot_id,
                 environment_source=source,
             )
+            # _refuse_boot is annotated NoReturn (it raises _BootRefusedError); this
+            # line is unreachable defence-in-depth for the type checker's flow, matching
+            # the sibling _refuse_boot arms.
+            raise AssertionError("unreachable") from exc  # pragma: no cover
 
     # Supervisor construction + pidfile + start live INSIDE the try so the finally
     # reaps the live quarantine child (comms_graph) on a failure of ANY of them, not

@@ -29,6 +29,10 @@ SPEC_B_KEYS: tuple[str, ...] = (
     # only (never rendered via ``t()``) so they are NOT reserved (no dead catalog key).
     "gateway.adapter.credential.refused.unknown_adapter",
     "gateway.adapter.credential.refused.missing_secret",
+    # G6-7-4 (#309) devex HIGH-1: the one-time operator preview-status warning emitted
+    # at the gateway-leg forwarded-inbound arm site. A LIVE ``t()`` caller in
+    # ``_commands.py`` (pybabel extracts it directly — no reserve entry needed).
+    "gateway.adapter.forwarded_inbound.preview_unbounded",
 )
 
 # Every Spec-B operator-facing catalog key carries this prefix; the reverse-drift
