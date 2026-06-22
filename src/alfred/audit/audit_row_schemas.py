@@ -1251,6 +1251,24 @@ COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Emitted when a FORWARDED inbound (the gateway dispatched-edge path, Spec B
+# G6-7-4 / ADR-0039 item 4) fails at ``orchestrator.dispatch``. The frame is
+# deliberately left NOT committed and NOT observed so the forwarding leg replays
+# it — a recoverable event recorded in the SIGNED audit log. Same content-free
+# shape as the replay row (adapter id + peppered inbound_id hash + observed_at;
+# NO body, NO user text, NO platform_user_id, so no ``language`` column), but a
+# DISTINCT ``result="dispatch_failed"`` so it never reads as the ``"dropped"``
+# replay value. ``dispatch_failed`` is added to the ``ck_audit_log_result`` CHECK
+# domain by migration 0019 (and the ``AuditEntry`` ORM model) — a free-text INSERT
+# of an out-of-domain value would crash against real Postgres.
+COMMS_INBOUND_DISPATCH_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "inbound_id_hash",
+        "observed_at",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # supervisor.plugin lifecycle (PR-S4-9/10 restart wiring)
 # ---------------------------------------------------------------------------
@@ -1307,6 +1325,7 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "COMMS_ADDRESSING_DRIFT_FIELDS",
     "COMMS_INBOUND_BUDGET_CAPPED_FIELDS",
     "COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS",
+    "COMMS_INBOUND_DISPATCH_FAILED_FIELDS",
     "SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS",
     # Spec B (#288) G6-2a gateway.adapter.* status family — listed here because
     # the AST guard sweeps all post-marker ``*_FIELDS`` (see the roster header).

@@ -165,7 +165,12 @@ class AuditEntry(Base):
             # dispositions emitted by Supervisor.stop / reset_breaker: the
             # force-cancel "clean shutdown failed" row (cancelled_with_errors)
             # and the breaker-state persistence-failure row (persistence_failed).
-            "'cancelled_with_errors', 'persistence_failed')",
+            "'cancelled_with_errors', 'persistence_failed', "
+            # Spec B G6-7-4 (migration 0019, #309) — the gateway dispatched-edge
+            # dispatch-failure row: a forwarded inbound whose dispatch raised is
+            # left NOT committed / NOT observed (the leg replays it) and recorded
+            # with this DISTINCT discriminator (never the "dropped" replay value).
+            "'dispatch_failed')",
             name="ck_audit_log_result",
         ),
     )

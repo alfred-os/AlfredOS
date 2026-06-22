@@ -30,7 +30,7 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 37 entries (post-marker field-set surface).
+    """Roster must contain exactly 38 entries (post-marker field-set surface).
 
     Adding a new post-marker ``*_FIELDS`` constant requires bumping this
     assertion AND extending ``AUDIT_FIELDSET_ROSTER`` in the same commit. The
@@ -46,9 +46,11 @@ def test_slice_4_fieldset_names_count() -> None:
     (``GATEWAY_ADAPTER_SPAWN_REQUEST_FIELDS``, ``CORE_ADAPTER_SPAWN_GRANT_FIELDS``,
     ``GATEWAY_ADAPTER_AWAITING_CORE_FIELDS``,
     ``GATEWAY_ADAPTER_SPAWN_ABORTED_FIELDS``) — the 34th-37th (NONE carries the
-    credential — maintainer C1 / SEC-1).
+    credential — maintainer C1 / SEC-1); G6-7-4 (Spec B / #309 / ADR-0039 item 4)
+    added ``COMMS_INBOUND_DISPATCH_FAILED_FIELDS`` — the 38th (the dispatched-edge
+    dispatch-failure row; content-free, distinct ``result="dispatch_failed"``).
     """
-    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 37
+    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 38
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
