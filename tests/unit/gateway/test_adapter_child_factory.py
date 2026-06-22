@@ -134,14 +134,25 @@ class _PopenFactory:
 
 
 class _FakeRunner:
-    """A :class:`CommsPluginRunner` double driving the handshake + teardown seams."""
+    """A :class:`CommsPluginRunner` double driving the handshake + pump + teardown seams.
+
+    ``pump_blocks`` (Spec B G6-7-3 / #309): when set, :meth:`pump` parks on it so a test
+    can cancel the awaiting ``wait_until_exit`` mid-pump (the supervised steady state). By
+    default ``pump`` returns at once (a clean child stdout EOF) so the exit-code reap runs.
+    """
 
     def __init__(
-        self, *, transport: GatewayAdapterStdioTransport, handshake_raises: Exception | None = None
+        self,
+        *,
+        transport: GatewayAdapterStdioTransport,
+        handshake_raises: Exception | None = None,
+        pump_blocks: asyncio.Event | None = None,
     ) -> None:
         self._transport = transport
         self._handshake_raises = handshake_raises
+        self._pump_blocks = pump_blocks
         self.handshake_calls = 0
+        self.pump_calls = 0
 
     async def start_and_handshake(self) -> None:
         self.handshake_calls += 1
@@ -150,12 +161,29 @@ class _FakeRunner:
             await self._transport.close()
             raise self._handshake_raises
 
+    async def pump(self) -> None:
+        self.pump_calls += 1
+        if self._pump_blocks is not None:
+            # Park until released (or cancelled) — the supervised steady state. The real
+            # pump closes the transport on a cancel; mirror it so teardown is observable.
+            try:
+                await self._pump_blocks.wait()
+            except asyncio.CancelledError:
+                await self._transport.close()
+                raise
+
 
 class _RunnerFactory:
     """Captures the transport the factory builds + yields a scriptable fake runner."""
 
-    def __init__(self, *, handshake_raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        handshake_raises: Exception | None = None,
+        pump_blocks: asyncio.Event | None = None,
+    ) -> None:
         self._handshake_raises = handshake_raises
+        self._pump_blocks = pump_blocks
         self.transport: GatewayAdapterStdioTransport | None = None
         self.adapter_id: str | None = None
         self.runner: _FakeRunner | None = None
@@ -163,7 +191,11 @@ class _RunnerFactory:
     def __call__(self, *, transport: GatewayAdapterStdioTransport, adapter_id: str) -> _FakeRunner:
         self.transport = transport
         self.adapter_id = adapter_id
-        self.runner = _FakeRunner(transport=transport, handshake_raises=self._handshake_raises)
+        self.runner = _FakeRunner(
+            transport=transport,
+            handshake_raises=self._handshake_raises,
+            pump_blocks=self._pump_blocks,
+        )
         return self.runner
 
 
@@ -597,6 +629,50 @@ async def test_teardown_reaps_popen_and_closes_transport() -> None:
     assert proc.stdin.closed is True
     assert proc.stdout.closed is True
     # Idempotent.
+    await child.aclose()
+    assert proc.terminate_calls == 1
+
+
+async def test_wait_until_exit_drives_the_runner_pump_then_reaps() -> None:
+    """Spec B G6-7-3 (#309): the supervised lifetime DRIVES the pump, then reaps the code.
+
+    The production-unwired trap guard: ``wait_until_exit`` must run ``runner.pump()`` (which
+    forwards the child's inbound) before reaping the exit code — else the runner is dropped
+    and a hosted child's ``inbound.message`` reaches nothing.
+    """
+    proc = _FakePopen(returncode=0)
+    popen_factory = _PopenFactory(proc=proc)
+    runner_factory = _RunnerFactory()
+    factory = _build_factory(popen_factory=popen_factory, runner_factory=runner_factory)
+
+    child = await factory.spawn_and_handshake(
+        adapter_id="discord", epoch="e1", deliver_credential=_DeliverRecorder()
+    )
+    assert runner_factory.runner is not None
+    assert runner_factory.runner.pump_calls == 0  # not driven yet (factory just handshook)
+    await child.wait_until_exit()
+    assert runner_factory.runner.pump_calls == 1  # the supervised lifetime drove the pump
+    assert proc.wait_calls >= 1  # then reaped the exit code
+    await child.aclose()
+
+
+async def test_wait_until_exit_cancel_during_pump_unwinds() -> None:
+    """A planned-stop cancel mid-pump unwinds cleanly (the pump closes the transport)."""
+    proc = _FakePopen()
+    pump_gate = asyncio.Event()
+    popen_factory = _PopenFactory(proc=proc)
+    runner_factory = _RunnerFactory(pump_blocks=pump_gate)
+    factory = _build_factory(popen_factory=popen_factory, runner_factory=runner_factory)
+
+    child = await factory.spawn_and_handshake(
+        adapter_id="discord", epoch="e1", deliver_credential=_DeliverRecorder()
+    )
+    task = asyncio.ensure_future(child.wait_until_exit())
+    await asyncio.sleep(0)  # let the pump park
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The cancelled pump closed the transport (clean EOF for the child); teardown reaps.
     await child.aclose()
     assert proc.terminate_calls == 1
 

@@ -76,7 +76,7 @@ def test_process_builds_status_sink_and_supervisor_for_core_link() -> None:
     """
     process = GatewayProcess(shutdown_event=asyncio.Event())
     core_link = _make_core_link()
-    supervisor = process._build_adapter_supervisor(core_link)
+    supervisor = process._build_adapter_supervisor(core_link, _make_scheduler(core_link))
     assert isinstance(supervisor, GatewayAdapterSupervisor)
     assert process._adapter_ids == []  # 2b-2a wires the plumbing, spawns nothing
 
@@ -85,7 +85,7 @@ async def test_supervise_empty_set_is_a_clean_noop() -> None:
     """supervise_all([]) returns immediately — live-wired, spawns nothing (gap b)."""
     process = GatewayProcess(shutdown_event=asyncio.Event())
     core_link = _make_core_link()
-    supervisor = process._build_adapter_supervisor(core_link)
+    supervisor = process._build_adapter_supervisor(core_link, _make_scheduler(core_link))
     await asyncio.wait_for(supervisor.supervise_all(process._adapter_ids), timeout=1.0)
 
 
@@ -98,7 +98,7 @@ def test_supervisor_is_built_with_the_real_child_factory() -> None:
     """
     process = GatewayProcess(shutdown_event=asyncio.Event(), adapter_ids=["discord"])
     core_link = _make_core_link()
-    supervisor = process._build_adapter_supervisor(core_link)
+    supervisor = process._build_adapter_supervisor(core_link, _make_scheduler(core_link))
     assert isinstance(supervisor._factory, GatewayAdapterChildFactory)
 
 
@@ -138,7 +138,7 @@ def test_process_builds_supervisor_with_real_credential_client() -> None:
 
     process = GatewayProcess(shutdown_event=asyncio.Event())
     core_link = _make_core_link()
-    supervisor = process._build_adapter_supervisor(core_link)
+    supervisor = process._build_adapter_supervisor(core_link, _make_scheduler(core_link))
     # The supervisor holds the real client + the live epoch source (not a snapshot).
     assert isinstance(supervisor._credential_client, GatewayAdapterCredentialClient)
     assert isinstance(supervisor._cred, _CoreEpochCredSeam)
@@ -171,8 +171,8 @@ async def test_supervisor_task_is_cancelled_on_shutdown() -> None:
     shutdown = asyncio.Event()
     process = GatewayProcess(shutdown_event=shutdown, adapter_ids=["discord"])
     core_link = _make_core_link()
-    supervisor = process._build_adapter_supervisor(core_link)
     scheduler = _make_scheduler(core_link)
+    supervisor = process._build_adapter_supervisor(core_link, scheduler)
 
     class _FakeRelay:
         async def run(self) -> None:

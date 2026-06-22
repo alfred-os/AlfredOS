@@ -53,6 +53,7 @@ from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink, _CommsTransportLike
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.inbound_forward_runner import GatewayInboundForwardRunner
 from alfred.gateway.ingress_gate import PerAdapterIngressGate
 from alfred.gateway.leg_router import LegRouter
 from alfred.gateway.leg_scheduler import GatewayLegScheduler
@@ -348,7 +349,49 @@ class GatewayProcess:
             expected_uid=os.getuid(),
         )
 
-    def _build_adapter_supervisor(self, core_link: GatewayCoreLink) -> GatewayAdapterSupervisor:
+    def _build_adapter_runner_factory(
+        self, core_link: GatewayCoreLink, scheduler: GatewayLegScheduler
+    ) -> Callable[..., _RunnerLike]:
+        """Build the REAL session-less forward-runner factory (Spec B G6-7-3 / #309).
+
+        The production ``adapter_runner_factory`` the
+        :class:`GatewayAdapterChildFactory` drives over each spawned child. The closure,
+        per spawned ``(transport, adapter_id)``:
+
+        1. mints a per-adapter back-pressure :class:`asyncio.Event` (starts SET — no
+           back-pressure) and REGISTERS it with the scheduler
+           (:meth:`GatewayLegScheduler.set_back_pressure_gate`) so the scheduler's drain
+           RESUMES the reader when the leg drains (FORK-C — the back-pressure loop is
+           bidirectional only if the gate is registered);
+        2. builds a :class:`GatewayInboundForwardRunner` (session-LESS, FORK-A) whose
+           forward sink is ``core_link.forward_adapter_inbound`` and whose
+           ``back_pressure_gate`` is the minted event — so a full leg pauses the reader
+           and a drain resumes it.
+
+        The adapter leg MUST already be registered (``_register_adapter_legs`` runs in
+        :meth:`run` before this factory is ever called at spawn time), so
+        ``set_back_pressure_gate`` finds the leg. The forward target is the SPAWN-BINDING
+        ``adapter_id`` (SEC-309-1) — the closure binds it from the factory call, never the
+        body.
+        """
+
+        def _factory(*, transport: _CommsTransportLike, adapter_id: str) -> _RunnerLike:
+            gate = asyncio.Event()
+            gate.set()  # no back-pressure until a full leg clears it
+            scheduler.set_back_pressure_gate(adapter_id, gate)
+            return GatewayInboundForwardRunner(
+                transport=transport,
+                adapter_id=adapter_id,
+                forward=core_link.forward_adapter_inbound,
+                shutdown_event=self._shutdown_event,
+                back_pressure_gate=gate,
+            )
+
+        return _factory
+
+    def _build_adapter_supervisor(
+        self, core_link: GatewayCoreLink, scheduler: GatewayLegScheduler
+    ) -> GatewayAdapterSupervisor:
         """Build the live-wired adapter supervisor for this gateway process (#288).
 
         Spec B G6-2b-2a: bind the supervisor's status emitter to the LIVE gateway->core
@@ -372,10 +415,22 @@ class GatewayProcess:
         # ``_UnspawnedAdapterChildFactory`` placeholder. It owns the fd-3 pipe + the
         # synchronous dup2->Popen->restore spawn window + the launcher exec; the
         # credential never passes through it (the supervisor's ``deliver_credential``
-        # hook over the credential client owns that). The session-bearing runner is
-        # built by ``self._adapter_runner_factory`` (the daemon-collaborator seam).
+        # hook over the credential client owns that).
+        #
+        # Spec B G6-7-3 (#309): the runner_factory is the REAL session-less forward-runner
+        # factory (bound to ``core_link.forward_adapter_inbound`` + the scheduler's
+        # per-adapter back-pressure gate) — UNLESS the constructor injected an override
+        # (the test seam). The default ``_unwired_runner_factory`` no longer reaches
+        # production: it is replaced HERE by the forward factory so a hosted child's
+        # ``inbound.message`` actually forwards (the production-unwired trap guard). An
+        # explicitly-injected factory still wins (a test drives its own).
+        runner_factory = (
+            self._build_adapter_runner_factory(core_link, scheduler)
+            if self._adapter_runner_factory is _unwired_runner_factory
+            else self._adapter_runner_factory
+        )
         child_factory = GatewayAdapterChildFactory(
-            runner_factory=self._adapter_runner_factory,
+            runner_factory=runner_factory,
         )
         return GatewayAdapterSupervisor(
             child_factory=child_factory,
@@ -568,7 +623,7 @@ class GatewayProcess:
             # emitter bound to ``core_link.send_status_frame``) alongside the relay, with
             # an EMPTY configured set (spawns nothing until G6-3). It is cancelled/reaped
             # on shutdown (correction #5) so a future non-empty set cannot block the stop.
-            supervisor = self._build_adapter_supervisor(core_link)
+            supervisor = self._build_adapter_supervisor(core_link, scheduler)
             await self._run_relay_and_scheduler(relay, supervisor, scheduler)
         finally:
             # Reap the accepted transport + the socket file on EVERY exit path, including a
