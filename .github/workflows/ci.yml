@@ -198,6 +198,22 @@ jobs:
           uv run coverage report \
             --include='src/alfred/comms_mcp/inbound_reparse.py' \
             --fail-under=100
+      - name: Forwarded-inbound receive trust-boundary 100% line+branch coverage
+        # Spec B G6-7-4 (#309, ADR-0039): ``forwarded_inbound_receiver.py`` is the
+        # core-side receive trust boundary of the gateway->core inbound bridge — it
+        # K4-admits the closed-vocab envelope adapter_id, re-parses the opaque body,
+        # acks-to-drain every terminal drop (unknown adapter / envelope-body mismatch
+        # / malformed body), and dispatches at the commit-after-dispatch edge. A
+        # coverage hole could ship an un-exercised refusal/drain branch (a silent
+        # admission of a forged adapter, or a wedged high-water), so 100% line+branch
+        # is the bar. Fully covered by the unit tier
+        # (tests/unit/comms/test_forwarded_inbound_receiver.py) — no root, no Postgres.
+        # Named explicitly (two-gates pattern); keep the combined gate in sync.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/comms_mcp/forwarded_inbound_receiver.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/comms_mcp/forwarded_inbound_receiver.py' \
+            --fail-under=100
       - name: Quarantine transport trust-boundary 100% line+branch coverage
         # PR-S4-11c-2a (ADR-0029): ``quarantine_transport.py`` is the host-side
         # wire that carries a T3 inbound body to the quarantined LLM — the single-
@@ -1298,6 +1314,16 @@ jobs:
         run: |
           uv run coverage report \
             --include='src/alfred/comms_mcp/inbound_reparse.py' \
+            --fail-under=100
+      - name: Forwarded-inbound receive trust-boundary 100% line+branch coverage (combined)
+        # Combined twin of the python-job gate (two-gates pattern, Spec B G6-7-4,
+        # #309, ADR-0039). ``forwarded_inbound_receiver.py`` is the core-side receive
+        # trust boundary of the gateway->core inbound bridge; keep the --include in
+        # lockstep with the python-job step.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/comms_mcp/forwarded_inbound_receiver.py') != ''
+        run: |
+          uv run coverage report \
+            --include='src/alfred/comms_mcp/forwarded_inbound_receiver.py' \
             --fail-under=100
       - name: Comms-MCP trust-boundary 100% line+branch coverage (combined)
         # PR-S4-8 (#152) host-side comms-MCP foundations (spec §8). Every file
