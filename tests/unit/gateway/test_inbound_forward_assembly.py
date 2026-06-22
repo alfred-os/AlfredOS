@@ -124,15 +124,14 @@ async def test_forward_runner_factory_registers_back_pressure_gate() -> None:
     transport = _FakeChildTransport([dict(_HANDSHAKE_OK)])
     factory(transport=transport, adapter_id=_ADAPTER_ID)
 
-    # Registering the gate again for an unknown adapter would raise — proving the factory
-    # used the registered leg's id. Re-registering the SAME id is allowed (overwrite), so
-    # we instead assert the scheduler knows the discord leg (the gate's home).
-    assert _ADAPTER_ID in scheduler.registered_adapters
-    # The scheduler can set the discord gate (it was registered by the factory). If the
-    # factory had NOT registered it, the scheduler's drain would have no gate to set — we
-    # prove registration by re-setting it without a KeyError.
-    gate = asyncio.Event()
-    scheduler.set_back_pressure_gate(_ADAPTER_ID, gate)  # no KeyError -> the leg is registered
+    # Assert the gate THE FACTORY registered is present + non-None (do NOT overwrite it —
+    # overwriting would let this test pass even if the factory stopped registering its own
+    # gate). The scheduler exposes no public read accessor, so read the registry directly:
+    # the entry exists iff the factory wired the per-adapter back-pressure gate, so the
+    # test FAILS the moment the factory stops registering it.
+    registered_gate = scheduler._back_pressure_gates.get(_ADAPTER_ID)
+    assert registered_gate is not None
+    assert isinstance(registered_gate, asyncio.Event)
 
 
 async def test_default_process_uses_real_forward_factory_not_unwired() -> None:

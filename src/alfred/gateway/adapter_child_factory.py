@@ -220,10 +220,32 @@ class _GatewayAdapterChild:
         :meth:`aclose` on the supervisor's teardown path, NOT the cancelled task. The detail
         is the closed-vocab exit code only (payload-blind, #5); the emitter does the
         REDACT-then-bound.
+
+        PUMP-FAULT REAP (CR-1, Spec B G6-7-3 / #309): the pump's normal terminal arms (EOF /
+        crash / malformed / shutdown) all RETURN, so a non-``CancelledError`` exception
+        escaping ``pump()`` is the defensive "a bug or an unhandled transport fault escaped"
+        case. Were it to propagate, the live Popen child would LEAK (no reap) — violating the
+        H1 "no leaked sandbox child" discipline (CLAUDE.md hard rule #7). So we
+        :func:`_terminate_and_reap` the child and RETURN a bounded, payload-blind crash tuple
+        so the supervisor's crash arm restarts/breakers it instead of an exception escaping
+        ``supervise_one``. A ``CancelledError`` still propagates (``aclose`` owns the reap).
         """
         # Drive the pump (forward the child's inbound) until its stdout EOFs / crashes. The
         # pump owns its own transport-close on every terminal arm; we then reap the code.
-        await self._runner.pump()
+        try:
+            await self._runner.pump()
+        except asyncio.CancelledError:
+            # A planned-stop cancellation propagates and is reaped via ``aclose`` on the
+            # supervisor's teardown path (NOT here — ``aclose`` owns the reap on cancel).
+            raise
+        except Exception:
+            # An UNEXPECTED pump fault (a bug / unhandled transport fault — every normal
+            # pump arm RETURNS). Reap the still-live child so it never leaks (H1 / hard
+            # rule #7), then return a bounded, payload-blind crash tuple (NEVER the
+            # exception text, #5) so the supervisor treats it as a child exit and
+            # restarts/breakers it rather than letting the fault escape ``supervise_one``.
+            await _terminate_and_reap(self._process)
+            return (_CHILD_EXITED_ERROR_CLASS, "exit_code=pump_failed")
         loop = asyncio.get_running_loop()
         returncode = await loop.run_in_executor(None, self._process.wait)
         return (_CHILD_EXITED_ERROR_CLASS, f"exit_code={returncode}")
