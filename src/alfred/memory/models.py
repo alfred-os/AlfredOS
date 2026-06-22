@@ -753,6 +753,9 @@ class ForwardedDispatchAttempt(Base):
 
     __table_args__ = (
         sa.PrimaryKeyConstraint("adapter_id", "inbound_id", name="pk_forwarded_dispatch_attempts"),
+        # Retention index mirroring InboundIdempotency's committed_at index — a
+        # future age-based GC sweep prunes by last_failed_at off this index.
+        Index("ix_forwarded_dispatch_attempts_last_failed_at", "last_failed_at"),
     )
 
 
