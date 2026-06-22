@@ -14,6 +14,7 @@ so ``reparse_forwarded_inbound`` reconstructs an EQUAL ``InboundMessageNotificat
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 
@@ -25,9 +26,12 @@ from alfred.comms_mcp.protocol import (
     GatewayAdapterInboundEnvelope,
     InboundMessageNotification,
 )
-from alfred.gateway.core_link import GatewayCoreLink
-from alfred.gateway.leg_router import RouteOutcome
-from alfred.gateway.leg_scheduler import LegQueueFullError
+from alfred.gateway.core_link import ForwardLegUnavailableError, GatewayCoreLink
+from alfred.gateway.gateway_leg import GatewayLeg
+from alfred.gateway.global_replay_cap import GlobalReplayCap
+from alfred.gateway.ingress_gate import PerAdapterIngressGate
+from alfred.gateway.leg_router import LegRouter, RouteOutcome
+from alfred.gateway.leg_scheduler import GatewayLegScheduler, LegQueueFullError
 from alfred.gateway.replay_buffer import ReplayBuffer, ReplayBufferError
 
 pytestmark = pytest.mark.asyncio
@@ -63,6 +67,45 @@ class _RecordingLegRouter:
 
 def _link() -> GatewayCoreLink:
     return GatewayCoreLink(client_listener=_RecordingClientListener())  # type: ignore[arg-type]
+
+
+class _RecordingCoreLink:
+    """A minimal core-link the scheduler can be constructed over (no drain is run)."""
+
+    def __init__(self) -> None:
+        self._gate = asyncio.Event()
+        self._gate.set()
+
+    def core_cumulative_ack(self) -> int:
+        return 0
+
+    @property
+    def replay_pending_gate(self) -> asyncio.Event:
+        return self._gate
+
+    async def escalate_if_breaker_tripped(self, leg: GatewayLeg) -> None:
+        return None
+
+    async def write_leg_unit(self, adapter_id: str, payload: bytes, *, seq: int, ack: int) -> None:
+        return None
+
+
+def _forward_leg(adapter_id: str, cap: GlobalReplayCap) -> GatewayLeg:
+    return GatewayLeg(
+        adapter_id=adapter_id,
+        buffer=ReplayBuffer(max_frames=1000, max_bytes=1_000_000, ttl_seconds=30.0),
+        ingress_gate=PerAdapterIngressGate(
+            adapter_id,
+            sustained_rate_per_s=1000.0,
+            burst=1000,
+            max_inflight=1000,
+            ttl_seconds=30.0,
+            max_frame_bytes=1_000_000,
+            now=lambda: 0.0,
+        ),
+        global_cap=cap,
+        now=lambda: 0.0,
+    )
 
 
 def _inbound_body(*, adapter_id: str = "discord", inbound_id: str = "frame-1") -> str:
@@ -153,6 +196,48 @@ async def test_forward_surfaces_replay_buffer_error_to_caller() -> None:
     link = _link()
     link.set_leg_router(router)  # type: ignore[arg-type]
     with pytest.raises(ReplayBufferError):
+        await link.forward_adapter_inbound("discord", _inbound_body())
+
+
+class _RefusingLegRouter:
+    """A LegRouter stand-in that REFUSES every route (the unknown/gone-leg outcome).
+
+    ``route`` RETURNS (never raises) :data:`RouteOutcome.REFUSED_UNKNOWN_ADAPTER` — the K4
+    contract — so the forward must INSPECT the outcome and raise (FOLD-1 / ERR-309-1).
+    """
+
+    def __init__(self) -> None:
+        self.routes: list[tuple[str, bytes]] = []
+
+    def route(self, adapter_id: str, payload: bytes) -> RouteOutcome:
+        self.routes.append((adapter_id, payload))
+        return RouteOutcome.REFUSED_UNKNOWN_ADAPTER
+
+
+async def test_forward_raises_leg_unavailable_when_router_refuses() -> None:
+    # FOLD-1 (ERR-309-1): the router RETURNS REFUSED_UNKNOWN_ADAPTER (it does not raise) when
+    # the adapter_id names no registered leg. The forward MUST inspect that outcome and raise
+    # ForwardLegUnavailableError — never DISCARD it (discarding it would let the disposition
+    # falsely log forward_accepted on a LOST frame, hard rule #7 silent-loss).
+    router = _RefusingLegRouter()
+    link = _link()
+    link.set_leg_router(router)  # type: ignore[arg-type]
+    with pytest.raises(ForwardLegUnavailableError):
+        await link.forward_adapter_inbound("discord", _inbound_body())
+
+
+async def test_forward_raises_leg_unavailable_against_deregistered_leg() -> None:
+    # FOLD-1 reachable path: a REAL LegRouter over a REAL scheduler whose leg was registered
+    # then DEREGISTERED (the scheduler's isolation arm tears a leg down). The router now refuses
+    # the (gone) leg's adapter_id -> the forward raises ForwardLegUnavailableError.
+    scheduler = GatewayLegScheduler(_RecordingCoreLink(), max_per_leg_queue_bytes=1_000_000)  # type: ignore[arg-type]
+    cap = GlobalReplayCap(max_total_bytes=10_000_000)
+    scheduler.register_leg(_forward_leg("discord", cap))
+    scheduler.deregister_leg("discord")  # the isolation arm tore the leg down
+    assert "discord" not in scheduler.registered_adapters
+    link = _link()
+    link.set_leg_router(LegRouter(scheduler))
+    with pytest.raises(ForwardLegUnavailableError):
         await link.forward_adapter_inbound("discord", _inbound_body())
 
 

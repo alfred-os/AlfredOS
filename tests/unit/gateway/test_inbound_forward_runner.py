@@ -24,6 +24,7 @@ import json
 import pytest
 import structlog
 
+from alfred.gateway.core_link import ForwardLegUnavailableError
 from alfred.gateway.inbound_forward_runner import (
     GatewayForwardDisposition,
     GatewayInboundForwardRunner,
@@ -232,6 +233,18 @@ async def test_forward_fault_retries_after_drain_never_drops(exc: BaseException)
     events = [row["event"] for row in logs]
     assert "gateway.adapter.inbound.backpressure_engaged" in events
     assert "gateway.adapter.inbound.backpressure_released" in events
+    # FOLD-2 (DEVEX-309-1) + FOLD-6: the back-pressure rows carry the closed-vocab reason
+    # distinguishing per-leg saturation (leg_full) from whole-gateway over-budget (global_cap),
+    # and each carries the adapter_id — assert the FIELDS, not just the event name.
+    expected_reason = "leg_full" if isinstance(exc, LegQueueFullError) else "global_cap"
+    engaged = next(r for r in logs if r["event"] == "gateway.adapter.inbound.backpressure_engaged")
+    released = next(
+        r for r in logs if r["event"] == "gateway.adapter.inbound.backpressure_released"
+    )
+    assert engaged["adapter_id"] == _ADAPTER_ID
+    assert engaged["reason"] == expected_reason
+    assert released["adapter_id"] == _ADAPTER_ID
+    assert released["reason"] == expected_reason
 
 
 async def test_forward_fault_retries_with_gate_but_no_shutdown_event() -> None:
@@ -292,15 +305,33 @@ async def test_forward_fault_park_cancels_cleanly() -> None:
     assert forward.forwards == []
 
 
-async def test_forward_fault_with_no_gate_still_loud_audited_never_raises() -> None:
-    # No back-pressure gate wired (defensive): a forward fault still loud-audits + never
-    # raises — the gate is optional, the loud row is not.
+async def test_forward_fault_with_no_gate_drops_loud_with_reason_never_raises() -> None:
+    # No back-pressure gate wired (defensive): there is NOTHING to park on, so a full-leg
+    # fault is a real DROP — DEVEX-309-2 gives it a DISTINCT ``forward_dropped`` event (NOT
+    # the ``backpressure_engaged`` row that implies a HOLD), and never raises. FOLD-6:
+    # assert the row carries the expected adapter_id + reason, not just the event name.
     forward = _RecordingForward(raise_on_forward=LegQueueFullError("full"))
     disposition = _disposition(forward, gate=None)
     with structlog.testing.capture_logs() as logs:
         await disposition.dispatch("inbound.message", _inbound_params())
-    events = {row["event"] for row in logs}
-    assert "gateway.adapter.inbound.backpressure_engaged" in events
+    dropped = [row for row in logs if row["event"] == "gateway.adapter.inbound.forward_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0]["adapter_id"] == _ADAPTER_ID
+    assert dropped[0]["reason"] == "leg_full"
+    # The HOLD event must NOT appear — a no-gate fault is a drop, not back-pressure.
+    assert "gateway.adapter.inbound.backpressure_engaged" not in {row["event"] for row in logs}
+
+
+async def test_forward_fault_no_gate_global_cap_reason() -> None:
+    # DEVEX-309-1: the no-gate drop distinguishes the global-cap cause (ReplayBufferError)
+    # from the per-leg-full cause via the closed-vocab reason field.
+    forward = _RecordingForward(raise_on_forward=ReplayBufferError("cap"))
+    disposition = _disposition(forward, gate=None)
+    with structlog.testing.capture_logs() as logs:
+        await disposition.dispatch("inbound.message", _inbound_params())
+    dropped = [row for row in logs if row["event"] == "gateway.adapter.inbound.forward_dropped"]
+    assert len(dropped) == 1
+    assert dropped[0]["reason"] == "global_cap"
 
 
 async def test_forward_accepted_emits_structlog() -> None:
@@ -310,6 +341,43 @@ async def test_forward_accepted_emits_structlog() -> None:
         await disposition.dispatch("inbound.message", _inbound_params())
     events = {row["event"] for row in logs}
     assert "gateway.adapter.inbound.forward_accepted" in events
+
+
+class _CountingForward:
+    """Records attempts; raises ``exc`` on every call (drives the terminal-drop path)."""
+
+    def __init__(self, *, exc: BaseException) -> None:
+        self.attempts = 0
+        self._exc = exc
+
+    async def __call__(self, adapter_id: str, body: str) -> None:
+        self.attempts += 1
+        raise self._exc
+
+
+async def test_leg_unavailable_is_loud_terminal_drop_no_retry_no_accept() -> None:
+    # FOLD-1 (ERR-309-1): the forward raises ForwardLegUnavailableError (the router refused —
+    # the leg is unregistered/gone). This is NOT back-pressure: the disposition LOUD-TERMINAL
+    # drops the frame (leg_unavailable_drop), does NOT retry, does NOT log forward_accepted,
+    # and never raises. A gate IS wired to prove the drop does NOT touch the back-pressure
+    # path (the gate stays SET — never cleared).
+    gate = asyncio.Event()
+    gate.set()
+    forward = _CountingForward(exc=ForwardLegUnavailableError("no leg"))
+    disposition = _disposition(forward, gate=gate, shutdown_event=asyncio.Event())
+    with structlog.testing.capture_logs() as logs:
+        await disposition.dispatch("inbound.message", _inbound_params())  # must NOT raise
+    # Exactly ONE forward attempt — no retry against a gone leg.
+    assert forward.attempts == 1
+    # The gate was NEVER cleared — the terminal drop is not a back-pressure engage.
+    assert gate.is_set()
+    events = [row["event"] for row in logs]
+    drops = [r for r in logs if r["event"] == "gateway.adapter.inbound.leg_unavailable_drop"]
+    assert len(drops) == 1
+    assert drops[0]["adapter_id"] == _ADAPTER_ID  # FOLD-6: assert the field, not just the event
+    # The frame was LOST — it must NOT be reported as accepted (the load-bearing silent-loss fix).
+    assert "gateway.adapter.inbound.forward_accepted" not in events
+    assert "gateway.adapter.inbound.backpressure_engaged" not in events
 
 
 # ---------------------------------------------------------------------------
