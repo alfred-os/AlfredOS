@@ -132,15 +132,19 @@ async def test_forward_builds_envelope_from_spawn_binding_routes_to_leg() -> Non
     assert len(router.routes) == 1
     routed_adapter, routed_payload = router.routes[0]
     assert routed_adapter == "discord"
-    # The leg payload is the serialized WHOLE envelope (method + adapter_id + body).
-    # The serialize keeps the str body VERBATIM — assert on the raw JSON, where the body
-    # member is the source string byte-for-byte (the re-parsed model coerces the bytes|str
-    # union to bytes, so compare the encoded body content, not the model field type).
-    parsed = json.loads(routed_payload)
-    assert parsed["adapter_id"] == "discord"
-    assert parsed["body"] == body  # str body kept verbatim through serialize
-    # The re-parsed envelope's body is byte-identical to the source body.
-    envelope = GatewayAdapterInboundEnvelope.model_validate_json(routed_payload)
+    # ADR-0039 item 3: the leg payload is a JSON-RPC NOTIFICATION (no ``id`` — fire-and-forget,
+    # mirroring ``inbound.message``) whose ``method`` is the shared constant the core's
+    # ``_route_notification`` keys on. The core discriminates a forwarded inbound by METHOD NAME,
+    # NOT an adapter_id heuristic — a bare envelope object would be mistaken for a response frame
+    # and silently dropped by the daemon pump.
+    decoded = json.loads(routed_payload)
+    assert decoded["jsonrpc"] == "2.0"
+    assert decoded["method"] == GATEWAY_ADAPTER_INBOUND
+    assert "id" not in decoded  # a notification: fire-and-forget
+    # The envelope rides INSIDE ``params``; the str body is kept VERBATIM through serialize.
+    assert decoded["params"] == {"adapter_id": "discord", "body": body}
+    # The ``params`` round-trip back to the envelope, body byte-identical to the source body.
+    envelope = GatewayAdapterInboundEnvelope.model_validate(decoded["params"])
     assert envelope.adapter_id == "discord"
     envelope_body = envelope.body.encode() if isinstance(envelope.body, str) else envelope.body
     assert envelope_body == body.encode()
@@ -156,7 +160,8 @@ async def test_forward_uses_binding_id_not_body_id() -> None:
     await link.forward_adapter_inbound("discord", body)  # spawn binding = discord
 
     _routed_adapter, routed_payload = router.routes[0]
-    envelope = GatewayAdapterInboundEnvelope.model_validate_json(routed_payload)
+    decoded = json.loads(routed_payload)
+    envelope = GatewayAdapterInboundEnvelope.model_validate(decoded["params"])
     # The envelope carries the BINDING value, never the body's claimed id.
     assert envelope.adapter_id == "discord"
 
@@ -177,10 +182,28 @@ async def test_forward_byte_stable_through_replay_buffer_roundtrip() -> None:
     assert len(replayed) == 1
     assert replayed[0].payload == payload  # byte-identical through the buffer
 
-    envelope = GatewayAdapterInboundEnvelope.model_validate_json(replayed[0].payload)
+    decoded = json.loads(replayed[0].payload)
+    envelope = GatewayAdapterInboundEnvelope.model_validate(decoded["params"])
     reconstructed = reparse_forwarded_inbound(envelope)
     expected = InboundMessageNotification.model_validate_json(body)
     assert reconstructed == expected
+
+
+async def test_forward_body_is_byte_stable_across_two_forwards() -> None:
+    # SEC-309-2: two forwards of the SAME body produce a byte-identical ``params.body`` — so the
+    # embedded ``inbound_id`` stays stable and G0 dedup is never a no-op. The JSON-RPC framing
+    # changes the OUTER shape but never touches the verbatim body inside ``params``.
+    router = _RecordingLegRouter()
+    link = _link()
+    link.set_leg_router(router)  # type: ignore[arg-type]
+    body = _inbound_body()
+
+    await link.forward_adapter_inbound("discord", body)
+    await link.forward_adapter_inbound("discord", body)
+
+    first = json.loads(router.routes[0][1])["params"]["body"]
+    second = json.loads(router.routes[1][1])["params"]["body"]
+    assert first == second == body  # byte-identical body across both forwards
 
 
 async def test_forward_surfaces_leg_queue_full_to_caller() -> None:
