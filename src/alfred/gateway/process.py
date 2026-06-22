@@ -210,17 +210,20 @@ def wire_leg_scheduler(core_link: GatewayCoreLink, tui_leg: GatewayLeg) -> Gatew
 def _unwired_runner_factory(
     *, transport: GatewayAdapterStdioTransport, adapter_id: str
 ) -> _RunnerLike:
-    """Fail-loud default ``runner_factory`` for :class:`GatewayAdapterChildFactory` (G6-5).
+    """Fail-loud DEFAULT/fallback ``runner_factory`` for :class:`GatewayAdapterChildFactory`.
 
-    The real session-bearing :class:`alfred.plugins.comms_runner.CommsPluginRunner`
-    needs the daemon boot graph (a full ``AlfredPluginSession`` + the inbound / binding /
-    crash / rate-limit handlers + the credential resolver), which the standalone
-    ``alfred-gateway`` process does NOT build (those are daemon-side collaborators —
-    see the G6-5 Task-5 collaborator flag). So the production process passes its own
-    ``adapter_runner_factory`` in; if a non-empty ``adapter_ids`` is configured without
-    one, the spawn refuses LOUD (CLAUDE.md hard rule #7) rather than handshaking against
-    a session-less runner. ``transport`` is accepted to satisfy the factory's
-    ``runner_factory`` signature; it is never used on this fail-closed path.
+    The fail-loud FALLBACK used ONLY when no ``adapter_runner_factory`` is injected. In
+    production this is NOT the live posture: :meth:`GatewayProcess._build_adapter_supervisor`
+    ALWAYS substitutes the real session-LESS forward factory (G6-7-3 —
+    :meth:`_build_adapter_runner_factory` builds it) when the injected factory is still this
+    default sentinel, so a configured ``alfred-gateway`` spawns the real
+    :class:`GatewayInboundForwardRunner` (FORK-A), never reaching this fail-closed body.
+
+    This default exists so that a non-empty ``adapter_ids`` configured WITHOUT any runner
+    wiring at all (a misconstructed process / test seam that bypasses the supervisor builder)
+    refuses LOUD (CLAUDE.md hard rule #7) rather than handshaking against nothing.
+    ``transport`` is accepted to satisfy the factory's ``runner_factory`` signature; it is
+    never used on this fail-closed path.
     """
     del transport
     raise GatewayAdapterSpawnError(
