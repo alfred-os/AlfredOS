@@ -14,10 +14,11 @@ core link's ``forward_adapter_inbound`` (the production forward target).
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
-from alfred.comms_mcp.protocol import GatewayAdapterInboundEnvelope
+from alfred.comms_mcp.protocol import GATEWAY_ADAPTER_INBOUND, GatewayAdapterInboundEnvelope
 from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.core_link import GatewayCoreLink
 from alfred.gateway.process import GatewayProcess, wire_leg_scheduler
@@ -102,11 +103,14 @@ async def test_forward_runner_factory_lands_inbound_as_leg_unit() -> None:
     frames = leg.unacked_frames()  # tuple[(seq, payload), ...]
     assert len(frames) == 1
     _seq, payload = frames[0]
-    envelope = GatewayAdapterInboundEnvelope.model_validate_json(payload)
+    # ADR-0039 item 3: the leg payload is a JSON-RPC notification; the envelope rides in ``params``.
+    decoded = json.loads(payload)
+    assert decoded["jsonrpc"] == "2.0"
+    assert decoded["method"] == GATEWAY_ADAPTER_INBOUND
+    assert "id" not in decoded
+    envelope = GatewayAdapterInboundEnvelope.model_validate(decoded["params"])
     assert envelope.adapter_id == _ADAPTER_ID
     # Byte-stable: the envelope body re-parses to the forwarded inbound params.
-    import json
-
     body = envelope.body.decode() if isinstance(envelope.body, bytes) else envelope.body
     assert json.loads(body) == _inbound_params()
 

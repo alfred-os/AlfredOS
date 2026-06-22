@@ -48,6 +48,7 @@ from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
+    GATEWAY_ADAPTER_INBOUND,
     GatewayAdapterInboundEnvelope,
     GoingDownNotification,
     ReadyNotification,
@@ -1233,7 +1234,19 @@ class GatewayCoreLink:
         # closed-vocab ``AdapterId`` validates it at construction — a forged kind is a loud
         # ValidationError at this boundary (fail-loud, hard rule #7), never a silent route.
         envelope = GatewayAdapterInboundEnvelope(adapter_id=adapter_id, body=body)
-        payload = envelope.model_dump_json().encode()
+        # ADR-0039 item 3 (Spec B G6-7-4, #309): the core discriminates a forwarded inbound
+        # from a directly-connected adapter's ``inbound.message`` by METHOD NAME — so the
+        # forward rides as a JSON-RPC NOTIFICATION (no ``id``: fire-and-forget, mirroring
+        # ``inbound.message`` itself), NOT a bare envelope object the daemon pump would mistake
+        # for a response frame and drop. The opaque body stays verbatim inside ``params.body``
+        # (payload-blind, byte-stable for G0 — SEC-309-2).
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": GATEWAY_ADAPTER_INBOUND,
+                "params": envelope.model_dump(mode="json"),
+            }
+        ).encode()
         outcome = self._leg_router.route(adapter_id, payload)
         if outcome is RouteOutcome.REFUSED_UNKNOWN_ADAPTER:
             # ERR-309-1: the router refused (the leg is unregistered/gone). The K4
