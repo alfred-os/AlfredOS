@@ -177,7 +177,7 @@ class CommsPluginRunner:
     def __init__(
         self,
         *,
-        session: AlfredPluginSession,
+        session: AlfredPluginSession | None = None,
         transport: _CommsTransportLike,
         adapter_id: str,
         shutdown_event: asyncio.Event | None = None,
@@ -185,7 +185,24 @@ class CommsPluginRunner:
         boot_epoch: str | None = None,
         credential_resolver: CredentialResolverLike | None = None,
         inbound_disposition: InboundDisposition | None = None,
+        back_pressure_gate: asyncio.Event | None = None,
     ) -> None:
+        # Spec B G6-7-3 (#309) — FORK-A: ``session`` is OPTIONAL. The DAEMON wires a
+        # real :class:`AlfredPluginSession` (the capability gate + the audited state
+        # machine); the GATEWAY forward-runner wires ``None`` — the gateway has NO
+        # capability gate (it is core-side by design, the connectivity-free-core
+        # invariant), so the three session-touch sites (handshake-complete, transport
+        # crash, restart-request) take their None-branch. A ``session=None`` runner
+        # ALWAYS injects a forward disposition (the gateway never dispatches into a
+        # local session), so a ``session=None`` + no-disposition runner is a loud
+        # PROGRAMMING error (the default-disposition construction below would NPE on
+        # the ``session`` arg) — fail it at construction (CLAUDE.md hard rule #7) rather
+        # than at the first frame.
+        if session is None and inbound_disposition is None:
+            raise ValueError(
+                "session=None requires an inbound_disposition "
+                f"(adapter_id={adapter_id!r}); the gateway forward-runner injects one"
+            )
         self._session = session
         self._transport = transport
         self._adapter_id = adapter_id
@@ -214,6 +231,15 @@ class CommsPluginRunner:
         # graceful stop drops no frames: we are shutting the adapter down. ``None``
         # (legacy / substrate callers) preserves the EOF-only pump exactly.
         self._shutdown_event = shutdown_event
+        # Spec B G6-7-3 (#309) — FORK-C: an optional shared back-pressure gate the
+        # pump awaits at the TOP of each loop before the next ``read_frame``, mirroring
+        # the scheduler's ``replay_pending_gate.wait()`` (relay.py). The GATEWAY forward
+        # disposition CLEARS it on a full leg (pause the child-stdio read so the child's
+        # stdout back-pressures the platform without losing the in-flight frame) and the
+        # scheduler-drain SETS it (resume). ``None`` (the daemon) leaves the pump
+        # byte-for-byte unchanged. Shutdown MUST win the gate-await so a permanently
+        # cleared gate during shutdown never wedges the pump.
+        self._back_pressure_gate = back_pressure_gate
         # Outbound request/response correlation (Wave 1, #237). The transport has
         # no ``request()`` by design — the single-reader rule means only the pump
         # reads, so the runner OWNS the pending map: ``send_request`` registers a
@@ -249,15 +275,22 @@ class CommsPluginRunner:
         # routing is byte-for-byte the pre-refactor inline ``_route_notification``.
         # The G6-7-3 gateway forward-runner injects a session-LESS disposition that
         # forwards inbound frames instead of dispatching them into a local session.
-        self._inbound_disposition: InboundDisposition = inbound_disposition or (
-            SessionDispatchDisposition(
+        # The default-disposition construction is reached ONLY when no disposition was
+        # injected, which the ctor guard above proves implies ``session is not None`` —
+        # so the daemon path builds its ``SessionDispatchDisposition`` over a real
+        # session exactly as before (byte-for-byte). The gateway path always injects, so
+        # this branch never runs there.
+        if inbound_disposition is not None:
+            self._inbound_disposition: InboundDisposition = inbound_disposition
+        else:
+            assert session is not None  # ctor guard: no-disposition => session present
+            self._inbound_disposition = SessionDispatchDisposition(
                 session=session,
                 credential_resolver=credential_resolver,
                 adapter_id=adapter_id,
                 send_notification=self.send_notification,
                 request_restart=self._request_restart,
             )
-        )
 
     async def send_request(
         self,
@@ -499,6 +532,15 @@ class CommsPluginRunner:
             )
         # Gate check + plugin.lifecycle.loaded emit. Raises PluginError on denial,
         # which propagates through run()'s finally (transport.close()).
+        #
+        # Spec B G6-7-3 (#309) — FORK-A: the GATEWAY forward-runner has NO session, so
+        # there is NO capability gate to run here. This is NOT a dropped control — the
+        # gateway is core-side by design (the connectivity-free-core invariant); the
+        # capability gate lives on the daemon's session. The transport-level handshake
+        # (lifecycle.start send + ack read + seq/ack negotiation above) still ran.
+        if self._session is None:
+            log.info("comms.runner.handshake_complete_no_session", adapter_id=self._adapter_id)
+            return
         await self._session._on_handshake_complete()
 
     async def _pump(self) -> None:
@@ -519,6 +561,14 @@ class CommsPluginRunner:
             # ``finally`` in :meth:`pump` closes the transport on this exit, same
             # as the EOF/crash arms — no frame loss, we are shutting down.
             if self._shutdown_event is not None and self._shutdown_event.is_set():
+                log.info("comms.runner.shutdown_signalled", adapter_id=self._adapter_id)
+                return
+            # Spec B G6-7-3 (#309) — FORK-C: pause the reader while a CLEARED back-pressure
+            # gate signals a full leg, BEFORE the next ``read_frame`` so the in-flight frame
+            # is never dropped (the child's stdout back-pressures the platform). Shutdown
+            # MUST win so a permanently-cleared gate during shutdown never wedges. ``None``
+            # (the daemon) skips this entirely — the pump is byte-for-byte unchanged.
+            if not await self._await_back_pressure_gate_or_shutdown():
                 log.info("comms.runner.shutdown_signalled", adapter_id=self._adapter_id)
                 return
             try:
@@ -636,6 +686,54 @@ class CommsPluginRunner:
         with suppress(asyncio.CancelledError, *_TRANSPORT_READ_EXCEPTIONS):
             await read_task
         raise _ShutdownSignalled
+
+    async def _await_back_pressure_gate_or_shutdown(self) -> bool:
+        """Pause the pump while the back-pressure gate is CLEARED; shutdown wins (FORK-C).
+
+        Spec B G6-7-3 (#309). Returns ``True`` to continue the loop, ``False`` if a
+        shutdown won and the pump should return. With NO gate wired (the daemon) this is
+        an immediate ``True`` — the pump is byte-for-byte unchanged. With a gate wired:
+
+        * an already-SET gate (the common case — no back-pressure) returns ``True`` at
+          once (``Event.wait`` on a set event is a zero-cost return);
+        * a CLEARED gate (the gateway forward path engaged back-pressure on a full leg)
+          PARKS here until the scheduler-drain SETS it again (resume) — so the reader
+          stops pulling frames the leg cannot accept, and the in-flight frame is never
+          dropped;
+        * a SHUTDOWN must win the park so a permanently-cleared gate during shutdown
+          (a saturated leg that never drains while we are stopping) cannot wedge the
+          pump: the gate-wait races ``shutdown_event.wait()`` (FIRST_COMPLETED); a
+          shutdown win returns ``False``.
+
+        CANCELLATION-SAFE: a force-cancel (the supervisor drain-timeout escalation) of a
+        parked pump cancels both child waits and re-raises — the ``finally`` in
+        :meth:`pump` still closes the transport (CLAUDE.md hard rule #7).
+        """
+        gate = self._back_pressure_gate
+        if gate is None or gate.is_set():
+            return True
+        if self._shutdown_event is None:
+            await gate.wait()
+            return True
+        gate_task: asyncio.Task[bool] = asyncio.ensure_future(gate.wait())
+        shutdown_task: asyncio.Task[bool] = asyncio.ensure_future(self._shutdown_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {gate_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            gate_task.cancel()
+            shutdown_task.cancel()
+            raise
+        if shutdown_task in done:
+            gate_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await gate_task
+            return False
+        shutdown_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await shutdown_task
+        return True
 
     def _spawn_notification_dispatch(
         self, method: str, params: object, *, wire_seq: int | None = None
@@ -832,6 +930,19 @@ class CommsPluginRunner:
             "comms.runner.transport_crash",
             adapter_id=self._adapter_id,
         )
+        # Spec B G6-7-3 (#309) — FORK-A: the GATEWAY forward-runner has NO session, so it
+        # CANNOT synthesize a session-bound ``adapter.crashed`` route — and MUST NOT: the
+        # gateway's adapter SUPERVISOR owns crash detection (it races the child's
+        # ``wait_until_exit`` and emits the audited ``gateway.adapter.crashed`` status
+        # frame). Routing a synthetic crash here would double-count it. A LOUD log is the
+        # whole teardown on this path (CLAUDE.md hard rule #7 — never silent); the pump's
+        # caller closes the transport.
+        if self._session is None:
+            log.warning(
+                "comms.runner.transport_crash_no_session",
+                adapter_id=self._adapter_id,
+            )
+            return
         crash_params: Mapping[str, object] = {
             "adapter_id": self._adapter_id,
             "error_class": _TRANSPORT_CRASH_ERROR_CLASS,
@@ -855,6 +966,18 @@ class CommsPluginRunner:
         fail-loud posture (CLAUDE.md hard rule #7). Log it LOUD so the missing
         actuator is visible rather than swallowed (error-low-#2).
         """
+        # Spec B G6-7-3 (#309) — FORK-A (CORE-FIX): the GATEWAY forward-runner has NO
+        # session, so ``self._session._supervisor`` would NPE. Guard it: with no session
+        # there is no supervisor to actuate a restart, so LOUD-LOG + return (the gateway's
+        # adapter supervisor owns restart via ``wait_until_exit``). NEVER a silent no-op
+        # on a security-path escalation (CLAUDE.md hard rule #7).
+        if self._session is None:
+            log.error(
+                "comms.runner.restart_request_no_session",
+                adapter_id=self._adapter_id,
+                reason=reason,
+            )
+            return
         supervisor: _SupervisorLike | None = self._session._supervisor
         if supervisor is not None:
             await supervisor.request_plugin_restart(adapter_id=self._adapter_id, reason=reason)
