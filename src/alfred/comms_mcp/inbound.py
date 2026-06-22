@@ -44,7 +44,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, runtime_checkable
 
 import structlog
 
@@ -192,6 +192,28 @@ class _SubPayloadPromoterLike(Protocol):
     """
 
     async def promote(self, body: Mapping[str, object]) -> PromotedBody: ...
+
+
+# ADR-0039 item 4b (Spec B G6-7-5): the forwarded dispatched-edge replay bound. A
+# never-committed forwarded frame whose post-extract region has failed this many
+# times is POISON — dead-lettered rather than re-charged on the next reconnect.
+_FORWARDED_DISPATCH_ATTEMPT_CEILING: Final[int] = 5
+
+
+@runtime_checkable
+class _DispatchAttemptStoreLike(Protocol):
+    """Structural type for the durable forwarded-dispatch attempt ledger (G6-7-5).
+
+    Binds to the SHAPE of
+    :class:`alfred.memory.forwarded_dispatch_attempts.ForwardedDispatchAttemptStore`
+    so the inbound path stays decoupled from the ORM. ``increment`` is the atomic
+    UPSERT returning the post-write count; ``attempt_count`` is the non-mutating
+    read (0 if absent). A genuine DB failure on either PROPAGATES (fail-loud).
+    """
+
+    async def increment(self, *, adapter_id: str, inbound_id: str) -> int: ...
+
+    async def attempt_count(self, *, adapter_id: str, inbound_id: str) -> int: ...
 
 
 def _inbound_message_cheap_validate(*, platform_user_id: object, body: object) -> bool:
@@ -497,6 +519,39 @@ async def _emit_dispatch_failed(
     )
 
 
+async def _emit_poisoned(
+    notification: InboundMessageNotification,
+    *,
+    attempt_count: int,
+    audit_writer: _AuditWriterLike,
+) -> None:
+    """Emit the content-free terminal poisoned dead-letter row (Spec B G6-7-5 / item 4b).
+
+    Carries ONLY the closed-vocab adapter_id, the PEPPERED inbound_id hash (sec-010), the
+    bounded attempt_count, and observed_at. Shares trace_id with this frame's dispatch_failed
+    rows so triage can pivot from the dead-letter to its failure history. An audit-write
+    failure PROPAGATES (the caller wraps it in ForwardedInboundAuditWriteError).
+    """
+    await audit_writer.append_schema(
+        fields=audit_row_schemas.COMMS_INBOUND_POISONED_FIELDS,
+        schema_name="COMMS_INBOUND_POISONED_FIELDS",
+        event="comms.inbound.poisoned",
+        actor_user_id=None,
+        subject={
+            "adapter_id": notification.adapter_id,
+            "inbound_id_hash": audit_hash.hash_inbound_id(notification.inbound_id),
+            "attempt_count": attempt_count,
+            "observed_at": datetime.now(UTC).isoformat(),
+        },
+        trust_tier_of_trigger="T3",
+        result="poisoned",
+        cost_estimate_usd=0.0,
+        # sec-010: trace_id is a persisted, indexed column — the peppered hash of
+        # inbound_id (shared with this frame's dispatch_failed rows), never the raw id.
+        trace_id=audit_hash.hash_inbound_id(notification.inbound_id),
+    )
+
+
 async def process_inbound_message(
     notification: InboundMessageNotification,
     *,
@@ -509,7 +564,9 @@ async def process_inbound_message(
     sub_payload_promoter: _SubPayloadPromoterLike | None = None,
     idempotency_store: _InboundIdempotencyStoreLike | None = None,
     ack_tracker: _AckTrackerLike | None = None,
+    attempt_store: _DispatchAttemptStoreLike | None = None,
     commit_at_dispatch_edge: bool = False,
+    dispatch_attempt_ceiling: int = _FORWARDED_DISPATCH_ATTEMPT_CEILING,
 ) -> None:
     """Route one inbound comms notification through the trust boundary.
 
@@ -674,6 +731,35 @@ async def process_inbound_message(
             _drain_forwarded_seq(ack_tracker, notification.wire_seq)
         return
 
+    # ADR-0039 item 4b (Spec B G6-7-5): a never-committed forwarded frame that has already
+    # failed the post-extract region >= ceiling times is POISON — dead-letter it and drain,
+    # BEFORE quarantined_extract, so a deterministically-failing frame stops re-charging the
+    # extractor on every reconnect (closes PERF-309-1). Placed AFTER the pre-resolution DoS
+    # limiter (sec C-1) so a flood of distinct attacker-chosen inbound_ids is shed before it
+    # can grow the ledger. A DB error on the read PROPAGATES (fail-loud) -> leg replays. The
+    # poison emit is audit-before-drain: a write failure raises ForwardedInboundAuditWriteError
+    # and leaves the frame UNDRAINED.
+    if commit_at_dispatch_edge and attempt_store is not None:
+        attempts = await attempt_store.attempt_count(
+            adapter_id=notification.adapter_id, inbound_id=notification.inbound_id
+        )
+        if attempts >= dispatch_attempt_ceiling:
+            try:
+                await _emit_poisoned(
+                    notification, attempt_count=attempts, audit_writer=audit_writer
+                )
+            except Exception as exc:
+                raise ForwardedInboundAuditWriteError(
+                    "forwarded-inbound poisoned audit write failed"
+                ) from exc
+            _drain_forwarded_seq(ack_tracker, notification.wire_seq)
+            _log.warning(
+                "comms.inbound.poisoned",
+                adapter_id=notification.adapter_id,
+                attempt_count=attempts,
+            )
+            return
+
     # 1) Resolution — host-side, first.
     resolved = await identity_resolver.resolve(
         adapter_id=notification.adapter_id,
@@ -750,15 +836,30 @@ async def process_inbound_message(
         source_tier="T3",
     )
 
+    # ADR-0039 item 4b (Spec B G6-7-5): count THIS attempt at entry to the post-extract
+    # region so EVERY un-observed/non-draining downstream failure (promotion-emit, ingest,
+    # dispatch) is ceilinged, not just dispatch (sec C-2). increment-before-audit: the durable
+    # bound must never under-count (a flaky audit backend must not let a poison frame slip the
+    # ceiling forever). The increment's own SQLAlchemyError PROPAGATES as a leg replay (NOT
+    # escalate-restart) — the count simply has not advanced yet. Gated under
+    # commit_at_dispatch_edge so the DIRECT path is byte-for-byte unchanged.
+    if commit_at_dispatch_edge and attempt_store is not None:
+        await attempt_store.increment(
+            adapter_id=notification.adapter_id, inbound_id=notification.inbound_id
+        )
+
     inbound_message_id = uuid.uuid4().hex
 
     # 4) Observability — the T3 promotion row. INTENTIONALLY NOT wrapped in
     # ForwardedInboundAuditWriteError (unlike replay_observed / dispatch_failed):
     # this emit precedes commit_once + observe, so a raw audit-write failure here
-    # propagates with NOTHING committed or observed → the leg replays (re-charging
-    # quarantined_extract, bounded by G6-7-5). The typed-marker escalation is reserved
-    # for audit failures adjacent to an irreversible drain/commit; escalating a
-    # replayable pre-commit emit would cause a restart-storm on a transient audit blip.
+    # propagates with NOTHING committed or observed → the leg replays. The on-entry
+    # increment above counted this attempt FIRST, so a promotion-emit (or ingest)
+    # failure replay IS bounded by the item-4b ceiling — the frame is dead-lettered
+    # (poisoned) once it has failed the post-extract region >= ceiling times. The
+    # typed-marker escalation is reserved for audit failures adjacent to an
+    # irreversible drain/commit; escalating a replayable pre-commit emit would cause
+    # a restart-storm on a transient audit blip.
     await _emit_t3_promotion(
         notification,
         resolved=resolved,
