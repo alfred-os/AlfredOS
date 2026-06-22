@@ -1269,6 +1269,28 @@ COMMS_INBOUND_DISPATCH_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Emitted by the core-side GatewayForwardedInboundReceiver (Spec B G6-7-4 /
+# ADR-0039) on a TERMINAL DROP of a gateway-forwarded inbound — the receive trust
+# boundary's three refusal/drop dispositions. Content-free by construction: the
+# row carries ONLY the closed-vocab ENVELOPE ``adapter_id`` (the routing key, NOT
+# the body — SEC-309-1), a fixed closed-vocab ``reason`` discriminator, and the
+# observation time. NO raw T3 body, NO ``inbound_id`` (the body may not even have
+# re-parsed), NO ``str(exc)`` (the leak-safe structural summary from
+# ``reparse_forwarded_inbound`` goes ONLY to a structlog ``.warning``, never the
+# signed row — spec §3.3). The three drops REUSE in-domain ``result`` values (no
+# migration): ``unknown_adapter`` + ``envelope_body_mismatch`` are K4-style /
+# forge REFUSALS (``result="refused"``); ``body_malformed`` is an ack-to-drain
+# DROP (``result="dropped"``, the same value the G0 replay row reuses).
+#
+# ``reason`` closed-vocab: unknown_adapter | envelope_body_mismatch | body_malformed.
+COMMS_FORWARDED_INBOUND_DROPPED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "adapter_id",
+        "reason",
+        "observed_at",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # supervisor.plugin lifecycle (PR-S4-9/10 restart wiring)
 # ---------------------------------------------------------------------------
@@ -1326,6 +1348,7 @@ AUDIT_FIELDSET_ROSTER: Final[tuple[str, ...]] = (
     "COMMS_INBOUND_BUDGET_CAPPED_FIELDS",
     "COMMS_INBOUND_IDEMPOTENCY_REPLAY_FIELDS",
     "COMMS_INBOUND_DISPATCH_FAILED_FIELDS",
+    "COMMS_FORWARDED_INBOUND_DROPPED_FIELDS",
     "SUPERVISOR_PLUGIN_RESTART_REQUESTED_FIELDS",
     # Spec B (#288) G6-2a gateway.adapter.* status family — listed here because
     # the AST guard sweeps all post-marker ``*_FIELDS`` (see the roster header).
