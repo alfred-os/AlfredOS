@@ -114,6 +114,21 @@ class _SpyIdempotencyStore:
         return False
 
 
+class _FakeAttemptStore:
+    """A no-op forwarded-dispatch attempt ledger satisfying ``_DispatchAttemptStoreLike``.
+
+    The receiver only THREADS this store into the dispatch (the poison ceiling is the
+    pipeline's concern, covered by the dispatched-edge tests); these unit tests assert
+    the SAME instance reaches the dispatch ``attempt_store=`` kwarg.
+    """
+
+    async def increment(self, *, adapter_id: str, inbound_id: str) -> int:
+        return 1
+
+    async def attempt_count(self, *, adapter_id: str, inbound_id: str) -> int:
+        return 0
+
+
 class _RecordingDispatch:
     """An injected fake ``dispatch`` recording its call kwargs (no real pipeline)."""
 
@@ -166,11 +181,13 @@ def _build_receiver(
     audit_writer: Any,
     pre_resolution_limiter: Any,
     ack_tracker: _SpyAckTracker | None = None,
+    attempt_store: Any = None,
 ) -> GatewayForwardedInboundReceiver:
     registry = {"discord": _discord_collaborators(pre_resolution_limiter=pre_resolution_limiter)}
     receiver = GatewayForwardedInboundReceiver(
         registry=registry,
         idempotency_store=_SpyIdempotencyStore(),
+        attempt_store=attempt_store if attempt_store is not None else _FakeAttemptStore(),
         audit_writer=audit_writer,
         dispatch=dispatch,
     )
@@ -211,9 +228,31 @@ async def test_happy_dispatches_discord_collaborators_at_dispatch_edge() -> None
     assert call["audit_writer"] is audit_writer
     assert call["ack_tracker"] is ack
     assert call["idempotency_store"] is receiver._idempotency_store
+    assert call["attempt_store"] is receiver._attempt_store
     # No drop happened — the receiver does NOT drain on the dispatched path (the
     # pipeline owns the dispatched-edge observe).
     assert ack.observed == []
+
+
+async def test_happy_forwards_injected_attempt_store_to_dispatch() -> None:
+    """The per-boot attempt ledger is threaded VERBATIM into the dispatch (G6-7-5).
+
+    The dispatched-edge poison ceiling (ADR-0039 item 4b) is the pipeline's concern;
+    the receiver's only job is to carry the SAME injected ``attempt_store`` instance
+    into ``process_inbound_message`` via the ``attempt_store=`` kwarg.
+    """
+    dispatch = _RecordingDispatch()
+    attempt_store = _FakeAttemptStore()
+    receiver = _build_receiver(
+        dispatch=dispatch,
+        audit_writer=SpyAuditWriter(),
+        pre_resolution_limiter=object(),
+        attempt_store=attempt_store,
+    )
+
+    await receiver.receive(params=_envelope(adapter_id="discord", body=_discord_body()), wire_seq=1)
+
+    assert dispatch.calls[0]["attempt_store"] is attempt_store
 
 
 async def test_happy_rebinds_real_leg_wire_seq_not_body_value() -> None:
@@ -537,6 +576,7 @@ async def test_signed_audit_write_precedes_drain_observe() -> None:
     receiver = GatewayForwardedInboundReceiver(
         registry={"discord": _discord_collaborators(pre_resolution_limiter=object())},
         idempotency_store=_SpyIdempotencyStore(),
+        attempt_store=_FakeAttemptStore(),
         audit_writer=_OrderRecordingAuditWriter(order),
         dispatch=dispatch,
     )

@@ -172,6 +172,28 @@ class _ReplayableStore:
         return (adapter_id, inbound_id) in self._committed
 
 
+class _NonTrippingAttemptStore:
+    """A forwarded-dispatch attempt ledger whose count NEVER reaches the ceiling.
+
+    Satisfies ``_DispatchAttemptStoreLike`` so the receiver can thread it into the real
+    dispatched-edge pipeline (G6-7-5). ``attempt_count`` always returns ``0`` so the
+    item-4b poison ceiling NEVER trips here — these cases pin the receive-boundary
+    admission / drain / replay properties, NOT the ceiling itself (the ceiling's own
+    dead-letter behaviour is covered by the dispatched-edge tests). Keeping the count
+    at zero preserves case 7's deliberate un-observed-on-failure replay contract.
+    """
+
+    def __init__(self) -> None:
+        self.increments: list[tuple[str, str]] = []
+
+    async def increment(self, *, adapter_id: str, inbound_id: str) -> int:
+        self.increments.append((adapter_id, inbound_id))
+        return 1
+
+    async def attempt_count(self, *, adapter_id: str, inbound_id: str) -> int:
+        return 0
+
+
 class _RaisingAuditWriter:
     """An audit writer whose ``append_schema`` always raises (drop-path failure).
 
@@ -215,11 +237,18 @@ def _build_receiver(
     idempotency_store: Any,
     ack_tracker: _SpyAckTracker | None = None,
     orchestrator: SpyOrchestrator | None = None,
+    attempt_store: Any = None,
 ) -> GatewayForwardedInboundReceiver:
-    """A REAL receiver over the REAL dispatched-edge pipeline (deps mocked, no DB)."""
+    """A REAL receiver over the REAL dispatched-edge pipeline (deps mocked, no DB).
+
+    ``attempt_store`` defaults to a NON-tripping fake (count fixed at 0) so the
+    item-4b poison ceiling does not fire — these cases pin the admission / drain /
+    replay contract, not the ceiling. A case that needs the ceiling injects its own.
+    """
     receiver = GatewayForwardedInboundReceiver(
         registry={_ADAPTER_ID: _discord_collaborators(orchestrator=orchestrator)},
         idempotency_store=idempotency_store,
+        attempt_store=attempt_store if attempt_store is not None else _NonTrippingAttemptStore(),
         audit_writer=audit_writer,
     )
     if ack_tracker is not None:
