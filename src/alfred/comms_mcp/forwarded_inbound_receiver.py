@@ -68,6 +68,7 @@ from alfred.comms_mcp.inbound import (
     _AckTrackerLike,
     _AuditWriterLike,
     _BurstLimiterLike,
+    _DispatchAttemptStoreLike,
     _IdentityResolverLike,
     _InboundIdempotencyStoreLike,
     _OrchestratorLike,
@@ -134,6 +135,14 @@ class GatewayForwardedInboundReceiver:
     Per-boot singleton (one per core). The per-connection ack tracker is bound after
     each accepted gateway connection via :meth:`set_ack_tracker`; the receiver itself
     outlives any single connection.
+
+    Carries the per-boot ``attempt_store`` (the durable forwarded-dispatch attempt
+    ledger) threaded into every dispatch so ``process_inbound_message`` can apply the
+    ADR-0039 item-4b poison ceiling on the dispatched edge (a frame that fails dispatch
+    more than the ceiling is force-drained rather than replayed forever). The ledger is
+    a DISPATCH concern only — the admission region (K4 / re-parse / receive_fault
+    terminal drops) is never ceilinged (ADR-0039 item 5; admission drops drain
+    single-shot).
     """
 
     def __init__(
@@ -141,11 +150,13 @@ class GatewayForwardedInboundReceiver:
         *,
         registry: Mapping[str, _ForwardedCollaborators],
         idempotency_store: _InboundIdempotencyStoreLike,
+        attempt_store: _DispatchAttemptStoreLike,
         audit_writer: _AuditWriterLike,
         dispatch: Callable[..., Awaitable[None]] = process_inbound_message,
     ) -> None:
         self._registry = registry
         self._idempotency_store = idempotency_store
+        self._attempt_store = attempt_store
         self._audit_writer = audit_writer
         self._dispatch = dispatch
         # Per-connection mutable slot. The receiver is a per-boot singleton; the
@@ -231,6 +242,7 @@ class GatewayForwardedInboundReceiver:
             pre_resolution_limiter=collab.pre_resolution_limiter,
             sub_payload_promoter=collab.sub_payload_promoter,
             idempotency_store=self._idempotency_store,
+            attempt_store=self._attempt_store,
             ack_tracker=tracker,
             commit_at_dispatch_edge=True,
         )

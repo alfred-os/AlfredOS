@@ -71,6 +71,20 @@ class _NeverCommittedStore:
         return False
 
 
+class _StubAttemptStore:
+    """A forwarded-dispatch attempt ledger double (G6-7-5).
+
+    The wiring tests inject a fake ``dispatch`` so the ceiling never engages; this
+    only satisfies the receiver's required ``attempt_store`` collaborator shape.
+    """
+
+    async def increment(self, *, adapter_id: str, inbound_id: str) -> int:
+        return 1
+
+    async def attempt_count(self, *, adapter_id: str, inbound_id: str) -> int:
+        return 0
+
+
 def _build_registry() -> Any:
     return _build_forwarded_inbound_registry(
         graph_content_store=_Store(),
@@ -112,6 +126,7 @@ async def test_pre_resolution_limiter_is_long_lived_across_dispatches() -> None:
     receiver = GatewayForwardedInboundReceiver(
         registry=registry,
         idempotency_store=_NeverCommittedStore(),
+        attempt_store=_StubAttemptStore(),
         audit_writer=FakeAuditWriter(),  # type: ignore[arg-type]
         dispatch=_capture_dispatch,
     )

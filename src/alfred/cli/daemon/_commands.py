@@ -807,6 +807,9 @@ async def _build_comms_boot_graph(
         CommsInboundOrchestratorAdapter,
         _build_comms_inbound_extractor,
     )
+    from alfred.memory.forwarded_dispatch_attempts import (
+        PostgresForwardedDispatchAttemptStore,
+    )
     from alfred.memory.inbound_idempotency import PostgresInboundIdempotencyStore
     from alfred.orchestrator.burst_limiter import BurstLimiter
     from alfred.plugins.web_fetch.content_store import ContentStore
@@ -868,6 +871,13 @@ async def _build_comms_boot_graph(
         # field comment + the resolved-open-question (shared-engine, must-not-dispose):
         # ``dispose_all_engines()`` reaps that one cached engine at process exit, and
         # disposing it here would break every other daemon component that shares it.
+        # Spec B G6-7-5 (#309): the durable forwarded-dispatch attempt ledger backing
+        # the ADR-0039 item-4b poison ceiling. Same shared-engine ``session_scope``
+        # shape as ``idempotency_store`` (NOT reaped on graph teardown — see that
+        # field's comment); the receiver threads it into every dispatched-edge call.
+        forwarded_dispatch_attempt_store = PostgresForwardedDispatchAttemptStore(
+            session_scope=build_boot_session_scope(settings),
+        )
         idempotency_store = PostgresInboundIdempotencyStore(
             session_scope=build_boot_session_scope(settings),
         )
@@ -925,6 +935,7 @@ async def _build_comms_boot_graph(
                 secret_broker=secret_broker,
             ),
             idempotency_store=idempotency_store,
+            attempt_store=forwarded_dispatch_attempt_store,
             audit_writer=audit,  # type: ignore[arg-type]
         )
         return _CommsBootGraph(
