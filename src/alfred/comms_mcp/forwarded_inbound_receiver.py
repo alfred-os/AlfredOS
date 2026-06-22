@@ -60,6 +60,7 @@ import structlog
 
 from alfred.audit import audit_row_schemas
 from alfred.comms_mcp.errors import (
+    ForwardedInboundAuditWriteError,
     InboundBodyMalformedError,
     InboundEnvelopeBodyMismatchError,
 )
@@ -238,28 +239,44 @@ class GatewayForwardedInboundReceiver:
         the observation time. NO raw T3 body, NO ``inbound_id`` (the body may not have
         re-parsed), NO ``str(exc)`` (spec §3.3). REUSES an in-domain ``result`` value
         (``refused`` for the K4/forge refusals, ``dropped`` for the malformed-body
-        drain) so no migration is needed. An ``append_schema`` write failure
-        PROPAGATES — the caller does NOT catch it, so the drain is short-circuited and
-        Task 4's disposition arm escalates the non-skippable audit-write fault.
+        drain) so no migration is needed. An ``append_schema`` write failure is wrapped
+        in the typed :class:`ForwardedInboundAuditWriteError` marker (mirroring
+        ``AdapterStatusAuditWriteError``) and PROPAGATES — the caller does NOT catch it,
+        so the drain is short-circuited and Task 4's disposition arm escalates the
+        non-skippable audit-write fault. Wrapping AT THE WRITE SITE lets the disposition
+        discriminate this loud-escalate fault from a raw ``SQLAlchemyError`` thrown by a
+        non-audit source whose recovery is leg replay.
         """
-        await self._audit_writer.append_schema(
-            fields=audit_row_schemas.COMMS_FORWARDED_INBOUND_DROPPED_FIELDS,
-            schema_name="COMMS_FORWARDED_INBOUND_DROPPED_FIELDS",
-            event="comms.forwarded_inbound.dropped",
-            actor_user_id=None,
-            subject={
-                "adapter_id": adapter_id,
-                "reason": reason,
-                "observed_at": datetime.now(UTC).isoformat(),
-            },
-            trust_tier_of_trigger="T3",
-            result=result,
-            cost_estimate_usd=0.0,
-            # sec-010: trace_id is a persisted, indexed column — the ENVELOPE
-            # adapter_id (closed-vocab, non-secret) is the only safe correlation
-            # token here (a drop carries no resolved user / inbound_id to hash).
-            trace_id=adapter_id,
-        )
+        try:
+            await self._audit_writer.append_schema(
+                fields=audit_row_schemas.COMMS_FORWARDED_INBOUND_DROPPED_FIELDS,
+                schema_name="COMMS_FORWARDED_INBOUND_DROPPED_FIELDS",
+                event="comms.forwarded_inbound.dropped",
+                actor_user_id=None,
+                subject={
+                    "adapter_id": adapter_id,
+                    "reason": reason,
+                    "observed_at": datetime.now(UTC).isoformat(),
+                },
+                trust_tier_of_trigger="T3",
+                result=result,
+                cost_estimate_usd=0.0,
+                # sec-010: trace_id is a persisted, indexed column — the ENVELOPE
+                # adapter_id (closed-vocab, non-secret) is the only safe correlation
+                # token here (a drop carries no resolved user / inbound_id to hash).
+                trace_id=adapter_id,
+            )
+        except Exception as exc:
+            # Loud + typed: a failed signed-audit write at this T3 receive seam is a
+            # non-skippable event. Raising the DISTINCT marker (not the raw backend
+            # error) lets the disposition's _route_forwarded_inbound recognise it past
+            # its blanket catch-and-continue and ESCALATE (log.error + restart request)
+            # — never replay (a raw SQLAlchemyError here would mislabel a transient DB
+            # blip as audit-unwritable and risk a restart storm). The cause is the bare
+            # backend error; no T3 body lands on the marker.
+            raise ForwardedInboundAuditWriteError(
+                f"forwarded-inbound audit write failed for {reason!r}"
+            ) from exc
 
 
 __all__ = ["GatewayForwardedInboundReceiver", "_ForwardedCollaborators"]

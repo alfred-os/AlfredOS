@@ -32,7 +32,10 @@ Invariants pinned here:
 * **F fail-loud** — ``PromoterRequiredError`` (a misconfig the dispatch raises) is
   NOT caught; it propagates.
 * **G audit-write failure** — a drop whose signed audit row fails to write does NOT
-  drain (we never ACK an unrecorded drop) and PROPAGATES (Task 4 escalates it).
+  drain (we never ACK an unrecorded drop) and PROPAGATES wrapped in the typed
+  :class:`ForwardedInboundAuditWriteError` marker (chaining the raw backend error as
+  its ``__cause__``) so Task 4's disposition discriminates it from a replayable fault
+  and escalates a restart.
 * **H order** — the signed audit write happens BEFORE the drain ``observe`` on every
   drop, so G short-circuits cleanly.
 """
@@ -46,7 +49,7 @@ import pytest
 
 from alfred.audit import audit_row_schemas
 from alfred.comms_mcp import audit_hash
-from alfred.comms_mcp.errors import PromoterRequiredError
+from alfred.comms_mcp.errors import ForwardedInboundAuditWriteError, PromoterRequiredError
 from alfred.comms_mcp.forwarded_inbound_receiver import (
     GatewayForwardedInboundReceiver,
     _ForwardedCollaborators,
@@ -490,13 +493,14 @@ async def test_audit_write_failure_on_drop_does_not_drain_and_propagates(
         ack_tracker=ack,
     )
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(ForwardedInboundAuditWriteError) as excinfo:
         await receiver.receive(
             params=_envelope(adapter_id=envelope_adapter, body=body), wire_seq=31
         )
 
-    # The audit-write failure propagates (Task 4 escalates it) ...
-    assert excinfo.value is _AUDIT_WRITE_FAILED
+    # The audit-write failure propagates wrapped in the typed marker (Task 4's
+    # disposition escalates a restart), chaining the raw backend error as its cause ...
+    assert excinfo.value.__cause__ is _AUDIT_WRITE_FAILED
     # ... and the drop was NOT drained: never ACK an unrecorded drop.
     assert ack.observed == []
     assert dispatch.calls == []

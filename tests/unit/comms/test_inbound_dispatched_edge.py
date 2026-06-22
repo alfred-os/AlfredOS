@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from alfred.comms_mcp import audit_hash
+from alfred.comms_mcp.errors import ForwardedInboundAuditWriteError
 from alfred.comms_mcp.inbound import process_inbound_message
 from tests.unit.comms_mcp._inbound_spies import (
     SpyAuditWriter,
@@ -102,6 +103,15 @@ class _RaisingAuditWriter(SpyAuditWriter):
     async def append_schema(self, *, event: str, **kwargs: Any) -> None:
         if event == "comms.inbound.dispatch_failed":
             raise RuntimeError("audit sink down")
+        await super().append_schema(event=event, **kwargs)
+
+
+class _RaisingReplayObservedAuditWriter(SpyAuditWriter):
+    """A spy audit writer that raises on the ``replay_observed`` row only."""
+
+    async def append_schema(self, *, event: str, **kwargs: Any) -> None:
+        if event == "comms.inbound.idempotency.replay_observed":
+            raise RuntimeError("replay audit sink down")
         await super().append_schema(event=event, **kwargs)
 
 
@@ -356,8 +366,11 @@ async def test_dispatch_failed_audit_write_failure_propagates() -> None:
     tracker = _OrderedAckTracker(order=order)
     orch = _RaisingDispatchOrchestrator(call_order=order)
     audit = _RaisingAuditWriter()
-    # The audit-write failure (not the dispatch RuntimeError) surfaces loud.
-    with pytest.raises(RuntimeError, match="audit sink down"):
+    # The dispatch_failed audit-write failure (not the dispatch RuntimeError) surfaces
+    # loud, wrapped in the typed ForwardedInboundAuditWriteError marker AT THE WRITE SITE
+    # so the disposition escalates a restart (Spec B G6-7-4); the raw backend error is
+    # chained as its __cause__.
+    with pytest.raises(ForwardedInboundAuditWriteError) as excinfo:
         await process_inbound_message(
             make_notification(inbound_id="frame-audit-fail", wire_seq=6),
             identity_resolver=SpyIdentityResolver(returns=make_resolved()),
@@ -369,6 +382,40 @@ async def test_dispatch_failed_audit_write_failure_propagates() -> None:
             ack_tracker=tracker,
             commit_at_dispatch_edge=True,
         )
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "audit sink down"
     # The frame is NOT committed and NOT observed — the leg will replay it.
     assert store.commit_once_calls == []
+    assert tracker.observed == []
+
+
+# --------------------------------------------------------------------------- #
+# 7 — AUDIT-WRITE FAILURE on the forwarded replay-observed row -> typed marker;
+#     no drain (the replay is never ACKed without its signed record)
+# --------------------------------------------------------------------------- #
+async def test_forwarded_replay_observed_audit_write_failure_propagates() -> None:
+    order: list[str] = []
+    store = _OrderedStore(already=True)._bind_order(order)
+    tracker = _OrderedAckTracker(order=order)
+    audit = _RaisingReplayObservedAuditWriter()
+    # The forwarded-path replay-observed audit-write failure surfaces loud, wrapped in
+    # the typed ForwardedInboundAuditWriteError marker AT THE WRITE SITE so the
+    # disposition escalates a restart (Spec B G6-7-4); the raw backend error chains as
+    # its __cause__. The drain ``observe`` is SHORT-CIRCUITED — never ACK a replay that
+    # was not signed-audited.
+    with pytest.raises(ForwardedInboundAuditWriteError) as excinfo:
+        await process_inbound_message(
+            make_notification(inbound_id="frame-replay-audit-fail", wire_seq=8),
+            identity_resolver=SpyIdentityResolver(returns=make_resolved()),
+            orchestrator=SpyOrchestrator(call_order=order),
+            burst_limiter=SpyBurstLimiter(call_order=order),
+            audit_writer=audit,
+            secret_broker=SpySecretBroker(),
+            idempotency_store=store,
+            ack_tracker=tracker,
+            commit_at_dispatch_edge=True,
+        )
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "replay audit sink down"
+    # The drain was short-circuited: a replay is never ACKed without its signed record.
     assert tracker.observed == []

@@ -51,7 +51,7 @@ import structlog
 from alfred.audit import audit_row_schemas
 from alfred.comms_mcp import audit_hash, observability
 from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
-from alfred.comms_mcp.errors import PromoterRequiredError
+from alfred.comms_mcp.errors import ForwardedInboundAuditWriteError, PromoterRequiredError
 
 if TYPE_CHECKING:
     from alfred.comms_mcp.protocol import InboundMessageNotification
@@ -536,7 +536,18 @@ async def process_inbound_message(
             adapter_id=notification.adapter_id,
         ):
             audit_hash.set_broker(secret_broker)
-            await _emit_idempotency_replay_observed(notification, audit_writer=audit_writer)
+            # Spec B G6-7-4 (#309): the forwarded-path replay-observed audit row is a
+            # SIGNED security fact. Wrap a write failure in the typed
+            # ForwardedInboundAuditWriteError marker AT THE WRITE SITE so the
+            # disposition escalates LOUD (restart) — never the leg-replay path a raw
+            # SQLAlchemyError takes. A failed audit short-circuits BEFORE the drain
+            # observe, so a replay is never ACKed without its signed record.
+            try:
+                await _emit_idempotency_replay_observed(notification, audit_writer=audit_writer)
+            except Exception as exc:
+                raise ForwardedInboundAuditWriteError(
+                    "forwarded-inbound replay-observed audit write failed"
+                ) from exc
             if ack_tracker is not None and notification.wire_seq is not None:
                 ack_tracker.observe(notification.wire_seq)
             _log.info(
@@ -687,8 +698,22 @@ async def process_inbound_message(
             # audit-write failure here PROPAGATES — it is not nested-swallowed.
             # ``Exception`` (not ``BaseException``) so cancellation tears down
             # cleanly rather than being audited as a dispatch fault.
+            #
+            # Spec B G6-7-4 (#309): the dispatch_failed row is a SIGNED security fact.
+            # A write failure here is wrapped in the typed
+            # ForwardedInboundAuditWriteError marker AT THE WRITE SITE so the
+            # disposition escalates LOUD (restart) — distinct from the original dispatch
+            # ``exc`` (whose recovery is leg replay, re-raised below when the audit
+            # succeeds). The wrapped audit fault replaces the re-raise: it is the
+            # non-skippable signal that takes precedence over the replayable dispatch
+            # fault.
             audit_hash.set_broker(secret_broker)
-            await _emit_dispatch_failed(notification, audit_writer=audit_writer)
+            try:
+                await _emit_dispatch_failed(notification, audit_writer=audit_writer)
+            except Exception as audit_exc:
+                raise ForwardedInboundAuditWriteError(
+                    "forwarded-inbound dispatch_failed audit write failed"
+                ) from audit_exc
             raise
         if idempotency_store is not None:
             await idempotency_store.commit_once(

@@ -86,6 +86,25 @@ class InboundReparseError(CommsMcpError):
     """
 
 
+class ForwardedInboundAuditWriteError(CommsMcpError):
+    """A signed-audit write FAILED on the gateway-forwarded receive path (G6-7-4, #309).
+
+    The typed marker the forwarded-inbound receive seam raises when an
+    ``append_schema`` for a terminal-drop / dispatched-edge audit row fails to write.
+    It mirrors :class:`alfred.comms_mcp.adapter_status_observer.AdapterStatusAuditWriteError`:
+    the failure is wrapped in this DISTINCT marker AT THE WRITE SITE (the receiver's
+    ``_audit_drop`` and ``inbound.py``'s forwarded-path audit emits), so the
+    disposition's ``_route_forwarded_inbound`` can recognise it past its blanket
+    catch-and-continue and ESCALATE loud (``log.error`` + restart request) — a failed
+    signed-audit write at this T3 trust seam is non-skippable (CLAUDE.md hard rules
+    #5/#7). It MUST escalate (restart), NEVER replay: a raw ``SQLAlchemyError`` on the
+    forwarded path also comes from non-audit sources (``has_committed`` / ``commit_once``
+    / ``orchestrator.dispatch``) whose designed recovery is LEG REPLAY, so the
+    audit-write fault MUST be type-discriminated from those. Carries NO raw T3 body
+    (the cause is the bare backend error).
+    """
+
+
 class InboundEnvelopeBodyMismatchError(InboundReparseError):
     """The envelope ``adapter_id`` did not equal the body-derived ``adapter_id``.
 
@@ -112,6 +131,7 @@ __all__ = [
     "CommsHandlerFailedError",
     "CommsMcpError",
     "DaemonUnavailableError",
+    "ForwardedInboundAuditWriteError",
     "InboundBodyMalformedError",
     "InboundBurstDroppedError",
     "InboundEnvelopeBodyMismatchError",
