@@ -1197,14 +1197,17 @@ class GatewayCoreLink:
            passed (binding) ``adapter_id`` — the envelope is the method-bearing
            (``gateway.adapter.inbound``) frame the core's ``_route_notification`` discriminates
            by METHOD (G6-7-4), never by an id heuristic;
-        2. serializes the WHOLE envelope to ``payload: bytes`` via ``model_dump_json``. The
-           body's BYTE CONTENT is stable through serialize -> ReplayBuffer -> core re-parse,
-           so the embedded ``inbound_id`` is byte-stable across the leg's ReplayBuffer replay
-           (SEC-309-2). NOTE: a ``str`` ``body`` re-validates core-side as ``bytes`` (the wire
-           model's ``bytes | str`` union coerces a JSON string to ``bytes``) — the content is
-           preserved verbatim, but the runtime TYPE flips ``str`` -> ``bytes``. The disposition
-           hands a ``str`` body precisely so the envelope serializer never base64-round-trips a
-           ``bytes`` body lossily;
+        2. serializes the envelope as a **JSON-RPC notification frame** — no ``id`` (fire-and-
+           forget, mirroring ``inbound.message`` itself) — using
+           ``json.dumps({"jsonrpc": "2.0", "method": GATEWAY_ADAPTER_INBOUND, "params":
+           envelope.model_dump(mode="json")}).encode()``. The opaque body rides verbatim inside
+           ``params.body`` (payload-blind, SEC-309-2): its BYTE CONTENT is stable through
+           serialize -> ReplayBuffer -> core re-parse, so the embedded ``inbound_id`` is
+           byte-stable across replay. NOTE: a ``str`` ``body`` re-validates core-side as
+           ``bytes`` (the wire model's ``bytes | str`` union coerces a JSON string to
+           ``bytes``) — the content is preserved verbatim, but the runtime TYPE flips ``str``
+           -> ``bytes``. The disposition hands a ``str`` body precisely so the envelope
+           serializer never base64-round-trips a ``bytes`` body lossily;
         3. routes ``payload`` through the :class:`LegRouter` the link already holds (the same
            ``set_leg_router`` binding ``submit_tui_unit`` uses) — the per-adapter leg's seq/ack
            + ReplayBuffer give the forwarded inbound resume + replay byte-stability for free.

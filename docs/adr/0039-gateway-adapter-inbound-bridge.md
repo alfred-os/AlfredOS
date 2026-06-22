@@ -261,6 +261,48 @@ assigns G6-6 to the separate adversarial-corpus / `adversarial.yml`-to-required 
   fire-and-forget, so no inbound ack exists or is needed; the only request/response is the
   outbound direction, which is #235.
 
+## Amendments
+
+### 2026-06-22 — G6-7-3 forward shape was non-conformant; corrected in G6-7-4 Task 0 (commit af9c3b5e)
+
+**What the original decision said (item 3).** The core's `_route_notification` gains a
+`gateway.adapter.inbound` arm that discriminates the forwarded inbound from other leg frames by
+**METHOD NAME**.
+
+**What G6-7-3 actually shipped.** `forward_adapter_inbound` serialized the
+`GatewayAdapterInboundEnvelope` via `model_dump_json()` as a **bare JSON object** — no
+`"jsonrpc"` field, no `"method"` field. The daemon pump parses leg units as JSON-RPC frames; a
+frame with no `"method"` key is treated as a **response frame** (it has no `id` either, so it is
+silently dropped). Item 3's method-name discriminator was therefore **unimplementable** against the
+G6-7-3 forward shape: the core's router never saw a `gateway.adapter.inbound` method to route.
+
+**Correction (G6-7-4 Task 0, commit af9c3b5e).** `forward_adapter_inbound` now serializes the
+forward as a **JSON-RPC notification frame**:
+
+```json
+{"jsonrpc": "2.0", "method": "gateway.adapter.inbound", "params": {"adapter_id": "…", "body": "…"}}
+```
+
+No `"id"` (fire-and-forget, mirroring the child's own `inbound.message` notification). The opaque
+body rides verbatim inside `params.body` (payload-blind, byte-stable for G0 — SEC-309-2
+preserved). The Decision body above is unchanged and remains authoritative; this amendment records
+the G6-7-3 non-conformance and the G6-7-4 correction.
+
+**PERF-309-1 — unbounded per-replay `quarantined_extract` cost (deferred to G6-7-5).** Item 4b
+specifies a dispatch-attempt poison ceiling that bounds the replay cost of a deterministically-
+failing forwarded frame. That ceiling (**item 4b**) is **not yet implemented** — it is deferred to
+G6-7-5. Today, a forwarded frame that fails dispatch on every attempt replays **unbounded** across
+core reconnects, re-charging the `quarantined_extract` cost on each replay. This is contained by
+two test-only posture facts:
+
+- The gateway-hosted Discord forward leg is **test-only** until G6-7-5 ships the poison ceiling
+  and G6-7-8 completes the flag-day; no production inbound traverses the forwarded path today.
+- The daemon's quarantined child runs a **deterministic-echo loop** (no real LLM, no provider
+  cost, no network egress) — PR-S4-11c-2b; the real LLM child is hard-blocked behind issue #230.
+
+Item 4b does NOT bound replay cost today. Do not imply otherwise when describing the current
+system.
+
 ## Resolved decisions (formerly open maintainer-steer flags)
 
 - **F1 (runner factoring):** the injectable inbound-disposition seam with the daemon dispatch
