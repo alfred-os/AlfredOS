@@ -267,6 +267,20 @@ def test_gateway_leg_runner_built_with_forwarded_receiver(
     runner = _ReceiverCapturingRunner.instances[0]
     assert isinstance(runner.forwarded_inbound_receiver, _Recv)
 
+    # G6-7-5 Task 7 (#309): the boot graph threaded a REAL durable attempt ledger into
+    # the receiver — the Postgres-backed ADR-0039 item-4b poison-ceiling store, NOT a
+    # fake. Its constructor only captures the ``session_scope`` callable (no DB at build
+    # time), so the Postgres-less boot harness still constructs it. The store is a
+    # builder-local threaded into the receiver, never a ``_CommsBootGraph`` field — so
+    # ``aclose`` cannot reach (and so never disposes) it; the shared DSN-cached engine is
+    # reaped only at process exit (pinned by the promoter-wiring module's
+    # ``test_graph_aclose_skips_close_for_non_content_store``).
+    from alfred.memory.forwarded_dispatch_attempts import PostgresForwardedDispatchAttemptStore
+
+    assert isinstance(
+        runner.forwarded_inbound_receiver._attempt_store, PostgresForwardedDispatchAttemptStore
+    )
+
     # The receiver's ack tracker is the SAME instance bound to the inbound handler.
     assert len(receiver_trackers) == 1
     assert len(handler_trackers) == 1
