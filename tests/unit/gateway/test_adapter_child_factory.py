@@ -147,10 +147,12 @@ class _FakeRunner:
         transport: GatewayAdapterStdioTransport,
         handshake_raises: Exception | None = None,
         pump_blocks: asyncio.Event | None = None,
+        pump_raises: Exception | None = None,
     ) -> None:
         self._transport = transport
         self._handshake_raises = handshake_raises
         self._pump_blocks = pump_blocks
+        self._pump_raises = pump_raises
         self.handshake_calls = 0
         self.pump_calls = 0
 
@@ -163,6 +165,11 @@ class _FakeRunner:
 
     async def pump(self) -> None:
         self.pump_calls += 1
+        if self._pump_raises is not None:
+            # A defensive "unexpected fault escaped the pump" — the pump's normal terminal
+            # arms RETURN, so a raise here is a bug/unhandled transport fault (Spec B
+            # G6-7-3 / #309). ``wait_until_exit`` must reap the live child, not let it leak.
+            raise self._pump_raises
         if self._pump_blocks is not None:
             # Park until released (or cancelled) — the supervised steady state. The real
             # pump closes the transport on a cancel; mirror it so teardown is observable.
@@ -181,9 +188,11 @@ class _RunnerFactory:
         *,
         handshake_raises: Exception | None = None,
         pump_blocks: asyncio.Event | None = None,
+        pump_raises: Exception | None = None,
     ) -> None:
         self._handshake_raises = handshake_raises
         self._pump_blocks = pump_blocks
+        self._pump_raises = pump_raises
         self.transport: GatewayAdapterStdioTransport | None = None
         self.adapter_id: str | None = None
         self.runner: _FakeRunner | None = None
@@ -195,6 +204,7 @@ class _RunnerFactory:
             transport=transport,
             handshake_raises=self._handshake_raises,
             pump_blocks=self._pump_blocks,
+            pump_raises=self._pump_raises,
         )
         return self.runner
 
@@ -673,6 +683,61 @@ async def test_wait_until_exit_cancel_during_pump_unwinds() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     # The cancelled pump closed the transport (clean EOF for the child); teardown reaps.
+    await child.aclose()
+    assert proc.terminate_calls == 1
+
+
+async def test_wait_until_exit_pump_fault_reaps_child_and_returns_crash_tuple() -> None:
+    """A non-Cancelled pump fault reaps the child + returns a bounded crash tuple (CR-1).
+
+    ``pump``'s normal terminal arms (EOF / crash / malformed / shutdown) RETURN — so a
+    raised non-``CancelledError`` exception is the defensive "a bug or unhandled transport
+    fault escaped" case. If it propagated out of ``wait_until_exit`` the live Popen would
+    leak (no reap) — violating the H1 "no leaked sandbox child" discipline (CLAUDE.md hard
+    rule #7). The fix: terminate-and-reap the child and return a bounded, payload-blind
+    crash tuple so the supervisor's crash arm restarts/breakers it instead of an exception
+    escaping ``supervise_one``. The detail carries NO exception text (hard rule #5).
+    """
+    proc = _FakePopen()
+    popen_factory = _PopenFactory(proc=proc)
+    runner_factory = _RunnerFactory(pump_raises=RuntimeError("secret-bearing pump fault"))
+    factory = _build_factory(popen_factory=popen_factory, runner_factory=runner_factory)
+
+    child = await factory.spawn_and_handshake(
+        adapter_id="discord", epoch="e1", deliver_credential=_DeliverRecorder()
+    )
+    error_class, detail = await child.wait_until_exit()
+    # A bounded, closed-vocab crash tuple — NOT the exception text (payload-blind, #5).
+    assert error_class == "AdapterChildExited"
+    assert detail == "exit_code=pump_failed"
+    assert "secret-bearing" not in detail
+    # The live child was terminate-and-reaped (no leaked sandbox child) — H1 / hard rule #7.
+    assert proc.terminate_calls == 1
+    assert proc.wait_calls == 1
+    await child.aclose()
+
+
+async def test_wait_until_exit_pump_cancel_propagates_without_reaping() -> None:
+    """A ``CancelledError`` from the pump propagates; ``wait_until_exit`` does NOT reap (CR-1).
+
+    A planned-stop cancellation still propagates and is reaped via ``aclose`` on the
+    supervisor's teardown path — ``wait_until_exit`` must NOT reap on cancel (``aclose``
+    owns it), distinguishing the planned-stop cancel from an unexpected pump fault.
+    """
+    proc = _FakePopen()
+    popen_factory = _PopenFactory(proc=proc)
+    runner_factory = _RunnerFactory(pump_raises=asyncio.CancelledError())
+    factory = _build_factory(popen_factory=popen_factory, runner_factory=runner_factory)
+
+    child = await factory.spawn_and_handshake(
+        adapter_id="discord", epoch="e1", deliver_credential=_DeliverRecorder()
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await child.wait_until_exit()
+    # ``wait_until_exit`` did NOT reap — ``aclose`` (the supervisor teardown) owns it.
+    assert proc.terminate_calls == 0
+    assert proc.wait_calls == 0
+    # ``aclose`` reaps it on the teardown path.
     await child.aclose()
     assert proc.terminate_calls == 1
 

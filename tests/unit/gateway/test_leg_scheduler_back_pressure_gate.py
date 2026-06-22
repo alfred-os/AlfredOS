@@ -122,13 +122,28 @@ async def test_set_back_pressure_gate_for_unregistered_adapter_is_loud() -> None
 
 async def test_deregister_drops_back_pressure_gate() -> None:
     # A deregistered leg's gate must not linger (the reap-on-teardown contract): re-using
-    # the adapter id after deregister starts with no gate.
+    # the adapter id after deregister must NOT touch the STALE gate. We prove the registry
+    # entry was actually dropped (not just the leg) by re-registering a fresh leg, draining
+    # a frame, and asserting the OLD gate stays clear — if deregister had failed to drop the
+    # stale gate, the drain's resume-set would have set it.
     cap = GlobalReplayCap(max_total_bytes=1_000_000)
     core = _RecordingCoreLink()
     sched = GatewayLegScheduler(core, max_per_leg_queue_bytes=1_000_000)
     sched.register_leg(_make_leg("discord", cap))
-    gate = asyncio.Event()
-    sched.set_back_pressure_gate("discord", gate)
+    stale_gate = asyncio.Event()
+    stale_gate.clear()  # the (about-to-be-deregistered) leg's back-pressure gate
+    sched.set_back_pressure_gate("discord", stale_gate)
     sched.deregister_leg("discord")
-    # The gate registry dropped the entry; a fresh registration has no stale gate.
     assert "discord" not in sched.registered_adapters
+
+    # Re-register the SAME adapter id with a fresh leg + NO gate, enqueue + drain a frame.
+    sched.register_leg(_make_leg("discord", cap))
+    sched.enqueue("discord", b"frame")
+    async with asyncio.TaskGroup() as tg:
+        pump = tg.create_task(sched.run())
+        await _drain_until(lambda: bool(core.writes))
+        pump.cancel()
+    # The drain resumed no gate (the fresh leg has none), and critically did NOT set the
+    # STALE gate — proving deregister dropped the stale gate-registry entry.
+    assert core.writes and core.writes[0][0] == "discord"
+    assert not stale_gate.is_set()
