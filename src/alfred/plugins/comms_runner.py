@@ -62,6 +62,7 @@ from alfred.plugins.inbound_disposition import (
     CredentialResolverLike,
     InboundDisposition,
     SessionDispatchDisposition,
+    _ForwardedReceiverLike,
 )
 
 if TYPE_CHECKING:
@@ -186,6 +187,7 @@ class CommsPluginRunner:
         credential_resolver: CredentialResolverLike | None = None,
         inbound_disposition: InboundDisposition | None = None,
         back_pressure_gate: asyncio.Event | None = None,
+        forwarded_inbound_receiver: _ForwardedReceiverLike | None = None,
     ) -> None:
         # Spec B G6-7-3 (#309) — FORK-A: ``session`` is OPTIONAL. The DAEMON wires a
         # real :class:`AlfredPluginSession` (the capability gate + the audited state
@@ -240,6 +242,16 @@ class CommsPluginRunner:
         # byte-for-byte unchanged. Shutdown MUST win the gate-await so a permanently
         # cleared gate during shutdown never wedges the pump.
         self._back_pressure_gate = back_pressure_gate
+        # Spec B G6-7-4 (#309): the per-boot gateway-forwarded inbound receiver. The
+        # DAEMON gateway leg (the ``with_credential_resolver=True`` socket carrier)
+        # injects the singleton receiver so the default-disposition construction below
+        # threads it into the ``SessionDispatchDisposition``; that disposition routes a
+        # ``gateway.adapter.inbound`` notification to it (re-parse + dispatched-edge
+        # commit) instead of the session's unknown_method refusal. ``None`` (the stdio
+        # daemon-spawned legs / a directly-injected disposition) leaves the routing OFF
+        # — those legs carry no forwarded inbound, so the disposition's None-branch
+        # falls through to the fail-closed refusal (byte-for-byte unchanged).
+        self._forwarded_inbound_receiver = forwarded_inbound_receiver
         # Outbound request/response correlation (Wave 1, #237). The transport has
         # no ``request()`` by design — the single-reader rule means only the pump
         # reads, so the runner OWNS the pending map: ``send_request`` registers a
@@ -290,6 +302,7 @@ class CommsPluginRunner:
                 adapter_id=adapter_id,
                 send_notification=self.send_notification,
                 request_restart=self._request_restart,
+                forwarded_inbound_receiver=forwarded_inbound_receiver,
             )
 
     async def send_request(

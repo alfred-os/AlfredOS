@@ -97,10 +97,15 @@ class _FakeRunner:
         max_in_flight_notifications: int = 32,
         boot_epoch: str | None = None,
         credential_resolver: Any = None,
+        forwarded_inbound_receiver: Any = None,
     ) -> None:
         self.session = session
         self.transport = transport
         self.adapter_id = adapter_id
+        # Spec B G6-7-4 (#309): the boot path threads the forwarded-inbound receiver on
+        # the gateway leg ONLY; the STDIO (daemon-spawned) carrier gets None. Record it
+        # so the spawn test can assert the stdio leg stays receiver-LESS.
+        self.forwarded_inbound_receiver = forwarded_inbound_receiver
         # Spec A G3-2 (#237): the boot path now threads the per-boot epoch into the
         # runner so it rides the handshake (architect H-2). Record it for assertions.
         self.boot_epoch = boot_epoch
@@ -235,6 +240,10 @@ def test_enabled_adapter_spawns_and_registers(
     # round-trip — the resolver is wired ONLY on the socket (gateway) leg. So a
     # stdio-spawned adapter's runner gets credential_resolver=None.
     assert runner.credential_resolver is None
+    # Spec B G6-7-4 (#309): the STDIO carrier carries NO forwarded inbound either —
+    # the receiver is wired ONLY on the gateway leg. A stdio-spawned runner gets
+    # forwarded_inbound_receiver=None (the default-disposition refusal path unchanged).
+    assert runner.forwarded_inbound_receiver is None
     # PR-S4-11b deadlock fix: the runner's in-flight dispatch-task cap is wired
     # from the SAME Settings field as the session's dispatch semaphore so the two
     # backpressure bounds match. The boot env here leaves the field at its default.
