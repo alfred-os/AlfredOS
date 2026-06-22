@@ -101,13 +101,19 @@ _CHILD_EXITED_ERROR_CLASS: Final[str] = "AdapterChildExited"
 class _RunnerLike(Protocol):
     """The session-bearing runner the factory drives over the spawned child.
 
-    Satisfied by :class:`alfred.plugins.comms_runner.CommsPluginRunner`. The factory
-    only ``await``s ``start_and_handshake`` — the steady-state pump lifetime belongs to
-    the daemon's supervised TaskGroup, NOT the factory (the factory just gets the child
-    to ``up``).
+    Satisfied by :class:`alfred.plugins.comms_runner.CommsPluginRunner` (and the
+    gateway's :class:`alfred.gateway.inbound_forward_runner.GatewayInboundForwardRunner`).
+    The factory ``await``s ``start_and_handshake`` to bring the child to ``up``; the
+    steady-state ``pump`` is driven by the SUPERVISED child lifetime
+    (:meth:`_GatewayAdapterChild.wait_until_exit`), NOT the factory — but the runner MUST
+    expose it so the supervised lifetime can own the pump (Spec B G6-7-3 / #309: without
+    a driven pump a hosted child's ``inbound.message`` reaches nothing — the
+    production-unwired trap).
     """
 
     async def start_and_handshake(self) -> None: ...
+
+    async def pump(self) -> None: ...
 
 
 def _launcher_path() -> str:
@@ -172,29 +178,52 @@ async def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
 class _GatewayAdapterChild:
     """A spawned + handshaked adapter child the supervisor awaits + reaps (H1 b/c).
 
-    Wraps the live :class:`subprocess.Popen` + its :class:`GatewayAdapterStdioTransport`.
-    :meth:`wait_until_exit` blocks on the process exit off-loop (cancellation-safe);
-    :meth:`aclose` is the supervisor's restart/crash/shutdown teardown — it terminates +
-    reaps the Popen and closes the transport pipes (idempotent).
+    Wraps the live :class:`subprocess.Popen` + its :class:`GatewayAdapterStdioTransport`
+    + the :class:`_RunnerLike` (Spec B G6-7-3 / #309). :meth:`wait_until_exit` DRIVES the
+    runner's pump (the supervised steady state) until the child's stdout reaches EOF
+    (the child exiting), THEN reaps the process exit code off-loop; :meth:`aclose` is the
+    supervisor's restart/crash/shutdown teardown — it terminates + reaps the Popen and
+    closes the transport pipes (idempotent).
     """
 
     def __init__(
-        self, *, process: subprocess.Popen[bytes], transport: GatewayAdapterStdioTransport
+        self,
+        *,
+        process: subprocess.Popen[bytes],
+        transport: GatewayAdapterStdioTransport,
+        runner: _RunnerLike,
     ) -> None:
         self._process = process
         self._transport = transport
+        # Spec B G6-7-3 (#309): the supervised lifetime OWNS the pump. The factory built
+        # the runner + ran its handshake, but in the pre-G6-7-3 factory the runner was
+        # DROPPED — so ``pump()`` never ran and a hosted child's ``inbound.message``
+        # reached nothing (the production-unwired trap). Holding the runner here and
+        # driving its pump in :meth:`wait_until_exit` keeps "the supervised lifetime owns
+        # the pump" literally true: the pump returns on the child's stdout EOF (= the
+        # child exiting) and a planned-stop cancellation of ``wait_until_exit`` cancels
+        # the pump (the runner's ``finally`` closes the transport — cancellation-safe).
+        self._runner = runner
         self._closed = False
 
     async def wait_until_exit(self) -> tuple[str, str]:
-        """Block until the child process exits; return ``(error_class, detail)``.
+        """Drive the pump until the child's stdout EOFs, then reap the exit code.
 
-        The blocking ``Popen.wait`` runs in the default executor so the loop is never
-        blocked. CANCELLATION-SAFE (H1c): if the awaiting task is cancelled, the
-        ``run_in_executor`` wait keeps running on its thread — the child is NOT reaped
-        by the cancelled task; reaping happens via :meth:`aclose` on the supervisor's
-        teardown path. The detail is the closed-vocab exit code only (payload-blind,
-        #5); the emitter does the REDACT-then-bound.
+        The supervised steady state (Spec B G6-7-3 / #309). ``await self._runner.pump()``
+        runs the single-reader pump that FORWARDS each ``inbound.message`` to the core; it
+        returns when the child's stdout reaches a clean EOF (the child exiting) or on a
+        transport crash. THEN the blocking ``Popen.wait`` reaps the exit code in the
+        default executor so the loop is never blocked.
+
+        CANCELLATION-SAFE (H1c): if the awaiting task is cancelled (a planned stop), the
+        pump's own cancellation-safe teardown closes the transport; the child is reaped via
+        :meth:`aclose` on the supervisor's teardown path, NOT the cancelled task. The detail
+        is the closed-vocab exit code only (payload-blind, #5); the emitter does the
+        REDACT-then-bound.
         """
+        # Drive the pump (forward the child's inbound) until its stdout EOFs / crashes. The
+        # pump owns its own transport-close on every terminal arm; we then reap the code.
+        await self._runner.pump()
         loop = asyncio.get_running_loop()
         returncode = await loop.run_in_executor(None, self._process.wait)
         return (_CHILD_EXITED_ERROR_CLASS, f"exit_code={returncode}")
@@ -290,7 +319,7 @@ class GatewayAdapterChildFactory:
                 f"adapter handshake failed (adapter_id={adapter_id!r})"
             ) from exc
 
-        return _GatewayAdapterChild(process=process, transport=transport)
+        return _GatewayAdapterChild(process=process, transport=transport, runner=runner)
 
     def _spawn_in_fd3_window(
         self, *, plugin_id: str, module: str
