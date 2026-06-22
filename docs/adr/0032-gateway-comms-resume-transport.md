@@ -3,7 +3,7 @@
 - **Status**: Proposed (first cut — codec / wire-format only; G3/G4 amend)
 - **Date**: 2026-06-13
 - **Slice**: Spec A (Comms-Resume Gateway) — `docs/superpowers/specs/2026-06-13-comms-gateway-resume-design.md`
-- **Relates to**: ADR-0025 (the line-delimited comms transport this extends), ADR-0031 (the TUI socket carrier), ADR-0033 (core lifecycle signalling / epoch, G1), issue #237 (graduation criterion #7).
+- **Relates to**: ADR-0025 (the line-delimited comms transport this extends), ADR-0031 (the TUI socket carrier), ADR-0033 (core lifecycle signalling / epoch, G1), ADR-0036 (the adapter-hosting inversion whose trust posture this substrate serves), issue #237 (graduation criterion #7).
 - **Supersedes**: —
 - **Amended by**: [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — Spec B reuses this wire for the gateway-hosted adapter legs + the spawn-credential control frames.
 
@@ -237,3 +237,33 @@ The G4a section and the G4b-2a-pre framing are **not deleted** — they record t
 > **G6-4a annotation (#288):** Spec B G6-4 multiplexes N adapter legs (+ the TUI leg) over this transport, each leg owning its own `ReplayBuffer` + per-leg seq counter. `relay_to_core` is **retired as a write path**: the leg-agnostic `core_link.write_leg_unit(adapter_id, payload, seq, ack)` is now the **sole physical writer** onto the single core transport. The seq-mint + `buffer.append` + breaker-feed that previously lived in `relay_to_core` move into the per-leg `GatewayLeg` (drained by the fair `GatewayLegScheduler`); the capture → `reset_for_new_epoch` → `_flush_pending_replay` reconnect sequence and the `_replay_pending` FIFO gate described above re-target `write_leg_unit` instead of `relay_to_core`.
 >
 > The resume invariants are **UNCHANGED** — only the implementation locus moved: (1) **single physical writer** onto the core transport (now `write_leg_unit`, snapshotting `_current_core_transport` exactly as before); (2) **append-before-send** (the per-leg buffer append precedes the wire send at drain time, so a frame is replayable the instant it can be lost); (3) **per-connection seq reset** on each handshake (`reset_for_new_epoch` rebinds the floor; replay re-mints fresh seqs from 0), with cross-restart exactly-once still anchored on the durable in-payload `inbound_id` keyed by G0 `commit_once` on `(adapter_id, inbound_id)`. The gateway stays payload-blind throughout (the `adapter_id` rides the out-of-band envelope; the body is never decoded). See [ADR-0036](0036-gateway-adapter-hosting-inversion.md) (G6-4 annotation, K1).
+
+## Rejected alternative — an off-the-shelf message-queue / broker substrate (recorded 2026-06-22)
+
+This section closes a **documentation gap**: the original ADR (and ADR-0031) went straight from the requirement to a bespoke seq/ack-over-unix-socket transport without recording why an off-the-shelf message broker was not used. It is recorded retroactively after G0..G6-7-3 shipped, and it **records — it does not reopen — that decision**.
+
+**What we in fact built is a message queue.** Taken together, the `ReplayBuffer` (G4a), the `A1` seq/ack codec + `SeqDedupWindow` (G2), the `BoundedSeqAckTracker` cumulative ack, the per-leg `GatewayLegScheduler`, and the G0 `commit_once` ledger ARE the primitives of a single-partition durable log: producer offsets (`seq`), consumer acknowledgement (cumulative `ack`), replay-from-offset (reconnect-replay, G4b-2b), at-least-once delivery, and an idempotency/dedup table (`(adapter_id, inbound_id)`). The honest framing of the design choice is therefore **"hand-rolled in-process log vs. an external broker,"** not "queue vs. no queue."
+
+**Alternatives weighed.** Kafka / NATS JetStream / RabbitMQ — all provide durable, ordered, offset-acked logs with consumer groups and replay out of the box. The **strongest** candidate is **Redis Streams** (`XADD` / `XREADGROUP` / `XACK`): Redis is **already a stack dependency** (`Settings.redis_url`; used by the web-fetch and comms `ContentStore`s), so it would add durable replay + offsets + dedup with **no new fourth-party dependency**.
+
+**Why the in-process local log was chosen over a broker:**
+
+1. **Trust-surface minimization is the dominant constraint (ADR-0036).** A broker is a new always-on, network-listening process sitting **between the two most trust-sensitive components** (the network-facing privileged gateway and the connectivity-free core) — a component to authenticate (mTLS / SASL), DLP-audit, and secure. The entire adapter-hosting-inversion thesis is to *minimize* the network-facing trust surface; a broker enlarges it. The chosen substrate is a **local `0600` / `SO_PEERCRED` unix socket between two co-located, same-uid processes** with zero network exposure (ADR-0031).
+
+2. **The acknowledgement is trust-coupled, which a broker does not give for free.** The G6-7-4 *dispatched-edge* ack (the in-progress core-receive slice, ADR-0039 item 4 — design locked, not yet landed) is defined so the ack means "the quarantined extractor + capability gate **dispatched** this," not "a consumer **received** this." A broker's delivery-ack is the latter. The G0 Postgres ledger and the dispatched-edge commit/ack logic would still be required **on top of** any broker — so a broker replaces the transport + replay layer only, not the idempotency / exactly-once layer that is the hard part. The bespoke seq/ack was co-designed with those semantics.
+
+3. **Durability belongs in the core tier, not the gateway.** The comms-adapter contract is "stateless beyond a small connection buffer"; the gateway's `ReplayBuffer` is deliberately **in-memory and zero-on-removal** (it pins *pre-DLP operator input* in the always-up process, a security property — see the G4a amendment). The durable authority is the core's Postgres `InboundIdempotency` ledger. A broker would place durability — and the opaque T3-bearing bodies — in the wrong tier.
+
+4. **Payload-blindness + T3 retention.** AlfredOS *does* persist T3 in Redis where it is deliberate and bounded — the web-fetch / comms `ContentStore` holds promoted sub-payload blobs behind **single-use (`GETDEL`), TTL'd, tier-wrapped (`TaggedContent[T3]`), content-addressed** handles: an access-controlled store with its own DLP posture, not an undifferentiated dump. Using a broker as the *transport* is categorically different — it would route the **entire opaque inbound stream**, every body byte-for-byte, through a shared, durable, **non-zeroing** log: the precise retention / DLP / crypto-erase concern the `ReplayBuffer`'s bounded TTL + best-effort zeroing (this ADR's *ReplayBuffer security-bounded retention (G4a)* amendment, incl. its residual-risk caveat) was built to bound. The local leg keeps each body a transient, payload-blind, zeroed-on-discard byte run; the sanctioned ContentStore is a deliberate, narrowly-scoped exception, **not** a precedent for putting the whole transport stream in a shared broker.
+
+5. **Scale.** AlfredOS is self-hostable at single-to-low-N users with conversational (human-chat) inbound rates. Kafka is categorically over-built; even Redis Streams' consumer-group machinery is heavier than one bounded in-process `ReplayBuffer` per client plus a Postgres dedup row. The bespoke leg is a small, pure, hypothesis-property-tested + adversarially-gated unit.
+
+**Cost accepted.** A hand-rolled log is where the subtle bugs surface — the no-drop-on-full-leg gap, the lost-wakeup analysis, the H3 stale-write race, and the dispatched-edge commit/ack semantics — each of which a battle-tested broker would have handled. We **own that complexity** in exchange for the trust-posture, tier-placement, and dependency-footprint properties above. This is a deliberate trade, not an oversight.
+
+**Revisit triggers (when a broker — Redis Streams first, given it is in-stack — earns its keep).** The decision is conditioned on the *co-located, single-host, low-N* topology. Re-open it when any of these change:
+
+- **Multi-host topology** — the gateway and core stop being co-located, so "two same-uid processes over a unix socket" is no longer the substrate (a broker becomes the natural cross-host transport).
+- **The remote-management plane (D1)** — captured as an open question in `docs/ARCHITECTURE.md`; a management surface fanning events across processes is a broker-shaped problem.
+- **Spec C egress fan-out** — a high-fan-out outbound control plane may justify a durable broker where the inbound leg did not.
+
+**Status:** this records the rationale; it does **not** change the substrate. G0..G6-7 remain on the bespoke leg.
