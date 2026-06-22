@@ -30,7 +30,7 @@ from alfred.audit import audit_row_schemas
 
 
 def test_slice_4_fieldset_names_count() -> None:
-    """Roster must contain exactly 39 entries (post-marker field-set surface).
+    """Roster must contain exactly 40 entries (post-marker field-set surface).
 
     Adding a new post-marker ``*_FIELDS`` constant requires bumping this
     assertion AND extending ``AUDIT_FIELDSET_ROSTER`` in the same commit. The
@@ -51,9 +51,12 @@ def test_slice_4_fieldset_names_count() -> None:
     dispatch-failure row; content-free, distinct ``result="dispatch_failed"``); and
     G6-7-4 Task 3 (Spec B / #309 / ADR-0039) added
     ``COMMS_FORWARDED_INBOUND_DROPPED_FIELDS`` — the 39th (the receive-boundary
-    terminal-drop row; content-free, reuses in-domain ``refused`` / ``dropped``).
+    terminal-drop row; content-free, reuses in-domain ``refused`` / ``dropped``);
+    and G6-7-5 (Spec B / #309 / ADR-0039 item 4b) added
+    ``COMMS_INBOUND_POISONED_FIELDS`` — the 40th (the dispatched-edge dead-letter
+    row; content-free plus a bounded ``attempt_count`` int, ``result="poisoned"``).
     """
-    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 39
+    assert len(audit_row_schemas.AUDIT_FIELDSET_ROSTER) == 40
 
 
 def test_slice_4_roster_matches_module_attrs() -> None:
@@ -267,6 +270,20 @@ def test_refusal_rows_have_reason_discriminator(constant_name: str) -> None:
 def test_daemon_boot_failed_has_failure_reason() -> None:
     """``DAEMON_BOOT_FAILED_FIELDS`` uses ``failure_reason`` (boot-specific name)."""
     assert "failure_reason" in audit_row_schemas.DAEMON_BOOT_FAILED_FIELDS
+
+
+def test_comms_inbound_poisoned_fields() -> None:
+    """``COMMS_INBOUND_POISONED_FIELDS`` is the G6-7-5 dead-letter field-set.
+
+    Content-free by construction (closed-vocab ``adapter_id``, peppered
+    ``inbound_id_hash``, ``observed_at``) plus the bounded ``attempt_count``
+    int — no raw T3 body, no user text.
+    """
+    from alfred.audit.audit_row_schemas import COMMS_INBOUND_POISONED_FIELDS
+
+    assert COMMS_INBOUND_POISONED_FIELDS == frozenset(  # noqa: SIM300
+        {"adapter_id", "inbound_id_hash", "attempt_count", "observed_at"}
+    )
 
 
 # ---------------------------------------------------------------------------
