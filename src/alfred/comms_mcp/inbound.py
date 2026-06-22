@@ -752,7 +752,13 @@ async def process_inbound_message(
 
     inbound_message_id = uuid.uuid4().hex
 
-    # 4) Observability — the T3 promotion row.
+    # 4) Observability — the T3 promotion row. INTENTIONALLY NOT wrapped in
+    # ForwardedInboundAuditWriteError (unlike replay_observed / dispatch_failed):
+    # this emit precedes commit_once + observe, so a raw audit-write failure here
+    # propagates with NOTHING committed or observed → the leg replays (re-charging
+    # quarantined_extract, bounded by G6-7-5). The typed-marker escalation is reserved
+    # for audit failures adjacent to an irreversible drain/commit; escalating a
+    # replayable pre-commit emit would cause a restart-storm on a transient audit blip.
     await _emit_t3_promotion(
         notification,
         resolved=resolved,
@@ -819,8 +825,13 @@ async def process_inbound_message(
                 inbound_id=notification.inbound_id,
                 adapter_id=notification.adapter_id,
             )
-        if ack_tracker is not None and notification.wire_seq is not None:
-            ack_tracker.observe(notification.wire_seq)
+            # ADR-0039 item 4: the G0 commit and the durable-intake observe move
+            # TOGETHER. The observe lives INSIDE the commit_once guard so it can
+            # NEVER advance the ACK high-water without a durable commit — observing
+            # a frame that was never committed would let a crash-then-replay re-run
+            # the side effect past an ACK that claimed it durable.
+            if ack_tracker is not None and notification.wire_seq is not None:
+                ack_tracker.observe(notification.wire_seq)
     else:
         await orchestrator.dispatch(ingested)
 
