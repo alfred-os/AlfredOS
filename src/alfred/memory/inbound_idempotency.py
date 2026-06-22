@@ -39,6 +39,13 @@ _COMMIT_ONCE_SQL = sa.text(
     "RETURNING inbound_id"
 )
 
+# Non-mutating existence probe on the same COMPOSITE key. ``SELECT 1`` yields one
+# row IFF the inbound was already accepted; zero rows otherwise. It NEVER inserts —
+# the durable accept stays the sole job of ``_COMMIT_ONCE_SQL``.
+_HAS_COMMITTED_SQL = sa.text(
+    "SELECT 1 FROM inbound_idempotency WHERE adapter_id = :adapter_id AND inbound_id = :inbound_id"
+)
+
 
 @runtime_checkable
 class InboundIdempotencyStore(Protocol):
@@ -55,6 +62,17 @@ class InboundIdempotencyStore(Protocol):
         ``SQLAlchemyError`` only on a genuine DB failure (fail-loud at the
         boundary — CLAUDE.md hard rule #7; the error propagates, it is never
         swallowed into a won/replay bool).
+        """
+        ...
+
+    async def has_committed(self, *, inbound_id: str, adapter_id: str) -> bool:
+        """Non-mutating: True iff ``(adapter_id, inbound_id)`` is already accepted.
+
+        The forwarded dispatched-edge path (Spec B G6-7-4, ADR-0039 item 4) reads this
+        BEFORE dispatch to short-circuit a replay (drain its leg seq, do not re-dispatch),
+        and only ``commit_once`` AFTER dispatch succeeds — so no committed-but-undispatched
+        row can ever exist. Raises ``SQLAlchemyError`` only on a genuine DB failure
+        (fail-loud; never swallowed into a bool).
         """
         ...
 
@@ -83,6 +101,14 @@ class PostgresInboundIdempotencyStore:
         async with self._session_scope() as session:
             result = await session.execute(
                 _COMMIT_ONCE_SQL,
+                {"inbound_id": inbound_id, "adapter_id": adapter_id},
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def has_committed(self, *, inbound_id: str, adapter_id: str) -> bool:
+        async with self._session_scope() as session:
+            result = await session.execute(
+                _HAS_COMMITTED_SQL,
                 {"inbound_id": inbound_id, "adapter_id": adapter_id},
             )
             return result.scalar_one_or_none() is not None
