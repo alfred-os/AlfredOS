@@ -991,12 +991,13 @@ msgstr ""
 "`comms-*.sock`, then re-run `alfred daemon start`."
 
 #: src/alfred/cli/daemon/_commands.py:1446
-msgid "gateway.adapter.forwarded_inbound.preview_unbounded"
+msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
-"PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
-" currently UNBOUNDED — a frame that repeatedly fails to dispatch will "
-"replay without a poison ceiling (deferred to G6-7-5), and the path is not"
-" yet flag-day'd (G6-7-8). Do not depend on it for production inbound."
+"PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is "
+"bounded by the poison ceiling — a deterministically-failing frame is "
+"dead-lettered after a small number of attempts. The path is NOT yet "
+"flag-day'd into production (G6-7-8); do not depend on it for production "
+"inbound."
 
 #: src/alfred/cli/daemon/_commands.py:1506
 msgid "daemon.comms.adapter_listening"

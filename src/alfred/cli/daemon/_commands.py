@@ -1438,12 +1438,12 @@ async def _listen_socket_comms_adapter(
         # devex HIGH-1 (Spec B G6-7-4 / #309): ONE operator-facing preview-status
         # warning at ARM-TIME (the socket listener is one-shot per boot, so this fires
         # once per boot — never per-frame / per-connection). Names the G6-7
-        # inbound-bridge as PREVIEW: forwarded-inbound replay is currently UNBOUNDED
-        # (the poison ceiling / dead-letter is deferred to G6-7-5) and the path is NOT
-        # flag-day'd (G6-7-8). Operator-routed via ``t()`` (i18n hard rule #1).
+        # inbound-bridge as PREVIEW/test-only: forwarded-inbound replay is now BOUNDED
+        # by the item-4b poison ceiling (G6-7-5), but the path is NOT yet flag-day'd
+        # into production (G6-7-8). Operator-routed via ``t()`` (i18n hard rule #1).
         log.warning(
             "comms.gateway.forwarded_inbound_preview",
-            message=t("gateway.adapter.forwarded_inbound.preview_unbounded"),
+            message=t("gateway.adapter.forwarded_inbound.preview"),
             adapter_id=wire.adapter_kind,
         )
         # Spec A G3-2 (#237): split ``run`` into ``start_and_handshake`` + ``pump``
