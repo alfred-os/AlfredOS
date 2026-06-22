@@ -170,7 +170,15 @@ class AuditEntry(Base):
             # dispatch-failure row: a forwarded inbound whose dispatch raised is
             # left NOT committed / NOT observed (the leg replays it) and recorded
             # with this DISTINCT discriminator (never the "dropped" replay value).
-            "'dispatch_failed')",
+            "'dispatch_failed', "
+            # Spec B G6-7-5 (#309) — the poison-ceiling row: a forwarded inbound
+            # that has failed the post-extract region enough times to breach the
+            # replay bound (ForwardedDispatchAttempt). The frame is then DRAINED
+            # (observe-only, NO commit_once — it writes no idempotency row) so the
+            # leg stops replaying it: a TERMINAL dead-letter, never committed,
+            # distinct from the per-attempt 'dispatch_failed' row that leaves the
+            # frame replayable.
+            "'poisoned')",
             name="ck_audit_log_result",
         ),
     )
@@ -716,6 +724,35 @@ class InboundIdempotency(Base):
         # tests cannot parse them (PoliciesSnapshotHistory precedent). The
         # dialect-portable named PK + retention index stay here.
         Index("ix_inbound_idempotency_committed_at", "committed_at"),
+    )
+
+
+class ForwardedDispatchAttempt(Base):
+    """Durable per-(adapter_id, inbound_id) dispatch-attempt ledger (Spec B G6-7-5, #309).
+
+    ADR-0039 item 4b. The forwarded dispatched-edge path leaves a failed frame NOT
+    committed/NOT observed so the leg replays it; this ledger BOUNDS that replay. It is
+    DURABLE (Postgres) because replay happens across core restarts — an in-memory counter
+    would reset exactly when the bound is needed. Composite PK isolates each adapter's
+    free-form inbound_id namespace (mirrors InboundIdempotency); that isolation is
+    load-bearing ONLY because upstream K4 admission mints adapter_id from the spawn
+    binding (closed-vocab, un-forgeable — ADR-0039 item 4c).
+    """
+
+    __tablename__ = "forwarded_dispatch_attempts"
+
+    adapter_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    inbound_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=sa.text("0"))
+    first_failed_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_failed_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        sa.PrimaryKeyConstraint("adapter_id", "inbound_id", name="pk_forwarded_dispatch_attempts"),
     )
 
 
