@@ -335,10 +335,10 @@ def test_arm_time_preview_warning_emitted_once(
     assert len(preview) == 1
     assert preview[0]["log_level"] == "warning"
     # ``t()``-routed: the resolved preview string, never a bare key.
-    expected = t("gateway.adapter.forwarded_inbound.preview_unbounded")
+    expected = t("gateway.adapter.forwarded_inbound.preview")
     assert preview[0]["message"] == expected
-    assert preview[0]["message"] != "gateway.adapter.forwarded_inbound.preview_unbounded"
-    assert "UNBOUNDED" in preview[0]["message"]
+    assert preview[0]["message"] != "gateway.adapter.forwarded_inbound.preview"
+    assert "PREVIEW" in preview[0]["message"]
 
 
 def test_boot_refuses_when_forwarded_registry_promoter_misconfigured(
