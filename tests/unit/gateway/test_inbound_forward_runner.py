@@ -177,6 +177,17 @@ async def test_forward_fault_engages_back_pressure_never_raises() -> None:
         assert "gateway.adapter.inbound.backpressure_engaged" in events
 
 
+async def test_forward_fault_with_no_gate_still_loud_audited_never_raises() -> None:
+    # No back-pressure gate wired (defensive): a forward fault still loud-audits + never
+    # raises — the gate is optional, the loud row is not.
+    forward = _RecordingForward(raise_on_forward=LegQueueFullError("full"))
+    disposition = _disposition(forward, gate=None)
+    with structlog.testing.capture_logs() as logs:
+        await disposition.dispatch("inbound.message", _inbound_params())
+    events = {row["event"] for row in logs}
+    assert "gateway.adapter.inbound.backpressure_engaged" in events
+
+
 async def test_forward_accepted_emits_structlog() -> None:
     forward = _RecordingForward()
     disposition = _disposition(forward)
