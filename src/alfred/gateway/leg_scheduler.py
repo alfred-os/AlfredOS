@@ -149,6 +149,13 @@ class GatewayLegScheduler:
         self._queues: dict[str, _LegQueue] = {}
         # Signalled whenever a frame is enqueued so an idle pump wakes promptly.
         self._wakeup = asyncio.Event()
+        # Spec B G6-7-3 (#309) — FORK-C: optional per-adapter back-pressure gates. The
+        # gateway forward path CLEARS an adapter's gate when its leg is full (pausing the
+        # child-stdio reader so the child back-pressures the platform); this scheduler
+        # SETS that adapter's gate after it drains a frame off that leg (resume). A leg
+        # with NO registered gate (the TUI / daemon-default legs) drains byte-for-byte
+        # unchanged — the gate is a forward-runner collaborator, not a scheduler invariant.
+        self._back_pressure_gates: dict[str, asyncio.Event] = {}
 
     @property
     def registered_adapters(self) -> frozenset[str]:
@@ -161,8 +168,25 @@ class GatewayLegScheduler:
             raise ValueError(f"leg already registered: {leg.adapter_id!r}")
         self._queues[leg.adapter_id] = _LegQueue(leg, max_bytes=self._max_per_leg_queue_bytes)
 
+    def set_back_pressure_gate(self, adapter_id: str, gate: asyncio.Event) -> None:
+        """Register ``adapter_id``'s forward back-pressure gate (Spec B G6-7-3 / FORK-C).
+
+        The gateway forward path clears this gate when the leg is full; this scheduler
+        SETS it after draining a frame off the leg (resume). ``KeyError`` for an
+        unregistered adapter — registering a gate for a leg the scheduler does not own
+        is a loud routing misuse (CLAUDE.md hard rule #7), never a silent no-op.
+        """
+        if adapter_id not in self._queues:
+            raise KeyError(f"back-pressure gate for an unregistered leg: {adapter_id!r}")
+        self._back_pressure_gates[adapter_id] = gate
+
     def deregister_leg(self, adapter_id: str) -> None:
-        """Drop + tear down a leg (discard buffer + release budget); no-op if absent."""
+        """Drop + tear down a leg (discard buffer + release budget); no-op if absent.
+
+        Spec B G6-7-3 (#309): also drops the leg's back-pressure gate so a deregistered
+        leg's gate cannot linger and a later re-registration starts clean.
+        """
+        self._back_pressure_gates.pop(adapter_id, None)
         entry = self._queues.pop(adapter_id, None)
         if entry is not None:
             entry.leg.teardown()
@@ -284,6 +308,15 @@ class GatewayLegScheduler:
         wire-seq contiguity + exactly-once delivery (the frame is NOT lost).
         """
         payload = queue.pop()
+        # Spec B G6-7-3 (#309) — FORK-C: the queue slot just freed; SET this adapter's
+        # back-pressure gate (if the forward path registered one) so a paused child-stdio
+        # reader RESUMES. Set on the POP (capacity-freed edge), before the record/write
+        # awaits, so resume is prompt and the isolation/stale-write arms below still
+        # release the reader (the frame left the queue regardless of the wire outcome).
+        # A leg with no registered gate (TUI / daemon-default) is unaffected.
+        resume_gate = self._back_pressure_gates.get(adapter_id)
+        if resume_gate is not None:
+            resume_gate.set()
         ack = self._core_link.core_cumulative_ack()
         try:
             seq = queue.leg.record_for_send(payload)
