@@ -30,17 +30,27 @@ blob (the transport parsed the frame) to a JSON ``str`` and forwards it; it neve
 NOT set so the producer's key order is preserved — the core re-parses the body, so the
 exact key order is immaterial, but we never reorder/mutate the producer's blob).
 
-**Back-pressure (FORK-C).** On a ``LegQueueFullError`` / ``ReplayBufferError`` from the
-forward, the disposition CLEARS the shared gate (pause the child-stdio reader) so the
-in-flight frame is NOT dropped (hard rule #7); the scheduler SETS it on the next drain
-(resume). The structlog ``backpressure_engaged`` row makes the pause observable (never
-silent). The gate is a forward-runner collaborator, NOT part of ``InboundDisposition``.
+**Back-pressure = no-drop RETRY (FORK-C / ADR-0039 invariant).** A leg-full is
+BACK-PRESSURE, not drop: "no path silently loses an inbound." On a
+``LegQueueFullError`` / ``ReplayBufferError`` from the forward, the disposition CLEARS
+the shared gate (pause the child-stdio reader), logs ``backpressure_engaged``, then
+PARKS — ``await``-ing the gate (raced against ``shutdown_event`` so shutdown wins) — and
+on resume logs ``backpressure_released`` and RE-FORWARDS THE SAME body, looping until the
+forward succeeds or shutdown ends it. The scheduler SETS the gate after it drains a frame
+off the leg (resume). Because the gateway pump routes this notification SYNCHRONOUSLY (the
+reader ``await``s the dispatch, NOT fire-and-forget — there is no reentrant ``send_request``
+on the forward path), the reader is naturally paused while a frame is being (re)forwarded:
+no-drop, in-order, and no read-ahead all fall out by construction. Dropping the held frame
+is acceptable ONLY on the shutdown path (we are tearing down) — logged
+``backpressure_shutdown_drop`` (never silent, hard rule #7). The gate + shutdown_event are
+forward-runner collaborators, NOT part of the ``InboundDisposition`` Protocol.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import structlog
@@ -88,10 +98,15 @@ class GatewayForwardDisposition:
         adapter_id: str,
         forward: _ForwardCallable,
         back_pressure_gate: asyncio.Event | None = None,
+        shutdown_event: asyncio.Event | None = None,
     ) -> None:
         self._adapter_id = adapter_id
         self._forward = forward
         self._back_pressure_gate = back_pressure_gate
+        # ADR-0039: the no-drop retry PARKS on the gate; a SET shutdown_event must win that
+        # park so a permanently-full leg during shutdown cannot wedge the reader (the held
+        # frame is then dropped on the shutdown path — acceptable while tearing down).
+        self._shutdown_event = shutdown_event
 
     async def dispatch(self, method: str, params: object, *, wire_seq: int | None = None) -> None:
         """Route ONE child notification per the §3.1 table; NEVER raise.
@@ -129,33 +144,94 @@ class GatewayForwardDisposition:
         )
 
     async def _forward_inbound(self, params: object) -> None:
-        """Serialize the already-parsed ``params`` blob + forward it; engage back-pressure.
+        """Serialize the already-parsed ``params`` blob + forward it; RETRY on back-pressure.
 
         Payload-blind: the params arrive ALREADY PARSED (the transport parsed the frame).
-        We serialize them to an opaque JSON ``str`` and hand them to the forward sink — we
-        never ``json.loads`` / read a field (SEC-309-1 / hard rule #5). ``adapter_id`` is
-        the construction (spawn-binding) value.
+        We serialize them ONCE to an opaque JSON ``str`` and hand the SAME body to the
+        forward sink — we never ``json.loads`` / read a field (SEC-309-1 / hard rule #5).
+        ``adapter_id`` is the construction (spawn-binding) value.
 
-        On a full leg (:class:`LegQueueFullError` — the live synchronous raise — or
-        :class:`ReplayBufferError` — the global-cap defensive catch) ENGAGE back-pressure
-        (clear the gate) so the reader pauses BEFORE the next frame and the in-flight frame
-        is not dropped. NEVER raises (fire-and-forget).
+        ADR-0039 invariant (no-drop): on a full leg (:class:`LegQueueFullError` — the live
+        synchronous raise — or :class:`ReplayBufferError` — the global-cap defensive catch)
+        ENGAGE back-pressure (clear the gate), PARK on the gate until the scheduler drains
+        (sets it), then RE-FORWARD THE SAME body — looping until the forward succeeds. The
+        triggering frame is held, never dropped. Because the gateway pump routes this
+        SYNCHRONOUSLY, the reader is paused for the duration, so no later frame is read
+        ahead and source order is preserved. NEVER raises (fire-and-forget); a ``shutdown``
+        wins the park and drops the held frame (acceptable while tearing down).
+
+        With NO gate wired (defensive — the gate is optional, the loud row is not) there is
+        nothing to park on, so a fault is a single loud-audited drop (the legacy behaviour).
         """
         body = json.dumps(params, ensure_ascii=False)
-        try:
-            await self._forward(self._adapter_id, body)
-        except (LegQueueFullError, ReplayBufferError):
-            # The leg is full: pause the reader (clear the gate) so the child's stdout
-            # back-pressures the platform without losing the in-flight frame (hard rule #7).
-            # The scheduler SETS the gate on its next drain (resume).
-            if self._back_pressure_gate is not None:
+        while True:
+            try:
+                await self._forward(self._adapter_id, body)
+            except (LegQueueFullError, ReplayBufferError):
+                # The leg is full: pause the reader (clear the gate) so the child's stdout
+                # back-pressures the platform. The scheduler SETS the gate on its next
+                # drain (resume), and we RE-FORWARD the same body (no-drop, hard rule #7).
+                if self._back_pressure_gate is None:
+                    # No gate to park on (defensive): a single loud-audited drop.
+                    log.warning(
+                        "gateway.adapter.inbound.backpressure_engaged",
+                        adapter_id=self._adapter_id,
+                    )
+                    return
                 self._back_pressure_gate.clear()
-            log.warning(
-                "gateway.adapter.inbound.backpressure_engaged",
-                adapter_id=self._adapter_id,
-            )
+                log.warning(
+                    "gateway.adapter.inbound.backpressure_engaged",
+                    adapter_id=self._adapter_id,
+                )
+                if not await self._await_resume_or_shutdown(self._back_pressure_gate):
+                    # Shutdown won the park: drop the held frame (we are tearing down) —
+                    # LOUD (never silent), the one acceptable drop on the no-drop path.
+                    log.warning(
+                        "gateway.adapter.inbound.backpressure_shutdown_drop",
+                        adapter_id=self._adapter_id,
+                    )
+                    return
+                log.warning(
+                    "gateway.adapter.inbound.backpressure_released",
+                    adapter_id=self._adapter_id,
+                )
+                continue
+            log.debug("gateway.adapter.inbound.forward_accepted", adapter_id=self._adapter_id)
             return
-        log.debug("gateway.adapter.inbound.forward_accepted", adapter_id=self._adapter_id)
+
+    async def _await_resume_or_shutdown(self, gate: asyncio.Event) -> bool:
+        """Park until the scheduler-drain SETS ``gate`` (resume); shutdown wins (ADR-0039).
+
+        Returns ``True`` to RESUME (re-forward the held frame), ``False`` if a shutdown won
+        the park (drop the held frame on the teardown path). With NO ``shutdown_event``
+        wired this is a plain ``await gate.wait()`` (always resumes). With one wired, the
+        gate-wait races ``shutdown_event.wait()`` (FIRST_COMPLETED) so a permanently-full
+        leg during shutdown cannot wedge the reader. CANCELLATION-SAFE: a force-cancel of a
+        parked disposition cancels both child waits and re-raises (CLAUDE.md hard rule #7) —
+        the pump's ``finally`` still closes the transport.
+        """
+        if self._shutdown_event is None:
+            await gate.wait()
+            return True
+        gate_task: asyncio.Task[bool] = asyncio.ensure_future(gate.wait())
+        shutdown_task: asyncio.Task[bool] = asyncio.ensure_future(self._shutdown_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {gate_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            gate_task.cancel()
+            shutdown_task.cancel()
+            raise
+        if shutdown_task in done:
+            gate_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await gate_task
+            return False
+        shutdown_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await shutdown_task
+        return True
 
 
 class GatewayInboundForwardRunner:
@@ -182,6 +258,11 @@ class GatewayInboundForwardRunner:
             adapter_id=adapter_id,
             forward=forward,
             back_pressure_gate=back_pressure_gate,
+            # ADR-0039: the disposition's no-drop RETRY parks on the gate; the runner's
+            # shutdown_event must win that park so a permanently-full leg during shutdown
+            # cannot wedge the synchronously-routed reader (the held frame is dropped on
+            # the teardown path — the one acceptable drop on the no-drop path).
+            shutdown_event=shutdown_event,
         )
         self._runner = CommsPluginRunner(
             session=None,

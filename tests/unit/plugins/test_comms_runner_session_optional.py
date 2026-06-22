@@ -256,6 +256,51 @@ class _GateClearingTransport(_FakeTransport):
         return frame
 
 
+class _BlockingDisposition:
+    """A disposition that BLOCKS in ``dispatch`` until released — proves fire-and-forget.
+
+    On the daemon path (``back_pressure_gate is None``) the pump must NOT ``await`` the
+    dispatch: it spawns a tracked task and KEEPS READING. So a dispatch that blocks must
+    NOT stall the reader — it reads the next frame while the first dispatch is in flight.
+    """
+
+    def __init__(self, release: asyncio.Event) -> None:
+        self.entered = 0
+        self._release = release
+
+    async def dispatch(self, method: str, params: object, *, wire_seq: int | None = None) -> None:
+        self.entered += 1
+        await self._release.wait()
+
+
+async def test_no_gate_daemon_shape_is_fire_and_forget_not_awaited() -> None:
+    # The DAEMON-path guarantee: with NO back_pressure_gate the pump stays fire-and-forget.
+    # A dispatch that BLOCKS does not stall the reader — both inbound frames are dispatched
+    # (entered) before either completes, and they live in the _inflight task set. Only the
+    # gateway path (gate wired) routes synchronously; this proves the None path is unchanged.
+    release = asyncio.Event()
+    disposition = _BlockingDisposition(release)
+    transport = _FakeTransport([dict(_HANDSHAKE_OK), _inbound_frame(), _inbound_frame()])
+    runner = CommsPluginRunner(
+        session=None,
+        transport=transport,  # type: ignore[arg-type]
+        adapter_id=_ADAPTER_ID,
+        inbound_disposition=disposition,
+        back_pressure_gate=None,  # daemon shape
+    )
+
+    await runner.start_and_handshake()
+    pump = asyncio.ensure_future(runner.pump())
+    for _ in range(6):
+        await asyncio.sleep(0)
+    # Both blocked dispatches are in flight — the reader was NEVER awaited on the first.
+    assert disposition.entered == 2
+    assert len(runner._inflight) == 2  # fire-and-forget tracked tasks (not synchronous)
+    release.set()  # let the blocked dispatches finish so the pump reaches EOF
+    await asyncio.wait_for(pump, timeout=1.0)
+    assert transport.closed is True
+
+
 async def test_back_pressure_gate_pauses_pump_then_resumes() -> None:
     gate = asyncio.Event()
     gate.set()  # start open
