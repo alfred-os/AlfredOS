@@ -739,6 +739,11 @@ class CommsPluginRunner:
         except asyncio.CancelledError:
             gate_task.cancel()
             shutdown_task.cancel()
+            # Await the cancelled children before re-raising so neither leaks a transient
+            # pending-task warning under aggressive teardown (matches the
+            # ``_read_frame_or_shutdown`` discipline; the win/lose arms already await-suppress).
+            with suppress(asyncio.CancelledError):
+                await asyncio.gather(gate_task, shutdown_task, return_exceptions=True)
             raise
         if shutdown_task in done:
             gate_task.cancel()

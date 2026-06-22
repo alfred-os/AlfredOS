@@ -59,7 +59,7 @@ from alfred.gateway.client_listener import GatewayClientListener
 from alfred.gateway.gateway_leg import GatewayLeg
 from alfred.gateway.ingress_audit import IngressRefusalReason, record_ingress_refusal
 from alfred.gateway.ingress_gate import IngressDecision
-from alfred.gateway.leg_router import LegRouter
+from alfred.gateway.leg_router import LegRouter, RouteOutcome
 from alfred.gateway.leg_scheduler import LegQueueFullError
 from alfred.gateway.link_state import (
     GatewayLinkEvent,
@@ -180,6 +180,26 @@ class CredentialReplyTimeoutError(AlfredError):
     but the reply was dropped / unrouted (the leg silently drops unknown inbound
     methods, so a spawn could otherwise hang). A typed LOUD abort, never a hang —
     the gateway refuses the spawn rather than block forever.
+    """
+
+
+class ForwardLegUnavailableError(AlfredError):
+    """A forwarded inbound named an adapter whose leg is NOT registered (G6-7-3, ERR-309-1).
+
+    FORK-B. :meth:`GatewayCoreLink.forward_adapter_inbound` routes the wrapped inbound
+    through the :class:`LegRouter`, which RETURNS (does not raise)
+    :data:`RouteOutcome.REFUSED_UNKNOWN_ADAPTER` when the spawn-binding ``adapter_id`` is
+    not a registered leg. That outcome MUST surface as this typed error — never be
+    discarded — so the disposition can LOUD-TERMINAL-DROP the frame (CLAUDE.md hard rule #7:
+    a lost inbound is loud, never silent, never a false ``forward_accepted``).
+
+    DISTINCT from :class:`LegQueueFullError` / :class:`ReplayBufferError`: those are a FULL
+    but REGISTERED leg (back-pressure — retry after the scheduler drains). This error is an
+    UNREGISTERED / gone leg — the frame can never be delivered to it, so the disposition
+    drops it terminally (retrying a gone leg is futile). Reachable when the scheduler's
+    isolation arm (``record_for_send`` raises ``ReplayBufferError`` -> ``deregister_leg``)
+    tears the leg down WHILE a forward is parked on back-pressure: on resume the held frame
+    re-forwards and the router now refuses the (deregistered) leg.
     """
 
 
@@ -1176,10 +1196,13 @@ class GatewayCoreLink:
            passed (binding) ``adapter_id`` — the envelope is the method-bearing
            (``gateway.adapter.inbound``) frame the core's ``_route_notification`` discriminates
            by METHOD (G6-7-4), never by an id heuristic;
-        2. serializes the WHOLE envelope to ``payload: bytes`` via ``model_dump_json`` — a
-           ``str`` ``body`` is kept VERBATIM (no re-encode), so the embedded ``inbound_id`` is
-           byte-stable across the leg's ReplayBuffer replay (SEC-309-2). The disposition hands
-           a ``str`` body precisely so the envelope serializer never base64-round-trips a
+        2. serializes the WHOLE envelope to ``payload: bytes`` via ``model_dump_json``. The
+           body's BYTE CONTENT is stable through serialize -> ReplayBuffer -> core re-parse,
+           so the embedded ``inbound_id`` is byte-stable across the leg's ReplayBuffer replay
+           (SEC-309-2). NOTE: a ``str`` ``body`` re-validates core-side as ``bytes`` (the wire
+           model's ``bytes | str`` union coerces a JSON string to ``bytes``) — the content is
+           preserved verbatim, but the runtime TYPE flips ``str`` -> ``bytes``. The disposition
+           hands a ``str`` body precisely so the envelope serializer never base64-round-trips a
            ``bytes`` body lossily;
         3. routes ``payload`` through the :class:`LegRouter` the link already holds (the same
            ``set_leg_router`` binding ``submit_tui_unit`` uses) — the per-adapter leg's seq/ack
@@ -1190,6 +1213,17 @@ class GatewayCoreLink:
         — only ``LegQueueFullError`` is the live synchronous raise) propagates to the
         disposition, which engages reader back-pressure (clear the gate). They are NOT swallowed
         here — a genuine full leg is back-pressure, never a silent drop (CLAUDE.md hard rule #7).
+        Those are a FULL but REGISTERED leg.
+
+        DISTINCTLY: the :class:`LegRouter` RETURNS (does not raise)
+        :data:`RouteOutcome.REFUSED_UNKNOWN_ADAPTER` when ``adapter_id`` names NO registered
+        leg (ERR-309-1). Discarding that return would let the disposition falsely log
+        ``forward_accepted`` on a LOST frame (hard rule #7 silent-loss). So we INSPECT the
+        outcome and raise :class:`ForwardLegUnavailableError` — a typed signal the disposition
+        catches as a LOUD TERMINAL drop (the leg is gone — retrying is futile). This is reachable
+        when the scheduler's isolation arm deregisters the leg WHILE a forward is parked on
+        back-pressure: on resume the held frame re-forwards and the router now refuses it.
+
         The route is the PRODUCER path (enqueue), NEVER ``GatewayLeg.record_for_send`` (that is
         drain-time, scheduler-only). Payload-blind: ``adapter_id`` is the only routing key; the
         body is never parsed here.
@@ -1200,7 +1234,16 @@ class GatewayCoreLink:
         # ValidationError at this boundary (fail-loud, hard rule #7), never a silent route.
         envelope = GatewayAdapterInboundEnvelope(adapter_id=adapter_id, body=body)
         payload = envelope.model_dump_json().encode()
-        self._leg_router.route(adapter_id, payload)
+        outcome = self._leg_router.route(adapter_id, payload)
+        if outcome is RouteOutcome.REFUSED_UNKNOWN_ADAPTER:
+            # ERR-309-1: the router refused (the leg is unregistered/gone). The K4
+            # ``record_unknown_adapter_refusal`` row already fired inside ``route`` (labelled
+            # as a forged/unknown-adapter refusal). Surface it as a typed terminal-drop signal
+            # so the disposition LOUD-DROPS rather than discarding the outcome and falsely
+            # logging ``forward_accepted`` on a LOST frame (hard rule #7 silent-loss).
+            raise ForwardLegUnavailableError(
+                f"forward refused: adapter_id={adapter_id!r} has no registered leg"
+            )
 
     def _record_ingress_refusal(self, leg: GatewayLeg, decision: IngressDecision) -> None:
         """Back-pressure + metric + LOUD audit on an ingress trip (K6, never silent).
@@ -1569,6 +1612,9 @@ class GatewayCoreLink:
 
 __all__ = [
     "GATEWAY_PLUGIN_VERSION",
+    "CredentialLegDownError",
+    "CredentialReplyTimeoutError",
+    "ForwardLegUnavailableError",
     "GatewayCoreLink",
     "GatewayCoreLinkError",
     # REV-2 (#288): the shared transport-seam Protocol is part of this module's

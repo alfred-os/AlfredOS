@@ -30,10 +30,11 @@ blob (the transport parsed the frame) to a JSON ``str`` and forwards it; it neve
 NOT set so the producer's key order is preserved — the core re-parses the body, so the
 exact key order is immaterial, but we never reorder/mutate the producer's blob).
 
-**Back-pressure = no-drop RETRY (FORK-C / ADR-0039 invariant).** A leg-full is
-BACK-PRESSURE, not drop: "no path silently loses an inbound." On a
+**Back-pressure = no-drop RETRY (FORK-C / ADR-0039 invariant).** A leg-full (a full but
+REGISTERED leg) is BACK-PRESSURE, not drop: "no path silently loses an inbound." On a
 ``LegQueueFullError`` / ``ReplayBufferError`` from the forward, the disposition CLEARS
-the shared gate (pause the child-stdio reader), logs ``backpressure_engaged``, then
+the shared gate (pause the child-stdio reader), logs ``backpressure_engaged`` (carrying a
+closed-vocab ``reason`` — ``leg_full`` vs ``global_cap``, DEVEX-309-1), then
 PARKS — ``await``-ing the gate (raced against ``shutdown_event`` so shutdown wins) — and
 on resume logs ``backpressure_released`` and RE-FORWARDS THE SAME body, looping until the
 forward succeeds or shutdown ends it. The scheduler SETS the gate after it drains a frame
@@ -44,6 +45,14 @@ no-drop, in-order, and no read-ahead all fall out by construction. Dropping the 
 is acceptable ONLY on the shutdown path (we are tearing down) — logged
 ``backpressure_shutdown_drop`` (never silent, hard rule #7). The gate + shutdown_event are
 forward-runner collaborators, NOT part of the ``InboundDisposition`` Protocol.
+
+**Leg-unavailable = LOUD TERMINAL drop (ERR-309-1).** DISTINCT from back-pressure: a
+:class:`alfred.gateway.core_link.ForwardLegUnavailableError` (the LegRouter refused —
+the spawn-binding ``adapter_id`` names NO registered leg, e.g. the scheduler's isolation
+arm deregistered it while a forward was parked on back-pressure) is an UNREGISTERED / gone
+leg. A forward can never reach it, so retrying is futile — the disposition LOUD-TERMINAL
+drops the frame (``leg_unavailable_drop``), never logging ``forward_accepted`` on a LOST
+frame. This is the load-bearing silent-loss fix (hard rule #7).
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import structlog
 
+from alfred.gateway.core_link import ForwardLegUnavailableError
 from alfred.gateway.leg_scheduler import LegQueueFullError
 from alfred.gateway.replay_buffer import ReplayBufferError
 from alfred.plugins.comms_runner import CommsPluginRunner
@@ -70,6 +80,14 @@ log = structlog.get_logger(__name__)
 _INBOUND_MESSAGE: Final[str] = "inbound.message"
 _RATE_LIMIT_SIGNAL: Final[str] = "adapter.rate_limit_signal"
 _BINDING_REQUEST: Final[str] = "adapter.binding_request"
+
+# DEVEX-309-1: the back-pressure except arm catches BOTH a per-leg queue-budget overflow
+# (``LegQueueFullError``) and a global-cap overflow (``ReplayBufferError``) — different
+# remediations (one leg saturated vs whole-gateway over budget). A closed-vocab ``reason``
+# on the back-pressure / drop rows lets an operator tell them apart (mirrors the
+# ``reason=``-on-structlog convention, e.g. ``gateway.ingress.slot_evicted reason=...``).
+_BACK_PRESSURE_LEG_FULL: Final[str] = "leg_full"
+_BACK_PRESSURE_GLOBAL_CAP: Final[str] = "global_cap"
 
 
 @runtime_checkable
@@ -149,39 +167,74 @@ class GatewayForwardDisposition:
         Payload-blind: the params arrive ALREADY PARSED (the transport parsed the frame).
         We serialize them ONCE to an opaque JSON ``str`` and hand the SAME body to the
         forward sink — we never ``json.loads`` / read a field (SEC-309-1 / hard rule #5).
+        The body's BYTE CONTENT is stable through serialize -> ReplayBuffer -> core re-parse
+        (SEC-309-2); a ``str`` body re-validates core-side as ``bytes`` (the wire model's
+        ``bytes | str`` union coerces it) — content preserved, the type flips.
         ``adapter_id`` is the construction (spawn-binding) value.
 
-        ADR-0039 invariant (no-drop): on a full leg (:class:`LegQueueFullError` — the live
-        synchronous raise — or :class:`ReplayBufferError` — the global-cap defensive catch)
-        ENGAGE back-pressure (clear the gate), PARK on the gate until the scheduler drains
-        (sets it), then RE-FORWARD THE SAME body — looping until the forward succeeds. The
-        triggering frame is held, never dropped. Because the gateway pump routes this
-        SYNCHRONOUSLY, the reader is paused for the duration, so no later frame is read
-        ahead and source order is preserved. NEVER raises (fire-and-forget); a ``shutdown``
-        wins the park and drops the held frame (acceptable while tearing down).
+        ADR-0039 invariant (no-drop): on a full but REGISTERED leg (:class:`LegQueueFullError`
+        — the live synchronous raise — or :class:`ReplayBufferError` — the global-cap defensive
+        catch) ENGAGE back-pressure (clear the gate, carrying the closed-vocab ``reason``), PARK
+        on the gate until the scheduler drains (sets it), then RE-FORWARD THE SAME body —
+        looping until the forward succeeds. The triggering frame is held, never dropped. Because
+        the gateway pump routes this SYNCHRONOUSLY, the reader is paused for the duration, so no
+        later frame is read ahead and source order is preserved. NEVER raises (fire-and-forget);
+        a ``shutdown`` wins the park and drops the held frame (acceptable while tearing down).
+
+        ERR-309-1 TERMINAL DROP: a :class:`ForwardLegUnavailableError` is an UNREGISTERED / gone
+        leg (the router refused), NOT back-pressure. Retrying a gone leg is futile — so this is a
+        LOUD TERMINAL drop (``leg_unavailable_drop``), no retry, no ``forward_accepted``. DISTINCT
+        from the full-but-registered back-pressure path above.
 
         With NO gate wired (defensive — the gate is optional, the loud row is not) there is
-        nothing to park on, so a fault is a single loud-audited drop (the legacy behaviour).
+        nothing to park on, so a full-leg fault is a single loud-audited DROP — logged
+        ``forward_dropped`` (a real drop, not a back-pressure HOLD).
         """
         body = json.dumps(params, ensure_ascii=False)
         while True:
             try:
                 await self._forward(self._adapter_id, body)
-            except (LegQueueFullError, ReplayBufferError):
-                # The leg is full: pause the reader (clear the gate) so the child's stdout
-                # back-pressures the platform. The scheduler SETS the gate on its next
+            except ForwardLegUnavailableError:
+                # ERR-309-1: the leg is unregistered / gone (the router refused) — a forward
+                # can NEVER be delivered to it, so retrying is futile. LOUD TERMINAL drop
+                # (hard rule #7: never silent, never a false ``forward_accepted``). The K4
+                # ``record_unknown_adapter_refusal`` audit row already fired core-side.
+                #
+                # FOLLOW-UP (lifecycle, later slice): an isolated discord leg is registered
+                # at BOOT (not per-spawn), so a deregistered leg leaves that adapter
+                # inbound-dark until process restart — there is no leg re-registration here.
+                # Out of scope for G6-7-3; tracked separately. Do NOT attempt re-registration.
+                log.warning(
+                    "gateway.adapter.inbound.leg_unavailable_drop",
+                    adapter_id=self._adapter_id,
+                )
+                return
+            except (LegQueueFullError, ReplayBufferError) as exc:
+                # A full but REGISTERED leg: pause the reader (clear the gate) so the child's
+                # stdout back-pressures the platform. The scheduler SETS the gate on its next
                 # drain (resume), and we RE-FORWARD the same body (no-drop, hard rule #7).
+                # DEVEX-309-1: distinguish per-leg saturation from whole-gateway over-budget.
+                reason = (
+                    _BACK_PRESSURE_LEG_FULL
+                    if isinstance(exc, LegQueueFullError)
+                    else _BACK_PRESSURE_GLOBAL_CAP
+                )
                 if self._back_pressure_gate is None:
-                    # No gate to park on (defensive): a single loud-audited drop.
+                    # No gate to park on (defensive): this arm DROPS the frame (there is
+                    # nothing to hold it on) — a real drop, NOT a back-pressure HOLD, so it
+                    # gets its own greppable event (DEVEX-309-2), never the shared
+                    # ``backpressure_engaged`` row.
                     log.warning(
-                        "gateway.adapter.inbound.backpressure_engaged",
+                        "gateway.adapter.inbound.forward_dropped",
                         adapter_id=self._adapter_id,
+                        reason=reason,
                     )
                     return
                 self._back_pressure_gate.clear()
                 log.warning(
                     "gateway.adapter.inbound.backpressure_engaged",
                     adapter_id=self._adapter_id,
+                    reason=reason,
                 )
                 if not await self._await_resume_or_shutdown(self._back_pressure_gate):
                     # Shutdown won the park: drop the held frame (we are tearing down) —
@@ -194,6 +247,7 @@ class GatewayForwardDisposition:
                 log.warning(
                     "gateway.adapter.inbound.backpressure_released",
                     adapter_id=self._adapter_id,
+                    reason=reason,
                 )
                 continue
             log.debug("gateway.adapter.inbound.forward_accepted", adapter_id=self._adapter_id)
@@ -222,6 +276,11 @@ class GatewayForwardDisposition:
         except asyncio.CancelledError:
             gate_task.cancel()
             shutdown_task.cancel()
+            # Await the cancelled children before re-raising so neither leaks a transient
+            # pending-task warning under aggressive teardown (matches the
+            # ``_read_frame_or_shutdown`` discipline; the win/lose arms already await-suppress).
+            with suppress(asyncio.CancelledError):
+                await asyncio.gather(gate_task, shutdown_task, return_exceptions=True)
             raise
         if shutdown_task in done:
             gate_task.cancel()
