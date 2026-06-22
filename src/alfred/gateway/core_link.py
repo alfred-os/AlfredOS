@@ -48,6 +48,7 @@ from alfred.comms_mcp.protocol import (
     DAEMON_COMMS_ACK,
     DAEMON_LIFECYCLE_GOING_DOWN,
     DAEMON_LIFECYCLE_READY,
+    GatewayAdapterInboundEnvelope,
     GoingDownNotification,
     ReadyNotification,
 )
@@ -1162,6 +1163,44 @@ class GatewayCoreLink:
             self._leg_router.route(self._tui_leg.adapter_id, payload)
         except LegQueueFullError:
             self._record_queue_full_back_pressure(self._tui_leg)
+
+    async def forward_adapter_inbound(self, adapter_id: str, body: bytes | str) -> None:
+        """Forward a hosted adapter child's ``inbound.message`` to the core (Spec B G6-7-3).
+
+        FORK-B. The gateway forward-runner's disposition calls this with the SPAWN-BINDING
+        ``adapter_id`` (SEC-309-1 — NEVER read from the body) and the child's already-parsed
+        ``inbound.message`` ``params`` serialized to an opaque JSON ``str`` ``body``. This
+        method:
+
+        1. wraps the opaque body in a :class:`GatewayAdapterInboundEnvelope` carrying the
+           passed (binding) ``adapter_id`` — the envelope is the method-bearing
+           (``gateway.adapter.inbound``) frame the core's ``_route_notification`` discriminates
+           by METHOD (G6-7-4), never by an id heuristic;
+        2. serializes the WHOLE envelope to ``payload: bytes`` via ``model_dump_json`` — a
+           ``str`` ``body`` is kept VERBATIM (no re-encode), so the embedded ``inbound_id`` is
+           byte-stable across the leg's ReplayBuffer replay (SEC-309-2). The disposition hands
+           a ``str`` body precisely so the envelope serializer never base64-round-trips a
+           ``bytes`` body lossily;
+        3. routes ``payload`` through the :class:`LegRouter` the link already holds (the same
+           ``set_leg_router`` binding ``submit_tui_unit`` uses) — the per-adapter leg's seq/ack
+           + ReplayBuffer give the forwarded inbound resume + replay byte-stability for free.
+
+        **Errors SURFACE to the caller (FORK-B / FORK-C).** A :class:`LegQueueFullError`
+        (per-leg byte budget) or a :class:`ReplayBufferError` (global cap, defensively caught
+        — only ``LegQueueFullError`` is the live synchronous raise) propagates to the
+        disposition, which engages reader back-pressure (clear the gate). They are NOT swallowed
+        here — a genuine full leg is back-pressure, never a silent drop (CLAUDE.md hard rule #7).
+        The route is the PRODUCER path (enqueue), NEVER ``GatewayLeg.record_for_send`` (that is
+        drain-time, scheduler-only). Payload-blind: ``adapter_id`` is the only routing key; the
+        body is never parsed here.
+        """
+        assert self._leg_router is not None  # the gateway always wires the router before forward
+        # ``adapter_id`` is a plain ``str`` here (the spawn-binding id); the wire model's
+        # closed-vocab ``AdapterId`` validates it at construction — a forged kind is a loud
+        # ValidationError at this boundary (fail-loud, hard rule #7), never a silent route.
+        envelope = GatewayAdapterInboundEnvelope(adapter_id=adapter_id, body=body)
+        payload = envelope.model_dump_json().encode()
+        self._leg_router.route(adapter_id, payload)
 
     def _record_ingress_refusal(self, leg: GatewayLeg, decision: IngressDecision) -> None:
         """Back-pressure + metric + LOUD audit on an ingress trip (K6, never silent).
