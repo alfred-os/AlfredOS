@@ -49,6 +49,39 @@ class _RecordingForward:
         self.forwards.append((adapter_id, body))
 
 
+class _FullThenAcceptForward:
+    """Raises ``exc`` on the FIRST forward (leg full), accepts every later forward.
+
+    Drives the no-drop retry path: the disposition must clear the gate + park on it,
+    and after a simulated scheduler drain (the test SETS the gate) re-forward the SAME
+    body — proving the triggering frame is never dropped.
+    """
+
+    def __init__(self, *, exc: BaseException) -> None:
+        self.forwards: list[tuple[str, str]] = []
+        self._exc = exc
+        self.attempts = 0
+
+    async def __call__(self, adapter_id: str, body: str) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise self._exc
+        self.forwards.append((adapter_id, body))
+
+
+class _AlwaysFullForward:
+    """Every forward raises ``exc`` (a permanently-full leg) — drives the shutdown path."""
+
+    def __init__(self, *, exc: BaseException) -> None:
+        self.forwards: list[tuple[str, str]] = []
+        self._exc = exc
+        self.attempts = 0
+
+    async def __call__(self, adapter_id: str, body: str) -> None:
+        self.attempts += 1
+        raise self._exc
+
+
 def _inbound_params(*, adapter_id: str = _ADAPTER_ID) -> dict[str, object]:
     return {
         "adapter_id": adapter_id,
@@ -62,10 +95,16 @@ def _inbound_params(*, adapter_id: str = _ADAPTER_ID) -> dict[str, object]:
 
 
 def _disposition(
-    forward: _RecordingForward, *, gate: asyncio.Event | None = None
+    forward: object,
+    *,
+    gate: asyncio.Event | None = None,
+    shutdown_event: asyncio.Event | None = None,
 ) -> GatewayForwardDisposition:
     return GatewayForwardDisposition(
-        adapter_id=_ADAPTER_ID, forward=forward, back_pressure_gate=gate
+        adapter_id=_ADAPTER_ID,
+        forward=forward,  # type: ignore[arg-type]
+        back_pressure_gate=gate,
+        shutdown_event=shutdown_event,
     )
 
 
@@ -162,19 +201,95 @@ async def test_disposition_never_json_loads_the_body(monkeypatch: pytest.MonkeyP
     assert len(forward.forwards) == 1
 
 
-async def test_forward_fault_engages_back_pressure_never_raises() -> None:
+@pytest.mark.parametrize("exc", [LegQueueFullError("full"), ReplayBufferError("cap")])
+async def test_forward_fault_retries_after_drain_never_drops(exc: BaseException) -> None:
+    # ADR-0039 invariant: a leg-full is BACK-PRESSURE, not drop. The first forward hits a
+    # full leg; the disposition clears the gate (pause) + PARKS on it, NEVER returning
+    # until the leg drains. A concurrent "scheduler drain" SETS the gate; the disposition
+    # then re-forwards the SAME body — proving the triggering frame is never dropped.
     gate = asyncio.Event()
     gate.set()
-    for exc in (LegQueueFullError("full"), ReplayBufferError("cap")):
+    forward = _FullThenAcceptForward(exc=exc)
+    disposition = _disposition(forward, gate=gate, shutdown_event=asyncio.Event())
+    params = _inbound_params()
+
+    with structlog.testing.capture_logs() as logs:
+        dispatch = asyncio.ensure_future(disposition.dispatch("inbound.message", params))
+        # Let the first (full) forward run + the disposition park on the cleared gate.
+        await asyncio.sleep(0)
+        assert not gate.is_set()  # back-pressure engaged
+        assert forward.forwards == []  # NOT yet delivered (held, not dropped)
+        assert not dispatch.done()  # the disposition is PARKED, not returned (no drop)
+        # The scheduler drained a frame off the leg -> SET the gate (resume).
         gate.set()
-        forward = _RecordingForward(raise_on_forward=exc)
-        disposition = _disposition(forward, gate=gate)
-        with structlog.testing.capture_logs() as logs:
-            # MUST NOT raise (fire-and-forget contract).
-            await disposition.dispatch("inbound.message", _inbound_params())
-        assert not gate.is_set()  # back-pressure engaged (gate cleared)
-        events = {row["event"] for row in logs}
-        assert "gateway.adapter.inbound.backpressure_engaged" in events
+        await dispatch  # MUST NOT raise (fire-and-forget contract)
+
+    # The SAME triggering frame was re-forwarded after the drain (no-drop).
+    assert len(forward.forwards) == 1
+    adapter_id, body = forward.forwards[0]
+    assert adapter_id == _ADAPTER_ID
+    assert json.loads(body) == params
+    events = [row["event"] for row in logs]
+    assert "gateway.adapter.inbound.backpressure_engaged" in events
+    assert "gateway.adapter.inbound.backpressure_released" in events
+
+
+async def test_forward_fault_retries_with_gate_but_no_shutdown_event() -> None:
+    # A gate wired but NO shutdown_event (defensive): the park is a plain ``gate.wait()``
+    # (always resumes). The first forward is full; after the drain SETS the gate the SAME
+    # body re-forwards — proving no-drop even without a shutdown_event.
+    gate = asyncio.Event()
+    gate.set()
+    forward = _FullThenAcceptForward(exc=LegQueueFullError("full"))
+    disposition = _disposition(forward, gate=gate, shutdown_event=None)
+    params = _inbound_params()
+
+    dispatch = asyncio.ensure_future(disposition.dispatch("inbound.message", params))
+    await asyncio.sleep(0)
+    assert not gate.is_set()  # back-pressure engaged
+    assert not dispatch.done()  # parked on the plain gate.wait()
+    gate.set()  # scheduler drained -> resume
+    await dispatch
+
+    assert len(forward.forwards) == 1
+    assert json.loads(forward.forwards[0][1]) == params
+
+
+async def test_forward_fault_shutdown_ends_retry_promptly() -> None:
+    # A permanently-full leg + a SET shutdown_event must end the retry-wait promptly (no
+    # wedge). The frame may be dropped ONLY on the shutdown path (we are tearing down).
+    gate = asyncio.Event()  # never set -> the leg never drains
+    shutdown_event = asyncio.Event()
+    forward = _AlwaysFullForward(exc=LegQueueFullError("full"))
+    disposition = _disposition(forward, gate=gate, shutdown_event=shutdown_event)
+
+    with structlog.testing.capture_logs() as logs:
+        dispatch = asyncio.ensure_future(disposition.dispatch("inbound.message", _inbound_params()))
+        await asyncio.sleep(0)
+        assert not dispatch.done()  # parked on the never-draining gate
+        shutdown_event.set()  # shutdown wins the park
+        await asyncio.wait_for(dispatch, timeout=1.0)  # ends promptly, never raises
+
+    assert forward.forwards == []  # dropped on the shutdown path (acceptable)
+    events = [row["event"] for row in logs]
+    assert "gateway.adapter.inbound.backpressure_engaged" in events
+    assert "gateway.adapter.inbound.backpressure_shutdown_drop" in events
+
+
+async def test_forward_fault_park_cancels_cleanly() -> None:
+    # A force-cancel (supervisor drain-timeout escalation) of a parked disposition unwinds
+    # cleanly: the CancelledError propagates (never swallowed) and nothing is delivered.
+    gate = asyncio.Event()  # never set
+    forward = _AlwaysFullForward(exc=LegQueueFullError("full"))
+    disposition = _disposition(forward, gate=gate, shutdown_event=asyncio.Event())
+
+    dispatch = asyncio.ensure_future(disposition.dispatch("inbound.message", _inbound_params()))
+    await asyncio.sleep(0)
+    assert not dispatch.done()
+    dispatch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+    assert forward.forwards == []
 
 
 async def test_forward_fault_with_no_gate_still_loud_audited_never_raises() -> None:
@@ -256,6 +371,88 @@ async def test_runner_forwards_inbound_with_no_session() -> None:
     adapter_id, body = forward.forwards[0]
     assert adapter_id == _ADAPTER_ID
     assert json.loads(body) == _inbound_params()
+
+
+class _OrderTrackingTransport:
+    """A transport that RECORDS each ``read_frame`` so a test can prove the reader paused.
+
+    ``read_log`` appends the index of every frame read; under back-pressure the reader
+    must NOT read the next frame until the in-flight one is forwarded (synchronous-in-reader
+    routing — no read-ahead).
+    """
+
+    def __init__(self, inbound: list[object]) -> None:
+        self._inbound = list(inbound)
+        self.read_log: list[int] = []
+        self._read_index = 0
+        self.sent: list[object] = []
+        self.spawned = False
+        self.closed = False
+
+    async def spawn(self) -> None:
+        self.spawned = True
+
+    async def send(self, frame: object) -> None:
+        self.sent.append(frame)
+
+    async def read_frame(self) -> object | None:
+        if not self._inbound:
+            return None
+        item = self._inbound.pop(0)
+        self.read_log.append(self._read_index)
+        self._read_index += 1
+        return item() if callable(item) else item
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def enable_seq_ack(self) -> None:
+        return None
+
+
+async def test_runner_no_read_ahead_and_in_order_under_back_pressure() -> None:
+    # The end-to-end no-drop + order-preserved property: two inbound frames, the FIRST
+    # leg-full. Synchronous-in-reader routing means the reader does NOT read frame 2 until
+    # frame 1 is forwarded; after the drain the SAME first frame forwards, THEN frame 2 —
+    # in source order, none dropped.
+    gate = asyncio.Event()
+    gate.set()
+    forward = _FullThenAcceptForward(exc=LegQueueFullError("full"))
+    params_a = _inbound_params()
+    params_b = _inbound_params(adapter_id="discord")
+    params_b["inbound_id"] = "frame-2"
+    transport = _OrderTrackingTransport(
+        [
+            dict(_HANDSHAKE_OK),
+            {"jsonrpc": "2.0", "method": "inbound.message", "params": params_a},
+            {"jsonrpc": "2.0", "method": "inbound.message", "params": params_b},
+        ]
+    )
+    runner = GatewayInboundForwardRunner(
+        transport=transport,  # type: ignore[arg-type]
+        adapter_id=_ADAPTER_ID,
+        forward=forward,
+        back_pressure_gate=gate,
+        shutdown_event=asyncio.Event(),
+    )
+    await runner.start_and_handshake()
+    assert transport.read_log == [0]  # the handshake ack consumed read #0
+    pump = asyncio.ensure_future(runner.pump())
+    # Drive the loop: the reader reads frame A (read #1), forwards it (full -> the
+    # disposition parks on the cleared gate). It must NOT read frame B ahead.
+    for _ in range(6):
+        await asyncio.sleep(0)
+    assert forward.forwards == []  # frame A held, not dropped
+    assert not pump.done()  # parked inside the synchronous forward, not returned
+    assert not gate.is_set()  # back-pressure engaged
+    # The handshake read (0) + frame A (1) only — frame B NOT read ahead.
+    assert transport.read_log == [0, 1]
+    # Drain: SET the gate -> frame A re-forwards, then frame B forwards.
+    gate.set()
+    await asyncio.wait_for(pump, timeout=1.0)
+
+    assert [json.loads(b) for _a, b in forward.forwards] == [params_a, params_b]
+    assert transport.closed is True
 
 
 async def test_runner_exposes_start_and_handshake_and_pump() -> None:

@@ -621,18 +621,33 @@ class CommsPluginRunner:
                 self._resolve_pending(frame)
                 continue
 
-            # A NOTIFICATION. Dispatch it as a tracked background task and KEEP
-            # READING — the reader must stay free to resolve the response a
-            # reentrant handler's ``send_request`` awaits (module docstring).
+            # A NOTIFICATION.
             #
             # Spec A G4b-2a-pre (#237) — F1: lift THIS frame's reserved wire seq
             # HERE (synchronously, before the next read clobbers nothing — the seq
-            # rides ON the frame, not a slot) and bind it as a per-task argument so
-            # it travels with its own dispatched frame all the way to
-            # ``model_validate``. ``None`` for a stdio / un-sequenced frame.
-            self._spawn_notification_dispatch(
-                str(method), frame.get("params"), wire_seq=_wire_seq_of(frame)
-            )
+            # rides ON the frame, not a slot) and bind it so it travels with its own
+            # dispatched frame all the way to ``model_validate``. ``None`` for a
+            # stdio / un-sequenced frame.
+            wire_seq = _wire_seq_of(frame)
+            if self._back_pressure_gate is not None:
+                # Spec B G6-7-3 (#309) — FORK-C / ADR-0039: the GATEWAY forward path routes
+                # SYNCHRONOUSLY. The forward disposition does NO reentrant ``send_request``
+                # (it only ENQUEUES onto the leg — no response is awaited), so the daemon's
+                # fire-and-forget reentrancy machinery is unnecessary and synchronous routing
+                # is deadlock-free. ``await``-ing the dispatch here keeps the reader PAUSED
+                # while the disposition (re)forwards the in-flight frame under back-pressure —
+                # so the no-drop RETRY holds the frame, source order is preserved, and no
+                # later frame is read ahead, all by construction (the disposition's gate-park
+                # is what blocks; this await is what makes the reader honour it). The gateway
+                # never grows :attr:`_inflight` (at most one frame in flight), so its teardown
+                # carries no dispatch-task drain.
+                await self._route_notification(str(method), frame.get("params"), wire_seq=wire_seq)
+                continue
+            # The DAEMON path (no gate): dispatch as a tracked background task and KEEP
+            # READING — the reader must stay free to resolve the response a reentrant
+            # handler's ``send_request`` awaits (module docstring). BYTE-FOR-BYTE the
+            # pre-G6-7-3 fire-and-forget shape.
+            self._spawn_notification_dispatch(str(method), frame.get("params"), wire_seq=wire_seq)
             # Backpressure into the pipe: cap the number of in-flight dispatch
             # tasks. Only the NEXT notification intake is gated — responses are
             # resolved above WITHOUT a cap check — so an in-flight dispatch's
