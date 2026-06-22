@@ -637,16 +637,20 @@ changed (the daemon-spawn path was already scrubbed-env).
 
 ### Spec B G6-7: the gateway adapter inbound bridge (#309)
 
-> **TEST-ONLY caveat — read before enabling the forward leg in production.**
-> The gateway-hosted Discord forward leg MUST NOT be pointed at a live platform until
-> G6-7-5 ships the item-4b poison ceiling. Until that ceiling lands, a forwarded frame
-> that fails dispatch (or is deterministically refused) on every attempt replays
-> **unbounded** across core reconnects, re-charging the `quarantined_extract` cost on
-> every replay. This is currently contained only by the forward leg being test-only and
-> by the daemon's quarantined child running a deterministic-echo loop with no real LLM
-> and no provider cost (the real LLM child is hard-blocked behind issue #230). The
-> forward leg is not flag-day'd into production until G6-7-8, which is gated on G6-7-5
-> going green. See [ADR-0039 §PERF-309-1](../adr/0039-gateway-adapter-inbound-bridge.md#2026-06-22--g6-7-3-forward-shape-was-non-conformant-corrected-in-g6-7-4-task-0-commit-af9c3b5e).
+> **TEST-ONLY caveat — the forward leg is not yet in production.**
+> The item-4b poison ceiling shipped in G6-7-5 (PERF-309-1 is closed): a
+> deterministically-failing forwarded frame is now dead-lettered after N=5 attempts
+> instead of replaying unbounded. However, the forward leg is still NOT flag-day'd into
+> production. Live graduation requires:
+>
+> - **G6-7-7** — the privileged real-spawn proof (the `integration-privileged` lane
+>   promoted to a currently-required merge gate).
+> - **G6-7-8** — the flag-day: delete the daemon-spawn path, add the `alfred-discord`
+>   Compose service, and cut the credential source over to the gateway.
+>
+> Until G6-7-8 completes, no production inbound traverses the forwarded path.
+> See [ADR-0039 §Amendments](../adr/0039-gateway-adapter-inbound-bridge.md#amendments)
+> for the full history (G6-7-3 non-conformance, G6-7-4 correction, G6-7-5 ceiling).
 
 G6-7 closes the inbound data path left open by the ADR-0036 hosting inversion. The gateway
 now hosts and supervises the adapter child (G6-5); G6-7 wires the **inbound→core bridge** so
@@ -730,17 +734,48 @@ All terminal drop dispositions (admission failures and malformed bodies) share t
 **closed-vocab `subject.reason` field** with four values: `unknown_adapter`,
 `envelope_body_mismatch`, `body_malformed`, `receive_fault`.
 
-> **Devex deferred (G6-7-5).** `alfred audit log` does not yet render `subject`, so
-> operator-facing discrimination between these reasons (render-subject or a `--reason`
-> filter) is scheduled in G6-7-5 alongside the new `poisoned` dead-letter reason (the
-> item-4b poison ceiling). Until that lands, all four drop reasons are distinguishable
-> only by reading raw audit rows.
+`alfred audit log` now renders the drop reason and accepts a `--reason <value>` filter
+covering all forwarded-drop reasons. The `_row_reason` helper in `src/alfred/cli/audit.py`
+reads `subject.reason` for the receiver terminal drops; for the poison dead-letter it reads
+the `result` discriminator instead (`result="poisoned"` — the `comms.inbound.poisoned` row
+carries no `subject.reason`). The render and filter logic shipped in G6-7-5; the operator
+sees the full benefit once PR-S3-7 wires the `_query_audit_log` backend (currently a stub
+that raises rather than returning false-empty rows).
+
+#### Poison ceiling (item 4b)
+
+When a forwarded frame fails the post-extract region (T3-promotion, ingest, or dispatch) on
+**N=5** consecutive attempts (`_FORWARDED_DISPATCH_ATTEMPT_CEILING` in
+`src/alfred/comms_mcp/inbound.py`), the core dead-letters it:
+
+- A `comms.inbound.poisoned` signed audit row is written (`result="poisoned"`, migration
+  0020) before the drain.
+- The seq is ack-to-drained (`BoundedSeqAckTracker.observe(wire_seq)` observe-only, no
+  commit) so the stalled contiguous high-water advances and the gateway stops replaying the
+  frame.
+- The frame is never dispatched, never committed, and never re-extracted.
+
+The durable counter (`forwarded_dispatch_attempts` Postgres table, composite PK
+`(adapter_id, inbound_id)`, via `PostgresForwardedDispatchAttemptStore`) survives core
+restarts — an in-memory counter would reset exactly when the bound is needed. The count is
+incremented on entry to the post-extract region (AFTER `quarantined_extract`); the ceiling
+check fires BEFORE `quarantined_extract`, so `quarantined_extract` is called at most N=5
+times per `(adapter_id, inbound_id)` pair.
+
+Deliberate pre-extract sheds (burst-drop, budget-capped, unbound-binding refusals) never
+charge the ledger and can never accumulate a poison count. The audit vocabulary remains
+distinct: `budget_capped` / `dropped` / `binding_requested` are `comms.forwarded_inbound.dropped`
+rows; `poisoned` is the separate `comms.inbound.poisoned` event.
+
+See [ADR-0039 §Amendments — G6-7-5](../adr/0039-gateway-adapter-inbound-bridge.md#amendments)
+for the full item-4b mechanics, the budget-guard clarification, and the known follow-up
+(no TTL sweeper for the ledger this slice).
 
 #### Cross-references
 
 - [ADR-0039](../adr/0039-gateway-adapter-inbound-bridge.md) — the full design rationale
   (option selection, wire fact, invariants, consequences, resolved open flags).
-- [ADR-0039 §Amendments](../adr/0039-gateway-adapter-inbound-bridge.md#2026-06-22--g6-7-3-forward-shape-was-non-conformant-corrected-in-g6-7-4-task-0-commit-af9c3b5e) — G6-7-3 non-conformant forward shape + PERF-309-1 unbounded-replay note.
+- [ADR-0039 §Amendments](../adr/0039-gateway-adapter-inbound-bridge.md#amendments) — G6-7-3 non-conformant forward shape, G6-7-4 correction, G6-7-5 item-4b poison ceiling + PERF-309-1 closure.
 - G6-4 ingress gate section (this file) — the gateway-side admission collaborators the
   forwarded path runs before reaching the core.
 - G6-3 credential path section (this file) — the spawn-binding origin of `adapter_id`
