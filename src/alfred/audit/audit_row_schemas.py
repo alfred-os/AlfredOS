@@ -1282,7 +1282,8 @@ COMMS_INBOUND_DISPATCH_FAILED_FIELDS: Final[frozenset[str]] = frozenset(
 # forge REFUSALS (``result="refused"``); ``body_malformed`` is an ack-to-drain
 # DROP (``result="dropped"``, the same value the G0 replay row reuses).
 #
-# ``reason`` closed-vocab: unknown_adapter | envelope_body_mismatch | body_malformed.
+# ``reason`` closed-vocab: unknown_adapter | envelope_body_mismatch | body_malformed |
+# receive_fault (the SEC-G674-1 admission-fault terminal drop).
 COMMS_FORWARDED_INBOUND_DROPPED_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "adapter_id",

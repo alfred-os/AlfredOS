@@ -177,8 +177,19 @@ class GatewayForwardedInboundReceiver:
         ``PromoterRequiredError`` and any genuine dispatch fault keep their
         ADR-0039-item-4 leg-replay recovery untouched.
         """
+        # SEC-G674-1 (singleton rebind race): snapshot the per-connection ack tracker
+        # slot ONCE, before any await. The receiver is a per-boot singleton whose
+        # ``self._ack_tracker`` is rebound per accepted connection via
+        # ``set_ack_tracker``. A drop's ``_audit_drop`` awaits BEFORE ``_drain`` reads
+        # the tracker; were a future multi-connection topology to rebind the slot
+        # mid-await, the drain would ACK the WRONG connection's leg. Pinning a single
+        # local reference makes the entire ``receive()`` invocation operate on one
+        # consistent tracker — for both DRAINS and the dispatch ``ack_tracker=`` arg.
+        tracker = self._ack_tracker
         try:
-            prepared = await self._admit_and_reparse(params=params, wire_seq=wire_seq)
+            prepared = await self._admit_and_reparse(
+                params=params, wire_seq=wire_seq, tracker=tracker
+            )
         except ForwardedInboundAuditWriteError:
             # A signed-audit write failed inside a drop disposition — non-skippable.
             # Re-raise so the disposition escalates (restart); the frame is left
@@ -199,7 +210,7 @@ class GatewayForwardedInboundReceiver:
                 reason=_REASON_RECEIVE_FAULT,
                 result="dropped",
             )
-            self._drain(wire_seq)
+            self._drain(tracker, wire_seq)
             return
         if prepared is None:
             # A terminal drop already wrote its signed row + drained inside
@@ -220,12 +231,16 @@ class GatewayForwardedInboundReceiver:
             pre_resolution_limiter=collab.pre_resolution_limiter,
             sub_payload_promoter=collab.sub_payload_promoter,
             idempotency_store=self._idempotency_store,
-            ack_tracker=self._ack_tracker,
+            ack_tracker=tracker,
             commit_at_dispatch_edge=True,
         )
 
     async def _admit_and_reparse(
-        self, *, params: object, wire_seq: int | None
+        self,
+        *,
+        params: object,
+        wire_seq: int | None,
+        tracker: _AckTrackerLike | None,
     ) -> tuple[InboundMessageNotification, _ForwardedCollaborators] | None:
         """K4 admission + re-parse + wire_seq rebind (the dispatch's prologue).
 
@@ -235,6 +250,10 @@ class GatewayForwardedInboundReceiver:
         is wrapped by :meth:`receive`'s admission catch — any UNEXPECTED fault it raises
         (e.g. the off-vocab envelope ``adapter_id`` ``ValidationError``) becomes a
         ``receive_fault`` drop there, never an escape to the blanket catch-and-continue.
+
+        ``tracker`` is :meth:`receive`'s once-snapshotted ack-tracker reference (the
+        singleton-rebind-race guard); the drains here use it rather than re-reading
+        the mutable ``self._ack_tracker`` slot.
         """
         # The off-vocab envelope ``adapter_id`` fails the closed-vocab AdapterId
         # validator HERE — a ValidationError caught by ``receive`` and turned into a
@@ -251,7 +270,7 @@ class GatewayForwardedInboundReceiver:
                 reason=_REASON_UNKNOWN_ADAPTER,
                 result="refused",
             )
-            self._drain(wire_seq)
+            self._drain(tracker, wire_seq)
             return None
 
         # The SOLE body parser is core-side. It enforces the §3.3 F3 equality check
@@ -264,7 +283,7 @@ class GatewayForwardedInboundReceiver:
                 reason=_REASON_ENVELOPE_BODY_MISMATCH,
                 result="refused",
             )
-            self._drain(wire_seq)
+            self._drain(tracker, wire_seq)
             return None
         except InboundBodyMalformedError as exc:
             # The structural summary is LEAK-SAFE (closed structural shape, no T3 —
@@ -280,7 +299,7 @@ class GatewayForwardedInboundReceiver:
                 reason=_REASON_BODY_MALFORMED,
                 result="dropped",
             )
-            self._drain(wire_seq)
+            self._drain(tracker, wire_seq)
             return None
 
         # Rebind the REAL leg-carrier wire_seq (the re-parse scrubbed the
@@ -289,16 +308,20 @@ class GatewayForwardedInboundReceiver:
         notification = notification.model_copy(update={"wire_seq": wire_seq})
         return notification, self._registry[envelope.adapter_id]
 
-    def _drain(self, wire_seq: int | None) -> None:
+    def _drain(self, tracker: _AckTrackerLike | None, wire_seq: int | None) -> None:
         """ACK the leg ``wire_seq`` to drain a terminal drop (ARCH-309-3).
 
         Called ONLY after the drop's signed audit row WROTE — the audit helper
         raises BEFORE the caller reaches here on a write failure, so a failed audit
-        never drains an un-recorded drop. A None tracker (no connection bound yet)
+        never drains an un-recorded drop. A None ``tracker`` (no connection bound yet)
         or a None ``wire_seq`` (un-sequenced leg) makes this a no-op.
+
+        ``tracker`` is :meth:`receive`'s once-snapshotted ack-tracker reference, NOT a
+        fresh read of the mutable ``self._ack_tracker`` slot — so a future
+        multi-connection rebind mid-await cannot redirect the drain at the wrong leg.
         """
-        if self._ack_tracker is not None and wire_seq is not None:
-            self._ack_tracker.observe(wire_seq)
+        if tracker is not None and wire_seq is not None:
+            tracker.observe(wire_seq)
 
     async def _audit_drop(self, *, adapter_id: str, reason: str, result: str) -> None:
         """Write the ONE signed, content-free row for a terminal drop.
