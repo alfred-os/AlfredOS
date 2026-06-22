@@ -634,3 +634,114 @@ launcher-spawn path already hands the child a scrubbed env with no fd-3 writer, 
 source authenticated on the live daemon-spawn path (the credential cut-over is #309). The
 accurate framing is: the Discord credential SOURCE was rewired to fd-3; no live flow
 changed (the daemon-spawn path was already scrubbed-env).
+
+### Spec B G6-7: the gateway adapter inbound bridge (#309)
+
+> **TEST-ONLY caveat — read before enabling the forward leg in production.**
+> The gateway-hosted Discord forward leg MUST NOT be pointed at a live platform until
+> G6-7-5 ships the item-4b poison ceiling. Until that ceiling lands, a forwarded frame
+> that fails dispatch (or is deterministically refused) on every attempt replays
+> **unbounded** across core reconnects, re-charging the `quarantined_extract` cost on
+> every replay. This is currently contained only by the forward leg being test-only and
+> by the daemon's quarantined child running a deterministic-echo loop with no real LLM
+> and no provider cost (the real LLM child is hard-blocked behind issue #230). The
+> forward leg is not flag-day'd into production until G6-7-8, which is gated on G6-7-5
+> going green. See [ADR-0039 §PERF-309-1](../adr/0039-gateway-adapter-inbound-bridge.md#2026-06-22--g6-7-3-forward-shape-was-non-conformant-corrected-in-g6-7-4-task-0-commit-af9c3b5e).
+
+G6-7 closes the inbound data path left open by the ADR-0036 hosting inversion. The gateway
+now hosts and supervises the adapter child (G6-5); G6-7 wires the **inbound→core bridge** so
+the child's `inbound.message` notifications actually reach dispatch. The full design rationale
+is in [ADR-0039](../adr/0039-gateway-adapter-inbound-bridge.md); this section documents the
+implementation landmarks and the boundary contracts the operator and engineer need to know.
+
+#### The `gateway.adapter.inbound` wire frame
+
+When the `GatewayInboundForwardRunner` receives an `inbound.message` notification from the
+hosted child it calls `GatewayCoreLink.forward_adapter_inbound` with:
+
+- `adapter_id` — sourced from the **spawn binding** (never read from the body — ADR-0039
+  item 2 / SEC-309-1).
+- `body` — the child's `inbound.message` `params` serialized to an opaque JSON `str`
+  (byte-stable, never parsed by the gateway — payload-blind hard rule #5).
+
+`forward_adapter_inbound` wraps those in a `GatewayAdapterInboundEnvelope`
+(`src/alfred/comms_mcp/protocol.py`) and serializes it as a **JSON-RPC notification frame**:
+
+```json
+{"jsonrpc": "2.0", "method": "gateway.adapter.inbound", "params": {"adapter_id": "…", "body": "…"}}
+```
+
+No `"id"` field (fire-and-forget, mirroring the child's own `inbound.message`). The opaque
+body rides verbatim inside `params.body` — byte-stable through the leg's `ReplayBuffer`
+replay, so the embedded `inbound_id` is stable and G0 dedup is never a silent no-op
+(SEC-309-2). The frame rides the per-adapter `GatewayLeg` payload-unit channel (seq/ack +
+`ReplayBuffer`) giving the forwarded inbound resume and replay for free.
+
+#### Core-side receive boundary — `GatewayForwardedInboundReceiver`
+
+The daemon's `CommsPluginRunner` (running as HOST over the gateway leg) routes the
+`gateway.adapter.inbound` method to `GatewayForwardedInboundReceiver`
+(`src/alfred/comms_mcp/forwarded_inbound_receiver.py`). The receiver enforces two-sided
+admission:
+
+- **K4 registered-adapter admission.** The envelope `adapter_id` must name a registered
+  adapter the gateway is authorised to host. An unregistered or unknown id is a loud
+  `comms.forwarded_inbound.dropped` audit row (reason `unknown_adapter`), frame dropped,
+  never default-routed.
+- **Envelope-equals-body equality (reparse).** The receiver re-parses the opaque body as
+  an `InboundMessageNotification` and asserts that the body's derived `adapter_id` equals
+  the envelope `adapter_id`. A mismatch is a loud drop (reason `envelope_body_mismatch`).
+  This closes the vacuous-equality gap: a forged body that claims a different kind cannot
+  masquerade as the envelope's registered adapter.
+- **Per-kind collaborator registry (fail-closed at boot).** The receiver selects the
+  per-`adapter_id` collaborator set (sub-payload promoter, identity resolver, rate-limiter,
+  handler) from a registry built at daemon boot. A kind whose collaborators are not
+  registered causes a loud `comms.forwarded_inbound.dropped` (reason `receive_fault`).
+  `process_inbound_message` is collaborator-parameterised and fails closed without the
+  Discord promoter — the registry makes the receive arm not a bare pipeline call.
+
+A body that fails to parse as `InboundMessageNotification` is a loud drop (reason
+`body_malformed`). All four drop reasons are closed-vocab fields on the single
+`comms.forwarded_inbound.dropped` signed audit event — see the Triage note below.
+
+#### Dispatched-edge commit/observe — exactly-once-once-committed
+
+On the forwarded path the G0 commit on `(adapter_id, inbound_id)` and the
+`BoundedSeqAckTracker.observe(wire_seq)` call **move to the dispatched edge** — they fire
+only after `process_inbound_message` returns successfully, not on receipt. This is the
+ADR-0039 item-4 guarantee:
+
+- **Exactly-once once committed; at-least-once on the dispatched edge.** A dispatch failure
+  leaves the seq un-observed → it never enters the contiguous high-water → the leg replays
+  it on reconnect → re-dispatch. A crash between dispatch returning and the commit becoming
+  durable re-dispatches the frame on replay; the G0 commit deduplicates the tail
+  (`replay_observed` row, not re-dispatched). On the steady (no-crash) path this collapses
+  to exactly-once.
+- **Terminal-drop + ack-to-drain.** A body that is malformed or triggers a loud
+  admission-drop is **ack-to-drain**: the receiver writes the `comms.forwarded_inbound.dropped`
+  audit row, then calls `observe(wire_seq)` purely to release the stalled contiguous
+  high-water so the successfully-dispatched tail can trim. The frame is never committed, never
+  dispatched, and never replayed.
+
+#### Triage note — forwarded-inbound terminal drops
+
+All terminal drop dispositions (admission failures and malformed bodies) share the single
+`comms.forwarded_inbound.dropped` signed audit event. The drop reason is carried in the
+**closed-vocab `subject.reason` field** with four values: `unknown_adapter`,
+`envelope_body_mismatch`, `body_malformed`, `receive_fault`.
+
+> **Devex deferred (G6-7-5).** `alfred audit log` does not yet render `subject`, so
+> operator-facing discrimination between these reasons (render-subject or a `--reason`
+> filter) is scheduled in G6-7-5 alongside the new `poisoned` dead-letter reason (the
+> item-4b poison ceiling). Until that lands, all four drop reasons are distinguishable
+> only by reading raw audit rows.
+
+#### Cross-references
+
+- [ADR-0039](../adr/0039-gateway-adapter-inbound-bridge.md) — the full design rationale
+  (option selection, wire fact, invariants, consequences, resolved open flags).
+- [ADR-0039 §Amendments](../adr/0039-gateway-adapter-inbound-bridge.md#2026-06-22--g6-7-3-forward-shape-was-non-conformant-corrected-in-g6-7-4-task-0-commit-af9c3b5e) — G6-7-3 non-conformant forward shape + PERF-309-1 unbounded-replay note.
+- G6-4 ingress gate section (this file) — the gateway-side admission collaborators the
+  forwarded path runs before reaching the core.
+- G6-3 credential path section (this file) — the spawn-binding origin of `adapter_id`
+  (item 2 / SEC-309-1).
