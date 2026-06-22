@@ -130,6 +130,10 @@ if TYPE_CHECKING:
         CommsInboundOrchestratorAdapter,
         OutboundSenderLike,
     )
+    from alfred.comms_mcp.forwarded_inbound_receiver import (
+        GatewayForwardedInboundReceiver,
+        _ForwardedCollaborators,
+    )
     from alfred.comms_mcp.protocol import OutboundMessageRequest
     from alfred.config.settings import Settings
     from alfred.hooks.capability import CapabilityGate
@@ -348,6 +352,98 @@ class _CommsAdapterManifestError(Exception):
         super().__init__(f"comms adapter {adapter_id!r} manifest missing {field!r}")
         self.adapter_id = adapter_id
         self.field = field
+
+
+# The forwarded-inbound kinds the HOST can re-parse + dispatch behind the gateway
+# leg (ADR-0039). One registry entry per kind. Initially just ``"discord"`` (the
+# first network-facing adapter the gateway spawns + forwards); a new hostable kind
+# is added here AND must carry the host-side classifier/promoter machinery the
+# registry builder fail-closes on. Keyed on the wire ``adapter_kind`` (the host's
+# closed vocabulary), mirroring ``REQUIRED_CLASSIFIERS_BY_KIND`` / the promoter
+# factory — NOT the per-instance launcher id.
+_FORWARDED_INBOUND_KINDS: Final[tuple[str, ...]] = ("discord",)
+
+
+class _ForwardedInboundRegistryMisconfiguredError(Exception):
+    """A forwarded-inbound kind needs a promoter the deterministic factory withheld.
+
+    Spec B G6-7-4 (#309). The boot-time mirror of the inbound M2 fail-closed guard,
+    raised for a forwarded-inbound kind whose
+    :data:`alfred.comms_mcp.classifier_registry.REQUIRED_CLASSIFIERS_BY_KIND` set is
+    non-empty (e.g. ``"discord"``) but whose :func:`_build_sub_payload_promoter`
+    yielded ``None`` (a structural REQUIRED_CLASSIFIERS_BY_KIND / factory drift). The
+    promoter is what promotes raw (T3) sub-payloads to single-use ``ContentHandle``
+    refs BEFORE the quarantined extract (CLAUDE.md hard rule #5), so a missing one is
+    a fail-closed BOOT refusal — never a deferred per-message ``PromoterRequiredError``
+    that would trip mid-traffic on the first forwarded inbound. Raised out of
+    :func:`_build_forwarded_inbound_registry` (which has no supervisor / ``_refuse_boot``
+    plumbing yet) and caught at the :func:`_build_comms_boot_graph` CALL SITE, where it
+    is routed to an audited ``CommsPromoterMisconfiguredFailure`` refusal — exactly the
+    catch-at-call-site shape ``QuarantineChildSpawnError`` uses (the graph builder runs
+    before the supervisor exists).
+    """
+
+    def __init__(self, adapter_kind: str) -> None:
+        super().__init__(
+            f"forwarded-inbound kind {adapter_kind!r} requires a sub-payload promoter "
+            "but the factory yielded None"
+        )
+        self.adapter_kind = adapter_kind
+
+
+def _build_forwarded_inbound_registry(
+    *,
+    graph_content_store: object,
+    resolver_bridge: object,
+    inbound_orchestrator: object,
+    burst_limiter: object,
+    secret_broker: object,
+) -> Mapping[str, _ForwardedCollaborators]:
+    """Build the per-kind forwarded-inbound collaborator registry (Spec B G6-7-4 / #309).
+
+    One :class:`_ForwardedCollaborators` entry per hostable forwarded kind
+    (:data:`_FORWARDED_INBOUND_KINDS` — initially just ``"discord"``). For each kind:
+
+    * build the per-kind :class:`SubPayloadPromoter` via the SAME deterministic factory
+      the spawned-adapter wiring uses (:func:`_build_sub_payload_promoter`), so the host
+      promotes raw (T3) sub-payloads to single-use ``ContentHandle`` refs BEFORE the
+      quarantined extract (CLAUDE.md hard rule #5);
+    * FAIL CLOSED at boot if a classifier-bearing kind yields a ``None`` promoter —
+      raise :class:`_ForwardedInboundRegistryMisconfiguredError` (the call site refuses
+      the boot) rather than defer to a per-message ``PromoterRequiredError`` mid-traffic;
+    * mint ONE LONG-LIVED :class:`_PreResolutionLimiter` per kind (sec-003): the coarse
+      per-``(adapter_id, platform_user_id_hash)`` DoS budget MUST accumulate across the
+      flood of inbounds one platform user can send, so the limiter is built ONCE here
+      and held for the receiver's whole lifetime — a per-call instance would silently
+      reset the window every message and disable the gate.
+
+    The orchestrator / resolver / burst-limiter / secret-broker are the per-boot
+    singletons shared with the spawned-adapter inbound handlers (the SAME graph fields),
+    so a forwarded inbound is dispatched with the identical collaborator set a
+    daemon-spawned one would be. Returns an immutable mapping (the receiver only reads).
+    """
+    from alfred.comms_mcp.classifier_registry import REQUIRED_CLASSIFIERS_BY_KIND
+    from alfred.comms_mcp.forwarded_inbound_receiver import _ForwardedCollaborators
+    from alfred.comms_mcp.inbound import _PreResolutionLimiter
+
+    registry: dict[str, _ForwardedCollaborators] = {}
+    for kind in _FORWARDED_INBOUND_KINDS:
+        promoter = _build_sub_payload_promoter(
+            adapter_kind=kind,
+            content_store=graph_content_store,
+        )
+        if promoter is None and REQUIRED_CLASSIFIERS_BY_KIND.get(kind, frozenset()):
+            raise _ForwardedInboundRegistryMisconfiguredError(kind)
+        registry[kind] = _ForwardedCollaborators(
+            sub_payload_promoter=promoter,  # type: ignore[arg-type]
+            resolver_bridge=resolver_bridge,  # type: ignore[arg-type]
+            orchestrator=inbound_orchestrator,  # type: ignore[arg-type]
+            burst_limiter=burst_limiter,  # type: ignore[arg-type]
+            secret_broker=secret_broker,  # type: ignore[arg-type]
+            # ONE long-lived limiter per kind (sec-003) — built ONCE, never per call.
+            pre_resolution_limiter=_PreResolutionLimiter(),
+        )
+    return registry
 
 
 # The comms ``adapter_kind`` whose host wire is a 0600 unix socket the daemon
@@ -632,6 +728,16 @@ class _CommsBootGraph:
     # docstring's snapshot-reachability decision; 2b-2c owns the query seam). Holds no
     # resource to reap, so ``aclose`` does not touch it.
     crash_incident_reconciler: CrashIncidentReconciler
+    # Spec B G6-7-4 (#309): the per-boot gateway-forwarded inbound receiver — the
+    # core-side T3 trust seam that re-parses a ``gateway.adapter.inbound`` envelope and
+    # dispatches it on the dispatched edge with the right per-kind collaborator set.
+    # Built ONCE here (over the fail-closed per-kind registry) and injected into the
+    # gateway-leg runner; the per-CONNECTION ack tracker is bound onto it at accept time
+    # (the SAME instance the inbound handler + ack-emit timer use). In-memory only (the
+    # registry of per-boot singletons + a per-kind long-lived limiter); holds no resource
+    # to reap, so ``aclose`` does not touch it (the same posture as ``credential_resolver``
+    # / ``status_observer``).
+    forwarded_inbound_receiver: GatewayForwardedInboundReceiver
 
     async def aclose(self) -> None:
         """Reap the LIVE bwrap quarantined child + the daemon-owned ContentStore.
@@ -800,6 +906,27 @@ async def _build_comms_boot_graph(
             now=lambda: datetime.now(UTC),
             reconciler=crash_incident_reconciler,
         )
+        # Spec B G6-7-4 (#309): the per-boot gateway-forwarded inbound receiver, built
+        # over the fail-closed per-kind collaborator registry. A classifier-bearing kind
+        # with a None promoter raises ``_ForwardedInboundRegistryMisconfiguredError`` HERE
+        # (caught at the call site -> audited refuse-boot) — fail-closed at boot, never a
+        # deferred per-message ``PromoterRequiredError`` (CLAUDE.md hard rules #5 + #7).
+        # The collaborators are the SAME per-boot singletons the spawned-adapter inbound
+        # handlers use (so a forwarded inbound dispatches identically); the ack tracker is
+        # bound per accepted connection at accept time, not here.
+        from alfred.comms_mcp.forwarded_inbound_receiver import GatewayForwardedInboundReceiver
+
+        forwarded_inbound_receiver = GatewayForwardedInboundReceiver(
+            registry=_build_forwarded_inbound_registry(
+                graph_content_store=content_store,
+                resolver_bridge=resolver_bridge,
+                inbound_orchestrator=inbound_orchestrator,
+                burst_limiter=burst_limiter,
+                secret_broker=secret_broker,
+            ),
+            idempotency_store=idempotency_store,
+            audit_writer=audit,  # type: ignore[arg-type]
+        )
         return _CommsBootGraph(
             secret_broker=secret_broker,
             resolver_bridge=resolver_bridge,
@@ -813,6 +940,7 @@ async def _build_comms_boot_graph(
             status_observer=status_observer,
             credential_resolver=credential_resolver,
             crash_incident_reconciler=crash_incident_reconciler,
+            forwarded_inbound_receiver=forwarded_inbound_receiver,
         )
     except Exception:
         # Reap BOTH the live bwrap child (via the transport) and the ContentStore's
@@ -981,6 +1109,7 @@ def _build_comms_runner(
     settings: Settings,
     graph: _CommsBootGraph,
     with_credential_resolver: bool = False,
+    with_forwarded_inbound_receiver: bool = False,
 ) -> CommsPluginRunner:
     """Construct the runner over an established transport + bind the outbound sender.
 
@@ -992,6 +1121,14 @@ def _build_comms_runner(
     request/response routing ONLY on the SOCKET (gateway) leg — the leg the gateway
     dials to request adapter credentials. The stdio (daemon-spawned) legs carry no
     credential request, so they leave it OFF (the resolver is never reached on them).
+
+    ``with_forwarded_inbound_receiver`` (Spec B G6-7-4 / #309) injects the per-boot
+    gateway-forwarded inbound receiver ONLY on the gateway leg, so a
+    ``gateway.adapter.inbound`` notification is re-parsed + dispatched on the trusted
+    T3 seam (instead of the session's unknown_method refusal). The stdio
+    (daemon-spawned) legs carry no forwarded inbound, so they leave it OFF (the
+    disposition's None-branch falls through to the fail-closed refusal — byte-for-byte
+    unchanged).
     """
     runner = CommsPluginRunner(
         session=session,  # type: ignore[arg-type]
@@ -1013,6 +1150,17 @@ def _build_comms_runner(
         # Spec B G6-3 (#288): only the gateway (socket) leg carries the credential
         # round-trip; the resolver routes spawn_request -> spawn_grant on this runner.
         credential_resolver=graph.credential_resolver if with_credential_resolver else None,
+        # Spec B G6-7-4 (#309): only the gateway leg carries forwarded inbounds; the
+        # receiver re-parses + dispatches a ``gateway.adapter.inbound`` on this runner.
+        # The concrete ``GatewayForwardedInboundReceiver.set_ack_tracker`` narrows its
+        # param to ``_AckTrackerLike`` against the runner's ``_ForwardedReceiverLike``
+        # Protocol (``object``), the same structural-override mismatch the per-adapter
+        # handlers / credential resolver carry an ignore for.
+        forwarded_inbound_receiver=(
+            graph.forwarded_inbound_receiver  # type: ignore[arg-type]
+            if with_forwarded_inbound_receiver
+            else None
+        ),
     )
     sender: OutboundSenderLike = _RunnerOutboundSender(runner=runner)
     graph.inbound_orchestrator.bind_outbound_sender(sender)
@@ -1271,8 +1419,10 @@ async def _listen_socket_comms_adapter(
             supervisor=supervisor,
             settings=settings,
             graph=graph,
-            # The SOCKET carrier IS the gateway leg — wire the credential round-trip.
+            # The SOCKET carrier IS the gateway leg — wire the credential round-trip
+            # AND the forwarded-inbound receiver (Spec B G6-7-4 / #309).
             with_credential_resolver=True,
+            with_forwarded_inbound_receiver=True,
         )
         # Spec A G3-2 (#237): split ``run`` into ``start_and_handshake`` + ``pump``
         # so the socket-carrier runner's id-less ``send_notification`` is registered
@@ -1299,6 +1449,14 @@ async def _listen_socket_comms_adapter(
         # (NOT ``_CommsBootGraph.aclose`` — that reaps process-singletons; wrong lifetime).
         ack_tracker = BoundedSeqAckTracker()
         wiring.inbound_handler.set_ack_tracker(ack_tracker)  # type: ignore[attr-defined]
+        # Spec B G6-7-4 (#309): bind the SAME per-connection tracker onto the
+        # gateway-forwarded inbound receiver (the per-boot singleton on the graph, the
+        # SAME instance injected into this runner's disposition). The receiver's
+        # dispatched-edge ``observe(wire_seq)`` must advance the SAME contiguous
+        # high-water this connection's ack-emit timer reports back to the gateway — a
+        # fresh tracker here would split the high-water and the gateway would never see
+        # the forwarded inbounds acked.
+        graph.forwarded_inbound_receiver.set_ack_tracker(ack_tracker)
         ack_timer = asyncio.ensure_future(
             _emit_durable_intake_ack_loop(
                 send_notification=runner.send_notification,
@@ -2125,6 +2283,23 @@ async def _start_async() -> None:
                 audit,
                 QuarantineChildSpawnFailedFailure(),
                 t("daemon.boot.quarantine_child_spawn_failed"),
+                boot_id=boot_id,
+                environment_source=source,
+            )
+        except _ForwardedInboundRegistryMisconfiguredError as exc:
+            # Spec B G6-7-4 (#309): a forwarded-inbound kind in the receiver registry
+            # needs a promoter the deterministic factory withheld (a structural
+            # REQUIRED_CLASSIFIERS_BY_KIND / factory drift). REFUSE BOOT fail-closed
+            # (audited, exit 2) under the SAME ``comms_promoter_misconfigured`` reason the
+            # spawned-adapter inbound-handler path uses — rather than defer to a
+            # per-message ``PromoterRequiredError`` mid-traffic (CLAUDE.md hard rules #5 +
+            # #7). The graph builder's post-spawn ``except`` already reaped the live bwrap
+            # child + the ContentStore before this propagated, so nothing leaks. The
+            # closed-vocab kind is the failure's ``adapter_id`` (never raw content).
+            await _refuse_boot(
+                audit,
+                CommsPromoterMisconfiguredFailure(adapter_id=exc.adapter_kind),
+                t("daemon.boot.comms_promoter_misconfigured", adapter_id=exc.adapter_kind),
                 boot_id=boot_id,
                 environment_source=source,
             )

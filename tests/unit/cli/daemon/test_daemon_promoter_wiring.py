@@ -288,6 +288,7 @@ async def test_graph_aclose_skips_close_for_non_content_store() -> None:
         status_observer=object(),  # type: ignore[arg-type]  # unused by aclose
         credential_resolver=object(),  # type: ignore[arg-type]  # unused by aclose
         crash_incident_reconciler=object(),  # type: ignore[arg-type]  # unused by aclose
+        forwarded_inbound_receiver=object(),  # type: ignore[arg-type]  # unused by aclose
     )
 
     await graph.aclose()
