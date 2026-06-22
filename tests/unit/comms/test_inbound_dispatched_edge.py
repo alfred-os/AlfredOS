@@ -27,7 +27,8 @@ import pytest
 
 from alfred.comms_mcp import audit_hash
 from alfred.comms_mcp.errors import ForwardedInboundAuditWriteError
-from alfred.comms_mcp.inbound import process_inbound_message
+from alfred.comms_mcp.inbound import _PreResolutionLimiter, process_inbound_message
+from alfred.orchestrator.burst_limiter import Dropped
 from tests.unit.comms_mcp._inbound_spies import (
     SpyAuditWriter,
     SpyBurstLimiter,
@@ -418,4 +419,192 @@ async def test_forwarded_replay_observed_audit_write_failure_propagates() -> Non
     assert isinstance(excinfo.value.__cause__, RuntimeError)
     assert str(excinfo.value.__cause__) == "replay audit sink down"
     # The drain was short-circuited: a replay is never ACKed without its signed record.
+    assert tracker.observed == []
+
+
+# --------------------------------------------------------------------------- #
+# 8 — DETERMINISTIC MID-PIPELINE REFUSALS drain under edge mode (FIX 1, #309)
+#
+# The three deterministic refusals (pre-resolution budget cap / unbound
+# first-contact / burst Dropped) refuse identically on every replay. On the
+# forwarded dispatched edge they MUST observe-only DRAIN (NO commit_once) AFTER
+# their signed row, else the contiguous high-water wedges → infinite replay.
+# --------------------------------------------------------------------------- #
+def _capped_pre_resolution_limiter() -> _PreResolutionLimiter:
+    """A pre-resolution limiter whose budget is ALREADY exhausted (limit 0)."""
+    return _PreResolutionLimiter(limit_per_minute=0)
+
+
+async def test_edge_budget_cap_audits_then_drains_no_commit() -> None:
+    order: list[str] = []
+    store = _OrderedStore()._bind_order(order)
+    tracker = _OrderedAckTracker(order=order)
+    orch = SpyOrchestrator(call_order=order)
+    audit = SpyAuditWriter()
+    await process_inbound_message(
+        make_notification(inbound_id="frame-cap", wire_seq=11),
+        identity_resolver=SpyIdentityResolver(returns=make_resolved()),
+        orchestrator=orch,
+        burst_limiter=SpyBurstLimiter(call_order=order),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+        pre_resolution_limiter=_capped_pre_resolution_limiter(),
+        idempotency_store=store,
+        ack_tracker=tracker,
+        commit_at_dispatch_edge=True,
+    )
+    # (a) the signed budget-capped row wrote.
+    rows = audit.rows_with_schema("COMMS_INBOUND_BUDGET_CAPPED_FIELDS")
+    assert len(rows) == 1
+    assert rows[0]["result"] == "dropped"
+    # (b) observe called exactly once; (c) commit_once NOT called.
+    assert tracker.observed == [11]
+    assert store.commit_once_calls == []
+    # Refused before resolution → no dispatch.
+    assert orch.dispatch_calls == 0
+
+
+async def test_edge_binding_request_audits_then_drains_no_commit() -> None:
+    order: list[str] = []
+    store = _OrderedStore()._bind_order(order)
+    tracker = _OrderedAckTracker(order=order)
+    orch = SpyOrchestrator(call_order=order)
+    audit = SpyAuditWriter()
+    await process_inbound_message(
+        make_notification(inbound_id="frame-bind", wire_seq=12),
+        identity_resolver=SpyIdentityResolver(returns=None),  # unbound first-contact
+        orchestrator=orch,
+        burst_limiter=SpyBurstLimiter(call_order=order),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+        idempotency_store=store,
+        ack_tracker=tracker,
+        commit_at_dispatch_edge=True,
+    )
+    rows = audit.rows_with_schema("COMMS_BINDING_REQUESTED_FIELDS")
+    assert len(rows) == 1
+    assert tracker.observed == [12]
+    assert store.commit_once_calls == []
+    assert orch.dispatch_calls == 0
+
+
+async def test_edge_burst_dropped_audits_then_drains_no_commit() -> None:
+    from datetime import UTC, datetime
+
+    order: list[str] = []
+    store = _OrderedStore()._bind_order(order)
+    tracker = _OrderedAckTracker(order=order)
+    orch = SpyOrchestrator(call_order=order)
+    audit = SpyAuditWriter()
+    dropped = Dropped(waited_seconds=0.0, bucket_empty_since=datetime.now(UTC))
+    await process_inbound_message(
+        make_notification(inbound_id="frame-burst", wire_seq=13),
+        identity_resolver=SpyIdentityResolver(returns=make_resolved()),
+        orchestrator=orch,
+        burst_limiter=SpyBurstLimiter(call_order=order, result=dropped),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+        idempotency_store=store,
+        ack_tracker=tracker,
+        commit_at_dispatch_edge=True,
+    )
+    # The burst-drop arm is SILENT on the direct path; the forwarded edge emits a
+    # NEW content-free signed row (reusing the budget-capped field set, result=dropped).
+    rows = audit.rows_with_schema("COMMS_INBOUND_BUDGET_CAPPED_FIELDS")
+    assert len(rows) == 1
+    assert rows[0]["event"] == "comms.inbound.burst_dropped"
+    assert rows[0]["result"] == "dropped"
+    assert rows[0]["canonical_user_id"] == make_resolved().canonical_user_id
+    # No raw body / user text on the row.
+    assert "hello" not in str(rows[0])
+    assert tracker.observed == [13]
+    assert store.commit_once_calls == []
+    assert orch.dispatch_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# 9 — DIRECT-PATH REGRESSION: the new edge-only drains are NOT reached
+#     (byte-for-byte unchanged refusals).
+# --------------------------------------------------------------------------- #
+async def test_direct_budget_cap_does_not_observe_or_emit_new_row() -> None:
+    order: list[str] = []
+    tracker = _OrderedAckTracker(order=order)
+    audit = SpyAuditWriter()
+    await process_inbound_message(
+        make_notification(inbound_id="frame-cap-direct", wire_seq=21),
+        identity_resolver=SpyIdentityResolver(returns=make_resolved()),
+        orchestrator=SpyOrchestrator(call_order=order),
+        burst_limiter=SpyBurstLimiter(call_order=order),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+        pre_resolution_limiter=_capped_pre_resolution_limiter(),
+        idempotency_store=None,
+        ack_tracker=tracker,
+        # default commit_at_dispatch_edge=False
+    )
+    # The budget-capped row still wrote (unchanged), but NO drain on the direct path.
+    assert len(audit.rows_with_schema("COMMS_INBOUND_BUDGET_CAPPED_FIELDS")) == 1
+    assert tracker.observed == []
+
+
+async def test_direct_binding_request_does_not_observe() -> None:
+    order: list[str] = []
+    tracker = _OrderedAckTracker(order=order)
+    audit = SpyAuditWriter()
+    await process_inbound_message(
+        make_notification(inbound_id="frame-bind-direct", wire_seq=22),
+        identity_resolver=SpyIdentityResolver(returns=None),
+        orchestrator=SpyOrchestrator(call_order=order),
+        burst_limiter=SpyBurstLimiter(call_order=order),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+        idempotency_store=None,
+        ack_tracker=tracker,
+    )
+    assert len(audit.rows_with_schema("COMMS_BINDING_REQUESTED_FIELDS")) == 1
+    assert tracker.observed == []
+
+
+async def test_edge_budget_cap_drain_is_noop_when_no_wire_seq() -> None:
+    # edge=True but the leg is un-sequenced (wire_seq=None): the row still writes and
+    # _drain_forwarded_seq is invoked, but its observe branch is a NO-OP (nothing to
+    # drain). Covers the drain helper's False (fall-through) branch.
+    order: list[str] = []
+    tracker = _OrderedAckTracker(order=order)
+    audit = SpyAuditWriter()
+    await process_inbound_message(
+        make_notification(inbound_id="frame-cap-noseq", wire_seq=None),
+        identity_resolver=SpyIdentityResolver(returns=make_resolved()),
+        orchestrator=SpyOrchestrator(call_order=order),
+        burst_limiter=SpyBurstLimiter(call_order=order),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+        pre_resolution_limiter=_capped_pre_resolution_limiter(),
+        idempotency_store=None,
+        ack_tracker=tracker,
+        commit_at_dispatch_edge=True,
+    )
+    assert len(audit.rows_with_schema("COMMS_INBOUND_BUDGET_CAPPED_FIELDS")) == 1
+    assert tracker.observed == []  # un-sequenced leg → drain no-op
+
+
+async def test_direct_burst_dropped_stays_silent_and_does_not_observe() -> None:
+    from datetime import UTC, datetime
+
+    order: list[str] = []
+    tracker = _OrderedAckTracker(order=order)
+    audit = SpyAuditWriter()
+    dropped = Dropped(waited_seconds=0.0, bucket_empty_since=datetime.now(UTC))
+    await process_inbound_message(
+        make_notification(inbound_id="frame-burst-direct", wire_seq=23),
+        identity_resolver=SpyIdentityResolver(returns=make_resolved()),
+        orchestrator=SpyOrchestrator(call_order=order),
+        burst_limiter=SpyBurstLimiter(call_order=order, result=dropped),
+        audit_writer=audit,
+        secret_broker=SpySecretBroker(),
+        idempotency_store=None,
+        ack_tracker=tracker,
+    )
+    # Direct path: the burst-drop arm writes NO row and does NOT observe (byte-for-byte).
+    assert audit.rows_with_schema("COMMS_INBOUND_BUDGET_CAPPED_FIELDS") == []
     assert tracker.observed == []

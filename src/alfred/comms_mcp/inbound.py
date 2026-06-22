@@ -263,6 +263,62 @@ class _PreResolutionLimiter:
             self._hits.popitem(last=False)
 
 
+def _drain_forwarded_seq(ack_tracker: _AckTrackerLike | None, wire_seq: int | None) -> None:
+    """Observe-only drain of a forwarded leg ``wire_seq`` (Spec B G6-7-4, #309).
+
+    Mirrors :meth:`GatewayForwardedInboundReceiver._drain` (2nd-duplication factor).
+    A deterministic mid-pipeline refusal on the FORWARDED (dispatched-edge) path
+    refuses identically on every replay; if it never ``observe``\\d the seq, the
+    leg's contiguous high-water would wedge and the gateway would replay it
+    forever. This advances the high-water so the dispatched tail can trim — WITHOUT
+    a ``commit_once`` (the refusal is not a durable accept, just a drain). A ``None``
+    tracker (no connection bound yet) or a ``None`` ``wire_seq`` (un-sequenced leg)
+    makes this a no-op. ``observe`` is pure-CPU (no ``await``).
+    """
+    if ack_tracker is not None and wire_seq is not None:
+        ack_tracker.observe(wire_seq)
+
+
+async def _emit_burst_dropped_at_edge(
+    notification: InboundMessageNotification,
+    *,
+    resolved: ResolvedInbound,
+    audit_writer: _AuditWriterLike,
+) -> None:
+    """Emit the FORWARDED-path burst-drop row (Spec B G6-7-4, #309).
+
+    The burst ``Dropped`` arm has no signed audit trail on the DIRECT path (it just
+    returns). On the forwarded dispatched edge a silent drop that is then drained
+    would be an un-recorded side-effecting DROP — a hard-rule-#7 hole. So the
+    FORWARDED path (and only it — gated under ``commit_at_dispatch_edge`` at the call
+    site) emits a content-free row BEFORE the drain. Reuses the budget-capped field
+    set + the in-domain ``result="dropped"`` value (no new migration). The canonical
+    user id IS known here (resolution ran), so it anchors the row; the body / user
+    text never lands on it.
+    """
+    await audit_writer.append_schema(
+        fields=audit_row_schemas.COMMS_INBOUND_BUDGET_CAPPED_FIELDS,
+        schema_name="COMMS_INBOUND_BUDGET_CAPPED_FIELDS",
+        event="comms.inbound.burst_dropped",
+        actor_user_id=resolved.canonical_user_id,
+        subject={
+            "adapter_id": notification.adapter_id,
+            "canonical_user_id": resolved.canonical_user_id,
+            "persona": resolved.persona,
+            "tokens_available": 0.0,
+            "wait_seconds": 0.0,
+            "dropped": True,
+            "observed_at": datetime.now(UTC).isoformat(),
+            "language": resolved.language,
+        },
+        trust_tier_of_trigger="T3",
+        result="dropped",
+        cost_estimate_usd=0.0,
+        trace_id=resolved.canonical_user_id,
+        language=resolved.language,
+    )
+
+
 async def _emit_binding_request(
     notification: InboundMessageNotification,
     *,
@@ -609,6 +665,13 @@ async def process_inbound_message(
             platform_user_id_hash=platform_user_id_hash,
             audit_writer=audit_writer,
         )
+        # Spec B G6-7-4 (#309): on the FORWARDED dispatched edge this deterministic
+        # refusal repeats identically every replay; drain the seq (observe-only, NO
+        # commit_once) AFTER the signed row wrote so the leg's high-water advances and
+        # the gateway stops replaying it (ARCH-309-3 audit-before-drain). Gated under
+        # commit_at_dispatch_edge so the DIRECT path is byte-for-byte unchanged.
+        if commit_at_dispatch_edge:
+            _drain_forwarded_seq(ack_tracker, notification.wire_seq)
         return
 
     # 1) Resolution — host-side, first.
@@ -622,6 +685,12 @@ async def process_inbound_message(
             audit_writer=audit_writer,
             language="en-US",
         )
+        # Spec B G6-7-4 (#309): an unbound first-contact refuses identically on every
+        # forwarded replay; drain the seq (observe-only, NO commit_once) AFTER the
+        # signed binding row wrote (ARCH-309-3 audit-before-drain). Gated under
+        # commit_at_dispatch_edge so the DIRECT path is byte-for-byte unchanged.
+        if commit_at_dispatch_edge:
+            _drain_forwarded_seq(ack_tracker, notification.wire_seq)
         return
 
     # 2) Burst-limit acquire — BEFORE the extractor (the bucket refuses to call
@@ -635,6 +704,21 @@ async def process_inbound_message(
     # ``Dropped`` carries no ``tokens_remaining``; branch by attribute presence
     # without importing the concrete class at runtime (kept TYPE_CHECKING-only).
     if not hasattr(acquired, "tokens_remaining"):
+        # Spec B G6-7-4 (#309): the burst-drop arm is SILENT on the DIRECT path (it
+        # just returns — the BurstLimiter writes no row). On the FORWARDED dispatched
+        # edge a silent drop that is then drained would be an un-recorded
+        # side-effecting DROP (hard rule #7). So the forwarded path FIRST emits a
+        # content-free signed row (in-domain result="dropped", no migration), THEN
+        # drains the seq (observe-only, NO commit_once) so the leg's high-water
+        # advances. Both are gated under commit_at_dispatch_edge so the DIRECT path
+        # stays byte-for-byte (no new emit, no drain).
+        if commit_at_dispatch_edge:
+            await _emit_burst_dropped_at_edge(
+                notification,
+                resolved=resolved,
+                audit_writer=audit_writer,
+            )
+            _drain_forwarded_seq(ack_tracker, notification.wire_seq)
         return
 
     # Task 62: observe the backpressure wait the message incurred at the limiter.
@@ -691,7 +775,7 @@ async def process_inbound_message(
         # observed and the forwarding leg replays it → the core re-dispatches.
         try:
             await orchestrator.dispatch(ingested)
-        except Exception:
+        except Exception as exc:
             # Fail-loud (hard rule #7): emit the distinct closed-vocab
             # dispatch_failed row and re-raise. NOT committed, NOT observed. The
             # bound on this replay (poison ceiling / dead-letter) is G6-7-5. An
@@ -707,6 +791,14 @@ async def process_inbound_message(
             # succeeds). The wrapped audit fault replaces the re-raise: it is the
             # non-skippable signal that takes precedence over the replayable dispatch
             # fault.
+            #
+            # Carry the exception CLASS NAME (never ``str(exc)`` — that could embed raw
+            # T3) on the structlog line so a replay-storm is triageable by fault kind.
+            _log.warning(
+                "comms.inbound.dispatch_failed",
+                adapter_id=notification.adapter_id,
+                error_class=type(exc).__name__,
+            )
             audit_hash.set_broker(secret_broker)
             try:
                 await _emit_dispatch_failed(notification, audit_writer=audit_writer)
@@ -716,6 +808,13 @@ async def process_inbound_message(
                 ) from audit_exc
             raise
         if idempotency_store is not None:
+            # The bool result is intentionally DISCARDED: on the dispatched edge a
+            # dispatch SUCCEEDED, but a concurrent replay of the same frame (the
+            # bounded at-least-once race ADR-0039 item 4 accepts, ceilinged by G6-7-5)
+            # may have already won commit_once. Either outcome — fresh durable accept
+            # (True) or already-committed (False) — is benign here: the side effect
+            # (dispatch) ran exactly as intended and the seq is observed below. The
+            # row's existence, not the winner, is what the replay short-circuit reads.
             await idempotency_store.commit_once(
                 inbound_id=notification.inbound_id,
                 adapter_id=notification.adapter_id,

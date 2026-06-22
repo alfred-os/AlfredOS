@@ -259,6 +259,59 @@ def test_gateway_leg_runner_built_with_forwarded_receiver(
     assert receiver_trackers[0] is handler_trackers[0]
 
 
+def test_arm_time_preview_warning_emitted_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot_success_env: FakeAuditWriter,
+    quarantine_registry: HookRegistry,
+    patch_quarantine_child_spawn: list[Any],
+) -> None:
+    """devex HIGH-1 (#309): ONE operator-facing preview-status warning at arm-time.
+
+    The gateway-leg socket listener is one-shot per boot, so the
+    ``comms.gateway.forwarded_inbound_preview`` warning must fire EXACTLY once when the
+    forwarded-inbound receiver is armed (NOT per-frame / per-connection). The message is
+    ``t()``-routed (i18n hard rule #1) — it carries the resolved preview-status string,
+    never a bare key.
+    """
+    import structlog.testing
+
+    from alfred.i18n import t
+
+    del quarantine_registry
+    del patch_quarantine_child_spawn
+    _ReceiverCapturingRunner.instances.clear()
+    _ImmediateAcceptListener.instances.clear()
+    _CapturingSupervisor.captured.clear()
+    monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
+    monkeypatch.setenv("ALFRED_COMMS_ENABLED_ADAPTERS", f'["{_TUI_ADAPTER}"]')
+    monkeypatch.setattr("alfred.cli.daemon._commands.CommsSocketListener", _ImmediateAcceptListener)
+    monkeypatch.setattr("alfred.cli.daemon._commands.CommsPluginRunner", _ReceiverCapturingRunner)
+    monkeypatch.setattr("alfred.cli.daemon._commands.Supervisor", _CapturingSupervisor)
+
+    result = CliRunner().invoke(daemon_app, ["start"])
+    assert result.exit_code == 0, result.output
+    assert len(_CapturingSupervisor.captured) == 1
+    accept_coro = _CapturingSupervisor.captured[0]
+
+    with structlog.testing.capture_logs() as logs:
+
+        async def _drive() -> None:
+            await asyncio.wait_for(asyncio.ensure_future(accept_coro), timeout=1.0)
+
+        asyncio.run(_drive())
+
+    preview = [e for e in logs if e.get("event") == "comms.gateway.forwarded_inbound_preview"]
+    # Fires EXACTLY once at arm-time — never per-frame / per-connection.
+    assert len(preview) == 1
+    assert preview[0]["log_level"] == "warning"
+    # ``t()``-routed: the resolved preview string, never a bare key.
+    expected = t("gateway.adapter.forwarded_inbound.preview_unbounded")
+    assert preview[0]["message"] == expected
+    assert preview[0]["message"] != "gateway.adapter.forwarded_inbound.preview_unbounded"
+    assert "UNBOUNDED" in preview[0]["message"]
+
+
 def test_boot_refuses_when_forwarded_registry_promoter_misconfigured(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
