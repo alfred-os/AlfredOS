@@ -335,3 +335,64 @@ async def test_back_pressure_gate_force_cancel_during_pause_unwinds() -> None:
     with pytest.raises(asyncio.CancelledError):
         await pump
     assert transport.closed is True
+
+
+async def test_back_pressure_gate_resumes_with_shutdown_wired() -> None:
+    # The gate-WINS-the-race arm (shutdown wired, gate cleared then set): the pump parks on
+    # the gate-vs-shutdown race, the gate is set (resume), the gate task wins, the pump
+    # drains the frame and reaches EOF — shutdown never fires.
+    gate = asyncio.Event()
+    gate.set()
+    shutdown = asyncio.Event()
+    disposition = _RecordingDisposition()
+
+    transport = _GateClearingTransport(
+        [dict(_HANDSHAKE_OK), _inbound_frame(), _inbound_frame()], gate=gate
+    )
+    runner = CommsPluginRunner(
+        session=None,
+        transport=transport,  # type: ignore[arg-type]
+        adapter_id=_ADAPTER_ID,
+        inbound_disposition=disposition,
+        back_pressure_gate=gate,
+        shutdown_event=shutdown,
+    )
+
+    await runner.start_and_handshake()
+    pump = asyncio.ensure_future(runner.pump())
+    for _ in range(6):
+        await asyncio.sleep(0)
+    assert transport.reads == 2  # parked on the gate (shutdown unset)
+    assert not pump.done()
+    assert not gate.is_set()
+    gate.set()  # resume — the gate task wins the gate-vs-shutdown race
+    await asyncio.wait_for(pump, timeout=1.0)
+    assert len(disposition.dispatched) == 2
+    assert not shutdown.is_set()  # shutdown never fired — the gate won
+
+
+async def test_back_pressure_gate_force_cancel_with_shutdown_wired_unwinds() -> None:
+    # The CancelledError arm of the gate-vs-shutdown race (both wired): a force-cancel of
+    # the parked pump cancels both child waits and re-raises cleanly.
+    gate = asyncio.Event()
+    gate.clear()
+    shutdown = asyncio.Event()
+    disposition = _RecordingDisposition()
+
+    transport = _FakeTransport([dict(_HANDSHAKE_OK), _inbound_frame()])
+    runner = CommsPluginRunner(
+        session=None,
+        transport=transport,  # type: ignore[arg-type]
+        adapter_id=_ADAPTER_ID,
+        inbound_disposition=disposition,
+        back_pressure_gate=gate,
+        shutdown_event=shutdown,
+    )
+
+    await runner.start_and_handshake()
+    pump = asyncio.ensure_future(runner.pump())
+    await asyncio.sleep(0)  # park on the gate-vs-shutdown race
+    pump.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pump
+    assert transport.closed is True
