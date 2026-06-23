@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-22 21:41+0100\n"
+"POT-Creation-Date: 2026-06-23 13:56+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -993,10 +993,10 @@ msgstr ""
 #: src/alfred/cli/daemon/_commands.py:1446
 msgid "gateway.adapter.forwarded_inbound.preview"
 msgstr ""
-"PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is "
-"bounded by the poison ceiling — a deterministically-failing frame is "
-"dead-lettered after a small number of attempts. The path is NOT yet "
-"flag-day'd into production (G6-7-8); do not depend on it for production "
+"PREVIEW: the gateway inbound bridge is armed. Forwarded-inbound replay is"
+" bounded by the poison ceiling — a deterministically-failing frame is "
+"dead-lettered after a small number of attempts. The path is NOT yet flag-"
+"day'd into production (G6-7-8); do not depend on it for production "
 "inbound."
 
 #: src/alfred/cli/daemon/_commands.py:1506
@@ -1365,6 +1365,13 @@ msgstr "Comms dispatch ingest result is missing a required key; refusing to send
 #: src/alfred/comms_mcp/daemon_runtime.py:236
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
+
+#: src/alfred/gateway/adapter_child_factory.py:156
+msgid "gateway.adapter.launch_target.override_refused"
+msgstr ""
+"Launch-target override for adapter {adapter_id} refused: active environment "
+"{environment} is not in the override allowlist {allowed}. The override is "
+"honored only in development/test."
 
 #: src/alfred/gateway/adapter_stdio_transport.py:146
 #: src/alfred/gateway/adapter_stdio_transport.py:178
