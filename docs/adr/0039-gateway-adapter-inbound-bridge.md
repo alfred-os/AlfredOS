@@ -376,6 +376,59 @@ stub that raises).
 The Decision body above is unchanged and remains authoritative. This amendment records what
 shipped in G6-7-5 and closes PERF-309-1.
 
+### 2026-06-23 — G6-7-6: end-to-end composition proof + adversarial-corpus lane promotion
+
+**The forwarded path is now proven end-to-end over real infrastructure.** Two new integration
+tests cover the composition; they run under different CI gates (see `docs/ci/required-checks.md`):
+
+- `tests/integration/comms/test_forwarded_poison_ceiling_postgres.py` — composes the N=5
+  poison ceiling through the REAL `GatewayForwardedInboundReceiver` +
+  `process_inbound_message(commit_at_dispatch_edge=True)` + the REAL
+  `PostgresForwardedDispatchAttemptStore` + `PostgresInboundIdempotencyStore` + a real Postgres
+  `AuditWriter`. Asserts: exactly N extracts per `(adapter_id, inbound_id)` pair (the ceiling
+  bounds it to ≤N; the sequential drive charges exactly N); exactly one content-free
+  `comms.inbound.poisoned` audit row; the durable ledger reaching the ceiling; G0 never committed
+  on the poison path; and the drain releasing the stalled contiguous high-water so the tail can
+  advance. **No root requirement → this leg genuinely gates under the currently-required
+  `Integration` check.**
+- `tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py` — drives a
+  forwarded **discord** `gateway.adapter.inbound` frame over the REAL `comms-tui.sock` + seq
+  codec into the real daemon HOST runner via the production `core_link.forward_adapter_inbound`.
+  Asserts: a discord `comms.inbound.t3_promoted` audit row and a committed dispatched-edge G0
+  `inbound_idempotency` row. **Carries `@pytest.mark.skipif(_LAUNCHER_REQUIRES_ROOT)` (Linux and
+  non-root), so it SKIPS on the non-root `Integration` runner and executes only under the root
+  `integration-privileged` job — itself still PENDING-required (promoted at G6-7-7). Until then
+  this leg's merge-gating value is Pending, exactly as the existing TUI / PR-S4-11b launcher-spawn
+  legs; the poison-ceiling test above is the leg that gates the forwarded path on a
+  currently-required check.**
+
+**Explicit chain to the 2026-06-22 G6-7-5 amendment (arch-006).** That amendment closed
+PERF-309-1 with a MOCK-store proof and covered the durable store only in isolation. This A2
+test is the REAL-Postgres composition that the mock-store proof deferred: the ceiling's coverage
+story is now end-to-end — in-memory ledger → real `PostgresForwardedDispatchAttemptStore`
+through the real `GatewayForwardedInboundReceiver` + `process_inbound_message`.
+
+**The adversarial corpus becomes a required merge gate.** `adversarial.yml` is release-blocking
+(`continue-on-error` removed), unfiltered (the `paths:` filter dropped so it runs on every PR),
+and fail-closed on an empty or moved corpus. This PR ESTABLISHES the gate; the `Adversarial
+corpus` status check is registered Pending-required in `docs/ci/required-checks.md` and is moved
+to currently-required by the tracked post-merge promotion (`gh api POST …/contexts` once the
+workflow has run on a subsequent PR) — at which point the G6-6 governance follow-up (the
+`Comms credential adversarial corpus` step's NOTE in `ci.yml`) is fully closed and that interim
+discrete step is removed.
+
+**COVERAGE HONESTY (sec-001).** The required `Adversarial corpus` check gates the NON-bwrap
+corpus only — the 6 `@_bwrap_required` `sandbox_escape` payloads (`sbx-2026-012`/`-013`) SKIP
+on its non-root runner and are NOT yet on any currently-required check (`integration-privileged`
+is still PENDING-required). Promoting that lane to required and the Discord flag-day are G6-7-7
+and G6-7-8 respectively. **The gateway Discord leg stays TEST-ONLY until G6-7-8.** A
+reasoned-skip CI guard asserts those payloads stay collected so they cannot silently vanish. Note
+for operators: the now-unfiltered required gate depends on ambient Docker (Postgres/Redis via
+Testcontainers in the `dlp_egress`/`state` legs); a testcontainer hiccup is infra flake, not a
+corpus regression — the workflow fails loud on Docker-absence rather than skipping.
+
+The Decision body above is unchanged and remains authoritative.
+
 ## Resolved decisions (formerly open maintainer-steer flags)
 
 - **F1 (runner factoring):** the injectable inbound-disposition seam with the daemon dispatch
