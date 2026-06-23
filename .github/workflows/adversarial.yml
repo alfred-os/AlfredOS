@@ -1,38 +1,32 @@
 name: adversarial
 
 # Runs the AlfredOS adversarial security corpus
-# (`uv run pytest tests/adversarial -v`) on every PR that touches the corpus,
-# the security/audit subsystems, or the adversarial-corpus skill definition,
-# plus every push to main.
+# (`uv run pytest tests/adversarial -v`) on EVERY PR to main and every push
+# to main.
 #
-# PR-E plan task 9: Slice 2 ships the corpus as ADVISORY — the workflow
-# carries `continue-on-error: true` so failures surface as warnings, not
-# merge-blocking. Slice 3 makes this release-blocking by REMOVING that line:
-# a single-line flip, no other change needed. The tracking issue cited in
-# the plan tracks that follow-up.
+# Spec B G6-7-6 (#309) flipped this corpus from ADVISORY to RELEASE-BLOCKING:
+#   - `continue-on-error: true` REMOVED — a corpus failure now blocks merge.
+#   - the `paths:` filter DROPPED from both triggers — the suite runs on
+#     EVERY PR, closing the "off-path PR ⇒ required check never runs ⇒ merge
+#     blocked forever" footgun documented in docs/ci/required-checks.md
+#     (the perf-gate paths-filter caveat).
+#   - the `corpuscheck` step is now FAIL-CLOSED on an empty/moved corpus
+#     (it FAILs the job instead of skipping) so a layout change that breaks
+#     the `find` pattern cannot pass the required gate while gating nothing.
+# The `Adversarial corpus` check is being promoted to a required status check
+# — see docs/ci/required-checks.md.
 #
-# Why advisory in Slice 2: the corpus is largely empty scaffolding plus one
-# DLP wiring-smoke payload. Most coverage lands in Slice 3 as the full
-# payload population PRs land. Once the corpus is dense enough to be the
-# real release gate it gets flipped to release-blocking.
+# COVERAGE HONESTY: the bwrap-gated `sandbox_escape` legs SKIP here (no bwrap
+# on this runner) and stay gated by the `integration-privileged` job (its own
+# promotion is G6-7-7's done-definition). A green `Adversarial corpus` does
+# NOT certify the escape payloads until that lands.
 
 on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
-    paths:
-      - 'tests/adversarial/**'
-      - 'src/alfred/security/**'
-      - 'src/alfred/audit/**'
-      - '.rulesync/skills/alfred-adversarial-corpus/**'
-      - '.github/workflows/adversarial.yml'
   push:
     branches: [main]
-    paths:
-      - 'tests/adversarial/**'
-      - 'src/alfred/security/**'
-      - 'src/alfred/audit/**'
-      - '.rulesync/skills/alfred-adversarial-corpus/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -58,11 +52,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    # Slice 2: advisory only. Slice 3 removes this line to flip the gate to
-    # release-blocking — single-line flip, no other change needed. See the
-    # PR-E plan (docs/superpowers/plans/2026-05-26-slice-2-pr-E-smoke-corpus-docs.md)
-    # task 9 step 2, which opens the tracking issue.
-    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -76,8 +65,13 @@ jobs:
           if [ -d tests/adversarial ] && find tests/adversarial -name 'test_*.py' 2>/dev/null | grep -q .; then
             echo "has_corpus=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_corpus=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No tests/adversarial/test_*.py — skipping adversarial run."
+            # FAIL-CLOSED (Spec B G6-7-6, #309): this is now a REQUIRED gate.
+            # `tests/adversarial` is permanent (235 tests); a missing/moved
+            # corpus means the `find` pattern broke, NOT that there's nothing
+            # to gate. Skipping here would pass the required check while gating
+            # nothing (green-because-skipped). Fail loud instead.
+            echo "::error::adversarial corpus missing — required gate cannot run"
+            exit 1
           fi
       - name: Install uv
         if: steps.corpuscheck.outputs.has_corpus == 'true'
@@ -97,3 +91,36 @@ jobs:
       - name: Run adversarial corpus
         if: steps.corpuscheck.outputs.has_corpus == 'true'
         run: uv run pytest tests/adversarial -v
+      - name: Assert sandbox-escape corpus is present (collected, even if skipped)
+        # sec-001(b) (Spec B G6-7-6, #309): the bwrap-gated `sandbox_escape`
+        # payloads SKIP here (no bwrap on this runner) — they are gated by the
+        # `integration-privileged` job (G6-7-7). Assert they are still
+        # COLLECTED so a future deletion/rename can't make them vanish while
+        # this required gate stays green. (Skipped-but-present is fine; absent
+        # is a fail.)
+        #
+        # ROBUSTNESS (Spec B G6-7-6 fleet review — devops-002/err-001/sec-g676-001):
+        # assert the SPECIFIC load-bearing escape node-ids, not merely "some test_
+        # line", and check pytest's collect exit code SEPARATELY from the grep. The
+        # naive `--collect-only … 2>&1 | grep -q 'test_'` had two green-because-
+        # skipped holes this step exists to prevent: (a) deleting only the escape
+        # payload FILE while sibling detector tests survive still emits `test_`
+        # node-ids and passes; (b) `pipefail` + a collection error that streams one
+        # line before dying is masked by the pipe. The two node-ids live in
+        # `test_sbx_corpus_executable.py`, the third in its sibling, so the trio
+        # also fails loud if EITHER file vanishes. Capturing into `$collected` under
+        # `set -e` fails the step on a non-zero collect (error/empty) before any grep.
+        if: steps.corpuscheck.outputs.has_corpus == 'true'
+        run: |
+          set -euo pipefail
+          collected="$(uv run pytest tests/adversarial/sandbox_escape --collect-only -q)"
+          for node in \
+            test_sbx_2026_012_quarantine_child_does_not_leak_fd3_key \
+            test_sbx_2026_013_live_spawned_child_host_escape_contained \
+            test_only_sanctioned_quarantined_llm_spawn_while_egress_open ; do
+            if ! printf '%s\n' "$collected" | grep -q "::${node}"; then
+              echo "::error::sandbox_escape payload ${node} missing from the required adversarial corpus"
+              printf '%s\n' "$collected"
+              exit 1
+            fi
+          done
