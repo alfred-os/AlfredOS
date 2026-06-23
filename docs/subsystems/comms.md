@@ -640,17 +640,28 @@ changed (the daemon-spawn path was already scrubbed-env).
 > **TEST-ONLY caveat — the forward leg is not yet in production.**
 > The item-4b poison ceiling shipped in G6-7-5 (PERF-309-1 is closed): a
 > deterministically-failing forwarded frame is now dead-lettered after N=5 attempts
-> instead of replaying unbounded. However, the forward leg is still NOT flag-day'd into
-> production. Live graduation requires:
+> instead of replaying unbounded. G6-7-6 added two integration tests that prove the
+> path end-to-end over real infrastructure:
+> `tests/integration/comms/test_forwarded_poison_ceiling_postgres.py` (real Postgres +
+> real `GatewayForwardedInboundReceiver` + `process_inbound_message`) and
+> `tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py` (real
+> `comms-tui.sock` + seq codec → daemon HOST runner → dispatched-edge G0 commit). The
+> `Adversarial corpus` check is now a required merge gate (`adversarial.yml`
+> unfiltered + fail-closed; see `docs/ci/required-checks.md`). However, the forward
+> leg remains NOT flag-day'd into production. Live graduation still requires:
 >
 > - **G6-7-7** — the privileged real-spawn proof (the `integration-privileged` lane
 >   promoted to a currently-required merge gate).
 > - **G6-7-8** — the flag-day: delete the daemon-spawn path, add the `alfred-discord`
 >   Compose service, and cut the credential source over to the gateway.
 >
+> The required `Adversarial corpus` gate covers the non-bwrap corpus only; the 6
+> `@_bwrap_required` sandbox-escape payloads (`sbx-2026-012`/`-013`) skip on its
+> non-root runner and are not on any currently-required check until G6-7-7.
 > Until G6-7-8 completes, no production inbound traverses the forwarded path.
 > See [ADR-0039 §Amendments](../adr/0039-gateway-adapter-inbound-bridge.md#amendments)
-> for the full history (G6-7-3 non-conformance, G6-7-4 correction, G6-7-5 ceiling).
+> for the full history (G6-7-3 non-conformance, G6-7-4 correction, G6-7-5 ceiling,
+> G6-7-6 e2e proof + required gate).
 
 G6-7 closes the inbound data path left open by the ADR-0036 hosting inversion. The gateway
 now hosts and supervises the adapter child (G6-5); G6-7 wires the **inbound→core bridge** so
