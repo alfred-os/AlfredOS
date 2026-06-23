@@ -178,7 +178,14 @@ class AuditEntry(Base):
             # leg stops replaying it: a TERMINAL dead-letter, never committed,
             # distinct from the per-attempt 'dispatch_failed' row that leaves the
             # frame replayable.
-            "'poisoned')",
+            "'poisoned', "
+            # Spec B G6-3 (migration 0021, #288/#309) — the core-side credential
+            # resolver's signed ``core.adapter.spawn_grant`` row records that a
+            # platform credential was released to the gateway over the trusted leg.
+            # Closed-vocab grant outcome (the refusal sibling reuses 'refused');
+            # the credential itself is NEVER in the row (audit_row_schemas
+            # CORE_ADAPTER_SPAWN_GRANT_FIELDS has no credential field).
+            "'granted')",
             name="ck_audit_log_result",
         ),
     )
