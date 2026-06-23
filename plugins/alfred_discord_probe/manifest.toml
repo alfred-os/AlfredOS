@@ -1,0 +1,62 @@
+# TEST-ONLY: the G6-7-7 real-spawn probe; reachable ONLY via the
+# ALFRED_ENVIRONMENT-gated launch-target override
+# (alfred.gateway.adapter_child_factory._resolve_launch_target); NEVER a
+# production adapter. This manifest exists SOLELY for bwrap-POLICY resolution:
+# the launcher resolves the per-OS sandbox policy via
+# ``plugin_id.replace(".", "_")`` -> ``plugins/alfred_discord_probe/manifest.toml``.
+# The probe MODULE is the SEPARATE packaged ``alfred.gateway.discord_probe``
+# (shipped in the wheel, exec'd as ``python -m alfred.gateway.discord_probe``);
+# the launch-target tuple Task 1's override uses keeps the two apart:
+# ``("alfred.discord_probe", "alfred.gateway.discord_probe")``.
+#
+# manifest_version=1 is the integer Slice-3/4 baseline. The host refuses any
+# version > N+1 at handshake (spec §4.9).
+#
+# No ``[[hooks]]`` blocks. The probe only EMITS notifications (``inbound.message``
+# + the content-free ``alfred.discord_probe/fd3_received`` ack); it subscribes to
+# no hookpoints. Declaring any hook subscription would make
+# ``RealGate.check_plugin_load`` reject this manifest, since none appear in the
+# spec §14 hookpoint table.
+alfred.manifest_version = 1
+
+[plugin]
+# id is the bwrap-POLICY resolution key (NOT the python -m module). The override
+# tuple supplies the module separately.
+id = "alfred.discord_probe"
+# subscriber_tier=user-plugin: the closed capability-gate vocabulary the manifest
+# parser validates is {system, operator, user-plugin}. The probe announces the
+# "discord" adapter_kind on the wire (a content-trust axis, orthogonal to this
+# capability axis); the inbound BODY becomes T3 host-side at
+# ``process_inbound_message``, not in-plugin.
+subscriber_tier = "user-plugin"
+# sandbox_profile: legacy free-form label, orthogonal to the [sandbox] block.
+sandbox_profile = "user-plugin"
+# platform field reserved for the comms-MCP manifest extension (spec §4.3);
+# optional in manifest_version=1.
+platform = "discord"
+
+# kind = "full": the probe is spawned under the SAME bwrap (Linux) /
+# sandbox-exec (macOS) isolation primitive as the real Discord adapter so Task 4's
+# real-spawn proof exercises the production sandbox boundary. It REUSES the
+# already-shipped Discord policies (it never authors new policy bytes — a new
+# policy file would risk ``policy_ref_missing`` / ``policy_ref_unreadable``). The
+# probe performs NO real Discord login, so the reused egress-capable policy is
+# never exercised against the network.
+[sandbox]
+kind = "full"
+
+[sandbox.policy_refs]
+# REUSE the shipped Discord adapter policies verbatim (the merged SandboxBlock
+# schema requires per-OS keys for kind=full). These bytes already ship in-tree.
+linux   = "config/sandbox/discord-adapter.linux.bwrap.policy"
+macos   = "config/sandbox/discord-adapter.macos.sb"
+windows = "config/sandbox/discord-adapter.windows.stub.policy"
+
+# comms-MCP adapter declaration. ``adapter_kind = "discord"`` so the host's
+# BODY_FIELD_BY_KIND["discord"]="content" scanner + the spawn-binding adapter_id
+# line up with the real Discord adapter this probe stands in for.
+# ``classifiers_optional`` is empty — the probe ships a single inline-bodied
+# inbound and opts into no additional classifiers.
+[comms_mcp]
+adapter_kind = "discord"
+classifiers_optional = []
