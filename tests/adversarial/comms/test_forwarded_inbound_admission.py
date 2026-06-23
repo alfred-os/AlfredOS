@@ -724,14 +724,20 @@ class _AlwaysFailOrchestrator(SpyOrchestrator):
 
 
 async def test_poison_frame_replays_unboundedly_this_slice() -> None:
-    """KNOWN-THIS-SLICE (G6-7-4): a deterministically-failing frame replays unboundedly.
+    """With a NON-tripping attempt ledger, a poison frame replays unbounded (isolation case).
 
-    The poison CEILING (a bound on the replay count) is G6-7-5's job. Here we pin the
-    behaviour G6-7-4 actually ships and the ceiling will build on: EVERY delivery of a
-    deterministically-failing frame raises, NEVER commits, NEVER observes — so the
-    forwarding leg replays it forever. The gateway leg is therefore TEST-ONLY-resumable
-    until G6-7-5 lands the ceiling; if a future change makes this frame stop replaying
-    WITHOUT a deliberate ceiling, this test fails loud and surfaces the regression.
+    The N=5 poison ceiling SHIPPED in G6-7-5. This case deliberately threads the default
+    ``_NonTrippingAttemptStore`` (``attempt_count`` fixed at 0) so the ceiling is wired
+    into the dispatched-edge pipeline but NEVER trips here — isolating the
+    un-observed-on-failure replay + drain contract (every delivery raises, never commits,
+    never observes; the high-water never advances past the poison seq). It does NOT replay
+    "because there is no ceiling" — it replays because this ledger never reaches the bound.
+    The BOUNDED behaviour (the real ledger trips the ceiling at N=5 → dead-letter + drain)
+    is proven in ``test_forwarded_inbound_poison.py`` (in-memory ledger) and composed
+    against real Postgres in
+    ``tests/integration/comms/test_forwarded_poison_ceiling_postgres.py`` (G6-7-6). If a
+    future change makes THIS frame stop replaying without a ceiling trip, this case fails
+    loud and surfaces the regression.
     """
     store = _ReplayableStore()
     ack = _SpyAckTracker()
@@ -745,7 +751,11 @@ async def test_poison_frame_replays_unboundedly_this_slice() -> None:
     params = _inbound_params(adapter_id=_ADAPTER_ID, body=_discord_body(inbound_id="poison-loop"))
 
     # Re-deliver the SAME poison frame several times: each raises, none commits, none
-    # observes — an unbounded replay (no ceiling this slice).
+    # observes — unbounded replay because the default _NonTrippingAttemptStore keeps
+    # attempt_count at 0, so the (shipped) ceiling never trips for this case. The loop bound
+    # (N deliveries, NOT N+1) is intentional: this case isolates the un-observed-replay/drain
+    # contract and deliberately never reaches the trip-edge — that edge is proven by the
+    # real-ledger composition tests (test_forwarded_inbound_poison.py + the A2 Postgres test).
     for seq in range(5):
         with pytest.raises(RuntimeError, match="poison frame"):
             await receiver.receive(params=params, wire_seq=seq)
