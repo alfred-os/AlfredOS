@@ -66,12 +66,14 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 import structlog
 
+from alfred.config._environment_loader import load_environment
 from alfred.gateway.adapter_stdio_transport import GatewayAdapterStdioTransport
 from alfred.gateway.adapter_supervisor import (
     GatewayAdapterSpawnError,
     _AdapterChildLike,
     _DeliverCredential,
 )
+from alfred.i18n import t
 from alfred.plugins._comms_child_env import _scrubbed_base
 
 if TYPE_CHECKING:
@@ -79,15 +81,105 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-# The CLOSED static adapter_id -> (launcher plugin id, ``python -m`` module) map. An
-# id outside this set is a fail-closed spawn refusal (no dynamic manifest lookup — the
+# The environments in which a constructor-injected launch-target override is honored
+# (Spec B G6-7-7 / #309). Anywhere else an injected override is a fail-closed refusal —
+# default-DENY so a probe redirect can NEVER take effect on a production gateway.
+_OVERRIDE_ALLOWED_ENVIRONMENTS: Final[frozenset[str]] = frozenset({"development", "test"})
+
+# The default adapter_id -> (launcher plugin id, ``python -m`` module) map. An id
+# outside this set is a fail-closed spawn refusal (no dynamic manifest lookup — the
 # gateway hosts a fixed, audited set of first-party adapters). ``plugin_id`` matches
 # the manifest ``[plugin] id`` so the launcher resolves the ``kind="full"`` sandbox
 # policy; ``module`` is the ``python -m`` entrypoint (``plugins/alfred_discord/server.py``
 # has the ``__main__`` block + wires the fd-3 ``Fd3TokenSource`` into ``DiscordLifecycle``).
+#
+# Spec B G6-7-7 (#309) de-stale: this map is no longer STRICTLY fixed. A TEST-ONLY,
+# constructor-injected ``override_map`` (resolved by :func:`_resolve_launch_target`) can
+# redirect an entry to a probe target — but ONLY in a development/test environment.
+# Outside that allowlist an injected override is a fail-closed refusal, so a probe
+# redirect can never take effect on a production gateway; production with no override
+# resolves this map exactly as before.
 _ADAPTER_LAUNCH_TARGETS: Final[Mapping[str, tuple[str, str]]] = {
     "discord": ("alfred.discord", "plugins.alfred_discord.server"),
 }
+
+
+class LaunchTargetOverrideRefusedError(GatewayAdapterSpawnError):
+    """A launch-target override was injected outside a development/test environment.
+
+    Spec B G6-7-7 (#309), FAIL-CLOSED / default-DENY. The override map is honored ONLY
+    in ``{"development", "test"}``; an injected override anywhere else (incl.
+    ``production``, ``staging``, an unset / unrecognised environment) is this loud
+    refusal. It MUST subclass :class:`GatewayAdapterSpawnError` (load-bearing): the
+    supervisor's spawn-error arm catches ``GatewayAdapterSpawnError`` and audits it via
+    ``_apply(HANDSHAKE_FAILED, error_class=type(spawn_error).__name__,
+    detail=str(spawn_error))`` — the factory itself owns no audit writer.
+
+    CONTENT-FREE (sec-003/sec-101): ``str(...)`` flows verbatim into that audit row, so
+    the message carries ONLY the ``adapter_id``, the active environment string, and the
+    allowlist — NEVER the rejected override module string (which would be a canary leak
+    into the audit log).
+    """
+
+
+def _resolve_launch_target(
+    adapter_id: str, *, override_map: Mapping[str, tuple[str, str]] | None
+) -> tuple[str, str]:
+    """Resolve ``adapter_id`` to its ``(plugin_id, module)`` launch target.
+
+    Spec B G6-7-7 (#309). Two paths:
+
+    * ``override_map is None`` (production / no override injected) — the pre-G6-7-7
+      behaviour, byte-for-byte: return :data:`_ADAPTER_LAUNCH_TARGETS`\\ ``[adapter_id]``
+      if present, else raise the SAME closed-static-map :class:`GatewayAdapterSpawnError`.
+      The environment is NOT read on this path (no override means no gate to apply).
+    * ``override_map is not None`` (an override was injected) — read the active
+      environment via :func:`load_environment`. Only in ``{"development", "test"}`` is
+      the override honored: if ``adapter_id`` is in the override map, return its probe
+      target; if it is not, FALL THROUGH to the production default (the override only
+      redirects ids it names). Outside that allowlist (incl. ``production``,
+      ``staging``, unset / unrecognised → ``None``) raise
+      :class:`LaunchTargetOverrideRefusedError` — FAIL-CLOSED / default-DENY.
+    """
+    if override_map is None:
+        return _production_launch_target(adapter_id)
+
+    environment = load_environment().value
+    if environment not in _OVERRIDE_ALLOWED_ENVIRONMENTS:
+        # FAIL-CLOSED: an override was injected but the environment is not allowlisted.
+        # The message is CONTENT-FREE — built from a ``t()`` callsite with kwargs (not
+        # f-string interpolation, i18n-001) — and carries NO override module string
+        # (sec-003/sec-101): it lands verbatim in the supervisor audit row.
+        allowed = ", ".join(sorted(_OVERRIDE_ALLOWED_ENVIRONMENTS))
+        raise LaunchTargetOverrideRefusedError(
+            t(
+                "gateway.adapter.launch_target.override_refused",
+                adapter_id=adapter_id,
+                environment="" if environment is None else environment,
+                allowed=allowed,
+            )
+        )
+
+    override = override_map.get(adapter_id)
+    if override is not None:
+        return override
+    # Allowlisted env, but this id is not in the override map — production default.
+    return _production_launch_target(adapter_id)
+
+
+def _production_launch_target(adapter_id: str) -> tuple[str, str]:
+    """Return the production launch target for ``adapter_id`` or raise the closed-map error.
+
+    The pre-G6-7-7 lookup, factored out so both the no-override path and the
+    allowlisted-but-not-in-override-map fall-through share one closed-static-map refusal.
+    """
+    target = _ADAPTER_LAUNCH_TARGETS.get(adapter_id)
+    if target is None:
+        raise GatewayAdapterSpawnError(
+            f"no launch target for adapter_id={adapter_id!r} (closed static map)"
+        )
+    return target
+
 
 # The literal fd the credential is delivered over (ADR-0015 #218). The child reads
 # ``os.read(3)`` directly — a hard-coded convention, not an env-named fd.
@@ -271,6 +363,14 @@ class GatewayAdapterChildFactory:
     :class:`CommsPluginRunner` over the transport (the daemon boot graph supplies it —
     Task 5); ``popen_factory`` is injectable ONLY so the unit tests substitute a
     synchronous fake (production always uses :class:`subprocess.Popen`).
+
+    ``override_map`` (Spec B G6-7-7 / #309) is a TEST-ONLY launch-target redirect: a
+    later docker-only e2e (Task 4) injects ``{"discord": (probe_plugin_id, probe_module)}``
+    so the forwarded-inbound bridge can be proved against a probe child without touching
+    the production Discord adapter. It defaults to ``None`` (production never injects one);
+    when injected it is honored ONLY in a development/test environment and is a
+    fail-closed :class:`LaunchTargetOverrideRefusedError` anywhere else (see
+    :func:`_resolve_launch_target`).
     """
 
     def __init__(
@@ -278,9 +378,11 @@ class GatewayAdapterChildFactory:
         *,
         runner_factory: Callable[..., _RunnerLike],
         popen_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
+        override_map: Mapping[str, tuple[str, str]] | None = None,
     ) -> None:
         self._runner_factory = runner_factory
         self._popen_factory = popen_factory
+        self._override_map = override_map
 
     async def spawn_and_handshake(
         self, *, adapter_id: str, epoch: str, deliver_credential: _DeliverCredential
@@ -294,12 +396,7 @@ class GatewayAdapterChildFactory:
         fault reaps the child before raising ``GatewayAdapterSpawnError`` (H1a).
         """
         del epoch  # the epoch is bound into the credential round-trip by the hook, not here
-        target = _ADAPTER_LAUNCH_TARGETS.get(adapter_id)
-        if target is None:
-            raise GatewayAdapterSpawnError(
-                f"no launch target for adapter_id={adapter_id!r} (closed static map)"
-            )
-        plugin_id, module = target
+        plugin_id, module = _resolve_launch_target(adapter_id, override_map=self._override_map)
 
         process, write_fd = self._spawn_in_fd3_window(plugin_id=plugin_id, module=module)
 
@@ -418,5 +515,6 @@ class GatewayAdapterChildFactory:
 
 __all__ = [
     "GatewayAdapterChildFactory",
+    "LaunchTargetOverrideRefusedError",
     "_GatewayAdapterChild",
 ]

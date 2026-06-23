@@ -33,6 +33,11 @@ SPEC_B_KEYS: tuple[str, ...] = (
     # at the gateway-leg forwarded-inbound arm site. A LIVE ``t()`` caller in
     # ``_commands.py`` (pybabel extracts it directly — no reserve entry needed).
     "gateway.adapter.forwarded_inbound.preview",
+    # G6-7-7 (#309) Task 1: the fail-closed launch-target-override refusal. A LIVE
+    # ``t()`` caller in ``adapter_child_factory._resolve_launch_target`` (pybabel
+    # extracts it directly — no reserve entry needed). CONTENT-FREE: renders only the
+    # adapter_id, the active environment, and the allowlist (never the override module).
+    "gateway.adapter.launch_target.override_refused",
 )
 
 # Every Spec-B operator-facing catalog key carries this prefix; the reverse-drift
