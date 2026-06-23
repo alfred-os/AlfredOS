@@ -1083,6 +1083,12 @@ jobs:
         # env-indirection is the repo convention regardless.
         env:
           BOUND_PY: ${{ steps.bound_py.outputs.bound_py }}
+          # The gateway adapter child shares the SAME bound proto interpreter as
+          # the quarantine child today (ADR-0030 twins), but we surface it as its
+          # OWN env var (not aliasing BOUND_PY) so the assertion below is meaningful
+          # against `ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON` specifically — a future
+          # split (gateway var != BOUND_PY) is then caught, not passed silently.
+          ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
         # Guard against this gate silently regressing to paper-only. The
         # root-gated legs `skipif (not bwrap) or (sysname != Linux) or (geteuid
         # != 0)`. If a future change to this job broke any of those three
@@ -1115,7 +1121,20 @@ jobs:
             echo "::error::bound py3.14 (ALFRED_QUARANTINE_CHILD_PYTHON) missing or not executable ('${BOUND_PY}'); the real-spawn quarantine-child leg would SKIP and gate nothing (see #248)."
             exit 1
           fi
-          echo "Preconditions hold: euid 0 + bwrap + bound py3.14 (${BOUND_PY}) — the root-gated legs will EXECUTE, not skip."
+          # devops-006: the gateway adapter child shares the SAME bound proto
+          # py3.14 interpreter (ADR-0030 interpreter-prefix twins — no separate
+          # provisioning). Assert `ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON` is set and
+          # executable so the gateway real-spawn test's `_DOCKER_ONLY` third
+          # condition holds and the leg EXECUTES, not skips (#245 paper-gate
+          # discipline at the gateway layer). We check the gateway var DIRECTLY
+          # (not BOUND_PY) so a future divergence where the gateway interpreter is
+          # provisioned separately can never pass this gate silently.
+          if [ -z "${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" ] || [ ! -x "${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" ]; then
+            echo "::error::bound py3.14 (ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON) missing or not executable ('${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}'); the gateway real-spawn leg would SKIP and gate nothing (devops-006 / #245)."
+            exit 1
+          fi
+          echo "ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON=${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON} (shared bound proto interpreter, ADR-0030 twin) — set and executable."
+          echo "Preconditions hold: euid 0 + bwrap + bound py3.14 (${BOUND_PY}) for quarantine + gateway adapter child — the root-gated legs will EXECUTE, not skip."
       - name: Run real-spawn integration + smoke legs as root
         id: real_spawn
         if: steps.check.outputs.has_spawn == 'true'
@@ -1170,8 +1189,17 @@ jobs:
         # its `_PROVISIONED` skip-guard passes — the real-spawn round-trip RUNS here
         # rather than skipping. The provisioning step asserted both the interpreter
         # and the child package resolve from that bound proto prefix.
+        #
+        # `ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON` (devops-006) shares the SAME bound
+        # proto py3.14 interpreter — the gateway adapter child and the quarantine
+        # child are ADR-0030 interpreter-prefix twins, both exec'd under the same
+        # bwrap-bound prefix. No separate provisioning step is needed; we just thread
+        # the same `steps.bound_py.outputs.bound_py` value through both vars so the
+        # gateway real-spawn test's `_DOCKER_ONLY` third condition holds and the leg
+        # EXECUTES rather than skipping (the #245 paper-gate discipline).
         env:
           ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+          ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
         run: |
           set -euo pipefail
           UV_BIN="$(command -v uv)"
@@ -1179,8 +1207,41 @@ jobs:
           sudo env \
             "PATH=${UV_DIR}:${PATH}" \
             "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON=${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" \
             "${UV_BIN}" run pytest tests/integration tests/smoke -q \
             -p no:cacheprovider --cov-fail-under=0
+      - name: Assert the gateway real-spawn test RUNS (not skipped) — #245 paper-gate guard
+        # test-104: the deterministic precondition above guarantees the skipif is
+        # False (euid 0 + bwrap + ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON), but a
+        # RUNTIME proof that the test actually ran is required — `--collect-only`
+        # alone is insufficient (the exact #245 failure mode: a gate that reports
+        # green while silently skipping). Run just the new gateway probe test under
+        # the same `sudo env` context and FAIL the job if it skipped or didn't pass.
+        # The `env:` indirection for both child-python vars follows the zizmor
+        # workflow-injection-safe convention (step-output via env:, never ${{ }}
+        # spliced directly into run:).
+        if: steps.check.outputs.has_spawn == 'true' && hashFiles('tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py') != ''
+        env:
+          ALFRED_QUARANTINE_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+          ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON: ${{ steps.bound_py.outputs.bound_py }}
+        run: |
+          set -euo pipefail
+          UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "${UV_BIN}")"
+          # `tee` is intentional: we need pytest's summary on disk to skip-parse it
+          # below. `set -o pipefail` (above) still propagates a pytest non-zero exit
+          # through the pipe, so a FAILED run fails the step here — do not "simplify"
+          # the tee away.
+          sudo env "PATH=${UV_DIR}:${PATH}" \
+            "ALFRED_QUARANTINE_CHILD_PYTHON=${ALFRED_QUARANTINE_CHILD_PYTHON}" \
+            "ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON=${ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON}" \
+            "${UV_BIN}" run pytest \
+            tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py \
+            -rs -p no:cacheprovider --cov-fail-under=0 | tee /tmp/gw_probe_spawn.out
+          if grep -qE "(^|[^0-9])[1-9][0-9]* skipped" /tmp/gw_probe_spawn.out; then
+            echo "::error::gateway real-spawn test SKIPPED on the privileged lane — paper-gate hazard (#245); ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON / bwrap / euid-0 provisioning regressed."
+            exit 1
+          fi
+          grep -q "1 passed" /tmp/gw_probe_spawn.out || { echo "::error::gateway real-spawn test did not report '1 passed'."; exit 1; }
       - name: Run the bwrap-gated sandbox-escape adversarial corpus (#248)
         # Guard on the corpus harness existing too (not just `has_spawn`, derived
         # from tests/integration|smoke): on a stacked branch where those suites
