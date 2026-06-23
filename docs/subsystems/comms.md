@@ -647,21 +647,81 @@ changed (the daemon-spawn path was already scrubbed-env).
 > `tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py` (real
 > `comms-tui.sock` + seq codec → daemon HOST runner → dispatched-edge G0 commit). The
 > `Adversarial corpus` check is now a required merge gate (`adversarial.yml`
-> unfiltered + fail-closed; see `docs/ci/required-checks.md`). However, the forward
-> leg remains NOT flag-day'd into production. Live graduation still requires:
+> unfiltered + fail-closed; see `docs/ci/required-checks.md`). G6-7-7 added the
+> privileged real-spawn proof: the gateway spawns a REAL bwrap-sandboxed Discord probe
+> (`alfred.gateway.discord_probe`) via the env-gated launch-target override, delivers a
+> credential over fd-3 (asserted absent from the child's `/proc/<pid>/environ`), and the
+> probe's emitted inbound travels the full forwarded path to real core dispatch —
+> `comms.inbound.t3_promoted` audit row + committed G0 `inbound_idempotency` row.
+> See `tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py`.
+> However, the forward leg remains NOT flag-day'd into production. Live graduation still
+> requires:
 >
-> - **G6-7-7** — the privileged real-spawn proof (the `integration-privileged` lane
->   promoted to a currently-required merge gate).
+> - **G6-7-7 (done)** — the privileged real-spawn proof exists; the
+>   `integration-privileged` lane is Pending-required and will be promoted to
+>   currently-required in a post-merge soak-gated step (N≥3 consecutive green PRs,
+>   then `gh api POST .../contexts` — see `docs/ci/required-checks.md`).
 > - **G6-7-8** — the flag-day: delete the daemon-spawn path, add the `alfred-discord`
 >   Compose service, and cut the credential source over to the gateway.
 >
 > The required `Adversarial corpus` gate covers the non-bwrap corpus only; the 6
 > `@_bwrap_required` sandbox-escape payloads (`sbx-2026-012`/`-013`) skip on its
-> non-root runner and are not on any currently-required check until G6-7-7.
+> non-root runner. The `integration-privileged` lane runs them and is Pending-required
+> (promoted post-merge after the soak gate — see above).
 > Until G6-7-8 completes, no production inbound traverses the forwarded path.
 > See [ADR-0039 §Amendments](../adr/0039-gateway-adapter-inbound-bridge.md#amendments)
 > for the full history (G6-7-3 non-conformance, G6-7-4 correction, G6-7-5 ceiling,
-> G6-7-6 e2e proof + required gate).
+> G6-7-6 e2e proof + required gate, G6-7-7 real-spawn proof + probe/override seam).
+
+#### Reproducing the gateway real-spawn test locally (devex-001)
+
+The `integration-privileged` CI job provisions a hermetic `proto`-managed Python 3.14
+under `~/.proto` with `alfred` installed (`uv pip install --python <proto-py> .`), then
+threads both `ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON` and `ALFRED_QUARANTINE_CHILD_PYTHON`
+(ADR-0030 interpreter-prefix twins) into the root pytest run. The launcher binds that
+prefix read-only into the `kind=full` bwrap sandbox so `alfred.gateway.discord_probe`
+resolves off it. The test also sets `ALFRED_ENVIRONMENT=test` per-test (required so the
+launch-target override is accepted; the precondition guard asserts it is set).
+
+To reproduce a lane flake locally:
+
+```bash
+# 1. Start a privileged Debian or Ubuntu container (amd64; use linux/arm64 on Apple Silicon)
+docker run --rm --privileged --platform linux/amd64 debian:bookworm bash
+
+# 2. Inside the container: install bwrap, relax AppArmor user-ns restriction, install proto + uv
+apt-get update -qq && apt-get install -y bubblewrap curl
+sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   # required on Ubuntu 24.04+; no-op on Debian bookworm
+curl -fsSL https://moonrepo.dev/install/proto.sh | bash
+source ~/.bashrc
+proto install python 3.14
+
+# 3. Locate the bound proto interpreter (pin matches what CI globs)
+PROTO_PY=$(ls ~/.proto/tools/python/3.14.*/bin/python3 | head -1)
+
+# 4. Install alfred into the proto interpreter (child sandbox uses this interpreter)
+cd /path/to/AlfredOS
+uv pip install --python "$PROTO_PY" .
+
+# 4b. Sync the uv venv so the test runner (pytest) and alfred are available under uv run
+uv sync --dev
+
+# 5. Run the gateway real-spawn test under sudo env so EUID=0 and env vars are threaded
+# (sudo strips PATH; carry uv's directory explicitly — mirrors the CI "Run real-spawn" step)
+UV_BIN="$(command -v uv)"; UV_DIR="$(dirname "$UV_BIN")"
+sudo env \
+  "PATH=${UV_DIR}:${PATH}" \
+  "ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON=$PROTO_PY" \
+  "ALFRED_QUARANTINE_CHILD_PYTHON=$PROTO_PY" \
+  "$UV_BIN" run pytest \
+    tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py \
+    -rs -p no:cacheprovider --cov-fail-under=0
+```
+
+The probe module imports inside a real bwrap sandbox via the bound proto-py3.14 prefix —
+verified. If the test skips instead of running, check that `EUID=0`, `ALFRED_ENVIRONMENT=test`,
+and `ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON` are all set; the precondition guard will print
+which check failed.
 
 G6-7 closes the inbound data path left open by the ADR-0036 hosting inversion. The gateway
 now hosts and supervises the adapter child (G6-5); G6-7 wires the **inbound→core bridge** so

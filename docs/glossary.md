@@ -1594,3 +1594,41 @@ comms-4) that maps a `(adapter_id, thread_id)` to a stable
 durable persistence is a Slice-5 enhancement.
 
 See [addressing_signal / addressing_mode](#addressing_signal--addressing_mode).
+
+## Discord probe (`alfred.gateway.discord_probe`)
+
+The TEST-ONLY packaged adapter module (`src/alfred/gateway/discord_probe.py`) that the
+gateway real-spawn e2e (G6-7-7) launches in place of the production Discord adapter via
+the [launch-target override](#launch-target-override). Speaks the gateway adapter wire:
+handshake-first, reads a credential over fd-3 (content-free ack — it does not
+authenticate with Discord), emits exactly one scripted `inbound.message`, then blocks
+until stdin EOF so the host pump completes cleanly. Reachable only when
+`ALFRED_ENVIRONMENT ∈ {development,test}` via the env-gated `override_map` constructor
+parameter on `GatewayAdapterChildFactory`; the production factory never accepts an
+override. Being a packaged module (not under `plugins/`) is load-bearing: the `kind=full`
+bwrap sandbox binds the interpreter prefix read-only, so `alfred.gateway.discord_probe`
+resolves off the bound proto py3.14 interpreter — a `plugins/` module would raise
+`ModuleNotFoundError` inside the sandbox. Never a production adapter; the gateway Discord
+leg becomes production at G6-7-8 (the flag-day).
+
+See [launch-target override](#launch-target-override),
+[ADR-0039 §Amendments (G6-7-7)](adr/0039-gateway-adapter-inbound-bridge.md#amendments),
+and [docs/subsystems/comms.md](subsystems/comms.md).
+
+## Launch-target override
+
+The `ALFRED_ENVIRONMENT`-gated, constructor-injected `override_map` (`Mapping[str, tuple[str, str]] | None`)
+in `GatewayAdapterChildFactory` that redirects an adapter id's bwrap launch target — for
+example `discord` → `alfred.gateway.discord_probe` — when
+`ALFRED_ENVIRONMENT ∈ {development,test}` (read via the sanctioned `load_environment()` at
+each spawn call (inside `_resolve_launch_target`)). Fail-closed everywhere else: any non-None `override_map` passed
+when the environment is `production` (or unset/unrecognised) raises
+`LaunchTargetOverrideRefusedError`, a subclass of `GatewayAdapterSpawnError`, which the
+supervisor's spawn-error arm audits as a `gateway.adapter.crashed` row. The rejected
+module string never appears in any audit field or log line (sec-003). This is a
+deliberately narrow test-only trust seam, recorded as an ADR-0039 amendment (not a
+standalone ADR) per the project's docs-003 disposition.
+
+See [Discord probe (`alfred.gateway.discord_probe`)](#discord-probe-alfredgatewaydiscord_probe),
+[ADR-0039 §Amendments (G6-7-7)](adr/0039-gateway-adapter-inbound-bridge.md#amendments),
+and [docs/subsystems/comms.md](subsystems/comms.md).

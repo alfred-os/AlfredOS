@@ -429,6 +429,88 @@ corpus regression — the workflow fails loud on Docker-absence rather than skip
 
 The Decision body above is unchanged and remains authoritative.
 
+### 2026-06-23 — G6-7-7: packaged probe + env-gated launch-target override (privileged real-spawn proof)
+
+**Explicit chain to the 2026-06-23 G6-7-6 amendment (arch-006).** The G6-7-6 amendment
+stated, in future tense: "Promoting that lane to required and the Discord flag-day are G6-7-7
+and G6-7-8 respectively" and "carries `@pytest.mark.skipif(_LAUNCHER_REQUIRES_ROOT)` (Linux
+and non-root), so it SKIPS on the non-root `Integration` runner and executes only under the root
+`integration-privileged` job — itself still PENDING-required (promoted at G6-7-7)." This
+amendment fulfils the G6-7-7 half of that promise: the real-spawn proof now EXISTS and the
+`integration-privileged` lane now RUNS it. The promotion to currently-required remains
+post-merge and soak-gated (see below) — the doc does not move the row until that step
+completes. The flag-day promise ("G6-7-8 respectively") is unchanged.
+
+**Option A rejected (sec-001/sec-002).** The first candidate design used an
+`ALFRED_ENVIRONMENT`-gated test-injection seam inside the PRODUCTION Discord adapter
+(`plugins/alfred_discord/lifecycle.py`) — a conditional branch that would have redirected
+`lifecycle.start` to a no-op stub in `{development,test}`. Rejected on two grounds: (1) the
+adapter's `lifecycle.start` immediately calls `bot.login()`, an HTTP call that raises in the
+hermetic privileged lane (child is reaped before the pump starts → vacuous test), so the
+seam would not even exercise the target; and (2) introducing a conditional branch into a
+credential-bearing, network-connected, shipped adapter weakens a trust boundary that is already
+in production — a seam that exists in the production binary is a permanent attack surface
+expansion, not just a test convenience (sec-001/sec-002).
+
+**Option B shipped: packaged probe module + env-gated constructor-injected override.** Two
+components together form the privileged real-spawn proof:
+
+1. **`src/alfred/gateway/discord_probe.py`** — a dedicated packaged probe module (in the
+   wheel via `packages=["src/alfred"]`) that speaks the gateway adapter wire: handshake-first,
+   reads a credential over fd-3 (content-free ack — it does not authenticate), emits exactly
+   ONE scripted `inbound.message`, then blocks until stdin EOF so the host pump completes
+   cleanly. Being a packaged module (not under `plugins/`) is load-bearing: the `kind=full`
+   bwrap sandbox binds the interpreter prefix read-only, so `alfred.gateway.discord_probe`
+   resolves off the bound proto py3.14 interpreter; a `plugins/` module would raise
+   `ModuleNotFoundError` inside the sandbox.
+
+2. **Env-gated launch-target override in `GatewayAdapterChildFactory`.** An `override_map`
+   constructor parameter (type `Mapping[str, tuple[str, str]] | None`) redirects an adapter id's bwrap
+   launch target (e.g. `discord` → the probe) when `ALFRED_ENVIRONMENT ∈ {development,test}`,
+   read via the sanctioned `load_environment()` **at each spawn call** (inside `_resolve_launch_target`, not at construction — `__init__` only stores the map). The guard is
+   fail-closed by default: any non-None override map passed when `ALFRED_ENVIRONMENT` is
+   `production` (or unset/unrecognised) raises `LaunchTargetOverrideRefusedError`, a subclass
+   of `GatewayAdapterSpawnError`, which the supervisor's spawn-error arm audits as a
+   `gateway.adapter.crashed` row. The rejected module string never appears in any audit
+   field or log line (sec-003). This is a NEW test-only trust seam. It is recorded here as an
+   amendment rather than a new ADR because it is a narrow, env-gated addition to an existing
+   decision boundary (docs-003 disposition).
+
+**The proof.** `tests/integration/cli/daemon/test_gateway_real_probe_spawn_forwarded_inbound.py`
+(DOCKER-ONLY, `integration-privileged`, marked `@pytest.mark.skipif(_LAUNCHER_REQUIRES_ROOT)`):
+
+- Spawns the REAL bwrap-sandboxed probe child via the production `GatewayAdapterChildFactory`
+  (override `discord` → `alfred.gateway.discord_probe`, `ALFRED_ENVIRONMENT=test`).
+- Delivers the bot-token credential over fd-3. Asserts it is ABSENT from the child's
+  `/proc/<pid>/environ` — the G6-3 fd-3 delivery invariant is unbroken by the forwarding path.
+- The probe emits its scripted `inbound.message`; the `GatewayInboundForwardRunner` forwards it
+  over the real leg to real core dispatch.
+- End-to-end assertions: a `discord` `comms.inbound.t3_promoted` audit row; a committed
+  dispatched-edge G0 `inbound_idempotency` row for `(discord, inbound_id)`.
+
+The non-root wire-contract companion is the G6-7-6 A1 test
+(`test_forwarded_inbound_gateway_to_core_turn.py`). No new in-process companion is added
+(#245 discipline: the existing A1 test covers the wire contract on the non-root `Integration`
+runner).
+
+**Provisioning.** `ALFRED_GATEWAY_ADAPTER_CHILD_PYTHON` is the ADR-0030 twin of
+`ALFRED_QUARANTINE_CHILD_PYTHON` — both are set to the same bound proto py3.14 interpreter
+provisioned by the `integration-privileged` CI job. The launcher binds that prefix read-only
+into the `kind=full` bwrap sandbox so the packaged probe module resolves.
+
+**Promotion deferred (soak gate, devops-002/sec-004).** `integration-privileged` (now RUNNING
+the real-spawn test for real) and `Adversarial corpus` are promoted to currently-required in a
+POST-MERGE follow-up, after N≥3 consecutive green `integration-privileged` PRs, via
+`gh api -X POST repos/alfred-os/AlfredOS/branches/main/protection/required_status_checks/contexts`.
+Rollback: `gh api -X DELETE .../contexts/<name>` to de-require a flaking lane while
+investigating. See `docs/ci/required-checks.md` for the full runbook.
+
+**The gateway Discord leg stays TEST-ONLY until G6-7-8** (the flag-day: delete the
+daemon-spawn path, add the `alfred-discord` Compose service, cut the credential source
+over to the gateway). G6-7-7 proves the bridge is real; G6-7-8 makes it production.
+
+The Decision body above is unchanged and remains authoritative.
+
 ## Resolved decisions (formerly open maintainer-steer flags)
 
 - **F1 (runner factoring):** the injectable inbound-disposition seam with the daemon dispatch
