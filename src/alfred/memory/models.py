@@ -185,7 +185,26 @@ class AuditEntry(Base):
             # Closed-vocab grant outcome (the refusal sibling reuses 'refused');
             # the credential itself is NEVER in the row (audit_row_schemas
             # CORE_ADAPTER_SPAWN_GRANT_FIELDS has no credential field).
-            "'granted')",
+            "'granted', "
+            # Issue #252 / #320 (migration 0022) — 14 latent-gap result values:
+            # 13 the #320 static guard surfaced as literals + post_stage_refused
+            # (C1, adversarial review) reached via a DYNAMIC helper-param flow
+            # the guard cannot see. Each is genuinely written to this column via
+            # the real AuditWriter but shipped without a CHECK migration (the
+            # same bug class as 'granted'/0021). Quarantine extractor:
+            # transport_failed (#252, the triggering issue), protocol_violation
+            # (#134/#158), post_stage_refused (C1, post-stage T3 canary/DLP
+            # refusal). web.fetch dispatcher (tool.web.fetch): dlp_scan_error /
+            # domain_not_allowed / internal_ip_refused (#134), transport_error /
+            # handle_id_mismatch / ok (#157), dispatch_param_invalid /
+            # dispatch_shape_error (#147). Capability-gate grant-rebuild:
+            # rolled_back. Comms addressing-drift detector: drift_detected. CLI
+            # outbound-DLP sink: modified.
+            "'transport_failed', 'protocol_violation', 'post_stage_refused', "
+            "'dlp_scan_error', 'domain_not_allowed', 'internal_ip_refused', "
+            "'transport_error', 'handle_id_mismatch', "
+            "'dispatch_param_invalid', 'dispatch_shape_error', 'ok', "
+            "'rolled_back', 'drift_detected', 'modified')",
             name="ck_audit_log_result",
         ),
     )
