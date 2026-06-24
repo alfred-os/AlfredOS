@@ -101,7 +101,10 @@ Config lives at [`lefthook.yml`](./lefthook.yml). Skipping a hook (`LEFTHOOK=0`)
 | New feature | Unit + integration |
 | Bug fix | Regression unit test |
 | New skill | Happy-path + error-path + out-of-scope-refusal |
-| Anything touching `src/alfred/security/` | 100% coverage on the changed boundary + adversarial suite must pass |
+| Anything touching `src/alfred/security/` | 100% line+branch coverage on the changed boundary + a threat-model note in the PR |
+| **Every** PR | the adversarial corpus (`uv run pytest tests/adversarial`) must pass — see note below |
+
+The **`Adversarial corpus` check is release-blocking on every PR** (it runs unfiltered in `.github/workflows/adversarial.yml` and is a required status check), so a credential-leak / forged-grant / DLP / tier-confusion regression blocks merge regardless of which files you touched. (The bwrap `sandbox_escape` payloads `@_bwrap_required`-skip in that job; they're gated by the separate required `Integration (privileged Linux, real spawn)` check — see [`docs/ci/required-checks.md`](./docs/ci/required-checks.md).) Run `uv run pytest tests/adversarial` locally before pushing. The 100% line+branch coverage requirement above is the *additional* obligation for changes inside a trust boundary.
 
 See [PRD §8](./PRD.md#8-testing-strategy) for the full testing strategy.
 
@@ -125,7 +128,7 @@ If you're authoring a GitHub Actions workflow whose jobs should block the merge 
 
 1. **Open a discussion or issue first** for non-trivial changes.
 2. Fork → branch → PR. Keep it small.
-3. Make sure CI is green: lint, types, unit tests, and (for security-relevant code) the adversarial suite.
+3. Make sure CI is green: lint, types, unit tests, and the adversarial corpus (the `Adversarial corpus` check is release-blocking on **every** PR, not only security-relevant ones).
 4. Be responsive to review feedback. Reviewers may request a video call or out-of-band confirmation for security-relevant changes.
 5. Merge strategy: humans default to **squash on merge** via the GitHub UI; the [`/path-to-green`](./.rulesync/skills/path-to-green/SKILL.md) skill instead uses **`gh pr merge --rebase`** after a local `make autosquash` of all fixup commits. Both produce clean histories — squash collapses a multi-commit branch into one, rebase preserves the autosquashed sequence as separate commits on main. Pick squash when the branch had a single logical concern; pick rebase (which the skill does) when you want to preserve the commit progression.
 

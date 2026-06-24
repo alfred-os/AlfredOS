@@ -106,32 +106,6 @@ jobs:
         run: |
           uv run pytest tests/unit -q --cov=src/alfred --cov-report=term-missing --cov-fail-under=75
           uv run coverage report --include='src/alfred/security/*' --fail-under=100
-      - name: Comms credential adversarial corpus (release-blocking)
-        # Spec B G6-3 (#288): the G6-3 credential round-trip is the heaviest trust
-        # boundary in Spec B (a real platform credential over fd 3). Its non-root,
-        # in-process adversarial corpus (``tests/adversarial/comms`` — cross-adapter
-        # read, gateway-holds-no-vault-key, forged/replayed/unsolicited grant) is
-        # labelled release-blocking, so it MUST run on a REQUIRED gate. This discrete
-        # step in the required ``python`` job is that gate: a credential-leak /
-        # forged-grant regression blocks merge here. Kept SEPARATE from the unit
-        # ``--cov`` run above (it is not a coverage-bearing tier; the credential modules
-        # are gated 100% by the plugins + comms_mcp + gateway per-file gates). The
-        # corpus is ~3s and needs no root / Postgres / Docker.
-        #
-        # NOTE (governance follow-up, G6-6 → G6-7-6): ``adversarial.yml`` is now
-        # release-blocking + unfiltered (``continue-on-error`` removed; the ``paths:``
-        # filter dropped so it gates EVERY PR; fail-closed on an empty/moved corpus),
-        # and its ``Adversarial corpus`` check is being promoted to a required status
-        # check (G6-7-6, #309; see ``docs/ci/required-checks.md``). This discrete step
-        # is RETAINED until that promotion lands (the ``gh api POST .../contexts`` runs
-        # POST-MERGE) to avoid a no-gate window for the G6-3 credential corpus — it is
-        # the only CURRENTLY-required gate for that corpus while ``Adversarial corpus``
-        # is still only Pending-required. It is removed in a tracked follow-up once
-        # ``Adversarial corpus`` is promoted to Currently-required. The brief
-        # double-RUN of the credential corpus (here + in ``adversarial.yml``) is
-        # intentional during that window, NOT a double-required-gate.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('tests/adversarial/comms/**/*.py') != ''
-        run: uv run pytest tests/adversarial/comms -q
       - name: Hooks subsystem 100% line+branch coverage
         # Slice 2.5 PR-A's ``src/alfred/hooks/`` is a trust boundary in its
         # own right — the capability gate (sec-007), the re-entry bypass
