@@ -611,11 +611,11 @@ jobs:
     #     skip) on Windows. Guarding them all is a cross-cutting code change out
     #     of scope for this additive CI PR — tracked in the follow-up issue
     #     referenced in docs/ci/required-checks.md. Lint/format/type-check ARE
-    #     portable, so Windows gets that layer today. Per the required-vs-
-    #     informational split (docs/ci/required-checks.md), the Windows leg is
-    #     informational-until-green: `continue-on-error: true` keeps a Windows-
-    #     only regression visible WITHOUT blocking merge, until the win32
-    #     skip-guards land and it can be promoted to required.
+    #     portable, so Windows gets that layer today — and as of 2026-06-24
+    #     (#321 Phase 3) that layer is REQUIRED on Windows too: the
+    #     `continue-on-error` that kept it informational-until-green was dropped
+    #     after 6+ green PR cycles (#312–#319). The unit suite stays out of
+    #     scope on Windows (win32 skip-guards, #246).
     #
     # Cost discipline: the heavy Integration/Smoke (Testcontainers, needs the
     # Docker daemon) stay Linux-only; this matrix only adds the cheap
@@ -628,14 +628,13 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
-    # Windows is informational-until-green (see the job-level comment and
-    # docs/ci/required-checks.md): a Windows-only regression stays VISIBLE in the
-    # PR checklist but does NOT block merge until the win32 skip-guards land and
-    # the leg can be promoted to a required check. macOS is required (it must be
-    # green). `continue-on-error` is matrix-leg-scoped via the expression so it
-    # applies ONLY to the windows-latest leg; the macos-latest leg fails the job
-    # normally.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    # Both matrix legs are now BLOCKING. The `continue-on-error` that kept the
+    # windows-latest leg informational-until-green was removed on 2026-06-24
+    # (#321 Phase 3) after the windows static-analysis layer ran green for 6+
+    # consecutive PR cycles (#312–#319). Both macos-latest and windows-latest
+    # must now pass. The unit suite is still NOT run on either non-Linux leg —
+    # only the portable lint/format/type layer — so the win32 unit-suite
+    # skip-guards tracked in #246 remain out of scope here.
     # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()` in
     # job-level `if:` at workflow-parse time. The first-step `check` probes for
     # pyproject.toml and every downstream step short-circuits on

@@ -15,19 +15,16 @@ name: docs-check
 # load-bearing surfaces that the spec forward-references.
 
 on:
+  # No `paths:` filter on the PR trigger: this check must report on EVERY PR so
+  # it can be a required status check without deadlocking off-path PRs (a
+  # required check that never reports leaves the merge button blocked on
+  # "Expected — waiting for status"). The job is stdlib-only and ~7s, so the
+  # every-PR cost is negligible. Promoted to required 2026-06-24 (#321 Phase 3).
+  # The `push:` trigger keeps its `paths:` filter — branch protection gates PRs,
+  # not pushes, so the post-merge push run only needs to fire on doc changes.
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
-    paths:
-      - 'docs/**/*.md'
-      - 'PRD.md'
-      - 'README.md'
-      - 'CONTRIBUTING.md'
-      - 'CODE_OF_CONDUCT.md'
-      - 'SECURITY.md'
-      - 'scripts/docs_check.py'
-      - 'Makefile'
-      - '.github/workflows/docs-check.yml'
   push:
     branches: [main]
     paths:
