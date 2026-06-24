@@ -22,13 +22,14 @@
 
 - [ ] Unit tests pass locally: `uv run pytest tests/unit -q`
 - [ ] Integration tests pass (if applicable): `uv run pytest tests/integration`
+- [ ] Adversarial corpus passes (release-blocking on **every** PR): `uv run pytest tests/adversarial`
 - [ ] Lint and types clean: `uv run ruff check . && uv run mypy src/`
 
 ## Trust-boundary review
 
 - [ ] This PR does NOT touch `src/alfred/security/`, the secret broker, the capability gate, the DLP layer, or the audit log writers.
 - [ ] OR — this PR touches a trust boundary, and I have:
-  - [ ] Run the adversarial suite locally: `uv run pytest tests/adversarial`
+  - [ ] Extended the adversarial corpus to cover the new boundary behaviour (the corpus runs on every PR via the `Adversarial corpus` gate — a trust-boundary change should _add_ payloads, not just pass the existing ones)
   - [ ] Maintained 100% line and branch coverage on the changed boundary
   - [ ] Described the threat-model implications in the Summary above
 
