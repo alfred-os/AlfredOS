@@ -18,15 +18,18 @@ name: perf
 # author-gating-workflow convention.
 
 on:
+  # No `paths:` filter on the PR trigger: the `Hook dispatch perf gate` check
+  # must REPORT on every PR so it can be a required status check without
+  # deadlocking off-path PRs (a required check that never reports leaves the
+  # merge button blocked on "Expected — waiting for status"). The expensive
+  # benchmark itself does NOT run on every PR — the in-job `relevant` step
+  # (changed-files gate, #321 Phase 3) short-circuits to a fast green on PRs
+  # that touch no perf-relevant path, so only perf-touching PRs pay the bench
+  # cost. This is the manifest's mitigation option 3 (single job, always reports
+  # the check name, gates the actual bench run on changed files).
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
-    paths:
-      - 'src/alfred/hooks/**'
-      - 'src/alfred/memory/episodic.py'
-      - 'tests/perf/**'
-      - 'pyproject.toml'
-      - '.github/workflows/perf.yml'
   push:
     branches: [main]
     paths:
@@ -34,6 +37,8 @@ on:
       - 'src/alfred/memory/episodic.py'
       - 'tests/perf/**'
       - 'pyproject.toml'
+      - 'uv.lock'
+      - 'Makefile'
       - '.github/workflows/perf.yml'
   # Manual trigger — lets an operator re-run the perf gate against an
   # arbitrary ref to corroborate a regression report or to gather a fresh
@@ -72,7 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: read  # Minimal: read repo content for the perf bench
+      pull-requests: read  # Read-only PR changed-files list for the `relevant` changed-files gate below
     # Release-blocking: NO continue-on-error. The perf gate must block merge
     # on regression, per Slice-2.5 spec §5 "release-blocking for this subsystem".
     # Unlike adversarial.yml's advisory mode, this gate is enforced from day one.
@@ -92,20 +98,51 @@ jobs:
             echo "has_perf=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No tests/perf/test_*.py — skipping perf gate."
           fi
+      - name: Decide whether to run the benchmark (changed-files gate)
+        id: relevant
+        # The check `Hook dispatch perf gate` REPORTS on every PR (so it can be a
+        # required status check), but the ~minutes-long, variance-prone benchmark
+        # only RUNS when a perf-relevant path changed — otherwise it short-circuits
+        # to a fast green (#321 Phase 3, manifest mitigation option 3). The PR's
+        # changed-file list comes from the GitHub API (authoritative; needs no git
+        # history), keyed on the PR number passed via env (an integer — injection
+        # safe). On push / workflow_dispatch there is no PR, so the bench runs
+        # (the `push:` trigger keeps its `paths:` filter, so a push only reaches
+        # here when a perf-relevant path changed). Fails CLOSED: a GitHub API
+        # error aborts the step loud rather than silently skipping the gate.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "run_bench=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Non-PR event (push / manual) — running the perf benchmark."
+            exit 0
+          fi
+          changed="$(gh api --paginate "repos/${GH_REPO}/pulls/${PR_NUMBER}/files" --jq '.[].filename')"
+          if printf '%s\n' "$changed" | grep -Eq '^(src/alfred/hooks/|src/alfred/memory/episodic\.py$|tests/perf/|pyproject\.toml$|uv\.lock$|Makefile$|\.github/workflows/perf\.yml$)'; then
+            echo "run_bench=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::perf-relevant paths changed — running the benchmark."
+          else
+            echo "run_bench=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No perf-relevant paths changed — perf gate short-circuits to success."
+          fi
       - name: Install uv
-        if: steps.perfcheck.outputs.has_perf == 'true'
+        if: steps.perfcheck.outputs.has_perf == 'true' && steps.relevant.outputs.run_bench == 'true'
         uses: astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a # v5.1.0
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: "uv.lock"
       - name: Set up Python
-        if: steps.perfcheck.outputs.has_perf == 'true'
+        if: steps.perfcheck.outputs.has_perf == 'true' && steps.relevant.outputs.run_bench == 'true'
         uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Sync dependencies
-        if: steps.perfcheck.outputs.has_perf == 'true'
+        if: steps.perfcheck.outputs.has_perf == 'true' && steps.relevant.outputs.run_bench == 'true'
         run: uv sync --dev
       - name: Run perf gate (budgets + refusal short-circuit)
         # Single source of truth: `make test-perf` runs the bench pass
@@ -116,13 +153,13 @@ jobs:
         # the same gate as CI. The host-load guard at the top of the
         # target is bypassed via `ALFRED_TEST_PERF_FORCE=1` (set in
         # the workflow `env:` block).
-        if: steps.perfcheck.outputs.has_perf == 'true'
+        if: steps.perfcheck.outputs.has_perf == 'true' && steps.relevant.outputs.run_bench == 'true'
         run: make test-perf
       - name: Upload benchmark JSON
         # Uploaded even on failure so a regression run still leaves the
         # measurement record behind for Slice-3 recalibration analysis.
         # SHA pinned to match nightly.yml's upload-artifact pin.
-        if: always() && steps.perfcheck.outputs.has_perf == 'true'
+        if: always() && steps.perfcheck.outputs.has_perf == 'true' && steps.relevant.outputs.run_bench == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hook-dispatch-perf-${{ github.run_id }}
@@ -132,7 +169,7 @@ jobs:
         # Surfaces the calibration context + a regression-investigation
         # pointer in the GitHub UI so an operator hitting a red run does
         # not need to dig into the workflow file to know where to look.
-        if: always() && steps.perfcheck.outputs.has_perf == 'true'
+        if: always() && steps.perfcheck.outputs.has_perf == 'true' && steps.relevant.outputs.run_bench == 'true'
         run: |
           set -euo pipefail
           {
