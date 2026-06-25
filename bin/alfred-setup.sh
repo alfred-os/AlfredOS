@@ -14,7 +14,7 @@
 # identity, primes the secrets bind-mount directory + file with the
 # right perms, exports UID/GID for the compose `user:` substitution,
 # and optionally prompts for a Discord snowflake bind followed by an
-# `alfred discord verify` probe.
+# `alfred gateway adapters --wait-ready discord` probe (#309).
 set -euo pipefail
 
 dry_run=false
@@ -186,7 +186,7 @@ step "Priming secrets bind-mount"
 # downstream as a confusing SecretBrokerPermissionsError because the
 # secrets path inside the container is a directory, not a file. Touch
 # the host file with `chmod 600` BEFORE any `docker compose up
-# alfred-discord` so the bind-mount targets the right kind of inode.
+# alfred-gateway` so the bind-mount targets the right kind of inode.
 secrets_dir="$HOME/.config/alfred"
 secrets_file="$secrets_dir/secrets.toml"
 mkdir -p "$secrets_dir"
@@ -194,7 +194,8 @@ chmod 700 "$secrets_dir"
 if [[ ! -f "$secrets_file" ]]; then
   touch "$secrets_file"
   echo "Created empty secrets file at $secrets_file."
-  echo "Edit it and add ``discord_bot_token = \"...\"`` before running 'alfred discord verify'."
+  echo "NOTE: secrets.toml is for broker-managed secrets (hash pepper, provider API keys, etc.)."
+  echo "      The Discord bot token is now ALFRED_DISCORD_BOT_TOKEN in .env (not secrets.toml)."
 fi
 chmod 600 "$secrets_file"
 
@@ -371,9 +372,8 @@ fi
 
 # Optional Discord-bind prompt — TTY-only, skipped silently otherwise.
 # A blank answer is the documented skip path. On non-empty input we
-# bind the snowflake AND immediately run `alfred discord verify` so the
-# operator gets a green/red signal before daemonising the long-running
-# adapter.
+# bind the snowflake AND run `alfred gateway adapters --wait-ready discord`
+# so the operator gets a green/red signal before daemonising (#309).
 if [[ -t 0 ]]; then
   step "Optional: bind a Discord snowflake"
   echo "  In Discord: Settings > Advanced > Developer Mode > right-click your user > Copy ID."
@@ -385,15 +385,20 @@ if [[ -t 0 ]]; then
       --platform discord \
       --platform-id "$snowflake"
     echo "Bound snowflake $snowflake to operator $slug."
-    if [[ -s "$secrets_file" ]] && grep -q '^discord_bot_token' "$secrets_file"; then
-      step "Verifying Discord bot connectivity"
-      if docker compose run --rm alfred-discord verify; then
-        echo "Discord verify OK."
-      else
-        warn "Discord verify failed; inspect 'docker compose logs alfred-discord' or re-run."
-      fi
+    # #309 preflight: gateway-hosted Discord needs the token core-side, or the gateway
+    # ABORTS at first spawn (loud + audited, but it takes the relay down — #331). Refuse
+    # to bring Discord up without it rather than ship a green stack with a dead bot.
+    if grep -qE '^[[:space:]]*alfred-discord:' docker-compose.yaml 2>/dev/null; then
+      warn "Legacy alfred-discord Compose service detected — removed in the #309 flag-day. Pull latest docker-compose.yaml. See docs/runbooks/2026-06-25-discord-flag-day-migration.md."
+    fi
+    if docker compose ps --services 2>/dev/null | grep -qx alfred-discord; then
+      warn "A stale alfred-discord container is running — 'docker compose down' then 'up -d'."
+    fi
+    if [[ -n "${ALFRED_DISCORD_BOT_TOKEN:-}" ]]; then
+      echo "After 'docker compose up -d alfred-gateway', verify the Discord adapter with:"
+      echo "  alfred gateway adapters --wait-ready discord"
     else
-      echo "Skipping 'alfred discord verify' — set discord_bot_token in $secrets_file first."
+      warn "ALFRED_DISCORD_BOT_TOKEN is unset — NOT enabling Discord. Set it in .env (NOT secrets.toml, which would shadow env) then 'docker compose up -d alfred-gateway'."
     fi
   fi
 fi
@@ -404,4 +409,4 @@ echo "Run 'docker compose up -d' to start the long-running alfred-core daemon + 
 # one-off container links into the running stack (gateway holds the session across a
 # core restart). 'run --rm' overrides the service's 'daemon start' command.
 echo "Run 'docker compose run --rm -it alfred-core chat' to open the TUI (via the gateway)."
-echo "Run 'docker compose up -d alfred-discord' to start the Discord adapter daemon."
+echo "Run 'docker compose up -d alfred-gateway' to start the gateway (hosts the Discord adapter)."
