@@ -511,6 +511,10 @@ over to the gateway). G6-7-7 proves the bridge is real; G6-7-8 makes it producti
 
 The Decision body above is unchanged and remains authoritative.
 
+### 2026-06-25 — G6-7-8: Discord flag-day complete; inbound bridge now production
+
+**G6-7-8 annotation (#309):** the inbound bridge this ADR specifies is now in production. The Discord flag-day completed (standalone `alfred-discord` service deleted; gateway hosts the Discord child; token via core `ALFRED_DISCORD_BOT_TOKEN` → spawn-grant → fd-3); the first real platform inbound traverses the forwarded path in production.
+
 ## Resolved decisions (formerly open maintainer-steer flags)
 
 - **F1 (runner factoring):** the injectable inbound-disposition seam with the daemon dispatch

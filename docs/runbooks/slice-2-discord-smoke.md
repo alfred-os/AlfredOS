@@ -1,5 +1,18 @@
 # Slice 2 — Discord gateway deployment runbook
 
+> **SUPERSEDED — #309 Discord flag-day (2026-06-25)**
+>
+> The `alfred-discord` standalone Compose service and the `alfred discord verify`
+> CLI command were removed in PR #309 (Spec B G6-7-8). Discord now runs as a
+> gateway-hosted adapter child spawned by `alfred-gateway`.
+>
+> **For current deployments, follow the migration runbook instead:**
+> [`docs/runbooks/2026-06-25-discord-flag-day-migration.md`](./2026-06-25-discord-flag-day-migration.md)
+>
+> The steps below are preserved as a historical reference for the Slice-2
+> standalone-service architecture. Commands referencing `alfred-discord`,
+> `secrets.toml discord_bot_token`, and `alfred discord verify` no longer apply.
+
 Operator-facing walkthrough for taking a fresh AlfredOS deployment from "Docker
 is installed" to "I can DM the bot from Discord and the conversation lands in
 the audit log." Companion to the automated smoke test at

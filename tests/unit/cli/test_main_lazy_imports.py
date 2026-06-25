@@ -218,7 +218,6 @@ def test_alfred_cli_main_lazy_load_keeps_help_surface_intact() -> None:
         "status",
         "chat",
         "user",
-        "discord",
         "plugin",
         "web",
         "config",

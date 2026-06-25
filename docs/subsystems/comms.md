@@ -55,12 +55,6 @@ these factories rather than the concrete classes; the local imports
 defer the heavy adapter dependencies (`textual`, `discord.py`) so
 imports like `alfred status` stay light.
 
-A third allowlisted seam, `run_discord_verify_probe`, lets
-`alfred discord verify` run the 30-second readiness probe without
-importing `alfred.comms.discord` directly — the import-isolation test
-locks the allowlist to a small set of modules, and this seam keeps the
-CLI on the right side of it.
-
 ### `TuiAdapter`
 
 `src/alfred/comms/tui_adapter.py`. Wraps the Textual app from Slice 1.
@@ -195,34 +189,28 @@ boundaries. Reusable for Slice-4 Telegram (4096-char cap).
    funnels every outbound chunk; a grep-asserting unit test pins this
    invariant.
 
-### `alfred discord verify` (operator readiness probe)
+### Gateway adapter readiness probe (operator)
 
-`src/alfred/cli/discord_cmd.py`. The verify subcommand:
+Since the #309 flag-day, Discord runs as a gateway-hosted adapter child (no
+standalone `alfred-discord` service). The operator readiness probe is:
 
-1. Loads settings + broker (`_bootstrap.load_settings_or_die`,
-   `build_broker`).
-2. Constructs an `OutboundDlp` with a no-op audit sink (the probe does
-   not need durable audit on its own activity).
-3. Calls `run_discord_verify_probe(broker, outbound_dlp, timeout_s)`
-   — the allowlisted seam in `alfred.comms.adapter`.
-4. Maps the returned plain-int code onto `_VerifyExitCode` and emits
-   the structlog event with the returned key + kwargs.
+```sh
+alfred gateway adapters --wait-ready discord
+```
 
-Exit-code table:
+This polls the gateway's `status.query` endpoint until the Discord adapter
+reports ready or the timeout expires. Exit `0` means the adapter reached
+`on_ready` and is accepting DMs. See the
+[migration runbook](../runbooks/2026-06-25-discord-flag-day-migration.md)
+and the [deployment runbook](../runbooks/slice-2-discord-smoke.md) for the
+full walkthrough.
 
-| Code | Enum | Meaning |
-|---|---|---|
-| 0 | `OK` | `on_ready` fired within `timeout_s` |
-| 1 | `UPSTREAM_UNRECOVERABLE` | Gateway 5xx / repeated reconnect |
-| 2 | `CONFIG_FAILED` | Bad token, intents off, missing perms, secrets file unreadable, operator row missing |
-| 3 | `LOGIN_FAILED` | Token rejected at handshake (`discord.LoginFailure`) |
-| 4 | `TIMEOUT` | `timeout_s` elapsed without `on_ready` (default 30s) |
-| 130 | `INTERRUPTED` | SIGINT |
-
-Each branch is pinned by a dedicated unit test in
-`tests/unit/comms/test_discord.py` (cluster 14). The
-[deployment runbook](../runbooks/slice-2-discord-smoke.md) maps each
-code to remediation.
+> **Historical note.** Prior to the #309 flag-day, a standalone `alfred discord
+> verify` CLI command (`src/alfred/cli/discord_cmd.py`) ran a 30-second
+> readiness probe against the daemon-spawned adapter. That command and its host
+> service (`alfred-discord`) were removed in #309. See
+> [ADR-0036](../adr/0036-gateway-adapter-hosting-inversion.md) and
+> [ADR-0039](../adr/0039-gateway-adapter-inbound-bridge.md) for the design.
 
 ### Outbound DLP scan
 
@@ -242,10 +230,10 @@ system).
 
 | Source | Exception / event | Adapter behaviour |
 |---|---|---|
-| `discord.LoginFailure` | typed `LoginFailure` | `verify` exits `3`; long-running adapter exits `2` after log + audit |
+| `discord.LoginFailure` | typed `LoginFailure` | Long-running adapter exits `2` after log + audit |
 | `discord.ConnectionClosed` | typed | Auto-reconnect via `discord.py`'s built-in supervisor; exponential backoff |
 | `discord.HTTPException` 5xx | typed | Audit `discord.upstream_5xx` + single retry. Repeated → propagate, supervisor exits `1` |
-| Repeated-reconnect failure | none — supervisor exhausts retries | `verify` exits `1`; long-running adapter exits `1` |
+| Repeated-reconnect failure | none — supervisor exhausts retries | Long-running adapter exits `1` |
 | `OutboundDlp.scan` raises | propagates | `_send` returns `dlp_failed` sentinel; outbound message never leaves the process; audit `discord.alfred_error` |
 | Markdown splitter raises | propagates | `_send` returns `split_failed`; same audit |
 | `channel.send` raises | propagates | `_send` returns `send_failed`; same audit |

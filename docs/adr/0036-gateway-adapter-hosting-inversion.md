@@ -441,3 +441,11 @@ in-process.
 > itself is #309). So no LIVE flow changed, but the credential source is no longer
 > untouched — the accurate framing is: the Discord credential SOURCE was rewired to fd-3;
 > no live flow changed (the daemon-spawn path was already scrubbed-env).
+
+> **G6-7-8 annotation (#309):** the Discord flag-day is complete. The standalone
+> `alfred-discord` Compose service is deleted; the gateway hosts the Discord bwrap child
+> in production. The credential is sourced from the core's `ALFRED_DISCORD_BOT_TOKEN`
+> env var (GAP-4 Option A) and delivered to the gateway-hosted child over spawn-grant →
+> fd-3; the gateway and child hold no vault key. The daemon-spawn path and the
+> `alfred discord verify` CLI command are removed. Unset-token blast-radius tracking:
+> issue #331. PRD §7.1 vault (Spec C): issue #330.
