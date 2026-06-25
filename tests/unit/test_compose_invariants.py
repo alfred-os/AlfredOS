@@ -328,3 +328,29 @@ def test_alfred_core_has_discord_token_env(compose: dict[str, Any]) -> None:
     core = compose.get("services", {}).get("alfred-core", {})
     env = core.get("environment", {}) or {}
     assert "ALFRED_DISCORD_BOT_TOKEN" in env
+
+
+def test_alfred_gateway_hosts_discord(compose: dict[str, Any]) -> None:
+    """Spec B G6-7-8 (#309): the gateway is configured to host the Discord adapter."""
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    env = gw.get("environment", {}) or {}
+    assert "alfred_discord" in str(env.get("ALFRED_COMMS_ENABLED_ADAPTERS", ""))
+
+
+def test_no_secret_env_or_mount_on_gateway(compose: dict[str, Any]) -> None:
+    """The gateway holds NO platform secret — neither env nor bind-mount (ADR-0036)."""
+    gw = compose.get("services", {}).get("alfred-gateway", {})
+    env = gw.get("environment", {}) or {}
+    assert "ALFRED_DISCORD_BOT_TOKEN" not in env
+    assert "ALFRED_SECRETS_FILE" not in env
+    assert not any("secrets.toml" in v for v in _volume_strings(gw.get("volumes", []) or []))
+
+
+def test_alfred_core_comms_adapters_stay_tui_only(compose: dict[str, Any]) -> None:
+    """The CORE must NOT host Discord — adding alfred_discord trips
+    CommsMultiAdapterUnsupportedFailure + a second stdio-spawned Discord (dual-spawn).
+    Discord is gateway-hosted + forwarded; the core stays alfred_tui-only (#309)."""
+    core = compose.get("services", {}).get("alfred-core", {})
+    enabled = str(core.get("environment", {}).get("ALFRED_COMMS_ENABLED_ADAPTERS", ""))
+    assert "alfred_discord" not in enabled
+    assert "alfred_tui" in enabled

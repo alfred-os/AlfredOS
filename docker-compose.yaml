@@ -252,6 +252,11 @@ services:
       ALFRED_ENVIRONMENT: ${ALFRED_ENVIRONMENT:-production}
       ALFRED_OPERATOR_LANGUAGE: ${ALFRED_OPERATOR_LANGUAGE:-en-US}
       ALFRED_GATEWAY_METRICS_PORT: ${ALFRED_GATEWAY_METRICS_PORT:-9464}
+      # Spec B G6-7-8 (#309): the gateway HOSTS the Discord adapter as a bwrap child.
+      # _resolve_hosted_adapter_ids maps alfred_discord -> canonical "discord" and
+      # excludes the tui dial-in. The gateway holds NO secret — the core resolves the
+      # token and delivers it over spawn-grant -> fd-3 at each (re)spawn.
+      ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_GATEWAY_HOSTED_ADAPTERS:-["alfred_discord"]}'
     volumes:
       - alfred_run:/home/alfred/.run
     healthcheck:
