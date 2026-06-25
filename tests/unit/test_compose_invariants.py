@@ -320,3 +320,11 @@ def test_alfred_gateway_has_healthcheck(compose: dict[str, Any]) -> None:
     gw = compose.get("services", {}).get("alfred-gateway", {})
     hc = gw.get("healthcheck", {})
     assert hc.get("test") == ["CMD", "alfred", "gateway", "healthcheck"]
+
+
+def test_alfred_core_has_discord_token_env(compose: dict[str, Any]) -> None:
+    """#309 GAP-4: alfred-core carries ALFRED_DISCORD_BOT_TOKEN so the core broker
+    resolves the Discord credential (env-fallback) for spawn-grant -> fd-3."""
+    core = compose.get("services", {}).get("alfred-core", {})
+    env = core.get("environment", {}) or {}
+    assert "ALFRED_DISCORD_BOT_TOKEN" in env

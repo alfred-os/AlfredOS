@@ -134,6 +134,11 @@ services:
       ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_COMMS_ENABLED_ADAPTERS:-["alfred_tui"]}'
       ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
       ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
+      # #309 GAP-4 (Option A): the core resolves discord_bot_token from env and
+      # delivers it to the gateway-hosted Discord child via spawn-grant -> fd-3.
+      # Mirrors the provider keys; the gateway/child never hold a vault key. NOTE:
+      # discord_bot_token is _PREFER_FILE, so a mounted secrets.toml would SHADOW this.
+      ALFRED_DISCORD_BOT_TOKEN: ${ALFRED_DISCORD_BOT_TOKEN:-}
       # Reuse the same Postgres credentials so `.env` is the single source of
       # truth. The default chain mirrors the alfred-postgres service so the
       # two containers always agree on the DSN.
