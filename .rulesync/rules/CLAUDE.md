@@ -102,7 +102,8 @@ or `--help` will simply not list them; do not assume them present.
 | Type check | Slice 1 | `uv run mypy src/ && uv run pyright src/` |
 | All quality gates | Slice 1 | `make check` (lint + format + type + test) |
 | Local stack up | Slice 1 | `docker compose up -d` |
-| TUI conversation | Slice 1 | `alfred chat` |
+| TUI conversation | Slice 1 | `alfred chat` (dials the running gateway) |
+| Gateway (comms front door) | Slice 4 | `alfred gateway start` · `status` · `adapters` · `healthcheck` |
 | Status snapshot | Slice 1 | `alfred status` |
 | Inspect audit log/graph | Slice 3 | `alfred audit log` / `alfred audit graph --since 24h` |
 | Inspect a user's memory | Slice 4+ (planned) | `alfred memory show <user>` |
