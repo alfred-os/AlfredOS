@@ -8,6 +8,8 @@ Proposed
 
 **Amended by:** [ADR-0036](0036-gateway-adapter-hosting-inversion.md) — Spec B G6-1: the gateway is now a SECOND launcher / bwrap host (in addition to alfred-core), with `cap_add: SETUID` + the `alfred-bwrap` AppArmor/seccomp profiles.
 
+**G6-7-8 annotation (#309):** the gateway now hosts a production Discord bwrap child in addition to the quarantine child already covered here; both children are launched by the same launcher / bwrap machinery this ADR containerised.
+
 ## Context
 
 Slice 3 ships the quarantined LLM as an MCP stdio subprocess under the

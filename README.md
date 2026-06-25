@@ -76,8 +76,8 @@ re-created owned by the `alfred` user.
 
 ### Enable Discord (Developer Mode walkthrough)
 
-Slice 2 ships a DM-only Discord adapter. Operator workflow for a fresh
-deploy:
+AlfredOS ships a DM-only Discord adapter hosted by the gateway. Operator
+workflow for a fresh deploy:
 
 1. **Create a bot in the Discord developer portal.** Visit
    <https://discord.com/developers/applications>, create a new
@@ -87,14 +87,17 @@ deploy:
    this, the adapter sees every DM as empty content and never reaches
    the orchestrator.
 3. **Copy the bot token.** Bot settings → Reset Token → copy.
-4. **Write the token to `~/.config/alfred/secrets.toml`.** The setup
-   script created the file with `chmod 600` for you; add:
+4. **Set the token in `.env`.** Open your `.env` file (copy from
+   `.env.example` if you have not already) and set:
 
-   ```toml
-   discord_bot_token = "YOUR-TOKEN-HERE"
+   ```sh
+   ALFRED_DISCORD_BOT_TOKEN=YOUR-TOKEN-HERE
    ```
 
-5. **Invite the bot to a server with the `bot` scope.** Slice 2 only
+   The token is read by `alfred-core` on boot and delivered to the
+   gateway-hosted Discord child over fd-3 at spawn time. The gateway
+   and child never hold the token in their environment.
+5. **Invite the bot to a server with the `bot` scope.** AlfredOS only
    reads DMs; you do not need any guild-message permissions yet.
 6. **Bind your Discord user to the operator identity.** In Discord:
    Settings → Advanced → Developer Mode → right-click your user → Copy
@@ -106,24 +109,23 @@ deploy:
 
    The setup script offers an interactive prompt for this in its final
    step.
-7. **Verify the gateway is reachable.** Run:
+7. **Start the gateway.**
 
    ```sh
-   docker compose run --rm alfred-discord verify
+   docker compose up -d alfred-gateway
    ```
 
-   Exit codes: `0` ok / `1` upstream / `2` config (bad token, intents
-   off) / `3` LoginFailure / `4` timeout / `130` SIGINT. The error
-   message names the remediation surface.
-8. **Start the adapter as a daemon.** Once `verify` returns 0:
+8. **Verify the adapter is ready.** Once the gateway is up, run:
 
    ```sh
-   docker compose up -d alfred-discord
+   alfred gateway adapters --wait-ready discord
    ```
 
-   Send the bot a DM from your Discord account; the round-trip lands
-   through the orchestrator with audit + budget + episodic memory + DLP
-   all in place.
+   This polls until the Discord adapter reports ready or the timeout
+   expires. Exit `0` means the adapter reached `on_ready` and is
+   accepting DMs. Then send the bot a DM from your Discord account; the
+   round-trip lands through the orchestrator with audit + budget +
+   episodic memory + DLP all in place.
 
 ### Secrets file — permission propagation matrix
 
@@ -148,9 +150,10 @@ ships in Slice 4 per
 
 **Backup-vector reminder:** if you back up your `~/.config` with
 `restic`, `borg`, or similar, **exclude `~/.config/alfred/secrets.toml`**
-or the backup will contain plaintext API keys and your Discord bot
-token. The containerised secret broker lands in Slice 4; until then, the
-operator owns the exclusion.
+or the backup will contain plaintext API keys. The `ALFRED_DISCORD_BOT_TOKEN`
+lives in `.env` (not in `secrets.toml`); exclude `.env` from any backup
+that should not retain plaintext credentials. The containerised secret
+broker lands in Slice 4; until then, the operator owns both exclusions.
 
 ## Configuration
 
