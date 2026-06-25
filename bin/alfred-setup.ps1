@@ -30,5 +30,23 @@ run bin/alfred-setup.sh directly from a WSL2 terminal.
     exit 1
 }
 
+# #309 preflight (Windows/WSL2 parity): warn before forwarding if the Discord
+# bot token is missing, so the operator sees the guidance in their native shell
+# rather than inside the WSL2 transcript. Identical wording to bin/alfred-setup.sh.
+if (docker compose ps --services 2>$null | Select-String -Quiet "^alfred-discord$") {
+    Write-Warning "A stale alfred-discord container is running — 'docker compose down' then 'up -d'."
+}
+$_envFile = Join-Path $PSScriptRoot "..\.env"
+$_tokenInEnvFile = Test-Path $_envFile -PathType Leaf -ErrorAction SilentlyContinue
+if ($_tokenInEnvFile) {
+    $_tokenInEnvFile = (Get-Content $_envFile | Select-String -Quiet '^\s*ALFRED_DISCORD_BOT_TOKEN\s*=')
+}
+if (-not $env:ALFRED_DISCORD_BOT_TOKEN -and -not $_tokenInEnvFile) {
+    Write-Warning "ALFRED_DISCORD_BOT_TOKEN is unset — NOT enabling Discord. Set it in .env (NOT secrets.toml, which would shadow env) then 'docker compose up -d alfred-gateway'."
+}
+
 Write-Host "AlfredOS: forwarding setup to WSL2 (bin/alfred-setup.sh) — the supported Windows configuration."
+# ALFRED_DISCORD_BOT_TOKEN is forwarded into WSL2 via the environment; the
+# gateway adapters --wait-ready discord probe inside bin/alfred-setup.sh will
+# pick it up there. No duplicate probe here — the WSL2 run is authoritative.
 wsl bash bin/alfred-setup.sh @args
