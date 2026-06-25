@@ -454,7 +454,7 @@ class _GatewayStack:
         await self.session.flush_keystroke_batch()
 
 
-async def _record_link_state_factory(sink: list[str]) -> Callable[[str], Any]:
+def _record_link_state_factory(sink: list[str]) -> Callable[[str], Any]:
     async def _on_link_state(method: str) -> None:
         sink.append(method)
 
@@ -515,7 +515,7 @@ async def _running_gateway_stack(
     gateway_task: asyncio.Task[None] = asyncio.ensure_future(gateway.run())
 
     link_states: list[str] = []
-    on_link_state = await _record_link_state_factory(link_states)
+    on_link_state = _record_link_state_factory(link_states)
     captured_session: dict[str, TuiSession] = {}
 
     def _build_parking_app(session: TuiSession) -> _ParkingApp:
