@@ -166,11 +166,13 @@ async def test_closed_without_data_fd3_maps_to_not_ok() -> None:
 async def test_fd3_not_a_pipe_maps_to_not_ok_fast_no_hang() -> None:
     """The foreground ``alfred discord`` path: no fd-3 writer → ``ok=False`` fast, no hang.
 
-    The still-present foreground path (``discord_cmd.py``, retirement deferred to #309)
-    spawns the same entrypoint with NO fd-3 token writer. If fd 3 is NOT a readable pipe
-    (e.g. a regular file inherited at fd 3), a blocking ``os.read(3)`` could hang inside
-    ``_transition_lock`` forever. The source must fail-fast (``ok=False``) when fd 3 is not
-    a pipe — never block. A regular-file fd stands in for "not a connected inbound pipe".
+    The now-retired foreground path (``discord_cmd.py``, deleted in #309 — Discord is
+    gateway-hosted since Spec B G6-7-8) spawned the same entrypoint with NO fd-3 token
+    writer. The invariant this tests — fail-fast on a non-pipe fd 3 — remains a security
+    property of the plugin itself: if fd 3 is NOT a readable pipe (e.g. a regular file
+    inherited at fd 3), a blocking ``os.read(3)`` could hang inside ``_transition_lock``
+    forever. The source must fail-fast (``ok=False``) when fd 3 is not a pipe — never
+    block. A regular-file fd stands in for "not a connected inbound pipe".
     """
     from plugins.alfred_discord.lifecycle import Fd3TokenSource
 

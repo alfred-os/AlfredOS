@@ -11,8 +11,8 @@ mirroring ``_render_live_adapter_status``) + a FAKE inter-poll sleep, so the bou
 loop is exercised WITHOUT real wall-clock time. Assertions key on ``t()`` catalog values /
 canonical adapter ids — never raw English literals (i18n hard rule).
 
-Exit-code contract (mirrors the still-present ``alfred discord verify`` 0/1/2/3; verify's
-retirement is deferred to #309):
+Exit-code contract (mirrors the now-retired ``alfred discord verify`` 0/1/2/3;
+the verify subcommand was retired in #309 — Discord is gateway-hosted since Spec B G6-7-8):
 * 0 — ready
 * 1 — not-ready-by-timeout (loud)
 * 2 — daemon / control unavailable

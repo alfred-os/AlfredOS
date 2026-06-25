@@ -61,7 +61,6 @@ import typer
 from alfred.cli.audit import audit_app
 from alfred.cli.config import config_app
 from alfred.cli.daemon import daemon_app
-from alfred.cli.discord_cmd import discord_app
 from alfred.cli.gateway import gateway_app
 from alfred.cli.plugin import plugin_app
 from alfred.cli.supervisor import supervisor_app
@@ -99,12 +98,6 @@ def _user_bootstrap() -> None:
 
 
 app.add_typer(user_app, name="user", callback=_user_bootstrap)
-# PR D2: register the ``alfred discord`` Typer group. The group's
-# default callback (no subcommand) boots the long-running adapter;
-# ``alfred discord verify`` runs the 30s probe. Both subcommands
-# construct their own dependency graph inside the callback so the
-# import cost only lands when an operator actually uses the surface.
-app.add_typer(discord_app, name="discord")
 
 # PR-S3-6 Component G: register the Slice-3 Typer groups. Each sub-app
 # already carries its own ``help=t(...)`` on its ``typer.Typer(...)``
