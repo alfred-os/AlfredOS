@@ -25,9 +25,9 @@ Two modes:
   bounded) elapses, with a short bounded inter-poll ``await`` (NEVER a busy-spin).
 * one-shot (no flag) — a single ``status.query`` render of the per-adapter state.
 
-Exit-code contract (mirrors the still-present ``alfred discord verify`` 0/1/2/3 so
-operator scripts can branch the same way; the verify subcommand's retirement is deferred
-to epic #309):
+Exit-code contract (mirrors the now-retired ``alfred discord verify`` 0/1/2/3 that
+operator scripts branched on; the verify subcommand was retired in #309 — Discord is
+gateway-hosted since Spec B G6-7-8):
 
 * 0 — ready (``--wait-ready``) / rendered (one-shot)
 * 1 — not-ready-by-timeout (``--wait-ready`` only; LOUD)
@@ -68,8 +68,8 @@ log = structlog.get_logger(__name__)
 
 __all__ = ["adapters_verify"]
 
-# Exit codes (the still-present ``alfred discord verify`` 0/1/2/3 contract; verify's
-# retirement is deferred to #309).
+# Exit codes (mirrors the now-retired ``alfred discord verify`` 0/1/2/3 contract;
+# the verify subcommand was retired in #309 — Discord is gateway-hosted since Spec B G6-7-8).
 _EXIT_READY: Final[int] = 0
 _EXIT_NOT_READY: Final[int] = 1
 _EXIT_UNAVAILABLE: Final[int] = 2

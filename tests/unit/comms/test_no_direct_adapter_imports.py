@@ -51,7 +51,7 @@ def _imports_legacy_comms(tree: ast.AST) -> bool:
 
     Matches the deleted package exactly (``alfred.comms`` or a ``alfred.comms.``
     submodule) WITHOUT matching the surviving ``alfred.comms_mcp`` package — the
-    dotted-prefix guard is the same one ``discord_cmd``'s import test uses.
+    dotted-prefix guard avoids false matches on the ``alfred.comms_mcp`` namespace.
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module is not None:

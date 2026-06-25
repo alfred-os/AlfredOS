@@ -2,9 +2,13 @@
 
 The Slice-4 comms-MCP flag-day inverts the CLI model: instead of building the
 in-process orchestrator graph + comms adapter, an operator-facing comms command
-(``alfred chat``, ``alfred discord``) spawns the matching MCP plugin through
+(``alfred chat``) spawns the matching MCP plugin through
 ``bin/alfred-plugin-launcher.sh`` (the PR-S4-6 policy-resolving launcher) and
 lets the already-running daemon own the orchestrator graph.
+
+Previously ``alfred discord`` was a second call site here; that command was
+retired in #309 (Spec B G6-7-8). Discord is now gateway-hosted — access it
+via ``alfred gateway adapters --wait-ready discord``.
 
 Both call sites share the same launch shape — build the launcher argv, hand the
 child a manifest path + import roots, spawn, and treat a launcher failure within
@@ -72,11 +76,12 @@ class LaunchResult(Enum):
     FAILED = auto()
     #: The launcher was still alive after the probe window — it handed off a
     #: live, long-running session. Only surfaced to a caller that opted out of
-    #: blocking (``block_on_handoff=False``, the ``alfred discord verify``
-    #: readiness probe): the seam terminates the child and reports this so the
-    #: probe returns promptly instead of awaiting an exit that never comes
-    #: (review F3). A blocking caller (``alfred chat`` / boot) never sees it —
-    #: it waits for the session to end and gets COMPLETED/FAILED.
+    #: blocking (``block_on_handoff=False``, the now-retired readiness-probe
+    #: shape from the deleted ``alfred discord verify`` command): the seam
+    #: terminates the child and reports this so the probe returns promptly
+    #: instead of awaiting an exit that never comes (review F3). A blocking
+    #: caller (``alfred chat`` / boot) never sees it — it waits for the
+    #: session to end and gets COMPLETED/FAILED.
     HANDED_OFF = auto()
 
 

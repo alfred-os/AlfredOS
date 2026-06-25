@@ -1,25 +1,19 @@
 """Shared CLI bootstrap helpers.
 
-This module exists to break the import cycle between
-:mod:`alfred.cli.main` and :mod:`alfred.cli.discord_cmd`:
-
-* ``main.py`` registers the ``alfred discord`` sub-app at top-level so
-  Typer surfaces the subcommand in ``--help`` output.
-* ``discord_cmd.py`` needs the same dependency-graph helpers
-  (``_load_settings_or_die``, ``_build_broker``, ``_configure_logging``,
-  ``_install_identity_factories``, ``_build_router``,
-  ``_structlog_audit_sink``) that ``main._chat_main`` uses, so the
-  Discord boot path and the TUI boot path stay in lockstep.
-
-Pre-D2 the helpers lived in ``main.py`` and ``discord_cmd.py`` imported
-them inside its function bodies — that's a deferred import on one edge
-but the other edge (``main`` → ``discord_cmd``) is eager, which CodeQL
-flags as ``py/cyclic-import`` regardless of laziness on the other
-side. Extracting the helpers here is the structural fix.
+This module holds dependency-graph helpers shared by the CLI surfaces
+(``main.py``, the status/chat/daemon/gateway commands). Extracted here so
+the helpers remain DRY across callers without creating import cycles.
 
 All names are underscore-prefixed because they're internal-to-the-CLI:
 external consumers go through the public Typer surface
-(``alfred status``, ``alfred chat``, ``alfred discord ...``).
+(``alfred status``, ``alfred chat``, ...).
+
+History: prior to PR D2 these helpers lived in ``main.py``. A now-retired
+``discord_cmd.py`` (deleted in #309 — Discord is gateway-hosted since
+Spec B G6-7-8) imported them inside its function bodies; that eager edge
+triggered a CodeQL ``py/cyclic-import`` finding, motivating the extraction.
+The cyclic-import concern is moot post-deletion, but the extraction remains
+the cleaner organisation.
 """
 
 from __future__ import annotations
