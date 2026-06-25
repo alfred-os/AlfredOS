@@ -41,24 +41,10 @@ def _volume_strings(volumes: list[Any]) -> list[str]:
     return out
 
 
-def test_alfred_discord_has_no_setuid(compose: dict[str, Any]) -> None:
-    """alfred-discord must NOT have cap_add: SETUID (spec §5.2)."""
-    discord = compose.get("services", {}).get("alfred-discord", {})
-    cap_add = discord.get("cap_add", []) or []
-    assert "SETUID" not in cap_add, (
-        "alfred-discord must not have SETUID capability — this would let it "
-        "impersonate alfred-quarantine and bypass the process isolation."
-    )
-
-
-def test_alfred_discord_has_no_state_git_volume(compose: dict[str, Any]) -> None:
-    """alfred-discord must NOT have alfred_state_git mounted (spec §11.1)."""
-    discord = compose.get("services", {}).get("alfred-discord", {})
-    volumes = discord.get("volumes", []) or []
-    assert not any("alfred_state_git" in v for v in _volume_strings(volumes)), (
-        "alfred-discord must not mount alfred_state_git — this would expose "
-        "state.git grant files to the comms adapter, widening the trust surface."
-    )
+def test_alfred_discord_service_is_deleted(compose: dict[str, Any]) -> None:
+    """Spec B G6-7-8 (#309): the standalone alfred-discord service is gone — Discord is
+    a gateway-hosted bwrap child. No standalone process, no secrets.toml bind-mount."""
+    assert "alfred-discord" not in compose.get("services", {})
 
 
 def test_alfred_core_has_setuid(compose: dict[str, Any]) -> None:
@@ -338,12 +324,24 @@ def test_alfred_gateway_hosts_discord(compose: dict[str, Any]) -> None:
 
 
 def test_no_secret_env_or_mount_on_gateway(compose: dict[str, Any]) -> None:
-    """The gateway holds NO platform secret — neither env nor bind-mount (ADR-0036)."""
+    """The gateway holds NO platform secret — neither env nor bind-mount (ADR-0036).
+
+    The gateway must mount ONLY the approved set (alfred_run socket dir) — any
+    unexpected mount could carry a secret (e.g. a bind-mounted directory containing
+    secrets.toml).  Pinned exactly so additions require an explicit review.
+    """
     gw = compose.get("services", {}).get("alfred-gateway", {})
     env = gw.get("environment", {}) or {}
     assert "ALFRED_DISCORD_BOT_TOKEN" not in env
     assert "ALFRED_SECRETS_FILE" not in env
-    assert not any("secrets.toml" in v for v in _volume_strings(gw.get("volumes", []) or []))
+    # Exact-set assertion: the gateway must mount ONLY alfred_run.  A bind-mounted
+    # directory could silently carry secrets.toml (the _PREFER_FILE path), so we
+    # pin the approved mounts rather than just filtering for the filename.
+    approved_mounts = {"alfred_run:/home/alfred/.run"}
+    actual_mounts = set(_volume_strings(gw.get("volumes", []) or []))
+    assert actual_mounts == approved_mounts, (
+        f"Gateway mounts deviated from approved set: {actual_mounts!r}"
+    )
 
 
 def test_alfred_core_comms_adapters_stay_tui_only(compose: dict[str, Any]) -> None:
