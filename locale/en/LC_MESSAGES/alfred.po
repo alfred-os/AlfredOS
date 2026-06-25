@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-23 13:56+0100\n"
+"POT-Creation-Date: 2026-06-25 19:12+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -35,17 +35,17 @@ msgstr ""
 "provider; both are set to {provider}. The dual-LLM split (spec §5.4) "
 "requires distinct providers."
 
-#: src/alfred/cli/_bootstrap.py:107
+#: src/alfred/cli/_bootstrap.py:101
 msgid "error.placeholder_api_key"
 msgstr ""
 "ALFRED_DEEPSEEK_API_KEY is still the placeholder. Edit .env and replace "
 "'sk-...' with a real DeepSeek API key."
 
-#: src/alfred/cli/_bootstrap.py:109
+#: src/alfred/cli/_bootstrap.py:103
 msgid "error.config_invalid"
 msgstr "configuration is invalid: {detail}"
 
-#: src/alfred/cli/_bootstrap.py:110
+#: src/alfred/cli/_bootstrap.py:104
 msgid "hint.copy_env_example"
 msgstr "Tip: copy .env.example to .env and fill in ALFRED_DEEPSEEK_API_KEY."
 
@@ -285,86 +285,63 @@ msgstr ""
 "The new value is NOT yet active — it activates when the reviewer approves"
 " the proposal and the supervisor reloads its configuration."
 
-# PR D2 — CLI help and verify-event narration.
-#: src/alfred/cli/discord_cmd.py:79
-msgid "cli.discord.help.group"
-msgstr "Discord adapter subcommands."
-
-#: src/alfred/cli/discord_cmd.py:99
-msgid "cli.discord.help.verify.short"
-msgstr "Probe the Discord gateway for 30s and exit with a typed code."
-
-#: src/alfred/cli/discord_cmd.py:105
-msgid "cli.discord.help.verify.timeout"
-msgstr "Seconds to wait for on_ready before timing out (default 30)."
-
-# PR-S4-10 (#206): alfred discord now spawns plugins/alfred_discord via the
-# launcher; this is the daemon/launcher-unavailable message for both the boot
-# path and the readiness probe.
-#: src/alfred/cli/discord_cmd.py:137 src/alfred/cli/discord_cmd.py:167
-msgid "cli.discord.daemon_required"
-msgstr ""
-"alfred discord needs the daemon and the plugin launcher. Start the daemon"
-" with: alfred daemon start. For ad-hoc verification, run the launcher "
-"directly: bin/alfred-plugin-launcher.sh alfred.discord."
-
-#: src/alfred/cli/main.py:72
+#: src/alfred/cli/main.py:71
 msgid "cli.help.root"
 msgstr "AlfredOS CLI"
 
-#: src/alfred/cli/main.py:175
+#: src/alfred/cli/main.py:168
 msgid "status.help"
 msgstr ""
 "Print a short instance health summary: provider, budget, optional "
 "fallback. For daemon-specific status (PID, uptime, last boot event), see:"
 " alfred daemon status"
 
-#: src/alfred/cli/main.py:205
+#: src/alfred/cli/main.py:198
 msgid "status.yes"
 msgstr "yes"
 
-#: src/alfred/cli/main.py:208
+#: src/alfred/cli/main.py:201
 msgid "status.no"
 msgstr "no"
 
-#: src/alfred/cli/main.py:209
+#: src/alfred/cli/main.py:202
 msgid "status.fallback_none"
 msgstr "(none)"
 
-#: src/alfred/cli/main.py:210
+#: src/alfred/cli/main.py:203
 msgid "status.primary_provider"
 msgstr "primary provider: {provider}"
 
-#: src/alfred/cli/main.py:211
+#: src/alfred/cli/main.py:204
 msgid "status.fallback_provider"
 msgstr "fallback provider: {provider}"
 
-#: src/alfred/cli/main.py:212
+#: src/alfred/cli/main.py:205
 msgid "status.anthropic_configured"
 msgstr "anthropic fallback configured: {yes_or_no}"
 
-#: src/alfred/cli/main.py:213
+#: src/alfred/cli/main.py:206
 msgid "status.daily_budget"
 msgstr "daily budget USD: {amount}"
 
-#: src/alfred/cli/main.py:214
+#: src/alfred/cli/main.py:207
 msgid "status.per_call_max"
 msgstr "per-call max USD: {amount}"
 
-#: src/alfred/cli/main.py:220
+#: src/alfred/cli/main.py:213
 msgid "cli.login.help.user"
 msgstr "User slug to log in as."
 
-#: src/alfred/cli/main.py:223
+#: src/alfred/cli/main.py:216
 msgid "cli.login.help.expires_in"
 msgstr "Session lifetime, e.g. 12h (clamped to [1h, 7d])."
 
-#: src/alfred/cli/main.py:225
+#: src/alfred/cli/main.py:218
 msgid "cli.login.help.refresh"
 msgstr "Rotate the current session's token."
 
 # Chat gating (PR-S4-1; re-pointed daemon->gateway in Spec A G5).
-#: src/alfred/cli/main.py:372 src/alfred/i18n/_slice_4_reserve.py:154
+#: src/alfred/cli/main.py:365 src/alfred/i18n/_slice_4_reserve.py:154
 msgid "comms.tui.gateway_required_to_chat"
 msgstr ""
 "alfred chat needs the gateway. Start it with: alfred gateway start. If "
@@ -1369,9 +1346,9 @@ msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 #: src/alfred/gateway/adapter_child_factory.py:156
 msgid "gateway.adapter.launch_target.override_refused"
 msgstr ""
-"Launch-target override for adapter {adapter_id} refused: active environment "
-"{environment} is not in the override allowlist {allowed}. The override is "
-"honored only in development/test."
+"Launch-target override for adapter {adapter_id} refused: active "
+"environment {environment} is not in the override allowlist {allowed}. The"
+" override is honored only in development/test."
 
 #: src/alfred/gateway/adapter_stdio_transport.py:146
 #: src/alfred/gateway/adapter_stdio_transport.py:178
@@ -3277,4 +3254,26 @@ msgstr "alfred"
 #~ "Unexpected ingress tier for comms.tui.input:"
 #~ " {tier_name!r}; expected T1 or T2 per"
 #~ " spec §3.6."
+
+# PR D2 — CLI help and verify-event narration.
+#~ msgid "cli.discord.help.group"
+#~ msgstr "Discord adapter subcommands."
+
+#~ msgid "cli.discord.help.verify.short"
+#~ msgstr "Probe the Discord gateway for 30s and exit with a typed code."
+
+#~ msgid "cli.discord.help.verify.timeout"
+#~ msgstr "Seconds to wait for on_ready before timing out (default 30)."
+
+# PR-S4-10 (#206): alfred discord now spawns plugins/alfred_discord via the
+# launcher; this is the daemon/launcher-unavailable message for both the boot
+# path and the readiness probe.
+#~ msgid "cli.discord.daemon_required"
+#~ msgstr ""
+#~ "alfred discord needs the daemon and "
+#~ "the plugin launcher. Start the daemon"
+#~ " with: alfred daemon start. For "
+#~ "ad-hoc verification, run the launcher "
+#~ "directly: bin/alfred-plugin-launcher.sh "
+#~ "alfred.discord."
 
