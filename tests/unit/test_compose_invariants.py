@@ -488,11 +488,14 @@ def test_egress_proxy_port_never_host_published(compose: dict[str, Any]) -> None
 def test_core_routes_egress_through_gateway_proxy(compose: dict[str, Any]) -> None:
     """G7-1b: alfred-core routes provider egress through the gateway L7 CONNECT proxy."""
     env = compose["services"]["alfred-core"].get("environment", {}) or {}
-    # Assert the exact gateway authority (host AND port), not just the substring — a drift to
-    # e.g. ``alfred-gateway:9999`` would dial a port the proxy does not bind.
-    assert "alfred-gateway:8889" in str(env.get("ALFRED_EGRESS_PROXY_URL", "")), (
+    # Assert the EXACT default-chain value, not a substring — a drift to e.g.
+    # ``alfred-gateway:9999`` or a wrapped host would dial a port/host the proxy does not bind.
+    # (The compose fixture loads raw YAML, so the value is the ``${VAR:-default}`` literal, not
+    # the shell-resolved URL — hence the full default-chain string here.)
+    expected = f"${{ALFRED_EGRESS_PROXY_URL:-http://alfred-gateway:{_EGRESS_PROXY_PORT}}}"
+    assert env.get("ALFRED_EGRESS_PROXY_URL") == expected, (
         "alfred-core must set ALFRED_EGRESS_PROXY_URL pointing at the gateway proxy "
-        "(http://alfred-gateway:8889) so the connectivity-free core dials it for egress."
+        f"({expected}) so the connectivity-free core dials it for egress."
     )
 
 
