@@ -25,6 +25,25 @@ from typer.testing import CliRunner
 from alfred.cli.gateway import gateway_app
 
 
+@pytest.fixture(autouse=True)
+def _patch_egress_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the co-run L7 egress proxy with a no-op (Spec C G7-1b / #333).
+
+    ``alfred gateway start`` now serves the egress forward-proxy alongside the process; a
+    real listener bind has no place in these adapter-id wiring tests. The proxy's mount +
+    fail-closed behaviour are covered by ``test_egress_proxy_mount.py``.
+    """
+
+    class _NoopProxy:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def serve(self, shutdown_event: asyncio.Event) -> None:
+            del shutdown_event
+
+    monkeypatch.setattr("alfred.gateway.egress_proxy.EgressForwardProxy", _NoopProxy)
+
+
 def _patch_process(monkeypatch: pytest.MonkeyPatch, captured: dict[str, object]) -> None:
     class _FakeProcess:
         def __init__(
@@ -42,6 +61,9 @@ def _patch_process(monkeypatch: pytest.MonkeyPatch, captured: dict[str, object])
 def _patch_settings(monkeypatch: pytest.MonkeyPatch, enabled: tuple[str, ...]) -> None:
     class _FakeSettings:
         comms_enabled_adapters = enabled
+        # The gateway derives its egress allowlist from the live provider config; the
+        # proxy mount reads this (Spec C G7-1b / #333), so the fake must carry it.
+        deepseek_base_url = "https://api.deepseek.com/v1"
 
     monkeypatch.setattr("alfred.config.settings.Settings", _FakeSettings)
 

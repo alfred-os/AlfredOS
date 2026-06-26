@@ -26,7 +26,7 @@ import asyncio
 import http.client
 import os
 import stat
-from typing import Final
+from typing import Final, NoReturn, Protocol
 
 import structlog
 import typer
@@ -56,6 +56,14 @@ _EXIT_HANDSHAKE_FAILED = 5
 # ``bind_failed`` line (which mislabels the cause). Resolved BEFORE the socket bind so a
 # config fault can never be swallowed by the bind ``except OSError`` (CLAUDE.md hard #7).
 _EXIT_CONFIG_FAILED = 6
+
+# A friendly "the egress forward-proxy could not bind" refusal (Spec C G7-1b / #333). The
+# gateway is the SOLE external egress plane, so a proxy bind failure is FAIL-CLOSED: it
+# refuses the start (a distinct non-zero so an operator can tell an egress-plane outage apart
+# from the client-socket bind / core-dial / config refusals) and the gateway crash-loops
+# under ``restart: unless-stopped`` — the intended I/O-plane posture (CONTRAST the metrics
+# server's loud-and-continue: the proxy IS the gateway's reason to exist, hard rule #7).
+_EXIT_EGRESS_PROXY_BIND_FAILED = 7
 
 # The adapter id the gateway dials on the core (the core binds ``comms-{adapter_kind}.sock``;
 # the socket-backed ``alfred_tui`` adapter has manifest ``adapter_kind="tui"``). Operator-
@@ -129,6 +137,59 @@ def _resolve_hosted_adapter_ids() -> list[str]:
     return [kind for kind in resolved if kind != _TUI_DIAL_IN_ADAPTER_ID]
 
 
+class _EgressProxyLike(Protocol):
+    """The minimal egress-proxy surface ``_main`` co-runs (Spec C G7-1b / #333)."""
+
+    async def serve(self, shutdown_event: asyncio.Event) -> None: ...
+
+
+def _egress_audit_stub(event: str, fields: dict[str, object]) -> None:
+    """Temporary egress-CONNECT audit sink wired in B2; B4 replaces it with the
+    field-allowlisted ``alfred.gateway.egress_audit.record_egress_connect``.
+
+    A structlog-tier emitter so a mounted proxy's CONNECT outcomes are never silent
+    before the closed-vocab audit module lands (CLAUDE.md hard rule #7)."""
+    log.info(event, **fields)
+
+
+async def _serve_egress_proxy_failclosed(
+    proxy: _EgressProxyLike, shutdown_event: asyncio.Event
+) -> None:
+    """Serve the egress proxy, mapping a bind ``OSError`` to ``IOPlaneUnavailableError``.
+
+    The proxy's ``serve`` raises ``OSError`` ONLY on the listener bind (a post-bind
+    per-connection fault is handled inside the proxy). A bind failure is the gateway's
+    fail-closed I/O-plane outage, so it is re-raised as the typed
+    :class:`alfred.egress.errors.IOPlaneUnavailableError` — distinct from the client-socket
+    bind ``OSError`` — so ``start_gateway`` renders the egress-proxy refusal (never the
+    mislabelled client ``bind_failed`` line) and the gateway crash-loops under
+    ``restart: unless-stopped``.
+    """
+    from alfred.egress.errors import IOPlaneUnavailableError
+
+    try:
+        await proxy.serve(shutdown_event)
+    except OSError as exc:
+        raise IOPlaneUnavailableError(detail=repr(exc)) from exc
+
+
+def _reraise_first_meaningful(group: BaseExceptionGroup[BaseException]) -> NoReturn:
+    """Re-raise the first non-cancellation leaf of a TaskGroup ``ExceptionGroup``.
+
+    ``_main`` co-runs the egress proxy + the gateway process under an ``asyncio.TaskGroup``,
+    which raises an ``ExceptionGroup`` when a sibling fails (the other is cancelled). The
+    start is fail-closed and single-cause, so the first REAL leaf is surfaced RAW — restoring
+    the flat typed-exception contract ``start_gateway``'s handlers depend on. A
+    pure-cancellation group (no real fault) is re-raised unchanged.
+    """
+    for exc in group.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            _reraise_first_meaningful(exc)
+        if not isinstance(exc, asyncio.CancelledError):
+            raise exc
+    raise group
+
+
 def start_gateway() -> None:
     """Run the long-running gateway process until SIGTERM / SIGINT (Spec A G3-3b-2b).
 
@@ -140,7 +201,15 @@ def start_gateway() -> None:
     # perf-001: the relay graph imports lazily here, not at module-top, so
     # ``alfred --help`` never pays the gateway-process import cost.
     from alfred.comms_mcp.errors import DaemonUnavailableError
+    from alfred.config.settings import Settings
+    from alfred.egress.allowlist import provider_egress_allowlist
+    from alfred.egress.errors import IOPlaneUnavailableError
     from alfred.gateway.client_link import GatewayHandshakeError
+    from alfred.gateway.egress_proxy import (
+        EgressForwardProxy,
+        resolve_egress_proxy_bind,
+        resolve_egress_proxy_port,
+    )
     from alfred.gateway.process import GatewayProcess
     from alfred.plugins.errors import ManifestError
 
@@ -187,16 +256,57 @@ def start_gateway() -> None:
             log.warning("gateway.cli.signal_handler_unavailable")
 
         dial_adapter_id = os.environ.get(_DIAL_ADAPTER_ID_ENV) or _DEFAULT_DIAL_ADAPTER_ID
-        await GatewayProcess(
-            shutdown_event=shutdown_event,
-            dial_adapter_id=dial_adapter_id,
-            # Resolved BEFORE the bind (above) so a manifest/config fault is a config
-            # refusal, never swallowed by the bind ``except OSError`` as ``bind_failed``.
-            adapter_ids=hosted_adapter_ids,
-        ).run()
+
+        # Spec C G7-1b (#333): the gateway is the SOLE external egress plane, so its start
+        # co-runs the L7 CONNECT forward-proxy alongside the gateway process. The proxy's
+        # destination allowlist is derived from the SAME live provider config the in-core
+        # EgressClient references (no drift). Fail-CLOSED: a proxy bind failure aborts the
+        # start (CONTRAST the metrics server's loud-and-continue above).
+        settings = Settings()  # type: ignore[no-untyped-call]  # BaseSettings __init__ is untyped
+        proxy = EgressForwardProxy(
+            allowlist=provider_egress_allowlist(settings),
+            bind_host=resolve_egress_proxy_bind(),
+            port=resolve_egress_proxy_port(),
+            # B4 replaces this stub with the field-allowlisted record_egress_connect.
+            audit=_egress_audit_stub,
+        )
+
+        async def _run_gateway() -> None:
+            try:
+                await GatewayProcess(
+                    shutdown_event=shutdown_event,
+                    dial_adapter_id=dial_adapter_id,
+                    # Resolved BEFORE the bind (above) so a manifest/config fault is a config
+                    # refusal, never swallowed by the bind ``except OSError`` as ``bind_failed``.
+                    adapter_ids=hosted_adapter_ids,
+                ).run()
+            finally:
+                # The proxy serves only as long as the gateway leg lives: when the gateway
+                # returns (clean stop) or raises (fail-closed), release the proxy's serve
+                # loop so the co-run TaskGroup unwinds promptly.
+                shutdown_event.set()
+
+        # Co-run under a TaskGroup so a proxy bind failure (mapped to
+        # IOPlaneUnavailableError) cancels the gateway leg and aborts the start. The group
+        # is unwrapped to the first real leaf so ``start_gateway``'s flat typed handlers
+        # below see a raw exception, not an ExceptionGroup.
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(_serve_egress_proxy_failclosed(proxy, shutdown_event))
+                tg.create_task(_run_gateway())
+        except BaseExceptionGroup as group:
+            _reraise_first_meaningful(group)
 
     try:
         asyncio.run(_main())
+    except IOPlaneUnavailableError as exc:
+        # Friendly refusal — the egress forward-proxy could not bind (Spec C G7-1b / #333).
+        # The gateway is the sole external egress plane, so this is fail-closed: refuse the
+        # start with a DISTINCT line + exit (never the client-socket ``bind_failed`` line),
+        # and the gateway crash-loops under ``restart: unless-stopped`` (intended posture).
+        log.warning("gateway.cli.egress_proxy_bind_failed", error=repr(exc))
+        typer.echo(t("gateway.start.egress_proxy_bind_failed"))
+        raise typer.Exit(code=_EXIT_EGRESS_PROXY_BIND_FAILED) from exc
     except DaemonUnavailableError as exc:
         # Friendly refusal — the core daemon socket was unreachable. Surface a
         # next-step message + a non-zero exit rather than a bare traceback.
