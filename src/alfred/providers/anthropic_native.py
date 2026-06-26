@@ -94,13 +94,22 @@ class AnthropicProvider:
         return self.CAPABILITIES
 
     @classmethod
-    def from_settings(cls, api_key: str, model: str) -> AnthropicProvider:
-        # max_retries=2 matches the SDK default but is stated explicitly: a
-        # transient failure on the fallback should retry once with backoff
-        # before surfacing to the orchestrator. Tiered routing in slice 2 will
-        # take over retry policy from the SDK.
+    def from_settings(
+        cls, api_key: str, model: str, *, http_client: httpx.AsyncClient | None = None
+    ) -> AnthropicProvider:
+        # http_client is the G7-1 egress seam (Spec C, #333): a proxied client when
+        # the gateway proxy is configured, None => direct (today's behaviour). The
+        # SDK builds its own client on None, so the default is byte-for-byte today.
+        #
+        # timeout + max_retries STAY on the SDK ctor (rider 4): the SDK applies
+        # timeout per-request and never inherits max_retries from the http_client,
+        # so anthropic's explicit max_retries=2 survives. max_retries=2 matches the
+        # SDK default but is stated explicitly: a transient failure on the fallback
+        # should retry once with backoff before surfacing to the orchestrator.
         return cls(
-            client=AsyncAnthropic(api_key=api_key, timeout=_HTTP_TIMEOUT, max_retries=2),
+            client=AsyncAnthropic(
+                api_key=api_key, timeout=_HTTP_TIMEOUT, max_retries=2, http_client=http_client
+            ),
             model=model,
         )
 

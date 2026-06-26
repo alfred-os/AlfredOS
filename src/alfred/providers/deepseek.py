@@ -108,9 +108,23 @@ class DeepSeekProvider:
         return self._capabilities_for_model(self._model)
 
     @classmethod
-    def from_settings(cls, api_key: str, base_url: str, model: str) -> DeepSeekProvider:
+    def from_settings(
+        cls,
+        api_key: str,
+        base_url: str,
+        model: str,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> DeepSeekProvider:
+        # http_client is the G7-1 egress seam (Spec C, #333); see
+        # AnthropicProvider.from_settings. None => the SDK builds its own client
+        # (byte-for-byte today's direct path). timeout stays on the SDK ctor
+        # (rider 4); max_retries is left at the SDK default (2), the same effective
+        # posture as Anthropic's explicit value.
         return cls(
-            client=AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=_HTTP_TIMEOUT),
+            client=AsyncOpenAI(
+                api_key=api_key, base_url=base_url, timeout=_HTTP_TIMEOUT, http_client=http_client
+            ),
             model=model,
         )
 
