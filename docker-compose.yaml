@@ -34,6 +34,8 @@ services:
       - "5432:5432"
     volumes:
       - alfred_pg_data:/var/lib/postgresql/data
+    networks:
+      - alfred_internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-alfred} -d ${POSTGRES_DB:-alfred}"]
       interval: 5s
@@ -67,6 +69,8 @@ services:
       retries: 10
     volumes:
       - alfred_redis_data:/data
+    networks:
+      - alfred_internal
 
   alfred-core:
     build:
@@ -159,6 +163,9 @@ services:
       # G6-0b (#288): the comms socket dir, shared with alfred-gateway so the
       # gateway can dial the comms-tui.sock the core binds.
       - alfred_run:/home/alfred/.run
+    networks:
+      - alfred_internal
+      - alfred_external   # G7-3 removes this line (the connectivity-free flip)
 
   # Spec B (#288) — the always-up resumable gateway, deployed as its own service.
   # Reuses the alfred-core image (one Dockerfile) and runs `alfred gateway start`. It is
@@ -205,12 +212,29 @@ services:
       ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_GATEWAY_HOSTED_ADAPTERS:-["alfred_discord"]}'
     volumes:
       - alfred_run:/home/alfred/.run
+    networks:
+      - alfred_internal
+      - alfred_external
     healthcheck:
       test: ["CMD", "alfred", "gateway", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+networks:
+  # Spec C / G7 (epic #333, ADR-0040): the connectivity-free-core split. G7-0
+  # lays down the network MEMBERSHIP only — core + datastores on alfred_internal,
+  # the gateway on both — behaviour-neutrally (both networks reach the internet
+  # for now, exactly like today's default bridge). The ISOLATION FLIP is a single
+  # atomic step at G7-3: add `internal: true` to alfred_internal AND remove
+  # alfred_external from alfred-core. It is deliberately NOT split across PRs —
+  # `internal: true` here would break the alfred-postgres host-published port on
+  # Docker Desktop (verified: an internal-only container is not port-forwarded on
+  # macOS), regressing dev/setup before the proxy that justifies it even exists.
+  # `internal: true` is the kernel enforcement-of-record; it lands with the flip.
+  alfred_internal: {}
+  alfred_external: {}
 
 volumes:
   alfred_pg_data:
