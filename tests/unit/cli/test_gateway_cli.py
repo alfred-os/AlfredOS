@@ -30,6 +30,26 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
 
 
+@pytest.fixture(autouse=True)
+def _patch_egress_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the co-run L7 egress proxy with a no-op (Spec C G7-1b / #333).
+
+    ``alfred gateway start`` now serves the egress forward-proxy alongside the process; a
+    real listener bind has no place in these pure-wiring CLI tests (the proxy's mount + its
+    fail-closed behaviour are covered by ``test_egress_proxy_mount.py``). The no-op
+    ``serve`` returns at once so the co-run TaskGroup unwinds on the gateway leg's exit.
+    """
+
+    class _NoopProxy:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def serve(self, shutdown_event: asyncio.Event) -> None:
+            del shutdown_event
+
+    monkeypatch.setattr("alfred.gateway.egress_proxy.EgressForwardProxy", _NoopProxy)
+
+
 # ---------------------------------------------------------------------------
 # Registration + help surface
 # ---------------------------------------------------------------------------

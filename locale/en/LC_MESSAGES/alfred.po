@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-26 13:09+0100\n"
+"POT-Creation-Date: 2026-06-26 19:15+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1254,18 +1254,18 @@ msgstr ""
 "--wait-ready needs an adapter to wait for, e.g. `alfred gateway adapters "
 "--wait-ready discord`."
 
-#: src/alfred/cli/gateway/_commands.py:109
+#: src/alfred/cli/gateway/_commands.py:117
 msgid "gateway.adapters.no_adapter_kind"
 msgstr ""
 "Comms adapter plugin '{plugin}' declares no [comms_mcp] adapter_kind in "
 "its manifest — the gateway cannot resolve its canonical adapter id. Fix "
 "the plugin manifest."
 
-#: src/alfred/cli/gateway/_commands.py:147
+#: src/alfred/cli/gateway/_commands.py:216
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:159
+#: src/alfred/cli/gateway/_commands.py:228
 msgid "gateway.start.config_failed"
 msgstr ""
 "The gateway could not resolve its hosted-adapter configuration — a comms "
@@ -1273,51 +1273,60 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS and the named plugin manifests, then re-run"
 " `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:204
+#: src/alfred/cli/gateway/_commands.py:308
+msgid "gateway.start.egress_proxy_bind_failed"
+msgstr ""
+"The gateway could not bind its egress forward-proxy — another gateway may"
+" already hold the egress port, or ALFRED_EGRESS_PROXY_PORT is "
+"misconfigured. The gateway is the sole external egress plane, so it "
+"refuses to start without it. Free the port (or fix the config), then re-"
+"run `alfred gateway start`."
+
+#: src/alfred/cli/gateway/_commands.py:314
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:211
+#: src/alfred/cli/gateway/_commands.py:321
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:220
+#: src/alfred/cli/gateway/_commands.py:330
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:222
+#: src/alfred/cli/gateway/_commands.py:332
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:243
-#: src/alfred/cli/gateway/_commands.py:257
+#: src/alfred/cli/gateway/_commands.py:353
+#: src/alfred/cli/gateway/_commands.py:367
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:261
+#: src/alfred/cli/gateway/_commands.py:371
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:333
-#: src/alfred/cli/gateway/_commands.py:339
+#: src/alfred/cli/gateway/_commands.py:443
+#: src/alfred/cli/gateway/_commands.py:449
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:343
+#: src/alfred/cli/gateway/_commands.py:453
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "

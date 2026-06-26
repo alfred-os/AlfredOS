@@ -9,7 +9,9 @@ from alfred.i18n import t
 G7_EGRESS_KEYS: tuple[str, ...] = (
     "egress.io_plane_unavailable",
     "egress.denied",
-    # B2 adds gateway.start.egress_proxy_bind_failed; B4 adds the audit-reason presentations.
+    # B2: the fail-closed egress-proxy bind refusal (alfred gateway start).
+    "gateway.start.egress_proxy_bind_failed",
+    # B4 adds the audit-reason presentations.
 )
 
 
