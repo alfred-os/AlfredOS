@@ -366,15 +366,46 @@ async def test_connection_done_surfaces_an_escaped_exception_loud() -> None:
     proxy = EgressForwardProxy(
         allowlist=_ALLOWLIST, bind_host="127.0.0.1", port=0, audit=_raising_audit
     )
+    writer = _CaptureWriter()
     with structlog.testing.capture_logs() as logs:
         proxy._handle_client(  # type: ignore[attr-defined]
-            _reader_with(b"CONNECT evil.example:443 HTTP/1.1\r\n\r\n"), _CaptureWriter()
+            _reader_with(b"CONNECT evil.example:443 HTTP/1.1\r\n\r\n"), writer
         )
         for _ in range(50):
             if not proxy._conns:  # type: ignore[attr-defined]
                 break
             await asyncio.sleep(0.01)
     assert any(e.get("event") == "gateway.egress.connection_failed" for e in logs), logs
+    assert writer.closed  # the deny path closes the client socket even when the audit raises
+
+
+@pytest.mark.asyncio
+async def test_audit_failure_on_allowed_path_still_reaps_both_writers() -> None:
+    # An audit-sink exception on the ALLOWED path (after the 200) must still tear down BOTH
+    # the client and upstream writers — never a leaked tunnel socket.
+    def _raising_audit(event: str, fields: dict[str, object]) -> None:
+        raise ValueError("audit sink rejected the allowed row")
+
+    up_writer = _CaptureWriter()
+    client_writer = _CaptureWriter()
+
+    async def _open(_ip: str, _port: int) -> tuple[asyncio.StreamReader, _CaptureWriter]:
+        return (_reader_with(b"UP"), up_writer)
+
+    proxy = EgressForwardProxy(
+        allowlist=_ALLOWLIST,
+        bind_host="127.0.0.1",
+        port=0,
+        audit=_raising_audit,
+        resolve=lambda _h: "1.1.1.1",
+        open_upstream=_open,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ValueError, match="allowed row"):
+        await proxy._serve_connection(  # type: ignore[attr-defined]
+            _reader_with(b"CONNECT api.anthropic.com:443 HTTP/1.1\r\n\r\n"), client_writer
+        )
+    assert client_writer.closed
+    assert up_writer.closed
 
 
 @pytest.mark.asyncio
