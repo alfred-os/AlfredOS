@@ -488,7 +488,9 @@ def test_egress_proxy_port_never_host_published(compose: dict[str, Any]) -> None
 def test_core_routes_egress_through_gateway_proxy(compose: dict[str, Any]) -> None:
     """G7-1b: alfred-core routes provider egress through the gateway L7 CONNECT proxy."""
     env = compose["services"]["alfred-core"].get("environment", {}) or {}
-    assert "alfred-gateway" in str(env.get("ALFRED_EGRESS_PROXY_URL", "")), (
+    # Assert the exact gateway authority (host AND port), not just the substring — a drift to
+    # e.g. ``alfred-gateway:9999`` would dial a port the proxy does not bind.
+    assert "alfred-gateway:8889" in str(env.get("ALFRED_EGRESS_PROXY_URL", "")), (
         "alfred-core must set ALFRED_EGRESS_PROXY_URL pointing at the gateway proxy "
         "(http://alfred-gateway:8889) so the connectivity-free core dials it for egress."
     )
@@ -496,15 +498,23 @@ def test_core_routes_egress_through_gateway_proxy(compose: dict[str, Any]) -> No
 
 def test_core_and_gateway_share_the_deepseek_base_url(compose: dict[str, Any]) -> None:
     """G7-1b: BOTH the core (which dials the provider) and the gateway (which allowlists it)
-    must carry ALFRED_DEEPSEEK_BASE_URL, so an operator override reaches both — else the core
-    would dial a host the gateway's allowlist denies (a silent egress mismatch)."""
+    must carry the SAME ALFRED_DEEPSEEK_BASE_URL value, so an operator override reaches both —
+    else the core would dial a host the gateway's allowlist denies (a silent egress mismatch)."""
     services = compose.get("services", {})
+    values = {}
     for name in ("alfred-core", "alfred-gateway"):
         env = services.get(name, {}).get("environment", {}) or {}
         assert "ALFRED_DEEPSEEK_BASE_URL" in env, (
             f"{name} must set ALFRED_DEEPSEEK_BASE_URL so the core's dialled host and the "
             "gateway's allowlist stay in lock-step under an operator override."
         )
+        values[name] = str(env["ALFRED_DEEPSEEK_BASE_URL"])
+    # Same default chain on both, not just present-on-both — divergent defaults would still
+    # split the dialled host from the allowlisted one.
+    assert values["alfred-core"] == values["alfred-gateway"], (
+        f"alfred-core and alfred-gateway must share the SAME ALFRED_DEEPSEEK_BASE_URL; "
+        f"got core={values['alfred-core']!r} gateway={values['alfred-gateway']!r}."
+    )
 
 
 def test_gateway_derives_egress_allowlist_from_same_provider_config(

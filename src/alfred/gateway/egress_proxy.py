@@ -293,13 +293,16 @@ class EgressForwardProxy:
         client_writer: asyncio.StreamWriter,
     ) -> None:
         up_reader, up_writer = await self._open_upstream(resolved_ip, port)
-        client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        await client_writer.drain()
-        GATEWAY_EGRESS_CONNECT.labels(outcome="allowed").inc()
-        # Field-allowlisted audit ({destination} only — the resolved IP is gateway-internal
-        # and deliberately NOT logged, keeping the row to the CONNECT authority).
-        self._audit(EGRESS_CONNECT_ALLOWED_EVENT, {"destination": f"{host}:{port}"})
+        # Everything after the upstream is open runs inside the try, so BOTH writers are
+        # reaped in the finally on EVERY exit — a 200-write error, an audit-sink exception
+        # (the fail-loud payload-blindness guard), or a splice fault — never a leaked socket.
         try:
+            client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            await client_writer.drain()
+            GATEWAY_EGRESS_CONNECT.labels(outcome="allowed").inc()
+            # Field-allowlisted audit ({destination} only — the resolved IP is gateway-internal
+            # and deliberately NOT logged, keeping the row to the CONNECT authority).
+            self._audit(EGRESS_CONNECT_ALLOWED_EVENT, {"destination": f"{host}:{port}"})
             await asyncio.gather(
                 self._pipe(client_reader, up_writer),
                 self._pipe(up_reader, client_writer),
@@ -337,15 +340,19 @@ class EgressForwardProxy:
         destination: str,
     ) -> None:
         GATEWAY_EGRESS_CONNECT.labels(outcome="denied").inc()
-        # Field-allowlisted audit ({reason, destination} only — the audit sink rejects any
-        # other field, so the row is payload-blind by construction).
-        self._audit(
-            EGRESS_CONNECT_DENIED_EVENT, {"reason": reason.value, "destination": destination}
-        )
-        with contextlib.suppress(OSError):
-            writer.write(f"HTTP/1.1 {status} {reason.value}\r\n\r\n".encode("latin-1"))
-            await writer.drain()
-        self._close(writer)
+        # The writer is reaped in the finally even if the audit sink raises (the fail-loud
+        # payload-blindness guard) — a refusal must never leak the client socket.
+        try:
+            # Field-allowlisted audit ({reason, destination} only — the audit sink rejects any
+            # other field, so the row is payload-blind by construction).
+            self._audit(
+                EGRESS_CONNECT_DENIED_EVENT, {"reason": reason.value, "destination": destination}
+            )
+            with contextlib.suppress(OSError):
+                writer.write(f"HTTP/1.1 {status} {reason.value}\r\n\r\n".encode("latin-1"))
+                await writer.drain()
+        finally:
+            self._close(writer)
 
     @staticmethod
     def _close(writer: asyncio.StreamWriter) -> None:

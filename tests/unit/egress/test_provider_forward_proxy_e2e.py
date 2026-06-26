@@ -60,6 +60,24 @@ async def _free_port() -> int:
     return port
 
 
+async def _await_proxy_ready(port: int, serve_task: asyncio.Task[None]) -> None:
+    """Wait until the proxy listener accepts a TCP connection — a readiness probe instead of a
+    fixed sleep, so a busy runner cannot race the bind. A bind failure surfaces via the serve
+    task rather than spinning. The benign probe connection is reaped by the proxy as a
+    malformed CONNECT, harmless to the row assertions."""
+    for _ in range(500):
+        if serve_task.done():
+            await serve_task  # re-raise a bind error instead of spinning forever
+        try:
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.005)
+            continue
+        writer.close()
+        return
+    raise AssertionError("egress proxy did not become ready")
+
+
 @asynccontextmanager
 async def _serving_proxy(
     *, upstream_handler: _UpstreamHandler | None = None
@@ -106,7 +124,7 @@ async def _serving_proxy(
     )
     shutdown = asyncio.Event()
     serve_task = asyncio.ensure_future(proxy.serve(shutdown))
-    await asyncio.sleep(0.05)  # let serve() bind
+    await _await_proxy_ready(port, serve_task)
     try:
         yield port, rows
     finally:
