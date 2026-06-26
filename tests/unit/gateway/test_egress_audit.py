@@ -14,12 +14,24 @@ import structlog
 
 from alfred.gateway.egress_audit import (
     EGRESS_CONNECT_ALLOWED_EVENT,
+    EGRESS_CONNECT_ALLOWED_FIELDS,
     EGRESS_CONNECT_AUDIT_FIELDS,
     EGRESS_CONNECT_DENIED_EVENT,
+    EGRESS_CONNECT_DENIED_FIELDS,
     EgressDenyReason,
     reason_i18n_key,
     record_egress_connect,
 )
+
+
+def test_per_event_field_sets_are_exact() -> None:
+    """The exact per-event schema the sink enforces: an allowed row is ONLY the destination,
+    a denied row is the destination + the closed-vocab reason. The union is the ceiling."""
+    assert frozenset({"destination"}) == EGRESS_CONNECT_ALLOWED_FIELDS
+    assert frozenset({"destination", "reason"}) == EGRESS_CONNECT_DENIED_FIELDS
+    assert (
+        EGRESS_CONNECT_AUDIT_FIELDS == EGRESS_CONNECT_ALLOWED_FIELDS | EGRESS_CONNECT_DENIED_FIELDS
+    )
 
 
 def test_deny_reason_vocabulary_is_closed() -> None:
