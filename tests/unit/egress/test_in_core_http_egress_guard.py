@@ -48,9 +48,13 @@ _IMPORT_ALLOWLIST: dict[str, str] = {
 }
 
 # Files permitted to import OR construct an httpx client (httpx.AsyncClient/Client).
-# Empty today — no in-core code opens an httpx connection directly. G7-1 adds the
-# sanctioned EgressClient module here (path -> reason).
-_CONSTRUCT_ALLOWLIST: dict[str, str] = {}
+# G7-1 adds the sanctioned EgressClient module here (path -> reason): it is the ONE
+# in-core constructor of the proxied httpx.AsyncClient routed at the gateway proxy.
+_CONSTRUCT_ALLOWLIST: dict[str, str] = {
+    "egress/client.py": (
+        "the sanctioned in-core egress seam — builds the proxied httpx.AsyncClient (Spec C G7-1)"
+    ),
+}
 
 # A broken _SRC_ROOT (a future dir-depth refactor or a src/ rename) would make rglob
 # return [] and every guard pass vacuously. The real tree has ~240 files; floor it well

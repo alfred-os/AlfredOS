@@ -91,6 +91,12 @@ class Settings(BaseSettings):
     primary_provider: str = "deepseek"
     fallback_provider: str = "anthropic"
 
+    # Spec C / G7-1 (#333): when set, the core builds provider SDK clients with an
+    # httpx proxy pointed at the gateway L7 CONNECT proxy (e.g. "http://alfred-gateway:8889").
+    # UNSET => direct egress (today's behaviour); the direct fallback is deleted
+    # atomically at G7-3.
+    egress_proxy_url: str | None = None
+
     # Database
     database_url: PostgresDsn = Field(
         default=PostgresDsn("postgresql+asyncpg://alfred:alfred@localhost:5432/alfred")
@@ -326,6 +332,21 @@ class Settings(BaseSettings):
                 raise ValueError(f"invalid comms adapter id {adapter_id!r}")
             if not manifest_path.is_file():
                 raise ValueError(f"no manifest for comms adapter id {adapter_id!r}")
+        return value
+
+    @field_validator("egress_proxy_url", mode="before")
+    @classmethod
+    def _normalize_egress_proxy_url(cls, value: object) -> object:
+        """Treat a blank/whitespace ``ALFRED_EGRESS_PROXY_URL`` as unset (None).
+
+        Without this, ``ALFRED_EGRESS_PROXY_URL=`` (a common .env typo) would
+        deserialize to ``""`` — a non-None string that forces the proxied path with
+        an empty proxy URL, silently breaking egress instead of preserving the
+        documented ``unset => direct`` fallback (Spec C G7-1).
+        """
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
         return value
 
     @field_validator("deepseek_api_key")
