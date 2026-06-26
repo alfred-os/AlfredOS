@@ -119,6 +119,29 @@ def _real_policy_flags_with_test_binds(plugin_dir: Path) -> list[str]:
     return pruned + extra
 
 
+def _skip_if_netns_unconfigurable(result: subprocess.CompletedProcess[str]) -> None:
+    """Skip LOUDLY if bwrap could not configure the unshared net namespace.
+
+    Spec C G7-1 (#333) added ``--unshare-net`` to the real quarantined-LLM policy.
+    bwrap brings up loopback in the new net namespace via netlink (RTM_NEWADDR);
+    some unprivileged userns (e.g. GitHub-Actions runners without CAP_NET_ADMIN)
+    forbid that, so bwrap exits BEFORE the child runs and the containment probes
+    are not exercisable. Skip loudly rather than fail or silent-pass — mirroring
+    ``test_launcher_policy_resolver.py::test_plugin_cannot_open_outbound_network``.
+
+    The signature (rc != 0 AND ``RTM_NEWADDR`` in stderr) is specific to netns
+    SETUP failing before the child runs; a real containment regression runs the
+    child and surfaces its own sentinel (``PASSWD_READ_OK`` / ``KEY_READ`` etc.)
+    with no RTM_NEWADDR, so this guard cannot mask one.
+    """
+    if result.returncode != 0 and "RTM_NEWADDR" in result.stderr:
+        pytest.skip(
+            "runner userns cannot configure the unshared net namespace's loopback "
+            f"(bwrap: {result.stderr.strip()}); containment probes not exercisable "
+            "here (Spec C G7-1 --unshare-net)"
+        )
+
+
 def _run_under_real_policy(stub: Path, plugin_dir: Path) -> subprocess.CompletedProcess[str]:
     """Exec ``sys.executable stub`` under the REAL quarantined-LLM Linux policy.
 
@@ -129,7 +152,7 @@ def _run_under_real_policy(stub: Path, plugin_dir: Path) -> subprocess.Completed
     flags = _real_policy_flags_with_test_binds(plugin_dir)
     bwrap = shutil.which("bwrap")
     assert bwrap is not None  # gated by _HAS_BWRAP on every caller
-    return subprocess.run(  # noqa: S603 — resolved bwrap path, repo-owned probe
+    result = subprocess.run(  # noqa: S603 — resolved bwrap path, repo-owned probe
         [bwrap, *flags, "--", sys.executable, str(stub)],
         capture_output=True,
         text=True,
@@ -137,6 +160,8 @@ def _run_under_real_policy(stub: Path, plugin_dir: Path) -> subprocess.Completed
         check=False,
         env=_bwrap_child_env(),
     )
+    _skip_if_netns_unconfigurable(result)
+    return result
 
 
 def _bwrap_child_env() -> dict[str, str]:
@@ -502,23 +527,24 @@ def test_sbx_2026_011_policy_ref_symlink_follow_contained(tmp_path: Path) -> Non
     assert exc_info.value.reason == "policy_ref_escapes_root"
 
 
-def test_sbx_2026_005_outbound_network_documented_unrestricted() -> None:
-    """sbx-2026-005 is the HONEST egress gap, not a defended vector (#230).
+def test_sbx_2026_005_outbound_network_egress_contained() -> None:
+    """sbx-2026-005 is now an ENFORCED-containment vector (Spec C G7-1, #333).
 
-    The payload is ``out_of_scope=True`` with a #230 rationale: the real Linux
-    policy does NOT --unshare-net (the quarantined LLM needs its own provider
-    HTTPS egress). We assert the corpus records that limitation rather than a
-    containment that does not exist — and that the SHIPPED policy genuinely
-    omits ``net`` from its unshare set, so the out_of_scope claim stays honest.
+    The deterministic-echo child needs no egress, so the real Linux policy
+    --unshare-net's it into an empty network namespace: an outbound connection is
+    refused at the kernel. The payload flipped from ``out_of_scope=True`` to a
+    defended vector; we assert the SHIPPED policy genuinely unshares ``net`` so the
+    containment claim stays honest. The 2c real-LLM child (still #230) reaches its
+    provider only through the gateway proxy, never by re-opening this namespace.
     """
     payload = _load("sbx-2026-005")
-    assert payload.out_of_scope is True
-    assert payload.out_of_scope_rationale is not None
-    assert "#230" in payload.out_of_scope_rationale
+    assert payload.out_of_scope is False
+    assert payload.expected_outcome == "refused"
     policy = read_policy_toml(_QUARANTINED_LINUX_POLICY.read_text())
-    assert "net" not in policy.unshare, (
-        "policy now unshares net — sbx-2026-005 must flip from out_of_scope to a "
-        "defended containment payload (#230 landed)"
+    assert "net" in policy.unshare, (
+        "policy no longer unshares net — sbx-2026-005 asserts the echo child's "
+        "egress is kernel-closed (--unshare-net); a dropped 'net' silently "
+        "re-opens the child's egress (Spec C G7-1)"
     )
 
 
@@ -611,6 +637,7 @@ def test_sbx_2026_012_quarantine_child_does_not_leak_fd3_key(tmp_path: Path) -> 
             os.close(saved)
         with contextlib.suppress(OSError):
             os.close(r_fd)
+    _skip_if_netns_unconfigurable(result)
     assert result.returncode == 0, result.stderr
     assert "KEY_READ True" in result.stdout, "child could not read the fd-3 key"
     # The marker key never appears on a host-visible surface.

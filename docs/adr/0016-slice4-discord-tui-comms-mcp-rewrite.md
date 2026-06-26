@@ -46,16 +46,22 @@ and MIRROR the quarantined-LLM policies' fs/namespace containment (ro-binds
 deliberate addition — a `/etc/ssl/certs` ro-bind the quarantined LLM does not
 need, for verifying the Discord TLS chain.
 
-**Egress is NOT yet kernel-enforced — deferred to #230.** Like the
-quarantined-LLM policy, the Discord policy does NOT `unshare net`: the plugin
-needs outbound network for the Discord WSS connection, and the `SandboxPolicy`
-schema cannot yet express a Discord-only egress allowlist. Filesystem and
-process/namespace containment ARE kernel-enforced; egress is the documented,
-accepted gap for the mid-flight slice state. The manifest's `[network] allowlist`
-records the intended Discord-only cap (`discord.com`, `gateway.discord.gg`); #230
-lands the `network.outbound_allowlist` schema field + the bwrap `--unshare-net` +
-a filtered forwarder/egress-proxy that enforces it at the kernel boundary. This
-mirrors ADR-0015's identical egress-deferral decision for the quarantined LLM.
+**Egress is NOT yet kernel-enforced — deferred to #230.** The Discord policy does
+NOT `unshare net`: the plugin needs outbound network for the Discord WSS
+connection, and the `SandboxPolicy` schema cannot yet express a Discord-only
+egress allowlist. Filesystem and process/namespace containment ARE kernel-enforced;
+egress is the documented, accepted gap for the mid-flight slice state. The
+manifest's `[network] allowlist` records the intended Discord-only cap
+(`discord.com`, `gateway.discord.gg`); #230 lands the `network.outbound_allowlist`
+schema field + the bwrap `--unshare-net` + a filtered forwarder/egress-proxy that
+enforces it at the kernel boundary.
+
+> **Amended 2026-06-26, Spec C G7-1 (#333).** The quarantined-LLM policy now
+> `--unshare-net`s its deterministic-echo child (which needs no egress), so the
+> Discord adapter no longer mirrors it on the net-namespace axis — the Discord
+> egress deferral stands ALONE, tracked by #230 / G7-4. The quarantined-LLM 2c
+> real-LLM egress (also #230) and the Discord egress both route through the gateway
+> L7 CONNECT proxy when they land, not by re-opening their own net namespaces.
 
 ## Consequences
 
