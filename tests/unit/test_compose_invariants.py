@@ -443,3 +443,84 @@ def test_core_not_on_external_deferred_to_g7_3(compose: dict[str, Any]) -> None:
     assert "alfred_external" not in nets, (
         f"alfred-core must NOT join alfred_external (connectivity-free core); got {sorted(nets)}."
     )
+
+
+# ---------------------------------------------------------------------------
+# G7-1b (Spec C §4.1): the egress forward-proxy flip — the core routes provider
+# egress through the gateway L7 CONNECT proxy, which never host-publishes its port.
+# ---------------------------------------------------------------------------
+
+_EGRESS_PROXY_PORT = 8889
+
+
+def _container_port(mapping: Any) -> str:
+    """The CONTAINER-side port of a Compose ``ports`` entry, in EITHER mapping form.
+
+    Short form is a string (``"8889:8889"`` / ``"127.0.0.1:8889:8889/tcp"``) — the part after
+    the last ``:``, stripped of any ``/proto``. Long form is a dict with a ``target`` key — the
+    container port directly. Handling both closes the bypass where a long-form mapping evades a
+    string-only split (CR).
+    """
+    if isinstance(mapping, dict):
+        return str(mapping.get("target", ""))
+    return str(mapping).split(":")[-1].split("/")[0]
+
+
+def test_egress_proxy_port_never_host_published(compose: dict[str, Any]) -> None:
+    """G7-1b rider 1: NO service host-publishes the egress proxy container port.
+
+    Defense-in-depth across ALL services (the existing
+    ``test_alfred_gateway_publishes_no_host_port`` is the primary gateway guard): inspect the
+    CONTAINER side of every ``ports`` mapping in BOTH the short (string) and long (dict) Compose
+    forms, so a ``"8889:8889"`` OR a ``{target: 8889, published: 8889}`` on any service fails
+    loud. The egress proxy must stay compose-internal (the destination allowlist is the security
+    control during the pre-internal:true window, closed structurally at G7-3).
+    """
+    for name, svc in (compose.get("services", {}) or {}).items():
+        for mapping in svc.get("ports", []) or []:
+            assert _container_port(mapping) != str(_EGRESS_PROXY_PORT), (
+                f"{name} host-publishes the egress proxy container port "
+                f"{_EGRESS_PROXY_PORT}; the egress proxy must stay compose-internal "
+                "(Spec C G7-1b rider 1)."
+            )
+
+
+def test_core_routes_egress_through_gateway_proxy(compose: dict[str, Any]) -> None:
+    """G7-1b: alfred-core routes provider egress through the gateway L7 CONNECT proxy."""
+    env = compose["services"]["alfred-core"].get("environment", {}) or {}
+    assert "alfred-gateway" in str(env.get("ALFRED_EGRESS_PROXY_URL", "")), (
+        "alfred-core must set ALFRED_EGRESS_PROXY_URL pointing at the gateway proxy "
+        "(http://alfred-gateway:8889) so the connectivity-free core dials it for egress."
+    )
+
+
+def test_core_and_gateway_share_the_deepseek_base_url(compose: dict[str, Any]) -> None:
+    """G7-1b: BOTH the core (which dials the provider) and the gateway (which allowlists it)
+    must carry ALFRED_DEEPSEEK_BASE_URL, so an operator override reaches both — else the core
+    would dial a host the gateway's allowlist denies (a silent egress mismatch)."""
+    services = compose.get("services", {})
+    for name in ("alfred-core", "alfred-gateway"):
+        env = services.get(name, {}).get("environment", {}) or {}
+        assert "ALFRED_DEEPSEEK_BASE_URL" in env, (
+            f"{name} must set ALFRED_DEEPSEEK_BASE_URL so the core's dialled host and the "
+            "gateway's allowlist stay in lock-step under an operator override."
+        )
+
+
+def test_gateway_derives_egress_allowlist_from_same_provider_config(
+    compose: dict[str, Any],
+) -> None:
+    """G7-1b: the gateway derives its destination allowlist from the SAME provider config the
+    core uses, so an operator base_url override reaches BOTH (else a silent allowlist
+    mismatch). The gateway therefore carries the proxy PORT + the DeepSeek base URL — neither
+    is a secret, so this does not breach ``test_no_secret_env_or_mount_on_gateway``.
+    """
+    env = compose["services"]["alfred-gateway"].get("environment", {}) or {}
+    assert "ALFRED_EGRESS_PROXY_PORT" in env, (
+        "alfred-gateway must set ALFRED_EGRESS_PROXY_PORT so the proxy binds the port the "
+        "core dials."
+    )
+    assert "ALFRED_DEEPSEEK_BASE_URL" in env, (
+        "alfred-gateway must set ALFRED_DEEPSEEK_BASE_URL so it derives the SAME egress "
+        "allowlist as the core (no silent mismatch on a base_url override)."
+    )
