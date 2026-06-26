@@ -1,0 +1,290 @@
+"""The gateway L7 CONNECT forward-proxy (Spec C §4.1, epic #333).
+
+This is the gateway-side egress ENFORCEMENT plane. The connectivity-free core dials
+this proxy (via the in-core ``EgressClient``'s proxied ``httpx.AsyncClient``); the
+proxy enforces the destination allowlist and tunnels the opaque TLS bytes through to
+the resolved upstream. It is **payload-blind** — a CONNECT tunnel is an opaque byte
+splice, so the prompt/response never leave the tunnel and native SDK streaming is
+preserved.
+
+Enforcement per CONNECT (each connection is its own task):
+
+* the request-line **authority is the SOLE allowlist source** — the ``Host:`` header
+  is never trusted (sec-004);
+* a **literal-IP** target is refused (the allowlist is hostname-based; an IP target
+  is an attempt to dodge gateway-side DNS) (sec-003 partner);
+* a destination not in the live-config allowlist is refused (default-deny);
+* DNS is resolved **gateway-side**, and a resolved IP that is **not globally
+  routable** is refused — closing the DNS-rebinding TOCTOU (sec-003);
+* the request-line read is **bounded** (a small byte cap + a per-handshake timeout),
+  so a slow-loris / oversized handshake cannot pin a task;
+* every CONNECT — allowed or denied — is audited (gateway-local structlog tier).
+
+A bind failure is **fail-closed**: the ``OSError`` propagates (B2 maps it to
+``IOPlaneUnavailableError`` and the gateway crash-loops under
+``restart: unless-stopped`` — the proxy IS the gateway's reason to exist).
+
+NOTE: ``import socket`` for the default resolver is permitted in-core (the
+HTTP-egress import-guard forbids only provider SDKs / alt-HTTP libs / httpx client
+construction; this module constructs neither — it splices raw asyncio streams).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import socket
+from collections.abc import Awaitable, Callable
+from typing import Final
+
+import structlog
+from prometheus_client import Counter
+
+from alfred.egress.allowlist import EgressDestination, is_globally_routable, is_literal_ip
+
+_log = structlog.get_logger(__name__)
+
+_DEFAULT_EGRESS_PROXY_PORT: Final[int] = 8889
+_EGRESS_PROXY_PORT_ENV: Final[str] = "ALFRED_EGRESS_PROXY_PORT"
+_EGRESS_PROXY_BIND_ENV: Final[str] = "ALFRED_EGRESS_PROXY_BIND"
+# Never host-published (a compose-invariant test asserts it); the destination
+# allowlist is the control during the pre-internal:true window (closed at G7-3).
+_DEFAULT_EGRESS_PROXY_BIND: Final[str] = "0.0.0.0"  # noqa: S104
+
+# Bounded request-line read: a CONNECT handshake is tiny; cap the buffer + the read
+# so a slow-loris / oversized line is refused rather than pinning a task.
+_REQUEST_LINE_CAP: Final[int] = 8192
+_HANDSHAKE_TIMEOUT_S: Final[float] = 10.0
+_SPLICE_CHUNK: Final[int] = 65536
+
+# Provisional metric (G7-5 owns the canonical egress metric/alert set). Default
+# registry so the existing gateway /metrics exposition serves it automatically.
+GATEWAY_EGRESS_CONNECT: Final[Counter] = Counter(
+    "gateway_egress_connect_total",
+    "Gateway L7 CONNECT forward-proxy outcomes (provisional; G7-5 finalises).",
+    ["outcome"],
+)
+
+_AuditSink = Callable[[str, dict[str, object]], None]
+_Resolver = Callable[[str], str]
+_UpstreamOpener = Callable[[str, int], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
+
+
+def resolve_egress_proxy_port() -> int:
+    """Resolve the proxy port from ``ALFRED_EGRESS_PROXY_PORT`` (default 8889).
+
+    Raises ``ValueError`` loudly on a non-integer / out-of-range value (operator
+    misconfig — never silently fall back). Mirrors ``resolve_metrics_port``.
+    """
+    raw = os.environ.get(_EGRESS_PROXY_PORT_ENV)
+    if raw is None or raw == "":
+        return _DEFAULT_EGRESS_PROXY_PORT
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{_EGRESS_PROXY_PORT_ENV} must be an integer, got {raw!r}") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{_EGRESS_PROXY_PORT_ENV} must be in 1..65535, got {port}")
+    return port
+
+
+def resolve_egress_proxy_bind() -> str:
+    """Resolve the proxy bind interface from ``ALFRED_EGRESS_PROXY_BIND`` (default
+    ``0.0.0.0``). The proxy is never host-published; the allowlist is the control."""
+    raw = os.environ.get(_EGRESS_PROXY_BIND_ENV)
+    if raw is None or raw == "":
+        return _DEFAULT_EGRESS_PROXY_BIND
+    return raw
+
+
+def _default_resolve(host: str) -> str:
+    """Resolve ``host`` to a single IPv4 literal (gateway-side DNS)."""
+    return socket.gethostbyname(host)
+
+
+async def _default_open_upstream(
+    ip: str, port: int
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    return await asyncio.open_connection(ip, port)
+
+
+class EgressForwardProxy:
+    """A TLS-passthrough L7 CONNECT forward-proxy with destination enforcement."""
+
+    def __init__(
+        self,
+        *,
+        allowlist: frozenset[EgressDestination],
+        bind_host: str,
+        port: int,
+        audit: _AuditSink,
+        resolve: _Resolver = _default_resolve,
+        open_upstream: _UpstreamOpener = _default_open_upstream,
+    ) -> None:
+        self._allowlist = allowlist
+        self._bind_host = bind_host
+        self._port = port
+        self._audit = audit
+        self._resolve = resolve
+        self._open_upstream = open_upstream
+        self._conns: set[asyncio.Task[None]] = set()
+
+    async def serve(self, shutdown_event: asyncio.Event) -> None:
+        """Bind + serve until ``shutdown_event``, then close the listener and reap.
+
+        Fail-closed: an ``OSError`` from ``start_server`` (e.g. EADDRINUSE) propagates
+        — B2 maps it to ``IOPlaneUnavailableError``.
+        """
+        server = await asyncio.start_server(
+            self._handle_client, self._bind_host, self._port, limit=_REQUEST_LINE_CAP
+        )
+        _log.info("gateway.egress.serving", bind=self._bind_host, port=self._port)
+        try:
+            async with server:
+                await shutdown_event.wait()
+        finally:
+            await self._drain_connections()
+
+    async def _drain_connections(self) -> None:
+        """Cancel + await every in-flight connection task on shutdown.
+
+        Each task is awaited INDIVIDUALLY (not via ``gather(return_exceptions=True)``,
+        which does not cleanly capture an externally-cancelled child's
+        ``CancelledError`` and can hang) so shutdown is deterministic and bounded.
+        """
+        for task in list(self._conns):
+            task.cancel()
+        for task in list(self._conns):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.ensure_future(self._serve_connection(reader, writer))
+        self._conns.add(task)
+        task.add_done_callback(self._conns.discard)
+
+    async def _serve_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            destination = await self._read_connect_target(writer, reader)
+            if destination is None:
+                return
+            host, port = destination
+            if not await self._authorize(host, port, writer):
+                return
+            resolved_ip = await asyncio.get_running_loop().run_in_executor(
+                None, self._resolve, host
+            )
+            if not is_globally_routable(resolved_ip):
+                await self._deny(writer, 403, "resolved_ip_not_global", f"{host}:{port}")
+                return
+            await self._tunnel(host, port, resolved_ip, reader, writer)
+        except asyncio.CancelledError:
+            raise
+        except OSError as exc:  # upstream open / splice I/O error — loud, bounded
+            _log.warning("gateway.egress.connection_error", error=repr(exc))
+            self._close(writer)
+
+    async def _read_connect_target(
+        self, writer: asyncio.StreamWriter, reader: asyncio.StreamReader
+    ) -> EgressDestination | None:
+        """Read + parse the bounded CONNECT request line. None => already denied."""
+        try:
+            raw = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), timeout=_HANDSHAKE_TIMEOUT_S
+            )
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+            await self._deny(writer, 400, "malformed_connect", "<unread>")
+            return None
+        request_line = raw.split(b"\r\n", 1)[0].decode("latin-1")
+        parts = request_line.split(" ")
+        # The request-line authority is the SOLE allowlist source — the Host: header
+        # (anywhere in ``raw``) is never parsed (sec-004).
+        if len(parts) != 3 or parts[0] != "CONNECT":
+            await self._deny(writer, 400, "malformed_connect", request_line[:120])
+            return None
+        host, sep, port_str = parts[1].rpartition(":")
+        if not sep or not host or not port_str.isdigit():
+            await self._deny(writer, 400, "malformed_connect", parts[1][:120])
+            return None
+        return (host, int(port_str))
+
+    async def _authorize(self, host: str, port: int, writer: asyncio.StreamWriter) -> bool:
+        if is_literal_ip(host):
+            await self._deny(writer, 403, "literal_ip_target", f"{host}:{port}")
+            return False
+        if (host, port) not in self._allowlist:
+            await self._deny(writer, 403, "destination_not_allowlisted", f"{host}:{port}")
+            return False
+        return True
+
+    async def _tunnel(
+        self,
+        host: str,
+        port: int,
+        resolved_ip: str,
+        client_reader: asyncio.StreamReader,
+        client_writer: asyncio.StreamWriter,
+    ) -> None:
+        up_reader, up_writer = await self._open_upstream(resolved_ip, port)
+        client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        await client_writer.drain()
+        GATEWAY_EGRESS_CONNECT.labels(outcome="allowed").inc()
+        self._audit(
+            "gateway.egress.connect_allowed",
+            {"destination": f"{host}:{port}", "resolved_ip": resolved_ip},
+        )
+        try:
+            await asyncio.gather(
+                self._pipe(client_reader, up_writer),
+                self._pipe(up_reader, client_writer),
+            )
+        finally:
+            self._close(up_writer)
+            self._close(client_writer)
+
+    @staticmethod
+    async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
+        """Splice src→dst incrementally (NEVER buffer-until-EOF, so streaming survives).
+
+        A mid-splice ``OSError`` (peer reset) is NOT swallowed here — it propagates to
+        the ``_tunnel`` gather → ``_serve_connection``'s bounded OSError handler, which
+        tears the whole tunnel down. On normal EOF we half-close (``write_eof``) so the
+        peer observes the close; ``suppress`` covers a transport that cannot half-close.
+        """
+        try:
+            while True:
+                chunk = await src.read(_SPLICE_CHUNK)
+                if not chunk:
+                    break
+                dst.write(chunk)
+                await dst.drain()
+                await asyncio.sleep(0)  # yield so the reverse direction interleaves
+        finally:
+            with contextlib.suppress(OSError):
+                dst.write_eof()
+
+    async def _deny(
+        self, writer: asyncio.StreamWriter, status: int, reason: str, destination: str
+    ) -> None:
+        GATEWAY_EGRESS_CONNECT.labels(outcome="denied").inc()
+        self._audit("gateway.egress.connect_denied", {"reason": reason, "destination": destination})
+        with contextlib.suppress(OSError):
+            writer.write(f"HTTP/1.1 {status} {reason}\r\n\r\n".encode("latin-1"))
+            await writer.drain()
+        self._close(writer)
+
+    @staticmethod
+    def _close(writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(OSError):
+            writer.close()
+
+
+__all__ = [
+    "GATEWAY_EGRESS_CONNECT",
+    "EgressForwardProxy",
+    "resolve_egress_proxy_bind",
+    "resolve_egress_proxy_port",
+]
