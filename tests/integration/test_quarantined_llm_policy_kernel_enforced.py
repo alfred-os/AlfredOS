@@ -26,11 +26,15 @@ the shipped bytes.
 dev). CI's alfred-core image (PR-S4-0b) ships bubblewrap 0.8.0 so this runs in
 docker-in-docker. Promoted to a required status check under PR-S4-7.
 
-NB: the real policy deliberately does NOT ``--unshare-net`` (the quarantined
-LLM makes its own provider HTTPS call); outbound egress is UNRESTRICTED and the
-provider-only allowlist is a release-blocker tracked in #230. This test
-therefore does NOT assert network containment — see
-``tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml``.
+NB: Spec C G7-1 (#333) made the real policy ``--unshare-net`` — the shipped
+deterministic-echo child needs no egress, so it runs in an empty network
+namespace (egress kernel-closed). The 2c real-LLM child (still #230) reaches its
+provider PROVIDER-ONLY through the gateway L7 CONNECT proxy, never by re-opening
+this namespace. This test asserts the shipped policy unshares ``net`` (the
+kernel-observable egress containment is enforced live in the
+``integration-privileged`` job) — see
+``tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml``
+(now an enforced-containment payload).
 """
 
 from __future__ import annotations
@@ -173,6 +177,29 @@ def _launcher_env(manifest: Path, policy_dir: Path) -> dict[str, str]:
     }
 
 
+def _skip_if_netns_unconfigurable(result: subprocess.CompletedProcess[str]) -> None:
+    """Skip LOUDLY if bwrap could not configure the unshared net namespace.
+
+    Spec C G7-1 (#333) added ``--unshare-net`` to the real policy. bwrap brings up
+    loopback in the new net namespace via netlink (RTM_NEWADDR); some unprivileged
+    userns (e.g. GitHub-Actions runners without CAP_NET_ADMIN) forbid that, so
+    bwrap exits BEFORE the plugin runs — the kernel-enforcement assertions below
+    are then not exercisable. Skip loudly rather than fail or silent-pass, mirroring
+    ``test_launcher_policy_resolver.py::test_plugin_cannot_open_outbound_network``.
+
+    The signature (rc != 0 AND ``RTM_NEWADDR`` in stderr) is specific to netns
+    SETUP failing before the child runs; a real containment regression runs the
+    child and surfaces its own sentinel (``READ_OK`` / ``EXEC_OK``) with no
+    RTM_NEWADDR, so this guard cannot mask one.
+    """
+    if result.returncode != 0 and "RTM_NEWADDR" in result.stderr:
+        pytest.skip(
+            "runner userns cannot configure the unshared net namespace's loopback "
+            f"(bwrap: {result.stderr.strip()}); kernel-enforcement assertions not "
+            "exercisable here (Spec C G7-1 --unshare-net)"
+        )
+
+
 def _spawn_with_fd3(
     stub: Path, manifest: Path, policy_dir: Path, key: bytes
 ) -> subprocess.CompletedProcess[str]:
@@ -219,7 +246,9 @@ def _spawn_with_fd3(
     finally:
         os.close(write_fd)
     stdout, stderr = proc.communicate(timeout=30)
-    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    result = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+    _skip_if_netns_unconfigurable(result)
+    return result
 
 
 def test_real_policy_unshare_set_matches_shipped() -> None:
@@ -228,12 +257,14 @@ def test_real_policy_unshare_set_matches_shipped() -> None:
     If a future edit drops ``pid`` from the real policy the containment
     assertions below would silently weaken; this pins the production posture so
     the kernel-enforcement claims stay anchored to what AlfredOS actually ships.
-    Also pins the documented #230 gap: the real policy MUST NOT unshare ``net``.
+    Also pins the Spec C G7-1 (#333) egress closure: the real policy MUST unshare
+    ``net`` so the echo child runs in an empty network namespace; dropping it
+    silently re-opens the child's egress.
     """
     shipped = tomllib.loads(_REAL_POLICY.read_text())
     unshare = set(shipped.get("unshare", []))
-    assert {"pid", "uts", "cgroup", "ipc"} <= unshare
-    assert "net" not in unshare, "egress allowlist landed — update this test + #230"
+    assert {"pid", "uts", "cgroup", "ipc", "net"} <= unshare
+    assert "net" in unshare, "net dropped — echo-child egress re-opened (Spec C G7-1)"
     assert 3 in shipped.get("keep_fds", [])
 
 
@@ -299,12 +330,12 @@ def test_quarantined_llm_cannot_exec_host_bin_sh(tmp_path: Path) -> None:
     assert "BLOCKED" in result.stdout, "stub did not run / exec was not refused"
 
 
-def test_launcher_invokes_bwrap_not_unshared_net(tmp_path: Path) -> None:
-    """Documented #230 gap: the real policy must NOT pass --unshare-net.
+def test_launcher_invokes_bwrap_with_unshared_net(tmp_path: Path) -> None:
+    """Spec C G7-1 (#333): the real policy passes --unshare-net.
 
-    A future edit that adds net isolation would change the egress posture; this
-    pins the current (documented, accepted) state at the launcher's emitted flag
-    set so the change is forced through review with #230.
+    The echo child needs no egress, so the launcher's emitted flag set isolates
+    the network namespace. Pinned here so a future edit that drops net isolation
+    (silently re-opening the child's egress) is forced through review.
     """
     stub = tmp_path / "stub.py"
     stub.write_text(
@@ -321,7 +352,7 @@ def test_launcher_invokes_bwrap_not_unshared_net(tmp_path: Path) -> None:
 
     body = (policy_dir / "quarantined-llm.linux.bwrap.policy").read_text()
     flags = policy_to_bwrap_flags(read_policy_toml(body))
-    assert "--unshare-net" not in flags, "egress isolation landed — update #230 + this test"
+    assert "--unshare-net" in flags, "net isolation dropped — echo-child egress re-opened (G7-1)"
     assert "--unshare-pid" in flags
     # And the chain actually runs end-to-end.
     result = _spawn_with_fd3(stub, manifest, policy_dir, key=b"sk-x")

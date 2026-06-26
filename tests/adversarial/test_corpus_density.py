@@ -106,8 +106,9 @@ def test_sandbox_escape_corpus_has_payloads() -> None:
     -010 (FAKE_UNAME production bypass). PR-S4-7 adds the kernel-observable
     bwrap-escape payloads against the REAL quarantined-LLM Linux policy:
     -003 (host /etc/passwd read contained), -004 (/bin/sh exec contained),
-    -005 (outbound egress UNRESTRICTED — out_of_scope, #230), -006 (host
-    /proc/1/environ read contained), and -011 (policy_ref symlink-follow
+    -005 (outbound egress contained via --unshare-net — Spec C G7-1; the 2c
+    real-LLM provider-only path is still #230), -006 (host /proc/1/environ read
+    contained), and -011 (policy_ref symlink-follow
     refused). The xfail-strict placeholder self-destructed when the payloads
     arrived, by design; the floor of 10 catches a silent deletion regression.
     """

@@ -29,10 +29,15 @@ carve-out). Their policy files:
 | `discord-adapter.macos.sb` | macOS | File only — execution deferred (#230) |
 | `discord-adapter.windows.stub.policy` | Windows | Documented stub — production refuses, dev emits `supervisor.plugin.sandbox_stub_used` |
 
-Both policies leave egress UN-kernel-enforced for now: the schema cannot yet
-express an endpoint allowlist, so neither `unshare net`s. The Discord-only
-egress cap is deferred to **#230** (the manifest's `[network] allowlist`
-documents the intended cap; #230 makes the policy enforce it).
+The **quarantined-LLM** policy now `unshare net`s (Spec C G7-1, #333): the
+shipped deterministic-echo child needs no egress, so it runs in an empty network
+namespace — egress is kernel-closed for it. The **Discord adapter** still leaves
+egress UN-kernel-enforced (the schema cannot yet express its endpoint allowlist),
+so it does not `unshare net` yet; that Discord-only egress cap is deferred to
+**#230 / G7-4** (the manifest's `[network] allowlist` documents the intended cap,
+which G7-4 makes the policy enforce via the gateway L7 CONNECT proxy). The 2c
+real-LLM quarantined child (still **#230**) likewise reaches its provider only
+through the gateway proxy, never by re-opening the child's network namespace.
 
 `_fixtures/` holds policy files used only by tests; they are NOT production
 policies.
@@ -80,7 +85,8 @@ The Linux policy is TOML validated by `alfred.plugins.sandbox_policy.SandboxPoli
 
 The shipped quarantined-LLM Linux policy binds only `/usr`, `/lib`, `/lib64`
 read-only (the interpreter + its loader/libs), a tmpfs scratch dir, synthesises
-`/dev`, unshares `pid/uts/cgroup/ipc`, dies with its parent, and keeps fd 3. It
+`/dev`, unshares `pid/uts/cgroup/ipc/net` (Spec C G7-1 — the echo child runs in an
+empty network namespace), dies with its parent, and keeps fd 3. It
 binds **no** `/etc` and **no** `/bin` — so host secrets are unreadable and
 `/bin/sh` / `/bin/*` are not exec targets. (Note: on x86-64 Debian `/lib64`
 exists and holds `ld-linux-x86-64.so.2`; on arches without a top-level `/lib64`,
@@ -104,25 +110,28 @@ Kernel enforcement of these bytes is proven by the merge-blocking integration
 test `tests/integration/test_quarantined_llm_policy_kernel_enforced.py` and the
 adversarial corpus `tests/adversarial/sandbox_escape/sbx-2026-003/004/006`.
 
-## ⚠️ Known limitation — outbound egress is UNRESTRICTED (release-blocker #230)
+## Outbound egress — CLOSED for the echo child (Spec C G7-1); 2c real-LLM egress is #230
 
-The quarantined LLM makes its provider HTTPS call **itself** (it receives the
-provider key over fd 3), so it needs outbound network. The current simple
-`SandboxPolicy` schema **cannot** express "egress to the provider endpoint
-only" — there is no `network.outbound_allowlist` field — so the Linux policy
-deliberately does **not** `unshare net`. Consequently:
+The shipped quarantined-LLM child runs a **deterministic echo loop** with no
+provider client and no socket of its own, so it needs **zero** outbound network.
+Spec C G7-1 (#333) therefore makes the Linux policy `unshare net`, putting the
+child in an **empty network namespace**. Consequently:
 
 - Filesystem, process, and pid/uts/cgroup/ipc isolation **are** kernel-enforced.
-- Outbound network egress is **NOT** restricted — a compromised quarantined
-  process could open a connection to an arbitrary host.
+- Outbound network egress is now **kernel-closed** for the echo child — even a
+  compromised child has no network namespace to connect from.
 
-This is an **accepted, documented gap** for the mid-flight slice state. Before
-the quarantined LLM runs against real provider traffic, **issue #230 MUST land**
-the provider-only egress allowlist (`network.outbound_allowlist` +
-`--unshare-net` + a filtered forwarder / egress proxy). #230 is a release-blocker
-for going live. The adversarial corpus records this honestly in
+The adversarial corpus records this as an **enforced-containment** vector in
 `tests/adversarial/sandbox_escape/sbx_2026_005_outbound_network_unrestricted.yaml`
-(`out_of_scope: true`, rationale → #230).
+(`out_of_scope: false`; the executable corpus asserts the shipped policy unshares
+`net`).
+
+**Still tracked by #230 — the 2c real-LLM child.** The real-LLM quarantined child
+(a separate follow-on) DOES make a provider call. It will **not** re-open this
+namespace: the core is connectivity-free and the gateway is the sole external I/O
+plane (Spec C), so the 2c child reaches its provider **provider-only** through the
+gateway L7 CONNECT proxy. The provider-only egress path + the unset-provider-key
+boot guard land with 2c, behind release-blocker **#230**.
 
 ## Also deferred to #230
 

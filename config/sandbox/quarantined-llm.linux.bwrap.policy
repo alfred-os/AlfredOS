@@ -22,11 +22,11 @@
 # dynamically link, and NOTHING else:
 #
 #   * NO /etc bind — /etc/passwd, /etc/shadow, resolv.conf, ssh configs, the
-#     host's secrets-in-config all stay invisible. (DNS still works: glibc
-#     reads /etc/resolv.conf, but with no /etc the resolver falls back; the
-#     provider call uses an IP-pinned or system-resolver path supplied by the
-#     Supervisor — see #230. An adversary that owns the response cannot read a
-#     host /etc/passwd to learn usernames for a follow-on attack.)
+#     host's secrets-in-config all stay invisible. (DNS is moot for the shipped
+#     echo child: it `--unshare-net`s into an empty network namespace, so there
+#     is no resolver and no provider call to make — see the egress note below. An
+#     adversary that owns the T3 response still cannot read a host /etc/passwd to
+#     learn usernames for a follow-on attack.)
 #   * NO /bin bind — on usrmerged Linux /bin is a symlink to /usr/bin, so we
 #     deliberately do NOT bind it separately; /bin/sh / /usr/bin/env are NOT
 #     reachable as exec targets from inside (process-exec containment, below).
@@ -62,41 +62,48 @@ dev = true
 #   * uts    — its own hostname; cannot read the host's.
 #   * cgroup — cannot observe/escape the host cgroup hierarchy.
 #   * ipc    — cannot reach host System V IPC / POSIX shm.
-#
-# We DELIBERATELY DO NOT unshare `net`. SECURITY-CRITICAL — read the egress
-# note below.
-unshare = ["pid", "uts", "cgroup", "ipc"]
+#   * net    — Spec C G7-1 (#333): an EMPTY network namespace. The shipped child
+#              runs a DETERMINISTIC ECHO loop (no provider client, no socket), so
+#              it needs ZERO egress; `--unshare-net` closes the #230 egress hole
+#              for it at the kernel. The 2c real-LLM child (separate follow-on,
+#              still #230) reaches its provider PROVIDER-ONLY via the gateway L7
+#              CONNECT proxy — NOT by re-opening this namespace. SECURITY-CRITICAL:
+#              read the egress note below before dropping `net`.
+unshare = ["pid", "uts", "cgroup", "ipc", "net"]
 
 # Reap the sandbox subtree when the Supervisor process exits — no orphaned
 # quarantined process can outlive its parent and keep running with T3 content.
 die_with_parent = true
 
-# fd 3 carries the Supervisor's provider-key channel (arch-2). The quarantined
-# LLM makes the provider HTTPS call ITSELF and needs the key; it arrives over
-# fd 3, which bwrap inherits by default (NO CLI flag — see the
-# `policy_to_bwrap_flags` docstring + #218). `keep_fds` is the validated
-# DECLARATION that fd 3 must survive; omitting it is refused at parse time
-# (`kind_full_requires_keep_fd_3`).
+# fd 3 carries the Supervisor's provider-key channel (arch-2). The shipped
+# deterministic-echo child does NOT make a provider call (it `--unshare-net`s,
+# below) and does not consume the key; the fd-3 channel is retained as the
+# stable substrate the 2c real-LLM child will use to receive the key, and the
+# 2c provider HTTPS call goes through the gateway L7 CONNECT proxy (Spec C, #230),
+# never by re-opening this child's network namespace. fd 3 arrives over the
+# inherited descriptor (NO CLI flag — see the `policy_to_bwrap_flags` docstring +
+# #218); `keep_fds` is the validated DECLARATION that fd 3 must survive — omitting
+# it is refused at parse time (`kind_full_requires_keep_fd_3`).
 keep_fds = [3]
 
 # ============================================================================
-# !! EGRESS IS CURRENTLY UNRESTRICTED — RELEASE-BLOCKER tracked in #230 !!
+# EGRESS IS CLOSED for the shipped echo child (Spec C G7-1, #333)
 # ============================================================================
-# The quarantined LLM makes the provider HTTPS call itself (it holds the
-# provider key, delivered over fd 3). It therefore NEEDS outbound network. The
-# simple `SandboxPolicy` schema this file uses cannot express "egress to the
-# provider endpoint ONLY" — there is no `network.outbound_allowlist` field yet.
+# The shipped quarantined-LLM child runs a DETERMINISTIC ECHO loop with NO
+# provider client and NO socket of its own (the import-graph invariant in
+# `tests/adversarial/sandbox_escape/test_quarantined_llm_not_yet_spawned_while_egress_open.py`
+# keeps it honest). It therefore needs ZERO outbound network, so `unshare`
+# now includes `net`: the child runs in an EMPTY network namespace. Even a
+# compromised echo child cannot open an outbound connection — there is no
+# network namespace to connect from. This closes the #230 egress hole for the
+# component that exists today; `sbx-2026-005` flips from `out_of_scope` to an
+# enforced-containment payload accordingly.
 #
-# Consequently we do NOT `unshare net`: the sandbox has FULL outbound network.
-# Filesystem and process/namespace containment are STILL kernel-enforced, but a
-# compromised quarantined process could in principle open an outbound
-# connection to an arbitrary host (data-exfiltration of whatever it can reach
-# in-process — which is only the T3 content it already holds + the provider
-# key). This is an ACCEPTED, DOCUMENTED gap for the mid-flight slice state.
-#
-# Before the quarantined LLM goes live against real provider traffic, #230 MUST
-# land the provider-only egress allowlist (a `network.outbound_allowlist` field
-# + the bwrap `--unshare-net` + slirp/pasta-style filtered forwarder, OR an
-# egress proxy the sandbox is pinned to). Until then this policy is for
-# resolver/containment testing, not production quarantined-LLM traffic.
+# STILL #230 — the 2c real-LLM child (a separate follow-on) DOES make a provider
+# call and needs egress. It will NOT re-open this namespace: it reaches the
+# provider endpoint PROVIDER-ONLY through the gateway L7 CONNECT proxy (the core
+# is connectivity-free; the gateway is the sole external I/O plane — Spec C). The
+# unset-provider-key boot guard + the real egress wiring land with 2c, behind the
+# `#230` release-blocker. Dropping `net` from the unshare set above would silently
+# re-open this child's egress and is refused by the closed-egress anchor gate.
 # ============================================================================

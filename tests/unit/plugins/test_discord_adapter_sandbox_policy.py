@@ -4,10 +4,11 @@ The Discord manifest declares ``[sandbox] kind = "full"`` and references three
 per-OS policy files. Wave 1 shipped the manifest reference; these policy bytes
 ship here. The Discord adapter ingests adversary-controlled bytes from arbitrary
 Discord users, so it runs under the SAME bwrap fs/namespace containment as the
-quarantined LLM — with ONE deliberate difference: it needs outbound TLS to the
+quarantined LLM — with deliberate differences: it needs outbound TLS to the
 Discord gateway, so it ro-binds ``/etc/ssl/certs`` (the quarantined LLM does
-not) and, like the quarantined LLM, does NOT yet ``unshare net`` (the
-Discord-only egress allowlist is deferred to #230).
+not) and, UNLIKE the quarantined LLM (whose echo child now ``--unshare-net``s
+under Spec C G7-1, #333), the Discord adapter does NOT yet ``unshare net`` — its
+Discord-only egress allowlist is deferred to #230 / G7-4.
 
 These tests pin:
 

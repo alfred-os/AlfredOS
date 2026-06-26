@@ -117,7 +117,7 @@ jobs:
           for node in \
             test_sbx_2026_012_quarantine_child_does_not_leak_fd3_key \
             test_sbx_2026_013_live_spawned_child_host_escape_contained \
-            test_only_sanctioned_quarantined_llm_spawn_while_egress_open ; do
+            test_only_sanctioned_quarantined_llm_spawn_site ; do
             if ! printf '%s\n' "$collected" | grep -q "::${node}"; then
               echo "::error::sandbox_escape payload ${node} missing from the required adversarial corpus"
               printf '%s\n' "$collected"

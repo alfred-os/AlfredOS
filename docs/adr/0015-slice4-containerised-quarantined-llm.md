@@ -110,6 +110,14 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
   release-blocker before the quarantined LLM is wired live.** Until #230 lands,
   the earlier claim that outbound calls are "kernel-enforced against the
   declared allowlist" does NOT hold and is superseded by this amendment.
+  **Amended 2026-06-26, Spec C G7-1 (#333): egress is now kernel-CLOSED for the
+  echo child.** The Linux policy now `unshare = [..., "net"]` — the
+  deterministic-echo child needs no egress, so it runs in an empty network
+  namespace, closing the #230 egress hole for the component that exists today
+  (the "unrestricted" claim above is superseded for the shipped child). #230 now
+  tracks ONLY the 2c real-LLM provider-only path, which reaches its provider
+  through the gateway L7 CONNECT proxy (the core is connectivity-free; the gateway
+  is the sole external I/O plane — Spec C), NOT by re-opening this namespace.
 - **The quarantined-LLM child code now ships in the wheel under a bound prefix
   (amended 2026-06-11, PR-S4-11c-2b0, ADR-0030).** The spawn target moved from
   the repo-root, wheel-excluded `plugins/alfred_quarantined_llm/quarantine_plugin.py`
@@ -135,6 +143,13 @@ fd-3 delivery still requires the spawning parent to place the pipe's read end
 > provider client, NO network egress — so the open-egress gap (release-blocker #230)
 > still contains nothing that can use it; the real LLM + its egress allowlist land in
 > PR-S4-11c-2c.
+>
+> **Spec C G7-1 note (2026-06-26, #333).** That open-egress gap is now CLOSED for the
+> echo child: the Linux policy `--unshare-net`s it into an empty network namespace
+> (kernel-closed egress, on top of the unchanged no-egress-capable-child import-graph
+> invariant — two independent layers). #230 now tracks only the 2c real-LLM child,
+> which reaches its provider provider-only through the gateway L7 CONNECT proxy, not
+> by re-opening this namespace.
 
 ## References
 
