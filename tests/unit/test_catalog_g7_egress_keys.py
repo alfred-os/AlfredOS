@@ -11,7 +11,11 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "egress.denied",
     # B2: the fail-closed egress-proxy bind refusal (alfred gateway start).
     "gateway.start.egress_proxy_bind_failed",
-    # B4 adds the audit-reason presentations.
+    # B4: the closed-vocab egress-CONNECT denial-reason presentations (gateway egress audit).
+    "gateway.egress.denied.destination_not_allowlisted",
+    "gateway.egress.denied.literal_ip_target",
+    "gateway.egress.denied.resolved_ip_not_global",
+    "gateway.egress.denied.malformed_connect",
 )
 
 

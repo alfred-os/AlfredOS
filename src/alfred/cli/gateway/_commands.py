@@ -26,6 +26,7 @@ import asyncio
 import http.client
 import os
 import stat
+from collections.abc import Iterator
 from typing import Final, NoReturn, Protocol
 
 import structlog
@@ -143,15 +144,6 @@ class _EgressProxyLike(Protocol):
     async def serve(self, shutdown_event: asyncio.Event) -> None: ...
 
 
-def _egress_audit_stub(event: str, fields: dict[str, object]) -> None:
-    """Temporary egress-CONNECT audit sink wired in B2; B4 replaces it with the
-    field-allowlisted ``alfred.gateway.egress_audit.record_egress_connect``.
-
-    A structlog-tier emitter so a mounted proxy's CONNECT outcomes are never silent
-    before the closed-vocab audit module lands (CLAUDE.md hard rule #7)."""
-    log.info(event, **fields)
-
-
 async def _serve_egress_proxy_failclosed(
     proxy: _EgressProxyLike, shutdown_event: asyncio.Event
 ) -> None:
@@ -173,18 +165,26 @@ async def _serve_egress_proxy_failclosed(
         raise IOPlaneUnavailableError(detail=repr(exc)) from exc
 
 
+def _iter_leaf_exceptions(group: BaseExceptionGroup[BaseException]) -> Iterator[BaseException]:
+    """Yield every LEAF exception of a (possibly nested) ``ExceptionGroup``, in tree order."""
+    for exc in group.exceptions:
+        if isinstance(exc, BaseExceptionGroup):
+            yield from _iter_leaf_exceptions(exc)
+        else:
+            yield exc
+
+
 def _reraise_first_meaningful(group: BaseExceptionGroup[BaseException]) -> NoReturn:
-    """Re-raise the first non-cancellation leaf of a TaskGroup ``ExceptionGroup``.
+    """Re-raise the first non-cancellation LEAF of a TaskGroup ``ExceptionGroup``.
 
     ``_main`` co-runs the egress proxy + the gateway process under an ``asyncio.TaskGroup``,
     which raises an ``ExceptionGroup`` when a sibling fails (the other is cancelled). The
     start is fail-closed and single-cause, so the first REAL leaf is surfaced RAW — restoring
-    the flat typed-exception contract ``start_gateway``'s handlers depend on. A
-    pure-cancellation group (no real fault) is re-raised unchanged.
+    the flat typed-exception contract ``start_gateway``'s handlers depend on. Nested subgroups
+    are FLATTENED first, so a leading pure-cancellation subgroup can never mask a real sibling
+    leaf later in the tree. A pure-cancellation group (no real fault) is re-raised unchanged.
     """
-    for exc in group.exceptions:
-        if isinstance(exc, BaseExceptionGroup):
-            _reraise_first_meaningful(exc)
+    for exc in _iter_leaf_exceptions(group):
         if not isinstance(exc, asyncio.CancelledError):
             raise exc
     raise group
@@ -201,12 +201,13 @@ def start_gateway() -> None:
     # perf-001: the relay graph imports lazily here, not at module-top, so
     # ``alfred --help`` never pays the gateway-process import cost.
     from alfred.comms_mcp.errors import DaemonUnavailableError
-    from alfred.config.settings import Settings
     from alfred.egress.allowlist import provider_egress_allowlist
     from alfred.egress.errors import IOPlaneUnavailableError
     from alfred.gateway.client_link import GatewayHandshakeError
+    from alfred.gateway.egress_audit import record_egress_connect
     from alfred.gateway.egress_proxy import (
         EgressForwardProxy,
+        resolve_deepseek_base_url,
         resolve_egress_proxy_bind,
         resolve_egress_proxy_port,
     )
@@ -258,17 +259,17 @@ def start_gateway() -> None:
         dial_adapter_id = os.environ.get(_DIAL_ADAPTER_ID_ENV) or _DEFAULT_DIAL_ADAPTER_ID
 
         # Spec C G7-1b (#333): the gateway is the SOLE external egress plane, so its start
-        # co-runs the L7 CONNECT forward-proxy alongside the gateway process. The proxy's
-        # destination allowlist is derived from the SAME live provider config the in-core
-        # EgressClient references (no drift). Fail-CLOSED: a proxy bind failure aborts the
-        # start (CONTRAST the metrics server's loud-and-continue above).
-        settings = Settings()  # type: ignore[no-untyped-call]  # BaseSettings __init__ is untyped
+        # co-runs the L7 CONNECT forward-proxy alongside the gateway process. The allowlist is
+        # derived from the public ``ALFRED_DEEPSEEK_BASE_URL`` (compose threads the SAME value
+        # to the core's Settings — no drift) WITHOUT constructing the secret-requiring Settings
+        # model, since the gateway holds no provider key (ADR-0036). Fail-CLOSED: a proxy bind
+        # failure aborts the start (CONTRAST the metrics server's loud-and-continue above).
         proxy = EgressForwardProxy(
-            allowlist=provider_egress_allowlist(settings),
+            allowlist=provider_egress_allowlist(resolve_deepseek_base_url()),
             bind_host=resolve_egress_proxy_bind(),
             port=resolve_egress_proxy_port(),
-            # B4 replaces this stub with the field-allowlisted record_egress_connect.
-            audit=_egress_audit_stub,
+            # The field-allowlisted ({destination, reason}) gateway-local egress audit sink.
+            audit=record_egress_connect,
         )
 
         async def _run_gateway() -> None:

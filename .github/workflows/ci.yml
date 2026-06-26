@@ -46,6 +46,12 @@ jobs:
     name: Python (lint, types, unit)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Least privilege: this job only checks out + runs local tooling (lint / type /
+    # unit / coverage report) — no PR comment, upload, or write. Pin contents:read so
+    # it does not inherit the default token's broader scope (matches the arm64 sibling
+    # + coverage-gates jobs).
+    permissions:
+      contents: read
     # No job-level `hashFiles()` guard: GitHub Actions rejects `hashFiles()`
     # in job-level `if:` at workflow-parse time (HTTP 422 "Unrecognized
     # function: 'hashFiles'") — the function is only valid inside step
@@ -473,15 +479,16 @@ jobs:
         # sanctioned proxied-httpx-client factory (client.py), and the gateway-side
         # L7 CONNECT forward-proxy (gateway/egress_proxy.py — the enforcement plane:
         # allowlist + literal-IP refusal + gateway-side DNS + resolved-IP guard +
-        # payload-blind splice). These files live OUTSIDE src/alfred/security/, so
-        # the ``security/*`` glob gate above does NOT catch them — they need their
-        # own named gate (the TWO-GATES pattern: this python-job step + the matching
-        # ``(combined)`` step in the ``coverage-gates`` job; keep BOTH ``--include``
-        # lists in sync). Chained ``&&`` hashFiles guard: ALL files must be present
-        # before the report runs.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != ''
+        # payload-blind splice), and the gateway-local egress audit (gateway/egress_audit.py
+        # — the closed-vocab denial set + the field-allowlisted, payload-blind audit sink).
+        # These files live OUTSIDE src/alfred/security/, so the ``security/*`` glob gate
+        # above does NOT catch them — they need their own named gate (the TWO-GATES pattern:
+        # this python-job step + the matching ``(combined)`` step in the ``coverage-gates``
+        # job; keep BOTH ``--include`` lists in sync). Chained ``&&`` hashFiles guard: ALL
+        # files must be present before the report runs.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != ''
         run: |
-          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py' --fail-under=100
+          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py' --fail-under=100
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
@@ -1617,9 +1624,9 @@ jobs:
         # future integration test that adds to the .coverage data lands here
         # automatically. Keep this ``--include`` list in sync with the python-job
         # ``(unit)`` step. Chained ``&&`` hashFiles guard per the two-gates pattern.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != ''
         run: |
-          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py' --fail-under=100
+          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py' --fail-under=100
 
   smoke:
     name: Smoke (end-to-end)

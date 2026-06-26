@@ -66,10 +66,15 @@ def test_host_port_from_url_without_host_raises() -> None:
         host_port_from_url("not-a-url")
 
 
-def test_provider_allowlist_from_settings() -> None:
-    class _S:
-        deepseek_base_url = "https://api.deepseek.com/v1"
-
-    allow = provider_egress_allowlist(_S())  # type: ignore[arg-type]
+def test_provider_allowlist_from_base_url() -> None:
+    # Takes the public base-URL string (not a Settings) so the gateway can derive the
+    # allowlist without the secret-requiring Settings model.
+    allow = provider_egress_allowlist("https://api.deepseek.com/v1")
     assert (ANTHROPIC_DEFAULT_HOST, 443) in allow
     assert ("api.deepseek.com", 443) in allow
+
+
+def test_provider_allowlist_honours_a_base_url_override() -> None:
+    allow = provider_egress_allowlist("https://custom.deepseek.proxy:8443/v1")
+    assert ("custom.deepseek.proxy", 8443) in allow
+    assert (ANTHROPIC_DEFAULT_HOST, 443) in allow
