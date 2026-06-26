@@ -43,3 +43,31 @@ async def test_complete_propagates_client_errors() -> None:
     req = CompletionRequest(messages=[Message(role="user", content="hi")], max_tokens=10)
     with pytest.raises(RuntimeError, match="rate limited"):
         await provider.complete(req)
+
+
+def test_from_settings_passes_http_client_and_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    import alfred.providers.deepseek as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+    sentinel = object()
+    mod.DeepSeekProvider.from_settings(
+        api_key="k",
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
+        http_client=sentinel,
+    )
+    assert captured["http_client"] is sentinel
+    assert captured["base_url"] == "https://api.deepseek.com/v1"
+
+
+def test_from_settings_default_passes_none_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Behaviour-neutral default: http_client=None => SDK builds its own (today's path)."""
+    import alfred.providers.deepseek as mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: captured.update(kw) or object())
+    mod.DeepSeekProvider.from_settings(
+        api_key="k", base_url="https://api.deepseek.com/v1", model="deepseek-chat"
+    )
+    assert captured["http_client"] is None

@@ -33,6 +33,7 @@ from structlog.types import EventDict
 from alfred.audit.log import AuditWriter
 from alfred.budget.guard import BudgetGuard
 from alfred.config.settings import Settings, SettingsError
+from alfred.egress.client import EgressClient
 from alfred.i18n import t
 from alfred.identity import (
     IdentityResolver,
@@ -116,17 +117,27 @@ def build_router(broker: SecretBroker, settings: Settings) -> ProviderRouter:
     DeepSeek is the primary; Anthropic is wired in as the fallback only if
     the Anthropic key is configured. Slice 2 replaces this with tiered
     capability-aware routing across more providers.
+
+    Spec C / G7-1 (#333): when ``ALFRED_EGRESS_PROXY_URL`` is set the providers get
+    a proxied ``http_client`` pointed at the gateway L7 CONNECT proxy; unset =>
+    direct (byte-for-byte today's path). One proxied client per provider is
+    intentional (no cross-provider pool sharing in G7-1); the ``EgressClient`` is a
+    stateless factory and the SDK/process owns each client's lifetime
+    (open-decision 3).
     """
+    egress = EgressClient.from_settings(settings)
     primary: Provider = DeepSeekProvider.from_settings(
         api_key=broker.get("deepseek_api_key"),
         base_url=settings.deepseek_base_url,
         model=settings.deepseek_model,
+        http_client=egress.build_provider_http_client(),
     )
     fallback: Provider | None = None
     if broker.has("anthropic_api_key"):
         fallback = AnthropicProvider.from_settings(
             api_key=broker.get("anthropic_api_key"),
             model=settings.anthropic_model,
+            http_client=egress.build_provider_http_client(),
         )
     return ProviderRouter(primary=primary, fallback=fallback)
 
