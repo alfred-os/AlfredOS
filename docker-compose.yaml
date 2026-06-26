@@ -138,6 +138,10 @@ services:
       ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_COMMS_ENABLED_ADAPTERS:-["alfred_tui"]}'
       ALFRED_DEEPSEEK_API_KEY: ${ALFRED_DEEPSEEK_API_KEY}
       ALFRED_ANTHROPIC_API_KEY: ${ALFRED_ANTHROPIC_API_KEY:-}
+      # Spec C G7-1b (#333): the SAME base URL the gateway derives its egress allowlist from
+      # (threaded to alfred-gateway too). An operator override MUST reach BOTH or the core
+      # would dial a host the gateway's allowlist denies — a silent egress mismatch.
+      ALFRED_DEEPSEEK_BASE_URL: ${ALFRED_DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
       # #309 GAP-4 (Option A): the core resolves discord_bot_token from env and
       # delivers it to the gateway-hosted Discord child via spawn-grant -> fd-3.
       # Mirrors the provider keys; the gateway/child never hold a vault key. NOTE:
@@ -155,6 +159,13 @@ services:
       # the compose network can reach it. PR-S3-5 ContentStore + RateLimiter
       # consume this.
       ALFRED_REDIS_URL: ${ALFRED_REDIS_URL:-redis://alfred-redis:6379/0}
+      # Spec C G7-1b (#333): route provider egress through the gateway L7 CONNECT
+      # proxy (the gateway is the sole external egress plane). Compose-internal —
+      # the proxy port is NEVER host-published (test_egress_proxy_port_never_host_published).
+      # UNSET => direct egress (dev / pre-G7-3 fallback, with a loud egress.client.direct
+      # log). G7-3 makes this mandatory + deletes the direct fallback atomically with
+      # the internal:true flip.
+      ALFRED_EGRESS_PROXY_URL: ${ALFRED_EGRESS_PROXY_URL:-http://alfred-gateway:8889}
     # state.git lives on this volume and is the source of truth for
     # reviewer-gated proposals + plugin grants (spec §11.1). NOT mounted in
     # alfred-discord — the comms adapter has no business writing grants.
@@ -210,6 +221,15 @@ services:
       # excludes the tui dial-in. The gateway holds NO secret — the core resolves the
       # token and delivers it over spawn-grant -> fd-3 at each (re)spawn.
       ALFRED_COMMS_ENABLED_ADAPTERS: '${ALFRED_GATEWAY_HOSTED_ADAPTERS:-["alfred_discord"]}'
+      # Spec C G7-1b (#333): the gateway serves the L7 CONNECT egress proxy on this port
+      # (the core dials http://alfred-gateway:8889). NEVER host-published (no `ports:` line —
+      # test_egress_proxy_port_never_host_published).
+      ALFRED_EGRESS_PROXY_PORT: ${ALFRED_EGRESS_PROXY_PORT:-8889}
+      # The gateway derives the egress destination allowlist from the SAME provider config
+      # the core uses, so an operator base_url override must reach BOTH (else the gateway
+      # would deny the core's legitimate destination — a silent mismatch). NOT a secret (a
+      # public API base URL), so it does not breach the no-secret-on-gateway invariant.
+      ALFRED_DEEPSEEK_BASE_URL: ${ALFRED_DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
     volumes:
       - alfred_run:/home/alfred/.run
     networks:
