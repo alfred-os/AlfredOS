@@ -168,6 +168,7 @@ These rules override everything else. Violating them is a release blocker.
 6. **Secrets live in the broker, not in env vars accessible to plugins.** Plugins request secret IDs; the broker substitutes at the tool-call boundary.
 7. **No silent failures in security paths.** Failed DLP, failed capability check, canary trip → loud audit entry + alert + (where appropriate) quarantine.
 8. **No skipping pre-commit hooks** with `--no-verify`. If a hook fails, fix the issue.
+9. **The gateway is the sole external egress plane; the core is connectivity-free (Spec C).** Never open an external socket directly from core `src/alfred/` code — provider/tool/adapter egress routes through the gateway L7 CONNECT forward-proxy (default-deny destination allowlist, refuse-literal-IP, gateway-side DNS, reject-non-globally-routable-resolved-IP, audit every CONNECT). The core builds provider SDK clients with a proxied `httpx.AsyncClient` via the `EgressClient` seam; the in-core HTTP-egress import-guard forbids new direct provider-SDK / alt-HTTP-lib / `httpx` client construction. A proxy bind failure is fail-closed (the gateway refuses to start). Shipped for providers in G7-1; tool-egress is G7-2, adapter-egress G7-4, and the `internal:true` kernel isolation of the core network lands at G7-3.
 
 ## Internationalization rules — HARD
 
