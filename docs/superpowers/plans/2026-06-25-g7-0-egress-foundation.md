@@ -70,8 +70,9 @@ def test_alfred_internal_is_internal_true_deferred_to_g7_3(compose: dict[str, An
 def _service_networks(compose: dict[str, Any], service: str) -> set[str]:
     svc = compose.get("services", {}).get(service, {}) or {}
     nets = svc.get("networks", []) or []
-    # Compose allows networks as a list OR a mapping; normalise to a name set.
-    return set(nets) if isinstance(nets, list) else set(nets)
+    # Compose allows networks as a list OR a mapping; set() over either yields the
+    # network-name set (set(dict) is its keys).
+    return set(nets)
 
 
 def test_gateway_joins_both_networks(compose: dict[str, Any]) -> None:
@@ -214,6 +215,8 @@ Add an AST-based test that fails if any module under `src/alfred/` gains a *new*
 - Produces: the guard contract that later G7 PRs maintain — `IMPORT_ALLOWLIST` (files permitted to import a provider SDK) and `CONSTRUCT_ALLOWLIST` (files permitted to construct an `httpx` client). G7-1 adds the new `EgressClient` module to `CONSTRUCT_ALLOWLIST` when it builds the proxied `httpx.AsyncClient`; the provider files stay in `IMPORT_ALLOWLIST` (they keep wrapping the SDK with an injected client).
 
 - [ ] **Step 1: Write the failing guard test**
+
+> **Note (post-`/review-pr` hardening):** the committed `tests/unit/egress/test_in_core_http_egress_guard.py` is the authoritative version and strengthens the sketch below per the fleet review: both the SDK-import and httpx checks walk the **full tree** (a function-local `import anthropic` is caught too — rev-001); the allowlists are `dict[path, reason]` so each entry carries its justification (devex-001); a `test_src_root_resolves_and_is_nonempty` floor prevents a vacuous pass on a broken `_SRC_ROOT` (err-001); and synthetic `@pytest.mark.parametrize` table tests make the guard self-proving without depending on the live tree (test-001). The docstring records the accepted static-scope limitation (dynamic `importlib` + `urllib`/`http.client` are out of scope — the G7-3 kernel block is the enforcement-of-record; sec-001).
 
 Create `tests/unit/egress/__init__.py` (empty file):
 
