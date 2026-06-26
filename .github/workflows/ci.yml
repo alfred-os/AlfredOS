@@ -466,6 +466,19 @@ jobs:
           echo "  where <module> is one of: allowlist, tls_policy, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors, host_ip_guard."
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
+      - name: Egress control-plane 100% line+branch coverage (unit)
+        # Spec C / G7-1 (#333): the in-core egress seam is a security boundary —
+        # the typed-error vocabulary (errors.py), the destination allowlist +
+        # literal-IP / globally-routable-IP guards (allowlist.py), and the
+        # sanctioned proxied-httpx-client factory (client.py). These files live
+        # OUTSIDE src/alfred/security/, so the ``security/*`` glob gate above does
+        # NOT catch them — they need their own named gate (the TWO-GATES pattern:
+        # this python-job step + the matching ``(combined)`` step in the
+        # ``coverage-gates`` job; keep BOTH ``--include`` lists in sync). Chained
+        # ``&&`` hashFiles guard: ALL files must be present before the report runs.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != ''
+        run: |
+          uv run coverage report --include='src/alfred/egress/errors.py' --fail-under=100
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
@@ -1594,6 +1607,16 @@ jobs:
           echo "  where <module> is one of: allowlist, tls_policy, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors, host_ip_guard."
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
+      - name: Egress control-plane 100% line+branch coverage (combined)
+        # Combined-data mirror of the ``python`` job's egress gate (Spec C / G7-1,
+        # #333). The in-core egress seam files are proven by unit-only data today;
+        # this mirror exists for parity with every other trust boundary so a
+        # future integration test that adds to the .coverage data lands here
+        # automatically. Keep this ``--include`` list in sync with the python-job
+        # ``(unit)`` step. Chained ``&&`` hashFiles guard per the two-gates pattern.
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != ''
+        run: |
+          uv run coverage report --include='src/alfred/egress/errors.py' --fail-under=100
 
   smoke:
     name: Smoke (end-to-end)

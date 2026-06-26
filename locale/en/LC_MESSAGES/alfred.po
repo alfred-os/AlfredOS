@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-25 19:12+0100\n"
+"POT-Creation-Date: 2026-06-26 12:20+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1342,6 +1342,16 @@ msgstr "Comms dispatch ingest result is missing a required key; refusing to send
 #: src/alfred/comms_mcp/daemon_runtime.py:236
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
+
+#: src/alfred/egress/errors.py:26
+msgid "egress.io_plane_unavailable"
+msgstr ""
+"External I/O is unavailable: the core could not reach the gateway egress "
+"proxy ({detail})."
+
+#: src/alfred/egress/errors.py:37
+msgid "egress.denied"
+msgstr "Egress to {destination} was denied ({reason})."
 
 #: src/alfred/gateway/adapter_child_factory.py:156
 msgid "gateway.adapter.launch_target.override_refused"
