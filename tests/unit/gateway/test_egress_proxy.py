@@ -16,9 +16,11 @@ the bind / shutdown LIFECYCLE tests stand up a real ``asyncio`` server.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 
 import pytest
+import structlog
 
 from alfred.gateway.egress_proxy import (
     EgressForwardProxy,
@@ -197,6 +199,35 @@ async def test_non_numeric_port_denied() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unicode_digit_port_is_clean_malformed_not_a_crash() -> None:
+    # ``\xb2`` (latin-1 SUPERSCRIPT TWO) passes str.isdigit() but int() raises ValueError —
+    # the require-ASCII guard keeps it a CLEAN 400 + malformed_connect audit instead of an
+    # uncaught task exception (sec-002).
+    audit: list[tuple[str, dict[str, object]]] = []
+    proxy = _proxy(audit)
+    writer = _CaptureWriter()
+    await _serve(proxy, b"CONNECT api.anthropic.com:\xb2 HTTP/1.1\r\n\r\n", writer)
+    assert b"400" in writer.buf
+    assert any(f.get("reason") == "malformed_connect" for _, f in audit)
+
+
+@pytest.mark.asyncio
+async def test_mixed_case_allowlisted_host_is_lowercased_and_allowed() -> None:
+    # DNS is case-insensitive; the request-line host is lowercased before the allowlist check,
+    # so a mixed-case authority for an allowlisted host is NOT spuriously denied (sec-002 nit).
+    audit: list[tuple[str, dict[str, object]]] = []
+    up_writer = _CaptureWriter()
+    proxy = _proxy(audit, upstream=(_reader_with(b"UP"), up_writer))
+    writer = _CaptureWriter()
+    await _serve(proxy, b"CONNECT API.Anthropic.COM:443 HTTP/1.1\r\n\r\n", writer)
+    assert b"200 Connection Established" in writer.buf
+    assert any(
+        e == "gateway.egress.connect_allowed" and f.get("destination") == "api.anthropic.com:443"
+        for e, f in audit
+    )
+
+
+@pytest.mark.asyncio
 async def test_incomplete_request_line_denied() -> None:
     # EOF before the CRLF-CRLF terminator → IncompleteReadError → malformed.
     audit: list[tuple[str, dict[str, object]]] = []
@@ -220,15 +251,21 @@ async def test_oversized_request_line_denied() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upstream_open_failure_is_handled() -> None:
-    # open_upstream raising an OSError (ECONNREFUSED) is caught by the bounded
-    # connection handler: the client is closed, no 200 is sent.
+async def test_upstream_open_failure_is_logged_with_destination() -> None:
+    # open_upstream raising an OSError (ECONNREFUSED) is an UPSTREAM error, not a policy
+    # denial: the bounded handler closes the client (no 200), counts a distinct ``error``
+    # outcome, and logs the connection_error breadcrumb ATTRIBUTED to the destination.
     audit: list[tuple[str, dict[str, object]]] = []
     proxy = _proxy(audit, open_error=ConnectionRefusedError("upstream down"))
     writer = _CaptureWriter()
-    await _serve(proxy, b"CONNECT api.anthropic.com:443 HTTP/1.1\r\n\r\n", writer)
+    with structlog.testing.capture_logs() as logs:
+        await _serve(proxy, b"CONNECT api.anthropic.com:443 HTTP/1.1\r\n\r\n", writer)
     assert b"200" not in writer.buf
     assert writer.closed
+    errors = [e for e in logs if e.get("event") == "gateway.egress.connection_error"]
+    assert errors and errors[0]["destination"] == "api.anthropic.com:443", logs
+    # NOT mislabelled as a policy denial.
+    assert not any(e == "gateway.egress.connect_denied" for e, _ in audit)
 
 
 def test_default_resolve_resolves_localhost() -> None:
@@ -288,6 +325,20 @@ def test_resolve_egress_proxy_bind_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolve_egress_proxy_bind() == "127.0.0.1"
 
 
+def test_resolve_deepseek_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from alfred.gateway.egress_proxy import resolve_deepseek_base_url
+
+    monkeypatch.delenv("ALFRED_DEEPSEEK_BASE_URL", raising=False)
+    assert resolve_deepseek_base_url() == "https://api.deepseek.com/v1"
+
+
+def test_resolve_deepseek_base_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from alfred.gateway.egress_proxy import resolve_deepseek_base_url
+
+    monkeypatch.setenv("ALFRED_DEEPSEEK_BASE_URL", "https://custom.deepseek.proxy/v1")
+    assert resolve_deepseek_base_url() == "https://custom.deepseek.proxy/v1"
+
+
 @pytest.mark.asyncio
 async def test_handle_client_registers_and_reaps_connection_task() -> None:
     # Drive the accept callback directly: it must register the connection task and
@@ -302,6 +353,48 @@ async def test_handle_client_registers_and_reaps_connection_task() -> None:
             break
         await asyncio.sleep(0.01)
     assert not proxy._conns  # type: ignore[attr-defined] — done-callback discarded it
+
+
+@pytest.mark.asyncio
+async def test_connection_done_surfaces_an_escaped_exception_loud() -> None:
+    # A non-cancellation exception escaping _serve_connection (here the audit sink raising —
+    # the fail-loud payload-blindness guard) must NOT vanish as a GC-time "never retrieved":
+    # the done-callback retrieves + logs it at error (hard rule #7).
+    def _raising_audit(event: str, fields: dict[str, object]) -> None:
+        raise ValueError("audit sink rejected the row")
+
+    proxy = EgressForwardProxy(
+        allowlist=_ALLOWLIST, bind_host="127.0.0.1", port=0, audit=_raising_audit
+    )
+    with structlog.testing.capture_logs() as logs:
+        proxy._handle_client(  # type: ignore[attr-defined]
+            _reader_with(b"CONNECT evil.example:443 HTTP/1.1\r\n\r\n"), _CaptureWriter()
+        )
+        for _ in range(50):
+            if not proxy._conns:  # type: ignore[attr-defined]
+                break
+            await asyncio.sleep(0.01)
+    assert any(e.get("event") == "gateway.egress.connection_failed" for e in logs), logs
+
+
+@pytest.mark.asyncio
+async def test_connection_done_ignores_a_cancelled_task() -> None:
+    # A cancelled connection task is reaped without touching .exception() (which would raise).
+    proxy = EgressForwardProxy(
+        allowlist=_ALLOWLIST, bind_host="127.0.0.1", port=0, audit=lambda e, f: None
+    )
+
+    async def _block() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.ensure_future(_block())
+    proxy._conns.add(task)  # type: ignore[attr-defined]
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    proxy._on_connection_done(task)  # type: ignore[attr-defined] — must not raise
+    assert task not in proxy._conns  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

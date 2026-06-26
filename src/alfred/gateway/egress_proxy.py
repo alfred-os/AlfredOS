@@ -42,6 +42,11 @@ import structlog
 from prometheus_client import Counter
 
 from alfred.egress.allowlist import EgressDestination, is_globally_routable, is_literal_ip
+from alfred.gateway.egress_audit import (
+    EGRESS_CONNECT_ALLOWED_EVENT,
+    EGRESS_CONNECT_DENIED_EVENT,
+    EgressDenyReason,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -51,6 +56,12 @@ _EGRESS_PROXY_BIND_ENV: Final[str] = "ALFRED_EGRESS_PROXY_BIND"
 # Never host-published (a compose-invariant test asserts it); the destination
 # allowlist is the control during the pre-internal:true window (closed at G7-3).
 _DEFAULT_EGRESS_PROXY_BIND: Final[str] = "0.0.0.0"  # noqa: S104
+
+# The public DeepSeek provider base URL the gateway adds to its egress allowlist. Read from
+# env (NOT the secret-requiring Settings) so the gateway derives the allowlist without a
+# provider key (ADR-0036); compose threads the SAME value to the core's Settings.
+_DEEPSEEK_BASE_URL_ENV: Final[str] = "ALFRED_DEEPSEEK_BASE_URL"
+_DEFAULT_DEEPSEEK_BASE_URL: Final[str] = "https://api.deepseek.com/v1"
 
 # Bounded request-line read: a CONNECT handshake is tiny; cap the buffer + the read
 # so a slow-loris / oversized line is refused rather than pinning a task.
@@ -95,6 +106,17 @@ def resolve_egress_proxy_bind() -> str:
     raw = os.environ.get(_EGRESS_PROXY_BIND_ENV)
     if raw is None or raw == "":
         return _DEFAULT_EGRESS_PROXY_BIND
+    return raw
+
+
+def resolve_deepseek_base_url() -> str:
+    """Resolve the DeepSeek provider base URL from ``ALFRED_DEEPSEEK_BASE_URL`` (default
+    ``https://api.deepseek.com/v1``) — the public host the gateway adds to its egress
+    allowlist. Read from env (NOT the secret-requiring Settings) so the gateway derives the
+    allowlist without a provider key; compose threads the SAME value to the core's Settings."""
+    raw = os.environ.get(_DEEPSEEK_BASE_URL_ENV)
+    if raw is None or raw == "":
+        return _DEFAULT_DEEPSEEK_BASE_URL
     return raw
 
 
@@ -162,29 +184,62 @@ class EgressForwardProxy:
     def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.ensure_future(self._serve_connection(reader, writer))
         self._conns.add(task)
-        task.add_done_callback(self._conns.discard)
+        task.add_done_callback(self._on_connection_done)
+
+    def _on_connection_done(self, task: asyncio.Task[None]) -> None:
+        """Reap a finished connection task + surface any ESCAPED exception LOUD.
+
+        A non-cancellation exception escaping ``_serve_connection`` (the audit sink rejecting a
+        non-allowlisted field — the fail-loud payload-blindness guard — or any programming bug)
+        would otherwise vanish as a GC-time "exception never retrieved". Retrieve + log it at
+        ``error`` so hard rule #7 (no silent failure) holds for the WHOLE per-connection task,
+        not only the OSError path handled inside ``_serve_connection``.
+        """
+        self._conns.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _log.error("gateway.egress.connection_failed", error=repr(exc))
 
     async def _serve_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        # The CONNECT authority, captured so a pre-/mid-tunnel OSError (DNS gaierror, upstream
+        # ECONNREFUSED, mid-splice reset) is ATTRIBUTABLE in the error breadcrumb. A resolution
+        # / upstream failure is an UPSTREAM error, NOT a policy denial, so it is recorded as a
+        # distinct ``error`` outcome (never mislabelled ``connect_denied``); the durable
+        # signed/structured upstream-failure audit is the deferred G7-5 observability set.
+        destination_label = "<unread>"
         try:
             destination = await self._read_connect_target(writer, reader)
             if destination is None:
                 return
             host, port = destination
+            destination_label = f"{host}:{port}"
             if not await self._authorize(host, port, writer):
                 return
+            # Gateway-side DNS, off the event loop. NOTE: run_in_executor(None, ...) uses the
+            # SHARED default thread pool; under a burst of concurrent CONNECTs a slow resolver
+            # can queue head-of-line + contend with other default-pool users. A dedicated
+            # resolver executor / async resolver is the G7-3/G7-5 head-of-line-isolation
+            # hardening (Spec C lists full HoL isolation as out-of-scope for G7-1).
             resolved_ip = await asyncio.get_running_loop().run_in_executor(
                 None, self._resolve, host
             )
             if not is_globally_routable(resolved_ip):
-                await self._deny(writer, 403, "resolved_ip_not_global", f"{host}:{port}")
+                await self._deny(
+                    writer, 403, EgressDenyReason.RESOLVED_IP_NOT_GLOBAL, f"{host}:{port}"
+                )
                 return
             await self._tunnel(host, port, resolved_ip, reader, writer)
         except asyncio.CancelledError:
             raise
-        except OSError as exc:  # upstream open / splice I/O error — loud, bounded
-            _log.warning("gateway.egress.connection_error", error=repr(exc))
+        except OSError as exc:  # DNS / upstream open / splice I/O error — loud, bounded, counted
+            GATEWAY_EGRESS_CONNECT.labels(outcome="error").inc()
+            _log.warning(
+                "gateway.egress.connection_error", destination=destination_label, error=repr(exc)
+            )
             self._close(writer)
 
     async def _read_connect_target(
@@ -196,27 +251,36 @@ class EgressForwardProxy:
                 reader.readuntil(b"\r\n\r\n"), timeout=_HANDSHAKE_TIMEOUT_S
             )
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
-            await self._deny(writer, 400, "malformed_connect", "<unread>")
+            await self._deny(writer, 400, EgressDenyReason.MALFORMED_CONNECT, "<unread>")
             return None
         request_line = raw.split(b"\r\n", 1)[0].decode("latin-1")
         parts = request_line.split(" ")
         # The request-line authority is the SOLE allowlist source — the Host: header
         # (anywhere in ``raw``) is never parsed (sec-004).
         if len(parts) != 3 or parts[0] != "CONNECT":
-            await self._deny(writer, 400, "malformed_connect", request_line[:120])
+            await self._deny(writer, 400, EgressDenyReason.MALFORMED_CONNECT, request_line[:120])
             return None
         host, sep, port_str = parts[1].rpartition(":")
-        if not sep or not host or not port_str.isdigit():
-            await self._deny(writer, 400, "malformed_connect", parts[1][:120])
+        # ``str.isdigit()`` alone accepts non-ASCII Unicode digits that then make ``int()``
+        # raise — which would escape ``_serve_connection`` as an uncaught task exception
+        # (no clean 400, no audit row). Require ASCII digits so a crafted port stays a CLEAN
+        # malformed_connect refusal (sec-002).
+        if not sep or not host or not (port_str.isascii() and port_str.isdigit()):
+            await self._deny(writer, 400, EgressDenyReason.MALFORMED_CONNECT, parts[1][:120])
             return None
-        return (host, int(port_str))
+        # DNS is case-insensitive and the allowlist is lowercased (``urlsplit().hostname``);
+        # lowercase the request-line authority so a mixed-case allowlisted host is not
+        # spuriously denied (fail-safe today, but a needless availability nit).
+        return (host.lower(), int(port_str))
 
     async def _authorize(self, host: str, port: int, writer: asyncio.StreamWriter) -> bool:
         if is_literal_ip(host):
-            await self._deny(writer, 403, "literal_ip_target", f"{host}:{port}")
+            await self._deny(writer, 403, EgressDenyReason.LITERAL_IP_TARGET, f"{host}:{port}")
             return False
         if (host, port) not in self._allowlist:
-            await self._deny(writer, 403, "destination_not_allowlisted", f"{host}:{port}")
+            await self._deny(
+                writer, 403, EgressDenyReason.DESTINATION_NOT_ALLOWLISTED, f"{host}:{port}"
+            )
             return False
         return True
 
@@ -232,10 +296,9 @@ class EgressForwardProxy:
         client_writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         await client_writer.drain()
         GATEWAY_EGRESS_CONNECT.labels(outcome="allowed").inc()
-        self._audit(
-            "gateway.egress.connect_allowed",
-            {"destination": f"{host}:{port}", "resolved_ip": resolved_ip},
-        )
+        # Field-allowlisted audit ({destination} only — the resolved IP is gateway-internal
+        # and deliberately NOT logged, keeping the row to the CONNECT authority).
+        self._audit(EGRESS_CONNECT_ALLOWED_EVENT, {"destination": f"{host}:{port}"})
         try:
             await asyncio.gather(
                 self._pipe(client_reader, up_writer),
@@ -267,12 +330,20 @@ class EgressForwardProxy:
                 dst.write_eof()
 
     async def _deny(
-        self, writer: asyncio.StreamWriter, status: int, reason: str, destination: str
+        self,
+        writer: asyncio.StreamWriter,
+        status: int,
+        reason: EgressDenyReason,
+        destination: str,
     ) -> None:
         GATEWAY_EGRESS_CONNECT.labels(outcome="denied").inc()
-        self._audit("gateway.egress.connect_denied", {"reason": reason, "destination": destination})
+        # Field-allowlisted audit ({reason, destination} only — the audit sink rejects any
+        # other field, so the row is payload-blind by construction).
+        self._audit(
+            EGRESS_CONNECT_DENIED_EVENT, {"reason": reason.value, "destination": destination}
+        )
         with contextlib.suppress(OSError):
-            writer.write(f"HTTP/1.1 {status} {reason}\r\n\r\n".encode("latin-1"))
+            writer.write(f"HTTP/1.1 {status} {reason.value}\r\n\r\n".encode("latin-1"))
             await writer.drain()
         self._close(writer)
 
@@ -285,6 +356,7 @@ class EgressForwardProxy:
 __all__ = [
     "GATEWAY_EGRESS_CONNECT",
     "EgressForwardProxy",
+    "resolve_deepseek_base_url",
     "resolve_egress_proxy_bind",
     "resolve_egress_proxy_port",
 ]

@@ -31,9 +31,10 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Settings() (the proxy allowlist source) needs the provider key + environment.
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
-    # Pin the proxy port/bind defaults so the resolvers never read a polluted env.
+    # Pin the proxy/allowlist resolvers' defaults so they never read a polluted env.
     monkeypatch.delenv("ALFRED_EGRESS_PROXY_PORT", raising=False)
     monkeypatch.delenv("ALFRED_EGRESS_PROXY_BIND", raising=False)
+    monkeypatch.delenv("ALFRED_DEEPSEEK_BASE_URL", raising=False)
 
 
 def _patch_gateway_process(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,14 +50,14 @@ def _patch_gateway_process(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
 
 
-def test_start_mounts_egress_proxy_with_settings_allowlist(
+def test_start_mounts_egress_proxy_with_provider_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``start`` builds an ``EgressForwardProxy`` from the live allowlist and serves it.
+    """``start`` builds an ``EgressForwardProxy`` from the provider allowlist and serves it.
 
-    The proxy is constructed with the SAME ``provider_egress_allowlist`` the in-core
-    EgressClient references (so the gateway cannot drift from the core's destination set)
-    and its ``serve`` is awaited concurrently with the gateway process.
+    The allowlist is derived from the public ``ALFRED_DEEPSEEK_BASE_URL`` (the SAME value
+    compose threads to the core's Settings, so the gateway cannot drift from the core's
+    destination set) and its ``serve`` is awaited concurrently with the gateway process.
     """
     captured: dict[str, object] = {}
     _patch_gateway_process(monkeypatch)
@@ -119,9 +120,45 @@ def test_start_egress_proxy_bind_failure_is_fail_closed(
 
     result = CliRunner().invoke(gateway_app, ["start"])
 
-    assert result.exit_code != 0
+    # The DEDICATED egress-proxy bind exit code (distinct from the client-socket bind / core
+    # / config refusals) so an operator script can branch on the egress-plane outage.
+    from alfred.cli.gateway._commands import _EXIT_EGRESS_PROXY_BIND_FAILED
+
+    assert result.exit_code == _EXIT_EGRESS_PROXY_BIND_FAILED
     # A friendly line rendered, not a bare traceback.
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert t("gateway.start.egress_proxy_bind_failed") in result.stdout
     # DISTINCT from the client-socket bind-failed line (different cause, different fix).
     assert t("gateway.start.bind_failed") not in result.stdout
+
+
+def test_reraise_first_meaningful_flattens_nested_cancellation_group() -> None:
+    """A leading pure-cancellation SUBGROUP must not mask a real sibling leaf (err-002).
+
+    The flat single-leaf case is what the TaskGroup produces in practice; this pins the
+    defensive nested-flatten so a future change that nests groups can't silently swallow the
+    real fault.
+    """
+    from alfred.cli.gateway._commands import _reraise_first_meaningful
+
+    real = RuntimeError("the real fault")
+    group = BaseExceptionGroup(
+        "outer",
+        [
+            BaseExceptionGroup("inner-cancellations", [asyncio.CancelledError()]),
+            real,
+        ],
+    )
+    with pytest.raises(RuntimeError, match="the real fault"):
+        _reraise_first_meaningful(group)
+
+
+def test_reraise_first_meaningful_reraises_a_pure_cancellation_group() -> None:
+    """A group with ONLY cancellations (no real fault) is re-raised unchanged."""
+    from alfred.cli.gateway._commands import _reraise_first_meaningful
+
+    group = BaseExceptionGroup(
+        "all-cancellations", [asyncio.CancelledError(), asyncio.CancelledError()]
+    )
+    with pytest.raises(BaseExceptionGroup):
+        _reraise_first_meaningful(group)

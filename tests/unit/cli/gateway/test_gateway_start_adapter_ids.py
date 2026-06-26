@@ -61,9 +61,6 @@ def _patch_process(monkeypatch: pytest.MonkeyPatch, captured: dict[str, object])
 def _patch_settings(monkeypatch: pytest.MonkeyPatch, enabled: tuple[str, ...]) -> None:
     class _FakeSettings:
         comms_enabled_adapters = enabled
-        # The gateway derives its egress allowlist from the live provider config; the
-        # proxy mount reads this (Spec C G7-1b / #333), so the fake must carry it.
-        deepseek_base_url = "https://api.deepseek.com/v1"
 
     monkeypatch.setattr("alfred.config.settings.Settings", _FakeSettings)
 
