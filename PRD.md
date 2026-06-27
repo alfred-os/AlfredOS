@@ -1,7 +1,7 @@
 # AlfredOS — Product Requirements Document
 
 | | |
-|---|---|
+| --- | --- |
 | **Project** | AlfredOS |
 | **Tagline** | An open-source, self-hostable, multi-user, multi-persona, security-hardened agentic OS. |
 | **Status** | Draft v0.1 — pre-implementation |
@@ -160,7 +160,7 @@ Hooks coexist with the event bus: the event bus stays the observation-only surfa
 ### 6.2 Multi-layered Memory
 
 | Layer | Purpose | Store | Persona scope |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Working memory** | Active turn buffer (~2k words) | Redis | Per-persona-per-user |
 | **Episodic log** | Raw conversation transcript | Postgres | Per-persona-per-user (+ shared group sessions) |
 | **Summarized episodes** | Narrative summaries of notable events | Postgres | Per-persona-per-user |
@@ -362,7 +362,7 @@ services:
 **Addressing model:**
 
 | Mode | How invoked | Behavior |
-|---|---|---|
+| --- | --- | --- |
 | **Default** | DM to Alfred or unprefixed message | Alfred answers, or hands off (announcing the handoff) |
 | **Direct** | `@lucius plan my week` or per-persona channel | Specialist answers directly; Alfred is silent unless asked |
 | **Group** | `@alfred @lucius help me plan this trip` or `/group ...` | Multiple personas join one thread, moderated by Alfred (or first-addressed persona) |
@@ -390,7 +390,7 @@ Coordination is free-form by design but bounded by these structural rails:
 **Starter persona pack** (bundled in `examples/personas/`, disabled by default, renameable):
 
 | Persona | Specialty | Default tier | Capabilities |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Alfred** (default, enabled) | Coordination, routing, general assistance, household-management | conversation | Broad |
 | **Lucius** | Research, deep reading, source-checking, technical analysis | deep-reasoning | Web fetch, doc readers, citation tools |
 | **Oracle** | Information retrieval, knowledge-graph queries, cross-reference | conversation | Memory query, graph traversal, vector search |
@@ -539,7 +539,7 @@ Catalogs live at `locale/<lang>/LC_MESSAGES/alfred.po`. English is the source ca
 ## 8. Testing Strategy
 
 | Layer | Tool | What it covers |
-|---|---|---|
+| --- | --- | --- |
 | **Unit** | pytest | Every component in isolation; LLM & plugin deps mocked |
 | **Integration** | pytest + testcontainers | Real Postgres/Redis/Qdrant; recorded LLM responses (VCR-style fixtures) |
 | **End-to-end** | pytest + full Docker Compose | Scripted multi-turn conversations across Discord/Telegram/TUI; real cheap-tier LLM calls behind per-test budget guard |

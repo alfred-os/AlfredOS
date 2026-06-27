@@ -23,7 +23,7 @@ ENUM type — new tiers land via additive CHECK migrations to keep
 rollback symmetry.
 
 | Role | Default rate limit / min | Reply on refusal? | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `read_only` | `0` (no requests) | **No — reply-suppressed** | Operator can add a row without granting interactive access |
 | `standard` | `30` | Yes | Default for newly-added users |
 | `trusted` | `60` | Yes | Elevated tier; no semantic difference beyond rate limits in Slice 2 |
@@ -80,7 +80,7 @@ provenance. Slice 3 ships the full closed T0–T3 model per
 superseding [ADR-0013](adr/0013-defer-t1-t3-and-dual-llm.md).
 
 | Tier | Source | Slice |
-|---|---|---|
+| --- | --- | --- |
 | `T0` | System-internal synthetic content (the system created it) | All |
 | `T1` | Operator-tier — TUI ingress + operator-attributable outbound | Slice 3 |
 | `T2` | Authenticated user — Discord DM from a bound snowflake | Slice 2 |

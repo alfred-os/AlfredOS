@@ -13,7 +13,7 @@
 ## G3-3 sub-epic decomposition
 
 | PR | Scope | Trust-boundary? |
-|----|-------|-----------------|
+| --- | --- | --- |
 | **G3-3a** | The stable kernel: the `GatewayLinkState` machine (`UP / DOWN_SIGNALLED / DOWN_CRASH / REDIALING`) + control-frame derivation (the spec §9 invariant: no `restored` without a preceding `reconnecting`; exactly one per gap), the gateway→client control-frame wire models (`link.reconnecting`/`restored`/`unavailable`), and a thin `GatewayClientListener` (reuses the merged `CommsSocketListener` 0600/0700 + peer-auth) that accepts the client + can emit control frames. NO core dial, NO seq/ack relay. Pure + hypothesis-testable. | Yes — client-facing socket. |
 | **G3-3b** | The core-facing half + the process: `GatewayCoreLink` (dials the core via `dial_comms_socket`; **dial-side `SO_PEERCRED`** — the both-direction dial side G3-1 deferred; fake-clock reconnect/backoff; the lifecycle-frame consume → drives the G3-3a state machine; **seq/ack deframe/reframe** as the first real peer; lifecycle-frame Pydantic validation + epoch check), the pure relay loop (client↔core, payload byte-for-byte, `id` preserved, no buffering), the `alfred gateway` CLI + `src/alfred/gateway/__main__.py`, Prometheus metrics, the **non-root in-process wire-contract test**, and the **payload-blindness canary test**. | Yes — always-up T1 carrier. |
 

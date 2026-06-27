@@ -441,7 +441,7 @@ This is the single biggest task in the PR. One dispatch of `alfred-docs-author` 
 ## 2. Acceptance gates (spec §6 PR-E row, restated as runnable assertions)
 
 | Gate | Assertion | How to verify |
-|---|---|---|
+| --- | --- | --- |
 | docs-reviewer pass clean | All six docs-author deliverables pass `alfred-docs-reviewer` review with zero unaddressed findings | Reviewer agent returns ALL-GREEN in Task 9 Step 6 |
 | Corpus harness runs trivially on empty corpus | `uv run pytest tests/adversarial -v` exits 0 with `test_corpus_health.py` + `test_payload_schema.py` + `test_dlp_payload_redaction.py[dlp-2026-001]` all passing; collection errors zero | Task 6 Step 2 + Task 7 Step 3 |
 | Glossary anchor existence checked by `make docs-check` | `make docs-check` exits 0; the spec at `docs/superpowers/specs/2026-05-26-slice-2-discord-multiuser-design.md` links `#authorization-role` and `#canonical-user-id` resolve to headings in `docs/glossary.md` | Task 8 Step 4 + Task 9 Step 5 |
@@ -462,7 +462,7 @@ This is the single biggest task in the PR. One dispatch of `alfred-docs-author` 
 ## 3. Open questions / decisions deferred to plan time
 
 | ID | Question | Working assumption | Decision moment |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Q1 | Should the payload-schema validator cross-check `id` year against the filesystem path's parent year (e.g. `dlp-2026-001` must live under a `2026/` subdir)? | No — Slice 2 ships flat per-category dirs; convention may evolve in Slice 3 when the corpus grows | Defer to first Slice-3 PR that introduces year-subdirs; document as a follow-up |
 | Q2 | Where does the `ALFRED_SMOKE_DISCORD_TOKEN` repo secret live? | In GitHub repo secrets under that exact name; operator-provisioned post-merge | Out-of-PR step; PR E's description includes the operator hand-off note |
 | Q3 | `markdown-link-check` Node action vs. custom Python script for `make docs-check`? | Custom Python script (`scripts/docs_check.py`) — the Node action doesn't follow `#anchor` fragments to verify the heading exists, and AlfredOS *requires* anchor checking (glossary forward-refs are load-bearing) | Decided in Task 8 Step 1; the script approach lands |

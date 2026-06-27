@@ -328,7 +328,7 @@ Reply once at end with a structured summary:
 CodeRabbit's findings are often correct but not always. Validate before applying.
 
 | Pattern | Likely action |
-|---|---|
+| --- | --- |
 | "X is unused" but X is exported in `__init__.py` for downstream callers | **Reject**: explain re-export. |
 | "Use `Path` instead of `str` for file paths" on a function whose contract is string paths | **Apply** if pre-Slice-1, **judge** if existing API. |
 | "Add type hint" on a function | **Apply** with the correct type. |

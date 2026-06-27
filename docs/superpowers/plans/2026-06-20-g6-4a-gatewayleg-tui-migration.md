@@ -31,7 +31,7 @@ Everything below assumes **A on all four**.
 ## File Structure
 
 | File | Create / Modify | Responsibility after this PR |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/gateway/core_link.py` | Modify | Replace `_replay_buffer` + `_client_to_core_seq` with a single `_tui_leg: GatewayLeg`. `relay_to_core` RETIRED as a write path; the TUI client→core send goes through `_drain_tui_unit` → `write_leg_unit` (sole writer). Capture/flush read the leg. `__init__` swaps `replay_buffer: ReplayBuffer \| None` for `tui_leg: GatewayLeg \| None`. |
 | `src/alfred/gateway/gateway_leg.py` | UNCHANGED | The shipped owning object is reused verbatim (JC-1..4 Decision A keep it edit-free). |
 | `src/alfred/gateway/replay_buffer.py` | UNCHANGED | The `ReplayBuffer` class is reused verbatim, one instance per leg. |

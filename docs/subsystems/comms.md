@@ -229,7 +229,7 @@ system).
 ## Error model
 
 | Source | Exception / event | Adapter behaviour |
-|---|---|---|
+| --- | --- | --- |
 | `discord.LoginFailure` | typed `LoginFailure` | Long-running adapter exits `2` after log + audit |
 | `discord.ConnectionClosed` | typed | Auto-reconnect via `discord.py`'s built-in supervisor; exponential backoff |
 | `discord.HTTPException` 5xx | typed | Audit `discord.upstream_5xx` + single retry. Repeated → propagate, supervisor exits `1` |

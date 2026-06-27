@@ -175,7 +175,7 @@ PR-S4-9 ships `DiscordSubPayloadClassifier` — registered via PR-S4-8's `@regis
 **Verification gate findings.** Before drafting this plan I `grep`-verified each cited Slice-3 surface against `main`:
 
 | Cited symbol | Verification result | Plan response |
-|---|---|---|
+| --- | --- | --- |
 | `class OutboundQueue` in `src/alfred/` | **Absent** — grep returned no hits | PR-S4-9 introduces `OutboundQueue` at `src/alfred/comms_mcp/outbound_queue.py`. Treated as honest new Slice-4 scope. Documented in `docs/glossary.md` Slice-4 additions (spec §13.1 lists it). |
 | `discord.py>=2.4,<3` in `pyproject.toml` | **Present** (line 29) | PR-S4-9 reuses; does NOT add. |
 | `discord_bot_token` in `SecretBroker._PREFER_FILE` | **Present** (`src/alfred/security/secrets.py:76`) | Plugin reads via `SecretBroker.get("discord_bot_token")` at lifecycle.start — the Slice-2 surface still works. |
@@ -192,7 +192,7 @@ PR-S4-9 ships `DiscordSubPayloadClassifier` — registered via PR-S4-8's `@regis
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `plugins/alfred_discord/__init__.py` | Create | Package marker |
 | `plugins/alfred_discord/manifest.toml` | Create | MCP manifest: `adapter_kind: discord`; `sandbox.kind: none` (spec §7.9 first-party relay carve-out); `secrets = ["discord_bot_token", "audit.hash_pepper"]`; `classifiers_optional: []`; no `[[hooks]]` entries (adapter only emits notifications) |
 | `plugins/alfred_discord/server.py` | Create | MCP server entry point — stdio JSON-RPC loop; constructs the four request handlers (`lifecycle.start`, `lifecycle.stop`, `adapter.health`, `outbound.message`); wires `discord_gateway.py` |
@@ -235,7 +235,7 @@ PR-S4-9 ships `DiscordSubPayloadClassifier` — registered via PR-S4-8's `@regis
 These are surfaces defined by upstream PRs; PR-S4-9 must consume them exactly and may not redefine them. Each row cites the defining PR + the consumer call-site in PR-S4-9.
 
 | Contract | Defined in | PR-S4-9 consumer |
-|---|---|---|
+| --- | --- | --- |
 | `InboundMessageNotification` Pydantic model | PR-S4-8 `src/alfred/comms_mcp/protocol.py` | `plugins/alfred_discord/inbound_emitter.py:normalise` constructs this |
 | `OutboundMessageRequest` Pydantic model | PR-S4-8 `src/alfred/comms_mcp/protocol.py` | `plugins/alfred_discord/outbound_handler.py` accepts this |
 | `OutboundMessageResult` discriminated union | PR-S4-8 `src/alfred/comms_mcp/protocol.py` | `plugins/alfred_discord/outbound_handler.py` returns one of three variants |
@@ -257,7 +257,7 @@ These are surfaces defined by upstream PRs; PR-S4-9 must consume them exactly an
 PR-S4-9 introduces these new contracts that PR-S4-10 will consume:
 
 | New contract | Defined in this PR | Consumer |
-|---|---|---|
+| --- | --- | --- |
 | `OutboundQueue` class with `pause(adapter_id, retry_after_seconds)` / `resume(adapter_id)` / `submit(adapter_id, request)` | `src/alfred/comms_mcp/outbound_queue.py` | PR-S4-10 TUI adapter outbound; PR-S4-11 graduation runbook |
 | `DiscordSubPayloadClassifier` registered under name `"discord_sub_payloads"` | `src/alfred/comms_mcp/classifiers/discord.py` | PR-S4-8's `REQUIRED_CLASSIFIERS_BY_KIND["discord"]` references; PR-S4-11 graduation glossary |
 | Two new hookpoints `comms.adapter.binding_requested` (T3) + `comms.adapter.rate_limit_signal` (T0) | `src/alfred/comms_mcp/discord_hookpoints.py` | Operator subscribers; PR-S4-11 graduation hookpoint surface table |
@@ -601,7 +601,7 @@ These ship first so the adapter's tests have something to import. Each task foll
   **The four-mode mapping table** (spec §8.6 verbatim, reproduced for implementer reference):
 
   | Inbound Discord shape | Inferred `addressing_signal` | PRD §6.8 concept | Outbound rendering for `addressing_mode=…` |
-  |---|---|---|---|
+  | --- | --- | --- | --- |
   | DM channel (`isinstance(channel, discord.DMChannel)`) | `"dm"` | direct (1:1) | `discord.User.send(body)` — ephemeral DM reply |
   | Guild channel + bot mentioned (`bot.user in message.mentions`) | `"mention"` | direct (1:N with explicit addressee) | `channel.send(f"<@{user_id}> {body}")` — channel reply with `@user` prefix |
   | Guild channel, no mention, channel in adapter's listen-set | `"channel"` | default (group, addressee not explicit) | `channel.send(body)` — bare channel reply |

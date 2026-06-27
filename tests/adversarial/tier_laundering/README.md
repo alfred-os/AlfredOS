@@ -40,7 +40,7 @@ closes. The matrix is the contract between this category's threat model and the 
 graph — drift between the two is a release-blocker.
 
 | Attack vector | Owning PR / Task |
-|---|---|
+| --- | --- |
 | `cast(TaggedContent[T2], t3_value)` bypass | PR-S3-1 Tasks 22 + 25 (`tl_cast_bypass.yaml` + `test_tier_laundering_cast_bypass.py`) |
 | Wire-format tier confusion (JSON + YAML) | PR-S3-1 Task 23 (`tl_wire_tier_confusion.yaml`) |
 | `tag(T3, ...)` from orchestrator module context | PR #134 retrospective (`tl_tag_t3_from_orchestrator_module.yaml` + `test_tier_laundering_tag_t3_from_orchestrator_module.py`) — formalises the within-orchestrator forgery branch of the §3.2 nonce-gate threat model |

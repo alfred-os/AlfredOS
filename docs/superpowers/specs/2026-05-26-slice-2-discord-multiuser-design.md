@@ -80,7 +80,7 @@ The detailed analysis (alternatives, full consequences, references to PRD sectio
 ### Out of scope (committed to later slices)
 
 | Deferred capability | Lands in |
-|---|---|
+| --- | --- |
 | Verification-phrase identity binding (interactive first-DM handshake) | Slice 3+ |
 | Cross-platform binding (one-time code from an already-bound channel) | Slice 3+ |
 | Discord server channels, threads, slash commands, embeds | Slice 4 (alongside persona registry) |
@@ -128,7 +128,7 @@ A new `alfred discord` Typer subcommand boots `DiscordAdapter.start() → run()`
 **`alfred discord verify` exit codes (devex-001 + err-004):**
 
 | Exit | Meaning (structlog event in italics) | Setup-script treatment |
-|---|---|---|
+| --- | --- | --- |
 | 0 | `on_ready` fired; identity + intents printed (*discord.verify.ok*) | Continue install |
 | 1 | Unrecoverable upstream — gateway 5xx, repeated reconnect failure inside the 30s window (*discord.verify.upstream_unrecoverable*) | Soft warning; operator retries later |
 | 2 | Config — bad token, intents off in the developer portal, missing perms, secrets file unreadable (*discord.verify.config_failed*). Intents-off message embeds the `https://discord.com/developers/applications/<bot-id>/bot` URL so first-time operators know where to toggle | Hard fail with remediation |
@@ -187,7 +187,7 @@ ADR-0010 records both the notify channel name and the fallback: in deployments w
 - `SecretBroker.__init__` grows `secrets_file: Path | None` and `require_file: bool = False` kwargs. **Path resolution** follows a layered, explicit pipeline so host CLI and containerised services agree on intent without sharing a filesystem:
 
   | Layer | Setting | Resolves to | Used by |
-  |---|---|---|---|
+  | --- | --- | --- | --- |
   | Host default | `Settings.secrets_file` (Pydantic) | `Path.home() / ".config/alfred/secrets.toml"` | `alfred` CLI run on the host |
   | Container default | `ALFRED_SECRETS_FILE` env var set in `docker-compose.yaml` | `/etc/alfred/secrets.toml` | `alfred`, `discord-bot`, persona workers inside containers |
   | Bind-mount | `docker-compose.yaml` volumes: `~/.config/alfred/secrets.toml:/etc/alfred/secrets.toml:ro` | Same file, two paths | Maps host secrets into container read-only |
@@ -476,7 +476,7 @@ New `src/alfred/identity/rate_limit.py` defines a `RateLimiter` Protocol with `a
 Authorization defaults (revised from ai-001):
 
 | `authorization` | Messages/min | Day-cap default |
-|---|---|---|
+| --- | --- | --- |
 | `read_only` | 0 (refusal) | n/a |
 | `standard` | 30 | none (BudgetGuard owns the cost ceiling) |
 | `trusted` | 60 | none |
@@ -553,7 +553,7 @@ Adapter's `stop()` triggers `client.close()` and awaits pending sends; SIGTERM/S
 `client.start(token, reconnect=True)` is explicit — `discord.py`'s built-in reconnect handles transient gateway disconnects. The adapter classifies known `discord.py` exceptions:
 
 | Exception | Adapter action | User-visible | Audit |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `LoginFailure` | log ERROR, exit 2 | n/a (no gateway up) | adapter-startup row with `result=login_failed` |
 | `ConnectionClosed` (4xxx) | log WARN, library auto-reconnects | nothing | nothing |
 | `HTTPException` 5xx mid-send | log WARN, retry once, then drop chunk + audit | error message (`discord.alfred_error`) | row with `result=send_failed` |
@@ -564,7 +564,7 @@ Adapter's `stop()` triggers `client.close()` and awaits pending sends; SIGTERM/S
 ### Error semantics (mirror TUI, augmented for Discord)
 
 | Event | Audit `result` | User-visible outcome |
-|---|---|---|
+| --- | --- | --- |
 | Embed/attachment/sticker | `refused` (event=`discord.embed_refused`) | One polite refusal message |
 | Unknown Discord ID (first contact) | `refused` (event=`discord.unknown_user_dm`) | One polite refusal with snowflake echo + bind hint |
 | Unknown Discord ID (dedup-suppressed) | `suppressed` (event=`discord.unknown_user_dm_suppressed`) | No reply |
@@ -608,7 +608,7 @@ Adapter's `stop()` triggers `client.close()` and awaits pending sends; SIGTERM/S
 ### `User` ORM (full column list)
 
 | Column | Type | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `id` | int PK | autoincrement, surrogate for FK efficiency |
 | `slug` | str UNIQUE NOT NULL | canonical user_id, slug from name |
 | `display_name` | str NOT NULL | original `--name`, preserved with casing/spacing for persona prompt |
@@ -623,7 +623,7 @@ Adapter's `stop()` triggers `client.close()` and awaits pending sends; SIGTERM/S
 ### `PlatformIdentity` ORM
 
 | Column | Type | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `id` | int PK | |
 | `user_id` | int FK → `users.id` ON DELETE CASCADE | |
 | `platform` | enum NOT NULL CHECK | `tui` / `discord` (extends in Slice 4 for Telegram) |
@@ -827,7 +827,7 @@ PR E ships runnable scaffolding, not just a directory tree:
 ### ADRs needed
 
 | ADR | Title | Lands in |
-|---|---|---|
+| --- | --- | --- |
 | ADR-0013 | Defer T1+T3+dual-LLM to Slice 3; supersede ADR-0008's Slice-2 commitment | PR A commit 2 (placeholder body; full text in PR E) |
 | ADR-0009 | `CommsAdapter` Protocol as Slice-2-only in-process seam; PRD §5 invariant bounded; Slice 3 rewrites for MCP transport | PR A |
 | ADR-0010 | Canonical `user_id` as slug-from-name (not UUID); PostgreSQL `LISTEN/NOTIFY` for cross-process cache invalidation with bounded-TTL fallback | PR A |
@@ -841,7 +841,7 @@ PR E ships runnable scaffolding, not just a directory tree:
 > *Slice-3+ columns are expected, not committed. Definite commitments live in `docs/superpowers/plans/<slice>.md` files.*
 
 | Subsystem | Slice 1 (shipped) | Slice 2 (this slice) | Deferred to |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Trust tiers | T0 + T2 | unchanged at runtime; `TaggedContent[T2]` becomes the orchestrator contract | Slice 3 (+T1 +T3 + dual-LLM, per ADR-0013) |
 | Comms adapters | TUI in-process | TUI + Discord (DM-only), both behind in-process `CommsAdapter` Protocol; embeds/attachments refused | Slice 3 (MCP transport — rewrites Protocol shape) · Slice 4 (Telegram, server channels) |
 | Identity | hardcoded `operator` | `User` + `PlatformIdentity` tables, `alfred user *` CLI, operator pre-map, `LISTEN/NOTIFY` cross-process | Slice 3 (verification phrase, cross-platform binding) |
@@ -860,7 +860,7 @@ PR E ships runnable scaffolding, not just a directory tree:
 PR D is split (per architect-006 / devops-004 / alfred-reviewer-002). The new `discord.py` dependency, the second new security-boundary module, and the compose change all land separately from the comms-Protocol extraction so each PR is reviewable in one pass and the 100%-coverage gate on `src/alfred/security/dlp.py` is enforced in isolation.
 
 | PR | Scope | Key gates |
-|---|---|---|
+| --- | --- | --- |
 | **A** | Step 0 (ContextVar refactor); ADR-0009 + ADR-0010 **bodies** plus ADR-0011 + ADR-0012 + ADR-0013 **placeholders** (architect-004); identity layer: `users` + `platform_identities` migration 0004 + ORMs + `IdentityResolver` (incl. `OperatorAlreadyExistsError` upper-bound guard, architect-001) + `IdentityVersionCounter` + `LISTEN/NOTIFY` plumbing + listener reconnect-with-backoff (err-001) + `alfred user *` CLI subcommands (incl. `--replace-operator`, `--output-slug`) + i18n catalog entries (cli.user.*) + drive-by fix for `cli/main.py:54` `t()` leak. Tests for the identity layer + migration backfill (extended scenarios — te-001). **Plumbing only — no Discord, no DLP, no compose.** | smoke test passes against canonical-slug user; migration 0004 idempotent + atomic; ContextVar isolation test green; listener reconnect test green |
 | **B** | `BudgetGuard` per-user refactor (typed `UnknownBudgetUserError`, `evict`, version-counter subscribe, NaN guards); `WorkingMemoryPool` in `src/alfred/memory/working.py` with `(persona, user_id)` key + per-key locks + acquire/release lifecycle; orchestrator contract change (`handle_user_message(*, user, content, working_memory)` accepting `TaggedContent[T2]`); persona-prompt rewording with `operator_name` + `requesting_user_name`; `render_persona_prompt(persona=…)` refactor; `episodic.record` + `audit.append` per-row `language` + `persona_id`. Slice-1 TUI continues working unchanged through `IdentityResolver.get_operator()`. **Atomic 18-call-site signature migration** is the default; **architect decides at plan time** whether to split, based on the criteria below. | TUI smoke test still passes; orchestrator audit branches each produce the spec'd `result` value; `WorkingMemoryPool` concurrent-rehydrate property test green |
 
@@ -915,7 +915,7 @@ Findings from the `/review-plan` pass on the 3142bf2 brainstorm were applied as 
 ### Criticals applied to spec body
 
 | Finding | Where | What changed |
-|---|---|---|
+| --- | --- | --- |
 | core-001 / i18n-001 / err-006 (T1) | §0.1 | ContextVar refactor promoted to Slice-2 prerequisite step in PR A commit 1. |
 | architect-002 / docs-001 (T2) | §0.2, §5 ADR table | ADR-0013 added; supersedes ADR-0008's Slice-2 commitment; lands as PR-A commit 2. |
 | architect-001 / docs-002 / sec-007 (T4) | §3 Trust tagging subsection, §3 Error semantics table, §5 unit tests | Embeds/attachments/stickers refused with audit + i18n key; `TaggedContent[T2]` in orchestrator contract. |
@@ -926,7 +926,7 @@ Findings from the `/review-plan` pass on the 3142bf2 brainstorm were applied as 
 ### Highs applied to spec body
 
 | Finding | Where | What changed |
-|---|---|---|
+| --- | --- | --- |
 | architect-004 / mem-007 / alfred-persona-engineer-004 (T8) | §2 migration 0004, §3 pool, §5 graduation | `episodes.persona_id` + `audit_log.persona_id` land in migration 0004; pool key is `(persona, user_id)` from day 1. |
 | architect-005 / comms-001 / comms-004 / comms-006 (T11) | §2 Protocol shape, §3 failure-modes table | Protocol grows `start/run/stop/health` + `AdapterHealth`; `client_factory` injection; reconnect policy table; `RateLimiter` async Protocol. ADR-0009 admits Slice-3 rewrites the Protocol shape. |
 | sec-001 / ai-002 (T5) | §3 OutboundDlp | Generic-API-key regex stage added; two-stage pluggable structure for Slice-3 swap; canary stub regression test. |
@@ -968,7 +968,7 @@ Findings from the `/review-plan` pass on the 3142bf2 brainstorm were applied as 
 ### Mediums applied or punched
 
 | Finding | Disposition |
-|---|---|
+| --- | --- |
 | docs-003 | §2 ADR-0009 explicitly admits PRD §5 deviation; architect amends PRD §6.1 in PR A. |
 | docs-005 | §5 graduation map prefixed with "Slice-3+ columns are expected, not committed." |
 | devex-003 | §4 `user list` columns + sort + empty-state spelled out; golden-output unit test. |
@@ -996,7 +996,7 @@ Most Lows fold into spec body without ceremony (CLI exit codes, intent decision 
 Second-pass review against the revised spec returned 0 Critical / 9 High / ~14 Medium / ~6 Low. None blocking. Highs and applicable Mediums folded in below.
 
 | Finding | Section | What changed |
-|---|---|---|
+| --- | --- | --- |
 | err-001 (H) | §2 cross-process | Listener wrapped in exponential-backoff supervisor (1s→60s cap); 60s TTL backstop runs concurrently; reconnect test stub added. |
 | perf-001 + perf-002 (H + M) | §3 WMP | NOTIFY-receipt recomputes the auto-formula cap in `alfred-discord`; explicit precedence: operator override wins, auto-formula only when unset. |
 | sec-001 (H) | §3 trust-tagging + `_handle` + §5 surface test | Denylist → **allowlist**: parse `msg.content` only; assert `msg.poll`/`.components`/`.activity`/`.application` etc. are empty/None; surface test pins every allowlist field. |

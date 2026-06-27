@@ -29,7 +29,7 @@ These are five separate decisions; they are bundled in this ADR because they shi
 The AlfredOS Python toolchain is:
 
 | Concern | Tool | Replaces |
-|---|---|---|
+| --- | --- | --- |
 | Package manager | `uv` | (unchanged from PRD) |
 | Build backend | `hatchling` | (unchanged) |
 | Formatter | **`ruff format`** | `black` (dropped) |

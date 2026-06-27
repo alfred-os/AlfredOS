@@ -151,7 +151,7 @@ This PR closes the Slice-4 documentation loop. Its three distinct jobs:
 written.** The table records what exists so implementers know what to update vs create.
 
 | Surface | Status at plan-write time | Action |
-|---|---|---|
+| --- | --- | --- |
 | `docs/subsystems/security.md` | EXISTS — Slice-3 deep-doc | Update: add Slice-4 section |
 | `docs/subsystems/comms.md` | EXISTS — Slice-2 deep-doc | Update: add comms-MCP rewrite section |
 | `docs/subsystems/supervisor.md` | EXISTS — Slice-3 deep-doc | Update: add Slice-4 daemon + plugin-restart section |
@@ -181,7 +181,7 @@ what is *actually there*.
 ## §3 File structure
 
 | File | Action |
-|---|---|
+| --- | --- |
 | `docs/subsystems/security.md` | Modify — append Slice-4 section |
 | `docs/subsystems/comms.md` | Modify — rewrite for comms-MCP shape |
 | `docs/subsystems/supervisor.md` | Modify — append Slice-4 daemon + plugin-restart section |
@@ -803,7 +803,7 @@ what is *actually there*.
   6. Extend the `## Failure modes` table with Slice-4 daemon boot failures:
 
      | Trigger | Behaviour | Observable signal |
-     |---|---|---|
+     | --- | --- | --- |
      | `Settings.environment` unset or unrecognised | Boot refused before TaskGroup opens | `daemon.boot.failed(failure_reason="environment_not_set")` |
      | `ALFRED_PLUGIN_LAUNCHER_UNSANDBOXED=1` in production | Boot refused | `daemon.boot.failed(failure_reason="unsandboxed_env_in_production")` |
      | Launcher policy-resolving probe fails | Boot refused | `daemon.boot.failed(failure_reason="launcher_not_policy_resolving")` |
@@ -866,7 +866,7 @@ what is *actually there*.
      **Failure modes table:**
 
      | Trigger | Behaviour | Observable signal |
-     |---|---|---|
+     | --- | --- | --- |
      | File vanishes mid-poll | Active snapshot unchanged; watcher continues | `CONFIG_RELOAD_REJECTED_FIELDS(reason="file_vanished")` |
      | `os.stat()` raises | Watcher continues; alert on 3 consecutive failures | `CONFIG_RELOAD_REJECTED_FIELDS(reason="stat_failed")` |
      | 3+ consecutive stat failures | Watcher degrades; poll frequency 10× configured | `supervisor.config_watcher.degraded` hookpoint; audit row |
@@ -1037,7 +1037,7 @@ what is *actually there*.
      Table of common issues → diagnostic command → fix:
 
      | Symptom | Diagnostic | Fix |
-     |---|---|---|
+     | --- | --- | --- |
      | `sandbox_refused` in audit log | `alfred audit log --event supervisor.plugin.sandbox_refused` | Check `sandbox.kind` in plugin manifest; confirm policy file exists |
      | `config_reload_rejected(reason=high_blast_change)` | `alfred audit log --event supervisor.config_reload_rejected` | Change only via reviewer-gate + daemon restart |
      | `operator.session.refused` | `alfred whoami` | Re-run `alfred login --as <user>` |
@@ -1052,7 +1052,7 @@ what is *actually there*.
      Per-PR-revertable matrix (matches spec §5 rollback strategy):
 
      | PR | What reverts | Side effect |
-     |---|---|---|
+     | --- | --- | --- |
      | PR-S4-1 | `alfred daemon start` CLI; daemon boot audit rows | Daemon can no longer be started via CLI; must start Supervisor manually |
      | PR-S4-4 | `PolicyWatcher` hot-reload | Config changes require daemon restart |
      | PR-S4-5 | `alfred login/logout/whoami`; all operator sessions revoked | Operators re-login after revert |
@@ -1333,7 +1333,7 @@ what is *actually there*.
      (`Check name | Workflow | Job key | Active since | Rationale`):
 
      | Check name | Workflow | Job key | Active since | Rationale |
-     |---|---|---|---|---|
+     | --- | --- | --- | --- | --- |
      | `test_error_chain_substitution_propagates` | `.github/workflows/ci.yml` | `integration` | 2026-06-07 | Carrier-substitution tier-guard correctness is a security boundary; merge-blocking enforces it. |
      | `test_hot_reload_high_blast_refusal` | `.github/workflows/ci.yml` | `integration` | 2026-06-07 | High-blast key refusal is a security invariant — a policy bug could swap the quarantined provider URL mid-flight. |
      | `test_operator_session_lifecycle` | `.github/workflows/ci.yml` | `integration` | 2026-06-07 | Session TOCTOU-safe load and machine-id binding are security boundaries. |
@@ -1553,7 +1553,7 @@ These are the 12 criteria from spec §14. Task 14 verifies each; this checklist 
 PR description reference.
 
 | # | Criterion | Verified by |
-|---|---|---|
+| --- | --- | --- |
 | 1 | All 12 PRs (S4-0a through S4-10) merged to `main` | `git log --oneline main` |
 | 2 | 2 anchor integration tests green on merge-base CI | GH Actions; Task 14 step 2 |
 | 3 | Adversarial suite passes | `uv run pytest tests/adversarial` |
@@ -1591,7 +1591,7 @@ PR-S4-11 consumes the following surfaces defined in prior PRs. Each must exist a
 before the corresponding task runs:
 
 | Surface | Defined in | Used in task |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/policies/watcher.py` (`PolicyWatcher`) | PR-S4-4 | Tasks 1, 7 |
 | `src/alfred/policies/models.py` (`PoliciesV1`, `HighBlastPolicies`) | PR-S4-4 | Tasks 1, 7 |
 | `src/alfred/policies/snapshot_ref.py` (`PoliciesSnapshotRef`) | PR-S4-4 | Tasks 1, 7 |

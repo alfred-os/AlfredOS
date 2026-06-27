@@ -33,7 +33,7 @@ After this PR:
 ## §2 File structure (revised)
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/cli/supervisor.py` | Modify | Delete `_get_supervisor()`. Rewrite `_list_breaker_states()` body (sync SQLAlchemy read). Rewrite `supervisor_reset` body: keep `--confirm` gate + forensic-attempt audit row; remove the `_get_supervisor`/`asyncio.run`/lazy-import blocks; print the deferred hint; exit 1. Drop now-unused error-handling arms in `supervisor_status`. |
 | `locale/en/LC_MESSAGES/alfred.po` | Modify | Add `cli.supervisor.status.postgres_unavailable`, `cli.supervisor.status.no_components_yet`, `cli.supervisor.reset.deferred_to_issue_171`. Tombstone deprecated keys. |
 | `tests/unit/cli/test_supervisor_status.py` | Modify | Replace `NotImplementedError`-asserting tests with new sync-Postgres-read tests. |

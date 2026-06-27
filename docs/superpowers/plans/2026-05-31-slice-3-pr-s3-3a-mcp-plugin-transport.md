@@ -73,7 +73,7 @@ The `inbound_t3_nonce` is a constructor parameter on `StdioTransport` (not a mod
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/plugins/__init__.py` | Create | Package marker; re-exports `PluginTransport`, `StdioTransport`, `AlfredPluginSession`, `DispatchResult`, `ContentHandle` |
 | `src/alfred/plugins/transport.py` | Create | `PluginTransport` Protocol, `ControlResult` BaseModel, `DispatchResult` discriminated union |
 | `src/alfred/plugins/stdio_transport.py` | Create | `StdioTransport`: outbound DLP, secret-broker substitution, subprocess write/read, `InboundContentScanner`, `tag(T3)`, content store write, return `ContentHandle` |
@@ -2256,7 +2256,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
 ## §5 Spec Coverage Map
 
 | Spec section | Implementing task(s) |
-|---|---|
+| --- | --- |
 | §4.1 `PluginTransport` Protocol + `DispatchResult` plain union (core-011 fix) | Task 2 |
 | §4.2 `StdioTransport` implementation + `AlfredPluginSession` | Tasks 6, 8 |
 | §4.3 Manifest schema: `manifest_version=1` pin, `subscriber_tier != T3`, `[plugin] platform` reserved; dedicated `plugin.manifest_subscriber_tier_invalid` i18n key (arch-007 fix) | Task 3 |
@@ -2283,7 +2283,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
 ### Findings applied in this fixup (plan-review pass 3)
 
 | Finding | Severity | Fix location |
-|---|---|---|
+| --- | --- | --- |
 | arch-001 / sec-010 | Critical | Task 6 dispatch(): DLP scans placeholder frame; substitution after |
 | sec-001 / core-006 | Critical | Task 6 dispatch(): DispatchResult union — ControlResult for control-plane, ContentHandle for content |
 | rvw-001 (Cluster 4) | Critical | Tasks 6, 8: all audit emits rewritten to `await append_schema(fields, **kwargs)` |
@@ -2307,7 +2307,7 @@ Tasks follow TDD: write failing test → confirm FAIL → implement → confirm 
 ### Findings skipped
 
 | Finding | Reason |
-|---|---|
+| --- | --- |
 | sec-005 | PR-S3-1 scope (sys._getframe in tiers.py) — not in PR-S3-3a |
 | sec-007 | PR-S3-4 scope (fd-3 reader in quarantine plugin subprocess) — not in PR-S3-3a |
 | sec-004 | Production canary registry wiring deferred to PR-S3-2/bootstrap task — InboundContentScanner API is correct; wiring is a bootstrap concern |

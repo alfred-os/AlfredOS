@@ -62,7 +62,7 @@ The critical path through dependencies is seven PRs deep: `0a → 0b → 5 → 8
 Slice 3 established that `OutboundDlp.scan` runs at the transport boundary, not in-handler. Slice 4 extends this discipline to three new wire surfaces. Each wire emits **two disjoint audit-row classes** — a *redaction-on-success* row (DLP found nothing or redacted patterns; the write proceeds) and a *refusal* row (DLP refuses the write entirely; the underlying operation aborts). This split closes the rev-002 / arch-004 / sec-005 finding that the original spec conflated the two outcomes.
 
 | Wire | DLP application | Success row (always emitted) | Refusal row (refusal aborts write) |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `processed_proposals.failure_detail` write (PR-S4-2) | Scan failure detail string before truncating to 512 chars | `PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS` (carries `dlp_redactions_count`; ≥0) | `DLP_OUTBOUND_REFUSED_FIELDS` (Slice-3 constant; reused — canary hit aborts write) |
 | `comms-MCP outbound.message` (PR-S4-9 wire) | Scan outbound body + attachment metadata before serialising to JSON-RPC | (host-side existing `OUTBOUND_REDACTED_FIELDS` Slice-3 reused) | `DLP_OUTBOUND_REFUSED_FIELDS` |
 | `operator.session.created` audit row (PR-S4-5) | Scan platform identifier fields (Discord snowflake / Telegram chat_id) before write | `OPERATOR_SESSION_CREATED_FIELDS` (DLP-clean assumption; auditor refuses write on redaction) | `DLP_OUTBOUND_REFUSED_FIELDS` |
@@ -422,7 +422,7 @@ The `_capability_heartbeat_loop` (`src/alfred/supervisor/core.py:317`) is **not*
 ### 5.6 Audit row families
 
 | Constant | Fields |
-|---|---|
+| --- | --- |
 | `CONFIG_RELOAD_FIELDS` | `file_path`, `prev_sha256`, `new_sha256`, `changed_keys` (list of dotted key paths), `loaded_at` |
 | `CONFIG_RELOAD_REJECTED_FIELDS` | `file_path`, `attempted_sha256`, `reason` (`parse_failure` \| `high_blast_change` \| `validation_failure`), `offending_key` (no value — value omitted to avoid secret leak), `dlp_scan_result` |
 
@@ -519,7 +519,7 @@ The resolver does not cache — every CLI command call hits Postgres — because
 ### 6.6 Audit row family
 
 | Constant | Fields |
-|---|---|
+| --- | --- |
 | `OPERATOR_SESSION_CREATED_FIELDS` | `user_id`, `issued_at`, `expires_at`, `host`, `machine_id_hash` (HMAC-SHA256, see §8.10), `via` (`Literal["login", "refresh"]`) |
 | `OPERATOR_SESSION_REVOKED_FIELDS` | `user_id`, `revoked_at`, `via` (`Literal["logout", "admin_revoke", "expiry"]`) |
 | `OPERATOR_SESSION_REFUSED_FIELDS` | `attempted_user_id`, `reason` (`Literal["expired", "host_mismatch", "machine_mismatch", "token_unknown", "user_revoked"]`), `host`, `machine_id_hash` |
@@ -721,7 +721,7 @@ PR-S4-0a lands this amendment. **PRD edits are human-gated** per CLAUDE.md self-
 ### 7.11 Audit row family
 
 | Constant | Fields |
-|---|---|
+| --- | --- |
 | `SANDBOX_REFUSED_FIELDS` | `plugin_id`, `policy_ref`, `host_os`, `reason` (one of: `policy_ref_missing` \| `policy_ref_os_mismatch` \| `policy_ref_unreadable` \| `sandbox_block_missing` \| `windows_stub_in_production` \| `unsandboxed_env_set_in_production`), `environment` |
 | `SANDBOX_STUB_USED_FIELDS` | `plugin_id`, `policy_ref`, `host_os`, `environment` (must be `development`) |
 
@@ -746,7 +746,7 @@ ADR-0024 defines the comms-MCP wire contract. Eight wire methods.
 **Host → plugin (JSON-RPC request, response expected):**
 
 | Method | Params | Result |
-|---|---|---|
+| --- | --- | --- |
 | `lifecycle.start` | `LifecycleStartRequest(adapter_id, credentials_ref, policies_snapshot_hash)` | `LifecycleStartResult(ok, plugin_version)` |
 | `lifecycle.stop` | `LifecycleStopRequest(adapter_id, reason)` | `LifecycleStopResult(ok, flushed_messages)` |
 | `adapter.health` | `AdapterHealthRequest(adapter_id)` | `HealthReport(ok, last_inbound_at, queue_depth, error_count)` |
@@ -783,7 +783,7 @@ The discriminated union forecloses field-coupling bugs (no `platform_message_id`
 `addressing_mode` carries the four wire `Literal` values that map onto PRD §6.8's three addressing concepts (comms-012 round-3 closure — explicit mapping table):
 
 | Wire `Literal` value | PRD §6.8 addressing concept | Discord rendering | TUI rendering |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `dm` | direct (1:1) | bot DM channel | TUI direct line |
 | `mention` | direct (1:N with explicit addressee) | guild channel with `@bot` | not used (TUI is 1:1 by shape) |
 | `channel` | default (group, addressee not explicit) | configured guild channel | not used |
@@ -794,7 +794,7 @@ PR-S4-9's routing rule in the Discord adapter: `dm` → ephemeral DM reply; `men
 **Plugin → host (JSON-RPC notification, no response):**
 
 | Method | Params |
-|---|---|
+| --- | --- |
 | `inbound.message` | `InboundMessageNotification(adapter_id, platform_user_id, body, sub_payload_refs, received_at, addressing_signal: Literal["dm","mention","channel","thread"])` |
 | `adapter.binding_request` | `BindingRequestNotification(adapter_id, platform_user_id, verification_phrase, platform_metadata)` |
 | `adapter.rate_limit_signal` | `RateLimitSignal(adapter_id, retry_after_seconds, platform_endpoint)` |
@@ -1009,7 +1009,7 @@ comms_mcp:
 The host's `REQUIRED_CLASSIFIERS_BY_KIND` table is owned in `src/alfred/comms_mcp/classifier_registry.py`:
 
 | Adapter kind | Required classifier set |
-|---|---|
+| --- | --- |
 | `discord` | `discord_sub_payloads` (embeds, attachments, polls, stickers, voice messages, message components, forwarded-message references, pinned-message references, link unfurls) |
 | `tui` | (empty — plain-text plugin) |
 | `telegram` (post-MVP) | `telegram_sub_payloads` (entities, attachments, forwards, polls) |
@@ -1090,7 +1090,7 @@ The deletion covers:
 The PR-S4-10 deletion has documented breakage scope. Every known consumer of the in-process Protocol gets migrated atomically in the PR (comms-006 closure):
 
 | Consumer file | Migration shape |
-|---|---|
+| --- | --- |
 | `tests/smoke/test_discord_gateway_smoke.py` (Slice-2-shipped — comms-009-r4 / rev-011 round-4 closure: round-2 named `test_discord_round_trip.py` which does not exist; the real file is `test_discord_gateway_smoke.py`) | Rewritten against MCP-plugin Discord; assertions stay |
 | `tests/smoke/test_tui_e2e.py` (Slice-1-shipped) | Rewritten to spawn `plugins/alfred_tui/` via the launcher; assertions stay |
 | `tests/smoke/test_slice4_graduation.py` (new; PR-S4-10 — see §14 criterion 7) | Compose-up + login + chat round-trip — covers the TUI plugin path |
@@ -1122,7 +1122,7 @@ Issue #152 closes via PR-S4-8's new `tests/integration/test_comms_mcp_identity_b
 ### 8.10 Audit row family
 
 | Constant | Fields |
-|---|---|
+| --- | --- |
 | `COMMS_INBOUND_T3_PROMOTION_FIELDS` | `adapter_id`, `inbound_message_id` (uuid), `platform_user_id_hash`, `canonical_user_id`, `sub_payload_kinds` (frozenset of `Literal["embed","attachment","poll","link_unfurl","sticker","voice_message","component","forwarded_ref","pinned_ref"]`), `language`, `addressing_signal` |
 | `COMMS_BINDING_REQUESTED_FIELDS` | `adapter_id`, `platform_user_id_hash`, `verification_phrase_hash`, `requested_at` |
 | `COMMS_ADAPTER_CRASHED_FIELDS` | `adapter_id`, `error_class`, `detail_redacted` (post-DLP), `crashed_at` |
@@ -1161,7 +1161,7 @@ A Slice-5 broker-hardening backlog item adds a custom-named accessor `secret_bro
 PR-S4-0a adds these `Final` frozenset constants to `src/alfred/audit/audit_row_schemas.py`. Each constant's field list is exhaustive; downstream PRs may not extend or shrink.
 
 | Constant | Fields | Defined in §, consumed in PR |
-|---|---|---|
+| --- | --- | --- |
 | `DAEMON_BOOT_FIELDS` | `boot_id`, `started_at`, `state_git_head_sha`, `slice_version`, `policies_snapshot_hash`, `environment` | §3.2 / PR-S4-1 |
 | `DAEMON_BOOT_FAILED_FIELDS` | `boot_id`, `attempted_at`, `failure_reason`, `environment_source` | §3.2, §3.4 / PR-S4-1 |
 | `DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS` | `boot_id`, `env_var_value`, `etc_file_value`, `resolved_value` | §7.3 / PR-S4-1 |
@@ -1197,7 +1197,7 @@ PR-S4-0a's test for the constants asserts every field name in every constant is 
 **Each hookpoint is registered by the PR named in its row's "Declared in PR" column** (arch-007 / rev-010 round-4 closure — the single source of truth is the table; the prose below the table reinforces it). PR-S4-0a does **not** register hookpoints; its scope is `audit_row_schemas.py` constants + `payload_schema.py` Literals. Each hookpoint declares its subscribable tiers exhaustively.
 
 | Hookpoint | Declared in PR | `subscribable_tiers` | `fail_closed` | `carrier_tier` |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `daemon.boot.completed` | PR-S4-1 | `SYSTEM_OPERATOR_TIERS` | `True` | `T0` |
 | `daemon.boot.failed` | PR-S4-1 | `SYSTEM_OPERATOR_TIERS` | `True` | `T0` |
 | `proposal.dispatch.failed` | PR-S4-1 | `SYSTEM_ONLY_TIERS` | `True` | `T0` |
@@ -1326,7 +1326,7 @@ The §14 §2 merge-blocking gates are joined by these new integration tests land
 ### 12.1 Alembic migrations 0011 – 0014
 
 | Migration | Adds | PR |
-|---|---|---|
+| --- | --- | --- |
 | `0011_operator_sessions` | `operator_sessions` table — `(user_id, token_hash, issued_at, expires_at, host, machine_id_hash, revoked_at)` indexed `(user_id, expires_at)` | PR-S4-0b |
 | `0012_policies_snapshot_history` | `policies_snapshot_history` table — `(snapshot_id, loaded_at, file_sha256, policies_json, swapped_from_snapshot_id)` optional rollback log | PR-S4-0b |
 | `0013_audit_columns_slice_4` | Adds new audit columns referenced by `audit_row_schemas.py` Slice-4 constants if not already present | PR-S4-0b |
@@ -1415,7 +1415,7 @@ CI runs `pybabel extract` + `pybabel compile --check`; catalog drift fails the b
 The full per-PR ordering, dependency table, and per-PR contracts live in the slice-index plan document (`docs/superpowers/plans/2026-06-06-slice-4-index.md`, authored after this spec is reviewed). The summary below sketches each PR's owned scope.
 
 | PR | Slug | What it owns |
-|---|---|---|
+| --- | --- | --- |
 | PR-S4-0a | docs-adrs-foundations | ADR-0022/0023/0024 full bodies; **ADR-0015/0016 stay Proposed** (status flips to Accepted are deferred to PR-S4-11 per the slice-3 precedent that status mirrors implementation reality — arch-003 closure); ADR-0009 caveat narrowing scheduled in PR-S4-10 (no PR-S4-0a touch — docs-001 closure); PRD §5 line 117 amendment (human-gated per rev-003); `audit_row_schemas.py` Slice-4 constants; `payload_schema.py` Slice-4 Literal additions PLUS `_PREFIX_TO_CATEGORY` and `_ID_PATTERN` extensions (Critical 7 / test-006 — preserve `prefix-YYYY-NNN` format); `docs/glossary.md` Slice-4 additions (full list in §13.1 below — docs-003). **NOTE**: `HookpointMeta.carrier_tier` + `HookpointMeta.allow_error_substitution` fields are explicitly *not* part of PR-S4-0a — those are runtime-type changes belonging to PR-S4-3 where they are consumed (rev-007 closure). |
 | PR-S4-0b | migrations-infra-i18n | Alembic 0011–0014; SQLAlchemy models; i18n catalog additions (full enumeration in §12.2 — i18n-002); **`Dockerfile` for `alfred-core` service** with `bubblewrap` apt-installed in the base (`docker-compose.yaml` flips from `image:` to `build:` for that service) — ops-001; `bin/alfred-setup.sh` updates (the spec previously referenced `bin/dev-setup.sh`; canonical name is `bin/alfred-setup.sh` per the existing file — ops-005). Sets `bin/alfred-setup.sh` to a real script if currently stub; CLAUDE.md command-table update for the canonical script-name follows in PR-S4-11. |
 | PR-S4-1 | daemon-boot-dispatch | `alfred daemon start/stop/status` subcommands; `Supervisor(state_git_path=…)` construction with the §3.1 kwarg shape; pre-TaskGroup probe orchestration (launcher / snapshot-ref / cap-gate); `daemon.boot.*` audit rows; smoke test. Launcher probe is a stub here (real check lands in PR-S4-6 — arch-001). |
@@ -1537,7 +1537,7 @@ These are flagged for the `/review-pr` panel and any reviewer with relevant subs
 ## 16. ADR mappings
 
 | ADR | Title | Slice-4 disposition |
-|---|---|---|
+| --- | --- | --- |
 | [ADR-0008](../../adr/0008-llm-output-trust-tier.md) | LLM output trust tier | Already superseded by ADR-0017 (Slice-3); no Slice-4 change |
 | [ADR-0009](../../adr/0009-comms-adapter-protocol-slice2-only.md) | CommsAdapter Protocol | Already reads "Superseded by ADR-0016 (for new adapters)" since 2026-05-27 — not a Slice-4 status flip; PR-S4-10 narrows the caveat to remove "for new adapters" once in-process adapters are deleted (docs-001) |
 | [ADR-0014](../../adr/0014-pluggable-hooks-for-every-action.md) | Pluggable hooks for every action | Load-bearing precedent; Slice-4 adds carrier-substitution semantic in ADR-0022 |

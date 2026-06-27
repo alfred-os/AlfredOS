@@ -13,7 +13,7 @@
 ## G3-3b-2 sub-epic decomposition
 
 | PR | Scope | Trust-boundary? |
-|----|-------|-----------------|
+| --- | --- | --- |
 | **G3-3b-2a** | The **opaque relay engine**: the codec-level opaque-payload transport seam (`read_payload_unit`/`send_payload_unit` on `CommsSocketTransport`); a `GatewayCoreLink` extension so its pump reads RAW units + routes (lifecycle→consume, payload→a relay sink) instead of dropping; the `GatewayRelay` (`src/alfred/gateway/relay.py`) — two pumped directions sharing a core-leg holder, per-leg bounded `BoundedSeqAckTracker` supplying the real `cumulative_ack()`, no buffering; the **non-root in-process wire-contract test** (#245 paper-gate hazard) + the **payload-blindness canary test** (spec §6 corpus (a)). Tested in-process with fake core + client transports. NO process/CLI yet. | Yes — T1 carrier wire-trust. |
 | **G3-3b-2b** | The **runnable process**: the client-leg HOST handshake (gateway → TUI `lifecycle.start`, `adapter_id="tui"`); `GatewayProcess` (`src/alfred/gateway/process.py`) — bind the client listener, accept the TUI, run the client handshake, wire `GatewayCoreLink` + `GatewayRelay`, supervise in an `asyncio.TaskGroup` with a shared `shutdown_event`, reap every transport + the listener on every exit; the `gateway_peer_auth_rejected_total` metric (wire the client listener's `on_peer_rejected`); the `alfred gateway` CLI (`src/alfred/cli/gateway/`) + `src/alfred/gateway/__main__.py`. | Yes — always-up T1 carrier. |
 

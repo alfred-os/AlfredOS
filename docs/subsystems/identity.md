@@ -219,7 +219,7 @@ current live operator (or `<bootstrap>` for the very first
 operator-add).
 
 | Subcommand | Resolver method | What it does |
-|---|---|---|
+| --- | --- | --- |
 | `add` | `add` | Create a new user. Defaults: `daily_budget_usd = 5.0`, `language = "en-US"`. Operator-bootstrap is the first invocation. |
 | `list` | `list_` | Print all live users (`--include-deleted` for history). |
 | `show <slug>` | `show` | Print one user row (live or soft-deleted). |
@@ -268,7 +268,7 @@ traceback. CLAUDE.md hard rule #7 forbids swallowing security-path
 exceptions silently; the catch surface is intentionally narrow.
 
 | Exception | CLI exit | Surface | Remediation |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `OperatorAlreadyExistsError` | 2 | `cli.user.error.operator_already_exists` | Re-run with `--replace-operator <existing>` |
 | `LastOperatorRemovalRefusedError` | 2 | `cli.user.error.last_operator_removal` | Promote another user to operator first |
 | `PlatformIdInUseError` | 2 | `cli.user.error.platform_id_in_use` | `alfred user unbind <existing_slug> --platform <p>` first |

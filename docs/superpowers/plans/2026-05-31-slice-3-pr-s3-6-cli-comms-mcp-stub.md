@@ -63,7 +63,7 @@ ADR-0009's status flip (spec §9.4, §15.2) lands in **PR-S3-0a**, not here. Tas
 ## §3 File structure
 
 | File | Action | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/cli/plugin.py` | Create | `alfred plugin {grant, grant_status, grant_list, list, show, revoke}` sub-app |
 | `src/alfred/cli/web.py` | Create | `alfred web allowlist {add, remove, list}` sub-app |
 | `src/alfred/cli/config.py` | Create | `alfred config {set, get, list}` sub-app |
@@ -2692,7 +2692,7 @@ ADR-0009's status flip (spec §9.4, §15.2) lands in **PR-S3-0a**, not here. Tas
 ## §5 Spec Coverage Map
 
 | Spec section | What it requires | Tasks | Finding fixes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | §9.1 — `CommsAdapterMCP` Protocol stub + 4 methods | Wire shape; `@runtime_checkable`; `InboundMessage` (with `platform` field) + `AdapterHealthResponse`; `WIRE_METHOD_NAMES` constant | 14, 15 | comms-001, comms-002, comms-009 |
 | §9.1 — Reference test plugin; plugin→host `inbound.message` direction | `plugins/alfred-comms-test/` using literal JSON-RPC handlers (not tools/call); lifecycle.start emits notification to host | 16, 17 | comms-002, comms-003, comms-007, comms-008 |
 | §9.1 — In-process identity boundary | Identity resolves in host; canonical user_id never sent to plugin | 17c | comms-006 |
@@ -2833,11 +2833,11 @@ Glossary ownership: per the [PR-S3-7 plan](./2026-05-31-slice-3-pr-s3-7-docs-glo
 
 ### §8.9 Test-filename rename map (plan §3 vs as-shipped)
 
-| Plan name (§3 table)                                 | As-shipped name                                                       |
-|---|---|
-| `tests/unit/cli/test_plugin_grant_async_ux.py`       | `tests/unit/cli/test_plugin_cli.py` + `test_plugin_grant_audit_wiring.py` |
-| `tests/unit/cli/test_web_allowlist.py`               | `tests/unit/cli/test_web_cli.py`                                      |
-| `tests/unit/cli/test_config_commands.py`             | `tests/unit/cli/test_config_cli.py`                                   |
+| Plan name (§3 table) | As-shipped name |
+| --- | --- |
+| `tests/unit/cli/test_plugin_grant_async_ux.py` | `tests/unit/cli/test_plugin_cli.py` + `test_plugin_grant_audit_wiring.py` |
+| `tests/unit/cli/test_web_allowlist.py` | `tests/unit/cli/test_web_cli.py` |
+| `tests/unit/cli/test_config_commands.py` | `tests/unit/cli/test_config_cli.py` |
 
 All other plan §3 test filenames shipped as-named. Rename rationale: aligning with the existing `test_<module>_cli.py` convention in `tests/unit/cli/` (e.g. `test_audit_graph_tier_swimlanes.py`, `test_supervisor_reset_confirm.py`) keeps the test-discovery order predictable and matches the CLI sub-app structure 1:1.
 

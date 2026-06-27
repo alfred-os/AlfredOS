@@ -166,7 +166,7 @@ If a future corpus shape emerges for "host defect surface area", we'd file an ad
 ## 7. Files affected
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/plugins/web_fetch/dispatch_params.py` | Create | `WebFetchDispatchParams` Pydantic v2 model |
 | `src/alfred/plugins/web_fetch/fetch_dispatcher.py` | Modify | Construct + validate before `transport.dispatch`; emit audit row on `ValidationError` |
 | `src/alfred/audit/audit_row_schemas.py` | Modify | Add `"dispatch_param_invalid"` to `DlpScanResult` Literal |

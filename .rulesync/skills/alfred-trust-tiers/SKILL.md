@@ -16,7 +16,7 @@ AlfredOS classifies every piece of content by trust tier. The classification gat
 ## The four tiers
 
 | Tier | Source | Examples |
-|---|---|---|
+| --- | --- | --- |
 | T0 system | AlfredOS itself | Code in `src/`, prompts in `personas/`, configs in `config/` |
 | T1 operator | Person running the instance | Operator-set config edits, plugin enable/disable decisions |
 | T2 authenticated user / sibling persona | A logged-in user, or another persona | A user's typed Discord message body; an inter-persona request from `lucius` to `oracle` |

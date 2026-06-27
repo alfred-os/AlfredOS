@@ -135,7 +135,7 @@ config/policies.yaml  (the source-of-truth file on disk)
 Spec §5.3 names two layers of "is this redundant?" gate:
 
 | Layer | Location | Trigger | Behaviour |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Phase 0 — watcher-side SHA short-circuit** | `PolicyWatcher.run()` (NOT `PoliciesSnapshotRef.swap`) | `new.file_sha256 == current.file_sha256` after the mtime gate passes | Return immediately; **no audit row emit**; no `swap()` call. Transient errors that re-observe the same file content collapse to a no-op before `swap()` is reached. (sec-007 — the load-bearing idempotency surface.) |
 | **Phase 1 — audit-then-swap** | `PoliciesSnapshotRef.swap()` | Any call to `swap()` | Emit `CONFIG_RELOAD_FIELDS`; **if the audit write raises, the swap aborts** (the prepared snapshot is discarded; `_current` stays at the previously-active value). The watcher catches the audit-write failure in `run()` and emits `CONFIG_RELOAD_REJECTED_FIELDS(reason="audit_write_failed")` (err-004 + err-010 + err-011). |
 | **Phase 2 — atomic assignment** | `PoliciesSnapshotRef.swap()` continued | Audit row written successfully | `self._current = new` (single-attribute store; GIL-atomic). New `current()` callers see the new snapshot on their next call. |
@@ -224,7 +224,7 @@ PR-S4-8 reads as `ref.current().rate_limits.quarantined_extract_per_user_persona
 ### §3.3 Three new hookpoints (declared here, subscribable slice-wide)
 
 | Hookpoint | Carrier tier | `fail_closed` | `allow_error_substitution` | Notes |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `supervisor.config_reload` | `"T0"` | `True` | `True` (default) | Fires on successful swap; carries new snapshot SHA |
 | `supervisor.config_reload_rejected` | `"T0"` | `True` | `True` (default) | Fires on any rejection path; carries `reason` Literal |
 | `supervisor.config_watcher.recovered` | `"T0"` | `True` | `True` (default) | Fires when the watcher transitions degraded → normal (err-006) |
@@ -234,7 +234,7 @@ All three are `carrier_tier="T0"` per index §3 Hookpoint surface table — they
 ### §3.4 Audit row constants consumed (defined in PR-S4-0a)
 
 | Constant | Fields (per spec §5.6) | Emit sites in this PR |
-|---|---|---|
+| --- | --- | --- |
 | `CONFIG_RELOAD_FIELDS` | `file_path`, `prev_sha256`, `new_sha256`, `changed_keys` (list[str], dotted), `loaded_at` | `PoliciesSnapshotRef.swap()` Phase 1 (one site) |
 | `CONFIG_RELOAD_REJECTED_FIELDS` | `file_path`, `attempted_sha256` (nullable for `stat_failed` / `file_vanished`), `reason` Literal, `offending_key`, `dlp_scan_result` Literal | `PolicyWatcher.run()` (six rejection branches) + `PoliciesSnapshotRef.swap()` (one site — `audit_write_failed` re-emit) |
 
@@ -281,7 +281,7 @@ The new kwarg ships as `policies_ref: PoliciesSnapshotRef | None = None` to keep
 Per index §8 backlog ("Fabricated-surfaces watchlist for writing-plans") + sec-007 lesson. Run BEFORE invoking each cited surface; any cited symbol that does NOT exist is marked new Slice-4 scope and called out in this section:
 
 | Symbol | Cited path | Verified state |
-|---|---|---|
+| --- | --- | --- |
 | `RateLimitConfig` | spec §5.5 cites `src/alfred/web_fetch/rate_limits.py`; **real path** `src/alfred/plugins/web_fetch/rate_limit.py:131` | EXISTS at corrected path — use the real path in this plan |
 | `HandleCapConfig` | spec §5.5 cites `src/alfred/web_fetch/handle_cap.py`; **real path** `src/alfred/plugins/web_fetch/handle_cap.py:49` | EXISTS at corrected path |
 | `ContentStore` | spec §5.5 cites `src/alfred/security/content_store.py`; **real path** `src/alfred/plugins/web_fetch/content_store.py:113` | EXISTS at corrected path |
@@ -305,7 +305,7 @@ Out-of-scope surfaces — explicitly NOT touched in this PR (per task prompt):
 ## §4 File structure
 
 | File | Create / Modify / Test | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/policies/__init__.py` | **Create** | Public exports: `PoliciesV1`, `PoliciesSnapshot`, `PoliciesSnapshotRef`, `PolicyWatcher`, `build_initial_snapshot` |
 | `src/alfred/policies/model.py` | **Create** | `PoliciesV1`, `RateLimitPolicies`, `BurstLimiterPolicy`, `HandleCapPolicies`, `HighBlastPolicies` (all frozen, Pydantic v2 strict-extra) |
 | `src/alfred/policies/load.py` | **Create** | `load_yaml_bytes(path)`, `parse_policies(raw, *, max_size_bytes)`, `compute_sha256(canonical_bytes)`, `yaml_canonical_dump(model)` |
@@ -1495,7 +1495,7 @@ Apply `superpowers:verification-before-completion`. Evidence before assertions, 
 ## §8 Risks + mitigations
 
 | Risk | Likelihood | Severity | Mitigation |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `_proposal_dispatch_loop` line drift between spec cite (:282) and current source (~:317) misleads the implementer | Med | Low | §3.7 verification gate + §5 Task 14's first step is `grep -n 'async def _proposal_dispatch_loop'` |
 | AST guard produces false positives on legitimate `current()` calls that share a name with the snapshot binding | Low | Med | Scope the guard to the five named target files only (spec §5.5 paragraph 7); document in the test docstring |
 | Audit-write failure during initial `swap()` of a freshly-started daemon prevents first-load attestation | Low | Med | The watcher emits `CONFIG_RELOAD_REJECTED_FIELDS(reason="audit_write_failed")` and retries on next mtime change; the daemon's `daemon.boot.completed` row from PR-S4-1 carries `policies_snapshot_hash` of the initial-load (NOT the watcher-load), so first-boot still has a SHA attestation |

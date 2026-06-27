@@ -82,7 +82,7 @@ The `deadline.py` module adds one `asyncio.timeout` context inside the existing 
 ## §3 File Structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/supervisor/__init__.py` | Create | Public exports: `Supervisor`, `BreakerState`, `CircuitBreaker`, `SupervisorError`, `BreakStateError` |
 | `src/alfred/supervisor/core.py` | Create | `Supervisor` class: owns the `asyncio.TaskGroup`, plugin lifecycle map, heartbeat loop, `reset_breaker()` |
 | `src/alfred/supervisor/breaker.py` | Create | `CircuitBreaker` state machine + Postgres persistence (load/save via `session_scope`) |
@@ -2628,7 +2628,7 @@ Tasks are grouped by component. Each task follows the TDD cycle: write failing t
 > **Note (devex-001/rvw-002):** `alfred supervisor status` and `alfred supervisor reset` CLI commands were deleted from this PR. They are owned by PR-S3-6.
 
 | Spec section / sub-section | Task(s) | Finding(s) applied |
-|---|---|---|
+| --- | --- | --- |
 | §10.1 — `src/alfred/supervisor/` module shape | Tasks 1, 10, 11, 17 | core-001 |
 | §10.2 — CircuitBreaker: 3 failures/5min → OPEN | Tasks 4, 5, 6, 7 | — |
 | §10.2 — Exponential backoff restart (5s, ×2, 5min max) | Task 6 | — |

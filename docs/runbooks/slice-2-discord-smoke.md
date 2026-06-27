@@ -126,7 +126,7 @@ for the `on_ready` signal, and exits. The exit code tells you the result.
 ### Exit-code → structlog event → remediation matrix
 
 | Exit | structlog event | What happened | Remediation |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `0` | `discord.verify.ok` | Bot reached `on_ready` within 30s. Healthy. | None — proceed to Step 6. |
 | `1` | `discord.verify.upstream_unrecoverable` | Repeated reconnect failure during the probe. Discord-side outage or network issue. | Check <https://discordstatus.com>. Retry with exponential backoff. |
 | `2` | `discord.verify.config_failed` | Secrets file unreadable, missing key, intents misconfigured, or the operator row missing. | Re-read Steps 1, 3, and 4. The structlog event carries a `detail` field naming the specific config error. |
@@ -187,7 +187,7 @@ restart the service to pick up the change immediately.
 ## Troubleshooting matrix
 
 | Symptom | Probable cause | Action |
-|---|---|---|
+| --- | --- | --- |
 | `verify` exits `2`, log mentions `permissions` | `secrets.toml` group/world-readable | `chmod 0600 ~/.config/alfred/secrets.toml` |
 | `verify` exits `2`, log mentions `discord_bot_token` missing | Token line missing from `secrets.toml` or empty string | Re-paste from Step 1.4 |
 | `verify` exits `2`, log mentions `no operator` | Operator row missing in `users` | `docker compose run --rm alfred-core user list`; if empty, re-run `bin/alfred-setup.sh` |

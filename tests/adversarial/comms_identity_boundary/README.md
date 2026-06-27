@@ -56,7 +56,7 @@ forward-looking numbering below was renumbered when PR-S4-8 landed the
 foundations).
 
 | Attack vector | Owning PR / Task |
-|---|---|
+| --- | --- |
 | Forged `canonical_user_id` in `platform_metadata` (ignored; resolver-state authoritative) | PR-S4-8 (`cib-2026-001`) |
 | Inter-persona relay tagging T3 content as T2 (inert claim; always T3) | PR-S4-8 (`cib-2026-002`) |
 | Canonical-id leakage on outbound (never echoed across the stdio boundary) | PR-S4-8 (`cib-2026-003`) |

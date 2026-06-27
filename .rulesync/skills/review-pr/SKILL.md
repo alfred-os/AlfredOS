@@ -60,30 +60,30 @@ If `$ARGUMENTS` is empty, use the current branch. Capture:
 
 **Always include (every PR):**
 
-| Agent (`subagent_type`)        | Focus                                                              |
-| ------------------------------ | ------------------------------------------------------------------ |
-| `alfred-architect`             | PRD alignment, cross-subsystem coherence, ADR if structural change |
-| `alfred-reviewer`              | Cross-cutting code quality, CLAUDE.md hard rules, scope discipline |
-| `alfred-test-engineer`         | Coverage, TDD, happy/error/refusal tests for new skills            |
-| `alfred-security-engineer`     | Trust tiers, secret broker, capability gate, DLP, audit log writes |
-| `alfred-error-reviewer`        | Silent failures, swallowed exceptions, fail-loud discipline        |
-| `alfred-performance-reviewer`  | Latency, OODA loop efficiency, unbounded queries, cache misses     |
-| `alfred-docs-reviewer`         | PRD/CLAUDE.md/README/ADR drift, agent-definition staleness         |
-| `alfred-i18n-reviewer`         | `t()` discipline, persona-prompt language placeholder, catalogs    |
-| `alfred-devex-reviewer`        | CLI ergonomics, error UX, setup friction, sensible defaults        |
+| Agent (`subagent_type`) | Focus |
+| --- | --- |
+| `alfred-architect` | PRD alignment, cross-subsystem coherence, ADR if structural change |
+| `alfred-reviewer` | Cross-cutting code quality, CLAUDE.md hard rules, scope discipline |
+| `alfred-test-engineer` | Coverage, TDD, happy/error/refusal tests for new skills |
+| `alfred-security-engineer` | Trust tiers, secret broker, capability gate, DLP, audit log writes |
+| `alfred-error-reviewer` | Silent failures, swallowed exceptions, fail-loud discipline |
+| `alfred-performance-reviewer` | Latency, OODA loop efficiency, unbounded queries, cache misses |
+| `alfred-docs-reviewer` | PRD/CLAUDE.md/README/ADR drift, agent-definition staleness |
+| `alfred-i18n-reviewer` | `t()` discipline, persona-prompt language placeholder, catalogs |
+| `alfred-devex-reviewer` | CLI ergonomics, error UX, setup friction, sensible defaults |
 
 **Conditionally include** (when changed paths match):
 
-| Path glob                                                | Add reviewer                  |
-| -------------------------------------------------------- | ----------------------------- |
-| `src/alfred/core/**`, `src/alfred/orchestrator/**`       | `alfred-core-engineer`        |
-| `src/alfred/memory/**`, `alembic.ini`, `**/migrations/**`| `alfred-memory-engineer`      |
-| `src/alfred/personas/**`, `personas/**`                  | `alfred-persona-engineer`     |
-| `src/alfred/providers/**`                                | `alfred-provider-engineer`    |
+| Path glob | Add reviewer |
+| --- | --- |
+| `src/alfred/core/**`, `src/alfred/orchestrator/**` | `alfred-core-engineer` |
+| `src/alfred/memory/**`, `alembic.ini`, `**/migrations/**` | `alfred-memory-engineer` |
+| `src/alfred/personas/**`, `personas/**` | `alfred-persona-engineer` |
+| `src/alfred/providers/**` | `alfred-provider-engineer` |
 | `src/alfred/comms/**`, `plugins/discord/**`, `plugins/telegram/**`, `plugins/tui/**` | `alfred-comms-engineer` |
 | `docker-compose.yaml`, `docker/**`, `bin/**`, `.github/workflows/**`, `ops/**` | `alfred-devops-engineer` |
-| `tests/adversarial/**`                                    | `alfred-test-engineer` (already always; intensify scrutiny) |
-| `src/alfred/security/**`                                  | `alfred-security-engineer` (already always; intensify scrutiny) |
+| `tests/adversarial/**` | `alfred-test-engineer` (already always; intensify scrutiny) |
+| `src/alfred/security/**` | `alfred-security-engineer` (already always; intensify scrutiny) |
 
 If a PR touches many subsystems, include every matching subsystem-engineer.
 

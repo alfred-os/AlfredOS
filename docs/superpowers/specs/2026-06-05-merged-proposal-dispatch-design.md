@@ -256,7 +256,7 @@ Handlers MUST be idempotent: re-applying the same payload produces the same obse
 Crash recovery by phase:
 
 | Phase of crash | State on restart | Behaviour |
-|---|---|---|
+| --- | --- | --- |
 | Before handler return | Handler may have committed OR not — framework does not know; ledger row absent | Next cycle re-detects blob via HEAD-diff; re-invokes handler; idempotency keeps observable state stable. Safe. |
 | After handler return; before ledger commit | Handler side-effect persisted; ledger row absent | Next cycle re-detects blob; re-invokes handler (no observable change); writes ledger row. Safe. |
 | After ledger commit; before sentinel bump | Handler ran; ledger row present (`"applied"`) | Next cycle re-walks from old sentinel; sees same blob; checks ledger PK; finds existing row; short-circuits (no handler call). Safe. |
@@ -285,7 +285,7 @@ The runbook documents this alongside `alfred supervisor proposals --recent`.
 ## 3. New types + files
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/state/proposal_payloads.py` | Modify | Add `BreakerResetProposal` |
 | `src/alfred/state/dispatch_registry.py` | Create | `DispatchOutcome`, `ProposalContext`, `ProposalEffectsProtocol`, `PROPOSAL_HANDLERS`, `_handle_breaker_reset` |
 | `src/alfred/state/dispatch_loop.py` | Create | `_proposal_dispatch_cycle`, `_iter_new_proposal_blobs`, `_load_proposal_blob` |
@@ -301,7 +301,7 @@ The runbook documents this alongside `alfred supervisor proposals --recent`.
 Docs:
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `docs/adr/0021-...md` | Created already | Architectural decision |
 | `docs/superpowers/specs/2026-06-05-...md` | Created already | This file |
 | `docs/superpowers/plans/2026-06-05-...md` | Created already | Implementation plan |

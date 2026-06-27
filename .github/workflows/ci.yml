@@ -37,7 +37,7 @@ jobs:
       - name: Run markdownlint-cli2
         run: |
           set -euo pipefail
-          npx --yes markdownlint-cli2@0.14.0 \
+          npx --yes markdownlint-cli2@0.22.1 \
             "**/*.md" \
             "!LICENSE" \
             "!node_modules/**"

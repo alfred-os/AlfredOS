@@ -45,6 +45,14 @@
   "globs": [
     "**/*.md"
   ],
+  // Respect .gitignore. CI checks out only tracked files, so its `**/*.md`
+  // never sees the many gitignored agent-tool dirs (.claude/, .memsearch/,
+  // .opencode/, .junie/, ... and the generated root CLAUDE.md/GEMINI.md
+  // rulesync OUTPUTS). A local `markdownlint-cli2` run, however, WOULD glob
+  // those in — producing thousands of violations CI never reports and making
+  // local disagree with CI. Honouring .gitignore makes a local run lint the
+  // SAME tracked set CI does. (#333 follow-up: bumped 0.14.0 -> 0.22.1.)
+  "gitignore": true,
   "ignores": [
     "LICENSE",
     "node_modules/**",

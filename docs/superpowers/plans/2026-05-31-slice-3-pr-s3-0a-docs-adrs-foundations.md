@@ -73,7 +73,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 ## §3 File structure
 
 | File | Status | 1-sentence responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `docs/adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md` | Create | Load-bearing ADR for all Slice-3 design decisions; supersedes ADR-0008 + ADR-0013. |
 | `docs/adr/0015-slice4-containerised-quarantined-llm.md` | Create | Slice-4 commitment stub: containerises the quarantined-LLM subprocess per PRD §5. |
 | `docs/adr/0016-slice4-discord-tui-comms-mcp-rewrite.md` | Create | Slice-4 commitment stub: rewrites Discord + TUI adapters as MCP plugins. |
@@ -1629,7 +1629,7 @@ PR-S3-1 through PR-S3-7 (each cites ADR-0017, imports audit_row_schemas)
 ## §5 Spec Coverage Map
 
 | Spec section | Task(s) that implement it |
-|---|---|
+| --- | --- |
 | §0 Summary — PR-S3-0a pre-committed split rationale | Tasks 1–3 (ADR-0017 records the split decision) |
 | §1.3 PR-S3-0 pre-committed split + PR-S3-3 pre-committed split | Task 2 (ADR-0017 Decision §5) |
 | §2 Cross-cutting wire-format ADR section | Tasks 1–3 (ADR-0017 records the three versioning schemes) |

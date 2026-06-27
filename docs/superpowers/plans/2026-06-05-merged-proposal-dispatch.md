@@ -34,7 +34,7 @@ After this PR:
 ## §2 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/state/proposal_payloads.py` | Modify | Add `BreakerResetProposal` Pydantic v2 class |
 | `src/alfred/state/dispatch_registry.py` | Create | `DispatchOutcome`, `ProposalContext`, `ProposalEffectsProtocol`, `PROPOSAL_HANDLERS`, `_handle_breaker_reset` |
 | `src/alfred/state/dispatch_loop.py` | Create | `_proposal_dispatch_cycle`, `_iter_new_proposal_blobs`, `_load_proposal_blob` |

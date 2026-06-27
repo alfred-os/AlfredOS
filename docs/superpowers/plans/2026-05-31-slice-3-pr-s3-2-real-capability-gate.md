@@ -74,7 +74,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
 ## §3 File structure
 
 | File | Create / Modify / Test | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/hooks/capability.py` | **Modify** | Add `check_plugin_load` + `check_content_clearance` to `CapabilityGate` Protocol; add stub impls to `DevGate` (fail-open for backward compat) |
 | `src/alfred/security/capability_gate/__init__.py` | **Create** | Public exports: `RealGate`, `GatePolicy`, `GrantRow` |
 | `src/alfred/security/capability_gate/policy.py` | **Create** | Pure-policy module: `GatePolicy` dataclass, grant-match logic, no `import os` |
@@ -2876,7 +2876,7 @@ Heartbeat task (every 10 s) → PostgresBackend.ping()
 ## §5 Spec Coverage Map
 
 | Spec section | Content | Task(s) |
-|---|---|---|
+| --- | --- | --- |
 | §8.1 Hybrid storage | state.git source of truth + Postgres cache; `capability_gate_sync` hash; commit-hash-change rebuild | Tasks 5, 6, 8, 10 |
 | §8.1 Fail-closed ALL dispatches | check + check_plugin_load + check_content_clearance all return False when fail-closed | Tasks 8, 9 |
 | §8.1 60 s heartbeat staleness window | _MAX_MISSED_HEARTBEATS × 10 s = 60 s; background task; constant-product invariant test | Tasks 8, 9 |

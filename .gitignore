@@ -97,6 +97,7 @@ AGENTS.md
 .cursor/
 .cursorrules
 .deepagents/
+.devin/
 .factory/
 .gemini/
 GEMINI.md
@@ -106,6 +107,7 @@ GEMINI.md
 .github/prompts/
 .github/skills/
 .goosehints
+.grok/
 .junie/
 .kilo/
 kilo.jsonc
@@ -121,6 +123,9 @@ QWEN.md
 .roo/
 .rovodev/
 .takt/
+.vibe/
+.warp/
+replit.md
 .windsurf/
 .windsurfrules
 WARP.md

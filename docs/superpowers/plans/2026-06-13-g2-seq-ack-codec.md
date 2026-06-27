@@ -80,7 +80,7 @@ A1 s=<seq> a=<ack> n=<payload_byte_len> |<opaque-payload-bytes>\n
 ## File-structure table
 
 | File | Create / Modify | Responsibility |
-|------|-----------------|----------------|
+| --- | --- | --- |
 | `src/alfred/plugins/comms_wire.py` | Create (Task 0) | The shared leaf module: `_MAX_COMMS_LINE_BYTES` + `CommsProtocolError`, extracted from `comms_stdio_transport` so `comms_seq_codec` + both transports import them from one place — breaking the codec↔transport import cycle (architect F6). No behaviour change; the values + class move verbatim. |
 | `src/alfred/plugins/comms_seq_codec.py` | Create | The PURE codec: `SEQ_MAGIC`/`SEQ_VERSION` constants; `_MAX_HEADER_BYTES` (header worst-case width); frozen `SeqFrame` value (`seq: int \| None`, `ack: int \| None`, `payload: bytes`); `encode_seq_frame(payload, *, seq, ack, max_unit_bytes) -> bytes`; `decode_seq_frame(raw, *, max_unit_bytes) -> SeqFrame` (magic-gated; plain-line fallback); `SeqDedupWindow` (per-leg `(seq)` accept-once + cumulative-ack contiguity/trim state machine, no I/O). Imports the bound + error type from `comms_wire`. Single-sourced; imported by both transports. |
 | `src/alfred/plugins/comms_stdio_transport.py` | Modify | Task 0: re-point `_MAX_COMMS_LINE_BYTES` + `CommsProtocolError` to a re-export from `comms_wire` (keep both in `__all__`). Task 3: add an OPTIONAL `seq_ack_enabled: bool` + a per-direction `_send_seq` counter; when enabled, `send` calls `encode_seq_frame` (with `ack=0` PLACEHOLDER — NO `_recv_ack` high-water) and `read_frame` calls `decode_seq_frame` (splitting the header before the existing `json.loads`). Default-OFF = byte-for-byte the current behaviour. |
@@ -1400,7 +1400,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ## Self-review: spec requirement -> task map
 
 | Spec requirement (§4/§6/§7/§9 + fleet findings) | Task | How it is satisfied / tested |
-|---|---|---|
+| --- | --- | --- |
 | Out-of-band header wrapping the opaque payload (NOT in-band JSON) | 1, 8 | `encode_seq_frame` prepends an ASCII header; payload never decoded — round-trip property test asserts `decode(encode(p)).payload == p`. |
 | Payload forwarded byte-for-byte (payload-blind relay) | 1 | Codec returns payload bytes untouched; `test_id_inside_payload_is_untouched` + the round-trip property. |
 | Per-direction monotonic seq, distinct from + additive to `id` | 1, 6 | Header `s=` counter; `id` lives in the opaque payload; `test_negotiation_does_not_change_id_allocation` proves `id` allocation is unperturbed. |

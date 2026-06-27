@@ -42,7 +42,7 @@
 Spec §1.3 commits Slice 4 to ship as 12 PRs mirroring Slice 3's foundations-first + max-parallelism shape.
 
 | PR | Slug | What it delivers |
-|---|---|---|
+| --- | --- | --- |
 | PR-S4-0a | docs-adrs-foundations | ADR-0022/0023/0024 full bodies; `audit_row_schemas.py` Slice-4 additions; `payload_schema.py` Slice-4 Literal + `_PREFIX_TO_CATEGORY` + `_ID_PATTERN` additions (preserving `prefix-YYYY-NNN` format); `docs/glossary.md` initial additions. ADR-0015/0016 stay Proposed (status flips deferred to PR-S4-11). |
 | PR-S4-0b | migrations-infra-i18n | Alembic **0012–0015** (the chain starts at 0012 because `0011_processed_proposals.py` already exists on `main` from Slice-3 carryover — mem-001 closure) + SQLAlchemy models; i18n catalog enumeration; **`docker/alfred-core.Dockerfile` already exists** and `docker-compose.yaml` already uses `build:` since Slice 2 (devops closure) — PR-S4-0b's work is `apt-get install -y bubblewrap` in the existing Dockerfile base layer, NOT a build-flip; `bin/alfred-setup.sh` gets a bubblewrap presence-check + apt-install (Linux) / no-op (macOS) / WSL2-hint (Windows). Bootstraps `audit.hash_pepper` secret in broker. |
 | PR-S4-1 | daemon-boot-dispatch | `alfred daemon start/stop/status` subcommands; pre-`TaskGroup` probe orchestration **at CLI layer** (not in `Supervisor.start()`); `daemon.boot.*` audit-row emit; smoke test. Launcher probe is a no-op stub until PR-S4-6. |
@@ -88,7 +88,7 @@ PR-S4-0a ─► 0b ─┤    │    ┌──► PR-S4-7 ───────�
 Explicit `depends_on` per PR:
 
 | PR | Depends on | Blocks |
-|---|---|---|
+| --- | --- | --- |
 | PR-S4-0a | — (first PR) | all downstream |
 | PR-S4-0b | S4-0a | all downstream |
 | PR-S4-3 | S4-0a, S4-0b | S4-1, S4-4, S4-5, S4-6, S4-7, S4-8, S4-9 (hookpoint-registration dep — rev-009) |
@@ -116,7 +116,7 @@ These surfaces are defined in one PR and consumed by later PRs. Drift between PR
 Spec §9 lists 22 Slice-4 audit-row-schema constants. Each implementation PR imports the named constant; no PR may inline a field-list literal at the call site. Every audit emit site uses `await self._audit.append_schema(fields, **kwargs)`.
 
 | Constant | Consuming PRs |
-|---|---|
+| --- | --- |
 | `DAEMON_BOOT_FIELDS` / `DAEMON_BOOT_FAILED_FIELDS` / `DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS` | S4-1, S4-6 (env-source check), S4-11 (docs) |
 | `PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS` | S4-2 (always emit, redactions ≥0) |
 | `CARRIER_SUBSTITUTION_FIELDS` / `CARRIER_SUBSTITUTION_REFUSED_FIELDS` | S4-3 (and 4 sibling-site migrations) |
@@ -137,7 +137,7 @@ PR-S4-0a's test `tests/unit/audit/test_audit_constants_slice_4.py` asserts every
 Each row's "Declared in PR" column is authoritative (arch-007 round-4 closure — round-2/3 had triple-claim that's collapsed to a single rule). Highlights:
 
 | Hookpoint | Declared in | Carrier tier |
-|---|---|---|
+| --- | --- | --- |
 | `daemon.boot.completed` / `daemon.boot.failed` / `proposal.dispatch.failed` | PR-S4-1 | T0 |
 | `hooks.carrier_substituted` / `hooks.carrier_substitution_refused` | PR-S4-3 (the only PR-S4-3-registered hookpoints) | n/a (observation-only) |
 | `supervisor.config_reload` / `supervisor.config_reload_rejected` / `supervisor.config_watcher.recovered` | PR-S4-4 | T0 |
@@ -285,7 +285,7 @@ PR-S4-0b migration adds the `audit.hash_pepper` secret to the operator's broker 
 Spec §11.5 lists 10 merge-blocking integration tests owned across the slice, **each promoted to required-status-check in the PR that ships it** (ops-007 closure — not bulked into PR-S4-11):
 
 | Test | Owning PR | Topology |
-|---|---|---|
+| --- | --- | --- |
 | `tests/integration/test_error_chain_substitution_propagates.py` | PR-S4-3 | ubuntu-latest |
 | `tests/integration/test_hot_reload_high_blast_refusal.py` | PR-S4-4 | ubuntu-latest (promoted from advisory) |
 | `tests/integration/test_operator_session_lifecycle.py` | PR-S4-5 | ubuntu-latest |
@@ -325,7 +325,7 @@ Every Slice-4 PR must clear:
 **Per-file 100%-coverage owning-PR mapping** (test-engineer closure on coverage-gate ownership — same ops-007 discipline applied to integration tests, now extended to per-file coverage thresholds):
 
 | Trust-boundary file | Owning PR (CI enforces 100% line + branch threshold) |
-|---|---|
+| --- | --- |
 | `src/alfred/hooks/registry.py` (HookpointMeta extensions) | PR-S4-3 |
 | `src/alfred/hooks/invoke.py` (`_run_error` carrier-substitution dispatch) | PR-S4-3 |
 | `src/alfred/policies/watcher.py` (PolicyWatcher) | PR-S4-4 |
@@ -380,7 +380,7 @@ A regression in any of the 10 merge-blocking integration tests requires revertin
 ### Per-PR plans
 
 | PR | Plan file |
-|---|---|
+| --- | --- |
 | PR-S4-0a | [2026-06-07-slice-4-pr-s4-0a-docs-adrs-foundations.md](./2026-06-07-slice-4-pr-s4-0a-docs-adrs-foundations.md) |
 | PR-S4-0b | [2026-06-07-slice-4-pr-s4-0b-migrations-infra-i18n.md](./2026-06-07-slice-4-pr-s4-0b-migrations-infra-i18n.md) |
 | PR-S4-1 | [2026-06-07-slice-4-pr-s4-1-daemon-boot-dispatch.md](./2026-06-07-slice-4-pr-s4-1-daemon-boot-dispatch.md) |
@@ -398,7 +398,7 @@ A regression in any of the 10 merge-blocking integration tests requires revertin
 ### ADRs
 
 | ADR | Title | Relation |
-|---|---|---|
+| --- | --- | --- |
 | [ADR-0009](../../adr/0009-comms-adapter-protocol-slice2-only.md) | CommsAdapter Protocol | Already "Superseded by ADR-0016 (for new adapters)" since 2026-05-27; PR-S4-10 narrows the caveat to remove "for new adapters" — not a status flip |
 | [ADR-0014](../../adr/0014-pluggable-hooks-for-every-action.md) | Pluggable hooks for every action | Load-bearing precedent; ADR-0022 layers carrier-substitution onto it |
 | ADR-0015 | Slice-4 containerised quarantined-LLM | Status flips Proposed → Accepted in PR-S4-11 |

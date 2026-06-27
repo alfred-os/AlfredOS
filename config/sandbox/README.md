@@ -21,7 +21,7 @@ users (PR #205 round-2 sec-1 dropped the first-party-relay `kind:none`
 carve-out). Their policy files:
 
 | File | OS | Status |
-|---|---|---|
+| --- | --- | --- |
 | `quarantined-llm.linux.bwrap.policy` | Linux | **Kernel-enforced** via bwrap |
 | `quarantined-llm.macos.sb` | macOS | File only — `sandbox-exec` execution deferred (#230); launcher refuses `kind:full` on macOS today |
 | `quarantined-llm.windows.stub.policy` | Windows | Documented stub — production refuses, dev emits `supervisor.plugin.sandbox_stub_used` |
@@ -74,7 +74,7 @@ The Linux policy is TOML validated by `alfred.plugins.sandbox_policy.SandboxPoli
 (frozen, `extra="forbid"` — an unknown key is a load-time refusal):
 
 | Field | Type | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `ro_binds` | `[[src, dst], …]` | Read-only bind mounts (interpreter + libs). |
 | `rw_binds` | `[[src, dst], …]` | Writable bind mounts (avoid for the quarantined LLM). |
 | `tmpfs` | `["/path", …]` | Ephemeral tmpfs scratch dirs, discarded on exit. |

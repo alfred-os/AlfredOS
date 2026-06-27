@@ -442,7 +442,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 **Spec coverage:**
 
 | Requirement | Task |
-|---|---|
+| --- | --- |
 | `BREAKER_TRIPPED` event + `UNAVAILABLE` state | Task 1 |
 | breaker escalates every live state → `UNAVAILABLE`, emit once | Task 2 |
 | `UP`→`UNAVAILABLE` (wedged-but-connected core, no prior RECONNECTING) | Task 2 |

@@ -205,7 +205,7 @@ will act on the `OPEN` breaker state.
 ## Failure modes
 
 | Trigger | Behaviour | Observable signal |
-|---|---|---|
+| --- | --- | --- |
 | `manifest_version != 1` | `ManifestVersionError`; `plugin.lifecycle.load_refused` audit row | audit log |
 | `subscriber_tier = "T3"` in manifest | `ManifestTierError`; `plugin.lifecycle.load_refused` audit row | audit log |
 | Malformed TOML in manifest | `ManifestError`; `plugin.lifecycle.load_refused` audit row | audit log |
@@ -238,7 +238,7 @@ internals.
 ## Slice graduation map
 
 | Subsystem | Slice 3 (this slice) | Deferred to | Anchor |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Plugins | `PluginTransport` Protocol; `StdioTransport`; `AlfredPluginSession`; `PluginManifest` + error hierarchy; `InboundContentScanner`; `ContentStoreBase` + `InMemoryContentStore`; `DispatchResult` union; `CapabilityGateNonce` injection | Slice 3 (remaining PRs): circuit-breaker supervisor (PR-S3-3b); quarantined LLM host (PR-S3-4); Redis content store (PR-S3-5); state.git rebuild wiring (PR-S3-6); `DevGate` flag-day removal (PR-S3-7). Slice 4: comms adapters migrated to MCP (ADR-0016); container isolation (ADR-0015). Slice 5+: HTTP transport. | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md), [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md) |
 
 ## Cross-references

@@ -33,7 +33,7 @@ alfred supervisor status
 **Failure modes** (in order of probability):
 
 | Condition | Disposition |
-|---|---|
+| --- | --- |
 | `DATABASE_URL` unset / Postgres unreachable | `t("cli.supervisor.status.postgres_unavailable")` + `exit 1` |
 | `circuit_breakers` table empty | `t("cli.supervisor.status.no_components_yet")` + `exit 0` |
 | Row decode fails (schema drift) | propagate (programmer bug) |
@@ -119,26 +119,26 @@ Both `BreakerResetProposal` (originally spec §3.1) and `_handle_breaker_reset` 
 Files modified (CLI side):
 
 | File | Change |
-|---|---|
+| --- | --- |
 | `src/alfred/cli/supervisor.py` | Remove `_get_supervisor()` entirely. Rewrite `_list_breaker_states()` body (sync SQLAlchemy read). Update `supervisor_status` handler arms to drop the probe + the `NotImplementedError` arm. Update `supervisor_reset` body to remove the `_get_supervisor`/`asyncio.run`/lazy-import blocks; keep the `--confirm` gate + forensic-attempt audit row; print the new `cli.supervisor.reset.deferred_to_issue_171` hint; exit 1. |
 | `locale/en/LC_MESSAGES/alfred.po` | Add new catalog keys: `cli.supervisor.status.postgres_unavailable`, `cli.supervisor.status.no_components_yet`, `cli.supervisor.reset.deferred_to_issue_171`. Tombstone deprecated keys (`cli.supervisor.reset.confirm_prompt`, `cli.supervisor.reset.rerun_hint`, `cli.supervisor.reset.component_not_found`, `cli.supervisor.reset.unexpected_error`, and the `cli.supervisor.status.no_supervisor_running` + `cli.supervisor.status.read_path_unavailable` pair) per the existing tombstoning pattern. |
 
 Files modified (supervisor side):
 
 | File | Change |
-|---|---|
+| --- | --- |
 | (none) | Supervisor side untouched. `Supervisor.reset_breaker` stays as-is (called from tests directly + by #171's dispatch infrastructure when that lands). |
 
 Files modified (audit vocab):
 
 | File | Change |
-|---|---|
+| --- | --- |
 | (none likely) | No new audit-vocab entries — the existing forensic-attempt row stays unchanged. |
 
 Docs / runbooks:
 
 | File | Change |
-|---|---|
+| --- | --- |
 | `docs/runbooks/slice-3-supervisor.md` | Document the freshness contract for `status` + the "reset deferred to #171" state + the two workarounds (supervisor restart, direct Postgres update). |
 | `docs/subsystems/supervisor.md` | Architecture overview: read via Postgres now; reset path deferred to #171's dispatch infrastructure. Cross-reference ADR-0020. |
 | `docs/glossary.md` | Add an entry naming the "merged-proposal-branch dispatch infrastructure" (the missing piece) if other architecture terms are listed. |

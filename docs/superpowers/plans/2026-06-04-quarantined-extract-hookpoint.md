@@ -33,7 +33,7 @@ After this PR merges:
 ## §2 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/security/quarantine.py` | Modify | Add `declare_hookpoints()` at module bottom; wrap `extract` body in `invoking()`; thread `outbound_dlp` through `__init__` to the subscriber registration helper |
 | `src/alfred/security/_extract_dlp_subscriber.py` | Create | `OutboundDlpExtractSubscriber` class + `register_extract_dlp_subscriber()` helper |
 | `src/alfred/hooks/_known_hookpoints.py` | Modify | Add `"security.quarantined.extract"` under a new `alfred.security.quarantine` key |

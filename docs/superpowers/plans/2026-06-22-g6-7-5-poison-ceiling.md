@@ -13,7 +13,7 @@
 ## Charter mapping (architect-mandated; from the G6-7-4 PR #315 memory entry)
 
 | Charter item | Where it lands |
-|---|---|
+| --- | --- |
 | 1. Item-4b poison ceiling: per-`(adapter_id, inbound_id)` attempt counter + `gateway.adapter.inbound.poisoned` dead-letter + ack-to-drain on >= N | Tasks 1–7 |
 | 2. Replay-cost bounding tied to the counter (close PERF-309-1) | **Satisfied by item 1** — the ceiling read runs *before* `quarantined_extract`, so the (N+1)th replay short-circuits before paying extract cost (the bound is **N extracts, poison on the (N+1)th attempt** — stated honestly). A `BudgetGuard` mechanism *does* exist (`src/alfred/budget/guard.py`, `check_and_charge`) but it is wired into the act-loop provider calls (`orchestrator/core.py:787`), **NOT** into `quarantined_extract` (core.py:301-342 records latency only). So there is nothing to "charge" extract against today; the ceiling is the bound. (Today the quarantined child is a deterministic-echo loop with no provider cost — real-LLM is #230-blocked — so extract has nothing to meter until #230; wiring extract→BudgetGuard is the explicit alternative being declined.) **(resolved fork PR-1)** |
 | 3. Forwarded-drop TRIAGE legibility (devex HIGH-2) | Task 8 — render the drop reason + `--reason` filter at the CLI render/filter layer (fixture-tested). `_query_audit_log` is a dead stub (raises `AuditBackendUnavailable`; backend SQL deferred to unbuilt PR-S3-7) and `audit log` renders no `subject` today, so operator value lands when PR-S3-7 wires the backend; G6-7-5 ships the triage render/filter logic ready + tested. **(resolved fork PR-2)** |

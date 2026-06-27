@@ -49,7 +49,7 @@ current tree, not decisions — verify them with the cited commands if in doubt.
 ## File Structure
 
 | File | Create / Modify | Responsibility after this slice |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/comms_mcp/protocol.py` | Modify | Add `GATEWAY_ADAPTER_INBOUND: Final[str] = "gateway.adapter.inbound"` (beside the `GATEWAY_ADAPTER_*` family) + the `GatewayAdapterInboundEnvelope` frozen model (out-of-band `adapter_id: AdapterId` + opaque `body: bytes \| str`), and export both in`**all**`. The model NEVER introspects`body`. |
 | `src/alfred/comms_mcp/errors.py` | Modify | Add `InboundReparseError(CommsMcpError)` (base for the two re-parse refusals), `InboundEnvelopeBodyMismatchError(InboundReparseError)` (envelope==body adapter_id mismatch), `InboundBodyMalformedError(InboundReparseError)` (body un-parseable into `InboundMessageNotification`). Export in `__all__`. |
 | `src/alfred/comms_mcp/inbound_reparse.py` | Create | The pure core-side re-parse: `reparse_forwarded_inbound(envelope) -> InboundMessageNotification`. Decodes the opaque body, `model_validate`s it into `InboundMessageNotification`, enforces envelope.adapter_id == body.adapter_id (else `InboundEnvelopeBodyMismatchError`), raises `InboundBodyMalformedError` on any decode/validation failure. **Trust-boundary leaf → both ci.yml per-file 100% gates.** |
@@ -696,7 +696,7 @@ NEVER `git add docs/superpowers/plans/2026-06-21-g6-7-1-inbound-envelope-reparse
 **1. Spec coverage (G6-7-1 scope only — `docs/.../2026-06-21-gateway-adapter-inbound-bridge-design.md` §5 + §3.2/§3.3):**
 
 | G6-7-1 requirement | Task |
-|---|---|
+| --- | --- |
 | `gateway.adapter.inbound` envelope Pydantic model (method + out-of-band `adapter_id` + opaque body member) — §4, §5 G6-7-1 | Task 1 |
 | Frozen Pydantic v2, strong-typed, payload-blind body (`bytes \| str`, never introspected) — Global Constraints, §3.2 | Task 1 (`_WireModel` frozen + `extra="forbid"`; body opaque; tests assert no parse) |
 | `adapter_id` modeled as the spawn-binding routing key (enforcement = G6-7-3; modeled here) — SEC-309-1 | Task 1 (docstring states origin; closed-vocab `AdapterId`) |

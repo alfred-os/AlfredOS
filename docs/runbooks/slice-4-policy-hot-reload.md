@@ -41,7 +41,7 @@ degraded watcher.
      snapshot is unchanged. Inspect `reason`:
 
      | `reason` | What happened | Fix |
-     |---|---|---|
+     | --- | --- | --- |
      | `parse_failure` | YAML is malformed or > 256 KB | Fix the syntax / shrink the file and re-save |
      | `validation_failure` | A field violates its constraint | Check `offending_key`; correct the value |
      | `high_blast_change` | You edited a reviewer-gated key | Submit a proposal via `alfred config quarantined-provider …` instead |

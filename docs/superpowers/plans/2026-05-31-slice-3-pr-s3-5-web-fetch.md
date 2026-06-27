@@ -63,7 +63,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `plugins/alfred-web-fetch/__init__.py` | Create | Package marker |
 | `plugins/alfred-web-fetch/manifest.toml` | Create | MCP manifest: `subscriber_tier=system`, `sandbox_profile=user-plugin`, `network.allowlist=*`, `secrets={cookie:*}` (spec §4.3, §7) |
 | `plugins/alfred-web-fetch/web_fetch_plugin.py` | Create | MCP server entry point; `web.fetch` JSON-RPC method implementation |
@@ -2628,7 +2628,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
 ## §5 Spec Coverage Map
 
 | Spec section | What it specifies | Task(s) |
-|---|---|---|
+| --- | --- | --- |
 | §7.1 | In-tree MCP plugin loaded via StdioTransport | Task 9 |
 | §7.2 | ContentHandle output; TTL formula; single-extract-per-handle invariant | Task 2 |
 | §7.3 | ContentHandle as opaque orchestrator-side return; no `.content` field | Task 2 |
@@ -2656,7 +2656,7 @@ The `InboundCanaryScanner` runs on the plugin-host side — it reads from the co
 ### Review-round fixups applied (2026-05-31)
 
 | Finding | Severity | Applied in | Change |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | rvw-001 / Cluster 4 | Critical | Task 10 (`fetch_dispatcher.py`) | All `audit_sink.emit()` calls replaced with `await audit.append_schema(fields, **kwargs)` matching `AuditWriter.append_schema` contract from PR-S3-0a |
 | err-004 | Critical | Task 9 (`web_fetch_plugin.py` stdio loop) | Narrowed broad `except Exception` to typed `except json.JSONDecodeError`; programming-bug exceptions now propagate to surface crash to host process; JSON-RPC error response sent on parse errors |
 | err-010 | High | Task 5 (`canary_scanner.py`) | `InboundCanaryScanner.scan()` raises `CanaryScanError` on `body_bytes is None` instead of silently returning; new `CanaryScanError` class + test added |

@@ -83,12 +83,12 @@ If the plan does not have a coverage matrix or owner-agent annotations, that its
 
 Always include these reviewers:
 
-| Agent (subagent_type)       | Focus area for plan review                                                |
-| --------------------------- | ------------------------------------------------------------------------- |
-| `alfred-architect`          | PRD alignment, scope discipline, cross-subsystem coherence                |
-| `alfred-reviewer`           | Cross-cutting plan quality, CLAUDE.md hard rules, placeholder/no-TBD scan |
-| `alfred-test-engineer`      | TDD discipline, coverage targets, test naming, adversarial coverage       |
-| `alfred-security-engineer`  | Trust-boundary surface area, secret-broker usage, audit-log writes        |
+| Agent (subagent_type) | Focus area for plan review |
+| --- | --- |
+| `alfred-architect` | PRD alignment, scope discipline, cross-subsystem coherence |
+| `alfred-reviewer` | Cross-cutting plan quality, CLAUDE.md hard rules, placeholder/no-TBD scan |
+| `alfred-test-engineer` | TDD discipline, coverage targets, test naming, adversarial coverage |
+| `alfred-security-engineer` | Trust-boundary surface area, secret-broker usage, audit-log writes |
 
 Conditionally include the matching subsystem agent for every subsystem the plan touches. Look at the coverage matrix and map each row to its agent. Examples:
 
@@ -205,7 +205,7 @@ Load:
 Reconcile each finding's final confidence using this table:
 
 | Coordinator class. | Cross-check verdict | Final confidence | Display tag |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `corroborated` | n/a (no cross-check needed) | High | `[corroborated]` |
 | `solo` | `confirmed` | High | `[corroborated]` |
 | `solo` | `disputed` | Medium | `[disputed]` |

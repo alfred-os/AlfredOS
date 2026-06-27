@@ -18,7 +18,7 @@ linear critical path. Every PR is `#237`, full `/review-pr` fleet (security ALWA
 CodeRabbit, plain `gh pr merge <n> --rebase --delete-branch`.
 
 | PR | Scope | Depends on | Trust-boundary? |
-|----|-------|-----------|-----------------|
+| --- | --- | --- | --- |
 | **G3-1** | Listener peer-auth: cross-platform `SO_PEERCRED` same-uid check on `CommsSocketListener.accept` (refuse a mismatched-uid peer without wedging a legitimate dial-in). | G2 (merged) | **Yes** — listener accept path. |
 | **G3-2** | Core lifecycle wire-send: a `send_lifecycle_notification` seam on `CommsPluginRunner` + the core actually SENDING `ready`/`going_down` frames over the comms wire (alongside the G1 audit rows), epoch carried in the handshake, a mandatory transport write-lock, and the peer-auth-reject daemon audit row. | G3-1 | **Yes** — core→peer wire. |
 | **G3-3** | The `alfred-gateway` process: `GatewayCoreLink` (dial + dial-side peer-auth + fake-clock reconnect/backoff + epoch-reconciling handshake + seq/ack deframe/reframe + lifecycle consume) + `GatewayClientListener` (stable kernel) + pure relay loop + control frames + Prometheus metrics + `alfred gateway` CLI. *(Split candidate below.)* | G3-2 | **Yes** — always-up T1 carrier. |

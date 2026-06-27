@@ -116,7 +116,7 @@ ZCARD = current alive count. ZREMRANGEBYSCORE at the head of every reserve passi
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/plugins/web_fetch/handle_cap.py` | Create | `HandleCap` class, `HandleCapConfig` dataclass, Lua script, ARGV validator, idempotent close (spec §2-§2.4, §7) |
 | `src/alfred/plugins/web_fetch/errors.py` | Modify | Widen `WebFetchRateLimited.bucket` Literal to include `"handle_cap"`; add `WebFetchHandleIdMismatch(WebFetchError)`; update docstrings (spec §6.1) |
 | `src/alfred/plugins/web_fetch/content_store.py` | Modify | `ContentStore.write(handle_id=...)` becomes required kwarg; remove internal `uuid.uuid4()` mint path (spec §3) |
@@ -146,7 +146,7 @@ ZCARD = current alive count. ZREMRANGEBYSCORE at the head of every reserve passi
 ## §4 Coverage matrix (subsystem owners)
 
 | Subsystem | Files | Owner agent |
-|---|---|---|
+| --- | --- | --- |
 | HandleCap module + Lua script | `handle_cap.py`, `test_handle_cap.py`, `test_handle_cap_invariants.py` | alfred-security-engineer |
 | ContentStore contract change | `content_store.py`, `test_content_handle_single_use.py` | alfred-security-engineer |
 | Errors module + typed Literal | `errors.py`, `test_handle_cap_errors.py` | alfred-security-engineer |

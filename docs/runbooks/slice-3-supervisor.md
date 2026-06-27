@@ -31,7 +31,7 @@ dispatch results.
 running supervisor process via materially different mechanisms:
 
 | Command | Channel | State |
-|---|---|---|
+| --- | --- | --- |
 | `alfred supervisor status` | Synchronous SQLAlchemy read against the `circuit_breakers` Postgres table | Working |
 | `alfred supervisor reset <component> --confirm` | Writes a reviewer-gated `BreakerResetProposal` to state.git; the supervisor's `_proposal_dispatch_loop` picks up the merged branch on its next cycle (≤30s) and calls `Supervisor.reset_breaker` | Working (subject to #174 daemon boot wiring caveat above) |
 | `alfred supervisor proposals [--since DURATION] [--limit N] [--all]` | Synchronous SQLAlchemy read against the `processed_proposals` Postgres table | Working |
@@ -59,7 +59,7 @@ poll.
 ### Failure modes (in order of probability)
 
 | Condition | Operator sees | Operator action |
-|---|---|---|
+| --- | --- | --- |
 | `DATABASE_URL` env var unset OR Postgres unreachable | `cli.supervisor.status.postgres_unavailable` + exit 1 | Check `alfred status`; verify the Postgres container is up; verify `DATABASE_URL` is exported to the CLI shell |
 | `circuit_breakers` table empty | `cli.supervisor.status.no_components_yet` + exit 0 | Wait for the supervisor to register at least one component (the row appears on first `save_to_db`) |
 | Row decode fails (schema drift) | Raw traceback | Programmer bug — file an issue; do NOT mask in the CLI surface |
@@ -111,7 +111,7 @@ Renders the `processed_proposals` table for the chosen window. The
 columns:
 
 | Column | Meaning |
-|---|---|
+| --- | --- |
 | `TYPE` | The `proposal_type` discriminator (`breaker-reset`, ...). |
 | `ID` | The 16-hex `proposal_id` from the proposal branch. |
 | `RESULT` | `applied` / `failed_handler` / `failed_parse` / `failed_unknown_type` (see legend printed after the table). |

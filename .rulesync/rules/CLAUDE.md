@@ -92,7 +92,7 @@ binary will surface them as `TypedRefusal(reason="not_implemented")`
 or `--help` will simply not list them; do not assume them present.
 
 | Purpose | Available | Command |
-|---|---|---|
+| --- | --- | --- |
 | Set up dev environment | Slice 1 | `bin/dev-setup.sh` (creates `.venv`, installs deps, pulls test fixtures) |
 | Run unit tests | Slice 1 | `uv run pytest tests/unit -q` |
 | Run integration tests | Slice 1 | `uv run pytest tests/integration` (boots ephemeral containers) |

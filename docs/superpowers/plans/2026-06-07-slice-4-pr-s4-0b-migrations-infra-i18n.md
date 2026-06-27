@@ -124,7 +124,7 @@ Note: spec §12.2 also calls out that PR-S4-5's `alfred whoami` formats timestam
 Per index §8 Slice-5 backlog note ("Fabricated-surfaces watchlist for writing-plans"), this plan grep-verifies every cited Slice-3 surface before invoking it:
 
 | Cited symbol | Verified at | Status |
-|---|---|---|
+| --- | --- | --- |
 | `SecretBroker.get(name) -> str` | `src/alfred/security/secrets.py:396` | Present — returns `str`, whitelisted via `SUPPORTED_SECRETS` |
 | `SecretBroker.has(name) -> bool` | `src/alfred/security/secrets.py:412` | Present — used by daemon-boot probe (PR-S4-1) |
 | `class AuditEntry(Base)` (`__tablename__ = "audit_log"`) | `src/alfred/memory/models.py:89` | Present — Slice-4 columns added here |
@@ -150,7 +150,7 @@ Surfaces that **do not** exist yet and are explicitly out-of-scope for this PR (
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/memory/migrations/versions/0012_operator_sessions.py` | Create | Creates `operator_sessions` table + `uq_operator_sessions_token_hash` unique index + `(user_id, expires_at)` index |
 | `src/alfred/memory/migrations/versions/0013_policies_snapshot_history.py` | Create | Creates `policies_snapshot_history` table (optional rollback log) |
 | `src/alfred/memory/migrations/versions/0014_audit_columns_slice_4.py` | Create | Adds Slice-4 audit columns to `audit_log` for `*_FIELDS` constants from PR-S4-0a's `audit_row_schemas.py` |
@@ -2037,7 +2037,7 @@ Surfaces that **do not** exist yet and are explicitly out-of-scope for this PR (
 ## §5 Spec Coverage Map
 
 | Spec section | Delivered in this PR | Notes |
-|---|---|---|
+| --- | --- | --- |
 | Spec §12.1 Alembic migration 0012 | Component A | `operator_sessions` + `uq_operator_sessions_token_hash` + lookup index |
 | Spec §12.1 Alembic migration 0013 | Component B | `policies_snapshot_history` self-reference FK |
 | Spec §12.1 Alembic migration 0014 | Component C | Slice-4 audit columns; cross-validated against `audit_row_schemas.py` |
@@ -2090,7 +2090,7 @@ Every gate below must be green before this PR is mergeable. The bar is identical
 When implementing this plan via `superpowers:subagent-driven-development`:
 
 | Component | Recommended subagent persona |
-|---|---|
+| --- | --- |
 | A, B, C, D (migrations) | `alfred-memory-engineer` — owns SQLAlchemy + Alembic discipline |
 | E (ORM models) | `alfred-memory-engineer` |
 | F (Dockerfile) | `alfred-devops-engineer` (this agent) — owns Docker + compose |
@@ -2147,7 +2147,7 @@ A reviewer evaluating this PR must confirm:
 ## §10 Risks + mitigations
 
 | Risk | Mitigation |
-|---|---|
+| --- | --- |
 | Migration 0014's column union drifts from `audit_row_schemas.py` Slice-4 constants — a Slice-4 emit site fails at runtime with `column does not exist` | `tests/unit/test_audit_log_slice_4_columns.py` cross-validates every `*_FIELDS` entry against the ORM model. The model must have every column; the migration must have added it. Two layers of drift detection. |
 | `audit.hash_pepper` accidentally regenerated on a production setup re-run, silently invalidating cross-row correlation | The setup script's `grep -q "^audit.hash_pepper\\s*="` guard is the safety net. `tests/unit/test_setup_script_audit_pepper.py::test_setup_script_audit_pepper_is_idempotent` enforces the guard's presence. Reviewer checklist item also calls it out. |
 | `uq_operator_sessions_token_hash` accidentally created as a non-unique index — silent perf regression on the 5ms p99 budget; PR-S4-5 only notices in load testing | `tests/integration/test_migrations_0012_0015.py::test_0012_unique_token_hash_index_exists` asserts `unique=True`. Reviewer checklist item also calls it out. |

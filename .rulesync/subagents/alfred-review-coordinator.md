@@ -46,7 +46,7 @@ Do not use `SendMessage`. Do not assume you can continue the original specialist
 For every finding in the pool, tag it with exactly one confidence label:
 
 | Label | Meaning | Action |
-|---|---|---|
+| --- | --- | --- |
 | `corroborated` | 2+ reviewers flagged the same issue (same section / overlapping line range / same category). | Keep. Mark as high-confidence in the final report. |
 | `solo` | One reviewer flagged it; no other reviewer is in scope to verify. | Dispatch a cross-check (fresh `Agent` call) to the most-relevant other specialist. |
 | `disputed` | Reviewer A flagged it; reviewer B's findings contain a statement that contradicts A's premise (e.g. A says "missing audit write," B describes the audit write that A missed). | Dispatch cross-checks to both reviewers showing the conflict. Ask each to confirm or retract. |

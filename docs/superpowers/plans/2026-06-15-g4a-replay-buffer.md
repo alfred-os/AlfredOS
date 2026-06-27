@@ -1099,7 +1099,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 **Spec coverage (spec §4/§5/§6/§7/§9):**
 
 | Spec requirement | Task |
-|---|---|
+| --- | --- |
 | `ReplayBuffer` — per-direction un-acked retention | Tasks 1-2 |
 | trim + zero on ack | Task 3 |
 | cap (frames **and** bytes) + hard-ceiling backstop | Tasks 1, 2, 4 |
