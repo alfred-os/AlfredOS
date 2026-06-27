@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-26 20:10+0100\n"
+"POT-Creation-Date: 2026-06-27 20:35+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1351,6 +1351,15 @@ msgstr "Comms dispatch ingest result is missing a required key; refusing to send
 #: src/alfred/comms_mcp/daemon_runtime.py:236
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
+
+#: src/alfred/egress/egress_id.py:79
+msgid "egress.id_integrity_mismatch"
+msgstr ""
+"Egress idempotency integrity check failed for egress-id {egress_id}: a "
+"duplicate egress-id arrived with a different redacted-body hash, which means "
+"a non-deterministic re-run produced a different request body for the same "
+"logical call. This is a fail-loud security boundary; no body content is "
+"exposed."
 
 #: src/alfred/egress/errors.py:26
 msgid "egress.io_plane_unavailable"
