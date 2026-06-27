@@ -29,7 +29,7 @@
 
 **Two charter conditions (both AI-expert and architect insisted):**
 
-1. The synthetic driver drives the **real** `dispatch_web_fetch` and the **real** `QuarantinedExtractor` — it substitutes ONLY the LLM's tool-selection decision, never the dispatcher / relay / proxy / DLP / extractor. The production `web.fetch` dispatcher **is genuinely re-pointed** at the relay (Part C). If a relay only the synthetic driver can reach ships while the dispatcher stays unwired, that is the dead-code trap — do not do that.
+1. The synthetic driver drives the **real** `EgressResponseExtractor` → `RelayEgressClient` → the **real** `EgressRelay` → a loopback fake upstream, exercising the real relay / DLP / SSRF / TLS-origination / ledger / §4.3-extract path end-to-end — it substitutes ONLY the LLM's tool-selection decision, never the relay / DLP / extractor / ledger. **C1 SCOPE DECISION (2026-06-27, maintainer): option (B) — the live `web.fetch` re-home is its own sub-slice G7-2.5, landing with/just before the G7-3 connectivity flip; it is NOT in G7-2.** Rationale (the C1 reality below): web.fetch egress today is a GET-only plugin **subprocess** with no request body and a transport-side T3 mint, so routing it through the gateway is an **L-sized re-home** of the fetch (TLS/size/MIME/redirect + content-store/handle-mint), not a "re-point". G7-2 therefore ships the relay as **honestly-named defense-in-depth infrastructure proven end-to-end by the synthetic driver + the §9 corpus** (the gateway proxy shipped the same way in G7-1b before all its consumers existed). **The anti-dead-code guarantee is preserved by sequencing, not by a same-slice live consumer:** the G7-3 connectivity flip is hard-blocked on G7-2.5 landing the real consumer (a live tool must never egress while the core's direct fallback still exists), so no relay ships that *stays* consumer-less. G7-2.5's re-home is tracked as a first-class task here (see "Part D — G7-2.5" below); #339's tool-loop is the eventual model-driven caller.
 2. The deferred risk — **injection-driven URL/argument selection** (a model coerced into fetching an attacker URL) — is **out of G7-2's charter** (it lives in the tool-loop, #339) and is recorded on #339 as its release-blocker. G7-2's synthetic driver cannot and need not exercise it; G7-2's security surface is *what happens to bytes once a destination is chosen*, which is fully determinable without an LLM.
 
 **What stays DEFERRED to G7-5 (human-gated):** ADR-0040 (incl. the new Stage-1 residual below) and the PRD §5/§7.1 rewrite. Do NOT edit `PRD.md` / `CLAUDE.md` / ADRs in G7-2 except factual amendments already permitted.
@@ -74,7 +74,7 @@ An 8-specialist `/review-plan` (architect, reviewer, test, security, memory, cor
 - **[HIGH H6 — request-line/header smuggling].** Validate `req.method` against a closed set (GET-only for the live path); strip caller-supplied `Host`/`Content-Length`/`Transfer-Encoding` before forwarding; test a `Host: evil` drop + CRLF-method refusal. (The destination SSRF chain is verified correct; the request-line/headers are the unguarded surface.)
 - **[MEDIUM].** Fix stale line refs (`extract` at :624, `del canonical_user_id` at :155, canary compile loop ~:322). Record the env-delivered gateway canary tokens as a (host-root-readable) residual. State B4 scans the **request** body only (response canary/T3 = the §4.3 path). Reconcile the now-permanently-`False` `OutboundDlpScanResult.canary_tripped` field (a trip raises). Make `record_response` idempotent on already-recorded rows. Move the "mode-(a) residual" out of the executable corpus into ADR-0040 prose. Make the "compromised core → gateway catches" corpus entry inject a **no-op core DLP** so the gateway is provably the catcher.
 
-**C1 reconciliation — the decision for the next session.** Mode-b for web.fetch is really "**the gateway performs the fetch on behalf of the core**" (the subprocess's job moves to the gateway), not "core redacts a body." Two shapes: **(A) Relay-as-fetcher** — re-home `web_fetch_plugin.py`'s fetch + TLS/size/MIME/redirect + content-store/handle-mint into `gateway/egress_relay.py`; `dispatch_web_fetch` calls the relay client; the §4.3 response uses the **existing** transport-side T3 seam, not a new mint. L-sized but it is the real connectivity-free end-state (required by G7-3). The body-DLP second pass (decision 12) ships as **honestly-named DiD infrastructure awaiting a body-sending tool** (proven by the synthetic driver + the corpus), like the gateway proxy shipped before all its consumers. **(B) Split** — G7-2 ships Part A (ledger) + the gateway relay infra + the framed transport, proven by the synthetic driver, and the web.fetch **re-home** becomes its own sub-slice (G7-2.5) landing with/just before G7-3's connectivity flip. Recommend confirming (A)-as-end-state with the re-home tracked as its own task, since the body-DLP-without-a-body-tool reality means "live web.fetch cutover" is the fetch re-home, not a body redaction.
+**C1 reconciliation — RESOLVED (2026-06-27, maintainer): option (B).** Mode-b for web.fetch is really "**the gateway performs the fetch on behalf of the core**" (the subprocess's job moves to the gateway), not "core redacts a body." Two shapes were on the table: **(A) Relay-as-fetcher within G7-2** — re-home `web_fetch_plugin.py`'s fetch + TLS/size/MIME/redirect + content-store/handle-mint into `gateway/egress_relay.py` *inside G7-2*; vs **(B) Split** — G7-2 ships Part A (ledger) + the gateway relay infra + the framed transport + the in-core relay client + the §4.3 extract, all proven by the synthetic driver, and the web.fetch **re-home** becomes its own sub-slice **G7-2.5** landing with/just before G7-3's connectivity flip. **(B) is chosen.** The C1 *mechanism* is locked either way (round-2 CORE-1): the gateway **fetches + returns the response bytes** over the framed wire; the **core** mints the `ContentHandle` + tags T3 + runs the one extractor (the gateway holds no `CapabilityGateNonce` — ADR-0036 — so it structurally cannot mint T3). Under (B), G7-2's relay is honestly-named DiD infrastructure proven by the synthetic driver + the §9 corpus; the body-DLP second pass (decision 12) is real and exercised by the corpus's synthetic body-sending driver even though the *live* GET-only web.fetch sends no body. The G7-2.5 re-home is the live cutover (it is what "routes web.fetch through the gateway" actually means) and is sequenced as the hard predecessor of the G7-3 flip. See **Part D — G7-2.5** below.
 
 ---
 
@@ -82,9 +82,10 @@ An 8-specialist `/review-plan` (architect, reviewer, test, security, memory, cor
 
 - **G7-2a — egress-id + `TurnEgressContext` + the tri-state ledger.** Pure + DB infra, no egress consumer. The ledger must exist before any relay-send path.
 - **G7-2b — `gateway/egress_relay.py` (gateway side only) + gateway DLP (stages 2+3) + real canary.** The gateway inspecting-relay endpoint: parse the envelope, re-run DLP, enforce the tool allowlist + SSRF chain, originate the real TLS, return the response. Tested entirely **gateway-side** (loopback fake upstream + a test HTTP client) — **no in-core consumer, no in-core T3 handling**, so no production caller exists.
-- **G7-2c — in-core relay client (ledger-wrapped) + §4.3 T3 response-extract, then the dispatcher re-point + synthetic driver + adversarial corpus.** Ships as **two PRs**: **G7-2c-1** (the core relay mechanism: `relay_client.py` + the §4.3 tag-at-ingestion/extract/record-T2 — fires only via tests, no dispatcher re-point) and **G7-2c-2** (re-point the real `dispatch_web_fetch` at the relay — the side-effecting flip, guarded by the G7-2a ledger — + the synthetic driver + the release-blocking barrier test + the §9 corpus).
+- **G7-2c — in-core relay client (ledger-wrapped) + §4.3 T3 response-extract + the synthetic driver + the release-blocking barrier test + the §9 corpus.** Ships as **two PRs**: **G7-2c-1** (the core relay mechanism: `relay_client.py` over the framed transport + the §4.3 tag-at-ingestion/gate-checked-extract/record-T2 — fires only via tests, no production caller) and **G7-2c-2** (the synthetic driver + `fake_external_world` fixture + the release-blocking barrier/dedup/TTL test + the §9 adversarial corpus — all driving the **real** relay/extract/ledger path end-to-end). **No live `dispatch_web_fetch` re-point in G7-2c (C1=(B)) — that is G7-2.5.**
+- **G7-2.5 (Part D) — the live web.fetch re-home (the side-effecting cutover).** Re-home the GET fetch (TLS/size/MIME/redirect + content-store + transport-side T3 mint) out of the `alfred_web_fetch` subprocess; `dispatch_web_fetch` calls the relay client; compose wiring; the live dispatcher reaches the real relay. Lands **with/just before G7-3's connectivity flip** and is its **hard predecessor** (a live tool must not egress while the core's direct fallback still exists). Sized L; kept out of G7-2 per the maintainer C1=(B) decision.
 
-Sequencing rule: **the relay-send path and the ledger that wraps it must never exist in separate merges** — G7-2a (ledger) precedes any fire; the in-core fire (G7-2c-1) is ledger-wrapped from its first line and has no production caller until the dispatcher re-point (G7-2c-2) merges last. The gateway relay (G7-2b) enforces the allowlist + DLP independently, so even the first core call is doubly guarded.
+Sequencing rule: **the relay-send path and the ledger that wraps it must never exist in separate merges** — G7-2a (ledger) precedes any fire; the in-core fire (G7-2c-1) is ledger-wrapped from its first line and has **no production caller** until the G7-2.5 re-home merges (with/before G7-3). The gateway relay (G7-2b) enforces the allowlist + DLP independently, so even the first synthetic-driver call is doubly guarded. The anti-dead-code guarantee is **sequencing-enforced**: the G7-3 flip is hard-blocked on G7-2.5, so no consumer-less relay survives to a release.
 
 ---
 
@@ -95,25 +96,31 @@ Sequencing rule: **the relay-send path and the ledger that wraps it must never e
 - `src/alfred/egress/egress_id.py` — `TurnEgressContext`, `compute_egress_id`, `compute_body_hash`, `EgressIdIntegrityError` (pure; rides nothing — see coverage note). *(G7-2a)*
 - `src/alfred/memory/egress_idempotency.py` — `EgressIdempotencyStore` Protocol + `PostgresEgressIdempotencyStore` DAO (tri-state). *(G7-2a)*
 - `src/alfred/memory/migrations/versions/0023_egress_idempotency.py` — the ledger table migration. *(G7-2a)*
-- `src/alfred/egress/relay_client.py` — in-core mode-b relay client (HTTP POST → gateway; ledger-wrapped). *(G7-2c-1)*
-- `src/alfred/gateway/egress_relay.py` — gateway mode-b inspecting relay endpoint (DLP + SSRF + TLS origination). *(G7-2b)*
+- `src/alfred/egress/relay_protocol.py` — shared framed-transport envelopes (`EgressRequest`/`EgressResponse`/`_RawToolRequest`) + the length-prefixed frame read/write helpers. *(G7-2b)*
+- `src/alfred/egress/relay_client.py` — in-core mode-b relay client over the **framed JSON protocol** (raw asyncio, **no httpx** → NOT import-guard-allowlisted; ledger-wrapped). *(G7-2c-1)*
+- `src/alfred/egress/egress_response_extract.py` — the §4.3 wrapper (gate-checked extract + ledger T2 recording). *(G7-2c-1)*
+- `src/alfred/gateway/egress_relay.py` — gateway mode-b inspecting relay endpoint (framed-frame server + DLP + SSRF + TLS origination). The **only** new httpx site → gateway-side import-guard-allowlisted. *(G7-2b)*
 - `src/alfred/security/canary_matcher.py` — shared pure canary token-matcher. *(G7-2b)*
 - `src/alfred/gateway/egress_relay_audit.py` — mode-b relay audit vocab (structlog tier; separate from the CONNECT field-allowlist). *(G7-2b)*
-- `tests/integration/egress/conftest.py` — the epic-wide `fake_external_world` fixture. *(G7-2c)*
-- `tests/integration/egress/test_egress_barrier_dedup_postgres.py` — the release-blocking §5 barrier test. *(G7-2c)*
+- `tests/integration/egress/conftest.py` — the epic-wide `fake_external_world` fixture. *(G7-2c-2)*
+- `tests/integration/egress/test_egress_barrier_dedup_postgres.py` — the release-blocking §5 barrier test. *(G7-2c-2)*
 - `tests/integration/test_egress_idempotency_postgres.py`, `tests/integration/test_migration_0023_egress_idempotency.py` — ledger contract + migration round-trip. *(G7-2a)*
-- `tests/adversarial/dlp_egress/*.yaml` + executable drivers; `tests/adversarial/tier_laundering/*` additions. *(G7-2c)*
+- `tests/adversarial/dlp_egress/*.yaml` + executable drivers; `tests/adversarial/tier_laundering/*` additions. *(G7-2c-2)*
 
 **Modified:**
 
 - `src/alfred/security/dlp.py` — `OutboundDlp.broker` becomes optional; `_canary_stub` → real canary stage via `canary_matcher`. *(G7-2b)*
 - `src/alfred/config/settings.py` — add the relay-endpoint URL field (core side). *(G7-2c-1)*
-- `docker-compose.yaml` + `.env.example` — relay endpoint env wiring (never host-published). *(G7-2c)*
 - `src/alfred/cli/gateway/_commands.py` — mount the relay endpoint as a third sibling `TaskGroup` task. *(G7-2b)*
-- `src/alfred/plugins/web_fetch/fetch_dispatcher.py` — re-point outbound through the relay client. *(G7-2c)*
-- `tests/unit/egress/test_in_core_http_egress_guard.py` — add `egress/relay_client.py` to `_CONSTRUCT_ALLOWLIST`. *(G7-2c-1)*
 - `tests/unit/security/test_dlp.py` — retire `test_canary_stub_is_identity_in_slice_2`; add the real-canary suite. *(G7-2b)*
-- `.github/workflows/ci.yml` — extend BOTH egress coverage steps + BOTH `hashFiles()` guards. *(G7-2a adds the ledger DAO; G7-2b adds the relay + audit files)*
+- `.github/workflows/ci.yml` — extend BOTH egress coverage steps + BOTH `hashFiles()` guards. *(G7-2a adds the ledger DAO; G7-2b adds the relay + audit + protocol files; G7-2c-1 adds relay_client + egress_response_extract — the latter two combined-job-only.)*
+
+**Moved to G7-2.5 (Part D — the live re-home, NOT G7-2):**
+
+- `docker-compose.yaml` + `.env.example` — relay endpoint env wiring (never host-published).
+- `src/alfred/plugins/web_fetch/...` — re-home the GET fetch + content-store/T3 mint; `dispatch_web_fetch` calls the relay client.
+
+> **Import-guard ruling (round-2 TE-2/devops-1):** the framed-transport ruling means the in-core relay client speaks **raw asyncio**, so there is **no** new in-core httpx construction site — `egress/relay_client.py` is **NOT** added to `_CONSTRUCT_ALLOWLIST` (the budget stays at one entry). Only `gateway/egress_relay.py` (gateway-side) is httpx-allowlisted, under the gateway guard.
 
 ---
 
@@ -272,7 +279,7 @@ git commit -m "feat(egress): deterministic injective egress-id + body-hash (#333
 
 **Interfaces:**
 
-- Produces: table `egress_idempotency` with columns `egress_id` (PK, String(255)), `adapter_id` String(128), `inbound_id` String(255), `session_id` String(255), `call_index` Integer, `body_hash` String(64), `state` String(32) CHECK in `('committed_no_response','committed_with_response')`, `response` Text NULL, `language` String(35) NULL, `committed_at` timestamptz server-default `now()`; index `ix_egress_idempotency_committed_at`.
+- Produces: table `egress_idempotency` with columns `egress_id` (PK, **String(64)** — a sha256 hexdigest is exactly 64 chars; MEM-4), `adapter_id` String(128), `inbound_id` String(255), `session_id` String(255), `call_index` Integer, `body_hash` String(64), `state` String(32) CHECK in `('committed_no_response','committed_with_response')`, `response` Text NULL, `language` **String(16)** NULL (BCP-47 tag — convention; MEM-2), `committed_at` timestamptz server-default `now()`; index `ix_egress_idempotency_committed_at`. (MEM-4 also suggests a nullable user-scoped column while the table is empty — defer until #339 supplies a real turn-user; do not add a constant-valued column now.)
 
 - [ ] **Step 1: Add the ORM model** (`src/alfred/memory/models.py`)
 
@@ -287,7 +294,7 @@ class EgressIdempotency(Base):
 
     __tablename__ = "egress_idempotency"
 
-    egress_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    egress_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     adapter_id: Mapped[str] = mapped_column(String(128), nullable=False)
     inbound_id: Mapped[str] = mapped_column(String(255), nullable=False)
     session_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -295,7 +302,7 @@ class EgressIdempotency(Base):
     body_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     state: Mapped[str] = mapped_column(String(32), nullable=False)
     response: Mapped[str | None] = mapped_column(Text, nullable=True)
-    language: Mapped[str | None] = mapped_column(String(35), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True)
     committed_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -370,7 +377,7 @@ git commit -m "ci(egress): name 100% line+branch gates for egress-id + ledger DA
 
 **PR scope:** the **gateway side only** — the inspecting relay endpoint, the shared canary matcher, the broker-optional `OutboundDlp`, and the relay audit vocab. Tested entirely gateway-side with a loopback fake upstream + a test HTTP client. **No in-core consumer, no in-core T3 handling** in this PR.
 
-> **Open sub-decision for plan-review:** the core↔gateway relay wire. This plan specifies **HTTP POST (httpx core-side → a minimal framework-free asyncio HTTP/1.1 handler gateway-side)** per the provider-engineer panel position (verified against pinned httpx 0.28.1). The alternative is a **length-prefixed JSON frame protocol** over `asyncio.start_server` (core uses raw asyncio → no in-core httpx → the import-guard needs no new allowlist entry). Trade-off: HTTP is the panel default and gives natural request/response semantics; the framed protocol is ~20 lines simpler and keeps the in-core import-guard story trivial. Both are payload-explicit and `alfred_internal`-only. **Let the plan-review fleet rule before implementing B4/C-1.** The tasks below assume HTTP POST; if the framed protocol wins, B4's parser + C-1's client swap accordingly (the envelope types and all enforcement are identical either way).
+> **Sub-decision RESOLVED (round-2 architect ruling): framed JSON protocol, NOT HTTP POST.** The core↔gateway relay wire is a **length-prefixed JSON-frame protocol over `asyncio.start_server`** (reusing `egress_proxy.py`'s `_handle_client`/`_serve_connection`/`_on_connection_done`/bounded-read/`_drain_connections` discipline). Rationale: the core relay client speaks **raw asyncio** → **no second in-core httpx construction site** (the import-guard `_CONSTRUCT_ALLOWLIST` stays at one entry — the connectivity-free-core budget is not spent on an internal hop); and a smaller, `extra="forbid"`-validated parse surface than a hand-rolled HTTP/1.1 server (no Content-Length / Transfer-Encoding smuggling surface). The envelope types (`EgressRequest`/`EgressResponse`, `model_dump_json()`) are unchanged — only the transport bytes differ. B4 implements the frame server; C1's client speaks frames; the gateway's **upstream-origination** client (`gateway/egress_relay.py`, D2 IP-in-URL+`sni_hostname`) is the ONLY new httpx site and stays gateway-side-allowlisted.
 
 ### Task B1: shared relay protocol envelopes + the canary matcher
 
@@ -384,12 +391,14 @@ git commit -m "ci(egress): name 100% line+branch gates for egress-id + ledger DA
 
 - Produces:
   - `EgressRequest` — frozen Pydantic: `method: str`, `url: str`, `headers: Mapping[str, str]`, `body: str` (the **redacted** body), `egress_id: str`. `model_config = ConfigDict(frozen=True, extra="forbid")`.
-  - `EgressResponse` — frozen Pydantic: `status: int`, `headers: Mapping[str, str]`, `body: str`.
+  - `EgressResponse` — frozen Pydantic: `status: int`, `headers: Mapping[str, str]`, `body: str`. `frozen=True, extra="forbid"`.
+  - `_RawToolRequest` (H4 — define it here; consumed by C1/C2) — frozen Pydantic, the in-core pre-redaction tool request: `method: str`, `url: str`, `headers: Mapping[str, str]`, `body: str` (the **raw** body the core will redact; for the live GET-only consumer it is `""`), `idempotent: bool = False` (the manifest-declared idempotency flag — gates the H3 in-doubt auto-refire; default `False` = in-doubt refuses). `frozen=True, extra="forbid"`. Modelled as empty/optional-body DiD infra per ARCH-3 — the live web.fetch GET sends no body; only the synthetic body-sending driver populates it.
+  - `read_frame(reader, *, max_len) -> bytes` / `write_frame(writer, payload: bytes) -> None` — the **length-prefixed frame** transport helpers (4-byte big-endian length prefix; `max_len` bound; timeout at the caller; mirror `egress_proxy._read_connect_target`'s bounded-read discipline). Shared by the gateway server (B4) and the in-core client (C1) — the ONE wire-bytes definition, no drift.
   - `CanaryMatcher` — pure token-matcher extracted from `InboundCanaryScanner`'s logic:
     - `__init__(self, *, tokens: Sequence[CanaryToken])` — compiles `re.compile(re.escape(t.value), re.IGNORECASE)` per token; reuse the existing `CanaryToken` value object (with its blank-token `__post_init__` guard) from `plugins/web_fetch/canary_scanner.py`.
     - `first_match(self, text: str) -> str | None` — returns the matched token value (for the audit row) or `None`. Pure, no I/O, no store coupling.
 
-- [ ] **Step 1:** Write `test_canary_matcher.py` — happy (a planted token returns its value), clean (no token → `None`), case-insensitive, non-UTF8-safe input, blank-token rejection (constructing with a blank token raises via `CanaryToken.__post_init__`). Write `test_relay_protocol.py` — round-trip `model_dump_json()`/`model_validate_json()`; `extra="forbid"` rejects unknown fields.
+- [ ] **Step 1:** Write `test_canary_matcher.py` — happy (a planted token returns its value), clean (no token → `None`), case-insensitive, non-UTF8-safe input, blank-token rejection (constructing with a blank token raises via `CanaryToken.__post_init__`). Write `test_relay_protocol.py` — round-trip `model_dump_json()`/`model_validate_json()` for all three envelopes; `extra="forbid"` rejects unknown fields; `read_frame`/`write_frame` round-trip + an over-`max_len` frame raises (no unbounded read).
 - [ ] **Step 2:** Run → FAIL.
 - [ ] **Step 3:** Implement both. `CanaryMatcher` lifts the compile + `pattern.search` loop from `canary_scanner.py:323` (DRY — the inbound scanner is refactored to depend on `CanaryMatcher` in Step 5).
 - [ ] **Step 4:** Run → PASS.
@@ -458,41 +467,53 @@ git commit -m "feat(gateway): mode-b relay audit vocab (structlog tier, separate
 - Consumes: `EgressRequest`/`EgressResponse` (B1), `OutboundDlp` (broker=None) + `CanaryMatcher` (B1/B2), `record_egress_relay` (B3), `is_literal_ip`/`is_globally_routable`/`host_port_from_url` (`egress/allowlist.py`).
 - Produces:
   - `EgressRelay.__init__(self, *, tool_allowlist: frozenset[EgressDestination], dlp: OutboundDlp, audit, bind_host, port, resolve=_default_resolve, open_client=_default_httpx_client, response_byte_cap: int = _DEFAULT_RESPONSE_CAP)`.
-  - `async serve(self, shutdown_event) -> None` — bind + serve the minimal HTTP/1.1 endpoint until shutdown; **fail-closed** bind (OSError propagates → B5 maps to `IOPlaneUnavailableError`).
+  - `async serve(self, shutdown_event) -> None` — bind + serve the **length-prefixed JSON-frame** endpoint (`asyncio.start_server`, one task per connection, `_on_connection_done` loud-log) until shutdown; **fail-closed** bind (OSError propagates → B5 maps to `IOPlaneUnavailableError`).
   - `resolve_egress_relay_port()` / `resolve_egress_relay_bind()` — env `ALFRED_EGRESS_RELAY_PORT` (default e.g. 8890) / `ALFRED_EGRESS_RELAY_BIND` (default `0.0.0.0`, never host-published). Mirror `resolve_egress_proxy_port`.
+
+> **FOLDED (round-2) — the pipeline below supersedes any HTTP/1.1 framing. Implement THIS:**
+>
+> - **Transport = framed JSON** (round-2 ruling): the request arrives as one length-prefixed JSON frame (`relay_protocol.read_frame` — bounded length, timeout; mirror `egress_proxy._read_connect_target`), `EgressRequest.model_validate_json` parses it (`extra="forbid"`). The response is one `EgressResponse` frame back. No `Content-Length`/HTTP request-line surface.
+> - **Method allowlist (H6):** validate `req.method` against a closed set — **GET-only** for the live path — before anything else; a non-member or a CRLF-bearing method → `MALFORMED_ENVELOPE` deny. Strip any caller-supplied `Host`/`Content-Length`/`Transfer-Encoding` from `req.headers` before forwarding.
+> - **PROV-1 — inject `Host: <hostname>`:** because the URL host is the **resolved IP**, httpx would auto-send `Host: <IP>` (CDNs/vhosts reject) → `_safe_headers` **sets `Host` to the original hostname** explicitly (do NOT "let httpx set Host").
+> - **PROV-2 — no connection pooling:** a shared keepalive pool lets two allowlisted hostnames on the same IP reuse one TLS connection → the per-request cert-vs-hostname check is bypassed. Build the client with `max_keepalive_connections=0` (or a fresh client per request) + a no-reuse test.
+> - **PROV-3 — IPv6:** the resolved IP is **bracketed** in the URL host, **unbracketed** in `request.extensions["sni_hostname"]`.
 
 **The enforcement pipeline (per request — order is load-bearing):**
 
 ```python
-# 1. Read the request envelope (bounded Content-Length; reject oversized/malformed -> MALFORMED_ENVELOPE).
-req = EgressRequest.model_validate_json(body_bytes)          # extra="forbid" rejects junk
-host, port = host_port_from_url(req.url)                     # authority from the URL ONLY
-# 2. SSRF chain — IDENTICAL to the CONNECT proxy (these do NOT come for free; per-path):
+# 0. Read ONE length-prefixed JSON frame (bounded length + timeout; oversized/garbage -> MALFORMED_ENVELOPE).
+req = EgressRequest.model_validate_json(frame_bytes)         # extra="forbid" rejects junk
+if req.method not in _ALLOWED_METHODS:  deny(MALFORMED_ENVELOPE)   # H6: GET-only live path; CRLF method -> deny
+host, port = host_port_from_url(req.url)                     # authority from the URL ONLY (never a Host header)
+# 1. SSRF chain — IDENTICAL to the CONNECT proxy (these do NOT come for free; per-path):
 if is_literal_ip(host):            deny(LITERAL_IP_TARGET)   # an IP target dodges gateway DNS
 if (host, port) not in self._allowlist:  deny(DESTINATION_NOT_ALLOWLISTED)   # default-deny, TOOL allowlist
 resolved_ip = await loop.run_in_executor(None, self._resolve, host)          # gateway-side DNS, off-loop
 if not is_globally_routable(resolved_ip): deny(RESOLVED_IP_NOT_GLOBAL)       # DNS-rebinding TOCTOU
-# 3. Gateway DLP second pass (decision 12) — stages 2+3 on the REDACTED body the core sent:
-scanned = self._dlp.scan(req.body)   # broker=None -> regex + canary; canary trip raises -> CANARY/DLP_REDACTED deny
-# (a redaction that CHANGES the body = the core failed to redact -> DLP_REDACTED deny + audit; do not forward.)
-# 4. Originate the REAL upstream TLS — connect to the validated IP, validate cert against the hostname:
-ip_url = req.url with host replaced by resolved_ip (bracket IPv6); keep scheme/port/path/query
-request = client.build_request(req.method, ip_url, headers=_safe_headers(req.headers), content=req.body)
-request.extensions["sni_hostname"] = host                   # SNI + cert identity = original hostname
+# 2. Gateway DLP second pass (decision 12) — stages 2+3 on the REDACTED body the core sent:
+scanned = self._dlp.scan_for_outbound(req.body)   # returns ScannedOutboundBody; canary trip RAISES -> CANARY deny
+if scanned.redacted_text != req.body:  deny(DLP_REDACTED)   # the core failed to redact -> deny + audit, do NOT forward
+forward_body = scanned.redacted_text                        # forward the (re-)redacted text, never req.body raw
+# 3. Originate the REAL upstream TLS — connect to the validated IP, validate cert against the hostname:
+ip_url = req.url with host replaced by resolved_ip (BRACKET IPv6); keep scheme/port/path/query
+headers = _safe_headers(req.headers)                        # strip hop-by-hop + caller Host/CL/TE
+headers["Host"] = host                                      # PROV-1: explicit Host = ORIGINAL hostname (not the IP)
+request = client.build_request(req.method, ip_url, headers=headers, content=forward_body)
+request.extensions["sni_hostname"] = host_unbracketed       # PROV-3: SNI/cert identity = hostname, IPv6 unbracketed
 resp = await client.send(request, follow_redirects=False, stream=True)       # NO redirect chasing
 if resp.is_redirect: deny(UPSTREAM_REDIRECT_REFUSED)        # a 3xx to an unchecked host must not be followed
-# 5. Buffer-with-cap (streaming fights the response scan; the cap makes buffering safe):
+# 4. Buffer-with-cap (streaming fights the response scan; the cap makes buffering safe):
 body = bounded_read(resp.aiter_bytes(), self._response_byte_cap)  # exceed -> RESPONSE_TOO_LARGE deny
-# 6. Audit forwarded + return EgressResponse(status, _safe_headers(resp.headers), body)
+# 5. Audit forwarded + return EgressResponse(status, _safe_headers(resp.headers), body)  [body bytes are T3 → core extracts]
 record_egress_relay(EGRESS_RELAY_FORWARDED_EVENT, {...})
 ```
 
-- `_default_httpx_client()` builds `httpx.AsyncClient(trust_env=False)` (gateway-side; ambient proxy env must not redirect mode-b). This file is the **gateway-side sanctioned httpx construction** — it lives under `src/alfred/gateway/`, so the in-core import-guard **will** flag it → add `gateway/egress_relay.py` to the guard's `_CONSTRUCT_ALLOWLIST` with a justification ("the sanctioned gateway-side egress origination site — Spec C G7-2; the gateway IS the egress plane").
-- `_safe_headers` strips hop-by-hop headers (`Connection`, `Proxy-*`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) and builds a fresh dict; lets httpx set `Host`/`Content-Length`. The `egress_id` is NOT forwarded upstream by default (internal correlation only — §5 honest contract).
+- `_default_httpx_client()` builds `httpx.AsyncClient(trust_env=False, limits=httpx.Limits(max_keepalive_connections=0))` (PROV-2: no pooled connection reuse — else two allowlisted hostnames on one IP share a TLS conn and the per-request cert-vs-hostname check is bypassed; ambient proxy env must not redirect mode-b either). This file is the **gateway-side sanctioned httpx construction** — it lives under `src/alfred/gateway/`, so the in-core import-guard **will** flag it → add `gateway/egress_relay.py` to the guard's `_CONSTRUCT_ALLOWLIST` with a justification ("the sanctioned gateway-side egress origination site — Spec C G7-2; the gateway IS the egress plane"). This is the ONLY new httpx site in G7-2 (the core relay client speaks raw-asyncio frames).
+- `_safe_headers` strips hop-by-hop headers (`Connection`, `Proxy-*`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) **and any caller `Host`/`Content-Length`/`Transfer-Encoding`** (H6) and builds a fresh dict; the caller `Host` is replaced by the explicit hostname `Host` (PROV-1). The `egress_id` is NOT forwarded upstream by default (internal correlation only — §5 honest contract); G7-2.5/#339 add it as the remote `Idempotency-Key` on a manifest-idempotent tool (H3).
 
-- [ ] **Step 1: Write the failing tests** — happy forward (loopback fake upstream returns a body; assert `EgressResponse` + a forwarded audit row); literal-IP deny; non-allowlisted deny; non-globally-routable resolved IP deny (inject a resolver returning `10.0.0.1`); **DLP second-pass catch** (a body with an API-key shape the "core forgot" → `DLP_REDACTED` deny + audit, NOT forwarded); **canary trip** (a planted token → `CANARY_TRIPPED` deny + audit); redirect refusal (fake upstream returns 302 → `UPSTREAM_REDIRECT_REFUSED`); response-too-large (fake upstream returns body > cap → `RESPONSE_TOO_LARGE` deny); malformed envelope (junk JSON → `MALFORMED_ENVELOPE`); **IP-pinning** (assert the client connects to the resolved IP with `sni_hostname` = the original host — inject a fake `open_client` capturing the request and assert `request.extensions["sni_hostname"]` + the IP-host URL). Use in-memory streams for parsing logic + a loopback `asyncio.start_server` fake upstream for origination (mirror `test_provider_forward_proxy_e2e.py`; reuse the `_shutdown_default_executor` autouse drain — the off-loop resolver leaks the default executor otherwise).
+- [ ] **Step 1: Write the failing tests** — happy forward (loopback fake upstream returns a body; assert `EgressResponse` + a forwarded audit row); literal-IP deny; non-allowlisted deny; non-globally-routable resolved IP deny (inject a resolver returning `10.0.0.1`); **DLP second-pass catch** (a body with an API-key shape the "core forgot" → `DLP_REDACTED` deny + audit, NOT forwarded); **canary trip** (a planted token → `CANARY_TRIPPED` deny + audit); redirect refusal (fake upstream returns 302 → `UPSTREAM_REDIRECT_REFUSED`); response-too-large (fake upstream returns body > cap → `RESPONSE_TOO_LARGE` deny); malformed envelope (junk frame → `MALFORMED_ENVELOPE`); **method/smuggling (H6)** (a non-GET method and a CRLF-bearing method → `MALFORMED_ENVELOPE`; a caller-supplied `Host: evil`/`Content-Length`/`Transfer-Encoding` is dropped — assert it never reaches the upstream request); **Host injection (PROV-1)** (assert the forwarded request carries `Host: <hostname>`, not `Host: <resolved-IP>`); **no-pooling (PROV-2)** (two requests to two allowlisted hostnames that resolve to the SAME IP do NOT reuse one TLS connection — assert a fresh connect each); **IP-pinning (PROV-3)** (assert the client connects to the resolved IP with `sni_hostname` = the original host — inject a fake `open_client` capturing the request and assert `request.extensions["sni_hostname"]` + the IP-host URL; IPv6 bracketed in the URL, unbracketed in `sni_hostname`). Use in-memory streams for the frame-parsing logic + a loopback `asyncio.start_server` fake upstream for origination (mirror `test_provider_forward_proxy_e2e.py`; reuse the `_shutdown_default_executor` autouse drain — the off-loop resolver leaks the default executor otherwise).
 - [ ] **Step 2:** Run → FAIL.
-- [ ] **Step 3: Implement** `egress_relay.py` per the pipeline above. The minimal HTTP/1.1 handler: bounded request-line + headers read (cap + timeout, mirror `egress_proxy._read_connect_target`), parse `Content-Length`, bounded body read, dispatch, write a JSON HTTP/1.1 response. Each connection is its own task with `_on_connection_done` loud-logging (mirror `egress_proxy`).
+- [ ] **Step 3: Implement** `egress_relay.py` per the pipeline above. The **framed handler**: bounded length-prefixed frame read (cap + timeout, mirror `egress_proxy._read_connect_target`), `EgressRequest.model_validate_json`, dispatch, write one `EgressResponse` frame back. Each connection is its own task with `_on_connection_done` loud-logging (mirror `egress_proxy`). Share `relay_protocol.read_frame`/`write_frame` with the in-core client (B1).
 - [ ] **Step 4:** Run → PASS. Add `gateway/egress_relay.py` + `gateway/egress_relay_audit.py` to BOTH egress coverage `--include` lists + BOTH `hashFiles()` guards in `ci.yml`. Verify 100% via the CI pattern.
 - [ ] **Step 5:** Add `gateway/egress_relay.py` to the import-guard `_CONSTRUCT_ALLOWLIST` (`tests/unit/egress/test_in_core_http_egress_guard.py`); add an assertion in the guard's "allowlist entries still exist" test. `make check` + commit.
 
@@ -516,37 +537,39 @@ git commit -m "feat(gateway): mount the mode-b relay as a fail-closed sibling ta
 
 ---
 
-## Part C — G7-2c: in-core relay client + §4.3 response-extract, then the dispatcher re-point + synthetic driver + corpus
+## Part C — G7-2c: in-core relay client (framed) + §4.3 response-extract + synthetic driver + barrier + corpus
 
-**PR split:** **G7-2c-1** = the core relay mechanism (relay client + §4.3) with no production caller; **G7-2c-2** = the dispatcher re-point (the side-effecting flip) + the synthetic driver + the release-blocking barrier test + the §9 corpus.
+**PR split:** **G7-2c-1** = the core relay mechanism (framed relay client + the gate-checked §4.3 extract) with **no production caller**; **G7-2c-2** = the synthetic driver + `fake_external_world` fixture + the release-blocking barrier/dedup/TTL test + the §9 corpus, all driving the **real** relay/extract/ledger path. **The live `dispatch_web_fetch` re-point is NOT in Part C — it is Part D / G7-2.5 (C1=(B)).** So G7-2c ships zero live egress; the synthetic driver is the only caller until G7-2.5.
 
-**G7-2c-1 — in-core relay client (ledger-wrapped) + §4.3 T3 response-extract**
+**G7-2c-1 — in-core framed relay client (ledger-wrapped) + §4.3 T3 response-extract**
 
 ### Task C1: the in-core relay client
 
 **Files:**
 
-- Create: `src/alfred/egress/relay_client.py`
+- Create: `src/alfred/egress/relay_client.py` (raw-asyncio **framed** client — NO httpx)
 - Modify: `src/alfred/config/settings.py` (add `egress_relay_url: str | None = None` with the blank→None validator, mirror `egress_proxy_url`)
-- Modify: `tests/unit/egress/test_in_core_http_egress_guard.py` (allowlist `egress/relay_client.py` if HTTP-POST wire wins)
+- Modify: `src/alfred/egress/errors.py` (add `EgressInDoubtError`)
 - Test: `tests/unit/egress/test_relay_client.py`
+
+> **DO NOT** touch `test_in_core_http_egress_guard.py` here — the framed client speaks raw asyncio, has **no** httpx construction, so it is NOT added to `_CONSTRUCT_ALLOWLIST` (round-2 TE-2). The guard stays at its one entry (`gateway/egress_relay.py`, added in B4).
 
 **Interfaces:**
 
-- Consumes: `EgressRequest`/`EgressResponse` (B1), `OutboundDlp` (core-side, broker set) for the core stage-1 redaction, `compute_egress_id`/`compute_body_hash`/`TurnEgressContext` (A1), `EgressIdempotencyStore` + `IntentFresh`/`IntentReplayComplete`/`IntentInDoubt` (A3), `IOPlaneUnavailableError`/`EgressDeniedError` (`egress/errors.py`).
+- Consumes: `EgressRequest`/`EgressResponse`/`_RawToolRequest` + `read_frame`/`write_frame` (B1), `OutboundDlp` (core-side, broker set) for the core stage-1 redaction, `compute_egress_id`/`compute_body_hash`/`TurnEgressContext` (A1), `EgressIdempotencyStore` + `IntentFresh`/`IntentReplayComplete`/`IntentInDoubt` (A3), `IOPlaneUnavailableError`/`EgressDeniedError`/`EgressInDoubtError` (`egress/errors.py`).
 - Produces:
-  - `RelayEgressClient.__init__(self, *, relay_url, core_dlp: OutboundDlp, ledger: EgressIdempotencyStore, http_client_factory, concurrency: int)` — an `asyncio.Semaphore(concurrency)` + a per-call `asyncio.timeout`. Holds NO `core_link`/seq-ack reference (must not HoL the comms relay).
+  - `RelayEgressClient.__init__(self, *, relay_url, core_dlp: OutboundDlp, ledger: EgressIdempotencyStore, open_connection=asyncio.open_connection, concurrency: int)` — an `asyncio.Semaphore(concurrency)` + a per-call `asyncio.timeout`. Holds NO `core_link`/seq-ack reference (must not HoL the comms relay). `open_connection` is the injectable raw-asyncio dialer (fake gateway in tests).
   - `async fire(self, *, raw_request: _RawToolRequest, ctx: TurnEgressContext, call_index: int) -> RelayOutcome` where `RelayOutcome = Fired(EgressResponse) | Deduplicated(stored_t2: str, language)`. Flow:
-    1. `redacted = self._core_dlp.scan_for_outbound(raw_request.body)` (core stage 1+2+3).
+    1. `scanned = self._core_dlp.scan_for_outbound(raw_request.body)`; **`redacted_text = scanned.redacted_text`** (reviewer-2: `scan_for_outbound` returns a `ScannedOutboundBody` wrapper, **not** a `str` — take `.redacted_text`).
     2. `egress_id = compute_egress_id(ctx, call_index=call_index)`; `body_hash = compute_body_hash(redacted_text)`.
-    3. `intent = await ledger.commit_intent(egress_id=..., body_hash=body_hash, ...)`.
-    4. `match intent`: `IntentReplayComplete(resp, lang)` → return `Deduplicated(resp, lang)` (**no fire, no re-extract**); `IntentInDoubt()` → if `raw_request.method in {"GET","HEAD"}` fall through (idempotent, safe re-fire) else `raise EgressInDoubtError` (at-most-once: never blind double-fire); `IntentFresh()` → fall through.
-    5. POST the `EgressRequest` envelope to `relay_url` (httpx, `trust_env=False`); a connect failure → `IOPlaneUnavailableError`; a relay deny (non-2xx relay status with a deny reason) → `EgressDeniedError(destination, deny_reason)`.
-    6. return `Fired(EgressResponse(...))`. (The §4.3 extract + `ledger.record_response` happen in the C2 wrapper, NOT here — the relay client never stores raw T3.)
+    3. `intent = await ledger.commit_intent(egress_id=…, body_hash=body_hash, …)` — this **commits the intent row in its own session** (commit-then-fire: it is durable BEFORE the fire, so a later barrier-kill in this `fire` cannot unwind it — MEM-1; the DAO uses its own `session_scope`, there is no `_autocommit_audit` symbol).
+    4. `match intent`: `IntentReplayComplete(resp, lang)` → return `Deduplicated(resp, lang)` (**no fire, no re-extract**); `IntentInDoubt()` → **H3: raise `EgressInDoubtError` BY DEFAULT**; auto-refire ONLY when `raw_request` carries a **manifest-declared-idempotent** flag (`raw_request.idempotent is True`), and when re-firing, **forward the `egress_id` as the remote `Idempotency-Key` header** (the §5 honest at-most-once contract). NEVER infer "safe to re-fire" from `method == GET` (HTTP idempotency is a remote convention, not a guarantee; the live consumer is a GET → it would take the re-fire branch every time). `IntentFresh()` → fall through.
+    5. Open a framed connection to `relay_url`, `write_frame(EgressRequest(...).model_dump_json())`, `read_frame` → `EgressResponse`; a connect/IO failure → `IOPlaneUnavailableError`; a relay deny frame (status carrying a `deny_reason`) → `EgressDeniedError(destination, deny_reason)` (which the core records via its DB-backed `AuditWriter` — H2/H5: the gateway holds no DB, so the durable canary/DLP-trip audit row is written **core-side** off this typed error).
+    6. return `Fired(EgressResponse(...))`. (The §4.3 extract + `ledger.record_response` happen in the C2 wrapper, NOT here. The relay client returns the `EgressResponse` whose `body` is raw T3 bytes — C2 mints the `ContentHandle` immediately and never lets the orchestrator touch `.body`; SEC-1/CORE-1: prefer returning an already-staged handle if the staging seam is cheap to call here, else C2 stages on the very next line.)
   - `EgressInDoubtError(AlfredError)` (`reason = "egress_in_doubt"`) added to `egress/errors.py`.
 
-- [ ] **Step 1: Write failing tests** — fresh fire POSTs the envelope + returns `Fired`; a `ReplayComplete` intent returns `Deduplicated` WITHOUT POSTing (assert the http_client_factory is never called — `assert_not_called`); `IntentInDoubt` + GET re-fires; `IntentInDoubt` + POST raises `EgressInDoubtError`; a different-hash duplicate surfaces `EgressIdIntegrityError` (from the ledger); relay-unreachable → `IOPlaneUnavailableError`; relay-deny → `EgressDeniedError`; HoL: a slow fire under the semaphore does not block a second concurrent fire on a free slot (deterministic Event-gated).
-- [ ] **Step 2–4:** Implement (fake gateway via the injected `http_client_factory`; real `PostgresEgressIdempotencyStore` against testcontainers for the intent states). Run green.
+- [ ] **Step 1: Write failing tests** — fresh fire writes the frame + returns `Fired`; a `ReplayComplete` intent returns `Deduplicated` WITHOUT dialing (assert `open_connection` is **never called** — the load-bearing no-fire); `IntentInDoubt` + non-idempotent (default) raises `EgressInDoubtError` (no dial); `IntentInDoubt` + manifest-idempotent re-fires AND the forwarded frame carries the `Idempotency-Key: <egress_id>` header; a different-hash duplicate surfaces `EgressIdIntegrityError` (from the ledger); relay-unreachable → `IOPlaneUnavailableError`; relay-deny → `EgressDeniedError`; a deny path triggers exactly one core-side `AuditWriter` row (H5); HoL: a slow fire under the semaphore does not block a second concurrent fire on a free slot (deterministic Event-gated).
+- [ ] **Step 2–4:** Implement (fake gateway via the injected `open_connection`; real `PostgresEgressIdempotencyStore` against testcontainers for the intent states). Run green.
 - [ ] **Step 5:** CI gate — add `src/alfred/egress/relay_client.py` to BOTH egress coverage `--include` + guards. i18n keys (`egress.in_doubt`). `make check` + commit.
 
 ```bash
@@ -562,19 +585,20 @@ git commit -m "feat(egress): in-core ledger-wrapped mode-b relay client (#333)"
 
 **Interfaces:**
 
-- Consumes: `RelayEgressClient` (C1), `QuarantinedExtractor.extract` (`security/quarantine.py:404`), the `T3BodyRecorder`/`ContentHandle`/`tag_t3_with_nonce` ingestion seam (`security/quarantine_transport.py`), `EgressIdempotencyStore.record_response` (A3).
+- Consumes: `RelayEgressClient` (C1), **`quarantined_to_structured(…, gate: CapabilityGate)`** (the sole sanctioned seam — `security/quarantine.py:~1385`, NOT the gateless `extract()` at :404 — CRITICAL C2/round-2 R2-High ②), the `T3BodyRecorder`/`ContentHandle`/`tag_t3_with_nonce` ingestion seam (`security/quarantine_transport.py`), `EgressIdempotencyStore.record_response` (A3).
 - Produces:
-  - `EgressResponseExtractor.handle(self, *, raw_request, ctx, call_index, canonical_user_id, schema) -> ExtractionResult` — wraps `RelayEgressClient.fire`:
-    - `Deduplicated(stored_t2, lang)` → return the stored T2 **directly**, flagged `deduplicated` — **do NOT call `QuarantinedExtractor.extract`** (the replay must not re-enter raw-T3 ingestion; HARD rule #5).
-    - `Fired(response)` → the response body is **T3**: mint a `ContentHandle`, stage it via `T3BodyRecorder` (under `tag_t3_with_nonce`), call the **one** `QuarantinedExtractor.extract(handle, schema)`, then `await ledger.record_response(egress_id=..., response=<serialized post-extraction T2>, language=...)`, and return the `ExtractionResult`. `canonical_user_id` is **host-side only**, never threaded into the extractor call (mirror `comms_mcp/bootstrap.py:138` — `del canonical_user_id`).
-    - The privileged orchestrator only ever receives the `ExtractionResult` (T2 `Extracted | TypedRefusal`), never the raw response.
+  - `EgressResponseExtractor.handle(self, *, raw_request, ctx, call_index, schema) -> EgressExtractOutcome` — wraps `RelayEgressClient.fire`. **No `canonical_user_id` param** (round-2 CORE-2/H1): `extract`/`quarantined_to_structured` take no such arg on this path, so threading one is dead plumbing; record the per-user-rate-limiter premise as a residual until #339 supplies a real turn-user. The wrapper requires a **`gate: CapabilityGate`** (constructor-injected).
+    - `Deduplicated(stored_t2, lang)` → return the stored T2 **directly**, as `EgressExtractOutcome(result=<deserialized stored T2>, deduplicated=True, language=lang)` — **do NOT call the extractor** (the replay must not re-enter raw-T3 ingestion; HARD rule #5). `ExtractionResult` has **no `deduplicated` field** (reviewer-1) → the `deduplicated` flag lives on the **wrapper return type** `EgressExtractOutcome` (frozen Pydantic: `result: ExtractionResult`, `deduplicated: bool`, `language: str | None`), and the stored-T2 ↔ replay serialization is `ExtractionResult.model_dump_json()` ↔ `model_validate_json()` into the `response` text column.
+    - `Fired(response)` → the response body is **T3**: mint a `ContentHandle`, stage it via `T3BodyRecorder` (under `tag_t3_with_nonce`), route through **`quarantined_to_structured(handle, schema, gate=self._gate)`** — which runs `gate.check_content_clearance(plugin_id="alfred.quarantined-llm", hookpoint="quarantine.dereference", content_tier="T3")` BEFORE extract — then `await ledger.record_response(egress_id=…, response=ExtractionResult.model_dump_json(), language=…)`, and return `EgressExtractOutcome(result, deduplicated=False, language=…)`.
+    - The privileged orchestrator only ever receives `EgressExtractOutcome.result` (T2 `Extracted | TypedRefusal`), never the raw response.
 
 - [ ] **Step 1: Write failing tests** —
-  - **Fresh:** a fired T3 response → `QuarantinedExtractor.extract` is called **once** (spy `assert_awaited_once`), the ledger row transitions to `committed_with_response` with the **post-extraction T2** (assert the stored value is the extracted data, never the raw T3 body), the returned tier is T2.
-  - **Replay (the load-bearing negative):** a `Deduplicated` outcome → `QuarantinedExtractor.extract` is **`assert_not_called`** (replay must not re-enter T3 ingestion), the returned value is the stored T2 flagged `deduplicated`.
+  - **Fresh:** a fired T3 response → `quarantined_to_structured` runs the gate THEN the extractor **once** (spy `assert_awaited_once`), the ledger row transitions to `committed_with_response` with the **post-extraction T2** (assert the stored value is `ExtractionResult.model_dump_json()`, never the raw T3 body), the returned tier is T2.
+  - **Gate-denial (new — CRITICAL C2):** `gate.check_content_clearance` denies → **no extract, no T2 stored**, a typed refusal/denial surfaces, the ledger row stays `committed_no_response`.
+  - **Replay (the load-bearing negative):** a `Deduplicated` outcome → the extractor is **`assert_not_called`** (replay must not re-enter T3 ingestion), the returned `EgressExtractOutcome.deduplicated is True`, `result` is the deserialized stored T2.
   - **Tier-downgrade guard:** the returned object is structurally T2; a mode-b (T3) response cannot acquire a mode-a T2 tag except via the extractor (assert the type/tag).
-- [ ] **Step 2–4:** Implement. Run green (real extractor spy + real Postgres for the ledger transition).
-- [ ] **Step 5:** CI gate for `egress_response_extract.py` (combined-job — the record_response transition needs integration data). `make check` + commit.
+- [ ] **Step 2–4:** Implement. Run green (real `quarantined_to_structured` + a fixture `CapabilityGate` grant for the allow path + a deny grant for the denial path; real Postgres for the ledger transition).
+- [ ] **Step 5:** CI gate for `egress_response_extract.py` (combined-job ONLY — the record_response transition needs integration data; unit-only data is RED — round-2 TE-2). `make check` + commit.
 
 ```bash
 git commit -m "feat(egress): §4.3 T3 response quarantine-extract + ledger T2 recording; replay never re-tags T3 (#333)"
@@ -582,23 +606,7 @@ git commit -m "feat(egress): §4.3 T3 response quarantine-extract + ledger T2 re
 
 **G7-2c-1 exit:** the core egress mechanism is on `main`, **fires only via tests** (no dispatcher re-point) — no production live egress yet. Full fleet + CodeRabbit (security ALWAYS — this is the T3 boundary + the dedup ledger), merge.
 
-**G7-2c-2 — the dispatcher re-point + synthetic driver + barrier test + corpus**
-
-### Task C3: re-point `dispatch_web_fetch` through the relay + compose wiring
-
-**Files:**
-
-- Modify: `src/alfred/plugins/web_fetch/fetch_dispatcher.py`
-- Modify: `docker-compose.yaml`, `.env.example`
-- Test: `tests/unit/plugins/web_fetch/...`, `tests/unit/test_compose_invariants.py`
-
-- [ ] **Step 1:** Re-point the web-fetch outbound: instead of the plugin subprocess opening its own httpx, the dispatcher builds an `EgressRequest` and calls the `EgressResponseExtractor` (C2). **This is the anti-dead-code wiring** — the REAL production dispatcher now reaches the relay. Keep the existing DLP-scan of url+headers (`clean_url`/`clean_headers`) as the core stage-1; the relay client re-redacts the body; the gateway re-runs stages 2+3.
-- [ ] **Step 2:** Compose: `alfred-core` gets `ALFRED_EGRESS_RELAY_URL=http://alfred-gateway:8890`; `alfred-gateway` gets `ALFRED_EGRESS_RELAY_PORT` + `ALFRED_TOOL_EGRESS_ALLOWLIST` + `ALFRED_CANARY_TOKENS` (public, non-secret). Relay port NEVER under `ports:` (compose-invariant test asserts it). No `depends_on` (G7-3 adds boot ordering). `.env.example` placeholders.
-- [ ] **Step 3:** Tests: the dispatcher reaches the relay client (not a direct socket); compose-invariant pins (relay port not host-published; core+gateway share the tool-allowlist/canary env). `make check` + commit.
-
-```bash
-git commit -m "feat(web-fetch): route tool egress through the mode-b relay (the live cutover) (#333)"
-```
+**G7-2c-2 — the synthetic driver + barrier test + corpus (NO live re-point — that is G7-2.5)**
 
 ### Task C4: the synthetic driver + `fake_external_world` fixture + the release-blocking barrier test
 
@@ -609,13 +617,13 @@ git commit -m "feat(web-fetch): route tool egress through the mode-b relay (the 
 **Interfaces:**
 
 - `fake_external_world` — a loopback `asyncio.start_server` upstream with a `fire_count` ref + a settable canned response (mirror `test_provider_forward_proxy_e2e.py::_serving_proxy`), epic-wide so the barrier test + the corpus share one counter. Reuse `_await_proxy_ready` + `_shutdown_default_executor`.
-- The **synthetic driver** = a deterministic helper that constructs a `TurnEgressContext` + `call_index` and invokes the **real** `dispatch_web_fetch` → `EgressResponseExtractor` → `RelayEgressClient` → the **real** `EgressRelay` (loopback) → `fake_external_world`. It substitutes ONLY the LLM tool-selection.
-- The **barrier seam** = an injectable `post_commit_hook: Callable[[], Awaitable[None]] = _noop` on `RelayEgressClient.fire`, invoked **after** the ledger `committed_no_response` intent and the fire, **before** `record_response`. The test injects a hook that raises `_EgressBarrierKill`.
+- The **synthetic driver** = a deterministic helper that constructs a `TurnEgressContext` + `call_index` + a `_RawToolRequest` and invokes the **real** `EgressResponseExtractor.handle` → `RelayEgressClient.fire` → the **real** `EgressRelay` (loopback, framed) → `fake_external_world`. It substitutes ONLY the LLM tool-selection — it does **not** call `dispatch_web_fetch` (that live re-home is G7-2.5). It can construct an idempotent or non-idempotent `_RawToolRequest` to exercise both in-doubt branches.
+- The **barrier seam** = an injectable `post_fire_hook: Callable[[], Awaitable[None]] = _noop` on the C2 wrapper, invoked **after** `RelayEgressClient.fire` returns `Fired(...)` (the intent is already `committed_no_response` + the external call has fired), **before** `record_response`. The test injects a hook that raises `_EgressBarrierKill`.
 
-- [ ] **Step 1: Write the release-blocking barrier test** (real Postgres):
-  - **Act 1 (fire):** drive web-fetch via the synthetic driver; barrier hook fires after the external call commits, before ack → assert `fire_count == 1` and the ledger row is `committed_no_response`.
-  - **Act 2 (replay):** re-run the identical logical call (same `ctx` + `call_index` → same egress-id) → assert `fire_count` still `1` (no re-fire), the result is the stored T2 flagged `deduplicated`, the row is now `committed_with_response`, and `QuarantinedExtractor.extract` was **not** re-called on the replay (spy `assert_not_called`).
-  - **Act 3 (TTL):** `prune_expired(older_than=<injected now past the window>)` removes the row → a subsequent run re-fires (`fire_count == 2`) — proving expiry is not a silent permanent drop.
+- [ ] **Step 1: Write the release-blocking barrier test** (real Postgres). **TE-1 fix — the kill-before-`record_response` row is `committed_no_response`, so the replay is IN-DOUBT, not replay-complete; the two scenarios are SEPARATE (TE-3):**
+  - **Scenario A — barrier kill (in-doubt at-most-once):** drive a **non-idempotent** `_RawToolRequest`; the `post_fire_hook` raises after the external call fires, before `record_response` → assert `fire_count == 1` and the ledger row is `committed_no_response`. Then **replay the identical logical call** (same `ctx` + `call_index` → same egress-id) → the intent is `committed_no_response` → `IntentInDoubt` → **`EgressInDoubtError` is raised, `fire_count` is still `1`** (an in-doubt side-effect is NEVER blindly re-fired — the §5 at-most-once guarantee). [This is the barrier-kill safety; it does NOT assert a deduplicated replay, because no response was ever recorded.]
+  - **Scenario B — clean completion then replay (memoize/dedup):** drive a fire that **completes** (`record_response` runs) → row is `committed_with_response` storing the post-extraction T2. **Replay the identical logical call** → `IntentReplayComplete` → returns `EgressExtractOutcome(deduplicated=True, …)`, `fire_count` still `1` (no re-fire), and the extractor (`quarantined_to_structured`) was **not** re-called on the replay (spy `assert_not_called`).
+  - **Scenario C — TTL:** after Scenario B, `prune_expired(older_than=<injected now past the window>)` removes the row → a subsequent identical run re-fires (`fire_count` increments) — proving expiry is not a silent permanent drop.
   - Plus: 8-way concurrent `commit_intent` → exactly one winner (lift `test_concurrent_commits_exactly_one_winner`).
 - [ ] **Step 2–4:** Implement the fixture + driver + hook seam. Run green against testcontainers Postgres. **This test must live in `tests/integration/` (a required check), NOT `tests/e2e/`** — the loopback fixture removes any real-network/budget dependency, so there is no excuse to push it behind a skip-on-PR gate (paper-gate hazard).
 - [ ] **Step 5:** `make check` + commit.
@@ -630,21 +638,36 @@ git commit -m "test(egress): release-blocking egress-barrier dedup + TTL proof (
 
 - Create: `tests/adversarial/dlp_egress/*.yaml` + executable drivers; `tests/adversarial/tier_laundering/*` addition; `tests/integration/egress/test_quarantine_contention.py`.
 
-- [ ] **Step 1:** Add corpus entries (YAML per `payload_schema.py`, `de-`/`tl-` id prefixes, threat + provenance + `ingestion_path` + `expected_outcome`), each driven against `fake_external_world` + real Postgres:
-  - `de-` **non-canary body exfil to an allowlisted destination** → caught by the **gateway DLP pass** (`caught_by_dlp`) + audited + refused. (Makes the two-layer content claim real.)
+- [ ] **Step 1:** Add corpus entries (YAML per `payload_schema.py`, `de-`/`tl-` id prefixes, threat + provenance + `ingestion_path` + `expected_outcome`), each driven against the **synthetic driver** → real `EgressRelay` + `fake_external_world` + real Postgres (NOT the live `dispatch_web_fetch` — that is G7-2.5):
+  - `de-` **non-canary body exfil to an allowlisted destination, with the CORE DLP injected as a no-op** → caught by the **gateway DLP pass** (`caught_by_dlp`) + audited + refused. (MEDIUM: the no-op core DLP makes the gateway *provably* the catcher — the "compromised core that skipped its own redaction" threat — not the core catching it first.)
   - `de-` **canary trip on egress** → `quarantined`/refused; scanner fails loud not open.
-  - `de-` **egress-id replay / false-replay / forgery** → replay returns memoized T2, no re-fire; a forged/incremented id is rejected core-side; a same-position-different-hash replay → `EgressIdIntegrityError` (`refused`/`audit_row_emitted`).
-  - `de-` **IO-plane-down audit completeness** → `IOPlaneUnavailableError`/`EgressDeniedError` each emit their non-skippable audit row.
-  - `de-` **mode-(a) provider-prompt exfil residual** → recorded as an accepted residual (destination-only by design), not claimed caught.
+  - `de-` **egress-id replay / false-replay / forgery** → a `committed_with_response` replay returns memoized T2 with no re-fire; an **in-doubt** (`committed_no_response`) replay of a non-idempotent request → `EgressInDoubtError`, no re-fire; a forged/incremented id is rejected core-side; a same-position-different-hash replay → `EgressIdIntegrityError` (`refused`/`audit_row_emitted`).
+  - `de-` **IO-plane-down audit completeness** → `IOPlaneUnavailableError`/`EgressDeniedError`/`EgressInDoubtError` each emit their non-skippable core-side audit row (H5).
   - `tl-` **cross-mode tier-downgrade** → a mode-b T3 response cannot acquire the mode-a T2 tag via the response path (`boundary_refused`) — model on `test_tier_laundering_t3_derived_provenance.py`.
-- [ ] **Step 2: §4.3 contention HoL test** — deterministic Event-gated interleave: submit an inbound-extract + an egress-extract against the ONE quarantine child; release in reverse order; assert both complete within a bounded `asyncio.wait_for` (no deadlock); a hung first extract must not starve the second past the action-deadline (a bounded timeout refusal is a pass, a hang is a fail).
+  - **(NOT a corpus entry — MEDIUM):** the **mode-(a) provider-prompt exfil residual** (destination-only by design) is recorded as **ADR-0040 prose** at G7-5, not an executable corpus payload (it has no "caught" outcome to assert).
+- [ ] **Step 2: §4.3 contention HoL test (CORE-4 — the real HoL is the shared single quarantine child, not the relay semaphore)** — deterministic Event-gated interleave: submit an inbound-extract + an egress-extract against the ONE quarantine child; release in reverse order; assert both complete within a bounded `asyncio.wait_for` (no deadlock); a hung first extract must not starve the second **past the action-deadline** — a bounded action-deadline timeout **refusal** is a PASS, a hang is a FAIL.
 - [ ] **Step 3:** Confirm `adversarial.yml` (release-blocking, runs every PR) picks up the new `dlp_egress`/`tier_laundering` entries. `make check` + commit.
 
 ```bash
 git commit -m "test(adversarial): G7-2 egress corpus (gateway-DLP catch, canary, replay/forgery, tier-downgrade) (#333)"
 ```
 
-**G7-2c-2 exit:** web-fetch tool egress flows through the gateway relay end-to-end (synthetic-driver-proven), the dedup ledger blocks double-fire, the §4.3 extract is replay-safe, the corpus is green. Full fleet + CodeRabbit, resolve threads, merge. **Spec C G7-2 complete.**
+**G7-2c-2 exit:** the egress relay path is proven end-to-end by the synthetic driver (real relay/DLP/SSRF/TLS-origination/ledger/§4.3-extract over loopback), the dedup ledger blocks double-fire (in-doubt at-most-once + memoize-replay), the §4.3 extract is gate-checked + replay-safe, the corpus is green. **No live tool egress yet** — the `dispatch_web_fetch` re-home is G7-2.5. Full fleet + CodeRabbit, resolve threads, merge. **Spec C G7-2 complete (the spine; G7-2.5 lands the live consumer before G7-3).**
+
+---
+
+## Part D — G7-2.5: the live web.fetch re-home (the side-effecting cutover)
+
+**PR scope:** re-home the GET fetch out of the `alfred_web_fetch` plugin subprocess so the **gateway** performs it; the live `dispatch_web_fetch` reaches the relay. Lands **with/just before G7-3's connectivity flip** and is its **hard predecessor** (a live tool must not egress while the core keeps its direct fallback). Kept out of G7-2 per the maintainer C1=(B) decision — it is L-sized (it moves TLS/size/MIME/redirect enforcement + the content-store/`ContentHandle` mint), not a "re-point".
+
+**Files (sketch — `writing-plans` details it when G7-2.5 is scheduled):**
+
+- Modify: `src/alfred/plugins/web_fetch/...` — the GET fetch + TLS/size/MIME/redirect + content-store/T3 mint move to `gateway/egress_relay.py`'s fetch path; the subprocess no longer opens a socket.
+- Modify: `src/alfred/plugins/web_fetch/fetch_dispatcher.py` — `dispatch_web_fetch` builds a `_RawToolRequest` (GET, no body) and calls the `EgressResponseExtractor` (C2); the §4.3 response uses the **existing** transport-side T3 seam (CORE-1: the gateway returns bytes, the core mints/tags T3).
+- Modify: `docker-compose.yaml` + `.env.example` — `ALFRED_EGRESS_RELAY_URL=http://alfred-gateway:8890` on `alfred-core`; `ALFRED_EGRESS_RELAY_PORT` + `ALFRED_TOOL_EGRESS_ALLOWLIST` + `ALFRED_CANARY_TOKENS` on `alfred-gateway` (public, non-secret; relay port NEVER under `ports:`).
+- Test: `tests/unit/plugins/web_fetch/...` (the live dispatcher reaches the relay, not a direct socket) + `tests/unit/test_compose_invariants.py` (a **positive** wiring invariant — core's `ALFRED_EGRESS_RELAY_URL` host:port == the gateway's relay port; the canary/allowlist env is present on both — devops-3; relay port not host-published).
+
+**G7-2.5 exit:** the live web.fetch egress flows through the gateway relay; the relay is no longer consumer-less; G7-3 may now flip `internal:true` + delete the direct fallback.
 
 ---
 
@@ -653,15 +676,18 @@ git commit -m "test(adversarial): G7-2 egress corpus (gateway-DLP catch, canary,
 Append to the egress coverage `--include` in BOTH the `python` job (ci.yml ~489/491) and the `coverage-gates` job (~1627/1629), and to BOTH `hashFiles()` `if:` guards:
 
 ```
-src/alfred/egress/egress_id.py,              # G7-2a
-src/alfred/memory/egress_idempotency.py,     # G7-2a (combined-job reaches the committed_no_response branch)
-src/alfred/gateway/egress_relay.py,          # G7-2b
-src/alfred/gateway/egress_relay_audit.py,    # G7-2b
-src/alfred/egress/relay_client.py,           # G7-2c-1
-src/alfred/egress/egress_response_extract.py # G7-2c-1 (combined-job — record_response transition)
+# Unit-lane-reachable (named step in BOTH jobs):
+src/alfred/egress/egress_id.py,              # G7-2a — pure; 100% in the unit job
+src/alfred/egress/relay_protocol.py,         # G7-2b — pure envelopes + frame helpers; unit job
+src/alfred/gateway/egress_relay.py,          # G7-2b — gateway-side; in-memory-stream + loopback unit tests
+src/alfred/gateway/egress_relay_audit.py,    # G7-2b — structlog vocab; unit job
+src/alfred/egress/relay_client.py,           # G7-2c-1 — fake open_connection (unit) + ledger states
+# Combined-job ONLY (integration data — unit-only data is RED — round-2 TE-2):
+src/alfred/memory/egress_idempotency.py,     # G7-2a — committed_no_response branch needs Postgres
+src/alfred/egress/egress_response_extract.py # G7-2c-1 — record_response transition needs Postgres
 ```
 
-`OutboundDlp` (`security/dlp.py`) + `CanaryMatcher` (`security/canary_matcher.py`) ride the existing `security/*` glob — no named step. **Every** new file MUST be in BOTH `hashFiles()` guards or the gate silently no-ops on the introducing branch.
+`OutboundDlp` (`security/dlp.py`) + `CanaryMatcher` (`security/canary_matcher.py`) ride the existing `security/*` glob — no named step. **Every** new file MUST be in BOTH `hashFiles()` guards or the gate silently no-ops on the introducing branch. **Import-guard:** the framed transport means the in-core `relay_client.py` has NO httpx → it is NOT in `_CONSTRUCT_ALLOWLIST`; only `gateway/egress_relay.py` is added there (B4). `EgressRequest`/`EgressResponse`/`_RawToolRequest` carry `extra="forbid"` so the relay parse surface stays minimal.
 
 ## Release-blocking test inventory
 
@@ -677,6 +703,6 @@ src/alfred/egress/egress_response_extract.py # G7-2c-1 (combined-job — record_
 
 ## Self-review
 
-- **Spec coverage:** §4.2 mode-b relay → B4/C3; decision-12 gateway DLP → B2/B4 (with the honest stage-1 residual); §4.2 real canary → B1/B2; §4.3 quarantine-extract → C2 (replay-safe); §5 idempotency (deterministic+injective id, tri-state, memoize+replay, TTL, barrier test) → A1/A3/C1/C4; §6 fail-loud/HoL → B4/C1 (typed errors, semaphore, off-comms-relay); §9 corpus → C5; §7 enforcement (SSRF chain) → B4. Gaps: none — the connectivity-free flip + kernel tests are G7-3 (correctly out of scope).
+- **Spec coverage:** §4.2 mode-b relay → B4 (gateway) + C1 (core client), live consumer → G7-2.5; decision-12 gateway DLP → B2/B4 (with the honest stage-1 residual); §4.2 real canary → B1/B2; §4.3 quarantine-extract → C2 (gate-checked via `quarantined_to_structured` + replay-safe); §5 idempotency (deterministic+injective id, tri-state, in-doubt at-most-once, memoize+replay, TTL, barrier test) → A1/A3/C1/C4; §6 fail-loud/HoL → B4/C1/C5 (typed errors, semaphore, off-comms-relay, the shared-quarantine-child HoL bound); §9 corpus → C5; §7 enforcement (SSRF chain) → B4. Gaps: none — the connectivity-free flip + kernel tests are G7-3; the live web.fetch re-home is G7-2.5 (both correctly out of G7-2's spine).
 - **Placeholder scan:** the only intentional placeholder is the egress-id **golden vector** (A1 Step 4 fills it from the first run) — flagged, not a gap.
-- **Type consistency:** `TurnEgressContext`, `compute_egress_id(ctx, *, call_index)`, `compute_body_hash`, `EgressRequest`/`EgressResponse`, `commit_intent`/`record_response`/`prune_expired`, `IntentFresh`/`IntentReplayComplete`/`IntentInDoubt`, `RelayOutcome = Fired | Deduplicated`, `EgressIdIntegrityError`/`EgressInDoubtError`/`OutboundCanaryTripped` are used consistently across A→B→C.
+- **Type consistency:** `TurnEgressContext`, `compute_egress_id(ctx, *, call_index)`, `compute_body_hash`, `EgressRequest`/`EgressResponse`/`_RawToolRequest` (+ `read_frame`/`write_frame`), `commit_intent`/`record_response`/`prune_expired`, `IntentFresh`/`IntentReplayComplete`/`IntentInDoubt`, `RelayOutcome = Fired | Deduplicated`, `EgressExtractOutcome(result, deduplicated, language)`, `quarantined_to_structured(…, gate)`, `EgressIdIntegrityError`/`EgressInDoubtError`/`OutboundCanaryTripped` are used consistently across A→B→C→D.
