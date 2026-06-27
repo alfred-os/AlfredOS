@@ -49,7 +49,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass
 from typing import Final, cast
 from urllib.parse import urlparse
 
@@ -61,6 +60,7 @@ from alfred.errors import AlfredError
 from alfred.plugins.web_fetch.content_store import ContentStore
 from alfred.plugins.web_fetch.errors import WebFetchCanaryTripped
 from alfred.plugins.web_fetch.handle_cap import HandleCap
+from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
 
 _log = structlog.get_logger(__name__)
 
@@ -151,39 +151,11 @@ class CanaryScanError(AlfredError):
         self.audit_result = audit_result
 
 
-@dataclass(frozen=True, slots=True)
-class CanaryToken:
-    """A single canary token string to scan for.
-
-    Frozen on purpose: operators register the vocabulary once at
-    bootstrap; in-flight mutation would be a footgun (a compromised
-    subscriber rotating the registry mid-process would invalidate the
-    spec §7.6 guarantee for any fetch already in flight).
-    """
-
-    value: str
-
-    def __post_init__(self) -> None:
-        # CR-146 major: PRD §7.6 treats this registry as operator-
-        # supplied input and ``re.escape("")`` produces a pattern that
-        # matches every body at offset 0 — one blank entry in the
-        # registry would quarantine every web.fetch result and trip
-        # the canary path on benign content. Reject at construction so
-        # the misconfiguration is caught at bootstrap (loud) rather
-        # than at first scan (silent + impossible to attribute back to
-        # the registry load).
-        #
-        # Whitespace-only is the same hazard class as the literal empty
-        # string — ``re.escape(" ")`` matches every body that contains
-        # a space, which is also every body. Stripping first means a
-        # token of pure tabs/newlines also fails closed.
-        if not self.value.strip():
-            msg = (
-                "CanaryToken.value must not be blank — empty or whitespace-only "
-                "tokens compile to patterns that match every body and would "
-                "quarantine all web.fetch results (PRD §7.6)."
-            )
-            raise ValueError(msg)
+# ``CanaryToken`` now lives in :mod:`alfred.security.canary_matcher` (the shared,
+# Redis-free home so the gateway can build a matcher from operator config without
+# importing this plugin's content-store/Redis chain). It is imported above and
+# re-exported via ``__all__`` so existing importers of it from this module keep
+# working unchanged.
 
 
 class InboundCanaryScanner:
@@ -310,19 +282,14 @@ class InboundCanaryScanner:
         # host-owned client by passing redis_client=... but later
         # setting _owns_client=True.
         self._owns_client = redis_client is None
-        # Patterns are compiled against ``str`` (the body is decoded
-        # with ``errors='replace'`` at scan time) so a token match
-        # surfaces regardless of the body's exact UTF-8 validity. An
-        # attacker serving deliberately-mangled bytes cannot bypass
-        # the check by triggering a UnicodeDecodeError.
-        #
-        # Case-insensitive: an attacker lowercasing a well-known
-        # canary string must still trip. The token registry is an
-        # operator-controlled vocabulary, not user input, so
-        # IGNORECASE never widens past what the operator authorised.
-        self._patterns: tuple[re.Pattern[str], ...] = tuple(
-            re.compile(re.escape(token.value), re.IGNORECASE) for token in known_canary_tokens
-        )
+        # Matching is delegated to the shared :class:`CanaryMatcher` (DRY — the
+        # outbound gateway DLP pass uses the same primitive). The matcher compiles
+        # ``re.escape(token.value)`` with ``IGNORECASE`` per token: matching runs
+        # against ``str`` (the body is decoded with ``errors='replace'`` at scan
+        # time) so a token surfaces regardless of the body's exact UTF-8 validity
+        # (an attacker serving mangled bytes cannot bypass via UnicodeDecodeError),
+        # and IGNORECASE never widens past the operator-controlled vocabulary.
+        self._matcher = CanaryMatcher(tokens=known_canary_tokens)
 
     async def _get_peek_client(self) -> aioredis.Redis:
         """Return the long-lived peek client, minting on first call.
@@ -466,136 +433,140 @@ class InboundCanaryScanner:
         # canary is registered cannot block the check by serving
         # invalid encoding.
         body_text = body.decode("utf-8", errors="replace")
-        for pattern in self._patterns:
-            if pattern.search(body_text):
-                # CR-146 major: sanitized URL in the log; full URL
-                # rides on WebFetchCanaryTripped.source_url -> audit row.
-                _log.warning(
-                    "web_fetch.canary.tripped",
+        # Delegate matching to the shared CanaryMatcher; ``matched`` is the
+        # canonical registered token value (for the audit breadcrumb) or None.
+        matched = self._matcher.first_match(body_text)
+        if matched is not None:
+            # CR-146 major: sanitized URL in the log; full URL rides on
+            # WebFetchCanaryTripped.source_url -> audit row. ``pattern`` keeps its
+            # historical escaped-token form (``re.escape(matched)`` reproduces the
+            # prior ``re.Pattern.pattern`` value exactly — a behaviour-neutral DRY).
+            _log.warning(
+                "web_fetch.canary.tripped",
+                handle_id=handle_id,
+                source_url=_sanitize_url_for_log(source_url),
+                pattern=re.escape(matched),
+            )
+            # Quarantine BEFORE the raise — the handle must be gone
+            # from Redis at the moment WebFetchCanaryTripped
+            # propagates so a compromised downstream consumer
+            # cannot race to extract the trip'd content.
+            #
+            # err-002: a RedisError on the delete CANNOT silently
+            # swallow the canary trip. Two failure modes line up
+            # against each other here:
+            #   1. The handle stays alive in Redis (quarantine I/O
+            #      failed) — the orchestrator's TTL will eventually
+            #      reap it, but in the interim a compromised
+            #      consumer COULD race to extract.
+            #   2. The typed canary exception does NOT propagate —
+            #      the orchestrator's canary arm never fires; the
+            #      load-bearing defence is silently bypassed.
+            # The second failure mode is strictly worse: a missed
+            # quarantine without a missed exception means the
+            # orchestrator still aborts the turn and the operator
+            # still sees the canary_tripped audit row. A missed
+            # exception means the trip is invisible to every layer
+            # above. So we emit a LOUD structlog error naming the
+            # failed quarantine for operator action — and STILL
+            # raise the typed canary exception so the security
+            # event surfaces. The orchestrator's catch-arm emits
+            # tool.web.fetch.canary_tripped regardless of
+            # quarantine I/O outcome (the audit row schema
+            # WEB_FETCH_FIELDS does not currently include a
+            # quarantine-failure leg; the structlog event is the
+            # operator-visible signal until a dedicated
+            # quarantine_failed schema lands in a follow-up).
+            try:
+                await self._store.delete(handle_id)
+            except RedisError as quarantine_exc:
+                # CR-146 major: sanitized URL in the log so a
+                # quarantine failure does not leak query-string
+                # secrets into the operator-visible structlog.
+                _log.error(
+                    "web_fetch.canary.quarantine_failed",
                     handle_id=handle_id,
                     source_url=_sanitize_url_for_log(source_url),
-                    pattern=pattern.pattern,
+                    pattern=re.escape(matched),
+                    # Type name only — never str(exc) / exc.args
+                    # (T3 content fragments may have ended up in
+                    # the Redis error message). Spec §5.6.
+                    exception_type=type(quarantine_exc).__name__,
+                    note=(
+                        "canary quarantine I/O failed; handle may "
+                        "remain in store until TTL — typed canary "
+                        "exception STILL raised so orchestrator's "
+                        "canary arm fires and audit row is emitted; "
+                        "cap slot HELD (passive TTL eviction within "
+                        "~80s frees both body and slot atomically)"
+                    ),
                 )
-                # Quarantine BEFORE the raise — the handle must be gone
-                # from Redis at the moment WebFetchCanaryTripped
-                # propagates so a compromised downstream consumer
-                # cannot race to extract the trip'd content.
+            else:
+                # Spec §5.2: release ONLY on confirmed Redis state
+                # change. The body is GONE from Redis at this point
+                # — the user is no longer holding the resource the
+                # cap exists to bound, so the slot is genuinely
+                # free. Releasing in the ``except`` arm above would
+                # let a user reset their cap by serving canary-
+                # tripped content while the body still consumes
+                # Redis memory (perverse incentive).
                 #
-                # err-002: a RedisError on the delete CANNOT silently
-                # swallow the canary trip. Two failure modes line up
-                # against each other here:
-                #   1. The handle stays alive in Redis (quarantine I/O
-                #      failed) — the orchestrator's TTL will eventually
-                #      reap it, but in the interim a compromised
-                #      consumer COULD race to extract.
-                #   2. The typed canary exception does NOT propagate —
-                #      the orchestrator's canary arm never fires; the
-                #      load-bearing defence is silently bypassed.
-                # The second failure mode is strictly worse: a missed
-                # quarantine without a missed exception means the
-                # orchestrator still aborts the turn and the operator
-                # still sees the canary_tripped audit row. A missed
-                # exception means the trip is invisible to every layer
-                # above. So we emit a LOUD structlog error naming the
-                # failed quarantine for operator action — and STILL
-                # raise the typed canary exception so the security
-                # event surfaces. The orchestrator's catch-arm emits
-                # tool.web.fetch.canary_tripped regardless of
-                # quarantine I/O outcome (the audit row schema
-                # WEB_FETCH_FIELDS does not currently include a
-                # quarantine-failure leg; the structlog event is the
-                # operator-visible signal until a dedicated
-                # quarantine_failed schema lands in a follow-up).
-                try:
-                    await self._store.delete(handle_id)
-                except RedisError as quarantine_exc:
-                    # CR-146 major: sanitized URL in the log so a
-                    # quarantine failure does not leak query-string
-                    # secrets into the operator-visible structlog.
-                    _log.error(
-                        "web_fetch.canary.quarantine_failed",
-                        handle_id=handle_id,
-                        source_url=_sanitize_url_for_log(source_url),
-                        pattern=pattern.pattern,
-                        # Type name only — never str(exc) / exc.args
-                        # (T3 content fragments may have ended up in
-                        # the Redis error message). Spec §5.6.
-                        exception_type=type(quarantine_exc).__name__,
-                        note=(
-                            "canary quarantine I/O failed; handle may "
-                            "remain in store until TTL — typed canary "
-                            "exception STILL raised so orchestrator's "
-                            "canary arm fires and audit row is emitted; "
-                            "cap slot HELD (passive TTL eviction within "
-                            "~80s frees both body and slot atomically)"
-                        ),
-                    )
-                else:
-                    # Spec §5.2: release ONLY on confirmed Redis state
-                    # change. The body is GONE from Redis at this point
-                    # — the user is no longer holding the resource the
-                    # cap exists to bound, so the slot is genuinely
-                    # free. Releasing in the ``except`` arm above would
-                    # let a user reset their cap by serving canary-
-                    # tripped content while the body still consumes
-                    # Redis memory (perverse incentive).
-                    #
-                    # The release is idempotent (the cap's ``release``
-                    # is a single ZREM); if a future refactor adds a
-                    # second release site between here and end-of-turn,
-                    # the second call is a no-op.
-                    #
-                    # CR-2: best-effort release. A Redis hiccup mid-
-                    # release would otherwise REPLACE the typed
-                    # WebFetchCanaryTripped (the security signal) with
-                    # a generic RedisError — the orchestrator's canary
-                    # arm would never fire, and the typed audit row
-                    # would not be emitted. The security event MUST
-                    # propagate; the cap slot is freed by passive TTL
-                    # within ~80s on a release failure.
-                    if self._handle_cap is not None:
-                        try:
-                            # CR-156-r1 (T13) shield: if the hosting task is
-                            # cancelled mid-release, the ZREM must still run.
-                            # Without shield, the CancelledError propagates
-                            # INTO ``release()`` and the cap slot is held until
-                            # ~80s passive TTL despite the canary trip having
-                            # confirmed a ``store.delete`` succeeded. The
-                            # dispatcher's finally-arm uses the same pattern;
-                            # see fetch_dispatcher.py line 736 region.
-                            await asyncio.shield(
-                                self._handle_cap.release(
-                                    user_id=user_id,
-                                    handle_id=handle_id,
-                                )
-                            )
-                        except (RedisError, ConnectionError, TimeoutError) as release_exc:
-                            # CR-156-r1 narrowing: catch ONLY the Redis-transient
-                            # class. The intent (preserve typed
-                            # WebFetchCanaryTripped propagation across a
-                            # Redis-hiccup mid-release) is unchanged, but a
-                            # programmer-bug inside ``HandleCap.release`` —
-                            # AttributeError on a wrong client field, TypeError
-                            # on a bad kwarg, a future regression — would
-                            # previously have been silently logged-and-eaten,
-                            # masking the real defect. Those raise loudly now;
-                            # passive TTL still bounds the cap-slot leakage if
-                            # the broader cleanup arm tears the request down.
-                            _log.error(
-                                "web_fetch.handle_cap.eager_release_failed",
+                # The release is idempotent (the cap's ``release``
+                # is a single ZREM); if a future refactor adds a
+                # second release site between here and end-of-turn,
+                # the second call is a no-op.
+                #
+                # CR-2: best-effort release. A Redis hiccup mid-
+                # release would otherwise REPLACE the typed
+                # WebFetchCanaryTripped (the security signal) with
+                # a generic RedisError — the orchestrator's canary
+                # arm would never fire, and the typed audit row
+                # would not be emitted. The security event MUST
+                # propagate; the cap slot is freed by passive TTL
+                # within ~80s on a release failure.
+                if self._handle_cap is not None:
+                    try:
+                        # CR-156-r1 (T13) shield: if the hosting task is
+                        # cancelled mid-release, the ZREM must still run.
+                        # Without shield, the CancelledError propagates
+                        # INTO ``release()`` and the cap slot is held until
+                        # ~80s passive TTL despite the canary trip having
+                        # confirmed a ``store.delete`` succeeded. The
+                        # dispatcher's finally-arm uses the same pattern;
+                        # see fetch_dispatcher.py line 736 region.
+                        await asyncio.shield(
+                            self._handle_cap.release(
                                 user_id=user_id,
                                 handle_id=handle_id,
-                                source_url=_sanitize_url_for_log(source_url),
-                                exception_type=type(release_exc).__name__,
-                                note=(
-                                    "best-effort release failed during "
-                                    "canary-trip cleanup; typed "
-                                    "WebFetchCanaryTripped still "
-                                    "propagates; passive TTL will free "
-                                    "slot within ~80s"
-                                ),
                             )
-                raise WebFetchCanaryTripped(source_url=source_url, handle_id=handle_id)
+                        )
+                    except (RedisError, ConnectionError, TimeoutError) as release_exc:
+                        # CR-156-r1 narrowing: catch ONLY the Redis-transient
+                        # class. The intent (preserve typed
+                        # WebFetchCanaryTripped propagation across a
+                        # Redis-hiccup mid-release) is unchanged, but a
+                        # programmer-bug inside ``HandleCap.release`` —
+                        # AttributeError on a wrong client field, TypeError
+                        # on a bad kwarg, a future regression — would
+                        # previously have been silently logged-and-eaten,
+                        # masking the real defect. Those raise loudly now;
+                        # passive TTL still bounds the cap-slot leakage if
+                        # the broader cleanup arm tears the request down.
+                        _log.error(
+                            "web_fetch.handle_cap.eager_release_failed",
+                            user_id=user_id,
+                            handle_id=handle_id,
+                            source_url=_sanitize_url_for_log(source_url),
+                            exception_type=type(release_exc).__name__,
+                            note=(
+                                "best-effort release failed during "
+                                "canary-trip cleanup; typed "
+                                "WebFetchCanaryTripped still "
+                                "propagates; passive TTL will free "
+                                "slot within ~80s"
+                            ),
+                        )
+            raise WebFetchCanaryTripped(source_url=source_url, handle_id=handle_id)
 
 
 __all__ = [
