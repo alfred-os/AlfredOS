@@ -9,6 +9,8 @@ from alfred.i18n import t
 G7_EGRESS_KEYS: tuple[str, ...] = (
     "egress.io_plane_unavailable",
     "egress.denied",
+    # G7-2a: the egress-id ledger integrity-mismatch (duplicate id, different body-hash).
+    "egress.id_integrity_mismatch",
     # B2: the fail-closed egress-proxy bind refusal (alfred gateway start).
     "gateway.start.egress_proxy_bind_failed",
     # B4: the closed-vocab egress-CONNECT denial-reason presentations (gateway egress audit).
