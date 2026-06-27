@@ -2,6 +2,10 @@
 
 * IOPlaneUnavailableError — the gateway egress proxy is unreachable, so ALL
   external I/O is down. Loud, audited, bounded.
+* EgressRelayUnavailableError — the gateway mode-(b) tool-egress relay could not
+  bind (a fail-closed start refusal). A subtype of IOPlaneUnavailableError so
+  generic I/O-plane handling applies, but distinct so the start renders a
+  relay-specific refusal + exit, separate from the CONNECT proxy's.
 * EgressDeniedError — a destination-allowlist / DLP denial. Surfaced distinctly.
 
 Both root at AlfredError. ``reason`` is a closed-vocabulary audit token (stable,
@@ -26,6 +30,24 @@ class IOPlaneUnavailableError(AlfredError):
         super().__init__(t("egress.io_plane_unavailable", detail=detail))
 
 
+class EgressRelayUnavailableError(IOPlaneUnavailableError):
+    """The gateway mode-(b) tool-egress relay could not bind — fail-closed start refusal.
+
+    A subtype of :class:`IOPlaneUnavailableError` (the relay IS an egress I/O plane,
+    so generic I/O-plane handling still applies), but DISTINCT so the gateway start
+    catches it FIRST and renders a relay-specific refusal + exit code, separate from
+    the CONNECT proxy's bind-failed line.
+    """
+
+    reason = "egress_relay_unavailable"
+
+    def __init__(self, *, detail: str) -> None:
+        self.detail = detail
+        # Bypass IOPlaneUnavailableError.__init__ (its message is proxy-flavoured);
+        # set the relay-specific message on the AlfredError base directly.
+        AlfredError.__init__(self, t("egress.relay_unavailable", detail=detail))
+
+
 class EgressDeniedError(AlfredError):
     """An egress call was refused by the destination allowlist or the DLP pass."""
 
@@ -37,4 +59,4 @@ class EgressDeniedError(AlfredError):
         super().__init__(t("egress.denied", destination=destination, reason=deny_reason))
 
 
-__all__ = ["EgressDeniedError", "IOPlaneUnavailableError"]
+__all__ = ["EgressDeniedError", "EgressRelayUnavailableError", "IOPlaneUnavailableError"]

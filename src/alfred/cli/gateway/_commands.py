@@ -66,6 +66,13 @@ _EXIT_CONFIG_FAILED = 6
 # server's loud-and-continue: the proxy IS the gateway's reason to exist, hard rule #7).
 _EXIT_EGRESS_PROXY_BIND_FAILED = 7
 
+# A friendly "the mode-(b) tool-egress relay could not bind" refusal (Spec C G7-2b /
+# #333). Like the CONNECT proxy, the relay is a gateway egress plane, so a bind
+# failure is FAIL-CLOSED — a DISTINCT non-zero (apart from the proxy / client-socket
+# / core-dial / config refusals) so an operator can tell a relay-plane outage apart,
+# and the gateway crash-loops under ``restart: unless-stopped``.
+_EXIT_EGRESS_RELAY_BIND_FAILED = 8
+
 # The adapter id the gateway dials on the core (the core binds ``comms-{adapter_kind}.sock``;
 # the socket-backed ``alfred_tui`` adapter has manifest ``adapter_kind="tui"``). Operator-
 # overridable via the env so the dial target is not a hidden constant (Spec B G6-0b / #288).
@@ -165,6 +172,27 @@ async def _serve_egress_proxy_failclosed(
         raise IOPlaneUnavailableError(detail=repr(exc)) from exc
 
 
+async def _serve_egress_relay_failclosed(
+    relay: _EgressProxyLike, shutdown_event: asyncio.Event
+) -> None:
+    """Serve the mode-(b) tool-egress relay, mapping a bind ``OSError`` to the typed
+    :class:`alfred.egress.errors.EgressRelayUnavailableError`.
+
+    The relay's ``serve`` raises ``OSError`` ONLY on the listener bind (a post-bind
+    per-connection fault is handled inside the relay). A bind failure is the gateway's
+    fail-closed relay-plane outage, so it is re-raised as the RELAY-specific subtype of
+    ``IOPlaneUnavailableError`` — distinct from the CONNECT proxy's outage — so
+    ``start_gateway`` renders the relay refusal (never the proxy ``egress_proxy_bind_failed``
+    line) and the gateway crash-loops under ``restart: unless-stopped``.
+    """
+    from alfred.egress.errors import EgressRelayUnavailableError
+
+    try:
+        await relay.serve(shutdown_event)
+    except OSError as exc:
+        raise EgressRelayUnavailableError(detail=repr(exc)) from exc
+
+
 def _iter_leaf_exceptions(group: BaseExceptionGroup[BaseException]) -> Iterator[BaseException]:
     """Yield every LEAF exception of a (possibly nested) ``ExceptionGroup``, in tree order."""
     for exc in group.exceptions:
@@ -202,7 +230,7 @@ def start_gateway() -> None:
     # ``alfred --help`` never pays the gateway-process import cost.
     from alfred.comms_mcp.errors import DaemonUnavailableError
     from alfred.egress.allowlist import provider_egress_allowlist
-    from alfred.egress.errors import IOPlaneUnavailableError
+    from alfred.egress.errors import EgressRelayUnavailableError, IOPlaneUnavailableError
     from alfred.gateway.client_link import GatewayHandshakeError
     from alfred.gateway.egress_audit import record_egress_connect
     from alfred.gateway.egress_proxy import (
@@ -211,6 +239,14 @@ def start_gateway() -> None:
         resolve_egress_proxy_bind,
         resolve_egress_proxy_port,
     )
+    from alfred.gateway.egress_relay import (
+        EgressRelay,
+        build_gateway_egress_dlp,
+        resolve_egress_relay_bind,
+        resolve_egress_relay_port,
+        resolve_tool_egress_allowlist,
+    )
+    from alfred.gateway.egress_relay_audit import record_egress_relay
     from alfred.gateway.process import GatewayProcess
     from alfred.plugins.errors import ManifestError
 
@@ -272,6 +308,20 @@ def start_gateway() -> None:
             audit=record_egress_connect,
         )
 
+        # Spec C G7-2b (#333): the gateway is also the SOLE maker of inspectable tool
+        # HTTP requests, so its start co-runs the mode-(b) relay alongside the CONNECT
+        # proxy. Its tool allowlist + canary tokens + DLP are derived from PUBLIC
+        # compose-threaded env (never the secret-requiring Settings — ADR-0036). The
+        # relay has NO live consumer until G7-2.5, so an unset allowlist default-denies
+        # (safe). Fail-CLOSED like the proxy (distinct relay refusal line + exit).
+        relay = EgressRelay(
+            tool_allowlist=resolve_tool_egress_allowlist(),
+            dlp=build_gateway_egress_dlp(),
+            audit=record_egress_relay,
+            bind_host=resolve_egress_relay_bind(),
+            port=resolve_egress_relay_port(),
+        )
+
         async def _run_gateway() -> None:
             try:
                 await GatewayProcess(
@@ -294,12 +344,21 @@ def start_gateway() -> None:
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(_serve_egress_proxy_failclosed(proxy, shutdown_event))
+                tg.create_task(_serve_egress_relay_failclosed(relay, shutdown_event))
                 tg.create_task(_run_gateway())
         except BaseExceptionGroup as group:
             _reraise_first_meaningful(group)
 
     try:
         asyncio.run(_main())
+    except EgressRelayUnavailableError as exc:
+        # Friendly refusal — the mode-(b) tool-egress relay could not bind (Spec C G7-2b /
+        # #333). Caught BEFORE IOPlaneUnavailableError (it is a subtype) so the relay
+        # renders its OWN line + exit, distinct from the CONNECT proxy's. Fail-closed: the
+        # gateway crash-loops under ``restart: unless-stopped`` (intended posture).
+        log.warning("gateway.cli.egress_relay_bind_failed", error=repr(exc))
+        typer.echo(t("gateway.start.egress_relay_bind_failed"))
+        raise typer.Exit(code=_EXIT_EGRESS_RELAY_BIND_FAILED) from exc
     except IOPlaneUnavailableError as exc:
         # Friendly refusal — the egress forward-proxy could not bind (Spec C G7-1b / #333).
         # The gateway is the sole external egress plane, so this is fail-closed: refuse the

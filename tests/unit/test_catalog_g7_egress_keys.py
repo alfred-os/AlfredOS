@@ -17,6 +17,9 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "egress.outbound_canary_tripped",
     # B2: the fail-closed egress-proxy bind refusal (alfred gateway start).
     "gateway.start.egress_proxy_bind_failed",
+    # B5: the fail-closed mode-(b) relay bind refusal + its typed-error message.
+    "gateway.start.egress_relay_bind_failed",
+    "egress.relay_unavailable",
     # B4: the closed-vocab egress-CONNECT denial-reason presentations (gateway egress audit).
     "gateway.egress.denied.destination_not_allowlisted",
     "gateway.egress.denied.literal_ip_target",

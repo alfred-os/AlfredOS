@@ -31,8 +31,11 @@ from alfred.gateway.egress_relay import (
     EgressRelay,
     _default_httpx_client,
     _safe_headers,
+    build_gateway_egress_dlp,
+    resolve_canary_tokens,
     resolve_egress_relay_bind,
     resolve_egress_relay_port,
+    resolve_tool_egress_allowlist,
 )
 from alfred.gateway.egress_relay_audit import (
     EGRESS_RELAY_CANARY_EVENT,
@@ -41,7 +44,7 @@ from alfred.gateway.egress_relay_audit import (
     record_egress_relay,
 )
 from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
-from alfred.security.dlp import OutboundDlp
+from alfred.security.dlp import OutboundCanaryTripped, OutboundDlp
 
 _ALLOWLIST = frozenset({("api.example.com", 443)})
 
@@ -671,6 +674,62 @@ async def test_default_httpx_client_disables_trust_env() -> None:
         assert client.trust_env is False  # ambient proxy env must not redirect mode-b
     finally:
         await client.aclose()
+
+
+def test_resolve_tool_allowlist_default_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unset → default-deny everything (safe; the live consumer arrives at G7-2.5).
+    monkeypatch.delenv("ALFRED_TOOL_EGRESS_ALLOWLIST", raising=False)
+    assert resolve_tool_egress_allowlist() == frozenset()
+
+
+def test_resolve_tool_allowlist_parses_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_TOOL_EGRESS_ALLOWLIST", "Example.com, api.test:8443 ,  , bare.host")
+    assert resolve_tool_egress_allowlist() == frozenset(
+        {("example.com", 443), ("api.test", 8443), ("bare.host", 443)}
+    )
+
+
+def test_resolve_tool_allowlist_rejects_non_int_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_TOOL_EGRESS_ALLOWLIST", "host:notaport")
+    with pytest.raises(ValueError, match="non-integer port"):
+        resolve_tool_egress_allowlist()
+
+
+def test_resolve_tool_allowlist_rejects_out_of_range_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_TOOL_EGRESS_ALLOWLIST", "host:70000")
+    with pytest.raises(ValueError, match=r"1\.\.65535"):
+        resolve_tool_egress_allowlist()
+
+
+def test_resolve_tool_allowlist_rejects_empty_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_TOOL_EGRESS_ALLOWLIST", ":443")
+    with pytest.raises(ValueError, match="empty host"):
+        resolve_tool_egress_allowlist()
+
+
+def test_resolve_canary_tokens_default_never_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ALFRED_CANARY_TOKENS", raising=False)
+    assert resolve_canary_tokens().first_match("any body CANARY here") is None
+
+
+def test_resolve_canary_tokens_parses_and_skips_blanks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALFRED_CANARY_TOKENS", "TOK-A, ,TOK-B")
+    matcher = resolve_canary_tokens()
+    assert matcher.first_match("see TOK-B inside") == "TOK-B"
+    assert matcher.first_match("clean") is None
+
+
+def test_build_gateway_egress_dlp_runs_stages_2_and_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    # broker=None (no stage 1) + the env canary (stage 3) + the regex (stage 2). The
+    # DLP's own audit is dropped (no raise from the no-op sink); a canary trips loud.
+    monkeypatch.setenv("ALFRED_CANARY_TOKENS", "CANARY-BUILT")
+    dlp = build_gateway_egress_dlp()
+    # Stage 2 still redacts (drives the no-op DLP audit sink).
+    redacted, _result = dlp.scan_for_outbound("leak sk-AAAAAAAAAAAAAAAAAAAA")
+    assert "[REDACTED:api-key-shape]" in redacted
+    # Stage 3 fails loud on the env canary.
+    with pytest.raises(OutboundCanaryTripped):
+        dlp.scan_for_outbound("exfil CANARY-BUILT now")
 
 
 def test_resolve_relay_port_default(monkeypatch: pytest.MonkeyPatch) -> None:
