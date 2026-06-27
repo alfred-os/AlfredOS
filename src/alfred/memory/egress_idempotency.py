@@ -150,7 +150,10 @@ class EgressIdempotencyStore(Protocol):
     async def record_response(self, *, egress_id: str, response: str, language: str | None) -> None:
         """Advance a ``committed_no_response`` intent to ``committed_with_response``.
 
-        Idempotent on an already-recorded row (MEM-3); raises
+        Idempotent on an already-recorded row (MEM-3): a second call is a no-op and a
+        differing ``response`` is NOT re-applied — the egress-id pins one logical call to
+        one stored T2. Body integrity is fixed at ``commit_intent`` (the body-hash
+        compare); ``record_response`` does not re-verify it. Raises
         :class:`EgressLedgerStateError` if no intent row exists.
         """
         ...
@@ -205,9 +208,12 @@ class PostgresEgressIdempotencyStore:
             if not hmac.compare_digest(row.body_hash, body_hash):
                 raise EgressIdIntegrityError(egress_id=egress_id)
             if row.state == _STATE_WITH_RESPONSE:
-                # The response-matches-state CHECK guarantees a non-NULL response here.
-                assert row.response is not None
-                return IntentReplayComplete(response=row.response, language=row.language)
+                # The ck_egress_idempotency_response_matches_state CHECK guarantees a
+                # non-NULL response on a committed_with_response row — Postgres enforces it
+                # on every write (proven by the negative test below). Cast rather than
+                # assert so the invariant does not ride a runtime check that `python -O`
+                # would strip.
+                return IntentReplayComplete(response=cast(str, row.response), language=row.language)
             return IntentInDoubt()
 
     async def record_response(self, *, egress_id: str, response: str, language: str | None) -> None:
