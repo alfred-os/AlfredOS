@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-27 21:43+0100\n"
+"POT-Creation-Date: 2026-06-27 22:40+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2768,6 +2768,13 @@ msgstr ""
 "post-chain DLP scan was wired. Audit row "
 "HOOKS_DLP_SUBSCRIBER_NOT_REGISTERED carries plugin_id={plugin_id!r}, "
 "hookpoint={hookpoint!r}, requested_tier={requested_tier!r}."
+
+#: src/alfred/security/dlp.py:172
+msgid "egress.outbound_canary_tripped"
+msgstr ""
+"An outbound canary token was detected in content leaving AlfredOS. The egress "
+"was REFUSED and the trip recorded for the operator. This is a security event — "
+"inspect the audit log to find the originating turn."
 
 #: src/alfred/security/quarantine.py:1426
 msgid "security.quarantine.dereference_denied"

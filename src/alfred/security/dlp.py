@@ -11,11 +11,18 @@ Three pipeline stages run inside :meth:`OutboundDlp.scan`:
    into a log line from a code path that never registered the value with
    the broker (a third-party SDK that exposed the key via its own
    exception ``__repr__``, for instance).
-3. **Canary stub** — Slice-2 is a literal no-op (``return text``). Slice-3
-   expands this stage with the canary system; the stub is a regression
-   guard against accidentally dropping the stage in the interim. The unit
-   test ``test_canary_stub_is_identity_in_slice_2`` is intentionally
-   tight: any change to the stub fails the test on purpose.
+3. **Canary scan** (Spec C G7-2b) — scans the (post-stage-1+2) outbound text
+   for any operator-registered canary token via the shared
+   :class:`alfred.security.canary_matcher.CanaryMatcher`. A hit fails **LOUD**:
+   the trip audit row is written, then :class:`OutboundCanaryTripped` raises
+   (never fail-open — a swallowed match would let the canary'd body egress). An
+   internal matcher error PROPAGATES for the same reason. When no matcher is
+   wired (``canary=None`` — today's core default until it wires a vocabulary)
+   the stage is a transparent no-op.
+
+Broker-optional: ``broker`` may be ``None``. The gateway second pass (ADR-0036:
+the gateway holds no vault) constructs ``OutboundDlp(broker=None, …)`` to run
+the secret-INDEPENDENT stages 2+3 only — one code path, no fork.
 
 Audit-on-modification: when ``scan()`` modifies the text, exactly one
 ``dlp.outbound_redacted`` audit row is written. The audit sink is
@@ -38,6 +45,10 @@ from collections.abc import Mapping
 from typing import Final, NewType, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from alfred.errors import AlfredError
+from alfred.i18n import t
+from alfred.security.canary_matcher import CanaryMatcher
 
 # Generic API-key shape: prefix + separator + 20-or-more alnum bytes,
 # anchored on word boundaries so an embedded form (e.g.
@@ -88,10 +99,12 @@ class OutboundDlpScanResult(BaseModel):
     :data:`ScannedOutboundBody` tuple — the two are minted together so a
     comms ``OutboundMessageRequest`` cannot carry text that skipped the scan.
 
-    ``canary_tripped`` is wired to ``False`` here because the Slice-2 canary
-    stage is still a no-op (see :meth:`OutboundDlp._canary_stub`); the field
-    is present now so the Slice-3 canary expansion is a single-site change
-    and the comms wire contract does not move when it lands.
+    ``canary_tripped`` is **always False** on a returned result: as of Spec C
+    G7-2b the canary stage fails LOUD — a hit raises :class:`OutboundCanaryTripped`
+    BEFORE this result is minted, so a "tripped" body never produces a
+    :class:`OutboundDlpScanResult` at all. The field is retained (rather than
+    removed) for wire-contract stability — the comms ``OutboundMessageRequest``
+    shape does not move.
     """
 
     dlp_redactions_count: int = Field(ge=0)
@@ -141,6 +154,24 @@ class _AuditSink(Protocol):
         raise NotImplementedError  # pragma: no cover
 
 
+class OutboundCanaryTripped(AlfredError):  # noqa: N818 -- SECURITY EVENT, name pinned by Spec C §4.2
+    """A registered canary token was found in outbound text (Spec C G7-2b).
+
+    A SECURITY EVENT — raised by :meth:`OutboundDlp._scan_canary` after the trip
+    audit row is written, so the body is REFUSED rather than egressed (HARD rule
+    #7: loud, never fail-open). Carries the matched ``token`` as an attribute (an
+    operator sentinel, for the handler / gateway deny-reason mapping); the t()'d
+    message is deliberately token-free so it cannot leak the sentinel into a
+    wider error surface.
+    """
+
+    reason = "outbound_canary_tripped"
+
+    def __init__(self, *, token: str) -> None:
+        self.token = token
+        super().__init__(t("egress.outbound_canary_tripped"))
+
+
 class OutboundDlp:
     """Three-stage outbound scanner.
 
@@ -149,9 +180,19 @@ class OutboundDlp:
     invalidation, and the regex is immutable; no DLP-side lock needed.
     """
 
-    def __init__(self, *, broker: _BrokerLike, audit: _AuditSink) -> None:
+    def __init__(
+        self,
+        *,
+        broker: _BrokerLike | None,
+        audit: _AuditSink,
+        canary: CanaryMatcher | None = None,
+    ) -> None:
+        # ``broker`` and ``canary`` are BOTH optional. Core-side wires all three
+        # (broker + regex + canary). Gateway-side (ADR-0036, no vault) wires
+        # broker=None — stages 2+3 only. ONE code path, no fork.
         self._broker = broker
         self._audit = audit
+        self._canary = canary
 
     def scan(self, text: str) -> str:
         """Run all three stages on ``text``; emit an audit row on modification.
@@ -179,8 +220,9 @@ class OutboundDlp:
         redacted, stages_triggered = self._scan_stages(raw_body)
         scan_result = OutboundDlpScanResult(
             dlp_redactions_count=len(stages_triggered),
-            # Slice-2 canary is a no-op; the field is wired False until the
-            # Slice-3 canary stage replaces ``_canary_stub`` (see model docs).
+            # Always False on a returned result: a canary hit raises
+            # OutboundCanaryTripped inside _scan_stages BEFORE this point (G7-2b),
+            # so a tripped body never reaches here. Retained for wire stability.
             canary_tripped=False,
         )
         return ScannedOutboundBody((redacted, scan_result))
@@ -195,11 +237,15 @@ class OutboundDlp:
         pre = text
         stages_triggered: list[str] = []
 
-        # Stage 1 — broker redaction.
-        after_broker = self._broker.redact(text)
-        if after_broker != text:
-            stages_triggered.append("broker")
-        text = after_broker
+        # Stage 1 — broker redaction. Skipped when no broker is wired (the
+        # gateway second pass holds no vault — ADR-0036); the SAME code path,
+        # just without the stage-1 block (``broker`` never appears in
+        # ``stages_triggered`` then).
+        if self._broker is not None:
+            after_broker = self._broker.redact(text)
+            if after_broker != text:
+                stages_triggered.append("broker")
+            text = after_broker
 
         # Stage 2 — generic API-key regex.
         after_regex = _GENERIC_API_KEY_RE.sub(_REDACTION_SENTINEL, text)
@@ -207,8 +253,9 @@ class OutboundDlp:
             stages_triggered.append("api_key_shape")
         text = after_regex
 
-        # Stage 3 — canary stub (Slice-3 expands this).
-        text = self._canary_stub(text)
+        # Stage 3 — real canary scan. Fails LOUD on a hit (raises before this
+        # method returns) and never modifies ``text``; a no-op when no matcher.
+        self._scan_canary(text)
 
         if text != pre:
             # Audit-on-modification. Synchronous; raises propagate per
@@ -227,15 +274,24 @@ class OutboundDlp:
 
         return text, tuple(stages_triggered)
 
-    @staticmethod
-    def _canary_stub(text: str) -> str:
-        """Slice-3 canary stage hook. Slice-2: literal no-op.
+    def _scan_canary(self, text: str) -> None:
+        """Stage 3 — scan ``text`` for a registered canary token; fail LOUD on a hit.
 
-        REGRESSION GUARD: the unit test pins this as an identity
-        function. Do not change without an accompanying spec update —
-        the Slice-3 expansion replaces this with real canary handling.
+        No-op when no matcher is wired. On a match: write the trip audit row,
+        THEN raise :class:`OutboundCanaryTripped` (HARD rule #7 — loud, never
+        fail-open). The matcher's ``first_match`` is NOT wrapped in a swallowing
+        try/except: an internal matcher error PROPAGATES (a swallowed error would
+        let a canary'd body egress unscanned). Returns ``None`` (no modification).
         """
-        return text
+        if self._canary is None:
+            return
+        matched = self._canary.first_match(text)
+        if matched is not None:
+            # The matched token is an operator-registered sentinel (not T3 body
+            # content), so naming it gives the operator attribution without a
+            # body oracle. The raised exception's message stays token-free.
+            self._audit(event="dlp.outbound_canary_tripped", subject={"token": matched})
+            raise OutboundCanaryTripped(token=matched)
 
 
 @runtime_checkable
@@ -267,6 +323,7 @@ class OutboundDlpProtocol(Protocol):
 
 
 __all__ = [
+    "OutboundCanaryTripped",
     "OutboundDlp",
     "OutboundDlpProtocol",
     "OutboundDlpScanResult",
