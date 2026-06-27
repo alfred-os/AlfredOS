@@ -78,6 +78,7 @@ from alfred.gateway.egress_relay_audit import (
     GATEWAY_EGRESS_RELAY,
     EgressRelayDenyReason,
 )
+from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
 from alfred.security.dlp import OutboundCanaryTripped, OutboundDlp
 
 _log = structlog.get_logger(__name__)
@@ -85,6 +86,13 @@ _log = structlog.get_logger(__name__)
 _DEFAULT_RELAY_PORT: Final[int] = 8890
 _RELAY_PORT_ENV: Final[str] = "ALFRED_EGRESS_RELAY_PORT"
 _RELAY_BIND_ENV: Final[str] = "ALFRED_EGRESS_RELAY_BIND"
+# Public (non-secret) compose-threaded config the gateway derives its relay config
+# from, WITHOUT constructing the secret-requiring Settings (ADR-0036). The tool
+# allowlist is the web-fetch egress set (NOT the provider one); the canary tokens
+# arriving via public env is an accepted §9/ADR-0040 residual (G7-5).
+_TOOL_ALLOWLIST_ENV: Final[str] = "ALFRED_TOOL_EGRESS_ALLOWLIST"
+_CANARY_TOKENS_ENV: Final[str] = "ALFRED_CANARY_TOKENS"
+_DEFAULT_TOOL_PORT: Final[int] = 443
 # Never host-published (a compose-invariant test asserts it at G7-2.5); the tool
 # allowlist + the SSRF chain are the controls.
 _DEFAULT_RELAY_BIND: Final[str] = "0.0.0.0"  # noqa: S104
@@ -149,6 +157,68 @@ def resolve_egress_relay_bind() -> str:
     if raw is None or raw == "":
         return _DEFAULT_RELAY_BIND
     return raw
+
+
+def resolve_tool_egress_allowlist() -> frozenset[EgressDestination]:
+    """Parse the tool-egress allowlist from ``ALFRED_TOOL_EGRESS_ALLOWLIST`` (public env).
+
+    Comma-separated ``host`` or ``host:port`` entries; a bare host defaults to 443.
+    Unset / empty yields the EMPTY set (default-deny everything — safe; the live
+    consumer arrives at G7-2.5). A non-integer / out-of-range port or an empty host
+    raises ``ValueError`` LOUDLY (operator misconfig — never silently widen / drop).
+    """
+    raw = os.environ.get(_TOOL_ALLOWLIST_ENV)
+    if raw is None or raw == "":
+        return frozenset()
+    destinations: set[EgressDestination] = set()
+    for item in raw.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        host, sep, port_str = entry.rpartition(":")
+        if not sep:
+            destinations.add((entry.lower(), _DEFAULT_TOOL_PORT))
+            continue
+        if not (port_str.isascii() and port_str.isdigit()):
+            raise ValueError(f"{_TOOL_ALLOWLIST_ENV} entry {entry!r} has a non-integer port")
+        port = int(port_str)
+        if not 1 <= port <= 65535:
+            raise ValueError(f"{_TOOL_ALLOWLIST_ENV} entry {entry!r} port must be in 1..65535")
+        if not host:
+            raise ValueError(f"{_TOOL_ALLOWLIST_ENV} entry {entry!r} has an empty host")
+        destinations.add((host.lower(), port))
+    return frozenset(destinations)
+
+
+def resolve_canary_tokens() -> CanaryMatcher:
+    """Build the gateway canary matcher from ``ALFRED_CANARY_TOKENS`` (public env).
+
+    Comma-separated tokens; blank entries are skipped. Unset / empty yields a matcher
+    with no tokens (the stage-3 canary scan is a no-op until tokens are configured).
+    """
+    raw = os.environ.get(_CANARY_TOKENS_ENV, "")
+    tokens = [CanaryToken(part.strip()) for part in raw.split(",") if part.strip()]
+    return CanaryMatcher(tokens=tokens)
+
+
+def _drop_dlp_audit(*, event: str, subject: Mapping[str, object]) -> None:
+    """No-op sink for the gateway second-pass DLP's OWN audit rows.
+
+    The relay's :func:`record_egress_relay` (``DLP_REDACTED`` / ``CANARY_TRIPPED``)
+    is the SINGLE gateway-side egress audit surface, so a DLP-level row here would be
+    a redundant double-log. NOT a silent failure — a canary hit RAISES
+    ``OutboundCanaryTripped`` and the relay catches + loudly audits it.
+    """
+    del event, subject
+
+
+def build_gateway_egress_dlp() -> OutboundDlp:
+    """Assemble the gateway second-pass ``OutboundDlp`` from public env.
+
+    ``broker=None`` (the gateway holds no vault — ADR-0036) so it runs the
+    secret-INDEPENDENT stages 2+3 only; the canary matcher comes from public env.
+    """
+    return OutboundDlp(broker=None, audit=_drop_dlp_audit, canary=resolve_canary_tokens())
 
 
 def _default_resolve(host: str) -> str:
@@ -474,6 +544,9 @@ class EgressRelay:
 
 __all__ = [
     "EgressRelay",
+    "build_gateway_egress_dlp",
+    "resolve_canary_tokens",
     "resolve_egress_relay_bind",
     "resolve_egress_relay_port",
+    "resolve_tool_egress_allowlist",
 ]

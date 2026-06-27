@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-27 22:46+0100\n"
+"POT-Creation-Date: 2026-06-27 23:13+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1254,18 +1254,18 @@ msgstr ""
 "--wait-ready needs an adapter to wait for, e.g. `alfred gateway adapters "
 "--wait-ready discord`."
 
-#: src/alfred/cli/gateway/_commands.py:118
+#: src/alfred/cli/gateway/_commands.py:125
 msgid "gateway.adapters.no_adapter_kind"
 msgstr ""
 "Comms adapter plugin '{plugin}' declares no [comms_mcp] adapter_kind in "
 "its manifest — the gateway cannot resolve its canonical adapter id. Fix "
 "the plugin manifest."
 
-#: src/alfred/cli/gateway/_commands.py:217
+#: src/alfred/cli/gateway/_commands.py:253
 msgid "gateway.start.starting"
 msgstr "Starting the AlfredOS gateway; press Ctrl-C or send SIGTERM to stop."
 
-#: src/alfred/cli/gateway/_commands.py:229
+#: src/alfred/cli/gateway/_commands.py:265
 msgid "gateway.start.config_failed"
 msgstr ""
 "The gateway could not resolve its hosted-adapter configuration — a comms "
@@ -1273,7 +1273,16 @@ msgstr ""
 "ALFRED_COMMS_ENABLED_ADAPTERS and the named plugin manifests, then re-run"
 " `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:309
+#: src/alfred/cli/gateway/_commands.py:360
+msgid "gateway.start.egress_relay_bind_failed"
+msgstr ""
+"The gateway could not bind its tool-egress relay — another gateway may "
+"already hold the relay port, or ALFRED_EGRESS_RELAY_PORT is "
+"misconfigured. The gateway is the sole maker of tool HTTP requests, so it"
+" refuses to start without it. Free the port (or fix the config), then re-"
+"run `alfred gateway start`."
+
+#: src/alfred/cli/gateway/_commands.py:368
 msgid "gateway.start.egress_proxy_bind_failed"
 msgstr ""
 "The gateway could not bind its egress forward-proxy — another gateway may"
@@ -1282,51 +1291,51 @@ msgstr ""
 "refuses to start without it. Free the port (or fix the config), then re-"
 "run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:315
+#: src/alfred/cli/gateway/_commands.py:374
 msgid "gateway.start.unavailable"
 msgstr ""
 "The gateway could not reach the AlfredOS core daemon socket. Start the "
 "daemon first with `alfred daemon start`, then re-run `alfred gateway "
 "start`."
 
-#: src/alfred/cli/gateway/_commands.py:322
+#: src/alfred/cli/gateway/_commands.py:381
 msgid "gateway.start.handshake_failed"
 msgstr ""
 "The gateway could not complete the client handshake with the TUI. Check "
 "that a compatible `alfred chat` client is connecting, then re-run `alfred"
 " gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:331
+#: src/alfred/cli/gateway/_commands.py:390
 msgid "gateway.start.bind_failed"
 msgstr ""
 "The gateway could not bind its client socket — another gateway may "
 "already be running. Stop it first, then re-run `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:333
+#: src/alfred/cli/gateway/_commands.py:392
 msgid "gateway.start.stopped"
 msgstr "The AlfredOS gateway stopped cleanly."
 
-#: src/alfred/cli/gateway/_commands.py:354
-#: src/alfred/cli/gateway/_commands.py:368
+#: src/alfred/cli/gateway/_commands.py:413
+#: src/alfred/cli/gateway/_commands.py:427
 msgid "gateway.status.socket_absent"
 msgstr ""
 "Gateway socket not present at {path} — the gateway is not running. Start "
 "it with `alfred gateway start`."
 
-#: src/alfred/cli/gateway/_commands.py:372
+#: src/alfred/cli/gateway/_commands.py:431
 msgid "gateway.status.socket_present"
 msgstr ""
 "Gateway socket present at {path} (runtime dir mode {runtime_mode}, owner "
 "uid {uid}); the gateway appears to be running."
 
-#: src/alfred/cli/gateway/_commands.py:444
-#: src/alfred/cli/gateway/_commands.py:450
+#: src/alfred/cli/gateway/_commands.py:503
+#: src/alfred/cli/gateway/_commands.py:509
 msgid "gateway.healthcheck.unreachable"
 msgstr ""
 "Gateway metrics endpoint unreachable on port {port}; the gateway is not "
 "serving. Marking unhealthy."
 
-#: src/alfred/cli/gateway/_commands.py:454
+#: src/alfred/cli/gateway/_commands.py:513
 msgid "gateway.healthcheck.breaker_open"
 msgstr ""
 "Gateway back-pressure breaker is latched (buffer past cap); marking "
@@ -1363,7 +1372,7 @@ msgstr ""
 "audit log for this egress-id and its originating turn to find why the "
 "same logical call produced a different body."
 
-#: src/alfred/egress/errors.py:26
+#: src/alfred/egress/errors.py:30
 msgid "egress.io_plane_unavailable"
 msgstr ""
 "External I/O is unavailable: the core could not reach the gateway egress "
@@ -1371,7 +1380,14 @@ msgstr ""
 "ALFRED_EGRESS_PROXY_URL points at it — the gateway is the sole external "
 "egress plane, so every provider call routes through it."
 
-#: src/alfred/egress/errors.py:37
+#: src/alfred/egress/errors.py:48
+msgid "egress.relay_unavailable"
+msgstr ""
+"The gateway tool-egress relay is unavailable: it could not bind "
+"({detail}). The gateway is the sole maker of tool HTTP requests, so tool "
+"egress is down until it starts."
+
+#: src/alfred/egress/errors.py:59
 msgid "egress.denied"
 msgstr ""
 "Egress to {destination} was denied ({reason}). The gateway egress proxy "
@@ -2044,8 +2060,8 @@ msgstr ""
 #: src/alfred/i18n/_spec_c_reserve.py:38
 msgid "gateway.egress.relay_denied.dlp_redacted"
 msgstr ""
-"Tool egress denied: the request body still contained a secret-shaped value "
-"after the gateway DLP pass — the core failed to redact it."
+"Tool egress denied: the request body still contained a secret-shaped "
+"value after the gateway DLP pass — the core failed to redact it."
 
 #: src/alfred/i18n/_spec_c_reserve.py:39
 msgid "gateway.egress.relay_denied.canary_tripped"
@@ -2066,8 +2082,8 @@ msgstr ""
 #: src/alfred/i18n/_spec_c_reserve.py:42
 msgid "gateway.egress.relay_denied.upstream_redirect_refused"
 msgstr ""
-"Tool egress denied: the upstream returned a redirect, which the gateway does "
-"not follow."
+"Tool egress denied: the upstream returned a redirect, which the gateway "
+"does not follow."
 
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).

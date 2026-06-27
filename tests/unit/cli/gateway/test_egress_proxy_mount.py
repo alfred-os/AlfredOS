@@ -38,7 +38,9 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _patch_gateway_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace ``GatewayProcess`` with a double whose ``run`` returns at once."""
+    """Replace ``GatewayProcess`` with a double whose ``run`` returns at once, and the
+    mode-(b) ``EgressRelay`` with a double whose ``serve`` returns at once (so the
+    co-run TaskGroup unwinds without binding the relay's real port — G7-2b)."""
 
     class _FakeProcess:
         def __init__(self, *, shutdown_event: asyncio.Event, **_kw: object) -> None:
@@ -47,7 +49,15 @@ def _patch_gateway_process(monkeypatch: pytest.MonkeyPatch) -> None:
         async def run(self) -> None:
             return None
 
+    class _FakeRelay:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def serve(self, shutdown_event: asyncio.Event) -> None:
+            del shutdown_event
+
     monkeypatch.setattr("alfred.gateway.process.GatewayProcess", _FakeProcess)
+    monkeypatch.setattr("alfred.gateway.egress_relay.EgressRelay", _FakeRelay)
 
 
 def test_start_mounts_egress_proxy_with_provider_allowlist(
