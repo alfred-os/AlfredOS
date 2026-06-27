@@ -88,7 +88,7 @@ The cap value referenced below is **whatever cap is currently in effect**
 ## Common causes
 
 | Cause | Signal | Remediation |
-|---|---|---|
+| --- | --- | --- |
 | Legitimate burst (e.g., research agent in parallel-fetch mode) | Cap-refusals stop after extracts drain; ZCARD drops naturally | None — system is working as designed |
 | Stuck handles (extract path broken upstream) | ZCARD stays at cap, no decrement for >2× TTL | Investigate the extractor; passive TTL will free within ~80s × 2 |
 | Slow canary-quarantine I/O (delete failed) | `web_fetch.canary.quarantine_failed` structlog events | Investigate Redis health; cap slot held until passive TTL by design |

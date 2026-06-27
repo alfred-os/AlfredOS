@@ -601,7 +601,7 @@ pin.
 (the `HOOKS_*` `Final[str]` block):
 
 | Event | When |
-|---|---|
+| --- | --- |
 | `hooks.refusal` | Subscriber raised `HookRefusal` (`pre` kind only) |
 | `hooks.chain_timeout` | Per-chain `asyncio.timeout(...)` expired |
 | `hooks.subscriber_error` | Subscriber raised a non-refusal exception |

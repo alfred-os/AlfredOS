@@ -108,7 +108,7 @@ The architectural defense against indirect prompt injection. Two LLMs, two trust
 ### Six-layer memory (PRD §6.2)
 
 | Layer | What it holds | Slice | Retrieval pattern |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Working | Last ~40 turns | Slice 1 | Full inclusion in next prompt; bounded deque. |
 | Episodic | Every turn ever, by user | Slice 1 | Time-ordered SELECT LIMIT 20 on rehydrate; index on `(user_id, created_at DESC)`. |
 | Summarized | Compacted older episodes | Slice 4 | Pre-built summaries injected when episodic-recent isn't enough. |
@@ -143,7 +143,7 @@ The release-blocker test suite for prompt injection / jailbreak / DLP. You desig
 The corpus ships **six top-level categories** (see [`alfred-adversarial-corpus`](../skills/alfred-adversarial-corpus/SKILL.md)):
 
 | Category | Directory | What it exercises |
-|---|---|---|
+| --- | --- | --- |
 | `prompt_injection` | `tests/adversarial/prompt_injection/` | T3 content trying to issue instructions to the orchestrator (direct + indirect + memory-rehydrate + tool-output variants) |
 | `dlp` | `tests/adversarial/dlp/` | Synthetic secrets seeded into outbound paths; expected to be redacted before egress |
 | `capability_bypass` | `tests/adversarial/capability_bypass/` | Transcripts attempting tool calls outside the current capability grant |

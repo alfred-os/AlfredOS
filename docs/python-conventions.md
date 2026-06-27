@@ -27,7 +27,7 @@ Where CLAUDE.md hard rules and this doc disagree, CLAUDE.md wins (CLAUDE.md rule
 ## Tooling
 
 | Concern | Tool | Why |
-|---|---|---|
+| --- | --- | --- |
 | Package manager | **`uv`** | Fast, lock-file-first, drop-in replacement for pip + venv + pip-tools |
 | Build backend | `hatchling` | Modern PEP 517 backend, simple `src/`-layout support |
 | Formatter | **`ruff format`** | Black-compatible output, ~10x faster, one config |
@@ -228,7 +228,7 @@ from alfred.config.settings import Settings
 Pick the right tool:
 
 | Need | Use |
-|---|---|
+| --- | --- |
 | Serialization boundary (HTTP, MCP, DB DTO, config) | **Pydantic v2** model |
 | Pure-Python immutable record (internal only) | **`@dataclass(frozen=True, slots=True)`** |
 | Tagged union for `match` | Pydantic with `Field(discriminator=...)`, or dataclass + `TypeGuard` |
@@ -385,7 +385,7 @@ Prefer the comprehension when it reads better; prefer the reduce when the operat
 ### Layers
 
 | Layer | Lives in | What it tests | Speed | LLM/IO? | Schedule |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | Unit | `tests/unit/` | One module, no I/O | <50ms each | No (recorded fixtures only) | Every PR + pre-push |
 | Integration | `tests/integration/` | Multi-module + real datastores via testcontainers | seconds | Postgres yes, LLM recorded | Every PR (Docker required) |
 | Smoke | `tests/smoke/` | End-to-end happy path | tens of seconds | Real stack | Nightly + opt-in `make test-smoke` |

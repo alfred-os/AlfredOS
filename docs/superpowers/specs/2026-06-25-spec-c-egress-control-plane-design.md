@@ -79,7 +79,7 @@ The headline invariant: **the core has no external sockets** (kernel-enforced, t
 Four egress classes. Three are handled in Spec C; the fourth (2c) reuses the same L7 proxy.
 
 | Class | Today | Spec C |
-|---|---|---|
+| --- | --- | --- |
 | Core to provider (Anthropic / DeepSeek) | direct HTTPS from the core | core SDK targets the gateway **L7 CONNECT proxy** (mode a); destination allowlist + audit; TLS passthrough (gateway never sees the prompt); streaming preserved; responses tagged **T2** |
 | Core / plugin tool egress (web-fetch, email) | allowlist data model exists, unenforced | **inspecting relay** (mode b): core DLP-redacts the body, then the **gateway re-runs `OutboundDlp` (redaction + canary) as an independent pass**, destination-allowlists, audits, forwards; the response is handled by the §4.3 quarantine-extract entry |
 | Quarantine child | full unrestricted net (no 2c yet) | gets `--unshare-net` immediately — deterministic-echo needs zero net; the L7-proxy provider path is built in the 2c follow-on |

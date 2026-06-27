@@ -181,7 +181,7 @@ any state ──(operator reset)────► CLOSED      (trip_count preserve
 State constants (`src/alfred/supervisor/breaker.py`):
 
 | Constant | Value | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `_FAILURE_THRESHOLD` | 3 | Trips in one window |
 | `_FAILURE_WINDOW_SECONDS` | 300.0 | 5-minute sliding window |
 | `_RE_ARM_SECONDS` | 3600.0 | 1 h before OPEN→HALF_OPEN |
@@ -275,7 +275,7 @@ Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
 ### Breaker rows
 
 | Event | Schema constant | Key subject fields |
-|---|---|---|
+| --- | --- | --- |
 | `supervisor.breaker.tripped` | `SUPERVISOR_BREAKER_TRIPPED_FIELDS` | `component_id`, `trip_count`, `last_failure_type`, `breaker_state="OPEN"`, `correlation_id` |
 | `supervisor.breaker.reset.requested` | `SUPERVISOR_BREAKER_RESET_REQUESTED_FIELDS` | `component_id`, `operator_user_id`, `proposal_branch`, `trust_tier_of_trigger="T1"`, `correlation_id` |
 | `supervisor.breaker.reset` | `SUPERVISOR_BREAKER_RESET_FIELDS` | `component_id`, `old_state`, `new_state="CLOSED"`, `trip_count`, `operator_user_id`, `correlation_id` |
@@ -283,7 +283,7 @@ Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
 ### Lifecycle rows
 
 | Event | Schema constant | Key subject fields |
-|---|---|---|
+| --- | --- | --- |
 | `plugin.lifecycle.loaded` | `PLUGIN_LIFECYCLE_FIELDS` | `plugin_id`, `manifest_subscriber_tier`, `manifest_version`, `sandbox_profile`, `breaker_state` |
 | `plugin.lifecycle.load_refused` | `PLUGIN_LIFECYCLE_FIELDS` | same, `result="load_refused"` |
 | `plugin.lifecycle.crashed` | `PLUGIN_LIFECYCLE_CRASHED_FIELDS` | base fields + `exception_type` |
@@ -292,7 +292,7 @@ Three families of audit rows, all carrying `trust_tier_of_trigger="T0"` and
 ### Capability-gate rows
 
 | Event | Schema constant | Key subject fields |
-|---|---|---|
+| --- | --- | --- |
 | `supervisor.capability_gate_unavailable` | `SUPERVISOR_CAPABILITY_GATE_UNAVAILABLE_FIELDS` | `state_transition` (`"entering_fail_closed"` \| `"exiting_fail_closed"`), `denied_dispatch_count`, `backing_store_error_type`, `correlation_id` |
 
 ## Hookpoints
@@ -303,7 +303,7 @@ except `supervisor.plugin.sandbox_refused` (a subscriber timeout there must
 not let a refused spawn slip through).
 
 | Hookpoint | `subscribable_tiers` | `fail_closed` | Fires when |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `supervisor.breaker.tripped` | `{"system"}` | `False` | Breaker trips to OPEN |
 | `supervisor.breaker.reset` | `{"system", "operator"}` | `False` | Operator reset completes |
 | `supervisor.action_timeout` | `{"system"}` | `False` | Orchestrator action deadline exceeded |
@@ -382,7 +382,7 @@ about its own containment.
 ## Failure modes
 
 | Trigger | Behaviour | Observable signal |
-|---|---|---|
+| --- | --- | --- |
 | 3 plugin crashes in 5 min | Breaker trips OPEN; `plugin.lifecycle.quarantined` emitted; `QuarantinedUnavailable` raised on next dispatch | audit log + structlog `supervisor.plugin.quarantined` |
 | Plugin crashes in HALF_OPEN probe | `record_probe_failure()` → OPEN; backoff doubled | structlog `supervisor.breaker.tripped` |
 | Gate backing store unreachable for 60 s | `RealGate` trips fail-closed; `CapabilityGateMonitor` emits `entering_fail_closed` row | audit log + Prometheus `alfred_capability_gate_fail_closed` |
@@ -432,7 +432,7 @@ the scheduling loop that drives them does not.
 ## Slice graduation map
 
 | Subsystem | Slice 3 / PR-S3-3b | Deferred to | Anchor |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Supervisor | `Supervisor`, `CircuitBreaker`, `BreakerState`, `PluginLifecycle`, `CapabilityGateMonitor`, `DeadlineWrapper`; all 6 hookpoints registered; Postgres persistence (migration 0010); `load_all_breakers` + `save_to_db` round-trip; `alfred supervisor status` (Postgres read) + `alfred supervisor reset --confirm` (reviewer-gated `BreakerResetProposal` via the merged-proposal-branch dispatcher) + `alfred supervisor proposals --since 1h` (ledger readout). ADR-0021 dispatch loop wired (test-construction + dev-local). | [#174](https://github.com/alfred-os/AlfredOS/issues/174): daemon boot path that supplies `state_git_path` so the loop runs in production deployments. Slice 4: self-healing restart scheduling loop (`maybe_rearm` cadence + exponential backoff probe timing); multi-process `SELECT … FOR UPDATE` escalation for `save_to_db`. [#173](https://github.com/alfred-os/AlfredOS/issues/173): DLP wiring on the dispatcher's `failure_detail` boundary. | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md), [ADR-0020](../adr/0020-supervisor-cli-access-via-postgres-and-state-git.md), [ADR-0021](../adr/0021-merged-proposal-branch-dispatch-for-side-effecting-proposals.md), spec §10 |
 
 ## CLI access model
@@ -458,7 +458,7 @@ write; typically lags by ≤1 supervisor cycle" — the same staleness model
 Failure modes funnel through narrow `except` arms:
 
 | Condition | Disposition |
-|---|---|
+| --- | --- |
 | `DATABASE_URL` unset OR Postgres unreachable | `cli.supervisor.status.postgres_unavailable` + exit 1 |
 | `circuit_breakers` table empty | `cli.supervisor.status.no_components_yet` + exit 0 |
 | Row decode fails (schema drift) | Raw traceback (programmer bug) |

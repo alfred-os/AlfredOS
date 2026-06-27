@@ -15,7 +15,7 @@
 It complements — does not replace — the existing rate limits. Their coverage:
 
 | Defence | What it bounds | What it doesn't bound |
-|---|---|---|
+| --- | --- | --- |
 | Per-domain rate (10/min) | Hammering one site | Spreading across many sites |
 | Per-user rate (30/min) | Request burst rate | Bodies sitting in Redis from prior bursts |
 | Per-user daily (100/day) | Long-tail abuse | Burst at any moment |
@@ -348,7 +348,7 @@ The `user_id` propagation is via direct parameter threading — there is **no "c
 **Concrete propagation map:**
 
 | Release site | Current state | Required change |
-|---|---|---|
+| --- | --- | --- |
 | `dispatch_web_fetch` error arms (§4) | Already has `user_id` as a parameter | No change |
 | `InboundCanaryScanner.scan` (§5.2) | Signature is `scan(*, handle_id, source_url)` — no user_id | **Hook-payload extension:** the `tool.web.fetch` post-hookpoint dispatcher must include `triggering_user_id` in the event context, and the scanner's registration adapter pulls it out and threads to `scan()`. Update `canary_scanner.SCANNER_REGISTRATION` accordingly. |
 | `ContentStore.extract` (§5.1, forward-looking) | No caller in `src/` today | Contingent on canonical extract wire-up. When wired, the quarantined extractor (host-side, post-extract) calls `release(user_id=..., handle_id=...)`. The extractor already knows `user_id` from its own correlation. |
@@ -445,7 +445,7 @@ A misconfigured cap (≤ 0) fails loud at policies-loader time, not silently at 
 Lua scripts run against **real Redis** (`testcontainers.redis.RedisContainer("redis:7-alpine")`) — never mocked. Mocking would test our mental model of Lua semantics, not the interpreter. Module-scoped container fixture + function-scoped `HandleCap` mirrors `test_lua_atomic_rate_limit.py` precedent.
 
 | Layer | Backing | What it proves |
-|---|---|---|
+| --- | --- | --- |
 | `tests/unit/plugins/web_fetch/test_handle_cap.py` | testcontainers Redis | Lua script semantics, atomicity, TTL behaviour, error paths, ARGV validation |
 | `tests/property/plugins/web_fetch/test_handle_cap_invariants.py` | testcontainers Redis + hypothesis | Stateful invariant (`ZCARD ≤ cap`) under all interleavings of reserve/release/expire |
 | `tests/unit/plugins/web_fetch/test_fetch_dispatcher.py` (extend) | `HandleCap` AsyncMock | Dispatcher wiring: reserve before transport, release on error arms, host-side equality check, CancelledError safety, no release on success |

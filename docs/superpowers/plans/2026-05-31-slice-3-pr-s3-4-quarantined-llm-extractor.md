@@ -68,7 +68,7 @@ downgrade_to_orchestrator(data, audit_row=...)
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `plugins/alfred_quarantined_llm/__init__.py` | Create | Package marker |
 | `plugins/alfred_quarantined_llm/manifest.toml` | Create | MCP manifest: `subscriber_tier=system`, `sandbox_profile=user-plugin`; both `kind=pre` + `kind=post` hook entries |
 | `plugins/alfred_quarantined_llm/quarantine_plugin.py` | Create | MCP server entry point; fd-3 read in `main()` only (sec-007); `quarantine.ingest` + `quarantine.extract` methods |
@@ -1949,7 +1949,7 @@ Tasks follow TDD. All commits use `(#TBD-slice3)`.
 ## §5 Spec Coverage Map
 
 | Spec section | Implementing task(s) |
-|---|---|
+| --- | --- |
 | §5.1 Quarantined-LLM plugin shape: `quarantine.ingest` + `quarantine.extract` methods | Tasks 4, 5 |
 | §5.2 `alfred-quarantine` UID (subprocess runs under dedicated user) | Task 4 (launcher invocation with UID drop via bin/alfred-plugin-launcher) |
 | §5.3 fd-3 length-prefix handshake reader in `main()` only (sec-007) | Task 4 (`_read_provider_key_from_fd3` called from `main()`, not module scope) |

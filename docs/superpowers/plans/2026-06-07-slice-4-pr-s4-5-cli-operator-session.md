@@ -138,7 +138,7 @@ Key design constraints:
 ## §3 File structure
 
 | File | Action | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/identity/operator_session.py` | **Create** | `OperatorSession` Pydantic v2 model; `OperatorResolver` Protocol; `_resolve_operator(ctx) -> UserId` async helper; `load_session_file(path) -> OperatorSession` TOCTOU-safe loader; `compute_machine_id_hash(...)`; per-OS `MachineIdProvider` (`LinuxMachineIdProvider`, `MacosMachineIdProvider`, `WindowsMachineIdProvider`); exception hierarchy rooted at `OperatorSessionError` (`OperatorSessionMissing`, `OperatorSessionExpired`, `OperatorSessionRevoked`, `OperatorSessionHostMismatch`, `OperatorSessionMachineMismatch`, `OperatorSessionBadFileMode`, `OperatorSessionBadFileOwner`, `OperatorSessionTokenUnknown`, `OperatorSessionUserRevoked`, `OperatorSessionTimeout`). |
 | `src/alfred/cli/operator_session.py` | **Create** | `alfred login [--as <user>] [--expires-in <duration>] [--refresh]`, `alfred logout`, `alfred whoami` Typer commands. Imports `_resolve_operator`. Wires the bare-`alfred login` discoverability flow (devex-002). Locale-formats `whoami` timestamps via `babel.dates.format_datetime(dt, locale=user.language)`. |
 | `src/alfred/cli/main.py` | **Modify** | Register `login` / `logout` / `whoami` as top-level commands on the root `app` (mirrors `alfred status`, `alfred chat`). Lazy-import `operator_session` to keep `alfred --help` under the Slice-3 perf budget (PR-S3-6 §8.5 lesson). |
@@ -199,7 +199,7 @@ The AST guard `tests/unit/hooks/test_carrier_tier_required.py` (PR-S4-3) refuses
 Before any task begins, grep-verify every cited symbol exists or is explicitly marked as new. Captures the round-4 `/review-pr` lesson — invented `secret_broker.fetch_audit_pepper`, `AuditWriter.dedupe_surface`, `Python launcher`, `AlfredPluginSession._read_loop` all snuck through prior plans. Each row below has been re-verified on the `slice-4-plans` branch at planning time.
 
 | Cited surface | Status on `slice-4-plans` | Verification |
-|---|---|---|
+| --- | --- | --- |
 | `SecretBroker.get(name) -> str` at `src/alfred/security/secrets.py:396` | **Exists** | `grep -n "def get\b" src/alfred/security/secrets.py` → `396: def get(self, name: str) -> str:` |
 | `audit.hash_pepper` secret name | **Not yet present — lands in PR-S4-0b** | Bootstrapped by the PR-S4-0b migration per spec §8.10 + slice-index §3 audit-pepper bootstrap row. This PR assumes presence and emits `OperatorSessionError` at fetch time if missing (defensive — the daemon-boot probe in PR-S4-1 catches the absence first). |
 | `OperatorResolver` Protocol | **NEW in Slice 4 — defined by this PR** | No grep hits on `slice-4-plans`. This PR is the introducing site. |
@@ -829,7 +829,7 @@ The tasks are sequenced so that the AST guard (Task 4) lands BEFORE any producti
   Cover (one test per row of the refusal table):
 
   | Refusal reason | Setup | Expected exception |
-  |---|---|---|
+  | --- | --- | --- |
   | happy path | valid file + DB row + matching host + matching machine-id-hash + expires_at > now | returns `UserId` |
   | `expired` | file present, expires_at < now | `OperatorSessionExpired` |
   | `host_mismatch` | file's host != ctx.host | `OperatorSessionHostMismatch` |
@@ -1306,7 +1306,7 @@ The tasks are sequenced so that the AST guard (Task 4) lands BEFORE any producti
   Audit-row constants whose field-set includes `operator_user_id` at this point in the Slice-4 timeline:
 
   | Constant | Defined in | Consumed by |
-  |---|---|---|
+  | --- | --- | --- |
   | `SUPERVISOR_BREAKER_RESET_FIELDS` | Slice-3 (PR-S3-0a) | `supervisor.py` ✓ (Task 23) |
   | `SUPERVISOR_BREAKER_RESET_REFUSED_FIELDS` | PR-S4-0a | `supervisor.py` ✓ (Task 23) |
   | `PLUGIN_GRANT_FIELDS` (or whatever Slice-3 named it) | Slice-3 | `plugin.py` ✓ (Task 25) |

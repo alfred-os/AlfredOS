@@ -61,7 +61,7 @@ Spec anchors:
 Before any task starts, the implementer MUST `grep`-verify every symbol cited in this plan exists in the tree at the stated path. The verification record below was taken at plan-authoring time (2026-06-07) on branch `slice-4-plans`. Any drift between this gate and the live tree at implementation time is a **hard halt** — re-verify, update the plan via reviewer-gated proposal, do not improvise.
 
 | Symbol | Cited path | Verified? | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `class OutboundDlp` | `src/alfred/security/dlp.py:84` | **YES** | Constructor: `__init__(self, *, broker, audit)`. Public surface: `scan(text: str) -> str`. |
 | `OutboundDlpProtocol` | `src/alfred/security/dlp.py` (new) | **NEW — does not yet exist** | This PR introduces it as a structural Protocol over `OutboundDlp.scan`. Flagged honestly per "If a cited symbol does NOT exist, mark explicitly" rule. |
 | `class OutboundDlpExtractSubscriber` | `src/alfred/security/_extract_dlp_subscriber.py:70` | **YES** | The "quarantine extractor pattern" the spec refers to: constructor-inject `OutboundDlp` (no Protocol — concrete type). |
@@ -144,7 +144,7 @@ When Slice-3's canary stage lands real behaviour (Slice-3 §6 of `dlp.py` docstr
 ## §4 File structure
 
 | File | Create / Modify / Test | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/security/dlp.py` | **Modify** | Add `OutboundDlpProtocol` Protocol class + export from `__all__`. Body: a single `scan(text: str) -> str` method stub. No change to `OutboundDlp`. |
 | `src/alfred/state/dispatch_registry.py` | **Modify** | Add `outbound_dlp: OutboundDlpProtocol` field to `ProposalContext`. Frozen+slots is preserved — the field is REQUIRED, no default. |
 | `src/alfred/state/dispatch_loop.py` | **Modify** | Rename `_truncated_detail` → `_redacted_detail` (4 call sites + 1 def + module docstring + `__all__`). Change each call site from `_truncated_detail(text)` to `_redacted_detail(ctx.outbound_dlp.scan(text))`. Add the import of `PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS` + `DLP_OUTBOUND_REFUSED_FIELDS`. Wrap each `_record_failure(...)` call site in a `try / except HookRefusal` arm that emits `DLP_OUTBOUND_REFUSED_FIELDS` and aborts the row insert. |
@@ -966,7 +966,7 @@ Numbered tasks are sequenced. Earlier tasks define the contract; later tasks imp
 ## §7 Verification matrix
 
 | Spec line | Test that proves it | PR-S4-2 commits to |
-|---|---|---|
+| --- | --- | --- |
 | §3.3 line 116 "rename _truncated_detail → _redacted_detail" | `test_truncated_detail_was_renamed_to_redacted_detail` | Symbol rename + body unchanged |
 | §3.3 line 117 "scan via OutboundDlp.scan(detail) then _redacted_detail(scanned) where scanned = OutboundDlp.scan(detail).text" | `test_failure_detail_dlp_truncation_after_scan` | Scan happens at call site, truncate runs on the redacted text |
 | §3.3 line 118 "PROPOSAL_DISPATCH_FAILURE_REDACTED_FIELDS emits on every redact-and-truncate" | `test_failure_detail_clean_scan_emits_zero_count` + `test_failure_detail_planted_secret_is_redacted_and_count_emitted` | Success row emits regardless of count (≥0) |

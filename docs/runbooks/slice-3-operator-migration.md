@@ -165,7 +165,7 @@ The plugin subsystem becomes operator-visible in Slice 3. See
 architecture.
 
 | Command | Tier | Reviewer-gated | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `alfred plugin grant <plugin_id> <tier> <hookpoint>` | T1 (operator) | yes | queues a state.git proposal; emits `plugin.grant.requested` audit row |
 | `alfred plugin grant status <proposal_id>` | T1 | no | read-only proposal status |
 | `alfred plugin grant list [--pending]` | T1 | no | read-only grant projection from Postgres |
@@ -181,7 +181,7 @@ mutates that file via the reviewer-gate. See
 trust-tier model that drives the allowlist enforcement.
 
 | Command | Tier | Reviewer-gated | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `alfred web allowlist add <domain>` | T1 | yes | normalises domain, validates against `T1Domain` |
 | `alfred web allowlist remove <domain>` | T1 | yes | exit-nonzero if domain not in list |
 | `alfred web allowlist list` | T1 | no | renders current allowlist |
@@ -189,7 +189,7 @@ trust-tier model that drives the allowlist enforcement.
 ### `alfred config`
 
 | Command | Tier | Reviewer-gated | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `alfred config set <key> <value>` | T1 | depends on blast | low-blast keys mutate `config/policies.yaml` directly and the hot-reloader picks up the change on the next mtime tick; high-blast keys (currently `quarantined-provider` — see the per-key table below) queue a state.git proposal and require reviewer approval before they take effect |
 | `alfred config get <key>` | T1 | no | reads current value (refused for write-only keys like `quarantined-provider`) |
 | `alfred config list` | T1 | no | renders all keys |
@@ -199,7 +199,7 @@ whether the command performs a direct ``policies.yaml`` mutation
 (low-blast) or queues a reviewer-gated state.git proposal (high-blast):
 
 | Short alias | Canonical key | Blast | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `web-fetch-budget` | `web_fetch.user_daily_budget` | low | Per-user daily web-fetch handle budget. Mutates `policies.yaml`; hot-reloader picks up the change on the next mtime tick. |
 | `operator-fetch-budget` | `web_fetch.operator_daily_budget` | low | Operator-tier daily handle budget (separate pool from per-user). |
 | `extraction-max-retries` | `quarantine.extraction_max_retries` | low | Max retries the quarantined extractor performs before emitting `TypedRefusal(reason="cannot_extract")`. |
@@ -219,7 +219,7 @@ reconcile tick.
 ### `alfred supervisor`
 
 | Command | Tier | Reviewer-gated | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `alfred supervisor status` | T1 | no | per-component circuit-breaker state + trip count |
 | `alfred supervisor reset <component> --confirm` | T1 | no (read after `--confirm`) | clears a tripped breaker; emits `supervisor.breaker.reset` |
 
@@ -297,7 +297,7 @@ Provider capabilities determine the `ExtractionMode` the quarantined
 LLM uses:
 
 | Capability | ExtractionMode | Provider example |
-|---|---|---|
+| --- | --- | --- |
 | `NATIVE_CONSTRAINED_GENERATION` | `native_constrained` | Anthropic |
 | `JSON_OBJECT_MODE` | `json_object_unconstrained` | DeepSeek (chat) |
 | (none) | `prompt_embedded_fallback` | unknown / OpenAI compat |
@@ -637,7 +637,7 @@ container-level health-check failures surface through `docker compose`
 output rather than an `AlfredError` subclass.
 
 | Symptom | Typed exception | Subsystem | Audit family | Likely cause | Fix |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `docker compose ps alfred-redis` not `Up` | — | infra (`alfred-redis`) | — (host-level; surfaces via `docker compose logs alfred-redis`) | port conflict on 6379 or volume permission | free port or chown volume; `docker compose up -d alfred-redis` |
 | `plugin.lifecycle.load_refused` rows on every spawn | `ManifestError` | `src/alfred/plugins/` (supervisor load path) | `plugin.lifecycle.load_refused` | state.git not seeded | run Step 2 (seed), then `alfred supervisor reset <component> --confirm` |
 | `alfred plugin grant list --pending` shows stuck proposal | `StateGitError` (when the reviewer-agent later writes a refusal) | `src/alfred/reviewer/` + `src/alfred/cli/_state_git.py` | `state_git.proposal_failed` (on agent-side write refusal) | reviewer-agent not running | start reviewer agent (`docker compose up -d alfred-reviewer`); inspect its logs |

@@ -21,7 +21,7 @@ When you remove a required check: same flow in reverse — `gh api -X DELETE ...
 ## Currently required
 
 | Check name | Workflow | Job key | Active since | Rationale |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `Conventional commit format` | `.github/workflows/pr-validate-commits.yml` | `conventional-commits` | 2026-05-25 | Every commit subject must follow `<type>[(<scope>)][!]: <description> (#NN)` so the commit log stays parseable and traceable to an issue. |
 | `No autosquash commits` | `.github/workflows/pr-validate-commits.yml` | `no-autosquash` | 2026-05-25 | `fixup!` / `squash!` / `amend!` commits must be squashed via `make autosquash` before merge — they're scaffolding, not history. |
 | `No merge commits` | `.github/workflows/pr-validate-commits.yml` | `no-merge-commits` | 2026-05-25 | PRs are rebased onto main, not merged. Merge commits in a PR mean someone synced via `git merge` instead of `git rebase`. |
@@ -66,7 +66,7 @@ These checks are emitted by their workflow but not yet in the branch-protection 
 > Two checks can **never** gate PRs and are intentionally excluded: `End-to-end` and `Adversarial test suite` live in `nightly.yml` (`schedule:`-only — they never run on a PR, so requiring them would block every PR).
 
 | Check name | Workflow | Job key | Rationale | Promote after |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | ~~`i18n catalog freshness`~~ | _(never authored)_ | _(superseded)_ | **Superseded** by `i18n catalog drift` (`pr-validate-python.yml` job `i18n-catalog`), now in "Currently required" above — it already runs `pybabel extract` + `update --check` + `compile` on every PR. The separately-planned `pr-validate-i18n.yml` workflow is obsolete; no need to author it. | — (closed, see `i18n catalog drift`) |
 
 ### Pending required (promote after green) — arch breadth (#265, ADR-0034)
@@ -88,7 +88,7 @@ A third arm64 leg, `Integration (privileged Linux, real spawn) (arm64)` (the dua
 The `ci.yml` test layer runs across three operating systems. The split below is the empirically-assessed reality (not an aspiration): each OS runs exactly what is **green** on it today, and POSIX-only tests `skipif`/are-omitted cleanly rather than turning a non-Linux leg red.
 
 | Layer | ubuntu-latest | macos-latest | windows-latest |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Ruff lint + format | ✓ (job `python`) | ✓ (job `python-cross-os`) | ✓ (job `python-cross-os`) |
 | mypy --strict + pyright | ✓ | ✓ (Linux-target: `--platform linux` / `--pythonplatform Linux`) | ✓ (Linux-target) |
 | Unit suite | ✓ (+ 100% coverage gates) | ✗ deferred (Docker-needing tests; see below) | ✗ deferred (see below) |
@@ -121,7 +121,7 @@ the non-Linux legs — the unit suite remains out of scope; see below / #246.)
 ## Not currently required (but exists)
 
 | Check name | Workflow | Why not required |
-|---|---|---|
+| --- | --- | --- |
 | `CodeRabbit` | (external service, no workflow file) | CodeRabbit has occasional service blips that surface as non-success status. We gate via `request_changes_workflow: true` in `.coderabbit.yaml` + the 1-approving-review rule instead, so an outage means "manually approve" rather than "repo unmergeable". |
 
 ## On bypass

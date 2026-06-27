@@ -54,7 +54,7 @@ G6-4 registered only the TUI leg. G6-7-3 must create + register a discord `Gatew
 ## File structure (subject to FORK resolutions)
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `src/alfred/gateway/inbound_forward_runner.py` (**NEW**) | `GatewayForwardDisposition` (implements `InboundDisposition`: the §3.1 four-notification table) + `GatewayInboundForwardRunner` (thin `CommsPluginRunner` construction, session-less) + the gateway-local audit/structlog rows. Trust-boundary → both ci.yml per-file 100% gates. |
 | `src/alfred/gateway/core_link.py` (modify) | `forward_adapter_inbound(adapter_id, body)` — build `GatewayAdapterInboundEnvelope` (adapter_id from spawn binding) + enqueue on the per-adapter leg (FORK-B). |
 | `src/alfred/plugins/comms_runner.py` (modify, IF FORK-A=session-optional) | `session: AlfredPluginSession \| None`; None-branches for handshake-complete + transport-crash; behaviour-preserving for the daemon path. |

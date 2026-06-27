@@ -12,7 +12,7 @@ Thanks for your interest in contributing. AlfredOS is a security-sensitive Apach
 ## Where to discuss
 
 | You want to... | Use |
-|---|---|
+| --- | --- |
 | Report a bug | GitHub Issues — `Bug report` template |
 | Propose a feature | GitHub Issues — `Feature request` template |
 | Propose a persona | GitHub Issues — `Persona proposal` template |
@@ -97,7 +97,7 @@ Config lives at [`lefthook.yml`](./lefthook.yml). Skipping a hook (`LEFTHOOK=0`)
 ## Tests
 
 | Type of change | Tests required |
-|---|---|
+| --- | --- |
 | New feature | Unit + integration |
 | Bug fix | Regression unit test |
 | New skill | Happy-path + error-path + out-of-scope-refusal |

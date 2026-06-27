@@ -13,7 +13,7 @@
 ## G3-3b sub-epic decomposition
 
 | PR | Scope | Trust-boundary? |
-|----|-------|-----------------|
+| --- | --- | --- |
 | **G3-3b-1** | The **core-link manager**: `GatewayCoreLink` (`src/alfred/gateway/core_link.py`) — dial the core via `dial_comms_socket`; **dial-side `SO_PEERCRED`** (the both-direction dial side G3-1 deferred); a lean **peer-side** handshake (respond to the core's `lifecycle.start`: validate, capture + validate the `epoch`, echo `AlfredSeqAck/1`, enable core-leg seq/ack); lifecycle-frame **validation + epoch-reconcile** (parse via merged `ReadyNotification`/`GoingDownNotification`; a forged/mismatched-epoch `ready` is rejected + logged loud, never fed as `core_ready`); drive the merged `LinkStateMachine.feed(...)` → `GatewayClientListener.send_control(...)`; a **fake-clock reconnect/backoff** loop. NO payload relay (non-lifecycle frames are dropped + counted). Three of the four metrics. | Yes — core-facing socket + wire-trust. |
 | **G3-3b-2** | The **opaque relay + the process**: a codec-level opaque-payload seam on the transport (`read_payload_unit`/`send_payload_unit`); the relay loop (`src/alfred/gateway/relay.py`) — two pumped directions, payload byte-for-byte, `id` preserved, per-leg reseq, **no buffering**; the lean **client-leg host** handshake (gateway → TUI `lifecycle.start`); the `GatewayProcess` wiring (`src/alfred/gateway/process.py`); the `alfred gateway` CLI (`src/alfred/cli/gateway/`) + `src/alfred/gateway/__main__.py`; the fourth metric (`gateway_peer_auth_rejected_total`); the **non-root in-process wire-contract test** (#245 paper-gate hazard); the **payload-blindness canary test** (spec §6 corpus (a)). | Yes — always-up T1 carrier. |
 
@@ -38,7 +38,7 @@
 ### Link-event sourcing (the four merged `GatewayLinkEvent`s)
 
 | Wire observation on the core leg | Typed event fed |
-|----|----|
+| --- | --- |
 | `lifecycle.start` handshake completes (valid epoch captured) | `CORE_READY` (startup: `UP + core_ready → UP`, no spurious restored; post-gap: `REDIALING + core_ready → UP`, emit `restored`) |
 | `daemon.lifecycle.ready` frame, epoch matches handshake | `CORE_READY` (idempotent corroboration) |
 | `daemon.lifecycle.ready` frame, epoch MISMATCH | *(none — reject + log loud; forgery defense)* |

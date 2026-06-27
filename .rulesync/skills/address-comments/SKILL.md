@@ -236,7 +236,7 @@ For each actionable comment (from any of the three sources):
 ### Judgment table — apply vs reject vs escalate
 
 | Pattern | Action |
-|---|---|
+| --- | --- |
 | Specific code fix with concrete suggestion | **Apply** the fix. |
 | Style/convention violation (matches project conventions doc) | **Apply** the fix. |
 | "Consider doing X" optional suggestion | Use judgment — apply if reasonable, reject with reason if it's preference. |
@@ -405,7 +405,7 @@ Then return to Step 3 (re-fetch all three sources × all pages). If everything's
 ## Quick reference
 
 | Operation | Command |
-|---|---|
+| --- | --- |
 | Get PR number | `gh pr view --json number --jq .number` |
 | Derive owner/repo | `gh pr view "$PR" --json baseRepository --jq .baseRepository.nameWithOwner` |
 | Fetch all review threads (paginated) | `gh api graphql` + `reviewThreads(first:100, after:$cursor)` loop |

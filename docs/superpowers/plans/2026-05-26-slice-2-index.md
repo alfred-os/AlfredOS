@@ -22,7 +22,7 @@ When all 6 PRs below have merged:
 Each PR's plan is **self-contained** and **TDD-bite-sized**. Default executor: `superpowers:subagent-driven-development`.
 
 | # | Plan | Owner | Depends on |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | [PR A — Identity layer + ContextVar + 5 ADRs](./2026-05-26-slice-2-pr-A-identity.md) | `alfred-python-developer` + `alfred-docs-author` (ADR-0009 + 0010 bodies) | main as of slice-1 |
 | 2 | [PR B — Per-user BudgetGuard + WorkingMemoryPool + orchestrator contract](./2026-05-26-slice-2-pr-B-budget-memory-orchestrator.md) | `alfred-memory-engineer` + `alfred-provider-engineer` + `alfred-core-engineer` + `alfred-persona-engineer` | PR A |
 | 3 | [PR C — SecretBroker file backend + perf-006 caching](./2026-05-26-slice-2-pr-C-secret-broker.md) | `alfred-security-engineer` | PR A (PR B is independent) |
@@ -45,7 +45,7 @@ A → C ─┘
 Where each spec section lands:
 
 | Spec section | Lands in |
-|---|---|
+| --- | --- |
 | §0.1 ContextVar refactor | PR A (commit 1) |
 | §0.2 ADR-0013 placeholder body | PR A (commit 2) |
 | §2 `CommsAdapter` Protocol + TuiAdapter wrap | PR D1 |

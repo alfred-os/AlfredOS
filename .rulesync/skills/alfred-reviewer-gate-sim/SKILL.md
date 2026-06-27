@@ -41,7 +41,7 @@ The sim outputs a checklist with pass/fail and quotes the specific lines the run
 ## Mapping sim output → action
 
 | Sim says | You do |
-|---|---|
+| --- | --- |
 | "no refusal test" | Add `tests/test_refusal.py` |
 | "capability X granted but unused" | Remove from manifest or add a test that exercises it |
 | "similar skill 'foo' already exists" | Refactor to use the existing skill, or document why duplication is necessary |

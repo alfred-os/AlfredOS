@@ -34,7 +34,7 @@ The spec resolves all 11 design forks surfaced by the architecture review. Toget
 Spec §1.3 pre-commits two splits: PR-S3-0 → PR-S3-0a + PR-S3-0b (scope budget, see §7 below); PR-S3-3 → PR-S3-3a + PR-S3-3b (transport vs supervisor). The slice ships as **10 PRs** (PR-S3-0a through PR-S3-7).
 
 | PR | Slug | What it delivers |
-|---|---|---|
+| --- | --- | --- |
 | PR-S3-0a | docs-adrs-foundations | ADR-0017 + status flips (ADR-0008/0009/0013) + ADR-0015/0016 stubs + PRD §5 amendment + `audit_row_schemas.py` + `payload_schema.py` Literal additions |
 | PR-S3-0b | migrations-infra-i18n | Alembic migrations 0007–0009 + SQLAlchemy models + i18n catalog + Docker/Redis/state.git infra |
 | PR-S3-1 | trust-tier-types | T1+T3 classes + `AnyTaggedContent` + wire-format serializer + `tag(T3)` capability-gated factory + `quarantined_to_structured` stub + `_ingest_tier` |
@@ -82,7 +82,7 @@ PR-S3-5                                                              │        
 Explicit `depends_on` per PR:
 
 | PR | Depends on | Blocks |
-|---|---|---|
+| --- | --- | --- |
 | PR-S3-0a | — (first PR) | S3-0b, S3-1, S3-2, S3-3a, S3-3b, S3-4, S3-5, S3-6, S3-7 |
 | PR-S3-0b | S3-0a | S3-1, S3-2, S3-3a, S3-3b, S3-4, S3-5, S3-6, S3-7 |
 | PR-S3-1 | S3-0a, S3-0b | S3-3a, S3-4, S3-5, S3-6 |
@@ -111,7 +111,7 @@ PR-S3-0a adds `AuditWriter.append_schema(fields: frozenset[str], **kwargs) -> No
 `src/alfred/audit/audit_row_schemas.py` ships before any implementation PR and is the single import surface for all audit row field constants. Each implementation PR imports the named constant; no PR defines its own field list.
 
 | Constant | Consuming PRs |
-|---|---|
+| --- | --- |
 | `PLUGIN_LIFECYCLE_FIELDS` / `PLUGIN_LIFECYCLE_CRASHED_FIELDS` | S3-3a, S3-3b |
 | `PLUGIN_LIFECYCLE_QUARANTINED_FIELDS` | S3-3a, S3-3b |
 | `PLUGIN_GRANT_FIELDS` / `PLUGIN_GRANT_REVOKED_INFLIGHT_FIELDS` | S3-2, S3-6 (CLI emits `plugin.grant.*` audit rows), S3-7 |
@@ -128,7 +128,7 @@ PR-S3-0a adds `AuditWriter.append_schema(fields: frozenset[str], **kwargs) -> No
 ### Hookpoint surface from spec §14 (which PR declares each hookpoint)
 
 | Hookpoint name | Declared in | Consumed by |
-|---|---|---|
+| --- | --- | --- |
 | `tool.web.fetch` | PR-S3-5 | S3-5, S3-6 (CLI audit filter), S3-7 (docs) |
 | `security.quarantined.extract` | PR-S3-4 | S3-4, S3-7 (docs) |
 | `plugin.lifecycle.loaded` | PR-S3-3a | S3-3a, S3-3b, S3-7 (docs) |
@@ -257,7 +257,7 @@ The `DevGate` flag-day (PR-S3-7) is the one irreversible step in the slice. If a
 ### Per-PR plans
 
 | PR | Plan file |
-|---|---|
+| --- | --- |
 | PR-S3-0a | [2026-05-31-slice-3-pr-s3-0a-docs-adrs-foundations.md](./2026-05-31-slice-3-pr-s3-0a-docs-adrs-foundations.md) |
 | PR-S3-0b | [2026-05-31-slice-3-pr-s3-0b-migrations-infra-i18n.md](./2026-05-31-slice-3-pr-s3-0b-migrations-infra-i18n.md) |
 | PR-S3-1 | [2026-05-31-slice-3-pr-s3-1-trust-tier-types.md](./2026-05-31-slice-3-pr-s3-1-trust-tier-types.md) |
@@ -272,7 +272,7 @@ The `DevGate` flag-day (PR-S3-7) is the one irreversible step in the slice. If a
 ### ADRs
 
 | ADR | Title | Relation |
-|---|---|---|
+| --- | --- | --- |
 | [ADR-0008](../../adr/0008-llm-output-trust-tier.md) | LLM output trust tier | Superseded by ADR-0017 in PR-S3-0a |
 | [ADR-0009](../../adr/0009-comms-adapter-protocol-slice2-only.md) | CommsAdapter Protocol | Status flip to "Superseded by ADR-0016 for new adapters" in PR-S3-0a |
 | [ADR-0013](../../adr/0013-defer-t1-t3-and-dual-llm.md) | Defer T1/T3/dual-LLM to Slice 3 | Superseded by ADR-0017 in PR-S3-0a — the commitment this slice fulfils |

@@ -25,7 +25,7 @@ The complete list, grouped by purpose. No file outside this list is touched by P
 **Path resolution pipeline (must match spec §2 line 187 — reproduce verbatim in the module docstring so the layering is auditable from `pydoc alfred.security.secrets`):**
 
 | Layer | Setting | Resolves to | Used by |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Host default | `Settings.secrets_file` (Pydantic) | `Path.home() / ".config/alfred/secrets.toml"` | `alfred` CLI run on the host |
 | Container default | `ALFRED_SECRETS_FILE` env var set in `docker-compose.yaml` | `/etc/alfred/secrets.toml` | `alfred`, `discord-bot`, persona workers inside containers |
 | Bind-mount | `docker-compose.yaml` volumes: `~/.config/alfred/secrets.toml:/etc/alfred/secrets.toml:ro` | Same file, two paths | Maps host secrets into container read-only |

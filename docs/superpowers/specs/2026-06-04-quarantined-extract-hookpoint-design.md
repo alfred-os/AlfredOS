@@ -318,7 +318,7 @@ The existing `tests/adversarial/prompt_injection/pi_direct_injection_into_extrac
 ## 5. Files affected
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/security/quarantine.py` | Modify | `declare_hookpoints()` + wrap `extract` in `invoking()` + pre/post dispatch |
 | `src/alfred/security/_extract_dlp_subscriber.py` | Create | `OutboundDlpExtractSubscriber` + `register_extract_dlp_subscriber` |
 | `src/alfred/hooks/_known_hookpoints.py` | Modify | Add `"security.quarantined.extract"` under `alfred.security.quarantine` |

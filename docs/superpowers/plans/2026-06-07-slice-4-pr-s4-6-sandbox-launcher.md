@@ -225,7 +225,7 @@ Spec anchors: [§7.1 manifest sandbox](../specs/2026-06-06-slice-4-design.md#71-
 Per Slice-4 index §8 watchlist (round-2 invented `secret_broker.fetch_audit_pepper`, `AuditWriter.dedupe_surface`, `Python launcher`, `AlfredPluginSession._read_loop` — the pattern is reflexive enough to need explicit grep verification). Every claim below was checked at plan-authoring time; each row carries the verifying command, the actual location, and either "verified" or "NEW".
 
 | Claim | Location | Status |
-|---|---|---|
+| --- | --- | --- |
 | `bin/alfred-plugin-launcher.sh` exists and is bash | Read full file at `bin/alfred-plugin-launcher.sh` — `#!/usr/bin/env bash`, ~190 lines, `set -eu`, no `pipefail` | **verified** |
 | Existing launcher invariants: charset-validate PLUGIN_ID, help flag, dev escape hatch, fail-closed without policy, runuser UID-drop on Linux | All present in current file | **verified** — PR-S4-6 extends, does not rewrite |
 | `SecretBroker.get(name) -> str` at `src/alfred/security/secrets.py:396` | `sed -n '396p' src/alfred/security/secrets.py` shows `def get(self, name: str) -> str:` | **verified** |
@@ -248,7 +248,7 @@ Per Slice-4 index §8 watchlist (round-2 invented `secret_broker.fetch_audit_pep
 ## §4 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/config/settings.py` | Modify | Add `environment: Literal["development", "production", "test"]` field; dual-source resolver (env var > `/etc/alfred/environment`); emit `DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS` on disagreement |
 | `src/alfred/plugins/manifest.py` | Modify | Extend `PluginManifest` model with optional `sandbox: SandboxBlock` field; extend `parse_manifest` to read `[sandbox]` TOML table; define `SandboxKind = Literal["full", "none", "stub"]` and `SandboxBlock` Pydantic model with `kind` + `policy_refs: Mapping[Literal["linux","macos","windows"], str]` |
 | `src/alfred/plugins/manifest_reader.py` | **Create** | CLI-style Python entry point: `python3 -m alfred.plugins.manifest_reader --read-sandbox <plugin_id>` prints JSON sandbox block; `--read-environment` prints `Settings.environment`; `--policy-to-bwrap-flags` reads a policy file from stdin and prints bwrap CLI flags. All commands fail fast with non-zero exit + bare i18n key on stderr |
@@ -335,7 +335,7 @@ Both constants are imported from `alfred.audit.audit_row_schemas`; PR-S4-6 does 
 ### Hookpoint registration this PR ships
 
 | Hookpoint | Carrier tier | fail_closed | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `supervisor.plugin.sandbox_refused` | T0 | True | Fires on every `SANDBOX_REFUSED_FIELDS` emit. Carries `plugin_id` + `reason` in the hook context. |
 | `supervisor.boot.mlock_unavailable` | T0 | False | Informational — boot proceeds. Carries `errno_string` (translated) and `effective_uid` (no PII; this is the host process's UID). |
 | `supervisor.boot.core_dumps_disabled` | T0 | False | Informational — boot proceeds. Carries `rlim_cur_before` + `rlim_cur_after` for forensic visibility. |
@@ -1651,7 +1651,7 @@ This is the largest component. Each task touches `bin/alfred-plugin-launcher.sh`
 ## §7 Risk register
 
 | Risk | Mitigation | Severity |
-|---|---|---|
+| --- | --- | --- |
 | `bwrap` missing on alfred-core image after PR-S4-0b → all `kind: full` plugin spawns refuse | PR-S4-0b's Dockerfile change is a hard dependency; the integration test `test_launcher_policy_resolver.py` is skip-if-bwrap-missing locally but **required** in CI; CI image MUST have bwrap. PR description verifies. | HIGH |
 | Bash-launcher complexity grows past 400 lines, making review hard | Component G splits across seven sub-tasks; each task adds a tightly-scoped block; bash's `set -eu` catches missing-arg errors loudly | MEDIUM |
 | `manifest_reader.py` Python startup cost (~50ms per invocation) becomes a plugin-spawn perf regression | Slice-3 baseline already spawns Python for each plugin; one additional manifest-reader subprocess adds ~50ms per spawn. Plugin spawns are not hot-path (the daemon spawns each plugin once at boot). Spec §7.5 perf envelope is silent — Slice-4 graduation runbook documents the cost | LOW |

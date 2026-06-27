@@ -160,7 +160,7 @@ This closes #154's reset path inside the same PR — proves the infrastructure w
 ### Failure handling
 
 | Failure mode | Disposition | Audit emission |
-|---|---|---|
+| --- | --- | --- |
 | Unknown `proposal_type` (no handler registered) | Ledger `result="failed_unknown_type"`, `failure_kind="unknown_proposal_type"` | `state.proposal.dispatch_failed` |
 | Payload parse failure (Pydantic ValidationError) | Ledger `result="failed_parse"`, `failure_kind="payload_validation"` | `state.proposal.dispatch_failed` |
 | Path/body `proposal_type` mismatch | Ledger `result="failed_parse"`, `failure_kind="payload_validation"` | `state.proposal.dispatch_failed` |

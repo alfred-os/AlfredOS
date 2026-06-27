@@ -35,14 +35,14 @@ The throwaway probe (`experiment/g6-0b-spawn-probe`, run 27814087073) ran a
 posture matrix **with the host sysctl `apparmor_restrict_unprivileged_userns`
 already relaxed to 0**. Even so, every container posture failed EXCEPT one:
 
-| Posture (host sysctl already = 0)              | Result |
-| ---------------------------------------------- | ------ |
+| Posture (host sysctl already = 0) | Result |
+| --- | --- |
 | `--cap-drop ALL --cap-add SETUID` (tight prod) | FAILED |
-| `--cap-add SETUID` (compose default caps)      | FAILED |
-| `SETUID + SYS_ADMIN`                            | FAILED |
-| `SETUID + seccomp=unconfined`                  | FAILED |
-| `SETUID + SYS_ADMIN + seccomp=unconfined`      | FAILED |
-| `default caps + seccomp=unconfined`            | FAILED |
+| `--cap-add SETUID` (compose default caps) | FAILED |
+| `SETUID + SYS_ADMIN` | FAILED |
+| `SETUID + seccomp=unconfined` | FAILED |
+| `SETUID + SYS_ADMIN + seccomp=unconfined` | FAILED |
+| `default caps + seccomp=unconfined` | FAILED |
 | `SETUID + seccomp=unconfined + apparmor=unconfined` | **OK** |
 
 Decisive reading:

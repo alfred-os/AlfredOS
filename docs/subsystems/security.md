@@ -230,7 +230,7 @@ The enforcement points are:
 ## Failure modes
 
 | Trigger | Behaviour | Observable signal |
-|---|---|---|
+| --- | --- | --- |
 | `tag(T3, content)` called directly | `ValueError` with i18n key `security.tag_t3_unauthorized`; structlog `security.t3_boundary.refused` | log line |
 | Unknown tier on wire (`"TX"`) | `ValueError` from `_resolve_tier_from_wire` | exception at parse boundary |
 | Cross-tier wire payload (`T3` payload parsed as `TaggedContent[T2]`) | `ValueError` from `_validate_tier` | exception at field validation |
@@ -273,7 +273,7 @@ large frames.
 ## Slice graduation map
 
 | Subsystem | Slice 3 (this slice) | Deferred to | Anchor |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Security | Full T0–T3 type system; nonce-gated `tag_t3_with_nonce`; `TaggedContent` wire format; `RealGate` + `GatePolicy` + `GrantRow`; `ContentHandle` + `T3DerivedData`; `QuarantinedExtractor` + `ExtractionMode` + `TypedRefusalReason` + `ProviderCapability`; full `quarantined_to_structured` + `downgrade_to_orchestrator` + `T3_DERIVED_DOWNGRADE_FIELDS` (all shipped in PR-S3-4 #TBD) | Slice 4+: `RealGate.rebuild_from_state_git` full impl (PR-S3-6); container isolation for quarantined LLM (ADR-0015) | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md) |
 
 ## Cross-references

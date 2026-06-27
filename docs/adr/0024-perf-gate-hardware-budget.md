@@ -26,7 +26,7 @@ A second concern is **paper-only gates** — workflows that exist but do not blo
 PR-S4-1 lands the perf-gate hardware budget table and enforcement at `tests/perf/test_slice4_hardware_budgets.py`:
 
 | Primitive | Budget (p99) | Surface tested | Calibration |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Empty-chain hookpoint dispatch | 200 µs | Existing [#117](https://github.com/alfred-os/AlfredOS/issues/117) + [#180](https://github.com/alfred-os/AlfredOS/pull/180) budget, retained | Slice-3 measured |
 | `PoliciesSnapshotRef.current()` steady-state | 50 µs | Single `__slots__` load; the GIL-atomic guarantee makes this a pure microbenchmark | **Calibrate-then-set in PR-S4-1** — measure 1000 iters on `ubuntu-latest`, pick the next 10-µs band above the observed p99 with ≥50 % headroom; pin the value into this ADR via amendment in PR-S4-1 |
 | `BurstLimiter.acquire()` (lock hit) | 100 µs | Per-key lock acquire + token-bucket math | Calibrate-then-set in PR-S4-1 against `ubuntu-latest`; same rule as above |

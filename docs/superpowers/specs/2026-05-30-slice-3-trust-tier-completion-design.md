@@ -75,7 +75,7 @@ Three independent versioning schemes land in one slice and must be reconciled no
 Cross-fork risk §3 required an explicit DLP-placement table. Every Slice-3 wire and its scanner:
 
 | Wire | Direction | Scanner | Scan shape | Disposition on fail |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `StdioTransport` → subprocess stdin (outbound JSON-RPC) | Outbound | `OutboundDlp.scan(frame)` | Full frame (concatenated) | Refuse dispatch; `security.dlp_outbound_refused` audit row |
 | subprocess stdout → `StdioTransport` (inbound JSON-RPC) | Inbound | `InboundContentScanner.scan(frame)` | Full frame; per-field for structured responses | SECURITY EVENT on canary trip; `security.canary_tripped` audit row |
 | `web.fetch` outbound request (URL + headers) | Outbound | `OutboundDlp.scan_fields({"url": url, "headers": headers})` | Per-field (see §7.9b; cross-field deferral to Slice 4) | Refuse request |
@@ -439,7 +439,7 @@ PR-S3-4 includes an explicit line item: "add `capabilities()` to `Provider` Prot
 ### 6.2 Native constrained-generation per provider
 
 | Provider | Mechanism | Capability |
-|---|---|---|
+| --- | --- | --- |
 | Anthropic | Tool-use shape (tool with `input_schema`) | `NATIVE_CONSTRAINED_GENERATION` |
 | OpenAI | Structured outputs (`response_format={"type": "json_schema", "json_schema": {"name": ..., "schema": ..., "strict": true}}`) | `NATIVE_CONSTRAINED_GENERATION` |
 | DeepSeek-chat | JSON mode (`response_format={"type": "json_object"}`) | `JSON_OBJECT_MODE` (NOT `NATIVE_CONSTRAINED_GENERATION`) |
@@ -650,7 +650,7 @@ Slice 3 introduces three new hot paths — the subprocess transport round-trip, 
 ### 7a.1 Transport and scan budgets
 
 | Path | p99 budget | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `StdioTransport.dispatch()` empty-payload round-trip | < 5ms | Excludes provider call inside subprocess |
 | `OutboundDlp.scan` 1 KB frame | < 200µs | |
 | `InboundContentScanner.scan` 1 MB body | < 50ms | Scanner runs in `asyncio.to_thread()` — not on the event loop |
@@ -742,7 +742,7 @@ A new `src/alfred/comms/mcp_protocol.py` defines the MCP-shaped `CommsAdapterMCP
 The Slice-3 stub validates transport + handshake only. The minimum wire shape the test plugin pins:
 
 | Direction | Method | Payload | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Orchestrator → adapter | `lifecycle.start` | `{}` | Initiates adapter loop |
 | Orchestrator → adapter | `lifecycle.stop` | `{}` | Graceful shutdown |
 | Adapter → orchestrator | `inbound.message` | `{content: str, platform_user_id: str, language: str}` | User message event |
@@ -852,7 +852,7 @@ These narrow or tune within the existing trust surface; they cannot widen it.
 ### 11.3 CLI surface
 
 | Command | Blast radius | Storage |
-|---|---|---|
+| --- | --- | --- |
 | `alfred plugin grant <id> <tier> <hookpoint>` | High | state.git (reviewer-gated) |
 | `alfred plugin grant status <id>` | Read-only | state.git + Postgres |
 | `alfred plugin grant list --pending` | Read-only | state.git + Postgres |
@@ -938,7 +938,7 @@ The catalog-additions PR is a prerequisite for all fork implementation PRs. It r
 Every PR that touches a trust-boundary file enforces 100% line+branch coverage on that file via `coverage --fail-under` in the per-file allowlist (mirroring the Slice-2.5 `coverage --fail-under` pattern). The trust-boundary files and their owning PRs:
 
 | File | Owning PR |
-|---|---|
+| --- | --- |
 | `src/alfred/security/tiers.py` — `tag(T3, ...)` gate | PR-S3-1 |
 | `src/alfred/security/quarantine.py` — `quarantined_to_structured` | PR-S3-4 |
 | `src/alfred/hooks/capability.py` — `CapabilityGate.check_plugin_load`, `check_content_clearance` | PR-S3-2 |
@@ -958,7 +958,7 @@ The cross-fork integration test (§12.4) is a separate gate — it asserts chain
 The existing `payload_schema.py` ships `prompt_injection` (prefix `pi`) and `dlp` (prefix `dlp`). Slice 3 reuses the existing `prompt_injection` category and adds two new categories:
 
 | Category | Status | Attack family | Forward-compat |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `prompt_injection` | Existing (reused) | Injected instructions in fetched T3 content | Email, RAG retrievers add payloads in Slice 4+ |
 | `tier_laundering` | New (prefix `tl`) | T3 content posing as T2 / cast-bypass | New T3 ingesters add payloads in Slice 4+ |
 | `dlp_egress` | New (prefix `de`) | T3-origin credential exfiltration paths | New channels add payloads as they ship |
@@ -1051,7 +1051,7 @@ Only the security test (`test_quarantined_chain_security.py`) gates the Slice-3 
 **Alembic migrations (all named; assigned to owning PRs):**
 
 | Migration | Table / domain | PR |
-|---|---|---|
+| --- | --- | --- |
 | `0007_audit_result_slice3_values.py` | Extends `ck_audit_log_result` CHECK constraint with new `result` values | PR-S3-0b |
 | `0008_plugin_grants.py` | Creates `plugin_grants` table (Postgres projection of state.git grants) | PR-S3-0b |
 | `0009_capability_gate_sync.py` | Creates `capability_gate_sync` table (commit-hash cache for RealGate) | PR-S3-0b |
@@ -1178,7 +1178,7 @@ The `_SUBSCRIBER_ERROR_AUDIT_FIELDS` pattern from Slice 2.5 is reused: each audi
 Every new Slice-3 hookpoint declared via `register_hookpoint`. All hookpoints use dotted-action-name form (the Slice-2.5 convention — e.g. `tool.web.fetch`, not `pre.web.fetch`). `kind` (`pre`, `post`, `error`, `cancel`) is passed as a separate argument to `invoke()` — it is NOT encoded into the hookpoint name. All hookpoints are invoked via the Slice-2.5 `invoke()` primitive at `src/alfred/hooks/invoke.py`.
 
 | Action (hookpoint name) | Applicable kinds | `subscribable_tiers` | `refusable_tiers` | `fail_closed` |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `tool.web.fetch` | pre, post, error, cancel | `SYSTEM_ONLY_TIERS` | `SYSTEM_ONLY_TIERS` (pre/post only) | `True` |
 | `security.quarantined.extract` | pre, post, error | `SYSTEM_OPERATOR_TIERS` | `SYSTEM_ONLY_TIERS` (pre/post only) | `True` |
 | `plugin.lifecycle.loaded` | post | `SYSTEM_ONLY_TIERS` | — | `False` |
@@ -1232,7 +1232,7 @@ The Slice-2.5 spec §6.11 "Out of scope" items (supply-chain signing, ContextVar
 **What `alfred status` shows in each mode:**
 
 | Condition | `alfred status` line |
-|---|---|
+| --- | --- |
 | `ALFRED_ENV=development`, `DevGate` active | `gate: DevGate (development mode — not for production)` |
 | `ALFRED_ENV=production`, `RealGate`, backing store ok | `gate: RealGate (state.git: ok, postgres: ok)` |
 | `ALFRED_ENV=production`, backing store unavailable | `gate: RealGate (FAIL-CLOSED — backing store unavailable)` |

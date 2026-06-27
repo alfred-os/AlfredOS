@@ -45,7 +45,7 @@ The trade-off is cost/locality: Mechanism 1 keeps the suite in its own named che
 ## File structure
 
 | File | Responsibility | Action |
-|---|---|---|
+| --- | --- | --- |
 | `tests/integration/comms/test_forwarded_poison_ceiling_postgres.py` | A2: ceiling composition through the REAL receiver + REAL `PostgresForwardedDispatchAttemptStore` + REAL `PostgresInboundIdempotencyStore` against real Postgres | Create |
 | `tests/integration/comms/__init__.py` | package marker (if absent) | Create-if-absent |
 | `tests/integration/cli/daemon/test_forwarded_inbound_gateway_to_core_turn.py` | A1: real-socket forwarded discord inbound → real daemon receive → dispatch → real Postgres T3-promotion + dispatched-edge commit | Create |

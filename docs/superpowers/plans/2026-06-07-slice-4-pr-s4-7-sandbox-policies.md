@@ -117,7 +117,7 @@ Index anchors: [Slice-4 index §3 sandbox launcher contract](./2026-06-07-slice-
 Before any task in this plan runs, the implementing worker re-verifies the cited Slice-3 and PR-S4-6 surfaces. The pattern documented in #204 round-4 fixup (and Slice-4 index §8 backlog item "Fabricated-surfaces watchlist") makes this a mandatory pre-flight. Each surface below is followed by the `grep`/`ls` command that confirms it.
 
 | Surface | Verification command | Status at plan-write time |
-|---|---|---|
+| --- | --- | --- |
 | `bin/alfred-plugin-launcher.sh` exists and PR-S4-6 has added policy-resolution behaviour | `ls bin/alfred-plugin-launcher.sh && grep -n "policy_refs" bin/alfred-plugin-launcher.sh` | **Slice-3 launcher exists** (`bin/alfred-plugin-launcher.sh` confirmed). PR-S4-6 must be merged before PR-S4-7 implementation begins; the worker re-runs this grep and expects a match against `policy_refs`. NB: the launcher emits NO fd flag (`--sync-fd`/`--keep-fd`) — bwrap inherits fd 3 by default (superseding note); do NOT grep for an fd flag. |
 | `config/routing.yaml [quarantine]` block (Slice-3 shipped) | `grep -n "^quarantine:" config/routing.yaml` | **Confirmed** — `config/routing.yaml` declares a top-level `quarantine:` block at line 19. The macOS policy's `network*` host/port resolves from `routing.yaml[quarantine].provider_url` at policy-load time (spec §7.6). |
 | `plugins/alfred_quarantined_llm/manifest.toml` (Slice-3 shipped — TOML, NOT YAML) | `ls plugins/alfred_quarantined_llm/manifest.toml` | **Confirmed** — the manifest is TOML at `plugins/alfred_quarantined_llm/manifest.toml`. Spec §7.8 and index §3 use a YAML code-block to illustrate the `sandbox` block shape; the actual file format is TOML. The migration PR-S4-6 lands edits the TOML; this PR does NOT re-edit. |
@@ -184,7 +184,7 @@ The integration test boots the chain end-to-end on `ubuntu-latest`. Three escape
 ## §4 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `config/sandbox/quarantined-llm.linux.bwrap.policy` | Create | Declarative TOML policy file. Launcher (PR-S4-6) parses, translates into `bwrap` flags. Spec §7.5. |
 | `config/sandbox/quarantined-llm.macos.sb` | Create | macOS sandbox-exec scheme syntax. Launcher passes verbatim to `sandbox-exec -f`. Spec §7.6. |
 | `config/sandbox/quarantined-llm.windows.stub.policy` | Create | TOML stub: `schema_version`, `isolation`, `prd_compliant=false`, `notes`. Spec §7.7. |
@@ -1346,7 +1346,7 @@ The corpus YAMLs above are declarative. The harness needs Python helpers to muta
 ## §7 Spec Coverage Map
 
 | Spec section | Implementing task(s) |
-|---|---|
+| --- | --- |
 | §7.5 Linux bwrap policy file shape (`--ro-bind`, `--tmpfs`, `--unshare-*`, `--die-with-parent`, no `--share-net`; fd 3 inherited by default — NO fd flag, superseding note) | Tasks 3, 4 |
 | §7.5 fd-3 inheritance discipline (sec-004 round-4) — bash never reads, plugin reads exactly once | Tasks 13 (corpus), 17 (strace helper) |
 | §7.5 Process-level posture inheritance — covered by PR-S4-6 supervisor/launcher; no new code here | Verification only (§2) |
@@ -1396,7 +1396,7 @@ The corpus YAMLs above are declarative. The harness needs Python helpers to muta
 ## §9 Risks + mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `bwrap` not installed on the developer's local machine, integration test silently skips | Medium | Medium | The Linux integration test asserts `shutil.which("bwrap") is not None` at module level; if missing, the test FAILS rather than skips. CI installs it explicitly in Task 20. |
 | The fd-3 strace test is flaky on heavily-loaded CI runners | Low | Low | The `strace -f -e read,close -o <file>` output is parsed for the bash-PID's read-syscalls only; race conditions in interleaved syscalls do not affect the read-fd-3 invariant because the bash launcher does not race with itself. |
 | The macOS sandbox-exec policy works on the current `macos-latest` runner but stops working on a future runner image due to Apple deprecating sandbox-exec further | Medium | Low | The macOS leg is advisory (`continue-on-error: true`). ADR-0015 acknowledges macOS as best-effort. If the runner image bumps and the test fails, Slice 5 takes the deprecation-handling work; no Slice-4 release is blocked. |

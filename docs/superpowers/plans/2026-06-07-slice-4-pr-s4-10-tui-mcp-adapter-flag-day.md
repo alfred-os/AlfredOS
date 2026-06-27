@@ -194,7 +194,7 @@ Plugin tests live next to the plugin (`plugins/alfred_tui/tests/`) and run via `
 ## §3 File structure
 
 | File | Action | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `plugins/alfred_tui/manifest.toml` | Create | `adapter_kind=tui`, `sandbox.kind=none`, `plugin.subscriber_tier=operator`, `manifest_version=1`, `plugin.platform=tui` |
 | `plugins/alfred_tui/pyproject.toml` | Create | Standalone uv-managed package; depends on `model_context_protocol`, `textual`, `alfred_comms_protocol` (re-exports `alfred.comms_mcp.protocol`) |
 | `plugins/alfred_tui/README.md` | Create | Operator install pointer + sandbox.kind=none rationale + WSL2 note for Windows |
@@ -1651,7 +1651,7 @@ Plugin tests live next to the plugin (`plugins/alfred_tui/tests/`) and run via `
 ## §5 Risk register
 
 | Risk | Mitigation |
-|---|---|
+| --- | --- |
 | New consumer of `src/alfred/comms/` lands on `main` between Task 0a and Task 4e | Task 4e is a mandatory re-grep checkpoint; if it finds an unexpected importer, STOP and migrate before Task 5. |
 | Textual widget code breaks during the move because of an import the spec did not anticipate | Task 2 runs the full unit suite immediately after the move; any failure surfaces the missed import. The move shape preserves `git log --follow` so widget history is recoverable. |
 | 2.5s handshake-probe timeout flakes on slow CI runners | The probe lives in `bin/alfred-plugin-launcher.sh` (PR-S4-6 contract). If the integration test flakes on `ubuntu-latest`, raise it as a follow-up issue against PR-S4-6 — PR-S4-10 inherits the contract and does not modify it. |
@@ -1666,7 +1666,7 @@ Plugin tests live next to the plugin (`plugins/alfred_tui/tests/`) and run via `
 ## §6 Out-of-scope items (deferred from this PR)
 
 | Item | Defer to | Rationale |
-|---|---|---|
+| --- | --- | --- |
 | ADR-0015 status flip Proposed → Accepted | PR-S4-11 (graduation) | One-time ownership rule (index §3). Status flip mirrors the Slice-3 precedent — graduation PR owns it. |
 | ADR-0016 status flip Proposed → Accepted | PR-S4-11 (graduation) | Same as above. |
 | `CLAUDE.md` filesystem tree update (`src/alfred/comms/` removal) | PR-S4-11 | Tree updates batch at graduation for consistency across all Slice-4 surface changes. |

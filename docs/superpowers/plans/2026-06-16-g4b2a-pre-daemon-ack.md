@@ -133,7 +133,7 @@ The host tracker needs no per-connection reset *today* ONLY because `CommsSocket
 **Spec coverage (design §9):**
 
 | Requirement | Task |
-|---|---|
+| --- | --- |
 | carry the inbound wire seq inward, bound to its frame (NOT a slot) | Tasks 1-2 |
 | host `BoundedSeqAckTracker` advanced ONLY on `commit_once == True` | Task 3 |
 | replay / refusal / `wire_seq is None` / `None`-store do NOT advance | Task 3 |

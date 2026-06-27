@@ -31,7 +31,7 @@ closes. The matrix is the contract between this category's threat model and the 
 graph — drift between the two is a release-blocker.
 
 | Attack vector | Owning PR / Task |
-|---|---|
+| --- | --- |
 | Canary token planted in T3 web content → quarantined LLM → structured output → DLP scan → audit row | PR-S3-5 Task 12 (`de-2026-001` `canary_token_html.yaml`) |
 | Cross-field secret leak via headers + cookies in a web request | PR-S3-5 Task 13 (`de-2026-002` `cross_field_secret_leak.yaml`) |
 | Subprocess env-leak via misconfigured launcher (missing explicit `env=` dict) | **TBD — Slice-3 follow-on (no current task)** — PR-S3-3a covers the env-scrub spawn in `tests/unit/plugins/test_env_scrub_subprocess.py` but no `dlp_egress` adversarial payload formalises the exfiltration vector. Unit-test coverage protects against regression; the adversarial payload would close the threat-model loop |

@@ -28,7 +28,7 @@
 ## File structure
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `src/alfred/plugins/inbound_disposition.py` (**NEW**) | The `InboundDisposition` Protocol + the default `SessionDispatchDisposition` (moved `_route_notification`/`_route_spawn_request` logic) + the `_CredentialResolverLike` Protocol relocated here + the two restart-reason constants. Trust-boundary-adjacent → both plugins-subsystem ci.yml 100% gate sites. |
 | `src/alfred/plugins/comms_runner.py` (modify) | `__init__` gains `inbound_disposition: InboundDisposition \| None = None`; default-constructs `SessionDispatchDisposition`; `_route_notification` becomes a one-line delegator; `_route_spawn_request` deleted (moved); imports the moved symbols from `inbound_disposition`. |
 | `src/alfred/comms_mcp/inbound_reparse.py` (modify) | `_structural_summary` redacts `extra_forbidden` loc (carry-item). |

@@ -95,7 +95,7 @@ SHA, and swaps the ref — unless a gate refuses.
 Registered by `declare_hookpoints()` at module import:
 
 | Hookpoint | Fires when |
-|---|---|
+| --- | --- |
 | `supervisor.config_reload` | a swap succeeds (carries the new SHA) |
 | `supervisor.config_reload_rejected` | any rejection branch |
 | `supervisor.config_watcher.recovered` | degraded → normal transition |

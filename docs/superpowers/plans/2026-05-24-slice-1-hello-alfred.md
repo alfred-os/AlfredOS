@@ -26,7 +26,7 @@
 **Subsystem coverage matrix (what's in this slice vs. deferred):**
 
 | Subsystem | This slice | Deferred |
-|---|---|---|
+| --- | --- | --- |
 | Trust boundary | T0 + T2 markers, `tag()` only | T1, T3, dual-LLM split, capability gate, full DLP, canaries → Slice 2/3 |
 | Config + secrets | pydantic-settings + env-backed broker stub | age-encrypted file backend, HashiCorp Vault, OS keychain → Slice 3+ |
 | Core runtime | Plain asyncio orchestrator, no event bus | Redis-streams bus, plugin supervisor, hot reload, MCP client → Slice 3+ |
@@ -711,7 +711,7 @@ class AuditEntry(Base):
 Note the `Index` import: add `from sqlalchemy import ..., Index` near the top of `models.py`.
 
 | Field | Status | Why |
-|---|---|---|
+| --- | --- | --- |
 | `language` on `Episode` and `AuditEntry` | NEW (this slice) | CLAUDE.md i18n rule #3 — every user-content row carries BCP-47 |
 | `cost_actual_usd` on `AuditEntry` | NEW (this slice) | Truthful cost reporting: separate estimate from actual (fixes the "audit lie" finding) |
 | `ix_episodes_user_id_created_at` | NEW (this slice) | Hot-path index for episodic.recent(user_id, limit) |
@@ -2859,7 +2859,7 @@ class Orchestrator:
 The orchestrator's failure-mode contract:
 
 | Failure | Audit `result` | Cost recorded | Exception |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Budget pre-check refuses call | `budget_blocked` | `estimate=X, actual=0.0` | `BudgetError` |
 | Provider raises (both providers dead) | `provider_failed` | `estimate=X, actual=0.0` | the original exception |
 | Provider succeeds, charge fits cap | `success` | `estimate=X, actual=Y` | — |
@@ -3756,7 +3756,7 @@ gh pr merge --squash --delete-branch
 Each subsequent slice keeps the existing surface working and adds one or two new vertical strands. Rough order (re-prioritise based on what we learn from Slice 1):
 
 | Slice | Adds | Proves |
-|---|---|---|
+| --- | --- | --- |
 | **0.0.2** | Discord adapter; multi-user identity; secret broker file backend | Multi-platform + multi-user identity works; secret broker upgraded |
 | **0.0.3** | First real tool (e.g. `web.fetch`); T1/T3 types; dual-LLM split; capability gate; DLP | Full security stack on one feature |
 | **0.0.4** | Telegram; auto-retrieve; semantic facts; consolidation pass | Memory enrichment actually improves conversations |

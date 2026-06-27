@@ -405,7 +405,7 @@ The architect's atomic-vs-split decision rides on this list. Every site is verif
 ### Production sites (9)
 
 | # | File:Line | Slice-1 shape | PR-B shape | Pure xform? |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | `src/alfred/orchestrator/core.py:97-126` (`Orchestrator.__init__`) | `operator_name: str`, `operator_language: str`, `working: WorkingMemory` | `identity_resolver: IdentityResolverLike` (caches `get_operator()`); no `working` (pool-owned) | yes |
 | 2 | `src/alfred/orchestrator/core.py:128` (`handle_user_message`) | `(self, content: str) -> str` | `(self, *, user: User, content: TaggedContent[T2], working_memory: WorkingMemory) -> str` | yes |
 | 3 | `src/alfred/orchestrator/core.py:218` (`alfred_system_prompt`) | `alfred_system_prompt(operator_name=..., language=...)` | `render_persona_prompt(persona=ALFRED_PERSONA, operator_name=self._operator.display_name, requesting_user_name=user.display_name, language=user.language)` | yes |
@@ -419,7 +419,7 @@ The architect's atomic-vs-split decision rides on this list. Every site is verif
 ### Test sites (9)
 
 | # | File:Line | What changes |
-|---|---|---|
+| --- | --- | --- |
 | 10 | `tests/unit/orchestrator/test_core.py:25-30` (`_make_budget` helper) | Mocks accept leading `user_id` positional on `estimate_for/would_exceed/check_and_charge/spent_today/evict` |
 | 11 | `tests/unit/orchestrator/test_core.py:54-131` (`_build` helper) | Wire `User` fixture + mock `IdentityResolver.get_operator()` + mock `WorkingMemoryPool`; drop `operator_name`/`operator_language` constructor kwargs |
 | 12 | `tests/unit/orchestrator/test_core.py:137, 202, 230, 253, 274, 295, 309, 320, 343, 366, 400, 431` (every `await orch.handle_user_message("...")`) | Convert to `await orch.handle_user_message(user=user, content=tag(T2, "...", source="test"), working_memory=wm)` |

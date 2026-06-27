@@ -68,7 +68,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 ## §3 File structure
 
 | File | Action | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `docs/subsystems/plugins.md` | Create | MCP plugin transport deep-doc: PluginTransport Protocol, StdioTransport, AlfredPluginSession, manifest schema, DLP placement, secret substitution, lifecycle audit, sandbox profile |
 | `docs/subsystems/supervisor.md` | Create | Supervisor module deep-doc: circuit breaker, per-action deadline, capability-gate fail-closed integration, alfred supervisor CLI |
 | `docs/subsystems/quarantine.md` | Create | Quarantine deep-doc: dual-LLM split, T3DerivedData, QuarantinedExtractor, ContentHandle, ExtractionResult, retry-guidance hygiene |
@@ -1247,7 +1247,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
   Current Slice-3 `alfred status` output (unchanged from Slice 2):
 
   | Condition | Output |
-  |---|---|
+  | --- | --- |
   | Any `ALFRED_ENV` (Slice 3) | Slice-2 provider/budget lines — no `gate:` line |
 
   *Slice 3.x+: gate health (`gate: RealGate (state.git: ok, postgres: ok)`)
@@ -1941,7 +1941,7 @@ Every test that constructs `DevGate` for deny-path semantics gets one of three t
 ## §5 Spec coverage map
 
 | Spec section | What it requires | Implemented in |
-|---|---|---|
+| --- | --- | --- |
 | §15.1 | `DevGate` removed from `src/`; deny-path tests migrated to `RealGate` | Tasks 11–15 |
 | §15.2 | ADR-0009 status flip | PR-S3-0a (already done; confirmed clean in Task 17) |
 | §15.3 | Slice-2.5 §6.10 tracking issues retired | Task 16 *(intentionally in PR-S3-7 not PR-S3-0a — see Task 16 note)* |

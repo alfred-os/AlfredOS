@@ -14,7 +14,7 @@ The PRD (`PRD.md`) is the source of truth. Don't infer from code; read the secti
 ## Common section anchors
 
 | You need to know about... | Look at PRD section |
-|---|---|
+| --- | --- |
 | Mission, primary user, success criteria | §1–§4 |
 | Architecture overview + invariants | §5 |
 | Comms adapters | §6.1 |

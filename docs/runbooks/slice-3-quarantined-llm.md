@@ -18,7 +18,7 @@ The plugin manifest is at `src/alfred/security/quarantine_child/manifest.toml`.
 Three fields are load-bearing:
 
 | Field | Required value | Why |
-|---|---|---|
+| --- | --- | --- |
 | `alfred.manifest_version` | `1` | ADR-0017 Decision 7 — the `schema_version: Literal[1]` anchor that the audit row family pins |
 | `plugin.subscriber_tier` | `"system"` | grants orchestrator-internal hookpoints (`security.quarantined.extract`); `"operator"` or `"user-plugin"` would deny these hookpoints at the capability gate |
 | `plugin.sandbox_profile` | `"user-plugin"` | the subprocess runs under the OS-level user-plugin sandbox even though its subscriber tier is `"system"` — two-axis independence (spec §4.3) |
@@ -46,7 +46,7 @@ quarantine:
 which determines the `ExtractionMode` the dispatch path selects:
 
 | `provider` | `ProviderCapability` | `ExtractionMode` |
-|---|---|---|
+| --- | --- | --- |
 | `anthropic` | `NATIVE_CONSTRAINED_GENERATION` | `native_constrained` |
 | `deepseek` (chat model) | `JSON_OBJECT_MODE` | `json_object_unconstrained` |
 | `openai` or unknown model | none | `prompt_embedded_fallback` |
@@ -133,7 +133,7 @@ alfred audit log --event quarantine.extract --since 1h
 Key fields in each row:
 
 | Field | Meaning |
-|---|---|
+| --- | --- |
 | `extraction_mode` | `native_constrained` / `json_object_unconstrained` / `prompt_embedded_fallback` / `refused` |
 | `result` | `extracted` / `refused` / `protocol_violation` |
 | `schema_name` | which `ExtractionSchema` subclass was used |
@@ -172,7 +172,7 @@ contract. Check the plugin version and manifest against the host version.
 When the extraction result is a `TypedRefusal`, the `reason` field is one of:
 
 | Reason | Meaning | Operator action |
-|---|---|---|
+| --- | --- | --- |
 | `cannot_extract` | Retries exhausted — the model could not produce a schema-valid response | Check `schema_name` in the audit row; schema may be too complex for `prompt_embedded_fallback` mode; consider switching to a provider with `NATIVE_CONSTRAINED_GENERATION` |
 | `refused_by_safety` | Provider safety filter blocked the extraction | The T3 content likely contains material the provider refuses; log the source URL (forensic; never re-fetch for inspection) |
 | `ambiguous_input` | Input is schema-incompatible — content cannot be parsed into the declared schema | Review the `ExtractionSchema` definition; the schema may be too narrow for the input type |
@@ -185,7 +185,7 @@ When the extraction result is a `TypedRefusal`, the `reason` field is one of:
 ## Failure modes
 
 | Trigger | Behaviour | Observable signal |
-|---|---|---|
+| --- | --- | --- |
 | `manifest_version != 1` | `ManifestVersionError`; subprocess never starts | `plugin.lifecycle.load_refused` audit row |
 | `subscriber_tier = "T3"` | `ManifestTierError`; subprocess never starts | `plugin.lifecycle.load_refused` audit row |
 | Missing sandbox policy file (production) | Launcher exits non-zero; subprocess never starts | `plugin.lifecycle.load_refused` + structlog `plugin.launcher.policy_missing` |

@@ -144,7 +144,7 @@ Pattern mirrors `tests/unit/cli/test_main_lazy_imports.py`. Pins that the valida
 The issue lists three options: pyproject.toml entry_points, generated table, explicit eager registration.
 
 | Option | Pros | Cons | Chosen? |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | pyproject.toml entry_points | Aligns with packaging, plugin-friendly | Slow to enumerate on cold start; machinery; entry_points scanning depends on the install state of every package | No |
 | Codegen at build time | Never drifts | Build step; extra machinery; harder to grep | No |
 | **Hand-maintained thin manifest module** | Simple, fast, greppable, sync test catches drift | Requires hand-maintenance (one-line per hookpoint) — addressed by sync test | **Yes** |
@@ -154,7 +154,7 @@ The manifest is ~30 lines of static data. The sync test makes drift a CI fail. T
 ## 4. Files affected
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/hooks/_known_hookpoints.py` | Create | Static manifest of every declared hookpoint, grouped by declaring subsystem |
 | `src/alfred/cli/_validators.py` | Modify | `_default_known_hookpoints_provider` consults the manifest |
 | `tests/unit/hooks/test_known_hookpoints_sync.py` | Create | Imports every declarer module + asserts runtime registry == manifest |

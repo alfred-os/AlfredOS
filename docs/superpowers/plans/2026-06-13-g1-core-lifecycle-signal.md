@@ -45,7 +45,7 @@ You have zero context. Read these before touching code:
 ## File-structure table
 
 | File | Create / Modify | Responsibility |
-|------|-----------------|----------------|
+| --- | --- | --- |
 | `src/alfred/bootstrap/lifecycle_epoch.py` | Create | Mint + register the per-boot, non-secret, serialisable epoch (`mint_boot_epoch`), mirroring the nonce-factory's slot+lock+guard shape. Pure-ish; one module slot. |
 | `src/alfred/comms_mcp/protocol.py` | Modify | Add `LifecycleReason` `Literal` (`["shutdown"]` only), `GoingDownNotification`, `ReadyNotification` (host→outward `_WireModel`s, **defined for G3, not sent in G1**) + a new "Host -> outward lifecycle notifications" section + `__all__` entries. |
 | `src/alfred/audit/audit_row_schemas.py` | Modify | Add `DAEMON_LIFECYCLE_FIELDS` field-set. |
@@ -1158,7 +1158,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 ## Self-review — spec requirement → task → Definition of Done
 
 | Spec requirement (Spec A §4 / §8 G1) | Task | Definition of Done |
-|--------------------------------------|------|--------------------|
+| --- | --- | --- |
 | `core.lifecycle.going_down{reason}` AUDIT row on the drain | Task 2 (frame), Task 7 (emit) | `test_going_down_row_emitted_at_drain` asserts a `going_down` AUDIT row at the teardown with `reason="shutdown"`; `_emit_going_down` is the first action in the boot `finally` (`_commands.py:1764`), nested so it can never skip the supervisor-stop + child/socket/pidfile reap chain (#255). No wire send in G1. |
 | `going_down` only for a planned shutdown (not a refusal) | Task 7 | `test_going_down_not_emitted_when_boot_refuses` asserts no `going_down` row when `supervisor.start()` raises; the emit is guarded by `ready_emitted`. |
 | `core.lifecycle.ready` AUDIT row ONLY after the boot graph is healthy | Task 2 (frame), Task 6 (emit) | `test_ready_row_emitted_after_boot_completed` asserts a single `ready` AUDIT row, present only on `exit_code == 0`; the emit sits after `daemon.boot.completed` (`_commands.py:1761`), never on a refusing boot. |

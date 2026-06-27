@@ -131,7 +131,7 @@ The Slice-3 `Supervisor.start()` at `src/alfred/supervisor/core.py:227-251` is T
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/cli/daemon.py` | **Create** | `daemon_app: typer.Typer`; `start`, `stop`, `status` subcommands; probe orchestration |
 | `src/alfred/cli/_daemon_probes.py` | **Create** | The three probe helpers as pure async functions returning `Result[None, DaemonBootFailure]` |
 | `src/alfred/cli/_daemon_pidfile.py` | **Create** | PID-file write/read/delete + the small lockfile discipline (mode 0600, hostname-validated) |
@@ -172,7 +172,7 @@ The Slice-3 `Supervisor.start()` at `src/alfred/supervisor/core.py:227-251` is T
 ### Depends on (must land first)
 
 | Contract | Owning PR | Verification |
-|---|---|---|
+| --- | --- | --- |
 | `DAEMON_BOOT_FIELDS` `Final[frozenset[str]]` constant in `alfred.audit.audit_row_schemas` | PR-S4-0a | `from alfred.audit.audit_row_schemas import DAEMON_BOOT_FIELDS` imports cleanly |
 | `DAEMON_BOOT_FAILED_FIELDS` constant | PR-S4-0a | Same import test |
 | `DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS` constant | PR-S4-0a | Same import test |
@@ -184,7 +184,7 @@ The Slice-3 `Supervisor.start()` at `src/alfred/supervisor/core.py:227-251` is T
 ### Emits (later PRs may consume)
 
 | Contract | Consuming PR(s) | Shape |
-|---|---|---|
+| --- | --- | --- |
 | `Settings.environment: Literal["development", "production", "test"]` (mandatory) | PR-S4-6 (launcher reads it), PR-S4-7 (sandbox stub refuses in production), PR-S4-10 (TUI launcher check) | Pydantic field with no default; load fails if neither source set |
 | `Settings.state_git_path: Path` (default `/var/lib/alfred/state.git`) | PR-S4-2 (dispatch loop), PR-S4-4 (policy file lives under `config/`, distinct path), PR-S4-11 (graduation runbook) | Pydantic field, dir-checked at probe time |
 | `Supervisor.__init__(policies_ref=..., operator_session_resolver=...)` new kwargs | PR-S4-4 (real `PoliciesSnapshotRef`), PR-S4-5 (real `OperatorResolver`) | Both default `None`; legacy tests still pass |
@@ -2288,7 +2288,7 @@ The release-critical end-to-end: docker compose stack up, daemon boots, state.gi
 These belong to later Slice-4 PRs; this PR does NOT touch them.
 
 | Surface | Owning PR | Why deferred |
-|---|---|---|
+| --- | --- | --- |
 | `OutboundDlp.scan` into `processed_proposals.failure_detail` | PR-S4-2 | Different rewrite (DLP threading); separate review surface |
 | Real `PolicyWatcher` + `PoliciesV1` Pydantic model | PR-S4-4 | Hot-reload runtime is its own design; this PR ships a parse-once stub |
 | Real `_resolve_operator` + `OperatorSession` model | PR-S4-5 | Session-file + Postgres binding is its own design; this PR ships a no-op stub |
@@ -2306,7 +2306,7 @@ These belong to later Slice-4 PRs; this PR does NOT touch them.
 ## §8 Risk register
 
 | Risk | Severity | Mitigation |
-|---|---|---|
+| --- | --- | --- |
 | `Settings.environment` mandatory breaks every developer's local `.env` | High | PR-S4-0b's `bin/alfred-setup.sh` update adds `ALFRED_ENVIRONMENT=development` to `.env.example`; runbook calls this out; pre-existing `.env` files get a one-line append by the setup script |
 | Probe orchestration in CLI rather than `Supervisor.start()` creates two boot paths (CLI + legacy `alfred chat`) | Medium | Document the probes-CLI-only contract in `docs/subsystems/supervisor.md`; PR-S4-10's `alfred chat` rewrite will go through the same probes via launcher spawn |
 | `_StubPoliciesSnapshotRef` returning a parsed dict will break PR-S4-4 consumers that expect `PoliciesV1` | Medium | The Protocol explicitly types `current()` as `object` to widen — PR-S4-4 narrows the Protocol when it ships the real impl; the dispatch loop doesn't dereference `policies_ref.current()` in this PR |
@@ -2323,7 +2323,7 @@ These belong to later Slice-4 PRs; this PR does NOT touch them.
 Per index §8 backlog "Fabricated-surfaces watchlist for writing-plans," every Slice-3 surface this plan cites was grep-verified at authoring time. The result is recorded here so future plans inherit the discipline.
 
 | Cited surface | Status | Evidence |
-|---|---|---|
+| --- | --- | --- |
 | `Supervisor.__init__` kwargs | **Verified** | `src/alfred/supervisor/core.py:177-185` — `session_scope, gate, audit, state_git_path, proposal_dispatch_interval_s` confirmed |
 | `Supervisor.start()` TaskGroup-first shape | **Verified** | `src/alfred/supervisor/core.py:227-251` — `_run()` opens `async with asyncio.TaskGroup() as tg:` with no pre-flight |
 | `Supervisor._proposal_dispatch_loop` (#171 dispatch loop) | **Verified** | `src/alfred/supervisor/core.py:317` |

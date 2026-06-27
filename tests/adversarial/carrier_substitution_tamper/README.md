@@ -49,7 +49,7 @@ contract between this category's threat model and the slice's task graph —
 drift is a release-blocker.
 
 | Attack vector | Owning PR / Task |
-|---|---|
+| --- | --- |
 | Subscriber spoofs `source_tier="T0"` while registered at T3 | PR-S4-3 (`crf-2026-001` — dispatcher-attested `source_tier`) |
 | Error subscriber registered against meta-hookpoint (`hooks.carrier_substituted`) | PR-S4-3 (`crf-2026-002` — `recursion_refused` at registration + dispatch) |
 | `SubstituteResult[T]` payload-type mismatch | PR-S4-3 (`crf-2026-003` — `payload_type_mismatch` refusal + ReRaise) |

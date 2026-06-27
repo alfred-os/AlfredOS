@@ -84,7 +84,7 @@ gateway takes longer to start in your environment.
 ### Exit-code reference
 
 | Exit | Meaning | Operator action |
-|---|---|---|
+| --- | --- | --- |
 | `0` | Adapter reached `up` — ready | None. Proceed. |
 | `1` | Adapter not ready within the timeout | Check `ALFRED_DISCORD_BOT_TOKEN` is set and correct. Inspect `docker compose logs alfred-gateway` for the `missing_secret` or connection-error audit row. |
 | `2` | Daemon / control plane unavailable | Confirm `docker compose ps alfred-gateway` shows the service running. The control socket is unreachable — `up -d alfred-gateway` if the service is not started. |
@@ -177,7 +177,7 @@ moved between env var stores; no database rows changed. After reverting:
 ## Troubleshooting matrix
 
 | Symptom | Likely cause | Action |
-|---|---|---|
+| --- | --- | --- |
 | `alfred gateway adapters --wait-ready discord` exits `2` | `alfred-gateway` not running | `docker compose ps alfred-gateway` — start if missing: `docker compose up -d alfred-gateway` |
 | `alfred gateway adapters --wait-ready discord` exits `1` (timeout) | Token wrong, missing, or adapter crash-looping | `docker compose logs alfred-gateway \| grep missing_secret`; set correct token; `docker compose up -d alfred-gateway` |
 | `alfred gateway adapters --wait-ready discord` exits `3` | Typo in adapter id or adapter not enabled | Check spelling — `discord` (lowercase). Confirm the adapter is enabled in config. |

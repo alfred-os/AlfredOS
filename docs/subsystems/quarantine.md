@@ -318,7 +318,7 @@ with a non-vacuous control arm).
 which extraction path `QuarantinedExtractor` dispatches:
 
 | Provider | Mechanism | Capability |
-|---|---|---|
+| --- | --- | --- |
 | Anthropic | Tool-use shape | `NATIVE_CONSTRAINED_GENERATION` |
 | OpenAI | Strict structured-outputs (`strict: true` mandatory) | `NATIVE_CONSTRAINED_GENERATION` |
 | DeepSeek-chat | JSON mode (no schema enforcement) | `JSON_OBJECT_MODE` |
@@ -486,7 +486,7 @@ boundary. Schema constants live in
 ### Extraction-path rows (`QUARANTINE_EXTRACT_FIELDS`)
 
 | Event | `result` | Emitted when |
-|---|---|---|
+| --- | --- | --- |
 | `quarantine.extract` | `extracted` | Granted: payload validated, lifted to `Extracted` |
 | `quarantine.extract` | `refused` | Granted: payload lifted to `TypedRefusal` |
 | `quarantine.transport_failed` | `transport_failed` | Transport `dispatch()` raised (broken pipe, framing error, subprocess death) — emitted BEFORE re-raise |
@@ -499,7 +499,7 @@ Subject fields: `extraction_mode`, `provider="quarantined-llm"`,
 ### Downgrade row (`T3_DERIVED_DOWNGRADE_FIELDS`)
 
 | Event | `result` | Emitted when |
-|---|---|---|
+| --- | --- | --- |
 | `quarantine.t3_derived_downgrade` | `allowed` | Gate granted T3-derived→T2 downgrade via `downgrade_to_orchestrator` |
 
 Subject fields: `extraction_id`, `quarantined_llm_invocation_id`,
@@ -514,7 +514,7 @@ serialised here.
 ## Failure modes
 
 | Trigger | Behaviour | Observable signal |
-|---|---|---|
+| --- | --- | --- |
 | Schema not an `ExtractionSchema` subclass | `TypeError` at `_validate_schema_class` before any MCP call | exception propagates; no audit row |
 | Schema subclass with `schema_version != 1` | `TypeError` at `__init_subclass__` (import-time) | exception at module import; no audit row |
 | Gate denies `quarantine.dereference` | `AlfredError(t("security.quarantine.dereference_denied"))` | gate-side `security.capability_gate.*` audit row |
@@ -564,7 +564,7 @@ definitions.
 ## Performance characteristics
 
 | Path | Budget |
-|---|---|
+| --- | --- |
 | `security.quarantined.extract` 5-subscriber hook chain | ≤ 100 µs + provider RTT |
 | End-to-end quarantined extraction chain | ≤ 5 s (generous for subprocess hop; spec §12.4) |
 | `quarantined_to_structured` gate check | < 5 ms (Postgres clearance lookup) |
@@ -578,7 +578,7 @@ validates the 5 s ceiling per recorded provider fixtures.
 ## Slice graduation map
 
 | Subsystem | Slice 3 (shipped) | Deferred to | Anchor |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Quarantine | `quarantined_to_structured`; `QuarantinedExtractor`; `T3DerivedData` `NewType`; `ContentHandle` (frozen, slotted, timezone-aware); `ExtractionResult = Extracted / TypedRefusal` with `extra="forbid"`; `ExtractionSchema` ABC with `schema_version: ClassVar[Literal[1]]`; `_build_retry_prompt` closed-vocabulary builder; `quarantine.extract` / `quarantine.transport_failed` / `quarantine.protocol_violation` audit rows; `downgrade_to_orchestrator` with `T3_DERIVED_DOWNGRADE_FIELDS`; dual-LLM split under `alfred-quarantine` UID | Slice 4+: full containerisation ([ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md)); `TaggedContent` provenance axis (Slice-4 design); T3 promotion for Discord embeds/attachments; `schema_version` Literal widening + audit-row discriminated union | [ADR-0017](../adr/0017-slice3-trust-tier-completion-mcp-transport-dual-llm.md), [ADR-0015](../adr/0015-slice4-containerised-quarantined-llm.md) |
 
 ## Cross-references

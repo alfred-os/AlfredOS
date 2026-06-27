@@ -31,7 +31,7 @@ After this PR merges:
 ## §2 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/hooks/_known_hookpoints.py` | Create | Static manifest + `all_known_hookpoints()` helper |
 | `src/alfred/cli/_validators.py` | Modify | `_default_known_hookpoints_provider` consults the manifest |
 | `tests/unit/hooks/test_known_hookpoints_sync.py` | Create | Imports every declarer module + asserts runtime registry equals manifest |

@@ -33,7 +33,7 @@ Trust-boundary code reaches 100% line + branch coverage per CLAUDE.md.
 ## §2 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/plugins/web_fetch/dispatch_params.py` | Create | `WebFetchDispatchParams` Pydantic v2 model (single class, ~40 lines) |
 | `src/alfred/plugins/web_fetch/fetch_dispatcher.py` | Modify | Construct + validate before `transport.dispatch`; emit audit row + release cap on `ValidationError`; raise `WebFetchError` |
 | `src/alfred/audit/audit_row_schemas.py` | Modify | Add `"dispatch_param_invalid"` to `DlpScanResult` Literal |
@@ -50,7 +50,7 @@ Trust-boundary code reaches 100% line + branch coverage per CLAUDE.md.
 ## §3 Coverage matrix (subsystem owners)
 
 | Subsystem | Files | Owner agent |
-|---|---|---|
+| --- | --- | --- |
 | Pydantic model + tests | `dispatch_params.py`, `test_dispatch_params.py`, `test_dispatch_params_e2e.py` | alfred-security-engineer |
 | Dispatcher integration | `fetch_dispatcher.py`, `test_fetch_dispatcher.py` | alfred-security-engineer |
 | Audit row schema | `audit_row_schemas.py`, `test_audit_row_schemas.py` | alfred-security-engineer |

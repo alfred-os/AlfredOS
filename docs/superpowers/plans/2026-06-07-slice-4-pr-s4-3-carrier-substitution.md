@@ -161,7 +161,7 @@ The meta-hookpoint registration shape: `carrier_tier=None` is permitted ONLY for
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/hooks/registry.py` | Modify | Extend `HookpointMeta` with `carrier_tier: type[TrustTier] \| None` (None only for meta-hookpoints) and `allow_error_substitution: bool = True`. Update `register_hookpoint` to require `carrier_tier=` kwarg, validate `None` only for meta-hookpoints, and treat conflicting re-declarations as drift (per existing `register_hookpoint` semantics). Update `_TIER_RANK` is untouched (that's the subscriber tier rank for in-chain ordering — `system`/`operator`/`user-plugin`, NOT trust tiers). |
 | `src/alfred/hooks/invoke.py` | Modify | Add `ReRaise` (Pydantic frozen), `SubstituteResult[T]` (Pydantic frozen + PEP 695 generic), `ErrorOutcome[T]` type alias. Rewrite `_run_error` to take `carrier_type: type[T]`, return `ErrorOutcome[T]`. Add `_enforce_substitute_tier` helper. Add `_TRUST_TIER_RANK` mapping. Update `_dispatch_by_kind` (line 638-645) to pass `carrier_type` through. Update `invoke[T]` public entry to accept `carrier_type: type[T] \| None = None` and forward to `_run_error`. The `error` kind requires `carrier_type` — same shape as the existing `exc` requirement at lines 541-545. |
 | `src/alfred/hooks/_known_hookpoints.py` | Modify | Add `declare_meta_hookpoints(registry)` registering `hooks.carrier_substituted` and `hooks.carrier_substitution_refused` with `subscribable_tiers=SYSTEM_ONLY_TIERS`, `refusable_tiers=frozenset()`, `fail_closed=False`, `carrier_tier=None`, `allow_error_substitution=False`. Called from the bootstrap surface that already calls `declare_hookpoints` (consistent with the Slice-2.5 pattern at `src/alfred/memory/episodic.py:59`). |
@@ -360,7 +360,7 @@ PR-S4-0a registered the `crf` prefix in `_PREFIX_TO_CATEGORY` and the `_ID_PATTE
 ### Hookpoint declarations registered by THIS PR (per index §3 hookpoint surface)
 
 | Hookpoint | Subscribable | Refusable | fail_closed | carrier_tier | allow_error_substitution |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `hooks.carrier_substituted` | SYSTEM_ONLY | ∅ | False | None | False |
 | `hooks.carrier_substitution_refused` | SYSTEM_ONLY | ∅ | False | None | False |
 | `identity._ingest_tier.before_validate` | OPEN | OPEN | False | T1 | True |
@@ -1667,7 +1667,7 @@ Each sibling-site task is a self-contained test-then-implementation pair. The fo
 Per index §8's "Fabricated-surfaces watchlist for writing-plans" backlog entry, this plan grep-verifies every cited Slice-3 / Slice-2.5 surface BEFORE asserting it in §2-§5. The audit follows:
 
 | Cited surface | Status | Evidence |
-|---|---|---|
+| --- | --- | --- |
 | `class HookpointMeta` at `src/alfred/hooks/registry.py` | ✅ VERIFIED | Defined at line 175, `@dataclass(frozen=True, slots=True)`. |
 | `HookRegistry.register_hookpoint` shape | ✅ VERIFIED | Defined at line 539; takes `name`, `subscribable_tiers`, `refusable_tiers`, `fail_closed` keyword-only. |
 | `_run_error` current signature | ✅ VERIFIED | Defined at `src/alfred/hooks/invoke.py:1519-1526`. Returns `HookContext[T]`, NOT `None`. **Spec §4.3's "Before" claim (`-> None`) is wrong** — the actual return type was `HookContext[T]` already. The plan's "before" → "after" delta is the addition of `carrier_type` and the change from `HookContext[T]` to `ErrorOutcome[T]`. |

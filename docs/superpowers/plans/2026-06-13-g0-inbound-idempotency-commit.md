@@ -23,7 +23,7 @@
 ## File structure (decomposition)
 
 | File | Responsibility | New/Modify |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/memory/migrations/versions/0018_inbound_idempotency.py` | Schema: the `inbound_idempotency` dedup ledger | **New** |
 | `src/alfred/memory/models.py` | ORM model `InboundIdempotency` (mirrors the table for SQLite unit tests) | Modify |
 | `src/alfred/memory/inbound_idempotency.py` | `InboundIdempotencyStore` Protocol + `PostgresInboundIdempotencyStore` (the commit-once primitive) | **New** |

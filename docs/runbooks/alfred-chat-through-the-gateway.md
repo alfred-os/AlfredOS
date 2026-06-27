@@ -33,7 +33,7 @@ A typed turn round-trips `chat → gateway → daemon → ack → chat`. When th
 ## Failure modes (the direct cohost→daemon dial is deleted — no dual-mode)
 
 | Symptom | Cause | Fix |
-|---|---|---|
+| --- | --- | --- |
 | `alfred chat` exits 3 with "start the gateway" | The gateway isn't running (the dial to `comms-gateway.sock` failed). | `alfred gateway start`. |
 | chat connects but a turn never echoes; a reconnect/unavailable banner shows | The gateway is up but cannot reach the daemon (daemon down). | Start the daemon; check the gateway's logs (`gateway.core_link.*`). |
 | same as above, but the daemon IS up | The daemon did not bind `comms-tui.sock` — the `tui` adapter is not enabled. | Set `comms_enabled_adapters=("tui",)` and restart the daemon. |

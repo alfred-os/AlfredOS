@@ -49,7 +49,7 @@ contract between this category's threat model and the slice's task graph —
 drift is a release-blocker.
 
 | Attack vector | Owning PR / Task |
-|---|---|
+| --- | --- |
 | Host filesystem read of `/etc/passwd` | PR-S4-7 (`sbx-2026-003`) — kernel-observable against the REAL Linux policy (no /etc bind) |
 | Host `/proc/<host_pid>/environ` read | PR-S4-7 (`sbx-2026-006`) — contained by `--unshare-pid` |
 | Host binary exec attempts (`/bin/sh`, `/usr/bin/env`) | PR-S4-7 (`sbx-2026-004`) — no /bin bind + `--unshare-pid` |

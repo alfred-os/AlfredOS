@@ -43,7 +43,7 @@ contract between this category's threat model and the slice's task graph —
 drift is a release-blocker.
 
 | Attack vector | Owning PR / Task |
-|---|---|
+| --- | --- |
 | Planted file with attacker-crafted token | PR-S4-5 (`osf-2026-001` — `planted_file` refusal) |
 | Token-reuse on different machine | PR-S4-5 (`osf-2026-002` — `machine_mismatch` refusal) |
 | Host-rebind after laptop dock change | PR-S4-5 (`osf-2026-003` — `host_mismatch` refusal) |

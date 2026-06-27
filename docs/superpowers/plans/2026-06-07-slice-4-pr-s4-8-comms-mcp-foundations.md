@@ -158,7 +158,7 @@ The canonical `user_id` never crosses the stdio boundary outward. `IdentityResol
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/comms_mcp/__init__.py` | Create | Package marker; re-exports `protocol`, `inbound`, `classifier_registry`, `inbound_scanner` public surface |
 | `src/alfred/comms_mcp/protocol.py` | Create | Pydantic v2 wire schemas for the 8 ADR-0024 methods; `OutboundMessageResult` discriminated union (`_OutboundDelivered`, `_OutboundRetryable`, `_OutboundTerminal`); `adapter_kind: Final[frozenset[str]]`; `BODY_FIELD_BY_KIND: Final[Mapping[str, str]]`; `PersonaAddressingMode = Literal["dm","mention","channel","thread"]` |
 | `src/alfred/comms_mcp/inbound.py` | Create | `process_inbound_message(notification, identity_resolver, orchestrator, audit_writer)` host-side entrypoint enforcing resolution → burst-gate → quarantined_extract → ingest → dispatch ordering |
@@ -1780,7 +1780,7 @@ The Slice-3 stub one-shot becomes a full-lifecycle adapter.
 Every emit site in this PR (each must use `await self._audit.append_schema(fields, **kwargs)` — no inlined field-list literals):
 
 | Site | Constant | Trigger |
-|---|---|---|
+| --- | --- | --- |
 | `process_inbound_message` (after extract) | `COMMS_INBOUND_T3_PROMOTION_FIELDS` | Successful inbound that passed the burst gate + extract |
 | `process_inbound_message.refused_path` | `COMMS_INBOUND_T3_PROMOTION_FIELDS` with `.refused` event suffix | Inter-persona forgery / T2 claim refused at extract |
 | `_emit_binding_request` | `COMMS_BINDING_REQUESTED_FIELDS` | `IdentityResolver.resolve` returned None (first-contact) |
@@ -1801,7 +1801,7 @@ Every emit site in this PR (each must use `await self._audit.append_schema(field
 ## §7 Spec coverage map
 
 | Spec section | Implementing task(s) |
-|---|---|
+| --- | --- |
 | §8.1 Wire-method tables (8 methods) | Tasks 3–9 |
 | §8.1 `OutboundMessageResult` discriminated union (comms-008) | Task 7 |
 | §8.1 `addressing_mode` Literal mapping to PRD §6.8 (comms-012) | Tasks 6, plus outbound-drift emit-site in §6 above |
@@ -1832,7 +1832,7 @@ Every emit site in this PR (each must use `await self._audit.append_schema(field
 Per CLAUDE.md surgical-changes rule + Slice-3 lesson (`AlfredPluginSession._read_loop` did not exist; `_on_post_handshake_method` does). Grep results captured at plan-write time:
 
 | Cited symbol | Status | Source |
-|---|---|---|
+| --- | --- | --- |
 | `AlfredPluginSession._on_post_handshake_method` | **EXISTS** at `src/alfred/plugins/session.py:347` | `grep "_on_post_handshake_method" src/alfred/plugins/session.py` |
 | `class AlfredPluginSession.__init__` | **EXISTS** at `src/alfred/plugins/session.py:145` | as above |
 | `class Orchestrator` | **EXISTS** at `src/alfred/orchestrator/core.py:189` | `grep "class Orchestrator" src/alfred/orchestrator/core.py` |
@@ -1882,7 +1882,7 @@ Each step's tests pass before the next step starts. The merge-blocking integrati
 ## §10 Risks + mitigations
 
 | Risk | Mitigation |
-|---|---|
+| --- | --- |
 | `AlfredPluginSession._on_post_handshake_method` signature change breaks Slice-3 callers | Additive `params` kwarg with default `None`; Task 35 includes backwards-compat assertion |
 | `Orchestrator.quarantined_extract` accidentally drifts from the Slice-3 `QuarantinedExtractor.extract` contract | Task 20 wires through the existing extractor; Task 21 enforces `source_tier="T3"` at the wrapper level |
 | `BurstLimiter` deadlock when bucket is contested across many keys | `asyncio.Lock` is per-key (lazy); never global; `acquire()` uses `asyncio.wait_for(..., drop_after_seconds)` to bound wait |
@@ -1900,7 +1900,7 @@ Each step's tests pass before the next step starts. The merge-blocking integrati
 These are the spec-level closures this plan honours, captured here so reviewers can trace each invariant to its enforcing task:
 
 | Finding | Closure | Task(s) |
-|---|---|---|
+| --- | --- | --- |
 | Critical 1 | `src/alfred/comms_mcp/protocol.py` path (not `src/alfred/comms/`) | Task 1 |
 | Critical 6 | Unknown notification → typed audit row + `request_plugin_restart` (no silent drop) | Task 38, 43 |
 | comms-008 | `OutboundMessageResult` discriminated union (no field coupling) | Task 7 |
@@ -1926,7 +1926,7 @@ These are the spec-level closures this plan honours, captured here so reviewers 
 For reviewer clarity — the following do NOT land in this PR even though the topic touches comms-MCP:
 
 | Item | Owning PR |
-|---|---|
+| --- | --- |
 | Discord adapter (`plugins/alfred_discord/`) + `adapter_kind: discord` Literal entry + `REQUIRED_CLASSIFIERS_BY_KIND["discord"]` + `BODY_FIELD_BY_KIND["discord"]` | PR-S4-9 |
 | TUI adapter (`plugins/alfred_tui/`) + `adapter_kind: tui` Literal entry + body-field entry | PR-S4-10 |
 | `src/alfred/comms/` deletion (the entire in-process adapter directory) | PR-S4-10 |

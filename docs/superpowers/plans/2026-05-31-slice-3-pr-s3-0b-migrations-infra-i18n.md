@@ -75,7 +75,7 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/memory/migrations/versions/0007_audit_result_slice3_values.py` | Create | Extends `ck_audit_log_result` CHECK with 13 new Slice-3 result values |
 | `src/alfred/memory/migrations/versions/0008_plugin_grants.py` | Create | Creates `plugin_grants` table (Postgres projection of state.git grants) |
 | `src/alfred/memory/migrations/versions/0009_capability_gate_sync.py` | Create | Creates `capability_gate_sync` table (commit-hash cache for RealGate) |
@@ -2729,7 +2729,7 @@ All new `t()` keys ship in `locale/en/LC_MESSAGES/alfred.po` in this PR. The imp
 ## §5 Spec Coverage Map
 
 | Spec § / Sub-section | What it requires | Task(s) |
-|---|---|---|
+| --- | --- | --- |
 | §13 — migration 0007 | Extend `ck_audit_log_result` with 13 Slice-3 values | Tasks 1, 2 |
 | §13 — migration 0008 | Create `plugin_grants` table with `content_tier`, unique constraint on (plugin_id, hookpoint, subscriber_tier) | Tasks 3, 4 |
 | §13 — migration 0009 | Create `capability_gate_sync` table as singleton (INTEGER PK, `commit_hash` column) | Tasks 5, 6 |

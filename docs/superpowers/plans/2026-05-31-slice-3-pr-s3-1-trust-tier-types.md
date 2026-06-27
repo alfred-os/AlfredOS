@@ -72,7 +72,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
 ## §3 File structure
 
 | File | Status | Responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `src/alfred/security/tiers.py` | Modify | Add T1, T3, AnyTaggedContent, wire-format serializer, nonce-gated tag(T3) overload |
 | `src/alfred/security/quarantine.py` | Create | **Canonical home for ContentHandle** (arch-003). T3DerivedData NewType, ContentHandle, quarantined_to_structured stub, downgrade_to_orchestrator stub, ExtractionResult / Extracted / TypedRefusal discriminated-union type stubs (consumed by PR-S3-3a before PR-S3-4 lands — sec-002). PR-S3-5 re-exports ContentHandle for namespace continuity; it does not redefine it. |
 | `src/alfred/identity/_ingest.py` | Create | **Owned by this PR** (arch-011). `_ingest_tier(user, adapter_name) → type[TrustTier]`. PR-S3-3a consumes `_ingest_tier()` and registers identity.t1_ingress/t1_downgrade hookpoints; it does NOT create this module. |
@@ -2326,7 +2326,7 @@ The nonce model: `CapabilityGateNonce` is constructed once by a bootstrap factor
 ## §5 Spec Coverage Map
 
 | Spec section | What it requires | Task(s) |
-|---|---|---|
+| --- | --- | --- |
 | §3.1 — T1/T3 classes + `_APPROVED_TIERS` | T1, T3 subclasses; frozenset update | Tasks 1-2 |
 | §3.1 — orchestrator type-sig widening | `TaggedContent[T1] \| TaggedContent[T2]` | Tasks 17-18 |
 | §3.2 — `tag(T3)` capability-gated factory | Nonce identity check, refused callers | Tasks 9-12 |

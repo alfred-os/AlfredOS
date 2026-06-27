@@ -41,7 +41,7 @@ PR-S4-0a is the first Slice-4 PR and the prerequisite for every downstream PR (S
 ## §2 File structure
 
 | File | Status | 1-sentence responsibility |
-|---|---|---|
+| --- | --- | --- |
 | `docs/adr/0022-recoverable-carrier-semantic-for-error-stage-hookpoint-dispatch.md` | Create | Full ADR body committing `ErrorOutcome` discriminated union + tier-upgrade-refused guard + meta-hookpoint observation-only rule; closes #170. |
 | `docs/adr/0023-mtime-polled-hot-reload-for-policies-yaml.md` | Create | Full ADR body committing mtime polling at 1s + `PoliciesV1` Pydantic v2 + `PoliciesSnapshotRef` lock-free synchronous read + audit-then-swap two-phase commit + low-blast/high-blast partition; closes #159. |
 | `docs/adr/0024-comms-mcp-wire-contract.md` | Create | Full ADR body committing the eight wire methods + `OutboundMessageResult` discriminated union + `addressing_mode` Literal mapping + `process_inbound_message` order + host-side `IdentityResolver` + `REQUIRED_CLASSIFIERS_BY_KIND` registry rule + audit-emit ownership rule; consumed by PR-S4-8/9/10. |
@@ -82,7 +82,7 @@ These surfaces are defined in this PR and consumed by downstream PRs. Drift betw
 ### 3.1 `audit_row_schemas.py` constants (23 new — defined here)
 
 | Constant | Defined in spec § | Consumed in PR | Field-list (verbatim) |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `DAEMON_BOOT_FIELDS` | §9, §3.2 | PR-S4-1 | `boot_id`, `started_at`, `state_git_head_sha`, `slice_version`, `policies_snapshot_hash`, `environment` |
 | `DAEMON_BOOT_FAILED_FIELDS` | §9, §3.2, §3.4 | PR-S4-1, PR-S4-6 | `boot_id`, `attempted_at`, `failure_reason`, `environment_source` |
 | `DAEMON_BOOT_ENVIRONMENT_SOURCE_CONFLICT_FIELDS` | §9, §7.3 | PR-S4-1 | `boot_id`, `env_var_value`, `etc_file_value`, `resolved_value` |
@@ -165,7 +165,7 @@ The Slice-3 `Category` Literal values, the existing `_PREFIX_TO_CATEGORY` entrie
 Each ADR is the prose source-of-truth for one architectural decision. Downstream PR plans cite the ADR rather than the spec for the architectural rationale, because the ADR will outlive the spec (spec is the design pre-implementation; ADR is the record post-decision).
 
 | ADR | Anchored in spec § | Implemented in PR | Status at landing |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | ADR-0022 (recoverable-carrier semantic) | §4 | PR-S4-3 | Accepted |
 | ADR-0023 (mtime-polled hot-reload) | §5 | PR-S4-4 | Accepted |
 | ADR-0024 (comms-MCP wire contract) | §8 | PR-S4-8 (transport), PR-S4-9 (Discord), PR-S4-10 (TUI) | Accepted |
@@ -2151,7 +2151,7 @@ The tasks below add the constants in spec-§9-table order. Each task lands a sma
 ## §5 Spec Coverage Map
 
 | Spec section | Task(s) that implement it |
-|---|---|
+| --- | --- |
 | §0 Summary — three new ADRs land in PR-S4-0a | Tasks 1-6 (ADR-0022, 0023, 0024 bodies) |
 | §1.1 In-scope list — PR-S4-0a foundations | Tasks 1-16 |
 | §1.3 Scope budget — PR-S4-0a docs / constants only | All tasks (no runtime dispatch ships) |
@@ -2296,7 +2296,7 @@ Before opening the PR, the author runs through this checklist. Each item is a on
 This PR explicitly DOES NOT deliver any of the following. Each item lands in the named downstream PR:
 
 | Out-of-scope item | Delivered in |
-|---|---|
+| --- | --- |
 | `HookpointMeta.carrier_tier` field | PR-S4-3 (rev-007) |
 | `HookpointMeta.allow_error_substitution` field | PR-S4-3 (rev-007) |
 | `register_hookpoint(...)` calls for any Slice-4 hookpoint | Each owning PR per spec §10 |

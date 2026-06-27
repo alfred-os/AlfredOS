@@ -32,7 +32,7 @@ Creating a workflow that *runs* on every PR is easy. Creating one that *blocks* 
 Not every job in a workflow needs to block the merge button. Examples:
 
 | Job purpose | Gating? |
-|---|---|
+| --- | --- |
 | Lint / type-check / formatter that ALWAYS must pass | ✓ Yes |
 | Unit / integration / smoke tests | ✓ Yes |
 | Security gate (commit-msg validation, no-fixup, no-merge-commit) | ✓ Yes |

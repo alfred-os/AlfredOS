@@ -417,7 +417,7 @@ MrReasonable <4990954+MrReasonable@users.noreply.github.com>"
 **Spec coverage (design §3):**
 
 | Requirement | Task |
-|---|---|
+| --- | --- |
 | `send_payload_unit(payload, *, seq, ack)` caller-owned seq | Task 1 |
 | `_write_payload_unit` split (None→internal, explicit→caller; `_send_seq` untouched on relay path) | Task 1 |
 | `send()` lifecycle path unchanged (internal seq + `a=0`) | Task 1 |

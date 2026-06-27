@@ -93,7 +93,7 @@ Injectable seams `[fleet test]`: fake clock; explicit link-state machine (`UP / 
 ## 8. Epic decomposition (Spec A)
 
 | PR | Scope |
-|----|-------|
+| --- | --- |
 | **#259** | Land now — foreground TUI dials the core directly + co-hosts (substrate; `dial_comms_socket` reused by the gateway). |
 | **G0** | Core `InboundIdempotencyCommit` (wire inbound-id + durable dedup-before-side-effect + schema migration). Independently valuable; commit point at the **top** of the inbound pipeline. |
 | **G1** | ADR-0033 lifecycle signal (`going_down` on drain; `ready` after healthy boot graph) + epoch nonce. |

@@ -42,7 +42,7 @@ contract between this category's threat model and the slice's task graph —
 drift is a release-blocker.
 
 | Attack vector | Owning PR / Task |
-|---|---|
+| --- | --- |
 | TOCTOU inode-swap between `os.stat` and `os.read` | PR-S4-4 (`csb-2026-001` — `O_NOFOLLOW`+fstat refuses) |
 | `high_blast.*` key change attempted via hot-reload | PR-S4-4 (`csb-2026-002` — `high_blast_change` refusal) |
 | Audit-write-failure silent-rollback bypass | PR-S4-4 (`csb-2026-003` — fallback JSONL + `policies.watcher.degraded` hookpoint) |

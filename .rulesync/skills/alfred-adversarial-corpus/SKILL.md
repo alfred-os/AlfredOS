@@ -15,7 +15,7 @@ targets:
 ## Six categories
 
 | Category | What it exercises | Directory |
-|---|---|---|
+| --- | --- | --- |
 | Prompt-injection corpus | T3 content trying to issue instructions to the orchestrator | `tests/adversarial/prompt_injection/` |
 | DLP corpus | Synthetic secrets seeded into outbound paths | `tests/adversarial/dlp/` |
 | Capability-bypass corpus | Transcripts attempting tool calls outside the current grant | `tests/adversarial/capability_bypass/` |
