@@ -20,6 +20,7 @@ HTTP-egress import-guard allowlist.
 from __future__ import annotations
 
 import asyncio
+import enum
 from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -28,6 +29,27 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # the per-read ``max_len`` bound (a small cap the caller chooses) is what actually
 # protects against an unbounded/oversized read.
 _LENGTH_PREFIX_BYTES = 4
+
+
+class EgressRelayDenyReason(enum.StrEnum):
+    """The closed vocabulary of mode-(b) relay deny reasons (Spec C G7-2b).
+
+    Lives in the SHARED wire module (not the gateway audit module) because it is wire
+    data: it crosses the core↔gateway hop inside :class:`EgressRelayReply`. A ``StrEnum``
+    so it serialises to its value on the JSON frame AND an unknown value fails
+    ``model_validate_json`` LOUDLY at the protocol boundary (HARD rule #7 — a drifted /
+    typoed reason can never deserialise as a valid frame). The gateway audit vocab
+    (:mod:`alfred.gateway.egress_relay_audit`) re-exports it as the single source of truth.
+    """
+
+    DESTINATION_NOT_ALLOWLISTED = "destination_not_allowlisted"
+    LITERAL_IP_TARGET = "literal_ip_target"
+    RESOLVED_IP_NOT_GLOBAL = "resolved_ip_not_global"
+    DLP_REDACTED = "dlp_redacted"
+    CANARY_TRIPPED = "canary_tripped"
+    RESPONSE_TOO_LARGE = "response_too_large"
+    MALFORMED_ENVELOPE = "malformed_envelope"
+    UPSTREAM_REDIRECT_REFUSED = "upstream_redirect_refused"
 
 
 class FrameTooLargeError(ValueError):
@@ -90,7 +112,7 @@ class EgressRelayReply(BaseModel):
     """
 
     response: EgressResponse | None = None
-    deny_reason: str | None = None
+    deny_reason: EgressRelayDenyReason | None = None
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     @model_validator(mode="after")
@@ -144,12 +166,16 @@ async def write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
     await writer.drain()
 
 
+# ``_RawToolRequest`` is intentionally NOT exported: it is a leading-underscore
+# (package-internal) type consumed only by the in-core relay client + extractor
+# (C1/C2 in G7-2c), which import it explicitly. Keeping it out of ``__all__`` avoids
+# a ``_``-prefixed name in the public surface (review nit) while leaving it importable.
 __all__ = [
+    "EgressRelayDenyReason",
     "EgressRelayReply",
     "EgressRequest",
     "EgressResponse",
     "FrameTooLargeError",
-    "_RawToolRequest",
     "read_frame",
     "write_frame",
 ]

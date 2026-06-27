@@ -31,7 +31,10 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     # provider key + environment. The relay itself NEVER constructs Settings.
     monkeypatch.setenv("ALFRED_DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ALFRED_ENVIRONMENT", "test")
-    # Pin the relay/proxy resolvers' defaults so they never read a polluted env.
+    # Pin the relay/proxy resolvers' defaults so they never read a polluted env, and
+    # clear the hosted-adapter set — start_gateway() resolves it (via Settings) BEFORE
+    # building the relay, so an ambient value would send the test down config_failed
+    # before any relay assertion runs (CR review).
     for var in (
         "ALFRED_EGRESS_PROXY_PORT",
         "ALFRED_EGRESS_PROXY_BIND",
@@ -40,6 +43,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
         "ALFRED_EGRESS_RELAY_BIND",
         "ALFRED_TOOL_EGRESS_ALLOWLIST",
         "ALFRED_CANARY_TOKENS",
+        "ALFRED_COMMS_ENABLED_ADAPTERS",
     ):
         monkeypatch.delenv(var, raising=False)
 

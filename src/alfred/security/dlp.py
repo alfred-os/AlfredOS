@@ -253,16 +253,13 @@ class OutboundDlp:
             stages_triggered.append("api_key_shape")
         text = after_regex
 
-        # Stage 3 — real canary scan. Fails LOUD on a hit (raises before this
-        # method returns) and never modifies ``text``; a no-op when no matcher.
-        self._scan_canary(text)
-
+        # Audit-on-modification (stages 1+2) BEFORE the stage-3 canary scan, so a
+        # body that BOTH carried a redactable secret AND trips a canary records the
+        # redaction (``dlp.outbound_redacted``) before the trip (``dlp.outbound_canary_tripped``)
+        # rather than losing the redaction row to the canary raise (CR review). Synchronous;
+        # raises propagate per CLAUDE.md hard rule #7. ``pre_bytes`` / ``post_bytes`` are
+        # UTF-8 byte counts (not character counts) — forensic consumers reason in bytes.
         if text != pre:
-            # Audit-on-modification. Synchronous; raises propagate per
-            # CLAUDE.md hard rule #7. ``pre_bytes`` / ``post_bytes`` are
-            # UTF-8 byte counts (not character counts) — forensic audit
-            # consumers reason in bytes, and the byte/char split matters
-            # for non-ASCII content (multi-byte code points).
             self._audit(
                 event="dlp.outbound_redacted",
                 subject={
@@ -271,6 +268,13 @@ class OutboundDlp:
                     "stages_triggered": tuple(stages_triggered),
                 },
             )
+
+        # Stage 3 — real canary scan on the ORIGINAL ``pre`` text (NOT the redacted
+        # ``text``): a canary token that also matches a stage-1/2 redaction (e.g. an
+        # api-key-shaped canary) would otherwise be erased before this scan and the
+        # trip silently lost — a fail-LOUD violation (CR review, HARD rule #7). Fails
+        # loud on a hit (raises before returning); a no-op when no matcher.
+        self._scan_canary(pre)
 
         return text, tuple(stages_triggered)
 

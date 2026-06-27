@@ -34,12 +34,14 @@ def test_match_is_case_insensitive() -> None:
 
 
 def test_first_registered_matching_token_wins() -> None:
-    # Iterate in registration order; return the first token whose pattern matches
-    # anywhere in the text (mirrors InboundCanaryScanner's original loop).
+    # Registration order wins: with MULTIPLE registered tokens present in the text,
+    # first_match returns the EARLIEST-registered one (B before C), not the one that
+    # appears first positionally (CR review). Mirrors InboundCanaryScanner's loop.
     matcher = CanaryMatcher(
         tokens=[CanaryToken("SECRET-A"), CanaryToken("SECRET-B"), CanaryToken("SECRET-C")]
     )
-    assert matcher.first_match("only SECRET-B is present") == "SECRET-B"
+    # Text contains C earlier positionally and B later, but B is registered first.
+    assert matcher.first_match("SECRET-C appears, then SECRET-B") == "SECRET-B"
 
 
 def test_empty_token_set_never_matches() -> None:

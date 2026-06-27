@@ -152,6 +152,39 @@ def test_canary_trip_raises_and_audits_after_the_row() -> None:
     assert canary_rows[0][1]["token"] == "CANARY-OUT-12345"  # noqa: S105 -- canary sentinel
 
 
+def test_redaction_audit_is_preserved_when_canary_trips() -> None:
+    """A body that BOTH carries a redactable secret AND trips a canary records the
+    redaction row BEFORE the canary-trip row (the redaction audit is not lost to the
+    canary raise) — and the canary exception still propagates. (CR review.)"""
+    audit = _AuditRecorder()
+    dlp = OutboundDlp(
+        broker=_StubBroker({}),
+        audit=audit,
+        canary=CanaryMatcher(tokens=[CanaryToken("CANARY-OUT-12345")]),
+    )
+    with pytest.raises(OutboundCanaryTripped):
+        dlp.scan("leak sk-AAAAAAAAAAAAAAAAAAAA and CANARY-OUT-12345")
+    assert [event for event, _subject in audit.events] == [
+        "dlp.outbound_redacted",
+        "dlp.outbound_canary_tripped",
+    ]
+    assert audit.events[0][1]["stages_triggered"] == ("api_key_shape",)
+
+
+def test_canary_that_is_also_api_key_shaped_still_trips() -> None:
+    """A canary token that ALSO matches the stage-2 redaction regex must STILL trip —
+    the canary scan runs on the original text, so redaction cannot silently erase it
+    (CR review, fail-LOUD / HARD rule #7)."""
+    dlp = OutboundDlp(
+        broker=_StubBroker({}),
+        audit=_AuditRecorder(),
+        # The canary value is itself an api-key shape (would be redacted by stage 2).
+        canary=CanaryMatcher(tokens=[CanaryToken("sk-AAAAAAAAAAAAAAAAAAAA")]),
+    )
+    with pytest.raises(OutboundCanaryTripped):
+        dlp.scan("exfil sk-AAAAAAAAAAAAAAAAAAAA now")
+
+
 def test_clean_body_with_canary_matcher_returns_redacted_text() -> None:
     """When no canary is present the stage is transparent; redaction still runs."""
     audit = _AuditRecorder()

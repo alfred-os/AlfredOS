@@ -23,32 +23,18 @@ module owns:
 
 from __future__ import annotations
 
-import enum
 from collections.abc import Mapping
 from typing import Final
 
 import structlog
 from prometheus_client import Counter
 
+# Single source of truth for the closed deny vocabulary: it lives in the SHARED wire
+# module (it crosses the wire in EgressRelayReply) and is re-exported here so the
+# refusal sites in :mod:`alfred.gateway.egress_relay` + this audit vocab draw from one set.
+from alfred.egress.relay_protocol import EgressRelayDenyReason
+
 log = structlog.get_logger(__name__)
-
-
-class EgressRelayDenyReason(enum.Enum):
-    """The closed vocabulary of mode-(b) relay deny reasons (Spec C G7-2b).
-
-    Declared ONCE so every refusal site in :mod:`alfred.gateway.egress_relay`
-    (SSRF chain, gateway DLP second pass, canary, response cap, framing, redirect)
-    draws from the same set — no free-form reason strings.
-    """
-
-    DESTINATION_NOT_ALLOWLISTED = "destination_not_allowlisted"
-    LITERAL_IP_TARGET = "literal_ip_target"
-    RESOLVED_IP_NOT_GLOBAL = "resolved_ip_not_global"
-    DLP_REDACTED = "dlp_redacted"
-    CANARY_TRIPPED = "canary_tripped"
-    RESPONSE_TOO_LARGE = "response_too_large"
-    MALFORMED_ENVELOPE = "malformed_envelope"
-    UPSTREAM_REDIRECT_REFUSED = "upstream_redirect_refused"
 
 
 # The three relay audit events. A closed set so a typo'd / unknown event is a loud
@@ -85,6 +71,19 @@ _REASON_KEY_PREFIX: Final[str] = "gateway.egress.relay_denied."
 
 _DENY_REASON_VALUES: Final[frozenset[str]] = frozenset(r.value for r in EgressRelayDenyReason)
 
+# The expected primitive TYPE of each allowlisted field's value. The sink validates
+# values (not just names) so a wiring bug cannot smuggle a header / body / nested
+# object through an allowlisted key like ``destination`` or ``egress_id`` (CR review —
+# hard rules #5/#7: the payload-blindness floor is on values too, not only keys).
+_FIELD_VALUE_TYPES: Final[Mapping[str, type]] = {
+    "destination": str,
+    "method": str,
+    "status": int,
+    "egress_id": str,
+    "dlp_redactions": int,
+    "reason": str,
+}
+
 # Per-outcome relay Counter (provisional; G7-5 owns the canonical egress metric/
 # alert set). Default registry so the gateway /metrics exposition serves it.
 GATEWAY_EGRESS_RELAY: Final[Counter] = Counter(
@@ -107,6 +106,27 @@ def reason_i18n_key(reason: EgressRelayDenyReason) -> str:
     return f"{_REASON_KEY_PREFIX}{reason.value}"
 
 
+def _check_value_shapes(event: str, fields: Mapping[str, object]) -> None:
+    """Reject a field whose VALUE is not the expected primitive type (CR review).
+
+    Names are already exact-set-validated; this guards the values so a body / header /
+    nested object cannot ride through an allowlisted key. ``bool`` is rejected for the
+    integer fields (it is an ``int`` subclass — a ``status`` of ``True`` is a wiring bug).
+    """
+    for key, value in fields.items():
+        expected = _FIELD_VALUE_TYPES[key]
+        ok = (
+            (isinstance(value, int) and not isinstance(value, bool))
+            if expected is int
+            else isinstance(value, expected)
+        )
+        if not ok:
+            raise ValueError(
+                f"egress relay audit: {event} field {key!r} must be {expected.__name__}, "
+                f"got {type(value).__name__} (value-shape floor — hard rules #5/#7)"
+            )
+
+
 def record_egress_relay(event: str, fields: Mapping[str, object]) -> None:
     """Emit ONE field-allowlisted mode-(b) relay audit row (the relay's audit sink).
 
@@ -119,6 +139,8 @@ def record_egress_relay(event: str, fields: Mapping[str, object]) -> None:
     * a field map that does not EXACTLY match the event's expected set (a missing
       required field, OR a field outside it — e.g. a body) breaches the schema /
       payload-blindness floor → ``ValueError``;
+    * a field whose VALUE is not the expected primitive type (a body / header / nested
+      object smuggled through an allowlisted key) → ``ValueError`` (value-shape floor);
     * a deny / canary whose ``reason`` is outside :class:`EgressRelayDenyReason`
       is a free-form reason → ``ValueError``.
     """
@@ -130,6 +152,7 @@ def record_egress_relay(event: str, fields: Mapping[str, object]) -> None:
             f"egress relay audit: {event} row fields {sorted(fields)} must be EXACTLY "
             f"{sorted(expected)} (missing or non-allowlisted field — hard rules #5/#7)"
         )
+    _check_value_shapes(event, fields)
     if event in _REASON_EVENTS:
         if fields.get("reason") not in _DENY_REASON_VALUES:
             raise ValueError(

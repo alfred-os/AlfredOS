@@ -86,6 +86,13 @@ def test_relay_reply_denied_round_trips() -> None:
     assert restored.deny_reason == "destination_not_allowlisted"
 
 
+def test_relay_reply_rejects_unknown_deny_reason() -> None:
+    # The wire boundary fails LOUD on a drifted/typoed reason: deny_reason is the
+    # closed EgressRelayDenyReason, so an unknown value can't deserialise (CR review).
+    with pytest.raises(ValueError, match="deny_reason"):
+        EgressRelayReply.model_validate_json('{"deny_reason": "bogus_reason"}')
+
+
 def test_relay_reply_rejects_both_set() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         EgressRelayReply(

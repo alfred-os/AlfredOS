@@ -150,9 +150,31 @@ def test_every_deny_reason_passes_the_sink(reason: EgressRelayDenyReason) -> Non
     assert logs[0]["reason"] == reason.value
 
 
+def test_forwarded_non_string_value_raises() -> None:
+    """Value-shape floor (CR review): a non-str smuggled through an allowlisted key
+    (here a nested object via ``destination``) is rejected — names alone aren't enough."""
+    with pytest.raises(ValueError, match="value-shape floor"):
+        record_egress_relay(
+            EGRESS_RELAY_FORWARDED_EVENT, {**_forwarded_fields(), "destination": {"leak": "body"}}
+        )
+
+
+def test_forwarded_non_int_status_raises() -> None:
+    with pytest.raises(ValueError, match="value-shape floor"):
+        record_egress_relay(EGRESS_RELAY_FORWARDED_EVENT, {**_forwarded_fields(), "status": "200"})
+
+
+def test_forwarded_bool_status_raises() -> None:
+    # bool is an int subclass; a ``status`` of True is a wiring bug, not a status code.
+    with pytest.raises(ValueError, match="value-shape floor"):
+        record_egress_relay(EGRESS_RELAY_FORWARDED_EVENT, {**_forwarded_fields(), "status": True})
+
+
 def test_counter_has_outcome_label() -> None:
-    # The producer (B4) increments this; here we pin the label so a producer that
-    # forgets ``outcome=`` fails loud rather than emitting an unlabelled series.
-    GATEWAY_EGRESS_RELAY.labels(outcome="forwarded").inc()
-    GATEWAY_EGRESS_RELAY.labels(outcome="denied").inc()
-    GATEWAY_EGRESS_RELAY.labels(outcome="error").inc()
+    # Pin the required ``outcome`` label WITHOUT incrementing — mutating the
+    # process-global default-registry counter would make later value-based
+    # assertions order-dependent (CR review). ``.labels(...)`` registers/validates
+    # the label set without bumping the count.
+    GATEWAY_EGRESS_RELAY.labels(outcome="forwarded")
+    GATEWAY_EGRESS_RELAY.labels(outcome="denied")
+    GATEWAY_EGRESS_RELAY.labels(outcome="error")
