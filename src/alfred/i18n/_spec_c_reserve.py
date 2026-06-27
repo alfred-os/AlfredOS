@@ -28,6 +28,18 @@ def _register() -> None:
     t("gateway.egress.denied.literal_ip_target")
     t("gateway.egress.denied.resolved_ip_not_global")
     t("gateway.egress.denied.malformed_connect")
+    # G7-2b: the mode-(b) inspecting-relay deny-reason presentations. Rendered via
+    # ``t(reason_i18n_key(reason))`` (a ``f"{prefix}{reason.value}"`` dereference in
+    # ``alfred.gateway.egress_relay_audit``), so the literal msgids are invisible to
+    # ``pybabel extract`` at the call site and must be anchored here.
+    t("gateway.egress.relay_denied.destination_not_allowlisted")
+    t("gateway.egress.relay_denied.literal_ip_target")
+    t("gateway.egress.relay_denied.resolved_ip_not_global")
+    t("gateway.egress.relay_denied.dlp_redacted")
+    t("gateway.egress.relay_denied.canary_tripped")
+    t("gateway.egress.relay_denied.response_too_large")
+    t("gateway.egress.relay_denied.malformed_envelope")
+    t("gateway.egress.relay_denied.upstream_redirect_refused")
 
 
 __all__ = ["_register"]

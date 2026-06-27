@@ -22,6 +22,15 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "gateway.egress.denied.literal_ip_target",
     "gateway.egress.denied.resolved_ip_not_global",
     "gateway.egress.denied.malformed_connect",
+    # B3: the closed-vocab mode-(b) inspecting-relay deny-reason presentations.
+    "gateway.egress.relay_denied.destination_not_allowlisted",
+    "gateway.egress.relay_denied.literal_ip_target",
+    "gateway.egress.relay_denied.resolved_ip_not_global",
+    "gateway.egress.relay_denied.dlp_redacted",
+    "gateway.egress.relay_denied.canary_tripped",
+    "gateway.egress.relay_denied.response_too_large",
+    "gateway.egress.relay_denied.malformed_envelope",
+    "gateway.egress.relay_denied.upstream_redirect_refused",
 )
 
 

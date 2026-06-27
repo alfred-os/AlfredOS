@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-27 22:40+0100\n"
+"POT-Creation-Date: 2026-06-27 22:46+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2025,6 +2025,50 @@ msgstr ""
 msgid "gateway.egress.denied.malformed_connect"
 msgstr "Egress denied: the CONNECT request was malformed."
 
+#: src/alfred/i18n/_spec_c_reserve.py:35
+msgid "gateway.egress.relay_denied.destination_not_allowlisted"
+msgstr "Tool egress denied: the destination is not in the tool-egress allowlist."
+
+#: src/alfred/i18n/_spec_c_reserve.py:36
+msgid "gateway.egress.relay_denied.literal_ip_target"
+msgstr ""
+"Tool egress denied: a literal-IP target is refused — the allowlist is "
+"hostname-based and the gateway resolves DNS itself."
+
+#: src/alfred/i18n/_spec_c_reserve.py:37
+msgid "gateway.egress.relay_denied.resolved_ip_not_global"
+msgstr ""
+"Tool egress denied: the destination resolved to a non-globally-routable "
+"address."
+
+#: src/alfred/i18n/_spec_c_reserve.py:38
+msgid "gateway.egress.relay_denied.dlp_redacted"
+msgstr ""
+"Tool egress denied: the request body still contained a secret-shaped value "
+"after the gateway DLP pass — the core failed to redact it."
+
+#: src/alfred/i18n/_spec_c_reserve.py:39
+msgid "gateway.egress.relay_denied.canary_tripped"
+msgstr ""
+"Tool egress denied: an outbound canary token was detected in the request "
+"body. This is a security event."
+
+#: src/alfred/i18n/_spec_c_reserve.py:40
+msgid "gateway.egress.relay_denied.response_too_large"
+msgstr "Tool egress denied: the upstream response exceeded the size cap."
+
+#: src/alfred/i18n/_spec_c_reserve.py:41
+msgid "gateway.egress.relay_denied.malformed_envelope"
+msgstr ""
+"Tool egress denied: the relay request envelope was malformed or used a "
+"disallowed method."
+
+#: src/alfred/i18n/_spec_c_reserve.py:42
+msgid "gateway.egress.relay_denied.upstream_redirect_refused"
+msgstr ""
+"Tool egress denied: the upstream returned a redirect, which the gateway does "
+"not follow."
+
 # ---------------------------------------------------------------------------
 # Slice 2 PR A: CLI identity surface (cli.user.* + cli.help.root).
 # Only keys with live call-sites are retained; help-text long forms and
@@ -2772,9 +2816,9 @@ msgstr ""
 #: src/alfred/security/dlp.py:172
 msgid "egress.outbound_canary_tripped"
 msgstr ""
-"An outbound canary token was detected in content leaving AlfredOS. The egress "
-"was REFUSED and the trip recorded for the operator. This is a security event — "
-"inspect the audit log to find the originating turn."
+"An outbound canary token was detected in content leaving AlfredOS. The "
+"egress was REFUSED and the trip recorded for the operator. This is a "
+"security event — inspect the audit log to find the originating turn."
 
 #: src/alfred/security/quarantine.py:1426
 msgid "security.quarantine.dereference_denied"
