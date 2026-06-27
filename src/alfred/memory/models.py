@@ -786,9 +786,10 @@ class EgressIdempotency(Base):
 
     __table_args__ = (
         # Closed state vocabulary + the state<->response invariant. Both are
-        # dialect-portable (IN + boolean-equality parse under SQLite too, unlike
-        # the Postgres-only char_length CHECKs that live migration-side), so they
-        # ride the ORM into the unit-test SQLite create_all as well as migration 0023.
+        # dialect-portable (IN + boolean-equality parse + enforce under SQLite as well
+        # as Postgres — no char_length() or other Postgres-only function), so the SAME
+        # two CHECKs live here and in migration 0023, and they ride the ORM into the
+        # unit-test SQLite create_all as well as the Postgres migration.
         sa.CheckConstraint(
             "state IN ('committed_no_response', 'committed_with_response')",
             name="ck_egress_idempotency_state",

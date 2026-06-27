@@ -151,11 +151,17 @@ async def test_record_response_idempotent_on_already_recorded(
     store: PostgresEgressIdempotencyStore, migrated_url: str
 ) -> None:
     # MEM-3: a second record_response on an already-committed_with_response row is
-    # a no-op, not a raise (a Spec-A replay can re-enter this path).
+    # a no-op, not a raise (a Spec-A replay can re-enter this path) — AND it must not
+    # overwrite the stored payload (the egress-id pins one logical call to one T2).
     await _commit(store, egress_id="eg-idem")
     await store.record_response(egress_id="eg-idem", response="first", language="en")
-    await store.record_response(egress_id="eg-idem", response="second", language="en")
+    await store.record_response(egress_id="eg-idem", response="second", language="fr")
     assert await _state_of(migrated_url, "eg-idem") == "committed_with_response"
+    # The replay returns the FIRST stored response/language — the second call dropped.
+    replay = await _commit(store, egress_id="eg-idem")
+    assert isinstance(replay, IntentReplayComplete)
+    assert replay.response == "first"
+    assert replay.language == "en"
 
 
 async def test_record_response_unknown_id_raises(
@@ -165,11 +171,66 @@ async def test_record_response_unknown_id_raises(
         await store.record_response(egress_id="eg-nonexistent", response="x", language="en")
 
 
-async def test_prune_expired_sweeps_backdated_row(
+async def test_prune_expired_sweeps_only_backdated_rows(
     store: PostgresEgressIdempotencyStore, migrated_url: str
 ) -> None:
-    await _commit(store, egress_id="eg-ttl")
-    future = dt.datetime.now(dt.UTC) + dt.timedelta(days=1)
-    deleted = await store.prune_expired(older_than=future)
+    # Prove prune respects the committed_at cutoff (not "delete everything"): one row is
+    # backdated past the window, one stays fresh, and a cutoff between them removes ONLY
+    # the stale row. Backdate via a direct UPDATE since committed_at is server-defaulted.
+    await _commit(store, egress_id="eg-stale")
+    await _commit(store, egress_id="eg-fresh")
+    engine = create_async_engine(migrated_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text(
+                    "UPDATE egress_idempotency SET committed_at = now() - interval '10 days' "
+                    "WHERE egress_id = 'eg-stale'"
+                )
+            )
+    finally:
+        await engine.dispose()
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=1)
+    deleted = await store.prune_expired(older_than=cutoff)
     assert deleted == 1
-    assert await _state_of(migrated_url, "eg-ttl") is None
+    assert await _state_of(migrated_url, "eg-stale") is None
+    assert await _state_of(migrated_url, "eg-fresh") == "committed_no_response"
+
+
+async def test_prune_expired_returns_zero_when_nothing_expired(
+    store: PostgresEgressIdempotencyStore, migrated_url: str
+) -> None:
+    # The no-op path: a cutoff in the past matches no row, so prune returns 0 and the
+    # fresh row survives — proving the count contract, not just the delete-1 case.
+    await _commit(store, egress_id="eg-young")
+    past = dt.datetime.now(dt.UTC) - dt.timedelta(days=1)
+    assert await store.prune_expired(older_than=past) == 0
+    assert await _state_of(migrated_url, "eg-young") == "committed_no_response"
+
+
+async def test_check_constraint_rejects_no_response_row_with_a_response(
+    migrated_url: str,
+) -> None:
+    # The state<->response invariant is what justifies the DAO casting row.response to
+    # str on the committed_with_response branch. Prove Postgres ENFORCES it (not just
+    # that the constraint exists by name): a committed_no_response row carrying a
+    # non-NULL response must be rejected at write time.
+    engine = create_async_engine(migrated_url, future=True)
+    try:
+        # connect() (not begin()) so the immediate CHECK violation surfaces on execute
+        # and no commit is attempted on the aborted transaction. pytest.raises is a SYNC
+        # context manager wrapping the single await.
+        async with engine.connect() as conn:
+            with pytest.raises(sa.exc.IntegrityError):
+                await conn.execute(
+                    sa.text(
+                        "INSERT INTO egress_idempotency "
+                        "(egress_id, adapter_id, inbound_id, session_id, call_index, "
+                        "body_hash, state, response) "
+                        "VALUES ('eg-bad', 'discord', 'msg-1', 'sess-1', 0, :h, "
+                        "'committed_no_response', 'leaked-t2')"
+                    ),
+                    {"h": _HASH_A},
+                )
+    finally:
+        await engine.dispose()

@@ -12,6 +12,7 @@ every prior ledger row.
 from __future__ import annotations
 
 import hypothesis.strategies as st
+import pytest
 from hypothesis import assume, given
 
 from alfred.egress.egress_id import (
@@ -103,3 +104,10 @@ def test_integrity_error_carries_no_hash_oracle() -> None:
     assert err.egress_id == "abc123"
     assert err.reason == "egress_id_integrity_mismatch"
     assert "abc123" in str(err)
+    # Structural no-oracle guard: the error exposes no body/hash attribute, so a
+    # future refactor that threads a hash into it fails this test loudly.
+    assert not hasattr(err, "body_hash")
+    assert not hasattr(err, "response")
+    # The only constructor argument is the already-public egress-id.
+    with pytest.raises(TypeError):
+        EgressIdIntegrityError(egress_id="x", body_hash="leak")  # type: ignore[call-arg]
