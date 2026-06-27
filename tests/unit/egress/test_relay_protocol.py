@@ -18,6 +18,7 @@ import asyncio
 import pytest
 
 from alfred.egress.relay_protocol import (
+    EgressRelayReply,
     EgressRequest,
     EgressResponse,
     FrameTooLargeError,
@@ -68,6 +69,34 @@ def test_raw_tool_request_defaults() -> None:
 def test_raw_tool_request_rejects_unknown_field() -> None:
     with pytest.raises(ValueError, match="extra"):
         _RawToolRequest(method="GET", url="https://h/", headers={}, nope=1)  # type: ignore[call-arg]
+
+
+def test_relay_reply_forwarded_round_trips() -> None:
+    reply = EgressRelayReply(response=EgressResponse(status=200, headers={}, body=b"ok"))
+    restored = EgressRelayReply.model_validate_json(reply.model_dump_json())
+    assert restored.deny_reason is None
+    assert restored.response is not None
+    assert restored.response.body == b"ok"
+
+
+def test_relay_reply_denied_round_trips() -> None:
+    reply = EgressRelayReply(deny_reason="destination_not_allowlisted")
+    restored = EgressRelayReply.model_validate_json(reply.model_dump_json())
+    assert restored.response is None
+    assert restored.deny_reason == "destination_not_allowlisted"
+
+
+def test_relay_reply_rejects_both_set() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        EgressRelayReply(
+            response=EgressResponse(status=200, headers={}, body=b""),
+            deny_reason="dlp_redacted",
+        )
+
+
+def test_relay_reply_rejects_neither_set() -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        EgressRelayReply()
 
 
 @pytest.mark.asyncio

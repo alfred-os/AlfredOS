@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 # 4-byte big-endian unsigned length prefix → frames up to 4 GiB are *representable*;
 # the per-read ``max_len`` bound (a small cap the caller chooses) is what actually
@@ -76,6 +76,30 @@ class EgressResponse(BaseModel):
     )
 
 
+class EgressRelayReply(BaseModel):
+    """The gateway's single framed reply to an :class:`EgressRequest`.
+
+    EXACTLY ONE of ``response`` (the request was forwarded — carries the upstream
+    :class:`EgressResponse`) or ``deny_reason`` (the gateway refused to forward —
+    carries an ``EgressRelayDenyReason`` value) is set. The in-core relay client
+    (C1) maps a set ``deny_reason`` to ``EgressDeniedError`` and otherwise consumes
+    ``response``. A relay-level deny is structurally distinct from an upstream HTTP
+    error (a real 4xx/5xx arrives as a forwarded ``EgressResponse``); an upstream
+    *connect* failure produces NO reply frame at all (the core's truncated read
+    surfaces as ``IOPlaneUnavailableError``).
+    """
+
+    response: EgressResponse | None = None
+    deny_reason: str | None = None
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> EgressRelayReply:
+        if (self.response is None) == (self.deny_reason is None):
+            raise ValueError("EgressRelayReply must set exactly one of {response, deny_reason}")
+        return self
+
+
 class _RawToolRequest(BaseModel):
     """The in-core PRE-redaction tool request (consumed by the C1/C2 relay client).
 
@@ -121,6 +145,7 @@ async def write_frame(writer: asyncio.StreamWriter, payload: bytes) -> None:
 
 
 __all__ = [
+    "EgressRelayReply",
     "EgressRequest",
     "EgressResponse",
     "FrameTooLargeError",
