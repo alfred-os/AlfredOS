@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from alfred.security.dlp import OutboundDlp
+from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
+from alfred.security.dlp import OutboundCanaryTripped, OutboundDlp
 
 # ----- Doubles --------------------------------------------------------------
 
@@ -122,20 +123,104 @@ def test_stage_2_word_boundary_anchoring() -> None:
     assert "[REDACTED:api-key-shape]" in out
 
 
-# ----- Stage 3: canary stub ------------------------------------------------
+# ----- Stage 3: the real outbound canary scan (G7-2b) ----------------------
 
 
-def test_canary_stub_is_identity_in_slice_2() -> None:
-    """Slice-3 expands stage 3; Slice-2 keeps it as a literal no-op.
+class _RaisingMatcher:
+    """A canary matcher whose ``first_match`` raises — proves fail-LOUD."""
 
-    REGRESSION GUARD: do not change without updating spec. The
-    ``OutboundDlp._canary_stub`` docstring documents this contract.
-    """
-    assert OutboundDlp._canary_stub("anything") == "anything"
-    assert OutboundDlp._canary_stub("") == ""
-    assert OutboundDlp._canary_stub("with sk-AAAAAAAAAAAAAAAAAAAA shape") == (
-        "with sk-AAAAAAAAAAAAAAAAAAAA shape"
+    def first_match(self, text: str) -> str | None:
+        raise RuntimeError("simulated matcher internal error")
+
+
+def test_canary_trip_raises_and_audits_after_the_row() -> None:
+    """A registered canary in the outbound body fails LOUD: the trip audit row is
+    written, THEN OutboundCanaryTripped raises (never fail-open). HARD rule #7."""
+    audit = _AuditRecorder()
+    dlp = OutboundDlp(
+        broker=_StubBroker({}),
+        audit=audit,
+        canary=CanaryMatcher(tokens=[CanaryToken("CANARY-OUT-12345")]),
     )
+    with pytest.raises(OutboundCanaryTripped) as exc_info:
+        dlp.scan("exfil attempt carrying CANARY-OUT-12345 outbound")
+    assert exc_info.value.token == "CANARY-OUT-12345"  # noqa: S105 -- canary sentinel, not a secret
+    assert exc_info.value.reason == "outbound_canary_tripped"
+    # The trip audit row fired (loud), distinct from the redaction row.
+    canary_rows = [e for e in audit.events if e[0] == "dlp.outbound_canary_tripped"]
+    assert len(canary_rows) == 1
+    assert canary_rows[0][1]["token"] == "CANARY-OUT-12345"  # noqa: S105 -- canary sentinel
+
+
+def test_clean_body_with_canary_matcher_returns_redacted_text() -> None:
+    """When no canary is present the stage is transparent; redaction still runs."""
+    audit = _AuditRecorder()
+    dlp = OutboundDlp(
+        broker=_StubBroker({}),
+        audit=audit,
+        canary=CanaryMatcher(tokens=[CanaryToken("CANARY-OUT-12345")]),
+    )
+    assert dlp.scan("clean body sk-AAAAAAAAAAAAAAAAAAAA") == "clean body [REDACTED:api-key-shape]"
+    assert not any(e[0] == "dlp.outbound_canary_tripped" for e in audit.events)
+
+
+def test_no_canary_matcher_is_a_no_op_stage() -> None:
+    """When ``canary`` is None (today's core default) stage 3 does nothing."""
+    audit = _AuditRecorder()
+    dlp = OutboundDlp(broker=_StubBroker({}), audit=audit, canary=None)
+    assert dlp.scan("CANARY-OUT-12345 passes when no matcher is wired") == (
+        "CANARY-OUT-12345 passes when no matcher is wired"
+    )
+    assert audit.events == []
+
+
+def test_canary_matcher_internal_error_fails_loud_not_open() -> None:
+    """An internal matcher error must PROPAGATE — never swallow + fall through (a
+    swallowed error would silently let the canary'd body egress)."""
+    dlp = OutboundDlp(broker=_StubBroker({}), audit=_AuditRecorder(), canary=_RaisingMatcher())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="simulated matcher internal error"):
+        dlp.scan("any body at all")
+
+
+def test_canary_trips_on_scan_for_outbound_too() -> None:
+    """The chokepoint minting path also fails loud (B4 calls scan_for_outbound)."""
+    dlp = OutboundDlp(
+        broker=_StubBroker({}),
+        audit=_AuditRecorder(),
+        canary=CanaryMatcher(tokens=[CanaryToken("CANARY-OUT-12345")]),
+    )
+    with pytest.raises(OutboundCanaryTripped):
+        dlp.scan_for_outbound("body with CANARY-OUT-12345")
+
+
+# ----- Broker-optional (gateway side: stages 2+3 only) ---------------------
+
+
+def test_broker_none_skips_stage_1_but_runs_stage_2() -> None:
+    """The gateway holds no vault (ADR-0036), so it builds OutboundDlp(broker=None):
+    a broker-only-detectable value passes (no stage 1), but an API-key-shaped value
+    is still redacted by stage 2 — one code path, no fork."""
+    audit = _AuditRecorder()
+    dlp = OutboundDlp(broker=None, audit=audit)
+    # A value only the broker would know is NOT redacted (no stage 1).
+    assert dlp.scan("known-only-to-broker-value") == "known-only-to-broker-value"
+    # An API-key-shaped value is still caught by stage 2.
+    out = dlp.scan("leak sk-AAAAAAAAAAAAAAAAAAAA")
+    assert "[REDACTED:api-key-shape]" in out
+    # The stage-2 row never lists ``broker`` (it was skipped).
+    stage2_rows = [e for e in audit.events if e[0] == "dlp.outbound_redacted"]
+    assert stage2_rows[0][1]["stages_triggered"] == ("api_key_shape",)
+
+
+def test_broker_none_still_trips_canary_at_stage_3() -> None:
+    """broker=None + a canary matcher: stage 3 still fails loud (gateway 2nd pass)."""
+    dlp = OutboundDlp(
+        broker=None,
+        audit=_AuditRecorder(),
+        canary=CanaryMatcher(tokens=[CanaryToken("CANARY-OUT-12345")]),
+    )
+    with pytest.raises(OutboundCanaryTripped):
+        dlp.scan_for_outbound("redacted body still carrying CANARY-OUT-12345")
 
 
 # ----- Multi-secret ordering -----------------------------------------------

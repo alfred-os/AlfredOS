@@ -13,6 +13,8 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "egress.id_integrity_mismatch",
     # G7-2a: record_response on an egress-id with no committed intent row.
     "egress.ledger_unknown_egress_id",
+    # G7-2b: the fail-loud outbound canary trip (OutboundDlp stage 3).
+    "egress.outbound_canary_tripped",
     # B2: the fail-closed egress-proxy bind refusal (alfred gateway start).
     "gateway.start.egress_proxy_bind_failed",
     # B4: the closed-vocab egress-CONNECT denial-reason presentations (gateway egress audit).
