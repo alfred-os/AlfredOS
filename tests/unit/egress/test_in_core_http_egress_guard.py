@@ -54,6 +54,10 @@ _CONSTRUCT_ALLOWLIST: dict[str, str] = {
     "egress/client.py": (
         "the sanctioned in-core egress seam — builds the proxied httpx.AsyncClient (Spec C G7-1)"
     ),
+    "gateway/egress_relay.py": (
+        "the sanctioned gateway-side egress ORIGINATION site — builds the direct-originating "
+        "httpx.AsyncClient for mode-(b) tool egress (Spec C G7-2b; the gateway IS the egress plane)"
+    ),
 }
 
 # A broken _SRC_ROOT (a future dir-depth refactor or a src/ rename) would make rglob
