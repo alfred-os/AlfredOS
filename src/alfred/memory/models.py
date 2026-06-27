@@ -753,6 +753,54 @@ class InboundIdempotency(Base):
     )
 
 
+class EgressIdempotency(Base):
+    """Durable tri-state side-effecting-egress dedup ledger (Spec C §5, G7-2a).
+
+    Mirrors :class:`InboundIdempotency` but for OUTBOUND side-effects. One row per
+    logical egress call, keyed on the deterministic, injective ``egress_id`` (a
+    sha256 hexdigest, so exactly 64 chars). Tri-state: ``committed_no_response``
+    before the side-effect, ``committed_with_response`` after — the absent row is
+    the implicit third state. A duplicate ``egress_id`` replays the stored response
+    rather than re-firing (the money/side-effect boundary must be at-most-once).
+
+    ``response`` stores the POST-extraction **T2** result, NEVER the raw T3 tool
+    response, so a duplicate-egress replay can never re-hand raw T3 to the
+    orchestrator (HARD rule #5). ``language`` carries the BCP-47 tag because this
+    row holds user-derived content (i18n hard-rule #3).
+    """
+
+    __tablename__ = "egress_idempotency"
+
+    egress_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    adapter_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    inbound_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    call_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    body_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    committed_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # Closed state vocabulary + the state<->response invariant. Both are
+        # dialect-portable (IN + boolean-equality parse under SQLite too, unlike
+        # the Postgres-only char_length CHECKs that live migration-side), so they
+        # ride the ORM into the unit-test SQLite create_all as well as migration 0023.
+        sa.CheckConstraint(
+            "state IN ('committed_no_response', 'committed_with_response')",
+            name="ck_egress_idempotency_state",
+        ),
+        sa.CheckConstraint(
+            "(state = 'committed_no_response') = (response IS NULL)",
+            name="ck_egress_idempotency_response_matches_state",
+        ),
+        Index("ix_egress_idempotency_committed_at", "committed_at"),
+    )
+
+
 class ForwardedDispatchAttempt(Base):
     """Durable per-(adapter_id, inbound_id) dispatch-attempt ledger (Spec B G6-7-5, #309).
 
