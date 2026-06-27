@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-27 20:35+0100\n"
+"POT-Creation-Date: 2026-06-27 20:47+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1356,10 +1356,10 @@ msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 msgid "egress.id_integrity_mismatch"
 msgstr ""
 "Egress idempotency integrity check failed for egress-id {egress_id}: a "
-"duplicate egress-id arrived with a different redacted-body hash, which means "
-"a non-deterministic re-run produced a different request body for the same "
-"logical call. This is a fail-loud security boundary; no body content is "
-"exposed."
+"duplicate egress-id arrived with a different redacted-body hash, which "
+"means a non-deterministic re-run produced a different request body for "
+"the same logical call. This is a fail-loud security boundary; no body "
+"content is exposed."
 
 #: src/alfred/egress/errors.py:26
 msgid "egress.io_plane_unavailable"
@@ -2277,6 +2277,14 @@ msgstr ""
 #: src/alfred/identity/cli.py:762
 msgid "cli.user.set.success"
 msgstr "Updated user {slug}: {diff}."
+
+#: src/alfred/memory/egress_idempotency.py:124
+msgid "egress.ledger_unknown_egress_id"
+msgstr ""
+"Egress ledger error for egress-id {egress_id}: a response was recorded "
+"for an egress-id that has no committed intent row. record_response must "
+"follow a winning commit_intent — this is a caller-contract violation, not"
+" a transient failure."
 
 #: src/alfred/orchestrator/core.py:329
 msgid "orchestrator.quarantined_extract.source_tier_must_be_t3"
