@@ -106,7 +106,11 @@ _ALLOWED_METHODS: Final[frozenset[str]] = frozenset({"GET"})
 _REQUEST_FRAME_CAP: Final[int] = 4 * 1024 * 1024
 _FRAME_READ_TIMEOUT_S: Final[float] = 30.0
 _DEFAULT_RESPONSE_CAP: Final[int] = 10 * 1024 * 1024
+# httpx's per-OPERATION timeout (connect/read/write); a slow-loris response that
+# trickles a byte just under the read timeout would otherwise pin a task forever, so
+# the whole upstream forward is ALSO bounded by an overall wall-clock deadline below.
 _UPSTREAM_TIMEOUT_S: Final[float] = 30.0
+_DEFAULT_UPSTREAM_DEADLINE_S: Final[float] = 60.0
 
 # Headers never forwarded upstream: hop-by-hop (RFC 7230 §6.1) + the caller-
 # supplied Host / Content-Length / Transfer-Encoding (H6 — request smuggling /
@@ -246,10 +250,20 @@ def _default_httpx_client() -> httpx.AsyncClient:
 def _safe_headers(headers: Mapping[str, str]) -> dict[str, str]:
     """Drop hop-by-hop + caller Host/Content-Length/Transfer-Encoding (H6).
 
-    Used on BOTH the forwarded request headers (the caller Host is then replaced by
-    the original hostname) and the returned response headers.
+    Per RFC 7230 §6.1 the ``Connection`` header NOMINATES further connection-specific
+    header names an intermediary must also strip; those are collected (case-insensitive)
+    on top of the static set. Used on BOTH the forwarded request headers (the caller
+    Host is then replaced by the original hostname) and the returned response headers.
     """
-    return {key: value for key, value in headers.items() if key.lower() not in _STRIP_HEADERS}
+    nominated = {
+        name.strip().lower()
+        for key, value in headers.items()
+        if key.lower() == "connection"
+        for name in value.split(",")
+        if name.strip()
+    }
+    strip = _STRIP_HEADERS | nominated
+    return {key: value for key, value in headers.items() if key.lower() not in strip}
 
 
 def _ip_url(url: str, resolved_ip: str) -> str:
@@ -279,6 +293,7 @@ class EgressRelay:
         resolve: _Resolver = _default_resolve,
         open_client: _ClientFactory = _default_httpx_client,
         response_byte_cap: int = _DEFAULT_RESPONSE_CAP,
+        upstream_deadline_s: float = _DEFAULT_UPSTREAM_DEADLINE_S,
     ) -> None:
         self._allowlist = tool_allowlist
         self._dlp = dlp
@@ -288,6 +303,7 @@ class EgressRelay:
         self._resolve = resolve
         self._open_client = open_client
         self._response_byte_cap = response_byte_cap
+        self._upstream_deadline_s = upstream_deadline_s
         self._conns: set[asyncio.Task[None]] = set()
 
     async def serve(self, shutdown_event: asyncio.Event) -> None:
@@ -367,6 +383,17 @@ class EgressRelay:
                 )
                 return
             destination = f"{host}:{port}"
+            # 2b. https-ONLY (SEC review SEC-344-1). A non-https scheme would make httpx
+            # originate PLAINTEXT to a port the allowlist never vetted (a bare-host
+            # ``http://allowlisted-host/`` defaults to :443 and matches a 443 entry, yet
+            # connects to :80), bypassing the TLS cert-vs-hostname pin (PROV-1/3) entirely.
+            # urlsplit lower-cases the scheme, so "HTTPS" passes; anything else is refused
+            # BEFORE the SSRF chain + origination.
+            if urlsplit(req.url).scheme != "https":
+                await self._emit(
+                    writer, self._deny(EgressRelayDenyReason.MALFORMED_ENVELOPE, destination)
+                )
+                return
             # 3. SSRF chain — re-run per relay (these do NOT come for free).
             if is_literal_ip(host):
                 await self._emit(
@@ -389,39 +416,53 @@ class EgressRelay:
                     writer, self._deny(EgressRelayDenyReason.RESOLVED_IP_NOT_GLOBAL, destination)
                 )
                 return
-            # 4. Gateway DLP second pass (decision 12) on the redacted body the core sent.
+            # 4. Gateway DLP second pass (decision 12). Scan EVERY core-controlled field
+            # that egresses — body + URL + forwarded header values — not just the body
+            # (CR review SEC-critical): a compromised core could otherwise smuggle a
+            # secret/canary past the chokepoint via the URL query or a header. The
+            # gateway DLP is a DETECTOR here (deny on any change/canary), not a
+            # redact-and-forward — so on a clean scan the ORIGINAL (core-redacted) body
+            # is forwarded as-is.
+            scannable = self._scannable_egress_text(req)
             try:
-                redacted_text, scan_result = self._dlp.scan_for_outbound(req.body)
+                redacted_text, scan_result = self._dlp.scan_for_outbound(scannable)
             except OutboundCanaryTripped:
                 await self._emit(
                     writer,
                     self._deny(EgressRelayDenyReason.CANARY_TRIPPED, destination, canary=True),
                 )
                 return
-            if redacted_text != req.body:
-                # The core failed to redact — refuse, do NOT forward (the gateway is
-                # the second chokepoint, not a re-redacting forwarder).
+            if redacted_text != scannable:
+                # The core failed to redact some egressing field — refuse, do NOT
+                # forward (the gateway is the second chokepoint, not a re-redacter).
                 await self._emit(
                     writer, self._deny(EgressRelayDenyReason.DLP_REDACTED, destination)
                 )
                 return
-            # 5. Originate the real upstream TLS + reply.
-            reply = await self._forward(
-                req,
-                host=host,
-                resolved_ip=resolved_ip,
-                forward_body=redacted_text,
-                destination=destination,
-                dlp_redactions=scan_result.dlp_redactions_count,
+            # 5. Originate the real upstream TLS + reply, under an overall wall-clock
+            # deadline so a slow-loris response cannot pin the task indefinitely (CR
+            # review). A timeout raises ``TimeoutError`` (an ``OSError`` subtype) → the
+            # except below treats it as an I/O-plane outage (no reply, counted error).
+            reply = await asyncio.wait_for(
+                self._forward(
+                    req,
+                    host=host,
+                    resolved_ip=resolved_ip,
+                    forward_body=req.body,
+                    destination=destination,
+                    dlp_redactions=scan_result.dlp_redactions_count,
+                ),
+                timeout=self._upstream_deadline_s,
             )
             await self._emit(writer, reply)
         except asyncio.CancelledError:
             raise
-        except (httpx.TransportError, OSError) as exc:
-            # Gateway-side DNS, the gateway↔upstream connect/read, or the
-            # core↔gateway frame write failed. NOT a policy deny → no reply frame;
-            # the core's truncated read surfaces as IOPlaneUnavailableError. Loud +
-            # counted (hard rule #7).
+        except (httpx.TransportError, TimeoutError, OSError) as exc:
+            # Gateway-side DNS, the gateway↔upstream connect/read, the overall-deadline
+            # ``TimeoutError`` (an OSError subtype; listed explicitly for clarity), or the
+            # core↔gateway frame write failed. NOT a policy deny → no reply frame; the
+            # core's truncated read surfaces as IOPlaneUnavailableError. Loud + counted
+            # (hard rule #7).
             GATEWAY_EGRESS_RELAY.labels(outcome="error").inc()
             _log.warning(
                 "gateway.egress.relay_connection_error", destination=destination, error=repr(exc)
@@ -517,12 +558,27 @@ class EgressRelay:
             )
         )
 
+    @staticmethod
+    def _scannable_egress_text(req: EgressRequest) -> str:
+        """Every core-controlled field that could egress, joined for the DLP scan.
+
+        Body + URL + header values — so the gateway DLP second pass catches a
+        secret/canary smuggled via the URL query or a forwarded header, not only the
+        body (CR review). Newline-joined so a token spanning the field boundary can't
+        be hidden. Header NAMES are not scanned (a secret lives in a value), but all
+        values are (incl. ones ``_safe_headers`` would strip — denying a canary in a
+        soon-to-be-stripped header is the safe direction).
+        """
+        return "\n".join((req.body, req.url, *req.headers.values()))
+
     def _deny(
         self, reason: EgressRelayDenyReason, destination: str, *, canary: bool = False
     ) -> EgressRelayReply:
         event = EGRESS_RELAY_CANARY_EVENT if canary else EGRESS_RELAY_DENIED_EVENT
         self._audit(event, {"destination": destination, "reason": reason.value})
-        return EgressRelayReply(deny_reason=reason.value)
+        # Pass the closed-enum member (not the raw str) so the wire frame carries the
+        # validated type — a drifted reason can never serialise as a valid frame.
+        return EgressRelayReply(deny_reason=reason)
 
     async def _emit(self, writer: asyncio.StreamWriter, reply: EgressRelayReply) -> None:
         """Write the reply frame, then count the outcome (exactly one per connection).

@@ -154,6 +154,7 @@ def _relay(
     dlp: OutboundDlp | None = None,
     allowlist: frozenset[tuple[str, int]] = _ALLOWLIST,
     response_byte_cap: int = 4096,
+    upstream_deadline_s: float = 60.0,
 ) -> EgressRelay:
     return EgressRelay(
         tool_allowlist=allowlist,
@@ -164,6 +165,7 @@ def _relay(
         resolve=resolve or (lambda _h: "1.1.1.1"),  # type: ignore[arg-type, return-value]
         open_client=open_client,  # type: ignore[arg-type]
         response_byte_cap=response_byte_cap,
+        upstream_deadline_s=upstream_deadline_s,
     )
 
 
@@ -215,6 +217,10 @@ async def test_happy_forward_returns_response_and_audits() -> None:
     assert reply.response.status == 200
     assert reply.response.body == b"upstream-body"
     assert any(e.get("event") == EGRESS_RELAY_FORWARDED_EVENT for e in logs)
+    # TE-344-1: the response is read in STREAMING mode so the byte-cap can refuse an
+    # oversized body before it is fully buffered — pin it so a regression dropping
+    # ``stream=True`` (which would unboundedly buffer) is caught.
+    assert captured["stream"] is True
 
 
 @pytest.mark.asyncio
@@ -300,6 +306,19 @@ async def test_non_allowlisted_destination_denied() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_https_scheme_denied() -> None:
+    # SEC-344-1: an http:// URL to an allowlisted host (bare host → default 443,
+    # which MATCHES a 443 allowlist entry) must NOT egress — it would originate
+    # PLAINTEXT to :80, bypassing the TLS cert-vs-hostname pin. Refused as a
+    # malformed envelope BEFORE the SSRF chain + origination.
+    captured: dict[str, object] = {}
+    relay = _relay(open_client=_open_client_factory(captured))
+    writer = await _drive(relay, _frame(_req(url="http://api.example.com/v1/x")))
+    assert _reply(writer).deny_reason == EgressRelayDenyReason.MALFORMED_ENVELOPE.value
+    assert captured.get("open_calls", 0) == 0  # never originated
+
+
+@pytest.mark.asyncio
 async def test_resolved_private_ip_denied() -> None:
     # Allowlisted host, but gateway-side resolve returns a private IP → the
     # DNS-rebinding TOCTOU guard refuses.
@@ -338,6 +357,35 @@ async def test_canary_trip_denied_and_audited_as_canary_event() -> None:
     assert _reply(writer).deny_reason == EgressRelayDenyReason.CANARY_TRIPPED.value
     assert captured.get("open_calls", 0) == 0
     assert any(e.get("event") == EGRESS_RELAY_CANARY_EVENT for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_dlp_second_pass_scans_url_query_for_canary() -> None:
+    # CR SEC-critical: the chokepoint scans the URL too, not just the body — a canary
+    # smuggled into the query (a body-less GET, the live consumer's shape) is caught.
+    captured: dict[str, object] = {}
+    dlp = OutboundDlp(
+        broker=None,
+        audit=lambda **_kw: None,
+        canary=CanaryMatcher(tokens=[CanaryToken("CANARY-IN-URL")]),
+    )
+    relay = _relay(open_client=_open_client_factory(captured), dlp=dlp)
+    writer = await _drive(relay, _frame(_req(url="https://api.example.com/x?leak=CANARY-IN-URL")))
+    assert _reply(writer).deny_reason == EgressRelayDenyReason.CANARY_TRIPPED.value
+    assert captured.get("open_calls", 0) == 0  # never originated
+
+
+@pytest.mark.asyncio
+async def test_dlp_second_pass_scans_forwarded_header_values() -> None:
+    # CR SEC-critical: a secret-shaped value in a forwarded header (the core "forgot"
+    # to redact it) is caught — not only the body.
+    captured: dict[str, object] = {}
+    relay = _relay(open_client=_open_client_factory(captured))
+    writer = await _drive(
+        relay, _frame(_req(headers={"Authorization": "Bearer sk-AAAAAAAAAAAAAAAAAAAA"}))
+    )
+    assert _reply(writer).deny_reason == EgressRelayDenyReason.DLP_REDACTED.value
+    assert captured.get("open_calls", 0) == 0
 
 
 # --- upstream-response handling --------------------------------------------
@@ -469,6 +517,35 @@ async def test_upstream_connect_failure_writes_no_reply() -> None:
         writer = await _drive(relay, _frame(_req()))
     assert bytes(writer.buf) == b""  # NO reply frame
     assert writer.closed
+    assert any(e.get("event") == "gateway.egress.relay_connection_error" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_upstream_deadline_exceeded_writes_no_reply() -> None:
+    # CR major: a slow upstream (here a send that never returns) must not pin the task
+    # — the overall wall-clock deadline fires, TimeoutError (an OSError subtype) is
+    # handled by the error flow → no reply frame, counted error.
+    never = asyncio.Event()
+
+    class _HangingClient:
+        def build_request(
+            self, method: str, url: str, *, headers: dict[str, str], content: object
+        ) -> httpx.Request:
+            return httpx.Request(method, url, headers=headers, content=content)  # type: ignore[arg-type]
+
+        async def send(
+            self, request: httpx.Request, *, follow_redirects: bool, stream: bool = False
+        ) -> object:
+            await never.wait()  # hangs past the deadline
+            raise AssertionError("unreachable")
+
+        async def aclose(self) -> None:
+            return None
+
+    relay = _relay(open_client=lambda: _HangingClient(), upstream_deadline_s=0.05)
+    with structlog.testing.capture_logs() as logs:
+        writer = await _drive(relay, _frame(_req()))
+    assert bytes(writer.buf) == b""  # NO reply frame
     assert any(e.get("event") == "gateway.egress.relay_connection_error" for e in logs)
 
 
@@ -664,6 +741,15 @@ def test_safe_headers_strips_hop_by_hop_and_smuggling() -> None:
     assert "content-length" not in {k.lower() for k in out}
     assert "transfer-encoding" not in {k.lower() for k in out}
     assert "connection" not in {k.lower() for k in out}
+    assert out["X-Keep"] == "yes"
+
+
+def test_safe_headers_strips_connection_nominated_headers() -> None:
+    # RFC 7230 §6.1: the Connection header nominates further connection-specific
+    # headers an intermediary must strip (CR review).
+    out = _safe_headers({"Connection": "X-Foo, close", "X-Foo": "drop-me", "X-Keep": "yes"})
+    assert "x-foo" not in {k.lower() for k in out}  # nominated by Connection → stripped
+    assert "connection" not in {k.lower() for k in out}  # the static hop-by-hop set
     assert out["X-Keep"] == "yes"
 
 
