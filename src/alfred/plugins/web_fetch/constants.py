@@ -7,13 +7,10 @@ model and the host-side
 duplicating the literal. CodeRabbit CR-CLI flagged the dual definition
 across those two modules — co-locating here removes the drift hazard.
 
-NOT shared with the plugin subprocess at
-``plugins/alfred_web_fetch/web_fetch_plugin.py``: per the plugin-process-
-isolation contract the subprocess holds its own constant as the
-secondary defence (the subprocess must remain self-contained — if the
-host wire format ever lies about the cap, the plugin's own constant is
-the authority). The host-side and subprocess-side constants are
-intentionally kept in sync by code review, not by import.
+The subprocess at ``plugins/alfred_web_fetch/web_fetch_plugin.py`` held
+its own copy of this constant (plugin-process-isolation contract: the
+subprocess was self-contained). That subprocess was deleted in G7-2.5
+Task 7; this constant now exclusively serves the host-side dispatcher.
 """
 
 from __future__ import annotations

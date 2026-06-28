@@ -19,26 +19,23 @@
 # (manifest ∩ operator ∩ session) matches on netloc, NOT on resolved IP,
 # so it cannot block this on its own.
 #
-# Defence (sec-pr-s3-5-003 / H3 — host_ip_guard.py):
-#   - dispatch_web_fetch calls check_url_host_ips() AFTER the allowlist
-#     passes and BEFORE the transport dispatch.
-#   - The guard pre-resolves the hostname via socket.getaddrinfo and
-#     classifies every returned address via ipaddress.ip_address.
-#   - Refuse on ANY internal IP in the resolution set (RFC1918,
-#     loopback, link-local, multicast, reserved) — defends against the
-#     multi-record DNS shape (one public + one internal).
-#   - Loopback exception: ONLY when (URL scheme == http) AND (URL host
-#     is literal 127.0.0.1 / localhost / ::1). The dual-AND defends
-#     against DNS rebinding to loopback for non-loopback URL hosts.
-#   - Emits a ``tool.web.fetch`` audit row with
-#     ``result=internal_ip_refused`` AND
-#     ``dlp_scan_result=internal_ip_refused`` BEFORE raising
-#     :class:`WebFetchInternalIPRefused`.
+# Defence (G7-2b — gateway egress relay, ``EgressRelay._handle_one``):
+#   - The connectivity-free core (Spec C / CLAUDE.md hard rule #9) no
+#     longer resolves DNS; all outbound HTTP originates at the gateway.
+#   - The gateway relay resolves the hostname server-side and classifies
+#     the result via ``ipaddress.ip_address``.
+#   - ``RESOLVED_IP_NOT_GLOBAL`` deny_reason is emitted when the resolved
+#     IP is not globally routable — covers RFC1918, loopback, link-local,
+#     multicast, and reserved addresses.
+#   - The relay refuses BEFORE opening the upstream connection; the core
+#     never sees the raw IP — only the ``EgressRelayDenyReason`` enum
+#     value on the framed response.
+#   - Verified by: ``test_resolved_private_ip_denied`` in
+#     tests/unit/gateway/test_egress_relay.py.
 #
-# Outcome: ``refused`` — the merge-blocking assertion is that the IP
-# guard refuses the fetch BEFORE the network call (transport.dispatch
-# is never reached) AND emits the typed audit row carrying the closed
-# refusal-class reason (rfc1918 / link_local / loopback).
+# Outcome: ``refused`` — the merge-blocking assertion is that the
+# gateway relay refuses internal-IP fetches via ``RESOLVED_IP_NOT_GLOBAL``
+# before opening the upstream connection.
 id: de-2026-003
 category: dlp_egress
 threat: >-
@@ -48,13 +45,13 @@ threat: >-
   (169.254.169.254 AWS/Azure/GCP metadata, 10.0.0.1 RFC1918 internal
   endpoint, 127.0.0.1 loopback to local Redis/Postgres). The three-way
   URL allowlist matches on netloc — it does NOT check resolved IPs —
-  so this attack bypasses the URL allowlist completely. The host-IP
-  guard (sec-pr-s3-5-003 / H3) is the defence — it resolves the
-  hostname pre-dispatch and refuses internal IPs with a closed-vocabulary
-  reason (rfc1918 / link_local / loopback / multicast / reserved /
-  dns_failure / no_hostname) so audit consumers can pivot on attack
-  class. The guard MUST refuse BEFORE transport.dispatch is called AND
-  emit the typed audit row carrying internal_ip_refused.
+  so this attack bypasses the URL allowlist completely. The gateway
+  egress relay (G7-2b) is the defence — it resolves the hostname
+  server-side and refuses non-globally-routable IPs with
+  deny_reason=RESOLVED_IP_NOT_GLOBAL before opening the upstream
+  connection. The relay is the sole outbound HTTP origin (Spec C /
+  CLAUDE.md hard rule #9); the connectivity-free core never resolves
+  DNS and never sees raw resolved IPs.
 ingestion_path: web.fetch
 payload:
   # Three SSRF rebinding shapes the guard must refuse.
@@ -69,24 +66,27 @@ payload:
   notes: >-
     Each shape uses the SAME URL (https://example.com/api/data) — the
     allowlist passes for the netloc. The DNS resolver is the attacker-
-    controlled element; the guard's defence is name-independent (it
-    classifies the resolved IP, not the URL). The multi-record DNS
-    variant (where the resolver returns a public IP PLUS an internal
-    one) is covered by ``test_mixed_resolution_refuses_if_any_ip_is_internal``
-    in tests/unit/plugins/web_fetch/test_host_ip_guard.py.
+    controlled element; the gateway's defence is name-independent (it
+    classifies the resolved IP, not the URL). The refusal property is
+    verified by ``test_resolved_private_ip_denied`` in
+    tests/unit/gateway/test_egress_relay.py (the ``resolve`` seam
+    returns "10.0.0.1" and the relay emits RESOLVED_IP_NOT_GLOBAL
+    without opening the upstream connection).
 expected_outcome: refused
 provenance: >-
-  Slice-3 PR-S3-5 security review sec-pr-s3-5-003 / H3 (HIGH). The
-  three-way URL allowlist on its own does not block DNS-rebinding to
-  cloud-metadata / RFC1918 / loopback — an upstream resolver that
-  hands back 169.254.169.254 for an allowlisted hostname (example.com)
-  would let the fetcher reach the AWS metadata service and exfiltrate
-  IAM credentials. The host-IP allowlist guard
-  (src/alfred/plugins/web_fetch/host_ip_guard.py) is the defence;
-  this payload is the merge-blocking adversarial proof.
+  Slice-3 PR-S3-5 security review sec-pr-s3-5-003 / H3 (HIGH).
+  Originally defended by the in-core ``host_ip_guard.py``
+  (``check_url_host_ips``). G7-2b (PR #344) re-located the SSRF chain
+  to the gateway egress relay; the connectivity-free core (Spec C /
+  CLAUDE.md hard rule #9) can no longer resolve DNS or open raw sockets.
+  The gateway relay is now the sole defence: it resolves server-side and
+  emits ``RESOLVED_IP_NOT_GLOBAL`` for non-globally-routable IPs before
+  opening the upstream connection. ``host_ip_guard.py`` deleted in G7-2.5
+  Task 7 (this PR / #333).
 references:
   - "spec §7.4 three-way URL allowlist (manifest ∩ operator ∩ session)"
   - "sec-pr-s3-5-003 / H3 — security review finding: no connector-level IP-allowlist"
-  - "src/alfred/plugins/web_fetch/host_ip_guard.py — IP guard implementation"
+  - "tests/unit/gateway/test_egress_relay.py::test_resolved_private_ip_denied — gateway SSRF proof"
+  - "src/alfred/gateway/egress/relay.py — EgressRelay._handle_one (RESOLVED_IP_NOT_GLOBAL path)"
   - "OWASP SSRF cheat sheet — DNS rebinding section"
   - "AWS Instance Metadata Service v1 (IMDSv1) credential exfiltration"

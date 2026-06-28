@@ -60,9 +60,9 @@ class WebFetchDispatchParams(BaseModel):
     equality on the success path (handle-cap PR's Task 19)."""
 
     skip_tls_verify: bool = False
-    """Dev escape hatch (``ALFRED_ENV=development`` only). The
-    parent-side ``TlsPolicy`` check is the authoritative gate; this
-    flag is forwarded for the subprocess-side defence-in-depth check."""
+    """Dev escape hatch (``ALFRED_ENV=development`` only). TLS is now
+    enforced at the gateway relay (G7-2b); this field is kept for
+    backwards wire-compat and forwarded as-is in the relay request."""
 
     size_limit_bytes: int = Field(default=_DEFAULT_SIZE_LIMIT_BYTES, gt=0)
     """Response body cap. ``gt=0`` defends against a 0/negative value

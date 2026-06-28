@@ -10,13 +10,12 @@ when a provider key is being delivered. The host process's own
 environ`` rebind).
 
 That guard is load-bearing, but it created a regression: the documented
-dev-mode TLS escape hatch (spec §7.11, ``TlsPolicy.__post_init__``) reads
-``ALFRED_ENV`` from the subprocess's environment. With the subprocess
-running under the minimal env, ``ALFRED_ENV`` is **always unset** in the
-child, so the policy defaults to ``"production"`` and refuses
-``skip_tls_verify=True`` even when the operator legitimately set
-``ALFRED_ENV=development`` on the parent. The escape hatch never fires.
-arch-003 (HIGH) flagged this.
+dev-mode escape hatch (spec §7.11) reads ``ALFRED_ENV`` from the
+subprocess's environment. With the subprocess running under the minimal
+env, ``ALFRED_ENV`` is **always unset** in the child, so the policy
+defaults to ``"production"`` and refuses ``skip_tls_verify=True`` even
+when the operator legitimately set ``ALFRED_ENV=development`` on the
+parent. The escape hatch never fires. arch-003 (HIGH) flagged this.
 
 **Fix shape.** This module is the **sole sanctioned reader** of the
 parent-side ``ALFRED_ENV`` for the plugin-subprocess passthrough. It
@@ -80,9 +79,9 @@ def alfred_env_for_subprocess() -> str:
     weaker setting.
 
     The plugin subprocess then sees the resolved value in its env, and
-    :class:`alfred.plugins.web_fetch.tls_policy.TlsPolicy` honours the
-    operator's intent: ``ALFRED_ENV=development`` permits the
-    ``skip_tls_verify`` escape hatch; anything else refuses it.
+    any subprocess-side policy that reads ``ALFRED_ENV`` (e.g. dev-mode
+    escape hatches) honours the operator's intent: ``ALFRED_ENV=development``
+    permits relaxed behaviour; anything else refuses it.
 
     This is the single sanctioned passthrough path. The transport must
     NEVER read ``os.environ`` directly (the AST guard enforces that);

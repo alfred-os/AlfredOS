@@ -97,11 +97,11 @@ class WebFetchRedirectRefused(WebFetchError):  # noqa: N818 -- name pinned by sp
 class WebFetchTlsError(WebFetchError):
     """TLS verification failed (spec §7.11).
 
-    Production has no operator override — ``ALFRED_ENV=development`` is
-    the only escape hatch and is gated by :class:`TlsPolicy` at
-    construction time. The ``url`` and ``detail`` attributes are surfaced
-    so operators can correlate with the originating request without
-    parsing the structlog row.
+    TLS enforcement now originates at the gateway relay (G7-2b); this
+    exception records a TLS-level failure surfaced by the relay in its
+    deny/response envelope. The ``url`` and ``detail`` attributes are
+    surfaced so operators can correlate with the originating request
+    without parsing the structlog row.
     """
 
     def __init__(self, url: str, detail: str) -> None:
@@ -187,10 +187,10 @@ class WebFetchInternalIPRefused(WebFetchError):  # noqa: N818 -- name pinned by 
     that the URL-name allowlist alone cannot block: an upstream resolver
     that hands back ``10.0.0.1`` / ``169.254.169.254`` / ``127.0.0.1`` for
     an allowlisted hostname would otherwise let the fetcher reach an
-    internal endpoint. See :mod:`alfred.plugins.web_fetch.host_ip_guard`
-    for the classification logic and the closed reason vocabulary
-    (``rfc1918`` / ``link_local`` / ``loopback`` / ``multicast`` /
-    ``reserved`` / ``dns_failure`` / ``no_hostname``).
+    internal endpoint. Since G7-2b this guard lives in the gateway egress
+    relay (``EgressRelayDenyReason.RESOLVED_IP_NOT_GLOBAL``); the
+    connectivity-free core (Spec C) no longer resolves DNS. This exception
+    is raised when the relay returns that deny reason.
 
     ``url`` is the URL the caller asked for; ``resolved_ip`` is the
     offending IP address the resolver returned (empty string when the
