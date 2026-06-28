@@ -104,21 +104,11 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"url": "https://example.com/"},
         ("canary",),
     ),
-    "web.fetch.error.unexpected_dispatch_shape": (
-        # C3 / i18n-001 — fetch_dispatcher.py unexpected-dispatch-shape
-        # WebFetchError carrier. The Python type name of the bad result
-        # flows through ``{shape}``.
-        {"shape": "ExtractionResult"},
-        ("dispatch", "shape"),
-    ),
-    "web.fetch.error.plugin_returned_message": (
-        # C4 / i18n-002 — fetch_dispatcher.py generic WebFetchError
-        # fallback when the plugin returns a structured error envelope
-        # without a known ``type`` tag. The plugin-supplied detail
-        # flows through ``{message}``.
-        {"message": "DNS resolution failed"},
-        ("plugin",),
-    ),
+    # G7-2.5 Task 6 (#333): ``web.fetch.error.unexpected_dispatch_shape`` and
+    # ``web.fetch.error.plugin_returned_message`` were removed — the re-homed
+    # dispatcher no longer drives a plugin subprocess (no ControlResult /
+    # dispatch-shape arms), so those t() call sites (and their catalog entries)
+    # are gone.
     "web.fetch.error.internal_ip_refused": (
         # sec-pr-s3-5-003 / H3 — host-IP allowlist guard against
         # DNS-rebinding / cloud-metadata SSRF.
@@ -140,13 +130,18 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"env": "staging"},
         ("development", "production"),
     ),
-    "web.fetch.error.dispatch_param_invalid": (
-        # #147 — host-side Pydantic validation arm.
-        # Operator-actionable: distinguishes a host defect from a
-        # user-input issue AND points at the audit log invocation that
-        # surfaces the closed-vocabulary tag for forensic correlation.
+    # G7-2.5 Task 6 (#333): ``web.fetch.error.dispatch_param_invalid`` was
+    # removed — the re-homed dispatcher no longer constructs
+    # ``WebFetchDispatchParams`` (no host-side param-validation arm), so its
+    # t() call site (and catalog entry) are gone.
+    "web.fetch.error.url_secret_refused": (
+        # G7-2.5 Task 6 (#333) — the re-homed dispatcher's refuse-on-secret
+        # arm: the outbound DLP redacted the request URL, so it carries a
+        # secret. Payload-blind (NO url / NO secret in the surface) — the
+        # message names the symptom + the audit-log invocation that surfaces
+        # the closed-vocabulary tag.
         {},
-        ("host", "audit log"),
+        ("secret", "dlp"),
     ),
 }
 

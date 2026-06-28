@@ -48,6 +48,12 @@ import structlog
 from alfred.errors import AlfredError
 from alfred.i18n import t
 
+# G7-2.5 Task 6 (plan-review CORE-1): the action-deadline default now lives in
+# ``constants`` (the dispatcher wraps ``extractor.handle`` in
+# ``asyncio.timeout(action_deadline_seconds)`` and shares the literal). Imported
+# here so the ContentStore TTL formula keeps the same source of truth.
+from alfred.plugins.web_fetch.constants import _DEFAULT_ACTION_DEADLINE_SECONDS
+
 # Re-export so plugin-host callers stay decoupled from the quarantine
 # module's path. ``alfred.plugins.web_fetch`` owns the public surface
 # downstream code imports against.
@@ -94,7 +100,9 @@ def _sanitize_url_for_log(url: str) -> str:
 
 # TTL-formula defaults pinned in code so a missing operator override
 # never surprises with a different effective TTL. Spec §7.2.
-_DEFAULT_ACTION_DEADLINE_SECONDS: Final[int] = 30
+# ``_DEFAULT_ACTION_DEADLINE_SECONDS`` is imported from ``constants`` (shared
+# with the dispatcher's action-deadline); the remaining three are content-store
+# local.
 _DEFAULT_MAX_EXTRACTION_RETRIES: Final[int] = 2
 _DEFAULT_PER_RETRY_BUDGET_SECONDS: Final[int] = 10
 _DEFAULT_SLACK_SECONDS: Final[int] = 30

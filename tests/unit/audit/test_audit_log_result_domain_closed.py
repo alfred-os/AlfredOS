@@ -299,12 +299,13 @@ def test_dynamic_result_sites_are_documented() -> None:
     * ``security/quarantine.py`` — the ``_emit_extract_audit`` ``audit_result``
       param carries closed-vocab literals; its ``post_stage_refused`` value
       (C1) is now in ``ck_audit_log_result`` (migration 0022).
-    * ``plugins/web_fetch/fetch_dispatcher.py:914`` — ``result=dlp_result`` is
-      sourced from a plugin-supplied error payload
-      (``error_data["dlp_scan_result"]``), falling back to ``"fetch_error"`` —
-      neither is in the domain. Tracked as issue #326 (H2): the fix is an
-      emit-site CLAMP to an enumerated value, NOT a domain-widen, so the value
-      is deliberately NOT added to the CHECK here.
+    * ``plugins/web_fetch/fetch_dispatcher.py`` — the G7-2.5 re-home (#333)
+      removed the only dynamic ``result=`` site (the plugin-payload-derived
+      ``result=dlp_result`` once tracked as #326). The re-homed dispatcher emits
+      ONLY literal ``result=`` values (ok / refused / quarantined /
+      rate_limited / domain_not_allowed / dlp_scan_error / capped), all already
+      in-domain — they are covered by the literal subset guard above, so the
+      file no longer appears in this dynamic-site list.
     * ``egress/relay_client.py:375`` — ``result=result`` in ``_audit_refused``;
       the three reachable values are ``"in_doubt"``, ``"io_plane_unavailable"``,
       and ``"denied"`` — all in-domain (the first two added by migration 0024;
@@ -333,9 +334,12 @@ def test_dynamic_result_sites_are_documented() -> None:
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped
             "src/alfred/orchestrator/core.py:842",  # IfExp over charge_result
-            # web_fetch:914 — dynamic plugin-payload value tracked as #326 (H2);
-            # clamp at the emit site, do NOT widen the domain (see docstring).
-            "src/alfred/plugins/web_fetch/fetch_dispatcher.py:914",
+            # web_fetch/fetch_dispatcher.py: the G7-2.5 re-home (#333) deleted the
+            # dynamic ``result=dlp_result`` site (the plugin-payload-derived value
+            # tracked as #326). Every result= site in the re-homed dispatcher is
+            # now a LITERAL (ok / refused / quarantined / rate_limited /
+            # domain_not_allowed / dlp_scan_error / capped) — covered by the
+            # subset guard above, so the file no longer appears here.
             # audit_result param; post_stage_refused (C1) now in-domain.
             "src/alfred/security/quarantine.py:1261",
             "src/alfred/supervisor/core.py:692",  # result_label local
