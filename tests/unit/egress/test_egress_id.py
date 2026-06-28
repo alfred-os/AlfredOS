@@ -20,6 +20,7 @@ from alfred.egress.egress_id import (
     TurnEgressContext,
     compute_body_hash,
     compute_egress_id,
+    compute_request_descriptor,
 )
 
 _CTX = TurnEgressContext(adapter_id="discord", inbound_id="msg-1", session_id="sess-1")
@@ -95,6 +96,37 @@ def test_body_hash_is_sha256_hex() -> None:
     digest = compute_body_hash("redacted")
     assert len(digest) == 64
     assert all(ch in "0123456789abcdef" for ch in digest)
+
+
+# ---------------------------------------------------------------------------
+# compute_request_descriptor (C6 / G7-2.5 Task 1)
+# ---------------------------------------------------------------------------
+
+
+def test_request_descriptor_is_deterministic() -> None:
+    """C6-T1: identical inputs produce the same 64-char hex digest."""
+    a = compute_request_descriptor(method="GET", url="https://x.test/a", schema_id="m.S:v1")
+    b = compute_request_descriptor(method="GET", url="https://x.test/a", schema_id="m.S:v1")
+    assert a == b and len(a) == 64
+
+
+def test_request_descriptor_distinguishes_url_and_schema() -> None:
+    """C6-T2: changing url OR schema_id yields a different descriptor."""
+    base = {"method": "GET", "url": "https://x.test/a", "schema_id": "m.S:v1"}
+    assert compute_request_descriptor(**base) != compute_request_descriptor(
+        **{**base, "url": "https://x.test/b"}
+    )
+    assert compute_request_descriptor(**base) != compute_request_descriptor(
+        **{**base, "schema_id": "m.S:v2"}
+    )
+
+
+def test_request_descriptor_no_field_boundary_collision() -> None:
+    """C6-T3: length-prefixing prevents separator-collision across url/schema_id boundary."""
+    # ("GET","https://x.test/ab","") must NOT collide with ("GET","https://x.test/a","b").
+    assert compute_request_descriptor(
+        method="GET", url="https://x.test/ab", schema_id=""
+    ) != compute_request_descriptor(method="GET", url="https://x.test/a", schema_id="b")
 
 
 def test_integrity_error_carries_no_hash_oracle() -> None:

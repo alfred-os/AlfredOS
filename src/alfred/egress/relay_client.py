@@ -176,6 +176,7 @@ class RelayEgressClient:
         raw_request: _RawToolRequest,
         ctx: TurnEgressContext,
         call_index: int,
+        request_descriptor: str = "",
     ) -> RelayOutcome:
         """Execute one egress call through the gateway relay.
 
@@ -192,8 +193,12 @@ class RelayEgressClient:
         redacted_text: str = scanned[0]
 
         # Step 2: Deterministic dedup key + body-hash.
+        # ``request_descriptor`` is a fixed-width (64-char) sha256 hex string computed
+        # by C2 from (method, url, schema_id) so a divergent URL/schema replayed at
+        # the same (ctx, call_index) fires EgressIdIntegrityError (Spec C §5 / G7-2.5
+        # C6).  The default "" preserves the synthetic-driver hash for backward compat.
         egress_id = compute_egress_id(ctx, call_index=call_index)
-        body_hash = compute_body_hash(redacted_text)
+        body_hash = compute_body_hash(request_descriptor + redacted_text)
 
         # Step 3: Commit intent durably BEFORE the fire (commit-then-fire).
         # EgressIdIntegrityError propagates if the same id arrives with a
