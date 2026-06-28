@@ -305,7 +305,7 @@ def test_dynamic_result_sites_are_documented() -> None:
       neither is in the domain. Tracked as issue #326 (H2): the fix is an
       emit-site CLAMP to an enumerated value, NOT a domain-widen, so the value
       is deliberately NOT added to the CHECK here.
-    * ``egress/relay_client.py:325`` — ``result=result`` in ``_audit_refused``;
+    * ``egress/relay_client.py:376`` — ``result=result`` in ``_audit_refused``;
       the three reachable values are ``"in_doubt"``, ``"io_plane_unavailable"``,
       and ``"denied"`` — all in-domain (the first two added by migration 0024;
       ``"denied"`` was already in-domain since migration 0007). Manually audited
@@ -328,7 +328,7 @@ def test_dynamic_result_sites_are_documented() -> None:
             # G7-2c-1 (#333) — _audit_refused result param; reachable values:
             # "in_doubt" | "io_plane_unavailable" | "denied" (all in-domain,
             # migration 0024 added the first two; "denied" was already in-domain).
-            "src/alfred/egress/relay_client.py:325",
+            "src/alfred/egress/relay_client.py:376",
             "src/alfred/identity/cli.py:219",
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped

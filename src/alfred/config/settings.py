@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     egress_proxy_url: str | None = None
 
     # Spec C / G7-2c (#333): when set, the in-core RelayEgressClient dials the
-    # gateway's mode-(b) tool-egress relay at this URL (e.g. "tcp://alfred-gateway:9999").
+    # gateway's mode-(b) tool-egress relay at this URL (e.g. "http://alfred-gateway:8890").
     # UNSET => relay client is not constructed; tool egress is unavailable until G7-2.5
     # wires the live web.fetch re-home.  A blank/whitespace value is treated as None.
     egress_relay_url: str | None = None

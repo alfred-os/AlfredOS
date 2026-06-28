@@ -93,9 +93,11 @@ def authorized_t3_nonce() -> Any:
         previous = _tiers._AUTHORIZED_T3_NONCE
         nonce = CapabilityGateNonce()
         _tiers._set_authorized_t3_nonce(nonce)
-    yield nonce
-    with _NONCE_LOCK:
-        _tiers._set_authorized_t3_nonce(previous)
+    try:
+        yield nonce
+    finally:
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(previous)
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +172,16 @@ async def test_fresh_handle_stores_t2_in_ledger(
 
     # Build extractor with a relay that returns Fired (skips the C1 commit_intent
     # — that's already done above; the relay_client stub does NOT re-commit).
+    # The stub exposes ``ledger`` so EgressResponseExtractor can call
+    # record_response on the SAME real Postgres store (single-ledger, M8).
     class _DirectFiredRelay:
+        def __init__(self, _store: Any) -> None:
+            self._ledger = _store
+
+        @property
+        def ledger(self) -> Any:
+            return self._ledger
+
         async def fire(self, **_kw: Any) -> Fired:
             return Fired(response=EgressResponse(status=200, headers={}, body=b"raw T3 body"))
 
@@ -184,8 +195,7 @@ async def test_fresh_handle_stores_t2_in_ledger(
     mock_extractor.extract = AsyncMock(return_value=extracted)
 
     extractor_obj = EgressResponseExtractor(
-        relay_client=_DirectFiredRelay(),  # type: ignore[arg-type]
-        ledger=store,
+        relay_client=_DirectFiredRelay(store),  # type: ignore[arg-type]
         gate=gate,
         extractor=mock_extractor,
         recorder=recorder,
@@ -252,7 +262,16 @@ async def test_replay_handle_returns_deduplicated_without_re_extracting(
     # Second commit_intent returns IntentReplayComplete — the relay client would
     # return Deduplicated.  Simulate this by having the relay return Deduplicated
     # directly (the real C1 would do the same after seeing IntentReplayComplete).
+    # The stub exposes ``ledger`` for API consistency (M8); record_response is not
+    # called on a Deduplicated path so the ledger reference is unused here.
     class _DeduplicatedRelay:
+        def __init__(self, _store: Any) -> None:
+            self._ledger = _store
+
+        @property
+        def ledger(self) -> Any:
+            return self._ledger
+
         async def fire(self, **_kw: Any) -> Deduplicated:
             return Deduplicated(stored_t2=stored_t2, language="fr")
 
@@ -266,8 +285,7 @@ async def test_replay_handle_returns_deduplicated_without_re_extracting(
     spy_extract = mock_extractor.extract = AsyncMock(return_value=extracted)
 
     extractor_obj = EgressResponseExtractor(
-        relay_client=_DeduplicatedRelay(),  # type: ignore[arg-type]
-        ledger=store,
+        relay_client=_DeduplicatedRelay(store),  # type: ignore[arg-type]
         gate=gate,
         extractor=mock_extractor,
         recorder=recorder,

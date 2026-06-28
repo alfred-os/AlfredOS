@@ -1395,15 +1395,23 @@ msgstr ""
 "destination, add it to the provider config (ALFRED_DEEPSEEK_BASE_URL must"
 " match on both the core and the gateway)."
 
-#: src/alfred/egress/errors.py:77
+#: src/alfred/egress/errors.py:78
 msgid "egress.in_doubt"
 msgstr ""
-"Egress to {destination} is in-doubt: a prior fire committed the intent "
-"but its outcome is unknown. The request was not declared idempotent, so "
-"re-firing has been refused to avoid a double side-effect. Check the audit"
-" log for this egress-id to determine whether the previous attempt "
-"succeeded, then retry manually or declare the request idempotent if safe "
-"to refire."
+"Egress to {destination} is in-doubt (egress-id: {egress_id}): a prior "
+"fire committed the intent but its outcome is unknown. The request was not"
+" declared idempotent, so re-firing has been refused to avoid a double "
+"side-effect. Check the audit log for this egress-id to determine whether "
+"the previous attempt succeeded, then retry manually or declare the "
+"request idempotent if safe to refire."
+
+#: src/alfred/egress/errors.py:97
+msgid "egress.relay_io_unavailable"
+msgstr ""
+"External I/O is unavailable: the in-core relay client could not reach the"
+" gateway tool-egress relay ({detail}). Check that the alfred-gateway "
+"service is up and that ALFRED_EGRESS_RELAY_URL points at it — the gateway"
+" relay is the sole maker of tool HTTP requests."
 
 #: src/alfred/gateway/adapter_child_factory.py:156
 msgid "gateway.adapter.launch_target.override_refused"

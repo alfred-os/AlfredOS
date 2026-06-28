@@ -30,6 +30,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from alfred.audit.audit_row_schemas import EGRESS_RELAY_REFUSED_FIELDS
 from alfred.egress.egress_id import (
     EgressIdIntegrityError,
     TurnEgressContext,
@@ -48,6 +49,7 @@ from alfred.memory.egress_idempotency import (
     IntentInDoubt,
     IntentReplayComplete,
 )
+from alfred.security.dlp import OutboundCanaryTripped
 
 # ---------------------------------------------------------------------------
 # Fake infrastructure helpers
@@ -322,6 +324,7 @@ async def test_fresh_fire_body_is_dlp_redacted() -> None:
     assert parsed["url"] == "https://api.example.com/data"
     # egress_id must be a 64-char hex string
     assert len(parsed["egress_id"]) == 64
+    int(parsed["egress_id"], 16)  # raises ValueError if non-hex (S5)
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +380,12 @@ async def test_indoubt_non_idempotent_raises_and_audits() -> None:
         audit=audit,
     )
     raw = _make_raw_request(idempotent=False)
-    with pytest.raises(EgressInDoubtError):
+    with pytest.raises(EgressInDoubtError) as exc_info:
         await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
 
+    err = exc_info.value
+    assert err.egress_id, "EgressInDoubtError must carry the egress_id (M7)"
+    assert len(err.egress_id) == 64, "egress_id must be a 64-char hex string"
     assert not dialed
     assert len(audit.calls) == 1
     assert audit.calls[0]["result"] == "in_doubt"
@@ -601,11 +607,13 @@ async def test_concurrent_fire_does_not_head_of_line_block() -> None:
     outcome2 = await asyncio.wait_for(
         client.fire(raw_request=raw2, ctx=ctx2, call_index=0), timeout=5.0
     )
-    assert isinstance(outcome2, Fired)
-    assert not t1.done(), "first task must still be parked"
+    try:
+        assert isinstance(outcome2, Fired)
+        assert not t1.done(), "first task must still be parked"
+    finally:
+        # Release first — always, so a failed assertion can't leak the parked task.
+        slow_gate.set()
 
-    # Release first.
-    slow_gate.set()
     outcome1 = await asyncio.wait_for(t1, timeout=5.0)
     assert isinstance(outcome1, Fired)
 
@@ -619,9 +627,9 @@ async def test_concurrent_fire_does_not_head_of_line_block() -> None:
 async def test_malformed_reply_frame_raises_io_plane_unavailable_and_audits() -> None:
     """C1-T10: a well-framed but structurally invalid JSON reply → IOPlaneUnavailableError.
 
-    Exercises the ``except Exception`` branch in ``_do_fire`` (the parse fault
-    path for a gateway that returns valid JSON but fails ``EgressRelayReply``
-    model validation — e.g. an unknown deny_reason or missing both fields).
+    Exercises the ``pydantic.ValidationError`` branch in ``_do_fire`` (the parse fault path
+    for a gateway that returns valid JSON but fails ``EgressRelayReply`` model validation
+    — e.g. an unknown deny_reason or missing both fields).
     """
 
     async def _bad_frame_open(
@@ -658,3 +666,284 @@ async def test_malformed_reply_frame_raises_io_plane_unavailable_and_audits() ->
 
     assert len(audit.calls) == 1
     assert audit.calls[0]["result"] == "io_plane_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# M2 — relay_url validation
+# ---------------------------------------------------------------------------
+
+
+def test_relay_url_without_hostname_raises_value_error() -> None:
+    """M2: a relay_url with no hostname raises ValueError at construction time."""
+    with pytest.raises(ValueError, match="hostname"):
+        RelayEgressClient(
+            relay_url="tcp://",  # no hostname, no port
+            core_dlp=_StubDlp(),  # type: ignore[arg-type]
+            ledger=_StubLedger(),
+            audit_writer=_SpyAudit(),
+            concurrency=1,
+        )
+
+
+def test_relay_url_without_port_raises_value_error() -> None:
+    """M2: a relay_url with no port raises ValueError at construction time."""
+    with pytest.raises(ValueError, match="port"):
+        RelayEgressClient(
+            relay_url="tcp://localhost",  # hostname but no port
+            core_dlp=_StubDlp(),  # type: ignore[arg-type]
+            ledger=_StubLedger(),
+            audit_writer=_SpyAudit(),
+            concurrency=1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# M3 — concurrency validation
+# ---------------------------------------------------------------------------
+
+
+def test_zero_concurrency_raises_value_error() -> None:
+    """M3: concurrency=0 raises ValueError (Semaphore(0) blocks forever)."""
+    with pytest.raises(ValueError, match="concurrency"):
+        RelayEgressClient(
+            relay_url=_RELAY_URL,
+            core_dlp=_StubDlp(),  # type: ignore[arg-type]
+            ledger=_StubLedger(),
+            audit_writer=_SpyAudit(),
+            concurrency=0,
+        )
+
+
+def test_negative_concurrency_raises_value_error() -> None:
+    """M3: concurrency=-1 raises ValueError."""
+    with pytest.raises(ValueError, match="concurrency"):
+        RelayEgressClient(
+            relay_url=_RELAY_URL,
+            core_dlp=_StubDlp(),  # type: ignore[arg-type]
+            ledger=_StubLedger(),
+            audit_writer=_SpyAudit(),
+            concurrency=-1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# S1 — Payload-blind audit conformance
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_row_is_payload_blind_for_malformed_url() -> None:
+    """S1: the in-doubt refusal audit row's subject keys are exactly EGRESS_RELAY_REFUSED_FIELDS.
+
+    For a malformed URL with no hostname, the destination must fall back to
+    ``<invalid-url>`` — never a path or query component.
+    """
+    audit = _SpyAudit()
+    client = _make_client(
+        ledger=_StubLedger(result=IntentInDoubt()),
+        audit=audit,
+    )
+    # A URL with no authority — hostname is None; fallback must be "<invalid-url>".
+    raw = _make_raw_request(url="not-a-valid-url", idempotent=False)
+
+    with pytest.raises(EgressInDoubtError):
+        await client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+
+    assert len(audit.calls) == 1
+    subject = audit.calls[0]["subject"]
+    # Key-set must be exactly EGRESS_RELAY_REFUSED_FIELDS (no body, no header values).
+    assert set(subject.keys()) == set(EGRESS_RELAY_REFUSED_FIELDS)
+    # destination must be the bare host only — never a path/query.
+    assert subject["destination"] == "<invalid-url>", (
+        "malformed URL must not leak path/query into the audit row"
+    )
+    assert "reason" in subject
+    assert "egress_id" in subject
+
+
+# ---------------------------------------------------------------------------
+# S2 — OutboundCanaryTripped propagation
+# ---------------------------------------------------------------------------
+
+
+class _CanaryDlp:
+    """Stub DLP that raises OutboundCanaryTripped unconditionally."""
+
+    def scan_for_outbound(self, raw_body: str) -> tuple[str, Any]:
+        raise OutboundCanaryTripped(token="test-canary-sentinel")  # noqa: S106
+
+
+@pytest.mark.asyncio
+async def test_canary_tripped_propagates_without_committing_intent() -> None:
+    """S2: OutboundDlp.scan_for_outbound raises OutboundCanaryTripped → fire() propagates it.
+
+    Confirms the canary scan (step 1) happens BEFORE commit_intent (step 3),
+    so no dangling intent row is committed and no misleading io-down audit row
+    is written.
+    """
+    committed = False
+
+    class _TrackingLedger(_StubLedger):
+        async def commit_intent(self, **_kwargs: Any) -> CommitIntentResult:
+            nonlocal committed
+            committed = True
+            return await super().commit_intent(**_kwargs)
+
+    audit = _SpyAudit()
+    # Build the client directly so we can inject the canary DLP.
+    canary_client = RelayEgressClient(
+        relay_url=_RELAY_URL,
+        core_dlp=_CanaryDlp(),  # type: ignore[arg-type]
+        ledger=_TrackingLedger(),
+        audit_writer=audit,
+        concurrency=1,
+    )
+    raw = _make_raw_request()
+
+    with pytest.raises(OutboundCanaryTripped):
+        await canary_client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX)
+
+    assert not committed, "commit_intent must NOT be reached when canary trips before it"
+    assert len(audit.calls) == 0, "no audit row should be written for a canary trip"
+
+
+# ---------------------------------------------------------------------------
+# S3 — Timeout-expiry test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_timeout_expiry_raises_io_plane_unavailable_and_audits() -> None:
+    """S3: open_connection that never resolves (past per_call_timeout) → IOPlaneUnavailableError.
+
+    Uses a tiny timeout + an asyncio.Event that is never set to simulate a
+    hung gateway. Proves the asyncio.timeout deadline wiring.
+    """
+    never_resolves = asyncio.Event()
+
+    async def _hung_connection(host: str, port: int) -> Any:
+        await never_resolves.wait()
+        raise AssertionError("must never return")  # unreachable
+
+    audit = _SpyAudit()
+    client = RelayEgressClient(
+        relay_url=_RELAY_URL,
+        core_dlp=_StubDlp(),  # type: ignore[arg-type]
+        ledger=_StubLedger(),
+        audit_writer=audit,
+        concurrency=1,
+        open_connection=_hung_connection,
+        per_call_timeout=0.01,  # 10ms — fast enough for a unit test
+    )
+    raw = _make_raw_request()
+
+    with pytest.raises(IOPlaneUnavailableError):
+        await asyncio.wait_for(
+            client.fire(raw_request=raw, ctx=_CTX, call_index=_CALL_INDEX),
+            timeout=2.0,
+        )
+
+    # Exactly one io-down audit row must be written.
+    assert len(audit.calls) == 1
+    assert audit.calls[0]["result"] == "io_plane_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# M8 — the `ledger` property exposes the SAME store C1 commits to (single-ledger
+# invariant: C2 records the T2 against this exact instance, not a separately
+# injected one).
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_property_exposes_the_injected_ledger() -> None:
+    """C1-M8: `.ledger` returns the same store instance passed at construction."""
+    ledger = _StubLedger()
+    client = _make_client(ledger=ledger)
+    assert client.ledger is ledger
+
+
+# ---------------------------------------------------------------------------
+# M5 — a stuck/raising `wait_closed()` in teardown is a deliberate cleanup
+# swallow: it must NOT mask the fire's result nor escape (HARD rule #7 contrast —
+# this is teardown-only, not a trust-boundary swallow).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wait_closed_failure_in_teardown_is_swallowed() -> None:
+    """C1-M5: `wait_closed()` raising during teardown is suppressed; result preserved."""
+
+    async def _open(host: str, port: int) -> tuple[asyncio.StreamReader, Any]:
+        reader = asyncio.StreamReader()
+        reply = EgressRelayReply(response=_make_resp(b"ok"))
+        frame = reply.model_dump_json().encode("utf-8")
+        reader.feed_data(len(frame).to_bytes(4, "big") + frame)
+        reader.feed_eof()
+
+        class _BadCloseWriter:
+            def write(self, data: bytes) -> None:
+                pass
+
+            async def drain(self) -> None:
+                return None
+
+            def close(self) -> None:
+                pass
+
+            async def wait_closed(self) -> None:
+                raise OSError("socket stuck in half-open close")
+
+        return reader, _BadCloseWriter()
+
+    client = _make_client(open_connection=_open)
+    outcome = await client.fire(raw_request=_make_raw_request(), ctx=_CTX, call_index=_CALL_INDEX)
+    # The teardown error is swallowed; the successful Fired result survives intact.
+    assert isinstance(outcome, Fired)
+
+
+@pytest.mark.asyncio
+async def test_wait_closed_hang_is_bounded_by_the_per_call_timeout() -> None:
+    """C1-M5: a `wait_closed()` that HANGS is bounded by the per-call timeout.
+
+    Without the `asyncio.timeout` bound a half-open socket close would hold the
+    semaphore indefinitely; the timeout fires, the TimeoutError is swallowed as a
+    teardown-only error, and the already-read `Fired` result is preserved.
+    """
+    never = asyncio.Event()
+
+    async def _open(host: str, port: int) -> tuple[asyncio.StreamReader, Any]:
+        reader = asyncio.StreamReader()
+        reply = EgressRelayReply(response=_make_resp(b"ok"))
+        frame = reply.model_dump_json().encode("utf-8")
+        reader.feed_data(len(frame).to_bytes(4, "big") + frame)
+        reader.feed_eof()
+
+        class _HangingCloseWriter:
+            def write(self, data: bytes) -> None:
+                pass
+
+            async def drain(self) -> None:
+                return None
+
+            def close(self) -> None:
+                pass
+
+            async def wait_closed(self) -> None:
+                await never.wait()  # never set → hangs until the timeout bounds it
+
+        return reader, _HangingCloseWriter()
+
+    client = RelayEgressClient(
+        relay_url=_RELAY_URL,
+        core_dlp=_StubDlp(),  # type: ignore[arg-type]
+        ledger=_StubLedger(),
+        audit_writer=_SpyAudit(),
+        concurrency=4,
+        open_connection=_open,
+        per_call_timeout=0.1,
+    )
+    outcome = await asyncio.wait_for(
+        client.fire(raw_request=_make_raw_request(), ctx=_CTX, call_index=_CALL_INDEX),
+        timeout=5.0,
+    )
+    assert isinstance(outcome, Fired)

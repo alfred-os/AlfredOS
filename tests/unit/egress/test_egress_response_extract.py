@@ -98,9 +98,18 @@ class _StubLedger:
 
 @dataclass
 class _StubRelayClient:
-    """Scripted relay client whose fire() returns a preset RelayOutcome."""
+    """Scripted relay client whose fire() returns a preset RelayOutcome.
+
+    Exposes a ``ledger`` property so EgressResponseExtractor can access the
+    same ledger instance via the single-ledger API (M8).
+    """
 
     outcome: Fired | Deduplicated
+    _ledger: _StubLedger = field(default_factory=_StubLedger)
+
+    @property
+    def ledger(self) -> _StubLedger:
+        return self._ledger
 
     async def fire(self, **_kwargs: Any) -> Fired | Deduplicated:
         return self.outcome
@@ -146,7 +155,7 @@ def _make_extractor(
     Returns the extractor, the spy ledger, and the spy extractor mock.
     The spy extractor is an AsyncMock wrapping QuarantinedExtractor.extract.
     """
-    ledger = _StubLedger()
+    # relay_client holds the spy ledger (single-ledger invariant, M8).
     relay_client = _StubRelayClient(outcome=relay_outcome)
     staging = QuarantineStagingMap()
     recorder = T3BodyRecorder(nonce=authorized_nonce, staging=staging)
@@ -167,15 +176,17 @@ def _make_extractor(
 
     extractor = EgressResponseExtractor(
         relay_client=relay_client,  # type: ignore[arg-type]
-        ledger=ledger,
         gate=gate,
         extractor=mock_extractor,  # type: ignore[arg-type]
         recorder=recorder,
     )
+    # Return relay_client._ledger as the spy ledger so callers can assert
+    # `record_calls` — EgressResponseExtractor now fetches the ledger via
+    # relay_client.ledger (single-ledger invariant, M8).
     # Return the child `.extract` AsyncMock as the spy so callers can assert
     # `spy.assert_awaited_once()` — the parent mock_extractor is what
     # quarantined_to_structured receives; it calls .extract on it.
-    return extractor, ledger, mock_extractor.extract
+    return extractor, relay_client._ledger, mock_extractor.extract
 
 
 # ---------------------------------------------------------------------------
