@@ -31,6 +31,7 @@ supplies a real turn-user.  See TODO: #339 below.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, cast
 
@@ -85,6 +86,21 @@ class EgressExtractOutcome(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Default post-fire hook — a module-level no-op so production is unaffected.
+#
+# The barrier seam is injected in tests to simulate a process kill after the
+# external call fires (fire_count increments) but before record_response runs.
+# The module-level default ensures the parameter is never required and the
+# production path is never altered by an unconfigured seam.
+# ---------------------------------------------------------------------------
+
+
+async def _noop() -> None:
+    """No-op async hook; the production default for post_fire_hook."""
+    return
+
+
+# ---------------------------------------------------------------------------
 # EgressResponseExtractor
 # ---------------------------------------------------------------------------
 
@@ -113,11 +129,13 @@ class EgressResponseExtractor:
         gate: CapabilityGate,
         extractor: QuarantinedExtractor,
         recorder: T3BodyRecorder,
+        post_fire_hook: Callable[[], Awaitable[None]] = _noop,
     ) -> None:
         self._relay_client = relay_client
         self._gate = gate
         self._extractor = extractor
         self._recorder = recorder
+        self._post_fire_hook = post_fire_hook
 
     async def handle(
         self,
@@ -163,6 +181,14 @@ class EgressResponseExtractor:
         outcome = cast(  # type: ignore[redundant-cast]  # cast not assert: asserts stripped under -O; mirrors relay_client.py
             Fired, outcome
         )
+
+        # Barrier seam (C4 / §4.3): invoked after the external call has fired
+        # (intent is committed_no_response, fire_count incremented) and BEFORE
+        # record_response.  In production this is _noop (no cost).  Tests inject
+        # a hook that raises to simulate a process kill mid-window and prove the
+        # at-most-once invariant — a subsequent replay of the same (ctx,
+        # call_index) must see IntentInDoubt and refuse to re-fire.
+        await self._post_fire_hook()
 
         # Step 2: mint an opaque ContentHandle and stage the raw T3 body.
         # The orchestrator never touches outcome.response.body directly.
