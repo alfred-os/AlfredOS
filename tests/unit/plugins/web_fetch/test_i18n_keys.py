@@ -122,14 +122,9 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"url": "https://example.com/", "resolved_ip": "10.0.0.1"},
         ("internal", "ip"),
     ),
-    "web.fetch.tls.skip_refused_in_non_dev": (
-        # Slice-3 retrospective fix i18n-003 — TlsPolicy.__post_init__
-        # refusal. The key is in the web.fetch.tls.* namespace to keep
-        # the policy-validation surface distinct from the operational
-        # WebFetchError tree.
-        {"env": "staging"},
-        ("development", "production"),
-    ),
+    # G7-2.5 Task 7 (#333): ``web.fetch.tls.skip_refused_in_non_dev`` was
+    # removed — ``tls_policy.py`` (its only t() call site) is deleted; TLS now
+    # originates at the gateway, so the in-core TlsPolicy refusal no longer exists.
     # G7-2.5 Task 6 (#333): ``web.fetch.error.dispatch_param_invalid`` was
     # removed — the re-homed dispatcher no longer constructs
     # ``WebFetchDispatchParams`` (no host-side param-validation arm), so its

@@ -2701,7 +2701,7 @@ msgstr ""
 msgid "plugin.manifest_sandbox_policy_refs_value_type"
 msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
 
-#: src/alfred/plugins/stdio_transport.py:631
+#: src/alfred/plugins/stdio_transport.py:629
 #: src/alfred/plugins/web_fetch/errors.py:236
 msgid "security.canary_tripped"
 msgstr ""
@@ -2804,25 +2804,11 @@ msgstr ""
 #: src/alfred/plugins/web_fetch/fetch_dispatcher.py:253
 msgid "web.fetch.error.url_secret_refused"
 msgstr ""
-"web.fetch refused: the request URL was redacted by the outbound DLP scan — "
-"it appears to carry a secret. Refusing rather than forwarding the raw "
+"web.fetch refused: the request URL was redacted by the outbound DLP scan "
+"— it appears to carry a secret. Refusing rather than forwarding the raw "
 "secret-bearing URL or sending a redacted URL the gateway cannot fetch. "
-"Inspect the audit log: alfred audit log --event tool.web.fetch --since 1h "
-"(look for dlp_scan_result=url_secret_refused)."
-
-# Slice-3 retrospective fix i18n-003 — TlsConfigError raised from
-# TlsPolicy.__post_init__ used a raw f-string. The exception bubbles up
-# to the operator CLI/TUI when skip_tls_verify is toggled in a non-dev
-# environment, so it MUST route through t() per CLAUDE.md i18n hard
-# rule #1. {env} carries the offending ALFRED_ENV value so the operator
-# can correlate with what the process actually saw.
-#: src/alfred/plugins/web_fetch/tls_policy.py:90
-msgid "web.fetch.tls.skip_refused_in_non_dev"
-msgstr ""
-"web_fetch.skip_tls_verify=true is only permitted when "
-"ALFRED_ENV=development; current ALFRED_ENV={env!r}. A MITM injecting "
-"prompt-injection payloads is the canonical T3 ingestion attack; disabled "
-"TLS verification is the bypass (spec §7.11)."
+"Inspect the audit log: alfred audit log --event tool.web.fetch --since 1h"
+" (look for dlp_scan_result=url_secret_refused)."
 
 #: src/alfred/security/_extract_dlp_subscriber.py:368
 msgid "security.quarantine.dlp_subscriber_registration_denied"
@@ -3446,4 +3432,19 @@ msgstr "alfred"
 #~ "success or ControlResult on plugin-side"
 #~ " error; this is a transport-layer "
 #~ "protocol violation (spec §7.5)."
+
+# Slice-3 retrospective fix i18n-003 — TlsConfigError raised from
+# TlsPolicy.__post_init__ used a raw f-string. The exception bubbles up
+# to the operator CLI/TUI when skip_tls_verify is toggled in a non-dev
+# environment, so it MUST route through t() per CLAUDE.md i18n hard
+# rule #1. {env} carries the offending ALFRED_ENV value so the operator
+# can correlate with what the process actually saw.
+#~ msgid "web.fetch.tls.skip_refused_in_non_dev"
+#~ msgstr ""
+#~ "web_fetch.skip_tls_verify=true is only permitted "
+#~ "when ALFRED_ENV=development; current "
+#~ "ALFRED_ENV={env!r}. A MITM injecting "
+#~ "prompt-injection payloads is the canonical"
+#~ " T3 ingestion attack; disabled TLS "
+#~ "verification is the bypass (spec §7.11)."
 
