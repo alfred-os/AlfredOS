@@ -439,10 +439,10 @@ jobs:
         # at < 100% coverage. Chained ``&&`` hashFiles guard per
         # PR-S3-1 R1 F1: ANY-match must NOT no-op the gate; ALL files
         # must be present before the coverage report runs.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/tls_policy.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
+            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
             --fail-under=100
       - name: Web-fetch coverage gate — remediation hint
         # devex-004: when the 100% trust-boundary gate fails the operator
@@ -456,20 +456,20 @@ jobs:
         run: |
           echo "::error::Trust-boundary coverage gate failed for web_fetch."
           echo "Files required at 100% line+branch:"
-          echo "  - src/alfred/plugins/web_fetch/{allowlist,tls_policy,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
+          echo "  - src/alfred/plugins/web_fetch/{allowlist,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
           echo ""
           echo "Local reproduction (matches the CI gate one-for-one):"
           echo "  cd \$(git rev-parse --show-toplevel)"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch --cov-branch --cov-report=term-missing"
           echo "  uv run coverage report \\"
-          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py,src/alfred/plugins/web_fetch/host_ip_guard.py' \\"
+          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \\"
           echo "    --fail-under=100"
           echo ""
           echo "Per-file drill-down (replace <module> with a specific name):"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch.<module> --cov-branch --cov-fail-under=100 --cov-report=term-missing"
-          echo "  where <module> is one of: allowlist, tls_policy, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors, host_ip_guard."
+          echo "  where <module> is one of: allowlist, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors."
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
       - name: Egress control-plane 100% line+branch coverage (unit)
@@ -498,9 +498,12 @@ jobs:
         # All three reach 100% from unit data, so they gate here in the unit job too.
         # G7-2c-1 adds the in-core relay client (egress/relay_client.py) — pure
         # asyncio, no Postgres; fully covered by unit data, so it gates here too.
-        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != ''
+        # G7-2c-2 / G7-2.5 adds the T3→T2 response-inspection seam
+        # (egress/response_inspection.py) — pure dataclass transforms, fully covered
+        # by unit data, so it gates here in the unit job too.
+        if: steps.check.outputs.has_py == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != '' && hashFiles('src/alfred/egress/response_inspection.py') != ''
         run: |
-          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py' --fail-under=100
+          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py,src/alfred/egress/response_inspection.py' --fail-under=100
 
   python-arm64:
     # Axis 3 (arch breadth — #265) — run the lint / type / unit layer of the
@@ -1597,10 +1600,10 @@ jobs:
         # subsystem in both contexts; a future integration test that
         # adds to the .coverage data will land here automatically.
         # Chained ``&&`` hashFiles guard per PR-S3-1 R1 F1.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/tls_policy.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/plugins/web_fetch/errors.py') != '' && hashFiles('src/alfred/plugins/web_fetch/allowlist.py') != '' && hashFiles('src/alfred/plugins/web_fetch/content_store.py') != '' && hashFiles('src/alfred/plugins/web_fetch/rate_limit.py') != '' && hashFiles('src/alfred/plugins/web_fetch/canary_scanner.py') != '' && hashFiles('src/alfred/plugins/web_fetch/fetch_dispatcher.py') != ''
         run: |
           uv run coverage report \
-            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
+            --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \
             --fail-under=100
       - name: Web-fetch coverage gate — remediation hint (combined)
         # devex-004 mirror: combined-job gate failure deserves the same
@@ -1613,20 +1616,20 @@ jobs:
         run: |
           echo "::error::Trust-boundary coverage gate failed for web_fetch."
           echo "Files required at 100% line+branch:"
-          echo "  - src/alfred/plugins/web_fetch/{allowlist,tls_policy,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
+          echo "  - src/alfred/plugins/web_fetch/{allowlist,fetch_dispatcher,content_store,rate_limit,canary_scanner,errors}.py"
           echo ""
           echo "Local reproduction (matches the CI gate one-for-one):"
           echo "  cd \$(git rev-parse --show-toplevel)"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch --cov-branch --cov-report=term-missing"
           echo "  uv run coverage report \\"
-          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/tls_policy.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py,src/alfred/plugins/web_fetch/host_ip_guard.py' \\"
+          echo "    --include='src/alfred/plugins/web_fetch/errors.py,src/alfred/plugins/web_fetch/allowlist.py,src/alfred/plugins/web_fetch/content_store.py,src/alfred/plugins/web_fetch/rate_limit.py,src/alfred/plugins/web_fetch/canary_scanner.py,src/alfred/plugins/web_fetch/fetch_dispatcher.py' \\"
           echo "    --fail-under=100"
           echo ""
           echo "Per-file drill-down (replace <module> with a specific name):"
           echo "  uv run pytest tests/unit/plugins/web_fetch/ \\"
           echo "    --cov=alfred.plugins.web_fetch.<module> --cov-branch --cov-fail-under=100 --cov-report=term-missing"
-          echo "  where <module> is one of: allowlist, tls_policy, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors, host_ip_guard."
+          echo "  where <module> is one of: allowlist, fetch_dispatcher, content_store, rate_limit, canary_scanner, errors."
           echo ""
           echo "Why 100% on these files: trust-boundary code per CLAUDE.md security rule 8."
       - name: Egress control-plane 100% line+branch coverage (combined)
@@ -1646,9 +1649,12 @@ jobs:
         # G7-2c-1 C2 adds the §4.3 quarantine-extract wrapper (egress/egress_response_extract.py).
         # record_response needs Postgres data (committed_no_response intent must exist), so it
         # gates ONLY here (combined) — NOT in the python-job (unit) step.
-        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/memory/egress_idempotency.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != '' && hashFiles('src/alfred/egress/egress_response_extract.py') != ''
+        # G7-2c-2 / G7-2.5 adds the T3→T2 response-inspection seam
+        # (egress/response_inspection.py) — pure dataclass transforms; mirrored here for
+        # parity per the two-gates pattern (unit data is sufficient; see the python-job step).
+        if: steps.check.outputs.has_coverage_corpus == 'true' && hashFiles('src/alfred/egress/errors.py') != '' && hashFiles('src/alfred/egress/allowlist.py') != '' && hashFiles('src/alfred/egress/client.py') != '' && hashFiles('src/alfred/gateway/egress_proxy.py') != '' && hashFiles('src/alfred/gateway/egress_audit.py') != '' && hashFiles('src/alfred/egress/egress_id.py') != '' && hashFiles('src/alfred/memory/egress_idempotency.py') != '' && hashFiles('src/alfred/egress/relay_protocol.py') != '' && hashFiles('src/alfred/gateway/egress_relay.py') != '' && hashFiles('src/alfred/gateway/egress_relay_audit.py') != '' && hashFiles('src/alfred/egress/relay_client.py') != '' && hashFiles('src/alfred/egress/egress_response_extract.py') != '' && hashFiles('src/alfred/egress/response_inspection.py') != ''
         run: |
-          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/memory/egress_idempotency.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py,src/alfred/egress/egress_response_extract.py' --fail-under=100
+          uv run coverage report --include='src/alfred/egress/errors.py,src/alfred/egress/allowlist.py,src/alfred/egress/client.py,src/alfred/gateway/egress_proxy.py,src/alfred/gateway/egress_audit.py,src/alfred/egress/egress_id.py,src/alfred/memory/egress_idempotency.py,src/alfred/egress/relay_protocol.py,src/alfred/gateway/egress_relay.py,src/alfred/gateway/egress_relay_audit.py,src/alfred/egress/relay_client.py,src/alfred/egress/egress_response_extract.py,src/alfred/egress/response_inspection.py' --fail-under=100
 
   smoke:
     name: Smoke (end-to-end)
