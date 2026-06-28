@@ -40,6 +40,13 @@ def _register() -> None:
     t("gateway.egress.relay_denied.response_too_large")
     t("gateway.egress.relay_denied.malformed_envelope")
     t("gateway.egress.relay_denied.upstream_redirect_refused")
+    # G7-2.5 Task 4: inbound canary trip on a web.fetch response (in-core D1 seam).
+    # Rendered inside ``InboundCanaryTripped.__init__`` via
+    # ``t("egress.inbound_canary_tripped", destination=..., egress_id=...)``.
+    # Also a literal t() call in response_inspection.py, so pybabel would extract
+    # it directly — anchored here as a belt-and-braces guard matching the outbound
+    # ``egress.outbound_canary_tripped`` precedent.
+    t("egress.inbound_canary_tripped")
 
 
 __all__ = ["_register"]

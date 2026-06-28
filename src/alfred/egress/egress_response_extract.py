@@ -40,10 +40,19 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from alfred.egress.egress_id import TurnEgressContext, compute_egress_id, compute_request_descriptor
 from alfred.egress.relay_client import Deduplicated, Fired, RelayEgressClient
 from alfred.egress.relay_protocol import _RawToolRequest
+from alfred.egress.response_inspection import (
+    InboundCanaryTripped,
+    ResponsePolicy,
+    _CanaryHit,
+    _host_only,
+    _SoftRefusal,
+    inspect_response,
+)
 from alfred.security.quarantine import (
     ContentHandle,
     ExtractionResult,
     ExtractionSchema,
+    TypedRefusal,
     quarantined_to_structured,
 )
 from alfred.security.quarantine_transport import T3BodyRecorder
@@ -143,12 +152,14 @@ class EgressResponseExtractor:
         extractor: QuarantinedExtractor,
         recorder: T3BodyRecorder,
         post_fire_hook: Callable[[], Awaitable[None]] = _noop,
+        response_policy: ResponsePolicy | None = None,
     ) -> None:
         self._relay_client = relay_client
         self._gate = gate
         self._extractor = extractor
         self._recorder = recorder
         self._post_fire_hook = post_fire_hook
+        self._response_policy = response_policy
 
     async def handle(
         self,
@@ -216,6 +227,42 @@ class EgressResponseExtractor:
         # at-most-once invariant — a subsequent replay of the same (ctx,
         # call_index) must see IntentInDoubt and refuse to re-fire.
         await self._post_fire_hook()
+
+        # D1 pre-extract inspection seam (G7-2.5 Task 4): runs BEFORE minting the
+        # ContentHandle or staging the T3 body.  ``inspect_response`` is pure and
+        # NEVER raises — all side effects live here in C2.
+        if self._response_policy is not None:
+            verdict = inspect_response(outcome.response, self._response_policy)
+            if isinstance(verdict, _CanaryHit):
+                # Record the TERMINAL refusal FIRST (committed_with_response) so a
+                # §5 replay returns it Deduplicated and NEVER re-fires (C8 invariant).
+                # THEN raise loud.  If record_response itself fails, the row stays
+                # committed_no_response — this narrow window is a tracked residual
+                # (task-4-brief.md §Design / last bullet).
+                canary_refusal = TypedRefusal(reason="refused_by_safety")
+                await self._relay_client.ledger.record_response(
+                    egress_id=compute_egress_id(ctx, call_index=call_index),
+                    response=canary_refusal.model_dump_json(),
+                    language=language,
+                )
+                raise InboundCanaryTripped(
+                    destination=_host_only(raw_request.url),
+                    egress_id=compute_egress_id(ctx, call_index=call_index),
+                )
+            if isinstance(verdict, _SoftRefusal):
+                refusal = TypedRefusal(reason=verdict.reason)  # type: ignore[arg-type]
+                await self._relay_client.ledger.record_response(
+                    egress_id=compute_egress_id(ctx, call_index=call_index),
+                    response=refusal.model_dump_json(),
+                    language=language,
+                )
+                return EgressExtractOutcome(
+                    result=refusal,
+                    deduplicated=False,
+                    language=language,
+                    status=outcome.response.status,
+                )
+            # verdict is _Proceed → fall through to mint/stage/extract.
 
         # Step 2: mint an opaque ContentHandle and stage the raw T3 body.
         # The orchestrator never touches outcome.response.body directly.

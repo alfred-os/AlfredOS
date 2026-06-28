@@ -38,6 +38,8 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "gateway.egress.relay_denied.response_too_large",
     "gateway.egress.relay_denied.malformed_envelope",
     "gateway.egress.relay_denied.upstream_redirect_refused",
+    # G7-2.5 Task 4: inbound canary trip on a web.fetch response (in-core D1 seam).
+    "egress.inbound_canary_tripped",
 )
 
 
