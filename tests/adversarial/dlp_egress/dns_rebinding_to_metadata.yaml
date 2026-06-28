@@ -60,18 +60,18 @@ payload:
   resolved_ip_rfc1918: "10.0.0.1"
   resolved_ip_loopback: "127.0.0.1"
   expected_refusal_reasons:
-    - "link_local"  # AWS / Azure / GCP metadata service
-    - "rfc1918"     # RFC1918 internal network
-    - "loopback"    # Local-host services (Redis / Postgres / Alfred state)
+    - "RESOLVED_IP_NOT_GLOBAL"  # gateway collapses RFC1918/link-local/loopback into one deny reason
   notes: >-
     Each shape uses the SAME URL (https://example.com/api/data) — the
     allowlist passes for the netloc. The DNS resolver is the attacker-
     controlled element; the gateway's defence is name-independent (it
-    classifies the resolved IP, not the URL). The refusal property is
-    verified by ``test_resolved_private_ip_denied`` in
-    tests/unit/gateway/test_egress_relay.py (the ``resolve`` seam
-    returns "10.0.0.1" and the relay emits RESOLVED_IP_NOT_GLOBAL
-    without opening the upstream connection).
+    classifies the resolved IP, not the URL). The gateway collapses the
+    old per-class vocabulary (link_local / rfc1918 / loopback) into the
+    single ``RESOLVED_IP_NOT_GLOBAL`` deny reason. All three shapes are
+    proven by gateway unit tests: ``test_resolved_private_ip_denied``
+    (10.0.0.1 / RFC1918), ``test_resolved_link_local_ip_denied``
+    (169.254.169.254), and ``test_resolved_loopback_ip_denied`` (127.0.0.1)
+    in tests/unit/gateway/test_egress_relay.py.
 expected_outcome: refused
 provenance: >-
   Slice-3 PR-S3-5 security review sec-pr-s3-5-003 / H3 (HIGH).
@@ -86,7 +86,9 @@ provenance: >-
 references:
   - "spec §7.4 three-way URL allowlist (manifest ∩ operator ∩ session)"
   - "sec-pr-s3-5-003 / H3 — security review finding: no connector-level IP-allowlist"
-  - "tests/unit/gateway/test_egress_relay.py::test_resolved_private_ip_denied — gateway SSRF proof"
+  - "tests/unit/gateway/test_egress_relay.py::test_resolved_private_ip_denied — RFC1918 gateway SSRF proof"
+  - "tests/unit/gateway/test_egress_relay.py::test_resolved_link_local_ip_denied — link-local (169.254.x) gateway SSRF proof"
+  - "tests/unit/gateway/test_egress_relay.py::test_resolved_loopback_ip_denied — loopback (127.0.0.1) gateway SSRF proof"
   - "src/alfred/gateway/egress/relay.py — EgressRelay._handle_one (RESOLVED_IP_NOT_GLOBAL path)"
   - "OWASP SSRF cheat sheet — DNS rebinding section"
   - "AWS Instance Metadata Service v1 (IMDSv1) credential exfiltration"

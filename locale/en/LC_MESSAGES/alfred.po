@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-28 21:15+0100\n"
+"POT-Creation-Date: 2026-06-28 22:00+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -2702,7 +2702,7 @@ msgid "plugin.manifest_sandbox_policy_refs_value_type"
 msgstr "Plugin manifest [sandbox] policy_refs[{os_key}] must be a string."
 
 #: src/alfred/plugins/stdio_transport.py:629
-#: src/alfred/plugins/web_fetch/errors.py:236
+#: src/alfred/plugins/web_fetch/errors.py:186
 msgid "security.canary_tripped"
 msgstr ""
 "SECURITY: canary token detected in content from {url!r}; the plugin "
@@ -2733,14 +2733,7 @@ msgstr ""
 "allowlist. Operators can inspect the refused Location target in the audit"
 " row (``WEB_FETCH_FIELDS.dlp_scan_result='redirect_refused'``)."
 
-#: src/alfred/plugins/web_fetch/errors.py:108
-msgid "web.fetch.error.tls_failure"
-msgstr ""
-"web.fetch refused: TLS verification failed for {url!r} ({detail}). "
-"Production has no operator override; ALFRED_ENV=development is the only "
-"escape hatch."
-
-#: src/alfred/plugins/web_fetch/errors.py:125
+#: src/alfred/plugins/web_fetch/errors.py:109
 msgid "web.fetch.error.rate_limited.handle_cap"
 msgstr ""
 "Too many concurrent web.fetch requests are in flight for this user. Wait "
@@ -2748,7 +2741,7 @@ msgstr ""
 "seconds. Operator: see docs/runbooks/handle-cap-exceeded.md to raise the "
 "cap."
 
-#: src/alfred/plugins/web_fetch/errors.py:127
+#: src/alfred/plugins/web_fetch/errors.py:111
 msgid "web.fetch.error.rate_limited"
 msgstr ""
 "web.fetch refused: rate limit exceeded for bucket {bucket!r}. Operator "
@@ -2757,7 +2750,7 @@ msgstr ""
 " live under `web_fetch.user_daily_budget` / "
 "`web_fetch.operator_daily_budget`."
 
-#: src/alfred/plugins/web_fetch/errors.py:148
+#: src/alfred/plugins/web_fetch/errors.py:132
 msgid "web.fetch.error.handle_id_mismatch"
 msgstr ""
 "The web.fetch plugin returned a content handle whose id does not match "
@@ -2765,41 +2758,19 @@ msgstr ""
 "audit log: alfred audit log --event tool.web.fetch --since 1h (look for "
 "dlp_scan_result=handle_id_mismatch)."
 
-#: src/alfred/plugins/web_fetch/errors.py:162
+#: src/alfred/plugins/web_fetch/errors.py:146
 msgid "web.fetch.error.mime_type_not_allowed"
 msgstr ""
 "web.fetch refused: response MIME type {mime_type!r} is not allowed. "
 "Allowed MIME types are declared in the plugin manifest; operator can "
 "narrow via config/policies.yaml `web_fetch.allowed_mime_types`."
 
-#: src/alfred/plugins/web_fetch/errors.py:177
+#: src/alfred/plugins/web_fetch/errors.py:161
 msgid "web.fetch.error.size_limit_exceeded"
 msgstr ""
 "web.fetch refused: response body {size} bytes exceeds the {limit}-byte "
 "limit. Operator can adjust the size cap in config/policies.yaml "
 "`web_fetch.size_limit_bytes` (default 5 MiB)."
-
-# sec-pr-s3-5-003 / H3 — host-IP allowlist guard against DNS-rebinding /
-# cloud-metadata SSRF. The URL allowlist matches on name; the IP guard
-# resolves the hostname and refuses RFC1918 / loopback / link-local /
-# multicast / reserved IPs.
-# CR-146 major: the caller-visible message intentionally does NOT
-# include ``{url}`` or ``{resolved_ip}`` — leaking the resolved IP back
-# to the requester turns the refusal into a metadata-IP / RFC1918
-# oracle. The audit row still records both fields off
-# ``self.url`` / ``self.resolved_ip`` (operator audience). The
-# exception's ``reason`` attribute carries the closed-vocabulary refusal
-# class (rfc1918 / link_local / loopback / multicast / reserved /
-# dns_failure / no_hostname) for audit pivoting.
-#: src/alfred/plugins/web_fetch/errors.py:211
-msgid "web.fetch.error.internal_ip_refused"
-msgstr ""
-"web.fetch refused: target resolved to an internal address. Refused to "
-"prevent DNS-rebinding / cloud-metadata SSRF against an allowlisted "
-"hostname. Operator can review the IP-guard policy in "
-"src/alfred/plugins/web_fetch/host_ip_guard.py (spec §7.4); the resolved "
-"IP and full URL are recorded on the audit row "
-"(``WEB_FETCH_FIELDS.dlp_scan_result='internal_ip_refused'``)."
 
 #: src/alfred/plugins/web_fetch/fetch_dispatcher.py:253
 msgid "web.fetch.error.url_secret_refused"
@@ -3447,4 +3418,35 @@ msgstr "alfred"
 #~ "prompt-injection payloads is the canonical"
 #~ " T3 ingestion attack; disabled TLS "
 #~ "verification is the bypass (spec §7.11)."
+
+#~ msgid "web.fetch.error.tls_failure"
+#~ msgstr ""
+#~ "web.fetch refused: TLS verification failed "
+#~ "for {url!r} ({detail}). Production has "
+#~ "no operator override; ALFRED_ENV=development "
+#~ "is the only escape hatch."
+
+# sec-pr-s3-5-003 / H3 — host-IP allowlist guard against DNS-rebinding /
+# cloud-metadata SSRF. The URL allowlist matches on name; the IP guard
+# resolves the hostname and refuses RFC1918 / loopback / link-local /
+# multicast / reserved IPs.
+# CR-146 major: the caller-visible message intentionally does NOT
+# include ``{url}`` or ``{resolved_ip}`` — leaking the resolved IP back
+# to the requester turns the refusal into a metadata-IP / RFC1918
+# oracle. The audit row still records both fields off
+# ``self.url`` / ``self.resolved_ip`` (operator audience). The
+# exception's ``reason`` attribute carries the closed-vocabulary refusal
+# class (rfc1918 / link_local / loopback / multicast / reserved /
+# dns_failure / no_hostname) for audit pivoting.
+#~ msgid "web.fetch.error.internal_ip_refused"
+#~ msgstr ""
+#~ "web.fetch refused: target resolved to an"
+#~ " internal address. Refused to prevent "
+#~ "DNS-rebinding / cloud-metadata SSRF "
+#~ "against an allowlisted hostname. Operator "
+#~ "can review the IP-guard policy in"
+#~ " src/alfred/plugins/web_fetch/host_ip_guard.py (spec "
+#~ "§7.4); the resolved IP and full "
+#~ "URL are recorded on the audit row"
+#~ " (``WEB_FETCH_FIELDS.dlp_scan_result='internal_ip_refused'``)."
 

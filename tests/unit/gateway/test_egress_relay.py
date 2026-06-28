@@ -329,6 +329,32 @@ async def test_resolved_private_ip_denied() -> None:
     assert captured.get("open_calls", 0) == 0
 
 
+@pytest.mark.asyncio
+async def test_resolved_link_local_ip_denied() -> None:
+    # Highest-severity DNS-rebinding shape: 169.254.169.254 is the AWS/Azure/GCP
+    # instance metadata endpoint — an allowlisted hostname that rebinds to this
+    # address would hand the attacker temporary IAM credentials with no auth.
+    # The gateway collapses all non-globally-routable shapes into one deny reason.
+    captured: dict[str, object] = {}
+    relay = _relay(
+        open_client=_open_client_factory(captured), resolve=lambda _h: "169.254.169.254"
+    )
+    writer = await _drive(relay, _frame(_req()))
+    assert _reply(writer).deny_reason == EgressRelayDenyReason.RESOLVED_IP_NOT_GLOBAL.value
+    assert captured.get("open_calls", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_resolved_loopback_ip_denied() -> None:
+    # Loopback DNS-rebinding shape: 127.0.0.1 reaches local services
+    # (Redis / Postgres / Alfred state) on the same host.
+    captured: dict[str, object] = {}
+    relay = _relay(open_client=_open_client_factory(captured), resolve=lambda _h: "127.0.0.1")
+    writer = await _drive(relay, _frame(_req()))
+    assert _reply(writer).deny_reason == EgressRelayDenyReason.RESOLVED_IP_NOT_GLOBAL.value
+    assert captured.get("open_calls", 0) == 0
+
+
 # --- the gateway DLP second pass (decision 12) -----------------------------
 
 

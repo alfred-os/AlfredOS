@@ -94,22 +94,6 @@ class WebFetchRedirectRefused(WebFetchError):  # noqa: N818 -- name pinned by sp
         self.redirect_target = redirect_target
 
 
-class WebFetchTlsError(WebFetchError):
-    """TLS verification failed (spec §7.11).
-
-    TLS enforcement now originates at the gateway relay (G7-2b); this
-    exception records a TLS-level failure surfaced by the relay in its
-    deny/response envelope. The ``url`` and ``detail`` attributes are
-    surfaced so operators can correlate with the originating request
-    without parsing the structlog row.
-    """
-
-    def __init__(self, url: str, detail: str) -> None:
-        super().__init__(t("web.fetch.error.tls_failure", url=url, detail=detail))
-        self.url = url
-        self.detail = detail
-
-
 class WebFetchRateLimited(WebFetchError):  # noqa: N818 -- name pinned by spec §7.10
     """A rate-limit bucket refused the request (spec §7.7, §7.10).
 
@@ -180,40 +164,6 @@ class WebFetchSizeLimitExceeded(WebFetchError):  # noqa: N818 -- name pinned by 
         self.limit_bytes = limit_bytes
 
 
-class WebFetchInternalIPRefused(WebFetchError):  # noqa: N818 -- name pinned by sec-pr-s3-5-003
-    """The URL's hostname resolved to an internal address (sec-pr-s3-5-003).
-
-    DNS-rebinding / cloud-metadata SSRF / RFC1918 internal-IP attacks
-    that the URL-name allowlist alone cannot block: an upstream resolver
-    that hands back ``10.0.0.1`` / ``169.254.169.254`` / ``127.0.0.1`` for
-    an allowlisted hostname would otherwise let the fetcher reach an
-    internal endpoint. Since G7-2b this guard lives in the gateway egress
-    relay (``EgressRelayDenyReason.RESOLVED_IP_NOT_GLOBAL``); the
-    connectivity-free core (Spec C) no longer resolves DNS. This exception
-    is raised when the relay returns that deny reason.
-
-    ``url`` is the URL the caller asked for; ``resolved_ip`` is the
-    offending IP address the resolver returned (empty string when the
-    refusal happens before resolution — e.g. ``no_hostname`` / DNS
-    failure); ``reason`` is the closed-vocabulary refusal class so
-    audit rows can pivot on the attack shape.
-
-    CR-146 major: the caller-visible message intentionally does NOT
-    interpolate ``url`` or ``resolved_ip`` — leaking the resolved IP
-    back to the requester tells an SSRF attacker exactly which
-    internal address the resolver returned, weaponising the refusal
-    into a metadata-IP / RFC1918 oracle. The audit row still records
-    both fields off ``self.url`` / ``self.resolved_ip`` (operator
-    audience).
-    """
-
-    def __init__(self, url: str, resolved_ip: str, reason: str) -> None:
-        super().__init__(t("web.fetch.error.internal_ip_refused"))
-        self.url = url
-        self.resolved_ip = resolved_ip
-        self.reason = reason
-
-
 # NB: NOT a ``WebFetchError`` subclass. Spec §7.10 makes this distinction
 # load-bearing — the orchestrator's operational-error arm must not catch
 # canary trips.
@@ -243,10 +193,8 @@ __all__ = [
     "WebFetchDomainNotAllowed",
     "WebFetchError",
     "WebFetchHandleIdMismatch",
-    "WebFetchInternalIPRefused",
     "WebFetchMimeTypeNotAllowed",
     "WebFetchRateLimited",
     "WebFetchRedirectRefused",
     "WebFetchSizeLimitExceeded",
-    "WebFetchTlsError",
 ]

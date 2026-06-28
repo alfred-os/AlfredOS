@@ -18,12 +18,10 @@ from alfred.plugins.web_fetch.errors import (
     WebFetchCanaryTripped,
     WebFetchDomainNotAllowed,
     WebFetchError,
-    WebFetchInternalIPRefused,
     WebFetchMimeTypeNotAllowed,
     WebFetchRateLimited,
     WebFetchRedirectRefused,
     WebFetchSizeLimitExceeded,
-    WebFetchTlsError,
 )
 
 
@@ -34,10 +32,6 @@ def test_web_fetch_error_is_alfred_error() -> None:
 
 def test_domain_not_allowed_is_web_fetch_error() -> None:
     assert issubclass(WebFetchDomainNotAllowed, WebFetchError)
-
-
-def test_tls_error_is_web_fetch_error() -> None:
-    assert issubclass(WebFetchTlsError, WebFetchError)
 
 
 def test_rate_limited_is_web_fetch_error() -> None:
@@ -60,20 +54,6 @@ def test_redirect_refused_is_web_fetch_error() -> None:
     assert issubclass(WebFetchRedirectRefused, WebFetchError)
 
 
-def test_internal_ip_refused_is_web_fetch_error() -> None:
-    """sec-pr-s3-5-003 / H3: the internal-IP refusal is an operational
-    error so the orchestrator's ``except WebFetchError`` arm surfaces it
-    cleanly. It IS a security-relevant refusal (DNS rebinding / cloud-
-    metadata SSRF) but the operational-vs-security-event split is about
-    whether the orchestrator should treat it as an incident requiring
-    quarantine + alert (canary trip) vs a refusal it can surface to the
-    caller as a recoverable error. SSRF-class refusals are the latter:
-    the fetch never happened, no T3 content reached the orchestrator,
-    no canary token tripped. The audit row carries the attack class
-    via the closed-vocabulary ``internal_ip_refused`` tag."""
-    assert issubclass(WebFetchInternalIPRefused, WebFetchError)
-
-
 def test_canary_tripped_is_NOT_web_fetch_error() -> None:  # noqa: N802 -- emphasis intentional; the NOT is load-bearing
     """SECURITY INVARIANT (spec §7.10): the canary trip is a security event,
     not an operational fetch error. Collapsing it into the operational tree
@@ -87,15 +67,6 @@ def test_domain_not_allowed_carries_domain_attr() -> None:
     err = WebFetchDomainNotAllowed("attacker.example.com")
     assert err.domain == "attacker.example.com"
     assert "attacker.example.com" in str(err)
-
-
-def test_tls_error_carries_url_and_detail() -> None:
-    err = WebFetchTlsError(url="https://bad.example/", detail="cert verify failed")
-    assert err.url == "https://bad.example/"
-    assert err.detail == "cert verify failed"
-    # The string surface must include the URL so operators can correlate
-    # with the originating request without parsing the structlog row.
-    assert "https://bad.example/" in str(err)
 
 
 def test_rate_limited_carries_bucket_attr() -> None:
@@ -114,40 +85,6 @@ def test_size_limit_exceeded_carries_size_attrs() -> None:
     err = WebFetchSizeLimitExceeded(size_bytes=10_485_760, limit_bytes=5_242_880)
     assert err.size_bytes == 10_485_760
     assert err.limit_bytes == 5_242_880
-
-
-def test_internal_ip_refused_carries_url_resolved_ip_and_reason_attrs() -> None:
-    """The three attributes back the audit row and the forensic trail.
-
-    ``url`` is what the caller asked for; ``resolved_ip`` is what the
-    resolver returned (the attack-class evidence); ``reason`` is the
-    closed-vocabulary refusal class so audit consumers can pivot on
-    attack class (rfc1918 / link_local / loopback / etc).
-
-    CR-146 major: the caller-visible ``str(err)`` deliberately does
-    NOT leak ``url`` or ``resolved_ip`` — leaking the resolved IP back
-    to the requester turns the refusal into a metadata-IP / RFC1918
-    oracle. The audit row reads ``self.url`` / ``self.resolved_ip`` so
-    the operator audience still sees the forensics.
-    """
-    err = WebFetchInternalIPRefused(
-        url="https://example.com/api/data",
-        resolved_ip="169.254.169.254",
-        reason="link_local",
-    )
-    # Typed attrs preserved for the audit row.
-    assert err.url == "https://example.com/api/data"
-    assert err.resolved_ip == "169.254.169.254"
-    assert err.reason == "link_local"
-    # CR-146 major: caller-visible message MUST NOT include the URL or
-    # the resolved IP. The audit row (subject + audit_result fields)
-    # records both via ``self.url`` / ``self.resolved_ip``.
-    message = str(err)
-    assert "https://example.com/api/data" not in message
-    assert "169.254.169.254" not in message
-    # The message still mentions the refusal class so operators know
-    # what happened without parsing the structured payload.
-    assert "internal" in message.lower()
 
 
 def test_redirect_refused_carries_status_and_target_attrs() -> None:
@@ -183,14 +120,10 @@ def test_canary_tripped_carries_source_url_and_handle_id() -> None:
     "exc",
     [
         WebFetchDomainNotAllowed("d.example"),
-        WebFetchTlsError(url="https://x.example", detail="boom"),
         WebFetchRateLimited("per_user"),
         WebFetchMimeTypeNotAllowed("text/x-evil"),
         WebFetchSizeLimitExceeded(size_bytes=1, limit_bytes=0),
         WebFetchRedirectRefused(status_code=301, redirect_target="http://a.example/"),
-        WebFetchInternalIPRefused(
-            url="https://x.example/", resolved_ip="10.0.0.1", reason="rfc1918"
-        ),
         WebFetchCanaryTripped(source_url="https://x.example", handle_id="id"),
     ],
 )
