@@ -20,38 +20,41 @@
 id: de-2026-009
 category: dlp_egress
 threat: >-
-  Four distinct egress-id attacks against the relay ledger:
-  (a) a completed (committed_with_response) row is replayed by the ledger
-  — the upstream is NOT re-fired; fire_count stays 1 (dedup / memoize);
-  (b) an in-doubt (committed_no_response) + non-idempotent call raises
-  EgressInDoubtError before any re-fire (at-most-once firewall);
-  (c) a caller injects an invalid egress-id (not a valid sha256 hex) or a
-  forged id that does not correspond to the (ctx, call_index) pair — the
-  ledger produces a hash-mismatch that raises EgressIdIntegrityError;
-  (d) the same (ctx, call_index) slot is re-used with a DIFFERENT body
-  hash — EgressIdIntegrityError is raised loud before any re-fire.
-  All four must refuse or deduplicate without an upstream re-fire, proving
-  the egress-id is a tamper-evident, collision-resistant gate
-  (Spec C §5, HARD rule #7).
+  A caller replays, forges, or collides an egress-id to trick the relay into
+  re-firing an upstream call or injecting a response into the ledger.
+note: >-
+  Four sub-scenarios: (a) committed_with_response replay → deduped, no re-fire,
+  fire_count=1 (the memoised T2 replays; HARD rule #5 — re-extraction of raw T3
+  is forbidden); (b) committed_no_response (in-doubt) + non-idempotent →
+  EgressInDoubtError, no re-fire — at-most-once firewall; (c) forged/out-of-range
+  egress-id → EgressLedgerStateError (commit_intent rejects non-sha256-hex ids);
+  (d) same-position different-hash → EgressIdIntegrityError — non-deterministic
+  re-run is LOUD (HARD rule #7).  The egress-id is a trust-boundary primitive; any
+  deviation from the one-fire, one-response contract is refused or detected loud —
+  never silently duplicated or replayed as a T2 (Spec C §5).
 ingestion_path: web.fetch
 payload:
   scenarios:
     - id: replay_complete
       desc: "committed_with_response row → deduplicated, fire_count=1"
+      expected_outcome: deduped
     - id: in_doubt_non_idempotent
       desc: "committed_no_response + non-idempotent → EgressInDoubtError, no refire"
+      expected_outcome: refused
     - id: different_hash
       desc: "same egress_id, different body hash → EgressIdIntegrityError"
+      expected_outcome: refused
     - id: forged_unknown_id
       desc: "record_response on a never-committed egress-id → EgressLedgerStateError"
-expected_outcome: refused
+      expected_outcome: refused
+expected_outcome: deduped_or_refused
 provenance: >-
   Spec C §5 (at-most-once + dedup ledger) + HARD rules #5/#7.
   PostgresEgressIdempotencyStore commit_intent / record_response contract.
   G7-2a (#343) + G7-2c-1 (relay_client) + G7-2c-2 C4 (barrier/dedup). #333 C5.
 references:
   - "Spec C §5 — egress-id ledger tri-state + at-most-once guarantee"
-  - "CLAUDE.md hard rule #5 — dedup must not re-extract raw T3"
+  - "CLAUDE.md hard rule #5 — privileged orchestrator never sees raw T3; dedup path must not re-enter extraction"
   - "CLAUDE.md hard rule #7 — integrity mismatch is loud, never silent"
   - "alfred.egress.egress_id.EgressIdIntegrityError — body-hash mismatch"
   - "alfred.memory.egress_idempotency.PostgresEgressIdempotencyStore"

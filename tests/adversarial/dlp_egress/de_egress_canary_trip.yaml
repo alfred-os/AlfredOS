@@ -16,13 +16,14 @@ id: de-2026-008
 category: dlp_egress
 threat: >-
   A canary token seeded by the operator appears verbatim in an outbound egress
-  request body.  The gateway EgressRelay's OutboundDlp stage-3 canary scanner
-  (CanaryMatcher) detects it and raises OutboundCanaryTripped; the relay maps
-  this to a deny frame with deny_reason=canary_tripped.  The in-core
-  RelayEgressClient translates the deny to EgressDeniedError and writes the
-  non-skippable security.egress_relay_refused audit row before raising.  The
-  scanner is fail-loud: a hit NEVER produces a forwarded response
-  (Spec C §4.2, HARD rule #7 — canary trip as a loud security event).
+  body, and the gateway forwards it to the upstream rather than denying it.
+note: >-
+  The gateway EgressRelay's OutboundDlp stage-3 canary scanner (CanaryMatcher)
+  must detect the token and raise OutboundCanaryTripped; the relay maps this to a
+  deny frame with deny_reason=canary_tripped.  The in-core RelayEgressClient
+  translates to EgressDeniedError and writes the non-skippable
+  security.egress_relay_refused audit row before raising.  The scanner is
+  fail-loud: a hit NEVER produces a forwarded response (Spec C §4.2, HARD rule #7).
 ingestion_path: web.fetch
 payload:
   canary_token: "ALFRED-CANARY-TEST-TOKEN-8675309"

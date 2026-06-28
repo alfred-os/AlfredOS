@@ -67,6 +67,7 @@ from alfred.security.quarantine import (
 )
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
+from tests.helpers.egress_doubles import _await_relay_ready, _NullAuditWriter
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
 if TYPE_CHECKING:
@@ -144,44 +145,13 @@ def authorized_t3_nonce() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Loopback relay helpers (mirrors _await_proxy_ready from the proxy e2e test)
+# Loopback relay helpers — imported from tests.helpers.egress_doubles so
+# the implementation is shared with the adversarial dlp_egress suite.
+# _await_relay_ready: probes until the relay's listener accepts a TCP
+#   connection; portable (no fixed sleep, narrows OSError/TimeoutError).
+# _NullAuditWriter: discards every append_schema call; the egress_idempotency
+#   ledger (not audit rows) is what the barrier/contention tests care about.
 # ---------------------------------------------------------------------------
-
-
-async def _await_relay_ready(port: int, serve_task: asyncio.Task[Any]) -> None:
-    """Probe until the relay's listener accepts a TCP connection.
-
-    A fixed sleep on a busy runner can race the bind; probing eliminates the
-    race.  The relay reaps the benign probe as a ``FrameTooLargeError`` /
-    ``MALFORMED_ENVELOPE`` deny, harmless to the test assertions.
-    """
-    for _ in range(500):
-        if serve_task.done():
-            await serve_task  # re-raise a bind error rather than spinning
-        try:
-            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        except OSError:
-            await asyncio.sleep(0.005)
-            continue
-        writer.close()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(writer.wait_closed(), timeout=1)
-        return
-    raise AssertionError("EgressRelay did not become ready within 2.5 s")
-
-
-# ---------------------------------------------------------------------------
-# Fake AuditWriter — the relay client needs a real AuditWriter to write
-# refused-egress rows.  We use an in-memory stub that captures calls without
-# touching Postgres (the egress_idempotency table is what we care about).
-# ---------------------------------------------------------------------------
-
-
-class _NullAuditWriter:
-    """Minimal AuditWriter stub that discards every append_schema call."""
-
-    async def append_schema(self, **_kw: Any) -> None:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -258,36 +228,45 @@ async def _build_loopback_stack(
     shutdown = asyncio.Event()
     serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
 
-    await _await_relay_ready(port, serve_task)
+    # Guard: if readiness-probing or any downstream construction raises after
+    # ensure_future, cancel the relay task rather than leaking it.
+    try:
+        await _await_relay_ready(port, serve_task)
 
-    # Build the relay client
-    audit_writer = _NullAuditWriter()
-    relay_client = RelayEgressClient(
-        relay_url=f"tcp://127.0.0.1:{port}",
-        core_dlp=OutboundDlp(broker=None, audit=lambda **_kw: None),
-        ledger=store,
-        audit_writer=audit_writer,  # type: ignore[arg-type]
-        concurrency=8,
-    )
+        # Build the relay client
+        audit_writer = _NullAuditWriter()
+        relay_client = RelayEgressClient(
+            relay_url=f"tcp://127.0.0.1:{port}",
+            core_dlp=OutboundDlp(broker=None, audit=lambda **_kw: None),
+            ledger=store,
+            audit_writer=audit_writer,  # type: ignore[arg-type]
+            concurrency=8,
+        )
 
-    # Build the gate + recorder
-    staging = QuarantineStagingMap()
-    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
-    gate = make_quarantined_extract_chain_gate(
-        grant_dereference_t3=True,
-        dereference_plugin_id="alfred.quarantined-llm",
-    )
+        # Build the gate + recorder
+        staging = QuarantineStagingMap()
+        recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+        gate = make_quarantined_extract_chain_gate(
+            grant_dereference_t3=True,
+            dereference_plugin_id="alfred.quarantined-llm",
+        )
 
-    kwargs: dict[str, Any] = dict(
-        relay_client=relay_client,
-        gate=gate,
-        extractor=mock_extractor,
-        recorder=recorder,
-    )
-    if post_fire_hook is not None:
-        kwargs["post_fire_hook"] = post_fire_hook
+        kwargs: dict[str, Any] = dict(
+            relay_client=relay_client,
+            gate=gate,
+            extractor=mock_extractor,
+            recorder=recorder,
+        )
+        if post_fire_hook is not None:
+            kwargs["post_fire_hook"] = post_fire_hook
 
-    extractor = EgressResponseExtractor(**kwargs)
+        extractor = EgressResponseExtractor(**kwargs)
+    except BaseException:
+        shutdown.set()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(serve_task, timeout=2)
+        raise
+
     return extractor, serve_task, shutdown, port
 
 
@@ -343,7 +322,7 @@ async def test_scenario_a_barrier_kill_yields_in_doubt_and_no_refire(
     _, fire_counter, _ = fake_external_world
     extracted = _make_extracted("scenario-a")
     mock_extractor = AsyncMock()
-    mock_extractor.extract = AsyncMock(return_value=extracted)
+    spy_extract = mock_extractor.extract = AsyncMock(return_value=extracted)
 
     ctx = _make_ctx("a")
     call_index = 0
@@ -373,6 +352,11 @@ async def test_scenario_a_barrier_kill_yields_in_doubt_and_no_refire(
                 language="en",
             )
 
+        # The hook kills BEFORE extraction runs — the extractor must NOT have
+        # been called (a misplaced hook AFTER extraction would silently pass
+        # the fire_count guard but violate this property).
+        spy_extract.assert_not_called()
+
         assert fire_counter.value == 1, (
             f"expected exactly 1 upstream fire, got {fire_counter.value}"
         )
@@ -401,6 +385,11 @@ async def test_scenario_a_barrier_kill_yields_in_doubt_and_no_refire(
         assert fire_counter.value == 1, (
             f"EgressInDoubtError must not re-fire; fire_count is {fire_counter.value}"
         )
+
+        # The extractor must still not have been called — the in-doubt path
+        # short-circuits at the ledger level, before the relay is dialled and
+        # before extraction runs.
+        spy_extract.assert_not_called()
 
     finally:
         await _teardown(serve_task, shutdown)
@@ -597,7 +586,10 @@ async def test_concurrent_commit_intent_exactly_one_winner(
             body_hash=compute_body_hash(""),
         )
 
-    results = await asyncio.gather(*(_commit() for _ in range(8)))
+    # Wrap in a wall-clock timeout so a Postgres-pool hang surfaces as a clean
+    # failure rather than a CI stall (perf-001).
+    async with asyncio.timeout(30.0):
+        results = await asyncio.gather(*(_commit() for _ in range(8)))
     fresh_count = sum(isinstance(r, IntentFresh) for r in results)
     in_doubt_count = sum(isinstance(r, IntentInDoubt) for r in results)
 

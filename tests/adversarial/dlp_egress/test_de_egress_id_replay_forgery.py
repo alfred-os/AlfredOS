@@ -26,7 +26,6 @@ The egress-id is a tamper-evident, collision-resistant gate (Spec C §5).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -35,7 +34,6 @@ import pytest
 import yaml
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.egress.egress_id import (
     EgressIdIntegrityError,
     TurnEgressContext,
@@ -50,13 +48,13 @@ from alfred.gateway.egress_relay import EgressRelay
 from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.memory.db import session_scope
 from alfred.memory.egress_idempotency import EgressLedgerStateError, PostgresEgressIdempotencyStore
-from alfred.security import tiers as _tiers
 from alfred.security.canary_matcher import CanaryMatcher
 from alfred.security.dlp import OutboundDlp
 from alfred.security.quarantine import Extracted, ExtractionSchema, T3DerivedData
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.egress_doubles import _await_relay_ready, _CapturingAuditWriter
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
 _PAYLOAD_PATH = Path(__file__).parent / "de_egress_id_replay_forgery.yaml"
@@ -75,20 +73,12 @@ def test_payload_schema_valid() -> None:
     payload = _load_payload()
     assert payload.id == "de-2026-009"
     assert payload.category == "dlp_egress"
-    assert payload.expected_outcome == "refused"
+    assert payload.expected_outcome == "deduped_or_refused"
     assert payload.ingestion_path == "web.fetch"
 
 
 class _BarrierKillError(Exception):
     """Sentinel: simulates a process kill after fire, before record_response."""
-
-
-class _CapturingAuditWriter:
-    def __init__(self) -> None:
-        self.rows: list[dict[str, Any]] = []
-
-    async def append_schema(self, **kwargs: Any) -> None:
-        self.rows.append(dict(kwargs))
 
 
 class _TestSchema(ExtractionSchema):
@@ -125,43 +115,21 @@ async def store(migrated_url: str) -> Any:
         await engine.dispose()
 
 
-@pytest.fixture
-def authorized_t3_nonce() -> Any:
-    with _NONCE_LOCK:
-        previous = _tiers._AUTHORIZED_T3_NONCE
-        nonce = CapabilityGateNonce()
-        _tiers._set_authorized_t3_nonce(nonce)
-    try:
-        yield nonce
-    finally:
-        with _NONCE_LOCK:
-            _tiers._set_authorized_t3_nonce(previous)
-
-
-async def _await_relay_ready(port: int, serve_task: asyncio.Task[Any]) -> None:
-    for _ in range(500):
-        if serve_task.done():
-            await serve_task
-        try:
-            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        except OSError:
-            await asyncio.sleep(0.005)
-            continue
-        writer.close()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(writer.wait_closed(), timeout=1)
-        return
-    raise AssertionError("EgressRelay did not become ready within 2.5 s")
-
-
 async def _build_loopback(
     *,
     store: PostgresEgressIdempotencyStore,
     authorized_t3_nonce: CapabilityGateNonce,
     open_client_factory: Any,
     post_fire_hook: Any = None,
-) -> tuple[EgressResponseExtractor, asyncio.Task[Any], asyncio.Event, RelayEgressClient]:
-    """Build a loopback stack; return (extractor, serve_task, shutdown, relay_client)."""
+) -> tuple[EgressResponseExtractor, asyncio.Task[Any], asyncio.Event, RelayEgressClient, AsyncMock]:
+    """Build a loopback relay stack.
+
+    Returns ``(extractor, serve_task, shutdown, relay_client, mock_extractor_spy)``.
+
+    The ``mock_extractor_spy`` is the ``AsyncMock`` used as the extractor so callers can
+    assert on ``mock_extractor_spy.extract.await_count`` — proving the extractor is NOT
+    re-called on a dedup replay (HARD rule #5).
+    """
     srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
     port: int = srv.sockets[0].getsockname()[1]
     srv.close()
@@ -219,7 +187,7 @@ async def _build_loopback(
         kwargs["post_fire_hook"] = post_fire_hook
 
     extractor = EgressResponseExtractor(**kwargs)
-    return extractor, serve_task, shutdown, relay_client
+    return extractor, serve_task, shutdown, relay_client, mock_extractor
 
 
 @pytest.mark.asyncio
@@ -236,7 +204,7 @@ async def test_replay_complete_deduplicates_without_refire(
     and fire_count stays 1 (HARD rule #5 memoize invariant, Spec C §5).
     """
     open_client_factory, fire_counter, _canned = fake_external_world
-    extractor, serve_task, shutdown, _rc = await _build_loopback(
+    extractor, serve_task, shutdown, _rc, mock_extractor = await _build_loopback(
         store=store,
         authorized_t3_nonce=authorized_t3_nonce,
         open_client_factory=open_client_factory,
@@ -269,6 +237,11 @@ async def test_replay_complete_deduplicates_without_refire(
         )
         assert outcome_2.deduplicated is True, "second call MUST be deduplicated"
         assert fire_counter.value == 1, f"replay must not re-fire; fire_count={fire_counter.value}"
+
+        # The extractor must have been called exactly ONCE — across BOTH the first
+        # call and the replay.  On the dedup replay the ledger short-circuits before
+        # the extractor (HARD rule #5 — no re-extraction of raw T3 on dedup).
+        mock_extractor.extract.assert_called_once()
     finally:
         shutdown.set()
         await asyncio.wait_for(serve_task, timeout=5)
@@ -293,7 +266,7 @@ async def test_in_doubt_non_idempotent_raises_without_refire(
     async def _barrier_hook() -> None:
         raise _BarrierKillError("simulated kill after fire, before record_response")
 
-    extractor, serve_task, shutdown, _rc = await _build_loopback(
+    extractor, serve_task, shutdown, _rc, _mock_extractor = await _build_loopback(
         store=store,
         authorized_t3_nonce=authorized_t3_nonce,
         open_client_factory=open_client_factory,

@@ -19,14 +19,14 @@
 id: de-2026-010
 category: dlp_egress
 threat: >-
-  When the egress IO plane is down or the gateway refuses a request, the
-  in-core RelayEgressClient must emit exactly one non-skippable
-  security.egress_relay_refused audit row before raising the typed error.
-  Three paths are tested: relay unreachable (OSError → io_plane_unavailable),
-  gateway deny frame (→ the deny_reason value from EgressRelayDenyReason),
-  and in-doubt + non-idempotent (→ egress_in_doubt).  Each path must produce
-  EXACTLY ONE audit row, payload-blind (no body / header values), before
-  raising.  Zero rows or a swallowed error is a HARD rule #7 violation.
+  The egress IO plane going down or the gateway refusing a request suppresses
+  the mandatory audit row, letting the refusal pass without a forensic trail.
+note: >-
+  Three refusal paths tested — relay unreachable (OSError → io_plane_unavailable),
+  gateway deny frame (→ destination_not_allowlisted from EgressRelayDenyReason),
+  and in-doubt + non-idempotent (→ egress_in_doubt) — each must emit exactly one
+  payload-blind security.egress_relay_refused row before raising.  Zero rows or a
+  swallowed error is a HARD rule #7 violation.
 ingestion_path: web.fetch
 payload:
   paths_under_test:
@@ -35,7 +35,7 @@ payload:
       reason: io_plane_unavailable
     - name: gateway_deny
       error: EgressDeniedError
-      reason: "<EgressRelayDenyReason value>"
+      reason: "destination_not_allowlisted"
     - name: in_doubt_non_idempotent
       error: EgressInDoubtError
       reason: egress_in_doubt

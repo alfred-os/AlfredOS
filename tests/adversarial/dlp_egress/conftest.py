@@ -11,31 +11,35 @@ adversarial cases). The Redis-backed entries in this directory
 (``de-2026-004``) bring their own container fixtures and are unaffected.
 
 The C5 corpus entries (``de-2026-007`` through ``de-2026-010``) also need
-the ``fake_external_world`` fixture from the G7-2c-2 integration suite.
-pytest fixtures are scoped to conftest directory subtrees, so we provide
-the fixture here rather than importing from ``tests/integration/egress/conftest.py``
-(a sibling tree).  The implementation delegates to the shared
-``tests.helpers.egress_doubles.make_fake_external_world`` factory, keeping
-the adversarial and integration suites in sync without duplication.
+the ``fake_external_world`` and ``authorized_t3_nonce`` fixtures from the
+G7-2c-2 integration suite.  pytest fixtures are scoped to conftest directory
+subtrees, so we provide them here rather than importing from
+``tests/integration/egress/conftest.py`` (a sibling tree).  The
+implementations delegate to the shared helpers in
+``tests.helpers.egress_doubles``, keeping the adversarial and integration
+suites in sync without duplication.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterator
 
 import pytest
 from testcontainers.postgres import PostgresContainer
 
+from alfred.bootstrap.nonce_factory import _NONCE_LOCK
+from alfred.security import tiers as _tiers
+from alfred.security.tiers import CapabilityGateNonce
 from tests.helpers.egress_doubles import (
     _CannedResponse,
     _FakeClient,
+    _FireCounter,
     make_fake_external_world,
 )
 
 
 @pytest.fixture
-def postgres_url() -> Any:
+def postgres_url() -> Iterator[str]:
     """Yield a fresh Postgres container's asyncpg-driver URL for one test.
 
     Same shape as ``tests/integration/conftest.py::postgres_url`` — rewrites
@@ -48,14 +52,54 @@ def postgres_url() -> Any:
 
 
 @pytest.fixture
+def authorized_t3_nonce() -> Iterator[CapabilityGateNonce]:
+    """Install a fresh ``CapabilityGateNonce`` as the authorised slot.
+
+    Yields the nonce object so adversarial tests can pass it as
+    ``caller_token`` when exercising the legitimate-path branch. Saves
+    and restores the previous slot value on teardown.
+
+    Both the install and the restore happen under ``_NONCE_LOCK`` (the
+    same module-level lock that guards ``create_and_register_t3_nonce``)
+    so concurrent test workers cannot race the slot mutation — spec §3.2
+    "one live nonce per process" stays sound under same-process
+    parallelism (pytest-xdist with ``--dist loadgroup``, etc.).
+
+    Mirrors the canonical fixture in
+    ``tests/adversarial/tier_laundering/conftest.py``.
+    """
+    with _NONCE_LOCK:
+        previous = _tiers._AUTHORIZED_T3_NONCE
+        nonce = CapabilityGateNonce()
+        _tiers._set_authorized_t3_nonce(nonce)
+    try:
+        yield nonce
+    finally:
+        with _NONCE_LOCK:
+            _tiers._set_authorized_t3_nonce(previous)
+
+
+@pytest.fixture
 def fake_external_world() -> tuple[
     Callable[[], _FakeClient],
-    Any,
+    _FireCounter,
     _CannedResponse,
 ]:
     """Yield ``(open_client_factory, fire_counter, canned_response)``.
 
+    * ``open_client_factory`` — a zero-argument callable returning a fresh
+      ``_FakeClient`` bound to the shared ``fire_counter`` and
+      ``canned_response``; inject it as the relay's ``open_client`` seam.
+    * ``fire_counter`` — a ``_FireCounter`` whose ``.value`` increments each
+      time the relay's ``send`` is called; tests assert on this to prove the
+      upstream was (or was not) hit.
+    * ``canned_response`` — a ``_CannedResponse`` whose fields can be mutated
+      between test rounds (e.g. a TTL-prune scenario sets a new body after the
+      sweep, proving re-fire uses the new canned response, not the old ledger
+      replay).
+
     Delegates to ``tests.helpers.egress_doubles.make_fake_external_world``.
-    Inject ``open_client_factory`` as the relay's ``open_client`` seam.
+    The fixture itself stays directory-scoped (pytest constraint); only the
+    construction logic is shared with the integration conftest.
     """
     return make_fake_external_world()

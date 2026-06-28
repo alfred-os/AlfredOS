@@ -16,10 +16,23 @@ The ``_FakeClient`` / ``_FakeResponse`` shapes mirror the unit-test doubles in
 * ``_FakeClient.aclose`` is a no-op.
 * ``_FakeResponse`` has ``status_code``, ``headers``, ``is_redirect``,
   ``async aiter_bytes() -> AsyncIterator[bytes]``, and ``async aclose()``.
+
+Three extra test doubles are also provided here so they are not duplicated
+across test modules:
+
+* ``_await_relay_ready`` — probes until the relay's listener accepts a
+  TCP connection; used in every integration/adversarial test that starts
+  a loopback ``EgressRelay``.
+* ``_CapturingAuditWriter`` — records every ``append_schema`` call into
+  ``rows``; used by adversarial dlp_egress tests that assert audit rows.
+* ``_NullAuditWriter`` — discards every ``append_schema`` call; used by
+  barrier and contention tests where audit content is not under test.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -141,10 +154,66 @@ def make_fake_external_world() -> tuple[
     return _factory, fire_counter, canned
 
 
+async def _await_relay_ready(port: int, serve_task: asyncio.Task[Any]) -> None:
+    """Probe until the relay's listener accepts a TCP connection.
+
+    A fixed sleep on a busy runner can race the bind; probing eliminates
+    the race.  The relay reaps the benign probe as a ``FrameTooLargeError``
+    / ``MALFORMED_ENVELOPE`` deny, harmless to the test assertions.
+
+    Raises ``AssertionError`` if the relay does not become ready within
+    2.5 seconds (500 x 5 ms) or if ``serve_task`` exits early with an
+    error.
+    """
+    for _ in range(500):
+        if serve_task.done():
+            await serve_task  # re-raise a bind error rather than spinning
+        try:
+            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        except OSError:
+            await asyncio.sleep(0.005)
+            continue
+        writer.close()
+        with contextlib.suppress(OSError, asyncio.TimeoutError):
+            await asyncio.wait_for(writer.wait_closed(), timeout=1)
+        return
+    raise AssertionError("EgressRelay did not become ready within 2.5 s")
+
+
+class _CapturingAuditWriter:
+    """AuditWriter stub that captures every ``append_schema`` call into ``rows``.
+
+    Used by adversarial dlp_egress tests that assert on the audit rows
+    emitted by ``RelayEgressClient`` on refusal paths.  Stores the full
+    call kwargs (including ``subject``) so tests can assert payload-blind
+    field shapes.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+
+    async def append_schema(self, **kwargs: Any) -> None:
+        self.rows.append(dict(kwargs))
+
+
+class _NullAuditWriter:
+    """AuditWriter stub that discards every ``append_schema`` call.
+
+    Used by barrier and contention tests where audit content is not the
+    property under test — the egress idempotency ledger is.
+    """
+
+    async def append_schema(self, **_kw: Any) -> None:
+        return None
+
+
 __all__ = [
     "_CannedResponse",
+    "_CapturingAuditWriter",
     "_FakeClient",
     "_FakeResponse",
     "_FireCounter",
+    "_NullAuditWriter",
+    "_await_relay_ready",
     "make_fake_external_world",
 ]

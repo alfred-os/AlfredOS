@@ -91,6 +91,9 @@ ExpectedOutcome = Literal[
     # Slice 4 additions (PR-S4-0a):
     "policy_swap_aborted_on_audit_failure",  # config.reload audit-write fails → swap aborts
     "recursion_refused",  # error subscriber registered against meta-hookpoint refused
+    # G7-2c-2 additions (#333 C5):
+    # A corpus entry with mixed sub-scenario outcomes (some dedup, some refused).
+    "deduped_or_refused",
 ]
 
 
@@ -108,6 +111,13 @@ class AdversarialPayload(BaseModel):
     id: str = Field(..., description="`<prefix>-YYYY-NNN` per SKILL.md naming")
     category: Category
     threat: str = Field(..., min_length=1)
+    note: str | None = Field(
+        default=None,
+        description=(
+            "Optional extended prose: attack mechanics, sub-scenario detail, "
+            "or context moved out of `threat:` to keep that field to one sentence."
+        ),
+    )
     ingestion_path: IngestionPath
     payload: str | dict[str, Any]
     expected_outcome: ExpectedOutcome

@@ -24,7 +24,6 @@ Spec C §4.2 decision 12, CLAUDE.md hard rules #4/#7.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -33,7 +32,6 @@ import pytest
 import yaml
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from alfred.bootstrap.nonce_factory import _NONCE_LOCK
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.egress.egress_response_extract import EgressResponseExtractor
 from alfred.egress.errors import EgressDeniedError
@@ -43,13 +41,13 @@ from alfred.gateway.egress_relay import EgressRelay
 from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.memory.db import session_scope
 from alfred.memory.egress_idempotency import PostgresEgressIdempotencyStore
-from alfred.security import tiers as _tiers
 from alfred.security.canary_matcher import CanaryMatcher
 from alfred.security.dlp import OutboundDlp
 from alfred.security.quarantine import Extracted, ExtractionSchema, T3DerivedData
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.egress_doubles import _await_relay_ready, _CapturingAuditWriter
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
 _PAYLOAD_PATH = Path(__file__).parent / "de_egress_gateway_dlp_non_canary_catch.yaml"
@@ -107,16 +105,6 @@ class _NoOpDlp:
 # ---------------------------------------------------------------------------
 
 
-class _CapturingAuditWriter:
-    """Captures append_schema calls without touching Postgres."""
-
-    def __init__(self) -> None:
-        self.rows: list[dict[str, Any]] = []
-
-    async def append_schema(self, **kwargs: Any) -> None:
-        self.rows.append(dict(kwargs))
-
-
 # ---------------------------------------------------------------------------
 # Schema for extraction (the extractor should NOT be called in this test
 # because the relay denies before the upstream fires)
@@ -159,35 +147,6 @@ async def store(migrated_url: str) -> Any:
         yield PostgresEgressIdempotencyStore(session_scope=lambda: session_scope(factory))
     finally:
         await engine.dispose()
-
-
-@pytest.fixture
-def authorized_t3_nonce() -> Any:
-    with _NONCE_LOCK:
-        previous = _tiers._AUTHORIZED_T3_NONCE
-        nonce = CapabilityGateNonce()
-        _tiers._set_authorized_t3_nonce(nonce)
-    try:
-        yield nonce
-    finally:
-        with _NONCE_LOCK:
-            _tiers._set_authorized_t3_nonce(previous)
-
-
-async def _await_relay_ready(port: int, serve_task: asyncio.Task[Any]) -> None:
-    for _ in range(500):
-        if serve_task.done():
-            await serve_task
-        try:
-            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        except OSError:
-            await asyncio.sleep(0.005)
-            continue
-        writer.close()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(writer.wait_closed(), timeout=1)
-        return
-    raise AssertionError("EgressRelay did not become ready within 2.5 s")
 
 
 @pytest.mark.asyncio

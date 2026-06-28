@@ -16,21 +16,18 @@
 id: de-2026-007
 category: dlp_egress
 threat: >-
-  A compromised or no-op in-core OutboundDlp lets a secret-shaped value
-  (api-key-shape: sk-<20+ alnum chars>) exit the core unredacted.  The
-  gateway's DLP second pass (broker=None, stages 2+3) catches it during
-  the EgressRelay inspection phase and denies with deny_reason=dlp_redacted.
-  The in-core RelayEgressClient translates the deny frame into
+  A compromised or no-op in-core OutboundDlp lets a secret-shaped value exit
+  the core unredacted, and the gateway forwards it without a second-pass catch.
+note: >-
+  The gateway's DLP second pass (broker=None, stages 2+3) must catch the
+  api-key-shaped value (sk- prefix + 32 alnum chars) and deny with
+  deny_reason=dlp_redacted.  The in-core RelayEgressClient translates to
   EgressDeniedError and writes the non-skippable security.egress_relay_refused
   audit row before raising — proving the gateway is the defence-in-depth
-  backstop when the core is compromised (Spec C §4.2, decision 12, HARD rule #7).
+  backstop when the core is compromised (Spec C §4.2 decision 12, HARD rule #7).
 ingestion_path: web.fetch
 payload:
-  body: "result from tool: sk-Abcdefghijklmnopqrstuvwxyz12345 is the api key"
-  note: >-
-    The body carries a real api-key-shaped token (sk- prefix + 32 alnum chars).
-    The core DLP is injected as a no-op so the token is NOT redacted before
-    reaching the gateway relay.  The gateway DLP must catch it.
+  body: "result from tool: sk-Abcdefghijklmnopqrstuvwxyz123456 is the api key"
 expected_outcome: caught_by_dlp
 provenance: >-
   Spec C §4.2 decision 12 (gateway second-pass DLP defence in depth).

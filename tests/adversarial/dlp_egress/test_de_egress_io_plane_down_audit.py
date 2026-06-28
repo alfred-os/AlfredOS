@@ -29,7 +29,6 @@ CLAUDE.md hard rule #7, Spec C §6.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -37,20 +36,20 @@ import pytest
 import yaml
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from alfred.bootstrap.nonce_factory import _NONCE_LOCK
+from alfred.audit.audit_row_schemas import EGRESS_RELAY_REFUSED_FIELDS
 from alfred.egress.egress_id import TurnEgressContext
 from alfred.egress.errors import EgressDeniedError, EgressInDoubtError
 from alfred.egress.relay_client import RelayEgressClient
-from alfred.egress.relay_protocol import _RawToolRequest
+from alfred.egress.relay_protocol import EgressRelayDenyReason, _RawToolRequest
 from alfred.gateway.egress_relay import EgressRelay
 from alfred.gateway.egress_relay_audit import record_egress_relay
 from alfred.memory.db import session_scope
 from alfred.memory.egress_idempotency import IntentInDoubt, PostgresEgressIdempotencyStore
-from alfred.security import tiers as _tiers
 from alfred.security.canary_matcher import CanaryMatcher
 from alfred.security.dlp import OutboundDlp
 from alfred.security.tiers import CapabilityGateNonce
 from tests.adversarial.payload_schema import AdversarialPayload
+from tests.helpers.egress_doubles import _await_relay_ready, _CapturingAuditWriter
 
 _PAYLOAD_PATH = Path(__file__).parent / "de_egress_io_plane_down_audit.yaml"
 
@@ -65,14 +64,6 @@ def test_payload_schema_valid() -> None:
     assert payload.category == "dlp_egress"
     assert payload.expected_outcome == "audit_row_emitted"
     assert payload.ingestion_path == "web.fetch"
-
-
-class _CapturingAuditWriter:
-    def __init__(self) -> None:
-        self.rows: list[dict[str, Any]] = []
-
-    async def append_schema(self, **kwargs: Any) -> None:
-        self.rows.append(dict(kwargs))
 
 
 pytestmark = pytest.mark.integration
@@ -105,35 +96,6 @@ async def store(migrated_url: str) -> Any:
         await engine.dispose()
 
 
-@pytest.fixture
-def authorized_t3_nonce() -> Any:
-    with _NONCE_LOCK:
-        previous = _tiers._AUTHORIZED_T3_NONCE
-        nonce = CapabilityGateNonce()
-        _tiers._set_authorized_t3_nonce(nonce)
-    try:
-        yield nonce
-    finally:
-        with _NONCE_LOCK:
-            _tiers._set_authorized_t3_nonce(previous)
-
-
-async def _await_relay_ready(port: int, serve_task: asyncio.Task[Any]) -> None:
-    for _ in range(500):
-        if serve_task.done():
-            await serve_task
-        try:
-            _reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        except OSError:
-            await asyncio.sleep(0.005)
-            continue
-        writer.close()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(writer.wait_closed(), timeout=1)
-        return
-    raise AssertionError("EgressRelay did not become ready within 2.5 s")
-
-
 @pytest.mark.asyncio
 async def test_relay_unreachable_emits_audit_row_before_raise(
     store: PostgresEgressIdempotencyStore,
@@ -146,15 +108,25 @@ async def test_relay_unreachable_emits_audit_row_before_raise(
     security.egress_relay_refused audit row with reason=io_plane_unavailable,
     then raises RelayIOPlaneUnavailableError.  Exactly one row must land
     BEFORE the raise (HARD rule #7).
+
+    Uses a reserve-and-close ephemeral port so the test is portable across
+    platforms that restrict binding to port 1.
     """
     from alfred.egress.errors import RelayIOPlaneUnavailableError
 
     audit_writer = _CapturingAuditWriter()
     core_dlp = OutboundDlp(broker=None, audit=lambda **_kw: None)
 
-    # Point the relay client at a port with no listener (connection refused).
+    # Reserve an ephemeral port, close the server, then use that port as the
+    # "no listener" target — portable across platforms (unlike port 1 which
+    # requires privileges on Linux).
+    _srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    _unreachable_port: int = _srv.sockets[0].getsockname()[1]
+    _srv.close()
+    await _srv.wait_closed()
+
     relay_client = RelayEgressClient(
-        relay_url="tcp://127.0.0.1:1",  # port 1 — guaranteed no listener
+        relay_url=f"tcp://127.0.0.1:{_unreachable_port}",
         core_dlp=core_dlp,
         ledger=store,
         audit_writer=audit_writer,  # type: ignore[arg-type]
@@ -174,11 +146,18 @@ async def test_relay_unreachable_emits_audit_row_before_raise(
     with pytest.raises(RelayIOPlaneUnavailableError):
         await relay_client.fire(raw_request=raw_request, ctx=ctx, call_index=0)
 
-    # Exactly one security.egress_relay_refused audit row with reason=io_plane_unavailable.
+    # Exactly one security.egress_relay_refused audit row — proves the row was
+    # committed synchronously BEFORE the exception propagated (HARD rule #7).
     refused = [r for r in audit_writer.rows if r.get("event") == "security.egress_relay_refused"]
     assert len(refused) == 1, f"Expected 1 audit row, got {len(refused)}: {refused}"
-    assert refused[0]["subject"]["reason"] == "io_plane_unavailable"
-    assert refused[0]["subject"]["destination"] == "safe-upstream.example"
+    row = refused[0]
+    assert row["subject"]["reason"] == "io_plane_unavailable"
+    assert row["subject"]["destination"] == "safe-upstream.example"
+    # Row must be payload-blind: only the three closed-vocab fields, no body/header values.
+    assert set(row["subject"].keys()) == EGRESS_RELAY_REFUSED_FIELDS, (
+        f"Audit row subject keys must equal {EGRESS_RELAY_REFUSED_FIELDS!r}; "
+        f"got {set(row['subject'].keys())!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -249,12 +228,28 @@ async def test_gateway_deny_emits_audit_row_before_raise(
         # The upstream must NOT have been reached.
         assert fire_counter.value == 0
 
-        # Exactly one audit row with the deny reason.
+        # Exactly one audit row — proves the row was committed BEFORE the exception
+        # propagated (HARD rule #7).
         refused = [
             r for r in audit_writer.rows if r.get("event") == "security.egress_relay_refused"
         ]
         assert len(refused) == 1, f"Expected 1 audit row, got {len(refused)}"
-        assert refused[0]["subject"]["reason"] == exc_info.value.deny_reason
+        row = refused[0]
+        # Primary: assert the concrete closed-vocab token so drift from the enum
+        # value cannot hide behind exc_info matching the same wrong string.
+        assert (
+            row["subject"]["reason"] == EgressRelayDenyReason.DESTINATION_NOT_ALLOWLISTED.value
+        ), (
+            f"Expected reason={EgressRelayDenyReason.DESTINATION_NOT_ALLOWLISTED.value!r}; "
+            f"got {row['subject']['reason']!r}"
+        )
+        # Secondary: agree with the live exception (cross-checks the wire value roundtrip).
+        assert row["subject"]["reason"] == exc_info.value.deny_reason
+        # Row must be payload-blind: only the three closed-vocab fields.
+        assert set(row["subject"].keys()) == EGRESS_RELAY_REFUSED_FIELDS, (
+            f"Audit row subject keys must equal {EGRESS_RELAY_REFUSED_FIELDS!r}; "
+            f"got {set(row['subject'].keys())!r}"
+        )
 
     finally:
         shutdown.set()
@@ -308,8 +303,15 @@ async def test_in_doubt_emits_audit_row_before_raise(
     with pytest.raises(EgressInDoubtError):
         await relay_client.fire(raw_request=raw_request, ctx=ctx, call_index=0)
 
-    # Exactly one security.egress_relay_refused audit row with reason=egress_in_doubt.
+    # Exactly one security.egress_relay_refused audit row — proves the row was
+    # committed BEFORE the exception propagated (HARD rule #7).
     refused = [r for r in audit_writer.rows if r.get("event") == "security.egress_relay_refused"]
     assert len(refused) == 1, f"Expected 1 audit row, got {len(refused)}: {refused}"
-    assert refused[0]["subject"]["reason"] == "egress_in_doubt"
-    assert refused[0]["subject"]["destination"] == "safe-upstream.example"
+    row = refused[0]
+    assert row["subject"]["reason"] == "egress_in_doubt"
+    assert row["subject"]["destination"] == "safe-upstream.example"
+    # Row must be payload-blind: only the three closed-vocab fields.
+    assert set(row["subject"].keys()) == EGRESS_RELAY_REFUSED_FIELDS, (
+        f"Audit row subject keys must equal {EGRESS_RELAY_REFUSED_FIELDS!r}; "
+        f"got {set(row['subject'].keys())!r}"
+    )

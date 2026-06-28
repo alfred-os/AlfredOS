@@ -50,6 +50,7 @@ graph — drift between the two is a release-blocker.
 | In-flight grant revocation race | PR #134 retrospective (`tl_inflight_grant_revocation_race.yaml` + `test_tier_laundering_inflight_grant_revocation_race.py`) — atomic `_apply_grants` swap + revoke-before-upsert audit ordering |
 | Retry-guidance hygiene (strict token-set invariant + poisoned-input control) | PR-S3-4 (`test_tier_laundering_retry_guidance_hygiene.py`) |
 | `gc.get_objects()`-style T3 token retrieval (out-of-scope acknowledgement) | PR-S3-1 Task 24 (`tl_gc_traversal_out_of_scope.yaml`) — explicit out-of-scope label per spec §3.2 threat model limits |
+| Cross-mode tier-downgrade: `EgressResponse.body` (raw T3 bytes) treated as T2 `ExtractionResult` — structural gate refuses; `quarantined_to_structured()` is the only T2-producing path; dedup path returns stored T2 without re-extracting raw T3 (HARD rule #5) | PR #333 G7-2c-2 / issue #333 (`tl-2026-010` `tl_cross_mode_tier_downgrade.yaml` + `test_tier_laundering_cross_mode_tier_downgrade.py`) |
 
 See [`.rulesync/skills/alfred-adversarial-corpus/SKILL.md`](../../../.rulesync/skills/alfred-adversarial-corpus/SKILL.md)
 for naming, schema, and the "Adding a new payload" procedure.
