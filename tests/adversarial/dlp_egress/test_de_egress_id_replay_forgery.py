@@ -238,10 +238,12 @@ async def test_replay_complete_deduplicates_without_refire(
         assert outcome_2.deduplicated is True, "second call MUST be deduplicated"
         assert fire_counter.value == 1, f"replay must not re-fire; fire_count={fire_counter.value}"
 
-        # The extractor must have been called exactly ONCE — across BOTH the first
+        # The extractor must have been AWAITED exactly ONCE — across BOTH the first
         # call and the replay.  On the dedup replay the ledger short-circuits before
         # the extractor (HARD rule #5 — no re-extraction of raw T3 on dedup).
-        mock_extractor.extract.assert_called_once()
+        # assert_awaited_once (not assert_called_once) pins the async invocation:
+        # the real extract is awaited, so await_count is the load-bearing counter.
+        mock_extractor.extract.assert_awaited_once()
     finally:
         shutdown.set()
         await asyncio.wait_for(serve_task, timeout=5)
