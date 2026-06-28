@@ -35,6 +35,7 @@ Three collaborators:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -189,6 +190,24 @@ class T3BodyRecorder:
             caller_token=self._nonce,
         )
         self._staging.stage(handle.id, tagged)
+
+    def discard_staged(self, handle_id: str) -> None:
+        """Discard any staged T3 body for *handle_id*.
+
+        Drain-and-discard a staged body whose extraction never completed
+        (gate-deny before extract, an extract failure mid-flight, OR a
+        ``CancelledError`` from Task 6's action-deadline) so it cannot
+        orphan in the unbounded staging map (G7-2.5 C9).
+
+        Idempotent: a no-op when a successful extract already drained the
+        handle (the normal happy-path exit) or when the handle was never
+        staged.  Suppresses :class:`StagingHandleNotConfiguredError` so
+        the ``except BaseException`` block in
+        :meth:`EgressResponseExtractor.handle` can call this
+        unconditionally without a prior existence check.
+        """
+        with contextlib.suppress(StagingHandleNotConfiguredError):
+            self._staging.drain(handle_id)
 
 
 def _body_to_text(body: bytes | str | object) -> str:

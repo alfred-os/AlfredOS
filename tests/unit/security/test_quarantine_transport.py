@@ -426,3 +426,45 @@ def test_decode_result_payload_truncated_frame_raises_loud() -> None:
     """
     with pytest.raises(json.JSONDecodeError):
         _decode_result_payload(b"\x00\x01")  # 2 bytes — shorter than the 4-byte header
+
+
+# ---------------------------------------------------------------------------
+# 9: discard_staged — C9 drain-on-error, no orphaned T3 body (G7-2.5 Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_t3_body_recorder_discard_staged(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """``discard_staged`` removes a staged T3 body; subsequent drain raises; idempotent.
+
+    Verifies three properties required by C9 (G7-2.5 Task 3):
+    1. After staging a body via the recorder, ``discard_staged`` removes it so
+       a follow-up ``staging.drain`` raises ``StagingHandleNotConfiguredError``
+       (the staged entry is gone, not a silent no-op).
+    2. A second call to ``discard_staged`` is a no-op — it does NOT raise even
+       though the handle has already been drained/discarded.  This makes the
+       ``except BaseException`` block in ``egress_response_extract.handle``
+       safe to call unconditionally without checking first.
+    """
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    handle = _make_handle()
+
+    recorder(handle=handle, body="attack payload")
+
+    # Confirm the body is staged before the discard.
+    assert handle.id in staging._staged
+
+    # Discard the staged body.
+    recorder.discard_staged(handle.id)
+
+    # After discard the staging map must be empty — the body cannot orphan.
+    assert handle.id not in staging._staged
+
+    # A subsequent drain must raise (the entry was removed, not silently zeroed).
+    with pytest.raises(StagingHandleNotConfiguredError):
+        staging.drain(handle.id)
+
+    # A second discard is a no-op — must not raise even though handle is gone.
+    recorder.discard_staged(handle.id)

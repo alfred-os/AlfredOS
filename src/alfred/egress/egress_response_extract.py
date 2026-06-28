@@ -225,16 +225,31 @@ class EgressResponseExtractor:
             fetch_timestamp=datetime.now(UTC),
         )
         self._recorder(handle=handle, body=outcome.response.body)
-
-        # Step 3: gate-checked T3 → T2 extraction.  A gate denial raises
-        # AlfredError here; we let it propagate without calling record_response —
-        # the ledger row stays committed_no_response (at-most-once firewall).
-        result = await quarantined_to_structured(
-            handle,
-            schema,
-            extractor=self._extractor,
-            gate=self._gate,
-        )
+        # INVARIANT (C9 / G7-2.5 Task 3): ``self._recorder(...)`` (sync stage) is the
+        # LAST statement before the ``try:`` with NO ``await`` interposed.  This
+        # guarantees that a ``CancelledError`` can only land INSIDE the ``try`` (at
+        # the ``await quarantined_to_structured``), never between the stage and the
+        # guard — so the discard fires on every failure path (gate-deny, extract
+        # failure, cancellation from Task 6's action-deadline).
+        try:
+            # Step 3: gate-checked T3 → T2 extraction.  A gate denial raises
+            # AlfredError here; we let it propagate without calling record_response —
+            # the ledger row stays committed_no_response (at-most-once firewall).
+            result = await quarantined_to_structured(
+                handle,
+                schema,
+                extractor=self._extractor,
+                gate=self._gate,
+            )
+        except BaseException:
+            # The extractor never drained the staged body (gate-deny before extract,
+            # an extract failure mid-flight, OR a CancelledError from Task 6's
+            # action-deadline) → drain it here so the T3 body cannot orphan (C9).
+            # MUST be ``except BaseException``, NOT ``except Exception`` — a
+            # CancelledError is a BaseException subclass; an ``except Exception``
+            # block would let it escape without discarding the staged body.
+            self._recorder.discard_staged(handle.id)
+            raise
 
         # Step 4: recompute egress_id — pure, matches the id C1 committed.
         egress_id = compute_egress_id(ctx, call_index=call_index)

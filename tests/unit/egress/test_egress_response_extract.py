@@ -14,6 +14,7 @@ Four required behaviours exercised against stubs (no Postgres, no real extractor
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -503,4 +504,102 @@ async def test_replay_outcome_status_is_none(
 
     assert result.status is None, (
         f"Expected outcome.status is None on replay, got {result.status!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — C9 gate-denial no-orphan: staging map is empty after AlfredError
+# ---------------------------------------------------------------------------
+
+
+async def test_gate_denial_leaves_no_orphaned_body(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """C9: A gate denial raises AlfredError AND leaves no orphaned body in the staging map.
+
+    Before the fix, ``self._recorder(handle=handle, body=...)`` staged the T3 body and
+    then ``quarantined_to_structured`` raised ``AlfredError`` (gate-first deny) before
+    the extractor's transport could drain it.  The staged ``TaggedContent[T3]`` would
+    then orphan in the unbounded ``QuarantineStagingMap`` for process lifetime.
+
+    After the fix, the ``except BaseException`` wrapper in ``handle()`` calls
+    ``self._recorder.discard_staged(handle.id)`` so the map is empty on exit.
+    """
+    relay_client = _StubRelayClient(outcome=_make_fired_response())
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_deny_all_gate()
+    mock_extractor = AsyncMock()
+    mock_extractor.extract = AsyncMock()
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=relay_client,  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,  # type: ignore[arg-type]
+        recorder=recorder,
+    )
+
+    with pytest.raises(AlfredError):
+        await extractor_obj.handle(
+            raw_request=_make_raw_request(),
+            ctx=_CTX,
+            call_index=_CALL_INDEX,
+            schema=_TestSchema,
+            language=None,
+        )
+
+    # No orphaned body — the staging map must be empty after the gate denial (C9).
+    assert len(staging._staged) == 0, (
+        f"Orphaned body detected: staging map is not empty after gate denial: {staging._staged!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — C9 cancellation no-orphan: staging map is empty after CancelledError
+# ---------------------------------------------------------------------------
+
+
+async def test_cancelled_error_leaves_no_orphaned_body(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """C9: A CancelledError mid-quarantined_to_structured leaves no orphaned body.
+
+    This covers the Task 6 action-deadline path: the deadline cancels the
+    ``handle()`` coroutine AFTER ``self._recorder(...)`` has staged the T3 body but
+    BEFORE the extractor's transport drains it.  A bare ``except Exception`` would
+    NOT catch ``CancelledError`` (it is a ``BaseException`` subclass, not an
+    ``Exception`` subclass), so the orphan would escape.  The fix uses
+    ``except BaseException`` so the discard fires on cancellation too.
+    """
+    relay_client = _StubRelayClient(outcome=_make_fired_response())
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_quarantined_extract_chain_gate(
+        grant_dereference_t3=True,
+        dereference_plugin_id="alfred.quarantined-llm",
+    )
+    mock_extractor = AsyncMock()
+    # Simulate the action-deadline cancellation landing inside the extractor.
+    mock_extractor.extract = AsyncMock(side_effect=asyncio.CancelledError())
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=relay_client,  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,  # type: ignore[arg-type]
+        recorder=recorder,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await extractor_obj.handle(
+            raw_request=_make_raw_request(),
+            ctx=_CTX,
+            call_index=_CALL_INDEX,
+            schema=_TestSchema,
+            language=None,
+        )
+
+    # No orphaned body — the staging map must be empty after the CancelledError (C9).
+    assert len(staging._staged) == 0, (
+        "Orphaned body detected: staging map is not empty after CancelledError:"
+        f" {staging._staged!r}"
     )
