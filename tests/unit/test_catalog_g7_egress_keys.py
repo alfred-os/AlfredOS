@@ -11,6 +11,8 @@ G7_EGRESS_KEYS: tuple[str, ...] = (
     "egress.denied",
     # G7-2c-1: in-doubt refusal for a non-idempotent request (H3 policy).
     "egress.in_doubt",
+    # G7-2c-1: relay-reach-specific operator message (names ALFRED_EGRESS_RELAY_URL).
+    "egress.relay_io_unavailable",
     # G7-2a: the egress-id ledger integrity-mismatch (duplicate id, different body-hash).
     "egress.id_integrity_mismatch",
     # G7-2a: record_response on an egress-id with no committed intent row.

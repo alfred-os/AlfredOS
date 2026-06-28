@@ -32,14 +32,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from alfred.egress.egress_id import TurnEgressContext, compute_egress_id
 from alfred.egress.relay_client import Deduplicated, Fired, RelayEgressClient
 from alfred.egress.relay_protocol import _RawToolRequest
-from alfred.memory.egress_idempotency import EgressIdempotencyStore
 from alfred.security.quarantine import (
     ContentHandle,
     ExtractionResult,
@@ -111,13 +110,11 @@ class EgressResponseExtractor:
         self,
         *,
         relay_client: RelayEgressClient,
-        ledger: EgressIdempotencyStore,
         gate: CapabilityGate,
         extractor: QuarantinedExtractor,
         recorder: T3BodyRecorder,
     ) -> None:
         self._relay_client = relay_client
-        self._ledger = ledger
         self._gate = gate
         self._extractor = extractor
         self._recorder = recorder
@@ -163,7 +160,9 @@ class EgressResponseExtractor:
             )
 
         # outcome is Fired — raw T3 bytes in outcome.response.body.
-        assert isinstance(outcome, Fired)  # narrow for type checker
+        outcome = cast(  # type: ignore[redundant-cast]  # cast not assert: asserts stripped under -O; mirrors relay_client.py
+            Fired, outcome
+        )
 
         # Step 2: mint an opaque ContentHandle and stage the raw T3 body.
         # The orchestrator never touches outcome.response.body directly.
@@ -188,7 +187,9 @@ class EgressResponseExtractor:
         egress_id = compute_egress_id(ctx, call_index=call_index)
 
         # Step 5: record post-extraction T2 (NEVER raw T3 body).
-        await self._ledger.record_response(
+        # Use self._relay_client.ledger to enforce the single-ledger invariant:
+        # C1 committed the intent via this same ledger instance (M8).
+        await self._relay_client.ledger.record_response(
             egress_id=egress_id,
             response=result.model_dump_json(),
             language=language,
@@ -198,7 +199,6 @@ class EgressResponseExtractor:
 
 
 __all__ = [
-    "_EXTRACTION_RESULT_ADAPTER",
     "EgressExtractOutcome",
     "EgressResponseExtractor",
 ]

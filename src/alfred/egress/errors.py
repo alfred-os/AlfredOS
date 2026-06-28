@@ -72,9 +72,29 @@ class EgressInDoubtError(AlfredError):
 
     reason = "egress_in_doubt"
 
-    def __init__(self, *, destination: str) -> None:
+    def __init__(self, *, destination: str, egress_id: str) -> None:
         self.destination = destination
-        super().__init__(t("egress.in_doubt", destination=destination))
+        self.egress_id = egress_id
+        super().__init__(t("egress.in_doubt", destination=destination, egress_id=egress_id))
+
+
+class RelayIOPlaneUnavailableError(IOPlaneUnavailableError):
+    """The in-core relay client could not reach the gateway tool-egress relay.
+
+    A subtype of :class:`IOPlaneUnavailableError` (the relay IS an egress I/O
+    plane, so generic I/O-plane handling still applies), but DISTINCT so the
+    operator message names ``ALFRED_EGRESS_RELAY_URL`` / the gateway relay
+    specifically — not the CONNECT proxy (``ALFRED_EGRESS_PROXY_URL``) that
+    :class:`IOPlaneUnavailableError` names.
+    """
+
+    reason = "relay_io_plane_unavailable"
+
+    def __init__(self, *, detail: str) -> None:
+        self.detail = detail
+        # Bypass IOPlaneUnavailableError.__init__ (its message names the CONNECT
+        # proxy); set the relay-specific message directly on AlfredError.
+        AlfredError.__init__(self, t("egress.relay_io_unavailable", detail=detail))
 
 
 __all__ = [
@@ -82,4 +102,5 @@ __all__ = [
     "EgressInDoubtError",
     "EgressRelayUnavailableError",
     "IOPlaneUnavailableError",
+    "RelayIOPlaneUnavailableError",
 ]

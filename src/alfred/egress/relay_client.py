@@ -32,16 +32,21 @@ decodes or inspects the body.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import pydantic
 
 from alfred.audit.audit_row_schemas import EGRESS_RELAY_REFUSED_FIELDS
 from alfred.egress.egress_id import TurnEgressContext, compute_body_hash, compute_egress_id
-from alfred.egress.errors import EgressDeniedError, EgressInDoubtError, IOPlaneUnavailableError
+from alfred.egress.errors import (
+    EgressDeniedError,
+    EgressInDoubtError,
+    RelayIOPlaneUnavailableError,
+)
 from alfred.egress.relay_protocol import (
     EgressRelayReply,
     EgressRequest,
@@ -76,8 +81,8 @@ _DEFAULT_PER_CALL_TIMEOUT: float = 30.0
 _DEFAULT_MAX_FRAME_LEN: int = 64 * 1024 * 1024  # 64 MiB
 
 # Stable closed-vocab audit event name (never localised — audit tokens are English).
-_AUDIT_EVENT = "security.egress_relay_refused"
-_AUDIT_SCHEMA_NAME = "EGRESS_RELAY_REFUSED_FIELDS"
+_AUDIT_EVENT: Final[str] = "security.egress_relay_refused"
+_AUDIT_SCHEMA_NAME: Final[str] = "EGRESS_RELAY_REFUSED_FIELDS"
 
 
 @dataclass(frozen=True)
@@ -124,6 +129,18 @@ class RelayEgressClient:
         per_call_timeout: float = _DEFAULT_PER_CALL_TIMEOUT,
         max_frame_len: int = _DEFAULT_MAX_FRAME_LEN,
     ) -> None:
+        # Parse the relay URL once at construction; the dialer reuses host+port for
+        # every fire (urllib.parse.urlsplit handles both tcp:// and http:// forms).
+        parsed = urllib.parse.urlsplit(relay_url)
+        if parsed.hostname is None or parsed.port is None:
+            raise ValueError("relay_url must include a hostname and explicit port")
+        self._relay_host: str = parsed.hostname
+        self._relay_port: int = parsed.port
+
+        if concurrency <= 0:
+            raise ValueError("concurrency must be > 0")
+        # concurrency is an explicit required arg — a deliberate per-wiring-site
+        # HoL-capacity decision (no hidden default).
         self._core_dlp = core_dlp
         self._ledger = ledger
         self._audit_writer = audit_writer
@@ -132,11 +149,26 @@ class RelayEgressClient:
         self._per_call_timeout = per_call_timeout
         self._max_frame_len = max_frame_len
 
-        # Parse the relay URL once at construction; the dialer reuses host+port for
-        # every fire (urllib.parse.urlsplit handles both tcp:// and http:// forms).
-        parsed = urllib.parse.urlsplit(relay_url)
-        self._relay_host: str = parsed.hostname or ""
-        self._relay_port: int = parsed.port or 0
+    @property
+    def ledger(self) -> EgressIdempotencyStore:
+        """The idempotency ledger this client commits intents to.
+
+        C2 (EgressResponseExtractor) uses this to call record_response
+        against the SAME ledger instance as C1's commit_intent — enforcing
+        the single-ledger invariant via the API, not caller discipline.
+        """
+        return self._ledger
+
+    @staticmethod
+    def _destination_for_audit(url: str) -> str:
+        """Extract the bare host authority for audit rows (payload-blind).
+
+        Returns the hostname (or netloc) ONLY — never a path or query —
+        so malformed URLs cannot sneak body content into the durable
+        audit row or the EgressInDoubtError message (HARD rules #5/#7).
+        """
+        parsed = urllib.parse.urlsplit(url)
+        return parsed.hostname or parsed.netloc or "<invalid-url>"
 
     async def fire(
         self,
@@ -184,23 +216,31 @@ class RelayEgressClient:
             if not raw_request.idempotent:
                 # Default policy: refuse. A non-idempotent re-fire risks a double
                 # side-effect (spec §5 H3). Write the durable audit row FIRST.
-                destination = urllib.parse.urlsplit(raw_request.url).hostname or raw_request.url
+                destination = self._destination_for_audit(raw_request.url)
+                # Audit-failure is fail-loud (HARD rule #7): if _audit_refused raises,
+                # let it propagate — a broken audit write is more severe than the
+                # I/O outage it records.
                 await self._audit_refused(
                     destination=destination,
                     reason="egress_in_doubt",
                     egress_id=egress_id,
                     result="in_doubt",
                 )
-                raise EgressInDoubtError(destination=destination)
+                raise EgressInDoubtError(destination=destination, egress_id=egress_id)
             # Idempotent refire: forward egress_id as the remote Idempotency-Key
             # header so the upstream server can dedup the HTTP-level request.
+            # Drop any pre-existing idempotency-key (case-insensitive) before
+            # setting the canonical one — HTTP header names are case-insensitive,
+            # and keeping a lower-case duplicate creates two conflicting values.
             forwarded_headers: Mapping[str, str] = {
-                **raw_request.headers,
-                "Idempotency-Key": egress_id,
+                k: v for k, v in raw_request.headers.items() if k.lower() != "idempotency-key"
             }
+            forwarded_headers = {**forwarded_headers, "Idempotency-Key": egress_id}
         else:
             # IntentFresh — forward the original headers, no Idempotency-Key.
-            assert isinstance(intent, IntentFresh)
+            intent = cast(  # type: ignore[redundant-cast]  # cast not assert: asserts stripped under -O (mirrors the Fired cast above)
+                IntentFresh, intent
+            )
             forwarded_headers = raw_request.headers
 
         # Step 5: Fire under concurrency bound and per-call timeout.
@@ -225,7 +265,7 @@ class RelayEgressClient:
         FrameTooLargeError, JSON/validation errors) map to IOPlaneUnavailableError
         with a durable audit row before the raise.
         """
-        destination = urllib.parse.urlsplit(raw_request.url).hostname or raw_request.url
+        destination = self._destination_for_audit(raw_request.url)
 
         request = EgressRequest(
             method=raw_request.method,
@@ -267,17 +307,27 @@ class RelayEgressClient:
                 # - pydantic.ValidationError: malformed reply frame
                 #   (model_validate_json on non-conforming JSON).
                 detail = f"{type(exc).__name__}: {exc}"
+                # Audit-failure is fail-loud (HARD rule #7): if _audit_refused raises,
+                # let it propagate — a broken audit write is more severe than the
+                # I/O outage it records.
                 await self._audit_refused(
                     destination=destination,
                     reason="io_plane_unavailable",
                     egress_id=egress_id,
                     result="io_plane_unavailable",
                 )
-                raise IOPlaneUnavailableError(detail=detail) from exc
+                raise RelayIOPlaneUnavailableError(detail=detail) from exc
             finally:
                 if writer is not None:
                     writer.close()
-                    await writer.wait_closed()
+                    # Teardown-only cleanup swallow: wait_closed() can stall
+                    # on a half-open socket or unresponsive peer, which would
+                    # (a) hold _semaphore past the per-call budget and (b) mask
+                    # the typed IOPlaneUnavailableError/EgressDeniedError by
+                    # raising during exception unwinding. This is deliberate —
+                    # NOT a trust-boundary exception swallow (HARD rule #7).
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(writer.wait_closed(), self._per_call_timeout)
 
         if reply.deny_reason is not None:
             reason_token = str(reply.deny_reason)
