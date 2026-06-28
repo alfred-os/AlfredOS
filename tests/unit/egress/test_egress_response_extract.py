@@ -29,9 +29,14 @@ from alfred.egress.egress_response_extract import (
 )
 from alfred.egress.relay_client import Deduplicated, Fired
 from alfred.egress.relay_protocol import EgressResponse, _RawToolRequest
+from alfred.egress.response_inspection import (
+    InboundCanaryTripped,
+    ResponsePolicy,
+)
 from alfred.errors import AlfredError
 from alfred.memory.egress_idempotency import CommitIntentResult, IntentFresh
 from alfred.security import tiers as _tiers
+from alfred.security.canary_matcher import CanaryMatcher, CanaryToken
 from alfred.security.quarantine import (
     Extracted,
     ExtractionResult,
@@ -603,3 +608,238 @@ async def test_cancelled_error_leaves_no_orphaned_body(
         "Orphaned body detected: staging map is not empty after CancelledError:"
         f" {staging._staged!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — D1 soft refusal: disallowed MIME → TypedRefusal; extractor not called
+# ---------------------------------------------------------------------------
+
+
+def _make_response_policy(
+    *,
+    mime_allowlist: frozenset[str] | None = None,
+    max_bytes: int = 10 * 1024 * 1024,
+    canary: CanaryMatcher | None = None,
+) -> ResponsePolicy:
+    return ResponsePolicy(
+        mime_allowlist=mime_allowlist or frozenset({"text/html", "text/plain", "application/json"}),
+        max_bytes=max_bytes,
+        canary=canary,
+    )
+
+
+async def test_d1_disallowed_mime_returns_soft_refusal_extractor_not_called(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """D1: a Fired response with an disallowed MIME type returns TypedRefusal(cannot_extract).
+
+    The extractor is NOT called and the ledger row is committed_with_response
+    (replay returns Deduplicated, no re-fetch).
+    """
+    raw_body = b"binary content"
+    fired = Fired(
+        response=EgressResponse(
+            status=200,
+            headers={"Content-Type": "application/octet-stream"},
+            body=raw_body,
+        )
+    )
+    relay_client = _StubRelayClient(outcome=fired)
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_quarantined_extract_chain_gate(
+        grant_dereference_t3=True,
+        dereference_plugin_id="alfred.quarantined-llm",
+    )
+    mock_extractor = AsyncMock()
+    spy_extract = mock_extractor.extract = AsyncMock()
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=relay_client,  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,  # type: ignore[arg-type]
+        recorder=recorder,
+        response_policy=_make_response_policy(),
+    )
+
+    outcome = await extractor_obj.handle(
+        raw_request=_make_raw_request(),
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        schema=_TestSchema,
+        language="en",
+    )
+
+    # Extractor must NOT be called (soft refusal before extraction).
+    spy_extract.assert_not_called()
+
+    # Result is TypedRefusal(reason="cannot_extract") — structural T2.
+    assert isinstance(outcome.result, TypedRefusal)
+    assert outcome.result.reason == "cannot_extract"
+    assert outcome.deduplicated is False
+    assert outcome.status == 200
+
+    # Ledger received record_response (row is now committed_with_response).
+    assert len(relay_client.ledger.record_calls) == 1
+    rec = relay_client.ledger.record_calls[0]
+    assert rec["language"] == "en"
+
+    # Attacker-controlled Content-Type MUST NOT appear in the stored refusal value.
+    assert "application/octet-stream" not in rec["response"]
+    assert raw_body.decode("latin-1") not in rec["response"]
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — D1 canary hit: InboundCanaryTripped raised; ledger has refused_by_safety FIRST
+# ---------------------------------------------------------------------------
+
+
+async def test_d1_canary_hit_raises_inbound_canary_tripped_after_ledger_write(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """D1: a canary token in the response body raises InboundCanaryTripped AFTER ledger write.
+
+    C8 invariant: the ledger row must be committed_with_response(refused_by_safety)
+    BEFORE the raise, so a §5 replay returns Deduplicated and never re-fires.
+    """
+    canary_token = "CANARY-UNIT-TEST-XYZ"  # noqa: S105
+    canary_matcher = CanaryMatcher(tokens=[CanaryToken(value=canary_token)])
+    policy = _make_response_policy(canary=canary_matcher)
+
+    fired = Fired(
+        response=EgressResponse(
+            status=200,
+            headers={"Content-Type": "text/html"},
+            body=f"<html>contains {canary_token}</html>".encode(),
+        )
+    )
+    relay_client = _StubRelayClient(outcome=fired)
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_quarantined_extract_chain_gate(
+        grant_dereference_t3=True,
+        dereference_plugin_id="alfred.quarantined-llm",
+    )
+    mock_extractor = AsyncMock()
+    spy_extract = mock_extractor.extract = AsyncMock()
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=relay_client,  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,  # type: ignore[arg-type]
+        recorder=recorder,
+        response_policy=policy,
+    )
+
+    with pytest.raises(InboundCanaryTripped) as exc_info:
+        await extractor_obj.handle(
+            raw_request=_make_raw_request(url="https://hostile.example.com/data"),
+            ctx=_CTX,
+            call_index=_CALL_INDEX,
+            schema=_TestSchema,
+            language="en",
+        )
+
+    # Extractor MUST NOT be called.
+    spy_extract.assert_not_called()
+
+    # C8: ledger record_response was called BEFORE the raise.
+    assert len(relay_client.ledger.record_calls) == 1
+    rec = relay_client.ledger.record_calls[0]
+    # The stored value is TypedRefusal(reason="refused_by_safety") — terminal.
+    assert "refused_by_safety" in rec["response"]
+    assert rec["language"] == "en"
+
+    # Exception is payload-blind: carries destination + egress_id; no body content.
+    exc = exc_info.value
+    assert exc.destination == "hostile.example.com"
+    assert exc.reason == "inbound_canary_tripped"
+    assert canary_token not in str(exc)  # payload-blind: token not in message
+
+
+# ---------------------------------------------------------------------------
+# Test 12 — D1 no policy: response_policy=None → seam skipped entirely
+# ---------------------------------------------------------------------------
+
+
+async def test_d1_no_policy_seam_skipped(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """With response_policy=None, the D1 seam is skipped and extraction proceeds normally."""
+    extracted = _make_extracted("no-policy-payload")
+    fired = Fired(
+        response=EgressResponse(
+            status=200,
+            headers={"Content-Type": "application/octet-stream"},  # would be refused with a policy
+            body=b"binary-body",
+        )
+    )
+    extractor_obj, _ledger, spy_extract = _make_extractor(
+        relay_outcome=fired,
+        extracted=extracted,
+        authorized_nonce=authorized_t3_nonce,
+        # response_policy defaults to None → seam skipped
+    )
+
+    outcome = await extractor_obj.handle(
+        raw_request=_make_raw_request(),
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        schema=_TestSchema,
+        language="en",
+    )
+
+    # Extractor ran normally (seam was not invoked).
+    spy_extract.assert_awaited_once()
+    assert outcome.deduplicated is False
+    assert isinstance(outcome.result, Extracted)
+
+
+# ---------------------------------------------------------------------------
+# Test 13 — D1 _Proceed: policy set but verdict passes → extraction runs
+# ---------------------------------------------------------------------------
+
+
+async def test_d1_proceed_verdict_falls_through_to_extraction(
+    authorized_t3_nonce: CapabilityGateNonce,
+) -> None:
+    """D1: when response_policy is set and inspection returns _Proceed, extraction runs normally."""
+    extracted = _make_extracted("d1-proceed-payload")
+    fired = Fired(
+        response=EgressResponse(
+            status=200,
+            headers={"Content-Type": "text/html"},  # allowed MIME
+            body=b"hello world",  # under default max_bytes; no canary
+        )
+    )
+    relay_client = _StubRelayClient(outcome=fired)
+    staging = QuarantineStagingMap()
+    recorder = T3BodyRecorder(nonce=authorized_t3_nonce, staging=staging)
+    gate = make_quarantined_extract_chain_gate(
+        grant_dereference_t3=True,
+        dereference_plugin_id="alfred.quarantined-llm",
+    )
+    mock_extractor = AsyncMock()
+    spy_extract = mock_extractor.extract = AsyncMock(return_value=extracted)
+
+    extractor_obj = EgressResponseExtractor(
+        relay_client=relay_client,  # type: ignore[arg-type]
+        gate=gate,
+        extractor=mock_extractor,  # type: ignore[arg-type]
+        recorder=recorder,
+        response_policy=_make_response_policy(),  # policy is set; verdict will be _Proceed
+    )
+
+    outcome = await extractor_obj.handle(
+        raw_request=_make_raw_request(),
+        ctx=_CTX,
+        call_index=_CALL_INDEX,
+        schema=_TestSchema,
+        language="en",
+    )
+
+    # Extraction proceeded normally after the _Proceed verdict.
+    spy_extract.assert_awaited_once()
+    assert outcome.deduplicated is False
+    assert isinstance(outcome.result, Extracted)
+    assert outcome.result == extracted

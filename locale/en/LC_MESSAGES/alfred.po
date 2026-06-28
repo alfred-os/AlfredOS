@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: AlfredOS 0.0.1\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-06-28 00:52+0100\n"
+"POT-Creation-Date: 2026-06-28 20:25+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1361,7 +1361,7 @@ msgstr "Comms dispatch ingest result is missing a required key; refusing to send
 msgid "comms.daemon_runtime.sender_unbound"
 msgstr "Comms outbound sender is not bound; the adapter is not fully wired."
 
-#: src/alfred/egress/egress_id.py:89
+#: src/alfred/egress/egress_id.py:102
 msgid "egress.id_integrity_mismatch"
 msgstr ""
 "Egress idempotency integrity check failed for egress-id {egress_id}: a "
@@ -1412,6 +1412,15 @@ msgstr ""
 " gateway tool-egress relay ({detail}). Check that the alfred-gateway "
 "service is up and that ALFRED_EGRESS_RELAY_URL points at it — the gateway"
 " relay is the sole maker of tool HTTP requests."
+
+#: src/alfred/egress/response_inspection.py:153
+#: src/alfred/i18n/_spec_c_reserve.py:49
+msgid "egress.inbound_canary_tripped"
+msgstr ""
+"An inbound canary token was detected in a response received from "
+"{destination} (egress-id: {egress_id}). The response was REFUSED and the "
+"event recorded for the operator. This is a security event — inspect the "
+"audit log."
 
 #: src/alfred/gateway/adapter_child_factory.py:156
 msgid "gateway.adapter.launch_target.override_refused"
@@ -2886,21 +2895,21 @@ msgstr ""
 "Delivering the provider key to the quarantined-LLM child over fd 3 "
 "failed; the spawn was refused."
 
-#: src/alfred/security/quarantine_transport.py:142
+#: src/alfred/security/quarantine_transport.py:143
 msgid "security.quarantine_staging.handle_consumed"
 msgstr ""
 "Refusing to dereference a quarantine staging handle that was never staged"
 " or has already been consumed. Each inbound body is single-use; replay is"
 " refused."
 
-#: src/alfred/security/quarantine_transport.py:180
+#: src/alfred/security/quarantine_transport.py:181
 msgid "security.quarantine_staging.nonce_unconfigured"
 msgstr ""
 "Refusing to stage an inbound body for quarantine: the authorised T3 nonce"
 " is not configured. The daemon must register it at boot before wiring the"
 " comms inbound path."
 
-#: src/alfred/security/quarantine_transport.py:250
+#: src/alfred/security/quarantine_transport.py:269
 msgid "security.quarantine_transport.unsupported_method"
 msgstr ""
 "Quarantine transport refused an unsupported wire method '{method}'. "

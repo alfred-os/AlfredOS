@@ -328,7 +328,7 @@ def test_dynamic_result_sites_are_documented() -> None:
             # G7-2c-1 (#333) — _audit_refused result param; reachable values:
             # "in_doubt" | "io_plane_unavailable" | "denied" (all in-domain,
             # migration 0024 added the first two; "denied" was already in-domain).
-            "src/alfred/egress/relay_client.py:375",
+            "src/alfred/egress/relay_client.py:380",
             "src/alfred/identity/cli.py:219",
             "src/alfred/memory/hooks_audit_sink.py:398",  # _RESULT_BY_EVENT lookup
             "src/alfred/orchestrator/burst_limiter.py:368",  # IfExp dropped/capped
