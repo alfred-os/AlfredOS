@@ -19,6 +19,7 @@ except under a sha256 collision (not a threat we model).
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict
 
@@ -74,6 +75,38 @@ def compute_body_hash(redacted_body: str) -> str:
     return hashlib.sha256(redacted_body.encode("utf-8")).hexdigest()
 
 
+def compute_egress_body_hash(
+    *, request_descriptor: str, headers: Mapping[str, str], redacted_body: str
+) -> str:
+    """The ledger integrity hash for one egress fire (C6 / G7-2.5 Task 1).
+
+    Folds THREE inputs into a single sha256 hex digest so a replay at the same
+    ``(ctx, call_index)`` egress-id that diverges in ANY of them fires
+    :class:`EgressIdIntegrityError` rather than silently short-circuiting on a
+    body-only hash:
+
+    * ``request_descriptor`` — the fixed-width 64-char sha256 hex over
+      ``(method, url, schema_id)`` from :func:`compute_request_descriptor`. A
+      divergent method/url/schema replayed at the same egress-id is caught.
+    * ``headers`` — the already-redacted request headers, canonicalised as a
+      sorted, case-folded ``(key, value)`` field sequence so a divergent-header
+      replay (e.g. a swapped ``Authorization`` value at the same slot) is caught.
+    * ``redacted_body`` — the DLP-redacted request body.
+
+    The three are concatenated through the injective length-prefixed encoding
+    (:func:`_length_prefixed`): the descriptor is field 0, every header is a
+    ``(key, value)`` pair, and the body is the final field, so no field-boundary
+    collision can forge a different ``(descriptor, headers, body)`` tuple into the
+    same digest.
+    """
+    fields: list[str] = [request_descriptor]
+    for key, value in sorted((k.lower(), v) for k, v in headers.items()):
+        fields.append(key)
+        fields.append(value)
+    fields.append(redacted_body)
+    return hashlib.sha256(_length_prefixed(*fields)).hexdigest()
+
+
 def compute_request_descriptor(*, method: str, url: str, schema_id: str) -> str:
     """sha256 hex over the length-prefixed (method, url, schema_id) — the per-call
     request identity folded into the ledger integrity hash so a divergent URL/schema
@@ -106,6 +139,7 @@ __all__ = [
     "EgressIdIntegrityError",
     "TurnEgressContext",
     "compute_body_hash",
+    "compute_egress_body_hash",
     "compute_egress_id",
     "compute_request_descriptor",
 ]

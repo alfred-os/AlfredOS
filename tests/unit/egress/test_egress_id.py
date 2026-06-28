@@ -110,9 +110,14 @@ def test_request_descriptor_is_deterministic() -> None:
     assert a == b and len(a) == 64
 
 
-def test_request_descriptor_distinguishes_url_and_schema() -> None:
-    """C6-T2: changing url OR schema_id yields a different descriptor."""
+def test_request_descriptor_distinguishes_method_url_and_schema() -> None:
+    """C6-T2: changing method OR url OR schema_id yields a different descriptor."""
     base = {"method": "GET", "url": "https://x.test/a", "schema_id": "m.S:v1"}
+    # CR-8: a method change (GET vs POST) must produce a different descriptor — a
+    # POST replayed at a GET's egress-id slot must fire EgressIdIntegrityError.
+    assert compute_request_descriptor(**base) != compute_request_descriptor(
+        **{**base, "method": "POST"}
+    )
     assert compute_request_descriptor(**base) != compute_request_descriptor(
         **{**base, "url": "https://x.test/b"}
     )

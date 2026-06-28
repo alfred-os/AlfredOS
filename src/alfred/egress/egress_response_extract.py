@@ -30,6 +30,7 @@ supplies a real turn-user.  See TODO: #339 below.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -240,7 +241,13 @@ class EgressResponseExtractor:
         # ContentHandle or staging the T3 body.  ``inspect_response`` is pure and
         # NEVER raises — all side effects live here in C2.
         if self._response_policy is not None:
-            verdict = inspect_response(outcome.response, self._response_policy)
+            # H1 (perf+core): inspect_response is a synchronous MIME + size + canary
+            # scan over an up-to-10 MiB body. Run it off the event loop so it cannot
+            # head-of-line the comms relay (the invariant relay_client.py pins). The
+            # function is PURE (no I/O, no shared mutable state) so the offload is safe.
+            verdict = await asyncio.to_thread(
+                inspect_response, outcome.response, self._response_policy
+            )
             if isinstance(verdict, _CanaryHit):
                 # Record the TERMINAL refusal FIRST (committed_with_response) so a
                 # §5 replay returns it Deduplicated and NEVER re-fires (C8 invariant).

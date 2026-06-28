@@ -458,6 +458,18 @@ async def test_handle_passes_non_empty_request_descriptor_to_fire(
     assert all(c in "0123456789abcdef" for c in descriptor), (
         "request_descriptor must be lowercase hex"
     )
+    # CR-11 / CR-cloud-12: assert the EXACT descriptor handle() computes — folded
+    # from method + url + schema identity — not merely the sha256 SHAPE. A
+    # shape-only check would pass even if handle() folded the wrong fields.
+    from alfred.egress.egress_id import compute_request_descriptor
+    from alfred.egress.egress_response_extract import _schema_identity
+
+    expected_descriptor = compute_request_descriptor(
+        method=raw_req.method,
+        url=raw_req.url,
+        schema_id=_schema_identity(_TestSchema),
+    )
+    assert descriptor == expected_descriptor
 
 
 # ---------------------------------------------------------------------------
@@ -627,8 +639,13 @@ def _make_response_policy(
     max_bytes: int = 10 * 1024 * 1024,
     canary: CanaryMatcher | None = None,
 ) -> ResponsePolicy:
+    # CR-9: explicit ``is None`` rather than ``mime_allowlist or ...`` — an
+    # intentionally-empty ``frozenset()`` (a valid "allow nothing" policy) is falsy
+    # and the ``or`` form would silently swap in the default, masking the test.
+    if mime_allowlist is None:
+        mime_allowlist = frozenset({"text/html", "text/plain", "application/json"})
     return ResponsePolicy(
-        mime_allowlist=mime_allowlist or frozenset({"text/html", "text/plain", "application/json"}),
+        mime_allowlist=mime_allowlist,
         max_bytes=max_bytes,
         canary=canary,
     )
@@ -693,6 +710,12 @@ async def test_d1_disallowed_mime_returns_soft_refusal_extractor_not_called(
     # Attacker-controlled Content-Type MUST NOT appear in the stored refusal value.
     assert "application/octet-stream" not in rec["response"]
     assert raw_body.decode("latin-1") not in rec["response"]
+
+    # CR-cloud-13: a D1 soft refusal returns BEFORE minting a ContentHandle /
+    # staging the T3 body, so NO raw T3 body is staged — nothing can orphan.
+    assert len(staging._staged) == 0, (
+        f"D1 refusal must stage no T3 body; staging map non-empty: {staging._staged!r}"
+    )
 
     # Fix 1: policy_refusal_token surfaces the D1 subject token for Task 6 auditing.
     assert outcome.policy_refusal_token == "mime_type_not_allowed"  # noqa: S105 — audit token, not a credential

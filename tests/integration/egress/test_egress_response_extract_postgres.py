@@ -434,9 +434,30 @@ async def test_canary_replay_no_refire(
     )
     call_index = 0
 
-    from alfred.egress.egress_id import compute_body_hash, compute_egress_id
+    from alfred.egress.egress_id import (
+        compute_egress_body_hash,
+        compute_egress_id,
+        compute_request_descriptor,
+    )
+    from alfred.egress.egress_response_extract import _schema_identity
 
     egress_id = compute_egress_id(ctx, call_index=call_index)
+    raw_req = _make_raw_request(url="https://canary-target.example.com/fetch")
+
+    # CR-6 / CR-cloud-11: seed Round-1 with the REAL request_descriptor handle()
+    # computes (NOT request_descriptor="") so Round-2's real C1 exercises the
+    # production C1/C2 idempotency contract — the stored body_hash MUST equal the
+    # descriptor + headers + body folded hash compute_egress_body_hash produces,
+    # else commit_intent would raise EgressIdIntegrityError instead of returning
+    # IntentReplayComplete on the replay.
+    real_descriptor = compute_request_descriptor(
+        method=raw_req.method, url=raw_req.url, schema_id=_schema_identity(_TestSchema)
+    )
+    expected_body_hash = compute_egress_body_hash(
+        request_descriptor=real_descriptor,
+        headers=raw_req.headers,
+        redacted_body="",  # identity DLP of the empty body
+    )
 
     # Pre-commit the intent row (simulates C1's commit_intent before fire).
     await store.commit_intent(
@@ -445,7 +466,7 @@ async def test_canary_replay_no_refire(
         inbound_id=ctx.inbound_id,
         session_id=ctx.session_id,
         call_index=call_index,
-        body_hash=compute_body_hash(""),
+        body_hash=expected_body_hash,
     )
 
     # Track how many times fire() is called across both handle() calls.
@@ -493,8 +514,6 @@ async def test_canary_replay_no_refire(
         response_policy=policy,
     )
 
-    raw_req = _make_raw_request(url="https://canary-target.example.com/fetch")
-
     # --- Round 1: canary detected → InboundCanaryTripped ---
     with pytest.raises(InboundCanaryTripped) as exc_info:
         await extractor_obj.handle(
@@ -532,9 +551,9 @@ async def test_canary_replay_no_refire(
     # a new connection to the gateway relay.  We inject a spy open_connection that raises
     # if called, proving no re-dial occurs (C8 invariant proven end-to-end vs real Postgres).
     #
-    # request_descriptor="" matches the body_hash stored in Round 1's pre-commit
-    # (compute_body_hash("") — the default used when the synthetic stub bypasses C2's
-    # compute_request_descriptor step).
+    # ``real_descriptor`` matches the body_hash stored in Round 1's pre-commit
+    # (compute_egress_body_hash with the SAME descriptor + headers + empty body) —
+    # the production C1/C2 idempotency contract, not a synthetic-stub shortcut.
 
     open_conn_called = False
 
@@ -557,7 +576,7 @@ async def test_canary_replay_no_refire(
         raw_request=raw_req,
         ctx=ctx,
         call_index=call_index,
-        request_descriptor="",  # matches stored body_hash = compute_body_hash("")
+        request_descriptor=real_descriptor,  # the REAL descriptor handle() computes
     )
 
     # C1 must return Deduplicated (row is committed_with_response → IntentReplayComplete).

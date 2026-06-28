@@ -35,7 +35,6 @@ Three collaborators:
 
 from __future__ import annotations
 
-import contextlib
 import json
 import struct
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -143,6 +142,19 @@ class QuarantineStagingMap:
                 t("security.quarantine_staging.handle_consumed")
             ) from exc
 
+    def discard(self, handle_id: str) -> None:
+        """Drop any staged body for ``handle_id`` — a NON-logging, never-raising no-op.
+
+        Distinct from :meth:`drain`: ``drain`` is the single-use consume path whose
+        absence is a loud replay refusal (warning + raise). ``discard`` is the
+        cleanup path for a body whose extraction never completed (gate-deny,
+        extract failure, cancellation) — an absent handle is the EXPECTED
+        happy-path case (a successful extract already drained it), so it must NOT
+        emit ``security.quarantine_staging.handle_not_configured`` (false security
+        noise on the C9 happy-path cleanup).
+        """
+        self._staged.pop(handle_id, None)
+
 
 class T3BodyRecorder:
     """The ``record_body`` seam: tag the inbound body T3, stage it under a handle.
@@ -201,13 +213,14 @@ class T3BodyRecorder:
 
         Idempotent: a no-op when a successful extract already drained the
         handle (the normal happy-path exit) or when the handle was never
-        staged.  Suppresses :class:`StagingHandleNotConfiguredError` so
-        the ``except BaseException`` block in
-        :meth:`EgressResponseExtractor.handle` can call this
-        unconditionally without a prior existence check.
+        staged.  Delegates to :meth:`QuarantineStagingMap.discard` (a
+        non-logging ``pop(..., None)``) so the C9 happy-path cleanup does NOT
+        emit a false ``security.quarantine_staging.handle_not_configured``
+        warning — the ``except BaseException`` block in
+        :meth:`EgressResponseExtractor.handle` can call this unconditionally
+        without a prior existence check.
         """
-        with contextlib.suppress(StagingHandleNotConfiguredError):
-            self._staging.drain(handle_id)
+        self._staging.discard(handle_id)
 
 
 def _body_to_text(body: bytes | str | object) -> str:

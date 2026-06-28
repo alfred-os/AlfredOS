@@ -52,6 +52,7 @@ from alfred.plugins.web_fetch.errors import (
 )
 from alfred.plugins.web_fetch.fetch_dispatcher import (
     FetchDispatchConfig,
+    _safe_hostname,
     dispatch_web_fetch,
 )
 from alfred.security.quarantine import (
@@ -511,11 +512,19 @@ async def test_action_deadline_expiry_surfaces_timeout() -> None:
 
 @pytest.mark.asyncio
 async def test_default_action_deadline_constant_is_used() -> None:
-    """The default action-deadline comes from ``constants._DEFAULT_ACTION_DEADLINE_SECONDS``."""
+    """The default action-deadline IS ``constants._DEFAULT_ACTION_DEADLINE_SECONDS``.
+
+    CR-10: pin the dispatcher's actual default value (not just "positive") so a
+    future signature edit that hard-codes a different default fails loud.
+    """
+    import inspect
+
     # A no-op fast extractor completes well within the default deadline.
     outcome = await _dispatch()
     assert isinstance(outcome.result, Extracted)
-    # Sanity: the relocated constant is a positive number.
+    # The signature default equals the relocated constant, exactly.
+    default = inspect.signature(dispatch_web_fetch).parameters["action_deadline_seconds"].default
+    assert default == _DEFAULT_ACTION_DEADLINE_SECONDS
     assert _DEFAULT_ACTION_DEADLINE_SECONDS > 0
 
 
@@ -604,8 +613,91 @@ def test_config_drops_dead_redis_url_and_skip_tls_verify_fields() -> None:
     """The dead ``redis_url`` / ``skip_tls_verify`` fields are gone — the model
     constructs from the allowlist triple + ``manifest_commit_hash`` alone."""
     config = _build_config()
-    field_names = set(type(config).model_fields) if hasattr(type(config), "model_fields") else set()
-    # dataclass — inspect via __dataclass_fields__.
+    # FetchDispatchConfig is a dataclass — inspect via __dataclass_fields__ (CR-12:
+    # the earlier ``model_fields`` probe was dead — it was immediately overwritten).
     field_names = set(getattr(config, "__dataclass_fields__", {}))
     assert "redis_url" not in field_names
     assert "skip_tls_verify" not in field_names
+
+
+# ---------------------------------------------------------------------------
+# M3 / CR-5 — hostname-uniform audit + rate-limit domain (no userinfo/port leak)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_hostname_strips_userinfo_port_and_is_valueerror_safe() -> None:
+    """``_safe_hostname`` returns the bare host (no userinfo / port / path) and
+    collapses an unparseable URL to ``""`` rather than raising."""
+    assert _safe_hostname("https://alice:pw@example.com:8443/p?q=secret") == "example.com"
+    assert _safe_hostname("https://example.com/page") == "example.com"
+    # ValueError-safe: a malformed IPv6 URL makes urlsplit raise — collapse to "".
+    assert _safe_hostname("http://[::1") == ""
+
+
+@pytest.mark.asyncio
+async def test_userinfo_url_audit_domain_is_host_only_on_domain_not_allowed() -> None:
+    """A ``user:pass@host:port`` URL that fails the allowlist records a host-only
+    ``domain`` in the ``domain_not_allowed`` row — userinfo + port never leak."""
+    audit = _build_audit()
+    extractor = _build_extractor(outcome=_make_extracted_outcome())
+
+    with pytest.raises(WebFetchDomainNotAllowed):
+        await _dispatch(
+            audit=audit,
+            extractor=extractor,
+            url="https://alice:hunter2@example.com:8443/page",
+        )
+
+    extractor.handle.assert_not_awaited()
+    subject = audit.append_schema.await_args.kwargs["subject"]
+    # The audit + rate-limit ``domain`` field is host-only — userinfo + port never
+    # leak into it. (The separate ``url`` field carries the DLP-scanned URL by
+    # design; this test pins the host-only attribution field, not the whole row.)
+    assert subject["domain"] == "example.com"
+    assert "alice" not in subject["domain"]
+    assert "hunter2" not in subject["domain"]
+    assert "8443" not in subject["domain"]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_bucket_is_host_only() -> None:
+    """The PRD §7.7 per-domain rate-limit bucket is keyed on the bare host, so a
+    ``user@host`` variant cannot fragment (evade) the per-host limit."""
+    rate_limiter = _build_rate_limiter()
+
+    await _dispatch(
+        rate_limiter=rate_limiter,
+        url="https://example.com/page",
+    )
+
+    rate_limiter.check_and_increment.assert_awaited_once()
+    assert rate_limiter.check_and_increment.await_args.kwargs["domain"] == "example.com"
+
+
+# ---------------------------------------------------------------------------
+# M2 / CR-cloud-6 — preserve the quarantined-LLM refusal reason in the audit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_extractor_typed_refusal_reason_surfaced_in_audit() -> None:
+    """A quarantined-LLM ``TypedRefusal(refused_by_safety)`` (no pre-extract policy
+    token) surfaces its closed-vocab ``reason`` as ``dlp_scan_result`` — the
+    SECURITY signal is not dropped from the audit pivot."""
+    audit = _build_audit()
+    # policy_refusal_token is None (the D1 seam did not fire) — the refusal is the
+    # quarantined LLM's own decision, carried on outcome.result.reason.
+    outcome = EgressExtractOutcome(
+        result=TypedRefusal(reason="refused_by_safety"),
+        deduplicated=False,
+        language=None,
+        status=200,
+        policy_refusal_token=None,
+    )
+    extractor = _build_extractor(outcome=outcome)
+
+    await _dispatch(audit=audit, extractor=extractor)
+
+    call = audit.append_schema.await_args
+    assert call.kwargs["result"] == "refused"
+    assert call.kwargs["subject"]["dlp_scan_result"] == "refused_by_safety"

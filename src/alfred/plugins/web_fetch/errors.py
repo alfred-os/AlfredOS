@@ -13,10 +13,10 @@ The hierarchy splits along two intentionally non-overlapping trees:
   in :mod:`tests.unit.plugins.web_fetch.test_errors`.
 
 Each operational error carries the structured attribute(s) the
-``WEB_FETCH_FIELDS`` audit row records (``domain``, ``url``, ``bucket``,
-``mime_type``, ``size_bytes``, ``limit_bytes``). The audit writer reads
-typed exception attributes — never string-parses messages — so a future
-i18n change to the message template cannot drift the audit row.
+``WEB_FETCH_FIELDS`` audit row records (``domain``, ``url``, ``bucket``).
+The audit writer reads typed exception attributes — never string-parses
+messages — so a future i18n change to the message template cannot drift
+the audit row.
 
 i18n: every operator-facing string routes through :func:`alfred.i18n.t`
 per CLAUDE.md i18n rule #1. The catalog entries live under the ``web.*``
@@ -56,42 +56,6 @@ class WebFetchDomainNotAllowed(WebFetchError):  # noqa: N818 -- name pinned by s
     def __init__(self, domain: str) -> None:
         super().__init__(t("web.fetch.error.domain_not_allowed", domain=domain))
         self.domain = domain
-
-
-class WebFetchRedirectRefused(WebFetchError):  # noqa: N818 -- name pinned by spec §7.4
-    """The upstream returned an HTTP 3xx redirect (spec §7.4 SSRF guard).
-
-    The plugin subprocess refuses to follow redirects: an allowlisted
-    endpoint could otherwise hand off to an internal-IP / non-allowlisted
-    target via ``Location:``, silently widening the surface past the
-    operator's three-way allowlist cap. The host can re-dispatch the
-    redirect target through the full allowlist + rate-limit + audit
-    machinery if it actually wants to follow.
-
-    ``status_code`` carries the 3xx status (301 / 302 / 303 / 307 / 308)
-    so audit rows can distinguish permanent-vs-temporary redirects;
-    ``redirect_target`` is the upstream ``Location`` value, recorded
-    verbatim so reviewers see exactly where the bypass attempt pointed.
-
-    CR-146 major: the caller-visible message intentionally does NOT
-    interpolate ``redirect_target`` — the Location header is attacker-
-    controlled and may carry signed query params, internal hostnames,
-    or metadata IPs. Leaking that string back to the requester (the
-    typed ``WebFetchError`` surfaces to the caller per PRD §7.10) would
-    hand SSRF forensics to the attacker. The full ``redirect_target``
-    stays on ``self.redirect_target`` for the audit row (where the
-    operator audience belongs).
-    """
-
-    def __init__(self, status_code: int, redirect_target: str) -> None:
-        super().__init__(
-            t(
-                "web.fetch.error.redirect_refused",
-                status_code=status_code,
-            )
-        )
-        self.status_code = status_code
-        self.redirect_target = redirect_target
 
 
 class WebFetchRateLimited(WebFetchError):  # noqa: N818 -- name pinned by spec §7.10
@@ -134,36 +98,6 @@ class WebFetchHandleIdMismatch(WebFetchError):  # noqa: N818 -- spec §3 host eq
         self.got = got
 
 
-class WebFetchMimeTypeNotAllowed(WebFetchError):  # noqa: N818 -- name pinned by spec §7.10
-    """The response MIME type is not in the allowed set.
-
-    Resolves spec §16 open question — the plugin host narrows the allowed
-    MIME types at response time and refuses anything outside the manifest
-    declaration. ``mime_type`` is the refused value.
-    """
-
-    def __init__(self, mime_type: str) -> None:
-        super().__init__(t("web.fetch.error.mime_type_not_allowed", mime_type=mime_type))
-        self.mime_type = mime_type
-
-
-class WebFetchSizeLimitExceeded(WebFetchError):  # noqa: N818 -- name pinned by spec §7.10
-    """The response body exceeded the configured size limit (default 5 MB).
-
-    Both the actual byte count and the limit are carried so the audit row
-    can record both — the limit changes via operator config, and a row
-    that records only the actual size cannot be correlated with the
-    policy in effect at request time.
-    """
-
-    def __init__(self, size_bytes: int, limit_bytes: int) -> None:
-        super().__init__(
-            t("web.fetch.error.size_limit_exceeded", size=size_bytes, limit=limit_bytes)
-        )
-        self.size_bytes = size_bytes
-        self.limit_bytes = limit_bytes
-
-
 # NB: NOT a ``WebFetchError`` subclass. Spec §7.10 makes this distinction
 # load-bearing — the orchestrator's operational-error arm must not catch
 # canary trips.
@@ -193,8 +127,5 @@ __all__ = [
     "WebFetchDomainNotAllowed",
     "WebFetchError",
     "WebFetchHandleIdMismatch",
-    "WebFetchMimeTypeNotAllowed",
     "WebFetchRateLimited",
-    "WebFetchRedirectRefused",
-    "WebFetchSizeLimitExceeded",
 ]

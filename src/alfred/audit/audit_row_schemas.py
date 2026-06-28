@@ -49,30 +49,34 @@ at type-check time, not runtime."""
 
 DlpScanResult = Literal[
     "clean",
-    "scanned_dirty",
     "dlp_scan_error",
+    "url_secret_refused",  # G7-2.5 — refuse-on-secret in the URL (re-homed dispatcher)
     "domain_not_allowed",
     "rate_limited",
-    "transport_error",
-    "dispatch_shape_error",
-    "internal_ip_refused",
-    "redirect_refused",
-    "tls_verification_failed",
-    "fetch_error",
-    "handle_cap_exceeded",  # spec §6.2 — per-user concurrent ContentHandle cap refusal
-    "handle_id_mismatch",  # spec §3 — host-side equality check failed
-    "dispatch_param_invalid",  # #147 — host-side Pydantic validation of web.fetch params
+    "inbound_canary_tripped",  # G7-2.5 — inbound canary reflected in the T3 response
+    "mime_type_not_allowed",  # G7-2.5 — D1 pre-extract MIME refusal (response_inspection)
+    "size_limit_exceeded",  # G7-2.5 — D1 pre-extract size refusal (response_inspection)
 ]
 """Closed vocabulary recorded in ``WEB_FETCH_FIELDS['dlp_scan_result']``.
-Widened across two trust-boundary PRs:
-- ``handle_cap_exceeded`` / ``handle_id_mismatch`` by the handle-cap design
-  (slice-3 design spec §7.10).
-- ``dispatch_param_invalid`` by host-side Pydantic validation of the
-  ``web.fetch`` JSON-RPC params dict (#147 spec §4).
 
-See ``docs/subsystems/security.md`` for the audit-vocabulary section
-and ``docs/runbooks/handle-cap-exceeded.md`` for the operator-facing
-widening notice."""
+Reconciled for the G7-2.5 ``web.fetch`` re-home (#333): the dispatcher no longer
+drives a plugin subprocess, so the whole subprocess ``dlp_scan_result`` family
+(``scanned_dirty`` / ``transport_error`` / ``dispatch_shape_error`` /
+``internal_ip_refused`` / ``redirect_refused`` / ``tls_verification_failed`` /
+``fetch_error`` / ``handle_cap_exceeded`` / ``handle_id_mismatch`` /
+``dispatch_param_invalid``) is now unreachable and removed — each had NO live
+``"dlp_scan_result": "<token>"`` emit site after the re-home (grep-proven). The
+four NEW tokens are the re-homed dispatcher's own emits: ``url_secret_refused``
+(refuse-on-secret URL), ``inbound_canary_tripped`` (response canary reflection),
+and the two D1 pre-extract policy tokens ``mime_type_not_allowed`` /
+``size_limit_exceeded`` (``response_inspection._SoftRefusal.subject_token``,
+surfaced via ``EgressExtractOutcome.policy_refusal_token``).
+
+The ``dlp_scan_result`` subject field is free-JSON (no DB CHECK constraint); this
+Literal is the documentary contract pinned in lockstep by
+``tests/unit/audit/test_audit_row_schemas.py``.
+
+See ``docs/subsystems/security.md`` for the audit-vocabulary section."""
 
 # ---------------------------------------------------------------------------
 # plugin.lifecycle.* family

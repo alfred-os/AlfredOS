@@ -91,6 +91,23 @@ _SENTINEL_ALLOWLIST: Final[AllowlistIntersection] = AllowlistIntersection(
 )
 
 
+def _safe_hostname(url: str) -> str:
+    """The bare lowercase host authority for audit + rate-limit attribution.
+
+    Returns ``urlparse(url).hostname`` (host ONLY — never userinfo, port, path, or
+    query) so neither the audit ``domain`` nor the PRD §7.7 per-domain rate-limit
+    BUCKET can be fragmented or poisoned by a ``user:pass@host:port`` variant (a
+    ``netloc`` carries all of those, so a ``user@host`` form would both leak userinfo
+    into the audit row AND evade the per-host limit). ``ValueError``-safe: a URL
+    ``urlparse`` rejects (e.g. an out-of-range port) collapses to ``""`` rather than
+    crashing the gatekeeping path.
+    """
+    try:
+        return urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+
+
 @dataclass(frozen=True, slots=True)
 class FetchDispatchConfig:
     """Immutable per-session configuration for the fetch dispatcher.
@@ -190,10 +207,9 @@ async def dispatch_web_fetch(
         # CR-146: PRD §7.9b's fail-closed contract means a DLP outage MUST NOT
         # let an unscanned URL flow into audit storage — the raw URL may carry
         # secrets in its query string or userinfo. Substitute a redacted
-        # sentinel; host attribution survives via ``parsed.hostname`` (no
-        # userinfo, no port, no query).
-        parsed_for_audit = urlparse(url)
-        domain_for_audit = parsed_for_audit.hostname or ""
+        # sentinel; host attribution survives via ``_safe_hostname`` (host only —
+        # no userinfo, no port, no query).
+        domain_for_audit = _safe_hostname(url)
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
             schema_name="WEB_FETCH_FIELDS",
@@ -224,7 +240,12 @@ async def dispatch_web_fetch(
     # Refuse loud rather than EITHER forwarding the raw secret-bearing URL OR
     # sending a redacted URL the gateway cannot resolve. The audit row carries
     # the redacted ``clean_url`` (safe) + the refusal token.
-    domain = urlparse(clean_url).netloc
+    #
+    # M3 / CR-5: ``domain`` is the bare HOST (never ``netloc``) so it is uniform
+    # across the audit ``domain`` AND the PRD §7.7 per-domain rate-limit bucket —
+    # a ``user:pass@host:port`` variant cannot leak userinfo into the audit row or
+    # fragment (evade) the per-host rate limit.
+    domain = _safe_hostname(clean_url)
     if clean_url != url:
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
@@ -444,12 +465,24 @@ async def dispatch_web_fetch(
         # A soft TypedRefusal from the pre-extract MIME/size seam (the
         # payload-blind ``policy_refusal_token`` — NEVER the raw Content-Type),
         # or a quarantined-LLM extract refusal. Either way ``result="refused"``.
+        #
+        # M2 / CR-cloud-6: when the pre-extract seam did NOT fire
+        # (``policy_refusal_token is None``) the refusal came from the quarantined
+        # LLM itself — surface its closed-vocab ``TypedRefusal.reason``
+        # (``cannot_extract`` / ``refused_by_safety``) so the SECURITY signal of a
+        # ``refused_by_safety`` extraction is not dropped from the audit pivot.
+        # ``reason`` is closed-vocab + payload-blind (no T3 fragment). In this
+        # ``else`` branch ``outcome.result`` is narrowed to ``TypedRefusal`` (the
+        # ``Extracted`` arm returned above), so ``.reason`` is always present.
+        dlp_scan_result: str | None = outcome.policy_refusal_token
+        if dlp_scan_result is None:
+            dlp_scan_result = outcome.result.reason
         await audit.append_schema(
             fields=WEB_FETCH_FIELDS,
             schema_name="WEB_FETCH_FIELDS",
             event="tool.web.fetch",
             actor_user_id=user_id,
-            subject={**base_subject, "dlp_scan_result": outcome.policy_refusal_token},
+            subject={**base_subject, "dlp_scan_result": dlp_scan_result},
             trust_tier_of_trigger="T0",
             result="refused",
             cost_estimate_usd=0.0,

@@ -64,7 +64,11 @@ from alfred.security.quarantine import Extracted, ExtractionSchema, T3DerivedDat
 from alfred.security.quarantine_transport import QuarantineStagingMap, T3BodyRecorder
 from alfred.security.tiers import CapabilityGateNonce
 from tests.adversarial.payload_schema import AdversarialPayload
-from tests.helpers.egress_doubles import _await_relay_ready, _CapturingAuditWriter
+from tests.helpers.egress_doubles import (
+    _await_bound_port,
+    _await_relay_ready,
+    _CapturingAuditWriter,
+)
 from tests.helpers.gates import make_quarantined_extract_chain_gate
 
 _PAYLOAD_PATH = Path(__file__).parent / "de_egress_content_type_laundering.yaml"
@@ -192,12 +196,6 @@ async def test_content_type_laundering_refused_pre_extract(
     canned.headers = {"content-type": off_allowlist_content_type}
     canned.body = binary_body
 
-    # Reserve a free port for the relay.
-    srv = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-    port: int = srv.sockets[0].getsockname()[1]
-    srv.close()
-    await srv.wait_closed()
-
     # Gateway relay with standard outbound DLP — no canary needed.  The outbound
     # request body is clean; the laundering is on the inbound content-type.
     gateway_dlp = OutboundDlp(
@@ -205,12 +203,14 @@ async def test_content_type_laundering_refused_pre_extract(
         audit=lambda **_kw: None,
         canary=CanaryMatcher(tokens=[]),
     )
+    # CR-14: bind directly to port 0 (NO close-then-rebind free-port reservation
+    # TOCTOU) and read the OS-assigned port back off the relay once it binds.
     relay = EgressRelay(
         tool_allowlist=_FAKE_ALLOWLIST,
         dlp=gateway_dlp,
         audit=record_egress_relay,
         bind_host="127.0.0.1",
-        port=port,
+        port=0,
         resolve=lambda _h: "1.1.1.1",
         open_client=open_client_factory,
         response_byte_cap=4096,
@@ -218,6 +218,7 @@ async def test_content_type_laundering_refused_pre_extract(
     )
     shutdown = asyncio.Event()
     serve_task: asyncio.Task[Any] = asyncio.ensure_future(relay.serve(shutdown))
+    port = await _await_bound_port(relay, serve_task)
     await _await_relay_ready(port, serve_task)
 
     audit_writer = _CapturingAuditWriter()
@@ -300,6 +301,13 @@ async def test_content_type_laundering_refused_pre_extract(
         # quarantined_to_structured must NEVER be entered: binary bytes must not
         # reach the quarantined LLM (HARD rule #5).
         mock_extractor.extract.assert_not_called()
+
+        # CR-15 / CR-cloud-13: the D1 MIME refusal returns BEFORE minting a
+        # ContentHandle / staging the T3 body, so nothing can orphan — the staging
+        # map is empty (no raw T3 body alive after the refusal).
+        assert len(staging._staged) == 0, (
+            f"No-orphan BREACH (MIME refusal): staging map non-empty: {staging._staged!r}"
+        )
 
         # --- Upstream-reached assertion ---
 

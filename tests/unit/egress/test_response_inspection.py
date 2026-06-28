@@ -23,6 +23,7 @@ from alfred.egress.response_inspection import (
     InboundCanaryTripped,
     ResponsePolicy,
     _CanaryHit,
+    _host_only,
     _Proceed,
     _SoftRefusal,
     inspect_response,
@@ -335,3 +336,107 @@ def test_inbound_canary_tripped_has_no_body_content() -> None:
     msg = str(exc)
     assert body_content not in msg
     assert content_type not in msg
+
+
+# ---------------------------------------------------------------------------
+# Test 14 — _host_only is host-ONLY: userinfo + port + path never leak (CR-3)
+# ---------------------------------------------------------------------------
+
+
+def test_host_only_strips_userinfo_and_port() -> None:
+    """A URL with ``user:pass@host:port`` collapses to the bare host — the
+    ``netloc`` (which carries attacker userinfo + port) is NEVER returned."""
+    host = _host_only("https://alice:hunter2@evil.example.com:8443/path?q=SECRET")
+    assert host == "evil.example.com"
+    # The userinfo / port / path / query must NOT survive into the audit subject.
+    assert "alice" not in host
+    assert "hunter2" not in host
+    assert "8443" not in host
+    assert "SECRET" not in host
+
+
+def test_host_only_no_scheme_userinfo_still_stripped() -> None:
+    """Even a scheme-less ``//user@host:port`` form returns host only."""
+    assert _host_only("//bob:pw@internal.example:9000/x") == "internal.example"
+
+
+def test_host_only_unparseable_collapses_to_sentinel() -> None:
+    """A URL with no parseable hostname collapses to the payload-blind sentinel —
+    it never falls back to a userinfo-bearing ``netloc``."""
+    assert _host_only("not a url at all") == "<invalid-url>"
+
+
+# ---------------------------------------------------------------------------
+# Test 15 — canary scan is byte-LOSSLESS (latin-1), not lossy errors="replace"
+# ---------------------------------------------------------------------------
+
+
+def test_canary_with_nonascii_byte_detected_under_lossless_decode() -> None:
+    """A canary whose latin-1 bytes a lossy UTF-8 decode would mangle is STILL hit.
+
+    The canary contains a non-ASCII char (``Ö`` → latin-1 byte ``0xD6``, a UTF-8
+    lead byte). Embedded as raw latin-1 bytes, a lossy ``errors="replace"`` UTF-8
+    decode collapses the lead byte to ``U+FFFD`` (``"T\\ufffdKEN"``) and MISSES the
+    match. The byte-lossless latin-1 decode (G7-2.5 C12) preserves it, so the
+    canary trips.
+    """
+    token = "CANARY-TÖKEN-001"  # noqa: S105 — test sentinel, not a credential
+    canary = _make_canary(token)
+    policy = _make_policy(canary=canary)
+    body = ("prefix " + token + " suffix").encode("latin-1")
+    response = _make_response(headers={"Content-Type": "text/html"}, body=body)
+    result = inspect_response(response, policy)
+    assert isinstance(result, _CanaryHit)
+
+    # Document the bug the fix closes: the OLD lossy decode WOULD have missed it.
+    assert canary.first_match(body.decode("utf-8", errors="replace")) is None
+
+
+# ---------------------------------------------------------------------------
+# Test 16 — canary precedence: a canary in an oversized + disallowed-MIME body
+#           still wins (canary checked FIRST) (CR-7)
+# ---------------------------------------------------------------------------
+
+
+def test_canary_precedence_over_oversized_and_disallowed_mime() -> None:
+    """Canary is checked BEFORE MIME and size — a body that is ALSO oversized AND
+    of a disallowed MIME still returns ``_CanaryHit`` (the security-event ordering)."""
+    token = "PRECEDENCE-CANARY-9"  # noqa: S105 — test sentinel, not a credential
+    canary = _make_canary(token)
+    # max_bytes tiny + MIME off the allowlist: both would refuse, but canary wins.
+    policy = _make_policy(mime_allowlist=frozenset({"text/html"}), max_bytes=4, canary=canary)
+    body = (token + " " + "X" * 200).encode()
+    response = _make_response(headers={"Content-Type": "application/octet-stream"}, body=body)
+    result = inspect_response(response, policy)
+    assert isinstance(result, _CanaryHit)
+
+
+# ---------------------------------------------------------------------------
+# Test 17 — mime_allowlist is lowercased at ResponsePolicy construction (CR-2)
+# ---------------------------------------------------------------------------
+
+
+def test_mime_allowlist_lowercased_at_construction() -> None:
+    """An operator-configured ``"Text/HTML"`` matches a ``text/html`` response —
+    the allowlist is normalised to lowercase at construction so casing in config
+    never diverges from the lowercased parsed Content-Type."""
+    policy = ResponsePolicy(
+        mime_allowlist=frozenset({"Text/HTML", "Application/JSON"}),
+        max_bytes=1024,
+        canary=None,
+    )
+    # The stored allowlist is lowercased.
+    assert policy.mime_allowlist == frozenset({"text/html", "application/json"})
+    # A lowercase response Content-Type now matches the mixed-case config entry.
+    response = _make_response(headers={"Content-Type": "text/html"}, body=b"<p>hi</p>")
+    assert isinstance(inspect_response(response, policy), _Proceed)
+
+
+def test_mime_allowlist_non_collection_passes_through_to_pydantic() -> None:
+    """A non-collection ``mime_allowlist`` is left untouched by the lowercasing
+    normaliser so Pydantic raises a clean ValidationError (rather than the
+    validator masking the bad input)."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        ResponsePolicy(mime_allowlist=123, max_bytes=1024, canary=None)  # type: ignore[arg-type]

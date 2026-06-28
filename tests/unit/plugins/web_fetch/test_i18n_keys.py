@@ -69,33 +69,21 @@ _FINGERPRINTS: Final[dict[str, tuple[Mapping[str, object], tuple[str, ...]]]] = 
         {"domain": "example.com"},
         ("allowlist", "domain"),
     ),
-    "web.fetch.error.redirect_refused": (
-        # The pybabel-drift case that motivated this rewrite. Without
-        # a fingerprint, a fuzzy-match swap copies tls_failure's body
-        # onto this key and the old ``!= key`` assertion passes.
-        #
-        # CR-146 major: ``redirect_target`` is no longer interpolated
-        # into the caller-visible message (SSRF forensics stay on the
-        # audit row, not in the requester's surface). We still pass it
-        # below to defend against a future regression that re-adds the
-        # placeholder to the msgstr — ``str.format`` silently ignores
-        # extra kwargs, so the test keeps passing if the placeholder
-        # is removed, and the fingerprint check anchors semantics.
-        {"status_code": 301, "redirect_target": "https://internal.example.com/"},
-        ("redirect",),
-    ),
+    # G7-2.5 Task K (#333): ``web.fetch.error.redirect_refused`` was removed —
+    # ``WebFetchRedirectRefused`` is deleted (no live raiser after the re-home);
+    # redirects are now refused gateway-side
+    # (``EgressRelayDenyReason.UPSTREAM_REDIRECT_REFUSED``), so the in-core key is
+    # obsolete.
     "web.fetch.error.rate_limited": (
         {"bucket": "per_domain"},
         ("rate limit", "per_domain"),
     ),
-    "web.fetch.error.mime_type_not_allowed": (
-        {"mime_type": "application/pdf"},
-        ("mime", "type"),
-    ),
-    "web.fetch.error.size_limit_exceeded": (
-        {"size": 1000, "limit": 5000},
-        ("size", "limit"),
-    ),
+    # G7-2.5 Task K (#333): ``web.fetch.error.mime_type_not_allowed`` and
+    # ``web.fetch.error.size_limit_exceeded`` were removed —
+    # ``WebFetchMimeTypeNotAllowed`` / ``WebFetchSizeLimitExceeded`` are deleted
+    # (no live raiser after the re-home; the MIME/size refusals are now
+    # ``TypedRefusal(cannot_extract)`` from the C2 D1 ``response_inspection`` seam),
+    # so their attacker-``{mime_type}``-interpolating t() keys are obsolete.
     "security.canary_tripped": (
         {"url": "https://example.com/"},
         ("canary",),
@@ -211,14 +199,9 @@ _REMEDIATION_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "web.fetch.error.rate_limited",
         ("config/policies.yaml", "web_fetch.rate_limits"),
     ),
-    (
-        "web.fetch.error.mime_type_not_allowed",
-        ("config/policies.yaml", "web_fetch.allowed_mime_types"),
-    ),
-    (
-        "web.fetch.error.size_limit_exceeded",
-        ("config/policies.yaml", "web_fetch.size_limit_bytes"),
-    ),
+    # G7-2.5 Task K (#333): the mime_type_not_allowed / size_limit_exceeded
+    # remediation pins were removed with their (now-deleted) error classes —
+    # the MIME/size refusals are gateway-/D1-side TypedRefusals, not in-core keys.
 )
 
 
